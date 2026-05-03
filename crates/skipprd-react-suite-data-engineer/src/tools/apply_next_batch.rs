@@ -383,6 +383,7 @@ impl Tool for ApplyNextModelBatchTool {
                 "failed_item_names": [],
             }));
         }
+        plan::reconcile_model_batches_and_work_groups(&mut plan);
 
         if controller_kernel::batch_budget(&plan.progress).exhausted() {
             return Ok(serde_json::json!({
@@ -672,7 +673,9 @@ mod tests {
 
     fn observed_customer_key_claim() -> Vec<crate::providers::SemanticClaimRef> {
         vec![crate::providers::SemanticClaimRef {
-            claim_id: "candidate_key:test_raw.raw_customers:customer_id".to_string(),
+            claim_id: "candidate_key:test_raw.raw_customers:customer_id"
+                .to_string()
+                .into(),
             kind: crate::providers::SemanticClaimKind::CandidateKey,
             status: crate::providers::EvidenceStatus::Observed,
         }]

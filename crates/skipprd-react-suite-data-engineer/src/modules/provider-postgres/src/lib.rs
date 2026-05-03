@@ -3,8 +3,9 @@ use std::sync::Arc;
 use tokio::sync::Semaphore;
 
 use react_suite_data_engineer::providers::{
-    DatasetCatalogProvider, DatasetFieldStats, DatasetId, DatasetStats, QueryProvider, QueryResult,
-    WarehouseNaming, DEFAULT_MAX_CONCURRENCY,
+    DatasetCatalogProvider, DatasetFieldStats, DatasetId, DatasetStats,
+    ProviderEvidenceCapabilities, QueryProvider, QueryResult, WarehouseNaming,
+    DEFAULT_MAX_CONCURRENCY,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -290,6 +291,12 @@ impl DatasetCatalogProvider for PostgresProvider {
         _max_fields: usize,
     ) -> Result<(DatasetFieldStats, DatasetStats), String> {
         Err("postgres: get_dataset_stats not yet implemented; per-field stats collection requires dialect-specific SQL generation".to_string())
+    }
+
+    fn evidence_capabilities(&self) -> ProviderEvidenceCapabilities {
+        ProviderEvidenceCapabilities::schema_only(
+            "postgres get_dataset_stats is not implemented yet",
+        )
     }
 
     fn max_concurrency(&self) -> usize {

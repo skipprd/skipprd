@@ -416,7 +416,7 @@ impl Tool for GoldModelTool {
                         continue;
                     }
                 };
-                repl_validate.insert(ph.clone(), query.quote_fqn(&id));
+                repl_validate.insert(ph.clone(), query.format_dbt_model_relation_fqn(&id));
                 if inp.trim().contains('/') || inp.trim().ends_with(".sql") {
                     errors.push(format!(
                         "{name}: gold inputs must be model names, not paths ('{inp}')"
@@ -612,6 +612,10 @@ mod tests {
             String,
         > {
             Err("not used".to_string())
+        }
+
+        fn evidence_capabilities(&self) -> crate::providers::ProviderEvidenceCapabilities {
+            crate::providers::ProviderEvidenceCapabilities::schema_only("mock warehouse provider")
         }
     }
 
@@ -1015,7 +1019,9 @@ mod tests {
                     }],
                     assumptions: vec![],
                     evidence_claim_refs: vec![crate::providers::SemanticClaimRef {
-                        claim_id: "candidate_key:test_raw.raw_orders:order_id".to_string(),
+                        claim_id: "candidate_key:test_raw.raw_orders:order_id"
+                            .to_string()
+                            .into(),
                         kind: crate::providers::SemanticClaimKind::CandidateKey,
                         status: crate::providers::EvidenceStatus::Observed,
                     }],

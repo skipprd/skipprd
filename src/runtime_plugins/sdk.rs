@@ -13,14 +13,37 @@ use datafusion::physical_plan::{RecordBatchStream, SendableRecordBatchStream};
 use futures::Stream;
 use futures::StreamExt;
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EncodedRecordBatchStream {
+    pub bytes: Vec<u8>,
+    pub rows: u64,
+}
+
+pub struct DecodedRecordBatchStream {
+    pub stream: SendableRecordBatchStream,
+    pub rows: u64,
+}
+
 pub async fn encode_record_batch_stream(
-    mut stream: SendableRecordBatchStream,
+    stream: SendableRecordBatchStream,
 ) -> Result<Vec<u8>, io::Error> {
+    encode_record_batch_stream_with_stats(stream)
+        .await
+        .map(|encoded| encoded.bytes)
+}
+
+pub async fn encode_record_batch_stream_with_stats(
+    mut stream: SendableRecordBatchStream,
+) -> Result<EncodedRecordBatchStream, io::Error> {
     let mut batches = Vec::new();
+    let mut rows = 0u64;
     while let Some(batch_result) = stream.next().await {
-        batches.push(batch_result.map_err(|err| io::Error::other(err.to_string()))?);
+        let batch = batch_result.map_err(|err| io::Error::other(err.to_string()))?;
+        rows = rows.saturating_add(batch.num_rows() as u64);
+        batches.push(batch);
     }
-    encode_record_batches(&batches)
+    let bytes = encode_record_batches(&batches)?;
+    Ok(EncodedRecordBatchStream { bytes, rows })
 }
 
 pub fn encode_record_batches(batches: &[RecordBatch]) -> Result<Vec<u8>, io::Error> {
@@ -44,13 +67,25 @@ pub fn encode_record_batches(batches: &[RecordBatch]) -> Result<Vec<u8>, io::Err
 }
 
 pub fn decode_record_batch_stream(bytes: Vec<u8>) -> Result<SendableRecordBatchStream, io::Error> {
+    decode_record_batch_stream_with_stats(bytes).map(|decoded| decoded.stream)
+}
+
+pub fn decode_record_batch_stream_with_stats(
+    bytes: Vec<u8>,
+) -> Result<DecodedRecordBatchStream, io::Error> {
     let reader = StreamReader::try_new(Cursor::new(bytes), None)
         .map_err(|err| io::Error::other(err.to_string()))?;
     let schema = reader.schema();
     let batches: Vec<RecordBatch> = reader
         .collect::<Result<Vec<_>, _>>()
         .map_err(|err| io::Error::other(err.to_string()))?;
-    Ok(Box::pin(VecRecordBatchStream::new(schema, batches)))
+    let rows = batches.iter().fold(0u64, |rows, batch| {
+        rows.saturating_add(batch.num_rows() as u64)
+    });
+    Ok(DecodedRecordBatchStream {
+        stream: Box::pin(VecRecordBatchStream::new(schema, batches)),
+        rows,
+    })
 }
 
 struct VecRecordBatchStream {
@@ -121,5 +156,43 @@ mod tests {
         assert_eq!(decoded_batch.num_rows(), batch.num_rows());
         assert_eq!(decoded_batch.num_columns(), batch.num_columns());
         assert_eq!(decoded_batch.schema(), batch.schema());
+    }
+
+    #[tokio::test]
+    async fn encoded_stream_reports_total_rows() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let batch_one = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![1, 2, 3]))],
+        )
+        .unwrap();
+        let batch_two =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![4]))])
+                .unwrap();
+
+        let stream: SendableRecordBatchStream = Box::pin(VecRecordBatchStream::new(
+            schema,
+            vec![batch_one, batch_two],
+        ));
+
+        let encoded = encode_record_batch_stream_with_stats(stream).await.unwrap();
+
+        assert_eq!(encoded.rows, 4);
+        assert!(!encoded.bytes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn decoded_stream_reports_total_rows() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![1, 2, 3]))],
+        )
+        .unwrap();
+        let bytes = encode_record_batches(&[batch]).unwrap();
+
+        let decoded = decode_record_batch_stream_with_stats(bytes).unwrap();
+
+        assert_eq!(decoded.rows, 3);
     }
 }

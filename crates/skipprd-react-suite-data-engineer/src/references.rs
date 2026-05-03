@@ -2,6 +2,88 @@ use serde::{Deserialize, Serialize};
 
 use crate::providers::DatasetId;
 
+macro_rules! non_empty_string_newtype {
+    ($name:ident) => {
+        #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[serde(transparent)]
+        pub struct $name(String);
+
+        impl $name {
+            pub fn new(value: impl Into<String>) -> Option<Self> {
+                let value = value.into().trim().to_string();
+                if value.is_empty() {
+                    return None;
+                }
+                Some(Self(value))
+            }
+
+            pub fn as_str(&self) -> &str {
+                &self.0
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(&self.0)
+            }
+        }
+    };
+}
+
+non_empty_string_newtype!(FieldName);
+non_empty_string_newtype!(DbtModelName);
+non_empty_string_newtype!(ModelRelPath);
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct StagingModelName(DbtModelName);
+
+impl StagingModelName {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into().trim().to_ascii_lowercase();
+        if !value.starts_with("stg_") {
+            return None;
+        }
+        DbtModelName::new(value).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct GoldModelName(DbtModelName);
+
+impl GoldModelName {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into().trim().to_ascii_lowercase();
+        if value.is_empty() || value.starts_with("stg_") {
+            return None;
+        }
+        DbtModelName::new(value).map(Self)
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "name", rename_all = "snake_case")]
+pub enum ModelInput {
+    Staging(StagingModelName),
+    IntraPlan(GoldModelName),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "dataset", rename_all = "snake_case")]
+pub enum SemanticProfileKey {
+    Dataset(DatasetRef),
+    Global,
+}
+
 /// Canonical dataset reference in `<catalog>.<schema>.<table>` form.
 ///
 /// This is the internal reference type used throughout the data_engineer suite.
@@ -93,5 +175,13 @@ mod tests {
     fn column_ref_rejects_empty_column() {
         let ds = DatasetRef::parse("AwsDataCatalog.test_raw.raw_customers").expect("parse");
         assert!(ColumnRef::new(ds, "   ").is_none());
+    }
+
+    #[test]
+    fn model_name_newtypes_enforce_layer_prefixes() {
+        assert!(StagingModelName::new("stg_orders").is_some());
+        assert!(StagingModelName::new("orders").is_none());
+        assert!(GoldModelName::new("fct_orders").is_some());
+        assert!(GoldModelName::new("stg_orders").is_none());
     }
 }

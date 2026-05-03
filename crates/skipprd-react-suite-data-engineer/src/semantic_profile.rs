@@ -4,8 +4,10 @@ use react_core::agent::AgentCtx;
 use react_core::scope::RequestScope;
 
 use crate::providers::{
-    CatalogProvider, DataCatalog, DatasetProfile, EvidenceStatus, FieldProfile,
-    KeyCandidateProfile, ProfileMetric, SemanticClaimKind, SemanticClaimRef, SemanticProfile,
+    AggregateSafetyCandidateProfile, CatalogProvider, ClaimId, DataCatalog, DatasetProfile,
+    EvidenceStatus, FieldClaimProfile, FieldProfile, GrainCandidateProfile, KeyCandidateProfile,
+    ProfileMetric, RelationshipCandidateProfile, RowPreservationCandidateProfile,
+    SemanticClaimKind, SemanticClaimRef, SemanticEvidenceProvenance, SemanticProfile, StatsStatus,
     GLOBAL_SEMANTIC_DATASET_ID,
 };
 
@@ -19,11 +21,16 @@ pub(crate) async fn build_and_store_semantic_profiles(
         let Some(cat) = catalog.read_catalog(scope, dataset_id).await? else {
             continue;
         };
-        let profile = build_dataset_profile(&cat);
+        profiles.push(build_dataset_profile(&cat));
+    }
+
+    attach_unverified_relationship_candidates(&mut profiles);
+
+    for profile in &profiles {
         catalog
             .write_semantic_profile(
                 scope,
-                dataset_id,
+                &profile.dataset_id,
                 &SemanticProfile {
                     version: 1,
                     built_at_epoch_secs: now_epoch_secs(),
@@ -32,7 +39,6 @@ pub(crate) async fn build_and_store_semantic_profiles(
                 },
             )
             .await?;
-        profiles.push(profile);
     }
 
     catalog
@@ -58,9 +64,19 @@ pub(crate) fn build_dataset_profile(catalog: &DataCatalog) -> DatasetProfile {
         .filter(|rows| *rows > 0);
     let mut fields = Vec::new();
     let mut key_candidates = Vec::new();
+    let mut numeric_parse_candidates = Vec::new();
+    let mut time_field_candidates = Vec::new();
+    let mut grain_candidates = Vec::new();
+    let mut aggregate_safety_candidates = Vec::new();
 
     for field in &catalog.fields {
         let stats = field.stats.as_ref();
+        let stats_status = if stats.is_some() {
+            field.stats_status.clone()
+        } else {
+            StatsStatus::SchemaOnly
+        };
+        let stats_observed = stats_status.observed_distribution();
         let total_count = stats.map(|s| s.total).or(row_count);
         let null_count = stats.map(|s| s.nulls).or_else(|| {
             catalog
@@ -72,11 +88,12 @@ pub(crate) fn build_dataset_profile(catalog: &DataCatalog) -> DatasetProfile {
         let distinct_count_exact = stats.map(|s| s.distinct_count_exact).unwrap_or_default();
         fields.push(FieldProfile {
             field_name: field.name.clone(),
-            status: if stats.is_some() {
+            status: if stats_observed {
                 EvidenceStatus::Observed
             } else {
                 EvidenceStatus::Unverified
             },
+            stats_status: stats_status.clone(),
             total_count,
             null_count,
             approx_distinct_count,
@@ -88,17 +105,73 @@ pub(crate) fn build_dataset_profile(catalog: &DataCatalog) -> DatasetProfile {
         if let (Some(total), Some(nulls), Some(distinct)) =
             (total_count, null_count, approx_distinct_count)
         {
-            if distinct_count_exact && total > 0 && nulls == 0 && distinct == total {
+            if stats_observed
+                && distinct_count_exact
+                && total > 0
+                && nulls == 0
+                && distinct == total
+            {
+                let claim_id = candidate_key_claim_id(&catalog.dataset_id, &[field.name.as_str()]);
                 key_candidates.push(KeyCandidateProfile {
-                    claim_id: format!("candidate_key:{}:{}", catalog.dataset_id, field.name),
+                    claim_id: claim_id.clone(),
                     field_names: vec![field.name.clone()],
                     status: EvidenceStatus::Observed,
                     total_count: Some(total),
                     null_count: Some(nulls),
                     approx_distinct_count: Some(distinct),
                     distinct_count_exact,
+                    provenance: Some(SemanticEvidenceProvenance::rule(
+                        "candidate_key.exact_distinct_non_null.v1",
+                    )),
+                });
+                grain_candidates.push(GrainCandidateProfile {
+                    claim_id: grain_claim_id(&catalog.dataset_id, &[field.name.as_str()]),
+                    field_names: vec![field.name.clone()],
+                    status: EvidenceStatus::Observed,
+                    provenance: Some(SemanticEvidenceProvenance::rule(
+                        "grain.from_observed_candidate_key.v1",
+                    )),
                 });
             }
+        }
+
+        if is_numeric_field(field.data_type.as_deref()) {
+            numeric_parse_candidates.push(FieldClaimProfile {
+                claim_id: field_claim_id("numeric_parse", &catalog.dataset_id, &field.name),
+                field_name: field.name.clone(),
+                status: EvidenceStatus::Observed,
+                provenance: Some(SemanticEvidenceProvenance::rule(
+                    "numeric_parse.native_numeric_type.v1",
+                )),
+            });
+            aggregate_safety_candidates.push(AggregateSafetyCandidateProfile {
+                claim_id: aggregate_safety_claim_id(&catalog.dataset_id, &[field.name.as_str()]),
+                field_names: vec![field.name.clone()],
+                status: EvidenceStatus::Observed,
+                provenance: Some(SemanticEvidenceProvenance::rule(
+                    "aggregate_safety.native_numeric_field.v1",
+                )),
+            });
+        } else if stats_observed && stats.and_then(|s| s.min_numeric).is_some() {
+            numeric_parse_candidates.push(FieldClaimProfile {
+                claim_id: field_claim_id("numeric_parse", &catalog.dataset_id, &field.name),
+                field_name: field.name.clone(),
+                status: EvidenceStatus::Observed,
+                provenance: Some(SemanticEvidenceProvenance::rule(
+                    "numeric_parse.observed_try_cast_bounds.v1",
+                )),
+            });
+        }
+
+        if is_time_field(field.data_type.as_deref()) {
+            time_field_candidates.push(FieldClaimProfile {
+                claim_id: field_claim_id("time_field", &catalog.dataset_id, &field.name),
+                field_name: field.name.clone(),
+                status: EvidenceStatus::Observed,
+                provenance: Some(SemanticEvidenceProvenance::rule(
+                    "time_field.native_temporal_type.v1",
+                )),
+            });
         }
     }
 
@@ -108,7 +181,141 @@ pub(crate) fn build_dataset_profile(catalog: &DataCatalog) -> DatasetProfile {
         fields,
         key_candidates,
         relationship_candidates: vec![],
+        numeric_parse_candidates,
+        time_field_candidates,
+        grain_candidates,
+        aggregate_safety_candidates,
+        row_preservation_candidates: vec![RowPreservationCandidateProfile {
+            claim_id: ClaimId::generated(format!(
+                "row_preservation:{}:identity",
+                catalog.dataset_id
+            )),
+            status: EvidenceStatus::Unverified,
+            provenance: Some(SemanticEvidenceProvenance::rule(
+                "row_preservation.requires_sql_lint_or_probe.v1",
+            )),
+        }],
     }
+}
+
+fn candidate_key_claim_id(dataset_id: &str, fields: &[&str]) -> ClaimId {
+    ClaimId::generated(format!("candidate_key:{}:{}", dataset_id, fields.join(",")))
+}
+
+fn grain_claim_id(dataset_id: &str, fields: &[&str]) -> ClaimId {
+    ClaimId::generated(format!("grain:{}:{}", dataset_id, fields.join(",")))
+}
+
+fn aggregate_safety_claim_id(dataset_id: &str, fields: &[&str]) -> ClaimId {
+    ClaimId::generated(format!(
+        "aggregate_safety:{}:{}",
+        dataset_id,
+        fields.join(",")
+    ))
+}
+
+fn field_claim_id(kind: &str, dataset_id: &str, field: &str) -> ClaimId {
+    ClaimId::generated(format!("{kind}:{dataset_id}:{field}"))
+}
+
+fn relationship_claim_id(
+    left_dataset_id: &str,
+    left_field: &str,
+    right_dataset_id: &str,
+    right_field: &str,
+) -> ClaimId {
+    ClaimId::generated(format!(
+        "relationship:{left_dataset_id}:{left_field}->{right_dataset_id}:{right_field}"
+    ))
+}
+
+fn is_numeric_field(data_type: Option<&str>) -> bool {
+    let Some(data_type) = data_type.map(|ty| ty.trim().to_ascii_lowercase()) else {
+        return false;
+    };
+    data_type.starts_with("number")
+        || data_type.starts_with("decimal")
+        || data_type.starts_with("numeric")
+        || data_type.starts_with("int")
+        || data_type.starts_with("bigint")
+        || data_type.starts_with("smallint")
+        || data_type.starts_with("tinyint")
+        || data_type.starts_with("float")
+        || data_type.starts_with("double")
+        || data_type == "real"
+}
+
+fn is_time_field(data_type: Option<&str>) -> bool {
+    let Some(data_type) = data_type.map(|ty| ty.trim().to_ascii_lowercase()) else {
+        return false;
+    };
+    data_type.contains("timestamp")
+        || data_type.contains("datetime")
+        || data_type == "date"
+        || data_type == "time"
+}
+
+fn attach_unverified_relationship_candidates(profiles: &mut [DatasetProfile]) {
+    let key_fields = profiles
+        .iter()
+        .flat_map(|profile| {
+            profile.key_candidates.iter().flat_map(move |key| {
+                key.field_names
+                    .iter()
+                    .map(move |field| (profile.dataset_id.clone(), field.clone()))
+            })
+        })
+        .collect::<Vec<_>>();
+
+    for profile in profiles.iter_mut() {
+        let existing = profile
+            .relationship_candidates
+            .iter()
+            .map(|rel| rel.claim_id.clone())
+            .collect::<BTreeSet<_>>();
+        let mut additions = Vec::new();
+        for field in &profile.fields {
+            for (right_dataset_id, right_field) in &key_fields {
+                if right_dataset_id == &profile.dataset_id
+                    || !fields_may_relate(&field.field_name, right_field)
+                {
+                    continue;
+                }
+                let claim_id = relationship_claim_id(
+                    &profile.dataset_id,
+                    &field.field_name,
+                    right_dataset_id,
+                    right_field,
+                );
+                if existing.contains(&claim_id)
+                    || additions
+                        .iter()
+                        .any(|rel: &RelationshipCandidateProfile| rel.claim_id == claim_id)
+                {
+                    continue;
+                }
+                additions.push(RelationshipCandidateProfile {
+                    claim_id,
+                    left_dataset_id: profile.dataset_id.clone(),
+                    right_dataset_id: right_dataset_id.clone(),
+                    left_fields: vec![field.field_name.clone()],
+                    right_fields: vec![right_field.clone()],
+                    status: EvidenceStatus::Unverified,
+                    note: Some("name-aligned relationship candidate; requires FK metadata or user confirmation".to_string()),
+                    provenance: Some(SemanticEvidenceProvenance::rule(
+                        "relationship.name_aligned_candidate.v1",
+                    )),
+                });
+            }
+        }
+        profile.relationship_candidates.extend(additions);
+    }
+}
+
+fn fields_may_relate(left: &str, right: &str) -> bool {
+    let left = normalize_component(left);
+    let right = normalize_component(right);
+    left == right || (left.ends_with("_id") && right.ends_with("_id") && left == right)
 }
 
 fn ratio_metric(numerator: Option<u64>, denominator: Option<u64>) -> Option<ProfileMetric> {
@@ -232,7 +439,7 @@ pub(crate) fn semantic_claim_refs_for_model_task(
     task: &crate::plan_types::ModelTask,
 ) -> Vec<SemanticClaimRef> {
     let mut refs = Vec::new();
-    let mut seen = BTreeSet::<(String, String)>::new();
+    let mut seen = BTreeSet::<(ClaimId, SemanticClaimKind)>::new();
 
     for dataset_profile in matched_input_profiles(profile, task) {
         for key in &dataset_profile.key_candidates {
@@ -244,7 +451,7 @@ pub(crate) fn semantic_claim_refs_for_model_task(
                 kind: SemanticClaimKind::CandidateKey,
                 status: key.status.clone(),
             };
-            if seen.insert((claim_ref.claim_id.clone(), format!("{:?}", claim_ref.kind))) {
+            if seen.insert((claim_ref.claim_id.clone(), claim_ref.kind.clone())) {
                 refs.push(claim_ref);
             }
         }
@@ -257,13 +464,75 @@ pub(crate) fn semantic_claim_refs_for_model_task(
                 kind: SemanticClaimKind::Relationship,
                 status: rel.status.clone(),
             };
-            if seen.insert((claim_ref.claim_id.clone(), format!("{:?}", claim_ref.kind))) {
+            if seen.insert((claim_ref.claim_id.clone(), claim_ref.kind.clone())) {
                 refs.push(claim_ref);
             }
+        }
+        for claim in &dataset_profile.numeric_parse_candidates {
+            push_profile_claim_ref(
+                &mut refs,
+                &mut seen,
+                claim.claim_id.clone(),
+                SemanticClaimKind::NumericParse,
+                claim.status.clone(),
+            );
+        }
+        for claim in &dataset_profile.time_field_candidates {
+            push_profile_claim_ref(
+                &mut refs,
+                &mut seen,
+                claim.claim_id.clone(),
+                SemanticClaimKind::TimeField,
+                claim.status.clone(),
+            );
+        }
+        for claim in &dataset_profile.grain_candidates {
+            push_profile_claim_ref(
+                &mut refs,
+                &mut seen,
+                claim.claim_id.clone(),
+                SemanticClaimKind::Grain,
+                claim.status.clone(),
+            );
+        }
+        for claim in &dataset_profile.aggregate_safety_candidates {
+            push_profile_claim_ref(
+                &mut refs,
+                &mut seen,
+                claim.claim_id.clone(),
+                SemanticClaimKind::AggregateSafety,
+                claim.status.clone(),
+            );
+        }
+        for claim in &dataset_profile.row_preservation_candidates {
+            push_profile_claim_ref(
+                &mut refs,
+                &mut seen,
+                claim.claim_id.clone(),
+                SemanticClaimKind::RowPreservation,
+                claim.status.clone(),
+            );
         }
     }
 
     refs
+}
+
+fn push_profile_claim_ref(
+    refs: &mut Vec<SemanticClaimRef>,
+    seen: &mut BTreeSet<(ClaimId, SemanticClaimKind)>,
+    claim_id: ClaimId,
+    kind: SemanticClaimKind,
+    status: EvidenceStatus,
+) {
+    let claim_ref = SemanticClaimRef {
+        claim_id,
+        kind,
+        status,
+    };
+    if seen.insert((claim_ref.claim_id.clone(), claim_ref.kind.clone())) {
+        refs.push(claim_ref);
+    }
 }
 
 fn matched_input_profiles<'a>(
@@ -333,15 +602,24 @@ fn table_aliases(value: &str) -> BTreeSet<String> {
             aliases.insert(raw_name.to_string());
         }
     }
+    let parts = normalized_relation_components(value);
+    if parts.len() >= 2 {
+        let schema_table = format!("{}_{}", parts[parts.len() - 2], parts[parts.len() - 1]);
+        aliases.insert(schema_table.clone());
+        aliases.insert(format!("stg_{schema_table}"));
+    }
     aliases
 }
 
 fn normalize_relation(value: &str) -> String {
+    normalized_relation_components(value).join(".")
+}
+
+fn normalized_relation_components(value: &str) -> Vec<String> {
     value
         .split('.')
         .map(normalize_component)
         .collect::<Vec<_>>()
-        .join(".")
 }
 
 fn normalize_component(value: &str) -> String {
@@ -392,6 +670,7 @@ mod tests {
                 pii_sensitivity: None,
                 units_or_format: None,
                 role: None,
+                stats_status: StatsStatus::Collected,
                 stats: Some(FieldStatsLite {
                     total: 10,
                     nulls: 0,
@@ -445,6 +724,7 @@ mod tests {
                 pii_sensitivity: None,
                 units_or_format: None,
                 role: None,
+                stats_status: StatsStatus::Collected,
                 stats: Some(FieldStatsLite {
                     total: 10,
                     nulls: 0,
@@ -483,6 +763,122 @@ mod tests {
     }
 
     #[test]
+    fn schema_only_stats_do_not_become_observed_evidence() {
+        let catalog = DataCatalog {
+            dataset_id: "AwsDataCatalog.db.orders".to_string(),
+            catalog: "AwsDataCatalog".to_string(),
+            database: "db".to_string(),
+            table: "orders".to_string(),
+            description: None,
+            dimensions: vec![],
+            metrics: vec![],
+            fields: vec![CatalogField {
+                entity: String::new(),
+                name: "order_id".to_string(),
+                data_type: None,
+                root_column: None,
+                field_path: None,
+                structure_kind: None,
+                access_descriptor: None,
+                description: None,
+                synonyms: None,
+                pii_sensitivity: None,
+                units_or_format: None,
+                role: None,
+                stats_status: StatsStatus::SchemaOnly,
+                stats: None,
+            }],
+            structure_index: Default::default(),
+            dataset_stats: None,
+            built_at_epoch_secs: None,
+        };
+
+        let profile = build_dataset_profile(&catalog);
+        assert_eq!(profile.fields[0].status, EvidenceStatus::Unverified);
+        assert!(profile.key_candidates.is_empty());
+    }
+
+    #[test]
+    fn deterministic_builders_emit_numeric_time_and_grain_claims() {
+        let mut catalog = DataCatalog {
+            dataset_id: "AwsDataCatalog.db.orders".to_string(),
+            catalog: "AwsDataCatalog".to_string(),
+            database: "db".to_string(),
+            table: "orders".to_string(),
+            description: None,
+            dimensions: vec![],
+            metrics: vec![],
+            fields: vec![
+                CatalogField {
+                    entity: String::new(),
+                    name: "order_id".to_string(),
+                    data_type: Some("BIGINT".to_string()),
+                    root_column: None,
+                    field_path: None,
+                    structure_kind: None,
+                    access_descriptor: None,
+                    description: None,
+                    synonyms: None,
+                    pii_sensitivity: None,
+                    units_or_format: None,
+                    role: None,
+                    stats_status: StatsStatus::Collected,
+                    stats: Some(FieldStatsLite {
+                        total: 10,
+                        nulls: 0,
+                        min_numeric: Some(1.0),
+                        max_numeric: Some(10.0),
+                        min_len: None,
+                        max_len: None,
+                        approx_distinct: Some(10),
+                        distinct_count_exact: true,
+                        histogram_bins: None,
+                        histogram_min: None,
+                        histogram_max: None,
+                        last_updated_epoch_ms: 1,
+                    }),
+                },
+                CatalogField {
+                    entity: String::new(),
+                    name: "created_at".to_string(),
+                    data_type: Some("TIMESTAMP".to_string()),
+                    root_column: None,
+                    field_path: None,
+                    structure_kind: None,
+                    access_descriptor: None,
+                    description: None,
+                    synonyms: None,
+                    pii_sensitivity: None,
+                    units_or_format: None,
+                    role: None,
+                    stats_status: StatsStatus::SchemaOnly,
+                    stats: None,
+                },
+            ],
+            structure_index: Default::default(),
+            dataset_stats: Some(DatasetStats {
+                approx_total_rows: 10,
+                earliest_ts: None,
+                latest_ts: None,
+                nulls_by_field: Default::default(),
+            }),
+            built_at_epoch_secs: None,
+        };
+
+        let profile = build_dataset_profile(&catalog);
+        assert_eq!(profile.key_candidates.len(), 1);
+        assert_eq!(profile.grain_candidates.len(), 1);
+        assert_eq!(profile.numeric_parse_candidates.len(), 1);
+        assert_eq!(profile.time_field_candidates.len(), 1);
+        assert_eq!(profile.aggregate_safety_candidates.len(), 1);
+
+        catalog.fields[0].stats_status = StatsStatus::SchemaOnly;
+        let profile = build_dataset_profile(&catalog);
+        assert!(profile.key_candidates.is_empty());
+        assert!(profile.grain_candidates.is_empty());
+    }
+
+    #[test]
     fn returns_claim_refs_for_grounded_model_inputs() {
         let profile = SemanticProfile {
             version: 1,
@@ -492,15 +888,23 @@ mod tests {
                 row_count: Some(10),
                 fields: vec![],
                 key_candidates: vec![KeyCandidateProfile {
-                    claim_id: "candidate_key:ANALYTICS.DBT_SKIPPR.STG_ORDERS:ORDER_ID".to_string(),
+                    claim_id: ClaimId::from(
+                        "candidate_key:ANALYTICS.DBT_SKIPPR.STG_ORDERS:ORDER_ID",
+                    ),
                     field_names: vec!["ORDER_ID".to_string()],
                     status: EvidenceStatus::Observed,
                     total_count: Some(10),
                     null_count: Some(0),
                     approx_distinct_count: Some(10),
                     distinct_count_exact: true,
+                    provenance: None,
                 }],
                 relationship_candidates: vec![],
+                numeric_parse_candidates: vec![],
+                time_field_candidates: vec![],
+                grain_candidates: vec![],
+                aggregate_safety_candidates: vec![],
+                row_preservation_candidates: vec![],
             }],
             notes: vec![],
         };
@@ -539,15 +943,23 @@ mod tests {
                 row_count: Some(10),
                 fields: vec![],
                 key_candidates: vec![KeyCandidateProfile {
-                    claim_id: "candidate_key:ANALYTICS.RAW.RAW_CARGO_BUILD_1_ORDERS:ID".to_string(),
+                    claim_id: ClaimId::from(
+                        "candidate_key:ANALYTICS.RAW.RAW_CARGO_BUILD_1_ORDERS:ID",
+                    ),
                     field_names: vec!["ID".to_string()],
                     status: EvidenceStatus::Observed,
                     total_count: Some(10),
                     null_count: Some(0),
                     approx_distinct_count: Some(10),
                     distinct_count_exact: true,
+                    provenance: None,
                 }],
                 relationship_candidates: vec![],
+                numeric_parse_candidates: vec![],
+                time_field_candidates: vec![],
+                grain_candidates: vec![],
+                aggregate_safety_candidates: vec![],
+                row_preservation_candidates: vec![],
             }],
             notes: vec![],
         };
@@ -565,9 +977,49 @@ mod tests {
     }
 
     #[test]
+    fn returns_claim_refs_for_staging_inputs_backed_by_schema_table_profiles() {
+        let profile = SemanticProfile {
+            version: 1,
+            built_at_epoch_secs: None,
+            dataset_profiles: vec![DatasetProfile {
+                dataset_id: "ANALYTICS.RAW_CARGO_BUILD_1.ORDERS".to_string(),
+                row_count: Some(10),
+                fields: vec![],
+                key_candidates: vec![KeyCandidateProfile {
+                    claim_id: ClaimId::from("candidate_key:ANALYTICS.RAW_CARGO_BUILD_1.ORDERS:ID"),
+                    field_names: vec!["ID".to_string()],
+                    status: EvidenceStatus::Observed,
+                    total_count: Some(10),
+                    null_count: Some(0),
+                    approx_distinct_count: Some(10),
+                    distinct_count_exact: true,
+                    provenance: None,
+                }],
+                relationship_candidates: vec![],
+                numeric_parse_candidates: vec![],
+                time_field_candidates: vec![],
+                grain_candidates: vec![],
+                aggregate_safety_candidates: vec![],
+                row_preservation_candidates: vec![],
+            }],
+            notes: vec![],
+        };
+        let task = model_task_with_spec(
+            "fct_orders",
+            vec!["stg_raw_cargo_build_1_orders"],
+            Vec::new(),
+            Vec::new(),
+        );
+
+        let refs = semantic_claim_refs_for_model_task(&profile, &task);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs[0].kind, SemanticClaimKind::CandidateKey);
+    }
+
+    #[test]
     fn propagates_safe_claim_refs_through_intra_plan_inputs() {
         let observed_key = SemanticClaimRef {
-            claim_id: "candidate_key:raw.orders:id".to_string(),
+            claim_id: ClaimId::from("candidate_key:raw.orders:id"),
             kind: SemanticClaimKind::CandidateKey,
             status: EvidenceStatus::Observed,
         };

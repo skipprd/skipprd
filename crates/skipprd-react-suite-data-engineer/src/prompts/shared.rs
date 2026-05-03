@@ -95,7 +95,7 @@ Usage guidance:
 - Use `file op=patch` for ALL DBT project files, including model SQL under models/.
 - For `file op=patch`, provide `patch_text` as Cursor/Aider hunks-only unified diff:
   - args.path is REQUIRED and is the single file to mutate.
-  - patch_text MUST start with `@@` and MUST NOT include git file headers (`---`/`+++`), `diff --git` preamble, or diffy-style headers (`--- original` / `+++ modified`).
+  - patch_text MUST start with `@@` and MUST NOT include git file headers (`---`/`+++`), `diff --git` preamble, diffy-style headers (`--- original` / `+++ modified`), or `*** Begin Patch` envelopes.
   - Use Cursor/Aider hunk headers only: `@@ ... @@` (no line-number headers).
   The tool will compute and return `applied_patch_text` (canonical git-style diff) for audit.
 "#

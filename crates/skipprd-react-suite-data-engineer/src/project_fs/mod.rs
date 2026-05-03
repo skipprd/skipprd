@@ -349,6 +349,10 @@ pub(crate) mod test_helpers {
         > {
             Err("not implemented".to_string())
         }
+
+        fn evidence_capabilities(&self) -> crate::providers::ProviderEvidenceCapabilities {
+            crate::providers::ProviderEvidenceCapabilities::schema_only("mock dataset provider")
+        }
     }
 
     pub fn minimal_cfg() -> Arc<react_core::resolved_config::ReactResolvedConfig> {
@@ -447,6 +451,10 @@ pub(crate) mod test_helpers {
             String,
         > {
             Err("not implemented".to_string())
+        }
+
+        fn evidence_capabilities(&self) -> crate::providers::ProviderEvidenceCapabilities {
+            crate::providers::ProviderEvidenceCapabilities::schema_only("mock warehouse provider")
         }
     }
 

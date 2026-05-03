@@ -309,7 +309,7 @@ impl Orchestrator {
                         None,
                     )
                     .await;
-                    let (ns_stats_opt, ds_stats_opt) =
+                    let (ns_stats_opt, ds_stats_opt, stats_failure) =
                         match query.get_dataset_stats(&ds, max_fields).await {
                             Ok((ns_stats, ds_stats)) => {
                                 info!(
@@ -332,7 +332,7 @@ impl Orchestrator {
                             None,
                         )
                         .await;
-                                (Some(ns_stats), Some(ds_stats))
+                                (Some(ns_stats), Some(ds_stats), None)
                             }
                             Err(e) => {
                                 warn!("ORCHESTRATOR: dataset='{}' stats unavailable: {}", ds_id, e);
@@ -344,43 +344,20 @@ impl Orchestrator {
                             serde_json::json!({"dataset_id": ds_id, "max_fields": max_fields}),
                             false,
                             None,
-                            Some(e),
+                            Some(e.clone()),
                         )
                         .await;
-                                (None, None)
+                                (None, None, Some(e))
                             }
                         };
                     let has_stats = ns_stats_opt.is_some();
 
-                    let ns_stats_seeded: Option<
-                        react_suite_data_engineer::providers::DatasetFieldStats,
-                    > = if ns_stats_opt.is_some() {
-                        ns_stats_opt
-                    } else {
-                        if schema_cols.is_empty() {
-                            None
-                        } else {
-                            let mut ns =
-                                react_suite_data_engineer::providers::DatasetFieldStats::new(
-                                    &ds_id,
-                                );
-                            for (name, _ty) in schema_cols.iter() {
-                                for (path, _leaf_ty) in
-                                    crate::type_parse::flatten_type_paths(name, _ty).into_iter()
-                                {
-                                    ns.fields.entry(path).or_insert_with(
-                                        react_core::discover::stats::FieldStats::default,
-                                    );
-                                }
-                            }
-                            Some(ns)
-                        }
-                    };
-
                     let mut cat = crate::builder::CatalogBuilder::build_with_stats(
                         &ds,
-                        ns_stats_seeded,
+                        &schema_cols,
+                        ns_stats_opt,
                         ds_stats_opt,
+                        stats_failure,
                     )
                     .await;
                     for f in cat.fields.iter_mut() {

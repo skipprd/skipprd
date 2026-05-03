@@ -28,6 +28,13 @@ pub fn single_file_patch_good_example_json() -> &'static str {
     r#"{"op":"patch","path":"models/staging/stg_example.sql","patch_text":"@@ ... @@\n- select old_col from {{ source('raw','events') }}\n+ select new_col from {{ source('raw','events') }}\n"}"#
 }
 
+fn hunks_only_recovery_hint(expected_rel_path: &str) -> String {
+    format!(
+        "Provide exactly one file patch as path='{}' plus patch_text that starts with '@@' and contains only Cursor/Aider hunks.",
+        expected_rel_path
+    )
+}
+
 fn normalize_git_header_path(p: &str) -> String {
     let t = p.trim();
     if t == "/dev/null" {
@@ -152,6 +159,19 @@ pub fn normalize_hunks_only_patch_text(
     if patch_in.is_empty() {
         return Err("patch_text is empty".to_string());
     }
+    if patch_in.lines().any(|l| {
+        let t = l.trim_start();
+        t.starts_with("*** Begin Patch")
+            || t.starts_with("*** Update File:")
+            || t.starts_with("*** Add File:")
+            || t.starts_with("*** Delete File:")
+            || t.starts_with("*** End Patch")
+    }) {
+        return Err(format!(
+            "patch_text must not include a Begin Patch envelope or file operation headers. {}",
+            hunks_only_recovery_hint(expected_rel_path)
+        ));
+    }
 
     let has_hunks = patch_in.lines().any(|l| l.trim_start().starts_with("@@"));
     let has_git_headers = patch_in.lines().any(|l| {
@@ -187,7 +207,10 @@ pub fn normalize_hunks_only_patch_text(
             0usize,
         )
     } else {
-        return Err("patch_text must contain at least one hunk header ('@@')".to_string());
+        return Err(format!(
+            "patch_text must contain at least one hunk header ('@@'). {}",
+            hunks_only_recovery_hint(expected_rel_path)
+        ));
     };
 
     let mut out: Vec<String> = Vec::new();
@@ -206,9 +229,10 @@ pub fn normalize_hunks_only_patch_text(
         .map(|l| l.trim_start().starts_with("@@"))
         .unwrap_or(false)
     {
-        return Err(
-            "patch_text must normalize to Cursor/Aider hunks-only and start with '@@'".to_string(),
-        );
+        return Err(format!(
+            "patch_text must normalize to Cursor/Aider hunks-only and start with '@@'. {}",
+            hunks_only_recovery_hint(expected_rel_path)
+        ));
     }
 
     Ok(PatchTextNormalization {
@@ -217,4 +241,37 @@ pub fn normalize_hunks_only_patch_text(
         git_headers_stripped,
         git_metadata_lines_dropped,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_hunks_only_patch_text;
+
+    #[test]
+    fn rejects_begin_patch_envelope_with_recovery_hint() {
+        let err = normalize_hunks_only_patch_text(
+            "*** Begin Patch\n*** Update File: models/marts/model.sql\n@@ ... @@\n- old\n+ new\n*** End Patch",
+            "models/marts/model.sql",
+        )
+        .expect_err("Begin Patch envelopes are not accepted by file op=patch");
+
+        assert!(err.contains("must not include a Begin Patch envelope"));
+        assert!(err.contains("path='models/marts/model.sql'"));
+        assert!(err.contains("starts with '@@'"));
+    }
+
+    #[test]
+    fn accepts_single_file_hunks_only_patch() {
+        let normalized = normalize_hunks_only_patch_text(
+            "@@ ... @@\n- select old_col\n+ select new_col",
+            "models/marts/model.sql",
+        )
+        .expect("hunks-only patch should normalize");
+
+        assert_eq!(
+            normalized.patch_text,
+            "@@ ... @@\n- select old_col\n+ select new_col"
+        );
+        assert!(!normalized.git_headers_stripped);
+    }
 }

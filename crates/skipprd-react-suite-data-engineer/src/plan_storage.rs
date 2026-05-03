@@ -450,7 +450,9 @@ mod tests {
                     }],
                     assumptions: vec![],
                     evidence_claim_refs: vec![crate::providers::SemanticClaimRef {
-                        claim_id: "candidate_key:test_raw.raw_customers:customer_id".to_string(),
+                        claim_id: "candidate_key:test_raw.raw_customers:customer_id"
+                            .to_string()
+                            .into(),
                         kind: crate::providers::SemanticClaimKind::CandidateKey,
                         status: crate::providers::EvidenceStatus::Observed,
                     }],

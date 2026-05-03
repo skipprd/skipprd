@@ -25,7 +25,7 @@ fn yaml_get_str<'a>(v: &'a YamlValue, key: &str) -> Option<&'a str> {
 }
 
 fn yaml_is_staging_model_name(name: &str) -> bool {
-    name.trim_start().starts_with("stg_")
+    crate::dataset_truth::is_staging_model_name(name)
 }
 
 fn extract_model_names_from_yml_text(yml_text: &str) -> Result<HashSet<String>, String> {

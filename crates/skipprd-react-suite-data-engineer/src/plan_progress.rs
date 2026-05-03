@@ -245,6 +245,146 @@ pub fn canonical_work_groups_from_batches(
     out
 }
 
+pub fn canonical_sequential_work_groups_from_batches(
+    batches: &[Vec<String>],
+    item_prefix: &str,
+) -> Vec<PlanWorkGroup> {
+    let mut out: Vec<PlanWorkGroup> = Vec::new();
+    let mut schema_group_ids: Vec<String> = Vec::new();
+    let mut previous_schema_group_id: Option<String> = None;
+    for (idx, b) in batches.iter().enumerate() {
+        let mut item_ids: Vec<String> = Vec::new();
+        for item in b.iter() {
+            let id = item.trim();
+            if id.is_empty() {
+                continue;
+            }
+            if !item_ids.iter().any(|x| x == id) {
+                item_ids.push(id.to_string());
+            }
+        }
+        if item_ids.is_empty() {
+            continue;
+        }
+        let ord = idx + 1;
+        let sql_group_id = format!("{item_prefix}_author_sql_{ord:03}");
+        let schema_group_id = format!("{item_prefix}_author_schema_{ord:03}");
+        out.push(PlanWorkGroup {
+            group_id: sql_group_id.clone(),
+            label: format!("Author SQL batch {}", ord),
+            kind: WorkGroupKind::AuthorSql,
+            items: item_ids
+                .iter()
+                .map(|task_id| WorkGroupItemRef {
+                    task_id: task_id.clone(),
+                    checklist_item_id: CHECKLIST_SQL_MODEL.to_string(),
+                })
+                .collect(),
+            depends_on_group_ids: previous_schema_group_id.clone().map(|id| vec![id]),
+        });
+        out.push(PlanWorkGroup {
+            group_id: schema_group_id.clone(),
+            label: format!("Author schema batch {}", ord),
+            kind: WorkGroupKind::AuthorSchema,
+            items: item_ids
+                .iter()
+                .map(|task_id| WorkGroupItemRef {
+                    task_id: task_id.clone(),
+                    checklist_item_id: CHECKLIST_SCHEMA_CONTRACT.to_string(),
+                })
+                .collect(),
+            depends_on_group_ids: Some(vec![sql_group_id]),
+        });
+        previous_schema_group_id = Some(schema_group_id.clone());
+        schema_group_ids.push(schema_group_id);
+    }
+    if !schema_group_ids.is_empty() {
+        for (idx, b) in batches.iter().enumerate() {
+            let mut validate_items: Vec<WorkGroupItemRef> = Vec::new();
+            for item in b.iter() {
+                let id = item.trim();
+                if id.is_empty() {
+                    continue;
+                }
+                if !validate_items.iter().any(|it| it.task_id == id) {
+                    validate_items.push(WorkGroupItemRef {
+                        task_id: id.to_string(),
+                        checklist_item_id: CHECKLIST_VALIDATE.to_string(),
+                    });
+                }
+            }
+            if !validate_items.is_empty() {
+                let ord = idx + 1;
+                out.push(PlanWorkGroup {
+                    group_id: format!("{item_prefix}_validate_{ord:03}"),
+                    label: format!("Validate batch {}", ord),
+                    kind: WorkGroupKind::Validate,
+                    items: validate_items,
+                    depends_on_group_ids: Some(schema_group_ids.clone()),
+                });
+            }
+        }
+    }
+    out
+}
+
+pub fn canonical_model_batches_from_tasks(tasks: &[ModelTask]) -> Vec<Vec<String>> {
+    let mut task_names: Vec<String> = Vec::new();
+    for task in tasks.iter() {
+        let name = task.name.trim();
+        if !name.is_empty() && !task_names.iter().any(|n| n == name) {
+            task_names.push(name.to_string());
+        }
+    }
+
+    let task_name_set: std::collections::BTreeSet<String> = task_names.iter().cloned().collect();
+    let mut deps_by_name: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+        std::collections::BTreeMap::new();
+    for task in tasks.iter() {
+        let name = task.name.trim();
+        if name.is_empty() || !task_name_set.contains(name) {
+            continue;
+        }
+        let mut deps = std::collections::BTreeSet::new();
+        for input in task.inputs.iter() {
+            let dep = input.trim();
+            if dep != name && task_name_set.contains(dep) {
+                deps.insert(dep.to_string());
+            }
+        }
+        deps_by_name.insert(name.to_string(), deps);
+    }
+
+    let mut ordered: Vec<String> = Vec::new();
+    let mut done: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    while ordered.len() < task_names.len() {
+        let mut progressed = false;
+        for name in task_names.iter() {
+            if done.contains(name) {
+                continue;
+            }
+            let deps = deps_by_name.get(name).cloned().unwrap_or_default();
+            if deps.iter().all(|dep| done.contains(dep)) {
+                done.insert(name.clone());
+                ordered.push(name.clone());
+                progressed = true;
+            }
+        }
+        if !progressed {
+            // Cycles are semantically invalid, but keep the persisted plan executable enough
+            // for validation/repair to report the real issue instead of dropping tasks.
+            for name in task_names.iter() {
+                if !done.contains(name) {
+                    done.insert(name.clone());
+                    ordered.push(name.clone());
+                }
+            }
+        }
+    }
+
+    ordered.into_iter().map(|name| vec![name]).collect()
+}
+
 #[cfg(test)]
 fn file_stem(s: &str) -> Option<String> {
     std::path::Path::new(s)
@@ -2248,11 +2388,65 @@ mod tests {
             }],
             assumptions: vec![],
             evidence_claim_refs: vec![crate::providers::SemanticClaimRef {
-                claim_id: "candidate_key:test_raw.x:id".to_string(),
+                claim_id: "candidate_key:test_raw.x:id".to_string().into(),
                 kind: crate::providers::SemanticClaimKind::CandidateKey,
                 status: crate::providers::EvidenceStatus::Observed,
             }],
         }
+    }
+
+    fn model_task(name: &str, inputs: Vec<&str>) -> ModelTask {
+        ModelTask {
+            name: name.to_string(),
+            folder: ModelFolder::Marts,
+            goal: "model goal".to_string(),
+            inputs: inputs.into_iter().map(str::to_string).collect(),
+            expected_model_path: Some(format!("models/marts/{name}.sql")),
+            invariants: vec![],
+            implementation_spec: Some(dummy_model_spec()),
+            source_schema: vec![],
+            grounded_inputs: vec![],
+            status: TaskStatus::Pending,
+            checklist: std_checklist("Author gold SQL"),
+        }
+    }
+
+    #[test]
+    fn canonical_model_batches_order_intra_plan_dependencies_first() {
+        let tasks = vec![
+            model_task("fct_orders", vec!["dim_customers", "stg_orders"]),
+            model_task("dim_customers", vec!["stg_customers"]),
+            model_task("agg_orders", vec!["fct_orders"]),
+        ];
+
+        let batches = canonical_model_batches_from_tasks(&tasks);
+
+        assert_eq!(
+            batches,
+            vec![
+                vec!["dim_customers".to_string()],
+                vec!["fct_orders".to_string()],
+                vec!["agg_orders".to_string()],
+            ]
+        );
+    }
+
+    #[test]
+    fn sequential_model_work_groups_gate_next_sql_on_previous_schema() {
+        let batches = vec![
+            vec!["dim_customers".to_string()],
+            vec!["fct_orders".to_string()],
+        ];
+
+        let groups = canonical_sequential_work_groups_from_batches(&batches, "model");
+
+        assert_eq!(groups[0].group_id, "model_author_sql_001");
+        assert_eq!(groups[0].depends_on_group_ids, None);
+        assert_eq!(groups[2].group_id, "model_author_sql_002");
+        assert_eq!(
+            groups[2].depends_on_group_ids,
+            Some(vec!["model_author_schema_001".to_string()])
+        );
     }
 
     #[test]

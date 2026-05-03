@@ -8,6 +8,7 @@ pub mod infer;
 pub mod orchestrator;
 pub mod semantic;
 pub mod stats_from_catalog;
+pub mod stats_repair;
 pub mod type_parse;
 pub mod types;
 pub mod utils;

@@ -1037,11 +1037,6 @@ async fn compile_and_ground_model_plan(
         }
     }
 
-    let _grounded_proof =
-        crate::plan::save_model_plan_grounded(&pctx.actx, &plan, &staged.allowed_models)
-            .await
-            .map_err(|e| format!("failed to checkpoint grounded/enriched model draft plan: {e}"))?;
-
     // Semantic validation (with one targeted-enrichment retry).
     tracing::info!("data_engineer: [model] validating plan semantics");
     let sem = crate::plan::ensure_model_plan_semantically_valid_or_repaired(
@@ -1072,6 +1067,7 @@ async fn compile_and_ground_model_plan(
                 &mut plan.tasks,
                 gold_prefix.as_deref(),
             );
+            crate::plan_types::reconcile_model_batches_and_work_groups(&mut plan);
             let attached =
                 crate::semantic_profile::attach_semantic_profile_claim_refs_to_model_plan(
                     &pctx.actx, &mut plan,
@@ -1090,10 +1086,12 @@ async fn compile_and_ground_model_plan(
         }
     };
 
-    let _grounded_proof =
-        crate::plan::save_model_plan_grounded(&pctx.actx, &plan, &staged.allowed_models)
-            .await
-            .map_err(|e| format!("failed to checkpoint normalized model draft plan: {e}"))?;
+    if sem.ok {
+        let _grounded_proof =
+            crate::plan::save_model_plan_grounded(&pctx.actx, &plan, &staged.allowed_models)
+                .await
+                .map_err(|e| format!("failed to checkpoint normalized model plan: {e}"))?;
+    }
 
     use crate::progress_controller::SubjectiveRetryKind;
     finalize_plan_and_approve(

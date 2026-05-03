@@ -69,6 +69,10 @@ impl crate::providers::DatasetCatalogProvider for MockWarehouseOk {
     > {
         Err("not used".to_string())
     }
+
+    fn evidence_capabilities(&self) -> crate::providers::ProviderEvidenceCapabilities {
+        crate::providers::ProviderEvidenceCapabilities::schema_only("mock warehouse provider")
+    }
 }
 
 impl crate::providers::WarehouseNaming for MockWarehouseOk {
@@ -144,9 +148,9 @@ fn compile_model_candidates_plan_builds_batches_from_selected_threshold() {
     let tasks = plan.tasks;
     let batches = plan.batches;
     assert_eq!(tasks.len(), 7, "default min score 70 should keep 7");
-    assert_eq!(batches.len(), 2);
-    assert_eq!(batches[0].len(), 5);
-    assert_eq!(batches[1].len(), 2);
+    assert_eq!(batches.len(), 7);
+    assert!(batches.iter().all(|batch| batch.len() == 1));
+    assert_eq!(batches[0], vec!["m_0".to_string()]);
 }
 
 #[test]

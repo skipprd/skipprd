@@ -85,8 +85,9 @@ impl FieldStats {
         // Compute nullable ratio
         let denom = self.total.max(1); // avoid div-by-zero
         self.nullable_ratio = Some((self.nulls as f64) / (denom as f64));
-        // Only compute approx distinct if we observed any non-null values
-        if self.total.saturating_sub(self.nulls) > 0 {
+        // Only estimate distinct counts from the local sketch when the caller
+        // did not already provide an exact/warehouse value.
+        if self.approx_distinct.is_none() && self.total.saturating_sub(self.nulls) > 0 {
             // Estimate ~ 2^R / phi, phi≈0.77351; even R=0 yields ~1.29 → 1
             let r = self.hll_rho_max as f64;
             let estimate = (2f64.powf(r) / 0.77351f64).round() as u64;
@@ -249,6 +250,21 @@ mod tests {
         } else {
             panic!("missing field stats");
         }
+    }
+
+    #[test]
+    fn finalize_preserves_provider_supplied_distinct_count() {
+        let mut f = FieldStats {
+            total: 4,
+            nulls: 0,
+            approx_distinct: Some(4),
+            ..Default::default()
+        };
+
+        f.finalize();
+
+        assert_eq!(f.approx_distinct, Some(4));
+        assert_eq!(f.nullable_ratio, Some(0.0));
     }
 
     #[test]

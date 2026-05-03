@@ -47,7 +47,10 @@ use crate::runtime_plugins::schema_state::{
     apply_runtime_source_schema_state, bump_pipeline_schema_version,
     current_pipeline_schema_version, current_runtime_schema_state,
 };
-use crate::runtime_plugins::sdk::{decode_record_batch_stream, encode_record_batch_stream};
+use crate::runtime_plugins::sdk::{
+    decode_record_batch_stream, decode_record_batch_stream_with_stats,
+    encode_record_batch_stream_with_stats,
+};
 use crate::runtime_plugins::wire::{read_frame, write_frame, MAX_RUNTIME_FRAME_BYTES};
 
 #[derive(Clone, Debug)]
@@ -543,11 +546,16 @@ async fn ingest_runtime_batches_into_core(
 
     let mut buffer_batches = Vec::with_capacity(batches.len());
     let mut derived_namespaces = BTreeMap::new();
+    let mut total_rows = 0u64;
+    let mut total_bytes = 0u64;
     for batch in batches {
+        total_bytes = total_bytes.saturating_add(batch.arrow_stream_bytes.len() as u64);
         let mut stream = decode_record_batch_stream(batch.arrow_stream_bytes)?;
         let mut record_batches = Vec::new();
         while let Some(next_batch) = stream.next().await {
-            record_batches.push(next_batch.map_err(|err| io::Error::other(err.to_string()))?);
+            let record_batch = next_batch.map_err(|err| io::Error::other(err.to_string()))?;
+            total_rows = total_rows.saturating_add(record_batch.num_rows() as u64);
+            record_batches.push(record_batch);
         }
         let schema = record_batches
             .first()
@@ -584,6 +592,8 @@ async fn ingest_runtime_batches_into_core(
 
     let mut buffers = Buffers::new();
     buffers.write(buffer_batches);
+    crate::metrics::counters::add_messages(total_rows);
+    crate::metrics::counters::add_source_bytes(total_bytes);
     buffers
         .flush(offsets, shared_output)
         .await
@@ -746,7 +756,12 @@ pub async fn sync_runtime_input_plugin(
                 PluginDataFrame::SinkWrite(write) => {
                     let shared_output = shared_output.clone();
                     pending_source_tasks.spawn(async move {
-                        let stream = decode_record_batch_stream(write.arrow_stream_bytes)?;
+                        let source_bytes = write.arrow_stream_bytes.len() as u64;
+                        let decoded =
+                            decode_record_batch_stream_with_stats(write.arrow_stream_bytes)?;
+                        let stream = decoded.stream;
+                        crate::metrics::counters::add_messages(decoded.rows);
+                        crate::metrics::counters::add_source_bytes(source_bytes);
                         if let Some(namespace) =
                             query_value_from_runtime_filename(&write.filename, "namespace")
                         {
@@ -1033,6 +1048,7 @@ impl RuntimeDataSinkPlugin {
         &self,
         request: SinkRunRequest,
         arrow_stream_bytes: Vec<u8>,
+        row_count: u64,
     ) -> io::Result<()> {
         let mut retried = false;
         let mut schema_refreshes = 0usize;
@@ -1059,7 +1075,8 @@ impl RuntimeDataSinkPlugin {
                 Ok(PluginFrame::SinkAck(RuntimeRequestAck { request_id }))
                     if request_id == request.request_id =>
                 {
-                    return Ok(())
+                    crate::metrics::counters::add_parquet_rows(row_count);
+                    return Ok(());
                 }
                 Ok(PluginFrame::Error(err)) => return Err(io::Error::other(err)),
                 Ok(PluginFrame::SchemaStateRefreshRequired(_refresh)) => {
@@ -1138,7 +1155,7 @@ impl DataSink for RuntimeDataSinkPlugin {
         let schema_state = current_runtime_schema_state();
         self.install_schema_state_with_retry(schema_state.version, &schema_state.namespaces)
             .await?;
-        let arrow_stream_bytes = encode_record_batch_stream(stream).await?;
+        let encoded_stream = encode_record_batch_stream_with_stats(stream).await?;
         let request = SinkRunRequest {
             request_id: next_runtime_request_id(),
             compaction_id: runtime_compaction_id(&filename),
@@ -1147,7 +1164,8 @@ impl DataSink for RuntimeDataSinkPlugin {
             filename,
             cdc_ctx: cdc_ctx.cloned(),
         };
-        self.send_sink_request(request, arrow_stream_bytes).await
+        self.send_sink_request(request, encoded_stream.bytes, encoded_stream.rows)
+            .await
     }
 
     fn capability(&self) -> Option<&'static cdc::SinkCapability> {

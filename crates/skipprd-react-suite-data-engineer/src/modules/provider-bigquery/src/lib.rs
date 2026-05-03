@@ -18,7 +18,8 @@ use tokio::sync::Semaphore;
 
 use react_core::discover::stats::FieldStats;
 use react_suite_data_engineer::providers::{
-    DatasetCatalogProvider, DatasetFieldStats, DatasetId, DatasetStats, QueryProvider, QueryResult,
+    finalize_provider_field_stats, parse_provider_u64, DatasetCatalogProvider, DatasetFieldStats,
+    DatasetId, DatasetStats, ProviderEvidenceCapabilities, QueryProvider, QueryResult,
     WarehouseNaming,
 };
 
@@ -420,7 +421,7 @@ impl DatasetCatalogProvider for BigQueryProvider {
             .rows
             .first()
             .and_then(|r| r.first())
-            .and_then(|s| s.parse::<u64>().ok())
+            .and_then(|s| parse_provider_u64(s))
             .unwrap_or(0);
 
         let mut ns_stats = DatasetFieldStats::new(&dataset.fqn());
@@ -472,34 +473,32 @@ impl DatasetCatalogProvider for BigQueryProvider {
 
             let qr = match self.query(&sql).await {
                 Ok(qr) => qr,
-                Err(_) => {
-                    let mut fs = FieldStats::default();
-                    fs.total = total_rows;
-                    fs.finalize();
-                    ns_stats.fields.insert(name, fs);
-                    continue;
-                }
+                Err(_) => continue,
             };
 
             let row = qr.rows.first().cloned().unwrap_or_default();
             let mut fs = FieldStats::default();
             fs.total = total_rows;
-            fs.nulls = row.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            fs.nulls = row.get(1).and_then(|s| parse_provider_u64(s)).unwrap_or(0);
             if !is_complex {
-                fs.approx_distinct = row.get(2).and_then(|s| s.parse::<u64>().ok());
+                fs.approx_distinct = row.get(2).and_then(|s| parse_provider_u64(s));
                 if fs.approx_distinct.is_some() {
                     ns_stats.exact_distinct_fields.insert(name.clone());
                 }
                 fs.min_numeric = row.get(3).and_then(|s| s.parse::<f64>().ok());
                 fs.max_numeric = row.get(4).and_then(|s| s.parse::<f64>().ok());
             }
-            fs.finalize();
+            finalize_provider_field_stats(&mut fs);
             ns_stats.fields.insert(name, fs);
         }
 
         let mut ds_stats = DatasetStats::default();
         ds_stats.approx_total_rows = total_rows;
         Ok((ns_stats, ds_stats))
+    }
+
+    fn evidence_capabilities(&self) -> ProviderEvidenceCapabilities {
+        ProviderEvidenceCapabilities::sql_warehouse_without_relationships()
     }
 
     fn max_concurrency(&self) -> usize {

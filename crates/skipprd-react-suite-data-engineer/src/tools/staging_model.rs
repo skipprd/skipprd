@@ -1231,6 +1231,12 @@ mod tests {
             > {
                 Err("not used".to_string())
             }
+
+            fn evidence_capabilities(&self) -> crate::providers::ProviderEvidenceCapabilities {
+                crate::providers::ProviderEvidenceCapabilities::schema_only(
+                    "mock warehouse provider",
+                )
+            }
         }
         impl crate::providers::WarehouseNaming for MockWarehouse {
             fn kind(&self) -> crate::de_config::WarehouseKind {

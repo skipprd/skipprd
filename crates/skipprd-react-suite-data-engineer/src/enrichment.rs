@@ -923,10 +923,7 @@ Apply these fixes in the output.",
     ) -> crate::plan::ModelPlan {
         let selected = Self::select_high_value_model_candidates(&candidates.candidates);
         let task_names: Vec<String> = selected.into_iter().map(|c| c.name).collect();
-        let batches: Vec<Vec<String>> = task_names
-            .chunks(plan_progress::MAX_BATCH_SIZE)
-            .map(|c| c.to_vec())
-            .collect();
+        let batches: Vec<Vec<String>> = task_names.iter().map(|name| vec![name.clone()]).collect();
         let tasks: Vec<crate::plan::ModelTask> = task_names
             .into_iter()
             .map(|name| crate::plan::ModelTask {
@@ -943,7 +940,8 @@ Apply these fixes in the output.",
                 checklist: crate::plan::canonical_task_checklist(TrackKind::Model),
             })
             .collect();
-        let work_groups = crate::plan::canonical_work_groups_from_batches(&batches, "model");
+        let work_groups =
+            crate::plan::canonical_sequential_work_groups_from_batches(&batches, "model");
         crate::plan::ModelPlan {
             plan_key: String::new(),
             status: crate::plan::PlanStatus::Draft,
@@ -1100,7 +1098,7 @@ mod tests {
                     output_fields: vec![],
                     assumptions: vec![],
                     evidence_claim_refs: vec![crate::providers::SemanticClaimRef {
-                        claim_id: "candidate_key:test_raw.orders:order_id".to_string(),
+                        claim_id: "candidate_key:test_raw.orders:order_id".to_string().into(),
                         kind: crate::providers::SemanticClaimKind::CandidateKey,
                         status: crate::providers::EvidenceStatus::Observed,
                     }],

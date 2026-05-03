@@ -672,6 +672,11 @@ Output JSON only:",
                                 pii_sensitivity: pii,
                                 units_or_format: units,
                                 role,
+                                stats_status: if stats_lite.is_some() {
+                                    crate::types::StatsStatus::Collected
+                                } else {
+                                    crate::types::StatsStatus::SchemaOnly
+                                },
                                 stats: stats_lite,
                             })
                         })
@@ -694,6 +699,7 @@ Output JSON only:",
                             pii_sensitivity: None,
                             units_or_format: None,
                             role: Some(format!("{:?}", f.role)),
+                            stats_status: crate::types::StatsStatus::SchemaOnly,
                             stats: None,
                         })
                         .collect()

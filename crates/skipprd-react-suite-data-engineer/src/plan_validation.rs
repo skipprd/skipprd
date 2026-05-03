@@ -110,9 +110,31 @@ fn has_safe_claim(
     spec: &crate::plan_types::ModelImplementationSpec,
     kinds: &[crate::providers::SemanticClaimKind],
 ) -> bool {
-    spec.evidence_claim_refs
-        .iter()
-        .any(|claim| claim.status.authoring_safe() && kinds.iter().any(|kind| kind == &claim.kind))
+    spec.evidence_claim_refs.iter().any(|claim| {
+        claim.status.authoring_safe()
+            && claim_ref_resolves_for_validation(claim)
+            && kinds.iter().any(|kind| kind == &claim.kind)
+    })
+}
+
+fn claim_ref_resolves_for_validation(claim: &crate::providers::SemanticClaimRef) -> bool {
+    use crate::providers::{EvidenceStatus, SemanticClaimKind};
+    if claim.claim_id.as_str().trim().is_empty() {
+        return false;
+    }
+    if claim.status == EvidenceStatus::UserProvided {
+        return true;
+    }
+    let prefix = match claim.kind {
+        SemanticClaimKind::CandidateKey => "candidate_key:",
+        SemanticClaimKind::Relationship => "relationship:",
+        SemanticClaimKind::Grain => "grain:",
+        SemanticClaimKind::NumericParse => "numeric_parse:",
+        SemanticClaimKind::TimeField => "time_field:",
+        SemanticClaimKind::RowPreservation => "row_preservation:",
+        SemanticClaimKind::AggregateSafety => "aggregate_safety:",
+    };
+    claim.claim_id.as_str().starts_with(prefix)
 }
 
 fn model_evidence_issues(
@@ -121,6 +143,7 @@ fn model_evidence_issues(
 ) -> Vec<PlanSemanticIssue> {
     use crate::providers::SemanticClaimKind::{
         AggregateSafety, CandidateKey, Grain, NumericParse, Relationship, RowPreservation,
+        TimeField,
     };
     use PlanSemanticIssueCode::UnverifiedSemanticEvidence;
 
@@ -133,6 +156,16 @@ fn model_evidence_issues(
                 format!(
                     "{}: evidence claim '{}' for {:?} is {:?}; model authoring requires observed or user_provided evidence",
                     tid, claim.claim_id, claim.kind, claim.status
+                ),
+            ));
+        }
+        if claim.status.authoring_safe() && !claim_ref_resolves_for_validation(claim) {
+            issues.push(sem_task(
+                UnverifiedSemanticEvidence,
+                tid,
+                format!(
+                    "{}: evidence claim '{}' for {:?} does not resolve to a typed profile/user evidence id",
+                    tid, claim.claim_id, claim.kind
                 ),
             ));
         }
@@ -184,6 +217,7 @@ fn model_evidence_issues(
                 CandidateKey,
                 Relationship,
                 NumericParse,
+                TimeField,
                 RowPreservation,
                 AggregateSafety,
             ],
@@ -690,7 +724,9 @@ mod tests {
     #[test]
     fn model_plan_accepts_grain_with_observed_evidence() {
         let plan = model_plan_with_claims(vec![SemanticClaimRef {
-            claim_id: "candidate_key:db.schema.customers:customer_id".to_string(),
+            claim_id: "candidate_key:db.schema.customers:customer_id"
+                .to_string()
+                .into(),
             kind: SemanticClaimKind::CandidateKey,
             status: EvidenceStatus::Observed,
         }]);

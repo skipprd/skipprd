@@ -10,7 +10,8 @@ use tokio::sync::{Mutex, RwLock, Semaphore};
 use react_core::discover::stats::FieldStats;
 use react_suite_data_engineer::providers::warehouse_utils;
 use react_suite_data_engineer::providers::{
-    DatasetCatalogProvider, DatasetFieldStats, DatasetId, DatasetStats, QueryProvider, QueryResult,
+    finalize_provider_field_stats, parse_provider_u64, DatasetCatalogProvider, DatasetFieldStats,
+    DatasetId, DatasetStats, ProviderEvidenceCapabilities, QueryProvider, QueryResult,
     WarehouseNaming,
 };
 
@@ -200,7 +201,8 @@ impl SnowflakeProvider {
             .map(|row| {
                 header
                     .iter()
-                    .map(|col| row.get::<String>(col).unwrap_or_default())
+                    .enumerate()
+                    .map(|(idx, _)| row.at::<String>(idx).unwrap_or_default())
                     .collect()
             })
             .collect();
@@ -230,6 +232,18 @@ impl SnowflakeProvider {
             Self::quote_ident_sf(schema),
             Self::quote_ident_sf(table)
         )
+    }
+
+    fn dbt_model_relation(database: &str, schema: &str, table: &str) -> String {
+        format!("{}.{}.{}", database, schema, table)
+    }
+
+    fn dbt_model_lookup_id(id: &DatasetId) -> DatasetId {
+        DatasetId {
+            catalog: id.catalog.to_ascii_uppercase(),
+            database: id.database.to_ascii_uppercase(),
+            table: id.table.to_ascii_uppercase(),
+        }
     }
 
     async fn cached_schemas(&self) -> Result<Vec<String>, String> {
@@ -362,6 +376,14 @@ impl WarehouseNaming for SnowflakeProvider {
         Self::quote_table(&id.catalog, &id.database, &id.table)
     }
 
+    fn format_dbt_model_relation_fqn(&self, id: &DatasetId) -> String {
+        Self::dbt_model_relation(&id.catalog, &id.database, &id.table)
+    }
+
+    fn dbt_model_relation_lookup_id(&self, id: &DatasetId) -> DatasetId {
+        Self::dbt_model_lookup_id(id)
+    }
+
     fn sql_prompt_rules(&self) -> Vec<&'static str> {
         vec![
             "Snowflake SQL: Use VARIANT, OBJECT, and ARRAY types for semi-structured data. Access nested fields with colon notation (e.g. col:field::STRING).",
@@ -450,7 +472,7 @@ impl DatasetCatalogProvider for SnowflakeProvider {
             .rows
             .first()
             .and_then(|r| r.first())
-            .and_then(|s| s.parse::<u64>().ok())
+            .and_then(|s| parse_provider_u64(s))
             .unwrap_or(0);
 
         let mut ns_stats = DatasetFieldStats::new(&dataset.fqn());
@@ -534,10 +556,6 @@ impl DatasetCatalogProvider for SnowflakeProvider {
                         ty,
                         e
                     );
-                    let mut fs = FieldStats::default();
-                    fs.total = total_rows;
-                    fs.finalize();
-                    ns_stats.fields.insert(name, fs);
                     continue;
                 }
             };
@@ -545,22 +563,26 @@ impl DatasetCatalogProvider for SnowflakeProvider {
             let row = qr.rows.first().cloned().unwrap_or_default();
             let mut fs = FieldStats::default();
             fs.total = total_rows;
-            fs.nulls = row.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            fs.nulls = row.get(1).and_then(|s| parse_provider_u64(s)).unwrap_or(0);
             if !is_complex {
-                fs.approx_distinct = row.get(2).and_then(|s| s.parse::<u64>().ok());
+                fs.approx_distinct = row.get(2).and_then(|s| parse_provider_u64(s));
                 if fs.approx_distinct.is_some() {
                     ns_stats.exact_distinct_fields.insert(name.clone());
                 }
                 fs.min_numeric = row.get(3).and_then(|s| s.parse::<f64>().ok());
                 fs.max_numeric = row.get(4).and_then(|s| s.parse::<f64>().ok());
             }
-            fs.finalize();
+            finalize_provider_field_stats(&mut fs);
             ns_stats.fields.insert(name, fs);
         }
 
         let mut ds_stats = DatasetStats::default();
         ds_stats.approx_total_rows = total_rows;
         Ok((ns_stats, ds_stats))
+    }
+
+    fn evidence_capabilities(&self) -> ProviderEvidenceCapabilities {
+        ProviderEvidenceCapabilities::sql_warehouse_without_relationships()
     }
 
     fn max_concurrency(&self) -> usize {
@@ -580,7 +602,7 @@ fn is_skippr_internal_table(table: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::is_skippr_internal_table;
+    use super::{is_skippr_internal_table, DatasetId, SnowflakeProvider};
 
     #[test]
     fn skippr_internal_tables_are_excluded_from_discovery() {
@@ -588,5 +610,36 @@ mod tests {
         assert!(is_skippr_internal_table("_SKIPPR_TOMBSTONES_ORDERS"));
         assert!(!is_skippr_internal_table("TRIP_START"));
         assert!(!is_skippr_internal_table("orders"));
+    }
+
+    #[test]
+    fn dbt_model_relation_uses_unquoted_manifest_style() {
+        let id = DatasetId {
+            catalog: "ANALYTICS".to_string(),
+            database: "target_schema_silver".to_string(),
+            table: "stg_example".to_string(),
+        };
+
+        assert_eq!(
+            SnowflakeProvider::dbt_model_relation(&id.catalog, &id.database, &id.table),
+            "ANALYTICS.target_schema_silver.stg_example"
+        );
+        assert_eq!(
+            SnowflakeProvider::quote_table(&id.catalog, &id.database, &id.table),
+            "\"ANALYTICS\".\"target_schema_silver\".\"stg_example\""
+        );
+    }
+
+    #[test]
+    fn dbt_model_lookup_id_matches_snowflake_unquoted_identifier_fold() {
+        let lookup = SnowflakeProvider::dbt_model_lookup_id(&DatasetId {
+            catalog: "analytics".to_string(),
+            database: "example_silver".to_string(),
+            table: "stg_orders".to_string(),
+        });
+
+        assert_eq!(lookup.catalog, "ANALYTICS");
+        assert_eq!(lookup.database, "EXAMPLE_SILVER");
+        assert_eq!(lookup.table, "STG_ORDERS");
     }
 }

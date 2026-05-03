@@ -9,7 +9,9 @@ mod discover {
 
 mod providers {
     pub mod dataset_catalog_provider {
-        pub use react_suite_data_engineer::providers::{DatasetCatalogProvider, DatasetId};
+        pub use react_suite_data_engineer::providers::{
+            DatasetCatalogProvider, DatasetId, ProviderEvidenceCapabilities,
+        };
     }
     pub mod catalog {
         pub mod types {

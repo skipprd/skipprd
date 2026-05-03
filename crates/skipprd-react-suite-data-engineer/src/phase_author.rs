@@ -331,7 +331,9 @@ mod tests {
                     }],
                     assumptions: vec![],
                     evidence_claim_refs: vec![crate::providers::SemanticClaimRef {
-                        claim_id: "candidate_key:test_raw.raw_customers:customer_id".to_string(),
+                        claim_id: "candidate_key:test_raw.raw_customers:customer_id"
+                            .to_string()
+                            .into(),
                         kind: crate::providers::SemanticClaimKind::CandidateKey,
                         status: crate::providers::EvidenceStatus::Observed,
                     }],
@@ -464,6 +466,26 @@ mod tests {
     }
 
     #[test]
+    fn reconciled_model_sql_routes_next_action_to_schema_contract() {
+        let mut plan = sample_model_plan();
+        let item_names = vec!["dim_customers".to_string()];
+        let existing_paths =
+            std::collections::HashSet::from([String::from("models/marts/dim_customers.sql")]);
+
+        assert!(reconcile_existing_model_sql_checklist(
+            &mut plan,
+            &item_names,
+            crate::plan::CHECKLIST_SQL_MODEL,
+            &existing_paths,
+        ));
+
+        assert_eq!(
+            crate::plan::model_next_authoring_action(&plan),
+            crate::plan::AuthoringNextAction::AuthorSchema(vec!["dim_customers".to_string()])
+        );
+    }
+
+    #[test]
     fn reconcile_existing_model_sql_checklist_ignores_missing_paths() {
         let mut plan = sample_model_plan();
         let item_names = vec!["dim_customers".to_string()];
@@ -484,6 +506,22 @@ mod tests {
             .map(|it| it.status)
             .expect("sql checklist item should exist");
         assert_eq!(status, crate::plan::ChecklistItemStatus::Pending);
+    }
+
+    #[test]
+    fn schema_yml_model_names_detect_missing_model_stanza() {
+        let names = collect_model_names_from_schema_yml(
+            r#"
+version: 2
+models:
+  - name: dim_customers
+    columns: []
+"#,
+        )
+        .expect("schema yml should parse");
+
+        assert!(names.contains("dim_customers"));
+        assert!(!names.contains("fact_orders"));
     }
 }
 
@@ -658,6 +696,26 @@ async fn reconcile_existing_model_sql_from_storage(
         checklist_item_id,
         &existing_model_paths,
     )
+}
+
+fn collect_model_names_from_schema_yml(
+    content: &str,
+) -> Result<std::collections::HashSet<String>, serde_yaml::Error> {
+    let vy = serde_yaml::from_str::<serde_yaml::Value>(content)?;
+    let mut names_in_schema: std::collections::HashSet<String> = std::collections::HashSet::new();
+    if let Some(models) = vy.get("models").and_then(|m| m.as_sequence()) {
+        for m in models.iter() {
+            if let Some(nm) = m
+                .get("name")
+                .and_then(|n| n.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+            {
+                names_in_schema.insert(nm);
+            }
+        }
+    }
+    Ok(names_in_schema)
 }
 
 fn build_schema_checklist_context(
@@ -999,11 +1057,30 @@ async fn load_model_author_context(
         plan.plan_key.clone(),
         next_item,
     );
+    let next_action = crate::plan::model_next_authoring_action(&plan);
+    let next_names = next_action.author_sql_ids();
+    if !next_names.is_empty() {
+        let checklist_item_id = resolve_checklist_item_id(actx, crate::plan::CHECKLIST_SQL_MODEL);
+        if reconcile_existing_model_sql_from_storage(
+            actx,
+            &mut plan,
+            &next_names,
+            &checklist_item_id,
+        )
+        .await
+        {
+            crate::plan::save_model_plan(actx, &plan).await?;
+            return Ok(AuthorPlanLoadResult::EarlyReturn(
+                PhaseOutcome::stayed_with_progress(
+                    "marked existing model SQL checklist items done after reconciling written gold SQL",
+                ),
+            ));
+        }
+    }
     {
-        let next = crate::plan::model_next_authoring_action(&plan).author_sql_ids();
         let expected_paths = crate::phase_author_lifecycle::collect_expected_paths(
             &plan.tasks,
-            &next,
+            &next_names,
             |task| task.name.as_str(),
             |task| task.expected_model_path.as_deref(),
         );
@@ -1015,7 +1092,7 @@ async fn load_model_author_context(
             &plan.plan_key,
             plan.progress.consecutive_batch_failures,
             plan.progress.total_batch_failures,
-            &next,
+            &next_names,
             &expected_paths,
         )
         .await?
@@ -1039,9 +1116,6 @@ async fn load_model_author_context(
         ));
     }
 
-    let next_action = crate::plan::model_next_authoring_action(&plan);
-    let next_names = next_action.author_sql_ids();
-
     if crate::phase_gate::patch_impl_intent_unsatisfied(params.execution_state, params.phase) {
         let review_target_paths = review_patch_detail(params.execution_state)
             .map(|detail| {
@@ -1063,25 +1137,6 @@ async fn load_model_author_context(
         });
     }
 
-    if !next_names.is_empty() {
-        let checklist_item_id = resolve_checklist_item_id(actx, crate::plan::CHECKLIST_SQL_MODEL);
-        if reconcile_existing_model_sql_from_storage(
-            actx,
-            &mut plan,
-            &next_names,
-            &checklist_item_id,
-        )
-        .await
-        {
-            crate::plan::save_model_plan(actx, &plan).await?;
-            return Ok(AuthorPlanLoadResult::EarlyReturn(
-                PhaseOutcome::stayed_with_progress(
-                    "marked existing model SQL checklist items done after reconciling written gold SQL",
-                ),
-            ));
-        }
-    }
-
     if next_names.is_empty() {
         if let crate::plan::AuthoringNextAction::AuthorSchema(ids) = &next_action {
             // Reconcile: if models/schema.yml already contains stanzas for all
@@ -1092,21 +1147,7 @@ async fn load_model_author_context(
                     crate::project_fs::join_storage_key(actx, crate::project_fs::MODELS_SCHEMA_YML);
                 if let Ok(bytes) = retry_get_bytes(actx.storage().as_ref(), &key).await {
                     let content = String::from_utf8_lossy(&bytes).to_string();
-                    if let Ok(vy) = serde_yaml::from_str::<serde_yaml::Value>(&content) {
-                        let mut names_in_schema: std::collections::HashSet<String> =
-                            std::collections::HashSet::new();
-                        if let Some(models) = vy.get("models").and_then(|m| m.as_sequence()) {
-                            for m in models.iter() {
-                                if let Some(nm) = m
-                                    .get("name")
-                                    .and_then(|n| n.as_str())
-                                    .map(|s| s.trim().to_string())
-                                    .filter(|s| !s.is_empty())
-                                {
-                                    names_in_schema.insert(nm);
-                                }
-                            }
-                        }
+                    if let Ok(names_in_schema) = collect_model_names_from_schema_yml(&content) {
                         let all_present = ids.iter().all(|n| names_in_schema.contains(n));
                         if all_present {
                             let mut changed = false;

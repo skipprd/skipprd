@@ -91,52 +91,9 @@ pub fn prune_model_plan_to_grounded_staging_models(
     plan: &mut ModelPlan,
     allowed_stg_models: &std::collections::BTreeSet<String>,
 ) {
-    fn normalize_staging_input_name(raw: &str) -> Option<String> {
-        let mut t = raw.trim();
-        if t.is_empty() {
-            return None;
-        }
-        if t.starts_with("{{") && t.ends_with("}}") && t.len() >= 4 {
-            t = t[2..t.len() - 2].trim();
-        }
-        let lower = t.to_ascii_lowercase();
-        let mut candidate = if lower.starts_with("ref(") && t.ends_with(')') {
-            let inner = &t[4..t.len() - 1];
-            inner
-                .trim()
-                .trim_matches(|c| c == '\'' || c == '"' || c == '`')
-                .to_string()
-        } else {
-            t.to_string()
-        };
-        if candidate.contains('/') {
-            let stem = std::path::Path::new(candidate.as_str())
-                .file_stem()
-                .map(|s| s.to_string_lossy().to_string())
-                .unwrap_or_default();
-            if !stem.trim().is_empty() {
-                candidate = stem.trim().to_string();
-            }
-        }
-        if candidate.contains('.') {
-            if let Some(last) = candidate.rsplit('.').next() {
-                candidate = last.trim().to_string();
-            }
-        }
-        let normalized = candidate
-            .trim()
-            .trim_matches(|c| c == '\'' || c == '"' || c == '`')
-            .to_ascii_lowercase();
-        if normalized.starts_with("stg_") {
-            Some(normalized)
-        } else {
-            None
-        }
-    }
-
     let normalized_allowed: std::collections::BTreeSet<String> = allowed_stg_models
         .iter()
-        .filter_map(|s| normalize_staging_input_name(s))
+        .filter_map(|s| crate::dataset_truth::normalize_staging_model_name(s))
         .collect();
 
     let plan_task_names: std::collections::BTreeSet<String> = plan
@@ -164,7 +121,7 @@ pub fn prune_model_plan_to_grounded_staging_models(
             if it.is_empty() {
                 continue;
             }
-            let Some(normalized) = normalize_staging_input_name(it) else {
+            let Some(normalized) = crate::dataset_truth::normalize_staging_model_name(it) else {
                 if plan_task_names.contains(it) {
                     normalized_inputs.push(it.to_string());
                     continue;
@@ -205,7 +162,7 @@ pub fn prune_model_plan_to_grounded_staging_models(
             }),
         );
     }
-    plan.reconcile_work_groups();
+    crate::plan_types::reconcile_model_batches_and_work_groups(plan);
 }
 
 fn default_cleanse_implementation_spec() -> CleanseImplementationSpec {

@@ -1,6 +1,6 @@
 use tracing::{debug, info};
 
-use crate::types::{DataCatalog, SemanticField, SemanticFieldRole};
+use crate::types::{DataCatalog, SemanticField, SemanticFieldRole, StatsStatus};
 use crate::utils::{classify_field, to_stats_lite};
 
 pub struct CatalogBuilder;
@@ -8,8 +8,10 @@ pub struct CatalogBuilder;
 impl CatalogBuilder {
     pub async fn build_with_stats(
         dataset: &react_suite_data_engineer::providers::DatasetId,
+        schema_cols: &[(String, String)],
         ns_stats: Option<react_suite_data_engineer::providers::DatasetFieldStats>,
         dataset_stats: Option<crate::types::DatasetStats>,
+        stats_failure: Option<String>,
     ) -> DataCatalog {
         let (semantic_fields, semantic_dims, semantic_metrics): (
             Vec<SemanticField>,
@@ -38,7 +40,22 @@ impl CatalogBuilder {
                 }
                 (fields, dims, mets)
             } else {
-                (Vec::new(), Vec::new(), Vec::new())
+                let mut fields = Vec::new();
+                for (name, _ty) in schema_cols {
+                    for (path, _leaf_ty) in crate::type_parse::flatten_type_paths(name, _ty) {
+                        fields.push(SemanticField {
+                            name: path,
+                            role: SemanticFieldRole::Categorical,
+                        });
+                    }
+                }
+                let mut dims = fields
+                    .iter()
+                    .map(|field| field.name.clone())
+                    .collect::<Vec<_>>();
+                dims.sort();
+                dims.dedup();
+                (fields, dims, Vec::new())
             }
         };
         fn build_structure_index(
@@ -86,6 +103,12 @@ impl CatalogBuilder {
                     pii_sensitivity: None,
                     units_or_format: None,
                     role: Some(format!("{:?}", f.role)),
+                    stats_status: stats_failure
+                        .as_ref()
+                        .map(|error| StatsStatus::Failed {
+                            error: error.clone(),
+                        })
+                        .unwrap_or(StatsStatus::SchemaOnly),
                     stats: None,
                 })
                 .collect(),
@@ -102,6 +125,7 @@ impl CatalogBuilder {
             for cf in catalog.fields.iter_mut() {
                 if let Some(fs) = ns.fields.get(&cf.name) {
                     nulls_by_field.insert(cf.name.clone(), fs.nulls);
+                    cf.stats_status = StatsStatus::Collected;
                     cf.stats = Some(to_stats_lite(
                         fs,
                         ns.exact_distinct_fields.contains(&cf.name),

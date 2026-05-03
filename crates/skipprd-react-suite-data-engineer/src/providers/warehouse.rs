@@ -1,7 +1,7 @@
 use async_trait::async_trait;
 
 use super::catalog_types::DatasetStats;
-use super::dataset_catalog::{DatasetCatalogProvider, DatasetId};
+use super::dataset_catalog::{DatasetCatalogProvider, DatasetId, ProviderEvidenceCapabilities};
 use super::query::{QueryProvider, QueryResult};
 use super::stats::DatasetFieldStats;
 
@@ -26,6 +26,14 @@ pub trait WarehouseNaming: Send + Sync {
             self.quote_ident(&id.database),
             self.quote_ident(&id.table)
         )
+    }
+
+    fn format_dbt_model_relation_fqn(&self, id: &DatasetId) -> String {
+        self.quote_fqn(id)
+    }
+
+    fn dbt_model_relation_lookup_id(&self, id: &DatasetId) -> DatasetId {
+        id.clone()
     }
 
     fn sql_prompt_rules(&self) -> Vec<&'static str> {
@@ -78,6 +86,10 @@ impl DatasetCatalogProvider for NullWarehouseProvider {
         _max_fields: usize,
     ) -> Result<(DatasetFieldStats, DatasetStats), String> {
         Err("warehouse provider not configured".to_string())
+    }
+
+    fn evidence_capabilities(&self) -> ProviderEvidenceCapabilities {
+        ProviderEvidenceCapabilities::schema_only("warehouse provider not configured")
     }
 }
 

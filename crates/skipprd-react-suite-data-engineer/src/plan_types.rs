@@ -574,6 +574,38 @@ pub fn apply_intra_plan_grounded_inputs(tasks: &mut [ModelTask], gold_prefix: Op
             (name, path)
         })
         .collect();
+    let task_schemas: std::collections::BTreeMap<String, Vec<SourceColumnDef>> = tasks
+        .iter()
+        .filter(|t| !t.name.trim().is_empty())
+        .map(|t| {
+            let schema = t
+                .implementation_spec
+                .as_ref()
+                .map(|spec| {
+                    spec.output_fields
+                        .iter()
+                        .filter_map(|field| {
+                            let name = field.name.trim();
+                            if name.is_empty() {
+                                return None;
+                            }
+                            Some(SourceColumnDef {
+                                name: name.to_string(),
+                                data_type: field
+                                    .data_type
+                                    .as_deref()
+                                    .map(str::trim)
+                                    .filter(|ty| !ty.is_empty())
+                                    .unwrap_or("unknown")
+                                    .to_string(),
+                            })
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            (t.name.trim().to_string(), schema)
+        })
+        .collect();
     for t in tasks.iter_mut() {
         for inp in &t.inputs {
             let input_name = inp.trim();
@@ -588,7 +620,7 @@ pub fn apply_intra_plan_grounded_inputs(tasks: &mut [ModelTask], gold_prefix: Op
                     input_name: input_name.to_string(),
                     model_rel_path: path.clone(),
                     relation_fqn: format!("{}.{}", prefix, input_name),
-                    source_schema: vec![],
+                    source_schema: task_schemas.get(input_name).cloned().unwrap_or_default(),
                 });
             }
         }
@@ -628,6 +660,12 @@ impl<T: PlanTask> Plan<T> {
             T::work_group_prefix(),
         );
     }
+}
+
+pub fn reconcile_model_batches_and_work_groups(plan: &mut ModelPlan) {
+    plan.batches = crate::plan_progress::canonical_model_batches_from_tasks(&plan.tasks);
+    plan.work_groups =
+        crate::plan_progress::canonical_sequential_work_groups_from_batches(&plan.batches, "model");
 }
 
 pub type CleansePlan = Plan<CleanseTask>;

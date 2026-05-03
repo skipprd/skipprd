@@ -20,7 +20,51 @@ impl EvidenceStatus {
     }
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
+#[derive(
+    Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, schemars::JsonSchema,
+)]
+#[serde(transparent)]
+pub struct ClaimId(pub String);
+
+impl ClaimId {
+    pub fn new(value: impl Into<String>) -> Option<Self> {
+        let value = value.into().trim().to_string();
+        if value.is_empty() {
+            return None;
+        }
+        Some(Self(value))
+    }
+
+    pub fn generated(value: impl Into<String>) -> Self {
+        Self::new(value).expect("generated claim id must be non-empty")
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<String> for ClaimId {
+    fn from(value: String) -> Self {
+        Self::generated(value)
+    }
+}
+
+impl From<&str> for ClaimId {
+    fn from(value: &str) -> Self {
+        Self::generated(value)
+    }
+}
+
+impl std::fmt::Display for ClaimId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(
+    Clone, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord, Hash, schemars::JsonSchema,
+)]
 #[serde(rename_all = "snake_case")]
 pub enum SemanticClaimKind {
     CandidateKey,
@@ -35,9 +79,49 @@ pub enum SemanticClaimKind {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SemanticClaimRef {
-    pub claim_id: String,
+    pub claim_id: ClaimId,
     pub kind: SemanticClaimKind,
     pub status: EvidenceStatus,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum StatsStatus {
+    Collected,
+    SchemaOnly,
+    Failed { error: String },
+}
+
+impl Default for StatsStatus {
+    fn default() -> Self {
+        Self::SchemaOnly
+    }
+}
+
+impl StatsStatus {
+    pub fn observed_distribution(&self) -> bool {
+        matches!(self, Self::Collected)
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct SemanticEvidenceProvenance {
+    pub rule_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe_sql_hash: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+}
+
+impl SemanticEvidenceProvenance {
+    pub fn rule(rule_id: impl Into<String>) -> Self {
+        Self {
+            rule_id: rule_id.into(),
+            probe_sql_hash: None,
+            note: None,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -53,6 +137,8 @@ pub struct ProfileMetric {
 pub struct FieldProfile {
     pub field_name: String,
     pub status: EvidenceStatus,
+    #[serde(default)]
+    pub stats_status: StatsStatus,
     #[serde(default)]
     pub total_count: Option<u64>,
     #[serde(default)]
@@ -70,7 +156,7 @@ pub struct FieldProfile {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
 pub struct KeyCandidateProfile {
-    pub claim_id: String,
+    pub claim_id: ClaimId,
     #[serde(default)]
     pub field_names: Vec<String>,
     pub status: EvidenceStatus,
@@ -82,12 +168,14 @@ pub struct KeyCandidateProfile {
     pub approx_distinct_count: Option<u64>,
     #[serde(default)]
     pub distinct_count_exact: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<SemanticEvidenceProvenance>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct RelationshipCandidateProfile {
-    pub claim_id: String,
+    pub claim_id: ClaimId,
     pub left_dataset_id: String,
     pub right_dataset_id: String,
     #[serde(default)]
@@ -97,6 +185,49 @@ pub struct RelationshipCandidateProfile {
     pub status: EvidenceStatus,
     #[serde(default)]
     pub note: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<SemanticEvidenceProvenance>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct FieldClaimProfile {
+    pub claim_id: ClaimId,
+    pub field_name: String,
+    pub status: EvidenceStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<SemanticEvidenceProvenance>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GrainCandidateProfile {
+    pub claim_id: ClaimId,
+    #[serde(default)]
+    pub field_names: Vec<String>,
+    pub status: EvidenceStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<SemanticEvidenceProvenance>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct AggregateSafetyCandidateProfile {
+    pub claim_id: ClaimId,
+    #[serde(default)]
+    pub field_names: Vec<String>,
+    pub status: EvidenceStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<SemanticEvidenceProvenance>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct RowPreservationCandidateProfile {
+    pub claim_id: ClaimId,
+    pub status: EvidenceStatus,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provenance: Option<SemanticEvidenceProvenance>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -111,6 +242,16 @@ pub struct DatasetProfile {
     pub key_candidates: Vec<KeyCandidateProfile>,
     #[serde(default)]
     pub relationship_candidates: Vec<RelationshipCandidateProfile>,
+    #[serde(default)]
+    pub numeric_parse_candidates: Vec<FieldClaimProfile>,
+    #[serde(default)]
+    pub time_field_candidates: Vec<FieldClaimProfile>,
+    #[serde(default)]
+    pub grain_candidates: Vec<GrainCandidateProfile>,
+    #[serde(default)]
+    pub aggregate_safety_candidates: Vec<AggregateSafetyCandidateProfile>,
+    #[serde(default)]
+    pub row_preservation_candidates: Vec<RowPreservationCandidateProfile>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -221,6 +362,8 @@ pub struct CatalogField {
     pub units_or_format: Option<String>,
     #[serde(default)]
     pub role: Option<String>,
+    #[serde(default)]
+    pub stats_status: StatsStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stats: Option<FieldStatsLite>,
 }

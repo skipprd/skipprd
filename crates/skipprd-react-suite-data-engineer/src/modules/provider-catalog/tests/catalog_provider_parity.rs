@@ -102,6 +102,11 @@ async fn provider_write_semantic_profile_uses_keyspace_key_and_roundtrips() {
             fields: vec![],
             key_candidates: vec![],
             relationship_candidates: vec![],
+            numeric_parse_candidates: vec![],
+            time_field_candidates: vec![],
+            grain_candidates: vec![],
+            aggregate_safety_candidates: vec![],
+            row_preservation_candidates: vec![],
         }],
         notes: vec!["aggregate-only".to_string()],
     };

@@ -14,13 +14,17 @@ pub const DEFAULT_MAX_CONCURRENCY: usize = 15;
 
 pub use catalog::{CatalogEnrichmentReport, CatalogProvider};
 pub use catalog_types::{
-    AccessDescriptor, CatalogField, DataCatalog, DatasetProfile, DatasetStats, EvidenceStatus,
-    FieldProfile, FieldStatsLite, GlobalAssumptionGap, GlobalAudience, GlobalContextBullet,
-    GlobalDatasetGroup, GlobalSemanticContext, KeyCandidateProfile, ProfileMetric,
-    RelationshipCandidateProfile, SemanticClaimKind, SemanticClaimRef, SemanticField,
-    SemanticFieldRole, SemanticModel, SemanticProfile, StructureKind, GLOBAL_SEMANTIC_DATASET_ID,
+    AccessDescriptor, AggregateSafetyCandidateProfile, CatalogField, ClaimId, DataCatalog,
+    DatasetProfile, DatasetStats, EvidenceStatus, FieldClaimProfile, FieldProfile, FieldStatsLite,
+    GlobalAssumptionGap, GlobalAudience, GlobalContextBullet, GlobalDatasetGroup,
+    GlobalSemanticContext, GrainCandidateProfile, KeyCandidateProfile, ProfileMetric,
+    RelationshipCandidateProfile, RowPreservationCandidateProfile, SemanticClaimKind,
+    SemanticClaimRef, SemanticEvidenceProvenance, SemanticField, SemanticFieldRole, SemanticModel,
+    SemanticProfile, StatsStatus, StructureKind, GLOBAL_SEMANTIC_DATASET_ID,
 };
-pub use dataset_catalog::{DatasetCatalogProvider, DatasetId};
+pub use dataset_catalog::{
+    DatasetCatalogProvider, DatasetId, EvidenceCapability, ProviderEvidenceCapabilities,
+};
 pub use dbt::{DbtProvider, DbtValidateArgs, DbtValidateResult};
 pub use query::{QueryProvider, QueryResult};
 pub use skippr::{
@@ -28,5 +32,5 @@ pub use skippr::{
     SkipprOutputConfig, SkipprPipelineConfig, SkipprPipelineStatus, SkipprProvider,
     SkipprSyncResult,
 };
-pub use stats::DatasetFieldStats;
+pub use stats::{finalize_provider_field_stats, parse_provider_u64, DatasetFieldStats};
 pub use warehouse::{WarehouseNaming, WarehouseProvider};

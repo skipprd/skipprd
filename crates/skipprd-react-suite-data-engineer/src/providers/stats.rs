@@ -38,3 +38,54 @@ impl DatasetFieldStats {
         self.last_updated_epoch_ms = current_millis();
     }
 }
+
+pub fn finalize_provider_field_stats(stats: &mut FieldStats) {
+    let provider_distinct = stats.approx_distinct;
+    stats.finalize();
+    if provider_distinct.is_some() {
+        stats.approx_distinct = provider_distinct;
+    }
+}
+
+pub fn parse_provider_u64(raw: &str) -> Option<u64> {
+    let value = raw.trim();
+    if value.is_empty() {
+        return None;
+    }
+    if let Ok(parsed) = value.parse::<u64>() {
+        return Some(parsed);
+    }
+    let unsigned = value.strip_prefix('+').unwrap_or(value);
+    let (whole, fractional) = unsigned.split_once('.')?;
+    if fractional.chars().all(|c| c == '0') {
+        whole.parse::<u64>().ok()
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn provider_finalize_preserves_exact_distinct_count() {
+        let mut stats = FieldStats::default();
+        stats.total = 4;
+        stats.nulls = 0;
+        stats.approx_distinct = Some(4);
+
+        finalize_provider_field_stats(&mut stats);
+
+        assert_eq!(stats.approx_distinct, Some(4));
+    }
+
+    #[test]
+    fn parse_provider_u64_accepts_integral_decimal_strings() {
+        assert_eq!(parse_provider_u64("4"), Some(4));
+        assert_eq!(parse_provider_u64("4.0"), Some(4));
+        assert_eq!(parse_provider_u64("+4.000000"), Some(4));
+        assert_eq!(parse_provider_u64("4.5"), None);
+        assert_eq!(parse_provider_u64("-4"), None);
+    }
+}

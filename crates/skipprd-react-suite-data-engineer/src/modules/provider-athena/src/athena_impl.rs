@@ -8,10 +8,14 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 use tokio::sync::Semaphore;
 
-use crate::providers::dataset_catalog_provider::{DatasetCatalogProvider, DatasetId};
+use crate::providers::dataset_catalog_provider::{
+    DatasetCatalogProvider, DatasetId, ProviderEvidenceCapabilities,
+};
 use crate::providers::warehouse::WarehouseNaming;
 use crate::providers::{QueryProvider, QueryResult};
 
+use react_suite_data_engineer::providers::finalize_provider_field_stats;
+use react_suite_data_engineer::providers::parse_provider_u64;
 use react_suite_data_engineer::providers::warehouse_utils::{
     clamp_cache_ttl_secs, clamp_concurrency,
 };
@@ -571,7 +575,7 @@ impl DatasetCatalogProvider for AthenaProvider {
             .rows
             .first()
             .and_then(|r| r.first())
-            .and_then(|s| s.parse::<u64>().ok())
+            .and_then(|s| parse_provider_u64(s))
             .unwrap_or(0);
 
         let mut ns_stats = crate::discover::stats::DatasetFieldStats::new(&dataset.fqn());
@@ -626,10 +630,6 @@ impl DatasetCatalogProvider for AthenaProvider {
                 );
             }
             let Some(expr) = expr_opt else {
-                let mut fs = crate::discover::stats::FieldStats::default();
-                fs.total = total_rows;
-                fs.finalize();
-                ns_stats.fields.insert(path, fs);
                 continue;
             };
 
@@ -687,10 +687,6 @@ impl DatasetCatalogProvider for AthenaProvider {
                     );
                     executed += 1;
                     failed += 1;
-                    let mut fs = crate::discover::stats::FieldStats::default();
-                    fs.total = total_rows;
-                    fs.finalize();
-                    ns_stats.fields.insert(path, fs);
                     continue;
                 }
             };
@@ -699,16 +695,16 @@ impl DatasetCatalogProvider for AthenaProvider {
             let row = qr.rows.first().cloned().unwrap_or_default();
             let mut fs = crate::discover::stats::FieldStats::default();
             fs.total = total_rows;
-            fs.nulls = row.get(1).and_then(|s| s.parse::<u64>().ok()).unwrap_or(0);
+            fs.nulls = row.get(1).and_then(|s| parse_provider_u64(s)).unwrap_or(0);
             if !is_complex {
-                fs.approx_distinct = row.get(2).and_then(|s| s.parse::<u64>().ok());
+                fs.approx_distinct = row.get(2).and_then(|s| parse_provider_u64(s));
                 if fs.approx_distinct.is_some() {
                     ns_stats.exact_distinct_fields.insert(path.clone());
                 }
                 fs.min_numeric = row.get(3).and_then(|s| s.parse::<f64>().ok());
                 fs.max_numeric = row.get(4).and_then(|s| s.parse::<f64>().ok());
             }
-            fs.finalize();
+            finalize_provider_field_stats(&mut fs);
             ns_stats.fields.insert(path, fs);
         }
 
@@ -725,6 +721,10 @@ impl DatasetCatalogProvider for AthenaProvider {
             "dataset_stats_done"
         );
         Ok((ns_stats, ds))
+    }
+
+    fn evidence_capabilities(&self) -> ProviderEvidenceCapabilities {
+        ProviderEvidenceCapabilities::sql_warehouse_without_relationships()
     }
 
     fn max_concurrency(&self) -> usize {

@@ -1,4 +1,4 @@
-use crate::providers::WarehouseProvider;
+use crate::providers::{DatasetId, WarehouseProvider};
 use crate::references::DatasetRef;
 use react_core::agent::AgentCtx;
 use react_core::storage::{retry_get_bytes, retry_list_prefix};
@@ -157,7 +157,50 @@ pub struct GroundedStagingModelSet {
 }
 
 pub fn is_staging_model_name(name: &str) -> bool {
-    name.trim().to_ascii_lowercase().starts_with("stg_")
+    normalize_staging_model_name(name).is_some()
+}
+
+pub fn normalize_staging_model_name(raw: &str) -> Option<String> {
+    let mut t = raw.trim();
+    if t.is_empty() {
+        return None;
+    }
+    if t.starts_with("{{") && t.ends_with("}}") && t.len() >= 4 {
+        t = t[2..t.len() - 2].trim();
+    }
+    let lower = t.to_ascii_lowercase();
+    let mut candidate = if lower.starts_with("ref(") && t.ends_with(')') {
+        let inner = &t[4..t.len() - 1];
+        inner
+            .trim()
+            .trim_matches(|c| c == '\'' || c == '"' || c == '`')
+            .to_string()
+    } else {
+        t.to_string()
+    };
+    if candidate.contains('/') {
+        let stem = std::path::Path::new(candidate.as_str())
+            .file_stem()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_default();
+        if !stem.trim().is_empty() {
+            candidate = stem.trim().to_string();
+        }
+    }
+    if candidate.contains('.') {
+        if let Some(last) = candidate.rsplit('.').next() {
+            candidate = last.trim().to_string();
+        }
+    }
+    let normalized = candidate
+        .trim()
+        .trim_matches(|c| c == '\'' || c == '"' || c == '`')
+        .to_ascii_lowercase();
+    if normalized.starts_with("stg_") {
+        Some(normalized)
+    } else {
+        None
+    }
 }
 
 /// Check whether `input` is a valid gold-model dependency: either a staging
@@ -414,28 +457,30 @@ fn effective_target_schema(
     }
 }
 
+fn dbt_relation_catalog_schema(ctx: &AgentCtx, suffix: &str) -> Option<(String, String)> {
+    let (base_schema, p) = effective_target_schema(ctx)?;
+    let container = p.warehouse.container.trim().to_string();
+    let suffix = suffix.trim();
+    if container.is_empty() || suffix.is_empty() {
+        return None;
+    }
+    Some((container, format!("{}_{}", base_schema, suffix)))
+}
+
 /// Canonical warehouse prefix for staged silver relations, e.g.
 /// `AwsDataCatalog.example_silver`.
 pub fn staging_relation_prefix(ctx: &AgentCtx) -> Option<String> {
-    let (base_schema, p) = effective_target_schema(ctx)?;
-    let container = p.warehouse.container.trim().to_string();
-    let silver_suffix = p.dbt.naming.silver_suffix.trim().to_string();
-    if container.is_empty() || silver_suffix.is_empty() {
-        return None;
-    }
-    Some(format!("{}.{}_{}", container, base_schema, silver_suffix))
+    let (_, p) = effective_target_schema(ctx)?;
+    let (container, schema) = dbt_relation_catalog_schema(ctx, &p.dbt.naming.silver_suffix)?;
+    Some(format!("{}.{}", container, schema))
 }
 
 /// Canonical warehouse prefix for gold (marts/core) relations, e.g.
 /// `AwsDataCatalog.example_warehouse`.
 pub fn gold_relation_prefix(ctx: &AgentCtx) -> Option<String> {
-    let (base_schema, p) = effective_target_schema(ctx)?;
-    let container = p.warehouse.container.trim().to_string();
-    let gold_suffix = p.dbt.naming.gold_suffix.trim().to_string();
-    if container.is_empty() || gold_suffix.is_empty() {
-        return None;
-    }
-    Some(format!("{}.{}_{}", container, base_schema, gold_suffix))
+    let (_, p) = effective_target_schema(ctx)?;
+    let (container, schema) = dbt_relation_catalog_schema(ctx, &p.dbt.naming.gold_suffix)?;
+    Some(format!("{}.{}", container, schema))
 }
 
 /// Query the warehouse for output schemas of materialized staging models and
@@ -451,18 +496,25 @@ pub async fn record_staging_output_schemas(
         Some(wh) => wh,
         None => return,
     };
-    let Some(relation_prefix) = staging_relation_prefix(ctx) else {
+    let Some((catalog, schema)) = effective_target_schema(ctx)
+        .and_then(|(_, p)| dbt_relation_catalog_schema(ctx, &p.dbt.naming.silver_suffix))
+    else {
         return;
     };
-
     for name_owned in staging_model_names {
         let name = name_owned.trim();
-        if name.is_empty() || source_schemas.contains_key(name) {
+        if !should_lookup_staging_output_schema(name, source_schemas) {
             continue;
         }
-        let fqn = format!("{}.{}", relation_prefix, name);
+        let relation_id = DatasetId {
+            catalog: catalog.clone(),
+            database: schema.clone(),
+            table: name.to_string(),
+        };
+        let lookup_id = wh.dbt_model_relation_lookup_id(&relation_id);
+        let fqn = wh.format_dbt_model_relation_fqn(&relation_id);
         match crate::transient_retry::retry_transient_default("staging_output_schema", || async {
-            wh.schema(&fqn).await
+            wh.get_dataset_schema(&lookup_id).await
         })
         .await
         {
@@ -491,6 +543,16 @@ pub async fn record_staging_output_schemas(
             }
         }
     }
+}
+
+fn should_lookup_staging_output_schema(
+    name: &str,
+    source_schemas: &crate::plan_types::SourceSchema,
+) -> bool {
+    !name.trim().is_empty()
+        && !source_schemas
+            .get(name.trim())
+            .is_some_and(|existing| !existing.is_empty())
 }
 
 /// All discovery results from a single pass, threaded through the plan pipeline
@@ -522,4 +584,33 @@ pub fn group_by_catalog_schema(
         v.dedup();
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_lookup_staging_output_schema;
+    use crate::plan_types::SourceColumnDef;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn staging_output_lookup_retries_empty_placeholder_schema() {
+        let mut schemas = BTreeMap::new();
+        schemas.insert("stg_orders".to_string(), Vec::new());
+
+        assert!(should_lookup_staging_output_schema("stg_orders", &schemas));
+    }
+
+    #[test]
+    fn staging_output_lookup_skips_existing_non_empty_schema() {
+        let mut schemas = BTreeMap::new();
+        schemas.insert(
+            "stg_orders".to_string(),
+            vec![SourceColumnDef {
+                name: "order_id".to_string(),
+                data_type: "number".to_string(),
+            }],
+        );
+
+        assert!(!should_lookup_staging_output_schema("stg_orders", &schemas));
+    }
 }
