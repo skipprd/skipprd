@@ -503,8 +503,8 @@ SCENARIOS = {
         ),
         smoke_runs=(SyncRun(pipeline="dynamodb_iceberg_types_cdc"),),
         full_runs=(SyncRun(pipeline="dynamodb_iceberg_types_cdc"),),
-        smoke_verifiers=("dynamodb_iceberg_types_cdc_final_state",),
-        full_verifiers=("dynamodb_iceberg_types_cdc_final_state",),
+        smoke_verifiers=("dynamodb_iceberg_types_cdc_encoded",),
+        full_verifiers=("dynamodb_iceberg_types_cdc_encoded",),
     ),
     "mssql_iceberg_debug_linux": Scenario(
         name="mssql_iceberg_debug_linux",
@@ -2192,8 +2192,8 @@ def verify_mysql_iceberg_types_cdc_final_state(context: ScenarioContext) -> None
     )
 
 
-def verify_dynamodb_iceberg_types_cdc_final_state(context: ScenarioContext) -> None:
-    verify_iceberg_type_matrix_final_state(
+def verify_dynamodb_iceberg_types_cdc_encoded(context: ScenarioContext) -> None:
+    verify_iceberg_type_matrix_cdc_encoded(
         context,
         database="iceberg_e2e_dynamodb",
         table=f"skippr_{DYNAMODB_ICEBERG_CDC_TABLE}",
@@ -2280,6 +2280,49 @@ def verify_iceberg_type_matrix_final_state(
         raise HarnessError(f"expected updated type-matrix row for id=1 in {table}")
 
 
+def verify_iceberg_type_matrix_cdc_encoded(
+    context: ScenarioContext,
+    *,
+    database: str,
+    table: str,
+    updated_row_predicate: str = "id = 1 AND bool_col = true AND string_col = 'updated'",
+) -> None:
+    row_count = int(
+        athena_scalar(
+            f'SELECT COUNT(*) FROM "{table}"',
+            database=database,
+            env=context.base_env,
+            output_location=context.assertion_output,
+        )
+    )
+    if row_count != 9:
+        raise HarnessError(
+            f"expected Iceberg CDC-encoded table {table} to contain 9 rows, got {row_count}"
+        )
+    deleted = int(
+        athena_scalar(
+            f'SELECT COUNT(*) FROM "{table}" '
+            'WHERE id = 2 AND "_skippr_mutation" = \'delete\'',
+            database=database,
+            env=context.base_env,
+            output_location=context.assertion_output,
+        )
+    )
+    if deleted != 1:
+        raise HarnessError(f"expected one CDC delete payload for id=2 in {table}")
+    type_probe = int(
+        athena_scalar(
+            f'SELECT COUNT(*) FROM "{table}" '
+            f'WHERE {updated_row_predicate} AND "_skippr_mutation" = \'update\'',
+            database=database,
+            env=context.base_env,
+            output_location=context.assertion_output,
+        )
+    )
+    if type_probe != 1:
+        raise HarnessError(f"expected updated CDC payload for id=1 in {table}")
+
+
 VERIFIERS: dict[str, Callable[[ScenarioContext], None]] = {
     "bike_hire_rows": verify_bike_hire_rows,
     "bike_hire_many_rows": verify_bike_hire_many_rows,
@@ -2292,7 +2335,7 @@ VERIFIERS: dict[str, Callable[[ScenarioContext], None]] = {
     "soda_deadletters": verify_soda_deadletters,
     "postgres_iceberg_types_cdc_final_state": verify_postgres_iceberg_types_cdc_final_state,
     "mysql_iceberg_types_cdc_final_state": verify_mysql_iceberg_types_cdc_final_state,
-    "dynamodb_iceberg_types_cdc_final_state": verify_dynamodb_iceberg_types_cdc_final_state,
+    "dynamodb_iceberg_types_cdc_encoded": verify_dynamodb_iceberg_types_cdc_encoded,
     "mssql_iceberg_debug_linux_rows": verify_mssql_iceberg_debug_linux_rows,
     "mssql_iceberg_debug_windows_rows": verify_mssql_iceberg_debug_windows_rows,
 }
