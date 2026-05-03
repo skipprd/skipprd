@@ -1128,6 +1128,24 @@ mod tests {
     }
 
     #[test]
+    fn test_dynamodb_to_iceberg_derives_exact_once() {
+        let source = source_capabilities::DYNAMODB;
+        let sink = sink_capabilities::ICEBERG;
+        let keys = vec!["pk".to_string()];
+        match derive_and_validate(&source, &sink, "events", &keys) {
+            CompatibilityResult::Compatible(g) => {
+                assert_eq!(g, EffectiveGuarantee::ExactOnceFinalState);
+            }
+            CompatibilityResult::Incompatible(reasons) => {
+                panic!(
+                    "dynamodb->Iceberg should derive ExactOnceFinalState, got: {:?}",
+                    reasons
+                );
+            }
+        }
+    }
+
+    #[test]
     fn test_exact_once_pair_requires_business_keys() {
         let source = source_capabilities::POSTGRES;
         let sink = sink_capabilities::POSTGRES;

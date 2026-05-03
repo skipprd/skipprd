@@ -792,7 +792,7 @@ impl Buffers {
                 Self::run_compaction_cycle(force, shared_output.clone(), offsets_db.clone()).await;
             if force && !did_work {
                 if let Some(reply) = drain_reply.take() {
-                    let _ = reply.send(true);
+                    let _ = reply.send(COMPACT_FAILURES.is_empty());
                 }
                 break;
             }
@@ -832,7 +832,7 @@ impl Buffers {
         offsets_db: Arc<Offsets>,
     ) -> bool {
         use futures::stream::StreamExt;
-        let mut did_work = false;
+        let mut made_progress = false;
         let concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
             .load(std::sync::atomic::Ordering::Relaxed)
             .clamp(1, 64) as usize;
@@ -857,24 +857,31 @@ impl Buffers {
             if candidates.is_empty() {
                 break;
             }
-            did_work = true;
+            let mut cycle_progress = false;
             let mut in_flight: futures::stream::FuturesUnordered<
-                Pin<Box<dyn Future<Output = ()> + Send>>,
+                Pin<Box<dyn Future<Output = bool> + Send>>,
             > = futures::stream::FuturesUnordered::new();
             for (source, meta, idx) in candidates {
                 let out = shared_output.clone();
                 let off = offsets_db.clone();
                 in_flight.push(Box::pin(async move {
-                    let _ = Self::compact_segment_partition_source(&source, &meta, &idx, out, off)
-                        .await;
+                    Self::compact_segment_partition_source(&source, &meta, &idx, out, off)
+                        .await
+                        .unwrap_or(false)
                 }));
             }
-            while let Some(_) = in_flight.next().await {}
+            while let Some(compacted) = in_flight.next().await {
+                cycle_progress |= compacted;
+            }
+            if !cycle_progress {
+                break;
+            }
+            made_progress = true;
         }
-        if did_work && !is_s3_wal() {
+        if made_progress && !is_s3_wal() {
             Self::sweep_segment_cleanup();
         }
-        did_work
+        made_progress
     }
 
     #[allow(dead_code)]
