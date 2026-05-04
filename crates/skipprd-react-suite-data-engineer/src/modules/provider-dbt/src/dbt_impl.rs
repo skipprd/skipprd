@@ -734,6 +734,32 @@ fn run_cmd_labeled(
     run_spawned_cmd_labeled(c, "host", cmd, args.join(" "), label)
 }
 
+fn resolve_host_dbt_command() -> String {
+    if let Ok(path) = std::env::var("DBT_BIN") {
+        let path = path.trim();
+        if !path.is_empty() {
+            return path.to_string();
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        let candidate = cwd.join(".venv").join("bin").join("dbt");
+        if candidate.is_file() {
+            return candidate.display().to_string();
+        }
+    }
+    "dbt".to_string()
+}
+
+fn run_dbt_host_labeled(
+    dbt_args: &[&str],
+    cwd: &Path,
+    envs: &[(&str, String)],
+    label: &str,
+) -> CmdOut {
+    let cmd = resolve_host_dbt_command();
+    run_cmd_labeled(&cmd, dbt_args, cwd, envs, label)
+}
+
 fn run_spawned_cmd_labeled(
     mut cmd: std::process::Command,
     runner_label: &'static str,
@@ -1079,7 +1105,7 @@ fn run_cmd_for_runner_labeled(
     label: &str,
 ) -> CmdOut {
     match runner.mode {
-        DbtRunnerMode::Host => run_cmd_labeled("dbt", dbt_args, project_dir, envs, label),
+        DbtRunnerMode::Host => run_dbt_host_labeled(dbt_args, project_dir, envs, label),
         DbtRunnerMode::Docker => {
             run_cmd_docker_labeled(runner, project_dir, profiles_dir, dbt_args, envs, label)
         }
@@ -1564,6 +1590,13 @@ mod tests {
         assert!(joined.contains(":/project"));
         assert!(joined.contains("-w /project"));
         assert!(joined.contains("ghcr.io/dbt-labs/dbt-athena:1.8.3"));
+    }
+
+    #[test]
+    fn host_dbt_command_prefers_explicit_env() {
+        std::env::set_var("DBT_BIN", "/tmp/custom-dbt");
+        assert_eq!(resolve_host_dbt_command(), "/tmp/custom-dbt");
+        std::env::remove_var("DBT_BIN");
     }
 
     #[test]
