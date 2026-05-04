@@ -110,6 +110,61 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
             with self.assertRaises(runtime_e2e_harness.HarnessError):
                 runtime_e2e_harness.assert_no_bundled_runtime_plugins(binary)
 
+    def test_use_local_plugin_code_enabled_accepts_truthy_values(self) -> None:
+        self.assertTrue(
+            runtime_e2e_harness.use_local_plugin_code_enabled(
+                {"USE_LOCAL_PLUGIN_CODE": "1"}
+            )
+        )
+        self.assertTrue(
+            runtime_e2e_harness.use_local_plugin_code_enabled(
+                {"USE_LOCAL_PLUGIN_CODE": "true"}
+            )
+        )
+        self.assertFalse(
+            runtime_e2e_harness.use_local_plugin_code_enabled(
+                {"USE_LOCAL_PLUGIN_CODE": "0"}
+            )
+        )
+
+    def test_main_skips_bundled_plugin_guard_for_local_plugin_code(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            binary = Path(temp_dir) / "skipprd"
+            binary.write_text("#!/bin/sh\n", encoding="utf-8")
+            binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+            (Path(temp_dir) / "skippr-plugin-data-source-dynamodb").write_text(
+                "",
+                encoding="utf-8",
+            )
+
+            with (
+                mock.patch.dict(
+                    os.environ,
+                    {
+                        "USE_LOCAL_PLUGIN_CODE": "1",
+                        "SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR": "/tmp/local-manifests",
+                    },
+                    clear=False,
+                ),
+                mock.patch.object(
+                    runtime_e2e_harness,
+                    "run_scenario",
+                ) as run_scenario,
+            ):
+                status = runtime_e2e_harness.main(
+                    [
+                        "run",
+                        "dynamodb_iceberg_types_cdc",
+                        "--mode",
+                        "full",
+                        "--skipprd",
+                        str(binary),
+                    ]
+                )
+
+        self.assertEqual(status, 0)
+        run_scenario.assert_called_once()
+
     def test_runtime_release_manifest_filenames_include_all_sources_and_smoke_support(self) -> None:
         catalog = [
             {"manifest_filename": "file-source.json", "manifest_kind": "DataSource"},

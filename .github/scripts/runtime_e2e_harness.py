@@ -688,6 +688,11 @@ def assert_no_bundled_runtime_plugins(skipprd: Path) -> None:
         )
 
 
+def use_local_plugin_code_enabled(env: dict[str, str] | None = None) -> bool:
+    values = os.environ if env is None else env
+    return values.get("USE_LOCAL_PLUGIN_CODE", "").lower() in {"1", "true", "yes", "on"}
+
+
 def find_runtime_plugins_matching(
     runtime_plugin_dir: Path, patterns: tuple[str, ...]
 ) -> list[Path]:
@@ -2693,7 +2698,7 @@ def main(argv: list[str] | None = None) -> int:
 
         if args.command == "run":
             skipprd = resolve_skipprd(args.skipprd)
-            if not args.local_runtime_manifest_dir:
+            if not args.local_runtime_manifest_dir and not use_local_plugin_code_enabled():
                 assert_no_bundled_runtime_plugins(skipprd)
             runtime_plugin_versions = parse_runtime_plugin_versions(
                 args.runtime_plugin_version
