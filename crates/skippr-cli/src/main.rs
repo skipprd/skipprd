@@ -124,7 +124,7 @@ enum Cmd {
     Sync(EngineSyncArgs),
 
     /// Run the data-engineer modeling workflow.
-    Model,
+    Model(ModelArgs),
 
     /// Attach human feedback to a project thread run.
     Feedback {
@@ -170,6 +170,13 @@ struct EngineSyncArgs {
     /// Run a single sync pass and exit.
     #[arg(long, default_value_t = false)]
     once: bool,
+}
+
+#[derive(Parser, Debug, Clone)]
+struct ModelArgs {
+    /// Start a fresh modeling thread instead of resuming the latest project thread.
+    #[arg(long, default_value_t = false)]
+    no_resume: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -715,6 +722,96 @@ fn default_react_providers_config() -> serde_json::Value {
     })
 }
 
+fn ref_name(reference: &str, prefix: &str) -> Option<String> {
+    reference
+        .trim()
+        .strip_prefix(prefix)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn first_mapping_key(map: &serde_yaml::Mapping) -> Option<String> {
+    map.keys()
+        .filter_map(|key| key.as_str())
+        .map(str::trim)
+        .find(|key| !key.is_empty())
+        .map(str::to_string)
+}
+
+fn selected_pipeline<'a>(
+    engine_cfg: &'a serde_yaml::Value,
+    project: &str,
+) -> Option<&'a serde_yaml::Value> {
+    let pipelines = engine_cfg.get("pipelines")?.as_mapping()?;
+    if let Some(p) = pipelines.get(yaml_key(project)) {
+        return Some(p);
+    }
+    let first = first_mapping_key(pipelines)?;
+    pipelines.get(yaml_key(&first))
+}
+
+fn selected_data_sink_config(
+    engine_cfg: &serde_yaml::Value,
+    project: &str,
+) -> Option<serde_json::Value> {
+    let pipeline = selected_pipeline(engine_cfg, project)?;
+    let sink_ref = pipeline.get("data_sink")?.as_str()?;
+    let sink_name = ref_name(sink_ref, "data_sinks.")?;
+    let sink = engine_cfg.get("data_sinks")?.get(&sink_name)?;
+    let sink_map = sink.as_mapping()?;
+    let plugin = first_mapping_key(sink_map)?;
+    let plugin_cfg = sink.get(&plugin)?;
+    let mut json_cfg = serde_json::to_value(plugin_cfg).ok()?;
+    if let Some(obj) = json_cfg.as_object_mut() {
+        obj.entry("kind".to_string())
+            .or_insert_with(|| serde_json::Value::String(plugin.to_ascii_lowercase()));
+    }
+    Some(json_cfg)
+}
+
+fn merge_selected_sink_into_react_warehouse(
+    mut providers: serde_json::Value,
+    engine_cfg: &serde_yaml::Value,
+    project: &str,
+) -> serde_json::Value {
+    let Some(sink_cfg) = selected_data_sink_config(engine_cfg, project) else {
+        return providers;
+    };
+    let Some(sink_obj) = sink_cfg.as_object() else {
+        return providers;
+    };
+    let Some(providers_obj) = providers.as_object_mut() else {
+        return providers;
+    };
+    let warehouse = providers_obj
+        .entry("warehouse".to_string())
+        .or_insert_with(|| serde_json::json!({}));
+    let Some(warehouse_obj) = warehouse.as_object_mut() else {
+        return providers;
+    };
+    let existing_kind = warehouse_obj
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .map(str::to_ascii_lowercase);
+    let sink_kind = sink_obj
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .map(str::to_ascii_lowercase);
+    if existing_kind.is_some() && sink_kind.is_some() && existing_kind != sink_kind {
+        return providers;
+    }
+    for (key, value) in sink_obj {
+        if value.is_null() {
+            continue;
+        }
+        warehouse_obj
+            .entry(key.clone())
+            .or_insert_with(|| value.clone());
+    }
+    providers
+}
+
 fn react_config_from_engine_config(value: &serde_yaml::Value) -> Result<ReactConfigFile, String> {
     let project = engine_project_name(value)?;
     let providers_yaml = value
@@ -726,6 +823,7 @@ fn react_config_from_engine_config(value: &serde_yaml::Value) -> Result<ReactCon
             .map_err(|e| format!("failed to convert react.providers to JSON: {}", e))?,
         None => default_react_providers_config(),
     };
+    let providers = merge_selected_sink_into_react_warehouse(providers, value, &project);
 
     Ok(ReactConfigFile {
         version: Some(1),
@@ -2429,7 +2527,7 @@ async fn cmd_sync(log: Option<String>, explicit_config: &Option<PathBuf>, args: 
     }
 }
 
-async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>) {
+async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args: ModelArgs) {
     let engine_cfg = match load_engine_config(explicit_config) {
         Ok(c) => c,
         Err(e) => {
@@ -2566,32 +2664,146 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>) {
         };
     attach_s3_credentials_provider(&mut resolved, client.clone());
 
-    let thread_id = match find_latest_thread_for_resolved_config(&resolved).await {
-        Ok(thread_id) => thread_id,
-        Err(e) => {
-            eprintln!("[skippr] WARNING: failed to discover latest thread: {e}");
-            None
+    eprintln!(
+        "[skippr] model config: project={} tenant={} storage={:?}",
+        resolved.scope.project_id, resolved.scope.tenant, resolved.storage.mode
+    );
+
+    let thread_id = if args.no_resume {
+        eprintln!("[skippr] not resuming previous thread (--no-resume)");
+        None
+    } else {
+        match find_latest_thread_for_resolved_config(&resolved).await {
+            Ok(thread_id) => thread_id,
+            Err(e) => {
+                eprintln!("[skippr] WARNING: failed to discover latest thread: {e}");
+                None
+            }
         }
     };
     if let Some(ref tid) = thread_id {
         react_suite_data_engineer::metering::set_metering_thread_id(tid);
         eprintln!("[skippr] resuming thread {tid}");
+    } else {
+        eprintln!("[skippr] starting new modeling thread");
     }
 
-    let exit_code = react_host::run_headless(
+    let status_cfg = resolved.clone();
+    let run_thread_id = thread_id.clone();
+    eprintln!("[skippr] starting headless data-engineer workflow");
+    let headless = react_host::run_headless_detailed(
         resolved,
         react::run_engine::HeadlessRunOpts {
             log_level: log,
             verbose_debug: false,
             terminal: false,
             thread_id,
-            suite_id: None,
+            suite_id: Some("data_engineer".to_string()),
             agent: "agent".to_string(),
             skip_logging_init: false,
         },
     )
     .await;
+    let exit_code = headless.exit_code;
+    eprintln!("[skippr] headless data-engineer workflow exited with code {exit_code}");
+    if let Some(err) = headless.bootstrap_error.as_deref() {
+        eprintln!("[skippr] data-engineer bootstrap failed before a thread was created: {err}");
+    }
+    let status_thread_id = run_thread_id;
+    if let Some(tid) = status_thread_id.as_deref() {
+        match load_model_thread_status(&status_cfg, tid).await {
+            Ok(Some(status)) => {
+                eprintln!(
+                    "[skippr] data-engineer thread status: current_phase={} repair_status={} failed={} pending_plan_revision={}",
+                    status.current_phase,
+                    status.repair_status,
+                    status.has_failure_context,
+                    status.pending_plan_revision
+                );
+                if let Some(reason) = status.failure_brief.as_deref() {
+                    eprintln!("[skippr] resumed thread failure detail: {reason}");
+                }
+                if exit_code != 0 && status.is_done {
+                    eprintln!(
+                        "[skippr] resumed thread is already complete; treating model as idempotent success."
+                    );
+                    std::process::exit(0);
+                }
+                if exit_code != 0 && !status.has_failure_context {
+                    eprintln!(
+                        "[skippr] resumed thread did not complete and has no data-engineer failure context; rerun with --no-resume to start a fresh modeling thread."
+                    );
+                }
+            }
+            Ok(None) => {
+                eprintln!("[skippr] no persisted data-engineer status found for thread {tid}");
+            }
+            Err(e) => {
+                eprintln!("[skippr] WARNING: failed to load data-engineer thread status: {e}");
+            }
+        }
+    } else if exit_code != 0 && headless.bootstrap_error.is_none() {
+        eprintln!(
+            "[skippr] model run failed before the CLI received a thread id; no stale latest-thread status was used."
+        );
+    }
     std::process::exit(exit_code);
+}
+
+async fn load_model_thread_status(
+    cfg: &react_core::resolved_config::ReactResolvedConfig,
+    thread_id: &str,
+) -> Result<Option<react_suite_data_engineer::DataEngineerThreadStatus>, String> {
+    let storage: Arc<dyn react_core::storage::StorageAdapter> = match cfg.storage.mode {
+        react_core::resolved_config::StorageMode::Local => {
+            let root = cfg
+                .storage
+                .path
+                .as_ref()
+                .ok_or_else(|| "missing storage.path for local mode".to_string())?;
+            Arc::new(
+                react_module_storage_local::LocalFileStorageAdapter::new(root)
+                    .map_err(|e| e.to_string())?,
+            )
+        }
+        react_core::resolved_config::StorageMode::S3 => {
+            let bucket = cfg
+                .storage
+                .bucket
+                .clone()
+                .ok_or_else(|| "missing storage.bucket for s3 mode".to_string())?;
+            if let Some(creds) = cfg.storage.s3_credentials.as_ref() {
+                Arc::new(
+                    react_module_storage_s3::S3StorageAdapter::from_resolved_credentials(
+                        bucket, creds,
+                    )
+                    .await,
+                )
+            } else {
+                Arc::new(react_module_storage_s3::S3StorageAdapter::from_env(bucket).await)
+            }
+        }
+    };
+    let keyspace: Arc<dyn react_core::keyspace::Keyspace> = match cfg.storage.mode {
+        react_core::resolved_config::StorageMode::Local => {
+            let root = cfg
+                .storage
+                .path
+                .as_ref()
+                .ok_or_else(|| "missing storage.path for local mode".to_string())?;
+            Arc::new(react_core::keyspace::LocalKeyspace::new(root.clone()))
+        }
+        react_core::resolved_config::StorageMode::S3 => {
+            let bucket = cfg
+                .storage
+                .bucket
+                .clone()
+                .ok_or_else(|| "missing storage.bucket for s3 mode".to_string())?;
+            Arc::new(react_core::keyspace::DefaultKeyspace::new(bucket))
+        }
+    };
+    let control = react_core::session::ControlStateStore::new(storage, cfg.scope.clone(), keyspace);
+    react_suite_data_engineer::load_thread_status(&control, thread_id).await
 }
 
 async fn cmd_feedback(
@@ -3073,7 +3285,7 @@ async fn async_main() {
         Cmd::Doctor => cmd_doctor(&cli.config),
         Cmd::Discover(args) => cmd_discover(cli.log, &cli.config, args).await,
         Cmd::Sync(args) => cmd_sync(cli.log, &cli.config, args).await,
-        Cmd::Model => cmd_model(cli.log, &cli.config).await,
+        Cmd::Model(args) => cmd_model(cli.log, &cli.config, args).await,
         Cmd::Feedback {
             good,
             bad,
@@ -3575,6 +3787,50 @@ mod tests {
         assert_eq!(
             postgres_schema_or_default(Some("analytics".into())).as_deref(),
             Some("analytics")
+        );
+    }
+
+    #[test]
+    fn react_config_merges_selected_data_sink_into_warehouse_provider() {
+        let cfg: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+skippr:
+  workspace: cursor_semantic_validation
+pipelines:
+  cursor_semantic_validation:
+    data_sink: data_sinks.snowflake
+data_sinks:
+  snowflake:
+    Snowflake:
+      account: ACCT
+      user: paul
+      database: ANALYTICS
+      schema: RAW
+      warehouse: COMPUTE_WH
+      role: ACCOUNTADMIN
+      private_key_path: /tmp/snowflake_key.p8
+react:
+  providers:
+    warehouse:
+      kind: snowflake
+      database: ANALYTICS
+      schema: RAW
+"#,
+        )
+        .expect("yaml");
+
+        let internal = react_config_from_engine_config(&cfg).expect("internal config");
+        let providers = internal.providers.expect("providers");
+        let wh = providers
+            .get("warehouse")
+            .and_then(|v| v.as_object())
+            .expect("warehouse object");
+
+        assert_eq!(wh.get("account").and_then(|v| v.as_str()), Some("ACCT"));
+        assert_eq!(wh.get("user").and_then(|v| v.as_str()), Some("paul"));
+        assert_eq!(
+            wh.get("private_key_path").and_then(|v| v.as_str()),
+            Some("/tmp/snowflake_key.p8")
         );
     }
 

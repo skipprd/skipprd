@@ -48,11 +48,30 @@ pub fn resolve_config(
     react::config::resolve_config_with(file, overrides, &SkipprHost)
 }
 
-pub async fn run_headless(
+pub(crate) struct HeadlessRunDetail {
+    pub exit_code: i32,
+    pub bootstrap_error: Option<String>,
+}
+
+pub async fn run_headless_detailed(
     cfg: ReactResolvedConfig,
     opts: react::run_engine::HeadlessRunOpts,
-) -> i32 {
-    react::run_engine::run_headless_with_host(cfg, &SkipprHost, opts).await
+) -> HeadlessRunDetail {
+    let registry = react::host::registry_from_host(&SkipprHost);
+    let suite_ctx = match react::bootstrap::build_suite_ctx_with(&cfg, &SkipprHost).await {
+        Ok(ctx) => ctx,
+        Err(e) => {
+            return HeadlessRunDetail {
+                exit_code: 1,
+                bootstrap_error: Some(e),
+            }
+        }
+    };
+    let exit_code = react::run_engine::run_headless_with_ctx(cfg, registry, suite_ctx, opts).await;
+    HeadlessRunDetail {
+        exit_code,
+        bootstrap_error: None,
+    }
 }
 
 fn lance_storage(cfg: &ReactResolvedConfig) -> Result<(String, LanceStorageOptions), String> {

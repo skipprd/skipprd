@@ -169,6 +169,50 @@ pub(crate) use track_spec::TrackKind;
 
 pub(crate) use react_core::workflow::PhaseOutcome;
 
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+pub struct DataEngineerThreadStatus {
+    pub current_phase: String,
+    pub is_done: bool,
+    pub has_failure_context: bool,
+    pub failure_brief: Option<String>,
+    pub repair_status: String,
+    pub pending_plan_revision: bool,
+}
+
+pub async fn load_thread_status(
+    control: &react_core::session::ControlStateStore,
+    thread_id: &str,
+) -> Result<Option<DataEngineerThreadStatus>, String> {
+    let Some(state) = state_manager::load_execution_state_strict(control, thread_id)
+        .await
+        .map_err(|e| e.to_string())?
+    else {
+        return Ok(None);
+    };
+    let current_phase = state.phase.current_phase;
+    let failure_brief = state
+        .repair
+        .failure_context
+        .as_ref()
+        .map(|ctx| ctx.brief.clone());
+    Ok(Some(DataEngineerThreadStatus {
+        current_phase: current_phase.as_str().to_string(),
+        is_done: current_phase == control_flow::Phase::Done,
+        has_failure_context: failure_brief.is_some(),
+        failure_brief,
+        repair_status: match &state.repair.status {
+            progress_controller::RepairStatus::Idle => "idle".to_string(),
+            progress_controller::RepairStatus::Pending { cycle } => {
+                format!("pending(cycle={cycle})")
+            }
+            progress_controller::RepairStatus::Exhausted { cycles_used } => {
+                format!("exhausted(cycles_used={cycles_used})")
+            }
+        },
+        pending_plan_revision: state.phase.pending_plan_revision.is_some(),
+    }))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum PhaseError {
     #[error(transparent)]
