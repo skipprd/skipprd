@@ -2092,6 +2092,7 @@ def verify_postgres_iceberg_types_cdc_final_state(context: ScenarioContext) -> N
         context,
         database="iceberg_e2e_postgres",
         table="skippr_type_matrix_orders",
+        updated_row_predicate="id = 1 AND bool_col = true AND int_col = 11",
     )
 
 
@@ -2254,8 +2255,75 @@ VERIFIERS: dict[str, Callable[[ScenarioContext], None]] = {
 
 
 def delete_glue_database(name: str, env: dict[str, str]) -> None:
+    aws = ensure_tool("aws")
+    list_command = [
+        aws,
+        "glue",
+        "get-tables",
+        "--catalog-id",
+        "353855562591",
+        "--database-name",
+        name,
+        "--query",
+        "TableList[].Name",
+        "--output",
+        "json",
+    ]
+    listed = subprocess.run(
+        list_command,
+        cwd=REPO_ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if listed.returncode != 0:
+        combined = "\n".join(
+            part for part in (listed.stdout.strip(), listed.stderr.strip()) if part
+        )
+        if "EntityNotFoundException" in combined or "Database not found" in combined:
+            print_step(f"Glue database {name} did not exist; continuing")
+            return
+        raise HarnessError(
+            f"failed to list Glue tables in database {name}: {combined or f'exit code {listed.returncode}'}"
+        )
+
+    table_names = json.loads(listed.stdout or "[]")
+    for table_name in table_names:
+        delete_table = subprocess.run(
+            [
+                aws,
+                "glue",
+                "delete-table",
+                "--catalog-id",
+                "353855562591",
+                "--database-name",
+                name,
+                "--name",
+                table_name,
+            ],
+            cwd=REPO_ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if delete_table.returncode == 0:
+            continue
+        combined = "\n".join(
+            part
+            for part in (delete_table.stdout.strip(), delete_table.stderr.strip())
+            if part
+        )
+        if "EntityNotFoundException" in combined or "Table not found" in combined:
+            print_step(f"Glue table {name}.{table_name} did not exist; continuing")
+            continue
+        raise HarnessError(
+            f"failed to delete Glue table {name}.{table_name}: {combined or f'exit code {delete_table.returncode}'}"
+        )
+
     command = [
-        ensure_tool("aws"),
+        aws,
         "glue",
         "delete-database",
         "--catalog-id",

@@ -239,6 +239,40 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
 
         self.assertEqual(list(expected_queries), observed)
 
+    def test_postgres_final_state_verifier_uses_numeric_update_predicate(self) -> None:
+        expected_queries = {
+            'SELECT COUNT(*) FROM "skippr_type_matrix_orders"': "3",
+            'SELECT COUNT(*) FROM "skippr_type_matrix_orders" WHERE id = 2': "0",
+            (
+                'SELECT COUNT(*) FROM "skippr_type_matrix_orders" '
+                "WHERE id = 1 AND bool_col = true AND int_col = 11"
+            ): "1",
+        }
+        observed: list[str] = []
+
+        def fake_athena_scalar(sql, *, database, env, output_location):
+            self.assertEqual(database, "iceberg_e2e_postgres")
+            observed.append(sql)
+            return expected_queries[sql]
+
+        context = runtime_e2e_harness.ScenarioContext(
+            scenario=runtime_e2e_harness.SCENARIOS["postgres_iceberg_types_cdc"],
+            skipprd=Path("/tmp/skipprd"),
+            runtime_plugin_dir=Path("/tmp/runtime-plugins"),
+            base_env={},
+            assertion_output="s3://example/assertions",
+            namespace=None,
+        )
+
+        with mock.patch.object(
+            runtime_e2e_harness,
+            "athena_scalar",
+            side_effect=fake_athena_scalar,
+        ):
+            runtime_e2e_harness.verify_postgres_iceberg_types_cdc_final_state(context)
+
+        self.assertEqual(list(expected_queries), observed)
+
     def test_runtime_release_manifest_filenames_include_all_sources_and_smoke_support(self) -> None:
         catalog = [
             {"manifest_filename": "file-source.json", "manifest_kind": "DataSource"},
@@ -591,6 +625,49 @@ schema_sinks:
             runtime_e2e_harness.purge_dynamodb({})
 
         mock_run.assert_called_once()
+
+    def test_delete_glue_database_deletes_tables_first(self) -> None:
+        calls: list[list[str]] = []
+
+        def fake_run(command, **_kwargs):
+            calls.append(command)
+            if command[1:3] == ["glue", "get-tables"]:
+                return subprocess.CompletedProcess(
+                    args=command,
+                    returncode=0,
+                    stdout='["skippr_orders", "skippr_order_items"]',
+                    stderr="",
+                )
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=0,
+                stdout="",
+                stderr="",
+            )
+
+        with (
+            mock.patch.object(
+                runtime_e2e_harness, "ensure_tool", return_value="/usr/bin/aws"
+            ),
+            mock.patch.object(
+                runtime_e2e_harness.subprocess, "run", side_effect=fake_run
+            ),
+        ):
+            runtime_e2e_harness.delete_glue_database("iceberg_e2e_mssql_debug_windows", {})
+
+        self.assertEqual(
+            [call[1:3] for call in calls],
+            [
+                ["glue", "get-tables"],
+                ["glue", "delete-table"],
+                ["glue", "delete-table"],
+                ["glue", "delete-database"],
+            ],
+        )
+        self.assertIn("--database-name", calls[1])
+        self.assertIn("iceberg_e2e_mssql_debug_windows", calls[1])
+        self.assertIn("--name", calls[1])
+        self.assertIn("skippr_orders", calls[1])
 
     def test_ensure_soda_installed_uses_virtualenv(self) -> None:
         original_installed = runtime_e2e_harness.SODA_INSTALLED
