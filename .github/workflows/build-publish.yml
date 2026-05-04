@@ -1198,7 +1198,7 @@ jobs:
           RUSTFLAGS: "-C debuginfo=0"
         run: |
           manifest_dir="$(python3 .github/scripts/local_runtime_plugins.py \
-            --config .github/actions/e2e/postgres_iceberg_types_cdc/skipprd.yml \
+            --config .github/actions/e2e/postgres_iceberg_types_cdc/skippr.yml \
             --pipeline postgres_iceberg_types_cdc)"
           echo "manifest_dir=${manifest_dir}" >> "$GITHUB_OUTPUT"
 
@@ -1320,7 +1320,7 @@ jobs:
           RUSTFLAGS: "-C debuginfo=0"
         run: |
           manifest_dir="$(python3 .github/scripts/local_runtime_plugins.py \
-            --config .github/actions/e2e/mysql_iceberg_types_cdc/skipprd.yml \
+            --config .github/actions/e2e/mysql_iceberg_types_cdc/skippr.yml \
             --pipeline mysql_iceberg_types_cdc)"
           echo "manifest_dir=${manifest_dir}" >> "$GITHUB_OUTPUT"
 
@@ -1394,7 +1394,7 @@ jobs:
           RUSTFLAGS: "-C debuginfo=0"
         run: |
           manifest_dir="$(python3 .github/scripts/local_runtime_plugins.py \
-            --config .github/actions/e2e/dynamodb_iceberg_types_cdc/skipprd.yml \
+            --config .github/actions/e2e/dynamodb_iceberg_types_cdc/skippr.yml \
             --pipeline dynamodb_iceberg_types_cdc)"
           echo "manifest_dir=${manifest_dir}" >> "$GITHUB_OUTPUT"
 
@@ -1500,7 +1500,7 @@ jobs:
           CARGO_TARGET_DIR: target
         run: |
           manifest_dir="$(python3 .github/scripts/local_runtime_plugins.py \
-            --config .github/actions/e2e/mssql_iceberg_debug_linux/skipprd.yml \
+            --config .github/actions/e2e/mssql_iceberg_debug_linux/skippr.yml \
             --pipeline mssql_iceberg_debug_linux)"
           echo "manifest_dir=${manifest_dir}" >> "$GITHUB_OUTPUT"
 
@@ -1652,7 +1652,7 @@ jobs:
           AWS_REGION: us-east-1
         run: |
           $manifestDir = python .github/scripts/local_runtime_plugins.py `
-            --config .github/actions/e2e/mssql_iceberg_debug_windows/skipprd.yml `
+            --config .github/actions/e2e/mssql_iceberg_debug_windows/skippr.yml `
             --pipeline mssql_iceberg_debug_windows
           "manifest_dir=$manifestDir" >> $env:GITHUB_OUTPUT
 

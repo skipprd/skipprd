@@ -18,7 +18,7 @@ runs:
       run: |
         chmod +x ./skipprd-${{ inputs.architecture_name }}/skipprd
         
-        cp .github/actions/e2e/chaos_mode/skipprd.yml ./skipprd.yml
+        cp .github/actions/e2e/chaos_mode/skippr.yml ./skippr.yml
                       
         
         SKIPPR_CHAOS_MODE=yes AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} AWS_DEFAULT_REGION=us-east-1 ./skipprd-${{ inputs.architecture_name }}/skipprd sync --log --pipeline chaos_mode

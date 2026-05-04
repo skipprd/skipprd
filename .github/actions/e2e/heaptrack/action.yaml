@@ -19,7 +19,7 @@ runs:
       run: |
         chmod +x ./skipprd-${{ inputs.architecture_name }}/skipprd
         
-        cp .github/actions/e2e/heaptrack/skipprd.yml ./skipprd.yml
+        cp .github/actions/e2e/heaptrack/skippr.yml ./skippr.yml
         
         ls -la ./
         

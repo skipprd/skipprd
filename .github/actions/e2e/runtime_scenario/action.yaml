@@ -5,9 +5,9 @@ inputs:
     description: 'Harness scenario name to run'
     required: true
   architecture_name:
-    description: 'macos_arm64, macos-x86, linux_x86'
+    description: 'Artifact architecture name, e.g. linux_x86, macos_arm64, or windows_x86'
     required: true
-    default: 'stable'
+    default: 'linux_x86'
   aws_access_key_id:
     required: true
   aws_secret_access_key:

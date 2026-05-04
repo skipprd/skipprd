@@ -120,8 +120,7 @@ runs:
           $projectName = "mssql_snowflake_e2e_${testNamespace}_${runId}_${runAttempt}"
           $targetSchema = "${env:SNOWFLAKE_SCHEMA}_${testNamespace}_${runId}_${runAttempt}".ToUpperInvariant()
           $env:DATA_DIR = Join-Path $workdir "data"
-          $env:SKIPPRD_EL_STORAGE_MODE = "local"
-          $configPath = Join-Path $workdir "skippr.yaml"
+          $configPath = Join-Path $workdir "skippr.yml"
 
           function ConvertTo-YamlSingleQuoted([string] $value) {
             return "'" + ($value -replace "'", "''") + "'"
@@ -178,14 +177,6 @@ runs:
             "      enabled: true"
           )
           Set-Content -Path $configPath -Value ($configLines -join "`n") -Encoding utf8
-
-          Write-Host "Building config-referenced local runtime plugins"
-          $manifestDir = python .\.github\scripts\local_runtime_plugins.py --config $configPath --pipeline $projectName
-          if ($LASTEXITCODE -ne 0) {
-            Write-Error "::error::local runtime plugin helper failed with exit code $LASTEXITCODE"
-          }
-          $env:USE_LOCAL_PLUGIN_CODE = "1"
-          $env:SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR = $manifestDir.Trim()
 
           Push-Location $workdir
           $pushedLocation = $true
@@ -284,7 +275,7 @@ finally:
             Write-Error "::error::Snowflake raw type assertion failed with exit code $LASTEXITCODE"
           }
 
-          & $skipprBin --config $configPath model --log info 2>&1 | Tee-Object -FilePath $logPath
+          & $skipprBin --config $configPath --log info model 2>&1 | Tee-Object -FilePath $logPath
           $status = $LASTEXITCODE
           if ($status -ne 0) {
             Write-Error "::error::skippr model failed with exit code $status"

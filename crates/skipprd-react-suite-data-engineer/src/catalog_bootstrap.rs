@@ -118,7 +118,7 @@ impl DataEngineerSuite {
             format!("catalog bootstrap failed: dataset discovery error: {e}")
         })?;
         if dss.is_empty() {
-            return Err("catalog bootstrap failed: dataset discovery returned zero datasets. The configured warehouse schema appears empty; run `skippr sync` for this pipeline before `skippr model`, then verify the data sink database/schema in skippr.yaml if the problem persists.".to_string());
+            return Err("catalog bootstrap failed: dataset discovery returned zero datasets. The configured warehouse schema appears empty; run `skippr sync` for this pipeline before `skippr model`, then verify the data sink database/schema in skippr.yml if the problem persists.".to_string());
         }
 
         // Also detect whether the global semantic context exists.

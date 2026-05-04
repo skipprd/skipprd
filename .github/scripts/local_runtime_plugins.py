@@ -302,7 +302,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description="Build runtime plugins referenced by a Skippr config and write local manifests."
     )
-    parser.add_argument("--config", required=True, help="Path to skippr.yaml")
+    parser.add_argument("--config", required=True, help="Path to a Skippr YAML config")
     parser.add_argument("--pipeline", help="Pipeline name when the config contains multiple")
     parser.add_argument(
         "--output-dir",

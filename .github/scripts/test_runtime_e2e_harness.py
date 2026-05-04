@@ -63,7 +63,7 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
     def test_skippr_engine_command_prefix_passes_config_to_installed_cli(self) -> None:
         command = runtime_e2e_harness.skippr_engine_command_prefix(
             Path("/usr/local/bin/skippr"),
-            {"SKIPPR_CONFIG_FILE": "/tmp/skippr-runtime-e2e/skippr.yaml"},
+            {"SKIPPR_CONFIG_FILE": "/tmp/skippr-runtime-e2e/skippr.yml"},
         )
 
         self.assertEqual(
@@ -71,14 +71,14 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
             [
                 "/usr/local/bin/skippr",
                 "--config",
-                "/tmp/skippr-runtime-e2e/skippr.yaml",
+                "/tmp/skippr-runtime-e2e/skippr.yml",
             ],
         )
 
     def test_skippr_engine_command_prefix_leaves_skipprd_artifact_unchanged(self) -> None:
         command = runtime_e2e_harness.skippr_engine_command_prefix(
             Path("/tmp/skipprd-linux_x86/skipprd"),
-            {"SKIPPR_CONFIG_FILE": "/tmp/skippr-runtime-e2e/skippr.yaml"},
+            {"SKIPPR_CONFIG_FILE": "/tmp/skippr-runtime-e2e/skippr.yml"},
         )
 
         self.assertEqual(command, ["/tmp/skipprd-linux_x86/skipprd"])
@@ -561,6 +561,54 @@ schema_sinks:
             )
 
         self.assertEqual(completed.returncode, -9)
+
+    def test_local_plugin_env_skips_download_assertion(self) -> None:
+        scenario = runtime_e2e_harness.Scenario(
+            name="local_plugins",
+            config_path=Path("/tmp/local_plugins.yml"),
+            smoke_runs=(),
+            full_runs=(),
+        )
+        skipprd = Path("/tmp/skipprd")
+        with (
+            mock.patch.object(
+                runtime_e2e_harness,
+                "prepare_local_state",
+            ),
+            mock.patch.object(
+                runtime_e2e_harness,
+                "prepare_aws_state",
+            ),
+            mock.patch.object(
+                runtime_e2e_harness,
+                "materialize_scenario_config",
+                return_value=Path("/tmp/local_plugins.yml"),
+            ),
+            mock.patch.object(
+                runtime_e2e_harness,
+                "base_environment",
+                return_value={
+                    "USE_LOCAL_PLUGIN_CODE": "1",
+                    "SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR": "/tmp/local-manifests",
+                },
+            ),
+            mock.patch.object(
+                runtime_e2e_harness,
+                "assert_runtime_plugins_downloaded",
+            ) as assert_downloaded,
+        ):
+            runtime_e2e_harness.run_scenario(
+                scenario,
+                mode="smoke",
+                skipprd=skipprd,
+                prepare=False,
+                skip_dynamodb=True,
+                runtime_plugin_versions=None,
+                local_runtime_manifests=None,
+                namespace=None,
+            )
+
+        assert_downloaded.assert_not_called()
 
 
 if __name__ == "__main__":

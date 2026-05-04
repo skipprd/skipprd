@@ -315,7 +315,7 @@ BIKE_HIRE_MANY_CHAOS_ENV = (
 SCENARIOS = {
     "bike_hire": Scenario(
         name="bike_hire",
-        config_path=scenario_config(".github/actions/e2e/bike_hire/skipprd.yml"),
+        config_path=scenario_config(".github/actions/e2e/bike_hire/skippr.yml"),
         smoke_runs=(
             SyncRun(
                 pipeline="bike_hire",
@@ -353,7 +353,7 @@ SCENARIOS = {
     ),
     "bike_hire_many": Scenario(
         name="bike_hire_many",
-        config_path=scenario_config(".github/actions/e2e/bike_hire_many/skipprd.yml"),
+        config_path=scenario_config(".github/actions/e2e/bike_hire_many/skippr.yml"),
         smoke_runs=(
             SyncRun(
                 pipeline="bike_hire_many",
@@ -398,7 +398,7 @@ SCENARIOS = {
     "bike_hire_s3_wal_many": Scenario(
         name="bike_hire_s3_wal_many",
         config_path=scenario_config(
-            ".github/actions/e2e/bike_hire_s3_wal_many/skipprd.yml"
+            ".github/actions/e2e/bike_hire_s3_wal_many/skippr.yml"
         ),
         smoke_runs=(
             SyncRun(
@@ -470,7 +470,7 @@ SCENARIOS = {
     ),
     "deadletters_test": Scenario(
         name="deadletters_test",
-        config_path=scenario_config(".github/actions/e2e/deadletters/skipprd.yml"),
+        config_path=scenario_config(".github/actions/e2e/deadletters/skippr.yml"),
         smoke_runs=(SyncRun(pipeline="deadletters_test"),),
         full_runs=(SyncRun(pipeline="deadletters_test"),),
         smoke_verifiers=("deadletters_athena_routing",),
@@ -479,7 +479,7 @@ SCENARIOS = {
     "postgres_iceberg_types_cdc": Scenario(
         name="postgres_iceberg_types_cdc",
         config_path=scenario_config(
-            ".github/actions/e2e/postgres_iceberg_types_cdc/skipprd.yml"
+            ".github/actions/e2e/postgres_iceberg_types_cdc/skippr.yml"
         ),
         smoke_runs=(SyncRun(pipeline="postgres_iceberg_types_cdc"),),
         full_runs=(SyncRun(pipeline="postgres_iceberg_types_cdc"),),
@@ -489,7 +489,7 @@ SCENARIOS = {
     "mysql_iceberg_types_cdc": Scenario(
         name="mysql_iceberg_types_cdc",
         config_path=scenario_config(
-            ".github/actions/e2e/mysql_iceberg_types_cdc/skipprd.yml"
+            ".github/actions/e2e/mysql_iceberg_types_cdc/skippr.yml"
         ),
         smoke_runs=(SyncRun(pipeline="mysql_iceberg_types_cdc"),),
         full_runs=(SyncRun(pipeline="mysql_iceberg_types_cdc"),),
@@ -499,7 +499,7 @@ SCENARIOS = {
     "dynamodb_iceberg_types_cdc": Scenario(
         name="dynamodb_iceberg_types_cdc",
         config_path=scenario_config(
-            ".github/actions/e2e/dynamodb_iceberg_types_cdc/skipprd.yml"
+            ".github/actions/e2e/dynamodb_iceberg_types_cdc/skippr.yml"
         ),
         smoke_runs=(SyncRun(pipeline="dynamodb_iceberg_types_cdc"),),
         full_runs=(SyncRun(pipeline="dynamodb_iceberg_types_cdc"),),
@@ -509,7 +509,7 @@ SCENARIOS = {
     "mssql_iceberg_debug_linux": Scenario(
         name="mssql_iceberg_debug_linux",
         config_path=scenario_config(
-            ".github/actions/e2e/mssql_iceberg_debug_linux/skipprd.yml"
+            ".github/actions/e2e/mssql_iceberg_debug_linux/skippr.yml"
         ),
         smoke_runs=(
             SyncRun(
@@ -538,7 +538,7 @@ SCENARIOS = {
     "mssql_iceberg_debug_windows": Scenario(
         name="mssql_iceberg_debug_windows",
         config_path=scenario_config(
-            ".github/actions/e2e/mssql_iceberg_debug_windows/skipprd.yml"
+            ".github/actions/e2e/mssql_iceberg_debug_windows/skippr.yml"
         ),
         smoke_runs=(
             SyncRun(
@@ -1393,7 +1393,7 @@ def run_runtime_file_release_smoke(
     cleanup = True
     try:
         pipeline_name = "runtime_release_file_smoke"
-        config_path = data_dir / "skipprd.yml"
+        config_path = data_dir / "skippr.yml"
         config_path.write_text(
             f"""skippr:
   workspace: {RUNTIME_ACCEPTANCE_WORKSPACE}
@@ -1528,7 +1528,7 @@ CREATE SCHEMA public;
         )
 
         pipeline_name = "runtime_release_postgres_smoke"
-        config_path = data_dir / "skipprd.yml"
+        config_path = data_dir / "skippr.yml"
         config_path.write_text(
             f"""skippr:
   workspace: {RUNTIME_ACCEPTANCE_WORKSPACE}

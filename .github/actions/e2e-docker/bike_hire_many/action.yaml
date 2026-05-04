@@ -28,14 +28,14 @@ runs:
           -e AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} \
           -e AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} \
           -e AWS_DEFAULT_REGION=us-east-1 \
-          -e SKIPPR_CONFIG_FILE=/foo/skipprd.yml \
+          -e SKIPPR_CONFIG_FILE=/foo/skippr.yml \
           -v `pwd`/.github/actions/e2e-docker/bike_hire_many/:/foo/ \
           ./skipprd-${{ inputs.architecture_name }}/skipprd discover --pipeline bike_hire_many
          docker run --name skipprd \
           -e AWS_ACCESS_KEY_ID=${{ inputs.aws_access_key_id }} \
           -e AWS_SECRET_ACCESS_KEY=${{ inputs.aws_secret_access_key }} \
           -e AWS_DEFAULT_REGION=us-east-1 \
-          -e SKIPPR_CONFIG_FILE=/foo/skipprd.yml \
+          -e SKIPPR_CONFIG_FILE=/foo/skippr.yml \
           -v `pwd`/.github/actions/e2e-docker/bike_hire_many/:/foo/ \
           skippr/skippr:latest sync --pipeline bike_hire_many
         docker logs skipprd

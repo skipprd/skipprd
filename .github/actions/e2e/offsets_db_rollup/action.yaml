@@ -18,7 +18,7 @@ runs:
       run: |
         chmod +x ./skipprd-${{ inputs.architecture_name }}/skipprd
         
-        cp .github/actions/e2e/offsets_db_rollup/skipprd.yml ./skipprd.yml
+        cp .github/actions/e2e/offsets_db_rollup/skippr.yml ./skippr.yml
         
         ls -la ./
         

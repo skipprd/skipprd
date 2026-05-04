@@ -177,7 +177,7 @@ jobs:
         run: |
           set -euo pipefail
           manifest_dir="$(python3 .github/scripts/local_runtime_plugins.py \
-            --config .github/actions/e2e/mssql_iceberg_debug_linux/skipprd.yml \
+            --config .github/actions/e2e/mssql_iceberg_debug_linux/skippr.yml \
             --pipeline mssql_iceberg_debug_linux)"
           echo "manifest_dir=${manifest_dir}" >> "$GITHUB_OUTPUT"
 
@@ -324,7 +324,7 @@ jobs:
         run: |
           $ErrorActionPreference = "Stop"
           $manifestDir = python .github/scripts/local_runtime_plugins.py `
-            --config .github/actions/e2e/mssql_iceberg_debug_windows/skipprd.yml `
+            --config .github/actions/e2e/mssql_iceberg_debug_windows/skippr.yml `
             --pipeline mssql_iceberg_debug_windows
           "manifest_dir=$manifestDir" >> $env:GITHUB_OUTPUT
 

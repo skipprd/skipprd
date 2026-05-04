@@ -32,7 +32,7 @@ impl DataEngineerSuite {
             schema_sink: None,
         };
 
-        // 1. Write skipprd.yml
+        // 1. Write skippr.yml
         skippr
             .write_pipeline_config(sctx.scope(), &pipeline_config)
             .await
@@ -116,7 +116,7 @@ mod tests {
             _scope: &RequestScope,
             _config: &crate::providers::SkipprPipelineConfig,
         ) -> Result<String, String> {
-            Ok("skipprd.yaml".to_string())
+            Ok("skippr.yml".to_string())
         }
 
         async fn discover_pipeline(

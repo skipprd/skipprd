@@ -53,7 +53,7 @@ impl SkipprCliProvider {
     }
 
     fn skippr_yml_path(&self) -> PathBuf {
-        self.data_dir_path().join("skipprd.yaml")
+        self.data_dir_path().join("skippr.yml")
     }
 
     fn env_vars(&self) -> HashMap<String, String> {
@@ -1472,6 +1472,10 @@ mod tests {
 
                 let env = provider.env_vars();
                 assert_eq!(
+                    env.get("SKIPPR_CONFIG_FILE").map(String::as_str),
+                    Some("/tmp/skippr-provider-test/skippr.yml")
+                );
+                assert_eq!(
                     env.get("POSTGRES_HOST").map(String::as_str),
                     Some("localhost")
                 );
@@ -1760,9 +1764,9 @@ impl SkipprProvider for SkipprCliProvider {
             .map_err(|e| format!("failed to create data dir: {}", e))?;
 
         std::fs::write(&yml_path, yml_content.as_bytes())
-            .map_err(|e| format!("failed to write skipprd.yml: {}", e))?;
+            .map_err(|e| format!("failed to write skippr.yml: {}", e))?;
 
-        tracing::info!(path = %yml_path.display(), "wrote skipprd.yml");
+        tracing::info!(path = %yml_path.display(), "wrote skippr.yml");
         Ok(yml_path.to_string_lossy().to_string())
     }
 
