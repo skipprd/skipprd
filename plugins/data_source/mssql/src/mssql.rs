@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use serde_derive::Deserialize;
-use tiberius::{numeric::Numeric, Client, ColumnType, Config as TiberiusConfig, Row};
+use tiberius::{numeric::Numeric, Client, ColumnData, Config as TiberiusConfig, Row};
 use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 use tracing::{error, info};
@@ -119,9 +119,9 @@ impl DataSourceMssqlPlugin {
 
     fn row_to_json(row: &Row) -> String {
         let mut map = serde_json::Map::new();
-        for (i, col) in row.columns().iter().enumerate() {
+        for (col, data) in row.cells() {
             let name = col.name().to_string();
-            let value = Self::column_value_to_json(row, i, col.column_type());
+            let value = Self::column_value_to_json(data);
             map.insert(name, value);
         }
         serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_default()
@@ -134,107 +134,100 @@ impl DataSourceMssqlPlugin {
             .unwrap_or(serde_json::Value::Null)
     }
 
-    fn column_value_to_json(row: &Row, idx: usize, column_type: ColumnType) -> serde_json::Value {
-        match column_type {
-            ColumnType::Daten => {
-                return match row.try_get::<chrono::NaiveDate, _>(idx) {
-                    Ok(Some(v)) => serde_json::Value::String(v.to_string()),
-                    Ok(None) => serde_json::Value::Null,
-                    Err(_) => serde_json::Value::Null,
-                };
-            }
-            ColumnType::Datetime
-            | ColumnType::Datetime2
-            | ColumnType::Datetime4
-            | ColumnType::Datetimen => {
-                return match row.try_get::<chrono::NaiveDateTime, _>(idx) {
-                    Ok(Some(v)) => serde_json::Value::String(v.to_string()),
-                    Ok(None) => serde_json::Value::Null,
-                    Err(_) => serde_json::Value::Null,
-                };
-            }
-            ColumnType::DatetimeOffsetn => {
-                return match row.try_get::<chrono::DateTime<chrono::FixedOffset>, _>(idx) {
-                    Ok(Some(v)) => serde_json::Value::String(v.to_rfc3339()),
-                    Ok(None) => serde_json::Value::Null,
-                    Err(_) => serde_json::Value::Null,
-                };
-            }
-            ColumnType::Timen => {
-                return match row.try_get::<chrono::NaiveTime, _>(idx) {
-                    Ok(Some(v)) => serde_json::Value::String(v.to_string()),
-                    Ok(None) => serde_json::Value::Null,
-                    Err(_) => serde_json::Value::Null,
-                };
-            }
-            ColumnType::Decimaln
-            | ColumnType::Numericn
-            | ColumnType::Money
-            | ColumnType::Money4 => {
-                return match row.try_get::<Numeric, _>(idx) {
-                    Ok(Some(v)) => Self::numeric_to_json(v),
-                    Ok(None) => serde_json::Value::Null,
-                    Err(_) => match row.try_get::<f64, _>(idx) {
-                        Ok(Some(v)) => serde_json::json!(v),
-                        Ok(None) => serde_json::Value::Null,
-                        Err(_) => serde_json::Value::Null,
-                    },
-                };
-            }
-            _ => {}
-        }
+    fn tds_date_to_chrono(date: tiberius::time::Date) -> chrono::NaiveDate {
+        chrono::NaiveDate::from_ymd_opt(1, 1, 1).unwrap()
+            + chrono::Duration::days(date.days() as i64)
+    }
 
-        match row.try_get::<&str, _>(idx) {
-            Ok(Some(s)) => return serde_json::Value::String(s.to_string()),
-            Ok(None) => return serde_json::Value::Null,
-            Err(_) => {}
+    fn tds_time_to_chrono(time: tiberius::time::Time) -> chrono::NaiveTime {
+        let nanos_per_increment = 10_i64.pow(9 - u32::from(time.scale()));
+        chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap()
+            + chrono::Duration::nanoseconds(time.increments() as i64 * nanos_per_increment)
+    }
+
+    fn tds_datetime2_to_chrono(datetime: tiberius::time::DateTime2) -> chrono::NaiveDateTime {
+        chrono::NaiveDateTime::new(
+            Self::tds_date_to_chrono(datetime.date()),
+            Self::tds_time_to_chrono(datetime.time()),
+        )
+    }
+
+    fn tds_legacy_datetime_to_chrono(days: i64, seconds_fragments: i64) -> chrono::NaiveDateTime {
+        let date =
+            chrono::NaiveDate::from_ymd_opt(1900, 1, 1).unwrap() + chrono::Duration::days(days);
+        let time = chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap()
+            + chrono::Duration::nanoseconds(seconds_fragments * 1_000_000_000 / 300);
+        chrono::NaiveDateTime::new(date, time)
+    }
+
+    fn tds_smalldatetime_to_chrono(days: i64, minute_fragments: i64) -> chrono::NaiveDateTime {
+        let date =
+            chrono::NaiveDate::from_ymd_opt(1900, 1, 1).unwrap() + chrono::Duration::days(days);
+        let time = chrono::NaiveTime::from_hms_opt(0, 0, 0).unwrap()
+            + chrono::Duration::minutes(minute_fragments);
+        chrono::NaiveDateTime::new(date, time)
+    }
+
+    fn column_value_to_json(data: &ColumnData<'static>) -> serde_json::Value {
+        match data {
+            ColumnData::U8(v) => v.map_or(serde_json::Value::Null, |v| serde_json::json!(v)),
+            ColumnData::I16(v) => v.map_or(serde_json::Value::Null, |v| serde_json::json!(v)),
+            ColumnData::I32(v) => v.map_or(serde_json::Value::Null, |v| serde_json::json!(v)),
+            ColumnData::I64(v) => v.map_or(serde_json::Value::Null, |v| serde_json::json!(v)),
+            ColumnData::F32(v) => v.map_or(serde_json::Value::Null, |v| serde_json::json!(v)),
+            ColumnData::F64(v) => v.map_or(serde_json::Value::Null, |v| serde_json::json!(v)),
+            ColumnData::Bit(v) => v.map_or(serde_json::Value::Null, |v| serde_json::json!(v)),
+            ColumnData::String(v) => v
+                .as_ref()
+                .map_or(serde_json::Value::Null, |v| serde_json::json!(v.as_ref())),
+            ColumnData::Guid(v) => v.map_or(serde_json::Value::Null, |v| {
+                serde_json::Value::String(v.to_string())
+            }),
+            ColumnData::Binary(v) => v
+                .as_ref()
+                .map_or(serde_json::Value::Null, |v| serde_json::json!(v.as_ref())),
+            ColumnData::Numeric(v) => v.map_or(serde_json::Value::Null, Self::numeric_to_json),
+            ColumnData::Xml(v) => v.as_ref().map_or(serde_json::Value::Null, |v| {
+                serde_json::Value::String(v.as_ref().to_string())
+            }),
+            ColumnData::DateTime(v) => v.map_or(serde_json::Value::Null, |v| {
+                serde_json::Value::String(
+                    Self::tds_legacy_datetime_to_chrono(
+                        i64::from(v.days()),
+                        i64::from(v.seconds_fragments()),
+                    )
+                    .to_string(),
+                )
+            }),
+            ColumnData::SmallDateTime(v) => v.map_or(serde_json::Value::Null, |v| {
+                serde_json::Value::String(
+                    Self::tds_smalldatetime_to_chrono(
+                        i64::from(v.days()),
+                        i64::from(v.seconds_fragments()),
+                    )
+                    .to_string(),
+                )
+            }),
+            ColumnData::Time(v) => v.map_or(serde_json::Value::Null, |v| {
+                serde_json::Value::String(Self::tds_time_to_chrono(v).to_string())
+            }),
+            ColumnData::Date(v) => v.map_or(serde_json::Value::Null, |v| {
+                serde_json::Value::String(Self::tds_date_to_chrono(v).to_string())
+            }),
+            ColumnData::DateTime2(v) => v.map_or(serde_json::Value::Null, |v| {
+                serde_json::Value::String(Self::tds_datetime2_to_chrono(v).to_string())
+            }),
+            ColumnData::DateTimeOffset(v) => v.map_or(serde_json::Value::Null, |v| {
+                let offset = chrono::FixedOffset::east_opt(i32::from(v.offset()) * 60).unwrap();
+                let datetime = Self::tds_datetime2_to_chrono(v.datetime2());
+                serde_json::Value::String(
+                    chrono::DateTime::<chrono::FixedOffset>::from_naive_utc_and_offset(
+                        datetime, offset,
+                    )
+                    .to_rfc3339(),
+                )
+            }),
         }
-        match row.try_get::<i32, _>(idx) {
-            Ok(Some(v)) => return serde_json::json!(v),
-            Ok(None) => return serde_json::Value::Null,
-            Err(_) => {}
-        }
-        match row.try_get::<i64, _>(idx) {
-            Ok(Some(v)) => return serde_json::json!(v),
-            Ok(None) => return serde_json::Value::Null,
-            Err(_) => {}
-        }
-        match row.try_get::<i16, _>(idx) {
-            Ok(Some(v)) => return serde_json::json!(v),
-            Ok(None) => return serde_json::Value::Null,
-            Err(_) => {}
-        }
-        match row.try_get::<f64, _>(idx) {
-            Ok(Some(v)) => return serde_json::json!(v),
-            Ok(None) => return serde_json::Value::Null,
-            Err(_) => {}
-        }
-        match row.try_get::<f32, _>(idx) {
-            Ok(Some(v)) => return serde_json::json!(v),
-            Ok(None) => return serde_json::Value::Null,
-            Err(_) => {}
-        }
-        match row.try_get::<bool, _>(idx) {
-            Ok(Some(v)) => return serde_json::json!(v),
-            Ok(None) => return serde_json::Value::Null,
-            Err(_) => {}
-        }
-        match row.try_get::<Numeric, _>(idx) {
-            Ok(Some(v)) => return Self::numeric_to_json(v),
-            Ok(None) => return serde_json::Value::Null,
-            Err(_) => {}
-        }
-        match row.try_get::<chrono::NaiveDateTime, _>(idx) {
-            Ok(Some(v)) => return serde_json::Value::String(v.to_string()),
-            Ok(None) => return serde_json::Value::Null,
-            Err(_) => {}
-        }
-        match row.try_get::<chrono::NaiveDate, _>(idx) {
-            Ok(Some(v)) => return serde_json::Value::String(v.to_string()),
-            Ok(None) => return serde_json::Value::Null,
-            Err(_) => {}
-        }
-        serde_json::Value::Null
     }
 
     pub async fn sync(
@@ -373,10 +366,75 @@ impl DataSource for DataSourceMssqlPlugin {
 mod tests {
     use super::*;
 
+    fn tds_days_since_year_one(date: chrono::NaiveDate) -> u32 {
+        date.signed_duration_since(chrono::NaiveDate::from_ymd_opt(1, 1, 1).unwrap())
+            .num_days() as u32
+    }
+
     #[test]
     fn numeric_to_json_preserves_decimal_value() {
         let value = DataSourceMssqlPlugin::numeric_to_json(Numeric::new_with_scale(12050, 2));
 
         assert_eq!(value, serde_json::json!(120.50));
+    }
+
+    #[test]
+    fn column_value_to_json_preserves_datetime2_value() {
+        let date = chrono::NaiveDate::from_ymd_opt(2025, 1, 3).unwrap();
+        let time_increments = (9 * 60 * 60 + 15 * 60) * 10_000_000;
+        let datetime = tiberius::time::DateTime2::new(
+            tiberius::time::Date::new(tds_days_since_year_one(date)),
+            tiberius::time::Time::new(time_increments, 7),
+        );
+
+        let value =
+            DataSourceMssqlPlugin::column_value_to_json(&ColumnData::DateTime2(Some(datetime)));
+
+        assert_eq!(value, serde_json::json!("2025-01-03 09:15:00"));
+    }
+
+    #[test]
+    fn column_value_to_json_preserves_decimal_value() {
+        let value = DataSourceMssqlPlugin::column_value_to_json(&ColumnData::Numeric(Some(
+            Numeric::new_with_scale(12050, 2),
+        )));
+
+        assert_eq!(value, serde_json::json!(120.50));
+    }
+
+    #[cfg(feature = "mssql_integration")]
+    #[tokio::test]
+    async fn feature_decodes_seeded_mssql_dates_and_prices() {
+        let connection_string = std::env::var("MSSQL_CONNECTION_STRING").unwrap_or_else(|_| {
+            "server=tcp:127.0.0.1,1433;database=testdb;user id=sa;password=Skippr!Test123;TrustServerCertificate=true".to_string()
+        });
+        let config = DataSourceMssqlPluginConfig {
+            connection_string,
+            tables: None,
+            batch_size_rows: None,
+            query_timeout_seconds: None,
+            format: None,
+            batch_size_bytes: None,
+            batch_size_seconds: None,
+        };
+        let mut client = DataSourceMssqlPlugin::connect(&config).await.unwrap();
+        let stream = client
+            .simple_query(
+                "SELECT o.order_id, o.total_amount, o.placed_at, i.unit_price \
+                 FROM dbo.orders o \
+                 JOIN dbo.order_items i ON i.order_id = o.order_id \
+                 WHERE o.order_id = 'o1' AND i.order_item_id = 'oi1'",
+            )
+            .await
+            .unwrap();
+        let rows: Vec<Row> = stream.into_first_result().await.unwrap();
+        let row = rows.first().expect("seeded MSSQL row should exist");
+        let value: serde_json::Value =
+            serde_json::from_str(&DataSourceMssqlPlugin::row_to_json(row)).unwrap();
+
+        assert_eq!(value["order_id"], serde_json::json!("o1"));
+        assert_eq!(value["total_amount"], serde_json::json!(120.50));
+        assert_eq!(value["unit_price"], serde_json::json!(50.00));
+        assert_eq!(value["placed_at"], serde_json::json!("2025-01-03 09:15:00"));
     }
 }
