@@ -1,6 +1,6 @@
 # Runtime Plugins
 
-Skippr treats runtime plugins as independently versioned packages. The host binary is published separately, while source, sink, and schema plugins are resolved from published manifests or explicit local overrides.
+Skippr treats runtime plugins as independently versioned packages. The host binary is published separately, while source, sink, and schema plugins are resolved from published manifests by default.
 
 The runtime boundary is intentionally narrow:
 
@@ -65,9 +65,34 @@ Resolution rules:
 
 - default to the latest manifest index
 - if a connector config includes a `version` field, pin only that plugin to that published version
-- if pipeline config provides an explicit manifest override in `runtime_plugins`, skip published discovery for that slot
+- for maintainer and CI validation only, `USE_LOCAL_PLUGIN_CODE=1` can opt into generated local manifests before falling back to published discovery
 
 Downloaded manifests and binaries are cached under `SKIPPR_RUNTIME_PLUGIN_DIR` when set, otherwise under `~/.skippr/runtime_plugins`.
+
+## Local plugin code
+
+Use the local plugin flow when a maintainer needs to validate the runtime plugin binaries built from the current checkout before publishing them:
+
+```bash
+cargo build -p skipprd
+manifest_dir="$(python3 .github/scripts/local_runtime_plugins.py \
+  --config path/to/skippr.yaml \
+  --pipeline my_pipeline)"
+
+export USE_LOCAL_PLUGIN_CODE=1
+export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="$manifest_dir"
+target/debug/skipprd --config path/to/skippr.yaml sync --pipeline my_pipeline --once
+```
+
+The helper parses the active Skippr config, builds only the referenced runtime plugin packages, and writes manifests under `.skippr/local-runtime-plugins/manifests` by default. The generated manifests point directly at `target/debug` or `target/release` binaries from the current commit.
+
+Keep this as an internal maintainer mechanism. Do not add per-pipeline YAML fields for local plugin paths, and do not document `USE_LOCAL_PLUGIN_CODE` in public configuration docs.
+
+Resolution behavior with `USE_LOCAL_PLUGIN_CODE=1`:
+
+- matching local manifest found: validate kind/plugin/executable and run that binary
+- local manifest directory missing or no matching manifest: fall back to published discovery
+- matching manifest is malformed or points at a missing executable: fail loudly so CI does not accidentally test published code
 
 ## Runtime transport
 

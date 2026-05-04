@@ -1,5 +1,6 @@
+use std::fs as std_fs;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use reqwest::header::{CACHE_CONTROL, PRAGMA, USER_AGENT};
@@ -10,10 +11,13 @@ use tokio::io::AsyncWriteExt;
 use tracing::info;
 
 use crate::runtime_plugins::host::ResolvedRuntimePlugin;
+use crate::runtime_plugins::manifest::RuntimePluginManifest;
 use crate::runtime_plugins::protocol::RuntimePluginKind;
 
 const DEFAULT_DISCOVERY_BASE_URL: &str = "https://install.skippr.io/releases/runtime-plugins";
 const METADATA_REFRESH_QUERY_PARAM: &str = "skippr_metadata_refresh";
+const LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR_ENV: &str = "SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR";
+const USE_LOCAL_PLUGIN_CODE_ENV: &str = "USE_LOCAL_PLUGIN_CODE";
 
 #[derive(Clone, Debug, Deserialize)]
 struct RuntimePluginIndex {
@@ -122,6 +126,32 @@ pub fn runtime_plugin_cache_root() -> PathBuf {
     std::env::temp_dir().join("skippr_runtime_plugins")
 }
 
+fn env_truthy(name: &str) -> bool {
+    std::env::var(name)
+        .ok()
+        .map(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn use_local_plugin_code() -> bool {
+    env_truthy(USE_LOCAL_PLUGIN_CODE_ENV)
+}
+
+fn local_runtime_plugin_manifest_dir() -> io::Result<PathBuf> {
+    if let Some(path) = std::env::var_os(LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR_ENV) {
+        return Ok(PathBuf::from(path));
+    }
+    Ok(std::env::current_dir()?
+        .join(".skippr")
+        .join("local-runtime-plugins")
+        .join("manifests"))
+}
+
 pub fn validate_resolved_plugin(
     resolved: ResolvedRuntimePlugin,
     expected_kind: RuntimePluginKind,
@@ -149,12 +179,26 @@ pub async fn resolve_runtime_plugin(
     expected_plugin_name: &str,
     configured_plugin_version: Option<&str>,
 ) -> io::Result<ResolvedRuntimePlugin> {
-    let resolved = discover_runtime_plugin(
-        expected_kind,
-        expected_plugin_name,
-        configured_plugin_version,
-    )
-    .await?;
+    let resolved = if use_local_plugin_code() {
+        match resolve_local_runtime_plugin(expected_kind, expected_plugin_name)? {
+            Some(resolved) => resolved,
+            None => {
+                discover_runtime_plugin(
+                    expected_kind,
+                    expected_plugin_name,
+                    configured_plugin_version,
+                )
+                .await?
+            }
+        }
+    } else {
+        discover_runtime_plugin(
+            expected_kind,
+            expected_plugin_name,
+            configured_plugin_version,
+        )
+        .await?
+    };
 
     let resolved = validate_resolved_plugin(resolved, expected_kind, expected_plugin_name)?;
     info!(
@@ -166,6 +210,95 @@ pub async fn resolve_runtime_plugin(
         resolved.manifest_path.display(),
     );
     Ok(resolved)
+}
+
+fn resolve_local_runtime_plugin(
+    expected_kind: RuntimePluginKind,
+    expected_plugin_name: &str,
+) -> io::Result<Option<ResolvedRuntimePlugin>> {
+    let manifest_dir = local_runtime_plugin_manifest_dir()?;
+    if !manifest_dir.exists() {
+        info!(
+            "USE_LOCAL_PLUGIN_CODE=1 but local runtime plugin manifest directory does not exist; falling back to published registry path={}",
+            manifest_dir.display(),
+        );
+        return Ok(None);
+    }
+    if !manifest_dir.is_dir() {
+        return Err(io::Error::other(format!(
+            "USE_LOCAL_PLUGIN_CODE=1 but local runtime plugin manifest path is not a directory: {}",
+            manifest_dir.display()
+        )));
+    }
+
+    for manifest_path in sorted_json_files(&manifest_dir)? {
+        let manifest = RuntimePluginManifest::load_from_path(&manifest_path).map_err(|err| {
+            io::Error::other(format!(
+                "failed to load local runtime plugin manifest {}: {}",
+                manifest_path.display(),
+                err
+            ))
+        })?;
+        if manifest.kind != expected_kind || manifest.plugin_name != expected_plugin_name {
+            continue;
+        }
+
+        let executable = manifest.resolve_executable(&manifest_path).map_err(|err| {
+            io::Error::other(format!(
+                "local runtime plugin manifest {} has invalid executable path: {}",
+                manifest_path.display(),
+                err
+            ))
+        })?;
+        if !executable.exists() {
+            return Err(io::Error::other(format!(
+                "local runtime plugin manifest {} matched {} {:?} but executable does not exist: {}",
+                manifest_path.display(),
+                expected_plugin_name,
+                expected_kind,
+                executable.display()
+            )));
+        }
+
+        info!(
+            "Resolved local runtime {} plugin '{}' version={} manifest={} path={} executable={}",
+            runtime_plugin_kind_label(expected_kind),
+            manifest.plugin_name,
+            manifest.version,
+            manifest.name,
+            manifest_path.display(),
+            executable.display(),
+        );
+        return Ok(Some(ResolvedRuntimePlugin {
+            manifest_path,
+            manifest,
+        }));
+    }
+
+    info!(
+        "USE_LOCAL_PLUGIN_CODE=1 but no matching local runtime {} plugin '{}' manifest was found under {}; falling back to published registry",
+        runtime_plugin_kind_label(expected_kind),
+        expected_plugin_name,
+        manifest_dir.display(),
+    );
+    Ok(None)
+}
+
+fn sorted_json_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    for entry in std_fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if path.is_file()
+            && path
+                .extension()
+                .is_some_and(|ext| ext == std::ffi::OsStr::new("json"))
+        {
+            paths.push(path);
+        }
+    }
+    paths.sort();
+    Ok(paths)
 }
 
 async fn discover_runtime_plugin(
@@ -359,18 +492,37 @@ async fn fetch_metadata_bytes(client: &reqwest::Client, url: &str) -> io::Result
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
     use std::path::PathBuf;
 
+    use serde_json::json;
     use serial_test::serial;
+    use tempfile::tempdir;
 
     use crate::runtime_plugins::protocol::RuntimePluginKind;
 
     use super::{
         append_metadata_refresh_query, configured_runtime_plugin_version,
         latest_manifest_index_url, manifest_cache_key, missing_runtime_plugin_message,
-        rewrite_manifest_url_version, runtime_plugin_cache_root, RuntimePluginIndex,
-        RuntimePluginIndexEntry,
+        resolve_local_runtime_plugin, rewrite_manifest_url_version, runtime_plugin_cache_root,
+        use_local_plugin_code, RuntimePluginIndex, RuntimePluginIndexEntry,
     };
+
+    fn local_manifest_json(plugin_name: &str, kind: RuntimePluginKind, executable: &str) -> String {
+        serde_json::to_string_pretty(&json!({
+            "name": format!("{}-local", plugin_name.to_ascii_lowercase()),
+            "kind": kind,
+            "plugin_name": plugin_name,
+            "version": "0.0.0-dev",
+            "protocol_version": 1,
+            "config_schema_version": 1,
+            "executable": executable,
+            "artifacts": {},
+            "args": [],
+            "supports_schema": false
+        }))
+        .unwrap()
+    }
 
     #[test]
     fn manifest_index_url_uses_latest_prefix() {
@@ -473,6 +625,124 @@ mod tests {
         assert!(message.contains("- latest index label: 8.1.0"));
         assert!(message.contains("- case-insensitive matches: S3"));
         assert!(message.contains("- available plugins for this kind: File, S3"));
+    }
+
+    #[test]
+    #[serial]
+    fn local_plugin_code_is_opt_in() {
+        std::env::remove_var("USE_LOCAL_PLUGIN_CODE");
+        assert!(!use_local_plugin_code());
+        std::env::set_var("USE_LOCAL_PLUGIN_CODE", "1");
+        assert!(use_local_plugin_code());
+        std::env::remove_var("USE_LOCAL_PLUGIN_CODE");
+    }
+
+    #[test]
+    #[serial]
+    fn local_manifest_resolves_matching_plugin() {
+        let temp = tempdir().unwrap();
+        let manifest_dir = temp.path().join("manifests");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        let executable = temp.path().join("skippr-plugin-data-source-mssql");
+        fs::write(&executable, b"local plugin").unwrap();
+        fs::write(
+            manifest_dir.join("mssql-source.json"),
+            local_manifest_json(
+                "Mssql",
+                RuntimePluginKind::DataSource,
+                executable.to_str().unwrap(),
+            ),
+        )
+        .unwrap();
+
+        std::env::set_var("SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR", &manifest_dir);
+        let resolved =
+            resolve_local_runtime_plugin(RuntimePluginKind::DataSource, "Mssql").unwrap();
+        std::env::remove_var("SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR");
+
+        let resolved = resolved.expect("matching local manifest should resolve");
+        assert_eq!(resolved.manifest.plugin_name, "Mssql");
+        assert_eq!(resolved.manifest.kind, RuntimePluginKind::DataSource);
+    }
+
+    #[test]
+    #[serial]
+    fn local_manifest_absence_falls_back_to_published_discovery() {
+        let temp = tempdir().unwrap();
+        let manifest_dir = temp.path().join("missing");
+        std::env::set_var("SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR", &manifest_dir);
+        let resolved =
+            resolve_local_runtime_plugin(RuntimePluginKind::DataSource, "Mssql").unwrap();
+        std::env::remove_var("SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR");
+
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn local_manifest_miss_falls_back_to_published_discovery() {
+        let temp = tempdir().unwrap();
+        let manifest_dir = temp.path().join("manifests");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        let executable = temp.path().join("skippr-plugin-data-source-postgres");
+        fs::write(&executable, b"local plugin").unwrap();
+        fs::write(
+            manifest_dir.join("postgres-source.json"),
+            local_manifest_json(
+                "Postgres",
+                RuntimePluginKind::DataSource,
+                executable.to_str().unwrap(),
+            ),
+        )
+        .unwrap();
+
+        std::env::set_var("SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR", &manifest_dir);
+        let resolved =
+            resolve_local_runtime_plugin(RuntimePluginKind::DataSource, "Mssql").unwrap();
+        std::env::remove_var("SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR");
+
+        assert!(resolved.is_none());
+    }
+
+    #[test]
+    #[serial]
+    fn malformed_local_manifest_fails_loudly() {
+        let temp = tempdir().unwrap();
+        let manifest_dir = temp.path().join("manifests");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        fs::write(manifest_dir.join("mssql-source.json"), b"{not-json").unwrap();
+
+        std::env::set_var("SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR", &manifest_dir);
+        let err = resolve_local_runtime_plugin(RuntimePluginKind::DataSource, "Mssql").unwrap_err();
+        std::env::remove_var("SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR");
+
+        assert!(err
+            .to_string()
+            .contains("failed to load local runtime plugin manifest"));
+    }
+
+    #[test]
+    #[serial]
+    fn matching_local_manifest_with_missing_executable_fails_loudly() {
+        let temp = tempdir().unwrap();
+        let manifest_dir = temp.path().join("manifests");
+        fs::create_dir_all(&manifest_dir).unwrap();
+        let executable = temp.path().join("missing-plugin");
+        fs::write(
+            manifest_dir.join("mssql-source.json"),
+            local_manifest_json(
+                "Mssql",
+                RuntimePluginKind::DataSource,
+                executable.to_str().unwrap(),
+            ),
+        )
+        .unwrap();
+
+        std::env::set_var("SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR", &manifest_dir);
+        let err = resolve_local_runtime_plugin(RuntimePluginKind::DataSource, "Mssql").unwrap_err();
+        std::env::remove_var("SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR");
+
+        assert!(err.to_string().contains("executable does not exist"));
     }
 
     #[test]

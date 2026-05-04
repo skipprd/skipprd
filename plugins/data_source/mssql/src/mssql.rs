@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
 use serde_derive::Deserialize;
+use skippr_core::METADATA;
 use tiberius::{numeric::Numeric, Client, ColumnData, Config as TiberiusConfig, Row};
 use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 use tracing::{error, info};
 
+use crate::discover::{Metadata, SkipprDataType};
 use crate::helpers::configuration::{Config, DataSourcePluginConfig};
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
@@ -34,6 +36,12 @@ impl TryFrom<DataSourcePluginConfig> for DataSourceMssqlPluginConfig {
 pub struct DataSourceMssqlPlugin {
     pub(crate) ingest: Ingest,
     pub(crate) config: DataSourceMssqlPluginConfig,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct MssqlColumnSchema {
+    name: String,
+    data_type: String,
 }
 
 impl DataSourceMssqlPlugin {
@@ -117,6 +125,99 @@ impl DataSourceMssqlPlugin {
         }
     }
 
+    fn sql_string_literal(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "''"))
+    }
+
+    async fn table_columns(
+        client: &mut Client<tokio_util::compat::Compat<TcpStream>>,
+        schema: &str,
+        table: &str,
+    ) -> Result<Vec<MssqlColumnSchema>, Box<dyn std::error::Error>> {
+        let sql = format!(
+            "SELECT COLUMN_NAME, DATA_TYPE \
+             FROM INFORMATION_SCHEMA.COLUMNS \
+             WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
+             ORDER BY ORDINAL_POSITION",
+            Self::sql_string_literal(schema),
+            Self::sql_string_literal(table)
+        );
+        let stream = client.simple_query(sql).await?;
+        let rows: Vec<Row> = stream.into_first_result().await?;
+        let mut columns = Vec::new();
+        for row in rows {
+            let name: &str = row.get(0).unwrap_or("");
+            let data_type: &str = row.get(1).unwrap_or("");
+            if !name.is_empty() && !data_type.is_empty() {
+                columns.push(MssqlColumnSchema {
+                    name: name.to_string(),
+                    data_type: data_type.to_ascii_lowercase(),
+                });
+            }
+        }
+        Ok(columns)
+    }
+
+    fn skippr_type_for_mssql_type(data_type: &str) -> SkipprDataType {
+        match data_type.to_ascii_lowercase().as_str() {
+            "bigint" => SkipprDataType::Long,
+            "int" => SkipprDataType::Integer,
+            "smallint" => SkipprDataType::Short,
+            "tinyint" => SkipprDataType::Byte,
+            "bit" => SkipprDataType::Boolean,
+            "decimal" | "numeric" | "money" | "smallmoney" => SkipprDataType::Decimal,
+            "float" => SkipprDataType::Double,
+            "real" => SkipprDataType::Float,
+            "date" => SkipprDataType::Date,
+            "datetime" | "datetime2" | "smalldatetime" | "datetimeoffset" => {
+                SkipprDataType::Timestamp
+            }
+            "time" => SkipprDataType::Time,
+            "binary" | "varbinary" | "image" => SkipprDataType::Binary,
+            "uniqueidentifier" => SkipprDataType::Uuid,
+            "xml" => SkipprDataType::String,
+            _ => SkipprDataType::String,
+        }
+    }
+
+    fn metadata_for_columns(columns: &[MssqlColumnSchema]) -> Metadata {
+        let mut root = Metadata::new_with_type(SkipprDataType::Record, "");
+        for column in columns {
+            root.set_field(
+                &column.name,
+                Metadata::new_with_type(
+                    Self::skippr_type_for_mssql_type(&column.data_type),
+                    &column.name,
+                ),
+            );
+        }
+        root
+    }
+
+    fn seed_table_metadata(namespace: &str, columns: &[MssqlColumnSchema]) {
+        if columns.is_empty() {
+            return;
+        }
+        let current = METADATA.load();
+        let mut updated = current.as_ref().clone();
+        updated
+            .metadata
+            .insert(namespace.to_string(), Self::metadata_for_columns(columns));
+        METADATA.store(Arc::new(updated));
+        let metadata = METADATA.load();
+        let flatten = Config::truth_value(
+            &Config::get_transform_config()
+                .flatten_events
+                .or(Some("no".to_string()))
+                .unwrap(),
+        );
+        if let Err(err) =
+            Ingest::prepare_arrow_schema_with_metadata(namespace, &metadata.metadata, flatten)
+        {
+            error!("Failed to prepare MSSQL schema for {}: {}", namespace, err);
+        }
+    }
+
     fn row_to_json(row: &Row) -> String {
         let mut map = serde_json::Map::new();
         for (col, data) in row.cells() {
@@ -128,10 +229,11 @@ impl DataSourceMssqlPlugin {
     }
 
     fn numeric_to_json(n: Numeric) -> serde_json::Value {
-        let value: f64 = n.into();
-        serde_json::Number::from_f64(value)
-            .map(serde_json::Value::Number)
-            .unwrap_or(serde_json::Value::Null)
+        serde_json::Value::String(n.to_string())
+    }
+
+    fn naive_datetime_to_json_value(datetime: chrono::NaiveDateTime) -> serde_json::Value {
+        serde_json::Value::String(datetime.format("%Y-%m-%dT%H:%M:%S%.f").to_string())
     }
 
     fn tds_date_to_chrono(date: tiberius::time::Date) -> chrono::NaiveDate {
@@ -191,22 +293,16 @@ impl DataSourceMssqlPlugin {
                 serde_json::Value::String(v.as_ref().to_string())
             }),
             ColumnData::DateTime(v) => v.map_or(serde_json::Value::Null, |v| {
-                serde_json::Value::String(
-                    Self::tds_legacy_datetime_to_chrono(
-                        i64::from(v.days()),
-                        i64::from(v.seconds_fragments()),
-                    )
-                    .to_string(),
-                )
+                Self::naive_datetime_to_json_value(Self::tds_legacy_datetime_to_chrono(
+                    i64::from(v.days()),
+                    i64::from(v.seconds_fragments()),
+                ))
             }),
             ColumnData::SmallDateTime(v) => v.map_or(serde_json::Value::Null, |v| {
-                serde_json::Value::String(
-                    Self::tds_smalldatetime_to_chrono(
-                        i64::from(v.days()),
-                        i64::from(v.seconds_fragments()),
-                    )
-                    .to_string(),
-                )
+                Self::naive_datetime_to_json_value(Self::tds_smalldatetime_to_chrono(
+                    i64::from(v.days()),
+                    i64::from(v.seconds_fragments()),
+                ))
             }),
             ColumnData::Time(v) => v.map_or(serde_json::Value::Null, |v| {
                 serde_json::Value::String(Self::tds_time_to_chrono(v).to_string())
@@ -215,7 +311,7 @@ impl DataSourceMssqlPlugin {
                 serde_json::Value::String(Self::tds_date_to_chrono(v).to_string())
             }),
             ColumnData::DateTime2(v) => v.map_or(serde_json::Value::Null, |v| {
-                serde_json::Value::String(Self::tds_datetime2_to_chrono(v).to_string())
+                Self::naive_datetime_to_json_value(Self::tds_datetime2_to_chrono(v))
             }),
             ColumnData::DateTimeOffset(v) => v.map_or(serde_json::Value::Null, |v| {
                 let offset = chrono::FixedOffset::east_opt(i32::from(v.offset()) * 60).unwrap();
@@ -285,6 +381,10 @@ impl DataSourceMssqlPlugin {
             info!("Ingesting table: {} -> namespace: {}", table_fq, namespace);
 
             let query_sql = format!("SELECT * FROM [{}].[{}]", schema, table);
+            match Self::table_columns(&mut client, schema, table).await {
+                Ok(columns) => Self::seed_table_metadata(table, &columns),
+                Err(e) => error!("Failed to read schema for {}: {}", table_fq, e),
+            }
 
             let stream = match client.simple_query(&query_sql).await {
                 Ok(s) => s,
@@ -375,7 +475,7 @@ mod tests {
     fn numeric_to_json_preserves_decimal_value() {
         let value = DataSourceMssqlPlugin::numeric_to_json(Numeric::new_with_scale(12050, 2));
 
-        assert_eq!(value, serde_json::json!(120.50));
+        assert_eq!(value, serde_json::json!("120.50"));
     }
 
     #[test]
@@ -390,7 +490,7 @@ mod tests {
         let value =
             DataSourceMssqlPlugin::column_value_to_json(&ColumnData::DateTime2(Some(datetime)));
 
-        assert_eq!(value, serde_json::json!("2025-01-03 09:15:00"));
+        assert_eq!(value, serde_json::json!("2025-01-03T09:15:00"));
     }
 
     #[test]
@@ -399,7 +499,42 @@ mod tests {
             Numeric::new_with_scale(12050, 2),
         )));
 
-        assert_eq!(value, serde_json::json!(120.50));
+        assert_eq!(value, serde_json::json!("120.50"));
+    }
+
+    #[test]
+    fn maps_mssql_numeric_columns_to_decimal_metadata() {
+        assert_eq!(
+            DataSourceMssqlPlugin::skippr_type_for_mssql_type("decimal"),
+            SkipprDataType::Decimal
+        );
+        assert_eq!(
+            DataSourceMssqlPlugin::skippr_type_for_mssql_type("numeric"),
+            SkipprDataType::Decimal
+        );
+    }
+
+    #[test]
+    fn builds_table_metadata_from_mssql_column_schema() {
+        let metadata = DataSourceMssqlPlugin::metadata_for_columns(&[
+            MssqlColumnSchema {
+                name: "order_id".to_string(),
+                data_type: "nvarchar".to_string(),
+            },
+            MssqlColumnSchema {
+                name: "total_amount".to_string(),
+                data_type: "decimal".to_string(),
+            },
+            MssqlColumnSchema {
+                name: "placed_at".to_string(),
+                data_type: "datetime2".to_string(),
+            },
+        ]);
+
+        let details = metadata.field_details();
+        assert!(details.contains(&("order_id".to_string(), "string".to_string(), true)));
+        assert!(details.contains(&("total_amount".to_string(), "decimal".to_string(), true)));
+        assert!(details.contains(&("placed_at".to_string(), "timestamp".to_string(), true)));
     }
 
     #[cfg(feature = "mssql_integration")]
@@ -433,8 +568,8 @@ mod tests {
             serde_json::from_str(&DataSourceMssqlPlugin::row_to_json(row)).unwrap();
 
         assert_eq!(value["order_id"], serde_json::json!("o1"));
-        assert_eq!(value["total_amount"], serde_json::json!(120.50));
-        assert_eq!(value["unit_price"], serde_json::json!(50.00));
-        assert_eq!(value["placed_at"], serde_json::json!("2025-01-03 09:15:00"));
+        assert_eq!(value["total_amount"], serde_json::json!("120.50"));
+        assert_eq!(value["unit_price"], serde_json::json!("50.00"));
+        assert_eq!(value["placed_at"], serde_json::json!("2025-01-03T09:15:00"));
     }
 }

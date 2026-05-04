@@ -15,13 +15,13 @@ use object_store::{Attribute, Attributes, ObjectStore, PutOptions, StaticCredent
 use once_cell::sync::Lazy;
 use serde_derive::Deserialize;
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use tracing::{error, info, warn};
 use url::Url;
 
 use crate::buffer::BufferChunker;
-use crate::discover::SkipprDataType;
+use crate::discover::{OutputMetadata, SkipprDataType};
 use crate::plugins::{DataSink, SchemaSink};
 
 static ENSURED_SCHEMAS: Lazy<DashMap<String, Arc<tokio::sync::OnceCell<()>>>> =
@@ -121,6 +121,7 @@ pub struct DataSinkSnowflakePlugin {
     token: tokio::sync::RwLock<Option<(String, std::time::Instant)>>,
     /// Cached v1 session token (always a session token, works for PUT)
     session_token: tokio::sync::RwLock<Option<(String, std::time::Instant)>>,
+    schema_state: tokio::sync::RwLock<BTreeMap<String, OutputMetadata>>,
 }
 
 const TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(50 * 60);
@@ -141,6 +142,7 @@ impl DataSinkSnowflakePlugin {
             client: reqwest::Client::new(),
             token: Default::default(),
             session_token: Default::default(),
+            schema_state: Default::default(),
         }
     }
 
@@ -1353,6 +1355,10 @@ impl DataSinkSnowflakePlugin {
             ArrowDataType::Float16 | ArrowDataType::Float32 | ArrowDataType::Float64 => {
                 "DOUBLE".into()
             }
+            ArrowDataType::Decimal128(precision, scale)
+            | ArrowDataType::Decimal256(precision, scale) => {
+                format!("NUMBER({},{})", precision, scale)
+            }
             ArrowDataType::Date32 | ArrowDataType::Date64 => "DATE".into(),
             ArrowDataType::Timestamp(_, _) => "TIMESTAMP_NTZ".into(),
             ArrowDataType::Utf8 | ArrowDataType::LargeUtf8 => "VARCHAR".into(),
@@ -1626,6 +1632,67 @@ impl DataSinkSnowflakePlugin {
             .collect()
     }
 
+    async fn col_defs_for_namespace(
+        &self,
+        namespace: &str,
+        arrow_schema: &datafusion::arrow::datatypes::Schema,
+    ) -> Vec<(String, String)> {
+        let installed = self.schema_state.read().await.get(namespace).cloned();
+        if let Some(metadata) = installed {
+            let fields: HashMap<String, OutputMetadata> = metadata
+                .child_fields()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect();
+            match crate::converters::skippr_arrow::convert_skippr_to_arrow(Box::new(fields)) {
+                Ok(installed_schema) => {
+                    return Self::col_defs_for_arrow_schema(&installed_schema);
+                }
+                Err(err) => {
+                    warn!(
+                        "Falling back to stream schema for Snowflake DDL: namespace={} err={}",
+                        namespace, err
+                    );
+                }
+            }
+        }
+
+        Self::col_defs_for_arrow_schema(arrow_schema)
+    }
+
+    fn parquet_file_format_clause() -> &'static str {
+        "FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE)"
+    }
+
+    fn copy_into_stage_sql(
+        fq_table: &str,
+        stage: &str,
+        table_name: &str,
+        parquet_filename: &str,
+    ) -> String {
+        format!(
+            "COPY INTO {} FROM {}/{}/{} {} MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE",
+            fq_table,
+            stage,
+            table_name,
+            parquet_filename,
+            Self::parquet_file_format_clause(),
+        )
+    }
+
+    fn copy_into_external_staging_sql(
+        fq_table: &str,
+        object_uri: &str,
+        copy_auth_clause: &str,
+    ) -> String {
+        format!(
+            "COPY INTO {} FROM {} {} {} MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE",
+            fq_table,
+            Self::sql_string_literal(object_uri),
+            copy_auth_clause,
+            Self::parquet_file_format_clause(),
+        )
+    }
+
     async fn ensure_table(
         &self,
         fq_table: &str,
@@ -1739,7 +1806,7 @@ impl DataSinkSnowflakePlugin {
         let namespace = BufferChunker::decode_file_namespace(&filename);
         let table_name = Self::namespace_to_table_name(&namespace);
         let arrow_schema = stream.schema();
-        let col_defs = Self::col_defs_for_arrow_schema(&arrow_schema);
+        let col_defs = self.col_defs_for_namespace(&namespace, &arrow_schema).await;
         let fq_table = format!(
             "\"{}\".\"{}\".\"{}\"",
             self.config.database,
@@ -1799,10 +1866,7 @@ impl DataSinkSnowflakePlugin {
                 std::io::Error::other(format!("Stage upload: {}", e))
             })?;
 
-        let copy_sql = format!(
-            "COPY INTO {} FROM {}/{}/{} FILE_FORMAT = (TYPE = PARQUET) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE",
-            fq_table, stage, table_name, parquet_filename
-        );
+        let copy_sql = Self::copy_into_stage_sql(&fq_table, stage, &table_name, &parquet_filename);
 
         info!("Snowflake COPY INTO {} ({} rows)", fq_table, row_count);
 
@@ -1847,7 +1911,7 @@ impl DataSinkSnowflakePlugin {
         let namespace = BufferChunker::decode_file_namespace(&filename);
         let table_name = Self::namespace_to_table_name(&namespace);
         let arrow_schema = stream.schema();
-        let col_defs = Self::col_defs_for_arrow_schema(&arrow_schema);
+        let col_defs = self.col_defs_for_namespace(&namespace, &arrow_schema).await;
         let fq_table = format!(
             "\"{}\".\"{}\".\"{}\"",
             self.config.database,
@@ -1948,12 +2012,8 @@ impl DataSinkSnowflakePlugin {
             crate::helpers::Helpers::human_readable_size(byte_count)
         );
 
-        let copy_sql = format!(
-            "COPY INTO {} FROM {} {} FILE_FORMAT = (TYPE = PARQUET) MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE",
-            fq_table,
-            Self::sql_string_literal(&object_uri),
-            copy_auth_clause
-        );
+        let copy_sql =
+            Self::copy_into_external_staging_sql(&fq_table, &object_uri, &copy_auth_clause);
 
         info!(
             "Snowflake COPY INTO {} from {} staging ({} rows)",
@@ -2017,7 +2077,7 @@ impl DataSinkSnowflakePlugin {
         let table_name = Self::namespace_to_table_name(&namespace);
         let arrow_schema = stream.schema();
 
-        let col_defs = Self::col_defs_for_arrow_schema(&arrow_schema);
+        let col_defs = self.col_defs_for_namespace(&namespace, &arrow_schema).await;
 
         let fq_table = format!(
             "\"{}\".\"{}\".\"{}\"",
@@ -2161,7 +2221,7 @@ impl DataSinkSnowflakePlugin {
         let table_name = Self::namespace_to_table_name(&namespace);
         let arrow_schema = stream.schema();
 
-        let col_defs = Self::col_defs_for_arrow_schema(&arrow_schema);
+        let col_defs = self.col_defs_for_namespace(&namespace, &arrow_schema).await;
 
         let fq_table = format!(
             "\"{}\".\"{}\".\"{}\"",
@@ -2363,6 +2423,15 @@ impl DataSink for DataSinkSnowflakePlugin {
     fn capability(&self) -> Option<&'static crate::plugins::cdc::SinkCapability> {
         Some(&crate::plugins::cdc::sink_capabilities::SNOWFLAKE)
     }
+
+    async fn install_schema_state(
+        &self,
+        _schema_version: u64,
+        namespaces: &BTreeMap<String, OutputMetadata>,
+    ) -> Result<(), std::io::Error> {
+        *self.schema_state.write().await = namespaces.clone();
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -2457,6 +2526,42 @@ mod tests {
         attrs
             .get(&DataSinkSnowflakePlugin::metadata_attribute(key))
             .map(|value| value.as_ref().to_string())
+    }
+
+    #[test]
+    fn maps_arrow_decimal_types_to_snowflake_number() {
+        assert_eq!(
+            DataSinkSnowflakePlugin::arrow_type_to_snowflake_ddl(&ArrowDataType::Decimal128(10, 2)),
+            "NUMBER(10,2)"
+        );
+        assert_eq!(
+            DataSinkSnowflakePlugin::arrow_type_to_snowflake_ddl(&ArrowDataType::Decimal128(38, 9)),
+            "NUMBER(38,9)"
+        );
+        assert_eq!(
+            DataSinkSnowflakePlugin::arrow_type_to_snowflake_ddl(&ArrowDataType::Decimal256(38, 9)),
+            "NUMBER(38,9)"
+        );
+    }
+
+    #[test]
+    fn copy_into_sql_enables_parquet_logical_types() {
+        let stage_sql = DataSinkSnowflakePlugin::copy_into_stage_sql(
+            "\"DB\".\"PUBLIC\".\"ORDERS\"",
+            "@~",
+            "orders",
+            "batch.parquet",
+        );
+        assert!(stage_sql.contains("FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE)"));
+        assert!(stage_sql.contains("MATCH_BY_COLUMN_NAME = CASE_INSENSITIVE"));
+
+        let external_sql = DataSinkSnowflakePlugin::copy_into_external_staging_sql(
+            "\"DB\".\"PUBLIC\".\"ORDERS\"",
+            "s3://bucket/orders/batch.parquet",
+            "CREDENTIALS = (AWS_KEY_ID = 'key' AWS_SECRET_KEY = 'secret')",
+        );
+        assert!(external_sql.contains("FILE_FORMAT = (TYPE = PARQUET USE_LOGICAL_TYPE = TRUE)"));
+        assert!(external_sql.contains("'s3://bucket/orders/batch.parquet'"));
     }
 
     #[test]

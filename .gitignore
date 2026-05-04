@@ -37,6 +37,7 @@ _bak
 data
 docs/site
 logs
+.skippr/local-runtime-plugins/
 __pycache__/
 *.pyc
 crates/skipprd-react-suite-data-engineer/.cursor-local-mssql-snowflake-fresh-20260502-1339.yaml

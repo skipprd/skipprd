@@ -422,6 +422,15 @@ pub fn match_scalar_value_optimized(
                         )),
                     });
                 }
+                if chrono::DateTime::parse_from_rfc3339(s).is_ok()
+                    || chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%dT%H:%M:%S%.f").is_ok()
+                    || chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S%.f").is_ok()
+                {
+                    return Ok(ResolvedFieldValue {
+                        field: output_field_name,
+                        value: Value::String(s.replace(' ', "T")),
+                    });
+                }
             } else if let Some(b) = value.as_bool() {
                 // Convert boolean to timestamp (true -> 1, false -> 0)
                 return Ok(ResolvedFieldValue {
@@ -473,6 +482,34 @@ pub fn match_scalar_value_optimized(
             Err(Box::new(std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
                 format!("Value {} is not a double", value),
+            )))
+        }
+        SkipprDataType::Decimal => {
+            if let Some(s) = value.as_str() {
+                if s.parse::<f64>().is_ok() {
+                    return Ok(ResolvedFieldValue {
+                        field: output_field_name,
+                        value: Value::String(s.to_string()),
+                    });
+                }
+            } else if value.as_f64().is_some() || value.as_i64().is_some() {
+                return Ok(ResolvedFieldValue {
+                    field: output_field_name,
+                    value: Value::String(value.to_string()),
+                });
+            }
+
+            if apply_evolution {
+                let mut _meta_ev = metadata.clone();
+                match Evolution::apply_evolution_factory(field, value, &mut _meta_ev, flatten) {
+                    Ok(v) => return Ok(v),
+                    Err(_) => {}
+                }
+            }
+
+            Err(Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Value {} is not a decimal", value),
             )))
         }
         SkipprDataType::Boolean => {
@@ -1356,6 +1393,58 @@ mod tests_match_scalar_value_fast {
             ))
             .value,
             f64_to_val(123.4)
+        );
+    }
+
+    #[test]
+    fn test_match_scalar_value_fast_decimal() {
+        let mut metadata = HashMap::new();
+        metadata.insert("field".to_string(), Metadata::new().unwrap());
+        let flatten = false;
+
+        assert_eq!(
+            get_or_panic(match_scalar_value_fast(
+                "field",
+                "decimal",
+                &str_to_val("120.50"),
+                &metadata,
+                true,
+                flatten
+            ))
+            .value,
+            str_to_val("120.50")
+        );
+        assert_eq!(
+            get_or_panic(match_scalar_value_fast(
+                "field",
+                "decimal",
+                &f64_to_val(50.0),
+                &metadata,
+                true,
+                flatten
+            ))
+            .value,
+            str_to_val("50.0")
+        );
+    }
+
+    #[test]
+    fn test_match_scalar_value_fast_timestamp_string() {
+        let mut metadata = HashMap::new();
+        metadata.insert("field".to_string(), Metadata::new().unwrap());
+        let flatten = false;
+
+        assert_eq!(
+            get_or_panic(match_scalar_value_fast(
+                "field",
+                "timestamp",
+                &str_to_val("2025-01-03T09:15:00"),
+                &metadata,
+                true,
+                flatten
+            ))
+            .value,
+            str_to_val("2025-01-03T09:15:00")
         );
     }
 

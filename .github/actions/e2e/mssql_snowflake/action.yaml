@@ -179,6 +179,14 @@ runs:
           )
           Set-Content -Path $configPath -Value ($configLines -join "`n") -Encoding utf8
 
+          Write-Host "Building config-referenced local runtime plugins"
+          $manifestDir = python .\.github\scripts\local_runtime_plugins.py --config $configPath --pipeline $projectName
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "::error::local runtime plugin helper failed with exit code $LASTEXITCODE"
+          }
+          $env:USE_LOCAL_PLUGIN_CODE = "1"
+          $env:SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR = $manifestDir.Trim()
+
           Push-Location $workdir
           $pushedLocation = $true
 
@@ -198,6 +206,84 @@ runs:
           if ($LASTEXITCODE -ne 0) {
             Write-Error "::error::skippr sync failed with exit code $LASTEXITCODE"
           }
+
+          Write-Host "Verifying Snowflake raw timestamp and decimal types"
+          $checkScript = Join-Path $workdir "assert_snowflake_raw_types.py"
+          Set-Content -Path $checkScript -Encoding utf8 -Value @'
+import os
+from decimal import Decimal
+import snowflake.connector
+from cryptography.hazmat.primitives import serialization
+
+with open(os.environ["SNOWFLAKE_PRIVATE_KEY_PATH"], "rb") as handle:
+    private_key = serialization.load_pem_private_key(handle.read(), password=None)
+private_key_der = private_key.private_bytes(
+    encoding=serialization.Encoding.DER,
+    format=serialization.PrivateFormat.PKCS8,
+    encryption_algorithm=serialization.NoEncryption(),
+)
+
+ctx = snowflake.connector.connect(
+    account=os.environ["SNOWFLAKE_ACCOUNT"],
+    user=os.environ["SNOWFLAKE_USER"],
+    private_key=private_key_der,
+    warehouse=os.environ["SNOWFLAKE_WAREHOUSE"],
+    database=os.environ["SNOWFLAKE_DATABASE"],
+    schema=os.environ["SNOWFLAKE_TARGET_SCHEMA"],
+    role=os.environ.get("SNOWFLAKE_ROLE") or None,
+)
+try:
+    cur = ctx.cursor()
+    cur.execute(
+        """
+        SELECT DATA_TYPE, NUMERIC_PRECISION, NUMERIC_SCALE
+        FROM INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_CATALOG = %s
+          AND TABLE_SCHEMA = %s
+          AND TABLE_NAME = 'ORDER_ITEMS'
+          AND COLUMN_NAME = 'UNIT_PRICE'
+        """,
+        (os.environ["SNOWFLAKE_DATABASE"].upper(), os.environ["SNOWFLAKE_TARGET_SCHEMA"].upper()),
+    )
+    column = cur.fetchone()
+    if column is None:
+        raise SystemExit("UNIT_PRICE column was not found in ORDER_ITEMS")
+    data_type, precision, scale = column
+    if data_type != "NUMBER" or int(scale) <= 0:
+        raise SystemExit(f"expected UNIT_PRICE numeric with a decimal scale, got {column!r}")
+
+    cur.execute(
+        'SELECT TO_CHAR(PLACED_AT, \'YYYY-MM-DD HH24:MI:SS\'), TOTAL_AMOUNT FROM "'
+        + os.environ["SNOWFLAKE_DATABASE"].upper()
+        + '"."'
+        + os.environ["SNOWFLAKE_TARGET_SCHEMA"].upper()
+        + '"."ORDERS" WHERE ORDER_ID = %s',
+        ("o1",),
+    )
+    order = cur.fetchone()
+    if order != ("2025-01-03 09:15:00", Decimal("120.50")):
+        raise SystemExit(f"unexpected ORDERS o1 values: {order!r}")
+
+    cur.execute(
+        'SELECT UNIT_PRICE FROM "'
+        + os.environ["SNOWFLAKE_DATABASE"].upper()
+        + '"."'
+        + os.environ["SNOWFLAKE_TARGET_SCHEMA"].upper()
+        + '"."ORDER_ITEMS" WHERE ORDER_ITEM_ID = %s',
+        ("oi1",),
+    )
+    item = cur.fetchone()
+    if item != (Decimal("50.00"),):
+        raise SystemExit(f"unexpected ORDER_ITEMS oi1 UNIT_PRICE: {item!r}")
+finally:
+    ctx.close()
+'@
+          $env:SNOWFLAKE_TARGET_SCHEMA = $targetSchema
+          python $checkScript
+          if ($LASTEXITCODE -ne 0) {
+            Write-Error "::error::Snowflake raw type assertion failed with exit code $LASTEXITCODE"
+          }
+
           & $skipprBin --config $configPath model --log info 2>&1 | Tee-Object -FilePath $logPath
           $status = $LASTEXITCODE
           if ($status -ne 0) {

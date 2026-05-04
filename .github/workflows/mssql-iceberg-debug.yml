@@ -176,9 +176,9 @@ jobs:
           CARGO_TARGET_DIR: target
         run: |
           set -euo pipefail
-          manifest_dir="$(python3 .github/scripts/runtime_e2e_harness.py stage-local-runtime-release \
-            --skipprd target/debug/skipprd \
-            --scenario mssql_iceberg_debug_linux)"
+          manifest_dir="$(python3 .github/scripts/local_runtime_plugins.py \
+            --config .github/actions/e2e/mssql_iceberg_debug_linux/skipprd.yml \
+            --pipeline mssql_iceberg_debug_linux)"
           echo "manifest_dir=${manifest_dir}" >> "$GITHUB_OUTPUT"
 
       - name: Run MSSQL to Iceberg debug scenario
@@ -186,14 +186,15 @@ jobs:
         env:
           RUST_BACKTRACE: "1"
           SKIPPR_RUNTIME_LOG_LEVEL: debug
+          USE_LOCAL_PLUGIN_CODE: "1"
+          SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR: ${{ steps.local_runtime.outputs.manifest_dir }}
         run: |
           set -euo pipefail
           python3 .github/scripts/runtime_e2e_harness.py run mssql_iceberg_debug_linux \
             --mode full \
             --skipprd target/debug/skipprd \
             --prepare-aws-state \
-            --skip-dynamodb-purge \
-            --local-runtime-manifest-dir "${{ steps.local_runtime.outputs.manifest_dir }}"
+            --skip-dynamodb-purge
 
   windows:
     name: MSSQL to Iceberg debug (windows)
@@ -322,9 +323,9 @@ jobs:
           AWS_REGION: us-east-1
         run: |
           $ErrorActionPreference = "Stop"
-          $manifestDir = python .github/scripts/runtime_e2e_harness.py stage-local-runtime-release `
-            --skipprd target/debug/skipprd.exe `
-            --scenario mssql_iceberg_debug_windows
+          $manifestDir = python .github/scripts/local_runtime_plugins.py `
+            --config .github/actions/e2e/mssql_iceberg_debug_windows/skipprd.yml `
+            --pipeline mssql_iceberg_debug_windows
           "manifest_dir=$manifestDir" >> $env:GITHUB_OUTPUT
 
       - name: Run MSSQL to Iceberg debug scenario
@@ -332,11 +333,12 @@ jobs:
         env:
           RUST_BACKTRACE: "1"
           SKIPPR_RUNTIME_LOG_LEVEL: debug
+          USE_LOCAL_PLUGIN_CODE: "1"
+          SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR: ${{ steps.local_runtime.outputs.manifest_dir }}
         run: |
           $ErrorActionPreference = "Stop"
           python .github/scripts/runtime_e2e_harness.py run mssql_iceberg_debug_windows `
             --mode full `
             --skipprd target/debug/skipprd.exe `
             --prepare-aws-state `
-            --skip-dynamodb-purge `
-            --local-runtime-manifest-dir "${{ steps.local_runtime.outputs.manifest_dir }}"
+            --skip-dynamodb-purge

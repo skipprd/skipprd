@@ -12026,7 +12026,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-snowflake"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "aes",
  "arrow 56.2.0",
@@ -12341,7 +12341,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-mssql"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "chrono",

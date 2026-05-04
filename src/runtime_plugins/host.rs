@@ -534,6 +534,13 @@ fn query_value_from_runtime_filename(filename: &str, key: &str) -> Option<String
 }
 
 fn apply_derived_runtime_schema(namespace: String, schema: &SchemaRef) {
+    if current_runtime_schema_state()
+        .namespaces
+        .contains_key(&namespace)
+    {
+        return;
+    }
+
     let version = bump_pipeline_schema_version();
     apply_runtime_source_schema_state(RuntimeSchemaState {
         version,
@@ -567,10 +574,15 @@ async fn ingest_runtime_batches_into_core(
             .first()
             .map(|batch| batch.schema())
             .unwrap_or_else(|| Arc::new(arrow::datatypes::Schema::empty()));
-        derived_namespaces.insert(
-            batch.namespace.clone(),
-            output_metadata_for_arrow_schema(&schema),
-        );
+        if !current_runtime_schema_state()
+            .namespaces
+            .contains_key(&batch.namespace)
+        {
+            derived_namespaces.insert(
+                batch.namespace.clone(),
+                output_metadata_for_arrow_schema(&schema),
+            );
+        }
         let offsets_map = batch
             .offsets
             .into_iter()

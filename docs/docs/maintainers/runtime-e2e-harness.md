@@ -64,32 +64,30 @@ python3 .github/scripts/runtime_e2e_harness.py runtime-plugins \
 
 For day-to-day development, start with `bike_hire --mode smoke`. Use the chaos scenarios only when you are working on exactly-once, WAL recovery, or deadletter behavior.
 
-## Local staged manifests
+## Local plugin code
 
 The fastest realistic maintainer loop is:
 
 1. build `skipprd`
-2. run `stage-local-runtime-release`
-3. copy `skipprd` into a clean directory
-4. run a smoke scenario with `--local-runtime-manifest-dir`
+2. run the config-aware local runtime plugin helper
+3. set `USE_LOCAL_PLUGIN_CODE=1`
+4. run the e2e scenario
 
 Example:
 
 ```bash
-python3 .github/scripts/runtime_e2e_harness.py stage-local-runtime-release \
-  --skipprd target/debug/skipprd
+manifest_dir="$(python3 .github/scripts/local_runtime_plugins.py \
+  --config .github/actions/e2e/postgres_iceberg_types_cdc/skipprd.yml \
+  --pipeline postgres_iceberg_types_cdc)"
 
-tmpdir="$(mktemp -d)"
-mkdir -p "$tmpdir/debug"
-cp target/debug/skipprd "$tmpdir/debug/skipprd"
-
-python3 .github/scripts/runtime_e2e_harness.py run bike_hire \
+USE_LOCAL_PLUGIN_CODE=1 \
+SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="$manifest_dir" \
+python3 .github/scripts/runtime_e2e_harness.py run postgres_iceberg_types_cdc \
   --mode smoke \
-  --skipprd "$tmpdir/debug/skipprd" \
-  --local-runtime-manifest-dir /path/to/staged-local-runtime-release
+  --skipprd target/debug/skipprd
 ```
 
-The clean host directory matters because the harness explicitly rejects a host artifact that already contains `skippr-plugin-*` binaries beside it.
+The helper builds only the runtime plugins referenced by the chosen config and pipeline. If `USE_LOCAL_PLUGIN_CODE` is unset, the harness validates the published download path as usual.
 
 ## Published version pins
 
@@ -105,7 +103,7 @@ python3 .github/scripts/runtime_e2e_harness.py run bike_hire \
 
 This is useful when debugging a published regression or validating a release candidate against one plugin at a time.
 
-Do not combine `--runtime-plugin-version` with `--local-runtime-manifest-dir`.
+Do not combine published version pins with `USE_LOCAL_PLUGIN_CODE` unless you are explicitly testing fallback behavior for a plugin that has no generated local manifest.
 
 ## CI usage
 
@@ -115,6 +113,16 @@ The main workflow uses the harness in two ways:
 - the `runtime-plugins` acceptance job, which verifies published manifest discovery and release download behavior
 
 That makes the harness the best place to reproduce CI failures locally before pushing fixes.
+
+CI jobs that need current-commit plugin behavior should:
+
+1. build `skipprd`
+2. run `.github/scripts/local_runtime_plugins.py --config <scenario skipprd.yml> --pipeline <pipeline>`
+3. export `USE_LOCAL_PLUGIN_CODE=1`
+4. export `SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR` to the helper output
+5. run the harness scenario
+
+Release-style acceptance jobs should leave `USE_LOCAL_PLUGIN_CODE` unset so they continue to verify published manifest discovery and download behavior.
 
 ## Soda bootstrapping
 

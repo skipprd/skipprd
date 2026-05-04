@@ -1197,20 +1197,22 @@ jobs:
           CARGO_TARGET_DIR: target
           RUSTFLAGS: "-C debuginfo=0"
         run: |
-          manifest_dir="$(python3 .github/scripts/runtime_e2e_harness.py stage-local-runtime-release \
-            --skipprd target/debug/skipprd \
-            --scenario postgres_iceberg_types_cdc)"
+          manifest_dir="$(python3 .github/scripts/local_runtime_plugins.py \
+            --config .github/actions/e2e/postgres_iceberg_types_cdc/skipprd.yml \
+            --pipeline postgres_iceberg_types_cdc)"
           echo "manifest_dir=${manifest_dir}" >> "$GITHUB_OUTPUT"
 
       - name: Run DB to Iceberg Glue Athena e2e
         shell: bash
+        env:
+          USE_LOCAL_PLUGIN_CODE: "1"
+          SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR: ${{ steps.local_runtime.outputs.manifest_dir }}
         run: |
           python3 .github/scripts/runtime_e2e_harness.py run postgres_iceberg_types_cdc \
             --mode full \
             --skipprd target/debug/skipprd \
             --prepare-aws-state \
-            --skip-dynamodb-purge \
-            --local-runtime-manifest-dir "${{ steps.local_runtime.outputs.manifest_dir }}"
+            --skip-dynamodb-purge
 
   mysql_iceberg_types_cdc_test:
     needs:
@@ -1317,20 +1319,22 @@ jobs:
           CARGO_TARGET_DIR: target
           RUSTFLAGS: "-C debuginfo=0"
         run: |
-          manifest_dir="$(python3 .github/scripts/runtime_e2e_harness.py stage-local-runtime-release \
-            --skipprd target/debug/skipprd \
-            --scenario mysql_iceberg_types_cdc)"
+          manifest_dir="$(python3 .github/scripts/local_runtime_plugins.py \
+            --config .github/actions/e2e/mysql_iceberg_types_cdc/skipprd.yml \
+            --pipeline mysql_iceberg_types_cdc)"
           echo "manifest_dir=${manifest_dir}" >> "$GITHUB_OUTPUT"
 
       - name: Run MySQL to Iceberg Glue Athena e2e
         shell: bash
+        env:
+          USE_LOCAL_PLUGIN_CODE: "1"
+          SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR: ${{ steps.local_runtime.outputs.manifest_dir }}
         run: |
           python3 .github/scripts/runtime_e2e_harness.py run mysql_iceberg_types_cdc \
             --mode full \
             --skipprd target/debug/skipprd \
             --prepare-aws-state \
-            --skip-dynamodb-purge \
-            --local-runtime-manifest-dir "${{ steps.local_runtime.outputs.manifest_dir }}"
+            --skip-dynamodb-purge
 
   dynamodb_iceberg_types_cdc_test:
     needs:
@@ -1389,9 +1393,9 @@ jobs:
           CARGO_TARGET_DIR: target
           RUSTFLAGS: "-C debuginfo=0"
         run: |
-          manifest_dir="$(python3 .github/scripts/runtime_e2e_harness.py stage-local-runtime-release \
-            --skipprd target/debug/skipprd \
-            --scenario dynamodb_iceberg_types_cdc)"
+          manifest_dir="$(python3 .github/scripts/local_runtime_plugins.py \
+            --config .github/actions/e2e/dynamodb_iceberg_types_cdc/skipprd.yml \
+            --pipeline dynamodb_iceberg_types_cdc)"
           echo "manifest_dir=${manifest_dir}" >> "$GITHUB_OUTPUT"
 
       - name: Seed DynamoDB type and CDC source data
@@ -1417,11 +1421,13 @@ jobs:
 
       - name: Run DynamoDB to Iceberg Glue Athena e2e
         shell: bash
+        env:
+          USE_LOCAL_PLUGIN_CODE: "1"
+          SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR: ${{ steps.local_runtime.outputs.manifest_dir }}
         run: |
           python3 .github/scripts/runtime_e2e_harness.py run dynamodb_iceberg_types_cdc \
             --mode full \
-            --skipprd target/debug/skipprd \
-            --local-runtime-manifest-dir "${{ steps.local_runtime.outputs.manifest_dir }}"
+            --skipprd target/debug/skipprd
 
   mssql_iceberg_debug_linux_test:
     needs:
@@ -1493,9 +1499,9 @@ jobs:
         env:
           CARGO_TARGET_DIR: target
         run: |
-          manifest_dir="$(python3 .github/scripts/runtime_e2e_harness.py stage-local-runtime-release \
-            --skipprd target/debug/skipprd \
-            --scenario mssql_iceberg_debug_linux)"
+          manifest_dir="$(python3 .github/scripts/local_runtime_plugins.py \
+            --config .github/actions/e2e/mssql_iceberg_debug_linux/skipprd.yml \
+            --pipeline mssql_iceberg_debug_linux)"
           echo "manifest_dir=${manifest_dir}" >> "$GITHUB_OUTPUT"
 
       - name: Run MSSQL to Iceberg debug e2e
@@ -1503,13 +1509,14 @@ jobs:
         env:
           RUST_BACKTRACE: "1"
           SKIPPR_RUNTIME_LOG_LEVEL: debug
+          USE_LOCAL_PLUGIN_CODE: "1"
+          SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR: ${{ steps.local_runtime.outputs.manifest_dir }}
         run: |
           python3 .github/scripts/runtime_e2e_harness.py run mssql_iceberg_debug_linux \
             --mode full \
             --skipprd target/debug/skipprd \
             --prepare-aws-state \
-            --skip-dynamodb-purge \
-            --local-runtime-manifest-dir "${{ steps.local_runtime.outputs.manifest_dir }}"
+            --skip-dynamodb-purge
 
   mssql_iceberg_debug_windows_test:
     needs:
@@ -1644,9 +1651,9 @@ jobs:
           AWS_DEFAULT_REGION: us-east-1
           AWS_REGION: us-east-1
         run: |
-          $manifestDir = python .github/scripts/runtime_e2e_harness.py stage-local-runtime-release `
-            --skipprd target/debug/skipprd.exe `
-            --scenario mssql_iceberg_debug_windows
+          $manifestDir = python .github/scripts/local_runtime_plugins.py `
+            --config .github/actions/e2e/mssql_iceberg_debug_windows/skipprd.yml `
+            --pipeline mssql_iceberg_debug_windows
           "manifest_dir=$manifestDir" >> $env:GITHUB_OUTPUT
 
       - name: Run MSSQL to Iceberg debug e2e
@@ -1654,13 +1661,14 @@ jobs:
         env:
           RUST_BACKTRACE: "1"
           SKIPPR_RUNTIME_LOG_LEVEL: debug
+          USE_LOCAL_PLUGIN_CODE: "1"
+          SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR: ${{ steps.local_runtime.outputs.manifest_dir }}
         run: |
           python .github/scripts/runtime_e2e_harness.py run mssql_iceberg_debug_windows `
             --mode full `
             --skipprd target/debug/skipprd.exe `
             --prepare-aws-state `
-            --skip-dynamodb-purge `
-            --local-runtime-manifest-dir "${{ steps.local_runtime.outputs.manifest_dir }}"
+            --skip-dynamodb-purge
 
   mssql_snowflake_test:
     needs:

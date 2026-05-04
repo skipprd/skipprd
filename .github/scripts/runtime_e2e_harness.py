@@ -2506,7 +2506,12 @@ def run_scenario(
         for sync_run in sync_runs:
             run_sync(skipprd, sync_run, base_env)
 
-        if local_runtime_manifests is None:
+        if base_env.get("USE_LOCAL_PLUGIN_CODE", "").lower() in {"1", "true", "yes", "on"}:
+            print_step(
+                "Scenario used USE_LOCAL_PLUGIN_CODE local manifests from "
+                f"{base_env.get('SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR', '.skippr/local-runtime-plugins/manifests')}"
+            )
+        elif local_runtime_manifests is None:
             assert_runtime_plugins_downloaded(runtime_plugin_dir_path)
         else:
             print_step(
