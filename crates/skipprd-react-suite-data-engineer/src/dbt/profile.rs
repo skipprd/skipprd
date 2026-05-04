@@ -221,6 +221,22 @@ pub fn generate_profiles_yml(
             } else {
                 "{{ env_var('SNOWFLAKE_DATABASE') }}".to_string()
             };
+            let account = wh
+                .extras
+                .get("account")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string())
+                .or_else(|| std::env::var("SNOWFLAKE_ACCOUNT").ok())
+                .unwrap_or_else(|| "{{ env_var('SNOWFLAKE_ACCOUNT') }}".to_string());
+            let user = wh
+                .extras
+                .get("user")
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.trim().is_empty())
+                .map(|s| s.trim().to_string())
+                .or_else(|| std::env::var("SNOWFLAKE_USER").ok())
+                .unwrap_or_else(|| "{{ env_var('SNOWFLAKE_USER') }}".to_string());
             let warehouse = wh
                 .extras
                 .get("warehouse")
@@ -231,10 +247,25 @@ pub fn generate_profiles_yml(
                 .get("role")
                 .and_then(|v| v.as_str())
                 .unwrap_or("{{ env_var('SNOWFLAKE_ROLE') }}");
-            let use_keypair = std::env::var("SNOWFLAKE_PRIVATE_KEY_PATH")
-                .ok()
+            let private_key_path = wh
+                .extras
+                .get("private_key_path")
+                .and_then(|v| v.as_str())
                 .filter(|v| !v.trim().is_empty())
-                .is_some();
+                .map(resolve_to_absolute_path)
+                .or_else(|| {
+                    std::env::var("SNOWFLAKE_PRIVATE_KEY_PATH")
+                        .ok()
+                        .filter(|v| !v.trim().is_empty())
+                        .map(|v| resolve_to_absolute_path(&v))
+                });
+            let password = wh
+                .extras
+                .get("password")
+                .and_then(|v| v.as_str())
+                .filter(|v| !v.trim().is_empty())
+                .map(|s| s.to_string())
+                .or_else(|| std::env::var("SNOWFLAKE_PASSWORD").ok());
 
             let mut out = String::new();
             out.push_str(&format!("{}:\n", yaml_escape_key(profile_name.as_str())));
@@ -242,15 +273,21 @@ pub fn generate_profiles_yml(
             out.push_str("  outputs:\n");
             out.push_str(&format!("    {}:\n", yaml_escape_key(&target)));
             out.push_str("      type: snowflake\n");
-            out.push_str("      account: \"{{ env_var('SNOWFLAKE_ACCOUNT') }}\"\n");
-            out.push_str("      user: \"{{ env_var('SNOWFLAKE_USER') }}\"\n");
-            if use_keypair {
-                let raw = std::env::var("SNOWFLAKE_PRIVATE_KEY_PATH").unwrap_or_default();
-                let abs = resolve_to_absolute_path(&raw);
-                std::env::set_var("SNOWFLAKE_PRIVATE_KEY_PATH", &abs);
-                out.push_str(
-                    "      private_key_path: \"{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH') }}\"\n",
-                );
+            out.push_str(&format!(
+                "      account: {}\n",
+                yaml_escape_scalar(&account)
+            ));
+            out.push_str(&format!("      user: {}\n", yaml_escape_scalar(&user)));
+            if let Some(path) = private_key_path {
+                out.push_str(&format!(
+                    "      private_key_path: {}\n",
+                    yaml_escape_scalar(path)
+                ));
+            } else if let Some(password) = password {
+                out.push_str(&format!(
+                    "      password: {}\n",
+                    yaml_escape_scalar(password)
+                ));
             } else {
                 out.push_str("      password: \"{{ env_var('SNOWFLAKE_PASSWORD') }}\"\n");
             }
@@ -683,5 +720,50 @@ mod tests {
             "resolved path should not contain backslashes: {result}"
         );
         assert!(result.contains('/'));
+    }
+
+    #[test]
+    fn snowflake_profile_uses_resolved_config_values_before_env_vars() {
+        let cfg = ReactResolvedConfig {
+            server: react_core::resolved_config::ServerResolved { port: 1 },
+            storage: react_core::resolved_config::StorageResolved {
+                mode: react_core::resolved_config::StorageMode::Local,
+                bucket: None,
+                path: Some("/tmp/react".to_string()),
+                s3_credentials: None,
+            },
+            scope: react_core::scope::RequestScope::parse("t", "w", "proj").unwrap(),
+            llm: react_core::resolved_config::LlmResolved::default(),
+            suite_config: serde_json::json!({
+                "warehouse": {
+                    "kind": "snowflake",
+                    "container": "ANALYTICS",
+                    "namespace": "RAW",
+                    "extras": {
+                        "account": "ACCT",
+                        "user": "USER1",
+                        "warehouse": "COMPUTE_WH",
+                        "role": "ACCOUNTADMIN",
+                        "private_key_path": "/tmp/snowflake_key.p8"
+                    }
+                },
+                "dbt": {
+                    "enabled": true,
+                    "target": "dev",
+                    "naming": { "target_schema": "proj", "silver_suffix": "silver", "gold_suffix": "gold" }
+                },
+                "catalog": { "enabled": false },
+                "vector": { "enabled": false }
+            }),
+        };
+
+        let profile = generate_profiles_yml(&cfg, None).expect("profile");
+
+        assert!(profile.profiles_yml.contains("account: \"ACCT\""));
+        assert!(profile.profiles_yml.contains("user: \"USER1\""));
+        assert!(profile
+            .profiles_yml
+            .contains("private_key_path: \"/tmp/snowflake_key.p8\""));
+        assert!(!profile.profiles_yml.contains("SNOWFLAKE_ACCOUNT"));
     }
 }
