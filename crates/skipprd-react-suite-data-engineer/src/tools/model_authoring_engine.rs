@@ -70,10 +70,11 @@ where
     let intent =
         authoring_ir::compile_sql_first_draft(&draft.sql, &draft.notes, plan_output_fields)?;
 
-    let dbt_sql = crate::authoring_contract::add_sql_spec_digest(
-        &sql_first::apply_placeholders(&intent.sql, materialize_replacements),
-        spec_digest,
-    );
+    let materialized_sql = sql_first::strip_trailing_semicolon(&sql_first::apply_placeholders(
+        &intent.sql,
+        materialize_replacements,
+    ));
+    let dbt_sql = crate::authoring_contract::add_sql_spec_digest(&materialized_sql, spec_digest);
 
     validate_dbt_sql(&dbt_sql)?;
 

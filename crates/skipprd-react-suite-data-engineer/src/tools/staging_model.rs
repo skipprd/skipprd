@@ -486,6 +486,7 @@ impl Tool for StagingModelTool {
         // Optional fast-path: direct write mode. If SQL is provided, we write exactly one dataset's model
         // without calling the LLM (avoids extra OpenAI calls and reduces timeout risk).
         if let Some(sql_out) = resolve_direct_sql(&args) {
+            let sql_out = sql_first::strip_trailing_semicolon(&sql_out);
             if dataset_ids.len() != 1 {
                 return Err("staging_model direct-write requires exactly one dataset (use a single-item args.dataset_ids).".to_string());
             }
