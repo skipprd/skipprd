@@ -214,7 +214,7 @@ schema_sinks:
         with self.assertRaises(runtime_e2e_harness.HarnessError):
             runtime_e2e_harness.parse_runtime_plugin_versions(["Athena"])
 
-    def test_local_runtime_config_text_injects_explicit_manifests(self) -> None:
+    def test_local_runtime_config_text_rejects_explicit_manifests(self) -> None:
         config_text = """pipelines:
   bike_hire:
     data_source: data_sources.s3_bike_hire
@@ -234,18 +234,12 @@ schema_sinks:
             },
         )
 
-        rewritten = runtime_e2e_harness.local_runtime_config_text(
-            "bike_hire",
-            config_text,
-            local_manifests,
-        )
-
-        self.assertIn("runtime_input: runtime_plugins.runtime_s3_source", rewritten)
-        self.assertIn("runtime_output: runtime_plugins.runtime_athena_sink", rewritten)
-        self.assertIn("runtime_schema: runtime_plugins.runtime_glue_schema", rewritten)
-        self.assertIn('manifest: "/tmp/local-runtime/s3-source.json"', rewritten)
-        self.assertIn('manifest: "/tmp/local-runtime/athena-sink.json"', rewritten)
-        self.assertIn('manifest: "/tmp/local-runtime/glue-schema.json"', rewritten)
+        with self.assertRaises(runtime_e2e_harness.HarnessError):
+            runtime_e2e_harness.local_runtime_config_text(
+                "bike_hire",
+                config_text,
+                local_manifests,
+            )
 
     def test_load_local_runtime_manifests_requires_expected_files(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

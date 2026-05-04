@@ -1676,7 +1676,6 @@ pipelines:
 data_sources: {{}}
 data_sinks: {{}}
 schema_sinks: {{}}
-runtime_plugins: {{}}
 
 react:
   providers:
@@ -3798,7 +3797,13 @@ skippr:
   workspace: cursor_semantic_validation
 pipelines:
   cursor_semantic_validation:
+    data_source: data_sources.mssql
     data_sink: data_sinks.snowflake
+data_sources:
+  mssql:
+    Mssql:
+      connection_string: server=tcp:127.0.0.1,1433;database=testdb
+      tables: [dbo.customers]
 data_sinks:
   snowflake:
     Snowflake:
@@ -3809,12 +3814,6 @@ data_sinks:
       warehouse: COMPUTE_WH
       role: ACCOUNTADMIN
       private_key_path: /tmp/snowflake_key.p8
-react:
-  providers:
-    warehouse:
-      kind: snowflake
-      database: ANALYTICS
-      schema: RAW
 "#,
         )
         .expect("yaml");
@@ -3832,6 +3831,7 @@ react:
             wh.get("private_key_path").and_then(|v| v.as_str()),
             Some("/tmp/snowflake_key.p8")
         );
+        assert!(providers.get("el").is_none());
     }
 
     #[tokio::test]

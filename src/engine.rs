@@ -18,7 +18,7 @@ use tracing::{error, info, warn};
 
 use crate::buffer::ingest_buffer::{wal_recover, Buffers};
 use crate::buffer::BufferChunker;
-use crate::discover::PipelineMetadata;
+use crate::discover::{Metadata, OutputMetadata, PipelineMetadata};
 use crate::helpers::configuration::{Config, PIPELINE_NAME};
 use crate::helpers::logger::LogLevel;
 use crate::helpers::offsets::Offsets;
@@ -36,7 +36,9 @@ use crate::runtime_plugins::host::{
 use crate::runtime_plugins::protocol::{
     RuntimeBinding, RuntimeExecutionMode, RuntimePluginKind, RuntimeSinkConfig,
 };
-use crate::runtime_plugins::schema_state::clear_runtime_source_schema_state;
+use crate::runtime_plugins::schema_state::{
+    clear_runtime_source_schema_state, current_runtime_schema_state,
+};
 use crate::sqlrt::query::query;
 use crate::{LOGGER, METADATA, METRICS, RUNNING};
 
@@ -61,6 +63,26 @@ fn chaos_mode_delay() -> Duration {
         rand::thread_rng().gen_range(min..=max)
     };
     Duration::from_secs(secs)
+}
+
+fn metadata_from_runtime_output(output: &OutputMetadata) -> Metadata {
+    let mut metadata = Metadata::new().expect("new metadata");
+    metadata.enabled = true;
+    metadata.out_field_name = output.out_field_name().to_string();
+    metadata.determined_type = output.determined_type().clone();
+    metadata.determined_type_values = output.determined_type_values().cloned();
+    metadata.field_id = output.field_id();
+    metadata.schema_id = output.schema_id();
+    metadata.lineage_id = output.lineage_id().to_string();
+    metadata.nullable = output.nullable();
+    metadata.default_value = output.default_value().cloned();
+    metadata.fields = Box::new(
+        output
+            .child_fields()
+            .map(|(name, child)| (name.clone(), metadata_from_runtime_output(child)))
+            .collect(),
+    );
+    metadata
 }
 
 struct OutputRouter {
@@ -263,6 +285,13 @@ pub async fn run_discover(output_mode: &str) -> io::Result<()> {
     );
 
     let mut updated_metadata = METADATA.load().as_ref().clone();
+    let runtime_schema_state = current_runtime_schema_state();
+    for (namespace, output_metadata) in runtime_schema_state.namespaces {
+        updated_metadata
+            .metadata
+            .entry(namespace)
+            .or_insert_with(|| metadata_from_runtime_output(&output_metadata));
+    }
     for (_namespace, metadata) in updated_metadata.metadata.iter_mut() {
         metadata.finalize_field_types(flatten);
     }
@@ -423,47 +452,27 @@ pub async fn run_sync(output_mode: &str) -> io::Result<()> {
                 Config::get_pipeline_input_plugin_version().unwrap_or_else(|err| {
                     panic!("Runtime input plugin version lookup failed: {}", err)
                 });
-            let runtime_input_manifest = match Config::get_pipeline_runtime_input_plugin() {
-                Ok(entry) => Some(
-                    resolve_runtime_plugin(
-                        entry,
-                        RuntimePluginKind::DataSource,
-                        &input_name,
-                        runtime_input_version.as_deref(),
-                    )
-                    .await
-                    .unwrap_or_else(|err| {
-                        panic!("Runtime input manifest resolution failed: {}", err)
-                    }),
-                ),
-                Err(err) => panic!("Runtime input manifest lookup failed: {}", err),
-            };
+            let runtime_input_manifest = resolve_runtime_plugin(
+                RuntimePluginKind::DataSource,
+                &input_name,
+                runtime_input_version.as_deref(),
+            )
+            .await
+            .unwrap_or_else(|err| panic!("Runtime input manifest resolution failed: {}", err));
             let runtime_output_version = Config::get_pipeline_output_plugin_version()
                 .unwrap_or_else(|err| {
                     panic!("Runtime output plugin version lookup failed: {}", err)
                 });
-            let runtime_output_manifest = match Config::get_pipeline_runtime_output_plugin() {
-                Ok(entry) => Some(
-                    resolve_runtime_plugin(
-                        entry,
-                        RuntimePluginKind::DataSink,
-                        &output_plugin_name,
-                        runtime_output_version.as_deref(),
-                    )
-                    .await
-                    .unwrap_or_else(|err| {
-                        panic!("Runtime output manifest resolution failed: {}", err)
-                    }),
-                ),
-                Err(err) => panic!("Runtime output manifest lookup failed: {}", err),
-            };
-            let src_cap = runtime_input_manifest
-                .as_ref()
-                .and_then(runtime_source_capability_for_manifest)
+            let runtime_output_manifest = resolve_runtime_plugin(
+                RuntimePluginKind::DataSink,
+                &output_plugin_name,
+                runtime_output_version.as_deref(),
+            )
+            .await
+            .unwrap_or_else(|err| panic!("Runtime output manifest resolution failed: {}", err));
+            let src_cap = runtime_source_capability_for_manifest(&runtime_input_manifest)
                 .or_else(|| source_capability_for_plugin(&input_name).cloned());
-            let sink_cap = runtime_output_manifest
-                .as_ref()
-                .and_then(runtime_sink_capability_for_manifest)
+            let sink_cap = runtime_sink_capability_for_manifest(&runtime_output_manifest)
                 .or_else(|| sink_capability_for_plugin(&output_plugin_name).cloned());
             if let (Some(src), Some(snk)) = (src_cap.as_ref(), sink_cap.as_ref()) {
                 let mut contracts = BTreeMap::new();
@@ -778,10 +787,8 @@ pub async fn sync_output_plugin(
     info!("Output plugin: {}", plugin_name);
 
     let primary_sink_ref = Config::get_pipeline_output_sink_ref();
-    let runtime_entry = Config::get_pipeline_runtime_output_plugin().map_err(io::Error::other)?;
     let runtime_version = Config::get_pipeline_output_plugin_version().map_err(io::Error::other)?;
     let resolved = resolve_runtime_plugin(
-        runtime_entry,
         RuntimePluginKind::DataSink,
         plugin_name,
         runtime_version.as_deref(),
@@ -825,11 +832,9 @@ pub async fn sync_deadletter_plugin(
     else {
         return Ok(None);
     };
-    let runtime_entry = Config::get_pipeline_runtime_output_plugin().map_err(io::Error::other)?;
     let runtime_version =
         Config::get_pipeline_deadletter_plugin_version().map_err(io::Error::other)?;
     let resolved = resolve_runtime_plugin(
-        runtime_entry,
         RuntimePluginKind::DataSink,
         &plugin_name,
         runtime_version.as_deref(),
@@ -959,12 +964,6 @@ pub async fn sync_input_plugin(
     execution_mode: RuntimeExecutionMode,
 ) -> io::Result<()> {
     let plugin_name = Config::get_pipeline_input_plugin_name();
-    let runtime_entry = Config::get_pipeline_runtime_input_plugin().map_err(|err| {
-        io::Error::other(format!(
-            "Failed to resolve runtime input manifest reference: {}",
-            err
-        ))
-    })?;
     let runtime_version = Config::get_pipeline_input_plugin_version().map_err(|err| {
         io::Error::other(format!(
             "Failed to resolve runtime input plugin version: {}",
@@ -972,7 +971,6 @@ pub async fn sync_input_plugin(
         ))
     })?;
     let resolved = resolve_runtime_plugin(
-        runtime_entry,
         RuntimePluginKind::DataSource,
         &plugin_name,
         runtime_version.as_deref(),

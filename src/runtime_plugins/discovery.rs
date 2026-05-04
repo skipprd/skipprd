@@ -9,7 +9,6 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tracing::info;
 
-use crate::helpers::configuration::RuntimePluginEntry;
 use crate::runtime_plugins::host::ResolvedRuntimePlugin;
 use crate::runtime_plugins::protocol::RuntimePluginKind;
 
@@ -146,22 +145,16 @@ pub fn validate_resolved_plugin(
 }
 
 pub async fn resolve_runtime_plugin(
-    explicit_entry: Option<RuntimePluginEntry>,
     expected_kind: RuntimePluginKind,
     expected_plugin_name: &str,
     configured_plugin_version: Option<&str>,
 ) -> io::Result<ResolvedRuntimePlugin> {
-    let resolved = match explicit_entry {
-        Some(entry) => ResolvedRuntimePlugin::load(PathBuf::from(entry.manifest))?,
-        None => {
-            discover_runtime_plugin(
-                expected_kind,
-                expected_plugin_name,
-                configured_plugin_version,
-            )
-            .await?
-        }
-    };
+    let resolved = discover_runtime_plugin(
+        expected_kind,
+        expected_plugin_name,
+        configured_plugin_version,
+    )
+    .await?;
 
     let resolved = validate_resolved_plugin(resolved, expected_kind, expected_plugin_name)?;
     info!(

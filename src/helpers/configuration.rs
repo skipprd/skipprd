@@ -109,11 +109,6 @@ pub type DataSinkPluginConfig = PluginConfigEntry;
 pub type SchemaSinkConfig = PluginConfigEntry;
 
 #[derive(Debug, Deserialize, Clone)]
-pub struct RuntimePluginEntry {
-    pub manifest: String,
-}
-
-#[derive(Debug, Deserialize, Clone)]
 pub struct Pipeline {
     #[serde(rename = "type")]
     pub r#type: Option<String>,
@@ -135,12 +130,6 @@ pub struct Pipeline {
     pub data_source: Option<String>,
     #[serde(alias = "output")]
     pub data_sink: Option<String>,
-    #[serde(alias = "runtime_source", alias = "runtime_input_plugin")]
-    pub runtime_input: Option<String>,
-    #[serde(alias = "runtime_sink", alias = "runtime_output_plugin")]
-    pub runtime_output: Option<String>,
-    #[serde(alias = "runtime_schema", alias = "runtime_schema_plugin")]
-    pub runtime_schema_sink: Option<String>,
     #[serde(alias = "deadletters", alias = "deadletter")]
     pub deadletter_sink: Option<String>,
     pub stats: Option<Stats>,
@@ -197,7 +186,6 @@ pub struct Config {
     pub deadletter_sinks: Option<HashMap<String, DataSinkEntry>>,
     #[serde(alias = "schema_outputs")]
     pub schema_sinks: Option<HashMap<String, SchemaSinkConfig>>,
-    pub runtime_plugins: Option<HashMap<String, RuntimePluginEntry>>,
 }
 
 pub static APP_CONFIG: Lazy<Arc<TimedRwLock<Option<Config>>>> =
@@ -328,7 +316,6 @@ impl Config {
             data_sinks: None,
             deadletter_sinks: None,
             schema_sinks: None,
-            runtime_plugins: None,
         }
     }
 
@@ -596,46 +583,6 @@ impl Config {
     pub fn get_pipeline_deadletters_ref() -> Option<String> {
         let pipeline = Config::get_pipeline_config();
         pipeline.deadletter_sink.clone()
-    }
-
-    fn resolve_runtime_plugin_entry(reference: &str) -> Result<RuntimePluginEntry, String> {
-        let config = Config::get();
-        let name = Self::parse_registry_ref(reference, "runtime_plugins")?;
-        config
-            .runtime_plugins
-            .as_ref()
-            .and_then(|registry| registry.get(&name))
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "Runtime plugin '{}' was configured but not found.",
-                    reference
-                )
-            })
-    }
-
-    pub fn get_pipeline_runtime_input_plugin() -> Result<Option<RuntimePluginEntry>, String> {
-        let pipeline = Config::get_pipeline_config();
-        match pipeline.runtime_input.as_deref() {
-            Some(reference) => Self::resolve_runtime_plugin_entry(reference).map(Some),
-            None => Ok(None),
-        }
-    }
-
-    pub fn get_pipeline_runtime_output_plugin() -> Result<Option<RuntimePluginEntry>, String> {
-        let pipeline = Config::get_pipeline_config();
-        match pipeline.runtime_output.as_deref() {
-            Some(reference) => Self::resolve_runtime_plugin_entry(reference).map(Some),
-            None => Ok(None),
-        }
-    }
-
-    pub fn get_pipeline_runtime_schema_plugin() -> Result<Option<RuntimePluginEntry>, String> {
-        let pipeline = Config::get_pipeline_config();
-        match pipeline.runtime_schema_sink.as_deref() {
-            Some(reference) => Self::resolve_runtime_plugin_entry(reference).map(Some),
-            None => Ok(None),
-        }
     }
 
     fn resolve_deadletter_plugin_config_for(
@@ -914,9 +861,6 @@ impl Config {
                     transform: None,
                     data_source: None,
                     data_sink: None,
-                    runtime_input: None,
-                    runtime_output: None,
-                    runtime_schema_sink: None,
                     deadletter_sink: None,
                     stats: None,
                     semantic_layer: None,
@@ -2128,17 +2072,6 @@ impl Config {
                                 if schema_plugin_name.is_empty() {
                                     debug!("Schema sync: no schema sink configured for primary output");
                                 } else {
-                                    let runtime_entry =
-                                        match Config::get_pipeline_runtime_schema_plugin() {
-                                            Ok(runtime_entry) => runtime_entry,
-                                            Err(err) => {
-                                                warn!(
-                                                    "Schema sync: failed to resolve runtime schema plugin reference: {}",
-                                                    err
-                                                );
-                                                None
-                                            }
-                                        };
                                     let runtime_version =
                                         match Config::get_pipeline_schema_plugin_version() {
                                             Ok(runtime_version) => runtime_version,
@@ -2155,7 +2088,6 @@ impl Config {
                                         .and_then(|cfg| crate::runtime_plugins::protocol::RuntimeSchemaConfig::try_from(cfg).ok());
                                     if let Some(runtime_config) = runtime_config {
                                         match crate::runtime_plugins::discovery::resolve_runtime_plugin(
-                                            runtime_entry,
                                             crate::runtime_plugins::protocol::RuntimePluginKind::SchemaSink,
                                             &schema_plugin_name,
                                             runtime_version.as_deref(),
@@ -2217,17 +2149,6 @@ impl Config {
                                 let dl_sink_cfg = Config::get_pipeline_deadletter_plugin_config().ok().flatten();
                                 match Config::get_pipeline_deadletter_schema_plugin_name() {
                                     Ok(Some(schema_plugin_name)) => {
-                                        let runtime_entry =
-                                            match Config::get_pipeline_runtime_schema_plugin() {
-                                                Ok(runtime_entry) => runtime_entry,
-                                                Err(err) => {
-                                                    warn!(
-                                                        "Schema sync: failed to resolve runtime schema plugin reference: {}",
-                                                        err
-                                                    );
-                                                    None
-                                                }
-                                            };
                                         let runtime_config = dl_sink_cfg
                                             .clone()
                                             .and_then(|cfg| crate::runtime_plugins::protocol::RuntimeSchemaConfig::try_from(cfg).ok());
@@ -2245,7 +2166,6 @@ impl Config {
                                             };
                                         if let Some(runtime_config) = runtime_config {
                                             match crate::runtime_plugins::discovery::resolve_runtime_plugin(
-                                                runtime_entry,
                                                 crate::runtime_plugins::protocol::RuntimePluginKind::SchemaSink,
                                                 &schema_plugin_name,
                                                 runtime_version.as_deref(),
@@ -2595,9 +2515,6 @@ mod tests {
             transform: None,
             data_source: None,
             data_sink: Some("data_sinks.main".to_string()),
-            runtime_input: None,
-            runtime_output: None,
-            runtime_schema_sink: None,
             deadletter_sink: None,
             stats: None,
             semantic_layer: None,
@@ -2615,7 +2532,6 @@ mod tests {
             data_sinks: None,
             deadletter_sinks: Some(HashMap::new()),
             schema_sinks: None,
-            runtime_plugins: None,
         };
 
         assert!(
@@ -2642,9 +2558,6 @@ mod tests {
             transform: None,
             data_source: None,
             data_sink: Some("data_sinks.main".to_string()),
-            runtime_input: None,
-            runtime_output: None,
-            runtime_schema_sink: None,
             deadletter_sink: Some("deadletter_sinks.missing".to_string()),
             stats: None,
             semantic_layer: None,
@@ -2662,7 +2575,6 @@ mod tests {
             data_sinks: None,
             deadletter_sinks: Some(HashMap::new()),
             schema_sinks: None,
-            runtime_plugins: None,
         };
 
         assert!(Config::resolve_deadletter_plugin_config_for(&config, &pipeline).is_err());

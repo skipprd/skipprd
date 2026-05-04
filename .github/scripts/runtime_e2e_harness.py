@@ -1297,88 +1297,10 @@ def local_runtime_config_text(
 ) -> str:
     if local_runtime_manifests is None:
         return config_text
-
-    anchor = LOCAL_SCENARIO_RUNTIME_PIPELINE_ANCHORS.get(scenario_name)
-    if anchor is None:
-        return config_text
-    if "\nruntime_plugins:\n" in config_text:
-        raise HarnessError(
-            f"scenario {scenario_name} already declares runtime_plugins; local staged runtime injection is unsupported"
-        )
-
-    count = config_text.count(anchor)
-    if count != 1:
-        raise HarnessError(
-            f"expected to find anchor {anchor!r} exactly once in scenario {scenario_name}, found {count}"
-        )
-
-    iceberg_runtime_sources = {
-        "postgres_iceberg_types_cdc": "runtime_postgres_source",
-        "mysql_iceberg_types_cdc": "runtime_mysql_source",
-        "dynamodb_iceberg_types_cdc": "runtime_dynamodb_source",
-        "mssql_iceberg_debug_linux": "runtime_mssql_source",
-        "mssql_iceberg_debug_windows": "runtime_mssql_source",
-    }
-    if scenario_name in iceberg_runtime_sources:
-        runtime_source_key = iceberg_runtime_sources[scenario_name]
-        required_runtime_keys = (
-            runtime_source_key,
-            "runtime_iceberg_sink",
-            "runtime_iceberg_schema",
-        )
-        missing = [
-            key
-            for key in required_runtime_keys
-            if key not in local_runtime_manifests.manifest_paths
-        ]
-        if missing:
-            raise HarnessError(
-                f"local staged runtime manifests for {scenario_name} are missing: {', '.join(missing)}"
-            )
-        runtime_lines = (
-            f"    runtime_input: runtime_plugins.{runtime_source_key}\n"
-            "    runtime_output: runtime_plugins.runtime_iceberg_sink\n"
-            "    runtime_schema: runtime_plugins.runtime_iceberg_schema\n"
-        )
-        runtime_plugins_block = (
-            "\nruntime_plugins:\n"
-            f"  {runtime_source_key}:\n    manifest: {yaml_scalar(local_runtime_manifests.manifest_paths[runtime_source_key])}\n"
-            f"  runtime_iceberg_sink:\n    manifest: {yaml_scalar(local_runtime_manifests.manifest_paths['runtime_iceberg_sink'])}\n"
-            f"  runtime_iceberg_schema:\n    manifest: {yaml_scalar(local_runtime_manifests.manifest_paths['runtime_iceberg_schema'])}\n"
-        )
-    else:
-        required_runtime_keys = (
-            "runtime_s3_source",
-            "runtime_athena_sink",
-            "runtime_glue_schema",
-        )
-        missing = [
-            key
-            for key in required_runtime_keys
-            if key not in local_runtime_manifests.manifest_paths
-        ]
-        if missing:
-            raise HarnessError(
-                f"local staged runtime manifests for {scenario_name} are missing: {', '.join(missing)}"
-            )
-        runtime_lines = (
-            "    runtime_input: runtime_plugins.runtime_s3_source\n"
-            "    runtime_output: runtime_plugins.runtime_athena_sink\n"
-            "    runtime_schema: runtime_plugins.runtime_glue_schema\n"
-        )
-        runtime_plugins_block = (
-            "\nruntime_plugins:\n"
-            f"  runtime_s3_source:\n    manifest: {yaml_scalar(local_runtime_manifests.manifest_paths['runtime_s3_source'])}\n"
-            f"  runtime_athena_sink:\n    manifest: {yaml_scalar(local_runtime_manifests.manifest_paths['runtime_athena_sink'])}\n"
-            f"  runtime_glue_schema:\n    manifest: {yaml_scalar(local_runtime_manifests.manifest_paths['runtime_glue_schema'])}\n"
-        )
-    rewritten = config_text.replace(anchor, anchor + runtime_lines, 1)
-    if not rewritten.endswith("\n"):
-        rewritten += "\n"
-    print_step(
-        f"Using local staged runtime manifests for {scenario_name} from {local_runtime_manifests.manifest_dir}"
+    raise HarnessError(
+        "local staged runtime manifest injection is no longer supported; "
+        "runtime plugins are resolved from the published registry"
     )
-    return rewritten + runtime_plugins_block
 
 
 def namespaced_scenario_config_text(
@@ -1488,18 +1410,10 @@ data_sinks:
     File:
       format: parquet
 
-runtime_plugins:
-  file_runtime_source:
-    manifest: "{manifests['file-source.json'].path}"
-  file_runtime_sink:
-    manifest: "{manifests['file-sink.json'].path}"
-
 pipelines:
   {pipeline_name}:
     data_source: data_sources.file_source
     data_sink: data_sinks.file_sink
-    runtime_input: runtime_plugins.file_runtime_source
-    runtime_output: runtime_plugins.file_runtime_sink
 """,
             encoding="utf-8",
         )
@@ -1650,21 +1564,10 @@ schema_sinks:
       password: testpass
       database: skippr_test
 
-runtime_plugins:
-  postgres_runtime_source:
-    manifest: "{manifests['postgres-source.json'].path}"
-  postgres_runtime_sink:
-    manifest: "{manifests['postgres-sink.json'].path}"
-  postgres_runtime_schema:
-    manifest: "{manifests['postgres-schema.json'].path}"
-
 pipelines:
   {pipeline_name}:
     data_source: data_sources.postgres_source
     data_sink: data_sinks.postgres_sink
-    runtime_input: runtime_plugins.postgres_runtime_source
-    runtime_output: runtime_plugins.postgres_runtime_sink
-    runtime_schema: runtime_plugins.postgres_runtime_schema
 """,
             encoding="utf-8",
         )
@@ -1836,11 +1739,6 @@ def run_runtime_plugin_acceptance(
             ["cargo", "test", "--test", "runtime_host_contracts", "--", "--nocapture"],
             env=test_env,
         )
-        if mode == "full":
-            run_command(
-                ["cargo", "test", "--test", "runtime_file_csv_to_file", "--", "--nocapture"],
-                env=test_env,
-            )
 
         run_runtime_file_release_smoke(
             skipprd=skipprd,
