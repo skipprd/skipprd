@@ -501,46 +501,114 @@ pub async fn record_staging_output_schemas(
     else {
         return;
     };
-    for name_owned in staging_model_names {
-        let name = name_owned.trim();
-        if !should_lookup_staging_output_schema(name, source_schemas) {
+
+    let pending: Vec<String> = staging_model_names
+        .iter()
+        .map(|name| name.trim().to_string())
+        .filter(|name| should_lookup_staging_output_schema(name, source_schemas))
+        .collect();
+    let concurrency = crate::providers::QueryProvider::max_concurrency(wh.as_ref())
+        .clamp(1, 8)
+        .min(pending.len().max(1));
+    let mut names = pending.into_iter();
+    let mut lookups = tokio::task::JoinSet::new();
+
+    while lookups.len() < concurrency {
+        let Some(name) = names.next() else {
+            break;
+        };
+        spawn_staging_output_schema_lookup(
+            &mut lookups,
+            wh.clone(),
+            catalog.clone(),
+            schema.clone(),
+            name,
+        );
+    }
+
+    while let Some(joined) = lookups.join_next().await {
+        let Some(name) = names.next() else {
+            match joined {
+                Ok((name, fqn, result)) => {
+                    merge_staging_output_schema_result(source_schemas, name, fqn, result);
+                }
+                Err(e) => {
+                    tracing::debug!("record_staging_output_schemas: lookup task failed: {}", e);
+                }
+            }
             continue;
+        };
+        match joined {
+            Ok((finished_name, fqn, result)) => {
+                merge_staging_output_schema_result(source_schemas, finished_name, fqn, result);
+            }
+            Err(e) => {
+                tracing::debug!("record_staging_output_schemas: lookup task failed: {}", e);
+            }
         }
+        spawn_staging_output_schema_lookup(
+            &mut lookups,
+            wh.clone(),
+            catalog.clone(),
+            schema.clone(),
+            name,
+        );
+    }
+}
+
+fn spawn_staging_output_schema_lookup(
+    lookups: &mut tokio::task::JoinSet<(String, String, Result<Vec<(String, String)>, String>)>,
+    wh: Arc<dyn WarehouseProvider>,
+    catalog: String,
+    schema: String,
+    name: String,
+) {
+    lookups.spawn(async move {
         let relation_id = DatasetId {
-            catalog: catalog.clone(),
-            database: schema.clone(),
-            table: name.to_string(),
+            catalog,
+            database: schema,
+            table: name.clone(),
         };
         let lookup_id = wh.dbt_model_relation_lookup_id(&relation_id);
         let fqn = wh.format_dbt_model_relation_fqn(&relation_id);
-        match crate::transient_retry::retry_transient_default("staging_output_schema", || async {
-            wh.get_dataset_schema(&lookup_id).await
-        })
-        .await
-        {
-            Ok(cols) if !cols.is_empty() => {
-                let defs: Vec<crate::plan_types::SourceColumnDef> = cols
-                    .into_iter()
-                    .map(|(n, t)| crate::plan_types::SourceColumnDef {
-                        name: n,
-                        data_type: t,
-                    })
-                    .collect();
-                source_schemas.insert(name.to_string(), defs);
-            }
-            Ok(_) => {
-                tracing::debug!(
-                    "record_staging_output_schemas: empty schema for {} (not yet materialized?)",
-                    fqn
-                );
-            }
-            Err(e) => {
-                tracing::debug!(
-                    "record_staging_output_schemas: schema lookup failed for {}: {}",
-                    fqn,
-                    e
-                );
-            }
+        let result =
+            crate::transient_retry::retry_transient_default("staging_output_schema", || async {
+                wh.get_dataset_schema(&lookup_id).await
+            })
+            .await;
+        (name, fqn, result)
+    });
+}
+
+fn merge_staging_output_schema_result(
+    source_schemas: &mut crate::plan_types::SourceSchema,
+    name: String,
+    fqn: String,
+    result: Result<Vec<(String, String)>, String>,
+) {
+    match result {
+        Ok(cols) if !cols.is_empty() => {
+            let defs: Vec<crate::plan_types::SourceColumnDef> = cols
+                .into_iter()
+                .map(|(n, t)| crate::plan_types::SourceColumnDef {
+                    name: n,
+                    data_type: t,
+                })
+                .collect();
+            source_schemas.insert(name.to_string(), defs);
+        }
+        Ok(_) => {
+            tracing::debug!(
+                "record_staging_output_schemas: empty schema for {} (not yet materialized?)",
+                fqn
+            );
+        }
+        Err(e) => {
+            tracing::debug!(
+                "record_staging_output_schemas: schema lookup failed for {}: {}",
+                fqn,
+                e
+            );
         }
     }
 }

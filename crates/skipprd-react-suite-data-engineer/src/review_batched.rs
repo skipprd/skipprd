@@ -6,6 +6,7 @@ use std::sync::Arc;
 use crate::domain_types::{
     ReviewArtifactRef, ReviewBatchOutput, ReviewSummaryOutput, ReviewTier, ReviewUnifyOutput,
 };
+use futures::StreamExt;
 use react_core::agent::AgentCtx;
 use react_core::keyspace::encode_key_component;
 use react_core::llm::{ChatMessage, ChatRole, LlmCallOptions, LlmExpectedFormat, ReasoningEffort};
@@ -677,6 +678,13 @@ struct ProjectSummary {
     project_notes: Vec<String>,
 }
 
+struct BatchReviewDetail {
+    batch_idx: usize,
+    batch_items: Vec<String>,
+    findings: Vec<String>,
+    detail: Value,
+}
+
 async fn build_project_summary(
     actx: &AgentCtx,
     thread_store: &ThreadStore,
@@ -753,18 +761,15 @@ async fn build_project_summary(
 async fn review_single_batch(
     sctx: &SuiteCtx,
     actx: &AgentCtx,
-    thread_store: &ThreadStore,
     thread_id: &str,
     phase: Phase,
     original_question_with_context: &str,
-    plan_kind: Option<PlanKind>,
-    plan_key: Option<&str>,
     global_ctx_block: &str,
     batch: &[String],
     batch_idx: usize,
     total_batches: usize,
     item_to_path_inv_notes: &Option<Value>,
-) -> Result<Value, String> {
+) -> Result<BatchReviewDetail, String> {
     let mut files: Vec<ProjectFile> = Vec::new();
     let mut batch_detail: Vec<ReviewBatchItem> = Vec::new();
 
@@ -861,22 +866,13 @@ async fn review_single_batch(
         "batch_items": batch,
         "findings": findings,
     });
-    append_review_step(
-        thread_store,
-        thread_id,
-        phase,
-        "review",
-        crate::progress_controller::PhaseTransition::ReviewBatch.as_reason_str(),
-        detail.clone(),
-    )
-    .await?;
 
-    if let (Some(pk), Some(key)) = (plan_kind, plan_key) {
-        persist_review_batch_to_plan(actx, pk, key, batch_idx, batch.to_vec(), findings.clone())
-            .await?;
-    }
-
-    Ok(detail)
+    Ok(BatchReviewDetail {
+        batch_idx,
+        batch_items: batch.to_vec(),
+        findings,
+        detail,
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1116,25 +1112,61 @@ pub async fn run_batched_review(
     .await?;
 
     // 2) Per-batch reviews.
+    let total_batches = batches.len();
+    let review_concurrency = crate::env_util::review_batch_concurrency().min(total_batches.max(1));
+    let mut batch_details = futures::stream::iter(batches.iter().cloned().enumerate())
+        .map(|(bidx, batch)| {
+            let actx = &actx;
+            let global_ctx_block = &global_ctx_block;
+            let item_to_path_inv_notes = &item_to_path_inv_notes;
+            async move {
+                review_single_batch(
+                    sctx,
+                    actx,
+                    thread_id,
+                    phase,
+                    original_question_with_context,
+                    global_ctx_block,
+                    &batch,
+                    bidx,
+                    total_batches,
+                    item_to_path_inv_notes,
+                )
+                .await
+            }
+        })
+        .buffer_unordered(review_concurrency)
+        .collect::<Vec<_>>()
+        .await
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()?;
+    batch_details.sort_by_key(|detail| detail.batch_idx);
+
     let mut all_batch_notes: Vec<Value> = Vec::new();
-    for (bidx, batch) in batches.iter().enumerate() {
-        let detail = review_single_batch(
-            sctx,
-            &actx,
+    for batch_detail in batch_details {
+        append_review_step(
             &thread_store,
             thread_id,
             phase,
-            original_question_with_context,
-            plan_kind,
-            plan_key.as_deref(),
-            &global_ctx_block,
-            batch,
-            bidx,
-            batches.len(),
-            &item_to_path_inv_notes,
+            "review",
+            crate::progress_controller::PhaseTransition::ReviewBatch.as_reason_str(),
+            batch_detail.detail.clone(),
         )
         .await?;
-        all_batch_notes.push(detail);
+
+        if let (Some(pk), Some(key)) = (plan_kind, plan_key.as_deref()) {
+            persist_review_batch_to_plan(
+                &actx,
+                pk,
+                key,
+                batch_detail.batch_idx,
+                batch_detail.batch_items.clone(),
+                batch_detail.findings.clone(),
+            )
+            .await?;
+        }
+
+        all_batch_notes.push(batch_detail.detail);
     }
 
     // 3) Unification.

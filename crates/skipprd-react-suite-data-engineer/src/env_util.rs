@@ -73,6 +73,15 @@ pub fn repair_reasoning_effort() -> react_core::llm::ReasoningEffort {
         .unwrap_or(react_core::llm::ReasoningEffort::ExtraHigh)
 }
 
+pub fn review_batch_concurrency() -> usize {
+    static CACHE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *CACHE.get_or_init(|| {
+        env_usize(env_keys::LLM_REVIEW_BATCH_CONCURRENCY)
+            .unwrap_or(DEFAULT_REVIEW_BATCH_CONCURRENCY)
+            .clamp(1, MAX_REVIEW_BATCH_CONCURRENCY)
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Centralized env-var key names
 // ---------------------------------------------------------------------------
@@ -120,6 +129,7 @@ pub mod env_keys {
     pub const LLM_REVIEW_MAX_TOKENS_CLEANSE_UNIFY: &str = "LLM_REVIEW_MAX_TOKENS_CLEANSE_UNIFY";
     pub const LLM_REVIEW_MAX_TOKENS_MODEL: &str = "LLM_REVIEW_MAX_TOKENS_MODEL";
     pub const LLM_REVIEW_MAX_TOKENS_MODEL_UNIFY: &str = "LLM_REVIEW_MAX_TOKENS_MODEL_UNIFY";
+    pub const LLM_REVIEW_BATCH_CONCURRENCY: &str = "LLM_REVIEW_BATCH_CONCURRENCY";
 
     // SQL-first
     pub const REACT_SQL_FIRST_MAX_OUTPUT_TOKENS: &str = "REACT_SQL_FIRST_MAX_OUTPUT_TOKENS";
@@ -291,6 +301,9 @@ pub const DEFAULT_MAX_PUBLISH_RETRIES: usize = 3;
 pub const DEFAULT_PLAN_ENRICH_CHUNK_SIZE: usize = 3;
 pub const MIN_PLAN_ENRICH_CHUNK_SIZE: usize = 1;
 pub const MAX_PLAN_ENRICH_CHUNK_SIZE: usize = 3;
+
+pub const DEFAULT_REVIEW_BATCH_CONCURRENCY: usize = 2;
+pub const MAX_REVIEW_BATCH_CONCURRENCY: usize = 4;
 
 pub const DEFAULT_MODEL_PLAN_MIN_SCORE: i32 = 70;
 pub const MIN_MODEL_PLAN_SCORE: i32 = 0;

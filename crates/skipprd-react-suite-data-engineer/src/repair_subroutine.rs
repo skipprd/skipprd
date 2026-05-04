@@ -49,6 +49,13 @@ use crate::repair_session::{
 
 const GATHER_MAX_STEPS: usize = 14;
 const DEFAULT_MAX_ITERATIONS: usize = 5;
+const FIX_PLAN_HISTORY_MAX_ITERATIONS: usize = 3;
+const FIX_PLAN_HISTORY_MAX_CHARS: usize = 12_000;
+const FIX_PLAN_HISTORY_BRIEF_MAX_CHARS: usize = 2_000;
+const FIX_PLAN_HISTORY_LOG_MAX_CHARS: usize = 4_000;
+const FIX_PLAN_HISTORY_DIAGNOSIS_MAX_CHARS: usize = 2_000;
+const FIX_PLAN_HISTORY_ERROR_MAX_CHARS: usize = 3_000;
+const REPAIR_FIX_PLAN_MAX_OUTPUT_TOKENS: u32 = 16_000;
 
 struct RepairExecutor<'a> {
     sctx: &'a SuiteCtx,
@@ -479,6 +486,56 @@ struct RepairFixPlanV1 {
     fixes: Vec<PlannedFix>,
 }
 
+fn compact_text_tail(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let tail: String = s
+        .chars()
+        .rev()
+        .take(max_chars)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    format!("[truncated to latest {max_chars} chars]\n{tail}")
+}
+
+fn compact_repair_history_for_fix_plan(session_log: &RepairSessionLog) -> String {
+    let mut compact = session_log.clone();
+    compact.error_context.brief = compact_text_tail(
+        &compact.error_context.brief,
+        FIX_PLAN_HISTORY_BRIEF_MAX_CHARS,
+    );
+    compact.error_context.log_excerpts = compact
+        .error_context
+        .log_excerpts
+        .as_deref()
+        .map(|s| compact_text_tail(s, FIX_PLAN_HISTORY_LOG_MAX_CHARS));
+
+    if compact.iterations.len() > FIX_PLAN_HISTORY_MAX_ITERATIONS {
+        let keep_from = compact.iterations.len() - FIX_PLAN_HISTORY_MAX_ITERATIONS;
+        compact.iterations = compact.iterations.split_off(keep_from);
+    }
+
+    for iter in compact.iterations.iter_mut() {
+        iter.diagnosis = compact_text_tail(&iter.diagnosis, FIX_PLAN_HISTORY_DIAGNOSIS_MAX_CHARS);
+        for result in iter.apply_results.iter_mut() {
+            result.error = result
+                .error
+                .as_deref()
+                .map(|s| compact_text_tail(s, FIX_PLAN_HISTORY_ERROR_MAX_CHARS));
+        }
+        if let Some(validate) = iter.validate_outcome.as_mut() {
+            validate.error_summary =
+                compact_text_tail(&validate.error_summary, FIX_PLAN_HISTORY_ERROR_MAX_CHARS);
+        }
+    }
+
+    let rendered = compact.format_for_prompt();
+    compact_text_tail(&rendered, FIX_PLAN_HISTORY_MAX_CHARS)
+}
+
 /// Stage 2: Reason — single LLM call with the reason_model, no tools.
 /// Produces a JSON object containing an array of planned fixes, enforced
 /// via `LlmExpectedFormat::JsonSchema`.
@@ -489,7 +546,7 @@ async fn run_reason(
     session_log: &RepairSessionLog,
     _iteration: usize,
 ) -> Result<Vec<PlannedFix>, String> {
-    let history = session_log.format_for_prompt();
+    let history = compact_repair_history_for_fix_plan(session_log);
     let dialect = resolved_config_from_ctx_sctx(sctx)
         .map(|cfg| crate::dialect::active_provider_dialect(cfg))
         .unwrap_or_else(|| "Unknown SQL dialect".into());
@@ -576,6 +633,7 @@ async fn run_reason(
         prompt_id: "repair.fix_plan",
         model: Some(dispatch.reason_model.clone()),
         expected_format: react_core::llm::LlmExpectedFormat::JsonSchema(schema),
+        max_output_tokens: Some(REPAIR_FIX_PLAN_MAX_OUTPUT_TOKENS),
         reasoning_effort: Some(crate::env_util::repair_reasoning_effort()),
         ..Default::default()
     };
@@ -824,5 +882,40 @@ mod tests {
             "test.gather_diagnosis",
         );
         assert!(schema.is_ok(), "schema generation must succeed");
+    }
+
+    #[test]
+    fn compact_repair_history_keeps_recent_attempts() {
+        let mut log = RepairSessionLog::new(ValidationFailureContext {
+            brief: "initial dbt failure".to_string(),
+            log_excerpts: None,
+            compile_ok: false,
+            run_ok: false,
+        });
+        for i in 0..5 {
+            log.record(
+                i,
+                vec![],
+                format!("diagnosis {i}"),
+                vec![PlannedFix {
+                    path: format!("models/model_{i}.sql"),
+                    op: FileOp::Write,
+                    content: "select 1".to_string(),
+                }],
+                vec![ApplyResult {
+                    path: format!("models/model_{i}.sql"),
+                    op: FileOp::Write,
+                    success: true,
+                    error: None,
+                }],
+            );
+        }
+
+        let compacted = compact_repair_history_for_fix_plan(&log);
+
+        assert!(!compacted.contains("diagnosis 0"));
+        assert!(!compacted.contains("diagnosis 1"));
+        assert!(compacted.contains("diagnosis 2"));
+        assert!(compacted.contains("diagnosis 4"));
     }
 }

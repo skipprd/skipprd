@@ -935,10 +935,9 @@ Apply these fixes in the output.",
         candidates: &crate::plan_schema::ModelPlanCandidatesV1,
     ) -> crate::plan::ModelPlan {
         let selected = Self::select_high_value_model_candidates(&candidates.candidates);
-        let task_names: Vec<String> = selected.into_iter().map(|c| c.name).collect();
-        let batches: Vec<Vec<String>> = task_names.iter().map(|name| vec![name.clone()]).collect();
-        let tasks: Vec<crate::plan::ModelTask> = task_names
+        let tasks: Vec<crate::plan::ModelTask> = selected
             .into_iter()
+            .map(|c| c.name)
             .map(|name| crate::plan::ModelTask {
                 name,
                 folder: crate::plan::ModelFolder::default(),
@@ -953,8 +952,8 @@ Apply these fixes in the output.",
                 checklist: crate::plan::canonical_task_checklist(TrackKind::Model),
             })
             .collect();
-        let work_groups =
-            crate::plan::canonical_sequential_work_groups_from_batches(&batches, "model");
+        let batches = crate::plan::canonical_model_batches_from_tasks(&tasks);
+        let work_groups = crate::plan::canonical_model_work_groups_from_batches(&batches);
         crate::plan::ModelPlan {
             plan_key: String::new(),
             status: crate::plan::PlanStatus::Draft,

@@ -328,6 +328,88 @@ pub fn canonical_sequential_work_groups_from_batches(
     out
 }
 
+pub fn canonical_model_work_groups_from_batches(batches: &[Vec<String>]) -> Vec<PlanWorkGroup> {
+    let mut normalized_batches: Vec<Vec<String>> = Vec::new();
+    for b in batches.iter() {
+        let mut item_ids: Vec<String> = Vec::new();
+        for item in b.iter() {
+            let id = item.trim();
+            if id.is_empty() {
+                continue;
+            }
+            if !item_ids.iter().any(|x| x == id) {
+                item_ids.push(id.to_string());
+            }
+        }
+        if !item_ids.is_empty() {
+            normalized_batches.push(item_ids);
+        }
+    }
+
+    let mut out: Vec<PlanWorkGroup> = Vec::new();
+    let mut sql_group_ids: Vec<String> = Vec::new();
+    let mut schema_group_ids: Vec<String> = Vec::new();
+
+    for (idx, item_ids) in normalized_batches.iter().enumerate() {
+        let ord = idx + 1;
+        let sql_group_id = format!("model_author_sql_{ord:03}");
+        out.push(PlanWorkGroup {
+            group_id: sql_group_id.clone(),
+            label: format!("Author SQL batch {}", ord),
+            kind: WorkGroupKind::AuthorSql,
+            items: item_ids
+                .iter()
+                .map(|task_id| WorkGroupItemRef {
+                    task_id: task_id.clone(),
+                    checklist_item_id: CHECKLIST_SQL_MODEL.to_string(),
+                })
+                .collect(),
+            depends_on_group_ids: None,
+        });
+        sql_group_ids.push(sql_group_id);
+    }
+
+    for (idx, item_ids) in normalized_batches.iter().enumerate() {
+        let ord = idx + 1;
+        let schema_group_id = format!("model_author_schema_{ord:03}");
+        out.push(PlanWorkGroup {
+            group_id: schema_group_id.clone(),
+            label: format!("Author schema batch {}", ord),
+            kind: WorkGroupKind::AuthorSchema,
+            items: item_ids
+                .iter()
+                .map(|task_id| WorkGroupItemRef {
+                    task_id: task_id.clone(),
+                    checklist_item_id: CHECKLIST_SCHEMA_CONTRACT.to_string(),
+                })
+                .collect(),
+            depends_on_group_ids: sql_group_ids.get(idx).cloned().map(|id| vec![id]),
+        });
+        schema_group_ids.push(schema_group_id);
+    }
+
+    if !schema_group_ids.is_empty() {
+        for (idx, item_ids) in normalized_batches.iter().enumerate() {
+            let ord = idx + 1;
+            out.push(PlanWorkGroup {
+                group_id: format!("model_validate_{ord:03}"),
+                label: format!("Validate batch {}", ord),
+                kind: WorkGroupKind::Validate,
+                items: item_ids
+                    .iter()
+                    .map(|task_id| WorkGroupItemRef {
+                        task_id: task_id.clone(),
+                        checklist_item_id: CHECKLIST_VALIDATE.to_string(),
+                    })
+                    .collect(),
+                depends_on_group_ids: Some(schema_group_ids.clone()),
+            });
+        }
+    }
+
+    out
+}
+
 pub fn canonical_model_batches_from_tasks(tasks: &[ModelTask]) -> Vec<Vec<String>> {
     let mut task_names: Vec<String> = Vec::new();
     for task in tasks.iter() {
@@ -355,34 +437,40 @@ pub fn canonical_model_batches_from_tasks(tasks: &[ModelTask]) -> Vec<Vec<String
         deps_by_name.insert(name.to_string(), deps);
     }
 
-    let mut ordered: Vec<String> = Vec::new();
+    let mut batches: Vec<Vec<String>> = Vec::new();
     let mut done: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    while ordered.len() < task_names.len() {
-        let mut progressed = false;
+    while done.len() < task_names.len() {
+        let mut ready: Vec<String> = Vec::new();
         for name in task_names.iter() {
             if done.contains(name) {
                 continue;
             }
             let deps = deps_by_name.get(name).cloned().unwrap_or_default();
             if deps.iter().all(|dep| done.contains(dep)) {
-                done.insert(name.clone());
-                ordered.push(name.clone());
-                progressed = true;
+                ready.push(name.clone());
             }
         }
-        if !progressed {
+        if ready.is_empty() {
             // Cycles are semantically invalid, but keep the persisted plan executable enough
             // for validation/repair to report the real issue instead of dropping tasks.
             for name in task_names.iter() {
                 if !done.contains(name) {
                     done.insert(name.clone());
-                    ordered.push(name.clone());
+                    batches.push(vec![name.clone()]);
                 }
             }
+            break;
+        }
+
+        for chunk in ready.chunks(MAX_BATCH_SIZE) {
+            batches.push(chunk.to_vec());
+        }
+        for name in ready {
+            done.insert(name);
         }
     }
 
-    ordered.into_iter().map(|name| vec![name]).collect()
+    batches
 }
 
 #[cfg(test)]
@@ -2432,6 +2520,34 @@ mod tests {
     }
 
     #[test]
+    fn canonical_model_batches_groups_independent_models_by_dependency_level() {
+        let tasks = vec![
+            model_task("fct_orders", vec!["stg_orders"]),
+            model_task("dim_customers", vec!["stg_customers"]),
+            model_task("fct_order_items", vec!["fct_orders", "stg_order_items"]),
+            model_task("agg_daily_orders", vec!["fct_orders"]),
+            model_task(
+                "agg_customer_order_summary",
+                vec!["dim_customers", "fct_orders"],
+            ),
+        ];
+
+        let batches = canonical_model_batches_from_tasks(&tasks);
+
+        assert_eq!(
+            batches,
+            vec![
+                vec!["fct_orders".to_string(), "dim_customers".to_string()],
+                vec![
+                    "fct_order_items".to_string(),
+                    "agg_daily_orders".to_string(),
+                    "agg_customer_order_summary".to_string(),
+                ],
+            ]
+        );
+    }
+
+    #[test]
     fn sequential_model_work_groups_gate_next_sql_on_previous_schema() {
         let batches = vec![
             vec!["dim_customers".to_string()],
@@ -2446,6 +2562,25 @@ mod tests {
         assert_eq!(
             groups[2].depends_on_group_ids,
             Some(vec!["model_author_schema_001".to_string()])
+        );
+    }
+
+    #[test]
+    fn canonical_model_work_groups_author_sql_levels_before_schema() {
+        let batches = vec![
+            vec!["dim_customers".to_string(), "fct_orders".to_string()],
+            vec!["fct_order_items".to_string()],
+        ];
+
+        let groups = canonical_model_work_groups_from_batches(&batches);
+
+        assert_eq!(groups[0].group_id, "model_author_sql_001");
+        assert_eq!(groups[1].group_id, "model_author_sql_002");
+        assert_eq!(groups[1].depends_on_group_ids, None);
+        assert_eq!(groups[2].group_id, "model_author_schema_001");
+        assert_eq!(
+            groups[2].depends_on_group_ids,
+            Some(vec!["model_author_sql_001".to_string()])
         );
     }
 

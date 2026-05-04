@@ -10166,6 +10166,7 @@ dependencies = [
  "chrono",
  "dashmap 5.5.3",
  "diffy",
+ "futures",
  "hex",
  "once_cell",
  "react-core",

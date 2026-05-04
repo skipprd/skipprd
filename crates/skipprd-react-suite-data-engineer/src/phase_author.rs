@@ -510,6 +510,24 @@ mod tests {
     }
 
     #[test]
+    fn storage_error_summary_hides_verbose_missing_object_details() {
+        let err = "storage error: s3 get_object failed: ServiceError(NoSuchKey: The specified key does not exist; request_id=abc)";
+
+        assert!(storage_error_is_missing_object(err));
+        assert_eq!(compact_storage_error_summary(err), "object not found");
+    }
+
+    #[test]
+    fn storage_error_summary_truncates_non_missing_errors() {
+        let err = format!("storage error: {}", "x".repeat(400));
+        let summary = compact_storage_error_summary(&err);
+
+        assert!(summary.starts_with("storage error: "));
+        assert!(summary.ends_with("..."));
+        assert!(summary.len() < err.len());
+    }
+
+    #[test]
     fn schema_yml_model_names_detect_missing_model_stanza() {
         let names = collect_model_names_from_schema_yml(
             r#"
@@ -703,12 +721,23 @@ async fn reconcile_existing_model_sql_from_storage(
                 }
             }
             Err(e) => {
-                tracing::warn!(
-                    item_name = %item_name,
-                    expected_model_path = %expected_path,
-                    error = %e,
-                    "model author reconciliation skipped existing SQL check after storage error"
-                );
+                let error_text = e.to_string();
+                let error_summary = compact_storage_error_summary(&error_text);
+                if storage_error_is_missing_object(&error_text) {
+                    tracing::info!(
+                        item_name = %item_name,
+                        expected_model_path = %expected_path,
+                        error_summary = %error_summary,
+                        "model SQL reconciliation found no existing file; item will be authored"
+                    );
+                } else {
+                    tracing::warn!(
+                        item_name = %item_name,
+                        expected_model_path = %expected_path,
+                        error_summary = %error_summary,
+                        "model SQL reconciliation could not read existing file; leaving item eligible for authoring"
+                    );
+                }
             }
         }
     }
@@ -718,6 +747,35 @@ async fn reconcile_existing_model_sql_from_storage(
         checklist_item_id,
         &contract_valid_item_names,
     )
+}
+
+fn storage_error_is_missing_object(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    lower.contains("nosuchkey")
+        || lower.contains("not found")
+        || lower.contains("statuscode(404)")
+        || lower.contains("status: 404")
+        || lower.contains("the specified key does not exist")
+}
+
+fn compact_storage_error_summary(error: &str) -> String {
+    if storage_error_is_missing_object(error) {
+        return "object not found".to_string();
+    }
+
+    let trimmed = error.trim();
+    if trimmed.is_empty() {
+        return "unknown storage error".to_string();
+    }
+
+    const MAX_SUMMARY_CHARS: usize = 240;
+    if trimmed.chars().count() <= MAX_SUMMARY_CHARS {
+        return trimmed.to_string();
+    }
+
+    let mut out: String = trimmed.chars().take(MAX_SUMMARY_CHARS).collect();
+    out.push_str("...");
+    out
 }
 
 fn collect_model_names_from_schema_yml(

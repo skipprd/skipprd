@@ -669,7 +669,7 @@ impl<T: PlanTask> Plan<T> {
 pub fn reconcile_model_batches_and_work_groups(plan: &mut ModelPlan) {
     plan.batches = crate::plan_progress::canonical_model_batches_from_tasks(&plan.tasks);
     plan.work_groups =
-        crate::plan_progress::canonical_sequential_work_groups_from_batches(&plan.batches, "model");
+        crate::plan_progress::canonical_model_work_groups_from_batches(&plan.batches);
 }
 
 pub type CleansePlan = Plan<CleanseTask>;
