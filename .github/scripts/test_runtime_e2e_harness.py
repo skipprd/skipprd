@@ -205,6 +205,40 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
             ],
         )
 
+    def test_mysql_final_state_verifier_uses_numeric_update_predicate(self) -> None:
+        expected_queries = {
+            'SELECT COUNT(*) FROM "skippr_type_matrix_orders"': "3",
+            'SELECT COUNT(*) FROM "skippr_type_matrix_orders" WHERE id = 2': "0",
+            (
+                'SELECT COUNT(*) FROM "skippr_type_matrix_orders" '
+                "WHERE id = 1 AND bool_col = 1 AND int_col = 11"
+            ): "1",
+        }
+        observed: list[str] = []
+
+        def fake_athena_scalar(sql, *, database, env, output_location):
+            self.assertEqual(database, "iceberg_e2e_mysql")
+            observed.append(sql)
+            return expected_queries[sql]
+
+        context = runtime_e2e_harness.ScenarioContext(
+            scenario=runtime_e2e_harness.SCENARIOS["mysql_iceberg_types_cdc"],
+            skipprd=Path("/tmp/skipprd"),
+            runtime_plugin_dir=Path("/tmp/runtime-plugins"),
+            base_env={},
+            assertion_output="s3://example/assertions",
+            namespace=None,
+        )
+
+        with mock.patch.object(
+            runtime_e2e_harness,
+            "athena_scalar",
+            side_effect=fake_athena_scalar,
+        ):
+            runtime_e2e_harness.verify_mysql_iceberg_types_cdc_final_state(context)
+
+        self.assertEqual(list(expected_queries), observed)
+
     def test_runtime_release_manifest_filenames_include_all_sources_and_smoke_support(self) -> None:
         catalog = [
             {"manifest_filename": "file-source.json", "manifest_kind": "DataSource"},
