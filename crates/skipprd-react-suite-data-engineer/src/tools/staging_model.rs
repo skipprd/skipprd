@@ -318,7 +318,8 @@ impl Tool for StagingModelTool {
             };
         if existing_schema.is_none() {
             let seed = "version: 2\n".to_string();
-            let patch_text = project_fs::hunks_only_full_replace_patch("", &seed);
+            let patch_text = project_fs::create_git_patch_text("", &seed, &schema_rel, false)
+                .map_err(|e| format!("failed to build models/schema.yml patch: {e}"))?;
             let outcome = match project_fs::apply_patch(
                 ctx,
                 self.datasets.as_ref(),
@@ -381,7 +382,9 @@ impl Tool for StagingModelTool {
                     }
                 };
             if canonical != existing {
-                let patch_text = project_fs::hunks_only_full_replace_patch(existing, &canonical);
+                let patch_text =
+                    project_fs::create_git_patch_text(existing, &canonical, &schema_rel, true)
+                        .map_err(|e| format!("failed to build models/schema.yml patch: {e}"))?;
                 let outcome = match project_fs::apply_patch(
                     ctx,
                     self.datasets.as_ref(),
@@ -564,7 +567,13 @@ impl Tool for StagingModelTool {
                 .ok()
                 .map(|b| String::from_utf8_lossy(&b).to_string());
             let old_text = existing_opt.unwrap_or_default();
-            let patch_text = project_fs::hunks_only_full_replace_patch(&old_text, &sql_out);
+            let patch_text = project_fs::create_git_patch_text(
+                &old_text,
+                &sql_out,
+                &rel_path,
+                !old_text.is_empty(),
+            )
+            .map_err(|e| format!("failed to build staging SQL patch: {e}"))?;
             let outcome = project_fs::apply_patch(
                 ctx,
                 None,

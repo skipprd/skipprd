@@ -82,7 +82,12 @@ where
     } else {
         Some(react_core::llm_observability::sha256_hex_str(existing_sql))
     };
-    let patch_text = project_fs::hunks_only_full_replace_patch(existing_sql, &dbt_sql);
+    let patch_text = project_fs::create_git_patch_text(
+        existing_sql,
+        &dbt_sql,
+        rel_path,
+        !existing_sql.is_empty(),
+    )?;
     let outcome = project_fs::apply_patch(
         ctx,
         None,

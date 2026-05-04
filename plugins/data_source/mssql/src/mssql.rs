@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use serde_derive::Deserialize;
-use tiberius::{Client, Config as TiberiusConfig, Row};
+use tiberius::{numeric::Numeric, Client, ColumnType, Config as TiberiusConfig, Row};
 use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 use tracing::{error, info};
@@ -121,13 +121,69 @@ impl DataSourceMssqlPlugin {
         let mut map = serde_json::Map::new();
         for (i, col) in row.columns().iter().enumerate() {
             let name = col.name().to_string();
-            let value = Self::column_value_to_json(row, i);
+            let value = Self::column_value_to_json(row, i, col.column_type());
             map.insert(name, value);
         }
         serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_default()
     }
 
-    fn column_value_to_json(row: &Row, idx: usize) -> serde_json::Value {
+    fn numeric_to_json(n: Numeric) -> serde_json::Value {
+        let value: f64 = n.into();
+        serde_json::Number::from_f64(value)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    fn column_value_to_json(row: &Row, idx: usize, column_type: ColumnType) -> serde_json::Value {
+        match column_type {
+            ColumnType::Daten => {
+                return match row.try_get::<chrono::NaiveDate, _>(idx) {
+                    Ok(Some(v)) => serde_json::Value::String(v.to_string()),
+                    Ok(None) => serde_json::Value::Null,
+                    Err(_) => serde_json::Value::Null,
+                };
+            }
+            ColumnType::Datetime
+            | ColumnType::Datetime2
+            | ColumnType::Datetime4
+            | ColumnType::Datetimen => {
+                return match row.try_get::<chrono::NaiveDateTime, _>(idx) {
+                    Ok(Some(v)) => serde_json::Value::String(v.to_string()),
+                    Ok(None) => serde_json::Value::Null,
+                    Err(_) => serde_json::Value::Null,
+                };
+            }
+            ColumnType::DatetimeOffsetn => {
+                return match row.try_get::<chrono::DateTime<chrono::FixedOffset>, _>(idx) {
+                    Ok(Some(v)) => serde_json::Value::String(v.to_rfc3339()),
+                    Ok(None) => serde_json::Value::Null,
+                    Err(_) => serde_json::Value::Null,
+                };
+            }
+            ColumnType::Timen => {
+                return match row.try_get::<chrono::NaiveTime, _>(idx) {
+                    Ok(Some(v)) => serde_json::Value::String(v.to_string()),
+                    Ok(None) => serde_json::Value::Null,
+                    Err(_) => serde_json::Value::Null,
+                };
+            }
+            ColumnType::Decimaln
+            | ColumnType::Numericn
+            | ColumnType::Money
+            | ColumnType::Money4 => {
+                return match row.try_get::<Numeric, _>(idx) {
+                    Ok(Some(v)) => Self::numeric_to_json(v),
+                    Ok(None) => serde_json::Value::Null,
+                    Err(_) => match row.try_get::<f64, _>(idx) {
+                        Ok(Some(v)) => serde_json::json!(v),
+                        Ok(None) => serde_json::Value::Null,
+                        Err(_) => serde_json::Value::Null,
+                    },
+                };
+            }
+            _ => {}
+        }
+
         match row.try_get::<&str, _>(idx) {
             Ok(Some(s)) => return serde_json::Value::String(s.to_string()),
             Ok(None) => return serde_json::Value::Null,
@@ -160,6 +216,11 @@ impl DataSourceMssqlPlugin {
         }
         match row.try_get::<bool, _>(idx) {
             Ok(Some(v)) => return serde_json::json!(v),
+            Ok(None) => return serde_json::Value::Null,
+            Err(_) => {}
+        }
+        match row.try_get::<Numeric, _>(idx) {
+            Ok(Some(v)) => return Self::numeric_to_json(v),
             Ok(None) => return serde_json::Value::Null,
             Err(_) => {}
         }
@@ -305,5 +366,17 @@ impl DataSource for DataSourceMssqlPlugin {
 
     fn execution_contract(&self) -> crate::plugins::SourceExecutionContract {
         crate::plugins::SourceExecutionContract::finite()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn numeric_to_json_preserves_decimal_value() {
+        let value = DataSourceMssqlPlugin::numeric_to_json(Numeric::new_with_scale(12050, 2));
+
+        assert_eq!(value, serde_json::json!(120.50));
     }
 }
