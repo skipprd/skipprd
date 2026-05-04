@@ -117,7 +117,9 @@ fn has_safe_claim(
     })
 }
 
-fn claim_ref_resolves_for_validation(claim: &crate::providers::SemanticClaimRef) -> bool {
+pub(crate) fn claim_ref_resolves_for_validation(
+    claim: &crate::providers::SemanticClaimRef,
+) -> bool {
     use crate::providers::{EvidenceStatus, SemanticClaimKind};
     if claim.claim_id.as_str().trim().is_empty() {
         return false;
@@ -562,6 +564,19 @@ pub fn validate_model_plan_semantics(
             .map(|c| c.name.trim().to_string())
             .filter(|s| !s.is_empty())
             .collect();
+        let available_metric_fields: std::collections::BTreeSet<String> = source_field_names
+            .iter()
+            .cloned()
+            .chain(output_field_names.iter().cloned())
+            .chain(t.grounded_inputs.iter().flat_map(|input| {
+                input
+                    .source_schema
+                    .iter()
+                    .map(|c| c.name.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+            }))
+            .collect();
         for metric in &spec.metrics {
             let metric_id = if metric.name.trim().is_empty() {
                 "<unnamed>"
@@ -583,9 +598,9 @@ pub fn validate_model_plan_semantics(
                 if f.is_empty() {
                     continue;
                 }
-                if !source_field_names.contains(f) && !output_field_names.contains(f) {
+                if !available_metric_fields.contains(f) {
                     issues.push(sem_task(MissingImplementationSpec, tid, format!(
-                        "{}: metric '{}'.source_fields references '{}' which is not in source_schema or output_fields",
+                        "{}: metric '{}'.source_fields references '{}' which is not in source_schema, output_fields, or grounded input schemas",
                         tid, metric_id, f
                     )));
                 }
@@ -838,5 +853,37 @@ mod tests {
             .errors
             .iter()
             .any(|e| e.contains("must list source_fields")));
+    }
+
+    #[test]
+    fn model_plan_allows_metric_source_fields_from_grounded_inputs() {
+        let mut plan = model_plan_with_claims(vec![SemanticClaimRef {
+            claim_id: "candidate_key:db.schema.customers:customer_id"
+                .to_string()
+                .into(),
+            kind: SemanticClaimKind::CandidateKey,
+            status: EvidenceStatus::Observed,
+        }]);
+        plan.tasks[0].source_schema.clear();
+        plan.tasks[0].grounded_inputs[0].source_schema = vec![SourceColumnDef {
+            name: "order_id".to_string(),
+            data_type: "number".to_string(),
+        }];
+        plan.tasks[0]
+            .implementation_spec
+            .as_mut()
+            .expect("spec")
+            .metrics
+            .push(MetricSpec {
+                name: "order_count".to_string(),
+                definition: "count(order_id)".to_string(),
+                source_fields: vec!["order_id".to_string()],
+                caveats: vec![],
+            });
+        let allowed = ["stg_customers".to_string()].into_iter().collect();
+
+        let result = validate_model_plan_semantics(&plan, Some(&allowed));
+
+        assert!(result.ok, "{:?}", result.errors);
     }
 }

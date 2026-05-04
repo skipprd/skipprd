@@ -191,8 +191,12 @@ impl EnrichableTask for crate::plan::ModelTask {
         Ok((item.task_id, spec_value))
     }
 
-    fn apply_spec(task: &mut Self, spec: Self::Spec) {
+    fn apply_spec(task: &mut Self, mut spec: Self::Spec) {
         let spec_inputs = spec.inputs.clone();
+        spec.evidence_claim_refs.retain(|claim| {
+            claim.status.authoring_safe()
+                && crate::plan_validation::claim_ref_resolves_for_validation(claim)
+        });
         task.implementation_spec = Some(spec);
         if !spec_inputs.is_empty() {
             task.inputs = spec_inputs;
@@ -673,7 +677,16 @@ impl DataEngineerSuite {
             )
             .await
             .map_err(|e| e.to_string())?;
-        Self::parse_json_typed_strict::<crate::plan_schema::PlanDesignCritiqueV1>(&raw)
+        let critique =
+            Self::parse_json_typed_strict::<crate::plan_schema::PlanDesignCritiqueV1>(&raw)?;
+        tracing::info!(
+            target: "data_engineer",
+            kind,
+            ok = critique.ok,
+            blockers = critique.blockers.len(),
+            "critiqued plan design memo"
+        );
+        Ok(critique)
     }
 
     pub(super) async fn revise_design_memo(

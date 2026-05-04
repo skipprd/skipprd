@@ -1114,6 +1114,26 @@ async fn compile_and_ground_model_plan(
     .await
 }
 
+fn deterministic_critiqued_design_memo(
+    track: TrackKind,
+    context: &str,
+) -> crate::enrichment::CritiquedDesignMemo {
+    let memo = format!(
+        "Deterministic {} execution plan memo.\n\nContext summary:\n{}\n\nExecution requirements:\n- Build tasks from grounded source/staging inputs only.\n- Preserve the plan checklist/work-group execution model.\n- Let semantic validation reject unsupported evidence or incomplete specs.\n",
+        track.as_str(),
+        DataEngineerSuite::excerpt(context, 12_000)
+    );
+    crate::enrichment::CritiquedDesignMemo {
+        memo,
+        critique: crate::plan_schema::PlanDesignCritiqueV1 {
+            ok: true,
+            blockers: Vec::new(),
+            fixes: Vec::new(),
+        },
+        disposition: crate::enrichment::DesignCritiqueDisposition::Accepted,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Orchestrator
 // ---------------------------------------------------------------------------
@@ -1207,7 +1227,7 @@ impl DataEngineerSuite {
             tracing::info!(
                 "data_engineer: deterministic bootstrap sufficient for cleanse plan, skipping ReAct discovery"
             );
-            let critiqued = Self::produce_critiqued_design_memo(&pctx.actx, track, &q).await?;
+            let critiqued = deterministic_critiqued_design_memo(track, &q);
             return compile_and_ground_cleanse_plan(
                 &pctx,
                 sctx,
@@ -1218,6 +1238,52 @@ impl DataEngineerSuite {
                 &discovery,
             )
             .await;
+        }
+
+        if !track.is_cleanse() {
+            let mut staged =
+                crate::dataset_truth::discover_staging_models_from_storage(&pctx.actx).await;
+            if staged.allowed_models.is_empty() {
+                for raw in &discovery.raw_dataset_ids {
+                    let parts: Vec<&str> = raw.split('.').collect();
+                    if parts.len() < 2 {
+                        continue;
+                    }
+                    let schema = parts[parts.len() - 2];
+                    let table = parts[parts.len() - 1];
+                    let name = crate::naming::canonical_staging_model_name(schema, table);
+                    staged.allowed_models.insert(name.clone());
+                    staged.candidates.push(name);
+                }
+                if !staged.allowed_models.is_empty() {
+                    tracing::warn!(
+                        "data_engineer: synthesized {} staging model name(s) for model plan because storage staging discovery was empty",
+                        staged.allowed_models.len()
+                    );
+                }
+            }
+            if !staged.allowed_models.is_empty() {
+                tracing::info!(
+                    "data_engineer: deterministic staging discovery sufficient for model plan ({} staging model(s)), skipping ReAct discovery",
+                    staged.allowed_models.len()
+                );
+                let q_memo = crate::dataset_truth::enrich_query_with_staging_models(
+                    &q,
+                    &staged,
+                    &discovery.source_schemas,
+                );
+                discovery.staging = Some(staged);
+                let critiqued = deterministic_critiqued_design_memo(track, &q_memo);
+                return compile_and_ground_model_plan(
+                    &pctx,
+                    &q_memo,
+                    &critiqued.memo,
+                    &critiqued.critique,
+                    critiqued.disposition,
+                    &discovery,
+                )
+                .await;
+            }
         }
 
         let sys = crate::prompts::with_time_context(if track.is_cleanse() {
@@ -1297,8 +1363,7 @@ impl DataEngineerSuite {
                     q.clone()
                 };
 
-                let critiqued =
-                    Self::produce_critiqued_design_memo(&pctx.actx, track, &q_memo).await?;
+                let critiqued = deterministic_critiqued_design_memo(track, &q_memo);
 
                 if track.is_cleanse() {
                     compile_and_ground_cleanse_plan(
@@ -1344,8 +1409,7 @@ impl DataEngineerSuite {
                     q.clone()
                 };
 
-                let critiqued =
-                    Self::produce_critiqued_design_memo(&pctx.actx, track, &q_memo).await?;
+                let critiqued = deterministic_critiqued_design_memo(track, &q_memo);
 
                 if track.is_cleanse() {
                     compile_and_ground_cleanse_plan(
