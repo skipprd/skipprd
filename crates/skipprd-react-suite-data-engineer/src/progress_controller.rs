@@ -777,7 +777,8 @@ pub fn format_plan_violations(violations: &[PlanViolation]) -> String {
         out.push_str(&format!("  Evidence: {}\n\n", v.evidence.trim()));
     }
     out.push_str(
-        "Revise the plan to fix these issues. Do NOT repeat the same unachievable instructions.\n",
+        "Revise the plan to fix these issues. Do NOT repeat the same unachievable instructions. \
+For each affected existing file, add concrete fix directives in the task checklist/details (for example: remove the stale field, preserve nulls instead of filtering, rename the output column, or restore the planned input).\n",
     );
     out
 }

@@ -62,6 +62,7 @@ pub(crate) async fn compile_and_write_model<V>(
     validate_dbt_sql: V,
     existing_sql: &str,
     rel_path: &str,
+    spec_digest: Option<&str>,
 ) -> Result<CompileAndWriteResult, String>
 where
     V: FnOnce(&str) -> Result<(), String>,
@@ -69,7 +70,10 @@ where
     let intent =
         authoring_ir::compile_sql_first_draft(&draft.sql, &draft.notes, plan_output_fields)?;
 
-    let dbt_sql = sql_first::apply_placeholders(&intent.sql, materialize_replacements);
+    let dbt_sql = crate::authoring_contract::add_sql_spec_digest(
+        &sql_first::apply_placeholders(&intent.sql, materialize_replacements),
+        spec_digest,
+    );
 
     validate_dbt_sql(&dbt_sql)?;
 

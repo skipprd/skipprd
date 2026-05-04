@@ -102,6 +102,7 @@ Cover all executable-plan sections explicitly:\n\
 - work-group sequencing + dependencies\n\
 - validation criteria/invariants for completion\n\
 Also cover goals, entities, risks, and validation strategy.\n\
+If this is responding to review/authoring failures for existing files, spell out exact per-file fix directives rather than broad intent.\n\
 Be specific and grounded; do not output JSON.\n\
 \n{layer_guidance}\n\
 \nWork-group batching (groups of up to 5) is an execution detail, NOT a cap on total model count."
@@ -212,9 +213,11 @@ implementation_spec MUST contain only these top-level keys:\n\
 - evidence_claim_refs\n\
 Do not emit batch_id, dependencies, data_quality, wrappers, commentary, or any non-schema keys.\n\
 Each output_fields item MUST include: name, kind, expression.\n\
+Each metrics[] item MUST include source_fields with the exact fields used by the metric definition.\n\
 spec_version MUST be an integer number (not a string).\n\
 COLUMN GROUNDING (CRITICAL):\n\
 - output_fields[].source_columns and joins[].on MUST reference ONLY columns from the AUTHORITATIVE SCHEMAS or IMMUTABLE FACTS staging model columns.\n\
+- metrics[].source_fields MUST reference ONLY columns from the AUTHORITATIVE SCHEMAS or output_fields.\n\
 - Do NOT invent, abbreviate, or rename column names.\n\
 - inputs[] MUST use exact staging model names from the IMMUTABLE FACTS section.\n\
 - evidence_claim_refs[] MUST reference only typed profile/user evidence with fields {claim_id, kind, status}. If proof is missing, include an `unverified` claim and keep assumptions explicit; downstream gates will request plan_change rather than speculative authoring.\n\

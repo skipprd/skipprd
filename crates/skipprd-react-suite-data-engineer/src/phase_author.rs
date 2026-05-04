@@ -1,6 +1,6 @@
 use super::*;
 use crate::control_flow::Phase;
-use react_core::storage::{retry_get_bytes, retry_head_etag, retry_list_prefix};
+use react_core::storage::{retry_get_bytes, retry_list_prefix};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AuthorValidateTrigger {
@@ -215,6 +215,9 @@ fn build_review_patch_plan_context(
     }
     ctx.push_str(
         "\nNext action: apply the smallest implementation fix that satisfies the prior review feedback. Keep changes local and preserve the approved grounded plan.\n",
+    );
+    ctx.push_str(
+        "If the feedback cannot be satisfied without changing the approved plan/spec, do NOT edit the plan in this PatchImpl loop. Return a concise complete result beginning with PLAN_CHANGE_REQUIRED and include the exact contradiction, target task, and file path.\n",
     );
     ctx
 }
@@ -442,17 +445,16 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_existing_model_sql_checklist_marks_matching_paths_done() {
+    fn reconcile_existing_model_sql_checklist_marks_contract_valid_items_done() {
         let mut plan = sample_model_plan();
         let item_names = vec!["dim_customers".to_string()];
-        let existing_paths =
-            std::collections::HashSet::from([String::from("./models/marts/dim_customers.sql")]);
+        let contract_valid_items = std::collections::HashSet::from([String::from("dim_customers")]);
 
         let changed = reconcile_existing_model_sql_checklist(
             &mut plan,
             &item_names,
             crate::plan::CHECKLIST_SQL_MODEL,
-            &existing_paths,
+            &contract_valid_items,
         );
 
         assert!(changed);
@@ -469,14 +471,13 @@ mod tests {
     fn reconciled_model_sql_routes_next_action_to_schema_contract() {
         let mut plan = sample_model_plan();
         let item_names = vec!["dim_customers".to_string()];
-        let existing_paths =
-            std::collections::HashSet::from([String::from("models/marts/dim_customers.sql")]);
+        let contract_valid_items = std::collections::HashSet::from([String::from("dim_customers")]);
 
         assert!(reconcile_existing_model_sql_checklist(
             &mut plan,
             &item_names,
             crate::plan::CHECKLIST_SQL_MODEL,
-            &existing_paths,
+            &contract_valid_items,
         ));
 
         assert_eq!(
@@ -486,16 +487,16 @@ mod tests {
     }
 
     #[test]
-    fn reconcile_existing_model_sql_checklist_ignores_missing_paths() {
+    fn reconcile_existing_model_sql_checklist_ignores_contract_invalid_items() {
         let mut plan = sample_model_plan();
         let item_names = vec!["dim_customers".to_string()];
-        let existing_paths = std::collections::HashSet::new();
+        let contract_valid_items = std::collections::HashSet::new();
 
         let changed = reconcile_existing_model_sql_checklist(
             &mut plan,
             &item_names,
             crate::plan::CHECKLIST_SQL_MODEL,
-            &existing_paths,
+            &contract_valid_items,
         );
 
         assert!(!changed);
@@ -522,6 +523,19 @@ models:
 
         assert!(names.contains("dim_customers"));
         assert!(!names.contains("fact_orders"));
+    }
+
+    #[test]
+    fn review_patch_context_forbids_plan_edits_and_names_escape_hatch() {
+        let ctx = build_review_patch_plan_context(
+            TrackKind::Model,
+            "plans/model.json",
+            &["models/marts/fct_orders.sql".to_string()],
+        );
+
+        assert!(ctx.contains("Do NOT revise the approved plan/spec"));
+        assert!(ctx.contains("PLAN_CHANGE_REQUIRED"));
+        assert!(ctx.contains("exact contradiction"));
     }
 }
 
@@ -611,7 +625,7 @@ fn reconcile_existing_model_sql_checklist(
     plan: &mut crate::plan::ModelPlan,
     item_names: &[String],
     checklist_item_id: &str,
-    existing_model_paths: &std::collections::HashSet<String>,
+    contract_valid_item_names: &std::collections::HashSet<String>,
 ) -> bool {
     if checklist_item_id.trim().is_empty() {
         return false;
@@ -622,14 +636,7 @@ fn reconcile_existing_model_sql_checklist(
         let Some(task) = plan.tasks.iter().find(|t| t.name == *item_name) else {
             continue;
         };
-        let Some(expected_path) = task.expected_model_path.as_deref() else {
-            continue;
-        };
-        let normalized_expected = normalize_review_patch_target_path(expected_path);
-        let has_matching_file = existing_model_paths
-            .iter()
-            .any(|path| normalize_review_patch_target_path(path) == normalized_expected);
-        if !has_matching_file {
+        if !contract_valid_item_names.contains(item_name) {
             continue;
         }
 
@@ -665,7 +672,7 @@ async fn reconcile_existing_model_sql_from_storage(
     item_names: &[String],
     checklist_item_id: &str,
 ) -> bool {
-    let mut existing_model_paths: std::collections::HashSet<String> =
+    let mut contract_valid_item_names: std::collections::HashSet<String> =
         std::collections::HashSet::new();
     for item_name in item_names {
         let Some(task) = plan.tasks.iter().find(|t| t.name == *item_name) else {
@@ -675,11 +682,26 @@ async fn reconcile_existing_model_sql_from_storage(
             continue;
         };
         let key = crate::project_fs::join_storage_key(actx, &expected_path);
-        match retry_head_etag(actx.storage().as_ref(), &key).await {
-            Ok(Some(_)) => {
-                existing_model_paths.insert(normalize_review_patch_target_path(&expected_path));
+        match retry_get_bytes(actx.storage().as_ref(), &key).await {
+            Ok(bytes) => {
+                let sql = String::from_utf8_lossy(&bytes).to_string();
+                let check = crate::authoring_contract::verify_model_sql_contract(
+                    &plan.plan_key,
+                    task,
+                    &sql,
+                    true,
+                );
+                if check.is_ok() {
+                    contract_valid_item_names.insert(item_name.clone());
+                } else {
+                    tracing::info!(
+                        item_name = %item_name,
+                        expected_model_path = %expected_path,
+                        drift = ?check.drift_reasons,
+                        "model SQL reconciliation refused stale/off-contract file"
+                    );
+                }
             }
-            Ok(None) => {}
             Err(e) => {
                 tracing::warn!(
                     item_name = %item_name,
@@ -694,7 +716,7 @@ async fn reconcile_existing_model_sql_from_storage(
         plan,
         item_names,
         checklist_item_id,
-        &existing_model_paths,
+        &contract_valid_item_names,
     )
 }
 
@@ -1147,9 +1169,33 @@ async fn load_model_author_context(
                     crate::project_fs::join_storage_key(actx, crate::project_fs::MODELS_SCHEMA_YML);
                 if let Ok(bytes) = retry_get_bytes(actx.storage().as_ref(), &key).await {
                     let content = String::from_utf8_lossy(&bytes).to_string();
-                    if let Ok(names_in_schema) = collect_model_names_from_schema_yml(&content) {
-                        let all_present = ids.iter().all(|n| names_in_schema.contains(n));
-                        if all_present {
+                    if collect_model_names_from_schema_yml(&content).is_ok() {
+                        let mut all_contract_valid = true;
+                        for n in ids.iter() {
+                            let Some(task) = plan.tasks.iter().find(|t| t.name == *n) else {
+                                all_contract_valid = false;
+                                break;
+                            };
+                            let Some(spec) = task.implementation_spec.as_ref() else {
+                                all_contract_valid = false;
+                                break;
+                            };
+                            let check = crate::authoring_contract::verify_model_schema_yml_contract(
+                                n,
+                                &spec.output_fields,
+                                &content,
+                            );
+                            if !check.is_ok() {
+                                tracing::info!(
+                                    item_name = %n,
+                                    drift = ?check.drift_reasons,
+                                    "model schema reconciliation refused stale/off-contract schema.yml entry"
+                                );
+                                all_contract_valid = false;
+                                break;
+                            }
+                        }
+                        if all_contract_valid {
                             let mut changed = false;
                             let checklist_item_id = resolve_checklist_item_id(
                                 actx,

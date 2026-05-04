@@ -540,10 +540,56 @@ pub fn validate_model_plan_semantics(
                 ),
             ));
         }
-        if spec.output_fields.is_empty() && spec.metrics.is_empty() {
-            issues.push(sem_task(MissingImplementationSpec, tid, format!(
-                "{}: implementation_spec must include output_fields and/or metrics (design detail required)", tid
-            )));
+        if spec.output_fields.is_empty() {
+            issues.push(sem_task(
+                MissingImplementationSpec,
+                tid,
+                format!(
+                    "{}: implementation_spec.output_fields is empty (gold SQL requires an explicit output contract)",
+                    tid
+                ),
+            ));
+        }
+        let output_field_names: std::collections::BTreeSet<String> = spec
+            .output_fields
+            .iter()
+            .map(|f| f.name.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        let source_field_names: std::collections::BTreeSet<String> = t
+            .source_schema
+            .iter()
+            .map(|c| c.name.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .collect();
+        for metric in &spec.metrics {
+            let metric_id = if metric.name.trim().is_empty() {
+                "<unnamed>"
+            } else {
+                metric.name.trim()
+            };
+            if metric.source_fields.is_empty() {
+                issues.push(sem_task(
+                    MissingImplementationSpec,
+                    tid,
+                    format!(
+                        "{}: metric '{}' must list source_fields used by its definition",
+                        tid, metric_id
+                    ),
+                ));
+            }
+            for field in &metric.source_fields {
+                let f = field.trim();
+                if f.is_empty() {
+                    continue;
+                }
+                if !source_field_names.contains(f) && !output_field_names.contains(f) {
+                    issues.push(sem_task(MissingImplementationSpec, tid, format!(
+                        "{}: metric '{}'.source_fields references '{}' which is not in source_schema or output_fields",
+                        tid, metric_id, f
+                    )));
+                }
+            }
         }
         issues.extend(model_evidence_issues(tid, spec));
         let sql_status = checklist_status(&t.checklist, CHECKLIST_SQL_MODEL);
@@ -735,5 +781,62 @@ mod tests {
         let result = validate_model_plan_semantics(&plan, Some(&allowed));
 
         assert!(result.ok, "{:?}", result.errors);
+    }
+
+    #[test]
+    fn model_plan_requires_explicit_output_fields() {
+        let mut plan = model_plan_with_claims(vec![SemanticClaimRef {
+            claim_id: "candidate_key:db.schema.customers:customer_id"
+                .to_string()
+                .into(),
+            kind: SemanticClaimKind::CandidateKey,
+            status: EvidenceStatus::Observed,
+        }]);
+        plan.tasks[0]
+            .implementation_spec
+            .as_mut()
+            .expect("spec")
+            .output_fields
+            .clear();
+        let allowed = ["stg_customers".to_string()].into_iter().collect();
+
+        let result = validate_model_plan_semantics(&plan, Some(&allowed));
+
+        assert!(!result.ok);
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("output_fields is empty")));
+    }
+
+    #[test]
+    fn model_plan_requires_metric_source_fields() {
+        let mut plan = model_plan_with_claims(vec![SemanticClaimRef {
+            claim_id: "candidate_key:db.schema.customers:customer_id"
+                .to_string()
+                .into(),
+            kind: SemanticClaimKind::CandidateKey,
+            status: EvidenceStatus::Observed,
+        }]);
+        plan.tasks[0]
+            .implementation_spec
+            .as_mut()
+            .expect("spec")
+            .metrics
+            .push(MetricSpec {
+                name: "revenue".to_string(),
+                definition: "sum(total_amount)".to_string(),
+                source_fields: vec![],
+                caveats: vec![],
+            });
+        let allowed = ["stg_customers".to_string()].into_iter().collect();
+
+        let result = validate_model_plan_semantics(&plan, Some(&allowed));
+
+        assert!(!result.ok);
+        assert!(result
+            .errors
+            .iter()
+            .any(|e| e.contains("must list source_fields")));
     }
 }

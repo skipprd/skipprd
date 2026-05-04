@@ -25,6 +25,25 @@ fn gold_model_rel_path(folder: &str, name: &str) -> String {
     format!("models/{}/{}.sql", folder, name)
 }
 
+fn existing_gold_model_path_for_name(
+    name: &str,
+    core_exists: bool,
+    marts_exists: bool,
+) -> Result<Option<String>, String> {
+    if core_exists && marts_exists {
+        return Err(format!(
+            "{name}: model exists in both canonical folders (models/core and models/marts). Keep exactly one canonical location before authoring."
+        ));
+    }
+    if core_exists {
+        Ok(Some(gold_model_rel_path("core", name)))
+    } else if marts_exists {
+        Ok(Some(gold_model_rel_path("marts", name)))
+    } else {
+        Ok(None)
+    }
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
@@ -77,6 +96,8 @@ fn build_gold_sys_prompt(
          - Gold models read from silver models (stg_*) or other gold models in the plan via ref(). NO source().\n\
          - Gold models MUST NOT call source() anywhere.\n\
          - IMPORTANT: The user payload may include plan invariants/notes; invariants are hard requirements.\n\
+         - If the payload includes authoring_mode=\"targeted_patch_from_current_file\", preserve correct existing logic and apply only the required change.\n\
+         - If authoring_mode=\"full_replacement_from_current_spec\", treat existing_model_sql as stale context only; write a fresh full query from the current plan_implementation_spec.\n\
          - Prefer minimal, stable columns for business use; do not invent fields.\n\
          - CRITICAL: Do NOT select or reference any column not present in inputs[].schema_columns for that input.\n\
            If you need a field that does not exist in silver, put it in notes and do NOT guess.\n\
@@ -186,6 +207,13 @@ impl Tool for GoldModelTool {
                 continue;
             }
 
+            let plan_task_opt = plan_opt
+                .as_ref()
+                .and_then(|p| p.tasks.iter().find(|t| t.name.trim() == name));
+            let plan_expected_path_early = plan_task_opt
+                .and_then(|t| t.expected_model_path.clone())
+                .map(|p| p.trim().to_string())
+                .filter(|p| !p.is_empty());
             let requested_folder = normalize_folder(it.folder.as_deref());
             let core_rel = gold_model_rel_path("core", name);
             let marts_rel = gold_model_rel_path("marts", name);
@@ -199,18 +227,46 @@ impl Tool for GoldModelTool {
                 .get_bytes(&format!("{}/{}", base, marts_rel))
                 .await
                 .is_ok();
-            if core_exists && marts_exists {
-                errors.push(format!(
-                    "{name}: model exists in both canonical folders (models/core and models/marts). Keep exactly one canonical location before authoring."
-                ));
-                continue;
-            }
-            let folder = if core_exists {
+            let existing_rel =
+                match existing_gold_model_path_for_name(name, core_exists, marts_exists) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        errors.push(e);
+                        continue;
+                    }
+                };
+            let rel_path = if let Some(path) = plan_expected_path_early.as_ref() {
+                path.clone()
+            } else {
+                let folder = existing_rel
+                    .as_deref()
+                    .and_then(|rel| {
+                        if rel.contains("/core/") {
+                            Some("core")
+                        } else if rel.contains("/marts/") {
+                            Some("marts")
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(requested_folder.as_str())
+                    .to_string();
+                gold_model_rel_path(&folder, name)
+            };
+            let folder = if rel_path.contains("/core/") {
                 "core".to_string()
-            } else if marts_exists {
+            } else if rel_path.contains("/marts/") {
                 "marts".to_string()
             } else {
                 requested_folder
+            };
+            if let Some(existing_rel) = existing_rel.as_deref() {
+                if existing_rel != rel_path {
+                    errors.push(format!(
+                        "{name}: existing model path '{existing_rel}' conflicts with approved plan path '{rel_path}'. Move or remove the stale artifact before authoring."
+                    ));
+                    continue;
+                }
             };
             if let Some(prev) = canonical_folder_by_name.get(name) {
                 if prev != &folder {
@@ -223,7 +279,6 @@ impl Tool for GoldModelTool {
             } else {
                 canonical_folder_by_name.insert(name.to_string(), folder.clone());
             }
-            let rel_path = gold_model_rel_path(&folder, name);
 
             // Load the inputs to ground the LLM in actual silver SQL.
             let effective_grounded_inputs = if it.grounded_inputs.is_empty() {
@@ -333,18 +388,20 @@ impl Tool for GoldModelTool {
                 plan_checklist,
                 plan_expected_model_path,
                 plan_implementation_spec,
-            ) = plan_opt
-                .as_ref()
-                .and_then(|p| p.tasks.iter().find(|t| t.name.trim() == name))
+                plan_spec_digest,
+            ) = plan_task_opt
                 .map(|t| {
                     (
                         t.invariants.clone(),
                         t.checklist.clone(),
                         t.expected_model_path.clone().unwrap_or_default(),
                         t.implementation_spec.clone(),
+                        plan_opt.as_ref().and_then(|p| {
+                            crate::authoring_contract::model_task_spec_digest(&p.plan_key, t)
+                        }),
                     )
                 })
-                .unwrap_or_else(|| (vec![], vec![], String::new(), None));
+                .unwrap_or_else(|| (vec![], vec![], String::new(), None, None));
             if plan_output_field_names.is_empty() {
                 if let Some(spec) = plan_implementation_spec.as_ref() {
                     plan_output_field_names =
@@ -353,6 +410,34 @@ impl Tool for GoldModelTool {
             }
             let plan_instr = render_plan_driven_instructions(&plan_invariants, &plan_checklist);
             let effective_instructions = combine_instructions(&it.instructions, &plan_instr);
+            let existing_model_sql = ctx
+                .storage()
+                .get_bytes(&format!("{}/{}", base, rel_path))
+                .await
+                .ok()
+                .map(|b| String::from_utf8_lossy(&b).to_string())
+                .unwrap_or_default();
+            let drift_reasons = plan_task_opt
+                .map(|t| {
+                    plan_opt
+                        .as_ref()
+                        .map(|p| {
+                            crate::authoring_contract::model_sql_drift_reasons(
+                                &p.plan_key,
+                                t,
+                                &existing_model_sql,
+                            )
+                        })
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            let authoring_mode = if existing_model_sql.trim().is_empty() {
+                "new_file"
+            } else if crate::authoring_contract::model_sql_is_high_drift(&drift_reasons) {
+                "full_replacement_from_current_spec"
+            } else {
+                "targeted_patch_from_current_file"
+            };
 
             let user_value = serde_json::json!({
                 "model_name": name,
@@ -365,14 +450,9 @@ impl Tool for GoldModelTool {
                 "plan_implementation_spec": plan_implementation_spec,
                 "plan_expected_model_path": plan_expected_model_path,
                 "inputs": input_blocks,
-                "existing_model_sql": ctx
-                    .storage()
-                    .get_bytes(&format!("{}/{}", base, rel_path))
-                    .await
-                    .ok()
-                    .map(|b| String::from_utf8_lossy(&b).to_string())
-                    .unwrap_or_default()
-                ,
+                "existing_model_sql": existing_model_sql,
+                "existing_model_drift_reasons": drift_reasons,
+                "authoring_mode": authoring_mode,
                 "sql_first": {
                     "input_placeholders": it.inputs.iter().enumerate().map(|(i, inp)| {
                         serde_json::json!({
@@ -463,13 +543,7 @@ impl Tool for GoldModelTool {
                     continue;
                 }
             };
-            let existing_sql = ctx
-                .storage()
-                .get_bytes(&format!("{}/{}", base, rel_path))
-                .await
-                .ok()
-                .map(|b| String::from_utf8_lossy(&b).to_string())
-                .unwrap_or_default();
+            let existing_sql = existing_model_sql;
 
             let write_result = engine::compile_and_write_model(
                 ctx,
@@ -490,6 +564,7 @@ impl Tool for GoldModelTool {
                 },
                 &existing_sql,
                 &rel_path,
+                plan_spec_digest.as_deref(),
             )
             .await;
             match write_result {
@@ -723,6 +798,14 @@ mod tests {
         );
         assert!(sys.contains("never reference a SELECT-list alias"));
         assert!(sys.contains("SAFE_CAST"));
+    }
+
+    #[test]
+    fn existing_gold_model_path_detects_folder_collision() {
+        let err = existing_gold_model_path_for_name("fct_orders", true, true)
+            .expect_err("core/marts duplicate should be rejected");
+
+        assert!(err.contains("both canonical folders"));
     }
 
     #[tokio::test]
@@ -1006,6 +1089,7 @@ mod tests {
                     metrics: vec![crate::plan::MetricSpec {
                         name: "orders".to_string(),
                         definition: "count(*) of orders".to_string(),
+                        source_fields: vec!["order_id".to_string()],
                         caveats: vec![],
                     }],
                     output_fields: vec![crate::plan::OutputFieldSpec {

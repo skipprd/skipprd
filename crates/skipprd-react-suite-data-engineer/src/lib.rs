@@ -82,6 +82,7 @@ impl react_core::suite::WorkflowNodeContract for DataEngineerSuite {
 }
 
 mod agent_modes;
+pub(crate) mod authoring_contract;
 pub(crate) mod authoring_driver;
 pub(crate) mod authoring_ir;
 mod catalog_bootstrap;
@@ -544,6 +545,7 @@ impl DataEngineerSuite {
                 "metrics",
                 "output_fields",
                 "assumptions",
+                "evidence_claim_refs",
             ]
             .into_iter()
             .collect()

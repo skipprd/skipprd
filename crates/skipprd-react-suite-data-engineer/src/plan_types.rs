@@ -360,6 +360,10 @@ pub struct MetricSpec {
     pub name: String,
     /// One-line definition (formula + inclusion/exclusion rules).
     pub definition: String,
+    /// Exact output/input fields used by the metric. This keeps metric plans
+    /// auditable and lets authoring require field-level parse/aggregate evidence.
+    #[serde(default)]
+    pub source_fields: Vec<String>,
     /// Optional caveats/assumptions (bounded).
     #[serde(default)]
     pub caveats: Vec<String>,

@@ -667,18 +667,21 @@ impl Tool for StagingModelTool {
                 plan_checklist,
                 plan_expected_model_path,
                 plan_implementation_spec,
+                plan_spec_digest,
             ) = plan_opt
                 .as_ref()
-                .and_then(|p| p.tasks.iter().find(|t| t.dataset_id == *ds))
-                .map(|t| {
-                    (
-                        t.invariants.clone(),
-                        t.checklist.clone(),
-                        t.expected_model_path.clone().unwrap_or_default(),
-                        t.implementation_spec.clone(),
-                    )
+                .and_then(|p| {
+                    p.tasks.iter().find(|t| t.dataset_id == *ds).map(|t| {
+                        (
+                            t.invariants.clone(),
+                            t.checklist.clone(),
+                            t.expected_model_path.clone().unwrap_or_default(),
+                            t.implementation_spec.clone(),
+                            crate::authoring_contract::cleanse_task_spec_digest(&p.plan_key, t),
+                        )
+                    })
                 })
-                .unwrap_or_else(|| (vec![], vec![], String::new(), None));
+                .unwrap_or_else(|| (vec![], vec![], String::new(), None, None));
             if plan_output_field_names.is_empty() {
                 if let Some(spec) = plan_implementation_spec.as_ref() {
                     plan_output_field_names =
@@ -812,6 +815,7 @@ impl Tool for StagingModelTool {
                 },
                 &existing_sql,
                 &rel_path,
+                plan_spec_digest.as_deref(),
             )
             .await;
             match write_result {

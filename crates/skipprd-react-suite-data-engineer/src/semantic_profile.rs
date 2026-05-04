@@ -1076,6 +1076,7 @@ mod tests {
                     .map(|name| crate::plan_types::MetricSpec {
                         name: name.to_string(),
                         definition: format!("{name} metric"),
+                        source_fields: vec![name.to_string()],
                         caveats: vec![],
                     })
                     .collect(),
