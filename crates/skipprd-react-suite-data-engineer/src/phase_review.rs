@@ -307,17 +307,36 @@ impl DataEngineerSuite {
                         trimmed.to_string()
                     }
                 };
-                let violation = crate::progress_controller::PlanViolation::new(
-                    phase,
-                    None,
-                    format!("Review requested plan change: {evidence}"),
-                );
+                let violations =
+                    if phase == control_flow::Phase::ModelReview && !meta.dataset_ids.is_empty() {
+                        meta.dataset_ids
+                            .iter()
+                            .map(|id| {
+                                crate::progress_controller::PlanViolation::new(
+                                    phase,
+                                    Some(id.trim().to_string()),
+                                    format!("Review requested plan change: {evidence}"),
+                                )
+                            })
+                            .collect()
+                    } else {
+                        vec![crate::progress_controller::PlanViolation::new(
+                            phase,
+                            None,
+                            format!("Review requested plan change: {evidence}"),
+                        )]
+                    };
+                let strategy = if phase == control_flow::Phase::ModelReview {
+                    crate::progress_controller::PlanRevisionStrategy::Amend
+                } else {
+                    crate::progress_controller::PlanRevisionStrategy::Rewrite
+                };
                 crate::phase_contract::commit_plan_revision_loopback(
                     thread_store,
                     thread_id,
                     phase,
-                    vec![violation],
-                    crate::progress_controller::PlanRevisionStrategy::Rewrite,
+                    violations,
+                    strategy,
                 )
                 .await?;
                 Ok(PhaseOutcome::TransitionCommitted)

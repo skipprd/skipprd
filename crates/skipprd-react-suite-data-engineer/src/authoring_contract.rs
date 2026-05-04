@@ -43,22 +43,20 @@ pub(crate) fn extract_sql_spec_digest(sql: &str) -> Option<String> {
     })
 }
 
-pub(crate) fn cleanse_task_spec_digest(plan_key: &str, task: &CleanseTask) -> Option<String> {
+pub(crate) fn cleanse_task_spec_digest(_plan_key: &str, task: &CleanseTask) -> Option<String> {
     let spec = task.implementation_spec.as_ref()?;
     Some(spec_digest(&serde_json::json!({
         "kind": "cleanse",
-        "plan_key": plan_key,
         "dataset_id": task.dataset_id,
         "expected_model_path": task.expected_model_path,
         "implementation_spec": spec,
     })))
 }
 
-pub(crate) fn model_task_spec_digest(plan_key: &str, task: &ModelTask) -> Option<String> {
+pub(crate) fn model_task_spec_digest(_plan_key: &str, task: &ModelTask) -> Option<String> {
     let spec = task.implementation_spec.as_ref()?;
     Some(spec_digest(&serde_json::json!({
         "kind": "model",
-        "plan_key": plan_key,
         "name": task.name,
         "folder": task.folder,
         "inputs": task.inputs,
@@ -290,6 +288,16 @@ mod tests {
             status: Default::default(),
             checklist: vec![],
         }
+    }
+
+    #[test]
+    fn model_task_spec_digest_is_stable_across_plan_keys() {
+        let task = model_task();
+
+        let digest_a = model_task_spec_digest("plan-a", &task).unwrap();
+        let digest_b = model_task_spec_digest("plan-b", &task).unwrap();
+
+        assert_eq!(digest_a, digest_b);
     }
 
     #[test]

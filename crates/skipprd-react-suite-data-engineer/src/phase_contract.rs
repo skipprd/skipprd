@@ -37,6 +37,15 @@ impl PhaseDecision {
     }
 }
 
+fn plan_revision_requested_transition(
+    strategy: crate::progress_controller::PlanRevisionStrategy,
+) -> PhaseTransition {
+    PhaseTransition::PlanRevisionRequested {
+        violations: vec![],
+        strategy,
+    }
+}
+
 pub async fn commit_phase_decision(
     thread_store: &ThreadStore,
     thread_id: &str,
@@ -135,11 +144,28 @@ pub async fn commit_plan_revision_loopback(
         Some(from_phase),
         PhaseDecision::loopback(
             track.plan_phase(),
-            Some(PhaseTransition::PlanRevisionRequested {
-                violations: vec![],
-                strategy: crate::progress_controller::PlanRevisionStrategy::Rewrite,
-            }),
+            Some(plan_revision_requested_transition(strategy)),
         ),
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn plan_revision_transition_preserves_requested_strategy() {
+        let transition = super::plan_revision_requested_transition(
+            crate::progress_controller::PlanRevisionStrategy::Amend,
+        );
+
+        match transition {
+            crate::progress_controller::PhaseTransition::PlanRevisionRequested {
+                strategy, ..
+            } => assert_eq!(
+                strategy,
+                crate::progress_controller::PlanRevisionStrategy::Amend
+            ),
+            _ => panic!("expected plan revision transition"),
+        }
+    }
 }

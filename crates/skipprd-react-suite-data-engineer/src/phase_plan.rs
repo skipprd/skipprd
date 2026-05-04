@@ -6,6 +6,8 @@ use crate::plan_types::TrackPlan;
 use react_core::keyspace::encode_key_component;
 use react_core::storage::{retry_get_json, retry_head_etag};
 
+const MODEL_PLAN_AMENDMENT_CHURN_WARNING: &str = "Preserve unaffected tasks exactly. Unnecessary byte diffs change contract digests and cause expensive re-authoring churn, so only surgically edit the named task IDs and explicitly required dependents.";
+
 // ---------------------------------------------------------------------------
 // Context struct: groups the recurring plan-phase parameters
 // ---------------------------------------------------------------------------
@@ -372,7 +374,13 @@ async fn run_plan_bootstrap(
 /// Returns the violations list and whether this is a plan-revision entry.
 async fn consume_plan_revision(
     pctx: &PlanPhaseCtx<'_>,
-) -> Result<(Vec<crate::progress_controller::PlanViolation>, bool), PhaseError> {
+) -> Result<
+    (
+        Vec<crate::progress_controller::PlanViolation>,
+        Option<crate::progress_controller::PlanRevisionStrategy>,
+    ),
+    PhaseError,
+> {
     let plan_revision: Option<crate::progress_controller::PlanRevisionIntent> = {
         let es = crate::state_manager::load_execution_state_strict(
             &pctx.thread_store.control_store(),
@@ -398,7 +406,7 @@ async fn consume_plan_revision(
         .as_ref()
         .map(|r| r.violations.clone())
         .unwrap_or_default();
-    let is_plan_revision = plan_revision.is_some();
+    let strategy = plan_revision.as_ref().map(|r| r.strategy);
 
     if let Some(ref revision) = plan_revision {
         match revision.strategy {
@@ -422,7 +430,7 @@ async fn consume_plan_revision(
         }
     }
 
-    Ok((plan_violations, is_plan_revision))
+    Ok((plan_violations, strategy))
 }
 
 // ---------------------------------------------------------------------------
@@ -1114,6 +1122,166 @@ async fn compile_and_ground_model_plan(
     .await
 }
 
+fn normalize_model_revision_target(raw: &str, plan: &crate::plan::ModelPlan) -> Option<String> {
+    let target = raw.trim().trim_start_matches("./");
+    if target.is_empty() {
+        return None;
+    }
+    for task in &plan.tasks {
+        let name = task.name.trim();
+        if target == name {
+            return Some(name.to_string());
+        }
+        if let Some(path) = task.expected_model_path.as_deref() {
+            let normalized_path = path.trim().trim_start_matches("./");
+            if target == normalized_path {
+                return Some(name.to_string());
+            }
+            let path_obj = std::path::Path::new(normalized_path);
+            if path_obj.file_stem().and_then(|s| s.to_str()) == Some(target)
+                || path_obj.file_name().and_then(|s| s.to_str()) == Some(target)
+            {
+                return Some(name.to_string());
+            }
+        }
+    }
+    None
+}
+
+fn targeted_model_revision_task_ids(
+    violations: &[crate::progress_controller::PlanViolation],
+    plan: &crate::plan::ModelPlan,
+) -> std::collections::BTreeSet<String> {
+    violations
+        .iter()
+        .filter_map(|violation| violation.task_id.as_deref())
+        .filter_map(|target| normalize_model_revision_target(target, plan))
+        .collect()
+}
+
+fn mark_model_amendment_targets_needs_update(
+    plan: &mut crate::plan::ModelPlan,
+    target_ids: &std::collections::BTreeSet<String>,
+) {
+    for task_id in target_ids {
+        crate::plan::model_mark_needs_update(
+            plan,
+            task_id,
+            Some("Plan amendment changed this task contract; re-author SQL against the amended spec."),
+        );
+        crate::plan::model_schema_contract_mark_needs_update(
+            plan,
+            task_id,
+            Some("Plan amendment changed this task contract; re-author schema.yml against the amended spec."),
+        );
+    }
+}
+
+async fn amend_and_ground_model_plan(
+    pctx: &PlanPhaseCtx<'_>,
+    q: &str,
+    design_memo: &str,
+    design_critique: &crate::plan_schema::PlanDesignCritiqueV1,
+    discovery: &crate::dataset_truth::PlanDiscoveryContext,
+    violations: &[crate::progress_controller::PlanViolation],
+) -> Result<PhaseOutcome, PhaseError> {
+    let staged = discovery
+        .staging
+        .as_ref()
+        .expect("amend_and_ground_model_plan requires discovery.staging to be populated");
+    let mut plan = crate::plan::load_model_plan(&pctx.actx)
+        .await?
+        .ok_or_else(|| {
+            "model plan amendment requested but no active model plan exists".to_string()
+        })?;
+    let before = plan.clone();
+    let target_ids = targeted_model_revision_task_ids(violations, &plan);
+    if target_ids.is_empty() {
+        return Err("model plan amendment requested without targeted task_id(s); refusing full-plan regeneration to avoid contract churn".to_string().into());
+    }
+
+    let amend_q = format!(
+        "{q}\n\nAMENDMENT MODE:\n{MODEL_PLAN_AMENDMENT_CHURN_WARNING}\n\nTarget task_ids:\n{}\n",
+        serde_json::to_string_pretty(&target_ids.iter().collect::<Vec<_>>())
+            .unwrap_or_else(|_| "[]".to_string())
+    );
+    let target_vec: Vec<String> = target_ids.iter().cloned().collect();
+    DataEngineerSuite::enrich_model_tasks(
+        &pctx.actx,
+        &amend_q,
+        &discovery.source_schemas,
+        design_memo,
+        design_critique,
+        &mut plan,
+        &target_vec,
+    )
+    .await?;
+
+    let mut staging_schemas = discovery.source_schemas.clone();
+    let all_stg_inputs: std::collections::BTreeSet<String> = plan
+        .tasks
+        .iter()
+        .flat_map(|t| t.inputs.iter().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty() && s.starts_with("stg_"))
+        .collect();
+    crate::dataset_truth::record_staging_output_schemas(
+        &pctx.actx,
+        &all_stg_inputs,
+        &mut staging_schemas,
+    )
+    .await;
+    let staging_prefix = crate::dataset_truth::staging_relation_prefix(&pctx.actx);
+    let gold_prefix = crate::dataset_truth::gold_relation_prefix(&pctx.actx);
+    for t in plan.tasks.iter_mut() {
+        t.apply_source_schema_from(&staging_schemas);
+        t.apply_grounded_inputs_from(&staging_schemas, staging_prefix.as_deref());
+    }
+    crate::plan_types::apply_intra_plan_grounded_inputs(&mut plan.tasks, gold_prefix.as_deref());
+    let _ = crate::semantic_profile::attach_semantic_profile_claim_refs_to_model_plan(
+        &pctx.actx, &mut plan,
+    )
+    .await?;
+
+    crate::plan_diff::restore_unamended_model_task_contracts(&before, &mut plan, &target_ids);
+    crate::plan_diff::guard_model_plan_amendment(&before, &plan, &target_ids)
+        .map_err(PhaseError::ToolContractViolation)?;
+    mark_model_amendment_targets_needs_update(&mut plan, &target_ids);
+    crate::plan_types::reconcile_model_batches_and_work_groups(&mut plan);
+
+    let sem = crate::plan::ensure_model_plan_semantically_valid_or_repaired(
+        &mut plan,
+        &staged.allowed_models,
+    );
+    if !sem.ok {
+        return handle_plan_semantic_failure(&sem, pctx.thread_store, pctx.thread_id, pctx.phase)
+            .await;
+    }
+    crate::plan::save_model_plan_grounded(&pctx.actx, &plan, &staged.allowed_models)
+        .await
+        .map_err(|e| format!("failed to checkpoint amended model plan: {e}"))?;
+    DataEngineerSuite::clear_subjective_retries(
+        pctx.thread_store,
+        pctx.thread_id,
+        vec![crate::progress_controller::SubjectiveRetryKind::PlanSemanticInvalid],
+    )
+    .await?;
+    crate::phase_contract::commit_phase_decision(
+        pctx.thread_store,
+        pctx.thread_id,
+        Some(pctx.phase),
+        PhaseDecision::forward(
+            pctx.track.author_phase(),
+            Some(
+                crate::progress_controller::PhaseTransition::PlanAutoApproved {
+                    source: crate::progress_controller::AutoApprovalSource::SystemDefault,
+                },
+            ),
+        ),
+    )
+    .await?;
+    Ok(PhaseOutcome::TransitionCommitted)
+}
+
 fn deterministic_critiqued_design_memo(
     track: TrackKind,
     context: &str,
@@ -1131,6 +1299,16 @@ fn deterministic_critiqued_design_memo(
             fixes: Vec::new(),
         },
         disposition: crate::enrichment::DesignCritiqueDisposition::Accepted,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn model_plan_amendment_prompt_explains_byte_diff_churn() {
+        assert!(super::MODEL_PLAN_AMENDMENT_CHURN_WARNING.contains("Unnecessary byte diffs"));
+        assert!(super::MODEL_PLAN_AMENDMENT_CHURN_WARNING.contains("expensive re-authoring churn"));
+        assert!(super::MODEL_PLAN_AMENDMENT_CHURN_WARNING.contains("surgically edit"));
     }
 }
 
@@ -1161,7 +1339,8 @@ impl DataEngineerSuite {
         };
 
         // 1. Consume plan-revision intent (if any).
-        let (plan_violations, is_plan_revision) = consume_plan_revision(&pctx).await?;
+        let (plan_violations, plan_revision_strategy) = consume_plan_revision(&pctx).await?;
+        let is_plan_revision = plan_revision_strategy.is_some();
 
         // 2. Fast-forward if a usable plan already exists.
         if !is_plan_revision {
@@ -1274,6 +1453,19 @@ impl DataEngineerSuite {
                 );
                 discovery.staging = Some(staged);
                 let critiqued = deterministic_critiqued_design_memo(track, &q_memo);
+                if plan_revision_strategy
+                    == Some(crate::progress_controller::PlanRevisionStrategy::Amend)
+                {
+                    return amend_and_ground_model_plan(
+                        &pctx,
+                        &q_memo,
+                        &critiqued.memo,
+                        &critiqued.critique,
+                        &discovery,
+                        &plan_violations,
+                    )
+                    .await;
+                }
                 return compile_and_ground_model_plan(
                     &pctx,
                     &q_memo,

@@ -125,6 +125,7 @@ pub(crate) mod phase_reason_detail;
 mod phase_review;
 mod phase_validate;
 pub(crate) mod plan;
+pub(crate) mod plan_diff;
 mod plan_grounding;
 pub(crate) mod plan_kind;
 pub(crate) mod plan_progress;
