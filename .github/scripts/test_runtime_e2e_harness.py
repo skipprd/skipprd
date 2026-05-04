@@ -165,6 +165,46 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
         self.assertEqual(status, 0)
         run_scenario.assert_called_once()
 
+    def test_mssql_debug_expected_counts_match_seed_fixture(self) -> None:
+        expected_queries = {
+            'SELECT COUNT(*) FROM "skippr_customers"': "6",
+            'SELECT COUNT(*) FROM "skippr_orders"': "8",
+            'SELECT COUNT(*) FROM "skippr_order_items"': "11",
+        }
+        observed: list[tuple[str, str]] = []
+
+        def fake_athena_scalar(sql, *, database, env, output_location):
+            observed.append((database, sql))
+            return expected_queries[sql]
+
+        context = runtime_e2e_harness.ScenarioContext(
+            scenario=runtime_e2e_harness.SCENARIOS["mssql_iceberg_debug_linux"],
+            skipprd=Path("/tmp/skipprd"),
+            runtime_plugin_dir=Path("/tmp/runtime-plugins"),
+            base_env={},
+            assertion_output="s3://example/assertions",
+            namespace=None,
+        )
+
+        with mock.patch.object(
+            runtime_e2e_harness,
+            "athena_scalar",
+            side_effect=fake_athena_scalar,
+        ):
+            runtime_e2e_harness.verify_mssql_iceberg_debug_linux_rows(context)
+
+        self.assertEqual(
+            observed,
+            [
+                ("iceberg_e2e_mssql_debug_linux", 'SELECT COUNT(*) FROM "skippr_customers"'),
+                ("iceberg_e2e_mssql_debug_linux", 'SELECT COUNT(*) FROM "skippr_orders"'),
+                (
+                    "iceberg_e2e_mssql_debug_linux",
+                    'SELECT COUNT(*) FROM "skippr_order_items"',
+                ),
+            ],
+        )
+
     def test_runtime_release_manifest_filenames_include_all_sources_and_smoke_support(self) -> None:
         catalog = [
             {"manifest_filename": "file-source.json", "manifest_kind": "DataSource"},

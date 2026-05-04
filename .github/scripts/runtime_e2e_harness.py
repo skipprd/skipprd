@@ -2132,9 +2132,9 @@ def verify_mssql_iceberg_debug_rows(
     database: str,
 ) -> None:
     expected_counts = {
-        "skippr_customers": 2,
-        "skippr_orders": 2,
-        "skippr_order_items": 3,
+        "skippr_customers": 6,
+        "skippr_orders": 8,
+        "skippr_order_items": 11,
     }
     for table, expected_count in expected_counts.items():
         actual_count = int(
