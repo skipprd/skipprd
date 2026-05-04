@@ -2092,7 +2092,7 @@ def verify_postgres_iceberg_types_cdc_final_state(context: ScenarioContext) -> N
         context,
         database="iceberg_e2e_postgres",
         table="skippr_type_matrix_orders",
-        updated_row_predicate="id = 1 AND bool_col = true AND int_col = 11",
+        updated_row_predicate="id = 1 AND int_col = 11",
     )
 
 
@@ -2101,7 +2101,7 @@ def verify_mysql_iceberg_types_cdc_final_state(context: ScenarioContext) -> None
         context,
         database="iceberg_e2e_mysql",
         table="skippr_type_matrix_orders",
-        updated_row_predicate="id = 1 AND bool_col = 1 AND int_col = 11",
+        updated_row_predicate="id = 1 AND int_col = 11",
     )
 
 

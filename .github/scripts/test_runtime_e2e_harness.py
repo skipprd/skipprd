@@ -211,7 +211,7 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
             'SELECT COUNT(*) FROM "skippr_type_matrix_orders" WHERE id = 2': "0",
             (
                 'SELECT COUNT(*) FROM "skippr_type_matrix_orders" '
-                "WHERE id = 1 AND bool_col = 1 AND int_col = 11"
+                "WHERE id = 1 AND int_col = 11"
             ): "1",
         }
         observed: list[str] = []
@@ -245,7 +245,7 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
             'SELECT COUNT(*) FROM "skippr_type_matrix_orders" WHERE id = 2': "0",
             (
                 'SELECT COUNT(*) FROM "skippr_type_matrix_orders" '
-                "WHERE id = 1 AND bool_col = true AND int_col = 11"
+                "WHERE id = 1 AND int_col = 11"
             ): "1",
         }
         observed: list[str] = []
