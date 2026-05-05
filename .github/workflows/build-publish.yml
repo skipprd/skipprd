@@ -543,7 +543,7 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: v2-release-windows_x86
-          env-vars: "CARGO_INCREMENTAL CARGO_TERM_COLOR CMAKE_PREFIX_PATH CMAKE_TOOLCHAIN_FILE OPENSSL_DIR RUSTFLAGS VCPKGRS_NO_ZLIB VCPKG_DEFAULT_TRIPLET VCPKG_TARGET_TRIPLET"
+          env-vars: "CARGO_INCREMENTAL CARGO_TERM_COLOR CMAKE_PREFIX_PATH CMAKE_TOOLCHAIN_FILE OPENSSL_DIR RUSTFLAGS SKIPPR_CLI_VERSION VCPKGRS_NO_ZLIB VCPKG_DEFAULT_TRIPLET VCPKG_TARGET_TRIPLET"
       - name: Configure version if tag commit
         if: startsWith(github.ref, 'refs/tags/')
         shell: pwsh
@@ -559,6 +559,9 @@ jobs:
       - name: Build release
         shell: pwsh
         run: |
+          if ($env:GITHUB_REF -like 'refs/tags/*') {
+            $env:SKIPPR_CLI_VERSION = $env:GITHUB_REF_NAME
+          }
           $rawPluginPackages = @'
           ${{ needs.plan_runtime_plugin_release.outputs.runtime_plugin_packages_json }}
           '@
@@ -630,6 +633,18 @@ jobs:
           if ($version -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
             Write-Error "Version was not plain semver"
             exit 1
+          }
+          $skipprVersion = (.\target\release\skippr.exe --version 2>&1) -replace '^skippr\s+', ''
+          Write-Host "skippr version: $skipprVersion"
+          if ($env:GITHUB_REF -like 'refs/tags/*') {
+            if ($skipprVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
+              Write-Error "skippr version was not plain semver"
+              exit 1
+            }
+            if ($skipprVersion -ne $env:GITHUB_REF_NAME) {
+              Write-Error "skippr version '$skipprVersion' did not match release tag '$env:GITHUB_REF_NAME'"
+              exit 1
+            }
           }
       - name: Upload Artifact
         uses: actions/upload-artifact@v4

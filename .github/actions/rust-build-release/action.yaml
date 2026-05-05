@@ -69,7 +69,7 @@ runs:
       uses: Swatinem/rust-cache@v2
       with:
         shared-key: v2-release-${{ inputs.architecture_name }}
-        env-vars: "CARGO_INCREMENTAL CARGO_TERM_COLOR RUSTFLAGS"
+        env-vars: "CARGO_INCREMENTAL CARGO_TERM_COLOR RUSTFLAGS SKIPPR_CLI_VERSION"
     - name: Configure version if tag commit
       shell: bash
       if: startsWith(github.ref, 'refs/tags/')
@@ -84,6 +84,9 @@ runs:
     - name: Build release
       shell: bash
       run: |
+        if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+          export SKIPPR_CLI_VERSION="${GITHUB_REF_NAME}"
+        fi
         export RUNTIME_PLUGIN_PACKAGES_JSON='${{ inputs.runtime_plugin_packages_json }}'
         plugin_packages_file="$(mktemp)"
         python3 - <<'PY' > "${plugin_packages_file}"
@@ -136,6 +139,18 @@ runs:
         if ! [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
           echo "::error::Version was not plain semver"
           exit 1
+        fi
+        SKIPPR_VERSION=$(target/release/skippr --version 2>&1 | awk '{print $2}')
+        echo "skippr version: $SKIPPR_VERSION"
+        if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
+          if ! [[ "$SKIPPR_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::skippr version was not plain semver"
+            exit 1
+          fi
+          if [[ "$SKIPPR_VERSION" != "${GITHUB_REF_NAME}" ]]; then
+            echo "::error::skippr version '$SKIPPR_VERSION' did not match release tag '${GITHUB_REF_NAME}'"
+            exit 1
+          fi
         fi
     - name: Show sccache stats
       if: env.SCCACHE_BUCKET != ''
