@@ -168,6 +168,9 @@ impl Orchestrator {
         )
         .await;
 
+        // Catalog bootstrap is the bounded warehouse refresh boundary for raw
+        // datasets. Provider schema/stats responses are canonical; the catalog
+        // written below is only a run-scoped cache of those database facts.
         let dataset_concurrency = query.max_concurrency().max(1);
         let stats_progress_every: usize = std::env::var("CATALOG_STATS_PROGRESS_EVERY")
             .ok()

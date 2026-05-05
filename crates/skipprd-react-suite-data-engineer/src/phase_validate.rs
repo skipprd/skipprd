@@ -456,6 +456,10 @@ impl DataEngineerSuite {
                 })?;
             }
 
+            if phase == Phase::ModelValidate {
+                crate::phase_plan_lifecycle::refresh_model_plan_grounded_schemas(sctx, &actx).await;
+            }
+
             let (completion_snapshot, active_plan_key, validated_count) =
                 Self::reduce_validate_pass_plan_state(&actx, phase).await?;
 

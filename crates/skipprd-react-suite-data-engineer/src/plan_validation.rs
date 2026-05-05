@@ -106,6 +106,76 @@ fn validation_result(issues: Vec<PlanSemanticIssue>) -> PlanSemanticValidation {
     }
 }
 
+fn insert_unambiguous_case_folded_field(
+    fields: &mut std::collections::BTreeMap<String, Option<String>>,
+    name: &str,
+) {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    let key = trimmed.to_ascii_lowercase();
+    match fields.get_mut(&key) {
+        Some(existing) if existing.as_deref() != Some(trimmed) => {
+            *existing = None;
+        }
+        Some(_) => {}
+        None => {
+            fields.insert(key, Some(trimmed.to_string()));
+        }
+    }
+}
+
+fn fill_missing_case_folded_fields_from_fallback(
+    fields: &mut std::collections::BTreeMap<String, Option<String>>,
+    fallback: std::collections::BTreeMap<String, Option<String>>,
+) {
+    for (key, value) in fallback {
+        fields.entry(key).or_insert(value);
+    }
+}
+
+fn normalize_model_metric_source_fields(plan: &mut ModelPlan) {
+    for task in plan.tasks.iter_mut() {
+        let Some(spec) = task.implementation_spec.as_mut() else {
+            continue;
+        };
+        // Prefer grounded input schemas because they come from materialized
+        // warehouse relations. `task.source_schema` and output fields are only
+        // fallback contracts when no warehouse-backed name is available.
+        let mut canonical_fields: std::collections::BTreeMap<String, Option<String>> =
+            std::collections::BTreeMap::new();
+        for input in &task.grounded_inputs {
+            for column in &input.source_schema {
+                insert_unambiguous_case_folded_field(&mut canonical_fields, &column.name);
+            }
+        }
+        let mut fallback_fields: std::collections::BTreeMap<String, Option<String>> =
+            std::collections::BTreeMap::new();
+        for column in &task.source_schema {
+            insert_unambiguous_case_folded_field(&mut fallback_fields, &column.name);
+        }
+        for output_field in &spec.output_fields {
+            insert_unambiguous_case_folded_field(&mut fallback_fields, &output_field.name);
+        }
+        fill_missing_case_folded_fields_from_fallback(&mut canonical_fields, fallback_fields);
+
+        for metric in &mut spec.metrics {
+            for field in &mut metric.source_fields {
+                let trimmed = field.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if let Some(Some(canonical)) = canonical_fields.get(&trimmed.to_ascii_lowercase()) {
+                    *field = canonical.clone();
+                }
+            }
+            metric.source_fields.sort();
+            metric.source_fields.dedup();
+        }
+    }
+}
+
 fn has_safe_claim(
     spec: &crate::plan_types::ModelImplementationSpec,
     kinds: &[crate::providers::SemanticClaimKind],
@@ -702,6 +772,7 @@ pub fn ensure_model_plan_semantically_valid_or_repaired(
     allowed_staging_models: &std::collections::BTreeSet<String>,
 ) -> PlanSemanticValidation {
     crate::plan_grounding::ensure_expected_model_paths_model(plan);
+    normalize_model_metric_source_fields(plan);
     validate_model_plan_semantics(plan, Some(allowed_staging_models))
 }
 
@@ -885,5 +956,126 @@ mod tests {
         let result = validate_model_plan_semantics(&plan, Some(&allowed));
 
         assert!(result.ok, "{:?}", result.errors);
+    }
+
+    #[test]
+    fn model_plan_repairs_metric_source_field_casing_before_validation() {
+        let mut plan = model_plan_with_claims(vec![SemanticClaimRef {
+            claim_id: "candidate_key:db.schema.customers:customer_id"
+                .to_string()
+                .into(),
+            kind: SemanticClaimKind::CandidateKey,
+            status: EvidenceStatus::Observed,
+        }]);
+        plan.tasks[0].source_schema.clear();
+        plan.tasks[0].grounded_inputs[0].source_schema = vec![SourceColumnDef {
+            name: "order_id".to_string(),
+            data_type: "number".to_string(),
+        }];
+        plan.tasks[0]
+            .implementation_spec
+            .as_mut()
+            .expect("spec")
+            .metrics
+            .push(MetricSpec {
+                name: "order_count".to_string(),
+                definition: "count(order_id)".to_string(),
+                source_fields: vec!["ORDER_ID".to_string()],
+                caveats: vec![],
+            });
+        let allowed = ["stg_customers".to_string()].into_iter().collect();
+
+        let result = ensure_model_plan_semantically_valid_or_repaired(&mut plan, &allowed);
+
+        assert!(result.ok, "{:?}", result.errors);
+        assert_eq!(
+            plan.tasks[0]
+                .implementation_spec
+                .as_ref()
+                .expect("spec")
+                .metrics[0]
+                .source_fields,
+            vec!["order_id".to_string()]
+        );
+    }
+
+    #[test]
+    fn model_plan_repairs_metric_source_field_to_warehouse_canonical_casing() {
+        let mut plan = model_plan_with_claims(vec![SemanticClaimRef {
+            claim_id: "candidate_key:db.schema.customers:customer_id"
+                .to_string()
+                .into(),
+            kind: SemanticClaimKind::CandidateKey,
+            status: EvidenceStatus::Observed,
+        }]);
+        plan.tasks[0].source_schema = vec![SourceColumnDef {
+            name: "order_id".to_string(),
+            data_type: "number".to_string(),
+        }];
+        plan.tasks[0].grounded_inputs[0].source_schema = vec![SourceColumnDef {
+            name: "ORDER_ID".to_string(),
+            data_type: "NUMBER".to_string(),
+        }];
+        plan.tasks[0]
+            .implementation_spec
+            .as_mut()
+            .expect("spec")
+            .metrics
+            .push(MetricSpec {
+                name: "order_count".to_string(),
+                definition: "count(order_id)".to_string(),
+                source_fields: vec!["order_id".to_string()],
+                caveats: vec![],
+            });
+        let allowed = ["stg_customers".to_string()].into_iter().collect();
+
+        let result = ensure_model_plan_semantically_valid_or_repaired(&mut plan, &allowed);
+
+        assert!(result.ok, "{:?}", result.errors);
+        assert_eq!(
+            plan.tasks[0]
+                .implementation_spec
+                .as_ref()
+                .expect("spec")
+                .metrics[0]
+                .source_fields,
+            vec!["ORDER_ID".to_string()]
+        );
+    }
+
+    #[test]
+    fn model_plan_still_rejects_unknown_metric_source_fields() {
+        let mut plan = model_plan_with_claims(vec![SemanticClaimRef {
+            claim_id: "candidate_key:db.schema.customers:customer_id"
+                .to_string()
+                .into(),
+            kind: SemanticClaimKind::CandidateKey,
+            status: EvidenceStatus::Observed,
+        }]);
+        plan.tasks[0].source_schema.clear();
+        plan.tasks[0].grounded_inputs[0].source_schema = vec![SourceColumnDef {
+            name: "ORDER_ID".to_string(),
+            data_type: "NUMBER".to_string(),
+        }];
+        plan.tasks[0]
+            .implementation_spec
+            .as_mut()
+            .expect("spec")
+            .metrics
+            .push(MetricSpec {
+                name: "missing".to_string(),
+                definition: "sum(missing_field)".to_string(),
+                source_fields: vec!["MISSING_FIELD".to_string()],
+                caveats: vec![],
+            });
+        let allowed = ["stg_customers".to_string()].into_iter().collect();
+
+        let result = ensure_model_plan_semantically_valid_or_repaired(&mut plan, &allowed);
+
+        assert!(!result.ok);
+        assert!(result
+            .errors
+            .iter()
+            .any(|err| err.contains("MISSING_FIELD")));
     }
 }

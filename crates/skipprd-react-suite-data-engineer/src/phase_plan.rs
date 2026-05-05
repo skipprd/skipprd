@@ -1060,7 +1060,7 @@ async fn compile_and_ground_model_plan(
             DataEngineerSuite::enrich_model_tasks(
                 &pctx.actx,
                 q,
-                &discovery.source_schemas,
+                &staging_schemas,
                 design_memo,
                 design_critique,
                 &mut plan,
@@ -1200,6 +1200,20 @@ async fn amend_and_ground_model_plan(
         return Err("model plan amendment requested without targeted task_id(s); refusing full-plan regeneration to avoid contract churn".to_string().into());
     }
 
+    let mut staging_schemas = discovery.source_schemas.clone();
+    let existing_stg_inputs: std::collections::BTreeSet<String> = plan
+        .tasks
+        .iter()
+        .flat_map(|t| t.inputs.iter().map(|s| s.trim().to_string()))
+        .filter(|s| !s.is_empty() && s.starts_with("stg_"))
+        .collect();
+    crate::dataset_truth::record_staging_output_schemas(
+        &pctx.actx,
+        &existing_stg_inputs,
+        &mut staging_schemas,
+    )
+    .await;
+
     let amend_q = format!(
         "{q}\n\nAMENDMENT MODE:\n{MODEL_PLAN_AMENDMENT_CHURN_WARNING}\n\nTarget task_ids:\n{}\n",
         serde_json::to_string_pretty(&target_ids.iter().collect::<Vec<_>>())
@@ -1209,7 +1223,7 @@ async fn amend_and_ground_model_plan(
     DataEngineerSuite::enrich_model_tasks(
         &pctx.actx,
         &amend_q,
-        &discovery.source_schemas,
+        &staging_schemas,
         design_memo,
         design_critique,
         &mut plan,
@@ -1217,7 +1231,6 @@ async fn amend_and_ground_model_plan(
     )
     .await?;
 
-    let mut staging_schemas = discovery.source_schemas.clone();
     let all_stg_inputs: std::collections::BTreeSet<String> = plan
         .tasks
         .iter()

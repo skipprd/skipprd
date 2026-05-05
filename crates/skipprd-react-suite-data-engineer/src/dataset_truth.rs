@@ -1,3 +1,11 @@
+//! Metadata precedence for source truth grounding.
+//!
+//! The DE suite treats materialized warehouse/database relations as the source
+//! of truth. Catalog entries are a run-scoped cache of those facts, refreshed at
+//! bounded phase boundaries. Static SQL inference is only an authoring aid before
+//! dbt materializes a relation and must never overwrite warehouse-reported
+//! column names, types, or identifier casing.
+
 use crate::providers::{DatasetId, WarehouseProvider};
 use crate::references::DatasetRef;
 use react_core::agent::AgentCtx;
@@ -234,7 +242,7 @@ pub fn enrich_query_with_available_models(
     let mut out = q.to_string();
     if !staging.allowed_models.is_empty() || !plan_gold_names.is_empty() {
         out.push_str(
-            "\n\nIMMUTABLE FACTS (available models \u{2014} GOLD models MUST reference these exact names via ref()):\n",
+            "\n\nIMMUTABLE FACTS (available models \u{2014} GOLD models MUST reference these exact names via ref(); listed columns are warehouse/database-reported when materialized):\n",
         );
         out.push_str("Staging models:\n");
         for name in &staging.allowed_models {
@@ -332,13 +340,17 @@ pub async fn discover_staging_models_from_storage(ctx: &AgentCtx) -> GroundedSta
     out
 }
 
-/// Fetch column schemas from the catalog for a set of dataset IDs.
+/// Fetch column schemas for a set of raw/source dataset IDs.
 /// Returns both the typed `SourceSchema` map (for compile-time threading) and
 /// a rendered prompt block string (for LLM injection).
 ///
 /// This is the single DRY helper reused by both cleanse and model paths.
-/// If the catalog is unavailable or a dataset has no catalog entry, that dataset
-/// is silently skipped — the grounding gate downstream will catch any gaps.
+///
+/// Precedence:
+/// 1. The catalog cache, which bootstrap refreshes from provider
+///    `get_dataset_schema` / `get_dataset_stats` once per run.
+/// 2. A bounded direct warehouse fallback only when the cache is missing.
+/// 3. No static SQL inference here; downstream gates catch any remaining gaps.
 pub async fn build_catalog_column_context(
     ctx: &AgentCtx,
     dataset_ids: &[String],
@@ -426,7 +438,7 @@ pub fn render_source_schema_prompt_block(schema: &crate::plan_types::SourceSchem
         return String::new();
     }
     let mut out =
-        String::from("\n\nAUTHORITATIVE SCHEMAS (source columns \u{2014} output_fields.source_columns MUST reference only these exact names):\n");
+        String::from("\n\nAUTHORITATIVE SCHEMAS (warehouse/database-reported source columns \u{2014} output_fields.source_columns MUST reference only these exact names and casing):\n");
     for (ds_id, cols) in schema.iter() {
         let cols_str: Vec<String> = cols
             .iter()
@@ -484,9 +496,11 @@ pub fn gold_relation_prefix(ctx: &AgentCtx) -> Option<String> {
 }
 
 /// Query the warehouse for output schemas of materialized staging models and
-/// merge them into `source_schemas` keyed by `stg_*` name. This is called during
-/// model plan compilation so the plan records what the gold LLM will see at
-/// authoring time.
+/// merge them into `source_schemas` keyed by `stg_*` name.
+///
+/// This deliberately overwrites any existing `stg_*` entries because those may
+/// be inferred from authored SQL/schema.yml. Once dbt has materialized a
+/// relation, warehouse-reported fields and casing are canonical.
 pub async fn record_staging_output_schemas(
     ctx: &AgentCtx,
     staging_model_names: &BTreeSet<String>,
@@ -505,7 +519,7 @@ pub async fn record_staging_output_schemas(
     let pending: Vec<String> = staging_model_names
         .iter()
         .map(|name| name.trim().to_string())
-        .filter(|name| should_lookup_staging_output_schema(name, source_schemas))
+        .filter(|name| !name.is_empty())
         .collect();
     let concurrency = crate::providers::QueryProvider::max_concurrency(wh.as_ref())
         .clamp(1, 8)
@@ -613,16 +627,6 @@ fn merge_staging_output_schema_result(
     }
 }
 
-fn should_lookup_staging_output_schema(
-    name: &str,
-    source_schemas: &crate::plan_types::SourceSchema,
-) -> bool {
-    !name.trim().is_empty()
-        && !source_schemas
-            .get(name.trim())
-            .is_some_and(|existing| !existing.is_empty())
-}
-
 /// All discovery results from a single pass, threaded through the plan pipeline
 /// so no downstream function re-fetches. Built once at the top of `execute_plan_phase`.
 pub struct PlanDiscoveryContext {
@@ -656,29 +660,28 @@ pub fn group_by_catalog_schema(
 
 #[cfg(test)]
 mod tests {
-    use super::should_lookup_staging_output_schema;
+    use super::merge_staging_output_schema_result;
     use crate::plan_types::SourceColumnDef;
     use std::collections::BTreeMap;
 
     #[test]
-    fn staging_output_lookup_retries_empty_placeholder_schema() {
-        let mut schemas = BTreeMap::new();
-        schemas.insert("stg_orders".to_string(), Vec::new());
-
-        assert!(should_lookup_staging_output_schema("stg_orders", &schemas));
-    }
-
-    #[test]
-    fn staging_output_lookup_skips_existing_non_empty_schema() {
+    fn staging_output_schema_result_overwrites_inferred_schema_with_warehouse_names() {
         let mut schemas = BTreeMap::new();
         schemas.insert(
             "stg_orders".to_string(),
             vec![SourceColumnDef {
-                name: "order_id".to_string(),
+                name: "total_amount".to_string(),
                 data_type: "number".to_string(),
             }],
         );
 
-        assert!(!should_lookup_staging_output_schema("stg_orders", &schemas));
+        merge_staging_output_schema_result(
+            &mut schemas,
+            "stg_orders".to_string(),
+            "ANALYTICS.SILVER.STG_ORDERS".to_string(),
+            Ok(vec![("TOTAL_AMOUNT".to_string(), "NUMBER".to_string())]),
+        );
+
+        assert_eq!(schemas["stg_orders"][0].name, "TOTAL_AMOUNT");
     }
 }

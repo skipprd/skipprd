@@ -14,7 +14,7 @@ Hard rules:
 
 Discovery checklist (stop when ALL are satisfied):
 1. Listed models/ directory to see existing dbt project files.
-2. Called sql_schema on each raw source table to get column names and types.
+2. Called sql_schema on each raw source table to get database-reported column names and types.
 3. Optionally: one sql_stats probe per source table for aggregate data quality evidence.
 Once you have items 1-2, you have enough evidence. Finish immediately.
 
@@ -51,7 +51,7 @@ Hard rules:
 Discovery checklist (stop when ALL are satisfied):
 1. Listed models/ directory to see existing staging models and any existing gold/marts models.
 2. Read each staging model SQL (one call per file) to understand available columns and transformations.
-3. Called sql_schema on each staging model to get column types.
+3. Called sql_schema on each staging model to get database-reported column names, types, and casing.
 4. Optionally: one aggregate-only run_sql probe for row counts / data quality if needed.
 Once you have items 1-3, you have enough evidence. Finish immediately.
 
@@ -188,7 +188,7 @@ ROW-PRESERVING SILVER CONTRACT:\n\
   An EMPTY output_fields is NEVER valid — the design memo always specifies transformation work.\n\
 - Raw passthrough columns (kind=raw) should also be listed explicitly if the plan references them.\n\
 COLUMN GROUNDING (CRITICAL):\n\
-- output_fields[].source_columns MUST reference ONLY columns listed in the AUTHORITATIVE SCHEMAS section.\n\
+- output_fields[].source_columns MUST reference ONLY columns listed in the AUTHORITATIVE SCHEMAS section; those names are warehouse/database-reported and canonical.\n\
 - Do NOT invent, abbreviate, or rename source column names.\n\
 - If AUTHORITATIVE SCHEMAS lists a column as 'customer_id (bigint)', use exactly 'customer_id'.\n\
 Your specs must be complete enough for executable plan completion (author + validate checklist items can be finished without downstream guesswork)."
@@ -216,9 +216,9 @@ Each output_fields item MUST include: name, kind, expression.\n\
 Each metrics[] item MUST include source_fields with the exact fields used by the metric definition.\n\
 spec_version MUST be an integer number (not a string).\n\
 COLUMN GROUNDING (CRITICAL):\n\
-- output_fields[].source_columns and joins[].on MUST reference ONLY columns from the AUTHORITATIVE SCHEMAS or IMMUTABLE FACTS staging model columns.\n\
-- metrics[].source_fields MUST reference ONLY columns from the AUTHORITATIVE SCHEMAS or output_fields.\n\
-- Do NOT invent, abbreviate, or rename column names.\n\
+- output_fields[].source_columns and joins[].on MUST reference ONLY columns from the AUTHORITATIVE SCHEMAS or IMMUTABLE FACTS staging model columns; those names are warehouse/database-reported whenever relations are materialized.\n\
+- metrics[].source_fields MUST reference ONLY columns from the AUTHORITATIVE SCHEMAS, IMMUTABLE FACTS staging model columns, or output_fields.\n\
+- Use the exact canonical field casing shown in AUTHORITATIVE SCHEMAS, IMMUTABLE FACTS, or output_fields. Do NOT invent, abbreviate, or rename column names.\n\
 - inputs[] MUST use exact staging model names from the IMMUTABLE FACTS section.\n\
 - evidence_claim_refs[] MUST reference only typed profile/user evidence with fields {claim_id, kind, status}. If proof is missing, include an `unverified` claim and keep assumptions explicit; downstream gates will request plan_change rather than speculative authoring.\n\
 Your specs must be complete enough for executable plan completion (author + validate checklist items can be finished without downstream guesswork)."
@@ -242,5 +242,15 @@ mod tests {
         assert!(p.contains("task inventory"));
         assert!(p.contains("checklist requirements per task"));
         assert!(p.contains("work-group sequencing + dependencies"));
+    }
+
+    #[test]
+    fn enrichment_prompts_treat_warehouse_reported_names_as_canonical() {
+        let cleanse = cleanse_plan_enrichment_system_prompt();
+        let model = model_plan_enrichment_system_prompt();
+
+        assert!(cleanse.contains("warehouse/database-reported"));
+        assert!(model.contains("warehouse/database-reported"));
+        assert!(model.contains("exact canonical field casing"));
     }
 }
