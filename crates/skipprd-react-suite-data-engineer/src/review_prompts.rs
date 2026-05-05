@@ -79,10 +79,16 @@ Rules:
 }
 
 pub(super) fn system_prompt_for_unify(plan_kind: Option<PlanKind>) -> String {
-    let tier_rule = if plan_kind == Some(PlanKind::Cleanse) {
-        "Tier rules: this is a SILVER (cleanse) review. Set tier=\"silver\"."
+    let (tier_rule, target_rule) = if plan_kind == Some(PlanKind::Cleanse) {
+        (
+            "Tier rules: this is a SILVER (cleanse) review. Set tier=\"silver\".",
+            "Target rules: target_task_ids means affected plan task IDs exactly as shown in batch_items.",
+        )
     } else {
-        "Tier rules: this is a GOLD/model review. Set tier=\"gold\"."
+        (
+            "Tier rules: this is a GOLD/model review. Set tier=\"gold\".",
+            "Target rules: target_task_ids means affected plan task IDs exactly as shown in batch_items. Do not use file paths, warehouse relation FQNs, or source catalog dataset IDs.",
+        )
     };
     format!(
         "You are a read-only reviewer for a DBT analytics project.\n\n\
@@ -99,15 +105,18 @@ pub(super) fn system_prompt_for_unify(plan_kind: Option<PlanKind>) -> String {
          Decision bias (CRITICAL):\n\
          - DEFAULT TO \"proceed\" unless there is a clear, high-severity conformance violation. The implementation has already passed dbt validation (compilation and tests). Stylistic improvements, naming suggestions, and \"nice to have\" enhancements are NOT grounds for patch_impl or plan_change.\n\
          - If the review context mentions a prior review cycle, apply a HIGHER BAR for patch_impl: only block on issues that are strictly worse than what was already reviewed. Findings that were visible in the prior cycle but not flagged should be considered implicitly accepted.\n\n\
-         {tier_rule}\n\n\
+         {tier_rule}\n\
+         {target_rule}\n\n\
          Unify requirements (CRITICAL):\n\
          - EVIDENCE-ONLY: you may ONLY promote issues that appear in the batch findings. Do NOT introduce new issues based on project_notes or general knowledge.\n\
          - If the batch findings are empty, set decision=\"proceed\" and keep the body brief.\n\
          - If the main finding is prefixed \"REQUIRES PLAN CHANGE\", set decision=\"plan_change\".\n\
+         - For decision=\"plan_change\", populate target_task_ids with the specific affected plan task IDs pertaining to the plan change suggestions. Leave target_task_ids empty only when the approved plan truly needs a complete rewrite.\n\
          - Set decision=\"patch_impl\" only when a batch finding identifies a concrete defect that would produce incorrect data or broken queries — not for improvements or style.\n\
          - Hard cap: at most 3 issues total across the final review body.\n\
          - Delta-first: suppress repeated advice that has no new evidence since the prior review context. If a finding was present in the prior review and the implementation was already patched for it, do NOT re-flag unless the patch introduced a new defect.",
         schema = render_output_schema::<crate::domain_types::ReviewUnifyOutput>(),
+        target_rule = target_rule,
     )
 }
 

@@ -31,7 +31,7 @@ pub struct ReviewDecisionMeta {
     #[serde(default)]
     pub tier: ReviewTier,
     #[serde(default)]
-    pub dataset_ids: Vec<String>,
+    pub target_task_ids: Vec<String>,
     #[serde(default)]
     pub review_ref: Option<ReviewArtifactRef>,
 }
@@ -65,7 +65,7 @@ pub struct ReviewUnifyOutput {
     #[serde(default)]
     pub tier: ReviewTier,
     #[serde(default)]
-    pub dataset_ids: Vec<String>,
+    pub target_task_ids: Vec<String>,
     pub final_review_text: String,
 }
 

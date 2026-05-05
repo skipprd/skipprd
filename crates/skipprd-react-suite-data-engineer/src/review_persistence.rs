@@ -171,7 +171,7 @@ pub(super) async fn persist_review_final_to_plan(
     plan_key: &str,
     decision: ReviewDecision,
     tier: ReviewTier,
-    dataset_ids: Vec<String>,
+    target_task_ids: Vec<String>,
     text: String,
 ) -> Result<(), String> {
     let ts = utc_ts();
@@ -196,7 +196,7 @@ pub(super) async fn persist_review_final_to_plan(
                 serde_json::json!({
                     "decision": decision,
                     "tier": tier,
-                    "dataset_ids": dataset_ids,
+                    "target_task_ids": target_task_ids,
                     "text": text,
                     "ts": ts
                 }),

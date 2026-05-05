@@ -4,7 +4,8 @@ use serde_json::Value;
 use std::sync::Arc;
 
 use crate::domain_types::{
-    ReviewArtifactRef, ReviewBatchOutput, ReviewSummaryOutput, ReviewTier, ReviewUnifyOutput,
+    ReviewArtifactRef, ReviewBatchOutput, ReviewDecision, ReviewSummaryOutput, ReviewTier,
+    ReviewUnifyOutput,
 };
 use futures::StreamExt;
 use react_core::agent::AgentCtx;
@@ -393,7 +394,7 @@ fn include_global_semantic_context(phase: Phase) -> bool {
     matches!(phase, Phase::ModelReview)
 }
 
-fn deterministic_unify_defaults(
+fn deterministic_unify_default_target_task_ids(
     phase: Phase,
     all_batch_notes: &[Value],
 ) -> (ReviewTier, Vec<String>) {
@@ -403,7 +404,7 @@ fn deterministic_unify_defaults(
         _ => ReviewTier::Unknown,
     };
 
-    let mut dataset_ids: Vec<String> = all_batch_notes
+    let mut target_task_ids: Vec<String> = all_batch_notes
         .iter()
         .flat_map(|v| {
             v.get("batch_items")
@@ -415,10 +416,28 @@ fn deterministic_unify_defaults(
                 .filter(|s| !s.is_empty())
         })
         .collect();
-    dataset_ids.sort();
-    dataset_ids.dedup();
+    target_task_ids.sort();
+    target_task_ids.dedup();
 
-    (tier, dataset_ids)
+    (tier, target_task_ids)
+}
+
+fn apply_unify_defaults(
+    phase: Phase,
+    all_batch_notes: &[Value],
+    unify_out: &mut ReviewUnifyOutput,
+) {
+    let (default_tier, default_target_task_ids) =
+        deterministic_unify_default_target_task_ids(phase, all_batch_notes);
+    if unify_out.tier == ReviewTier::Unknown {
+        unify_out.tier = default_tier;
+    }
+    if unify_out.target_task_ids.is_empty() && unify_out.decision != ReviewDecision::PlanChange {
+        unify_out.target_task_ids = default_target_task_ids;
+    } else {
+        unify_out.target_task_ids.sort();
+        unify_out.target_task_ids.dedup();
+    }
 }
 
 /// Resolved fields for a single cleanse batch item.
@@ -918,16 +937,7 @@ async fn unify_reviews(
     let config = ReviewLlmConfig::for_phase(phase, "unify");
     let unify_v = config.call(actx, thread_id, unify_user).await?;
     let mut unify_out: ReviewUnifyOutput = config.parse_typed(unify_v, "unify")?;
-    let (default_tier, default_dataset_ids) = deterministic_unify_defaults(phase, all_batch_notes);
-    if unify_out.tier == ReviewTier::Unknown {
-        unify_out.tier = default_tier;
-    }
-    if unify_out.dataset_ids.is_empty() {
-        unify_out.dataset_ids = default_dataset_ids;
-    } else {
-        unify_out.dataset_ids.sort();
-        unify_out.dataset_ids.dedup();
-    }
+    apply_unify_defaults(phase, all_batch_notes, &mut unify_out);
     let final_review_text = unify_out.final_review_text.trim().to_string();
     if final_review_text.trim().is_empty() {
         return Err("batched review unify produced empty final_review_text".to_string());
@@ -935,7 +945,7 @@ async fn unify_reviews(
 
     let decision = unify_out.decision;
     let tier = unify_out.tier;
-    let dataset_ids = unify_out.dataset_ids;
+    let target_task_ids = unify_out.target_task_ids;
     let review_sha256 = react_core::llm_observability::sha256_hex_str(&final_review_text);
     let review_bytes = final_review_text.as_bytes().len() as u64;
     let review_key = {
@@ -971,7 +981,7 @@ async fn unify_reviews(
             "meta": {
                 "decision": decision,
                 "tier": tier,
-                "dataset_ids": dataset_ids.clone()
+                "target_task_ids": target_task_ids.clone()
             },
             "review_phase": phase.as_str()
         }),
@@ -984,7 +994,7 @@ async fn unify_reviews(
             key,
             decision,
             tier,
-            dataset_ids.clone(),
+            target_task_ids.clone(),
             final_review_text.clone(),
         )
         .await?;
@@ -997,7 +1007,7 @@ async fn unify_reviews(
             "meta": {
                 "decision": decision,
                 "tier": tier,
-                "dataset_ids": dataset_ids,
+                "target_task_ids": target_task_ids,
                 "review_ref": review_ref
             }
         }),
@@ -1319,7 +1329,7 @@ mod tests {
                 // batch 2
                 serde_json::json!({"findings":["b2n"]}).to_string(),
                 // unify
-                serde_json::json!({"decision":"proceed","tier":"silver","dataset_ids":[],"final_review_text":"All good."}).to_string(),
+                serde_json::json!({"decision":"proceed","tier":"silver","target_task_ids":[],"final_review_text":"All good."}).to_string(),
             ])),
         });
         let sctx = make_suite_ctx(storage.clone(), llm);
@@ -1627,7 +1637,7 @@ mod tests {
             captured_user_prompts: captured_cleanse.clone(),
             replies: Arc::new(Mutex::new(vec![
                 serde_json::json!({"project_notes":[]}).to_string(), // summary
-                serde_json::json!({"decision":"proceed","tier":"silver","dataset_ids":[],"final_review_text":"ok"}).to_string(), // unify
+                serde_json::json!({"decision":"proceed","tier":"silver","target_task_ids":[],"final_review_text":"ok"}).to_string(), // unify
             ])),
         });
         let sctx_cleanse = SuiteCtx::new(
@@ -1653,7 +1663,7 @@ mod tests {
             captured_user_prompts: captured_model.clone(),
             replies: Arc::new(Mutex::new(vec![
                 serde_json::json!({"project_notes":[]}).to_string(), // summary
-                serde_json::json!({"decision":"proceed","tier":"gold","dataset_ids":[],"final_review_text":"ok"}).to_string(), // unify
+                serde_json::json!({"decision":"proceed","tier":"gold","target_task_ids":[],"final_review_text":"ok"}).to_string(), // unify
             ])),
         });
         let sctx_model = SuiteCtx::new(
@@ -1677,14 +1687,34 @@ mod tests {
     }
 
     #[test]
-    fn deterministic_unify_defaults_derives_tier_and_dataset_ids() {
+    fn deterministic_unify_defaults_derives_tier_and_target_task_ids() {
         let notes = vec![
-            serde_json::json!({"batch_items":["a.b.c","x.y.z"],"findings":[]}),
-            serde_json::json!({"batch_items":["x.y.z"],"findings":[]}),
+            serde_json::json!({"batch_items":["task_a","task_b"],"findings":[]}),
+            serde_json::json!({"batch_items":["task_b"],"findings":[]}),
         ];
-        let (tier, dataset_ids) = deterministic_unify_defaults(Phase::CleanseReview, &notes);
+        let (tier, target_task_ids) =
+            deterministic_unify_default_target_task_ids(Phase::CleanseReview, &notes);
         assert_eq!(tier, ReviewTier::Silver);
-        assert_eq!(dataset_ids, vec!["a.b.c".to_string(), "x.y.z".to_string()]);
+        assert_eq!(
+            target_task_ids,
+            vec!["task_a".to_string(), "task_b".to_string()]
+        );
+    }
+
+    #[test]
+    fn plan_change_does_not_default_empty_target_task_ids_to_all_batch_items() {
+        let notes = vec![serde_json::json!({"batch_items":["task_a","task_b"],"findings":[]})];
+        let mut out = crate::domain_types::ReviewUnifyOutput {
+            decision: crate::domain_types::ReviewDecision::PlanChange,
+            tier: ReviewTier::Unknown,
+            target_task_ids: vec![],
+            final_review_text: "REQUIRES PLAN CHANGE: plan contract is wrong".to_string(),
+        };
+
+        apply_unify_defaults(Phase::ModelReview, &notes, &mut out);
+
+        assert_eq!(out.tier, ReviewTier::Gold);
+        assert!(out.target_task_ids.is_empty());
     }
 
     #[tokio::test]
@@ -1698,7 +1728,7 @@ mod tests {
                 serde_json::json!({
                     "decision":"plan_change",
                     "tier":"silver",
-                    "dataset_ids":["a.b.c"],
+                    "target_task_ids":["task_a"],
                     "final_review_text":"REQUIRES PLAN CHANGE: the approved plan references fields that do not exist."
                 })
                 .to_string(),

@@ -186,7 +186,7 @@ pub enum PhaseTransition {
     ReviewProceed,
     ReviewPatchImpl {
         meta: ReviewDecisionMeta,
-        target_paths: Vec<String>,
+        target_task_ids: Vec<String>,
     },
     ReviewProjectSummary,
     ReviewBatch,

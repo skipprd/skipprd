@@ -396,11 +396,11 @@ mod tests {
             Some(PhaseTransition::ReviewPatchImpl {
                 meta: crate::domain_types::ReviewDecisionMeta {
                     decision: crate::domain_types::ReviewDecision::PatchImpl,
-                    dataset_ids: vec![],
+                    target_task_ids: vec![],
                     tier: crate::domain_types::ReviewTier::Gold,
                     review_ref: None,
                 },
-                target_paths: vec![],
+                target_task_ids: vec![],
             }),
         )
         .await

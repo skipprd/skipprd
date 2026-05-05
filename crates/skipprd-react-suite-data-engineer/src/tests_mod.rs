@@ -496,17 +496,16 @@ fn review_question_includes_prior_review_and_mutation_diff_when_available() {
     use crate::control_flow::Phase;
     use crate::progress_controller::{ExecutionState, LastMutationSummary};
 
-    let prior_review_answer = "Please add tests.";
     let mut st = ExecutionState::new();
     st.phase.transition = Some(
         crate::progress_controller::PhaseTransition::ReviewPatchImpl {
             meta: crate::domain_types::ReviewDecisionMeta {
                 decision: crate::domain_types::ReviewDecision::PatchImpl,
-                dataset_ids: vec!["x".to_string()],
+                target_task_ids: vec!["x".to_string()],
                 tier: crate::domain_types::ReviewTier::Silver,
                 review_ref: None,
             },
-            target_paths: vec!["x".to_string()],
+            target_task_ids: vec!["x".to_string()],
         },
     );
     st.telemetry.last_mutation_summary = Some(LastMutationSummary {

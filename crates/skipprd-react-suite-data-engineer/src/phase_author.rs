@@ -90,7 +90,7 @@ fn review_patch_detail(
     match execution_state.phase.transition.as_ref()? {
         crate::progress_controller::PhaseTransition::ReviewPatchImpl {
             meta,
-            target_paths: _,
+            target_task_ids: _,
         } => Some(crate::phase_reason_detail::ReviewDecisionTransitionDetail {
             meta: meta.clone(),
             review_phase: String::new(),
@@ -131,14 +131,14 @@ fn path_matches_review_target(expected_path: Option<&str>, target: &str) -> bool
 }
 
 fn resolve_review_patch_target_paths<T>(
-    dataset_ids: &[String],
+    target_task_ids: &[String],
     tasks: &[T],
     task_id_of: impl Fn(&T) -> &str,
     expected_path_of: impl Fn(&T) -> Option<&str>,
 ) -> Vec<String> {
     let mut paths = std::collections::BTreeSet::new();
-    for dataset_id in dataset_ids {
-        let target = dataset_id.trim();
+    for target_task_id in target_task_ids {
+        let target = target_task_id.trim();
         if target.is_empty() {
             continue;
         }
@@ -991,7 +991,7 @@ async fn load_cleanse_author_context(
         let review_target_paths = review_patch_detail(params.execution_state)
             .map(|detail| {
                 resolve_review_patch_target_paths(
-                    &detail.meta.dataset_ids,
+                    &detail.meta.target_task_ids,
                     &plan.tasks,
                     |task| task.dataset_id.as_str(),
                     |task| task.expected_model_path.as_deref(),
@@ -1200,7 +1200,7 @@ async fn load_model_author_context(
         let review_target_paths = review_patch_detail(params.execution_state)
             .map(|detail| {
                 resolve_review_patch_target_paths(
-                    &detail.meta.dataset_ids,
+                    &detail.meta.target_task_ids,
                     &plan.tasks,
                     |task| task.name.as_str(),
                     |task| task.expected_model_path.as_deref(),
@@ -1542,7 +1542,7 @@ async fn build_author_prompt(
                         .as_ref()
                         .map(|detail| {
                             resolve_review_patch_target_paths(
-                                &detail.meta.dataset_ids,
+                                &detail.meta.target_task_ids,
                                 &plan.tasks,
                                 |task| task.dataset_id.as_str(),
                                 |task| task.expected_model_path.as_deref(),
@@ -1559,7 +1559,7 @@ async fn build_author_prompt(
                         .as_ref()
                         .map(|detail| {
                             resolve_review_patch_target_paths(
-                                &detail.meta.dataset_ids,
+                                &detail.meta.target_task_ids,
                                 &plan.tasks,
                                 |task| task.name.as_str(),
                                 |task| task.expected_model_path.as_deref(),
