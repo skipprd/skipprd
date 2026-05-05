@@ -153,7 +153,7 @@ enum Cmd {
 struct EngineDiscoverArgs {
     /// The pipeline to use.
     #[arg(short, long)]
-    pipeline: Option<String>,
+    pipeline: String,
     /// Output mode: progress, json, or text.
     #[arg(long, default_value = "progress")]
     output: String,
@@ -163,7 +163,7 @@ struct EngineDiscoverArgs {
 struct EngineSyncArgs {
     /// The pipeline to use.
     #[arg(short, long)]
-    pipeline: Option<String>,
+    pipeline: String,
     /// Output mode: progress, json, or text.
     #[arg(long, default_value = "progress")]
     output: String,
@@ -174,6 +174,9 @@ struct EngineSyncArgs {
 
 #[derive(Parser, Debug, Clone)]
 struct ModelArgs {
+    /// Data sink from skippr.yml to use as the modeling warehouse.
+    #[arg(long)]
+    data_sink: String,
     /// Start a fresh modeling thread instead of resuming the latest project thread.
     #[arg(long, default_value_t = false)]
     no_resume: bool,
@@ -661,9 +664,16 @@ fn working_dir() -> PathBuf {
 }
 
 fn config_path(explicit: &Option<PathBuf>) -> PathBuf {
-    explicit
-        .clone()
-        .unwrap_or_else(|| working_dir().join("skippr.yaml"))
+    explicit.clone().unwrap_or_else(|| {
+        let cwd = working_dir();
+        let yml = cwd.join("skippr.yml");
+        let yaml = cwd.join("skippr.yaml");
+        if yml.exists() || !yaml.exists() {
+            yml
+        } else {
+            yaml
+        }
+    })
 }
 
 fn load_config(explicit: &Option<PathBuf>) -> Result<SkipprDbtConfig, String> {
@@ -679,6 +689,16 @@ fn load_engine_config(explicit: &Option<PathBuf>) -> Result<serde_yaml::Value, S
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
     serde_yaml::from_str(&raw).map_err(|e| format!("failed to parse {}: {}", path.display(), e))
+}
+
+fn load_resolved_engine_config(explicit: &Option<PathBuf>) -> Result<serde_yaml::Value, String> {
+    let path = config_path(explicit);
+    let value = load_engine_config(explicit)?;
+    let mut json_value = serde_json::to_value(value)
+        .map_err(|e| format!("failed to normalize {}: {}", path.display(), e))?;
+    skipprd::helpers::configuration::Config::resolve_env_refs_in_json_value(&mut json_value)?;
+    serde_yaml::to_value(json_value)
+        .map_err(|e| format!("failed to convert resolved {}: {}", path.display(), e))
 }
 
 fn save_engine_config(explicit: &Option<PathBuf>, value: &serde_yaml::Value) -> Result<(), String> {
@@ -704,6 +724,61 @@ fn engine_project_name(value: &serde_yaml::Value) -> Result<String, String> {
         .ok_or_else(|| "skippr.yaml must set skippr.workspace".to_string())
 }
 
+fn warn_and_normalize_legacy_cli_config(value: &mut serde_yaml::Value) -> Result<(), String> {
+    if value.get("react").is_some() {
+        return Err(
+            "skippr.yml no longer supports a top-level react: section. Remove react: and run `skippr model --data-sink <name>`; model settings are derived from data_sinks and built-in defaults."
+                .to_string(),
+        );
+    }
+    if value.get("providers").is_some() {
+        return Err(
+            "skippr.yml no longer supports top-level providers:. Remove providers: and configure warehouses under data_sinks."
+                .to_string(),
+        );
+    }
+    if let Some(mapping) = value.as_mapping_mut() {
+        if mapping.remove(yaml_key("dbt")).is_some() {
+            eprintln!(
+                "[skippr] WARNING: ignoring legacy top-level dbt: config; model dbt settings are now derived from built-in defaults."
+            );
+        }
+        if let Some(skippr) = mapping
+            .get_mut(yaml_key("skippr"))
+            .and_then(|v| v.as_mapping_mut())
+        {
+            if skippr.remove(yaml_key("tenant")).is_some() {
+                eprintln!(
+                    "[skippr] WARNING: ignoring skippr.tenant from config; tenant comes from authenticated credentials."
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn load_cli_execution_config(explicit: &Option<PathBuf>) -> Result<serde_yaml::Value, String> {
+    let mut value = load_resolved_engine_config(explicit)?;
+    warn_and_normalize_legacy_cli_config(&mut value)?;
+    Ok(value)
+}
+
+fn load_cli_raw_config_for_save(explicit: &Option<PathBuf>) -> Result<serde_yaml::Value, String> {
+    let mut value = load_engine_config(explicit)?;
+    warn_and_normalize_legacy_cli_config(&mut value)?;
+    Ok(value)
+}
+
+fn set_public_cli_el_storage_default() {
+    if std::env::var("SKIPPRD_EL_STORAGE_MODE")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .is_none()
+    {
+        skipprd::helpers::configuration::Config::setenv("SKIPPRD_EL_STORAGE_MODE", "local");
+    }
+}
+
 fn default_react_providers_config() -> serde_json::Value {
     serde_json::json!({
         "catalog": {
@@ -722,73 +797,93 @@ fn default_react_providers_config() -> serde_json::Value {
     })
 }
 
-fn ref_name(reference: &str, prefix: &str) -> Option<String> {
-    reference
-        .trim()
-        .strip_prefix(prefix)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
+fn plugin_mapping_key(map: &serde_yaml::Mapping) -> Option<String> {
+    map.iter()
+        .filter_map(|(key, value)| {
+            let key = key.as_str()?.trim();
+            if key.is_empty() || key == "schema_sink" {
+                return None;
+            }
+            value.as_mapping()?;
+            Some(key.to_string())
+        })
+        .next()
 }
 
-fn first_mapping_key(map: &serde_yaml::Mapping) -> Option<String> {
-    map.keys()
-        .filter_map(|key| key.as_str())
-        .map(str::trim)
-        .find(|key| !key.is_empty())
-        .map(str::to_string)
-}
-
-fn selected_pipeline<'a>(
-    engine_cfg: &'a serde_yaml::Value,
-    project: &str,
-) -> Option<&'a serde_yaml::Value> {
-    let pipelines = engine_cfg.get("pipelines")?.as_mapping()?;
-    if let Some(p) = pipelines.get(yaml_key(project)) {
-        return Some(p);
+fn validate_pipeline_exists(engine_cfg: &serde_yaml::Value, pipeline: &str) -> Result<(), String> {
+    let pipelines = engine_cfg
+        .get("pipelines")
+        .and_then(|pipelines| pipelines.as_mapping())
+        .ok_or_else(|| "skippr.yml must define pipelines".to_string())?;
+    if pipelines.get(yaml_key(pipeline)).is_some() {
+        return Ok(());
     }
-    let first = first_mapping_key(pipelines)?;
-    pipelines.get(yaml_key(&first))
+    let known = pipelines
+        .keys()
+        .filter_map(|key| key.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    Err(format!(
+        "skippr.yml does not define pipeline '{}'. Known pipelines: {}",
+        pipeline,
+        if known.is_empty() { "<none>" } else { &known }
+    ))
 }
 
 fn selected_data_sink_config(
     engine_cfg: &serde_yaml::Value,
-    project: &str,
-) -> Option<serde_json::Value> {
-    let pipeline = selected_pipeline(engine_cfg, project)?;
-    let sink_ref = pipeline.get("data_sink")?.as_str()?;
-    let sink_name = ref_name(sink_ref, "data_sinks.")?;
-    let sink = engine_cfg.get("data_sinks")?.get(&sink_name)?;
-    let sink_map = sink.as_mapping()?;
-    let plugin = first_mapping_key(sink_map)?;
-    let plugin_cfg = sink.get(&plugin)?;
-    let mut json_cfg = serde_json::to_value(plugin_cfg).ok()?;
+    data_sink_name: &str,
+) -> Result<serde_json::Value, String> {
+    let sink = engine_cfg
+        .get("data_sinks")
+        .and_then(|data_sinks| data_sinks.get(data_sink_name))
+        .ok_or_else(|| {
+            format!(
+                "skippr.yml does not define data sink '{}'. Use one of the data_sinks keys.",
+                data_sink_name
+            )
+        })?;
+    let sink_map = sink
+        .as_mapping()
+        .ok_or_else(|| format!("data_sinks.{} must be a mapping", data_sink_name))?;
+    let plugin = plugin_mapping_key(sink_map).ok_or_else(|| {
+        format!(
+            "data_sinks.{} must contain a runtime plugin config such as Snowflake:",
+            data_sink_name
+        )
+    })?;
+    let plugin_cfg = sink.get(&plugin).ok_or_else(|| {
+        format!(
+            "data_sinks.{} did not contain plugin config '{}'",
+            data_sink_name, plugin
+        )
+    })?;
+    let mut json_cfg = serde_json::to_value(plugin_cfg)
+        .map_err(|e| format!("failed to convert data_sinks.{}: {}", data_sink_name, e))?;
     if let Some(obj) = json_cfg.as_object_mut() {
         obj.entry("kind".to_string())
             .or_insert_with(|| serde_json::Value::String(plugin.to_ascii_lowercase()));
     }
-    Some(json_cfg)
+    Ok(json_cfg)
 }
 
 fn merge_selected_sink_into_react_warehouse(
     mut providers: serde_json::Value,
     engine_cfg: &serde_yaml::Value,
-    project: &str,
-) -> serde_json::Value {
-    let Some(sink_cfg) = selected_data_sink_config(engine_cfg, project) else {
-        return providers;
-    };
+    data_sink_name: &str,
+) -> Result<serde_json::Value, String> {
+    let sink_cfg = selected_data_sink_config(engine_cfg, data_sink_name)?;
     let Some(sink_obj) = sink_cfg.as_object() else {
-        return providers;
+        return Ok(providers);
     };
     let Some(providers_obj) = providers.as_object_mut() else {
-        return providers;
+        return Ok(providers);
     };
     let warehouse = providers_obj
         .entry("warehouse".to_string())
         .or_insert_with(|| serde_json::json!({}));
     let Some(warehouse_obj) = warehouse.as_object_mut() else {
-        return providers;
+        return Ok(providers);
     };
     let existing_kind = warehouse_obj
         .get("kind")
@@ -799,7 +894,7 @@ fn merge_selected_sink_into_react_warehouse(
         .and_then(|v| v.as_str())
         .map(str::to_ascii_lowercase);
     if existing_kind.is_some() && sink_kind.is_some() && existing_kind != sink_kind {
-        return providers;
+        return Ok(providers);
     }
     for (key, value) in sink_obj {
         if value.is_null() {
@@ -809,21 +904,46 @@ fn merge_selected_sink_into_react_warehouse(
             .entry(key.clone())
             .or_insert_with(|| value.clone());
     }
-    providers
+    Ok(providers)
 }
 
-fn react_config_from_engine_config(value: &serde_yaml::Value) -> Result<ReactConfigFile, String> {
+fn dbt_schema_name(project: &str) -> String {
+    let schema = project
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || ch == '_' {
+                ch.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>()
+        .trim_matches('_')
+        .to_string();
+    if schema.is_empty() {
+        "skippr".to_string()
+    } else {
+        schema
+    }
+}
+
+fn react_config_from_engine_config(
+    value: &serde_yaml::Value,
+    data_sink_name: &str,
+) -> Result<ReactConfigFile, String> {
     let project = engine_project_name(value)?;
-    let providers_yaml = value
-        .get("react")
-        .and_then(|react| react.get("providers"))
-        .or_else(|| value.get("providers"));
-    let providers = match providers_yaml {
-        Some(providers) => serde_json::to_value(providers)
-            .map_err(|e| format!("failed to convert react.providers to JSON: {}", e))?,
-        None => default_react_providers_config(),
-    };
-    let providers = merge_selected_sink_into_react_warehouse(providers, value, &project);
+    let mut providers = default_react_providers_config();
+    if let Some(dbt) = providers.get_mut("dbt").and_then(|dbt| dbt.as_object_mut()) {
+        dbt.insert(
+            "naming".to_string(),
+            serde_json::json!({
+                "target_schema": dbt_schema_name(&project),
+                "silver_suffix": "silver",
+                "gold_suffix": "gold",
+            }),
+        );
+    }
+    let providers = merge_selected_sink_into_react_warehouse(providers, value, data_sink_name)?;
 
     Ok(ReactConfigFile {
         version: Some(1),
@@ -1513,6 +1633,15 @@ async fn load_reset_server_credentials() -> Result<api_client::CredentialsRespon
         .map_err(|e| format!("Failed to fetch server credentials: {e}"))
 }
 
+async fn load_cli_server_credentials() -> Result<api_client::CredentialsResponse, String> {
+    load_reset_server_credentials().await.map_err(|err| {
+        err.replace(
+            "Authentication required to reset cloud project data",
+            "Authentication required to run this command",
+        )
+    })
+}
+
 fn build_remote_reset_target(
     project: &str,
     _project_root: &std::path::Path,
@@ -1665,8 +1794,6 @@ async fn cmd_init(name: &str, reset: bool, explicit_config: &Option<PathBuf>) {
     let raw = format!(
         r#"skippr:
   workspace: {name}
-  tenant: _
-  skipprd_el_storage_mode: local
 
 pipelines:
   {name}:
@@ -1676,19 +1803,6 @@ pipelines:
 data_sources: {{}}
 data_sinks: {{}}
 schema_sinks: {{}}
-
-react:
-  providers:
-    catalog:
-      enabled: true
-      refresh_secs: 3600
-      max_concurrency: 8
-    dbt:
-      enabled: true
-      runner: host
-      target: dev
-    vector:
-      enabled: true
 "#
     );
     let cfg: serde_yaml::Value = serde_yaml::from_str(&raw).expect("valid default skippr.yaml");
@@ -1712,7 +1826,7 @@ react:
     println!("  skippr doctor");
     println!("  skippr discover --pipeline {name}");
     println!("  skippr sync --pipeline {name} --once");
-    println!("  skippr model");
+    println!("  skippr model --data-sink warehouse");
 }
 
 // ---------------------------------------------------------------------------
@@ -1720,16 +1834,23 @@ react:
 // ---------------------------------------------------------------------------
 
 fn cmd_connect_warehouse(kind: WarehouseKind, explicit_config: &Option<PathBuf>) {
-    if let Ok(mut cfg) = load_engine_config(explicit_config) {
-        let (plugin, config) = warehouse_plugin_and_config(kind);
-        set_plugin_section(&mut cfg, "data_sinks", "warehouse", plugin, config);
-        set_primary_pipeline_refs(&mut cfg, None, Some("warehouse"));
-        if let Err(e) = save_engine_config(explicit_config, &cfg) {
+    match load_cli_raw_config_for_save(explicit_config) {
+        Ok(mut cfg) => {
+            let (plugin, config) = warehouse_plugin_and_config(kind);
+            set_plugin_section(&mut cfg, "data_sinks", "warehouse", plugin, config);
+            set_primary_pipeline_refs(&mut cfg, None, Some("warehouse"));
+            if let Err(e) = save_engine_config(explicit_config, &cfg) {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
+            println!("Configured warehouse data sink 'warehouse' ({plugin}) in skippr.yml");
+            return;
+        }
+        Err(e) if config_path(explicit_config).exists() => {
             eprintln!("error: {}", e);
             std::process::exit(1);
         }
-        println!("Configured warehouse data sink 'warehouse' ({plugin}) in skippr.yaml");
-        return;
+        Err(_) => {}
     }
 
     let mut cfg = match load_config(explicit_config) {
@@ -1901,16 +2022,23 @@ fn cmd_connect_warehouse(kind: WarehouseKind, explicit_config: &Option<PathBuf>)
 // ---------------------------------------------------------------------------
 
 fn cmd_connect_source(kind: SourceKind, explicit_config: &Option<PathBuf>) {
-    if let Ok(mut cfg) = load_engine_config(explicit_config) {
-        let (plugin, config) = source_plugin_and_config(kind);
-        set_plugin_section(&mut cfg, "data_sources", "source", plugin, config);
-        set_primary_pipeline_refs(&mut cfg, Some("source"), None);
-        if let Err(e) = save_engine_config(explicit_config, &cfg) {
+    match load_cli_raw_config_for_save(explicit_config) {
+        Ok(mut cfg) => {
+            let (plugin, config) = source_plugin_and_config(kind);
+            set_plugin_section(&mut cfg, "data_sources", "source", plugin, config);
+            set_primary_pipeline_refs(&mut cfg, Some("source"), None);
+            if let Err(e) = save_engine_config(explicit_config, &cfg) {
+                eprintln!("error: {}", e);
+                std::process::exit(1);
+            }
+            println!("Configured data source 'source' ({plugin}) in skippr.yml");
+            return;
+        }
+        Err(e) if config_path(explicit_config).exists() => {
             eprintln!("error: {}", e);
             std::process::exit(1);
         }
-        println!("Configured data source 'source' ({plugin}) in skippr.yaml");
-        return;
+        Err(_) => {}
     }
 
     let mut cfg = match load_config(explicit_config) {
@@ -2252,7 +2380,7 @@ fn cmd_connect_source(kind: SourceKind, explicit_config: &Option<PathBuf>) {
 fn cmd_doctor(explicit_config: &Option<PathBuf>) {
     let mut ok = true;
 
-    let cfg = match load_engine_config(explicit_config) {
+    let cfg = match load_cli_execution_config(explicit_config) {
         Ok(c) => {
             check_pass("skippr.yaml found");
             c
@@ -2472,7 +2600,7 @@ async fn prepare_engine_command(
     log: Option<String>,
     explicit_config: &Option<PathBuf>,
     mode: skipprd::cli::Mode,
-    pipeline: Option<&str>,
+    pipeline: &str,
 ) {
     let path = config_path(explicit_config);
     if !path.exists() {
@@ -2481,18 +2609,45 @@ async fn prepare_engine_command(
         std::process::exit(1);
     }
 
+    let engine_cfg = match load_cli_execution_config(explicit_config) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = validate_pipeline_exists(&engine_cfg, pipeline) {
+        eprintln!("error: {}", e);
+        std::process::exit(1);
+    }
+
+    let server_credentials = match load_cli_server_credentials().await {
+        Ok(credentials) => credentials,
+        Err(e) => {
+            eprintln!("[skippr] ERROR: {}", e);
+            eprintln!("[skippr]   Run 'skippr user login' to authenticate interactively,");
+            eprintln!("[skippr]   or set SKIPPR_API_KEY for CI/CD.");
+            std::process::exit(1);
+        }
+    };
+    let tenant = server_credentials.tenant_id.trim();
+    if tenant.is_empty() {
+        eprintln!("[skippr] ERROR: authenticated credentials did not include a tenant id.");
+        std::process::exit(1);
+    }
+    skipprd::helpers::configuration::Config::setenv("TENANT", tenant);
+    set_public_cli_el_storage_default();
+
     std::env::set_var("SKIPPR_CONFIG_FILE", &path);
     skipprd::helpers::logging::init_logging(log);
     skipprd::helpers::configuration::Config::build_config();
     skipprd::cli::CLI_MODE.write().clone_from(&mode);
-    if let Some(pipeline) = pipeline {
-        skipprd::helpers::configuration::PIPELINE_NAME
-            .write()
-            .clear();
-        skipprd::helpers::configuration::PIPELINE_NAME
-            .write()
-            .push_str(pipeline);
-    }
+    skipprd::helpers::configuration::PIPELINE_NAME
+        .write()
+        .clear();
+    skipprd::helpers::configuration::PIPELINE_NAME
+        .write()
+        .push_str(pipeline);
     skipprd::helpers::configuration::Config::init().await;
 }
 
@@ -2502,10 +2657,10 @@ async fn cmd_discover(
     args: EngineDiscoverArgs,
 ) {
     let mode = skipprd::cli::Mode::Discover(skipprd::cli::DisocverOptions {
-        pipeline: args.pipeline.clone(),
+        pipeline: Some(args.pipeline.clone()),
         output: args.output.clone(),
     });
-    prepare_engine_command(log, explicit_config, mode, args.pipeline.as_deref()).await;
+    prepare_engine_command(log, explicit_config, mode, &args.pipeline).await;
     if let Err(err) = skipprd::engine::run_discover(&args.output).await {
         eprintln!("[skippr] discover failed: {}", err);
         std::process::exit(1);
@@ -2514,11 +2669,11 @@ async fn cmd_discover(
 
 async fn cmd_sync(log: Option<String>, explicit_config: &Option<PathBuf>, args: EngineSyncArgs) {
     let mode = skipprd::cli::Mode::Sync(skipprd::cli::SyncOptions {
-        pipeline: args.pipeline.clone(),
+        pipeline: Some(args.pipeline.clone()),
         output: args.output.clone(),
         once: args.once,
     });
-    prepare_engine_command(log, explicit_config, mode, args.pipeline.as_deref()).await;
+    prepare_engine_command(log, explicit_config, mode, &args.pipeline).await;
     skipprd::metrics::Metrics::init_send_loop();
     if let Err(err) = skipprd::engine::run_sync(&args.output).await {
         eprintln!("[skippr] sync failed: {}", err);
@@ -2527,7 +2682,7 @@ async fn cmd_sync(log: Option<String>, explicit_config: &Option<PathBuf>, args: 
 }
 
 async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args: ModelArgs) {
-    let engine_cfg = match load_engine_config(explicit_config) {
+    let engine_cfg = match load_cli_execution_config(explicit_config) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -2542,7 +2697,7 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
             std::process::exit(1);
         }
     };
-    let mut internal_file = match react_config_from_engine_config(&engine_cfg) {
+    let mut internal_file = match react_config_from_engine_config(&engine_cfg, &args.data_sink) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -3756,6 +3911,9 @@ mod tests {
         assert!(config.exists());
         let contents = fs::read_to_string(&config).unwrap();
         assert!(contents.contains("test-project"));
+        assert!(!contents.contains("tenant:"));
+        assert!(!contents.contains("react:"));
+        assert!(!contents.contains("dbt:"));
     }
 
     #[tokio::test]
@@ -3818,7 +3976,7 @@ data_sinks:
         )
         .expect("yaml");
 
-        let internal = react_config_from_engine_config(&cfg).expect("internal config");
+        let internal = react_config_from_engine_config(&cfg, "snowflake").expect("internal config");
         let providers = internal.providers.expect("providers");
         let wh = providers
             .get("warehouse")
@@ -3832,6 +3990,103 @@ data_sinks:
             Some("/tmp/snowflake_key.p8")
         );
         assert!(providers.get("el").is_none());
+        assert_eq!(
+            providers
+                .get("dbt")
+                .and_then(|dbt| dbt.get("naming"))
+                .and_then(|naming| naming.get("target_schema"))
+                .and_then(|schema| schema.as_str()),
+            Some("cursor_semantic_validation")
+        );
+    }
+
+    #[test]
+    fn cli_config_rejects_react_section() {
+        let mut cfg: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+skippr:
+  workspace: demo
+react:
+  providers: {}
+"#,
+        )
+        .expect("yaml");
+
+        let err = warn_and_normalize_legacy_cli_config(&mut cfg).expect_err("react rejected");
+
+        assert!(err.contains("react:"));
+        assert!(err.contains("skippr model --data-sink"));
+    }
+
+    #[test]
+    fn cli_config_warns_and_drops_legacy_tenant_and_dbt() {
+        let mut cfg: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+skippr:
+  workspace: demo
+  tenant: old-tenant
+dbt:
+  target: prod
+"#,
+        )
+        .expect("yaml");
+
+        warn_and_normalize_legacy_cli_config(&mut cfg).expect("normalize legacy keys");
+
+        assert!(cfg.get("dbt").is_none());
+        assert!(cfg
+            .get("skippr")
+            .and_then(|skippr| skippr.get("tenant"))
+            .is_none());
+    }
+
+    #[test]
+    fn raw_config_save_path_does_not_expand_env_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("skippr.yaml");
+        fs::write(
+            &config,
+            r#"
+skippr:
+  workspace: demo
+pipelines: {}
+data_sources:
+  source:
+    Mssql:
+      connection_string: ${SKIPPR_TEST_RAW_SECRET}
+"#,
+        )
+        .unwrap();
+        std::env::set_var("SKIPPR_TEST_RAW_SECRET", "should-not-be-written");
+
+        let cfg = load_cli_raw_config_for_save(&Some(config)).expect("raw config");
+
+        assert_eq!(
+            cfg.get("data_sources")
+                .and_then(|sources| sources.get("source"))
+                .and_then(|source| source.get("Mssql"))
+                .and_then(|mssql| mssql.get("connection_string"))
+                .and_then(|value| value.as_str()),
+            Some("${SKIPPR_TEST_RAW_SECRET}")
+        );
+
+        std::env::remove_var("SKIPPR_TEST_RAW_SECRET");
+    }
+
+    #[test]
+    fn sync_and_discover_require_pipeline() {
+        let sync_err = Cli::try_parse_from(["skippr", "sync"]).expect_err("missing pipeline");
+        assert!(sync_err.to_string().contains("--pipeline"));
+
+        let discover_err =
+            Cli::try_parse_from(["skippr", "discover"]).expect_err("missing pipeline");
+        assert!(discover_err.to_string().contains("--pipeline"));
+    }
+
+    #[test]
+    fn model_requires_data_sink() {
+        let err = Cli::try_parse_from(["skippr", "model"]).expect_err("missing data sink");
+        assert!(err.to_string().contains("--data-sink"));
     }
 
     #[tokio::test]

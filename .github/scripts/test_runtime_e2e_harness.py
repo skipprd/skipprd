@@ -38,6 +38,25 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
             ],
         )
 
+    def test_github_action_configs_use_refined_skippr_shape(self) -> None:
+        github_dir = runtime_e2e_harness.REPO_ROOT / ".github"
+        config_paths = sorted(github_dir.glob("actions/**/skippr.yml"))
+        self.assertTrue(config_paths, "expected static GitHub Actions skippr.yml fixtures")
+        for config_path in config_paths:
+            text = config_path.read_text(encoding="utf-8")
+            with self.subTest(config=str(config_path.relative_to(github_dir))):
+                self.assertNotIn("tenant:", text)
+                self.assertNotIn("\nreact:", text)
+                self.assertNotIn("\ndbt:", text)
+
+        mssql_snowflake_action = (
+            github_dir / "actions" / "e2e" / "mssql_snowflake" / "action.yaml"
+        ).read_text(encoding="utf-8")
+        self.assertNotIn('"  tenant:', mssql_snowflake_action)
+        self.assertNotIn('"react:', mssql_snowflake_action)
+        self.assertNotIn('"    dbt:', mssql_snowflake_action)
+        self.assertIn("model --data-sink snowflake", mssql_snowflake_action)
+
     def test_resolve_skipprd_accepts_binary_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             binary = Path(temp_dir) / "skipprd"

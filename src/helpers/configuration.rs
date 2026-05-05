@@ -383,9 +383,12 @@ impl Config {
         let string_val = serde_json::to_string(&config).unwrap();
 
         // Deserialize the String back into serde_json::Value
-        let config: Value = serde_json::from_str(&string_val).unwrap();
+        let mut config: Value = serde_json::from_str(&string_val).unwrap();
 
-        // recusively merge config with any set ENV vars
+        Config::resolve_env_refs_in_json_value(&mut config)
+            .unwrap_or_else(|err| panic!("Invalid environment reference in config: {}", err));
+
+        // recursively merge config with any set ENV vars
         // let config = Config::merge_config_with_env(config);
 
         let string_val = serde_json::to_string(&config).unwrap();
@@ -444,6 +447,73 @@ impl Config {
     pub fn merge_config_with_env(mut config: Value) -> Value {
         Config::merge_env_vars(&mut config, "SKIPPR".to_string());
         config
+    }
+
+    fn resolve_env_ref(value: &str, path: &str) -> Result<Option<String>, String> {
+        let trimmed = value.trim();
+        if !(trimmed.starts_with("${") && trimmed.ends_with('}')) {
+            return Ok(None);
+        }
+        if trimmed.len() <= 3 || trimmed[2..trimmed.len() - 1].contains("${") {
+            return Err(format!(
+                "invalid environment reference '{}' at {}",
+                value, path
+            ));
+        }
+        if trimmed != value {
+            return Err(format!(
+                "environment reference '{}' at {} must be the entire scalar value",
+                value, path
+            ));
+        }
+        let var_name = &trimmed[2..trimmed.len() - 1];
+        if var_name.trim().is_empty() {
+            return Err(format!("empty environment reference at {}", path));
+        }
+        let env_value = std::env::var(var_name).map_err(|_| {
+            format!(
+                "skippr.yml references ${{{}}} at {}, but that environment variable is not set",
+                var_name, path
+            )
+        })?;
+        if env_value.trim().is_empty() {
+            return Err(format!(
+                "skippr.yml references ${{{}}} at {}, but that environment variable is empty",
+                var_name, path
+            ));
+        }
+        Ok(Some(env_value))
+    }
+
+    pub fn resolve_env_refs_in_json_value(value: &mut Value) -> Result<(), String> {
+        fn walk(value: &mut Value, path: String) -> Result<(), String> {
+            match value {
+                Value::String(raw) => {
+                    if let Some(resolved) = Config::resolve_env_ref(raw, &path)? {
+                        *raw = resolved;
+                    }
+                }
+                Value::Object(map) => {
+                    for (key, child) in map.iter_mut() {
+                        let child_path = if path.is_empty() {
+                            key.clone()
+                        } else {
+                            format!("{}.{}", path, key)
+                        };
+                        walk(child, child_path)?;
+                    }
+                }
+                Value::Array(items) => {
+                    for (idx, child) in items.iter_mut().enumerate() {
+                        walk(child, format!("{}[{}]", path, idx))?;
+                    }
+                }
+                Value::Null | Value::Bool(_) | Value::Number(_) => {}
+            }
+            Ok(())
+        }
+
+        walk(value, String::new())
     }
 
     fn parse_registry_ref(reference: &str, expected_prefix: &str) -> Result<String, String> {
@@ -1675,17 +1745,8 @@ impl Config {
         if Config::get_envcache("TENANT") != "" {
             return Config::get_envcache("TENANT");
         } else {
-            let config = Config::get();
-
             let default_tenant = Config::getenv("TENANT", "default");
-
-            let tenant = match config.skippr {
-                Some(skippr) => match skippr.tenant.as_ref() {
-                    Some(tenant) => tenant.to_string(),
-                    None => default_tenant,
-                },
-                None => default_tenant,
-            };
+            let tenant = default_tenant;
 
             Config::set_evncache("TENANT", &tenant.clone());
             tenant
@@ -2443,6 +2504,168 @@ mod tests {
     use serial_test::serial;
 
     use super::*;
+
+    #[test]
+    #[serial]
+    fn resolves_whole_value_env_refs_recursively() {
+        std::env::set_var("SKIPPR_TEST_CONNECTION", "server=tcp:127.0.0.1");
+        std::env::set_var("SKIPPR_TEST_TABLE", "dbo.customers");
+        std::env::set_var("SKIPPR_TEST_ACCOUNT", "ACCT");
+
+        let mut value = json!({
+            "data_sources": {
+                "mssql": {
+                    "Mssql": {
+                        "connection_string": "${SKIPPR_TEST_CONNECTION}",
+                        "tables": ["${SKIPPR_TEST_TABLE}", "dbo.orders"],
+                        "literal": "prefix ${SKIPPR_TEST_TABLE}"
+                    }
+                }
+            },
+            "data_sinks": {
+                "snowflake": {
+                    "Snowflake": {
+                        "account": "${SKIPPR_TEST_ACCOUNT}"
+                    }
+                }
+            }
+        });
+
+        Config::resolve_env_refs_in_json_value(&mut value).expect("resolve env refs");
+
+        assert_eq!(
+            value["data_sources"]["mssql"]["Mssql"]["connection_string"],
+            "server=tcp:127.0.0.1"
+        );
+        assert_eq!(
+            value["data_sources"]["mssql"]["Mssql"]["tables"][0],
+            "dbo.customers"
+        );
+        assert_eq!(
+            value["data_sources"]["mssql"]["Mssql"]["literal"],
+            "prefix ${SKIPPR_TEST_TABLE}"
+        );
+        assert_eq!(
+            value["data_sinks"]["snowflake"]["Snowflake"]["account"],
+            "ACCT"
+        );
+
+        std::env::remove_var("SKIPPR_TEST_CONNECTION");
+        std::env::remove_var("SKIPPR_TEST_TABLE");
+        std::env::remove_var("SKIPPR_TEST_ACCOUNT");
+    }
+
+    #[test]
+    #[serial]
+    fn missing_env_ref_reports_config_path() {
+        std::env::remove_var("SKIPPR_TEST_MISSING");
+        let mut value = json!({
+            "data_sources": {
+                "mssql": {
+                    "Mssql": {
+                        "connection_string": "${SKIPPR_TEST_MISSING}"
+                    }
+                }
+            }
+        });
+
+        let err = Config::resolve_env_refs_in_json_value(&mut value).expect_err("missing var");
+
+        assert!(err.contains("${SKIPPR_TEST_MISSING}"));
+        assert!(err.contains("data_sources.mssql.Mssql.connection_string"));
+    }
+
+    #[test]
+    #[serial]
+    fn build_config_resolves_customer_style_plugin_env_refs() {
+        let original_config = APP_CONFIG.read().clone();
+        let original_pipeline_name = PIPELINE_NAME.read().clone();
+        let original_config_file = std::env::var("SKIPPR_CONFIG_FILE").ok();
+        let original_connection = std::env::var("MSSQL_CONNECTION_STRING").ok();
+        let original_account = std::env::var("SNOWFLAKE_ACCOUNT").ok();
+        ENV_CACHE.write().clear();
+
+        std::env::set_var(
+            "MSSQL_CONNECTION_STRING",
+            "server=tcp:127.0.0.1,1433;database=testdb",
+        );
+        std::env::set_var("SNOWFLAKE_ACCOUNT", "ACCT");
+
+        let config_path = std::env::temp_dir().join(format!(
+            "skippr-customer-style-{}.yml",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(
+            &config_path,
+            r#"
+skippr:
+  workspace: mssql_migration
+
+pipelines:
+  mssql-migration:
+    data_source: data_sources.mssql
+    data_sink: data_sinks.snowflake
+
+data_sources:
+  mssql:
+    Mssql:
+      connection_string: ${MSSQL_CONNECTION_STRING}
+      tables: ["dbo.customers"]
+
+data_sinks:
+  snowflake:
+    Snowflake:
+      account: ${SNOWFLAKE_ACCOUNT}
+      user: test_user
+      database: ANALYTICS
+      schema: RAW
+      warehouse: COMPUTE_WH
+"#,
+        )
+        .expect("write config");
+        std::env::set_var("SKIPPR_CONFIG_FILE", &config_path);
+        PIPELINE_NAME
+            .write()
+            .clone_from(&"mssql-migration".to_string());
+
+        Config::build_config();
+
+        let input = Config::get_pipeline_input_plugin_config().expect("input config");
+        let output = Config::get_pipeline_output_plugin_config().expect("output config");
+        assert_eq!(input.plugin_name, "Mssql");
+        assert_eq!(
+            input
+                .config
+                .get("connection_string")
+                .and_then(|value| value.as_str()),
+            Some("server=tcp:127.0.0.1,1433;database=testdb")
+        );
+        assert_eq!(output.plugin_name, "Snowflake");
+        assert_eq!(
+            output
+                .config
+                .get("account")
+                .and_then(|value| value.as_str()),
+            Some("ACCT")
+        );
+
+        let _ = std::fs::remove_file(&config_path);
+        *APP_CONFIG.write() = original_config;
+        PIPELINE_NAME.write().clone_from(&original_pipeline_name);
+        match original_config_file {
+            Some(value) => std::env::set_var("SKIPPR_CONFIG_FILE", value),
+            None => std::env::remove_var("SKIPPR_CONFIG_FILE"),
+        }
+        match original_connection {
+            Some(value) => std::env::set_var("MSSQL_CONNECTION_STRING", value),
+            None => std::env::remove_var("MSSQL_CONNECTION_STRING"),
+        }
+        match original_account {
+            Some(value) => std::env::set_var("SNOWFLAKE_ACCOUNT", value),
+            None => std::env::remove_var("SNOWFLAKE_ACCOUNT"),
+        }
+        ENV_CACHE.write().clear();
+    }
 
     // Tests for our new JSON parsing configuration options
     #[test]

@@ -36,7 +36,7 @@ Controls where skipprd extract/load metadata and namespace stats are persisted.
 
 When set to `local`, metadata is read from and written to `{DATA_DIR}/metadata.json` (atomic write via temp + rename), and stats are stored under `{DATA_DIR}/stats/`.
 
-When set to `s3` (default), the existing S3-based persistence is used.
+When set to `s3` (default), S3-based persistence is used.
 
 This internal development/testing setting only affects where skipprd EL state (metadata, stats) is persisted. It does not control `skippr model` dbt project storage, React thread logs, or vector storage.
 

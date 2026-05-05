@@ -129,8 +129,6 @@ runs:
           $configLines = @(
             "skippr:",
             "  workspace: $projectName",
-            "  tenant: _",
-            "  skipprd_el_storage_mode: local",
             "pipelines:",
             "  ${projectName}:",
             "    data_source: data_sources.mssql",
@@ -139,43 +137,22 @@ runs:
             "data_sources:",
             "  mssql:",
             "    Mssql:",
-            "      connection_string: '${env:MSSQL_CONNECTION_STRING}'",
+            "      connection_string: `${MSSQL_CONNECTION_STRING}",
             "      tables: [dbo.customers, dbo.orders, dbo.order_items]",
             "data_sinks:",
             "  snowflake:",
             "    Snowflake:",
-            "      account: $env:SNOWFLAKE_ACCOUNT",
-            "      user: $env:SNOWFLAKE_USER",
-            "      database: $env:SNOWFLAKE_DATABASE",
-              "      schema: $targetSchema",
-            "      warehouse: $env:SNOWFLAKE_WAREHOUSE",
-            "      role: $env:SNOWFLAKE_ROLE",
-            "      private_key_path: $(ConvertTo-YamlSingleQuoted $keyPath)",
-            "schema_sinks: {}"
-          ) + @(
-            "react:",
-            "  providers:",
-            "    warehouse:",
-            "      kind: snowflake",
-            "      database: $env:SNOWFLAKE_DATABASE",
+            "      account: `${SNOWFLAKE_ACCOUNT}",
+            "      user: `${SNOWFLAKE_USER}",
+            "      database: `${SNOWFLAKE_DATABASE}",
             "      schema: $targetSchema",
-            "      warehouse: $env:SNOWFLAKE_WAREHOUSE",
-            "      role: $env:SNOWFLAKE_ROLE",
-            "    catalog:",
-            "      enabled: true",
-            "      refresh_secs: 3600",
-            "      max_concurrency: 8",
-            "    dbt:",
-            "      enabled: true",
-            "      runner: host",
-            "      target: dev",
-            "      naming:",
-            "        target_schema: $projectName",
-            "        silver_suffix: silver",
-            "        gold_suffix: gold",
-            "    vector:",
-            "      enabled: true"
+            "      warehouse: `${SNOWFLAKE_WAREHOUSE}",
+            "      private_key_path: `${SNOWFLAKE_PRIVATE_KEY_PATH}"
           )
+          if (-not [string]::IsNullOrWhiteSpace($env:SNOWFLAKE_ROLE)) {
+            $configLines += "      role: `${SNOWFLAKE_ROLE}"
+          }
+          $configLines += "schema_sinks: {}"
           Set-Content -Path $configPath -Value ($configLines -join "`n") -Encoding utf8
 
           Push-Location $workdir
@@ -275,7 +252,7 @@ runs:
             Write-Error "::error::Snowflake raw type assertion failed with exit code $LASTEXITCODE"
           }
 
-          & $skipprBin --config $configPath --log info model 2>&1 | Tee-Object -FilePath $logPath
+          & $skipprBin --config $configPath --log info model --data-sink snowflake 2>&1 | Tee-Object -FilePath $logPath
           $status = $LASTEXITCODE
           if ($status -ne 0) {
             Write-Error "::error::skippr model failed with exit code $status"

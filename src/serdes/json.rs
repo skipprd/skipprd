@@ -137,6 +137,7 @@ impl SerdeJson {
 mod json_serde_tests {
     use super::*;
     use serde_json::json;
+    use serial_test::serial;
     use std::env;
 
     // Helper function to set up environment for tests
@@ -208,6 +209,7 @@ mod json_serde_tests {
     }
 
     #[test]
+    #[serial]
     fn test_single_quote_strings_json() {
         // Enable single quote parsing for this test
         setup_test_env(true, false);
@@ -237,6 +239,7 @@ mod json_serde_tests {
     // }
 
     #[test]
+    #[serial]
     fn test_unicode_string_json() {
         // Enable both unicode parsing and single quote parsing for this test
         setup_test_env(true, true);
