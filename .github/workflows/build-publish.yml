@@ -1875,6 +1875,9 @@ jobs:
       - publish_runtime_plugins
     runs-on:
       - depot-ubuntu-22.04-16
+    environment: Skippr
+    env:
+      SKIPPR_API_KEY: ${{ secrets.SKIPPR_API_KEY }}
     steps:
       - uses: actions/checkout@v4
       - name: Install published skippr release
