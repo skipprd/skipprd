@@ -688,13 +688,48 @@ impl DataSinkSnowflakePlugin {
             .filter_map(|pair| {
                 let mut parts = pair.splitn(2, '=');
                 match (parts.next(), parts.next()) {
-                    (Some(key), Some(value)) if !key.is_empty() => {
-                        Some((key.to_string(), value.to_string()))
-                    }
+                    (Some(key), Some(value)) if !key.is_empty() => Some((
+                        Self::percent_decode_query_component(key),
+                        Self::percent_decode_query_component(value),
+                    )),
                     _ => None,
                 }
             })
             .collect()
+    }
+
+    fn percent_decode_query_component(value: &str) -> String {
+        let bytes = value.as_bytes();
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut idx = 0;
+
+        while idx < bytes.len() {
+            if bytes[idx] == b'%' && idx + 2 < bytes.len() {
+                if let (Some(high), Some(low)) = (
+                    Self::hex_digit_value(bytes[idx + 1]),
+                    Self::hex_digit_value(bytes[idx + 2]),
+                ) {
+                    decoded.push((high << 4) | low);
+                    idx += 3;
+                    continue;
+                }
+            }
+
+            decoded.push(bytes[idx]);
+            idx += 1;
+        }
+
+        String::from_utf8(decoded)
+            .unwrap_or_else(|err| String::from_utf8_lossy(err.as_bytes()).into_owned())
+    }
+
+    fn hex_digit_value(byte: u8) -> Option<u8> {
+        match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            b'A'..=b'F' => Some(byte - b'A' + 10),
+            _ => None,
+        }
     }
 
     fn gcs_base_url(info: &StageUploadInfo) -> Option<String> {
@@ -1146,11 +1181,12 @@ impl DataSinkSnowflakePlugin {
         })?;
         let sas_token = Self::required_stage_cred(info, "AZURE_SAS_TOKEN")?;
         let (payload, attributes) = Self::build_stage_upload_payload(info, data)?;
+        let sas_query_pairs = Self::parse_sas_query_pairs(&sas_token);
 
         let mut builder = MicrosoftAzureBuilder::new()
             .with_account(&storage_account)
             .with_container_name(container)
-            .with_sas_authorization(Self::parse_sas_query_pairs(&sas_token));
+            .with_sas_authorization(sas_query_pairs);
 
         if let Some(ref endpoint) = info.end_point {
             builder =
@@ -2599,6 +2635,25 @@ mod tests {
             Some("sv=1&sig=abc")
         );
         assert!(info.encryption_material.is_some());
+    }
+
+    #[test]
+    fn parses_azure_sas_query_pairs_without_double_encoding() {
+        let pairs = DataSinkSnowflakePlugin::parse_sas_query_pairs(
+            "?sv=2023-11-03&se=2026-05-06T12%3A00%3A00Z&skt=2026-05-06T11%3A00%3A00Z&sig=abc%2Bdef%2Fghi%3D&raw_plus=a+b&bad=keep%2Zliteral",
+        );
+
+        assert_eq!(
+            pairs,
+            vec![
+                ("sv".to_string(), "2023-11-03".to_string()),
+                ("se".to_string(), "2026-05-06T12:00:00Z".to_string()),
+                ("skt".to_string(), "2026-05-06T11:00:00Z".to_string()),
+                ("sig".to_string(), "abc+def/ghi=".to_string()),
+                ("raw_plus".to_string(), "a+b".to_string()),
+                ("bad".to_string(), "keep%2Zliteral".to_string()),
+            ]
+        );
     }
 
     #[test]
