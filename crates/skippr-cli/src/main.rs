@@ -2377,19 +2377,38 @@ fn cmd_connect_source(kind: SourceKind, explicit_config: &Option<PathBuf>) {
 // doctor
 // ---------------------------------------------------------------------------
 
+fn load_doctor_config(
+    explicit_config: &Option<PathBuf>,
+) -> Result<(PathBuf, serde_yaml::Value), String> {
+    let path = config_path(explicit_config);
+    if !path.exists() {
+        return Err(format!(
+            "{} not found — run 'skippr init <project>'",
+            path.display()
+        ));
+    }
+    load_cli_execution_config(explicit_config)
+        .map(|cfg| (path.clone(), cfg))
+        .map_err(|e| format!("failed to load {}: {}", path.display(), e))
+}
+
 fn cmd_doctor(explicit_config: &Option<PathBuf>) {
     let mut ok = true;
 
-    let cfg = match load_cli_execution_config(explicit_config) {
-        Ok(c) => {
-            check_pass("skippr.yaml found");
-            c
+    let (cfg_path, cfg) = match load_doctor_config(explicit_config) {
+        Ok((path, c)) => {
+            check_pass(&format!("config file found: {}", path.display()));
+            (path, c)
         }
-        Err(_) => {
-            check_fail("skippr.yaml not found — run 'skippr init <project>'");
+        Err(e) => {
+            check_fail(&e);
             std::process::exit(1);
         }
     };
+    let cfg_label = cfg_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("config file");
 
     if cfg
         .get("pipelines")
@@ -2399,7 +2418,7 @@ fn cmd_doctor(explicit_config: &Option<PathBuf>) {
     {
         check_pass("pipelines configured");
     } else {
-        check_fail("no pipelines configured in skippr.yaml");
+        check_fail(&format!("no pipelines configured in {cfg_label}"));
         ok = false;
     }
 
