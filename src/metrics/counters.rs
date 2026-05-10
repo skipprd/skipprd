@@ -103,7 +103,9 @@ pub fn inc_wal_compactions_in_flight() {
 }
 #[inline]
 pub fn dec_wal_compactions_in_flight() {
-    WAL_COMPACTIONS_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+    let _ = WAL_COMPACTIONS_IN_FLIGHT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        Some(value.saturating_sub(1))
+    });
 }
 
 #[inline]

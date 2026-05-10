@@ -14,7 +14,7 @@ use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tokio::task::JoinSet;
 use tokio::time::{timeout, Duration};
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 #[cfg(unix)]
 use {
@@ -716,9 +716,27 @@ pub async fn sync_runtime_input_plugin(
             if let Some(control_frame) = control_reader.take_frame::<PluginFrame>()? {
                 match control_frame {
                     PluginFrame::SourceEvent(SourceEvent::SchemaStateUpdate(schema_state)) => {
-                        apply_runtime_source_schema_state(schema_state.clone());
-                        for namespace in schema_state.namespaces.keys() {
-                            Config::sync_output_schema_namespace(namespace);
+                        let namespace_count = schema_state.namespaces.len();
+                        let changed_namespaces = apply_runtime_source_schema_state(schema_state);
+                        if namespace_count > 0 {
+                            info!(
+                                "Runtime source schema state update: {} namespaces received, {} changed",
+                                namespace_count,
+                                changed_namespaces.len()
+                            );
+                        }
+                        if Config::truth_value(&Config::getenv(
+                            "SCHEMA_SYNC_RUNTIME_SOURCE_STATE",
+                            "false",
+                        )) {
+                            for namespace in changed_namespaces {
+                                Config::sync_output_schema_namespace(&namespace);
+                            }
+                        } else if !changed_namespaces.is_empty() {
+                            debug!(
+                                "Runtime source schema state publication skipped for {} namespaces",
+                                changed_namespaces.len()
+                            );
                         }
                     }
                     PluginFrame::SourceEvent(SourceEvent::Completed) => {

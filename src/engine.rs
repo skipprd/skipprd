@@ -235,7 +235,7 @@ pub async fn run_discover(output_mode: &str) -> io::Result<()> {
     {
         let flatten = Config::get_transform_flatten_events();
         for (namespace, _metadata) in pipeline_metadata.metadata.iter() {
-            match Ingest::prepare_arrow_schema_with_metadata(
+            match Ingest::prepare_arrow_schema_with_metadata_for_query(
                 &namespace,
                 &pipeline_metadata.metadata,
                 flatten,
@@ -559,13 +559,13 @@ pub async fn run_sync(output_mode: &str) -> io::Result<()> {
     }
 
     // Build Arrow schema cache for all known namespaces so that the ingest
-    // hot-path does not treat first-seen records as "schema changes".  For
-    // Athena output this also enqueues each namespace for Glue table sync
-    // (one-by-one, via the worker), replacing the previous bulk re-send.
+    // hot-path does not treat first-seen records as schema changes. This is a
+    // local cache warmup only; it must not enqueue Glue/schema publication for
+    // every persisted namespace on process start.
     {
         let flatten = Config::get_transform_flatten_events();
         for (namespace, _ns_metadata) in pipeline_metadata.metadata.iter() {
-            match Ingest::prepare_arrow_schema_with_metadata(
+            match Ingest::prepare_arrow_schema_with_metadata_for_query(
                 namespace,
                 &pipeline_metadata.metadata,
                 flatten,

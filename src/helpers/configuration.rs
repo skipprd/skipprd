@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::fs;
 use std::fs::File;
@@ -6,6 +6,7 @@ use std::io::Read;
 
 use std::path::Path;
 
+use std::sync::mpsc::Receiver as StdReceiver;
 use std::sync::Arc;
 use yaml_rust::YamlLoader;
 
@@ -39,7 +40,11 @@ const DEFAULT_CONFIG: &'static str = "NULL_VALUE";
 
 pub static DATA_DIR_INIT_ONCE: OnceCell<()> = OnceCell::new();
 
-type SchemaSyncWorkerState = (UnboundedSender<String>, Option<std::thread::JoinHandle<()>>);
+type SchemaSyncWorkerState = (
+    UnboundedSender<String>,
+    Option<std::thread::JoinHandle<()>>,
+    StdReceiver<()>,
+);
 static SCHEMA_SYNC_WORKER: Lazy<std::sync::Mutex<Option<SchemaSyncWorkerState>>> =
     Lazy::new(|| std::sync::Mutex::new(None));
 
@@ -2083,15 +2088,51 @@ impl Config {
         Self::truth_value(&Self::getenv("CATALOG_LLM_ENABLED", "true"))
     }
 
+    fn schema_sync_debounce_duration() -> std::time::Duration {
+        std::time::Duration::from_millis(
+            Config::getenv("SCHEMA_SYNC_DEBOUNCE_MS", "400")
+                .parse::<u64>()
+                .unwrap_or(400),
+        )
+    }
+
+    fn schema_sync_drain_timeout() -> std::time::Duration {
+        std::time::Duration::from_secs(
+            Config::getenv("SCHEMA_SYNC_DRAIN_TIMEOUT_SECONDS", "30")
+                .parse::<u64>()
+                .unwrap_or(30),
+        )
+    }
+
+    fn drain_available_schema_sync_requests(
+        rx: &mut UnboundedReceiver<String>,
+        dirty: &mut HashSet<String>,
+    ) -> bool {
+        let mut closed = false;
+        loop {
+            match rx.try_recv() {
+                Ok(ns) => {
+                    dirty.insert(ns);
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    closed = true;
+                    break;
+                }
+            }
+        }
+        closed
+    }
+
     fn ensure_schema_sync_worker() -> UnboundedSender<String> {
         let mut guard = SCHEMA_SYNC_WORKER.lock().unwrap();
-        if let Some((tx, _)) = guard.as_ref() {
+        if let Some((tx, _, _)) = guard.as_ref() {
             return tx.clone();
         }
         let (tx, mut rx): (UnboundedSender<String>, UnboundedReceiver<String>) =
             unbounded_channel();
 
-        let pending: DashMap<String, ()> = DashMap::new();
+        let (done_tx, done_rx) = std::sync::mpsc::channel();
         let handle = std::thread::spawn(move || {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -2100,18 +2141,38 @@ impl Config {
             rt.block_on(async move {
                 let mut primary_plugin: Option<Box<dyn crate::plugins::SchemaSink + Send + Sync>> = None;
                 let mut deadletter_plugin: Option<Box<dyn crate::plugins::SchemaSink + Send + Sync>> = None;
+                let mut dirty: HashSet<String> = HashSet::new();
 
-                while let Some(ns) = rx.recv().await {
-                    if pending.insert(ns.clone(), ()).is_some() {
-                        continue;
+                loop {
+                    if dirty.is_empty() {
+                        match rx.recv().await {
+                            Some(ns) => {
+                                dirty.insert(ns);
+                            }
+                            None => break,
+                        }
                     }
-                    tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                    let debounce = Config::schema_sync_debounce_duration();
+                    if !debounce.is_zero() {
+                        tokio::time::sleep(debounce).await;
+                    }
+                    let channel_closed =
+                        Config::drain_available_schema_sync_requests(&mut rx, &mut dirty);
+                    let mut namespaces: Vec<String> = dirty.drain().collect();
+                    namespaces.sort();
+                    if namespaces.len() > 1 {
+                        info!(
+                            "Schema sync: coalesced {} namespace update requests",
+                            namespaces.len()
+                        );
+                    }
                     let sync_timeout = std::time::Duration::from_secs(
                         Config::getenv("SCHEMA_SYNC_TIMEOUT_SECONDS", "120")
                             .parse::<u64>()
                             .unwrap_or(120),
                     );
                     let flatten = Config::get_transform_flatten_events();
+                    for ns in namespaces {
                     let md_snapshot = { METADATA.load().metadata.clone() };
                     let out_meta = if let Some(schema) = md_snapshot.get(&ns) {
                         Some(if flatten {
@@ -2293,22 +2354,55 @@ impl Config {
                     } else {
                         debug!("Schema sync: namespace {} missing from metadata snapshot", ns);
                     }
-                    pending.remove(&ns);
+                    }
+                    if channel_closed {
+                        break;
+                    }
                 }
             });
+            let _ = done_tx.send(());
         });
-        *guard = Some((tx.clone(), Some(handle)));
+        *guard = Some((tx.clone(), Some(handle), done_rx));
         tx
     }
 
-    /// Drop the sender to close the channel, then join the worker thread so all
-    /// pending schema sync operations complete before the process exits.
+    /// Drop the sender to close the channel, then wait for the worker to flush
+    /// pending schema updates. The drain is bounded so `--once` cannot look
+    /// hung forever after data and compaction have already completed.
     pub fn drain_schema_sync_worker() {
         let mut guard = SCHEMA_SYNC_WORKER.lock().unwrap();
-        if let Some((tx, handle)) = guard.take() {
+        if let Some((tx, handle, done_rx)) = guard.take() {
             drop(tx);
             if let Some(h) = handle {
-                let _ = h.join();
+                let drain_timeout = Config::schema_sync_drain_timeout();
+                info!(
+                    "Schema sync: waiting up to {:?} for worker drain",
+                    drain_timeout
+                );
+                match done_rx.recv_timeout(drain_timeout) {
+                    Ok(()) => {
+                        if let Err(err) = h.join() {
+                            warn!(
+                                "Schema sync: worker thread panicked during drain: {:?}",
+                                err
+                            );
+                        }
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                        warn!(
+                            "Schema sync: drain timed out after {:?}; continuing shutdown",
+                            drain_timeout
+                        );
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        if let Err(err) = h.join() {
+                            warn!(
+                                "Schema sync: worker thread panicked during drain: {:?}",
+                                err
+                            );
+                        }
+                    }
+                }
             }
         }
     }
@@ -2500,10 +2594,62 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use serde_json::json;
     use serial_test::serial;
 
     use super::*;
+
+    #[test]
+    fn schema_sync_request_drain_coalesces_duplicate_namespaces() {
+        let (tx, mut rx) = unbounded_channel();
+        tx.send("events".to_string()).unwrap();
+        tx.send("events".to_string()).unwrap();
+        tx.send("users".to_string()).unwrap();
+
+        let mut dirty = HashSet::new();
+        let closed = Config::drain_available_schema_sync_requests(&mut rx, &mut dirty);
+
+        assert!(!closed);
+        assert_eq!(dirty.len(), 2);
+        assert!(dirty.contains("events"));
+        assert!(dirty.contains("users"));
+    }
+
+    #[test]
+    fn schema_sync_request_drain_flushes_when_sender_closes() {
+        let (tx, mut rx) = unbounded_channel();
+        tx.send("events".to_string()).unwrap();
+        tx.send("events".to_string()).unwrap();
+        drop(tx);
+
+        let mut dirty = HashSet::new();
+        let closed = Config::drain_available_schema_sync_requests(&mut rx, &mut dirty);
+
+        assert!(closed);
+        assert_eq!(dirty.len(), 1);
+        assert!(dirty.contains("events"));
+    }
+
+    #[test]
+    #[serial]
+    fn schema_sync_drain_timeout_is_env_configurable() {
+        let original = std::env::var("SCHEMA_SYNC_DRAIN_TIMEOUT_SECONDS").ok();
+        ENV_CACHE.write().clear();
+        std::env::set_var("SCHEMA_SYNC_DRAIN_TIMEOUT_SECONDS", "7");
+
+        assert_eq!(
+            Config::schema_sync_drain_timeout(),
+            std::time::Duration::from_secs(7)
+        );
+
+        match original {
+            Some(value) => std::env::set_var("SCHEMA_SYNC_DRAIN_TIMEOUT_SECONDS", value),
+            None => std::env::remove_var("SCHEMA_SYNC_DRAIN_TIMEOUT_SECONDS"),
+        }
+        ENV_CACHE.write().clear();
+    }
 
     #[test]
     #[serial]

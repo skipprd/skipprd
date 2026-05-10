@@ -713,6 +713,8 @@ impl Buffers {
             return false;
         }
         let num_cpus = num_cpus::get();
+        let drain_started = std::time::Instant::now();
+        let mut last_progress_log = std::time::Instant::now();
         tokio::pin!(done_rx);
         let drain_result = loop {
             tokio::select! {
@@ -726,6 +728,27 @@ impl Buffers {
                     let has_backlog =
                         wal_in_flight > 0 || uploads_in_flight > 0 || reclaimable_wal;
                     crate::ingest::tuner::drain_tick(num_cpus, has_backlog);
+                    if last_progress_log.elapsed() >= std::time::Duration::from_secs(5) {
+                        let remaining_sample = Self::reclaimable_wal_partition_count(10_000);
+                        let compacted_started = crate::metrics::counters::WAL_COMPACTIONS_STARTED
+                            .load(AtomicOrdering::Relaxed);
+                        let compacted_completed =
+                            crate::metrics::counters::WAL_COMPACTIONS_COMPLETED
+                                .load(AtomicOrdering::Relaxed);
+                        let failures = COMPACT_FAILURES.len();
+                        info!(
+                            "Compactor drain: waiting elapsed={:?} wal_in_flight={} uploads_in_flight={} reclaimable_wal={} remaining_partitions_sample={} compacted_started={} compacted_completed={} compact_failures={}",
+                            drain_started.elapsed(),
+                            wal_in_flight,
+                            uploads_in_flight,
+                            reclaimable_wal,
+                            remaining_sample,
+                            compacted_started,
+                            compacted_completed,
+                            failures
+                        );
+                        last_progress_log = std::time::Instant::now();
+                    }
                     if has_backlog && Config::log_wal_enabled() {
                         debug!(
                             "Compactor drain: wal_in_flight={} uploads_in_flight={} reclaimable_wal={}",
@@ -977,6 +1000,10 @@ impl Buffers {
 
     pub fn has_reclaimable_wal() -> bool {
         !Self::next_compaction_candidates(1, true).is_empty()
+    }
+
+    fn reclaimable_wal_partition_count(limit: usize) -> usize {
+        Self::next_compaction_candidates(limit, true).len()
     }
 
     fn tombstone_dir() -> PathBuf {
