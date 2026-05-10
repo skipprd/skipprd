@@ -132,6 +132,13 @@ fn ensure_slow_ingest_worker() {
                     ) {
                         Ok(v) => {
                             if updated == "yes" {
+                                // Monotonic schema evolution is an ingest-time contract:
+                                // this per-namespace worker is the only place that mutates
+                                // metadata for incoming records, and it publishes the evolved
+                                // metadata, Arrow schema, and default normalization template as
+                                // one ordered step before returning the normalized value. Later
+                                // Arrow serialization and compaction must only consume this
+                                // backward-compatible schema; they must not discover schema.
                                 METADATA.store(Arc::new(md_local.clone()));
                                 let _ = Ingest::prepare_arrow_schema_with_metadata(
                                     &task.namespace,
@@ -1260,7 +1267,7 @@ impl Ingest {
     fn process_batch(
         datas: &Arc<Vec<IngestBatch>>,
         offset_db_clone: &Arc<Offsets>,
-        schema_hashes: &mut DashMap<String, SchemaHash>,
+        _schema_hashes: &mut DashMap<String, SchemaHash>,
         handle: runtime::Handle,
         shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) {
@@ -1716,57 +1723,19 @@ impl Ingest {
             warn!("Warning: Could not update metrics - {:?}", e);
         }
 
-        // Serialize each entry's normalized JSON into Arrow RecordBatches eagerly (all-or-nothing per batch)
-        // If serialization fails, re-ingest entire batch via slow path to evolve schema and retry once
+        // Serialize each entry's normalized JSON into Arrow RecordBatches eagerly
+        // (all-or-nothing per batch).
+        //
+        // Critical invariant: schema discovery/evolution is an ingest-time
+        // operation, serialized per namespace by the slow-ingest worker. By the
+        // time records reach this point they must already be normalized against
+        // a monotonic, backward-compatible schema published from the evolved
+        // metadata. This path must not discover schema; a serialization failure
+        // here means ingest-time normalization/schema publication missed that
+        // invariant and should be handled as data-plane failure, not compaction
+        // recovery.
         for (k, entry) in buf.iter_mut() {
             let records_vec = raw_values.remove(k).unwrap_or_default();
-            // Seed schema for brand-new namespaces with inferred specs from this entry
-            let ns = entry._namespace.clone();
-            let md_snapshot = METADATA.load();
-            let _is_empty_ns = md_snapshot
-                .metadata
-                .get(&ns)
-                .map(|m| m.fields.is_empty())
-                .unwrap_or(true);
-            drop(md_snapshot);
-            // if is_empty_ns {
-            //     let ns_md = METADATA.load().metadata.get(&ns).cloned().unwrap_or(Metadata::new().unwrap());
-            //     let mut specs = Vec::new();
-            //     let values_ref_seed: Vec<&serde_json::Value> = records_vec.iter().map(|r| &r.record).collect();
-            //     for v in values_ref_seed.into_iter() { specs.extend(infer_specs_for_record(v, ns_md.fields.as_ref())); }
-            //     if !specs.is_empty() {
-            //         let proposal = EvolutionProposal { namespace: ns.clone(), fields: specs };
-            //         let _vb = match runtime::Handle::try_current() {
-            //             Ok(h) => h.block_on(async { propose_and_wait(&ns, proposal, 3000).await }),
-            //             Err(_) => {
-            //                 let rt = runtime::Builder::new_multi_thread().worker_threads(1).enable_all().build().unwrap();
-            //                 rt.block_on(async { propose_and_wait(&ns, proposal, 3000).await })
-            //             }
-            //         };
-            //         if let Some(swap) = ARROW_SCHEMA.get(&ns) {
-            //             entry.schema = Arc::clone(&swap.value().load());
-            //         }
-            //         // Persist updated metadata and kick schema sync for this namespace
-            //         let md_snapshot2 = METADATA.load().as_ref().clone();
-            //         if let Ok(h) = runtime::Handle::try_current() {
-            //             let md_clone2 = md_snapshot2.clone();
-            //             h.spawn(async move { Config::set_metadata(&md_clone2, false).await; });
-            //             let md_clone3 = md_snapshot2.clone();
-            //             h.spawn(async move { Config::sync_schema(&md_clone3.metadata).await; });
-            //         } else {
-            //             let md_clone2 = md_snapshot2.clone();
-            //             std::thread::spawn(move || {
-            //                 let rt = runtime::Builder::new_current_thread().enable_all().build().unwrap();
-            //                 rt.block_on(async move { Config::set_metadata(&md_clone2, false).await; });
-            //             });
-            //             let md_clone3 = md_snapshot2.clone();
-            //             std::thread::spawn(move || {
-            //                 let rt2 = runtime::Builder::new_current_thread().enable_all().build().unwrap();
-            //                 rt2.block_on(async move { Config::sync_schema(&md_clone3.metadata).await; });
-            //             });
-            //         }
-            //     }
-            // }
             let try_serialize = |schema: SchemaRef,
                                  values: &Vec<&serde_json::Value>|
              -> Result<Vec<RecordBatch>, String> {
@@ -1789,132 +1758,24 @@ impl Ingest {
                 continue;
             }
 
-            // First attempt using current snapshot schema (should succeed after serialized evolution)
+            // The ingest worker publishes schema and default templates before
+            // returning evolved normalized records, so this should succeed
+            // without attempting late schema evolution.
             match try_serialize(entry.schema.clone(), &values_ref) {
                 Ok(batches) => {
                     entry.record_batches = Some(batches);
                     continue;
                 }
                 Err(first_err) => {
-                    if Config::debug_enabled() {
-                        debug!(
-                            "Batch serialize failed (will retry): ns={} err={}",
-                            entry._namespace, first_err
-                        );
-                    }
-                }
-            }
-
-            // Fallback: route each record through the single-threaded slow-ingest queue
-            let flatten = Config::truth_value(
-                &Config::get_transform_config()
-                    .flatten_events
-                    .or(Some("no".to_string()))
-                    .unwrap(),
-            );
-            let skpr_namespace = entry._namespace.clone();
-            let mut persistent_error: Option<String> = None;
-            let mut fixed_records: Vec<serde_json::Value> = Vec::with_capacity(values_ref.len());
-            for rec in records_vec.iter() {
-                // Re-process from SOURCE record (not normalized) to avoid metadata contamination
-                let md_snapshot = METADATA.load();
-                let msg = match md_snapshot.metadata.get(&skpr_namespace) {
-                    Some(metadata) => fast_path_ingest(
-                        rec.source.inner(),
-                        metadata.fields.as_ref(),
-                        &skpr_namespace,
-                        flatten,
-                    ),
-                    None => Err(format!(
-                        "Failed to find metadata for namespace: {}",
-                        skpr_namespace
-                    )
-                    .into()),
-                };
-                let record_value = match msg {
-                    Ok(msg) => msg,
-                    Err(_err) => {
-                        // Final attempt via slow-path using source record
-                        match slow_ingest_blocking(&skpr_namespace, &rec.source, flatten) {
-                            Ok(v) => v,
-                            Err(e) => {
-                                if Config::debug_enabled() {
-                                    debug!(
-                                        "Ingest: record retry failed ns={} err={}",
-                                        skpr_namespace, e
-                                    );
-                                }
-                                persistent_error = Some(e.to_string());
-                                Value::Null
-                            }
-                        }
-                    }
-                };
-                if !record_value.is_null() {
-                    fixed_records.push(record_value);
-                }
-            }
-
-            if let Some(err) = persistent_error {
-                let off_key_str = match entry.offsets.iter().next() {
-                    Some((k, _)) => format!("{}:{}", k.namespace, k.partition),
-                    None => String::new(),
-                };
-                for (idx, rec) in records_vec.iter().enumerate() {
-                    dl_records.push(DeadletterRecord {
-                        namespace: skpr_namespace.clone(),
-                        record: rec.source.inner().to_string(),
-                        error: err.clone(),
-                        failure_code: "EVOLUTION_PERSISTENT".to_string(),
-                        event_time: rec._time,
-                        source_uri: String::new(),
-                        offset_key: off_key_str.clone(),
-                        offset_pos: idx as u64,
-                    });
-                }
-                for (ok, pos) in entry.offsets.iter() {
-                    dl_offsets
-                        .entry(ok.clone())
-                        .and_modify(|p| *p = (*p).max(*pos))
-                        .or_insert(*pos);
-                }
-                continue;
-            }
-
-            // Ensure entry.schema points to latest prepared schema for the namespace
-            if let Some(swap) = ARROW_SCHEMA.get(&skpr_namespace) {
-                entry.schema = Arc::clone(&swap.value().load());
-                let shard_version = ARROW_SCHEMA_VERSION
-                    .get(&skpr_namespace)
-                    .map(|v| v.value().load(Ordering::Relaxed))
-                    .unwrap_or(0);
-                let hash = format!("{}", shard_version);
-                schema_hashes.insert(
-                    skpr_namespace.clone(),
-                    SchemaHash {
-                        schema: entry.schema.clone(),
-                        hash,
-                    },
-                );
-            }
-
-            // Retry batch serialization once with potentially evolved schema
-            let values_ref2: Vec<&serde_json::Value> = if fixed_records.is_empty() {
-                records_vec.iter().map(|r| r.normalized.inner()).collect()
-            } else {
-                fixed_records.iter().collect()
-            };
-            match try_serialize(entry.schema.clone(), &values_ref2) {
-                Ok(batches) => {
-                    entry.record_batches = Some(batches);
-                }
-                Err(retry_err) => {
+                    let skpr_namespace = entry._namespace.clone();
                     let off_key_str = match entry.offsets.iter().next() {
                         Some((k, _)) => format!("{}:{}", k.namespace, k.partition),
                         None => String::new(),
                     };
-                    let arrow_err_msg =
-                        format!("Arrow serialization failed after retry: {}", retry_err);
+                    let arrow_err_msg = format!(
+                        "Arrow serialization invariant failed after ingest-time evolution: {}",
+                        first_err
+                    );
                     warn!(
                         "{} (ns={}, records={})",
                         arrow_err_msg,
@@ -1941,8 +1802,8 @@ impl Ingest {
                     }
                     if Config::debug_enabled() {
                         debug!(
-                            "Batch serialize failed after retry: ns={} err={} deadlettered",
-                            entry._namespace, retry_err
+                            "Batch serialize invariant failed: ns={} err={} deadlettered",
+                            entry._namespace, first_err
                         );
                     }
                 }

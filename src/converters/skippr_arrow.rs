@@ -7,6 +7,8 @@ use tracing::warn;
 use arrow::datatypes::TimeUnit::{Microsecond, Millisecond};
 // use arrow::datatypes::Fields;
 
+const EMPTY_STRUCT_MARKER_FIELD: &str = "__skippr_empty_struct";
+
 #[allow(dead_code)]
 #[derive(Debug, Clone)]
 enum InferredType {
@@ -180,13 +182,17 @@ fn output_metadata_field(metadata: &OutputMetadata) -> Result<Field, ArrowError>
 fn output_metadata_data_type(metadata: &OutputMetadata) -> Result<DataType, ArrowError> {
     match metadata.determined_type {
         SkipprDataType::Record | SkipprDataType::Map => {
-            if metadata.fields.is_empty() {
-                convert_skippr_type_to_arrow_data_type(&metadata.determined_type)
-            } else {
-                Ok(DataType::Struct(
-                    output_metadata_fields(&metadata.fields)?.into(),
-                ))
+            let mut fields = output_metadata_fields(&metadata.fields)?;
+            if !fields
+                .iter()
+                .any(|field| field.name() == EMPTY_STRUCT_MARKER_FIELD)
+            {
+                fields.insert(
+                    0,
+                    Field::new(EMPTY_STRUCT_MARKER_FIELD, DataType::Boolean, true),
+                );
             }
+            Ok(DataType::Struct(fields.into()))
         }
         SkipprDataType::Array => {
             let item_type = if metadata.determined_type_values == Some(SkipprDataType::Record) {
@@ -558,6 +564,37 @@ mod tests {
     }
 
     #[test]
+    fn test_empty_record_and_map_remain_structs() {
+        let mut record = OutputMetadata::new();
+        record.out_field_name = "consent".to_string();
+        record.determined_type = SkipprDataType::Record;
+
+        let mut map = OutputMetadata::new();
+        map.out_field_name = "app".to_string();
+        map.determined_type = SkipprDataType::Map;
+
+        let mut meta_map = HashMap::new();
+        meta_map.insert("consent".to_string(), record);
+        meta_map.insert("app".to_string(), map);
+
+        let schema = convert_skippr_to_arrow(Box::new(meta_map)).unwrap();
+        let consent = schema.field_with_name("consent").unwrap();
+        let app = schema.field_with_name("app").unwrap();
+
+        let expected = DataType::Struct(
+            vec![Field::new(
+                EMPTY_STRUCT_MARKER_FIELD,
+                DataType::Boolean,
+                true,
+            )]
+            .into(),
+        );
+
+        assert_eq!(consent.data_type(), &expected);
+        assert_eq!(app.data_type(), &expected);
+    }
+
+    #[test]
     fn test_convert_skippr_to_arrow_simple_array() {
         // Create a simple array of integers test metadata
         let mut metadata = OutputMetadata::new();
@@ -631,7 +668,10 @@ mod tests {
                 // Check that item type is a Struct
                 match item_field.data_type() {
                     DataType::Struct(struct_fields) => {
-                        assert_eq!(struct_fields.len(), 2);
+                        assert_eq!(struct_fields.len(), 3);
+                        assert!(struct_fields
+                            .iter()
+                            .any(|f| f.name() == EMPTY_STRUCT_MARKER_FIELD));
 
                         // Check name field
                         let name_field = struct_fields.iter().find(|f| f.name() == "name").unwrap();
@@ -774,7 +814,10 @@ mod tests {
                 // Check that the list items are structs
                 match item_field.data_type() {
                     DataType::Struct(struct_fields) => {
-                        assert_eq!(struct_fields.len(), 3); // name, age, emails
+                        assert_eq!(struct_fields.len(), 4); // marker, name, age, emails
+                        assert!(struct_fields
+                            .iter()
+                            .any(|f| f.name() == EMPTY_STRUCT_MARKER_FIELD));
 
                         // Check emails field is an array of strings
                         let emails_field =
@@ -837,7 +880,10 @@ mod tests {
         // Check that imu field is a Struct
         match imu_field.data_type() {
             DataType::Struct(struct_fields) => {
-                assert_eq!(struct_fields.len(), 1);
+                assert_eq!(struct_fields.len(), 2);
+                assert!(struct_fields
+                    .iter()
+                    .any(|f| f.name() == EMPTY_STRUCT_MARKER_FIELD));
 
                 // Check the array field inside the struct
                 let array_field = struct_fields

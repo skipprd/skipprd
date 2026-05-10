@@ -391,76 +391,64 @@ pub fn set_value(
                 if value.is_object() {
                     let mut m = Map::new();
 
-                    for (key, val) in value
-                        .as_object()
-                        .unwrap()
-                        .iter()
-                        .filter_map(|(k, v)| Some((k, v)))
-                    {
+                    for (key, val) in value.as_object().unwrap().iter() {
                         // if field == "trip" {
                         //     println!("{:?}", metadata.get_mut(field));
                         // }
 
-                        if Some(val).is_some() {
-                            match metadata.get(field).unwrap().fields.get(key) {
-                                Some(_t) => (),
-                                None => {
-                                    // println!("({}) no metadata for {} => {} with value: {}", data_type, field, key, val);
-                                    // discover_ingest(key, val, &mut metadata.get_mut(field).unwrap().fields, updatedSchema, flatten);
-                                    discover_ingest(
-                                        field,
-                                        value,
-                                        Some(field),
-                                        Some(data_type),
-                                        metadata,
-                                        updated_schema,
-                                    );
-                                }
-                            }
+                        if metadata.get(field).unwrap().fields.get(key).is_none() {
+                            discover_ingest(
+                                key,
+                                val,
+                                Some(field),
+                                Some(data_type),
+                                &mut metadata.get_mut(field).unwrap().fields,
+                                updated_schema,
+                            );
+                        }
 
-                            // only ingest fields enabled to sync to output
-                            if metadata.get_mut(&field.to_string()).is_some()
-                                && metadata
-                                    .get_mut(&field.to_string())
-                                    .unwrap()
-                                    .fields
-                                    .get_mut(key)
-                                    .is_some()
-                                && metadata
+                        // only ingest fields enabled to sync to output
+                        if metadata.get_mut(&field.to_string()).is_some()
+                            && metadata
+                                .get_mut(&field.to_string())
+                                .unwrap()
+                                .fields
+                                .get_mut(key)
+                                .is_some()
+                            && metadata
+                                .get_mut(field)
+                                .unwrap()
+                                .fields
+                                .get_mut(key)
+                                .unwrap()
+                                .enabled
+                        {
+                            // println!("ingesting {} => {} with value: {}", field, key, val);
+
+                            let newval = set_value(
+                                &metadata
                                     .get_mut(field)
                                     .unwrap()
                                     .fields
-                                    .get_mut(key)
+                                    .get_mut(&key.to_string())
                                     .unwrap()
-                                    .enabled
-                            {
-                                // println!("ingesting {} => {} with value: {}", field, key, val);
+                                    .determined_type
+                                    .to_string(),
+                                &key.to_string(),
+                                val,
+                                Some(field),
+                                Some(data_type),
+                                &mut metadata.get_mut(field).unwrap().fields,
+                                updated_schema,
+                                allow_evolve,
+                                flatten,
+                            );
 
-                                let newval = set_value(
-                                    &metadata
-                                        .get_mut(field)
-                                        .unwrap()
-                                        .fields
-                                        .get_mut(&key.to_string())
-                                        .unwrap()
-                                        .determined_type
-                                        .to_string(),
-                                    &key.to_string(),
-                                    val,
-                                    Some(field),
-                                    Some(data_type),
-                                    &mut metadata.get_mut(field).unwrap().fields,
-                                    updated_schema,
-                                    allow_evolve,
-                                    flatten,
-                                );
-
-                                match newval {
-                                    Ok(v) => {
-                                        m.insert(v.field, v.value);
-                                    }
-                                    Err(e) => return Err(e),
+                            match newval {
+                                Ok(v) => {
+                                    m.insert(v.field, v.value);
                                 }
+                                Err(e) => return Err(e),
                             }
                         }
                     }
@@ -1310,6 +1298,140 @@ pub fn set_date(
                 ),
             )))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests_nested_ingest_evolution {
+    use super::*;
+    use serde_json::json;
+
+    fn root_with_record(
+        field: &str,
+        children: HashMap<String, Metadata>,
+    ) -> HashMap<String, Metadata> {
+        let mut metadata = HashMap::new();
+        let mut record = Metadata::new().unwrap();
+        record.determined_type = SkipprDataType::Record;
+        record.out_field_name = field.to_string();
+        record.fields = Box::new(children);
+        metadata.insert(field.to_string(), record);
+        metadata
+    }
+
+    fn root_with_map(
+        field: &str,
+        children: HashMap<String, Metadata>,
+    ) -> HashMap<String, Metadata> {
+        let mut metadata = HashMap::new();
+        let mut map = Metadata::new().unwrap();
+        map.determined_type = SkipprDataType::Map;
+        map.out_field_name = field.to_string();
+        map.fields = Box::new(children);
+        metadata.insert(field.to_string(), map);
+        metadata
+    }
+
+    fn scalar(field: &str, data_type: SkipprDataType) -> Metadata {
+        let mut metadata = Metadata::new().unwrap();
+        metadata.determined_type = data_type;
+        metadata.out_field_name = field.to_string();
+        metadata
+    }
+
+    #[test]
+    fn record_ingest_discovers_missing_nested_child() {
+        let mut children = HashMap::new();
+        children.insert("name".to_string(), scalar("name", SkipprDataType::String));
+        let mut metadata = root_with_record("profile", children);
+        let mut updated_schema = "no".to_string();
+
+        let resolved = set_value(
+            "record",
+            "profile",
+            &json!({"name": "Ada", "active": true}),
+            None,
+            None,
+            &mut metadata,
+            &mut updated_schema,
+            true,
+            false,
+        )
+        .expect("record should normalize and discover nested child");
+
+        assert_eq!(updated_schema, "yes");
+        let profile = metadata.get("profile").unwrap();
+        assert_eq!(
+            profile.fields.get("active").unwrap().determined_type,
+            SkipprDataType::Boolean
+        );
+        assert_eq!(resolved.value["active"], true);
+    }
+
+    #[test]
+    fn map_ingest_discovers_missing_nested_child_under_map_metadata() {
+        let mut children = HashMap::new();
+        children.insert(
+            "existing".to_string(),
+            scalar("existing", SkipprDataType::String),
+        );
+        let mut metadata = root_with_map("attrs", children);
+        let mut updated_schema = "no".to_string();
+
+        let resolved = set_value(
+            "map",
+            "attrs",
+            &json!({"existing": "kept", "flag": true}),
+            None,
+            None,
+            &mut metadata,
+            &mut updated_schema,
+            true,
+            false,
+        )
+        .expect("map should normalize and discover nested child");
+
+        assert_eq!(updated_schema, "yes");
+        assert!(
+            metadata.get("flag").is_none(),
+            "map children must not be discovered at the root"
+        );
+        let attrs = metadata.get("attrs").unwrap();
+        assert_eq!(
+            attrs.fields.get("flag").unwrap().determined_type,
+            SkipprDataType::Boolean
+        );
+        assert_eq!(resolved.value["flag"], true);
+    }
+
+    #[test]
+    fn record_ingest_evolves_nested_child_sibling_under_parent_metadata() {
+        let mut children = HashMap::new();
+        children.insert("age".to_string(), scalar("age", SkipprDataType::Integer));
+        let mut metadata = root_with_record("profile", children);
+        let mut updated_schema = "no".to_string();
+
+        let resolved = set_value(
+            "record",
+            "profile",
+            &json!({"age": "senior"}),
+            None,
+            None,
+            &mut metadata,
+            &mut updated_schema,
+            true,
+            false,
+        )
+        .expect("nested child should evolve inside parent metadata");
+
+        assert_eq!(updated_schema, "yes");
+        assert!(
+            metadata.get("age_string").is_none(),
+            "nested evolution must not create root-level siblings"
+        );
+        let profile = metadata.get("profile").unwrap();
+        assert!(profile.fields.get("age_string").is_some());
+        assert_eq!(resolved.value["age_string"], "senior");
     }
 }
 
