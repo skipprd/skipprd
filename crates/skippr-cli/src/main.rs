@@ -8,10 +8,12 @@ mod translate;
 use std::{collections::HashMap, path::PathBuf, process::Command, sync::Arc};
 
 use clap::{Parser, Subcommand};
-use react::config::{LlmFile, ReactConfigFile, ScopeFile, StorageFile};
+use react::config::ReactConfigFile;
 use react_core::keyspace::Keyspace;
 
-use public_config::{DbtConfig, S3Transform, SkipprDbtConfig, SourceConfig, WarehouseConfig};
+use public_config::{
+    DbtConfig, S3Transform, SchemaSinkConfig, SkipprDbtConfig, SourceConfig, WarehouseConfig,
+};
 
 const SKIPPR_EULA_VERSION: &str = "skippr-eula-2026-04-29";
 const SKIPPR_EULA_URL: &str = "https://skippr.io/terms/eula";
@@ -184,9 +186,9 @@ struct ResetArgs {
 
 #[derive(Parser, Debug, Clone)]
 struct ModelArgs {
-    /// Data sink from skippr.yml to use as the modeling warehouse.
+    /// Pipeline to model. The modeling warehouse is derived from this pipeline's data sink.
     #[arg(long)]
-    data_sink: String,
+    pipeline: String,
     /// Start a fresh modeling thread instead of resuming the latest project thread.
     #[arg(long, default_value_t = false)]
     no_resume: bool,
@@ -737,7 +739,7 @@ fn engine_project_name(value: &serde_yaml::Value) -> Result<String, String> {
 fn warn_and_normalize_legacy_cli_config(value: &mut serde_yaml::Value) -> Result<(), String> {
     if value.get("react").is_some() {
         return Err(
-            "skippr.yml no longer supports a top-level react: section. Remove react: and run `skippr model --data-sink <name>`; model settings are derived from data_sinks and built-in defaults."
+            "skippr.yml no longer supports a top-level react: section. Remove react: and run `skippr model --pipeline <name>`; model settings are derived from the selected pipeline's data sink and built-in defaults."
                 .to_string(),
         );
     }
@@ -789,24 +791,6 @@ fn set_public_cli_el_storage_default() {
     }
 }
 
-fn default_react_providers_config() -> serde_json::Value {
-    serde_json::json!({
-        "catalog": {
-            "enabled": true,
-            "refresh_secs": 3600,
-            "max_concurrency": 8,
-        },
-        "dbt": {
-            "enabled": true,
-            "runner": "host",
-            "target": "dev",
-        },
-        "vector": {
-            "enabled": true,
-        }
-    })
-}
-
 fn plugin_mapping_key(map: &serde_yaml::Mapping) -> Option<String> {
     map.iter()
         .filter_map(|(key, value)| {
@@ -840,11 +824,28 @@ fn validate_pipeline_exists(engine_cfg: &serde_yaml::Value, pipeline: &str) -> R
     ))
 }
 
-fn selected_data_sink_config(
+fn pipeline_data_sink_name(
     engine_cfg: &serde_yaml::Value,
+    pipeline: &str,
+) -> Result<String, String> {
+    let pipeline_cfg = pipeline_config(engine_cfg, pipeline)?;
+    let data_sink_ref = pipeline_cfg
+        .get("data_sink")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("pipelines.{pipeline}.data_sink is required for `skippr model`"))?;
+    Ok(data_sink_ref
+        .strip_prefix("data_sinks.")
+        .unwrap_or(data_sink_ref)
+        .to_string())
+}
+
+fn selected_data_sink_mapping<'a>(
+    engine_cfg: &'a serde_yaml::Value,
     data_sink_name: &str,
-) -> Result<serde_json::Value, String> {
-    let sink = engine_cfg
+) -> Result<&'a serde_yaml::Mapping, String> {
+    engine_cfg
         .get("data_sinks")
         .and_then(|data_sinks| data_sinks.get(data_sink_name))
         .ok_or_else(|| {
@@ -852,69 +853,178 @@ fn selected_data_sink_config(
                 "skippr.yml does not define data sink '{}'. Use one of the data_sinks keys.",
                 data_sink_name
             )
-        })?;
-    let sink_map = sink
+        })?
         .as_mapping()
-        .ok_or_else(|| format!("data_sinks.{} must be a mapping", data_sink_name))?;
-    let plugin = plugin_mapping_key(sink_map).ok_or_else(|| {
+        .ok_or_else(|| format!("data_sinks.{} must be a mapping", data_sink_name))
+}
+
+fn schema_sink_config_for_data_sink(
+    engine_cfg: &serde_yaml::Value,
+    data_sink_name: &str,
+) -> Result<Option<SchemaSinkConfig>, String> {
+    let schema_sink_ref = engine_cfg
+        .get("data_sinks")
+        .and_then(|data_sinks| data_sinks.get(data_sink_name))
+        .and_then(|sink| sink.get("schema_sink"))
+        .and_then(|value| value.as_str())
+        .map(str::trim);
+    let Some(schema_sink_ref) = schema_sink_ref.filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let schema_sink_name = schema_sink_ref
+        .strip_prefix("schema_sinks.")
+        .unwrap_or(schema_sink_ref)
+        .trim();
+    let schema_sink = engine_cfg
+        .get("schema_sinks")
+        .and_then(|schema_sinks| schema_sinks.get(schema_sink_name))
+        .ok_or_else(|| format!("data_sinks.{data_sink_name}.schema_sink references unknown schema_sinks.{schema_sink_name}"))?;
+    if let Some(glue) = schema_sink.get("Glue") {
+        let glue_database_name = glue
+            .get("glue_database_name")
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                format!("schema_sinks.{schema_sink_name}.Glue.glue_database_name is required")
+            })?
+            .to_string();
+        return Ok(Some(SchemaSinkConfig::Glue { glue_database_name }));
+    }
+    Err(format!(
+        "schema_sinks.{schema_sink_name} must contain a supported schema sink config such as Glue"
+    ))
+}
+
+fn yaml_str(map: &serde_yaml::Mapping, key: &str) -> Option<String> {
+    map.get(yaml_key(key))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn result_s3_from_athena_results_bucket(bucket: Option<String>) -> Option<String> {
+    bucket.map(|bucket| {
+        let bucket = bucket.trim();
+        if bucket.starts_with("s3://") {
+            bucket.trim_end_matches('/').to_string() + "/"
+        } else {
+            format!("s3://{}/", bucket.trim_matches('/'))
+        }
+    })
+}
+
+fn warehouse_config_from_data_sink(
+    engine_cfg: &serde_yaml::Value,
+    data_sink_name: &str,
+) -> Result<(WarehouseConfig, Option<SchemaSinkConfig>), String> {
+    let sink = selected_data_sink_mapping(engine_cfg, data_sink_name)?;
+    let plugin = plugin_mapping_key(sink).ok_or_else(|| {
         format!(
             "data_sinks.{} must contain a runtime plugin config such as Snowflake:",
             data_sink_name
         )
     })?;
-    let plugin_cfg = sink.get(&plugin).ok_or_else(|| {
-        format!(
-            "data_sinks.{} did not contain plugin config '{}'",
-            data_sink_name, plugin
-        )
-    })?;
-    let mut json_cfg = serde_json::to_value(plugin_cfg)
-        .map_err(|e| format!("failed to convert data_sinks.{}: {}", data_sink_name, e))?;
-    if let Some(obj) = json_cfg.as_object_mut() {
-        obj.entry("kind".to_string())
-            .or_insert_with(|| serde_json::Value::String(plugin.to_ascii_lowercase()));
-    }
-    Ok(json_cfg)
-}
-
-fn merge_selected_sink_into_react_warehouse(
-    mut providers: serde_json::Value,
-    engine_cfg: &serde_yaml::Value,
-    data_sink_name: &str,
-) -> Result<serde_json::Value, String> {
-    let sink_cfg = selected_data_sink_config(engine_cfg, data_sink_name)?;
-    let Some(sink_obj) = sink_cfg.as_object() else {
-        return Ok(providers);
-    };
-    let Some(providers_obj) = providers.as_object_mut() else {
-        return Ok(providers);
-    };
-    let warehouse = providers_obj
-        .entry("warehouse".to_string())
-        .or_insert_with(|| serde_json::json!({}));
-    let Some(warehouse_obj) = warehouse.as_object_mut() else {
-        return Ok(providers);
-    };
-    let existing_kind = warehouse_obj
-        .get("kind")
-        .and_then(|v| v.as_str())
-        .map(str::to_ascii_lowercase);
-    let sink_kind = sink_obj
-        .get("kind")
-        .and_then(|v| v.as_str())
-        .map(str::to_ascii_lowercase);
-    if existing_kind.is_some() && sink_kind.is_some() && existing_kind != sink_kind {
-        return Ok(providers);
-    }
-    for (key, value) in sink_obj {
-        if value.is_null() {
-            continue;
+    let plugin_cfg = sink
+        .get(yaml_key(&plugin))
+        .and_then(|value| value.as_mapping())
+        .ok_or_else(|| {
+            format!(
+                "data_sinks.{} did not contain mapping config '{}'",
+                data_sink_name, plugin
+            )
+        })?;
+    let schema_sink = schema_sink_config_for_data_sink(engine_cfg, data_sink_name)?;
+    let warehouse = match plugin.to_ascii_lowercase().as_str() {
+        "athena" => {
+            let schema_from_sink = match &schema_sink {
+                Some(SchemaSinkConfig::Glue { glue_database_name }) => {
+                    Some(glue_database_name.clone())
+                }
+                None => None,
+            };
+            WarehouseConfig::Athena {
+                workgroup: yaml_str(plugin_cfg, "workgroup")
+                    .or_else(|| yaml_str(plugin_cfg, "athena_workgroup_name")),
+                region: yaml_str(plugin_cfg, "region"),
+                result_s3: yaml_str(plugin_cfg, "result_s3").or_else(|| {
+                    result_s3_from_athena_results_bucket(yaml_str(
+                        plugin_cfg,
+                        "athena_results_s3_bucket",
+                    ))
+                }),
+                schema: yaml_str(plugin_cfg, "schema").or(schema_from_sink),
+            }
         }
-        warehouse_obj
-            .entry(key.clone())
-            .or_insert_with(|| value.clone());
-    }
-    Ok(providers)
+        "snowflake" => WarehouseConfig::Snowflake {
+            account: yaml_str(plugin_cfg, "account"),
+            user: yaml_str(plugin_cfg, "user"),
+            password: yaml_str(plugin_cfg, "password"),
+            private_key_path: yaml_str(plugin_cfg, "private_key_path"),
+            stage: yaml_str(plugin_cfg, "stage"),
+            staging_uri: yaml_str(plugin_cfg, "staging_uri"),
+            staging_storage_integration: yaml_str(plugin_cfg, "staging_storage_integration"),
+            staging_azure_sas_token: yaml_str(plugin_cfg, "staging_azure_sas_token"),
+            staging_azure_account_key: yaml_str(plugin_cfg, "staging_azure_account_key"),
+            staging_gcs_service_account_key_path: yaml_str(
+                plugin_cfg,
+                "staging_gcs_service_account_key_path",
+            ),
+            database: yaml_str(plugin_cfg, "database"),
+            schema: yaml_str(plugin_cfg, "schema"),
+            warehouse: yaml_str(plugin_cfg, "warehouse"),
+            role: yaml_str(plugin_cfg, "role"),
+        },
+        "bigquery" => WarehouseConfig::Bigquery {
+            project: yaml_str(plugin_cfg, "project"),
+            dataset: yaml_str(plugin_cfg, "dataset"),
+            location: yaml_str(plugin_cfg, "location"),
+        },
+        "postgres" => WarehouseConfig::Postgres {
+            database: yaml_str(plugin_cfg, "database"),
+            schema: yaml_str(plugin_cfg, "schema"),
+        },
+        "databricks" => WarehouseConfig::Databricks {
+            workspace_url: yaml_str(plugin_cfg, "workspace_url"),
+            token: yaml_str(plugin_cfg, "token"),
+            warehouse_id: yaml_str(plugin_cfg, "warehouse_id"),
+            catalog: yaml_str(plugin_cfg, "catalog"),
+            schema: yaml_str(plugin_cfg, "schema"),
+        },
+        "synapse" => WarehouseConfig::Synapse {
+            connection_string: yaml_str(plugin_cfg, "connection_string"),
+            schema: yaml_str(plugin_cfg, "schema"),
+        },
+        "redshift" => WarehouseConfig::Redshift {
+            database: yaml_str(plugin_cfg, "database"),
+            cluster_identifier: yaml_str(plugin_cfg, "cluster_identifier"),
+            workgroup_name: yaml_str(plugin_cfg, "workgroup_name"),
+            db_user: yaml_str(plugin_cfg, "db_user"),
+            schema: yaml_str(plugin_cfg, "schema"),
+            region: yaml_str(plugin_cfg, "region"),
+            staging_s3_bucket: yaml_str(plugin_cfg, "staging_s3_bucket"),
+            staging_s3_prefix: yaml_str(plugin_cfg, "staging_s3_prefix"),
+            iam_role_arn: yaml_str(plugin_cfg, "iam_role_arn"),
+        },
+        "clickhouse" => WarehouseConfig::Clickhouse {
+            url: yaml_str(plugin_cfg, "url"),
+            database: yaml_str(plugin_cfg, "database"),
+            user: yaml_str(plugin_cfg, "user"),
+            password: yaml_str(plugin_cfg, "password"),
+        },
+        "motherduck" => WarehouseConfig::Motherduck {
+            motherduck_token: yaml_str(plugin_cfg, "motherduck_token"),
+            database: yaml_str(plugin_cfg, "database"),
+            schema: yaml_str(plugin_cfg, "schema"),
+        },
+        other => {
+            return Err(format!(
+                "data_sinks.{data_sink_name}.{other} is not supported by `skippr model`"
+            ));
+        }
+    };
+    Ok((warehouse, schema_sink))
 }
 
 fn dbt_schema_name(project: &str) -> String {
@@ -937,53 +1047,24 @@ fn dbt_schema_name(project: &str) -> String {
     }
 }
 
-fn react_config_from_engine_config(
+fn react_config_from_pipeline_config(
     value: &serde_yaml::Value,
-    data_sink_name: &str,
+    pipeline: &str,
 ) -> Result<ReactConfigFile, String> {
-    let project = engine_project_name(value)?;
-    let mut providers = default_react_providers_config();
-    if let Some(dbt) = providers.get_mut("dbt").and_then(|dbt| dbt.as_object_mut()) {
-        dbt.insert(
-            "naming".to_string(),
-            serde_json::json!({
-                "target_schema": dbt_schema_name(&project),
-                "silver_suffix": "silver",
-                "gold_suffix": "gold",
-            }),
-        );
-    }
-    let providers = merge_selected_sink_into_react_warehouse(providers, value, data_sink_name)?;
-
-    Ok(ReactConfigFile {
-        version: Some(1),
-        server: None,
-        storage: Some(StorageFile {
-            mode: Some("local".into()),
-            bucket: None,
-            path: Some("./.skippr".into()),
-            s3_credentials: None,
+    let data_sink_name = pipeline_data_sink_name(value, pipeline)?;
+    let (warehouse, schema_sink) = warehouse_config_from_data_sink(value, &data_sink_name)?;
+    let cfg = SkipprDbtConfig {
+        project: pipeline.to_string(),
+        warehouse: Some(warehouse),
+        source: None,
+        dbt: Some(DbtConfig {
+            target_schema: Some(dbt_schema_name(pipeline)),
+            silver_suffix: Some("silver".to_string()),
+            gold_suffix: Some("gold".to_string()),
         }),
-        scope: Some(ScopeFile {
-            tenant: Some("_".into()),
-            workspace: Some("dev".into()),
-            project_id: Some(project),
-        }),
-        llm: Some(LlmFile {
-            provider: Some("OPENAI_COMPAT".into()),
-            base_url: Some("https://api.openai.com".into()),
-            reason_model: Some("gpt-5.4".into()),
-            task_model: Some("gpt-5.4".into()),
-            embed_model: Some("text-embedding-3-small".into()),
-            context_length: Some(8192),
-            http_timeout_secs: Some(120),
-            max_tokens: Some(8192),
-            temperature: Some(0.2),
-            top_p: Some(1.0),
-            ..Default::default()
-        }),
-        providers: Some(providers),
-    })
+        schema_sink,
+    };
+    translate::to_internal(&cfg)
 }
 
 fn section_mapping_mut<'a>(
@@ -1736,7 +1817,7 @@ schema_sinks: {{}}
     println!("  skippr doctor");
     println!("  skippr discover --pipeline {name}");
     println!("  skippr sync --pipeline {name} --once");
-    println!("  skippr model --data-sink warehouse");
+    println!("  skippr model --pipeline {name}");
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2917,14 +2998,7 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
             std::process::exit(1);
         }
     };
-    let project = match engine_project_name(&engine_cfg) {
-        Ok(project) => project,
-        Err(e) => {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
-        }
-    };
-    let mut internal_file = match react_config_from_engine_config(&engine_cfg, &args.data_sink) {
+    let mut internal_file = match react_config_from_pipeline_config(&engine_cfg, &args.pipeline) {
         Ok(f) => f,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -3030,7 +3104,7 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
     let _ = metering
         .record_batch(&[
             react_suite_data_engineer::metering::UsageEvent::PipelineRun {
-                project_id: project.clone(),
+                project_id: args.pipeline.clone(),
             },
         ])
         .await;
@@ -3340,7 +3414,7 @@ fn find_latest_thread_in_local_storage(
             return Err(format!(
                 "failed to read local threads directory {}: {e}",
                 threads_dir.display()
-            ))
+            ));
         }
     };
 
@@ -4184,7 +4258,7 @@ mod tests {
     }
 
     #[test]
-    fn react_config_merges_selected_data_sink_into_warehouse_provider() {
+    fn react_config_derives_snowflake_warehouse_from_pipeline() {
         let cfg: serde_yaml::Value = serde_yaml::from_str(
             r#"
 skippr:
@@ -4212,7 +4286,8 @@ data_sinks:
         )
         .expect("yaml");
 
-        let internal = react_config_from_engine_config(&cfg, "snowflake").expect("internal config");
+        let internal = react_config_from_pipeline_config(&cfg, "cursor_semantic_validation")
+            .expect("internal config");
         let providers = internal.providers.expect("providers");
         let wh = providers
             .get("warehouse")
@@ -4225,7 +4300,13 @@ data_sinks:
             wh.get("private_key_path").and_then(|v| v.as_str()),
             Some("/tmp/snowflake_key.p8")
         );
-        assert!(providers.get("el").is_none());
+        assert_eq!(
+            providers
+                .get("el")
+                .and_then(|el| el.get("enabled"))
+                .and_then(|enabled| enabled.as_bool()),
+            Some(false)
+        );
         assert_eq!(
             providers
                 .get("dbt")
@@ -4234,6 +4315,120 @@ data_sinks:
                 .and_then(|schema| schema.as_str()),
             Some("cursor_semantic_validation")
         );
+    }
+
+    #[test]
+    fn react_config_derives_athena_schema_from_pipeline_schema_sink() {
+        let cfg: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+skippr:
+  workspace: picnic
+pipelines:
+  picnic:
+    data_source: data_sources.picnic
+    data_sink: data_sinks.picnic
+data_sources:
+  picnic:
+    S3:
+      s3_bucket: circles-analytics-prod
+data_sinks:
+  picnic:
+    schema_sink: schema_sinks.glue_picnic
+    Athena:
+      athena_workgroup_name: picnic
+      athena_results_s3_bucket: asgsdag-datalake
+      s3_bucket: asgsdag-datalake
+      s3_prefix: /datalake
+schema_sinks:
+  glue_picnic:
+    Glue:
+      glue_database_name: picnic
+"#,
+        )
+        .expect("yaml");
+
+        let internal = react_config_from_pipeline_config(&cfg, "picnic").expect("internal config");
+        let providers = internal.providers.expect("providers");
+        let wh = providers
+            .get("warehouse")
+            .and_then(|v| v.as_object())
+            .expect("warehouse object");
+
+        assert_eq!(wh.get("kind").and_then(|v| v.as_str()), Some("athena"));
+        assert_eq!(wh.get("schema").and_then(|v| v.as_str()), Some("picnic"));
+        assert_eq!(wh.get("workgroup").and_then(|v| v.as_str()), Some("picnic"));
+        assert_eq!(
+            wh.get("result_s3").and_then(|v| v.as_str()),
+            Some("s3://asgsdag-datalake/")
+        );
+    }
+
+    #[test]
+    fn react_config_pipeline_errors_are_actionable() {
+        let missing_pipeline: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+skippr:
+  workspace: demo
+pipelines: {}
+data_sinks: {}
+"#,
+        )
+        .expect("yaml");
+        let err = react_config_from_pipeline_config(&missing_pipeline, "missing")
+            .expect_err("missing pipeline");
+        assert!(err.contains("does not define pipeline"));
+
+        let missing_sink: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+skippr:
+  workspace: demo
+pipelines:
+  demo:
+    data_sink: data_sinks.warehouse
+data_sinks: {}
+"#,
+        )
+        .expect("yaml");
+        let err =
+            react_config_from_pipeline_config(&missing_sink, "demo").expect_err("missing sink");
+        assert!(err.contains("does not define data sink 'warehouse'"));
+
+        let missing_schema_sink: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+skippr:
+  workspace: demo
+pipelines:
+  demo:
+    data_sink: data_sinks.warehouse
+data_sinks:
+  warehouse:
+    schema_sink: schema_sinks.glue_missing
+    Athena:
+      athena_workgroup_name: demo
+"#,
+        )
+        .expect("yaml");
+        let err = react_config_from_pipeline_config(&missing_schema_sink, "demo")
+            .expect_err("missing schema sink");
+        assert!(err.contains("references unknown schema_sinks.glue_missing"));
+
+        let unsupported: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+skippr:
+  workspace: demo
+pipelines:
+  demo:
+    data_sink: data_sinks.warehouse
+data_sinks:
+  warehouse:
+    File:
+      path: /tmp/out
+"#,
+        )
+        .expect("yaml");
+        let err =
+            react_config_from_pipeline_config(&unsupported, "demo").expect_err("unsupported sink");
+        assert!(err.contains("not supported by `skippr model`"));
     }
 
     #[test]
@@ -4251,7 +4446,7 @@ react:
         let err = warn_and_normalize_legacy_cli_config(&mut cfg).expect_err("react rejected");
 
         assert!(err.contains("react:"));
-        assert!(err.contains("skippr model --data-sink"));
+        assert!(err.contains("skippr model --pipeline"));
     }
 
     #[test]
@@ -4270,10 +4465,11 @@ dbt:
         warn_and_normalize_legacy_cli_config(&mut cfg).expect("normalize legacy keys");
 
         assert!(cfg.get("dbt").is_none());
-        assert!(cfg
-            .get("skippr")
-            .and_then(|skippr| skippr.get("tenant"))
-            .is_none());
+        assert!(
+            cfg.get("skippr")
+                .and_then(|skippr| skippr.get("tenant"))
+                .is_none()
+        );
     }
 
     #[test]
@@ -4320,8 +4516,12 @@ data_sources:
     }
 
     #[test]
-    fn model_requires_data_sink() {
-        let err = Cli::try_parse_from(["skippr", "model"]).expect_err("missing data sink");
+    fn model_requires_pipeline_and_rejects_data_sink() {
+        let err = Cli::try_parse_from(["skippr", "model"]).expect_err("missing pipeline");
+        assert!(err.to_string().contains("--pipeline"));
+
+        let err = Cli::try_parse_from(["skippr", "model", "--data-sink", "warehouse"])
+            .expect_err("removed data sink flag");
         assert!(err.to_string().contains("--data-sink"));
     }
 
@@ -4526,11 +4726,13 @@ pipelines:
         }
         assert!(other_model.exists());
         assert_eq!(report.deleted_skipprd_remote.len(), 1);
-        assert!(skipprd_storage
-            .list_prefix("auth-tenant/analytics/orders/")
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            skipprd_storage
+                .list_prefix("auth-tenant/analytics/orders/")
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             skipprd_storage
                 .list_prefix("auth-tenant/analytics/customers/")
@@ -4540,11 +4742,13 @@ pipelines:
             1
         );
         assert_eq!(report.deleted_model_remote.len(), 1);
-        assert!(model_storage
-            .list_prefix(&target.model_prefix)
-            .await
-            .unwrap()
-            .is_empty());
+        assert!(
+            model_storage
+                .list_prefix(&target.model_prefix)
+                .await
+                .unwrap()
+                .is_empty()
+        );
         assert_eq!(
             model_storage.list_prefix(&model_keep).await.unwrap().len(),
             1

@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use react_core::resolved_config::{ReactResolvedConfig, StorageMode};
 use react_core::suite::{DebugProviderRegistry, SuiteCtx, SuiteRegistry};
-use vector::{lance_storage_options_from_credentials, LanceStorageOptions};
+use vector::{LanceStorageOptions, lance_storage_options_from_credentials};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SkipprHost;
@@ -64,7 +64,7 @@ pub async fn run_headless_detailed(
             return HeadlessRunDetail {
                 exit_code: 1,
                 bootstrap_error: Some(e),
-            }
+            };
         }
     };
     let exit_code = react::run_engine::run_headless_with_ctx(cfg, registry, suite_ctx, opts).await;

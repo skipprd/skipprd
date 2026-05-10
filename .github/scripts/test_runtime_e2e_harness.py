@@ -55,7 +55,7 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
         self.assertNotIn('"  tenant:', mssql_snowflake_action)
         self.assertNotIn('"react:', mssql_snowflake_action)
         self.assertNotIn('"    dbt:', mssql_snowflake_action)
-        self.assertIn("model --data-sink snowflake --no-resume", mssql_snowflake_action)
+        self.assertIn("model --pipeline mssql-migration --no-resume", mssql_snowflake_action)
 
     def test_resolve_skipprd_accepts_binary_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

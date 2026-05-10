@@ -254,7 +254,7 @@ pub fn to_internal(cfg: &SkipprDbtConfig) -> Result<ReactConfigFile, String> {
         None => {
             return Err(
                 "warehouse is not configured. Run: skippr connect warehouse <kind>".to_string(),
-            )
+            );
         }
     };
 
