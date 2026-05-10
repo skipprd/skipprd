@@ -25,6 +25,36 @@ struct ValidationLadderPhase {
     probe: Option<serde_json::Value>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ValidationScope {
+    PlanSlice,
+    PlanOwned,
+    FullProject,
+}
+
+impl ValidationScope {
+    fn from_args(args: &Value, select_terms: &[String]) -> Self {
+        match args
+            .get("validation_scope")
+            .or_else(|| args.get("scope"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.trim().to_ascii_lowercase())
+            .as_deref()
+        {
+            Some("plan_slice") | Some("slice") => Self::PlanSlice,
+            Some("plan_owned") | Some("owned") => Self::PlanOwned,
+            Some("full_project") | Some("full") => Self::FullProject,
+            _ if !select_terms.is_empty() => Self::PlanSlice,
+            _ => Self::FullProject,
+        }
+    }
+
+    fn allows_full_build_escalation(self) -> bool {
+        matches!(self, Self::FullProject)
+    }
+}
+
 async fn derive_select_terms(ctx: &AgentCtx, args: &Value) -> Vec<String> {
     if let Some(arr) = args.get("select").and_then(|v| v.as_array()) {
         let mut out: Vec<String> = arr
@@ -255,6 +285,7 @@ impl Tool for DbtValidateTool {
             .unwrap_or_else(|| "Unknown SQL dialect".to_string());
 
         let select_terms = derive_select_terms(ctx, &args).await;
+        let validation_scope = ValidationScope::from_args(&args, &select_terms);
         let mut ladder: Vec<ValidationLadderPhase> = Vec::new();
         let mut final_res: crate::providers::DbtValidateResult;
 
@@ -328,7 +359,7 @@ impl Tool for DbtValidateTool {
                     error_count: res2.errors.len(),
                     probe: None,
                 });
-                if !res2.ok {
+                if !res2.ok || !validation_scope.allows_full_build_escalation() {
                     final_res = res2;
                 } else {
                     let full_args = crate::providers::DbtValidateArgs {
@@ -415,6 +446,10 @@ impl Tool for DbtValidateTool {
         if let Some(obj) = v.as_object_mut() {
             obj.insert("dialect".to_string(), serde_json::json!(dialect));
             obj.insert(
+                "validation_scope".to_string(),
+                serde_json::to_value(validation_scope).unwrap_or(Value::Null),
+            );
+            obj.insert(
                 "validation_ladder".to_string(),
                 serde_json::to_value(ladder).unwrap_or(Value::Null),
             );
@@ -462,6 +497,8 @@ impl Tool for DbtValidateTool {
 
 #[cfg(test)]
 mod tests {
+    use super::ValidationScope;
+
     #[test]
     fn dbt_validate_mock_change_does_not_require_expected_sha256() {
         // Ensure unit tests do not require LLM echo of sha (suite enforces drift safety internally).
@@ -470,5 +507,27 @@ mod tests {
             "notes": []
         });
         assert!(v.get("patch_text").and_then(|x| x.as_str()).is_some());
+    }
+
+    #[test]
+    fn validation_scope_defaults_to_plan_slice_when_select_terms_exist() {
+        let args = serde_json::json!({});
+        let select_terms = vec!["agg_daily_product_sales".to_string()];
+
+        let scope = ValidationScope::from_args(&args, &select_terms);
+
+        assert_eq!(scope, ValidationScope::PlanSlice);
+        assert!(!scope.allows_full_build_escalation());
+    }
+
+    #[test]
+    fn validation_scope_can_request_full_project() {
+        let args = serde_json::json!({"validation_scope": "full_project"});
+        let select_terms = vec!["agg_daily_product_sales".to_string()];
+
+        let scope = ValidationScope::from_args(&args, &select_terms);
+
+        assert_eq!(scope, ValidationScope::FullProject);
+        assert!(scope.allows_full_build_escalation());
     }
 }

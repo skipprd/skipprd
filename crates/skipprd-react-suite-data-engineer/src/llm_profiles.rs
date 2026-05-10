@@ -35,7 +35,7 @@ impl DataEngineerSuite {
                         super::env_util::env_keys::LLM_PLAN_REASONING_EFFORT,
                     )
                 })
-                .unwrap_or(react_core::llm::ReasoningEffort::Medium);
+                .unwrap_or(react_core::llm::ReasoningEffort::High);
                 LlmCallOptions {
                     prompt_id,
                     thread_id,
@@ -60,7 +60,7 @@ impl DataEngineerSuite {
                         super::env_util::env_keys::LLM_PLAN_REASONING_EFFORT,
                     )
                 })
-                .unwrap_or(react_core::llm::ReasoningEffort::Medium);
+                .unwrap_or(react_core::llm::ReasoningEffort::High);
                 LlmCallOptions {
                     prompt_id,
                     thread_id,
@@ -79,7 +79,7 @@ impl DataEngineerSuite {
                 let reasoning_effort = Self::parse_reasoning_effort_env(
                     super::env_util::env_keys::LLM_PLAN_REASONING_EFFORT,
                 )
-                .unwrap_or(react_core::llm::ReasoningEffort::Medium);
+                .unwrap_or(react_core::llm::ReasoningEffort::High);
                 LlmCallOptions {
                     prompt_id,
                     thread_id,
@@ -106,7 +106,7 @@ impl DataEngineerSuite {
                         .map_err(|e| e.to_string())?,
                     ),
                     max_output_tokens: Some(max_tokens),
-                    reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
+                    reasoning_effort: Some(react_core::llm::ReasoningEffort::High),
                     ..Default::default()
                 }
             }
@@ -122,7 +122,7 @@ impl DataEngineerSuite {
                     thread_id,
                     expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
                     max_output_tokens: Some(max_tokens),
-                    reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
+                    reasoning_effort: Some(react_core::llm::ReasoningEffort::Medium),
                     ..Default::default()
                 }
             }
@@ -154,7 +154,7 @@ impl DataEngineerSuite {
                     thread_id,
                     expected_format: react_core::llm::LlmExpectedFormat::Text,
                     max_output_tokens: Some(max_tokens),
-                    reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
+                    reasoning_effort: Some(react_core::llm::ReasoningEffort::Medium),
                     ..Default::default()
                 }
             }

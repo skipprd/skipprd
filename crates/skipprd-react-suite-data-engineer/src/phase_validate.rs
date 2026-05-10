@@ -21,12 +21,14 @@ enum ValidateEscalation {
 
 impl DataEngineerSuite {
     async fn finish_validate_failure(
+        actx: &AgentCtx,
         thread_store: &ThreadStore,
         thread_id: &str,
         phase: Phase,
         guard_kind: GuardBlockKind,
         reason: String,
     ) -> Result<PhaseOutcome, PhaseError> {
+        Self::cancel_active_plan_for_phase(actx, phase, "validate retry exhausted").await?;
         apply_guard_block(thread_store, thread_id, phase, guard_kind, reason.clone()).await?;
         crate::state_manager::apply_execution_event(
             &thread_store.control_store(),
@@ -40,6 +42,56 @@ impl DataEngineerSuite {
             format!("failed to persist mark_failed after validate terminal failure: {e}")
         })?;
         Ok(PhaseOutcome::Failed { reason })
+    }
+
+    async fn cancel_active_plan_for_phase(
+        actx: &AgentCtx,
+        phase: Phase,
+        reason: &str,
+    ) -> Result<(), String> {
+        if phase == Phase::CleanseValidate {
+            if let Some(mut p) = crate::plan::load_cleanse_plan(actx)
+                .await
+                .map_err(|e| e.to_string())?
+            {
+                if !p.status.is_terminal() {
+                    tracing::warn!(plan_key = %p.plan_key, reason = %reason, "cancelling active cleanse plan before terminal failure");
+                    p.status = crate::plan::PlanStatus::Cancelled;
+                    crate::plan::save_cleanse_plan(actx, &p)
+                        .await
+                        .map_err(|e| format!("failed to cancel active cleanse plan: {e}"))?;
+                }
+            }
+        } else if let Some(mut p) = crate::plan::load_model_plan(actx)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            if !p.status.is_terminal() {
+                tracing::warn!(plan_key = %p.plan_key, reason = %reason, "cancelling active model plan before terminal failure");
+                p.status = crate::plan::PlanStatus::Cancelled;
+                crate::plan::save_model_plan(actx, &p)
+                    .await
+                    .map_err(|e| format!("failed to cancel active model plan: {e}"))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn model_validate_failure_plan_binding(
+        plan: &crate::plan::ModelPlan,
+    ) -> crate::facts::ValidateFailurePlanBinding {
+        let task_spec_digests = plan
+            .tasks
+            .iter()
+            .filter_map(|task| {
+                crate::authoring_contract::model_task_spec_digest(&plan.plan_key, task)
+                    .map(|digest| (task.name.clone(), digest))
+            })
+            .collect();
+        crate::facts::ValidateFailurePlanBinding {
+            plan_key: Some(plan.plan_key.clone()),
+            task_spec_digests,
+        }
     }
 
     async fn apply_validate_escalation(
@@ -580,12 +632,22 @@ impl DataEngineerSuite {
                 .unwrap_or("Unknown SQL dialect")
                 .to_string(),
         );
+        let plan_binding = if phase == Phase::ModelValidate {
+            crate::plan::load_model_plan(&actx)
+                .await?
+                .as_ref()
+                .map(Self::model_validate_failure_plan_binding)
+        } else {
+            None
+        };
         let facts_bundle = crate::facts::build_validate_fail_facts(
             &actx,
             dialect,
             &obs,
             crate::facts::FactsScope::ValidateFail,
-        );
+            plan_binding,
+        )
+        .await;
         // Best-effort persist into the active plan snapshot for reuse in subsequent authoring turns.
         // Keep bounded to avoid unbounded plan growth.
         if phase == Phase::CleanseValidate {
@@ -628,6 +690,7 @@ impl DataEngineerSuite {
                  manual intervention required.\n\n{brief}"
             );
             return Self::finish_validate_failure(
+                &actx,
                 thread_store,
                 thread_id,
                 phase,

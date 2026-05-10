@@ -184,7 +184,7 @@ fn parse_review_reasoning_effort(var: &str) -> Option<ReasoningEffort> {
         Some("low") => Some(ReasoningEffort::Low),
         Some("medium") => Some(ReasoningEffort::Medium),
         Some("high") => Some(ReasoningEffort::High),
-        Some("extra_high") | Some("xhigh") => Some(ReasoningEffort::ExtraHigh),
+        Some("extra_high") | Some("xhigh") => Some(ReasoningEffort::High),
         _ => None,
     }
 }

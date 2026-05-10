@@ -86,9 +86,21 @@ pub struct FactsBundle {
     pub scope: FactsScope,
     pub dialect: SqlDialect,
     #[serde(default)]
+    pub plan_binding: Option<ValidateFailurePlanBinding>,
+    #[serde(default)]
+    pub model_names: Vec<String>,
+    #[serde(default)]
     pub relations: Vec<RelationFacts>,
     /// Canonical tool contracts.
     pub tool_contracts: Value,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ValidateFailurePlanBinding {
+    #[serde(default)]
+    pub plan_key: Option<String>,
+    #[serde(default)]
+    pub task_spec_digests: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -315,19 +327,29 @@ pub async fn load_manifest_source_index(ctx: &AgentCtx) -> BTreeMap<(String, Str
 
 /// Build facts for a deterministic dbt_validate failure observation.
 ///
-/// Returns dialect + tool_contracts only (no model/column extraction).
-pub fn build_validate_fail_facts(
-    _ctx: &AgentCtx,
+/// Best-effort: attach failing model names and current relation schemas when
+/// validation output identifies concrete models. If the manifest or warehouse
+/// schema is unavailable, return the metadata/tool contract shell instead.
+pub async fn build_validate_fail_facts(
+    ctx: &AgentCtx,
     dialect: SqlDialect,
-    _validate_contract: &crate::controller_event::ValidateObservationContract,
+    validate_contract: &crate::controller_event::ValidateObservationContract,
     scope: FactsScope,
+    plan_binding: Option<ValidateFailurePlanBinding>,
 ) -> FactsBundle {
-    FactsBundle {
+    let model_names = extract_validate_failure_model_names(&validate_contract.observation);
+    let relation_fqns = resolve_model_names_to_fqns(ctx, &model_names).await;
+    let mut bundle = build_facts_bundle_from_relations(
+        ctx,
         scope,
         dialect,
-        relations: Vec::new(),
-        tool_contracts: file_patch_contract_value(),
-    }
+        &relation_fqns,
+        FactsLimits::for_scope(scope),
+    )
+    .await;
+    bundle.plan_binding = plan_binding;
+    bundle.model_names = model_names;
+    bundle
 }
 
 /// Build an auto-attached FactsBundle given a set of relation FQNs to include.
@@ -352,9 +374,73 @@ pub async fn build_facts_bundle_from_relations(
     FactsBundle {
         scope,
         dialect,
+        plan_binding: None,
+        model_names: Vec::new(),
         relations: rels,
         tool_contracts: file_patch_contract_value(),
     }
+}
+
+fn extract_validate_failure_model_names(observation: &Value) -> Vec<String> {
+    let mut names = Vec::new();
+    collect_model_names_from_value(observation.get("failing_nodes"), &mut names);
+    collect_model_names_from_value(observation.get("suggested_next_files"), &mut names);
+    collect_model_names_from_errors(observation.get("errors"), &mut names);
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn collect_model_names_from_value(value: Option<&Value>, out: &mut Vec<String>) {
+    match value {
+        Some(Value::String(s)) => push_model_name_from_text(s, out),
+        Some(Value::Array(arr)) => {
+            for v in arr {
+                collect_model_names_from_value(Some(v), out);
+            }
+        }
+        Some(Value::Object(map)) => {
+            for key in ["model", "model_name", "name", "node", "file", "path"] {
+                if let Some(v) = map.get(key) {
+                    collect_model_names_from_value(Some(v), out);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_model_names_from_errors(value: Option<&Value>, out: &mut Vec<String>) {
+    let Some(Value::Array(errors)) = value else {
+        return;
+    };
+    for err in errors {
+        if let Some(s) = err.as_str() {
+            push_model_name_from_text(s, out);
+        }
+    }
+}
+
+fn push_model_name_from_text(text: &str, out: &mut Vec<String>) {
+    for raw in
+        text.split(|c: char| c.is_whitespace() || c == '\\' || c == '/' || c == '"' || c == '\'')
+    {
+        let token = raw
+            .trim()
+            .trim_matches(|c: char| !c.is_ascii_alphanumeric() && c != '_' && c != '.');
+        let token = token.strip_suffix(".sql").unwrap_or(token);
+        let Some(name) = token.rsplit('.').next() else {
+            continue;
+        };
+        if is_likely_model_name(name) {
+            out.push(name.to_string());
+        }
+    }
+}
+
+fn is_likely_model_name(name: &str) -> bool {
+    let prefixes = ["stg_", "fct_", "dim_", "agg_", "int_"];
+    prefixes.iter().any(|p| name.starts_with(p))
 }
 
 /// Best-effort helper to resolve a list of model names into relation FQNs using manifest.json.
@@ -672,8 +758,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn build_validate_fail_facts_returns_dialect_and_tool_contracts() {
+    #[tokio::test]
+    async fn build_validate_fail_facts_returns_dialect_and_tool_contracts() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let query: Arc<dyn QueryProvider> = Arc::new(MockQueryProvider);
         let ctx = make_ctx(storage.clone(), query);
@@ -689,7 +775,9 @@ mod tests {
             SqlDialect("Amazon Athena (engine v3 / Trino SQL)".to_string()),
             &contract,
             FactsScope::ValidateFail,
-        );
+            None,
+        )
+        .await;
 
         assert_eq!(facts.scope, FactsScope::ValidateFail);
         assert_eq!(facts.dialect.0, "Amazon Athena (engine v3 / Trino SQL)");

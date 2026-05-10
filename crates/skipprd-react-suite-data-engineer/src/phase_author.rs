@@ -822,6 +822,7 @@ fn build_schema_checklist_context(
 }
 
 async fn check_batch_lock_and_loopback(
+    actx: &AgentCtx,
     thread_store: &ThreadStore,
     thread_id: &str,
     phase: Phase,
@@ -852,6 +853,7 @@ async fn check_batch_lock_and_loopback(
         "{label} batch authoring did not converge within the local retry budget. \
 This is an implementation/authoring failure, not an implicit plan rewrite.\n\n{reason}"
     );
+    cancel_active_plan_for_track(actx, track, "batch authoring retry budget exhausted").await?;
     Ok(Some(
         apply_author_escalation(
             thread_store,
@@ -861,6 +863,39 @@ This is an implementation/authoring failure, not an implicit plan rewrite.\n\n{r
         )
         .await?,
     ))
+}
+
+async fn cancel_active_plan_for_track(
+    actx: &AgentCtx,
+    track: TrackKind,
+    reason: &str,
+) -> Result<(), String> {
+    if track.is_cleanse() {
+        if let Some(mut plan) = crate::plan::load_cleanse_plan(actx)
+            .await
+            .map_err(|e| e.to_string())?
+        {
+            if !plan.status.is_terminal() {
+                tracing::warn!(plan_key = %plan.plan_key, reason = %reason, "cancelling active cleanse plan before terminal authoring failure");
+                plan.status = crate::plan::PlanStatus::Cancelled;
+                crate::plan::save_cleanse_plan(actx, &plan)
+                    .await
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    } else if let Some(mut plan) = crate::plan::load_model_plan(actx)
+        .await
+        .map_err(|e| e.to_string())?
+    {
+        if !plan.status.is_terminal() {
+            tracing::warn!(plan_key = %plan.plan_key, reason = %reason, "cancelling active model plan before terminal authoring failure");
+            plan.status = crate::plan::PlanStatus::Cancelled;
+            crate::plan::save_model_plan(actx, &plan)
+                .await
+                .map_err(|e| e.to_string())?;
+        }
+    }
+    Ok(())
 }
 
 fn author_plan_defect(phase: Phase, message: impl Into<String>) -> AuthorEscalation {
@@ -889,14 +924,193 @@ async fn apply_author_plan_defect(
     .await
 }
 
-fn extract_validate_fail_context(
+fn extract_validate_fail_context_for_cleanse(
+    plan_key: &str,
     snapshot: &crate::plan_types::PlanSnapshot,
 ) -> Option<serde_json::Value> {
-    if snapshot.validate_fail_facts.is_empty() {
+    let facts: Vec<_> = snapshot
+        .validate_fail_facts
+        .iter()
+        .filter(|bundle| {
+            bundle
+                .plan_binding
+                .as_ref()
+                .and_then(|binding| binding.plan_key.as_deref())
+                .map(|bound| bound == plan_key)
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect();
+    if facts.is_empty() {
         None
     } else {
-        serde_json::to_value(&snapshot.validate_fail_facts).ok()
+        serde_json::to_value(&facts).ok()
     }
+}
+
+fn extract_validate_fail_context_for_model(
+    plan: &crate::plan::ModelPlan,
+) -> Option<serde_json::Value> {
+    let current_digests: std::collections::BTreeMap<String, String> = plan
+        .tasks
+        .iter()
+        .filter_map(|task| {
+            crate::authoring_contract::model_task_spec_digest(&plan.plan_key, task)
+                .map(|digest| (task.name.clone(), digest))
+        })
+        .collect();
+    let facts: Vec<_> = plan
+        .project_snapshot
+        .validate_fail_facts
+        .iter()
+        .filter(|bundle| {
+            validate_fail_fact_matches_model_plan(&plan.plan_key, &current_digests, bundle)
+        })
+        .cloned()
+        .collect();
+    if facts.is_empty() {
+        None
+    } else {
+        serde_json::to_value(&facts).ok()
+    }
+}
+
+fn validate_fail_fact_matches_model_plan(
+    plan_key: &str,
+    current_digests: &std::collections::BTreeMap<String, String>,
+    bundle: &crate::facts::FactsBundle,
+) -> bool {
+    let Some(binding) = bundle.plan_binding.as_ref() else {
+        return false;
+    };
+    if binding.plan_key.as_deref() != Some(plan_key) {
+        return false;
+    }
+    binding.task_spec_digests.iter().all(|(task, digest)| {
+        current_digests
+            .get(task)
+            .map(|current| current == digest)
+            .unwrap_or(false)
+    })
+}
+
+async fn mark_off_contract_model_artifacts_from_storage(
+    actx: &AgentCtx,
+    plan: &mut crate::plan::ModelPlan,
+) -> Result<bool, PhaseError> {
+    let mut sql_updates: Vec<(String, String)> = Vec::new();
+    for task in plan.tasks.iter() {
+        let Some(expected_path) = task.expected_model_path.as_deref() else {
+            continue;
+        };
+        let key = crate::project_fs::join_storage_key(actx, expected_path);
+        match retry_get_bytes(actx.storage().as_ref(), &key).await {
+            Ok(bytes) => {
+                let sql = String::from_utf8_lossy(&bytes).to_string();
+                let check = crate::authoring_contract::verify_model_sql_contract(
+                    &plan.plan_key,
+                    task,
+                    &sql,
+                    true,
+                );
+                if !check.is_ok() && model_checklist_is_done(task, crate::plan::CHECKLIST_SQL_MODEL)
+                {
+                    let status = crate::authoring_contract::ArtifactContractStatus::OffContract(
+                        check.drifts.clone(),
+                    );
+                    if status.repair_route()
+                        == crate::authoring_contract::RepairRoute::ReconcileToPlan
+                    {
+                        sql_updates.push((
+                            task.name.clone(),
+                            format!(
+                                "Plan-owned SQL is stale/off-contract and must be reconciled before repair: {}",
+                                check.drift_reasons.join("; ")
+                            ),
+                        ));
+                    }
+                }
+            }
+            Err(e) => {
+                let error_text = e.to_string();
+                if storage_error_is_missing_object(&error_text)
+                    && model_checklist_is_done(task, crate::plan::CHECKLIST_SQL_MODEL)
+                {
+                    let status = crate::authoring_contract::ArtifactContractStatus::Missing;
+                    if status.repair_route()
+                        == crate::authoring_contract::RepairRoute::ReconcileToPlan
+                    {
+                        sql_updates.push((
+                            task.name.clone(),
+                            "Plan-owned SQL is missing and must be authored before repair."
+                                .to_string(),
+                        ));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut schema_updates: Vec<(String, String)> = Vec::new();
+    let schema_key =
+        crate::project_fs::join_storage_key(actx, crate::project_fs::MODELS_SCHEMA_YML);
+    match retry_get_bytes(actx.storage().as_ref(), &schema_key).await {
+        Ok(bytes) => {
+            let schema = String::from_utf8_lossy(&bytes).to_string();
+            for task in plan.tasks.iter() {
+                let Some(spec) = task.implementation_spec.as_ref() else {
+                    continue;
+                };
+                let check = crate::authoring_contract::verify_model_schema_yml_contract(
+                    &task.name,
+                    &spec.output_fields,
+                    &schema,
+                );
+                if !check.is_ok()
+                    && model_checklist_is_done(task, crate::plan::CHECKLIST_SCHEMA_CONTRACT)
+                {
+                    schema_updates.push((
+                        task.name.clone(),
+                        format!(
+                            "Plan-owned schema.yml stanza is stale/off-contract and must be reconciled before repair: {}",
+                            check.drift_reasons.join("; ")
+                        ),
+                    ));
+                }
+            }
+        }
+        Err(e) => {
+            if storage_error_is_missing_object(&e.to_string()) {
+                for task in plan.tasks.iter() {
+                    if !model_checklist_is_done(task, crate::plan::CHECKLIST_SCHEMA_CONTRACT) {
+                        continue;
+                    }
+                    schema_updates.push((
+                        task.name.clone(),
+                        "models/schema.yml is missing and must be authored before repair."
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+    }
+
+    let changed = !sql_updates.is_empty() || !schema_updates.is_empty();
+    for (name, reason) in sql_updates {
+        crate::plan::model_mark_needs_update(plan, &name, Some(&reason));
+    }
+    for (name, reason) in schema_updates {
+        crate::plan::model_schema_contract_mark_needs_update(plan, &name, Some(&reason));
+    }
+    Ok(changed)
+}
+
+fn model_checklist_is_done(task: &crate::plan::ModelTask, checklist_item_id: &str) -> bool {
+    task.checklist
+        .iter()
+        .find(|item| item.checklist_item_id == checklist_item_id)
+        .map(|item| item.status == crate::plan::ChecklistItemStatus::Done)
+        .unwrap_or(false)
 }
 
 // ---------------------------------------------------------------------------
@@ -953,6 +1167,7 @@ async fn load_cleanse_author_context(
             |task| task.expected_model_path.as_deref(),
         );
         if let Some(outcome) = check_batch_lock_and_loopback(
+            actx,
             params.thread_store,
             params.thread_id,
             params.phase,
@@ -1137,6 +1352,16 @@ async fn load_model_author_context(
         plan.plan_key.clone(),
         next_item,
     );
+    if params.last_validate_failed
+        && mark_off_contract_model_artifacts_from_storage(actx, &mut plan).await?
+    {
+        crate::plan::save_model_plan(actx, &plan).await?;
+        return Ok(AuthorPlanLoadResult::EarlyReturn(
+            PhaseOutcome::stayed_with_progress(
+                "marked stale plan-owned model artifacts for reconciliation before repair",
+            ),
+        ));
+    }
     let next_action = crate::plan::model_next_authoring_action(&plan);
     let next_names = next_action.author_sql_ids();
     if !next_names.is_empty() {
@@ -1165,6 +1390,7 @@ async fn load_model_author_context(
             |task| task.expected_model_path.as_deref(),
         );
         if let Some(outcome) = check_batch_lock_and_loopback(
+            actx,
             params.thread_store,
             params.thread_id,
             params.phase,
@@ -1461,7 +1687,8 @@ async fn build_author_prompt(
                 {
                     batch_relations = crate::facts::dataset_ids_to_fqns(ds);
                 }
-                prior_validate_facts = extract_validate_fail_context(&p.project_snapshot);
+                prior_validate_facts =
+                    extract_validate_fail_context_for_cleanse(&p.plan_key, &p.project_snapshot);
             }
         } else {
             if let Some(p) = crate::plan::load_model_plan(actx).await? {
@@ -1484,7 +1711,7 @@ async fn build_author_prompt(
                             crate::facts::resolve_model_names_to_fqns(actx, &want_names).await;
                     }
                 }
-                prior_validate_facts = extract_validate_fail_context(&p.project_snapshot);
+                prior_validate_facts = extract_validate_fail_context_for_model(&p);
             }
         }
 

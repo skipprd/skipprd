@@ -52,7 +52,7 @@ pub fn parse_reasoning_effort_env(key: &str) -> Option<react_core::llm::Reasonin
         Some("low") => Some(react_core::llm::ReasoningEffort::Low),
         Some("medium") => Some(react_core::llm::ReasoningEffort::Medium),
         Some("high") => Some(react_core::llm::ReasoningEffort::High),
-        Some("extra_high") | Some("xhigh") => Some(react_core::llm::ReasoningEffort::ExtraHigh),
+        Some("extra_high") | Some("xhigh") => Some(react_core::llm::ReasoningEffort::High),
         _ => None,
     }
 }
@@ -65,12 +65,12 @@ pub fn author_reasoning_effort(is_cleanse: bool) -> react_core::llm::ReasoningEf
     };
     parse_reasoning_effort_env(track_key)
         .or_else(|| parse_reasoning_effort_env(env_keys::LLM_AUTHOR_REASONING_EFFORT))
-        .unwrap_or(react_core::llm::ReasoningEffort::ExtraHigh)
+        .unwrap_or(react_core::llm::ReasoningEffort::Low)
 }
 
 pub fn repair_reasoning_effort() -> react_core::llm::ReasoningEffort {
     parse_reasoning_effort_env(env_keys::LLM_REPAIR_REASONING_EFFORT)
-        .unwrap_or(react_core::llm::ReasoningEffort::ExtraHigh)
+        .unwrap_or(react_core::llm::ReasoningEffort::Medium)
 }
 
 pub fn review_batch_concurrency() -> usize {

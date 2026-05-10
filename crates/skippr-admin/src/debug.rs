@@ -592,7 +592,7 @@ pub fn wire_debug_capabilities(ctx: &mut SuiteCtx, target_scope: RequestScope) {
         scope: target_scope,
     }));
     ctx.set_capability(Arc::new(SuiteDebuggerConfig {
-        reasoning_effort: react_core::llm::ReasoningEffort::ExtraHigh,
+        reasoning_effort: react_core::llm::ReasoningEffort::High,
         max_output_tokens: 64_000,
         strict_audit: true,
         enable_admin_repo_query: true,
