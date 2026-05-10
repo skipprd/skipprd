@@ -103,10 +103,10 @@ enum Cmd {
     Init {
         /// Project name (used as the pipeline identifier and default dbt schema).
         name: String,
-        /// Purge all local data (offsets, metadata, buffers) and re-initialise.
-        #[arg(long, default_value_t = false)]
-        reset: bool,
     },
+
+    /// Reset Skippr-owned state for a single configured pipeline.
+    Reset(ResetArgs),
 
     /// Configure a warehouse or source connection.
     Connect {
@@ -170,6 +170,16 @@ struct EngineSyncArgs {
     /// Run a single sync pass and exit.
     #[arg(long, default_value_t = false)]
     once: bool,
+}
+
+#[derive(Parser, Debug, Clone)]
+struct ResetArgs {
+    /// The configured pipeline to reset.
+    #[arg(short, long)]
+    pipeline: String,
+    /// Skip the interactive confirmation prompt.
+    #[arg(long, default_value_t = false)]
+    yes: bool,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -1642,60 +1652,32 @@ async fn load_cli_server_credentials() -> Result<api_client::CredentialsResponse
     })
 }
 
-fn build_remote_reset_target(
-    project: &str,
-    _project_root: &std::path::Path,
+fn authenticated_storage_bucket_and_credentials(
     srv_creds: &api_client::CredentialsResponse,
-) -> Result<
-    (
-        String,
-        react_core::resolved_config::S3Credentials,
-        String,
-        String,
-    ),
-    String,
-> {
+) -> Result<(String, react_core::resolved_config::S3Credentials), String> {
     let bucket = srv_creds.bucket.trim().to_string();
     if bucket.is_empty() {
         return Err("missing storage.bucket for reset".to_string());
     }
 
-    let tenant = srv_creds.tenant_id.trim().to_string();
-    if tenant.is_empty() {
-        return Err("missing tenant_id for reset".to_string());
-    }
-
-    let project = project.trim();
-    if project.is_empty() {
-        return Err("missing project name for reset".to_string());
-    }
-
     let s3_creds = translate::s3_credentials_from_auth(srv_creds);
-    let prefix = format!("{tenant}/dev/{project}/");
-    let remote_desc = format!("s3://{bucket}/{prefix}");
-    Ok((bucket, s3_creds, prefix, remote_desc))
+    Ok((bucket, s3_creds))
 }
 
-async fn delete_remote_project_data(
-    project: &str,
-    project_root: &std::path::Path,
-) -> Result<(String, Vec<String>), String> {
-    let srv_creds = load_reset_server_credentials().await?;
-    let (bucket, s3_creds, prefix, remote_desc) =
-        build_remote_reset_target(project, project_root, &srv_creds)?;
-    let storage = std::sync::Arc::new(
+async fn react_s3_storage_from_credentials(
+    bucket: &str,
+    s3_creds: &react_core::resolved_config::S3Credentials,
+) -> Arc<dyn react_core::storage::StorageAdapter> {
+    Arc::new(
         react_module_storage_s3::S3StorageAdapter::from_credentials(
-            bucket.clone(),
+            bucket.to_string(),
             &s3_creds.access_key_id,
             &s3_creds.secret_access_key,
             s3_creds.session_token.as_deref(),
             &s3_creds.region,
         )
         .await,
-    ) as std::sync::Arc<dyn react_core::storage::StorageAdapter>;
-
-    let deleted = delete_project_storage_prefix(&storage, &prefix).await?;
-    Ok((remote_desc, deleted))
+    ) as Arc<dyn react_core::storage::StorageAdapter>
 }
 
 fn ensure_local_environment(project_root: &std::path::Path) -> Result<(PathBuf, PathBuf), String> {
@@ -1710,81 +1692,9 @@ fn ensure_local_environment(project_root: &std::path::Path) -> Result<(PathBuf, 
     Ok((skippr_dir, env_example))
 }
 
-fn delete_local_reset_artifacts(
-    _config_path: &std::path::Path,
-    skippr_dir: &std::path::Path,
-) -> Result<Vec<PathBuf>, String> {
-    let mut deleted = Vec::new();
-    if skippr_dir.exists() {
-        std::fs::remove_dir_all(skippr_dir)
-            .map_err(|e| format!("failed to remove {}: {}", skippr_dir.display(), e))?;
-        deleted.push(skippr_dir.to_path_buf());
-    }
-    Ok(deleted)
-}
-
-async fn cmd_init(name: &str, reset: bool, explicit_config: &Option<PathBuf>) {
+async fn cmd_init(name: &str, explicit_config: &Option<PathBuf>) {
     let path = config_path(explicit_config);
     let project_root = project_root_from_config_path(&path);
-    let skippr_dir = skippr_dir_from_project_root(&project_root);
-
-    if reset {
-        eprintln!(
-            "WARNING: This will delete project metadata and state for '{}'",
-            name
-        );
-        eprintln!("  local: {}", skippr_dir.display());
-        eprintln!("  remote: authenticated project data on S3");
-        eprintln!();
-        eprint!("Type 'yes' to confirm: ");
-        let _ = std::io::Write::flush(&mut std::io::stderr());
-        let mut input = String::new();
-        if std::io::stdin().read_line(&mut input).is_err() || input.trim() != "yes" {
-            eprintln!("Aborted.");
-            std::process::exit(1);
-        }
-
-        eprintln!("[skippr] deleting remote metadata and state data...");
-        let (remote_desc, deleted_remote) =
-            match delete_remote_project_data(name, &project_root).await {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("[skippr] ERROR: {}", e);
-                    std::process::exit(1);
-                }
-            };
-        eprintln!(
-            "[skippr] deleted {} remote objects from {}",
-            deleted_remote.len(),
-            remote_desc
-        );
-
-        eprintln!("[skippr] deleting local metadata and state data...");
-        let deleted_local = match delete_local_reset_artifacts(&path, &skippr_dir) {
-            Ok(v) => v,
-            Err(e) => {
-                eprintln!("error: {}", e);
-                std::process::exit(1);
-            }
-        };
-        if deleted_local.is_empty() {
-            println!(
-                "Nothing to reset locally — {} does not exist.",
-                skippr_dir.display()
-            );
-        } else {
-            for deleted in deleted_local {
-                println!("Removed {}", deleted.display());
-            }
-        }
-
-        eprintln!("[skippr] recreating local environment...");
-        if let Err(e) = ensure_local_environment(&project_root) {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
-        }
-        eprintln!("[skippr] environment recreated.");
-    }
 
     if path.exists() {
         println!("Project already initialised — {}", path.display());
@@ -1827,6 +1737,304 @@ schema_sinks: {{}}
     println!("  skippr discover --pipeline {name}");
     println!("  skippr sync --pipeline {name} --once");
     println!("  skippr model --data-sink warehouse");
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PipelineResetTarget {
+    pipeline: String,
+    skipprd_tenant: String,
+    model_tenant: String,
+    workspace: String,
+    local_runtime_dir: PathBuf,
+    local_model_dirs: Vec<PathBuf>,
+    skipprd_bucket: Option<String>,
+    skipprd_prefix: String,
+    model_bucket: String,
+    model_prefix: String,
+}
+
+#[derive(Debug, Default)]
+struct PipelineResetReport {
+    deleted_local: Vec<PathBuf>,
+    deleted_skipprd_remote: Vec<String>,
+    deleted_model_remote: Vec<String>,
+}
+
+fn yaml_string_at<'a>(value: &'a serde_yaml::Value, path: &[&str]) -> Option<&'a str> {
+    let mut cur = value;
+    for key in path {
+        cur = cur.get(*key)?;
+    }
+    cur.as_str().map(str::trim).filter(|v| !v.is_empty())
+}
+
+fn pipeline_config<'a>(
+    engine_cfg: &'a serde_yaml::Value,
+    pipeline: &str,
+) -> Result<&'a serde_yaml::Value, String> {
+    validate_pipeline_exists(engine_cfg, pipeline)?;
+    engine_cfg
+        .get("pipelines")
+        .and_then(|pipelines| pipelines.get(pipeline))
+        .ok_or_else(|| format!("skippr.yml does not define pipeline '{pipeline}'"))
+}
+
+fn configured_skippr_s3_bucket(engine_cfg: &serde_yaml::Value) -> Option<String> {
+    yaml_string_at(engine_cfg, &["skippr", "skippr_s3_bucket"])
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            std::env::var("SKIPPR_S3_BUCKET")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        })
+}
+
+fn data_root_for_pipeline(
+    project_root: &std::path::Path,
+    pipeline_cfg: &serde_yaml::Value,
+) -> PathBuf {
+    let configured = pipeline_cfg
+        .get("data_dir")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToOwned::to_owned)
+        .or_else(|| {
+            std::env::var("DATA_DIR")
+                .ok()
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+        })
+        .unwrap_or_else(|| "./data".to_string());
+    let root = PathBuf::from(configured.trim_end_matches('/'));
+    if root.is_absolute() {
+        root
+    } else {
+        project_root.join(root)
+    }
+}
+
+fn dedupe_paths(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    for path in paths {
+        if !out.iter().any(|existing| existing == &path) {
+            out.push(path);
+        }
+    }
+    out
+}
+
+fn derive_pipeline_reset_target(
+    engine_cfg: &serde_yaml::Value,
+    config_path: &std::path::Path,
+    pipeline: &str,
+    srv_creds: &api_client::CredentialsResponse,
+) -> Result<PipelineResetTarget, String> {
+    let pipeline = pipeline.trim();
+    if pipeline.is_empty() {
+        return Err("pipeline cannot be empty".to_string());
+    }
+    let pipeline_cfg = pipeline_config(engine_cfg, pipeline)?;
+    let project_root = project_root_from_config_path(config_path);
+    let model_tenant = srv_creds.tenant_id.trim();
+    if model_tenant.is_empty() {
+        return Err("missing tenant_id for reset".to_string());
+    }
+    let workspace = yaml_string_at(engine_cfg, &["skippr", "workspace"])
+        .unwrap_or("default")
+        .to_string();
+    let skipprd_tenant = model_tenant.to_string();
+    let model_bucket = srv_creds.bucket.trim();
+    if model_bucket.is_empty() {
+        return Err("missing storage.bucket for reset".to_string());
+    }
+
+    let local_runtime_dir =
+        data_root_for_pipeline(&project_root, pipeline_cfg).join(format!("{workspace}_{pipeline}"));
+    let skippr_dir = skippr_dir_from_project_root(&project_root);
+    let local_model_dirs = dedupe_paths(vec![
+        skippr_dir.join(format!("_/dev/{pipeline}")),
+        skippr_dir.join(format!("{model_tenant}/dev/{pipeline}")),
+    ]);
+
+    let scope = react_core::scope::RequestScope::parse(model_tenant, "dev", pipeline)
+        .map_err(|e| format!("invalid reset scope: {e}"))?;
+    let keyspace = react_core::keyspace::DefaultKeyspace::new(model_bucket.to_string());
+    let model_prefix = keyspace.scoped_prefix(&scope, &[]);
+
+    Ok(PipelineResetTarget {
+        pipeline: pipeline.to_string(),
+        skipprd_tenant: skipprd_tenant.clone(),
+        model_tenant: model_tenant.to_string(),
+        workspace: workspace.clone(),
+        local_runtime_dir,
+        local_model_dirs,
+        skipprd_bucket: configured_skippr_s3_bucket(engine_cfg),
+        skipprd_prefix: format!("{skipprd_tenant}/{workspace}/{pipeline}/"),
+        model_bucket: model_bucket.to_string(),
+        model_prefix,
+    })
+}
+
+fn safe_remove_dir_all(path: &std::path::Path) -> Result<bool, String> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    if path.as_os_str().is_empty() || path.parent().is_none() || path == std::path::Path::new("/") {
+        return Err(format!("refusing to remove unsafe path {}", path.display()));
+    }
+    std::fs::remove_dir_all(path)
+        .map_err(|e| format!("failed to remove {}: {}", path.display(), e))?;
+    Ok(true)
+}
+
+fn confirm_pipeline_reset(target: &PipelineResetTarget) -> Result<(), String> {
+    eprintln!(
+        "WARNING: This will delete Skippr-owned state for pipeline '{}'",
+        target.pipeline
+    );
+    eprintln!("  local runtime: {}", target.local_runtime_dir.display());
+    for path in &target.local_model_dirs {
+        eprintln!("  local model: {}", path.display());
+    }
+    if let Some(bucket) = &target.skipprd_bucket {
+        eprintln!(
+            "  skipprd remote: s3://{}/{}",
+            bucket, target.skipprd_prefix
+        );
+    } else {
+        eprintln!("  skipprd remote: <none; no skippr_s3_bucket configured>");
+    }
+    eprintln!(
+        "  model remote: s3://{}/{}",
+        target.model_bucket, target.model_prefix
+    );
+    eprintln!("This does not delete source, sink, schema sink, or warehouse table data.");
+    eprintln!();
+    eprint!("Type 'yes' to confirm: ");
+    let _ = std::io::Write::flush(&mut std::io::stderr());
+    let mut input = String::new();
+    std::io::stdin()
+        .read_line(&mut input)
+        .map_err(|e| format!("failed to read confirmation: {e}"))?;
+    if input.trim() != "yes" {
+        return Err("Aborted.".to_string());
+    }
+    Ok(())
+}
+
+async fn delete_pipeline_reset_target_with_storage(
+    target: &PipelineResetTarget,
+    skipprd_storage: Option<&Arc<dyn skipprd::adapters::storage::StorageAdapter>>,
+    model_storage: &Arc<dyn react_core::storage::StorageAdapter>,
+) -> Result<PipelineResetReport, String> {
+    let mut report = PipelineResetReport::default();
+
+    if safe_remove_dir_all(&target.local_runtime_dir)? {
+        report.deleted_local.push(target.local_runtime_dir.clone());
+    }
+    for path in &target.local_model_dirs {
+        if safe_remove_dir_all(path)? {
+            report.deleted_local.push(path.clone());
+        }
+    }
+
+    if let (Some(_bucket), Some(storage)) = (&target.skipprd_bucket, skipprd_storage) {
+        report.deleted_skipprd_remote =
+            delete_skipprd_storage_prefix(storage, &target.skipprd_prefix).await?;
+    }
+    report.deleted_model_remote =
+        delete_storage_prefix(model_storage, &target.model_prefix).await?;
+
+    Ok(report)
+}
+
+async fn cmd_reset(explicit_config: &Option<PathBuf>, args: ResetArgs) {
+    let path = config_path(explicit_config);
+    if !path.exists() {
+        eprintln!("error: {} not found", path.display());
+        eprintln!("Run 'skippr init <project>' first.");
+        std::process::exit(1);
+    }
+    let engine_cfg = match load_resolved_engine_config(explicit_config) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let srv_creds = match load_reset_server_credentials().await {
+        Ok(creds) => creds,
+        Err(e) => {
+            eprintln!("[skippr] ERROR: {e}");
+            std::process::exit(1);
+        }
+    };
+    let target = match derive_pipeline_reset_target(&engine_cfg, &path, &args.pipeline, &srv_creds)
+    {
+        Ok(target) => target,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+    if !args.yes {
+        if let Err(e) = confirm_pipeline_reset(&target) {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+    }
+
+    let (_auth_bucket, s3_creds) = match authenticated_storage_bucket_and_credentials(&srv_creds) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("[skippr] ERROR: {e}");
+            std::process::exit(1);
+        }
+    };
+    let model_storage = react_s3_storage_from_credentials(&target.model_bucket, &s3_creds).await;
+    let skipprd_storage = match target.skipprd_bucket.as_deref() {
+        Some(bucket) => {
+            skipprd::helpers::configuration::Config::setenv("SKIPPR_S3_BUCKET", bucket);
+            Some(Arc::new(skipprd::adapters::storage::S3StorageAdapter)
+                as Arc<dyn skipprd::adapters::storage::StorageAdapter>)
+        }
+        None => None,
+    };
+
+    match delete_pipeline_reset_target_with_storage(
+        &target,
+        skipprd_storage.as_ref(),
+        &model_storage,
+    )
+    .await
+    {
+        Ok(report) => {
+            for path in &report.deleted_local {
+                println!("Removed {}", path.display());
+            }
+            if let Some(bucket) = &target.skipprd_bucket {
+                println!(
+                    "Deleted {} skipprd objects from s3://{}/{}",
+                    report.deleted_skipprd_remote.len(),
+                    bucket,
+                    target.skipprd_prefix
+                );
+            }
+            println!(
+                "Deleted {} model objects from s3://{}/{}",
+                report.deleted_model_remote.len(),
+                target.model_bucket,
+                target.model_prefix
+            );
+            println!("Reset pipeline '{}'.", target.pipeline);
+        }
+        Err(e) => {
+            eprintln!("[skippr] ERROR: {e}");
+            std::process::exit(1);
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3206,18 +3414,8 @@ async fn build_feedback_store(
     project: &str,
     srv_creds: &api_client::CredentialsResponse,
 ) -> Result<FeedbackStoreBundle, String> {
-    let (bucket, s3_creds, _prefix, _remote_desc) =
-        build_remote_reset_target(project, &working_dir(), &srv_creds)?;
-    let storage = Arc::new(
-        react_module_storage_s3::S3StorageAdapter::from_credentials(
-            bucket.clone(),
-            &s3_creds.access_key_id,
-            &s3_creds.secret_access_key,
-            s3_creds.session_token.as_deref(),
-            &s3_creds.region,
-        )
-        .await,
-    ) as Arc<dyn react_core::storage::StorageAdapter>;
+    let (bucket, s3_creds) = authenticated_storage_bucket_and_credentials(srv_creds)?;
+    let storage = react_s3_storage_from_credentials(&bucket, &s3_creds).await;
     let scope = react_core::scope::RequestScope::parse(srv_creds.tenant_id.trim(), "dev", project)
         .map_err(|e| format!("invalid feedback scope: {e}"))?;
     let keyspace = Arc::new(react_core::keyspace::DefaultKeyspace::new(bucket))
@@ -3450,7 +3648,8 @@ async fn async_main() {
     let cli = Cli::parse();
 
     match cli.cmd {
-        Cmd::Init { name, reset } => cmd_init(&name, reset, &cli.config).await,
+        Cmd::Init { name } => cmd_init(&name, &cli.config).await,
+        Cmd::Reset(args) => cmd_reset(&cli.config, args).await,
         Cmd::Connect { target } => match target {
             ConnectTarget::Warehouse { kind } => cmd_connect_warehouse(kind, &cli.config),
             ConnectTarget::Source { kind } => cmd_connect_source(kind, &cli.config),
@@ -3870,8 +4069,26 @@ fn print_low_balance_warning(balance: &api_client::Balance) {
     }
 }
 
-async fn delete_project_storage_prefix(
+async fn delete_storage_prefix(
     storage: &std::sync::Arc<dyn react_core::storage::StorageAdapter>,
+    prefix: &str,
+) -> Result<Vec<String>, String> {
+    let mut keys = storage
+        .list_prefix(prefix)
+        .await
+        .map_err(|e| format!("list_prefix('{prefix}'): {e}"))?;
+    keys.sort();
+    for key in &keys {
+        storage
+            .delete_object(key)
+            .await
+            .map_err(|e| format!("delete_object('{key}'): {e}"))?;
+    }
+    Ok(keys)
+}
+
+async fn delete_skipprd_storage_prefix(
+    storage: &std::sync::Arc<dyn skipprd::adapters::storage::StorageAdapter>,
     prefix: &str,
 ) -> Result<Vec<String>, String> {
     let mut keys = storage
@@ -3926,7 +4143,7 @@ mod tests {
     async fn init_creates_config_file() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("skippr.yaml");
-        cmd_init("test-project", false, &Some(config.clone())).await;
+        cmd_init("test-project", &Some(config.clone())).await;
         assert!(config.exists());
         let contents = fs::read_to_string(&config).unwrap();
         assert!(contents.contains("test-project"));
@@ -3939,12 +4156,12 @@ mod tests {
     async fn init_is_idempotent_when_already_initialised() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("skippr.yaml");
-        cmd_init("my-pipeline", false, &Some(config.clone())).await;
+        cmd_init("my-pipeline", &Some(config.clone())).await;
         assert!(config.exists());
         let original = fs::read_to_string(&config).unwrap();
 
         // Second init should not fail or change anything
-        cmd_init("my-pipeline", false, &Some(config.clone())).await;
+        cmd_init("my-pipeline", &Some(config.clone())).await;
         let after = fs::read_to_string(&config).unwrap();
         assert_eq!(original, after);
     }
@@ -4108,58 +4325,81 @@ data_sources:
         assert!(err.to_string().contains("--data-sink"));
     }
 
-    #[tokio::test]
-    async fn init_reset_purges_skippr_data_dir() {
-        let dir = tempfile::tempdir().unwrap();
-        let config = dir.path().join("skippr.yaml");
-        let skippr_dir = dir.path().join(".skippr");
-
-        cmd_init("reset-test", false, &Some(config.clone())).await;
-
-        // Simulate runtime data
-        fs::create_dir_all(skippr_dir.join("_/dev/reset-test/skippr")).unwrap();
-        fs::write(
-            skippr_dir.join("_/dev/reset-test/skippr/offsets.db"),
-            "fake",
-        )
-        .unwrap();
-        assert!(skippr_dir.exists());
-
-        // Reset without interactive confirmation — pass pre-filled stdin
-        // Since cmd_init reads stdin for "yes", we test the deletion logic directly
-        assert!(skippr_dir.exists());
-        fs::remove_dir_all(&skippr_dir).unwrap();
-        assert!(!skippr_dir.exists());
-
-        // Config file should still exist
-        assert!(config.exists());
+    #[test]
+    fn init_rejects_legacy_reset_flag() {
+        let err =
+            Cli::try_parse_from(["skippr", "init", "demo", "--reset"]).expect_err("legacy reset");
+        assert!(err.to_string().contains("--reset"));
     }
 
     #[test]
-    fn delete_local_reset_artifacts_removes_skippr_dir_but_keeps_config() {
+    fn reset_cli_accepts_pipeline_and_yes() {
+        let cli = Cli::try_parse_from(["skippr", "reset", "--pipeline", "orders", "--yes"])
+            .expect("parse reset");
+        match cli.cmd {
+            Cmd::Reset(args) => {
+                assert_eq!(args.pipeline, "orders");
+                assert!(args.yes);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    fn test_credentials() -> api_client::CredentialsResponse {
+        api_client::CredentialsResponse {
+            credentials: api_client::StsCreds {
+                access_key_id: "ak".to_string(),
+                secret_access_key: "sk".to_string(),
+                session_token: "tok".to_string(),
+                expiration: "never".to_string(),
+            },
+            bucket: "model-bucket".to_string(),
+            tenant_id: "auth-tenant".to_string(),
+            llm_api_key: String::new(),
+            accounting_url: String::new(),
+        }
+    }
+
+    #[test]
+    fn derive_pipeline_reset_target_uses_selected_pipeline_only() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("skippr.yaml");
-        let skippr_dir = dir.path().join(".skippr");
-
-        fs::write(&config, "project: bike-hire-snowflake\n").unwrap();
-        fs::create_dir_all(skippr_dir.join("_/dev/bike-hire-snowflake/skippr")).unwrap();
         fs::write(
-            skippr_dir.join("_/dev/bike-hire-snowflake/skippr/offsets.db"),
-            "fake",
+            &config,
+            r#"
+skippr:
+  workspace: analytics
+  skippr_s3_bucket: runtime-bucket
+pipelines:
+  orders:
+    data_dir: state
+  customers:
+    data_dir: other-state
+"#,
         )
         .unwrap();
+        let cfg = load_resolved_engine_config(&Some(config.clone())).expect("config");
 
-        let deleted = delete_local_reset_artifacts(&config, &skippr_dir).expect("delete local");
-        assert!(
-            deleted.contains(&skippr_dir),
-            "expected .skippr directory to be deleted"
+        let target =
+            derive_pipeline_reset_target(&cfg, &config, "orders", &test_credentials()).unwrap();
+
+        assert_eq!(target.pipeline, "orders");
+        assert_eq!(target.skipprd_tenant, "auth-tenant");
+        assert_eq!(target.model_tenant, "auth-tenant");
+        assert_eq!(target.workspace, "analytics");
+        assert_eq!(target.skipprd_bucket.as_deref(), Some("runtime-bucket"));
+        assert_eq!(target.skipprd_prefix, "auth-tenant/analytics/orders/");
+        assert_eq!(target.model_bucket, "model-bucket");
+        assert!(target.model_prefix.contains("auth-tenant"));
+        assert!(target.model_prefix.contains("orders"));
+        assert_eq!(
+            target.local_runtime_dir,
+            dir.path().join("state/analytics_orders")
         );
-        assert!(!skippr_dir.exists());
-        assert!(config.exists(), "skippr.yaml should be preserved");
     }
 
     #[tokio::test]
-    async fn delete_project_storage_prefix_removes_all_project_objects() {
+    async fn delete_storage_prefix_removes_only_matching_objects() {
         let dir = tempfile::tempdir().unwrap();
         let storage = Arc::new(LocalFileStorageAdapter::new(dir.path().to_path_buf()).unwrap())
             as Arc<dyn StorageAdapter>;
@@ -4181,7 +4421,7 @@ data_sources:
             .await
             .unwrap();
 
-        let deleted = delete_project_storage_prefix(&storage, "t/w/p/")
+        let deleted = delete_storage_prefix(&storage, "t/w/p/")
             .await
             .expect("delete");
         assert_eq!(deleted.len(), 3);
@@ -4192,32 +4432,122 @@ data_sources:
         );
     }
 
-    #[test]
-    fn build_remote_reset_target_does_not_require_warehouse_config() {
+    #[tokio::test]
+    async fn pipeline_reset_deletes_only_selected_pipeline_state() {
         let dir = tempfile::tempdir().unwrap();
-        let srv_creds = api_client::CredentialsResponse {
-            credentials: api_client::StsCreds {
-                access_key_id: "ak".to_string(),
-                secret_access_key: "sk".to_string(),
-                session_token: "tok".to_string(),
-                expiration: "never".to_string(),
-            },
-            bucket: "bucket-123".to_string(),
-            tenant_id: "tenant-abc".to_string(),
-            llm_api_key: String::new(),
-            accounting_url: String::new(),
-        };
+        let config = dir.path().join("skippr.yaml");
+        fs::write(
+            &config,
+            r#"
+skippr:
+  workspace: analytics
+  skippr_s3_bucket: runtime-bucket
+pipelines:
+  orders:
+    data_dir: state
+  customers:
+    data_dir: state
+"#,
+        )
+        .unwrap();
+        let cfg = load_resolved_engine_config(&Some(config.clone())).expect("config");
+        let target =
+            derive_pipeline_reset_target(&cfg, &config, "orders", &test_credentials()).unwrap();
 
-        let (bucket, s3_creds, prefix, remote_desc) =
-            build_remote_reset_target("bike-hire-snowflake", dir.path(), &srv_creds)
-                .expect("build reset target");
+        fs::create_dir_all(target.local_runtime_dir.join("db")).unwrap();
+        fs::write(target.local_runtime_dir.join("db/CURRENT"), "fake").unwrap();
+        let other_runtime = dir.path().join("state/analytics_customers");
+        fs::create_dir_all(other_runtime.join("db")).unwrap();
+        fs::write(other_runtime.join("db/CURRENT"), "fake").unwrap();
 
-        assert_eq!(bucket, "bucket-123");
-        assert_eq!(s3_creds.access_key_id, "ak");
-        assert_eq!(prefix, "tenant-abc/dev/bike-hire-snowflake/");
+        for path in &target.local_model_dirs {
+            fs::create_dir_all(path.join("threads")).unwrap();
+            fs::write(path.join("threads/t.json"), "{}").unwrap();
+        }
+        let other_model = dir.path().join(".skippr/_/dev/customers/threads");
+        fs::create_dir_all(&other_model).unwrap();
+        fs::write(other_model.join("t.json"), "{}").unwrap();
+
+        let skipprd_dir = tempfile::tempdir().unwrap();
+        let skipprd_storage = Arc::new(skipprd::adapters::storage::LocalDiskStorageAdapter::new(
+            &skipprd_dir.path().display().to_string(),
+        )) as Arc<dyn skipprd::adapters::storage::StorageAdapter>;
+        skipprd_storage
+            .put_bytes(
+                "auth-tenant/analytics/orders/metadata/metadata.json",
+                b"{}",
+                "application/json",
+            )
+            .await
+            .unwrap();
+        skipprd_storage
+            .put_bytes(
+                "auth-tenant/analytics/customers/metadata/metadata.json",
+                b"{}",
+                "application/json",
+            )
+            .await
+            .unwrap();
+
+        let model_dir = tempfile::tempdir().unwrap();
+        let model_storage =
+            Arc::new(LocalFileStorageAdapter::new(model_dir.path().to_path_buf()).unwrap())
+                as Arc<dyn StorageAdapter>;
+        let model_keep = target.model_prefix.replace("orders", "customers");
+        model_storage
+            .put_bytes(
+                &format!("{}threads/t.json", target.model_prefix),
+                b"{}",
+                "application/json",
+            )
+            .await
+            .unwrap();
+        model_storage
+            .put_bytes(
+                &format!("{model_keep}threads/t.json"),
+                b"{}",
+                "application/json",
+            )
+            .await
+            .unwrap();
+
+        let report = delete_pipeline_reset_target_with_storage(
+            &target,
+            Some(&skipprd_storage),
+            &model_storage,
+        )
+        .await
+        .expect("reset");
+
+        assert!(!target.local_runtime_dir.exists());
+        assert!(other_runtime.exists());
+        for path in &target.local_model_dirs {
+            assert!(!path.exists());
+        }
+        assert!(other_model.exists());
+        assert_eq!(report.deleted_skipprd_remote.len(), 1);
+        assert!(skipprd_storage
+            .list_prefix("auth-tenant/analytics/orders/")
+            .await
+            .unwrap()
+            .is_empty());
         assert_eq!(
-            remote_desc,
-            "s3://bucket-123/tenant-abc/dev/bike-hire-snowflake/"
+            skipprd_storage
+                .list_prefix("auth-tenant/analytics/customers/")
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(report.deleted_model_remote.len(), 1);
+        assert!(model_storage
+            .list_prefix(&target.model_prefix)
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            model_storage.list_prefix(&model_keep).await.unwrap().len(),
+            1
         );
     }
 
