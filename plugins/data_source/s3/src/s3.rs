@@ -14,12 +14,12 @@ use std::time::Duration;
 
 use serde_derive::Deserialize;
 
-use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
-use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks, ThroughputMetrics};
+use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes, Offsets};
+use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks, ThroughputMetrics};
 
 use crate::helpers::Helpers;
-use crate::plugins::DataSink;
-use crate::plugins::DataSource;
+use skippr_runtime_sdk::plugins::DataSink;
+use skippr_runtime_sdk::plugins::DataSource;
 use futures::stream::{self, StreamExt};
 use skippr_runtime_sdk::protocol::RuntimeExecutionContext;
 use std::io::BufRead as _;
@@ -263,7 +263,7 @@ impl DataSourceS3Plugin {
 
         let dl_concurrency_env = env_string("S3_DOWNLOAD_CONCURRENCY").unwrap_or_default();
         let env_dl = dl_concurrency_env.parse::<usize>().ok().filter(|v| *v > 0);
-        let tuned_dl = crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET
+        let tuned_dl = skippr_runtime_sdk::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET
             .load(std::sync::atomic::Ordering::Relaxed);
         let dl_concurrency = env_dl.unwrap_or_else(|| tuned_dl.clamp(8, 512));
         if runtime_log_wal_enabled() {
@@ -284,7 +284,7 @@ impl DataSourceS3Plugin {
                 let mut held: Vec<OwnedSemaphorePermit> = Vec::new();
                 loop {
                     sleep(Duration::from_millis(500)).await;
-                    let target = crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET
+                    let target = skippr_runtime_sdk::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET
                         .load(AtomicOrdering::Relaxed)
                         .clamp(8, 512);
                     if target > configured_total {
@@ -726,7 +726,7 @@ impl DataSource for DataSourceS3Plugin {
         self.sync(offsets, output).await
     }
 
-    fn execution_contract(&self) -> crate::plugins::SourceExecutionContract {
-        crate::plugins::SourceExecutionContract::finite()
+    fn execution_contract(&self) -> skippr_runtime_sdk::plugins::SourceExecutionContract {
+        skippr_runtime_sdk::plugins::SourceExecutionContract::finite()
     }
 }

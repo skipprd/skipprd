@@ -29,12 +29,12 @@ use serde_derive::Deserialize;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use crate::buffer::BufferChunker;
-use crate::discover::{OutputMetadata, SkipprDataType};
+use skippr_runtime_sdk::sink_compat::BufferChunker;
+use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
 use crate::helpers::configuration::DataSinkPluginConfig;
-use crate::plugins::cdc::EffectiveGuarantee;
-use crate::plugins::{DataSink, SchemaSink};
-use skippr_core::runtime_plugins::protocol::{RuntimeBinding, RuntimeExecutionContext};
+use skippr_runtime_sdk::plugins::cdc::EffectiveGuarantee;
+use skippr_runtime_sdk::plugins::{DataSink, SchemaSink};
+use skippr_runtime_sdk::protocol::{RuntimeBinding, RuntimeExecutionContext};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSinkIcebergPluginConfig {
@@ -124,7 +124,7 @@ impl DataSink for DataSinkIcebergPlugin {
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
-        cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
+        cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> Result<(), io::Error> {
         let stream = match cdc_ctx {
             Some(ctx) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &ctx.part_meta),
@@ -133,8 +133,8 @@ impl DataSink for DataSinkIcebergPlugin {
         self.native_append(stream, filename, cdc_ctx).await
     }
 
-    fn capability(&self) -> Option<&'static crate::plugins::cdc::SinkCapability> {
-        Some(&crate::plugins::cdc::sink_capabilities::ICEBERG)
+    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
+        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::ICEBERG)
     }
 
     async fn install_schema_state(
@@ -187,7 +187,7 @@ impl DataSinkIcebergPlugin {
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
-        cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
+        cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> Result<(), io::Error> {
         let namespace = BufferChunker::decode_file_namespace(&filename);
         let metadata = self.namespace_metadata(&namespace).await?;
@@ -341,7 +341,7 @@ impl DataSinkIcebergPlugin {
         &self,
         mut stream: SendableRecordBatchStream,
         namespace: &str,
-        ctx: &crate::plugins::cdc::SyncContext,
+        ctx: &skippr_runtime_sdk::plugins::cdc::SyncContext,
     ) -> Result<PreparedCdcStreams, io::Error> {
         let contract = ctx.contract.as_ref().ok_or_else(|| {
             io::Error::other(format!(
@@ -539,7 +539,7 @@ impl DataSinkIcebergPlugin {
         &self,
         table: &iceberg::table::Table,
         namespace: &str,
-        cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
+        cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> Result<Option<Vec<i32>>, io::Error> {
         let Some(ctx) = cdc_ctx else {
             return Ok(None);

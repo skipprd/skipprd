@@ -9,13 +9,13 @@ struct IcebergSchemaSync {
 }
 
 #[async_trait::async_trait]
-impl skippr_core::plugins::SchemaSink for IcebergSchemaSync {
+impl skippr_runtime_sdk::plugins::SchemaSink for IcebergSchemaSync {
     async fn sync_schema(
         &self,
         namespace: &str,
-        metadata: &skippr_core::discover::OutputMetadata,
+        metadata: &skippr_runtime_sdk::discover::OutputMetadata,
     ) -> Result<(), io::Error> {
-        <DataSinkIcebergPlugin as skippr_core::plugins::SchemaSink>::sync_schema(
+        <DataSinkIcebergPlugin as skippr_runtime_sdk::plugins::SchemaSink>::sync_schema(
             &self.inner,
             namespace,
             metadata,

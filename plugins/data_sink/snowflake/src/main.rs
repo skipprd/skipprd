@@ -16,7 +16,7 @@ fn main() {
         if let Err(err) = run_runtime_data_sink_plugin(
             "Snowflake",
             "Snowflake",
-            skippr_core::plugins::cdc::sink_capabilities::by_name("Snowflake").map(Into::into),
+            skippr_runtime_sdk::plugins::cdc::sink_capabilities::by_name("Snowflake").map(Into::into),
             true,
             "skippr-plugin-data-sink-snowflake",
             |install| async move {

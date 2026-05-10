@@ -10,7 +10,6 @@ path = "src/main.rs"
 [dependencies]
 async-trait.workspace = true
 clap.workspace = true
-skippr-core.workspace = true
 skippr-runtime-sdk.workspace = true
 tokio.workspace = true
 skippr-plugin-data-sink-iceberg = { path = "../../data_sink/iceberg" }

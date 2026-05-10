@@ -4,7 +4,7 @@ use datafusion::arrow::json::WriterBuilder;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
 
-use crate::plugins::DataSink;
+use skippr_runtime_sdk::plugins::DataSink;
 
 pub struct DataSinkStdoutPlugin;
 
@@ -20,7 +20,7 @@ impl DataSink for DataSinkStdoutPlugin {
         &self,
         stream: SendableRecordBatchStream,
         _filename: String,
-        cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
+        cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
         let mut stream = match cdc_ctx {
             Some(ctx) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &ctx.part_meta),
@@ -42,7 +42,7 @@ impl DataSink for DataSinkStdoutPlugin {
         Ok(())
     }
 
-    fn capability(&self) -> Option<&'static crate::plugins::cdc::SinkCapability> {
-        Some(&crate::plugins::cdc::sink_capabilities::STDOUT)
+    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
+        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::STDOUT)
     }
 }

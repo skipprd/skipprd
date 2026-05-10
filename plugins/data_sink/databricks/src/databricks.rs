@@ -1,9 +1,9 @@
 use std::collections::HashMap;
 
 use super::parquet_util::serialize_to_parquet;
-use crate::buffer::BufferChunker;
+use skippr_runtime_sdk::sink_compat::BufferChunker;
 use crate::helpers::configuration::DataSinkPluginConfig;
-use crate::plugins::DataSink;
+use skippr_runtime_sdk::plugins::DataSink;
 use async_trait::async_trait;
 use dashmap::DashSet;
 use datafusion::arrow::array::*;
@@ -62,7 +62,7 @@ impl DataSink for DataSinkDatabricksPlugin {
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
-        cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
+        cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
         if let Some(ctx) = cdc_ctx {
             return self.sync_cdc(stream, filename, ctx).await;
@@ -74,8 +74,8 @@ impl DataSink for DataSinkDatabricksPlugin {
         }
     }
 
-    fn capability(&self) -> Option<&'static crate::plugins::cdc::SinkCapability> {
-        Some(&crate::plugins::cdc::sink_capabilities::DATABRICKS)
+    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
+        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::DATABRICKS)
     }
 }
 
@@ -95,7 +95,7 @@ impl DataSinkDatabricksPlugin {
         stream: SendableRecordBatchStream,
         filename: String,
     ) -> Result<(), std::io::Error> {
-        use crate::metrics::counters;
+        use skippr_runtime_sdk::metrics::counters;
         counters::inc_uploads_in_flight();
 
         let parquet_bytes = serialize_to_parquet(stream).await?;
@@ -164,7 +164,7 @@ impl DataSinkDatabricksPlugin {
         stream: SendableRecordBatchStream,
         _filename: String,
     ) -> Result<(), std::io::Error> {
-        use crate::metrics::counters;
+        use skippr_runtime_sdk::metrics::counters;
         counters::inc_uploads_in_flight();
 
         let delta_uri = self.config.delta_table_uri.as_deref().unwrap();
@@ -333,14 +333,14 @@ impl DataSinkDatabricksPlugin {
         &self,
         mut stream: SendableRecordBatchStream,
         filename: String,
-        ctx: &crate::plugins::cdc::SyncContext,
+        ctx: &skippr_runtime_sdk::plugins::cdc::SyncContext,
     ) -> Result<(), std::io::Error> {
         use super::cdc_apply::{
             ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
             tombstone_table_name, upsert_if_newer_sql,
         };
-        use crate::metrics::counters;
-        use crate::plugins::cdc::MutationKind;
+        use skippr_runtime_sdk::metrics::counters;
+        use skippr_runtime_sdk::plugins::cdc::MutationKind;
 
         let contract = match ctx.contract.as_ref() {
             Some(c) if !c.business_key_columns.is_empty() => c,

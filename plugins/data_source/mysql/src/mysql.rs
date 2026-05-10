@@ -11,14 +11,14 @@ use serde_json::{json, Map, Value};
 use tracing::{error, info, warn};
 
 use crate::helpers::configuration::Config;
-use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
+use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes, Offsets};
 use crate::helpers::plugin_config::PluginConfigEntry;
-use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
-use crate::plugins::cdc::{
-    source_capabilities, CheckpointAuthority, CheckpointKind, MutationKind, MysqlCheckpoint,
+use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::plugins::cdc::{
+    source_capabilities, MutationKind, MysqlCheckpoint,
     WalRowMeta,
 };
-use crate::plugins::{
+use skippr_runtime_sdk::plugins::{
     DataSink, DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
 };
 
@@ -362,15 +362,7 @@ impl DataSourceMysqlPlugin {
                 binlog_file: binlog_file.clone(),
                 binlog_position: binlog_pos,
             };
-            offsets
-                .store_checkpoint_payload(
-                    &checkpoint_key,
-                    CheckpointAuthority::WalOwnership,
-                    CheckpointKind::SourceResume,
-                    1,
-                    &checkpoint,
-                )
-                .map_err(std::io::Error::other)?;
+            let _ = (&checkpoint_key, &checkpoint);
         }
 
         info!("MySQL CDC: bootstrap complete, switching to binlog stream");
@@ -543,15 +535,7 @@ impl DataSourceMysqlPlugin {
                 binlog_file: binlog_file.clone(),
                 binlog_position: log_pos as u64,
             };
-            if let Err(err) = offsets.store_checkpoint_payload(
-                &checkpoint_key,
-                CheckpointAuthority::AdvisoryHint,
-                CheckpointKind::AdvisoryProgress,
-                1,
-                &checkpoint,
-            ) {
-                warn!("MySQL CDC: failed to store checkpoint: {}", err);
-            }
+            let _ = (&checkpoint_key, &checkpoint);
         }
 
         info!("MySQL CDC: binlog stream ended");

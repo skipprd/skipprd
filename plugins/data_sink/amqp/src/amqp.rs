@@ -1,5 +1,5 @@
 use crate::helpers::configuration::DataSinkPluginConfig;
-use crate::plugins::DataSink;
+use skippr_runtime_sdk::plugins::DataSink;
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
@@ -36,9 +36,9 @@ impl DataSink for DataSinkAmqpPlugin {
         &self,
         stream: SendableRecordBatchStream,
         _filename: String,
-        cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
+        cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
-        use crate::metrics::counters;
+        use skippr_runtime_sdk::metrics::counters;
         counters::inc_uploads_in_flight();
 
         let conn = Connection::connect(
@@ -93,10 +93,10 @@ impl DataSink for DataSinkAmqpPlugin {
                 if let Some(ctx) = cdc_ctx {
                     if let Some(row_meta) = ctx.part_meta.rows.get(row_offset + row_idx) {
                         let mutation_str = match row_meta.mutation {
-                            crate::plugins::cdc::MutationKind::Snapshot => "snapshot",
-                            crate::plugins::cdc::MutationKind::Insert => "insert",
-                            crate::plugins::cdc::MutationKind::Update => "update",
-                            crate::plugins::cdc::MutationKind::Delete => "delete",
+                            skippr_runtime_sdk::plugins::cdc::MutationKind::Snapshot => "snapshot",
+                            skippr_runtime_sdk::plugins::cdc::MutationKind::Insert => "insert",
+                            skippr_runtime_sdk::plugins::cdc::MutationKind::Update => "update",
+                            skippr_runtime_sdk::plugins::cdc::MutationKind::Delete => "delete",
                         };
                         map.insert(
                             "_skippr_mutation".to_string(),
@@ -140,8 +140,8 @@ impl DataSink for DataSinkAmqpPlugin {
         Ok(())
     }
 
-    fn capability(&self) -> Option<&'static crate::plugins::cdc::SinkCapability> {
-        Some(&crate::plugins::cdc::sink_capabilities::AMQP)
+    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
+        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::AMQP)
     }
 }
 

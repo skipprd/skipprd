@@ -2,8 +2,8 @@ use std::io;
 
 use async_trait::async_trait;
 use clap::Parser;
-use skippr_core::discover::OutputMetadata;
-use skippr_core::plugins::SchemaSink;
+use skippr_runtime_sdk::discover::OutputMetadata;
+use skippr_runtime_sdk::plugins::SchemaSink;
 use skippr_plugin_data_sink_athena::*;
 use skippr_runtime_sdk::protocol::{RuntimeBinding, RuntimeExecutionContext};
 use skippr_runtime_sdk::sink_runtime_entry::run_runtime_schema_sink_plugin;

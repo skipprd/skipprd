@@ -15,7 +15,7 @@ async fn main() {
     if let Err(err) = run_runtime_data_sink_plugin(
         "Sftp",
         "Sftp",
-        skippr_core::plugins::cdc::sink_capabilities::by_name("Sftp").map(Into::into),
+        skippr_runtime_sdk::plugins::cdc::sink_capabilities::by_name("Sftp").map(Into::into),
         false,
         "skippr-plugin-data-sink-sftp",
         |install| async move {

@@ -29,6 +29,7 @@ use crate::helpers::offsets::{
     OffsetTypes, Offsets, RuntimeOffsetOperation, RuntimeOffsetRpcRequest,
     RuntimeOffsetRpcResponse, RuntimeOffsetValue,
 };
+use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
 use crate::plugins::cdc;
 use crate::plugins::{DataSink, SchemaSink};
 use crate::runtime_plugins::artifact::resolve_plugin_executable;
@@ -618,6 +619,34 @@ async fn ingest_runtime_batches_into_core(
         .map_err(|err| io::Error::other(err.to_string()))
 }
 
+async fn ingest_raw_runtime_tasks_into_core(
+    tasks: Vec<Vec<crate::runtime_plugins::protocol::RuntimeRawIngestBatch>>,
+    offsets: Arc<Offsets>,
+    shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+) -> io::Result<()> {
+    if tasks.is_empty() {
+        return Ok(());
+    }
+
+    let mut ingest_tasks = IngestTasks::new();
+    for task in tasks {
+        if task.is_empty() {
+            continue;
+        }
+        let batches = task.into_iter().map(IngestBatch::from).collect::<Vec<_>>();
+        ingest_tasks.add(IngestTask::new(
+            batches,
+            offsets.clone(),
+            shared_output.clone(),
+        ));
+    }
+    let ingest_tasks = Arc::new(ingest_tasks);
+    let ingest = Ingest::new();
+    let _ = ingest.ingest_file(&ingest_tasks, &offsets, shared_output);
+    ingest.wait_for_completion();
+    Ok(())
+}
+
 async fn drain_runtime_source_tasks(pending_tasks: &mut JoinSet<io::Result<()>>) -> io::Result<()> {
     while let Some(joined) = pending_tasks.join_next().await {
         match joined {
@@ -733,6 +762,28 @@ pub async fn sync_runtime_input_plugin(
 
         if let Some(data_frame) = data_reader.take_frame::<PluginDataFrame>()? {
             match data_frame {
+                PluginDataFrame::RawIngestTasks { tasks } => {
+                    if !tasks.is_empty() {
+                        if Config::debug_enabled() || Config::log_wal_enabled() {
+                            let total_batches: usize = tasks.iter().map(Vec::len).sum();
+                            info!(
+                                "runtime source host: received {} raw ingest tasks ({} batches)",
+                                tasks.len(),
+                                total_batches
+                            );
+                        }
+                        let offsets = offsets.clone();
+                        let shared_output = shared_output.clone();
+                        pending_source_tasks.spawn_blocking(move || {
+                            futures::executor::block_on(ingest_raw_runtime_tasks_into_core(
+                                tasks,
+                                offsets,
+                                shared_output,
+                            ))
+                        });
+                        saw_unflushed_batches = true;
+                    }
+                }
                 PluginDataFrame::IngestBatches { batches } => {
                     if !batches.is_empty() {
                         if Config::debug_enabled() || Config::log_wal_enabled() {
@@ -910,6 +961,7 @@ fn runtime_execution_context(
         value if value.is_empty() => None,
         value => Some(value),
     };
+    let time_partition_prefix = Config::get_time_partition_prefix();
 
     RuntimeExecutionContext {
         pipeline_name: pipeline_name.to_string(),
@@ -920,16 +972,15 @@ fn runtime_execution_context(
             partition_fields,
             order_fields,
             time_partition_granularity,
+            time_partition_prefix,
         },
     }
 }
 
 fn runtime_execution_once_enabled(execution_mode: RuntimeExecutionMode) -> bool {
-    if execution_mode != RuntimeExecutionMode::Sync {
-        return false;
-    }
     match crate::cli::CLI_MODE.read().clone() {
         crate::cli::Mode::Sync(options) => options.once,
+        crate::cli::Mode::Discover(_) => execution_mode == RuntimeExecutionMode::Discover,
         _ => false,
     }
 }

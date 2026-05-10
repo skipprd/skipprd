@@ -12,7 +12,6 @@ async-trait.workspace = true
 datafusion.workspace = true
 clap.workspace = true
 tokio.workspace = true
-skippr-core.workspace = true
 skippr-runtime-sdk.workspace = true
 
 flate2 = "1.0.25"

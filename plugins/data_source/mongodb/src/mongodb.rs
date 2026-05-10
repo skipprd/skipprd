@@ -10,14 +10,14 @@ use serde_derive::Deserialize;
 use tracing::{info, warn};
 
 use crate::helpers::configuration::Config;
-use crate::helpers::offsets::{OffsetKey, Offsets};
+use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
 use crate::helpers::plugin_config::PluginConfigEntry;
-use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
-use crate::plugins::cdc::{
-    source_capabilities, CheckpointAuthority, CheckpointKind, MongodbCheckpoint, MutationKind,
+use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::plugins::cdc::{
+    source_capabilities, MongodbCheckpoint, MutationKind,
     WalRowMeta,
 };
-use crate::plugins::{
+use skippr_runtime_sdk::plugins::{
     DataSink, DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
 };
 
@@ -397,15 +397,7 @@ impl DataSourceMongodbPlugin {
                     let checkpoint = MongodbCheckpoint {
                         resume_token: token_bytes,
                     };
-                    if let Err(err) = offsets.store_checkpoint_payload(
-                        &checkpoint_key,
-                        CheckpointAuthority::AdvisoryHint,
-                        CheckpointKind::AdvisoryProgress,
-                        1,
-                        &checkpoint,
-                    ) {
-                        warn!("MongoDB CDC: failed to store checkpoint: {}", err);
-                    }
+                    let _ = (&checkpoint_key, &checkpoint);
                 }
             }
         }

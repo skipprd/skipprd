@@ -10,10 +10,10 @@ use async_trait::async_trait;
 use clap::Parser;
 use datafusion::execution::SendableRecordBatchStream;
 use serde_derive::{Deserialize, Serialize};
-use skippr_core::buffer::BufferChunker;
-use skippr_core::ingest::partition_time::TimePartitioner;
-use skippr_core::plugins::cdc;
-use skippr_core::plugins::DataSink;
+use skippr_runtime_sdk::sink_compat::BufferChunker;
+use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
+use skippr_runtime_sdk::plugins::cdc;
+use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::sink_runtime_entry::run_runtime_data_sink_plugin;
 use tracing::error;
 
@@ -57,7 +57,7 @@ impl DataSink for FileSinkRuntimePlugin {
     async fn install_schema_state(
         &self,
         _schema_version: u64,
-        _namespaces: &std::collections::BTreeMap<String, skippr_core::discover::OutputMetadata>,
+        _namespaces: &std::collections::BTreeMap<String, skippr_runtime_sdk::discover::OutputMetadata>,
     ) -> Result<(), io::Error> {
         Ok(())
     }
@@ -69,7 +69,7 @@ async fn main() {
     if let Err(err) = run_runtime_data_sink_plugin(
         "File",
         "File",
-        skippr_core::plugins::cdc::sink_capabilities::by_name("File").map(Into::into),
+        skippr_runtime_sdk::plugins::cdc::sink_capabilities::by_name("File").map(Into::into),
         false,
         "skippr-plugin-data-sink-file",
         |install| async move {
@@ -96,7 +96,7 @@ async fn sync_file_sink(
     stream: SendableRecordBatchStream,
     filename: String,
 ) -> io::Result<()> {
-    use skippr_core::metrics::counters;
+    use skippr_runtime_sdk::metrics::counters;
 
     if let Some(output_dir) = config.output_dir.as_deref() {
         if let Err(err) = fs::create_dir_all(output_dir) {

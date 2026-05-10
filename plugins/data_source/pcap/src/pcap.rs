@@ -4,9 +4,9 @@ use async_trait::async_trait;
 use serde_derive::Deserialize;
 
 use crate::helpers::configuration::Config;
-use crate::helpers::offsets::Offsets;
+use skippr_runtime_sdk::progress::Offsets;
 use crate::helpers::plugin_config::PluginConfigEntry;
-use crate::plugins::{DataSink, DataSource};
+use skippr_runtime_sdk::plugins::{DataSink, DataSource};
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct DataSourcePcapPluginConfig {}
@@ -49,7 +49,7 @@ impl DataSource for DataSourcePcapPlugin {
         ))
     }
 
-    fn execution_contract(&self) -> crate::plugins::SourceExecutionContract {
-        crate::plugins::SourceExecutionContract::finite()
+    fn execution_contract(&self) -> skippr_runtime_sdk::plugins::SourceExecutionContract {
+        skippr_runtime_sdk::plugins::SourceExecutionContract::finite()
     }
 }

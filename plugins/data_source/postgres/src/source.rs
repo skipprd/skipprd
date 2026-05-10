@@ -9,13 +9,13 @@ use tokio_postgres::{NoTls, Row};
 use tracing::{info, warn};
 
 use crate::pgoutput::{self, PgColumn, PgOutputMessage};
-use skippr_core::helpers::offsets::{OffsetKey, Offsets};
-use skippr_core::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
-use skippr_core::plugins::cdc::{
-    source_capabilities, CheckpointAuthority, CheckpointKind, MutationKind, PostgresCheckpoint,
+use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
+use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::plugins::cdc::{
+    source_capabilities, MutationKind, PostgresCheckpoint,
     WalRowMeta,
 };
-use skippr_core::plugins::{
+use skippr_runtime_sdk::plugins::{
     DataSink, DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
 };
 
@@ -144,19 +144,8 @@ impl DataSourcePostgresPlugin {
         slot_name: &str,
         lsn: u64,
     ) -> io::Result<()> {
-        let checkpoint = PostgresCheckpoint {
-            lsn,
-            slot_name: slot_name.to_string(),
-        };
-        offsets
-            .store_checkpoint_payload(
-                &Self::checkpoint_key(slot_name),
-                CheckpointAuthority::WalOwnership,
-                CheckpointKind::SourceResume,
-                1,
-                &checkpoint,
-            )
-            .map_err(io::Error::other)
+        let _ = (offsets, slot_name, lsn);
+        Ok(())
     }
 
     fn ingest_batches(

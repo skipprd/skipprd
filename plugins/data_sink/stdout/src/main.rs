@@ -13,7 +13,7 @@ async fn main() {
     if let Err(err) = run_runtime_data_sink_plugin(
         "Stdout",
         "Stdout",
-        skippr_core::plugins::cdc::sink_capabilities::by_name("Stdout").map(Into::into),
+        skippr_runtime_sdk::plugins::cdc::sink_capabilities::by_name("Stdout").map(Into::into),
         false,
         "skippr-plugin-data-sink-stdout",
         |install| async move {

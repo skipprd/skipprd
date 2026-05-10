@@ -8,10 +8,15 @@ use crate::discover::OutputMetadata;
 use crate::helpers::offsets::Offsets;
 use crate::plugins::cdc::{SinkCapability, SourceCapability, SyncContext};
 use crate::runtime_plugins::protocol::{
-    RuntimeIngestPartitionBatch, RuntimeOffsetMaterializationHint,
+    RuntimeIngestPartitionBatch, RuntimeOffsetMaterializationHint, RuntimeRawIngestBatch,
 };
 
 pub trait RuntimeIngestRelay: Send + Sync {
+    fn relay_raw_ingest_tasks(
+        &self,
+        tasks: Vec<Vec<RuntimeRawIngestBatch>>,
+    ) -> Result<(), std::io::Error>;
+
     fn relay_ingest_batches(
         &self,
         batches: Vec<RuntimeIngestPartitionBatch>,

@@ -25,7 +25,6 @@ serde_derive.workspace = true
 tokio.workspace = true
 tokio-postgres.workspace = true
 tracing.workspace = true
-skippr-core.workspace = true
 skippr-runtime-sdk.workspace = true
 
 [dev-dependencies]

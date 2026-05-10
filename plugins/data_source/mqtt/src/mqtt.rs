@@ -8,10 +8,10 @@ use tokio::time::{timeout, Duration, Instant};
 use tracing::{error, info};
 
 use crate::helpers::configuration::Config;
-use crate::helpers::offsets::{OffsetKey, Offsets};
+use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
 use crate::helpers::plugin_config::PluginConfigEntry;
-use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
-use crate::plugins::{DataSink, DataSource, SourceExecutionContract, SourceOnceContract};
+use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::plugins::{DataSink, DataSource, SourceExecutionContract, SourceOnceContract};
 use crate::RUNNING;
 
 #[derive(Debug, Deserialize, Clone)]

@@ -30,21 +30,21 @@ pub async fn serialize_to_parquet_with_order_fields(
     }
 
     let order_fields =
-        skippr_core::converters::parquet_ordering::resolve_effective_order_from_fields(
+        skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order_from_fields(
             &schema,
             configured_order_fields,
         );
-    let sorted_batches = skippr_core::converters::parquet_ordering::materialize_and_sort(
+    let sorted_batches = skippr_runtime_sdk::converters::parquet_ordering::materialize_and_sort(
         raw_batches,
         &schema,
         &order_fields,
     )?;
 
-    let row_group_size = skippr_core::converters::parquet_ordering::estimate_row_group_size(
+    let row_group_size = skippr_runtime_sdk::converters::parquet_ordering::estimate_row_group_size(
         &sorted_batches,
         &order_fields,
     );
-    let props = skippr_core::converters::parquet_ordering::build_writer_properties(
+    let props = skippr_runtime_sdk::converters::parquet_ordering::build_writer_properties(
         &schema,
         &order_fields,
         row_group_size,

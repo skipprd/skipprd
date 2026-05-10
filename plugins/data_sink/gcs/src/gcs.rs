@@ -1,8 +1,8 @@
 use super::parquet_util::serialize_to_parquet;
-use crate::buffer::BufferChunker;
+use skippr_runtime_sdk::sink_compat::BufferChunker;
 use crate::helpers::configuration::DataSinkPluginConfig;
-use crate::ingest::partition_time::TimePartitioner;
-use crate::plugins::DataSink;
+use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
+use skippr_runtime_sdk::plugins::DataSink;
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 use object_store::gcp::GoogleCloudStorageBuilder;
@@ -39,13 +39,13 @@ impl DataSink for DataSinkGcsPlugin {
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
-        cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
+        cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
         let stream = match cdc_ctx {
             Some(ctx) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &ctx.part_meta),
             None => stream,
         };
-        use crate::metrics::counters;
+        use skippr_runtime_sdk::metrics::counters;
         counters::inc_uploads_in_flight();
 
         let namespace = BufferChunker::decode_file_namespace(&filename);
@@ -95,8 +95,8 @@ impl DataSink for DataSinkGcsPlugin {
         Ok(())
     }
 
-    fn capability(&self) -> Option<&'static crate::plugins::cdc::SinkCapability> {
-        Some(&crate::plugins::cdc::sink_capabilities::GCS)
+    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
+        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::GCS)
     }
 }
 

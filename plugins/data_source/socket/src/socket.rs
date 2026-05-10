@@ -9,10 +9,10 @@ use tokio::time::Duration;
 use tracing::{error, info};
 
 use crate::helpers::configuration::Config;
-use crate::helpers::offsets::{OffsetKey, Offsets};
+use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
 use crate::helpers::plugin_config::PluginConfigEntry;
-use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
-use crate::plugins::{DataSink, DataSource};
+use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::plugins::{DataSink, DataSource};
 use crate::RUNNING;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -186,9 +186,9 @@ impl DataSource for DataSourceSocketPlugin {
         Ok(())
     }
 
-    fn execution_contract(&self) -> crate::plugins::SourceExecutionContract {
-        crate::plugins::SourceExecutionContract::stream(
-            crate::plugins::SourceOnceContract::HostIdleBounded,
+    fn execution_contract(&self) -> skippr_runtime_sdk::plugins::SourceExecutionContract {
+        skippr_runtime_sdk::plugins::SourceExecutionContract::stream(
+            skippr_runtime_sdk::plugins::SourceOnceContract::HostIdleBounded,
         )
     }
 }

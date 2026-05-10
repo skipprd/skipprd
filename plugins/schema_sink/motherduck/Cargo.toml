@@ -9,7 +9,6 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
-skippr-core.workspace = true
 skippr-runtime-sdk.workspace = true
 tokio.workspace = true
 skippr-plugin-data-sink-motherduck = { path = "../../data_sink/motherduck" }

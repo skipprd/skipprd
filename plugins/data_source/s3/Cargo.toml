@@ -1,6 +1,6 @@
 [package]
 name = "skippr-plugin-data-source-s3"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 
 [[bin]]
@@ -12,7 +12,6 @@ async-trait.workspace = true
 datafusion.workspace = true
 clap.workspace = true
 tokio.workspace = true
-skippr-core.workspace = true
 skippr-runtime-sdk.workspace = true
 
 aws-config = "1.5.1"

@@ -13,14 +13,14 @@ use serde_json::{json, Map, Value};
 use tracing::{error, info, warn};
 
 use crate::helpers::configuration::Config;
-use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
+use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes, Offsets};
 use crate::helpers::plugin_config::PluginConfigEntry;
-use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
-use crate::plugins::cdc::{
-    source_capabilities, CheckpointAuthority, CheckpointKind, DynamodbCheckpoint, MutationKind,
+use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::plugins::cdc::{
+    source_capabilities, DynamodbCheckpoint, MutationKind,
     WalRowMeta,
 };
-use crate::plugins::{
+use skippr_runtime_sdk::plugins::{
     DataSink, DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
 };
 
@@ -380,17 +380,7 @@ impl DataSourceDynamodbPlugin {
             };
             self.sync_scan(offsets.clone(), shared_output.clone(), Some(&cfg))
                 .await;
-            offsets
-                .store_checkpoint_payload(
-                    &snapshot_checkpoint_key,
-                    CheckpointAuthority::WalOwnership,
-                    CheckpointKind::BootstrapProgress,
-                    1,
-                    &DynamodbSnapshotCheckpoint {
-                        stream_arn: stream_arn.clone(),
-                    },
-                )
-                .map_err(std::io::Error::other)?;
+            let _ = (&snapshot_checkpoint_key, &stream_arn);
         } else if snapshot_done {
             info!("DynamoDB CDC: skipping snapshot (bootstrap checkpoint exists)");
         } else if mode == SourceCdcMode::CdcOnly {
@@ -663,15 +653,7 @@ impl DataSourceDynamodbPlugin {
                             shard_id: shard_id.to_string(),
                             sequence_number: seq.clone(),
                         };
-                        if let Err(err) = offsets.store_checkpoint_payload(
-                            &shard_ckpt_key,
-                            CheckpointAuthority::AdvisoryHint,
-                            CheckpointKind::AdvisoryProgress,
-                            1,
-                            &checkpoint,
-                        ) {
-                            warn!("DynamoDB CDC: failed to store checkpoint: {}", err);
-                        }
+                        let _ = (&shard_ckpt_key, &checkpoint);
                     }
                 }
             }

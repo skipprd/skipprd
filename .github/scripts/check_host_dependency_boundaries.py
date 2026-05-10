@@ -8,6 +8,11 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PLUGIN_MANIFESTS = sorted(REPO_ROOT.glob("plugins/**/Cargo.toml"))
+PLUGIN_SOURCE_FILES = sorted(
+    path
+    for path in REPO_ROOT.glob("plugins/**/*")
+    if path.is_file() and path.suffix in {".rs", ".toml"}
+)
 
 # These crates are connector-specific and must not leak back into the host
 # dependency closure for the root `skipprd` crate, including test-only edges.
@@ -73,6 +78,36 @@ def collect_plugin_manifest_violations() -> list[str]:
         text = manifest_path.read_text(encoding="utf-8")
         if re.search(r"(?m)^\s*skippr\s*=", text):
             violations.append(str(manifest_path.relative_to(REPO_ROOT)))
+        if re.search(r"(?m)^\s*skippr-core(?:\.workspace|\s*=)", text):
+            violations.append(str(manifest_path.relative_to(REPO_ROOT)))
+    return violations
+
+
+FORBIDDEN_PLUGIN_PATTERNS = {
+    "direct skippr_core import": re.compile(r"\bskippr_core::"),
+    "core ingest import": re.compile(r"\b(?:crate::|skippr_runtime_sdk::)ingest_work\b"),
+    "core metadata singleton import": re.compile(
+        r"\b(?:crate::|skippr_runtime_sdk::)(?:METADATA|PIPELINE_SCHEMA_VERSION)\b"
+    ),
+    "core buffer module import": re.compile(r"\b(?:crate::|skippr_runtime_sdk::)buffer\b"),
+    "core compactor module import": re.compile(r"\b(?:crate::|skippr_runtime_sdk::)engine\b"),
+    "core runtime host import": re.compile(r"\b(?:crate::|skippr_runtime_sdk::)runtime_plugins::host\b"),
+    "offset writer API import": re.compile(
+        r"\b(?:crate::|skippr_runtime_sdk::)helpers::offsets::.*\bOffsets\b"
+    ),
+    "source checkpoint write": re.compile(r"\.store_checkpoint_(?:payload|envelope)\s*\("),
+    "source offset write": re.compile(r"\boffsets\s*\.\s*set\s*\("),
+}
+
+
+def collect_plugin_source_violations() -> list[str]:
+    violations = []
+    for source_path in PLUGIN_SOURCE_FILES:
+        relative = source_path.relative_to(REPO_ROOT)
+        text = source_path.read_text(encoding="utf-8", errors="ignore")
+        for label, pattern in FORBIDDEN_PLUGIN_PATTERNS.items():
+            if pattern.search(text):
+                violations.append(f"{relative}: {label}")
     return violations
 
 
@@ -80,8 +115,9 @@ def main() -> int:
     leaked_default = collect_leaked_host_packages(all_features=False)
     leaked_all_features = collect_leaked_host_packages(all_features=True)
     manifest_violations = collect_plugin_manifest_violations()
+    source_violations = collect_plugin_source_violations()
 
-    if leaked_default or leaked_all_features or manifest_violations:
+    if leaked_default or leaked_all_features or manifest_violations or source_violations:
         print(
             "host/plugin dependency boundary violated:",
             file=sys.stderr,
@@ -102,11 +138,18 @@ def main() -> int:
                 print(f"    - {name}", file=sys.stderr)
         if manifest_violations:
             print(
-                "  plugin manifests must depend on `skippr-core`, never root `skipprd`:",
+                "  plugin manifests must depend only on the narrow runtime SDK, never root `skipprd` or `skippr-core`:",
                 file=sys.stderr,
             )
             for path in manifest_violations:
                 print(f"    - {path}", file=sys.stderr)
+        if source_violations:
+            print(
+                "  plugin sources must not import host/core internals:",
+                file=sys.stderr,
+            )
+            for violation in source_violations:
+                print(f"    - {violation}", file=sys.stderr)
         return 1
 
     print(

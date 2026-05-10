@@ -11,7 +11,6 @@ path = "src/main.rs"
 async-trait.workspace = true
 clap.workspace = true
 tokio.workspace = true
-skippr-core.workspace = true
 skippr-runtime-sdk.workspace = true
 arrow.workspace = true
 bytes.workspace = true

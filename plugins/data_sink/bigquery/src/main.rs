@@ -15,7 +15,7 @@ async fn main() {
     if let Err(err) = run_runtime_data_sink_plugin(
         "Bigquery",
         "Bigquery",
-        skippr_core::plugins::cdc::sink_capabilities::by_name("Bigquery").map(Into::into),
+        skippr_runtime_sdk::plugins::cdc::sink_capabilities::by_name("Bigquery").map(Into::into),
         true,
         "skippr-plugin-data-sink-bigquery",
         |install| async move {

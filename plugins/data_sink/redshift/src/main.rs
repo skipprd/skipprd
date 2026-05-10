@@ -15,7 +15,7 @@ async fn main() {
     if let Err(err) = run_runtime_data_sink_plugin(
         "Redshift",
         "Redshift",
-        skippr_core::plugins::cdc::sink_capabilities::by_name("Redshift").map(Into::into),
+        skippr_runtime_sdk::plugins::cdc::sink_capabilities::by_name("Redshift").map(Into::into),
         true,
         "skippr-plugin-data-sink-redshift",
         |install| async move {

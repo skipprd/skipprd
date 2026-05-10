@@ -9,7 +9,7 @@ use datafusion::physical_plan::RecordBatchStream;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::Stream;
 
-use crate::plugins::cdc::{MutationKind, WalPartMeta};
+use skippr_runtime_sdk::plugins::cdc::{MutationKind, WalPartMeta};
 
 /// Augment a RecordBatch stream with CDC metadata columns.
 /// Returns a new stream that adds `_skippr_mutation` and `_skippr_order_token`
@@ -55,7 +55,7 @@ fn mutation_kind_str(kind: &MutationKind) -> &'static str {
 struct CdcEncodeStream {
     inner: SendableRecordBatchStream,
     schema: SchemaRef,
-    rows: Vec<crate::plugins::cdc::WalRowMeta>,
+    rows: Vec<skippr_runtime_sdk::plugins::cdc::WalRowMeta>,
     row_offset: usize,
 }
 
@@ -172,20 +172,20 @@ mod tests {
 
     fn make_test_wal_meta() -> WalPartMeta {
         WalPartMeta {
-            kind: crate::plugins::cdc::WalPartKind::Cdc,
+            kind: skippr_runtime_sdk::plugins::cdc::WalPartKind::Cdc,
             row_count: 3,
             rows: vec![
-                crate::plugins::cdc::WalRowMeta {
+                skippr_runtime_sdk::plugins::cdc::WalRowMeta {
                     mutation: MutationKind::Insert,
                     event_id: b"ev1".to_vec(),
                     order_token: vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01],
                 },
-                crate::plugins::cdc::WalRowMeta {
+                skippr_runtime_sdk::plugins::cdc::WalRowMeta {
                     mutation: MutationKind::Update,
                     event_id: b"ev2".to_vec(),
                     order_token: vec![0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x02],
                 },
-                crate::plugins::cdc::WalRowMeta {
+                skippr_runtime_sdk::plugins::cdc::WalRowMeta {
                     mutation: MutationKind::Delete,
                     event_id: b"ev3".to_vec(),
                     order_token: vec![0xAB, 0xCD, 0xEF, 0x01, 0x23, 0x45, 0x67, 0x89],

@@ -15,7 +15,7 @@ async fn main() {
     if let Err(err) = run_runtime_data_sink_plugin(
         "Databricks",
         "Databricks",
-        skippr_core::plugins::cdc::sink_capabilities::by_name("Databricks").map(Into::into),
+        skippr_runtime_sdk::plugins::cdc::sink_capabilities::by_name("Databricks").map(Into::into),
         false,
         "skippr-plugin-data-sink-databricks",
         |install| async move {

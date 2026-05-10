@@ -11,11 +11,11 @@ use tokio::time::{Duration, Instant};
 use tracing::{error, info};
 
 use crate::helpers::configuration::Config;
-use crate::helpers::offsets::{OffsetKey, Offsets};
+use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
 use crate::helpers::plugin_config::PluginConfigEntry;
-use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
-use crate::plugins::cdc::{source_capabilities, MutationKind, WalRowMeta};
-use crate::plugins::{
+use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::plugins::cdc::{source_capabilities, MutationKind, WalRowMeta};
+use skippr_runtime_sdk::plugins::{
     DataSink, DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
 };
 use crate::RUNNING;

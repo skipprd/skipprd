@@ -15,7 +15,7 @@ async fn main() {
     if let Err(err) = run_runtime_data_sink_plugin(
         "Clickhouse",
         "Clickhouse",
-        skippr_core::plugins::cdc::sink_capabilities::by_name("Clickhouse").map(Into::into),
+        skippr_runtime_sdk::plugins::cdc::sink_capabilities::by_name("Clickhouse").map(Into::into),
         true,
         "skippr-plugin-data-sink-clickhouse",
         |install| async move {

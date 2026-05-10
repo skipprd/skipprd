@@ -15,10 +15,10 @@ use tracing::error;
 use zip::ZipArchive;
 
 use crate::helpers::configuration::Config;
-use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
+use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes, Offsets};
 use crate::helpers::plugin_config::PluginConfigEntry;
-use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
-use crate::plugins::{DataSink, DataSource};
+use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::plugins::{DataSink, DataSource};
 use crate::serdes::input_format::InputFormat;
 
 type BatchSender = UnboundedSender<Vec<Vec<IngestBatch>>>;
@@ -361,7 +361,7 @@ impl DataSource for DataSourceLocalFilePlugin {
         Ok(())
     }
 
-    fn execution_contract(&self) -> crate::plugins::SourceExecutionContract {
-        crate::plugins::SourceExecutionContract::finite()
+    fn execution_contract(&self) -> skippr_runtime_sdk::plugins::SourceExecutionContract {
+        skippr_runtime_sdk::plugins::SourceExecutionContract::finite()
     }
 }

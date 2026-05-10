@@ -1,16 +1,15 @@
 skippr:
 #  api_token: B8ib6S3wa9nSq5wAwxkO9dceUIg04d4uTYUHBDg # deprecated in favour of skippr_s3_bucket
- skippr_s3_bucket: cloudcycle-skippr-state-production
- tenant: cloudcycle
- workspace: prod
+#  skippr_s3_bucket: cloudcycle-skippr-state-production
+#  tenant: cloudcycle
+#  workspace: prod
 
 #  skippr_s3_bucket: skippr-e2e-sample-data-output
 #  tenant: skippr
 #  workspace: test
 
-  # skippr_s3_bucket: asgsdag-datalake
-  # tenant: picnic
-  # workspace: prod
+  skippr_s3_bucket: asgsdag-datalake
+  workspace: prod
 
 pipelines:
 #  cloud_trail:

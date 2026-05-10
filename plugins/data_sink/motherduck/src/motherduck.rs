@@ -10,9 +10,9 @@ use tracing::{error, info};
 use dashmap::DashSet;
 use once_cell::sync::Lazy;
 
-use crate::buffer::BufferChunker;
+use skippr_runtime_sdk::sink_compat::BufferChunker;
 use crate::helpers::configuration::DataSinkPluginConfig;
-use crate::plugins::{DataSink, SchemaSink};
+use skippr_runtime_sdk::plugins::{DataSink, SchemaSink};
 
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 
@@ -258,14 +258,14 @@ impl DataSinkMotherduckPlugin {
         &self,
         mut stream: SendableRecordBatchStream,
         filename: String,
-        ctx: &crate::plugins::cdc::SyncContext,
+        ctx: &skippr_runtime_sdk::plugins::cdc::SyncContext,
     ) -> Result<(), std::io::Error> {
         use super::cdc_apply::{
             ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
             tombstone_table_name, upsert_if_newer_sql,
         };
-        use crate::metrics::counters;
-        use crate::plugins::cdc::MutationKind;
+        use skippr_runtime_sdk::metrics::counters;
+        use skippr_runtime_sdk::plugins::cdc::MutationKind;
 
         let contract = match ctx.contract.as_ref() {
             Some(c) if !c.business_key_columns.is_empty() => c,
@@ -540,12 +540,12 @@ impl DataSink for DataSinkMotherduckPlugin {
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
-        cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
+        cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
         if let Some(ctx) = cdc_ctx {
             return self.sync_cdc(stream, filename, ctx).await;
         }
-        use crate::metrics::counters;
+        use skippr_runtime_sdk::metrics::counters;
         counters::inc_uploads_in_flight();
 
         let namespace = BufferChunker::decode_file_namespace(&filename);
@@ -634,8 +634,8 @@ impl DataSink for DataSinkMotherduckPlugin {
         Ok(())
     }
 
-    fn capability(&self) -> Option<&'static crate::plugins::cdc::SinkCapability> {
-        Some(&crate::plugins::cdc::sink_capabilities::MOTHERDUCK)
+    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
+        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::MOTHERDUCK)
     }
 }
 
@@ -644,11 +644,11 @@ impl SchemaSink for DataSinkMotherduckPlugin {
     async fn sync_schema(
         &self,
         namespace: &str,
-        metadata: &crate::discover::OutputMetadata,
+        metadata: &skippr_runtime_sdk::discover::OutputMetadata,
     ) -> Result<(), std::io::Error> {
-        use crate::converters::skippr_arrow::convert_skippr_to_arrow;
+        use skippr_runtime_sdk::converters::skippr_arrow::convert_skippr_to_arrow;
 
-        let fields: std::collections::HashMap<String, crate::discover::OutputMetadata> = metadata
+        let fields: std::collections::HashMap<String, skippr_runtime_sdk::discover::OutputMetadata> = metadata
             .child_fields()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();

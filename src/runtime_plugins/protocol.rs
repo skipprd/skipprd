@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 // separate from the skippr/React adapter's CLI subprocess JSON summaries.
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 7;
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 9;
 pub const SKIPPR_RUNTIME_CONTROL_ADDR_ENV: &str = "SKIPPR_RUNTIME_CONTROL_ADDR";
 pub const SKIPPR_RUNTIME_DATA_ADDR_ENV: &str = "SKIPPR_RUNTIME_DATA_ADDR";
 pub const SKIPPR_RUNTIME_SESSION_TOKEN_ENV: &str = "SKIPPR_RUNTIME_SESSION_TOKEN";
@@ -194,6 +194,8 @@ pub struct RuntimeOutputLayout {
     #[serde(default)]
     pub order_fields: Vec<String>,
     pub time_partition_granularity: Option<String>,
+    #[serde(default)]
+    pub time_partition_prefix: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -302,6 +304,16 @@ pub struct RuntimeIngestPartitionBatch {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeRawIngestBatch {
+    pub offset_key: OffsetKey,
+    pub data: String,
+    pub bytes: usize,
+    pub source_uri: String,
+    pub namespace: Option<String>,
+    pub cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RuntimeSourceSinkWrite {
     pub filename: String,
     pub compaction_id: String,
@@ -377,6 +389,9 @@ pub enum HostDataFrame {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum PluginDataFrame {
+    RawIngestTasks {
+        tasks: Vec<Vec<RuntimeRawIngestBatch>>,
+    },
     IngestBatches {
         batches: Vec<RuntimeIngestPartitionBatch>,
     },

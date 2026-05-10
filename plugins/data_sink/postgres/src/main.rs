@@ -2,8 +2,8 @@ use std::io;
 
 use clap::Parser;
 use datafusion::execution::SendableRecordBatchStream;
-use skippr_core::plugins::cdc::SyncContext;
-use skippr_core::plugins::DataSink;
+use skippr_runtime_sdk::plugins::cdc::SyncContext;
+use skippr_runtime_sdk::plugins::DataSink;
 use skippr_plugin_data_sink_postgres::{DataSinkPostgresPlugin, DataSinkPostgresPluginConfig};
 use skippr_runtime_sdk::sink_runtime_entry::{
     buffer_name_for_runtime_binding, run_runtime_data_sink_plugin,
@@ -34,7 +34,7 @@ async fn main() {
     if let Err(err) = run_runtime_data_sink_plugin(
         "Postgres",
         "Postgres",
-        skippr_core::plugins::cdc::sink_capabilities::by_name("Postgres").map(Into::into),
+        skippr_runtime_sdk::plugins::cdc::sink_capabilities::by_name("Postgres").map(Into::into),
         true,
         "skippr-plugin-data-sink-postgres",
         |install| async move {

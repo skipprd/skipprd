@@ -215,13 +215,23 @@ where
                 }
                 let arrow_stream_bytes =
                     read_sink_payload(&mut data_reader, request.request_id).await?;
-                run_sink_request(
+                if let Err(err) = run_sink_request(
                     request.clone(),
                     arrow_stream_bytes,
                     &primary_plugin,
                     &deadletter_plugin,
                 )
-                .await?;
+                .await
+                {
+                    let message = format!(
+                        "{}: runtime sink request {} failed: {}",
+                        bin_name, request.request_id, err
+                    );
+                    let _ = control_writer
+                        .write(&PluginFrame::Error(message.clone()))
+                        .await;
+                    return Err(io::Error::other(message));
+                }
                 control_writer
                     .write(&PluginFrame::SinkAck(RuntimeRequestAck {
                         request_id: request.request_id,

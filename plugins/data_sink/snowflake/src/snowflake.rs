@@ -20,9 +20,9 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 use url::Url;
 
-use crate::buffer::BufferChunker;
-use crate::discover::{OutputMetadata, SkipprDataType};
-use crate::plugins::{DataSink, SchemaSink};
+use skippr_runtime_sdk::sink_compat::BufferChunker;
+use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
+use skippr_runtime_sdk::plugins::{DataSink, SchemaSink};
 
 static ENSURED_SCHEMAS: Lazy<DashMap<String, Arc<tokio::sync::OnceCell<()>>>> =
     Lazy::new(DashMap::new);
@@ -1679,7 +1679,7 @@ impl DataSinkSnowflakePlugin {
                 .child_fields()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            match crate::converters::skippr_arrow::convert_skippr_to_arrow(Box::new(fields)) {
+            match skippr_runtime_sdk::converters::skippr_arrow::convert_skippr_to_arrow(Box::new(fields)) {
                 Ok(installed_schema) => {
                     return Self::col_defs_for_arrow_schema(&installed_schema);
                 }
@@ -1835,7 +1835,7 @@ impl DataSinkSnowflakePlugin {
         filename: String,
     ) -> Result<(), std::io::Error> {
         use super::parquet_util::serialize_to_parquet;
-        use crate::metrics::counters;
+        use skippr_runtime_sdk::metrics::counters;
 
         counters::inc_uploads_in_flight();
 
@@ -1940,7 +1940,7 @@ impl DataSinkSnowflakePlugin {
         filename: String,
     ) -> Result<(), std::io::Error> {
         use super::parquet_util::serialize_to_parquet;
-        use crate::metrics::counters;
+        use skippr_runtime_sdk::metrics::counters;
 
         counters::inc_uploads_in_flight();
 
@@ -2106,7 +2106,7 @@ impl DataSinkSnowflakePlugin {
         mut stream: SendableRecordBatchStream,
         filename: String,
     ) -> Result<(), std::io::Error> {
-        use crate::metrics::counters;
+        use skippr_runtime_sdk::metrics::counters;
         counters::inc_uploads_in_flight();
 
         let namespace = BufferChunker::decode_file_namespace(&filename);
@@ -2234,14 +2234,14 @@ impl DataSinkSnowflakePlugin {
         &self,
         mut stream: SendableRecordBatchStream,
         filename: String,
-        ctx: &crate::plugins::cdc::SyncContext,
+        ctx: &skippr_runtime_sdk::plugins::cdc::SyncContext,
     ) -> Result<(), std::io::Error> {
         use super::cdc_apply::{
             ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
             tombstone_table_name, upsert_if_newer_sql,
         };
-        use crate::metrics::counters;
-        use crate::plugins::cdc::MutationKind;
+        use skippr_runtime_sdk::metrics::counters;
+        use skippr_runtime_sdk::plugins::cdc::MutationKind;
 
         let contract = match ctx.contract.as_ref() {
             Some(c) if !c.business_key_columns.is_empty() => c,
@@ -2448,7 +2448,7 @@ impl DataSink for DataSinkSnowflakePlugin {
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
-        cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
+        cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
         match cdc_ctx {
             Some(ctx) => self.sync_cdc(stream, filename, ctx).await,
@@ -2456,8 +2456,8 @@ impl DataSink for DataSinkSnowflakePlugin {
         }
     }
 
-    fn capability(&self) -> Option<&'static crate::plugins::cdc::SinkCapability> {
-        Some(&crate::plugins::cdc::sink_capabilities::SNOWFLAKE)
+    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
+        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::SNOWFLAKE)
     }
 
     async fn install_schema_state(
@@ -2475,13 +2475,13 @@ impl SchemaSink for DataSinkSnowflakePlugin {
     async fn sync_schema(
         &self,
         namespace: &str,
-        metadata: &crate::discover::OutputMetadata,
+        metadata: &skippr_runtime_sdk::discover::OutputMetadata,
     ) -> Result<(), std::io::Error> {
-        use crate::converters::skippr_arrow::convert_skippr_to_arrow;
+        use skippr_runtime_sdk::converters::skippr_arrow::convert_skippr_to_arrow;
 
         self.ensure_schema().await?;
 
-        let fields: std::collections::HashMap<String, crate::discover::OutputMetadata> = metadata
+        let fields: std::collections::HashMap<String, skippr_runtime_sdk::discover::OutputMetadata> = metadata
             .child_fields()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();

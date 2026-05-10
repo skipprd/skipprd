@@ -1,17 +1,15 @@
 use std::sync::Arc;
 
 use serde_derive::Deserialize;
-use skippr_core::METADATA;
 use tiberius::{numeric::Numeric, Client, ColumnData, Config as TiberiusConfig, Row};
 use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 use tracing::{error, info};
 
-use crate::discover::{Metadata, SkipprDataType};
 use crate::helpers::configuration::{Config, DataSourcePluginConfig};
-use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
-use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
-use crate::plugins::{DataSink, DataSource};
+use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes, Offsets};
+use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::plugins::{DataSink, DataSource};
 use async_trait::async_trait;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -158,64 +156,8 @@ impl DataSourceMssqlPlugin {
         Ok(columns)
     }
 
-    fn skippr_type_for_mssql_type(data_type: &str) -> SkipprDataType {
-        match data_type.to_ascii_lowercase().as_str() {
-            "bigint" => SkipprDataType::Long,
-            "int" => SkipprDataType::Integer,
-            "smallint" => SkipprDataType::Short,
-            "tinyint" => SkipprDataType::Byte,
-            "bit" => SkipprDataType::Boolean,
-            "decimal" | "numeric" | "money" | "smallmoney" => SkipprDataType::Decimal,
-            "float" => SkipprDataType::Double,
-            "real" => SkipprDataType::Float,
-            "date" => SkipprDataType::Date,
-            "datetime" | "datetime2" | "smalldatetime" | "datetimeoffset" => {
-                SkipprDataType::Timestamp
-            }
-            "time" => SkipprDataType::Time,
-            "binary" | "varbinary" | "image" => SkipprDataType::Binary,
-            "uniqueidentifier" => SkipprDataType::Uuid,
-            "xml" => SkipprDataType::String,
-            _ => SkipprDataType::String,
-        }
-    }
-
-    fn metadata_for_columns(columns: &[MssqlColumnSchema]) -> Metadata {
-        let mut root = Metadata::new_with_type(SkipprDataType::Record, "");
-        for column in columns {
-            root.set_field(
-                &column.name,
-                Metadata::new_with_type(
-                    Self::skippr_type_for_mssql_type(&column.data_type),
-                    &column.name,
-                ),
-            );
-        }
-        root
-    }
-
     fn seed_table_metadata(namespace: &str, columns: &[MssqlColumnSchema]) {
-        if columns.is_empty() {
-            return;
-        }
-        let current = METADATA.load();
-        let mut updated = current.as_ref().clone();
-        updated
-            .metadata
-            .insert(namespace.to_string(), Self::metadata_for_columns(columns));
-        METADATA.store(Arc::new(updated));
-        let metadata = METADATA.load();
-        let flatten = Config::truth_value(
-            &Config::get_transform_config()
-                .flatten_events
-                .or(Some("no".to_string()))
-                .unwrap(),
-        );
-        if let Err(err) =
-            Ingest::prepare_arrow_schema_with_metadata(namespace, &metadata.metadata, flatten)
-        {
-            error!("Failed to prepare MSSQL schema for {}: {}", namespace, err);
-        }
+        let _ = (namespace, columns);
     }
 
     fn row_to_json(row: &Row) -> String {
@@ -457,8 +399,8 @@ impl DataSource for DataSourceMssqlPlugin {
         Ok(())
     }
 
-    fn execution_contract(&self) -> crate::plugins::SourceExecutionContract {
-        crate::plugins::SourceExecutionContract::finite()
+    fn execution_contract(&self) -> skippr_runtime_sdk::plugins::SourceExecutionContract {
+        skippr_runtime_sdk::plugins::SourceExecutionContract::finite()
     }
 }
 

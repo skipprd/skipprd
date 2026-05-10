@@ -645,6 +645,7 @@ pub async fn run_sync(output_mode: &str) -> io::Result<()> {
 
     info!("All buffers flushed to output plugin");
 
+    let mut finalization_error: Option<String> = None;
     {
         if reporter.enabled() {
             reporter.start("Finalising");
@@ -655,7 +656,15 @@ pub async fn run_sync(output_mode: &str) -> io::Result<()> {
         if compactor_ok {
             info!("Finalising: compactor drained and stopped");
         } else {
-            panic!("Finalising: compactor drain/stop did not complete cleanly");
+            let message = match &source_sync_result {
+                Ok(()) => "Finalising: compactor drain/stop did not complete cleanly".to_string(),
+                Err(err) => format!(
+                    "Finalising: compactor drain/stop did not complete cleanly after source/sink failure: {}",
+                    err
+                ),
+            };
+            error!("{}", message);
+            finalization_error = Some(message);
         }
         let (scanned_commits, removed_orphans, orphan_errors) =
             Buffers::cleanup_orphan_seg_commits(200_000);
@@ -700,7 +709,7 @@ pub async fn run_sync(output_mode: &str) -> io::Result<()> {
     crate::converters::parquet_ordering::log_unmatched_order_fields();
 
     {
-        METRICS.write().status = if source_sync_result.is_ok() {
+        METRICS.write().status = if source_sync_result.is_ok() && finalization_error.is_none() {
             MetricsStatus::Completed
         } else {
             MetricsStatus::Error
@@ -760,6 +769,13 @@ pub async fn run_sync(output_mode: &str) -> io::Result<()> {
             reporter.finish();
         }
         return Err(err);
+    }
+
+    if let Some(err) = finalization_error {
+        if reporter.enabled() {
+            reporter.finish();
+        }
+        return Err(std::io::Error::other(err));
     }
 
     info!("Pipeline sync complete");

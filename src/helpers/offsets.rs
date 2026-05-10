@@ -519,12 +519,13 @@ impl Offsets {
     }
 
     fn remote_value(&self, operation: RuntimeOffsetOperation) -> Option<RuntimeOffsetValue> {
-        let transport = self.transport()?;
+        let transport = self
+            .transport()
+            .unwrap_or_else(|| panic!("remote offset operation has no authoritative transport"));
         match transport.call(operation) {
             Ok(value) => Some(value),
             Err(err) => {
-                error!("Remote offset operation failed: {}", err);
-                None
+                panic!("Remote offset operation failed authoritatively: {}", err);
             }
         }
     }
@@ -563,11 +564,10 @@ impl Offsets {
     }
     pub fn set(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Option<IVec> {
         if self.local_tree().is_none() {
-            error!(
-                "Remote offsets are read-only; ignoring set for {}:{} type={:?} offset={}",
+            panic!(
+                "remote/source offset handles are read-only; attempted set for {}:{} type={:?} offset={}",
                 key.namespace, key.partition, offset_type, offset
             );
-            return None;
         }
         match self.upsert(key, offset_type, offset) {
             Ok(val) => val,
@@ -973,6 +973,14 @@ mod tests {
         }
     }
 
+    struct FailingOffsetTransport;
+
+    impl OffsetTransport for FailingOffsetTransport {
+        fn call(&self, _operation: RuntimeOffsetOperation) -> Result<RuntimeOffsetValue, String> {
+            Err("transport disconnected".to_string())
+        }
+    }
+
     #[derive(Default)]
     struct RecordingCheckpointTransport {
         calls: Mutex<Vec<(String, CheckpointEnvelope)>>,
@@ -1129,7 +1137,6 @@ mod tests {
         let key = OffsetKey::new("remote-ns", "remote-partition");
 
         assert_eq!(offsets.validate(&key, OffsetTypes::Closed, 1), Some(true));
-        offsets.set(&key, OffsetTypes::Position, 42);
         offsets
             .store_checkpoint_payload(
                 "remote-key",
@@ -1172,6 +1179,24 @@ mod tests {
                 .unwrap(),
             )]
         );
+    }
+
+    #[test]
+    #[should_panic(expected = "remote/source offset handles are read-only")]
+    fn remote_offset_writes_fail_instead_of_silently_nooping() {
+        let offsets = Offsets::from_transport(Arc::new(RecordingOffsetTransport::default()));
+        let key = OffsetKey::new("remote-ns", "remote-partition");
+
+        offsets.set(&key, OffsetTypes::Position, 42);
+    }
+
+    #[test]
+    #[should_panic(expected = "Remote offset operation failed authoritatively")]
+    fn remote_offset_reads_fail_instead_of_defaulting_to_empty_state() {
+        let offsets = Offsets::from_transport(Arc::new(FailingOffsetTransport));
+        let key = OffsetKey::new("remote-ns", "remote-partition");
+
+        let _ = offsets.validate(&key, OffsetTypes::Closed, 1);
     }
 
     // #[test]

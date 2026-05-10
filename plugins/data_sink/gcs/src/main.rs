@@ -15,7 +15,7 @@ async fn main() {
     if let Err(err) = run_runtime_data_sink_plugin(
         "Gcs",
         "Gcs",
-        skippr_core::plugins::cdc::sink_capabilities::by_name("Gcs").map(Into::into),
+        skippr_runtime_sdk::plugins::cdc::sink_capabilities::by_name("Gcs").map(Into::into),
         false,
         "skippr-plugin-data-sink-gcs",
         |install| async move {

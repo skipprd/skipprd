@@ -1,9 +1,5 @@
-use crate::buffer::BufferChunker;
-use crate::converters::skippr_hive::SkipprHive;
-use crate::discover::OutputMetadata;
 use crate::helpers::configuration::DataSinkPluginConfig;
 use crate::helpers::Helpers;
-use crate::metrics::counters as metrics_counters;
 use aws_sdk_athena::types::{
     EncryptionConfiguration, EncryptionOption, ResultConfiguration, ResultConfigurationUpdates,
     Tag, WorkGroupConfiguration, WorkGroupConfigurationUpdates,
@@ -17,6 +13,10 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use aws_sdk_s3::Client as S3Client;
+use skippr_runtime_sdk::converters::skippr_hive::SkipprHive;
+use skippr_runtime_sdk::discover::OutputMetadata;
+use skippr_runtime_sdk::metrics::counters as metrics_counters;
+use skippr_runtime_sdk::sink_compat::BufferChunker;
 
 use async_trait::async_trait;
 use aws_sdk_glue::error::SdkError;
@@ -30,18 +30,20 @@ use std::io;
 use tokio::task::block_in_place;
 
 use super::parquet_util::serialize_to_parquet;
-use crate::ingest::partition_time::TimePartitioner;
-use crate::plugins::DataSink;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use rand::Rng;
 use serde_derive::Deserialize;
+use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::protocol::{RuntimeBinding, RuntimeExecutionContext};
+use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
 use tracing::{debug, info, warn};
+
+const TIME_PARTITION_GRANULARITIES: [&str; 5] = ["year", "month", "day", "hour", "minute"];
 
 // Global control-plane throttling and serialization
 const DEFAULT_GLUE_CONTROL_PLANE_CONCURRENCY: usize = 2;
@@ -105,7 +107,8 @@ struct InstalledAthenaSchemaState {
 }
 
 fn is_deadletter_athena_target(binding: RuntimeBinding, namespace: &str) -> bool {
-    binding == RuntimeBinding::Deadletter && namespace == crate::ingest::deadletter::table_name()
+    binding == RuntimeBinding::Deadletter
+        && namespace == skippr_runtime_sdk::sink_compat::deadletter::table_name()
 }
 
 fn deadletter_output_metadata() -> OutputMetadata {
@@ -185,7 +188,7 @@ impl DataSink for DataSinkAthenaPlugin {
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
-        cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
+        cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
         let stream = match cdc_ctx {
             Some(ctx) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &ctx.part_meta),
@@ -194,8 +197,8 @@ impl DataSink for DataSinkAthenaPlugin {
         self.inner_sync(stream, filename).await
     }
 
-    fn capability(&self) -> Option<&'static crate::plugins::cdc::SinkCapability> {
-        Some(&crate::plugins::cdc::sink_capabilities::ATHENA)
+    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
+        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::ATHENA)
     }
 
     async fn install_schema_state(
@@ -214,7 +217,7 @@ impl DataSinkAthenaPlugin {
     pub async fn sync_schema(
         &self,
         namespace: &str,
-        metadata: &crate::discover::OutputMetadata,
+        metadata: &skippr_runtime_sdk::discover::OutputMetadata,
     ) -> Result<(), std::io::Error> {
         AwsAthena::create_or_update_schema_with_config(
             namespace,
@@ -238,7 +241,7 @@ impl DataSinkAthenaPlugin {
 
         let s3_client = S3Client::new(&aws_config);
         let athena_client = AthenaClient::new(&aws_config);
-        let tuned_uploads = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET
+        let tuned_uploads = skippr_runtime_sdk::metrics::counters::UPLOAD_CONCURRENCY_TARGET
             .load(std::sync::atomic::Ordering::Relaxed);
         let max_async_uploads = tuned_uploads.max(1);
 
@@ -335,9 +338,13 @@ impl DataSinkAthenaPlugin {
         let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(&filename);
 
         if !is_deadletter_target && !time_partition_str.is_empty() {
-            match TimePartitioner::new(&filename).get_granularity_values() {
+            match AwsAthena::time_partition_values_for_layout(
+                &filename,
+                &self.context.output_layout,
+            ) {
                 Ok(time_partition_values) => {
-                    let granularity_names = TimePartitioner::get_granularity_names();
+                    let granularity_names =
+                        AwsAthena::time_partition_names_for_layout(&self.context.output_layout);
                     partition_values.extend(time_partition_values.iter().map(|v| v.to_string()));
                     granularity_names
                         .iter()
@@ -375,7 +382,7 @@ impl DataSinkAthenaPlugin {
 
         // Resize semaphore if target changed dynamically (clamp to 1..256)
         {
-            let target = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET
+            let target = skippr_runtime_sdk::metrics::counters::UPLOAD_CONCURRENCY_TARGET
                 .load(std::sync::atomic::Ordering::Relaxed)
                 .clamp(1, 256);
             let current = self.upload_sem.available_permits() + 1; // approx
@@ -392,7 +399,7 @@ impl DataSinkAthenaPlugin {
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "Semaphore closed"))?;
         let upload_start = std::time::Instant::now();
-        crate::metrics::counters::inc_uploads_in_flight();
+        skippr_runtime_sdk::metrics::counters::inc_uploads_in_flight();
 
         let bucket = self.config.s3_bucket.clone();
 
@@ -419,7 +426,7 @@ impl DataSinkAthenaPlugin {
         {
             Ok(Ok(v)) => v,
             Ok(Err(e)) => {
-                crate::metrics::counters::dec_uploads_in_flight();
+                skippr_runtime_sdk::metrics::counters::dec_uploads_in_flight();
                 return Err(io::Error::new(
                     io::ErrorKind::Other,
                     format!(
@@ -429,7 +436,7 @@ impl DataSinkAthenaPlugin {
                 ));
             }
             Err(_) => {
-                crate::metrics::counters::dec_uploads_in_flight();
+                skippr_runtime_sdk::metrics::counters::dec_uploads_in_flight();
                 return Err(io::Error::new(
                     io::ErrorKind::TimedOut,
                     "Timeout initiating multipart upload",
@@ -438,7 +445,7 @@ impl DataSinkAthenaPlugin {
         };
         let upload_id = create_out.upload_id().unwrap_or("").to_string();
         if upload_id.is_empty() {
-            crate::metrics::counters::dec_uploads_in_flight();
+            skippr_runtime_sdk::metrics::counters::dec_uploads_in_flight();
             return Err(io::Error::new(
                 io::ErrorKind::Other,
                 "Missing upload_id from S3",
@@ -642,21 +649,24 @@ impl DataSinkAthenaPlugin {
         }
 
         // Resolve ordering and sort if configured
-        let order_fields = crate::converters::parquet_ordering::resolve_effective_order_from_fields(
-            &schema,
-            &self.context.output_layout.order_fields,
-        );
-        let sorted_batches = crate::converters::parquet_ordering::materialize_and_sort(
-            raw_batches,
-            &schema,
-            &order_fields,
-        )?;
+        let order_fields =
+            skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order_from_fields(
+                &schema,
+                &self.context.output_layout.order_fields,
+            );
+        let sorted_batches =
+            skippr_runtime_sdk::converters::parquet_ordering::materialize_and_sort(
+                raw_batches,
+                &schema,
+                &order_fields,
+            )?;
 
-        let row_group_size = crate::converters::parquet_ordering::estimate_row_group_size(
-            &sorted_batches,
-            &order_fields,
-        );
-        let props = crate::converters::parquet_ordering::build_writer_properties(
+        let row_group_size =
+            skippr_runtime_sdk::converters::parquet_ordering::estimate_row_group_size(
+                &sorted_batches,
+                &order_fields,
+            );
+        let props = skippr_runtime_sdk::converters::parquet_ordering::build_writer_properties(
             &schema,
             &order_fields,
             row_group_size,
@@ -699,7 +709,7 @@ impl DataSinkAthenaPlugin {
             Err(e) => {
                 // Best-effort abort
                 writer.abort();
-                crate::metrics::counters::dec_uploads_in_flight();
+                skippr_runtime_sdk::metrics::counters::dec_uploads_in_flight();
                 return Err(e);
             }
         };
@@ -718,9 +728,11 @@ impl DataSinkAthenaPlugin {
         metrics_counters::add_parquet_bytes(uploaded_bytes);
         metrics_counters::add_parquet_objects(1);
         metrics_counters::add_parquet_rows(rows_written);
-        crate::metrics::counters::add_upload(1);
-        crate::metrics::counters::add_upload_latency_ns(upload_start.elapsed().as_nanos() as u64);
-        crate::metrics::counters::dec_uploads_in_flight();
+        skippr_runtime_sdk::metrics::counters::add_upload(1);
+        skippr_runtime_sdk::metrics::counters::add_upload_latency_ns(
+            upload_start.elapsed().as_nanos() as u64,
+        );
+        skippr_runtime_sdk::metrics::counters::dec_uploads_in_flight();
         // Update manifest with the canonical namespace root prefix (absolute s3:// URL)
         // Canonical: s3://{bucket}/{s3_prefix}/{namespace}/
         let trimmed_key_root = key.trim_matches('/').to_string();
@@ -1480,6 +1492,74 @@ impl AwsAthena {
         }
     }
 
+    fn time_partition_name_for_layout(
+        output_layout: &skippr_runtime_sdk::protocol::RuntimeOutputLayout,
+        granularity: &str,
+    ) -> String {
+        match output_layout.time_partition_prefix.as_deref() {
+            Some(prefix) if !prefix.is_empty() => format!("{prefix}{granularity}"),
+            _ => granularity.to_string(),
+        }
+    }
+
+    fn time_partition_names_for_layout(
+        output_layout: &skippr_runtime_sdk::protocol::RuntimeOutputLayout,
+    ) -> Vec<String> {
+        let Some(target) = output_layout.time_partition_granularity.as_deref() else {
+            return Vec::new();
+        };
+        if target.trim().is_empty() {
+            return Vec::new();
+        }
+
+        let mut names = Vec::new();
+        for granularity in TIME_PARTITION_GRANULARITIES {
+            names.push(Self::time_partition_name_for_layout(
+                output_layout,
+                granularity,
+            ));
+            if granularity.eq_ignore_ascii_case(target) {
+                return names;
+            }
+        }
+        names
+    }
+
+    fn time_partition_values_for_layout(
+        filename: &String,
+        output_layout: &skippr_runtime_sdk::protocol::RuntimeOutputLayout,
+    ) -> Result<Vec<u32>, io::Error> {
+        let Some(target) = output_layout.time_partition_granularity.as_deref() else {
+            return Ok(Vec::new());
+        };
+        if target.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let partitioner = TimePartitioner::new(filename);
+        let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(filename);
+        if time_partition_str.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "Time partition string is empty",
+            ));
+        }
+        let date = partitioner.parse_datetime(&time_partition_str)?;
+
+        let mut values = Vec::new();
+        for granularity in TIME_PARTITION_GRANULARITIES {
+            values.push(TimePartitioner::get_date_component(date, granularity)?);
+            if granularity.eq_ignore_ascii_case(target) {
+                return Ok(values);
+            }
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Unsupported time partition granularity '{target}'"),
+        ))
+    }
+
     pub async fn glue_delete_table(
         config: &DataSinkAthenaPluginConfig,
         namespace: &str,
@@ -1533,7 +1613,7 @@ impl AwsAthena {
         let mut partition_index_keys: Vec<String> = Vec::new();
 
         let is_deadletter = binding == RuntimeBinding::Deadletter
-            && namespace == crate::ingest::deadletter::table_name();
+            && namespace == skippr_runtime_sdk::sink_compat::deadletter::table_name();
         if !is_deadletter {
             AwsAthena::get_partition_by_fields(&context.output_layout, &mut partitions);
         }
@@ -1541,7 +1621,7 @@ impl AwsAthena {
         // Deadletters are always written flat to a dedicated sink, so do not
         // attach the pipeline's time partitioning config to their Glue table.
         if !is_deadletter && !granularity_target.is_empty() {
-            for granularity in TimePartitioner::get_granularity_names() {
+            for granularity in AwsAthena::time_partition_names_for_layout(&context.output_layout) {
                 partitions.push(
                     Column::builder()
                         .name(granularity.to_string())
@@ -1769,7 +1849,29 @@ impl AwsAthena {
             .send()
             .await
         {
-            Ok(_) => {}
+            Ok(output) => {
+                let existing_partition_keys = output
+                    .table()
+                    .and_then(|table| table.partition_keys.as_ref())
+                    .cloned()
+                    .unwrap_or_default();
+                if existing_partition_keys.len() != partition_values.len() {
+                    let key_names = existing_partition_keys
+                        .iter()
+                        .map(|column| column.name.clone())
+                        .collect::<Vec<_>>();
+                    return Err(format!(
+                        "Glue partition mismatch for '{}.{}': table has {} partition keys {:?}, but Skippr generated {} partition values {:?} for key '{}'. Check the pipeline batch_partition_fields/time partition config or reset/recreate the external Glue table/schema sink state.",
+                        database,
+                        namespace,
+                        existing_partition_keys.len(),
+                        key_names,
+                        partition_values.len(),
+                        partition_values,
+                        key
+                    ));
+                }
+            }
             Err(SdkError::ServiceError(err))
                 if matches!(err.err(), GetTableError::EntityNotFoundException(_)) =>
             {

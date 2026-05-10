@@ -10,7 +10,6 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 tokio.workspace = true
-skippr-core.workspace = true
 skippr-runtime-sdk.workspace = true
 bytes.workspace = true
 hex.workspace = true

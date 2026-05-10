@@ -1,5 +1,5 @@
 use super::parquet_util::serialize_to_parquet;
-use crate::plugins::DataSink;
+use skippr_runtime_sdk::plugins::DataSink;
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 use serde_derive::Deserialize;
@@ -39,13 +39,13 @@ impl DataSink for DataSinkSftpPlugin {
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
-        cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
+        cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
         let stream = match cdc_ctx {
             Some(ctx) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &ctx.part_meta),
             None => stream,
         };
-        use crate::metrics::counters;
+        use skippr_runtime_sdk::metrics::counters;
         counters::inc_uploads_in_flight();
 
         let parquet_bytes = serialize_to_parquet(stream).await?;
@@ -91,8 +91,8 @@ impl DataSink for DataSinkSftpPlugin {
         Ok(())
     }
 
-    fn capability(&self) -> Option<&'static crate::plugins::cdc::SinkCapability> {
-        Some(&crate::plugins::cdc::sink_capabilities::SFTP)
+    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
+        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::SFTP)
     }
 }
 

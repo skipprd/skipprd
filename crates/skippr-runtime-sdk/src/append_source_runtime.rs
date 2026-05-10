@@ -10,7 +10,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use clap::Parser;
 use datafusion::execution::SendableRecordBatchStream;
-use skippr_core::cli::{DisocverOptions, Mode, SyncOptions, CLI_MODE};
+use skippr_core::cli::{Mode, SyncOptions, CLI_MODE};
 use skippr_core::discover::OutputMetadata as CoreOutputMetadata;
 use skippr_core::helpers::configuration::{Config, PIPELINE_NAME};
 use skippr_core::helpers::logging::init_logging;
@@ -29,10 +29,10 @@ use tokio::sync::{watch, Mutex};
 use crate::protocol::{
     HandshakeResponse, HostFrame, PluginDataFrame, PluginFrame, RuntimeCheckpointUpdate,
     RuntimeExecutionMode, RuntimeIngestPartitionBatch, RuntimeOffsetMaterializationHint,
-    RuntimePluginConfigEnvelope, RuntimePluginKind, RuntimeSchemaState, RuntimeSessionHello,
-    RuntimeSourceCapabilityDescriptor, RuntimeSourceSinkWrite, SourceEvent, SourceStartRequest,
-    RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
-    SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
+    RuntimePluginConfigEnvelope, RuntimePluginKind, RuntimeRawIngestBatch, RuntimeSchemaState,
+    RuntimeSessionHello, RuntimeSourceCapabilityDescriptor, RuntimeSourceSinkWrite, SourceEvent,
+    SourceStartRequest, RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV,
+    SKIPPR_RUNTIME_DATA_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use crate::sdk::encode_record_batch_stream;
 use crate::wire::{read_frame_or_eof, write_frame};
@@ -65,22 +65,20 @@ fn configure_runtime_input_config(config: &RuntimePluginConfigEnvelope) {
 }
 
 fn runtime_mode_suppresses_data_relay(execution_mode: RuntimeExecutionMode) -> bool {
-    matches!(execution_mode, RuntimeExecutionMode::Discover)
+    let _ = execution_mode;
+    false
 }
 
 fn configure_runtime_source_cli_mode(start: &SourceStartRequest) {
     let pipeline = Some(start.context.pipeline_name.clone());
-    let mode = match start.context.execution_mode {
-        RuntimeExecutionMode::Discover => Mode::Discover(DisocverOptions {
-            pipeline,
-            output: "json".to_string(),
-        }),
-        RuntimeExecutionMode::Sync => Mode::Sync(SyncOptions {
-            pipeline,
-            output: "json".to_string(),
-            once: start.once,
-        }),
-    };
+    // Runtime source children are extractors only. Even for host-side discover,
+    // the child must not enter core discovery/ingest_work; it relays raw source
+    // batches and the host process owns discovery, schema evolution, WAL, and offsets.
+    let mode = Mode::Sync(SyncOptions {
+        pipeline,
+        output: "json".to_string(),
+        once: start.once,
+    });
     CLI_MODE.write().clone_from(&mode);
 }
 
@@ -442,6 +440,28 @@ impl DataSink for ArrowRelayToHostSink {
 }
 
 impl RuntimeIngestRelay for ArrowRelayToHostSink {
+    fn relay_raw_ingest_tasks(
+        &self,
+        tasks: Vec<Vec<RuntimeRawIngestBatch>>,
+    ) -> Result<(), std::io::Error> {
+        block_on_handle(&self.control_writer.handle, async {
+            if self.suppress_data_relay {
+                return Ok(());
+            }
+            let has_source_data = tasks.iter().any(|task| !task.is_empty());
+            if has_source_data {
+                self.activity.mark_source_data();
+            }
+            self.data_writer
+                .write(&PluginDataFrame::RawIngestTasks { tasks })
+                .await?;
+            if has_source_data {
+                self.activity.mark_source_data();
+            }
+            Ok(())
+        })
+    }
+
     fn relay_ingest_batches(
         &self,
         batches: Vec<RuntimeIngestPartitionBatch>,
