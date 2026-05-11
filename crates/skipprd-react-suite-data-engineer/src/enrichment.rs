@@ -25,9 +25,19 @@ pub(super) struct CritiquedDesignMemo {
     pub disposition: DesignCritiqueDisposition,
 }
 
-trait EnrichableTask: crate::plan::PlanTask + Sized {
+/// Output of one parallel chunk's LLM pass. Returned from the scattered
+/// chunk future and consumed sequentially in `chunk_idx` order during the
+/// gather phase, preserving the single-writer-into-plan invariant.
+struct ChunkOutcome<T: EnrichableTask> {
+    idx: usize,
+    chunk_vec: Vec<String>,
+    base_packet: crate::prompt_packets::PlanContextPacket,
+    primary_items: Vec<T::EnrichmentItem>,
+}
+
+trait EnrichableTask: crate::plan::PlanTask + Sized + Send + Sync + 'static {
     type Spec: serde::Serialize + DeserializeOwned;
-    type EnrichmentItem;
+    type EnrichmentItem: Send + 'static;
     type EnrichmentResponse: DeserializeOwned + JsonSchema;
 
     fn track_kind() -> TrackKind;
@@ -282,9 +292,15 @@ impl DataEngineerSuite {
         (failed, failure_errors)
     }
 
-    pub(super) fn build_enrichment_prompt_envelope(
-        phase: control_flow::Phase,
-        directive: crate::prompt_packets::TurnDirective,
+    /// Build the typed [`PlanContextPacket`] for an enrichment chunk.
+    ///
+    /// Returns a packet built via [`PromptContextBuilder`] — the typestate
+    /// guarantees each of `planning_context`, `design_memo`,
+    /// `critique_guidance`, and `plan_summary` is set exactly once. The
+    /// resulting packet is then handed to [`EnrichmentEnvelopeBuilder`]
+    /// (potentially multiple times, e.g. Reason → Compile) without any
+    /// freeform string concatenation re-introducing duplication.
+    fn build_enrichment_plan_context<T: EnrichableTask>(
         plan_kind: crate::plan_kind::PlanKind,
         plan_key: &str,
         planning_context: &str,
@@ -293,36 +309,18 @@ impl DataEngineerSuite {
         plan_summary: &str,
         task_ids: &[String],
         new_evidence_refs: &[String],
-    ) -> String {
-        let context_text = format!(
-            "Context:\n{}\n\nDesign memo:\n{}\n\n{}\n\nCurrent plan summary:\n{}",
-            Self::excerpt(planning_context, 20_000),
-            Self::excerpt(memo, 12_000),
-            Self::critique_guidance(critique),
-            plan_summary
-        );
-        let envelope = crate::prompt_packets::PromptEnvelope {
-            phase,
-            goal: "Produce implementation_spec content for target tasks".to_string(),
-            directive,
-            plan: Some(crate::prompt_packets::PlanContextPacket {
-                plan_kind: Some(plan_kind),
-                plan_key: Some(plan_key.to_string()),
-                context_text: Some(context_text),
-                unresolved_ids: task_ids.to_vec(),
-                new_evidence_refs: new_evidence_refs.to_vec(),
-            }),
-            batch: None,
-        };
-        crate::prompt_packets::render_envelope(&envelope).unwrap_or_else(|_| "{}".to_string())
-    }
-
-    pub(super) fn compile_prompt_from_reason(reason_memo: &str, base_user: &str) -> String {
-        format!(
-            "Reason memo:\n{}\n\n{}",
-            Self::excerpt(reason_memo, 8_000),
-            base_user
-        )
+    ) -> crate::prompt_packets::PlanContextPacket {
+        let _ = std::marker::PhantomData::<T>; // generic parameter retained for symmetry
+        crate::prompt_packets::PromptContextBuilder::new()
+            .planning_context(Self::excerpt(planning_context, 20_000))
+            .design_memo(Self::excerpt(memo, 12_000))
+            .critique_guidance(Self::critique_guidance(critique))
+            .plan_summary(plan_summary.to_string())
+            .plan_kind(plan_kind)
+            .plan_key(plan_key.to_string())
+            .unresolved_ids(task_ids.to_vec())
+            .new_evidence_refs(new_evidence_refs.to_vec())
+            .build()
     }
 
     /// Render a per-task schema block so the LLM sees each task's available
@@ -366,6 +364,148 @@ impl DataEngineerSuite {
             .collect()
     }
 
+    /// Run one chunk's full reason→compile (→optional retry) pipeline.
+    ///
+    /// Returns the enrichment items the LLM produced for the chunk, along
+    /// with the items returned by the bounded retry (if any). The caller
+    /// applies items sequentially to the plan afterwards; this function
+    /// never touches the plan, so it's safe to run many of these
+    /// concurrently against the same `AgentCtx`.
+    async fn enrich_chunk_llm<T: EnrichableTask>(
+        ctx: AgentCtx,
+        base_packet: crate::prompt_packets::PlanContextPacket,
+        chunk_vec: Vec<String>,
+        per_task_schema: String,
+    ) -> Result<Vec<T::EnrichmentItem>, String> {
+        use react_core::llm::{ChatMessage, ChatRole};
+        let reason_user = crate::prompt_packets::EnrichmentEnvelopeBuilder::new(
+            T::phase(),
+            crate::prompt_packets::TurnDirective::Reason,
+            base_packet.clone(),
+        )
+        .build();
+        let reason_memo = ctx
+            .llm_chat(
+                &[
+                    ChatMessage {
+                        role: ChatRole::System,
+                        content: prompts::plan::plan_enrichment_reason_system_prompt(),
+                    },
+                    ChatMessage {
+                        role: ChatRole::User,
+                        content: reason_user,
+                    },
+                ],
+                &Self::planning_llm_options(
+                    PlanningLlmProfile::EnrichmentReason,
+                    T::reason_prompt_id(),
+                    ctx.thread_id().clone(),
+                )?,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+
+        let mut compile_packet = base_packet.clone();
+        compile_packet.reasoning_memo = Some(Self::excerpt(&reason_memo, 8_000));
+        let compile_user = crate::prompt_packets::EnrichmentEnvelopeBuilder::new(
+            T::phase(),
+            crate::prompt_packets::TurnDirective::Compile,
+            compile_packet,
+        )
+        .batch(crate::prompt_packets::EnrichmentBatchPacket {
+            batch_items: chunk_vec.clone(),
+            per_task_schema: (!per_task_schema.is_empty()).then(|| per_task_schema.clone()),
+            retry_hint: None,
+        })
+        .build();
+
+        let mut opts = Self::planning_llm_options(
+            PlanningLlmProfile::EnrichmentCompile,
+            T::compile_prompt_id(),
+            ctx.thread_id().clone(),
+        )?;
+        opts.expected_format = react_core::llm::LlmExpectedFormat::JsonSchema(
+            react_core::schema_registry::OpenAiStrictSchema::for_type::<T::EnrichmentResponse>(
+                T::compile_schema_name(),
+            )
+            .map_err(|e| e.to_string())?,
+        );
+        let raw = ctx
+            .llm_chat(
+                &[
+                    ChatMessage {
+                        role: ChatRole::System,
+                        content: T::enrichment_system_prompt(),
+                    },
+                    ChatMessage {
+                        role: ChatRole::User,
+                        content: compile_user,
+                    },
+                ],
+                &opts,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let enrich = Self::parse_json_typed_strict::<T::EnrichmentResponse>(&raw)?;
+        Ok(T::response_items(enrich))
+    }
+
+    /// Re-issue a Verify-directive call for tasks the first compile pass
+    /// failed validation on. Bounded: caller wraps this in a single retry.
+    async fn enrich_chunk_retry_llm<T: EnrichableTask>(
+        ctx: AgentCtx,
+        base_packet: crate::prompt_packets::PlanContextPacket,
+        failed: Vec<String>,
+        failure_errors: Vec<String>,
+    ) -> Result<Vec<T::EnrichmentItem>, String> {
+        use react_core::llm::{ChatMessage, ChatRole};
+        let retry_hint = T::retry_hint(&failure_errors);
+        let mut retry_packet = base_packet.clone();
+        retry_packet.unresolved_ids = failed.clone();
+        retry_packet.new_evidence_refs = failure_errors;
+        let retry_user = crate::prompt_packets::EnrichmentEnvelopeBuilder::new(
+            T::phase(),
+            crate::prompt_packets::TurnDirective::Verify,
+            retry_packet,
+        )
+        .batch(crate::prompt_packets::EnrichmentBatchPacket {
+            batch_items: failed.clone(),
+            per_task_schema: None,
+            retry_hint: Some(retry_hint),
+        })
+        .build();
+
+        let mut opts = Self::planning_llm_options(
+            PlanningLlmProfile::EnrichmentCompile,
+            T::retry_prompt_id(),
+            ctx.thread_id().clone(),
+        )?;
+        opts.expected_format = react_core::llm::LlmExpectedFormat::JsonSchema(
+            react_core::schema_registry::OpenAiStrictSchema::for_type::<T::EnrichmentResponse>(
+                T::compile_schema_name(),
+            )
+            .map_err(|e| e.to_string())?,
+        );
+        let retry_raw = ctx
+            .llm_chat(
+                &[
+                    ChatMessage {
+                        role: ChatRole::System,
+                        content: T::enrichment_system_prompt(),
+                    },
+                    ChatMessage {
+                        role: ChatRole::User,
+                        content: retry_user,
+                    },
+                ],
+                &opts,
+            )
+            .await
+            .map_err(|e| e.to_string())?;
+        let retry_enrich = Self::parse_json_typed_strict::<T::EnrichmentResponse>(&retry_raw)?;
+        Ok(T::response_items(retry_enrich))
+    }
+
     async fn enrich_tasks<T: EnrichableTask>(
         ctx: &AgentCtx,
         planning_context: &str,
@@ -375,140 +515,173 @@ impl DataEngineerSuite {
         plan: &mut crate::plan::Plan<T>,
         task_ids: &[String],
     ) -> Result<(), String> {
-        use react_core::llm::{ChatMessage, ChatRole};
-        for chunk in task_ids.chunks(Self::plan_enrich_chunk_size()) {
-            let chunk_vec = chunk.to_vec();
-            let summary = T::summarize_plan(plan, 50);
+        // Pre-compute the immutable per-chunk inputs OUTSIDE the loop:
+        //   - plan_summary: invariant during enrichment (no task transitions
+        //     to Done in this phase, so summarize_plan is constant).
+        //   - one PlanContextPacket per chunk built via the typestate
+        //     builder (each chunk's `unresolved_ids` differs).
+        //
+        // These chunks are then scattered through an AdaptiveLimiter; chunk
+        // LLM calls run concurrently, results are gathered, and
+        // apply_enrichment_items runs SEQUENTIALLY against `&mut plan` in
+        // chunk_idx order. That preserves the existing single-writer
+        // invariant and produces byte-identical plan state to the serial
+        // version (modulo LLM nondeterminism).
+
+        let chunk_size = Self::plan_enrich_chunk_size();
+        let summary = T::summarize_plan(plan, 50);
+        let plan_kind = T::track_kind();
+        let plan_key = plan.plan_key.clone();
+        let track = plan_kind.as_str();
+        let chunks: Vec<Vec<String>> = task_ids
+            .chunks(chunk_size)
+            .map(|c| c.to_vec())
+            .collect();
+        let chunks_total = chunks.len();
+        let limiter = crate::enrichment_concurrency::AdaptiveLimiter::new();
+        let started_at = std::time::Instant::now();
+        tracing::info!(
+            target: "data_engineer",
+            track,
+            tasks_total = task_ids.len(),
+            chunk_size,
+            chunks_total,
+            cap_min = crate::enrichment_concurrency::MIN_CAP,
+            cap_max = crate::enrichment_concurrency::MAX_CAP,
+            cap_init = crate::enrichment_concurrency::INIT_CAP,
+            "enrichment loop start (parallel, AIMD)",
+        );
+
+        let mut chunk_inputs = Vec::with_capacity(chunks_total);
+        for (idx, chunk_vec) in chunks.into_iter().enumerate() {
             let per_task_schema = Self::render_per_task_schema_block(&chunk_vec, source_schemas);
-            let base_user = format!(
-                "{}\n\nTarget task_ids:\n{}\n{}\nReturn schema-valid enrichment JSON.",
-                Self::build_enrichment_prompt_envelope(
-                    T::phase(),
-                    crate::prompt_packets::TurnDirective::Compile,
-                    T::track_kind(),
-                    &plan.plan_key,
-                    planning_context,
-                    memo,
-                    critique,
-                    &summary,
-                    &chunk_vec,
-                    &[],
-                ),
-                serde_json::to_string_pretty(&chunk_vec).unwrap_or_else(|_| "[]".to_string()),
-                per_task_schema,
+            let base_packet = Self::build_enrichment_plan_context::<T>(
+                plan_kind,
+                &plan_key,
+                planning_context,
+                memo,
+                critique,
+                &summary,
+                &chunk_vec,
+                &[],
             );
-            let reason_user = format!(
-                "Think through the enrichment strategy for these task_ids. Return plain text only, no JSON.\n\n{}",
-                Self::build_enrichment_prompt_envelope(
-                    T::phase(),
-                    crate::prompt_packets::TurnDirective::Reason,
-                    T::track_kind(),
-                    &plan.plan_key,
-                    planning_context,
-                    memo,
-                    critique,
-                    &summary,
-                    &chunk_vec,
-                    &[],
-                )
-            );
-            let reason_memo = ctx
-                .llm_chat(
-                    &[
-                        ChatMessage {
-                            role: ChatRole::System,
-                            content: prompts::plan::plan_enrichment_reason_system_prompt(),
-                        },
-                        ChatMessage {
-                            role: ChatRole::User,
-                            content: reason_user,
-                        },
-                    ],
-                    &Self::planning_llm_options(
-                        PlanningLlmProfile::EnrichmentReason,
-                        T::reason_prompt_id(),
-                        ctx.thread_id().clone(),
-                    )?,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-            let compile_user = Self::compile_prompt_from_reason(&reason_memo, &base_user);
-            let mut opts = Self::planning_llm_options(
-                PlanningLlmProfile::EnrichmentCompile,
-                T::compile_prompt_id(),
-                ctx.thread_id().clone(),
-            )?;
-            opts.expected_format = react_core::llm::LlmExpectedFormat::JsonSchema(
-                react_core::schema_registry::OpenAiStrictSchema::for_type::<T::EnrichmentResponse>(
-                    T::compile_schema_name(),
-                )
-                .map_err(|e| e.to_string())?,
-            );
-            let raw = ctx
-                .llm_chat(
-                    &[
-                        ChatMessage {
-                            role: ChatRole::System,
-                            content: T::enrichment_system_prompt(),
-                        },
-                        ChatMessage {
-                            role: ChatRole::User,
-                            content: compile_user,
-                        },
-                    ],
-                    &opts,
-                )
-                .await
-                .map_err(|e| e.to_string())?;
-            let enrich = Self::parse_json_typed_strict::<T::EnrichmentResponse>(&raw)?;
-            let (failed, failure_errors) =
-                Self::apply_enrichment_items::<T>(plan, &chunk_vec, T::response_items(enrich));
-            if !failed.is_empty() {
-                let retry_hint = T::retry_hint(&failure_errors);
-                let retry_user = format!(
-                    "{}\n\nTarget task_ids:\n{}\n\nSTRICT RETRY REQUIREMENTS:\n{}\n\nReturn schema-valid enrichment JSON.",
-                    Self::build_enrichment_prompt_envelope(
-                        T::phase(),
-                        crate::prompt_packets::TurnDirective::Verify,
-                        T::track_kind(),
-                        &plan.plan_key,
-                        planning_context,
-                        memo,
-                        critique,
-                        &T::summarize_plan(plan, 50),
-                        &failed,
-                        &failure_errors,
-                    ),
-                    serde_json::to_string_pretty(&failed).unwrap_or_else(|_| "[]".to_string()),
-                    retry_hint
-                );
-                let retry_opts = react_core::llm::LlmCallOptions {
-                    prompt_id: T::retry_prompt_id(),
-                    ..opts
-                };
-                let retry_raw = ctx
-                    .llm_chat(
-                        &[
-                            ChatMessage {
-                                role: ChatRole::System,
-                                content: T::enrichment_system_prompt(),
-                            },
-                            ChatMessage {
-                                role: ChatRole::User,
-                                content: retry_user,
-                            },
-                        ],
-                        &retry_opts,
+            chunk_inputs.push((idx, chunk_vec, per_task_schema, base_packet));
+        }
+
+        // Scatter: each chunk runs its reason+compile concurrently, gated
+        // by the AdaptiveLimiter. The limiter shrinks on any throttle
+        // observed in the chunk's error result, and grows after a streak of
+        // successes. Up to MAX_CAP futures may be polled at once;
+        // `try_buffer_unordered` enforces this as a stream-driver bound.
+        use futures::stream::{self, StreamExt, TryStreamExt};
+        let stream = stream::iter(chunk_inputs.into_iter().map(
+            |(idx, chunk_vec, per_task_schema, base_packet)| {
+                let ctx_owned = ctx.clone();
+                let limiter = limiter.clone();
+                async move {
+                    let _permit = limiter.acquire().await;
+                    let chunk_started = std::time::Instant::now();
+                    let cap_at_start = limiter.current_cap();
+                    let inflight_at_start = limiter.inflight();
+                    tracing::info!(
+                        target: "data_engineer",
+                        track,
+                        chunk = idx + 1,
+                        of = chunks_total,
+                        task_ids = ?chunk_vec,
+                        cap = cap_at_start,
+                        inflight = inflight_at_start,
+                        "enrichment chunk start (reason+compile)",
+                    );
+                    let primary = Self::enrich_chunk_llm::<T>(
+                        ctx_owned.clone(),
+                        base_packet.clone(),
+                        chunk_vec.clone(),
+                        per_task_schema.clone(),
                     )
-                    .await
-                    .map_err(|e| e.to_string())?;
-                let retry_enrich =
-                    Self::parse_json_typed_strict::<T::EnrichmentResponse>(&retry_raw)?;
-                let (retry_failed, retry_errors) = Self::apply_enrichment_items::<T>(
-                    plan,
-                    &failed,
-                    T::response_items(retry_enrich),
+                    .await;
+                    let primary = match primary {
+                        Ok(items) => {
+                            limiter.record_success().await;
+                            items
+                        }
+                        Err(e) => {
+                            if crate::enrichment_concurrency::is_throttle_message(&e) {
+                                limiter.record_throttle().await;
+                                tracing::warn!(
+                                    target: "data_engineer",
+                                    track,
+                                    chunk = idx + 1,
+                                    of = chunks_total,
+                                    error = %e,
+                                    cap = limiter.current_cap(),
+                                    grew = limiter.grew_total(),
+                                    shrank = limiter.shrank_total(),
+                                    "enrichment chunk throttled; cap halved",
+                                );
+                            }
+                            return Err(e);
+                        }
+                    };
+                    tracing::info!(
+                        target: "data_engineer",
+                        track,
+                        chunk = idx + 1,
+                        of = chunks_total,
+                        elapsed_ms = chunk_started.elapsed().as_millis() as u64,
+                        cap = limiter.current_cap(),
+                        grew = limiter.grew_total(),
+                        shrank = limiter.shrank_total(),
+                        "enrichment chunk complete",
+                    );
+                    Ok::<_, String>(ChunkOutcome::<T> {
+                        idx,
+                        chunk_vec,
+                        base_packet,
+                        primary_items: primary,
+                    })
+                }
+            },
+        ));
+        // try_buffer_unordered caps stream-driver concurrency; the
+        // AdaptiveLimiter permit-gates effective parallelism within that.
+        let mut outcomes: Vec<ChunkOutcome<T>> = stream
+            .buffer_unordered(crate::enrichment_concurrency::MAX_CAP)
+            .try_collect()
+            .await?;
+        outcomes.sort_by_key(|o| o.idx);
+
+        // Gather: apply primary items sequentially in chunk_idx order.
+        // Retries (if any) run sequentially too — there are usually 0 or 1
+        // per run, so parallelism here would not pay back.
+        for outcome in outcomes {
+            let ChunkOutcome {
+                idx,
+                chunk_vec,
+                base_packet,
+                primary_items,
+            } = outcome;
+            let (failed, failure_errors) =
+                Self::apply_enrichment_items::<T>(plan, &chunk_vec, primary_items);
+            if !failed.is_empty() {
+                tracing::warn!(
+                    target: "data_engineer",
+                    track,
+                    chunk = idx + 1,
+                    of = chunks_total,
+                    failed = ?failed,
+                    errors = ?failure_errors,
+                    "enrichment chunk failed validation; retrying",
                 );
+                let retry_items = Self::enrich_chunk_retry_llm::<T>(
+                    ctx.clone(),
+                    base_packet,
+                    failed.clone(),
+                    failure_errors.clone(),
+                )
+                .await?;
+                let (retry_failed, retry_errors) =
+                    Self::apply_enrichment_items::<T>(plan, &failed, retry_items);
                 if !retry_failed.is_empty() {
                     return Err(format!(
                         "{} enrichment invalid after bounded retry for task_ids={}: {}",
@@ -519,6 +692,17 @@ impl DataEngineerSuite {
                 }
             }
         }
+
+        tracing::info!(
+            target: "data_engineer",
+            track,
+            tasks_total = task_ids.len(),
+            chunks_total,
+            elapsed_ms = started_at.elapsed().as_millis() as u64,
+            grew = limiter.grew_total(),
+            shrank = limiter.shrank_total(),
+            "enrichment loop complete",
+        );
         let unresolved = Self::unresolved_enrichment_task_ids::<T>(plan, task_ids);
         if !unresolved.is_empty() {
             return Err(format!(
