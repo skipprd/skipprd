@@ -46,13 +46,13 @@ mod tests {
     #[test]
     fn test_get_type_float_1() {
         let subject = 1.2;
-        assert_eq!(get_type(&mut subject.to_string()), SkipprDataType::Double);
+        assert_eq!(get_type(&mut subject.to_string()), SkipprDataType::Decimal);
     }
 
     #[test]
     fn test_get_type_float_2() {
         let subject = 0.2;
-        assert_eq!(get_type(&mut subject.to_string()), SkipprDataType::Double);
+        assert_eq!(get_type(&mut subject.to_string()), SkipprDataType::Decimal);
     }
 
     #[allow(dead_code)]
@@ -67,7 +67,7 @@ mod tests {
     #[test]
     fn test_get_type_float_4() {
         let subject = "0.0";
-        assert_eq!(get_type(&mut subject.to_string()), SkipprDataType::Double);
+        assert_eq!(get_type(&mut subject.to_string()), SkipprDataType::Decimal);
     }
 
     #[test]
@@ -75,19 +75,45 @@ mod tests {
         let subject = "23.4";
         let json_value: Value = serde_json::from_str(subject).unwrap();
         let value: &mut String = &mut json_value.to_string();
-        assert_eq!(get_type(value), SkipprDataType::Double);
+        assert_eq!(get_type(value), SkipprDataType::Decimal);
     }
 
     #[test]
     fn test_get_type_float_5() {
         let subject = "-0.1";
-        assert_eq!(get_type(&mut subject.to_string()), SkipprDataType::Double);
+        assert_eq!(get_type(&mut subject.to_string()), SkipprDataType::Decimal);
     }
 
     #[test]
     fn test_get_type_float_6() {
         let subject = "+0.1";
+        assert_eq!(get_type(&mut subject.to_string()), SkipprDataType::Decimal);
+    }
+
+    #[test]
+    fn test_get_type_money_string_decimal() {
+        assert_eq!(
+            get_type(&mut "\"50.00\"".to_string()),
+            SkipprDataType::Decimal
+        );
+        assert_eq!(
+            get_type(&mut "\"120.50\"".to_string()),
+            SkipprDataType::Decimal
+        );
+    }
+
+    #[test]
+    fn test_get_type_scientific_stays_double() {
+        let subject = "1e3";
         assert_eq!(get_type(&mut subject.to_string()), SkipprDataType::Double);
+    }
+
+    #[test]
+    fn test_get_type_version_like_not_decimal() {
+        assert_eq!(
+            get_type(&mut "\"1.0.0\"".to_string()),
+            SkipprDataType::String
+        );
     }
 }
 

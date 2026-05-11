@@ -937,6 +937,35 @@ impl SkipprDataType {
 
 const DATE_FIELD_VALIDATION_MIN_SAMPLE: i32 = 100;
 
+/// True when `s` is a plain fixed-point decimal (optional sign, digits, single dot, fractional digits).
+/// Excludes scientific notation and multi-dot strings (e.g. versions).
+fn looks_like_fixed_point_decimal(s: &str) -> bool {
+    let s = s.trim();
+    if s.is_empty() || s.contains('e') || s.contains('E') {
+        return false;
+    }
+    let mut parts = s.split('.');
+    let whole = parts.next().unwrap_or("");
+    let frac = match parts.next() {
+        Some(f) => f,
+        None => return false,
+    };
+    if parts.next().is_some() {
+        return false;
+    }
+    if frac.is_empty() {
+        return false;
+    }
+    if !frac.chars().all(|c| c.is_ascii_digit()) {
+        return false;
+    }
+    let whole_trim = whole.trim_start_matches('+').trim_start_matches('-');
+    if whole_trim.is_empty() {
+        return false;
+    }
+    whole_trim.chars().all(|c| c.is_ascii_digit())
+}
+
 fn get_type(value: &str) -> SkipprDataType {
     let _foo = "";
 
@@ -970,6 +999,13 @@ fn get_type(value: &str) -> SkipprDataType {
                 Err(_) => {}
             }
         }
+    }
+
+    // Fixed-point decimals ("50.00", JSON number 50.25 rendered as "50.25") must be Decimal so
+    // sinks like Snowflake emit NUMBER(p,s) instead of DOUBLE.
+    let trimmed_for_decimal = value.trim_matches('"');
+    if looks_like_fixed_point_decimal(trimmed_for_decimal) {
+        return SkipprDataType::Decimal;
     }
 
     match &value.parse::<f32>() {
@@ -3846,6 +3882,7 @@ mod tests_discover_proptest {
                     SkipprDataType::Integer,
                     SkipprDataType::Long,
                     SkipprDataType::Double,
+                    SkipprDataType::Decimal,
                     SkipprDataType::Boolean,
                     SkipprDataType::Date,
                     SkipprDataType::Timestamp,

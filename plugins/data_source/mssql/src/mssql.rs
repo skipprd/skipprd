@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use serde_derive::Deserialize;
@@ -7,10 +8,10 @@ use tokio_util::compat::TokioAsyncWriteCompatExt;
 use tracing::{error, info};
 
 use crate::helpers::configuration::{Config, DataSourcePluginConfig};
+use async_trait::async_trait;
+use skippr_runtime_sdk::plugins::{DataSink, DataSource};
 use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes, Offsets};
 use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
-use skippr_runtime_sdk::plugins::{DataSink, DataSource};
-use async_trait::async_trait;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceMssqlPluginConfig {
@@ -40,6 +41,8 @@ pub struct DataSourceMssqlPlugin {
 struct MssqlColumnSchema {
     name: String,
     data_type: String,
+    /// When set, this column is a fixed-scale SQL decimal type and float wire values must be formatted as decimal strings.
+    decimal_scale: Option<u8>,
 }
 
 impl DataSourceMssqlPlugin {
@@ -133,7 +136,7 @@ impl DataSourceMssqlPlugin {
         table: &str,
     ) -> Result<Vec<MssqlColumnSchema>, Box<dyn std::error::Error>> {
         let sql = format!(
-            "SELECT COLUMN_NAME, DATA_TYPE \
+            "SELECT COLUMN_NAME, DATA_TYPE, NUMERIC_SCALE \
              FROM INFORMATION_SCHEMA.COLUMNS \
              WHERE TABLE_SCHEMA = {} AND TABLE_NAME = {} \
              ORDER BY ORDINAL_POSITION",
@@ -146,28 +149,82 @@ impl DataSourceMssqlPlugin {
         for row in rows {
             let name: &str = row.get(0).unwrap_or("");
             let data_type: &str = row.get(1).unwrap_or("");
+            let numeric_scale: Option<i32> = row.try_get::<i32, _>(2).ok().flatten();
             if !name.is_empty() && !data_type.is_empty() {
+                let data_type = data_type.to_ascii_lowercase();
+                let decimal_scale = Self::effective_decimal_scale(&data_type, numeric_scale);
                 columns.push(MssqlColumnSchema {
                     name: name.to_string(),
-                    data_type: data_type.to_ascii_lowercase(),
+                    data_type,
+                    decimal_scale,
                 });
             }
         }
         Ok(columns)
     }
 
+    /// SQL Server `money` / `smallmoney` use scale 4; `decimal` / `numeric` use `NUMERIC_SCALE`.
+    fn effective_decimal_scale(data_type: &str, numeric_scale: Option<i32>) -> Option<u8> {
+        match data_type {
+            "money" | "smallmoney" => Some(4),
+            "decimal" | "numeric" => {
+                let s = numeric_scale.unwrap_or(0);
+                if s > 0 {
+                    Some((s as u8).min(38))
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        }
+    }
+
+    fn catalog_decimal_scales(columns: &[MssqlColumnSchema]) -> HashMap<String, u8> {
+        let mut m = HashMap::new();
+        for c in columns {
+            if let Some(scale) = c.decimal_scale {
+                m.insert(c.name.to_ascii_lowercase(), scale);
+            }
+        }
+        m
+    }
+
     fn seed_table_metadata(namespace: &str, columns: &[MssqlColumnSchema]) {
         let _ = (namespace, columns);
     }
 
-    fn row_to_json(row: &Row) -> String {
+    fn format_f64_as_decimal_string(value: f64, scale: u8) -> String {
+        let factor = 10_f64.powi(i32::from(scale));
+        let rounded = (value * factor).round() / factor;
+        format!("{:.prec$}", rounded, prec = usize::from(scale))
+    }
+
+    fn row_to_json(row: &Row, decimal_scales: &HashMap<String, u8>) -> String {
         let mut map = serde_json::Map::new();
         for (col, data) in row.cells() {
             let name = col.name().to_string();
-            let value = Self::column_value_to_json(data);
+            let scale = decimal_scales
+                .get(&col.name().to_ascii_lowercase())
+                .copied();
+            let value = Self::column_value_to_json_for_scale(data, scale);
             map.insert(name, value);
         }
         serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_default()
+    }
+
+    fn column_value_to_json_for_scale(
+        data: &ColumnData<'static>,
+        decimal_scale: Option<u8>,
+    ) -> serde_json::Value {
+        match (data, decimal_scale) {
+            (ColumnData::F64(Some(v)), Some(scale)) => {
+                serde_json::Value::String(Self::format_f64_as_decimal_string(*v, scale))
+            }
+            (ColumnData::F32(Some(v)), Some(scale)) => {
+                serde_json::Value::String(Self::format_f64_as_decimal_string(f64::from(*v), scale))
+            }
+            _ => Self::column_value_to_json(data),
+        }
     }
 
     fn numeric_to_json(n: Numeric) -> serde_json::Value {
@@ -323,10 +380,16 @@ impl DataSourceMssqlPlugin {
             info!("Ingesting table: {} -> namespace: {}", table_fq, namespace);
 
             let query_sql = format!("SELECT * FROM [{}].[{}]", schema, table);
-            match Self::table_columns(&mut client, schema, table).await {
-                Ok(columns) => Self::seed_table_metadata(table, &columns),
-                Err(e) => error!("Failed to read schema for {}: {}", table_fq, e),
-            }
+            let decimal_scales = match Self::table_columns(&mut client, schema, table).await {
+                Ok(columns) => {
+                    Self::seed_table_metadata(table, &columns);
+                    Self::catalog_decimal_scales(&columns)
+                }
+                Err(e) => {
+                    error!("Failed to read schema for {}: {}", table_fq, e);
+                    HashMap::new()
+                }
+            };
 
             let stream = match client.simple_query(&query_sql).await {
                 Ok(s) => s,
@@ -350,7 +413,7 @@ impl DataSourceMssqlPlugin {
             let mut ingest_tasks = IngestTasks::new();
 
             for row in &rows {
-                let json_str = Self::row_to_json(row);
+                let json_str = Self::row_to_json(row, &decimal_scales);
                 let bytes = json_str.len();
 
                 current_batch.push(IngestBatch {
@@ -445,38 +508,72 @@ mod tests {
     }
 
     #[test]
-    fn maps_mssql_numeric_columns_to_decimal_metadata() {
+    fn effective_decimal_scale_matches_sql_server_rules() {
         assert_eq!(
-            DataSourceMssqlPlugin::skippr_type_for_mssql_type("decimal"),
-            SkipprDataType::Decimal
+            DataSourceMssqlPlugin::effective_decimal_scale("decimal", Some(2)),
+            Some(2)
         );
         assert_eq!(
-            DataSourceMssqlPlugin::skippr_type_for_mssql_type("numeric"),
-            SkipprDataType::Decimal
+            DataSourceMssqlPlugin::effective_decimal_scale("numeric", Some(9)),
+            Some(9)
+        );
+        assert_eq!(
+            DataSourceMssqlPlugin::effective_decimal_scale("decimal", Some(0)),
+            None
+        );
+        assert_eq!(
+            DataSourceMssqlPlugin::effective_decimal_scale("money", None),
+            Some(4)
+        );
+        assert_eq!(
+            DataSourceMssqlPlugin::effective_decimal_scale("nvarchar", None),
+            None
         );
     }
 
     #[test]
-    fn builds_table_metadata_from_mssql_column_schema() {
-        let metadata = DataSourceMssqlPlugin::metadata_for_columns(&[
+    fn catalog_decimal_scales_is_case_insensitive_lookup_ready() {
+        let cols = [
             MssqlColumnSchema {
-                name: "order_id".to_string(),
-                data_type: "nvarchar".to_string(),
-            },
-            MssqlColumnSchema {
-                name: "total_amount".to_string(),
+                name: "Unit_Price".to_string(),
                 data_type: "decimal".to_string(),
+                decimal_scale: Some(2),
             },
             MssqlColumnSchema {
-                name: "placed_at".to_string(),
-                data_type: "datetime2".to_string(),
+                name: "name".to_string(),
+                data_type: "nvarchar".to_string(),
+                decimal_scale: None,
             },
-        ]);
+        ];
+        let m = DataSourceMssqlPlugin::catalog_decimal_scales(&cols);
+        assert_eq!(m.get("unit_price"), Some(&2u8));
+        assert_eq!(m.get("name"), None);
+    }
 
-        let details = metadata.field_details();
-        assert!(details.contains(&("order_id".to_string(), "string".to_string(), true)));
-        assert!(details.contains(&("total_amount".to_string(), "decimal".to_string(), true)));
-        assert!(details.contains(&("placed_at".to_string(), "timestamp".to_string(), true)));
+    #[test]
+    fn formats_float_wire_values_with_catalog_scale() {
+        assert_eq!(
+            DataSourceMssqlPlugin::format_f64_as_decimal_string(50.0, 2),
+            "50.00"
+        );
+        assert_eq!(
+            DataSourceMssqlPlugin::format_f64_as_decimal_string(120.5, 2),
+            "120.50"
+        );
+        assert_eq!(
+            DataSourceMssqlPlugin::column_value_to_json_for_scale(
+                &ColumnData::F64(Some(50.0)),
+                Some(2)
+            ),
+            serde_json::json!("50.00")
+        );
+        assert_eq!(
+            DataSourceMssqlPlugin::column_value_to_json_for_scale(
+                &ColumnData::Numeric(Some(Numeric::new_with_scale(5000, 2))),
+                Some(2)
+            ),
+            serde_json::json!("50.00")
+        );
     }
 
     #[cfg(feature = "mssql_integration")]
@@ -507,7 +604,8 @@ mod tests {
         let rows: Vec<Row> = stream.into_first_result().await.unwrap();
         let row = rows.first().expect("seeded MSSQL row should exist");
         let value: serde_json::Value =
-            serde_json::from_str(&DataSourceMssqlPlugin::row_to_json(row)).unwrap();
+            serde_json::from_str(&DataSourceMssqlPlugin::row_to_json(row, &HashMap::new()))
+                .unwrap();
 
         assert_eq!(value["order_id"], serde_json::json!("o1"));
         assert_eq!(value["total_amount"], serde_json::json!("120.50"));
