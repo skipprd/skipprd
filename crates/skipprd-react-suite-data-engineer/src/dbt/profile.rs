@@ -43,6 +43,13 @@ pub fn active_warehouse(cfg: &ReactResolvedConfig) -> Result<ActiveWarehouse, St
 
 /// Generate a DBT `profiles.yml` from resolved config.
 ///
+/// `profiles.yml` is system-scoped, authoritative, and immutable to the agent. Connection
+/// identity is a platform concern; the file is rendered from resolved config and the file-tool
+/// deny-list (`FileAccessPolicy::SystemOwnedDenyList`, see
+/// [`react_suite_data_engineer::file_ownership`]) rejects every agent write attempt against this
+/// path. The regeneration mechanism is an implementation detail — the contract is "agent does
+/// not author this file".
+///
 /// - No secrets are written (AWS credentials remain env-driven/default chain).
 /// - Uses provider-native adapter config shape.
 /// - Uses deterministic database/schema naming derived from scope (unless overridden by provider config).

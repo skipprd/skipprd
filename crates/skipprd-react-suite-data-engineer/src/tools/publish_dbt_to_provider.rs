@@ -459,8 +459,11 @@ mod tests {
 
     #[async_trait]
     impl DbtProvider for MockDbtProvider {
-        async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> {
-            Ok(())
+        async fn ensure_minimal_project(
+            &self,
+            _scope: &RequestScope,
+        ) -> Result<Vec<crate::plan_types::StrippedArtifact>, String> {
+            Ok(vec![])
         }
 
         async fn write_model_sql(
@@ -517,6 +520,7 @@ mod tests {
                 errors: vec![],
                 warnings: vec![],
                 logs: serde_json::json!({}),
+                stripped: vec![],
             })
         }
     }

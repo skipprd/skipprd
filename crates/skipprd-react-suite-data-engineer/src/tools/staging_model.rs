@@ -192,22 +192,29 @@ impl Tool for StagingModelTool {
         // default authoring instructions (and merge with any explicit user override instructions).
         let plan_opt = plan::load_cleanse_plan(ctx).await.ok().flatten();
 
-        // Ensure minimal dbt project exists before writing artifacts.
-        if let Err(e) = crate::transient_retry::retry_transient_default(
+        // Ensure minimal dbt project exists before writing artifacts. Any content the sanitizer
+        // removed flows back via the returned Vec; persist it so the next author turn can
+        // surface a stripped-content notice.
+        match crate::transient_retry::retry_transient_default(
             "staging_ensure_minimal_project",
             || async { dbt.ensure_minimal_project(ctx.scope()).await },
         )
         .await
         {
-            return Ok(serde_json::json!({
-                "ok": false,
-                "batch_failure_kind": "unknown",
-                "datasets": dataset_ids.len(),
-                "written_keys": [],
-                "schema_key": Value::Null,
-                "notes": [],
-                "errors": [format!("failed to ensure minimal dbt project: {e}")],
-            }));
+            Ok(stripped) => {
+                crate::plan_storage::persist_stripped_artifacts(ctx, stripped).await;
+            }
+            Err(e) => {
+                return Ok(serde_json::json!({
+                    "ok": false,
+                    "batch_failure_kind": "unknown",
+                    "datasets": dataset_ids.len(),
+                    "written_keys": [],
+                    "schema_key": Value::Null,
+                    "notes": [],
+                    "errors": [format!("failed to ensure minimal dbt project: {e}")],
+                }));
+            }
         }
 
         // Grounded gating (fail-fast, no side effects):
@@ -1036,8 +1043,11 @@ mod tests {
         struct MockDbt;
         #[async_trait]
         impl DbtProvider for MockDbt {
-            async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> {
-                Ok(())
+            async fn ensure_minimal_project(
+                &self,
+                _scope: &RequestScope,
+            ) -> Result<Vec<crate::plan_types::StrippedArtifact>, String> {
+                Ok(vec![])
             }
             async fn write_model_sql(
                 &self,
@@ -1158,8 +1168,11 @@ mod tests {
         struct MockDbt;
         #[async_trait]
         impl DbtProvider for MockDbt {
-            async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> {
-                Ok(())
+            async fn ensure_minimal_project(
+                &self,
+                _scope: &RequestScope,
+            ) -> Result<Vec<crate::plan_types::StrippedArtifact>, String> {
+                Ok(vec![])
             }
             async fn write_model_sql(
                 &self,

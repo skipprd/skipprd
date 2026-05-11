@@ -79,8 +79,19 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), String> {
 struct SanitizedProjectYaml {
     text: String,
     changed: bool,
+    /// One entry per top-level key the sanitizer removed from `dbt_project.yml`. Callers must
+    /// persist these into the active plan's stripped-artifact buffer so the next author/repair
+    /// turn can surface them. Empty when nothing was stripped.
+    stripped: Vec<react_suite_data_engineer::StrippedArtifact>,
 }
 
+/// Canonical template for the **shared** `dbt_project.yml`.
+///
+/// The system governs the project's structural identity (name, profile, model-paths,
+/// schema-suffix strategy). The LLM may extend the file with per-folder `models:` configuration
+/// for things like `+materialized`, but every top-level key listed in
+/// [`react_suite_data_engineer::file_ownership`]'s `dbt_project.yml` policy is stripped by
+/// [`sanitize_dbt_project_yaml`] on every save and reported back as a `StrippedArtifact`.
 fn render_dbt_project_yaml(project_name: &str, profile_name: &str) -> String {
     format!(
         "name: {name}\nversion: '1.0'\nprofile: '{profile_name}'\nmodel-paths: ['models']\nseed-paths: ['seeds']\nmacro-paths: ['macros']\ntarget-path: 'target'\n\nmodels:\n  {name}:\n    # Suffix strategy: dbt materializes schemas as <DBT_TARGET_SCHEMA>_<suffix>.\n    # Default all models into GOLD by setting their custom schema name to the gold suffix.\n    +schema: \"{{{{ env_var('DBT_GOLD_SUFFIX', 'gold') }}}}\"\n    # Force staging models under models/staging into SILVER.\n    staging:\n      +schema: \"{{{{ env_var('DBT_SILVER_SUFFIX', 'silver') }}}}\"\n",
@@ -89,8 +100,49 @@ fn render_dbt_project_yaml(project_name: &str, profile_name: &str) -> String {
     )
 }
 
-fn sanitize_dbt_project_yaml(raw: &str, desired_profile: &str) -> SanitizedProjectYaml {
+/// Truncate a serialized YAML value to keep prompt size bounded while still conveying the intent
+/// of the stripped content. Long values are cut at a byte boundary with a trailing marker.
+fn truncate_value_summary(yaml: &str) -> String {
+    const MAX_CHARS: usize = 400;
+    let trimmed = yaml.trim_start_matches("---\n").trim_end().to_string();
+    if trimmed.chars().count() <= MAX_CHARS {
+        return trimmed;
+    }
+    let mut out: String = trimmed.chars().take(MAX_CHARS).collect();
+    out.push_str("\n... (truncated)");
+    out
+}
+
+/// Strip-and-notify, not strip-silently.
+///
+/// Every removed top-level key that the LLM AUTHORED produces a
+/// [`react_suite_data_engineer::StrippedArtifact`] so the next author/repair turn can re-author
+/// the intent in the right place. The list of keys to strip and the relocation hints come from
+/// [`react_suite_data_engineer::file_ownership`] — the single source of truth for file
+/// ownership across the suite.
+///
+/// The canonical template (the one [`render_dbt_project_yaml`] writes on bootstrap) supplies
+/// system-managed values for structural keys like `name`, `profile`, `model-paths`. When the
+/// existing file's value for such a key matches the canonical value, we treat it as
+/// system-rendered and silently keep it. When it diverges, we emit a strip artifact and restore
+/// the canonical value. For pure-strip keys (e.g. `on-run-start`) the canonical template has no
+/// value and any LLM-authored presence emits an artifact.
+fn sanitize_dbt_project_yaml(
+    raw: &str,
+    project_name: &str,
+    desired_profile: &str,
+) -> SanitizedProjectYaml {
+    use react_suite_data_engineer::file_ownership;
     let mut changed = false;
+    let mut stripped: Vec<react_suite_data_engineer::StrippedArtifact> = Vec::new();
+
+    let canonical_text = render_dbt_project_yaml(project_name, desired_profile);
+    let canonical_map: serde_yaml::Mapping =
+        match serde_yaml::from_str::<serde_yaml::Value>(&canonical_text) {
+            Ok(serde_yaml::Value::Mapping(m)) => m,
+            _ => serde_yaml::Mapping::new(),
+        };
+
     let mut v: serde_yaml::Value = match serde_yaml::from_str(raw) {
         Ok(v) => v,
         Err(_) => {
@@ -103,21 +155,59 @@ fn sanitize_dbt_project_yaml(raw: &str, desired_profile: &str) -> SanitizedProje
         changed = true;
     }
     let map = v.as_mapping_mut().expect("mapping enforced above");
-    let dep_key = serde_yaml::Value::String("depends_on".to_string());
-    if map.remove(&dep_key).is_some() {
+
+    let strip_keys = file_ownership::shared_skippr_top_level_keys("dbt_project.yml");
+    for key in strip_keys {
+        let key_value = serde_yaml::Value::String((*key).to_string());
+        let canonical_value = canonical_map.get(&key_value).cloned();
+        let Some(existing_value) = map.remove(&key_value) else {
+            // Key absent from existing. If the canonical template provides one, install it
+            // silently (matches the prior "force canonical profile" behaviour).
+            if let Some(cv) = canonical_value {
+                map.insert(key_value, cv);
+                changed = true;
+            }
+            continue;
+        };
+        let matches_canonical = canonical_value.as_ref() == Some(&existing_value);
+        if matches_canonical {
+            // System-rendered key still matches the canonical template value: keep it, no
+            // artifact emitted.
+            map.insert(key_value, existing_value);
+            continue;
+        }
+        // Divergent (system-rendered key changed by the LLM) or pure-strip (no canonical):
+        // emit a strip artifact and install canonical if one exists.
         changed = true;
+        let value_summary = serde_yaml::to_string(&existing_value)
+            .map(|s| truncate_value_summary(&s))
+            .unwrap_or_default();
+        let reason = match file_ownership::classify_rel_path("dbt_project.yml") {
+            file_ownership::Ownership::Shared { reason, .. } => reason.to_string(),
+            _ => String::new(),
+        };
+        let hint = file_ownership::relocation_hint("dbt_project.yml", key).map(|s| s.to_string());
+        stripped.push(react_suite_data_engineer::StrippedArtifact {
+            file: "dbt_project.yml".to_string(),
+            key_path: vec![(*key).to_string()],
+            value_summary,
+            reason,
+            relocation_hint: hint,
+        });
+        if let Some(cv) = canonical_value {
+            map.insert(key_value, cv);
+        }
     }
-    let prof_key = serde_yaml::Value::String("profile".to_string());
-    let desired_profile = serde_yaml::Value::String(desired_profile.to_string());
-    if map.get(&prof_key) != Some(&desired_profile) {
-        map.insert(prof_key, desired_profile);
-        changed = true;
-    }
+
     let text = serde_yaml::to_string(&v).unwrap_or_else(|_| raw.to_string());
     if text != raw {
         changed = true;
     }
-    SanitizedProjectYaml { text, changed }
+    SanitizedProjectYaml {
+        text,
+        changed,
+        stripped,
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -1138,7 +1228,7 @@ impl DbtProjectProvider {
         &self,
         scope: &RequestScope,
         project_name: &str,
-    ) -> Result<(), String> {
+    ) -> Result<Vec<react_suite_data_engineer::StrippedArtifact>, String> {
         let project_key = self.keyspace.scoped_key(scope, &["dbt", "dbt_project.yml"]);
         let existing = if self
             .storage
@@ -1162,14 +1252,15 @@ impl DbtProjectProvider {
             .as_ref()
             .map(|b| String::from_utf8_lossy(b).to_string());
         let base = existing_text.as_deref().unwrap_or(&rendered);
-        let sanitized = sanitize_dbt_project_yaml(base, scope.project_id.as_str());
+        let sanitized =
+            sanitize_dbt_project_yaml(base, project_name, scope.project_id.as_str());
         if existing.is_none() || sanitized.changed {
             self.storage
                 .put_bytes(&project_key, sanitized.text.as_bytes(), "text/yaml")
                 .await
                 .map_err(|e| e.to_string())?;
         }
-        Ok(())
+        Ok(sanitized.stripped)
     }
 
     async fn ensure_local_project_yaml(
@@ -1177,13 +1268,14 @@ impl DbtProjectProvider {
         scope: &RequestScope,
         project_name: &str,
         proj_path: &Path,
-    ) -> Result<(), String> {
+    ) -> Result<Vec<react_suite_data_engineer::StrippedArtifact>, String> {
         if !proj_path.exists() {
             let rendered = render_dbt_project_yaml(project_name, scope.project_id.as_str());
             write_file(proj_path, rendered.as_bytes())?;
         }
         let raw = std::fs::read_to_string(proj_path).unwrap_or_default();
-        let sanitized = sanitize_dbt_project_yaml(&raw, scope.project_id.as_str());
+        let sanitized =
+            sanitize_dbt_project_yaml(&raw, project_name, scope.project_id.as_str());
         if sanitized.changed {
             write_file(proj_path, sanitized.text.as_bytes())?;
             // Best-effort persistence back to storage for future runs.
@@ -1193,7 +1285,7 @@ impl DbtProjectProvider {
                 .put_bytes(&project_key, sanitized.text.as_bytes(), "text/yaml")
                 .await;
         }
-        Ok(())
+        Ok(sanitized.stripped)
     }
 
     async fn upload_dir_to_storage(&self, local_dir: &Path, prefix: &str) -> Result<usize, String> {
@@ -1241,7 +1333,10 @@ impl DbtProjectProvider {
 
 #[async_trait]
 impl DbtProvider for DbtProjectProvider {
-    async fn ensure_minimal_project(&self, scope: &RequestScope) -> Result<(), String> {
+    async fn ensure_minimal_project(
+        &self,
+        scope: &RequestScope,
+    ) -> Result<Vec<react_suite_data_engineer::StrippedArtifact>, String> {
         let name = format!("{}_project", scope.project_id.as_str().replace('/', "_"));
         self.ensure_storage_project_yaml(scope, &name).await
     }
@@ -1346,7 +1441,8 @@ impl DbtProvider for DbtProjectProvider {
         }
 
         let proj = root.join("dbt_project.yml");
-        self.ensure_local_project_yaml(scope, &project_name, &proj)
+        let stripped = self
+            .ensure_local_project_yaml(scope, &project_name, &proj)
             .await?;
 
         let mut envs: Vec<(&str, String)> = Vec::new();
@@ -1532,6 +1628,7 @@ impl DbtProvider for DbtProjectProvider {
                 "run_or_build": run_or_build_res.as_ref().map(|r| serde_json::json!({ "code": r.code, "stdout": r.stdout, "stderr": r.stderr })),
                 "fetched_files": file_count,
             }),
+            stripped,
         })
     }
 }
@@ -1554,10 +1651,66 @@ mod tests {
     #[test]
     fn sanitize_dbt_project_yaml_strips_depends_on_and_forces_profile() {
         let raw = "name: demo\ndepends_on: []\nprofile: wrong\n";
-        let out = sanitize_dbt_project_yaml(raw, "correct_profile");
+        let out = sanitize_dbt_project_yaml(raw, "demo", "correct_profile");
         assert!(out.changed);
         assert!(!out.text.contains("depends_on"));
         assert!(out.text.contains("profile: correct_profile"));
+        let keys: Vec<&str> = out
+            .stripped
+            .iter()
+            .map(|a| a.key_path[0].as_str())
+            .collect();
+        assert!(keys.contains(&"depends_on"));
+        assert!(keys.contains(&"profile"));
+    }
+
+    #[test]
+    fn sanitize_dbt_project_yaml_emits_on_run_start_strip_with_hint() {
+        let raw = "name: demo\nprofile: demo\non-run-start:\n  - '{{ validate_athena_work_group() }}'\n";
+        let out = sanitize_dbt_project_yaml(raw, "demo", "demo");
+        assert!(out.changed);
+        assert!(!out.text.contains("on-run-start"));
+        let artifact = out
+            .stripped
+            .iter()
+            .find(|a| a.key_path == vec!["on-run-start".to_string()])
+            .expect("on-run-start strip artifact");
+        assert!(artifact.value_summary.contains("validate_athena_work_group"));
+        assert!(artifact
+            .relocation_hint
+            .as_ref()
+            .expect("hint")
+            .contains("pre_hook"));
+    }
+
+    #[test]
+    fn sanitize_dbt_project_yaml_emits_no_artifact_when_canonical_values_match() {
+        let raw = render_dbt_project_yaml("demo", "demo");
+        let out = sanitize_dbt_project_yaml(&raw, "demo", "demo");
+        assert!(
+            out.stripped.is_empty(),
+            "sanitizing a freshly rendered template must not emit strip artifacts: {:?}",
+            out.stripped
+        );
+    }
+
+    #[test]
+    fn sanitize_dbt_project_yaml_strips_top_level_vars_with_per_model_hint() {
+        let raw =
+            "name: demo\nprofile: demo\nvars:\n  some_global: 1\n  another: 'x'\n";
+        let out = sanitize_dbt_project_yaml(raw, "demo", "demo");
+        assert!(out.changed);
+        let artifact = out
+            .stripped
+            .iter()
+            .find(|a| a.key_path == vec!["vars".to_string()])
+            .expect("vars strip artifact");
+        assert!(artifact
+            .relocation_hint
+            .as_ref()
+            .expect("hint")
+            .to_lowercase()
+            .contains("per-model"));
     }
 
     #[test]

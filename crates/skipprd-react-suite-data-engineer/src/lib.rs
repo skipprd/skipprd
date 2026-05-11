@@ -103,6 +103,7 @@ pub(crate) mod env_util;
 pub(crate) mod facts;
 pub mod failure_kind;
 pub mod failure_text;
+pub mod file_ownership;
 mod llm_profiles;
 pub mod metering;
 pub(crate) mod model_dispatch;
@@ -166,6 +167,7 @@ pub(crate) mod ws_plans;
 use agent_modes::{AgentMode, AgentToolCapability};
 pub use ctx_ext::copy_capabilities_to_actx;
 use llm_profiles::PlanningLlmProfile;
+pub use plan_types::{StrippedArtifact, MAX_STRIPPED_ARTIFACTS};
 pub(crate) use track_spec::TrackKind;
 
 pub(crate) use react_core::workflow::PhaseOutcome;

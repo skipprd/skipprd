@@ -1741,6 +1741,19 @@ async fn build_author_prompt(
         q.push_str("\n\n");
         q.push_str(&params.repair_ctx.format_error_context());
     }
+    // Stripped-content notice (informational, not the current error). Surfaces sanitizer-removed
+    // content from system-shared files (dbt_project.yml today) so the agent can re-author intent
+    // in a sanctioned location instead of putting it back where it was stripped. See
+    // `prompts::shared::render_stripped_artifacts_section` for design contract and
+    // `file_ownership.rs` for the ownership table that drives reason + relocation_hint.
+    {
+        let stripped = crate::plan_storage::load_active_stripped_artifacts(actx).await;
+        if let Some(section) = crate::prompts::shared::render_stripped_artifacts_section(&stripped)
+        {
+            q.push_str("\n\n");
+            q.push_str(&section);
+        }
+    }
     if matches!(
         params.execution_state.phase.transition.as_ref(),
         Some(crate::progress_controller::PhaseTransition::ReviewPatchImpl { .. })

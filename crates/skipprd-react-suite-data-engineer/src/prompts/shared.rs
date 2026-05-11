@@ -110,9 +110,166 @@ pub fn user_goal_line(prefix: &str, question: &str) -> String {
     }
 }
 
+/// Render the "system-stripped content" notice for author/repair prompts.
+///
+/// This is the LLM-facing presentation of [`crate::plan_types::StrippedArtifact`] entries
+/// recorded by the dbt sanitizer (see [`crate::file_ownership`] for the ownership model
+/// and key-by-key rationale). It is intentionally framed as **informational** so the LLM
+/// does not confuse a strip notice with the dbt error it must repair this turn.
+///
+/// Design contract (locked in here, not in the call sites):
+/// - Returns `None` when the input is empty so callers can do a single `if let Some(...)`.
+/// - Renders entries verbatim in the order they appear (callers control ordering).
+/// - The "Do NOT re-author at the original location" guard is mandatory — without it the
+///   agent will simply put the content back where it was and trigger another strip.
+/// - `reason` and `relocation_hint` originate from `file_ownership.rs`; this helper never
+///   substitutes its own copy, keeping ownership rationale single-sourced.
+pub fn render_stripped_artifacts_section(
+    artifacts: &[crate::plan_types::StrippedArtifact],
+) -> Option<String> {
+    if artifacts.is_empty() {
+        return None;
+    }
+
+    let mut out = String::new();
+    out.push_str("## System-stripped content (informational, not the current error)\n\n");
+    out.push_str(
+        "The system removed the following content from system-shared files. Some parts\n\
+of the dbt project are governed by the system and cannot be authored by the\n\
+agent; the entries below were removed for that reason.\n\n",
+    );
+    out.push_str(
+        "For each entry below, decide whether the underlying intent still matters.\n\
+If it does, re-author it at the suggested location. If it does not,\n\
+ignore the entry. Do NOT re-author at the original location — the system\n\
+will strip it again on the next run.\n\n",
+    );
+
+    for (i, a) in artifacts.iter().enumerate() {
+        let idx = i + 1;
+        let key_joined = if a.key_path.is_empty() {
+            "(root)".to_string()
+        } else {
+            a.key_path.join(".")
+        };
+        out.push_str(&format!("{idx}. file: {file}\n", file = a.file));
+        out.push_str(&format!("   key:  {key}\n", key = key_joined));
+        out.push_str("   removed value:\n");
+        for line in a.value_summary.lines() {
+            out.push_str("       ");
+            out.push_str(line);
+            out.push('\n');
+        }
+        if a.value_summary.is_empty() {
+            out.push_str("       (empty)\n");
+        }
+        out.push_str(&format!("   reason: {reason}\n", reason = a.reason));
+        match a.relocation_hint.as_deref() {
+            Some(hint) if !hint.trim().is_empty() => {
+                out.push_str("   re-author here, if still needed:\n");
+                for line in hint.lines() {
+                    out.push_str("       ");
+                    out.push_str(line);
+                    out.push('\n');
+                }
+            }
+            _ => {
+                out.push_str("   this key has no sanctioned re-author location.\n");
+            }
+        }
+        out.push('\n');
+    }
+    out.push_str("End of stripped-content notice.\n");
+    Some(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plan_types::StrippedArtifact;
+
+    #[test]
+    fn stripped_section_is_none_when_empty() {
+        assert!(render_stripped_artifacts_section(&[]).is_none());
+    }
+
+    #[test]
+    fn stripped_section_renders_header_guard_and_entry() {
+        let artifacts = vec![StrippedArtifact {
+            file: "dbt_project.yml".to_string(),
+            key_path: vec!["on-run-start".to_string()],
+            value_summary: "- '{{ validate_athena_work_group() }}'".to_string(),
+            reason: "project-wide dbt hooks are system-owned".to_string(),
+            relocation_hint: Some(
+                "Use {{ config(pre_hook=[...]) }} in the specific model SQL.".to_string(),
+            ),
+        }];
+        let s = render_stripped_artifacts_section(&artifacts).expect("non-empty");
+        assert!(s.contains("informational, not the current error"));
+        assert!(s.contains("Do NOT re-author at the original location"));
+        assert!(s.contains("1. file: dbt_project.yml"));
+        assert!(s.contains("key:  on-run-start"));
+        assert!(s.contains("removed value:"));
+        assert!(s.contains("'{{ validate_athena_work_group() }}'"));
+        assert!(s.contains("re-author here, if still needed:"));
+        assert!(s.contains("End of stripped-content notice."));
+    }
+
+    #[test]
+    fn author_prompt_renders_stripped_artifacts_when_present() {
+        // End-to-end shape check: when `stripped_artifacts` is non-empty the section renders the
+        // mandatory framing (informational header, no-re-author guard), the per-entry file/key
+        // header, the indented removed value, and the relocation hint. This is the exact section
+        // that gets spliced into the author and repair prompts.
+        let artifacts = vec![
+            StrippedArtifact {
+                file: "dbt_project.yml".to_string(),
+                key_path: vec!["on-run-start".to_string()],
+                value_summary: "- '{{ validate_athena_work_group() }}'".to_string(),
+                reason: "project-wide dbt hooks are system-owned".to_string(),
+                relocation_hint: Some(
+                    "Use {{ config(pre_hook=[...]) }} in the specific model SQL.".to_string(),
+                ),
+            },
+            StrippedArtifact {
+                file: "dbt_project.yml".to_string(),
+                key_path: vec!["query-comment".to_string()],
+                value_summary: "comment: 'audit'".to_string(),
+                reason: "system-managed".to_string(),
+                relocation_hint: None,
+            },
+        ];
+        let s = render_stripped_artifacts_section(&artifacts).expect("non-empty");
+        // Framing
+        assert!(s.starts_with("## System-stripped content"));
+        assert!(s.contains("informational, not the current error"));
+        assert!(s.contains("Do NOT re-author at the original location"));
+        // Numbered entries in order
+        assert!(s.contains("1. file: dbt_project.yml"));
+        assert!(s.contains("2. file: dbt_project.yml"));
+        assert!(s.find("1. file:").unwrap() < s.find("2. file:").unwrap());
+        // Per-entry contract: removed value indented, reason + relocation path
+        assert!(s.contains("       - '{{ validate_athena_work_group() }}'"));
+        assert!(s.contains("re-author here, if still needed:"));
+        // Fallback for the entry with no hint
+        assert!(s.contains("this key has no sanctioned re-author location."));
+        // Trailing terminator
+        assert!(s.trim_end().ends_with("End of stripped-content notice."));
+    }
+
+    #[test]
+    fn stripped_section_renders_fallback_when_no_hint() {
+        let artifacts = vec![StrippedArtifact {
+            file: "dbt_project.yml".to_string(),
+            key_path: vec!["query-comment".to_string()],
+            value_summary: "comment: 'x'".to_string(),
+            reason: "system-owned".to_string(),
+            relocation_hint: None,
+        }];
+        let s = render_stripped_artifacts_section(&artifacts).expect("non-empty");
+        assert!(s.contains("this key has no sanctioned re-author location."));
+        assert!(!s.contains("re-author here, if still needed:"));
+    }
 
     #[test]
     fn tool_card_mentions_canonical_manifest_query_contract() {

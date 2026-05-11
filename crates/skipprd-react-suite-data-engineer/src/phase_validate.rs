@@ -158,33 +158,63 @@ impl DataEngineerSuite {
         }
     }
 
-    fn validate_precheck_escalation(
-        reason: String,
-        retry_outcome: crate::retry_budget::SubjectiveRetryOutcome,
+    /// Route a structured precheck failure into the repair subroutine via the existing
+    /// loopback-then-repair mechanism. The repair phase consumes `failure_context.brief` and
+    /// `failure_context.log_excerpts` to scope its gather pass; we encode the suggested target
+    /// files in `log_excerpts` so the LLM can read them in the first iteration without guessing.
+    fn precheck_failure_to_repair_escalation(
+        precheck: crate::schema_policy::PrecheckFailure,
     ) -> ValidateEscalation {
-        match retry_outcome {
-            crate::retry_budget::SubjectiveRetryOutcome::Exhausted(tries) => {
-                ValidateEscalation::Fatal(format!(
-                    "pre-validation repair did not converge after {tries} attempts; manual implementation fix required before re-validating.\n\n{reason}"
-                ))
+        let crate::schema_policy::PrecheckFailure {
+            kind,
+            brief,
+            suggested_targets,
+        } = precheck;
+        let kind_label = match kind {
+            crate::schema_policy::PrecheckFailureKind::SchemaModelMisplacement => {
+                "schema_model_misplacement"
             }
-            crate::retry_budget::SubjectiveRetryOutcome::WithinBudget(_) => {
-                let transition = crate::progress_controller::PhaseTransition::PrecheckFailed {
-                    reason: reason.clone(),
-                };
-                let failure_context = crate::progress_controller::ValidationFailureContext {
-                    brief: reason.clone(),
-                    log_excerpts: None,
-                    compile_ok: false,
-                    run_ok: false,
-                };
-                ValidateEscalation::LoopbackToAuthor {
-                    guard_kind: GuardBlockKind::PrecheckFailed,
-                    failure_context,
-                    reason,
-                    transition,
-                }
+            crate::schema_policy::PrecheckFailureKind::DuplicateModelDefinition => {
+                "duplicate_model_definition"
             }
+            crate::schema_policy::PrecheckFailureKind::DuplicateSqlModelStem => {
+                "duplicate_sql_model_stem"
+            }
+            crate::schema_policy::PrecheckFailureKind::StagingSchemaColumnMismatch => {
+                "staging_schema_column_mismatch"
+            }
+            crate::schema_policy::PrecheckFailureKind::InvalidTestDefinitionShape => {
+                "invalid_test_definition_shape"
+            }
+            crate::schema_policy::PrecheckFailureKind::Other => "other",
+        };
+        let log_excerpts = if suggested_targets.is_empty() {
+            Some(format!(
+                "precheck_failure_kind: {kind_label}\nsuggested_targets: (none — investigate via file op=list)"
+            ))
+        } else {
+            Some(format!(
+                "precheck_failure_kind: {kind_label}\nsuggested_targets:\n- {}",
+                suggested_targets.join("\n- ")
+            ))
+        };
+        let reason = format!(
+            "Pre-validation failed; fix DBT YAML/SQL artifacts before re-validating.\n\n{brief}"
+        );
+        let failure_context = crate::progress_controller::ValidationFailureContext {
+            brief: brief.clone(),
+            log_excerpts,
+            compile_ok: false,
+            run_ok: false,
+        };
+        let transition = crate::progress_controller::PhaseTransition::PrecheckFailed {
+            reason: reason.clone(),
+        };
+        ValidateEscalation::LoopbackToAuthor {
+            guard_kind: GuardBlockKind::PrecheckFailed,
+            failure_context,
+            reason,
+            transition,
         }
     }
 
@@ -375,37 +405,32 @@ impl DataEngineerSuite {
         // Pre-validate normalization: dedupe/merge repeated model+test definitions to
         // avoid deterministic compile loops before dbt_validate.
         if let Err(e) = crate::schema_policy::normalize_schema_artifacts_for_validate(&actx).await {
-            let retry_outcome = Self::check_subjective_retry_budget(
-                &thread_store,
-                thread_id,
-                crate::progress_controller::SubjectiveRetryKind::ValidatePrecheckFailed,
-            )
-            .await?;
-            let escalation = Self::validate_precheck_escalation(
-                format!(
-                    "Pre-validation normalization failed; fix DBT YAML artifacts before re-validating.\n\n{e}"
-                ),
-                retry_outcome,
-            );
+            // Normalization failures share the same routing policy as schema prechecks: send
+            // the agent into the repair loop with a structured "Other" failure rather than
+            // consuming the deprecated precheck-specific retry budget.
+            let precheck = crate::schema_policy::PrecheckFailure::other(format!(
+                "Pre-validation normalization failed; fix DBT YAML artifacts before re-validating.\n\n{e}"
+            ));
+            let escalation = Self::precheck_failure_to_repair_escalation(precheck);
             return Self::apply_validate_escalation(&thread_store, thread_id, phase, escalation)
                 .await;
         }
 
         // Cheap structural prechecks: fail fast on malformed/duplicated schema artifacts
         // instead of burning a full dbt_validate cycle.
-        if let Err(e) = crate::schema_policy::prevalidate_dbt_schema_artifacts(&actx).await {
-            let retry_outcome = Self::check_subjective_retry_budget(
-                &thread_store,
-                thread_id,
-                crate::progress_controller::SubjectiveRetryKind::ValidatePrecheckFailed,
-            )
-            .await?;
-            let escalation = Self::validate_precheck_escalation(
-                format!(
-                    "Pre-validation failed; fix DBT YAML artifacts before re-validating.\n\n{e}"
-                ),
-                retry_outcome,
-            );
+        //
+        // Precheck failures route to the repair subroutine, not the author loopback, because
+        // they describe structural relocations the LLM should solve in one focused
+        // gather→reason→apply cycle. We deliberately do NOT consume the `ValidatePrecheckFailed`
+        // subjective retry budget here — the repair loop owns its own retry budget and an
+        // overly aggressive precheck budget was previously causing premature Fatal escalations.
+        // The structured [`PrecheckFailure`] is carried into the repair prompt via the
+        // `ValidationFailureContext.brief`/`log_excerpts` so the LLM gets the failure kind and
+        // the list of files to look at first.
+        if let Err(precheck_failure) =
+            crate::schema_policy::prevalidate_dbt_schema_artifacts(&actx).await
+        {
+            let escalation = Self::precheck_failure_to_repair_escalation(precheck_failure);
             return Self::apply_validate_escalation(&thread_store, thread_id, phase, escalation)
                 .await;
         }
@@ -762,16 +787,32 @@ mod tests {
     }
 
     #[test]
-    fn validate_precheck_exhaustion_is_not_plan_rewrite() {
-        let escalation = DataEngineerSuite::validate_precheck_escalation(
-            "Pre-validation failed".to_string(),
-            crate::retry_budget::SubjectiveRetryOutcome::Exhausted(2),
-        );
+    fn precheck_failure_routes_into_repair_loopback_with_kind_label() {
+        let precheck = crate::schema_policy::PrecheckFailure {
+            kind: crate::schema_policy::PrecheckFailureKind::SchemaModelMisplacement,
+            brief: "models/schema.yml contains staging model 'stg_picnic_screen_birthdate'."
+                .to_string(),
+            suggested_targets: vec![
+                "models/schema.yml".to_string(),
+                "models/staging/stg_picnic_screen_birthdate.yml".to_string(),
+            ],
+        };
+        let escalation = DataEngineerSuite::precheck_failure_to_repair_escalation(precheck);
         match escalation {
-            ValidateEscalation::Fatal(reason) => {
-                assert!(reason.contains("manual implementation fix required"));
+            ValidateEscalation::LoopbackToAuthor {
+                guard_kind,
+                failure_context,
+                reason,
+                ..
+            } => {
+                assert!(matches!(guard_kind, GuardBlockKind::PrecheckFailed));
+                assert!(reason.contains("Pre-validation failed"));
+                assert!(failure_context.brief.contains("stg_picnic_screen_birthdate"));
+                let excerpts = failure_context.log_excerpts.expect("log_excerpts");
+                assert!(excerpts.contains("schema_model_misplacement"));
+                assert!(excerpts.contains("models/staging/stg_picnic_screen_birthdate.yml"));
             }
-            _ => panic!("expected fatal escalation"),
+            _ => panic!("expected loopback-to-author (which routes through the repair phase)"),
         }
     }
 }

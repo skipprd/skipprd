@@ -270,6 +270,70 @@ pub async fn save_model_plan_grounded(
     Ok(grounded)
 }
 
+/// Read the active plan's `PlanSnapshot::stripped_artifacts` for prompt assembly.
+///
+/// Prefers the model plan (later in the pipeline) and falls back to the cleanse plan, mirroring
+/// the write-side ordering in [`persist_stripped_artifacts`]. Returns an empty vector when no
+/// active plan exists, when neither plan has stripped artifacts, or on any storage/parse error
+/// (the strip notice is informational and must never block prompt assembly).
+pub async fn load_active_stripped_artifacts(ctx: &AgentCtx) -> Vec<StrippedArtifact> {
+    if let Ok(Some(plan)) = load_model_plan(ctx).await {
+        if !plan.project_snapshot.stripped_artifacts.is_empty() {
+            return plan.project_snapshot.stripped_artifacts;
+        }
+    }
+    if let Ok(Some(plan)) = load_cleanse_plan(ctx).await {
+        if !plan.project_snapshot.stripped_artifacts.is_empty() {
+            return plan.project_snapshot.stripped_artifacts;
+        }
+    }
+    Vec::new()
+}
+
+/// Persist a batch of stripped-artifact entries onto the active plan's `PlanSnapshot`.
+///
+/// The artifacts come from the dbt provider's sanitizer (see
+/// `crate::providers::DbtProvider::ensure_minimal_project`) and need to flow into whatever plan
+/// the agent is currently executing so the next author/repair turn surfaces them in the
+/// stripped-content prompt section. Best-effort: failures are logged and swallowed (a strip
+/// notification is informational, never the cause of a phase failure).
+pub async fn persist_stripped_artifacts(
+    ctx: &AgentCtx,
+    artifacts: Vec<StrippedArtifact>,
+) {
+    if artifacts.is_empty() {
+        return;
+    }
+    // Prefer the model plan if one is active (later in the pipeline). Fall back to the cleanse
+    // plan otherwise. We update at most one plan to avoid duplicate notices.
+    match load_model_plan(ctx).await {
+        Ok(Some(mut plan)) => {
+            plan.project_snapshot
+                .extend_stripped_artifacts(artifacts.clone());
+            if let Err(e) = save_model_plan(ctx, &plan).await {
+                tracing::warn!("failed to persist stripped artifacts onto model plan: {e}");
+            }
+            return;
+        }
+        Ok(None) => {}
+        Err(e) => tracing::warn!("failed to load model plan for stripped-artifact persistence: {e}"),
+    }
+    match load_cleanse_plan(ctx).await {
+        Ok(Some(mut plan)) => {
+            plan.project_snapshot.extend_stripped_artifacts(artifacts);
+            if let Err(e) = save_cleanse_plan(ctx, &plan).await {
+                tracing::warn!("failed to persist stripped artifacts onto cleanse plan: {e}");
+            }
+        }
+        Ok(None) => {
+            tracing::debug!(
+                "stripped artifacts produced but no active plan exists to record them"
+            );
+        }
+        Err(e) => tracing::warn!("failed to load cleanse plan for stripped-artifact persistence: {e}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

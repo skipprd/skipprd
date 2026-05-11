@@ -18,9 +18,17 @@ impl DataEngineerSuite {
         };
         {
             let dbt = dbt;
+            // Preflight runs before any plan exists, so any strips from this sanitizer pass
+            // would have nowhere to be persisted yet. In practice the project doesn't exist
+            // here either, so the sanitizer runs over the freshly-rendered canonical template
+            // and emits no artifacts. We discard the return Vec deliberately.
             if let Err(e) = crate::transient_retry::retry_transient_default(
                 "preflight_ensure_minimal_project",
-                || async { dbt.ensure_minimal_project(sctx.scope()).await },
+                || async {
+                    dbt.ensure_minimal_project(sctx.scope())
+                        .await
+                        .map(|_strips| ())
+                },
             )
             .await
             {

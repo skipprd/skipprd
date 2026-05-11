@@ -97,7 +97,15 @@ impl<'a> PhaseExecutor for RepairExecutor<'a> {
             return PhaseOutcome::Return(vec![]);
         }
 
-        let fix_plan = match run_reason(self.sctx, self.dispatch, &gathered, &log_snapshot, i).await
+        let fix_plan = match run_reason(
+            self.sctx,
+            self.thread_id,
+            self.dispatch,
+            &gathered,
+            &log_snapshot,
+            i,
+        )
+        .await
         {
             Ok(p) => p,
             Err(e) => return PhaseOutcome::Failed { reason: e },
@@ -277,8 +285,21 @@ STRICT RULES:\n\
     );
 
     let history = session_log.format_for_prompt();
+    // Stripped-content notice surfaces sanitizer-removed content from system-shared files so the
+    // gather agent reads the original intent (and the relocation hint) before authoring fixes —
+    // see `prompts::shared::render_stripped_artifacts_section` for the design contract.
+    //
+    // Plan loading is keyed by `AgentCtx::thread_id`, so we MUST use the parent thread id here
+    // (the gather actx is built against a synthetic per-iteration id for LLM bookkeeping).
+    let strip_section = {
+        let actx_for_strip = build_tool_ctx(sctx, thread_id);
+        let stripped = crate::plan_storage::load_active_stripped_artifacts(&actx_for_strip).await;
+        crate::prompts::shared::render_stripped_artifacts_section(&stripped)
+            .map(|s| format!("\n\n{s}"))
+            .unwrap_or_default()
+    };
     let question = format!(
-        "Investigate this dbt failure.\n\n{history}\n\n\
+        "Investigate this dbt failure.\n\n{history}{strip_section}\n\n\
          [Repair iteration {iter} of {max}]\n\n\
          Follow these steps in order:\n\
          1. Read the failing model SQL file.\n\
@@ -541,6 +562,7 @@ fn compact_repair_history_for_fix_plan(session_log: &RepairSessionLog) -> String
 /// via `LlmExpectedFormat::JsonSchema`.
 async fn run_reason(
     sctx: &SuiteCtx,
+    thread_id: &str,
     dispatch: &ModelDispatch,
     gathered: &GatheredContext,
     session_log: &RepairSessionLog,
@@ -595,6 +617,16 @@ async fn run_reason(
         String::new()
     };
 
+    // Plan loading is keyed by `AgentCtx::thread_id`, so we MUST use the parent thread id here
+    // (not the synthetic `repair_*` id used for LLM bookkeeping). Otherwise
+    // `load_active_stripped_artifacts` looks in the wrong storage prefix and always returns empty.
+    let actx_for_strip = build_tool_ctx(sctx, thread_id);
+    let strip_section = {
+        let stripped = crate::plan_storage::load_active_stripped_artifacts(&actx_for_strip).await;
+        crate::prompts::shared::render_stripped_artifacts_section(&stripped)
+            .map(|s| format!("\n\n{s}"))
+            .unwrap_or_default()
+    };
     let prompt = format!(
         "You are a senior dbt engineer. Based on the diagnosis, current file contents, and \
          full repair history below, produce fixes for the failing models.\n\n\
@@ -602,7 +634,7 @@ async fn run_reason(
          ## Diagnosis\n{diagnosis}\n\n\
          {upstream_block}\n\n\
          {files_block}\n\n\
-         ## Full Repair History\n{history}\n\n\
+         ## Full Repair History\n{history}{strip_section}\n\n\
          Rules:\n\
          - If a prior patch attempt failed, use op \"write\" instead of \"patch\".\n\
          - Fix BOTH SQL and YAML files as needed. When columns are added to or removed from \
@@ -722,6 +754,7 @@ async fn apply_fixes(sctx: &SuiteCtx, thread_id: &str, fixes: &[PlannedFix]) -> 
 }
 
 fn build_gather_tools(sctx: &SuiteCtx) -> Result<ToolRegistry, String> {
+    use crate::tool_policies::{FileAccessPolicy, PolicyFilesTool};
     use crate::tools::{
         files_tool::FilesTool, sql_run::SqlRunTool, sql_sample::SqlSampleTool,
         sql_schema::SqlSchemaTool, sql_stats::SqlStatsTool, vect_query::VectQueryTool,
@@ -731,8 +764,14 @@ fn build_gather_tools(sctx: &SuiteCtx) -> Result<ToolRegistry, String> {
         crate::ctx_ext::sctx_query(sctx).ok_or_else(|| "query provider missing".to_string())?;
 
     let mut reg = ToolRegistry::new();
-    reg.register(FilesTool {
-        datasets: crate::ctx_ext::sctx_datasets(sctx),
+    // Repair gather is investigation-only, but if the agent attempts a mutating op we still
+    // deny system-owned writes with the relocation hint (rather than letting the underlying
+    // tool reject with a low-context error).
+    reg.register(PolicyFilesTool {
+        inner: FilesTool {
+            datasets: crate::ctx_ext::sctx_datasets(sctx),
+        },
+        policy: FileAccessPolicy::SystemOwnedDenyList,
     });
     reg.register(SqlSchemaTool {
         query: query.clone(),

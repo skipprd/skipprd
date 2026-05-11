@@ -351,6 +351,12 @@ impl DeterministicDbtValidateOnce {
         )
         .await?;
 
+        // Persist any strip-and-notify artifacts the sanitizer emitted during this dbt
+        // invocation. See `crate::file_ownership` for the ownership policy that drives strips.
+        if !res.stripped.is_empty() {
+            crate::plan_storage::persist_stripped_artifacts(ctx, res.stripped.clone()).await;
+        }
+
         let mut v = serde_json::to_value(res).unwrap_or_else(
             |_| serde_json::json!({"ok": false, "error": "failed to serialize result"}),
         );

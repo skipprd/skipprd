@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use serde_yaml::Value as YamlValue;
 use std::collections::{HashMap, HashSet};
 
@@ -11,6 +12,50 @@ pub struct ModelAllowedColumns {
     /// If empty, we cannot safely author tests; docs-only changes are allowed.
     pub allowed_columns: HashSet<String>,
     pub error: Option<String>,
+}
+
+/// Structured precheck failure. Drives the repair-subroutine prompt so the LLM can scope its
+/// gather/reason pass to the relevant files without having to parse a free-form error string.
+///
+/// Each variant of [`PrecheckFailureKind`] describes a class of structural problem in the dbt
+/// project tree that the agent can resolve by re-authoring or relocating LLM-owned files.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct PrecheckFailure {
+    pub kind: PrecheckFailureKind,
+    /// Human-readable summary of the structural issue (used as the `ValidationFailureContext`
+    /// brief).
+    pub brief: String,
+    /// Relative paths the agent should examine first when repairing. Empty when the failure does
+    /// not point at specific files (rare).
+    pub suggested_targets: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum PrecheckFailureKind {
+    /// A staging model (`stg_*`) was defined in `models/schema.yml`. Staging docs/tests belong
+    /// in `models/staging/*.yml` (one yml per source).
+    SchemaModelMisplacement,
+    /// A model name was declared in both `models/schema.yml` and `models/staging/*.yml`.
+    DuplicateModelDefinition,
+    /// Two or more `.sql` files share the same stem (dbt rejects duplicate model names).
+    DuplicateSqlModelStem,
+    /// A staging YAML declares columns that don't appear in the matching staging SQL.
+    StagingSchemaColumnMismatch,
+    /// A test definition under `tests:` violated dbt's "single-key mapping" rule.
+    InvalidTestDefinitionShape,
+    /// Parser failure or other structural defect not classified above.
+    Other,
+}
+
+impl PrecheckFailure {
+    pub fn other(brief: impl Into<String>) -> Self {
+        Self {
+            kind: PrecheckFailureKind::Other,
+            brief: brief.into(),
+            suggested_targets: Vec::new(),
+        }
+    }
 }
 
 fn yaml_as_mapping_mut(v: &mut YamlValue) -> Option<&mut serde_yaml::Mapping> {
@@ -603,21 +648,37 @@ pub async fn normalize_schema_artifacts_for_validate(
 
 /// Cheap structural prechecks to avoid burning dbt_validate cycles on trivial YAML issues.
 ///
+/// Failures route to the repair subroutine (not the author loopback) because they describe
+/// structural relocations the LLM should solve in one focused gather→reason→apply cycle. See
+/// [`crate::phase_validate`] for the routing site and [`PrecheckFailure`] for the structured
+/// payload the repair prompt consumes.
+///
 /// Checks:
 /// - `models/schema.yml` parses (if present)
 /// - No `stg_*` models are defined in `models/schema.yml`
 /// - All test dicts under any `tests:` list are single-key mappings
-pub async fn prevalidate_dbt_schema_artifacts(ctx: &AgentCtx) -> Result<(), String> {
-    let sql_name_collisions = collect_sql_model_name_collisions(ctx, 2000).await?;
+/// - Staging YAML columns exist in the corresponding staging SQL
+pub async fn prevalidate_dbt_schema_artifacts(ctx: &AgentCtx) -> Result<(), PrecheckFailure> {
+    let sql_name_collisions = collect_sql_model_name_collisions(ctx, 2000)
+        .await
+        .map_err(PrecheckFailure::other)?;
     if !sql_name_collisions.is_empty() {
         let lines: Vec<String> = sql_name_collisions
-            .into_iter()
+            .iter()
             .map(|(name, rels)| format!("{name}: {}", rels.join(" | ")))
             .collect();
-        return Err(format!(
-            "duplicate SQL model names detected under models/**/*.sql (dbt model-name collision):\n- {}\n\nKeep each model name in exactly one canonical path before dbt_validate.",
-            lines.join("\n- ")
-        ));
+        let suggested_targets: Vec<String> = sql_name_collisions
+            .iter()
+            .flat_map(|(_, rels)| rels.iter().cloned())
+            .collect();
+        return Err(PrecheckFailure {
+            kind: PrecheckFailureKind::DuplicateSqlModelStem,
+            brief: format!(
+                "duplicate SQL model names detected under models/**/*.sql (dbt model-name collision):\n- {}\n\nKeep each model name in exactly one canonical path before dbt_validate.",
+                lines.join("\n- ")
+            ),
+            suggested_targets,
+        });
     }
 
     let key = project_fs::join_storage_key(ctx, project_fs::MODELS_SCHEMA_YML);
@@ -625,10 +686,17 @@ pub async fn prevalidate_dbt_schema_artifacts(ctx: &AgentCtx) -> Result<(), Stri
         match retry_get_bytes(ctx.storage().as_ref(), &key).await {
             Ok(bytes) => {
                 let text = String::from_utf8_lossy(&bytes).to_string();
-                let root: YamlValue = serde_yaml::from_str(&text)
-                    .map_err(|e| format!("models/schema.yml parse error: {e}"))?;
+                let root: YamlValue = serde_yaml::from_str(&text).map_err(|e| PrecheckFailure {
+                    kind: PrecheckFailureKind::Other,
+                    brief: format!("models/schema.yml parse error: {e}"),
+                    suggested_targets: vec![project_fs::MODELS_SCHEMA_YML.to_string()],
+                })?;
                 let YamlValue::Mapping(map) = root else {
-                    return Err("models/schema.yml root must be a mapping".to_string());
+                    return Err(PrecheckFailure {
+                        kind: PrecheckFailureKind::Other,
+                        brief: "models/schema.yml root must be a mapping".to_string(),
+                        suggested_targets: vec![project_fs::MODELS_SCHEMA_YML.to_string()],
+                    });
                 };
                 Some(map)
             }
@@ -653,16 +721,27 @@ pub async fn prevalidate_dbt_schema_artifacts(ctx: &AgentCtx) -> Result<(), Stri
                 continue;
             };
             if yaml_is_staging_model_name(&name) {
-                return Err(format!(
-                    "models/schema.yml contains staging model '{name}'. Staging model docs/tests must be in models/staging/*.yml to avoid duplicate definitions."
-                ));
+                return Err(PrecheckFailure {
+                    kind: PrecheckFailureKind::SchemaModelMisplacement,
+                    brief: format!(
+                        "models/schema.yml contains staging model '{name}'. Staging model docs/tests must be in models/staging/*.yml to avoid duplicate definitions."
+                    ),
+                    suggested_targets: vec![
+                        project_fs::MODELS_SCHEMA_YML.to_string(),
+                        format!("models/staging/{name}.yml"),
+                    ],
+                });
             }
             schema_model_names.insert(name.clone());
             // Validate test dict shapes under model-level tests and column-level tests.
             if let Some(YamlValue::Sequence(tests)) = m.get("tests") {
                 for t in tests.iter() {
                     if !test_mapping_has_single_key(t) {
-                        return Err("invalid test config in models/schema.yml: each test definition dictionary must have exactly one key".to_string());
+                        return Err(PrecheckFailure {
+                            kind: PrecheckFailureKind::InvalidTestDefinitionShape,
+                            brief: "invalid test config in models/schema.yml: each test definition dictionary must have exactly one key".to_string(),
+                            suggested_targets: vec![project_fs::MODELS_SCHEMA_YML.to_string()],
+                        });
                     }
                 }
             }
@@ -671,7 +750,11 @@ pub async fn prevalidate_dbt_schema_artifacts(ctx: &AgentCtx) -> Result<(), Stri
                     if let Some(YamlValue::Sequence(tests)) = c.get("tests") {
                         for t in tests.iter() {
                             if !test_mapping_has_single_key(t) {
-                                return Err("invalid test config in models/schema.yml: each test definition dictionary must have exactly one key".to_string());
+                                return Err(PrecheckFailure {
+                                    kind: PrecheckFailureKind::InvalidTestDefinitionShape,
+                                    brief: "invalid test config in models/schema.yml: each test definition dictionary must have exactly one key".to_string(),
+                                    suggested_targets: vec![project_fs::MODELS_SCHEMA_YML.to_string()],
+                                });
                             }
                         }
                     }
@@ -687,10 +770,18 @@ pub async fn prevalidate_dbt_schema_artifacts(ctx: &AgentCtx) -> Result<(), Stri
     dup.sort();
     dup.dedup();
     if !dup.is_empty() {
-        return Err(format!(
-            "duplicate model definitions detected in both models/schema.yml and models/staging/*.yml: {}. Keep staging docs/tests in models/staging/*.yml and gold docs/tests in models/schema.yml only.",
-            dup.join(", ")
-        ));
+        let mut suggested_targets = vec![project_fs::MODELS_SCHEMA_YML.to_string()];
+        for name in &dup {
+            suggested_targets.push(format!("models/staging/{name}.yml"));
+        }
+        return Err(PrecheckFailure {
+            kind: PrecheckFailureKind::DuplicateModelDefinition,
+            brief: format!(
+                "duplicate model definitions detected in both models/schema.yml and models/staging/*.yml: {}. Keep staging docs/tests in models/staging/*.yml and gold docs/tests in models/schema.yml only.",
+                dup.join(", ")
+            ),
+            suggested_targets,
+        });
     }
 
     // Staging schema guards: parse each staging YAML and ensure declared columns exist
@@ -712,10 +803,17 @@ pub async fn prevalidate_dbt_schema_artifacts(ctx: &AgentCtx) -> Result<(), Stri
             .to_string();
         let bytes = retry_get_bytes(ctx.storage().as_ref(), &key)
             .await
-            .map_err(|e| format!("failed to read {rel}: {e}"))?;
+            .map_err(|e| PrecheckFailure {
+                kind: PrecheckFailureKind::Other,
+                brief: format!("failed to read {rel}: {e}"),
+                suggested_targets: vec![rel.clone()],
+            })?;
         let text = String::from_utf8_lossy(&bytes).to_string();
-        let root: YamlValue =
-            serde_yaml::from_str(&text).map_err(|e| format!("invalid YAML in {rel}: {e}"))?;
+        let root: YamlValue = serde_yaml::from_str(&text).map_err(|e| PrecheckFailure {
+            kind: PrecheckFailureKind::Other,
+            brief: format!("invalid YAML in {rel}: {e}"),
+            suggested_targets: vec![rel.clone()],
+        })?;
         let Some(models) = root.get("models").and_then(|v| v.as_sequence()) else {
             continue;
         };
@@ -736,18 +834,22 @@ pub async fn prevalidate_dbt_schema_artifacts(ctx: &AgentCtx) -> Result<(), Stri
             let sql_key = project_fs::join_storage_key(ctx, &sql_rel);
             let sql_bytes = retry_get_bytes(ctx.storage().as_ref(), &sql_key)
                 .await
-                .map_err(|_| {
-                    format!(
+                .map_err(|_| PrecheckFailure {
+                    kind: PrecheckFailureKind::StagingSchemaColumnMismatch,
+                    brief: format!(
                         "cannot validate {rel}: missing staging SQL {sql_rel} for model '{name}'"
-                    )
+                    ),
+                    suggested_targets: vec![rel.clone(), sql_rel.clone()],
                 })?;
             let sql_text = String::from_utf8_lossy(&sql_bytes).to_string();
             let allowed = crate::tools::files_tool::extract_final_select_output_columns(&sql_text)
-                .map_err(|e| {
-                    format!(
+                .map_err(|e| PrecheckFailure {
+                    kind: PrecheckFailureKind::StagingSchemaColumnMismatch,
+                    brief: format!(
                         "cannot validate {rel} against {sql_rel} (model '{name}'): {}",
                         e.trim()
-                    )
+                    ),
+                    suggested_targets: vec![rel.clone(), sql_rel.clone()],
                 })?;
             let mut unknown: Vec<String> = declared
                 .into_iter()
@@ -756,10 +858,14 @@ pub async fn prevalidate_dbt_schema_artifacts(ctx: &AgentCtx) -> Result<(), Stri
             unknown.sort();
             unknown.dedup();
             if !unknown.is_empty() {
-                return Err(format!(
-                    "staging schema references unknown columns for model '{name}'.\nFile: {rel}\nStaging SQL: {sql_rel}\nUnknown columns:\n- {}\n\nFix: update staging SQL outputs or remove/rename these YAML columns before dbt_validate.",
-                    unknown.join("\n- ")
-                ));
+                return Err(PrecheckFailure {
+                    kind: PrecheckFailureKind::StagingSchemaColumnMismatch,
+                    brief: format!(
+                        "staging schema references unknown columns for model '{name}'.\nFile: {rel}\nStaging SQL: {sql_rel}\nUnknown columns:\n- {}\n\nFix: update staging SQL outputs or remove/rename these YAML columns before dbt_validate.",
+                        unknown.join("\n- ")
+                    ),
+                    suggested_targets: vec![rel.clone(), sql_rel.clone()],
+                });
             }
         }
     }
@@ -846,7 +952,36 @@ mod tests {
             .unwrap();
 
         let err = prevalidate_dbt_schema_artifacts(&ctx).await.unwrap_err();
-        assert!(err.contains("duplicate model definitions"));
+        assert_eq!(err.kind, PrecheckFailureKind::DuplicateModelDefinition);
+        assert!(err.brief.contains("duplicate model definitions"));
+        assert!(err
+            .suggested_targets
+            .iter()
+            .any(|t| t == project_fs::MODELS_SCHEMA_YML));
+    }
+
+    #[tokio::test]
+    async fn prevalidate_returns_schema_misplacement_for_stg_in_schema_yml() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let ctx = make_ctx(storage.clone());
+
+        let schema_key = project_fs::join_storage_key(&ctx, project_fs::MODELS_SCHEMA_YML);
+        ctx.storage()
+            .put_bytes(
+                &schema_key,
+                b"version: 2\nmodels:\n  - name: stg_picnic_screen_birthdate\n    columns: []\n",
+                "text/yaml",
+            )
+            .await
+            .unwrap();
+
+        let err = prevalidate_dbt_schema_artifacts(&ctx).await.unwrap_err();
+        assert_eq!(err.kind, PrecheckFailureKind::SchemaModelMisplacement);
+        assert!(err.brief.contains("stg_picnic_screen_birthdate"));
+        assert!(err
+            .suggested_targets
+            .iter()
+            .any(|t| t == "models/staging/stg_picnic_screen_birthdate.yml"));
     }
 
     #[tokio::test]
@@ -902,8 +1037,9 @@ mod tests {
             .unwrap();
 
         let err = prevalidate_dbt_schema_artifacts(&ctx).await.unwrap_err();
-        assert!(err.contains("stg_test_raw_raw_orders"));
-        assert!(err.contains("models/staging/stg_test_raw_raw_orders"));
+        assert_eq!(err.kind, PrecheckFailureKind::StagingSchemaColumnMismatch);
+        assert!(err.brief.contains("stg_test_raw_raw_orders"));
+        assert!(err.brief.contains("models/staging/stg_test_raw_raw_orders"));
     }
 
     #[tokio::test]
@@ -923,9 +1059,14 @@ mod tests {
             .unwrap();
 
         let err = prevalidate_dbt_schema_artifacts(&ctx).await.unwrap_err();
-        assert!(err.contains("duplicate SQL model names"));
-        assert!(err.contains("fct_orders"));
-        assert!(err.contains("models/marts/fct_orders.sql"));
-        assert!(err.contains("models/core/fct_orders.sql"));
+        assert_eq!(err.kind, PrecheckFailureKind::DuplicateSqlModelStem);
+        assert!(err.brief.contains("duplicate SQL model names"));
+        assert!(err.brief.contains("fct_orders"));
+        assert!(err.brief.contains("models/marts/fct_orders.sql"));
+        assert!(err.brief.contains("models/core/fct_orders.sql"));
+        assert!(err
+            .suggested_targets
+            .iter()
+            .any(|t| t == "models/marts/fct_orders.sql"));
     }
 }

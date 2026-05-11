@@ -2,6 +2,37 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
 
+/// Maximum number of `StrippedArtifact` entries held on a [`PlanSnapshot`]. The buffer is FIFO:
+/// once full, the oldest entry is evicted on push. Keeping this small bounds prompt size when
+/// the agent persistently authors stripped content.
+pub const MAX_STRIPPED_ARTIFACTS: usize = 5;
+
+/// One LLM-authored entry that the sanitizer removed from a system-shared file.
+///
+/// The sanitizer emits a `StrippedArtifact` each time it strips a top-level key from
+/// `dbt_project.yml` (or any future `Shared` file). The artifact is persisted on the active
+/// plan's [`PlanSnapshot::stripped_artifacts`] buffer and rendered into the author/repair prompt
+/// on the next turn, so the agent can decide whether to re-author the intent in a sanctioned
+/// location — see [`crate::file_ownership`] for the source-of-truth ownership table.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StrippedArtifact {
+    /// Relative path within the dbt project (e.g. `dbt_project.yml`).
+    pub file: String,
+    /// Nested key path that was removed. For top-level strips this is a single-element vec
+    /// (e.g. `["on-run-start"]`).
+    pub key_path: Vec<String>,
+    /// Truncated YAML of the removed value, suitable for rendering verbatim into the prompt.
+    pub value_summary: String,
+    /// Human-readable rationale shown to the agent; comes from
+    /// [`crate::file_ownership`]'s key tables.
+    pub reason: String,
+    /// Optional relocation hint shown to the agent; comes from
+    /// [`crate::file_ownership::relocation_hint`]. `None` means "no sanctioned alternative
+    /// location" and the prompt renders the corresponding fallback line.
+    pub relocation_hint: Option<String>,
+}
+
 /// Typed container for `Plan.project_snapshot`. Known fields are directly
 /// accessible; all other audit/diagnostic data falls through to `extra`.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -10,6 +41,11 @@ pub struct PlanSnapshot {
     pub pruned_task_count: Option<usize>,
     #[serde(default)]
     pub validate_fail_facts: Vec<crate::facts::FactsBundle>,
+    /// Bounded FIFO buffer (cap = [`MAX_STRIPPED_ARTIFACTS`]) of content the sanitizer removed
+    /// from system-shared files since the last author turn. The author/repair prompts read this
+    /// to surface a "stripped-content" notice so intent is not silently lost.
+    #[serde(default)]
+    pub stripped_artifacts: Vec<StrippedArtifact>,
     #[serde(flatten)]
     pub extra: serde_json::Map<String, Value>,
 }
@@ -23,6 +59,24 @@ impl PlanSnapshot {
     /// Construct from a JSON Value (deserializes into typed + extra).
     pub fn from_value(v: Value) -> Self {
         serde_json::from_value(v).unwrap_or_default()
+    }
+
+    /// Push a stripped-artifact entry, evicting the oldest if the buffer is at capacity.
+    pub fn push_stripped_artifact(&mut self, artifact: StrippedArtifact) {
+        self.stripped_artifacts.push(artifact);
+        while self.stripped_artifacts.len() > MAX_STRIPPED_ARTIFACTS {
+            self.stripped_artifacts.remove(0);
+        }
+    }
+
+    /// Push multiple stripped-artifact entries in order. Evicts oldest entries past capacity.
+    pub fn extend_stripped_artifacts<I: IntoIterator<Item = StrippedArtifact>>(
+        &mut self,
+        artifacts: I,
+    ) {
+        for a in artifacts {
+            self.push_stripped_artifact(a);
+        }
     }
 }
 
@@ -760,5 +814,79 @@ impl<T: PlanTask> PersistablePlan<T> {
             Self::Grounded(v) => v.into_inner(),
             Self::Terminal(v) => v,
         }
+    }
+}
+
+#[cfg(test)]
+mod stripped_artifact_tests {
+    use super::*;
+
+    fn make_artifact(key: &str) -> StrippedArtifact {
+        StrippedArtifact {
+            file: "dbt_project.yml".to_string(),
+            key_path: vec![key.to_string()],
+            value_summary: format!("- removed: {key}"),
+            reason: "test".to_string(),
+            relocation_hint: None,
+        }
+    }
+
+    #[test]
+    fn push_stripped_artifact_appends() {
+        let mut snap = PlanSnapshot::default();
+        snap.push_stripped_artifact(make_artifact("on-run-start"));
+        assert_eq!(snap.stripped_artifacts.len(), 1);
+        assert_eq!(snap.stripped_artifacts[0].key_path, vec!["on-run-start"]);
+    }
+
+    #[test]
+    fn push_stripped_artifact_evicts_oldest_past_capacity() {
+        let mut snap = PlanSnapshot::default();
+        for i in 0..(MAX_STRIPPED_ARTIFACTS + 3) {
+            snap.push_stripped_artifact(make_artifact(&format!("key_{i}")));
+        }
+        assert_eq!(snap.stripped_artifacts.len(), MAX_STRIPPED_ARTIFACTS);
+        // FIFO: the first three were evicted, so the oldest remaining is `key_3`.
+        assert_eq!(
+            snap.stripped_artifacts[0].key_path,
+            vec![format!("key_{}", 3)]
+        );
+        // The newest is `key_(MAX+2)`.
+        let last_index = MAX_STRIPPED_ARTIFACTS + 2;
+        assert_eq!(
+            snap.stripped_artifacts.last().unwrap().key_path,
+            vec![format!("key_{last_index}")]
+        );
+    }
+
+    #[test]
+    fn extend_stripped_artifacts_preserves_order_and_bounded() {
+        let mut snap = PlanSnapshot::default();
+        let batch: Vec<_> = (0..(MAX_STRIPPED_ARTIFACTS * 2))
+            .map(|i| make_artifact(&format!("k{i}")))
+            .collect();
+        snap.extend_stripped_artifacts(batch);
+        assert_eq!(snap.stripped_artifacts.len(), MAX_STRIPPED_ARTIFACTS);
+        let first_kept = MAX_STRIPPED_ARTIFACTS;
+        assert_eq!(
+            snap.stripped_artifacts[0].key_path,
+            vec![format!("k{first_kept}")]
+        );
+    }
+
+    #[test]
+    fn stripped_artifact_round_trips_through_json() {
+        let a = StrippedArtifact {
+            file: "dbt_project.yml".to_string(),
+            key_path: vec!["on-run-start".to_string()],
+            value_summary: "- '{{ x() }}'".to_string(),
+            reason: "system-owned".to_string(),
+            relocation_hint: Some("use config(pre_hook=[...])".to_string()),
+        };
+        let json = serde_json::to_string(&a).expect("serialize");
+        let back: StrippedArtifact = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back.file, a.file);
+        assert_eq!(back.key_path, a.key_path);
+        assert_eq!(back.relocation_hint, a.relocation_hint);
     }
 }

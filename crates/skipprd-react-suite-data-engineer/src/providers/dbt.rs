@@ -28,11 +28,23 @@ pub struct DbtValidateResult {
     pub errors: Vec<String>,
     pub warnings: Vec<String>,
     pub logs: serde_json::Value,
+    /// LLM-authored content the sanitizer removed from system-shared files during this
+    /// invocation. Surfaced to the next author/repair turn so the agent can decide whether to
+    /// re-author the intent in a sanctioned location. See [`crate::file_ownership`] for the
+    /// ownership rules that drive sanitization.
+    #[serde(default)]
+    pub stripped: Vec<crate::plan_types::StrippedArtifact>,
 }
 
 #[async_trait]
 pub trait DbtProvider: Send + Sync {
-    async fn ensure_minimal_project(&self, scope: &RequestScope) -> Result<(), String>;
+    /// Initialize the scoped dbt project on disk/storage. Returns any content the sanitizer had
+    /// to remove from `dbt_project.yml` so callers can persist the strips into the active plan's
+    /// stripped-artifact buffer (see [`crate::plan_types::PlanSnapshot::push_stripped_artifact`]).
+    async fn ensure_minimal_project(
+        &self,
+        scope: &RequestScope,
+    ) -> Result<Vec<crate::plan_types::StrippedArtifact>, String>;
 
     async fn write_model_sql(
         &self,

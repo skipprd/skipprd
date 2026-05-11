@@ -596,8 +596,11 @@ mod tests {
     struct NoopDbtProvider;
     #[async_trait]
     impl DbtProvider for NoopDbtProvider {
-        async fn ensure_minimal_project(&self, _scope: &RequestScope) -> Result<(), String> {
-            Ok(())
+        async fn ensure_minimal_project(
+            &self,
+            _scope: &RequestScope,
+        ) -> Result<Vec<crate::plan_types::StrippedArtifact>, String> {
+            Ok(vec![])
         }
         async fn write_model_sql(
             &self,

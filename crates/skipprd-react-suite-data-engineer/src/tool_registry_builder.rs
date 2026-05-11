@@ -1,6 +1,10 @@
 use super::tool_policies::*;
 use super::*;
 
+/// LLM-facing tool registries always wrap the base `FilesTool` with `PolicyFilesTool`. The deny-
+/// list policy consults `crate::file_ownership` so a single failed write already teaches the LLM
+/// where to put it. Deterministic suite-internal callers (e.g. `invariant_has_dbt_project`) use
+/// the base `FilesTool` directly because they are not user-controllable surfaces.
 impl DataEngineerSuite {
     pub(super) fn build_tools(
         agent_mode: AgentMode,
@@ -44,8 +48,11 @@ impl DataEngineerSuite {
                 },
             });
         } else if caps.contains(&AgentToolCapability::MutableFile) {
-            registry.register(FilesTool {
-                datasets: crate::ctx_ext::sctx_datasets(sctx),
+            registry.register(PolicyFilesTool {
+                inner: FilesTool {
+                    datasets: crate::ctx_ext::sctx_datasets(sctx),
+                },
+                policy: FileAccessPolicy::SystemOwnedDenyList,
             });
         }
         if caps.contains(&AgentToolCapability::RunSql) {
@@ -254,8 +261,11 @@ impl DataEngineerSuite {
 
                 match plan_state {
                     PlanState::Unconstrained => {
-                        reg.register(FilesTool {
-                            datasets: crate::ctx_ext::sctx_datasets(sctx),
+                        reg.register(PolicyFilesTool {
+                            inner: FilesTool {
+                                datasets: crate::ctx_ext::sctx_datasets(sctx),
+                            },
+                            policy: FileAccessPolicy::SystemOwnedDenyList,
                         });
                         if phase == control_flow::Phase::CleanseAuthor {
                             reg.register(tools::staging_model::StagingModelTool {
@@ -309,8 +319,11 @@ impl DataEngineerSuite {
                         );
                     }
                     PlanState::Repair => {
-                        reg.register(FilesTool {
-                            datasets: crate::ctx_ext::sctx_datasets(sctx),
+                        reg.register(PolicyFilesTool {
+                            inner: FilesTool {
+                                datasets: crate::ctx_ext::sctx_datasets(sctx),
+                            },
+                            policy: FileAccessPolicy::SystemOwnedDenyList,
                         });
                         let lines = vec![
                             "- file(args:{op:\"list\"|\"get\"|\"patch\"|\"write\"|\"rm\"|\"mv\", ...})".to_string(),
@@ -352,8 +365,11 @@ impl DataEngineerSuite {
                     PlanState::CleanseSqlDatasetIds(_)
                     | PlanState::CleanseSchemaDatasetIds(_)
                     | PlanState::ModelSqlItemNames(_) => {
-                        reg.register(FilesTool {
-                            datasets: crate::ctx_ext::sctx_datasets(sctx),
+                        reg.register(PolicyFilesTool {
+                            inner: FilesTool {
+                                datasets: crate::ctx_ext::sctx_datasets(sctx),
+                            },
+                            policy: FileAccessPolicy::SystemOwnedDenyList,
                         });
                         let batch_name = batch_tool_name.unwrap_or("apply_next_batch");
                         let lines = vec![

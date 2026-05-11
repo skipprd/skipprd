@@ -440,6 +440,14 @@ impl Tool for DbtValidateTool {
             final_res = res;
         }
 
+        // Persist any strip-and-notify artifacts the sanitizer emitted during these dbt
+        // invocations. The artifacts live on the validate result; we hand them off to the
+        // active plan so the next author/repair prompt can render the "stripped content"
+        // notice. See `crate::file_ownership` for the ownership policy that drives strips.
+        if !final_res.stripped.is_empty() {
+            crate::plan_storage::persist_stripped_artifacts(ctx, final_res.stripped.clone()).await;
+        }
+
         let mut v = serde_json::to_value(final_res).unwrap_or_else(
             |_| serde_json::json!({"ok": false, "error": "failed to serialize result"}),
         );
