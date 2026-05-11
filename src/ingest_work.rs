@@ -420,8 +420,7 @@ pub struct Ingest {
     task_queue: Arc<RwLock<VecDeque<IngestTask>>>,
     queue_lock: Arc<RwLock<()>>,
     queue_cv: Arc<(Mutex<()>, Condvar)>,
-    is_shutting_down: Arc<AtomicUsize>, // Flag to indicate shutdown in progress
-    max_queue_length: usize,            // Maximum number of tasks to queue
+    max_queue_length: usize, // Maximum number of tasks to queue
     optimal_chunk_size: Arc<AtomicUsize>,
     throughput_history: Arc<RwLock<VecDeque<(Instant, u64)>>>, // Track throughput over time
     max_chunk_size: usize,
@@ -431,9 +430,14 @@ use tracing::{debug, error, info, warn};
 
 impl Drop for Ingest {
     fn drop(&mut self) {
+        let outstanding = self.queue_length.load(Ordering::SeqCst);
+        if outstanding == 0 {
+            return;
+        }
+
         info!(
             "Completing, waiting for {} ingest tasks to finish",
-            self.active_count.load(Ordering::SeqCst)
+            outstanding
         );
 
         self.wait_for_completion();
@@ -782,8 +786,6 @@ impl Ingest {
         let queue_cv: Arc<(Mutex<()>, Condvar)> = Arc::new((Mutex::new(()), Condvar::new()));
         let queue_lock_clone = queue_lock.clone();
         let queue_cv_clone = queue_cv.clone();
-        let is_shutting_down = Arc::new(AtomicUsize::new(0));
-        let _is_shutting_down_clone = is_shutting_down.clone();
 
         let thread_pool = Arc::new(ThreadPool::new(num_cpus));
         let thread_pool_clone = thread_pool.clone();
@@ -928,7 +930,6 @@ impl Ingest {
             task_queue,
             queue_lock,
             queue_cv,
-            is_shutting_down,
             max_queue_length,
             optimal_chunk_size,
             throughput_history,
@@ -937,16 +938,17 @@ impl Ingest {
     }
 
     pub fn wait_for_completion(&self) {
-        self.is_shutting_down.store(1, Ordering::SeqCst);
-
-        let remaining = self.active_count.load(Ordering::SeqCst);
-        info!("Waiting for {remaining} ingest tasks to finish, signaling shutdown...");
+        let remaining = self.queue_length.load(Ordering::SeqCst);
+        if remaining > 0 {
+            info!("Draining ingest queue: {remaining} tasks outstanding");
+        }
 
         let mut last_report_time = Instant::now();
-        while self.active_count.load(Ordering::SeqCst) > 0 {
+        while self.queue_length.load(Ordering::SeqCst) > 0 {
             if last_report_time.elapsed() > Duration::from_secs(5) {
                 info!(
-                    "Waiting for {} ingest tasks to finish",
+                    "Draining ingest queue: {} tasks outstanding ({} active)",
+                    self.queue_length.load(Ordering::SeqCst),
                     self.active_count.load(Ordering::SeqCst)
                 );
                 last_report_time = Instant::now();
@@ -954,7 +956,9 @@ impl Ingest {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
 
-        info!("All ingest tasks finished");
+        if remaining > 0 {
+            info!("Ingest queue drained");
+        }
     }
 
     fn update_throughput(&self, bytes: u64) {

@@ -619,10 +619,11 @@ async fn ingest_runtime_batches_into_core(
         .map_err(|err| io::Error::other(err.to_string()))
 }
 
-async fn ingest_raw_runtime_tasks_into_core(
+fn ingest_raw_runtime_tasks_into_core(
     tasks: Vec<Vec<crate::runtime_plugins::protocol::RuntimeRawIngestBatch>>,
     offsets: Arc<Offsets>,
     shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+    ingest: Arc<Ingest>,
 ) -> io::Result<()> {
     if tasks.is_empty() {
         return Ok(());
@@ -641,9 +642,7 @@ async fn ingest_raw_runtime_tasks_into_core(
         ));
     }
     let ingest_tasks = Arc::new(ingest_tasks);
-    let ingest = Ingest::new();
     let _ = ingest.ingest_file(&ingest_tasks, &offsets, shared_output);
-    ingest.wait_for_completion();
     Ok(())
 }
 
@@ -659,6 +658,17 @@ async fn drain_runtime_source_tasks(pending_tasks: &mut JoinSet<io::Result<()>>)
             }
         }
     }
+    Ok(())
+}
+
+async fn drain_runtime_source_ingest(
+    pending_tasks: &mut JoinSet<io::Result<()>>,
+    ingest: Arc<Ingest>,
+) -> io::Result<()> {
+    drain_runtime_source_tasks(pending_tasks).await?;
+    tokio::task::spawn_blocking(move || ingest.wait_for_completion())
+        .await
+        .map_err(|err| io::Error::other(format!("runtime source ingest drain failed: {err}")))?;
     Ok(())
 }
 
@@ -709,6 +719,7 @@ pub async fn sync_runtime_input_plugin(
     let mut data_completed = false;
     let mut saw_unflushed_batches = false;
     let mut pending_source_tasks: JoinSet<io::Result<()>> = JoinSet::new();
+    let ingest = Arc::new(Ingest::new());
     let mut control_reader = BufferedRuntimeFrameReader::new();
     let mut data_reader = BufferedRuntimeFrameReader::new();
     loop {
@@ -741,7 +752,8 @@ pub async fn sync_runtime_input_plugin(
                     }
                     PluginFrame::SourceEvent(SourceEvent::Completed) => {
                         control_completed = true;
-                        drain_runtime_source_tasks(&mut pending_source_tasks).await?;
+                        drain_runtime_source_ingest(&mut pending_source_tasks, ingest.clone())
+                            .await?;
                     }
                     PluginFrame::OffsetRequest(request) => {
                         let response = handle_runtime_offset_request(&offsets, request);
@@ -768,7 +780,7 @@ pub async fn sync_runtime_input_plugin(
                     .await?
                 {
                     control_completed = true;
-                    drain_runtime_source_tasks(&mut pending_source_tasks).await?;
+                    drain_runtime_source_ingest(&mut pending_source_tasks, ingest.clone()).await?;
                     continue;
                 }
                 pending_source_tasks.abort_all();
@@ -792,12 +804,14 @@ pub async fn sync_runtime_input_plugin(
                         }
                         let offsets = offsets.clone();
                         let shared_output = shared_output.clone();
+                        let ingest = ingest.clone();
                         pending_source_tasks.spawn_blocking(move || {
-                            futures::executor::block_on(ingest_raw_runtime_tasks_into_core(
+                            ingest_raw_runtime_tasks_into_core(
                                 tasks,
                                 offsets,
                                 shared_output,
-                            ))
+                                ingest,
+                            )
                         });
                         saw_unflushed_batches = true;
                     }
@@ -861,7 +875,7 @@ pub async fn sync_runtime_input_plugin(
                     });
                 }
                 PluginDataFrame::CheckpointUpdate { update } => {
-                    drain_runtime_source_tasks(&mut pending_source_tasks).await?;
+                    drain_runtime_source_ingest(&mut pending_source_tasks, ingest.clone()).await?;
                     if Config::debug_enabled() || Config::log_wal_enabled() {
                         info!(
                             "runtime source host: checkpoint update key={} authority={:?} saw_unflushed_batches={}",
@@ -879,7 +893,7 @@ pub async fn sync_runtime_input_plugin(
                     store_checkpoint_update(&offsets, &update)?;
                 }
                 PluginDataFrame::OffsetMaterializationHints { hints } => {
-                    drain_runtime_source_tasks(&mut pending_source_tasks).await?;
+                    drain_runtime_source_ingest(&mut pending_source_tasks, ingest.clone()).await?;
                     if saw_unflushed_batches {
                         flush_all_segments(offsets.clone())
                             .await
@@ -897,7 +911,7 @@ pub async fn sync_runtime_input_plugin(
         }
 
         if control_completed && data_completed {
-            drain_runtime_source_tasks(&mut pending_source_tasks).await?;
+            drain_runtime_source_ingest(&mut pending_source_tasks, ingest.clone()).await?;
             if saw_unflushed_batches {
                 flush_all_segments(offsets.clone())
                     .await
@@ -920,7 +934,8 @@ pub async fn sync_runtime_input_plugin(
                         .await?
                         {
                             control_completed = true;
-                            drain_runtime_source_tasks(&mut pending_source_tasks).await?;
+                            drain_runtime_source_ingest(&mut pending_source_tasks, ingest.clone())
+                                .await?;
                             continue;
                         }
                         pending_source_tasks.abort_all();
@@ -955,7 +970,7 @@ pub async fn sync_runtime_input_plugin(
         }
     }
 
-    drain_runtime_source_tasks(&mut pending_source_tasks).await?;
+    drain_runtime_source_ingest(&mut pending_source_tasks, ingest).await?;
     Ok(())
 }
 
