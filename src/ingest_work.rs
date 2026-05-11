@@ -990,13 +990,12 @@ impl Ingest {
 
         let oldest_time = window.front().unwrap().0;
         let total_bytes: u64 = window.iter().map(|(_, bytes)| bytes).sum();
-        let duration = now.duration_since(oldest_time).as_secs_f64();
-
-        if duration == 0.0 {
-            return 0;
-        }
-
-        (total_bytes as f64 / duration) as u64
+        crate::ingest::tuner::rolling_rate_bytes_per_sec(
+            oldest_time,
+            now,
+            total_bytes,
+            crate::ingest::tuner::MIN_THROUGHPUT_RATE_WINDOW,
+        )
     }
 
     // get_optmial_chunk_size removed: logic moved to tuner and applied inline where invoked

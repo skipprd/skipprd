@@ -1,8 +1,74 @@
 use crate::helpers::configuration::Config;
 use std::collections::VecDeque;
 use std::sync::atomic::Ordering;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 use tracing::{debug, info};
+
+/// Minimum wall time before bytes/s (or throughput trend) is treated as meaningful.
+/// Shorter spans yield unstable divisions when many samples land in one burst.
+pub const MIN_THROUGHPUT_RATE_WINDOW: Duration = Duration::from_millis(100);
+
+/// Bytes per second over `elapsed`, or zero if elapsed is shorter than `min_elapsed`.
+pub fn rolling_rate_bytes_per_sec_for_elapsed(
+    elapsed: Duration,
+    total_bytes: u64,
+    min_elapsed: Duration,
+) -> u64 {
+    if elapsed < min_elapsed {
+        return 0;
+    }
+    let secs = elapsed.as_secs_f64();
+    if secs <= 0.0 {
+        return 0;
+    }
+    (total_bytes as f64 / secs) as u64
+}
+
+/// Rolling-window ingest rate: `total_bytes` since `oldest` until `now`.
+pub fn rolling_rate_bytes_per_sec(
+    oldest: Instant,
+    now: Instant,
+    total_bytes: u64,
+    min_elapsed: Duration,
+) -> u64 {
+    rolling_rate_bytes_per_sec_for_elapsed(
+        now.saturating_duration_since(oldest),
+        total_bytes,
+        min_elapsed,
+    )
+}
+
+/// Delta in reported bytes/s per second of wall time; zero if sample span is too short.
+pub fn throughput_trend_per_sec_for_span(
+    span: Duration,
+    oldest_bps: u64,
+    newest_bps: u64,
+    min_span: Duration,
+) -> f64 {
+    if span < min_span {
+        return 0.0;
+    }
+    let time_diff = span.as_secs_f64();
+    if time_diff <= 0.0 {
+        return 0.0;
+    }
+    (newest_bps as f64 - oldest_bps as f64) / time_diff
+}
+
+pub fn throughput_trend_per_sec(
+    oldest_time: Instant,
+    newest_time: Instant,
+    oldest_bps: u64,
+    newest_bps: u64,
+    min_span: Duration,
+) -> f64 {
+    throughput_trend_per_sec_for_span(
+        newest_time.saturating_duration_since(oldest_time),
+        oldest_bps,
+        newest_bps,
+        min_span,
+    )
+}
 
 fn update_retry_ema_x100() -> u64 {
     static LAST_WAL_RETRIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -320,12 +386,7 @@ pub fn tune_chunk_size(
     } else {
         let oldest = throughput_history.front().unwrap();
         let newest = throughput_history.back().unwrap();
-        let time_diff = newest.0.duration_since(oldest.0).as_secs_f64();
-        if time_diff == 0.0 {
-            0.0
-        } else {
-            (newest.1 as f64 - oldest.1 as f64) / time_diff
-        }
+        throughput_trend_per_sec(oldest.0, newest.0, oldest.1, newest.1, MIN_THROUGHPUT_RATE_WINDOW)
     };
     // Compute next size
     let inputs = ChunkSizeInputs {
@@ -339,4 +400,73 @@ pub fn tune_chunk_size(
     };
     let next = compute_optimal_chunk_size(&inputs);
     (next, trend)
+}
+
+#[cfg(test)]
+mod throughput_window_tests {
+    use super::{
+        rolling_rate_bytes_per_sec_for_elapsed, throughput_trend_per_sec_for_span,
+        MIN_THROUGHPUT_RATE_WINDOW,
+    };
+    use std::time::Duration;
+
+    #[test]
+    fn rolling_rate_zero_when_elapsed_below_min() {
+        assert_eq!(
+            rolling_rate_bytes_per_sec_for_elapsed(
+                Duration::from_millis(10),
+                1_000_000_000,
+                MIN_THROUGHPUT_RATE_WINDOW,
+            ),
+            0
+        );
+    }
+
+    #[test]
+    fn rolling_rate_matches_bytes_over_seconds_when_above_min() {
+        assert_eq!(
+            rolling_rate_bytes_per_sec_for_elapsed(
+                Duration::from_secs(2),
+                100,
+                MIN_THROUGHPUT_RATE_WINDOW,
+            ),
+            50
+        );
+    }
+
+    #[test]
+    fn rolling_rate_nonzero_at_exact_min_window() {
+        assert_eq!(
+            rolling_rate_bytes_per_sec_for_elapsed(
+                MIN_THROUGHPUT_RATE_WINDOW,
+                10_000,
+                MIN_THROUGHPUT_RATE_WINDOW,
+            ),
+            100_000
+        );
+    }
+
+    #[test]
+    fn trend_zero_when_span_below_min() {
+        assert_eq!(
+            throughput_trend_per_sec_for_span(
+                Duration::from_micros(500),
+                0,
+                1_000_000_000_000,
+                MIN_THROUGHPUT_RATE_WINDOW,
+            ),
+            0.0
+        );
+    }
+
+    #[test]
+    fn trend_is_delta_over_time_when_span_sufficient() {
+        let t = throughput_trend_per_sec_for_span(
+            Duration::from_millis(500),
+            100,
+            600,
+            MIN_THROUGHPUT_RATE_WINDOW,
+        );
+        assert!((t - 1000.0).abs() < 1e-6);
+    }
 }
