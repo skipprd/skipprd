@@ -1,8 +1,8 @@
 use super::parquet_util::serialize_to_parquet;
-use skippr_runtime_sdk::plugins::DataSink;
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 use serde_derive::Deserialize;
+use skippr_runtime_sdk::plugins::DataSink;
 use ssh2::Session;
 use std::io::Write;
 use std::net::TcpStream;

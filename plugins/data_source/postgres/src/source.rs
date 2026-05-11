@@ -9,15 +9,14 @@ use tokio_postgres::{NoTls, Row};
 use tracing::{info, warn};
 
 use crate::pgoutput::{self, PgColumn, PgOutputMessage};
-use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
 use skippr_runtime_sdk::plugins::cdc::{
-    source_capabilities, MutationKind, PostgresCheckpoint,
-    WalRowMeta,
+    source_capabilities, MutationKind, PostgresCheckpoint, WalRowMeta,
 };
 use skippr_runtime_sdk::plugins::{
     DataSink, DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
 };
+use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
+use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DataSourcePostgresPluginConfig {

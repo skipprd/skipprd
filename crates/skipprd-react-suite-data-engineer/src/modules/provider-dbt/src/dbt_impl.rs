@@ -1252,8 +1252,7 @@ impl DbtProjectProvider {
             .as_ref()
             .map(|b| String::from_utf8_lossy(b).to_string());
         let base = existing_text.as_deref().unwrap_or(&rendered);
-        let sanitized =
-            sanitize_dbt_project_yaml(base, project_name, scope.project_id.as_str());
+        let sanitized = sanitize_dbt_project_yaml(base, project_name, scope.project_id.as_str());
         if existing.is_none() || sanitized.changed {
             self.storage
                 .put_bytes(&project_key, sanitized.text.as_bytes(), "text/yaml")
@@ -1274,8 +1273,7 @@ impl DbtProjectProvider {
             write_file(proj_path, rendered.as_bytes())?;
         }
         let raw = std::fs::read_to_string(proj_path).unwrap_or_default();
-        let sanitized =
-            sanitize_dbt_project_yaml(&raw, project_name, scope.project_id.as_str());
+        let sanitized = sanitize_dbt_project_yaml(&raw, project_name, scope.project_id.as_str());
         if sanitized.changed {
             write_file(proj_path, sanitized.text.as_bytes())?;
             // Best-effort persistence back to storage for future runs.
@@ -1666,7 +1664,8 @@ mod tests {
 
     #[test]
     fn sanitize_dbt_project_yaml_emits_on_run_start_strip_with_hint() {
-        let raw = "name: demo\nprofile: demo\non-run-start:\n  - '{{ validate_athena_work_group() }}'\n";
+        let raw =
+            "name: demo\nprofile: demo\non-run-start:\n  - '{{ validate_athena_work_group() }}'\n";
         let out = sanitize_dbt_project_yaml(raw, "demo", "demo");
         assert!(out.changed);
         assert!(!out.text.contains("on-run-start"));
@@ -1675,7 +1674,9 @@ mod tests {
             .iter()
             .find(|a| a.key_path == vec!["on-run-start".to_string()])
             .expect("on-run-start strip artifact");
-        assert!(artifact.value_summary.contains("validate_athena_work_group"));
+        assert!(artifact
+            .value_summary
+            .contains("validate_athena_work_group"));
         assert!(artifact
             .relocation_hint
             .as_ref()
@@ -1696,8 +1697,7 @@ mod tests {
 
     #[test]
     fn sanitize_dbt_project_yaml_strips_top_level_vars_with_per_model_hint() {
-        let raw =
-            "name: demo\nprofile: demo\nvars:\n  some_global: 1\n  another: 'x'\n";
+        let raw = "name: demo\nprofile: demo\nvars:\n  some_global: 1\n  another: 'x'\n";
         let out = sanitize_dbt_project_yaml(raw, "demo", "demo");
         assert!(out.changed);
         let artifact = out

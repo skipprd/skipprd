@@ -15,11 +15,11 @@ use tokio::sync::mpsc;
 use tracing::info;
 
 use crate::helpers::configuration::Config;
-use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
 use crate::helpers::plugin_config::PluginConfigEntry;
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
-use skippr_runtime_sdk::plugins::{DataSink, DataSource};
 use crate::RUNNING;
+use skippr_runtime_sdk::plugins::{DataSink, DataSource};
+use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
+use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceHttpServerPluginConfig {

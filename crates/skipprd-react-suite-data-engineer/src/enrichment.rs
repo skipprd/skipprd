@@ -533,10 +533,7 @@ impl DataEngineerSuite {
         let plan_kind = T::track_kind();
         let plan_key = plan.plan_key.clone();
         let track = plan_kind.as_str();
-        let chunks: Vec<Vec<String>> = task_ids
-            .chunks(chunk_size)
-            .map(|c| c.to_vec())
-            .collect();
+        let chunks: Vec<Vec<String>> = task_ids.chunks(chunk_size).map(|c| c.to_vec()).collect();
         let chunks_total = chunks.len();
         let limiter = crate::enrichment_concurrency::AdaptiveLimiter::new();
         let started_at = std::time::Instant::now();

@@ -15,11 +15,11 @@ use tracing::error;
 use zip::ZipArchive;
 
 use crate::helpers::configuration::Config;
-use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes, Offsets};
 use crate::helpers::plugin_config::PluginConfigEntry;
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
-use skippr_runtime_sdk::plugins::{DataSink, DataSource};
 use crate::serdes::input_format::InputFormat;
+use skippr_runtime_sdk::plugins::{DataSink, DataSource};
+use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes, Offsets};
+use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
 
 type BatchSender = UnboundedSender<Vec<Vec<IngestBatch>>>;
 

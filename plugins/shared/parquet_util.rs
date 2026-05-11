@@ -21,7 +21,8 @@ pub async fn serialize_to_parquet(
         raw_batches.push(batch?);
     }
 
-    let order_fields = skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order(&schema);
+    let order_fields =
+        skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order(&schema);
     let sorted_batches = skippr_runtime_sdk::converters::parquet_ordering::materialize_and_sort(
         raw_batches,
         &schema,

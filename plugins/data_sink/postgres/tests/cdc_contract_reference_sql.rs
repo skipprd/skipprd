@@ -5,13 +5,13 @@
 use std::collections::HashMap;
 use std::time::SystemTime;
 
-use skippr_runtime_sdk::sink_compat::segment_file::{PartitionKey, SegmentFile};
-use skippr_runtime_sdk::progress::OffsetKey;
-use skippr_runtime_sdk::plugins::cdc::*;
 use skippr_plugin_data_sink_postgres::{
     ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
     tombstone_table_name, upsert_if_newer_sql, PostgresCdcBackend,
 };
+use skippr_runtime_sdk::plugins::cdc::*;
+use skippr_runtime_sdk::progress::OffsetKey;
+use skippr_runtime_sdk::sink_compat::segment_file::{PartitionKey, SegmentFile};
 
 fn to_hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()

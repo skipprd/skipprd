@@ -1,12 +1,12 @@
-use skippr_runtime_sdk::sink_compat::BufferChunker;
 use crate::helpers::configuration::DataSinkPluginConfig;
-use skippr_runtime_sdk::plugins::DataSink;
 use async_trait::async_trait;
 use dashmap::DashSet;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
 use once_cell::sync::Lazy;
 use serde_derive::Deserialize;
+use skippr_runtime_sdk::plugins::DataSink;
+use skippr_runtime_sdk::sink_compat::BufferChunker;
 use tiberius::{Client, Config as TibConfig};
 use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncWriteCompatExt;

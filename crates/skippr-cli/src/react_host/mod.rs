@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use react_core::resolved_config::{ReactResolvedConfig, StorageMode};
 use react_core::suite::{DebugProviderRegistry, SuiteCtx, SuiteRegistry};
-use vector::{LanceStorageOptions, lance_storage_options_from_credentials};
+use vector::{lance_storage_options_from_credentials, LanceStorageOptions};
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct SkipprHost;

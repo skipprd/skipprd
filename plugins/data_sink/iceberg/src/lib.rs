@@ -1,4 +1,6 @@
-pub use skippr_runtime_sdk::{converters, discover, helpers, ingest, lineage, metrics, plugins, serdes};
+pub use skippr_runtime_sdk::{
+    converters, discover, helpers, ingest, lineage, metrics, plugins, serdes,
+};
 
 #[path = "../../../shared/cdc_encode.rs"]
 pub mod cdc_encode;

@@ -1,5 +1,4 @@
 use crate::helpers::configuration::DataSinkPluginConfig;
-use skippr_runtime_sdk::plugins::DataSink;
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
@@ -7,6 +6,7 @@ use lapin::{
     options::*, types::FieldTable, BasicProperties, Connection, ConnectionProperties, ExchangeKind,
 };
 use serde_derive::Deserialize;
+use skippr_runtime_sdk::plugins::DataSink;
 use tracing::info;
 
 #[derive(Debug, Deserialize, Clone)]

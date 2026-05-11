@@ -15,12 +15,14 @@ use std::time::Duration;
 use serde_derive::Deserialize;
 
 use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes, Offsets};
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks, ThroughputMetrics};
+use skippr_runtime_sdk::source_compat::{
+    Ingest, IngestBatch, IngestTask, IngestTasks, ThroughputMetrics,
+};
 
 use crate::helpers::Helpers;
+use futures::stream::{self, StreamExt};
 use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::plugins::DataSource;
-use futures::stream::{self, StreamExt};
 use skippr_runtime_sdk::protocol::RuntimeExecutionContext;
 use std::io::BufRead as _;
 use std::sync::atomic::AtomicUsize;
@@ -284,9 +286,10 @@ impl DataSourceS3Plugin {
                 let mut held: Vec<OwnedSemaphorePermit> = Vec::new();
                 loop {
                     sleep(Duration::from_millis(500)).await;
-                    let target = skippr_runtime_sdk::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET
-                        .load(AtomicOrdering::Relaxed)
-                        .clamp(8, 512);
+                    let target =
+                        skippr_runtime_sdk::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET
+                            .load(AtomicOrdering::Relaxed)
+                            .clamp(8, 512);
                     if target > configured_total {
                         let add = target - configured_total;
                         dl_sem_mgr.add_permits(add);

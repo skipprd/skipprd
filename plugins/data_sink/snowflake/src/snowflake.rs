@@ -20,9 +20,9 @@ use std::sync::Arc;
 use tracing::{error, info, warn};
 use url::Url;
 
-use skippr_runtime_sdk::sink_compat::BufferChunker;
 use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
 use skippr_runtime_sdk::plugins::{DataSink, SchemaSink};
+use skippr_runtime_sdk::sink_compat::BufferChunker;
 
 static ENSURED_SCHEMAS: Lazy<DashMap<String, Arc<tokio::sync::OnceCell<()>>>> =
     Lazy::new(DashMap::new);
@@ -1679,7 +1679,9 @@ impl DataSinkSnowflakePlugin {
                 .child_fields()
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect();
-            match skippr_runtime_sdk::converters::skippr_arrow::convert_skippr_to_arrow(Box::new(fields)) {
+            match skippr_runtime_sdk::converters::skippr_arrow::convert_skippr_to_arrow(Box::new(
+                fields,
+            )) {
                 Ok(installed_schema) => {
                     return Self::col_defs_for_arrow_schema(&installed_schema);
                 }
@@ -2481,7 +2483,10 @@ impl SchemaSink for DataSinkSnowflakePlugin {
 
         self.ensure_schema().await?;
 
-        let fields: std::collections::HashMap<String, skippr_runtime_sdk::discover::OutputMetadata> = metadata
+        let fields: std::collections::HashMap<
+            String,
+            skippr_runtime_sdk::discover::OutputMetadata,
+        > = metadata
             .child_fields()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();

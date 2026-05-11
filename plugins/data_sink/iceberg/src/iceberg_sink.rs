@@ -29,12 +29,12 @@ use serde_derive::Deserialize;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use skippr_runtime_sdk::sink_compat::BufferChunker;
-use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
 use crate::helpers::configuration::DataSinkPluginConfig;
+use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
 use skippr_runtime_sdk::plugins::cdc::EffectiveGuarantee;
 use skippr_runtime_sdk::plugins::{DataSink, SchemaSink};
 use skippr_runtime_sdk::protocol::{RuntimeBinding, RuntimeExecutionContext};
+use skippr_runtime_sdk::sink_compat::BufferChunker;
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSinkIcebergPluginConfig {

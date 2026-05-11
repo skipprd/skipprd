@@ -202,10 +202,7 @@ impl PromptContextBuilder<Unset, Unset, Unset, Unset> {
 // already `Set`, which is what makes "set twice" a compile error.
 
 impl<M, Cr, S> PromptContextBuilder<Unset, M, Cr, S> {
-    pub fn planning_context(
-        self,
-        v: impl Into<String>,
-    ) -> PromptContextBuilder<Set, M, Cr, S> {
+    pub fn planning_context(self, v: impl Into<String>) -> PromptContextBuilder<Set, M, Cr, S> {
         PromptContextBuilder {
             plan_kind: self.plan_kind,
             plan_key: self.plan_key,
@@ -239,10 +236,7 @@ impl<C, Cr, S> PromptContextBuilder<C, Unset, Cr, S> {
 }
 
 impl<C, M, S> PromptContextBuilder<C, M, Unset, S> {
-    pub fn critique_guidance(
-        self,
-        v: impl Into<String>,
-    ) -> PromptContextBuilder<C, M, Set, S> {
+    pub fn critique_guidance(self, v: impl Into<String>) -> PromptContextBuilder<C, M, Set, S> {
         PromptContextBuilder {
             plan_kind: self.plan_kind,
             plan_key: self.plan_key,
@@ -417,9 +411,12 @@ mod tests {
             .critique_guidance("CRIT")
             .plan_summary("SUM")
             .build();
-        let reason_rendered =
-            EnrichmentEnvelopeBuilder::new(Phase::CleansePlan, TurnDirective::Reason, reason_packet)
-                .build();
+        let reason_rendered = EnrichmentEnvelopeBuilder::new(
+            Phase::CleansePlan,
+            TurnDirective::Reason,
+            reason_packet,
+        )
+        .build();
         assert!(
             !reason_rendered.contains("reasoning_memo"),
             "reason envelope must NOT carry reasoning_memo; got: {reason_rendered}"

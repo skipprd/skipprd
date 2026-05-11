@@ -8,8 +8,8 @@ use once_cell::sync::Lazy;
 use serde_derive::Deserialize;
 use tracing::{error, info, warn};
 
-use skippr_runtime_sdk::sink_compat::BufferChunker;
 use skippr_runtime_sdk::plugins::{DataSink, SchemaSink};
+use skippr_runtime_sdk::sink_compat::BufferChunker;
 
 static ENSURED_DATASETS: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 static ENSURED_TABLES: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
@@ -924,7 +924,10 @@ impl SchemaSink for DataSinkBigqueryPlugin {
 
         self.ensure_dataset().await?;
 
-        let fields: std::collections::HashMap<String, skippr_runtime_sdk::discover::OutputMetadata> = metadata
+        let fields: std::collections::HashMap<
+            String,
+            skippr_runtime_sdk::discover::OutputMetadata,
+        > = metadata
             .child_fields()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();

@@ -386,7 +386,13 @@ pub fn tune_chunk_size(
     } else {
         let oldest = throughput_history.front().unwrap();
         let newest = throughput_history.back().unwrap();
-        throughput_trend_per_sec(oldest.0, newest.0, oldest.1, newest.1, MIN_THROUGHPUT_RATE_WINDOW)
+        throughput_trend_per_sec(
+            oldest.0,
+            newest.0,
+            oldest.1,
+            newest.1,
+            MIN_THROUGHPUT_RATE_WINDOW,
+        )
     };
     // Compute next size
     let inputs = ChunkSizeInputs {

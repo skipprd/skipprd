@@ -2,9 +2,9 @@ use std::io;
 
 use clap::Parser;
 use datafusion::execution::SendableRecordBatchStream;
+use skippr_plugin_data_sink_postgres::{DataSinkPostgresPlugin, DataSinkPostgresPluginConfig};
 use skippr_runtime_sdk::plugins::cdc::SyncContext;
 use skippr_runtime_sdk::plugins::DataSink;
-use skippr_plugin_data_sink_postgres::{DataSinkPostgresPlugin, DataSinkPostgresPluginConfig};
 use skippr_runtime_sdk::sink_runtime_entry::{
     buffer_name_for_runtime_binding, run_runtime_data_sink_plugin,
 };

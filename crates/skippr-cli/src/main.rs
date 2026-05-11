@@ -4465,11 +4465,10 @@ dbt:
         warn_and_normalize_legacy_cli_config(&mut cfg).expect("normalize legacy keys");
 
         assert!(cfg.get("dbt").is_none());
-        assert!(
-            cfg.get("skippr")
-                .and_then(|skippr| skippr.get("tenant"))
-                .is_none()
-        );
+        assert!(cfg
+            .get("skippr")
+            .and_then(|skippr| skippr.get("tenant"))
+            .is_none());
     }
 
     #[test]
@@ -4726,13 +4725,11 @@ pipelines:
         }
         assert!(other_model.exists());
         assert_eq!(report.deleted_skipprd_remote.len(), 1);
-        assert!(
-            skipprd_storage
-                .list_prefix("auth-tenant/analytics/orders/")
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(skipprd_storage
+            .list_prefix("auth-tenant/analytics/orders/")
+            .await
+            .unwrap()
+            .is_empty());
         assert_eq!(
             skipprd_storage
                 .list_prefix("auth-tenant/analytics/customers/")
@@ -4742,13 +4739,11 @@ pipelines:
             1
         );
         assert_eq!(report.deleted_model_remote.len(), 1);
-        assert!(
-            model_storage
-                .list_prefix(&target.model_prefix)
-                .await
-                .unwrap()
-                .is_empty()
-        );
+        assert!(model_storage
+            .list_prefix(&target.model_prefix)
+            .await
+            .unwrap()
+            .is_empty());
         assert_eq!(
             model_storage.list_prefix(&model_keep).await.unwrap().len(),
             1

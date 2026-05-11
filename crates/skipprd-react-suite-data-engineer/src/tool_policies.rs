@@ -77,9 +77,8 @@ fn mutating_target_paths(args: &serde_json::Value) -> Vec<String> {
 
 /// Format the deny-list error shown to the LLM, embedding the relocation hint when one exists.
 fn format_deny_list_error(op: crate::tool_ops::FileOpKind, rel: &str) -> String {
-    let hint = crate::file_ownership::deny_list_hint(rel).unwrap_or(
-        "This path is system-managed and cannot be modified by the agent.",
-    );
+    let hint = crate::file_ownership::deny_list_hint(rel)
+        .unwrap_or("This path is system-managed and cannot be modified by the agent.");
     format!(
         "file op={} denied for '{}': {}",
         op.as_str(),
@@ -215,7 +214,10 @@ mod tests {
         .build();
 
         let err = policy_tool
-            .call(json!({"op": "patch", "path": "profiles.yml", "patch_text": "@@ \n"}), &ctx)
+            .call(
+                json!({"op": "patch", "path": "profiles.yml", "patch_text": "@@ \n"}),
+                &ctx,
+            )
             .await
             .expect_err("write to profiles.yml must be denied");
         assert!(err.contains("profiles.yml"), "error: {err}");

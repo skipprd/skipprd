@@ -10,12 +10,14 @@ use serde_derive::Deserialize;
 use tracing::error;
 
 use crate::helpers::configuration::Config;
-use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::helpers::Helpers;
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
-use skippr_runtime_sdk::plugins::{DataSink, DataSource, SourceExecutionContract, SourceOnceContract};
 use crate::RUNNING;
+use skippr_runtime_sdk::plugins::{
+    DataSink, DataSource, SourceExecutionContract, SourceOnceContract,
+};
+use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
+use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceStdinPluginConfig {

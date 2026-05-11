@@ -1,13 +1,13 @@
 use super::parquet_util::serialize_to_parquet;
-use skippr_runtime_sdk::sink_compat::BufferChunker;
 use crate::helpers::configuration::DataSinkPluginConfig;
-use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
-use skippr_runtime_sdk::plugins::DataSink;
 use async_trait::async_trait;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
 use datafusion::execution::SendableRecordBatchStream;
 use serde_derive::Deserialize;
+use skippr_runtime_sdk::plugins::DataSink;
+use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
+use skippr_runtime_sdk::sink_compat::BufferChunker;
 use std::io;
 use tracing::info;
 

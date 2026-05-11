@@ -10,10 +10,10 @@ use async_trait::async_trait;
 use clap::Parser;
 use datafusion::execution::SendableRecordBatchStream;
 use serde_derive::{Deserialize, Serialize};
-use skippr_runtime_sdk::sink_compat::BufferChunker;
-use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
 use skippr_runtime_sdk::plugins::cdc;
 use skippr_runtime_sdk::plugins::DataSink;
+use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
+use skippr_runtime_sdk::sink_compat::BufferChunker;
 use skippr_runtime_sdk::sink_runtime_entry::run_runtime_data_sink_plugin;
 use tracing::error;
 
@@ -57,7 +57,10 @@ impl DataSink for FileSinkRuntimePlugin {
     async fn install_schema_state(
         &self,
         _schema_version: u64,
-        _namespaces: &std::collections::BTreeMap<String, skippr_runtime_sdk::discover::OutputMetadata>,
+        _namespaces: &std::collections::BTreeMap<
+            String,
+            skippr_runtime_sdk::discover::OutputMetadata,
+        >,
     ) -> Result<(), io::Error> {
         Ok(())
     }

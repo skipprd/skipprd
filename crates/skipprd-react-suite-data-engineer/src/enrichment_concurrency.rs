@@ -249,7 +249,10 @@ mod tests {
         assert!(before >= 2, "should have grown above floor; got {before}");
         lim.record_throttle().await;
         let after = lim.current_cap();
-        assert!(after < before, "cap must drop; before={before} after={after}");
+        assert!(
+            after < before,
+            "cap must drop; before={before} after={after}"
+        );
         assert_eq!(lim.shrank_total(), 1);
         // Streak reset: one more success should not regrow immediately.
         lim.record_success().await;
@@ -288,8 +291,7 @@ mod tests {
         });
         // probe must NOT complete while p1 is held.
         let raced =
-            tokio::time::timeout(std::time::Duration::from_millis(50), async { probe.await })
-                .await;
+            tokio::time::timeout(std::time::Duration::from_millis(50), async { probe.await }).await;
         assert!(
             raced.is_err(),
             "probe should be blocked while permit is held"
@@ -306,10 +308,9 @@ mod tests {
         for _ in 0..GROW_AFTER_SUCCESSES {
             lim.record_success().await;
         }
-        let _p2 =
-            tokio::time::timeout(std::time::Duration::from_millis(100), lim.acquire())
-                .await
-                .expect("acquire must unblock after grow");
+        let _p2 = tokio::time::timeout(std::time::Duration::from_millis(100), lim.acquire())
+            .await
+            .expect("acquire must unblock after grow");
     }
 
     #[test]
@@ -368,8 +369,9 @@ mod tests {
         outcomes.sort_by_key(|(idx, _)| *idx);
         // Serial reference: same chunks, executed sequentially, would
         // produce exactly this ordered list.
-        let expected: Vec<(usize, String)> =
-            (0..chunks_total).map(|i| (i, format!("chunk-{i}"))).collect();
+        let expected: Vec<(usize, String)> = (0..chunks_total)
+            .map(|i| (i, format!("chunk-{i}")))
+            .collect();
         assert_eq!(outcomes, expected, "gather order must match chunk_idx");
     }
 

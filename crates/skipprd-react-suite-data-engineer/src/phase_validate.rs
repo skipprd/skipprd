@@ -807,7 +807,9 @@ mod tests {
             } => {
                 assert!(matches!(guard_kind, GuardBlockKind::PrecheckFailed));
                 assert!(reason.contains("Pre-validation failed"));
-                assert!(failure_context.brief.contains("stg_picnic_screen_birthdate"));
+                assert!(failure_context
+                    .brief
+                    .contains("stg_picnic_screen_birthdate"));
                 let excerpts = failure_context.log_excerpts.expect("log_excerpts");
                 assert!(excerpts.contains("schema_model_misplacement"));
                 assert!(excerpts.contains("models/staging/stg_picnic_screen_birthdate.yml"));

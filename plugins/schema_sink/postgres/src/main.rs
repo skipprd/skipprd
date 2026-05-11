@@ -1,9 +1,9 @@
 use std::io;
 
 use clap::Parser;
+use skippr_plugin_data_sink_postgres::{DataSinkPostgresPlugin, DataSinkPostgresPluginConfig};
 use skippr_runtime_sdk::discover::OutputMetadata;
 use skippr_runtime_sdk::plugins::SchemaSink;
-use skippr_plugin_data_sink_postgres::{DataSinkPostgresPlugin, DataSinkPostgresPluginConfig};
 use skippr_runtime_sdk::sink_runtime_entry::{
     buffer_name_for_runtime_binding, run_runtime_schema_sink_plugin,
 };

@@ -10,9 +10,9 @@ use tracing::{error, info};
 use dashmap::DashSet;
 use once_cell::sync::Lazy;
 
-use skippr_runtime_sdk::sink_compat::BufferChunker;
 use crate::helpers::configuration::DataSinkPluginConfig;
 use skippr_runtime_sdk::plugins::{DataSink, SchemaSink};
+use skippr_runtime_sdk::sink_compat::BufferChunker;
 
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 
@@ -648,7 +648,10 @@ impl SchemaSink for DataSinkMotherduckPlugin {
     ) -> Result<(), std::io::Error> {
         use skippr_runtime_sdk::converters::skippr_arrow::convert_skippr_to_arrow;
 
-        let fields: std::collections::HashMap<String, skippr_runtime_sdk::discover::OutputMetadata> = metadata
+        let fields: std::collections::HashMap<
+            String,
+            skippr_runtime_sdk::discover::OutputMetadata,
+        > = metadata
             .child_fields()
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect();

@@ -11,11 +11,11 @@ use crate::cdc_apply::{
     tombstone_table_name, upsert_if_newer_sql,
 };
 use crate::config::DataSinkPostgresPluginConfig;
-use skippr_runtime_sdk::sink_compat::BufferChunker;
 use skippr_runtime_sdk::converters::skippr_arrow::convert_skippr_to_arrow;
 use skippr_runtime_sdk::discover::OutputMetadata;
 use skippr_runtime_sdk::metrics::counters;
 use skippr_runtime_sdk::plugins::cdc::{MutationKind, SyncContext};
+use skippr_runtime_sdk::sink_compat::BufferChunker;
 
 static ENSURED_SCHEMAS: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 static ENSURED_TABLES: Lazy<DashSet<String>> = Lazy::new(DashSet::new);

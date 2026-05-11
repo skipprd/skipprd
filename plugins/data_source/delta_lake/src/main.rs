@@ -1,7 +1,7 @@
-use skippr_runtime_sdk::plugins::cdc;
-use skippr_runtime_sdk::plugins::DataSource;
 use skippr_plugin_data_source_delta_lake::*;
 use skippr_runtime_sdk::append_source_runtime::run_append_data_source_main;
+use skippr_runtime_sdk::plugins::cdc;
+use skippr_runtime_sdk::plugins::DataSource;
 
 #[tokio::main]
 async fn main() {

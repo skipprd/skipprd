@@ -297,10 +297,7 @@ pub async fn load_active_stripped_artifacts(ctx: &AgentCtx) -> Vec<StrippedArtif
 /// the agent is currently executing so the next author/repair turn surfaces them in the
 /// stripped-content prompt section. Best-effort: failures are logged and swallowed (a strip
 /// notification is informational, never the cause of a phase failure).
-pub async fn persist_stripped_artifacts(
-    ctx: &AgentCtx,
-    artifacts: Vec<StrippedArtifact>,
-) {
+pub async fn persist_stripped_artifacts(ctx: &AgentCtx, artifacts: Vec<StrippedArtifact>) {
     if artifacts.is_empty() {
         return;
     }
@@ -316,7 +313,9 @@ pub async fn persist_stripped_artifacts(
             return;
         }
         Ok(None) => {}
-        Err(e) => tracing::warn!("failed to load model plan for stripped-artifact persistence: {e}"),
+        Err(e) => {
+            tracing::warn!("failed to load model plan for stripped-artifact persistence: {e}")
+        }
     }
     match load_cleanse_plan(ctx).await {
         Ok(Some(mut plan)) => {
@@ -326,11 +325,11 @@ pub async fn persist_stripped_artifacts(
             }
         }
         Ok(None) => {
-            tracing::debug!(
-                "stripped artifacts produced but no active plan exists to record them"
-            );
+            tracing::debug!("stripped artifacts produced but no active plan exists to record them");
         }
-        Err(e) => tracing::warn!("failed to load cleanse plan for stripped-artifact persistence: {e}"),
+        Err(e) => {
+            tracing::warn!("failed to load cleanse plan for stripped-artifact persistence: {e}")
+        }
     }
 }
 

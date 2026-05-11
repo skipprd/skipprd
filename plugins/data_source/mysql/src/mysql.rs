@@ -11,16 +11,15 @@ use serde_json::{json, Map, Value};
 use tracing::{error, info, warn};
 
 use crate::helpers::configuration::Config;
-use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes, Offsets};
 use crate::helpers::plugin_config::PluginConfigEntry;
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
 use skippr_runtime_sdk::plugins::cdc::{
-    source_capabilities, MutationKind, MysqlCheckpoint,
-    WalRowMeta,
+    source_capabilities, MutationKind, MysqlCheckpoint, WalRowMeta,
 };
 use skippr_runtime_sdk::plugins::{
     DataSink, DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
 };
+use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes, Offsets};
+use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceMysqlPluginConfig {
