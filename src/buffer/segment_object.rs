@@ -27,8 +27,6 @@ struct S3MultipartWriter {
     hasher: Sha256,
     total_written: u64,
     part_number: i32,
-    /// Shadow copy of all bytes written, kept for the segment cache.
-    full_data: Vec<u8>,
 }
 
 impl S3MultipartWriter {
@@ -76,7 +74,6 @@ impl S3MultipartWriter {
             hasher: Sha256::new(),
             total_written: 0,
             part_number: 1,
-            full_data: Vec::with_capacity(MPU_PART_SIZE),
         })
     }
 
@@ -135,7 +132,6 @@ impl S3MultipartWriter {
         self.hasher.update(bytes);
         self.total_written = self.total_written.saturating_add(bytes.len() as u64);
         self.buf.extend_from_slice(bytes);
-        self.full_data.extend_from_slice(bytes);
         Ok(())
     }
 
@@ -154,7 +150,7 @@ impl S3MultipartWriter {
         sha
     }
 
-    async fn complete(mut self) -> io::Result<Vec<u8>> {
+    async fn complete(mut self) -> io::Result<()> {
         self.flush_part().await?;
         // Retry MPU complete for transient issues
         let mut attempts: u32 = 0;
@@ -190,7 +186,7 @@ impl S3MultipartWriter {
                 }
             }
         }
-        Ok(self.full_data)
+        Ok(())
     }
 }
 
@@ -229,7 +225,7 @@ impl SegmentObject {
     }
 
     /// Streams a WAL snapshot to S3 and publishes a commit marker.
-    /// Returns (meta, rows, sha256, bucket, key, captured_segment_bytes).
+    /// Returns (meta, rows, sha256, bucket, key). Segment bytes live on S3 only after commit.
     pub async fn stream_snapshot_to_s3(
         client: &aws_sdk_s3::Client,
         prefix_url: &str,
@@ -244,7 +240,6 @@ impl SegmentObject {
         [u8; 32], /*sha256*/
         String,   /*bucket*/
         String,   /*key*/
-        Vec<u8>,  /*segment bytes*/
     )> {
         let (bucket, seg_key, commit_key) = Self::compute_keys(prefix_url, snapshot_id)?;
         let mut writer =
@@ -339,8 +334,7 @@ impl SegmentObject {
         writer.write_bytes(&sha)?;
         writer.maybe_flush().await?;
 
-        let captured_data = std::mem::take(&mut writer.full_data);
-        let _ = writer.complete().await?;
+        writer.complete().await?;
 
         let commit_bytes = SegmentFile::build_commit_header_bytes(parts_count, total_bytes, &sha);
         {
@@ -382,6 +376,6 @@ impl SegmentObject {
             offsets: offsets.clone(),
             index,
         };
-        Ok((meta, total_rows, sha, bucket, seg_key, captured_data))
+        Ok((meta, total_rows, sha, bucket, seg_key))
     }
 }

@@ -1,4 +1,5 @@
 pub mod ingest_buffer;
+pub mod s3_wal_body_cache;
 pub mod segment_file;
 pub mod segment_object;
 pub mod wal_store;

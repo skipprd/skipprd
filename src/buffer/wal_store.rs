@@ -15,14 +15,8 @@ use url::Url;
 
 /// Where a segment was written -- compiler-enforced, no Options.
 pub enum SegmentWriteLocation {
-    Disk {
-        path: PathBuf,
-    },
-    S3 {
-        key: String,
-        bucket: String,
-        data: Vec<u8>,
-    },
+    Disk { path: PathBuf },
+    S3 { key: String, bucket: String },
 }
 
 pub struct SegmentWriteResult {
@@ -92,7 +86,7 @@ impl WalStore for S3WalStore {
         part_meta_blobs: &HashMap<PartitionKey, Vec<u8>>,
     ) -> io::Result<SegmentWriteResult> {
         let client = crate::helpers::s3::get_s3_client().await;
-        let (meta, total_rows, sha256, bucket, key, data) = SegmentObject::stream_snapshot_to_s3(
+        let (meta, total_rows, sha256, bucket, key) = SegmentObject::stream_snapshot_to_s3(
             &client,
             &self.prefix_url,
             snapshot_id,
@@ -106,7 +100,7 @@ impl WalStore for S3WalStore {
             meta,
             total_rows,
             sha256,
-            location: SegmentWriteLocation::S3 { key, bucket, data },
+            location: SegmentWriteLocation::S3 { key, bucket },
         })
     }
 }

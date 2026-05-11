@@ -7,6 +7,7 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::{Client as S3Client, Error as S3Error};
 use rand::{thread_rng, Rng};
 use serde_json::Value;
+use std::io;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::OnceCell;
@@ -159,6 +160,47 @@ pub async fn get_bytes(key: &str) -> Result<Vec<u8>, SdkError<GetObjectError>> {
                 attempt += 1;
                 if attempt >= max_attempts {
                     return Err(e);
+                }
+                let base = 200u64.saturating_mul(1u64 << attempt.min(10));
+                let jitter: u64 = thread_rng().gen_range(0..100);
+                let sleep_ms = (base + jitter).min(5_000);
+                tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+            }
+        }
+    }
+}
+
+/// Download full object bytes from an arbitrary bucket (e.g. WAL bucket), with retries.
+pub async fn get_object_bytes_for_bucket(bucket: &str, key: &str) -> io::Result<Vec<u8>> {
+    let client = get_s3_client().await;
+    let mut attempt: u32 = 0;
+    let max_attempts: u32 = 6;
+    loop {
+        let res = client.get_object().bucket(bucket).key(key).send().await;
+        match res {
+            Ok(resp) => match resp.body.collect().await {
+                Ok(agg) => return Ok(agg.into_bytes().to_vec()),
+                Err(e) => {
+                    attempt += 1;
+                    if attempt >= max_attempts {
+                        return Err(io::Error::new(
+                            io::ErrorKind::Other,
+                            format!("s3 get_object body collect {}: {}", key, e),
+                        ));
+                    }
+                    let base = 200u64.saturating_mul(1u64 << attempt.min(10));
+                    let jitter: u64 = thread_rng().gen_range(0..100);
+                    let sleep_ms = (base + jitter).min(5_000);
+                    tokio::time::sleep(Duration::from_millis(sleep_ms)).await;
+                }
+            },
+            Err(e) => {
+                attempt += 1;
+                if attempt >= max_attempts {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Other,
+                        format!("s3 get_object {}: {}", key, e),
+                    ));
                 }
                 let base = 200u64.saturating_mul(1u64 << attempt.min(10));
                 let jitter: u64 = thread_rng().gen_range(0..100);

@@ -3,6 +3,7 @@ enum PersistenceState {
     MemoryOnly,
     Persisted,
 }
+use crate::buffer::s3_wal_body_cache;
 use crate::buffer::segment_file::{
     PartitionKey, SegmentFile, SegmentFileMetadata, SegmentPartitionIndexEntry,
 };
@@ -50,15 +51,16 @@ use tracing::{debug, error, info, warn};
 use tokio::sync::mpsc;
 
 /// Identifies a WAL segment and provides access to its data.
-/// `Disk` holds a local path; `S3` holds the object key, bucket, and full
-/// in-memory bytes (downloaded once during candidate scanning).
+/// `Disk` holds a local path; `S3` holds bucket + object key. Optional `body`
+/// is a hot in-memory copy; when absent, bytes live on S3 and compaction loads
+/// them via the bounded body LRU.
 #[derive(Clone)]
 pub(crate) enum SegmentSource {
     Disk(PathBuf),
     S3 {
         key: String,
         bucket: String,
-        data: Arc<Vec<u8>>,
+        body: Option<Arc<Vec<u8>>>,
     },
 }
 
@@ -81,13 +83,16 @@ impl SegmentSource {
         }
     }
 
-    fn data_len(&self) -> io::Result<u64> {
+    fn logical_byte_len(&self, meta: &SegmentFileMetadata) -> io::Result<u64> {
         match self {
             SegmentSource::Disk(p) => {
                 let file = OpenOptions::new().read(true).open(p)?;
                 Ok(file.metadata()?.len())
             }
-            SegmentSource::S3 { data, .. } => Ok(data.len() as u64),
+            SegmentSource::S3 {
+                body: Some(data), ..
+            } => Ok(data.len() as u64),
+            SegmentSource::S3 { body: None, .. } => Ok(meta.total_bytes),
         }
     }
 
@@ -199,6 +204,62 @@ struct CachedSegment {
 }
 
 static SEGMENT_CACHE: OnceLazy<DashMap<String, CachedSegment>> = OnceLazy::new(DashMap::new);
+
+fn linux_vm_rss_kb() -> Option<u64> {
+    #[cfg(target_os = "linux")]
+    {
+        if let Ok(s) = std::fs::read_to_string("/proc/self/status") {
+            for line in s.lines() {
+                if let Some(rest) = line.strip_prefix("VmRSS:") {
+                    if let Some(kb) = rest.trim().split_whitespace().next() {
+                        return kb.parse().ok();
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+fn wal_segment_cache_obs_stats() -> (usize, u64, usize) {
+    let mut s3_entries = 0usize;
+    let mut indexed_body_bytes = 0u64;
+    let mut remote_meta_only = 0usize;
+    for e in SEGMENT_CACHE.iter() {
+        if let SegmentSource::S3 { body, .. } = &e.value().source {
+            s3_entries += 1;
+            if let Some(d) = body {
+                indexed_body_bytes = indexed_body_bytes.saturating_add(d.len() as u64);
+            } else {
+                remote_meta_only += 1;
+            }
+        }
+    }
+    (s3_entries, indexed_body_bytes, remote_meta_only)
+}
+
+fn log_wal_s3_memory_obs(tag: &str) {
+    if !Config::log_wal_enabled() {
+        return;
+    }
+    let (n_s3, ix_bytes, remote_n) = wal_segment_cache_obs_stats();
+    let rss = linux_vm_rss_kb()
+        .map(|k| format!("vm_rss_kb={}", k))
+        .unwrap_or_else(|| "vm_rss_kb=n/a".to_string());
+    let (cap_b, cap_e) = s3_wal_body_cache::autotuned_caps();
+    info!(
+        "WAL mem obs tag={} {} segment_cache_s3_entries={} segment_cache_s3_indexed_body_bytes={} segment_cache_s3_meta_only_entries={} s3_wal_body_lru_bytes={} s3_wal_body_lru_entries={} s3_wal_body_lru_autotune_max_bytes={} s3_wal_body_lru_autotune_max_entries={}",
+        tag,
+        rss,
+        n_s3,
+        ix_bytes,
+        remote_n,
+        s3_wal_body_cache::lru_byte_count(),
+        s3_wal_body_cache::lru_entry_count(),
+        cap_b,
+        cap_e,
+    );
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, Eq, PartialEq, Hash)]
 pub struct OffsetKeySerialize {
@@ -565,6 +626,9 @@ impl Buffers {
             append_wal_debug_trace(&format!("persist_offsets_durable id={}", snapshot_id));
         }
         Self::segment_cache_register_from_write(&write_result);
+        if is_s3_wal() {
+            log_wal_s3_memory_obs("after_persist_register");
+        }
         if Config::debug_enabled() || Config::log_wal_enabled() {
             info!(
                 "WAL persist cached id={} partitions={} offset_sample={:?}",
@@ -947,15 +1011,16 @@ impl Buffers {
 
     fn segment_cache_remove(segment_id: &str) {
         SEGMENT_CACHE.remove(segment_id);
+        s3_wal_body_cache::remove(segment_id);
     }
 
     fn segment_cache_register_from_write(result: &SegmentWriteResult) {
         let source = match &result.location {
             SegmentWriteLocation::Disk { path } => SegmentSource::Disk(path.clone()),
-            SegmentWriteLocation::S3 { key, bucket, data } => SegmentSource::S3 {
+            SegmentWriteLocation::S3 { key, bucket } => SegmentSource::S3 {
                 key: key.clone(),
                 bucket: bucket.clone(),
-                data: Arc::new(data.clone()),
+                body: None,
             },
         };
         Self::segment_cache_register(source, result.meta.clone());
@@ -1347,14 +1412,30 @@ impl Buffers {
             crate::metrics::counters::dec_wal_compactions_in_flight();
             return Ok(false);
         }
-        struct InflightGuard((String, u64, u64));
+        let s3_pin_id: Option<String> = match source {
+            SegmentSource::S3 { body: None, .. } => Some(source.segment_id().to_string()),
+            _ => None,
+        };
+        if let Some(ref pid) = s3_pin_id {
+            s3_wal_body_cache::S3_BODY_CACHE_PINS.insert(pid.clone());
+        }
+        struct InflightGuard {
+            inflight_key: (String, u64, u64),
+            s3_pin_id: Option<String>,
+        }
         impl Drop for InflightGuard {
             fn drop(&mut self) {
-                COMPACTION_IN_FLIGHT.remove(&self.0);
+                COMPACTION_IN_FLIGHT.remove(&self.inflight_key);
+                if let Some(pid) = self.s3_pin_id.take() {
+                    s3_wal_body_cache::S3_BODY_CACHE_PINS.remove(&pid);
+                }
                 crate::metrics::counters::dec_wal_compactions_in_flight();
             }
         }
-        let _guard = InflightGuard(inflight_key.clone());
+        let _guard = InflightGuard {
+            inflight_key: inflight_key.clone(),
+            s3_pin_id,
+        };
         if Config::debug_enabled() || Config::log_wal_enabled() {
             debug!(
                 "Compactor: start ns={} part={} time={} shard={} seg={} start={} len={} bytes={} out_key={}",
@@ -1362,7 +1443,7 @@ impl Buffers {
             );
         }
 
-        let file_len = source.data_len()?;
+        let file_len = source.logical_byte_len(meta)?;
         if idx.start >= file_len {
             error!(
                 "Compactor: partition start beyond file end for {} start={} len={} file_len={}",
@@ -1383,13 +1464,33 @@ impl Buffers {
             );
         }
 
+        let s3_resolved: Option<Arc<Vec<u8>>> = match source {
+            SegmentSource::S3 { body: Some(b), .. } => Some(b.clone()),
+            SegmentSource::S3 {
+                body: None,
+                bucket,
+                key,
+            } => Some(
+                s3_wal_body_cache::get_or_fetch(bucket, key, source.segment_id())
+                    .await
+                    .map_err(|e| {
+                        error!(
+                            "Compactor: S3 fetch seg={} bucket={} key={} err={}",
+                            seg_display, bucket, key, e
+                        );
+                        e
+                    })?,
+            ),
+            SegmentSource::Disk(_) => None,
+        };
+
         // ── Schema + batch-stream setup (branches on source type) ──────────
         let (tx, rx) = mpsc::channel::<Result<RecordBatch, DataFusionError>>(8);
         let start_pos = idx.start;
         let part_len = safe_len;
 
-        let schema: SchemaRef = match source {
-            SegmentSource::S3 { data, .. } => {
+        let schema: SchemaRef = match (&s3_resolved, source) {
+            (Some(data), SegmentSource::S3 { .. }) => {
                 let start = start_pos as usize;
                 let end = start.saturating_add(part_len as usize).min(data.len());
                 let mut cursor = io::Cursor::new(&data[start..end]);
@@ -1405,7 +1506,7 @@ impl Buffers {
                     }
                 }
             }
-            SegmentSource::Disk(seg_path) => {
+            (None, SegmentSource::Disk(seg_path)) => {
                 let mut file = OpenOptions::new().read(true).open(seg_path)?;
                 file.seek(io::SeekFrom::Start(start_pos))?;
                 let reader = io::BufReader::new(file);
@@ -1435,11 +1536,17 @@ impl Buffers {
                     }
                 }
             }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "compact: S3 segment without resolved body",
+                ));
+            }
         };
 
         // ── Spawn batch reader ─────────────────────────────────────────────
-        match source {
-            SegmentSource::S3 { data, .. } => {
+        match (&s3_resolved, source) {
+            (Some(data), SegmentSource::S3 { .. }) => {
                 let data = data.clone();
                 tokio::spawn(async move {
                     let start = start_pos as usize;
@@ -1475,7 +1582,7 @@ impl Buffers {
                     drop(tx);
                 });
             }
-            SegmentSource::Disk(seg_path) => {
+            (None, SegmentSource::Disk(seg_path)) => {
                 let seg_path_clone = seg_path.clone();
                 tokio::spawn(async move {
                     match OpenOptions::new().read(true).open(&seg_path_clone) {
@@ -1632,6 +1739,12 @@ impl Buffers {
                     drop(tx);
                 });
             }
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidInput,
+                    "compact: batch reader spawn mismatch",
+                ));
+            }
         }
 
         // ── Stream wrapper + output sync ───────────────────────────────────
@@ -1663,15 +1776,19 @@ impl Buffers {
         let cdc_ctx: Option<crate::plugins::cdc::SyncContext> = {
             use crate::plugins::cdc::{SyncContext, WalPartKind, WalPartMeta};
             let blobs_result: io::Result<std::collections::HashMap<PartitionKey, Vec<u8>>> =
-                match source {
-                    SegmentSource::Disk(seg_path) => match std::fs::File::open(seg_path) {
+                match (&s3_resolved, source) {
+                    (None, SegmentSource::Disk(seg_path)) => match std::fs::File::open(seg_path) {
                         Ok(mut f) => SegmentFile::read_part_meta_blobs_from_reader(&mut f),
                         Err(e) => Err(e),
                     },
-                    SegmentSource::S3 { data, .. } => {
+                    (Some(data), SegmentSource::S3 { .. }) => {
                         let mut cursor = io::Cursor::new(data.as_ref());
                         SegmentFile::read_part_meta_blobs_from_reader(&mut cursor)
                     }
+                    _ => Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "compact: CDC blob read inconsistent source",
+                    )),
                 };
             match blobs_result {
                 Ok(blobs) => blobs.get(&idx.key).and_then(|blob| {
@@ -1767,6 +1884,9 @@ impl Buffers {
                 meta.offsets.len(),
                 meta.index.len()
             );
+        }
+        if is_s3_wal() {
+            log_wal_s3_memory_obs("after_compaction_sync");
         }
 
         // ── Post-compaction: tombstone + cleanup ───────────────────────────
@@ -2146,46 +2266,51 @@ async fn wal_recover_s3(offsets_db: Arc<Offsets>) -> io::Result<()> {
             Ok(resp) => match resp.body.collect().await {
                 Ok(agg) => {
                     let data = agg.into_bytes().to_vec();
-                    if let Ok(meta) = SegmentFile::read_metadata_from_bytes(&data) {
-                        if Config::debug_enabled() || Config::log_wal_enabled() {
-                            let partition_sample: Vec<String> = meta
-                                .index
-                                .iter()
-                                .take(3)
-                                .map(|idx| {
-                                    format!(
-                                        "{}/{}/{}B",
-                                        idx.key.namespace, idx.key.partition, idx.bytes
-                                    )
-                                })
-                                .collect();
-                            info!(
-                                "WAL recover s3: segment={} partitions={} offsets={} total_bytes={} partition_sample={:?} offset_sample={:?}",
-                                seg_key,
-                                meta.index.len(),
-                                meta.offsets.len(),
-                                meta.total_bytes,
-                                partition_sample,
-                                offset_sample(meta.offsets.iter(), 3)
-                            );
+                    let meta = match SegmentFile::read_metadata_from_bytes(&data) {
+                        Ok(m) => m,
+                        Err(e) => {
+                            warn!("S3 WAL recovery: bad segment metadata {}: {}", seg_key, e);
+                            continue;
                         }
-                        for idx in meta.index.iter() {
-                            namespaces.insert(idx.key.namespace.clone());
-                        }
-                        mark_offsets_durable_in_wal(offsets_db.as_ref(), meta.offsets.iter());
-                        committed_offsets =
-                            committed_offsets.saturating_add(meta.offsets.len() as u64);
-                        bytes_total = bytes_total.saturating_add(meta.total_bytes);
-                        processed = processed.saturating_add(1);
-                        Buffers::segment_cache_register(
-                            SegmentSource::S3 {
-                                key: seg_key.clone(),
-                                bucket: bucket.clone(),
-                                data: Arc::new(data),
-                            },
-                            meta,
+                    };
+                    drop(data);
+                    if Config::debug_enabled() || Config::log_wal_enabled() {
+                        let partition_sample: Vec<String> = meta
+                            .index
+                            .iter()
+                            .take(3)
+                            .map(|idx| {
+                                format!(
+                                    "{}/{}/{}B",
+                                    idx.key.namespace, idx.key.partition, idx.bytes
+                                )
+                            })
+                            .collect();
+                        info!(
+                            "WAL recover s3: segment={} partitions={} offsets={} total_bytes={} partition_sample={:?} offset_sample={:?}",
+                            seg_key,
+                            meta.index.len(),
+                            meta.offsets.len(),
+                            meta.total_bytes,
+                            partition_sample,
+                            offset_sample(meta.offsets.iter(), 3)
                         );
                     }
+                    for idx in meta.index.iter() {
+                        namespaces.insert(idx.key.namespace.clone());
+                    }
+                    mark_offsets_durable_in_wal(offsets_db.as_ref(), meta.offsets.iter());
+                    committed_offsets = committed_offsets.saturating_add(meta.offsets.len() as u64);
+                    bytes_total = bytes_total.saturating_add(meta.total_bytes);
+                    processed = processed.saturating_add(1);
+                    Buffers::segment_cache_register(
+                        SegmentSource::S3 {
+                            key: seg_key.clone(),
+                            bucket: bucket.clone(),
+                            body: None,
+                        },
+                        meta,
+                    );
                 }
                 Err(e) => {
                     error!("S3 WAL recovery: body error {}: {}", seg_key, e);
@@ -2214,6 +2339,9 @@ async fn wal_recover_s3(offsets_db: Arc<Offsets>) -> io::Result<()> {
         w.wal_index_bytes_total = bytes_total;
     }
     offsets_db.flush();
+    if is_s3_wal() {
+        log_wal_s3_memory_obs("after_wal_recover_s3");
+    }
     Ok(())
 }
 
@@ -2335,6 +2463,7 @@ mod tests_wal_commit {
             snapshots.clear();
         }
         SEGMENT_CACHE.clear();
+        s3_wal_body_cache::clear_for_tests();
     }
 
     fn commit_exists(seg_path: &PathBuf) -> bool {
