@@ -213,10 +213,10 @@ impl Tool for DbtValidateTool {
     }
 
     async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
-        let project_name = args
+        let requested_project_name = args
             .get("project_name")
             .and_then(|x| x.as_str())
-            .unwrap_or("data_engineer");
+            .unwrap_or("");
         let dbt =
             crate::ctx_ext::actx_dbt(ctx).ok_or_else(|| "dbt provider missing".to_string())?;
         // Prefer profiles generated from resolved config (so dbt_validate is deterministic and
@@ -291,7 +291,7 @@ impl Tool for DbtValidateTool {
 
         if build {
             let compile_args = crate::providers::DbtValidateArgs {
-                project_name: project_name.to_string(),
+                project_name: requested_project_name.to_string(),
                 profiles_dir: profiles_dir.clone(),
                 target: target.clone(),
                 run: false,
@@ -308,7 +308,8 @@ impl Tool for DbtValidateTool {
                     dbt.validate_project(ctx.scope(), &compile_args).await
                 })
                 .await?;
-            let probe = probe_compiled_model_sql(ctx, project_name, &select_terms).await?;
+            let probe =
+                probe_compiled_model_sql(ctx, requested_project_name, &select_terms).await?;
             let probe_ok = probe.get("ok").and_then(|v| v.as_bool()).unwrap_or(true);
             ladder.push(ValidationLadderPhase {
                 phase: "compile_probe".to_string(),
@@ -337,7 +338,7 @@ impl Tool for DbtValidateTool {
                 }
             } else if !select_terms.is_empty() {
                 let selective_args = crate::providers::DbtValidateArgs {
-                    project_name: project_name.to_string(),
+                    project_name: requested_project_name.to_string(),
                     profiles_dir: profiles_dir.clone(),
                     target: target.clone(),
                     run: false,
@@ -363,7 +364,7 @@ impl Tool for DbtValidateTool {
                     final_res = res2;
                 } else {
                     let full_args = crate::providers::DbtValidateArgs {
-                        project_name: project_name.to_string(),
+                        project_name: requested_project_name.to_string(),
                         profiles_dir: profiles_dir.clone(),
                         target: target.clone(),
                         run: false,
@@ -389,7 +390,7 @@ impl Tool for DbtValidateTool {
                 }
             } else {
                 let full_args = crate::providers::DbtValidateArgs {
-                    project_name: project_name.to_string(),
+                    project_name: requested_project_name.to_string(),
                     profiles_dir: profiles_dir.clone(),
                     target: target.clone(),
                     run: false,
@@ -415,7 +416,7 @@ impl Tool for DbtValidateTool {
             }
         } else {
             let validate_args = crate::providers::DbtValidateArgs {
-                project_name: project_name.to_string(),
+                project_name: requested_project_name.to_string(),
                 profiles_dir: profiles_dir.clone(),
                 target: target.clone(),
                 run,

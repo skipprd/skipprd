@@ -85,6 +85,21 @@ struct SanitizedProjectYaml {
     stripped: Vec<react_suite_data_engineer::StrippedArtifact>,
 }
 
+fn canonical_dbt_project_name(_scope: &RequestScope) -> &'static str {
+    "data_engineer"
+}
+
+fn resolve_dbt_project_name(scope: &RequestScope, requested: &str) -> Result<String, String> {
+    let canonical = canonical_dbt_project_name(scope);
+    let requested = requested.trim();
+    if requested.is_empty() || requested == canonical {
+        return Ok(canonical.to_string());
+    }
+    Err(format!(
+        "dbt project_name is system-managed for the data_engineer suite: expected '{canonical}', got '{requested}'"
+    ))
+}
+
 /// Canonical template for the **shared** `dbt_project.yml`.
 ///
 /// The system governs the project's structural identity (name, profile, model-paths,
@@ -1335,7 +1350,7 @@ impl DbtProvider for DbtProjectProvider {
         &self,
         scope: &RequestScope,
     ) -> Result<Vec<react_suite_data_engineer::StrippedArtifact>, String> {
-        let name = format!("{}_project", scope.project_id.as_str().replace('/', "_"));
+        let name = canonical_dbt_project_name(scope);
         self.ensure_storage_project_yaml(scope, &name).await
     }
 
@@ -1380,11 +1395,7 @@ impl DbtProvider for DbtProjectProvider {
         scope: &RequestScope,
         args: &DbtValidateArgs,
     ) -> Result<DbtValidateResult, String> {
-        let project_name = if args.project_name.is_empty() {
-            "data_engineer".to_string()
-        } else {
-            args.project_name.clone()
-        };
+        let project_name = resolve_dbt_project_name(scope, &args.project_name)?;
         let s3_prefix_base = {
             let pref = self.keyspace.scoped_prefix(scope, &["dbt"]);
             if pref.ends_with('/') {
@@ -1693,6 +1704,27 @@ mod tests {
             "sanitizing a freshly rendered template must not emit strip artifacts: {:?}",
             out.stripped
         );
+    }
+
+    #[test]
+    fn resolve_dbt_project_name_rejects_mismatched_override() {
+        let scope = RequestScope::parse(
+            "76504ed9-9d6b-415e-812d-fd74cfc93244",
+            "dev",
+            "mssql_snowflake_e2e_cargo_build_25738299666_1",
+        )
+        .expect("valid scope");
+
+        assert_eq!(
+            resolve_dbt_project_name(&scope, "").expect("default"),
+            "data_engineer"
+        );
+        let err = resolve_dbt_project_name(
+            &scope,
+            "mssql_snowflake_e2e_cargo_build_25738299666_1_project",
+        )
+        .unwrap_err();
+        assert!(err.contains("system-managed"));
     }
 
     #[test]
