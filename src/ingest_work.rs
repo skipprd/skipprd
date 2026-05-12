@@ -7,8 +7,8 @@ use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
 use crate::runtime_plugins::protocol::{
-    RuntimeIngestPartitionBatch, RuntimeOffsetMaterializationHint, RuntimeOffsetPosition,
-    RuntimeRawIngestBatch,
+    RuntimeExecutionMode, RuntimeIngestPartitionBatch, RuntimeOffsetMaterializationHint,
+    RuntimeOffsetPosition, RuntimeRawIngestBatch,
 };
 use crate::runtime_plugins::schema_state::bump_pipeline_schema_version;
 use crate::runtime_plugins::sdk::encode_record_batches;
@@ -25,6 +25,8 @@ static SCHEMA_PREP_LOCKS: once_cell::sync::Lazy<DashMap<String, Arc<std::sync::M
 static EVOLUTION_LOCKS: once_cell::sync::Lazy<DashMap<String, Arc<std::sync::Mutex<()>>>> =
     once_cell::sync::Lazy::new(|| DashMap::new());
 static DATA_DIR_INGEST_PAUSED: once_cell::sync::Lazy<AtomicBool> =
+    once_cell::sync::Lazy::new(|| AtomicBool::new(false));
+static DISCOVERY_COMPLETE: once_cell::sync::Lazy<AtomicBool> =
     once_cell::sync::Lazy::new(|| AtomicBool::new(false));
 static DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS: once_cell::sync::Lazy<AtomicU64> =
     once_cell::sync::Lazy::new(|| AtomicU64::new(0));
@@ -68,7 +70,6 @@ use crate::ingest::fast_ingest::{
 use crate::ingest::record_types::{NormalizedRecord, SourceRecord};
 // use crate::converters::skippr_avro::convert_skippr_to_avro_field_types;
 
-use crate::cli::{Mode, CLI_MODE};
 use crate::converters::skippr_arrow::convert_skippr_to_arrow;
 use crate::plugins::DataSink;
 use arrow::datatypes;
@@ -409,6 +410,7 @@ fn runtime_offset_hints_from_positions(
 pub struct Ingest {
     thread_pool: Arc<ThreadPool>,
     num_cpus: usize,
+    execution_mode: RuntimeExecutionMode,
     tx: Sender<u64>,
     active_count: Arc<AtomicUsize>, // Track total number of active threads
     queue_length: Arc<AtomicUsize>, // Track total number of queued tasks
@@ -448,6 +450,15 @@ impl Drop for Ingest {
 }
 
 impl Ingest {
+    pub fn reset_discovery_progress() {
+        *NUM_ANALYSED_RECORDS.write() = 0;
+        DISCOVERY_COMPLETE.store(false, Ordering::Release);
+    }
+
+    pub fn discovery_complete() -> bool {
+        DISCOVERY_COMPLETE.load(Ordering::Acquire)
+    }
+
     fn normalize_data_dir_watermarks(high: u8, low: u8) -> Option<(u8, u8)> {
         if high == 0 {
             return None;
@@ -660,18 +671,24 @@ impl Ingest {
     }
 
     /// Autotuned cap on summed in-flight ingest payload bytes (queued + active).
-    /// Tighter when `WAL_STORAGE=s3` because WAL persist holds extra buffers and is network-bound.
+    /// With `WAL_STORAGE=s3`, allow up to **half** of the memory hint so ingest can overlap
+    /// network-bound WAL I/O without being capped as aggressively as before (~15% RSS on typical cores).
+    /// Disk WAL keeps a lower base fraction plus mild scaling with ingest thread count.
     fn compute_admission_budget_bytes(
         hint_bytes: usize,
         wal_s3: bool,
         num_ingest_threads: usize,
     ) -> usize {
-        let mut budget = hint_bytes.saturating_mul(25) / 100;
-        if wal_s3 {
-            budget = budget.saturating_mul(2) / 5;
-        }
-        let n = num_ingest_threads.max(1);
-        budget = budget.saturating_mul(n.saturating_add(2)) / 4;
+        let budget = if wal_s3 {
+            hint_bytes / 2
+        } else {
+            let n = num_ingest_threads.max(1);
+            hint_bytes
+                .saturating_mul(25)
+                .saturating_div(100)
+                .saturating_mul(n.saturating_add(2))
+                .saturating_div(4)
+        };
         const MIN_B: usize = 256 * 1024 * 1024;
         const MAX_B: usize = 12 * 1024 * 1024 * 1024;
         budget.clamp(MIN_B, MAX_B)
@@ -812,6 +829,10 @@ impl Ingest {
         }
     }
     pub fn new() -> Ingest {
+        Self::new_for_execution(RuntimeExecutionMode::Sync)
+    }
+
+    pub fn new_for_execution(execution_mode: RuntimeExecutionMode) -> Ingest {
         // We always want to use all cores unless overridden by env
         // On CI, cap default threads to reduce contention unless explicitly overridden
         let is_ci = {
@@ -819,8 +840,8 @@ impl Ingest {
             let ci = Config::getenv("CI", "");
             ga.eq_ignore_ascii_case("true") || ci == "1" || ci.eq_ignore_ascii_case("true")
         };
-        let default_threads = match CLI_MODE.read().clone() {
-            Mode::Sync(_) => {
+        let default_threads = match execution_mode {
+            RuntimeExecutionMode::Sync => {
                 let cores = num_cpus::get();
                 if is_ci {
                     cores.min(8)
@@ -828,7 +849,7 @@ impl Ingest {
                     cores
                 }
             }
-            _ => 1,
+            RuntimeExecutionMode::Discover => 1,
         };
         let num_cpus = Config::getenv("INGEST_THREADS", "")
             .parse::<usize>()
@@ -1022,6 +1043,7 @@ impl Ingest {
 
         Ingest {
             num_cpus,
+            execution_mode,
             thread_pool,
             tx,
             active_count,
@@ -1127,9 +1149,9 @@ impl Ingest {
             self.wait_for_completion();
             exit(0);
         } else {
-            match CLI_MODE.read().clone() {
-                Mode::Sync(_) => {}
-                _ => {
+            match self.execution_mode {
+                RuntimeExecutionMode::Sync => {}
+                RuntimeExecutionMode::Discover => {
                     let max_records = 1000;
                     let pipeline_metadata_arc = METADATA.load();
                     let mut pipeline_metadata: PipelineMetadata =
@@ -1174,7 +1196,13 @@ impl Ingest {
 
                         if pipeline_metadata.metadata.len() == 0 {
                             warn!("No data found in data source, skipping schema discovery");
-                            std::process::exit(0);
+                            DISCOVERY_COMPLETE.store(true, Ordering::Release);
+                            return ThroughputMetrics {
+                                bytes_per_second: self.get_current_throughput(),
+                                active_cores: self.active_count.load(Ordering::Acquire),
+                                queue_length: self.queue_length.load(Ordering::Acquire),
+                                optimal_chunk_size: self.optimal_chunk_size.load(Ordering::Acquire),
+                            };
                         }
 
                         let flatten = Config::truth_value(
@@ -1193,11 +1221,9 @@ impl Ingest {
 
                         info!("Schema discovery complete, writing metadata to Skippr");
 
-                        tokio::spawn(async move {
-                            pipeline_metadata.enabled = true;
-                            Config::set_metadata(&pipeline_metadata, false).await;
-                            std::process::exit(0);
-                        });
+                        pipeline_metadata.enabled = true;
+                        INGEST_RT.block_on(Config::set_metadata(&pipeline_metadata, false));
+                        DISCOVERY_COMPLETE.store(true, Ordering::Release);
                     }
 
                     info!(
@@ -2307,7 +2333,6 @@ impl Ingest {
 #[cfg(test)]
 mod empty_ingest_tasks_tests {
     use super::*;
-    use crate::cli::{DisocverOptions, Mode, CLI_MODE};
     use crate::helpers::offsets::{OffsetTransport, RuntimeOffsetOperation, RuntimeOffsetValue};
     use crate::plugins::{DataSink, RuntimeIngestRelay};
     use datafusion::execution::SendableRecordBatchStream;
@@ -2315,12 +2340,7 @@ mod empty_ingest_tasks_tests {
 
     #[test]
     fn ingest_file_empty_tasks_in_discover_mode_does_not_panic() {
-        *CLI_MODE.write() = Mode::Discover(DisocverOptions {
-            pipeline: Some("test".to_string()),
-            output: "json".to_string(),
-        });
-
-        let ingest = Ingest::new();
+        let ingest = Ingest::new_for_execution(RuntimeExecutionMode::Discover);
         let empty_tasks = Arc::new(IngestTasks::new());
 
         let offsets = Arc::new(crate::helpers::offsets::Offsets::init().expect("offset DB init"));
@@ -2445,7 +2465,6 @@ mod empty_ingest_tasks_tests {
 #[cfg(test)]
 mod ingest_admission_tests {
     use super::*;
-    use crate::cli::{Mode, SyncOptions, CLI_MODE};
     use crate::helpers::offsets::{OffsetTransport, RuntimeOffsetOperation, RuntimeOffsetValue};
     use crate::plugins::{DataSink, RuntimeIngestRelay};
     use datafusion::execution::SendableRecordBatchStream;
@@ -2512,25 +2531,31 @@ mod ingest_admission_tests {
     }
 
     #[test]
-    fn admission_budget_disk_is_looser_than_s3_for_same_hint() {
+    fn admission_budget_s3_is_half_memory_hint() {
+        let hint = 8_usize * 1024 * 1024 * 1024;
+        let s3 = Ingest::admission_budget_for_tests(hint, true, 4);
+        assert_eq!(
+            s3,
+            hint / 2,
+            "S3 WAL ingest admission should allow half of memory hint before global clamp"
+        );
+    }
+
+    #[test]
+    fn admission_budget_s3_is_looser_than_disk_for_same_hint() {
         let hint = 4_usize * 1024 * 1024 * 1024;
         let threads = 4;
         let disk = Ingest::admission_budget_for_tests(hint, false, threads);
         let s3 = Ingest::admission_budget_for_tests(hint, true, threads);
         assert!(
-            disk > s3,
-            "expected disk budget > s3 budget, got disk={disk} s3={s3}"
+            s3 >= disk,
+            "expected s3 WAL budget >= disk WAL budget, got disk={disk} s3={s3}"
         );
     }
 
     #[test]
     fn ingest_file_remote_relay_clears_outstanding_byte_counter() {
         std::env::set_var("DATA_DIR_HIGH_WATERMARK_PCT", "0");
-        *CLI_MODE.write() = Mode::Sync(SyncOptions {
-            pipeline: None,
-            output: "progress".to_string(),
-            once: false,
-        });
         let ingest = Ingest::new();
         let offsets = Arc::new(crate::helpers::offsets::Offsets::from_transport(Arc::new(
             AuthoritativeOffsetReader,

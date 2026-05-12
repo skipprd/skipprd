@@ -2,7 +2,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime};
 use std::{fs, process};
 
-use skipprd::cli::{Cli, Mode, CLI_MODE};
+use skipprd::cli::{Cli, Mode};
 
 extern crate clap;
 extern crate core;
@@ -21,7 +21,7 @@ use skipprd::METRICS;
 use skipprd::benchmark::PerformanceBenchmark;
 use skipprd::sqlrt::doc_parser::SqlDocParser;
 use skipprd::sqlrt::docs::{get_docs_in_format, DocFormat};
-use skipprd::sqlrt::query::query;
+use skipprd::sqlrt::query::{query_with_options, QueryExecutionMode, QueryExecutionOptions};
 
 // pub static DISPLAY_METRICS: Lazy<TimedRwLock<AtomicBool>> =
 //     Lazy::new(|| TimedRwLock::new("display_metrics".to_string(), AtomicBool::new(false)));
@@ -71,8 +71,8 @@ impl PipelineCache {
     }
 }
 
-async fn run_sync_or_exit(output_mode: &str) {
-    if let Err(err) = skipprd::engine::run_sync(output_mode).await {
+async fn run_sync_or_exit(output_mode: &str, source_once: bool) {
+    if let Err(err) = skipprd::engine::run_sync(output_mode, source_once).await {
         error!(
             "Pipeline '{}' sync failed: {}",
             Config::get_pipeline_name(),
@@ -130,8 +130,6 @@ async fn async_main() {
     // Initialize logging if --log is provided; default level is 'info', '--log debug' enables debug
     init_logging(cli.log.clone());
 
-    CLI_MODE.write().clone_from(&cli.mode);
-
     match cli.mode {
         Mode::Sync(options) => {
             Config::build_config();
@@ -148,7 +146,7 @@ async fn async_main() {
                     .push_str(&options.pipeline.unwrap().clone());
                 Config::init().await;
 
-                run_sync_or_exit(&output_mode).await;
+                run_sync_or_exit(&output_mode, run_once).await;
             } else {
                 let pipeline_name = Config::getenv("PIPELINE_NAME", "");
                 if !pipeline_name.is_empty() {
@@ -156,7 +154,7 @@ async fn async_main() {
                     PIPELINE_NAME.write().push_str(&pipeline_name.clone());
                     Config::init().await;
 
-                    run_sync_or_exit(&output_mode).await;
+                    run_sync_or_exit(&output_mode, run_once).await;
                 } else {
                     info!("Syncing all pipelines");
                     let pipelines = Config::get_pipelines();
@@ -188,7 +186,7 @@ async fn async_main() {
                                 counter_lock.reset();
                             }
 
-                            run_sync_or_exit(&output_mode).await;
+                            run_sync_or_exit(&output_mode, run_once).await;
                         }
 
                         if run_once {
@@ -220,7 +218,15 @@ async fn async_main() {
             Config::build_config();
             if let Some(sql) = options.sql {
                 let now = Instant::now();
-                query(&sql).await;
+                query_with_options(
+                    &sql,
+                    QueryExecutionOptions {
+                        mode: QueryExecutionMode::Query,
+                        plain: options.plain,
+                        watch: options.watch,
+                    },
+                )
+                .await;
                 let elapsed = now.elapsed();
                 if !options.plain {
                     println!("Query time: {} seconds", elapsed.as_secs());
@@ -244,7 +250,15 @@ async fn async_main() {
                         break;
                     }
                     let now = Instant::now();
-                    query(stmt).await;
+                    query_with_options(
+                        stmt,
+                        QueryExecutionOptions {
+                            mode: QueryExecutionMode::Query,
+                            plain: options.plain,
+                            watch: options.watch,
+                        },
+                    )
+                    .await;
                     let elapsed = now.elapsed();
                     println!("Query time: {} seconds", elapsed.as_secs());
                 }

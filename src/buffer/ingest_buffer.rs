@@ -920,7 +920,7 @@ impl Buffers {
     ) -> bool {
         use futures::stream::StreamExt;
         let mut made_progress = false;
-        let concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
+        let mut concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
             .load(std::sync::atomic::Ordering::Relaxed)
             .clamp(1, 64) as usize;
         if !force {
@@ -929,13 +929,13 @@ impl Buffers {
             let queued_ingest =
                 crate::metrics::counters::QUEUE_LENGTH.load(std::sync::atomic::Ordering::Relaxed);
             if active_ingest > 0 || queued_ingest > 0 {
+                concurrency = 1;
                 if Config::debug_enabled() || Config::log_wal_enabled() {
                     debug!(
-                        "Compactor: paused while ingest is busy active_threads={} queued_tasks={}",
+                        "Compactor: ingest busy; limiting background compaction concurrency active_threads={} queued_tasks={}",
                         active_ingest, queued_ingest
                     );
                 }
-                return false;
             }
         }
 
@@ -1069,6 +1069,17 @@ impl Buffers {
 
     fn reclaimable_wal_partition_count(limit: usize) -> usize {
         Self::next_compaction_candidates(limit, true).len()
+    }
+
+    fn compaction_file_len(
+        source: &SegmentSource,
+        meta: &SegmentFileMetadata,
+        s3_resolved: Option<&Arc<Vec<u8>>>,
+    ) -> io::Result<u64> {
+        match (s3_resolved, source) {
+            (Some(data), SegmentSource::S3 { .. }) => Ok(data.len() as u64),
+            _ => source.logical_byte_len(meta),
+        }
     }
 
     fn tombstone_dir() -> PathBuf {
@@ -1443,27 +1454,6 @@ impl Buffers {
             );
         }
 
-        let file_len = source.logical_byte_len(meta)?;
-        if idx.start >= file_len {
-            error!(
-                "Compactor: partition start beyond file end for {} start={} len={} file_len={}",
-                seg_display, idx.start, idx.len, file_len
-            );
-            return Ok(false);
-        }
-        let safe_len = std::cmp::min(idx.len, file_len.saturating_sub(idx.start));
-        if Config::debug_enabled() || Config::log_wal_enabled() {
-            debug!(
-                "Compactor: bounds seg={} file_len={} start={} idx_len={} safe_len={} end_hint={}",
-                seg_display,
-                file_len,
-                idx.start,
-                idx.len,
-                safe_len,
-                idx.start.saturating_add(safe_len)
-            );
-        }
-
         let s3_resolved: Option<Arc<Vec<u8>>> = match source {
             SegmentSource::S3 { body: Some(b), .. } => Some(b.clone()),
             SegmentSource::S3 {
@@ -1483,6 +1473,27 @@ impl Buffers {
             ),
             SegmentSource::Disk(_) => None,
         };
+
+        let file_len = Self::compaction_file_len(source, meta, s3_resolved.as_ref())?;
+        if idx.start >= file_len {
+            error!(
+                "Compactor: partition start beyond file end for {} start={} len={} file_len={}",
+                seg_display, idx.start, idx.len, file_len
+            );
+            return Ok(false);
+        }
+        let safe_len = std::cmp::min(idx.len, file_len.saturating_sub(idx.start));
+        if Config::debug_enabled() || Config::log_wal_enabled() {
+            debug!(
+                "Compactor: bounds seg={} file_len={} start={} idx_len={} safe_len={} end_hint={}",
+                seg_display,
+                file_len,
+                idx.start,
+                idx.len,
+                safe_len,
+                idx.start.saturating_add(safe_len)
+            );
+        }
 
         // ── Schema + batch-stream setup (branches on source type) ──────────
         let (tx, rx) = mpsc::channel::<Result<RecordBatch, DataFusionError>>(8);
@@ -2666,6 +2677,47 @@ mod tests_wal_commit {
         );
         let line = offsets_db.get_line(&offset_key).unwrap();
         assert_eq!(u64::from(line), 42);
+    }
+
+    #[test]
+    #[serial]
+    fn test_s3_compaction_file_len_uses_resolved_object_bytes() {
+        let (base, _guard) = setup_data_dir();
+        let segf = SegmentFile::new(&base, "s3-len").unwrap();
+        let key = PartitionKey {
+            sink_ref: "data_outputs.test".to_string(),
+            namespace: "ns".to_string(),
+            partition: "".to_string(),
+            time: Some(0),
+            shard: "shard".to_string(),
+        };
+        let mut batches: StdHashMap<PartitionKey, Vec<RecordBatch>> = StdHashMap::new();
+        batches.insert(key, vec![make_batch()]);
+        let parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = batches
+            .keys()
+            .cloned()
+            .map(|k| (k, (0, SystemTime::now())))
+            .collect();
+        let offsets: StdHashMap<crate::helpers::offsets::OffsetKey, u64> = StdHashMap::new();
+        let empty_blobs: StdHashMap<PartitionKey, Vec<u8>> = StdHashMap::new();
+        let (meta, _rows, _sha) = segf
+            .write_snapshot(&offsets, &batches, &parts_meta, &empty_blobs)
+            .unwrap();
+        let bytes = Arc::new(fs::read(&segf.path).unwrap());
+        let source = SegmentSource::S3 {
+            key: "segments/s3-len.seg".to_string(),
+            bucket: "test-bucket".to_string(),
+            body: None,
+        };
+
+        assert!(
+            bytes.len() as u64 > meta.total_bytes,
+            "segment object length includes headers and footer in addition to Arrow payload bytes"
+        );
+        assert_eq!(
+            Buffers::compaction_file_len(&source, &meta, Some(&bytes)).unwrap(),
+            bytes.len() as u64
+        );
     }
 
     #[test]

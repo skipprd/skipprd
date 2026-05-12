@@ -2,7 +2,6 @@ use std::fs::OpenOptions;
 use std::io::BufReader;
 use std::{fs, process};
 // removed unused Write import
-use crate::cli::{Mode, QueryOptions, CLI_MODE};
 use crate::discover::{Metadata, PipelineMetadata, SkipprDataType};
 use crate::helpers::athena_admin::{
     delete_glue_database, glue_delete_table, output_athena_admin_config,
@@ -54,6 +53,29 @@ use std::sync::mpsc;
 // removed unused Client
 
 // S3 object store registration moved to crate::sql::tables
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum QueryExecutionMode {
+    Query,
+    Sync,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct QueryExecutionOptions {
+    pub mode: QueryExecutionMode,
+    pub plain: bool,
+    pub watch: Option<u64>,
+}
+
+impl Default for QueryExecutionOptions {
+    fn default() -> Self {
+        Self {
+            mode: QueryExecutionMode::Query,
+            plain: false,
+            watch: None,
+        }
+    }
+}
 
 // Build a SessionContext and pre-register all pipelines/namespaces so two-part names resolve
 pub async fn new_context_all_namespaces() -> SessionContext {
@@ -218,6 +240,10 @@ pub async fn explain_query(sql_str: &str) -> String {
 }
 
 pub async fn query(sql_str: &str) {
+    query_with_options(sql_str, QueryExecutionOptions::default()).await;
+}
+
+pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOptions) {
     let sql_trim = sql_str.trim();
     // Enforce fully-qualified table names: require <pipeline>.<namespace>, forbid default.*
     {
@@ -623,14 +649,14 @@ pub async fn query(sql_str: &str) {
 
             println!("Dropping all schemas and data for: {}", pipeline_name);
 
-            match CLI_MODE.read().clone() {
-                Mode::Sync(_options) => {
+            match query_options.mode {
+                QueryExecutionMode::Sync => {
                     let _ = fs::remove_dir_all(&data_dir)
                         .expect(format!("Failed to remove dir: {}", data_dir).as_str());
                     Config::delete_metadata().await;
                     println!("Dropped Pipeline");
                 }
-                Mode::Query(_options) => match Config::get_metadata().await {
+                QueryExecutionMode::Query => match Config::get_metadata().await {
                     Ok(_metadata) => {
                         let mut empty_pipeline_metadata = PipelineMetadata::new();
                         empty_pipeline_metadata.append_sql(sql_str.to_string());
@@ -643,7 +669,6 @@ pub async fn query(sql_str: &str) {
                         println!("No metadata found for pipeline: {}", pipeline_name);
                     }
                 },
-                _ => {}
             }
         }
         Ok(Statement::PipelineReset(stmt)) => {
@@ -665,8 +690,8 @@ pub async fn query(sql_str: &str) {
                 .await
                 .expect(format!("No metadata found for pipeline: {}", pipeline_name).as_str());
 
-            match CLI_MODE.read().clone() {
-                Mode::Sync(_options) => {
+            match query_options.mode {
+                QueryExecutionMode::Sync => {
                     let mut tries = 15;
                     let mut _delete = true;
                     while _delete {
@@ -695,14 +720,13 @@ pub async fn query(sql_str: &str) {
                     metadata.sql = None;
                     Config::set_metadata(&metadata, false).await;
                 }
-                Mode::Query(_options) => {
+                QueryExecutionMode::Query => {
                     metadata.append_sql(sql_str.to_string());
 
                     Config::set_metadata(&metadata, false).await;
 
                     println!("Done. Pipeline will reset on next sync run");
                 }
-                _ => {}
             }
         }
         Ok(Statement::PipelineToggle(stmt)) => {
@@ -1379,10 +1403,7 @@ pub async fn query(sql_str: &str) {
             let rewritten_sql = sql_str.to_string();
 
             // Short-circuit for non-TUI plain mode
-            let plain = match CLI_MODE.read().clone() {
-                Mode::Query(QueryOptions { plain, .. }) => plain,
-                _ => false,
-            };
+            let plain = query_options.plain;
             if plain {
                 match ctx.sql(&rewritten_sql).await {
                     Ok(df) => match df.collect().await {
@@ -1420,10 +1441,7 @@ pub async fn query(sql_str: &str) {
             }
 
             // SELECT execution: support --watch for live TUI; else one-shot
-            let watch_secs = match CLI_MODE.read().clone() {
-                Mode::Query(opts) => opts.watch,
-                _ => None,
-            };
+            let watch_secs = query_options.watch;
             // Unified SELECT TUI editor: editable SQL, runs on Enter or r; if --watch set, periodic refresh
             let initial_sql = rewritten_sql.clone();
             let (tx_req, rx_req) = mpsc::channel::<String>();

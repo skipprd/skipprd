@@ -453,6 +453,7 @@ fn is_runtime_channel_eof(err: &io::Error) -> bool {
 fn build_source_start_request_for_pipeline(
     pipeline_name: &str,
     execution_mode: RuntimeExecutionMode,
+    source_once: bool,
 ) -> io::Result<SourceStartRequest> {
     let source_config = RuntimeSourceConfig::try_from(
         Config::get_pipeline_input_plugin_config().map_err(io::Error::other)?,
@@ -462,7 +463,7 @@ fn build_source_start_request_for_pipeline(
     Ok(SourceStartRequest {
         context: runtime_execution_context(pipeline_name, execution_mode),
         config: source_config,
-        once: runtime_execution_once_enabled(execution_mode),
+        once: source_once || execution_mode == RuntimeExecutionMode::Discover,
     })
 }
 
@@ -739,16 +740,33 @@ async fn runtime_discovery_completed_on_control_eof(
     )))
 }
 
+async fn stop_runtime_discovery_source(
+    connection: &mut RuntimeChildConnection,
+    pending_tasks: &mut JoinSet<io::Result<()>>,
+) -> io::Result<()> {
+    drain_runtime_source_tasks(pending_tasks).await?;
+    let child_pid = connection.child.id();
+    if !connection.has_exited()? {
+        let _ = connection.child.kill().await;
+        unregister_runtime_plugin_child(child_pid);
+    }
+    Ok(())
+}
+
 pub async fn sync_runtime_input_plugin(
     resolved: ResolvedRuntimePlugin,
     pipeline_name: String,
     execution_mode: RuntimeExecutionMode,
+    source_once: bool,
     offsets: Arc<Offsets>,
     shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
 ) -> io::Result<()> {
     let mut connection = RuntimeChildConnection::spawn(resolved, pipeline_name).await?;
-    let start_request =
-        build_source_start_request_for_pipeline(&connection.pipeline_name, execution_mode)?;
+    let start_request = build_source_start_request_for_pipeline(
+        &connection.pipeline_name,
+        execution_mode,
+        source_once,
+    )?;
     connection
         .send(&HostFrame::RunSource(start_request))
         .await?;
@@ -757,10 +775,15 @@ pub async fn sync_runtime_input_plugin(
     let mut data_completed = false;
     let mut saw_unflushed_batches = false;
     let mut pending_source_tasks: JoinSet<io::Result<()>> = JoinSet::new();
-    let ingest = Arc::new(Ingest::new());
+    let ingest = Arc::new(Ingest::new_for_execution(execution_mode));
     let mut control_reader = BufferedRuntimeFrameReader::new();
     let mut data_reader = BufferedRuntimeFrameReader::new();
     loop {
+        if execution_mode == RuntimeExecutionMode::Discover && Ingest::discovery_complete() {
+            stop_runtime_discovery_source(&mut connection, &mut pending_source_tasks).await?;
+            return Ok(());
+        }
+
         if !control_completed {
             if let Some(control_frame) = control_reader.take_frame::<PluginFrame>()? {
                 match control_frame {
@@ -1018,6 +1041,7 @@ pub async fn sync_runtime_input_plugin(
                     }
                 }
             }
+            _ = tokio::time::sleep(Duration::from_millis(100)), if execution_mode == RuntimeExecutionMode::Discover => {}
         }
     }
 
@@ -1058,14 +1082,6 @@ fn runtime_execution_context(
             time_partition_granularity,
             time_partition_prefix,
         },
-    }
-}
-
-fn runtime_execution_once_enabled(execution_mode: RuntimeExecutionMode) -> bool {
-    match crate::cli::CLI_MODE.read().clone() {
-        crate::cli::Mode::Sync(options) => options.once,
-        crate::cli::Mode::Discover(_) => execution_mode == RuntimeExecutionMode::Discover,
-        _ => false,
     }
 }
 

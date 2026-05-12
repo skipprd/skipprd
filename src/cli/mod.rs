@@ -1,18 +1,4 @@
-use crate::helpers::timed_rwlock::TimedRwLock;
 use clap::Parser;
-use once_cell::sync::Lazy;
-use std::string::ToString;
-
-pub static CLI_MODE: Lazy<TimedRwLock<Mode>> = Lazy::new(|| {
-    TimedRwLock::new(
-        "cli_mode".to_string(),
-        Mode::Sync(SyncOptions {
-            pipeline: None,
-            output: "progress".to_string(),
-            once: false,
-        }),
-    )
-});
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]

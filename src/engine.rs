@@ -39,8 +39,37 @@ use crate::runtime_plugins::protocol::{
 use crate::runtime_plugins::schema_state::{
     clear_runtime_source_schema_state, current_runtime_schema_state,
 };
-use crate::sqlrt::query::query;
+use crate::sqlrt::query::{query_with_options, QueryExecutionMode, QueryExecutionOptions};
 use crate::{LOGGER, METADATA, METRICS, RUNNING};
+
+async fn cleanup_discover_ingest_artifacts() {
+    if Config::get_wal_storage().eq_ignore_ascii_case("s3") {
+        let prefix = Config::get_wal_s3_prefix();
+        match crate::helpers::s3::delete_prefix(&prefix).await {
+            Ok(deleted) if deleted > 0 => {
+                info!(
+                    "Discover cleanup: removed {} leaked S3 WAL objects under {}",
+                    deleted, prefix
+                );
+            }
+            Ok(_) => {}
+            Err(err) => warn!(
+                "Discover cleanup: failed to remove S3 WAL prefix {}: {}",
+                prefix, err
+            ),
+        }
+    }
+
+    let data_dir = Config::get_data_dir();
+    if let Err(err) = std::fs::remove_dir_all(&data_dir) {
+        if err.kind() != io::ErrorKind::NotFound {
+            warn!(
+                "Discover cleanup: failed to remove local data dir {}: {}",
+                data_dir, err
+            );
+        }
+    }
+}
 
 fn chaos_mode_delay() -> Duration {
     const DEFAULT_MIN_SECS: u64 = 60;
@@ -186,6 +215,7 @@ pub async fn run_schema(pipeline: &str) {
 
 pub async fn run_discover(output_mode: &str) -> io::Result<()> {
     let pipeline_name = Config::get_pipeline_name();
+    Ingest::reset_discovery_progress();
     let start_time = Instant::now();
 
     let stdout_is_tty = std::io::stdout().is_terminal();
@@ -260,6 +290,7 @@ pub async fn run_discover(output_mode: &str) -> io::Result<()> {
         offsets_db.clone(),
         shared_output,
         RuntimeExecutionMode::Discover,
+        true,
     )
     .await;
     match previous_ingest_threads {
@@ -299,6 +330,7 @@ pub async fn run_discover(output_mode: &str) -> io::Result<()> {
     METADATA.store(Arc::new(updated_metadata.clone()));
 
     Config::set_metadata(&updated_metadata, true).await;
+    cleanup_discover_ingest_artifacts().await;
 
     let namespaces_discovered = updated_metadata.metadata.len();
     let total_fields = updated_metadata
@@ -322,7 +354,7 @@ pub async fn run_discover(output_mode: &str) -> io::Result<()> {
     Ok(())
 }
 
-pub async fn run_sync(output_mode: &str) -> io::Result<()> {
+pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
     let pipeline_name = Config::get_pipeline_name();
     let sync_started = Instant::now();
 
@@ -372,7 +404,14 @@ pub async fn run_sync(output_mode: &str) -> io::Result<()> {
                         info!("Recieved SQL statement: '{}'", stmt);
 
                         // Important to exec the SQL before saving metadata, as the SQL may drop or otherwise alter the metadata
-                        query(&stmt).await;
+                        query_with_options(
+                            &stmt,
+                            QueryExecutionOptions {
+                                mode: QueryExecutionMode::Sync,
+                                ..QueryExecutionOptions::default()
+                            },
+                        )
+                        .await;
                     }
 
                     return Ok(());
@@ -617,6 +656,7 @@ pub async fn run_sync(output_mode: &str) -> io::Result<()> {
         offsets_db.clone(),
         shared_output_clone,
         RuntimeExecutionMode::Sync,
+        source_once,
     )
     .await;
     match &source_sync_result {
@@ -978,6 +1018,7 @@ pub async fn sync_input_plugin(
     offsets_clone: Arc<Offsets>,
     shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     execution_mode: RuntimeExecutionMode,
+    source_once: bool,
 ) -> io::Result<()> {
     let plugin_name = Config::get_pipeline_input_plugin_name();
     let runtime_version = Config::get_pipeline_input_plugin_version().map_err(|err| {
@@ -999,6 +1040,7 @@ pub async fn sync_input_plugin(
         resolved,
         Config::get_pipeline_name(),
         execution_mode,
+        source_once,
         offsets_clone,
         shared_output,
     )
