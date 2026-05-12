@@ -360,10 +360,7 @@ fn source_column_def_from_catalog_field(
         .to_string();
     crate::plan_types::SourceColumnDef {
         name,
-        data_type: f
-            .data_type
-            .clone()
-            .unwrap_or_else(|| "unknown".to_string()),
+        data_type: f.data_type.clone().unwrap_or_else(|| "unknown".to_string()),
     }
 }
 

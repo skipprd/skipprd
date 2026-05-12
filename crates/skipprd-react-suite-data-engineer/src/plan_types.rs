@@ -360,20 +360,14 @@ pub enum FieldKind {
     QualityFlag,
 }
 
-/// How an output field relates to an upstream source column (or relation column).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
-#[serde(rename_all = "snake_case")]
-pub enum LineageRole {
-    /// Published output mirrors this source field (typically `FieldKind::Raw`).
-    Passthrough,
-    /// Normalized / cast / cleaned representation of this source field.
-    Normalized,
-    /// Parsed representation (e.g. extracted component) of this source field.
-    Parsed,
-    /// Non-quality derived logic that reads this source field.
-    DerivedInput,
-    /// Quality flag / validation signal derived from this source field.
-    QualityInput,
+/// Canonical `lineage[].role` values when `lineage_kind` is `column` (plain strings — not a
+/// JSON-Schema `oneOf` enum — for OpenAI strict structured output).
+pub mod lineage_role {
+    pub const PASSTHROUGH: &str = "passthrough";
+    pub const NORMALIZED: &str = "normalized";
+    pub const PARSED: &str = "parsed";
+    pub const DERIVED_INPUT: &str = "derived_input";
+    pub const QUALITY_INPUT: &str = "quality_input";
 }
 
 /// JSON / OpenAI structured-output values for [`FieldLineage::lineage_kind`].
@@ -404,9 +398,10 @@ pub struct FieldLineage {
     /// Set when `lineage_kind` is `column`.
     #[serde(default)]
     pub source: Option<SourceFieldRef>,
-    /// Set when `lineage_kind` is `column`.
+    /// Set when `lineage_kind` is `column` (snake_case string: `passthrough`, `normalized`, `parsed`,
+    /// `derived_input`, `quality_input` — not a JSON-schema enum, for OpenAI strict mode).
     #[serde(default)]
-    pub role: Option<LineageRole>,
+    pub role: Option<String>,
     /// Set when `lineage_kind` is `system` (stable key for tooling/prompts).
     #[serde(default)]
     pub system_key: Option<String>,
@@ -416,11 +411,11 @@ pub struct FieldLineage {
 }
 
 impl FieldLineage {
-    pub fn column(source: SourceFieldRef, role: LineageRole) -> Self {
+    pub fn column(source: SourceFieldRef, role: impl Into<String>) -> Self {
         Self {
             lineage_kind: field_lineage_kind::COLUMN.to_string(),
             source: Some(source),
-            role: Some(role),
+            role: Some(role.into()),
             system_key: None,
             constant_value: None,
         }

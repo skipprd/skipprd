@@ -72,8 +72,11 @@ fn disable_contract_enforcement_in_schema_yml_text(yml_text: &str) -> Result<Str
 
 /// Canonicalize `models/schema.yml` content.
 ///
-/// This is used when we want deterministic schema.yml normalization (e.g. rebuilding sources from
-/// the dataset catalog) without requiring the caller to go through a patch-apply cycle.
+/// **Mixed ownership:** Skippr deterministically rebuilds only the top-level `sources:` block from
+/// proved warehouse `schema()` facts plus `source()` calls found in `models/staging/*.sql` (and
+/// optional catalog listing). All other top-level YAML keys (e.g. `models:` docs/tests authored by
+/// the agent) are preserved verbatim. This mirrors `dbt_project.yml` shared ownership: the agent may
+/// edit the file, but the system post-processes an authoritative slice.
 pub async fn canonicalize_schema_yml(
     ctx: &AgentCtx,
     datasets: Option<&Arc<dyn DatasetCatalogProvider>>,

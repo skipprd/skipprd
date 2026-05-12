@@ -1100,7 +1100,7 @@ mod tests {
                                 relation: None,
                                 name: "order_id".to_string(),
                             },
-                            crate::plan::LineageRole::Normalized,
+                            crate::plan::lineage_role::NORMALIZED,
                         )],
                         expression: "order_id passthrough from staging".to_string(),
                         data_type: None,

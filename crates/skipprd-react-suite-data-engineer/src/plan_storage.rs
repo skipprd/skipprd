@@ -513,7 +513,7 @@ mod tests {
                                 relation: None,
                                 name: "customer_id".to_string(),
                             },
-                            crate::plan::LineageRole::Normalized,
+                            crate::plan::lineage_role::NORMALIZED,
                         )],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,

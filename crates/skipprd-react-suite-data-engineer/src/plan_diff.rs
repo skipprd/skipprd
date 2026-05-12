@@ -114,7 +114,7 @@ mod tests {
                             relation: None,
                             name: output_name.to_string(),
                         },
-                        crate::plan_types::LineageRole::Passthrough,
+                        crate::plan_types::lineage_role::PASSTHROUGH,
                     )],
                     expression: output_name.to_string(),
                     data_type: None,

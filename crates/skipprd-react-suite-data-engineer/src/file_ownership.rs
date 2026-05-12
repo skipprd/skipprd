@@ -11,7 +11,7 @@
 //! | ---------------- | -------------------------------------------------------------------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------- |
 //! | `SkipprOwned`    | `profiles.yml`, `packages.yml`                                       | LLM cannot write                      | System-scoped, authoritative, immutable to the agent. Connection identity and dependency governance. |
 //! | `Shared`         | `dbt_project.yml`                                                    | LLM can write; specific top-level keys are stripped on every save | Most of the file is structural routing; agent value is limited to per-folder `models:` config.       |
-//! | `LlmOwned`       | `models/**/*.sql`, `models/**/*.yml`, `models/schema.yml`, `seeds/*`, `macros/*.sql` | LLM has full write authority          | Modeling and reusable Jinja are the agent's primary surface.                                         |
+//! | `LlmOwned`       | `models/**/*.sql`, `models/**/*.yml`, `models/schema.yml`, `seeds/*`, `macros/*.sql` | LLM can write; for `models/schema.yml` only the top-level `sources:` block is system-rebuilt on save (agent-owned `models:` docs/tests preserved) | Modeling and reusable Jinja are the agent's primary surface; raw source registry stays warehouse-grounded. |
 //! | `BuildArtifact`  | `target/*`, `dbt_packages/*`, `.dbt/*`, `logs/*`                     | LLM cannot write; runtime manages     | Generated; never source-of-truth.                                                                    |
 //!
 //! # Strip-and-notify

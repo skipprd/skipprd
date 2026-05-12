@@ -3,6 +3,7 @@ use std::fmt;
 
 use serde::Serialize;
 
+use crate::naming::contains_expected_source_call;
 use crate::plan_types::{CleanseTask, ModelTask, OutputFieldSpec};
 
 pub(crate) const SQL_SPEC_DIGEST_PREFIX: &str = "-- skippr-plan-spec-digest:";
@@ -59,6 +60,8 @@ pub(crate) enum ContractDrift {
         column_name: String,
         reason: String,
     },
+    /// Staging/cleanse SQL must call `source(<schema>,<table>)` for the raw dataset when enforced.
+    CleanseSqlExpectedSourceMismatch(String),
 }
 
 impl fmt::Display for ContractDrift {
@@ -116,6 +119,9 @@ impl fmt::Display for ContractDrift {
                 f,
                 "schema relationship contradicts spec for {model_name}.{column_name}: {reason}"
             ),
+            Self::CleanseSqlExpectedSourceMismatch(msg) => {
+                write!(f, "cleanse SQL source() contract: {msg}")
+            }
         }
     }
 }
@@ -238,6 +244,71 @@ pub(crate) fn verify_model_sql_contract(
             expected: expected_refs,
             found: actual_refs,
         });
+    }
+
+    if let Some(spec) = task.implementation_spec.as_ref() {
+        let expected_cols = output_field_names(&spec.output_fields);
+        if expected_cols.is_empty() {
+            drifts.push(ContractDrift::MissingImplementationSpec);
+        } else {
+            match crate::tools::files_tool::extract_final_select_output_columns(sql) {
+                Ok(actual_cols) => {
+                    let actual_cols = normalize_set(actual_cols.iter().map(|s| s.as_str()));
+                    if expected_cols != actual_cols {
+                        drifts.push(ContractDrift::OutputColumnsMismatch {
+                            expected: expected_cols,
+                            found: actual_cols,
+                        });
+                    }
+                }
+                Err(e) => drifts.push(ContractDrift::FinalSelectColumnsUnavailable(e)),
+            }
+        }
+    } else {
+        drifts.push(ContractDrift::MissingImplementationSpec);
+    }
+
+    ContractVerification {
+        digest: expected_digest,
+        drift_reasons: drift_reason_strings(&drifts),
+        drifts,
+    }
+}
+
+/// Verify staging (cleanse) SQL against the active plan: optional spec digest, final `SELECT`
+/// column names vs `implementation_spec.output_fields`, and optional `source(schema, table)`.
+pub(crate) fn verify_cleanse_sql_contract(
+    plan_key: &str,
+    task: &CleanseTask,
+    sql: &str,
+    require_current_digest: bool,
+    expected_source: Option<(&str, &str)>,
+) -> ContractVerification {
+    let expected_digest = cleanse_task_spec_digest(plan_key, task);
+    let mut drifts = Vec::new();
+
+    if let Some((db, table)) = expected_source {
+        if !contains_expected_source_call(sql, db, table) {
+            drifts.push(ContractDrift::CleanseSqlExpectedSourceMismatch(format!(
+                "expected {{ source(\"{}\", \"{}\") }} for dataset {}",
+                db, table, task.dataset_id
+            )));
+        }
+    }
+
+    if require_current_digest {
+        match (
+            expected_digest.as_deref(),
+            extract_sql_spec_digest(sql).as_deref(),
+        ) {
+            (Some(expected), Some(actual)) if expected == actual => {}
+            (Some(expected), Some(actual)) => drifts.push(ContractDrift::SpecDigestMismatch {
+                expected: expected.to_string(),
+                found: actual.to_string(),
+            }),
+            (Some(_), None) => drifts.push(ContractDrift::MissingCurrentSpecDigest),
+            (None, _) => drifts.push(ContractDrift::MissingImplementationSpec),
+        }
     }
 
     if let Some(spec) = task.implementation_spec.as_ref() {
@@ -474,7 +545,10 @@ fn normalize_set<'a>(values: impl IntoIterator<Item = &'a str>) -> BTreeSet<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan_types::{FieldKind, FieldLineage, LineageRole, ModelFolder, ModelImplementationSpec, SourceFieldRef};
+    use crate::plan_types::{
+        lineage_role, CleanseImplementationSpec, CleanseTask, FieldKind, FieldLineage, ModelFolder,
+        ModelImplementationSpec, ModelTask, OutputFieldSpec, SourceFieldRef, TaskStatus,
+    };
 
     fn field(name: &str) -> OutputFieldSpec {
         OutputFieldSpec {
@@ -485,7 +559,7 @@ mod tests {
                     relation: None,
                     name: name.to_string(),
                 },
-                LineageRole::Normalized,
+                lineage_role::NORMALIZED,
             )],
             expression: name.to_string(),
             data_type: None,
@@ -635,5 +709,79 @@ models:
             .drifts
             .iter()
             .any(|d| matches!(d, ContractDrift::SchemaRelationshipContradictsSpec { .. })));
+    }
+
+    fn cleanse_task_order_id_raw() -> CleanseTask {
+        CleanseTask {
+            dataset_id: "AwsDataCatalog.test_raw.raw_orders".to_string(),
+            expected_model_path: Some("models/staging/stg_test_raw_raw_orders.sql".to_string()),
+            invariants: vec![],
+            implementation_spec: Some(CleanseImplementationSpec {
+                spec_version: 1,
+                row_preserving: true,
+                output_fields: vec![OutputFieldSpec {
+                    name: "order_id_raw".to_string(),
+                    kind: FieldKind::Raw,
+                    lineage: vec![FieldLineage::column(
+                        SourceFieldRef {
+                            relation: None,
+                            name: "order_id".to_string(),
+                        },
+                        lineage_role::PASSTHROUGH,
+                    )],
+                    expression: "order_id".to_string(),
+                    data_type: None,
+                    nullable: true,
+                    description: None,
+                }],
+                prohibited_ops: vec![],
+            }),
+            source_schema: vec![],
+            status: TaskStatus::Pending,
+            checklist: vec![],
+        }
+    }
+
+    #[test]
+    fn cleanse_sql_contract_rejects_wrong_final_alias() {
+        let task = cleanse_task_order_id_raw();
+        let digest = cleanse_task_spec_digest("pk", &task).expect("digest");
+        let sql = add_sql_spec_digest(
+            "{{ config(alias=\"stg_test_raw_raw_orders\") }}\n\nselect order_id as wrong_alias\nfrom {{ source('test_raw', 'raw_orders') }}",
+            Some(&digest),
+        );
+        let check =
+            verify_cleanse_sql_contract("pk", &task, &sql, true, Some(("test_raw", "raw_orders")));
+        assert!(!check.is_ok());
+        assert!(check
+            .drift_reasons
+            .iter()
+            .any(|r| r.contains("output columns mismatch")));
+    }
+
+    #[test]
+    fn cleanse_sql_contract_rejects_missing_digest_when_required() {
+        let task = cleanse_task_order_id_raw();
+        let sql = "{{ config(alias=\"stg_test_raw_raw_orders\") }}\n\nselect order_id as order_id_raw\nfrom {{ source('test_raw', 'raw_orders') }}";
+        let check =
+            verify_cleanse_sql_contract("pk", &task, sql, true, Some(("test_raw", "raw_orders")));
+        assert!(!check.is_ok());
+        assert!(check
+            .drift_reasons
+            .iter()
+            .any(|r| r.contains("missing current spec digest")));
+    }
+
+    #[test]
+    fn cleanse_sql_contract_accepts_matching_digest_columns_and_source() {
+        let task = cleanse_task_order_id_raw();
+        let digest = cleanse_task_spec_digest("pk", &task).expect("digest");
+        let sql = add_sql_spec_digest(
+            "{{ config(alias=\"stg_test_raw_raw_orders\") }}\n\nselect order_id as order_id_raw\nfrom {{ source('test_raw', 'raw_orders') }}",
+            Some(&digest),
+        );
+        let check =
+            verify_cleanse_sql_contract("pk", &task, &sql, true, Some(("test_raw", "raw_orders")));
+        assert!(check.is_ok(), "{:?}", check.drift_reasons);
     }
 }

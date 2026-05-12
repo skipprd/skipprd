@@ -1241,7 +1241,7 @@ mod tests {
                                 relation: None,
                                 name: "order_id".to_string(),
                             },
-                            crate::plan::LineageRole::Passthrough,
+                            crate::plan::lineage_role::PASSTHROUGH,
                         )],
                         expression: "order_id".to_string(),
                         data_type: None,

@@ -136,13 +136,20 @@ fn model_lineage_resolve_source_column(
     }
 }
 
+fn lineage_role_eq(role_opt: &Option<String>, expected: &str) -> bool {
+    role_opt
+        .as_deref()
+        .map(|s| s.trim().eq_ignore_ascii_case(expected))
+        .unwrap_or(false)
+}
+
 fn validate_output_field_lineage_cleanse(
     tid: &str,
     field: &crate::plan_types::OutputFieldSpec,
     known: &std::collections::BTreeSet<String>,
     issues: &mut Vec<PlanSemanticIssue>,
 ) {
-    use crate::plan_types::{field_lineage_kind, FieldKind, LineageRole};
+    use crate::plan_types::{field_lineage_kind, lineage_role, FieldKind};
     use PlanSemanticIssueCode::MissingImplementationSpec;
 
     if field.lineage.is_empty() {
@@ -171,7 +178,13 @@ fn validate_output_field_lineage_cleanse(
                 ));
                 continue;
             };
-            let Some(role) = ln.role else {
+            if ln
+                .role
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_none()
+            {
                 issues.push(sem_task(
                     MissingImplementationSpec,
                     tid,
@@ -208,15 +221,17 @@ fn validate_output_field_lineage_cleanse(
                 ));
             }
             let role_ok = match field.kind {
-                FieldKind::Raw => role == LineageRole::Passthrough,
+                FieldKind::Raw => lineage_role_eq(&ln.role, lineage_role::PASSTHROUGH),
                 FieldKind::Clean => {
-                    matches!(role, LineageRole::Normalized | LineageRole::Parsed)
+                    lineage_role_eq(&ln.role, lineage_role::NORMALIZED)
+                        || lineage_role_eq(&ln.role, lineage_role::PARSED)
                 }
-                FieldKind::Derived => matches!(
-                    role,
-                    LineageRole::DerivedInput | LineageRole::Parsed | LineageRole::Normalized
-                ),
-                FieldKind::QualityFlag => matches!(role, LineageRole::QualityInput),
+                FieldKind::Derived => {
+                    lineage_role_eq(&ln.role, lineage_role::DERIVED_INPUT)
+                        || lineage_role_eq(&ln.role, lineage_role::PARSED)
+                        || lineage_role_eq(&ln.role, lineage_role::NORMALIZED)
+                }
+                FieldKind::QualityFlag => lineage_role_eq(&ln.role, lineage_role::QUALITY_INPUT),
             };
             if !role_ok {
                 issues.push(sem_task(
@@ -224,7 +239,7 @@ fn validate_output_field_lineage_cleanse(
                     tid,
                     format!(
                         "{}: output_fields[{}] has kind={:?} but lineage role {:?} is inconsistent with mapping expectations",
-                        tid, field.name, field.kind, role
+                        tid, field.name, field.kind, ln.role
                     ),
                 ));
             }
@@ -295,7 +310,7 @@ fn validate_output_field_lineage_cleanse(
                 ),
             ));
         } else if field.lineage[0].lineage_kind.as_str().trim() != field_lineage_kind::COLUMN
-            || field.lineage[0].role != Some(LineageRole::Passthrough)
+            || !lineage_role_eq(&field.lineage[0].role, lineage_role::PASSTHROUGH)
         {
             issues.push(sem_task(
                 MissingImplementationSpec,
@@ -312,7 +327,7 @@ fn validate_output_field_lineage_cleanse(
         let ok = field.kind == FieldKind::Raw
             && field.lineage.len() == 1
             && field.lineage[0].lineage_kind.as_str().trim() == field_lineage_kind::COLUMN
-            && field.lineage[0].role == Some(LineageRole::Passthrough)
+            && lineage_role_eq(&field.lineage[0].role, lineage_role::PASSTHROUGH)
             && field.lineage[0]
                 .source
                 .as_ref()
@@ -338,7 +353,7 @@ fn validate_output_field_lineage_model(
     task_source: &std::collections::BTreeSet<String>,
     issues: &mut Vec<PlanSemanticIssue>,
 ) {
-    use crate::plan_types::{field_lineage_kind, FieldKind, LineageRole};
+    use crate::plan_types::{field_lineage_kind, lineage_role, FieldKind};
     use PlanSemanticIssueCode::MissingImplementationSpec;
 
     if field.lineage.is_empty() {
@@ -367,7 +382,13 @@ fn validate_output_field_lineage_model(
                 ));
                 continue;
             };
-            let Some(role) = ln.role else {
+            if ln
+                .role
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_none()
+            {
                 issues.push(sem_task(
                     MissingImplementationSpec,
                     tid,
@@ -393,15 +414,17 @@ fn validate_output_field_lineage_model(
                 ));
             }
             let role_ok = match field.kind {
-                FieldKind::Raw => role == LineageRole::Passthrough,
+                FieldKind::Raw => lineage_role_eq(&ln.role, lineage_role::PASSTHROUGH),
                 FieldKind::Clean => {
-                    matches!(role, LineageRole::Normalized | LineageRole::Parsed)
+                    lineage_role_eq(&ln.role, lineage_role::NORMALIZED)
+                        || lineage_role_eq(&ln.role, lineage_role::PARSED)
                 }
-                FieldKind::Derived => matches!(
-                    role,
-                    LineageRole::DerivedInput | LineageRole::Parsed | LineageRole::Normalized
-                ),
-                FieldKind::QualityFlag => matches!(role, LineageRole::QualityInput),
+                FieldKind::Derived => {
+                    lineage_role_eq(&ln.role, lineage_role::DERIVED_INPUT)
+                        || lineage_role_eq(&ln.role, lineage_role::PARSED)
+                        || lineage_role_eq(&ln.role, lineage_role::NORMALIZED)
+                }
+                FieldKind::QualityFlag => lineage_role_eq(&ln.role, lineage_role::QUALITY_INPUT),
             };
             if !role_ok {
                 issues.push(sem_task(
@@ -409,7 +432,7 @@ fn validate_output_field_lineage_model(
                     tid,
                     format!(
                         "{}: output_fields[{}] has kind={:?} but lineage role {:?} is inconsistent with mapping expectations",
-                        tid, field.name, field.kind, role
+                        tid, field.name, field.kind, ln.role
                     ),
                 ));
             }
@@ -480,7 +503,7 @@ fn validate_output_field_lineage_model(
                 ),
             ));
         } else if field.lineage[0].lineage_kind.as_str().trim() != field_lineage_kind::COLUMN
-            || field.lineage[0].role != Some(LineageRole::Passthrough)
+            || !lineage_role_eq(&field.lineage[0].role, lineage_role::PASSTHROUGH)
         {
             issues.push(sem_task(
                 MissingImplementationSpec,
@@ -501,7 +524,7 @@ fn validate_output_field_lineage_model(
         let ok = field.kind == FieldKind::Raw
             && field.lineage.len() == 1
             && field.lineage[0].lineage_kind.as_str().trim() == field_lineage_kind::COLUMN
-            && field.lineage[0].role == Some(LineageRole::Passthrough)
+            && lineage_role_eq(&field.lineage[0].role, lineage_role::PASSTHROUGH)
             && field.lineage[0]
                 .source
                 .as_ref()
@@ -1261,7 +1284,7 @@ mod tests {
                                 relation: None,
                                 name: "customer_id".to_string(),
                             },
-                            LineageRole::Normalized,
+                            lineage_role::NORMALIZED,
                         )],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,
@@ -1615,7 +1638,7 @@ mod tests {
                         relation: None,
                         name: "context.session.id".to_string(),
                     },
-                    LineageRole::Normalized,
+                    lineage_role::NORMALIZED,
                 )],
                 expression: "cast session as varchar".to_string(),
                 data_type: None,
@@ -1630,7 +1653,7 @@ mod tests {
                         relation: None,
                         name: "event_type".to_string(),
                     },
-                    LineageRole::Passthrough,
+                    lineage_role::PASSTHROUGH,
                 )],
                 expression: "passthrough".to_string(),
                 data_type: None,
@@ -1657,7 +1680,7 @@ mod tests {
                     relation: None,
                     name: "context.session.id".to_string(),
                 },
-                LineageRole::Normalized,
+                lineage_role::NORMALIZED,
             )],
             expression: "oops".to_string(),
             data_type: None,
@@ -1684,7 +1707,7 @@ mod tests {
                     relation: None,
                     name: "context.session.id".to_string(),
                 },
-                LineageRole::Passthrough,
+                lineage_role::PASSTHROUGH,
             )],
             expression: "passthrough".to_string(),
             data_type: None,
@@ -1731,7 +1754,7 @@ mod tests {
                     relation: None,
                     name: "event_ts".to_string(),
                 },
-                LineageRole::Normalized,
+                lineage_role::NORMALIZED,
             )],
             expression: "cast to timestamptz".to_string(),
             data_type: None,
@@ -1764,14 +1787,14 @@ mod tests {
                         relation: None,
                         name: "a".to_string(),
                     },
-                    LineageRole::Passthrough,
+                    lineage_role::PASSTHROUGH,
                 ),
                 FieldLineage::column(
                     SourceFieldRef {
                         relation: None,
                         name: "b".to_string(),
                     },
-                    LineageRole::Passthrough,
+                    lineage_role::PASSTHROUGH,
                 ),
             ],
             expression: "composite".to_string(),
@@ -1803,7 +1826,7 @@ mod tests {
                         relation: None,
                         name: "id".to_string(),
                     },
-                    LineageRole::Passthrough,
+                    lineage_role::PASSTHROUGH,
                 )],
                 expression: "passthrough".to_string(),
                 data_type: None,

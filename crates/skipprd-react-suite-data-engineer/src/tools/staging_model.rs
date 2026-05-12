@@ -326,36 +326,10 @@ impl Tool for StagingModelTool {
             };
         if existing_schema.is_none() {
             let seed = "version: 2\n".to_string();
-            let patch_text = project_fs::create_git_patch_text("", &seed, &schema_rel, false)
-                .map_err(|e| format!("failed to build models/schema.yml patch: {e}"))?;
-            let outcome = match project_fs::apply_patch(
-                ctx,
-                self.datasets.as_ref(),
-                &schema_rel,
-                &patch_text,
-                None,
-                None,
-                project_fs::PatchApplyKind::UnifiedDiff,
-            )
-            .await
-            {
-                Ok(outcome) => outcome,
-                Err(e) => {
-                    return Ok(serde_json::json!({
-                        "ok": false,
-                        "batch_failure_kind": "schema",
-                        "datasets": dataset_ids.len(),
-                        "written_keys": [],
-                        "schema_key": schema_key,
-                        "notes": [],
-                        "errors": [format!("failed to patch models/schema.yml: {e}")],
-                    }));
-                }
-            };
             if let Err(e) = retry_put_bytes(
                 ctx.storage().as_ref(),
                 &schema_key,
-                outcome.content.as_bytes(),
+                seed.as_bytes(),
                 "text/yaml",
             )
             .await
@@ -371,7 +345,8 @@ impl Tool for StagingModelTool {
                 }));
             }
         } else if let Some(existing) = existing_schema.as_deref() {
-            // Canonicalize schema.yml deterministically and only apply/write if it actually changes.
+            // Deterministic `sources:` ownership: canonicalize and idempotently overwrite when
+            // needed. Do not use unified-diff patch application (fragile vs LLM-edited YAML).
             let canonical =
                 match project_fs::canonicalize_schema_yml(ctx, self.datasets.as_ref(), existing)
                     .await
@@ -390,37 +365,10 @@ impl Tool for StagingModelTool {
                     }
                 };
             if canonical != existing {
-                let patch_text =
-                    project_fs::create_git_patch_text(existing, &canonical, &schema_rel, true)
-                        .map_err(|e| format!("failed to build models/schema.yml patch: {e}"))?;
-                let outcome = match project_fs::apply_patch(
-                    ctx,
-                    self.datasets.as_ref(),
-                    &schema_rel,
-                    &patch_text,
-                    None,
-                    None,
-                    project_fs::PatchApplyKind::UnifiedDiff,
-                )
-                .await
-                {
-                    Ok(outcome) => outcome,
-                    Err(e) => {
-                        return Ok(serde_json::json!({
-                            "ok": false,
-                            "batch_failure_kind": "schema",
-                            "datasets": dataset_ids.len(),
-                            "written_keys": [],
-                            "schema_key": schema_key,
-                            "notes": [],
-                            "errors": [format!("failed to patch models/schema.yml: {e}")],
-                        }));
-                    }
-                };
                 if let Err(e) = retry_put_bytes(
                     ctx.storage().as_ref(),
                     &schema_key,
-                    outcome.content.as_bytes(),
+                    canonical.as_bytes(),
                     "text/yaml",
                 )
                 .await
@@ -708,6 +656,30 @@ impl Tool for StagingModelTool {
             }
             let plan_instr = render_plan_driven_instructions(&plan_invariants, &plan_checklist);
             let effective_instructions = combine_instructions(&user_instructions, &plan_instr);
+
+            // Existing SQL: if it already satisfies the active cleanse contract (digest + final
+            // SELECT + expected source()), skip the LLM loop — same bar as post-author verification.
+            if let Some(ref p) = plan_opt {
+                if let Some(task) = p.tasks.iter().find(|t| t.dataset_id == *ds) {
+                    if !existing_sql.trim().is_empty() {
+                        let require_digest = plan_spec_digest.is_some();
+                        let check = crate::authoring_contract::verify_cleanse_sql_contract(
+                            p.plan_key.as_str(),
+                            task,
+                            &existing_sql,
+                            require_digest,
+                            Some((expected_db.as_str(), expected_table.as_str())),
+                        );
+                        if check.is_ok() {
+                            succeeded_dataset_ids.push(ds.clone());
+                            notes.push(format!(
+                                "{ds}: existing staging SQL matches the active cleanse contract; skipped re-authoring."
+                            ));
+                            continue;
+                        }
+                    }
+                }
+            }
 
             let cols_for_sql: Vec<String> = cols
                 .iter()
@@ -1391,7 +1363,7 @@ mod tests {
                                 relation: None,
                                 name: "order_id".to_string(),
                             },
-                            crate::plan::LineageRole::Passthrough,
+                            crate::plan::lineage_role::PASSTHROUGH,
                         )],
                         expression: "order_id as order_id_raw (raw passthrough)".to_string(),
                         data_type: None,
@@ -1492,5 +1464,473 @@ mod tests {
 
         // Avoid unused var warning in case future refactors remove ctx mutability.
         assert!(!plan_key.trim().is_empty());
+    }
+
+    #[derive(Clone)]
+    struct PanicIfInvokedLlm;
+    impl LargeLanguageModel for PanicIfInvokedLlm {
+        fn chat(
+            &self,
+            _messages: &[ChatMessage],
+            _options: &react_core::llm::LlmCallOptions,
+        ) -> Result<String, String> {
+            panic!("LLM invoked but existing staging SQL should satisfy cleanse contract");
+        }
+        fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, String> {
+            Ok(vec![])
+        }
+    }
+
+    #[tokio::test]
+    async fn staging_model_skips_llm_when_existing_cleanse_sql_matches_contract() {
+        #[derive(Clone)]
+        struct MockDbt;
+        #[async_trait]
+        impl DbtProvider for MockDbt {
+            async fn ensure_minimal_project(
+                &self,
+                _scope: &RequestScope,
+            ) -> Result<Vec<crate::plan_types::StrippedArtifact>, String> {
+                Ok(vec![])
+            }
+            async fn write_model_sql(
+                &self,
+                _scope: &RequestScope,
+                _rel_path: &str,
+                _sql: &str,
+            ) -> Result<String, String> {
+                Ok("k".to_string())
+            }
+            async fn write_metricflow_yaml(
+                &self,
+                _scope: &RequestScope,
+                _rel_path: &str,
+                _yaml_text: &str,
+            ) -> Result<String, String> {
+                Ok("k".to_string())
+            }
+            async fn validate_project(
+                &self,
+                _scope: &RequestScope,
+                _args: &crate::providers::DbtValidateArgs,
+            ) -> Result<crate::providers::DbtValidateResult, String> {
+                Err("not used".to_string())
+            }
+        }
+
+        #[derive(Clone)]
+        struct MockWarehouse;
+        #[async_trait]
+        impl QueryProvider for MockWarehouse {
+            async fn query(&self, _sql: &str) -> Result<QueryResult, String> {
+                Ok(QueryResult {
+                    header: vec![],
+                    rows: vec![],
+                    meta: None,
+                })
+            }
+            async fn schema(&self, dataset_fqn: &str) -> Result<Vec<(String, String)>, String> {
+                if dataset_fqn == "AwsDataCatalog.test_raw.raw_orders" {
+                    Ok(vec![("order_id".to_string(), "string".to_string())])
+                } else {
+                    Err(format!("not found: {}", dataset_fqn))
+                }
+            }
+            async fn sample(
+                &self,
+                _dataset_fqn: &str,
+                _limit: usize,
+            ) -> Result<Vec<Vec<String>>, String> {
+                Err("not used".to_string())
+            }
+        }
+        #[async_trait]
+        impl crate::providers::DatasetCatalogProvider for MockWarehouse {
+            async fn list_datasets(&self) -> Result<Vec<crate::providers::DatasetId>, String> {
+                Ok(vec![crate::providers::DatasetId {
+                    catalog: "AwsDataCatalog".to_string(),
+                    database: "test_raw".to_string(),
+                    table: "raw_orders".to_string(),
+                }])
+            }
+
+            async fn get_dataset_schema(
+                &self,
+                dataset: &crate::providers::DatasetId,
+            ) -> Result<Vec<(String, String)>, String> {
+                self.schema(&dataset.fqn()).await
+            }
+
+            async fn get_dataset_stats(
+                &self,
+                _dataset: &crate::providers::DatasetId,
+                _max_fields: usize,
+            ) -> Result<
+                (
+                    crate::providers::DatasetFieldStats,
+                    crate::providers::DatasetStats,
+                ),
+                String,
+            > {
+                Err("not used".to_string())
+            }
+
+            fn evidence_capabilities(&self) -> crate::providers::ProviderEvidenceCapabilities {
+                crate::providers::ProviderEvidenceCapabilities::schema_only(
+                    "mock warehouse provider",
+                )
+            }
+        }
+        impl crate::providers::WarehouseNaming for MockWarehouse {
+            fn kind(&self) -> crate::de_config::WarehouseKind {
+                crate::de_config::WarehouseKind::default()
+            }
+            fn parse_dataset_fqn(&self, fqn: &str) -> Result<crate::providers::DatasetId, String> {
+                let parts: Vec<&str> = fqn.split('.').collect();
+                if parts.len() != 3 {
+                    return Err("expected <catalog>.<schema>.<table>".to_string());
+                }
+                Ok(crate::providers::DatasetId {
+                    catalog: parts[0].to_string(),
+                    database: parts[1].to_string(),
+                    table: parts[2].to_string(),
+                })
+            }
+            fn quote_ident(&self, ident: &str) -> String {
+                format!("\"{}\"", ident.replace('"', "\"\""))
+            }
+        }
+
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope::parse("t", "w", "p").expect("valid test scope");
+        let cfg = Arc::new(react_core::resolved_config::ReactResolvedConfig {
+            server: react_core::resolved_config::ServerResolved { port: 1 },
+            storage: react_core::resolved_config::StorageResolved {
+                mode: react_core::resolved_config::StorageMode::Local,
+                bucket: None,
+                path: None,
+                s3_credentials: None,
+            },
+            scope: scope.clone(),
+            llm: react_core::resolved_config::LlmResolved::default(),
+            suite_config: serde_json::json!({
+                "warehouse": { "kind": "athena", "container": "AwsDataCatalog", "namespace": "test_raw", "extras": {"region":"eu-west-1","workgroup":"wg","result_s3":"s3://x/"} },
+                "catalog": { "enabled": false, "refresh_secs": 60, "max_concurrency": 8 },
+                "dbt": { "enabled": true, "target": "athena", "naming": { "target_schema": "test", "silver_suffix": "silver", "gold_suffix": "gold" }, "runner": "host" },
+                "vector": { "enabled": false }
+            }),
+        });
+
+        let warehouse: Arc<dyn crate::providers::WarehouseProvider> = Arc::new(MockWarehouse);
+        let dbt_prov: Arc<dyn crate::providers::DbtProvider> = Arc::new(MockDbt);
+        let mut ctx = react_core::agent::AgentCtxBuilder::new(
+            Arc::new(PanicIfInvokedLlm),
+            storage.clone(),
+            scope.clone(),
+            keyspace,
+            Arc::new(react_core::agent::DefaultPolicy),
+        )
+        .top_k(1)
+        .per_step_timeout_secs(1)
+        .max_steps(1)
+        .thread_id("t1".to_string())
+        .agent_name("test".to_string())
+        .resolved_config(Some(cfg))
+        .build();
+        ctx.set_capability(Arc::new(crate::ctx_ext::WarehouseCap(warehouse)));
+        ctx.set_capability(Arc::new(crate::ctx_ext::DbtCap(dbt_prov)));
+
+        let ds = "AwsDataCatalog.test_raw.raw_orders".to_string();
+        let plan_key = crate::plan::new_cleanse_plan_key(&ctx);
+        let plan = crate::plan::CleansePlan {
+            plan_key: plan_key.clone(),
+            status: crate::plan::PlanStatus::Approved,
+            project_snapshot: Default::default(),
+            tasks: vec![crate::plan::CleanseTask {
+                dataset_id: ds.clone(),
+                expected_model_path: Some("models/staging/stg_test_raw_raw_orders.sql".to_string()),
+                invariants: vec![],
+                implementation_spec: Some(crate::plan::CleanseImplementationSpec {
+                    spec_version: 1,
+                    row_preserving: true,
+                    output_fields: vec![crate::plan::OutputFieldSpec {
+                        name: "order_id_raw".to_string(),
+                        kind: crate::plan::FieldKind::Raw,
+                        lineage: vec![crate::plan::FieldLineage::column(
+                            crate::plan::SourceFieldRef {
+                                relation: None,
+                                name: "order_id".to_string(),
+                            },
+                            crate::plan::lineage_role::PASSTHROUGH,
+                        )],
+                        expression: "order_id".to_string(),
+                        data_type: None,
+                        nullable: true,
+                        description: None,
+                    }],
+                    prohibited_ops: vec![],
+                }),
+                source_schema: vec![crate::plan::SourceColumnDef {
+                    name: "order_id".to_string(),
+                    data_type: "string".to_string(),
+                }],
+                status: crate::plan::TaskStatus::Pending,
+                checklist: vec![],
+            }],
+            batches: vec![vec![ds.clone()]],
+            work_groups: vec![],
+            mutations: vec![],
+            progress: crate::plan::PlanProgress::default(),
+        };
+        let digest = crate::authoring_contract::cleanse_task_spec_digest(&plan_key, &plan.tasks[0])
+            .expect("digest");
+        let body = "{{ config(alias=\"stg_test_raw_raw_orders\") }}\n\nselect order_id as order_id_raw\nfrom {{ source('test_raw', 'raw_orders') }}";
+        let sql_on_disk = crate::authoring_contract::add_sql_spec_digest(body, Some(&digest));
+        assert!(crate::authoring_contract::verify_cleanse_sql_contract(
+            &plan_key,
+            &plan.tasks[0],
+            &sql_on_disk,
+            true,
+            Some(("test_raw", "raw_orders")),
+        )
+        .is_ok());
+
+        crate::plan::save_cleanse_plan(&ctx, &plan).await.unwrap();
+
+        let base = ctx
+            .keyspace()
+            .scoped_prefix(ctx.scope(), &["dbt"])
+            .trim_end_matches('/')
+            .to_string();
+        let staging_key = format!("{}/models/staging/stg_test_raw_raw_orders.sql", base);
+        storage
+            .put_bytes(&staging_key, sql_on_disk.as_bytes(), "text/sql")
+            .await
+            .expect("seed staging sql");
+
+        let tool = StagingModelTool {
+            datasets: Some(Arc::new(MockWarehouse)),
+        };
+        let out = tool
+            .call(serde_json::json!({"dataset_ids":[ds.clone()]}), &ctx)
+            .await
+            .expect("tool call");
+
+        assert!(
+            out.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+            "{out:?}"
+        );
+        let succeeded: Vec<String> = serde_json::from_value(
+            out.get("succeeded_dataset_ids")
+                .cloned()
+                .unwrap_or_default(),
+        )
+        .unwrap_or_default();
+        assert_eq!(succeeded, vec![ds]);
+        let written: Vec<String> =
+            serde_json::from_value(out.get("written_keys").cloned().unwrap_or_default())
+                .unwrap_or_default();
+        assert!(
+            written.is_empty(),
+            "idempotent success should not rewrite SQL: {written:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn staging_model_direct_sql_canonicalizes_schema_yml_without_patch_apply() {
+        #[derive(Clone)]
+        struct MockDbt;
+        #[async_trait]
+        impl DbtProvider for MockDbt {
+            async fn ensure_minimal_project(
+                &self,
+                _scope: &RequestScope,
+            ) -> Result<Vec<crate::plan_types::StrippedArtifact>, String> {
+                Ok(vec![])
+            }
+            async fn write_model_sql(
+                &self,
+                _scope: &RequestScope,
+                _rel_path: &str,
+                _sql: &str,
+            ) -> Result<String, String> {
+                Ok("k".to_string())
+            }
+            async fn write_metricflow_yaml(
+                &self,
+                _scope: &RequestScope,
+                _rel_path: &str,
+                _yaml_text: &str,
+            ) -> Result<String, String> {
+                Ok("k".to_string())
+            }
+            async fn validate_project(
+                &self,
+                _scope: &RequestScope,
+                _args: &crate::providers::DbtValidateArgs,
+            ) -> Result<crate::providers::DbtValidateResult, String> {
+                Err("not used".to_string())
+            }
+        }
+
+        #[derive(Clone)]
+        struct MockWarehouse;
+        #[async_trait]
+        impl QueryProvider for MockWarehouse {
+            async fn query(&self, _sql: &str) -> Result<QueryResult, String> {
+                Ok(QueryResult {
+                    header: vec![],
+                    rows: vec![],
+                    meta: None,
+                })
+            }
+            async fn schema(&self, dataset_fqn: &str) -> Result<Vec<(String, String)>, String> {
+                if dataset_fqn == "AwsDataCatalog.test_raw.raw_orders" {
+                    Ok(vec![("order_id".to_string(), "string".to_string())])
+                } else {
+                    Err(format!("not found: {}", dataset_fqn))
+                }
+            }
+            async fn sample(
+                &self,
+                _dataset_fqn: &str,
+                _limit: usize,
+            ) -> Result<Vec<Vec<String>>, String> {
+                Err("not used".to_string())
+            }
+        }
+        #[async_trait]
+        impl crate::providers::DatasetCatalogProvider for MockWarehouse {
+            async fn list_datasets(&self) -> Result<Vec<crate::providers::DatasetId>, String> {
+                Ok(vec![crate::providers::DatasetId {
+                    catalog: "AwsDataCatalog".to_string(),
+                    database: "test_raw".to_string(),
+                    table: "raw_orders".to_string(),
+                }])
+            }
+
+            async fn get_dataset_schema(
+                &self,
+                dataset: &crate::providers::DatasetId,
+            ) -> Result<Vec<(String, String)>, String> {
+                self.schema(&dataset.fqn()).await
+            }
+
+            async fn get_dataset_stats(
+                &self,
+                _dataset: &crate::providers::DatasetId,
+                _max_fields: usize,
+            ) -> Result<
+                (
+                    crate::providers::DatasetFieldStats,
+                    crate::providers::DatasetStats,
+                ),
+                String,
+            > {
+                Err("not used".to_string())
+            }
+
+            fn evidence_capabilities(&self) -> crate::providers::ProviderEvidenceCapabilities {
+                crate::providers::ProviderEvidenceCapabilities::schema_only(
+                    "mock warehouse provider",
+                )
+            }
+        }
+        impl crate::providers::WarehouseNaming for MockWarehouse {
+            fn kind(&self) -> crate::de_config::WarehouseKind {
+                crate::de_config::WarehouseKind::default()
+            }
+            fn parse_dataset_fqn(&self, fqn: &str) -> Result<crate::providers::DatasetId, String> {
+                let parts: Vec<&str> = fqn.split('.').collect();
+                if parts.len() != 3 {
+                    return Err("expected <catalog>.<schema>.<table>".to_string());
+                }
+                Ok(crate::providers::DatasetId {
+                    catalog: parts[0].to_string(),
+                    database: parts[1].to_string(),
+                    table: parts[2].to_string(),
+                })
+            }
+            fn quote_ident(&self, ident: &str) -> String {
+                format!("\"{}\"", ident.replace('"', "\"\""))
+            }
+        }
+
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope::parse("t", "w", "p").expect("valid test scope");
+        let cfg = Arc::new(react_core::resolved_config::ReactResolvedConfig {
+            server: react_core::resolved_config::ServerResolved { port: 1 },
+            storage: react_core::resolved_config::StorageResolved {
+                mode: react_core::resolved_config::StorageMode::Local,
+                bucket: None,
+                path: None,
+                s3_credentials: None,
+            },
+            scope: scope.clone(),
+            llm: react_core::resolved_config::LlmResolved::default(),
+            suite_config: serde_json::json!({
+                "warehouse": { "kind": "athena", "container": "AwsDataCatalog", "namespace": "test_raw", "extras": {"region":"eu-west-1","workgroup":"wg","result_s3":"s3://x/"} },
+                "catalog": { "enabled": false, "refresh_secs": 60, "max_concurrency": 8 },
+                "dbt": { "enabled": true, "target": "athena", "naming": { "target_schema": "test", "silver_suffix": "silver", "gold_suffix": "gold" }, "runner": "host" },
+                "vector": { "enabled": false }
+            }),
+        });
+
+        let warehouse: Arc<dyn crate::providers::WarehouseProvider> = Arc::new(MockWarehouse);
+        let dbt_prov: Arc<dyn crate::providers::DbtProvider> = Arc::new(MockDbt);
+        let mut ctx = react_core::agent::AgentCtxBuilder::new(
+            Arc::new(react_core::llm::NullModel::new()),
+            storage.clone(),
+            scope.clone(),
+            keyspace,
+            Arc::new(react_core::agent::DefaultPolicy),
+        )
+        .top_k(1)
+        .per_step_timeout_secs(1)
+        .max_steps(1)
+        .thread_id("t1".to_string())
+        .agent_name("test".to_string())
+        .resolved_config(Some(cfg))
+        .build();
+        ctx.set_capability(Arc::new(crate::ctx_ext::WarehouseCap(warehouse.clone())));
+        ctx.set_capability(Arc::new(crate::ctx_ext::DbtCap(dbt_prov)));
+
+        let base = ctx
+            .keyspace()
+            .scoped_prefix(ctx.scope(), &["dbt"])
+            .trim_end_matches('/')
+            .to_string();
+        let schema_key = format!("{}/{}", base, crate::project_fs::MODELS_SCHEMA_YML);
+        storage
+            .put_bytes(&schema_key, b"version: 2\nsources: []\n", "text/yaml")
+            .await
+            .expect("seed schema");
+
+        let ds = "AwsDataCatalog.test_raw.raw_orders";
+        let sql = concat!(
+            "{{ config(alias=\"stg_test_raw_raw_orders\") }}\n\n",
+            "select order_id as order_id_raw\n",
+            "from {{ source('test_raw', 'raw_orders') }}\n",
+        );
+        let tool = StagingModelTool {
+            datasets: Some(warehouse),
+        };
+        let out = tool
+            .call(serde_json::json!({"dataset_ids":[ds], "sql": sql}), &ctx)
+            .await
+            .expect("tool call");
+
+        assert!(
+            out.get("ok").and_then(|v| v.as_bool()).unwrap_or(false),
+            "{out:?}"
+        );
+        let schema_bytes = storage.get_bytes(&schema_key).await.expect("read schema");
+        let yml = String::from_utf8_lossy(&schema_bytes);
+        assert!(
+            yml.contains("raw_orders"),
+            "expected deterministic sources rebuild to register raw_orders; got:\n{yml}"
+        );
     }
 }
