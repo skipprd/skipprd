@@ -1114,6 +1114,7 @@ mod tests {
                         plan::OutputFieldSpec {
                             name: "customer_id_raw".to_string(),
                             kind: plan::FieldKind::Raw,
+                            lineage: vec![],
                             source_columns: vec!["customer_id".to_string()],
                             expression: "customer_id as customer_id_raw (raw)".to_string(),
                             data_type: None,
@@ -1123,6 +1124,7 @@ mod tests {
                         plan::OutputFieldSpec {
                             name: "email_raw".to_string(),
                             kind: plan::FieldKind::Raw,
+                            lineage: vec![],
                             source_columns: vec!["email".to_string()],
                             expression: "email as email_raw (raw)".to_string(),
                             data_type: None,
@@ -1240,6 +1242,7 @@ mod tests {
                     output_fields: vec![plan::OutputFieldSpec {
                         name: "customer_id_raw".to_string(),
                         kind: plan::FieldKind::Raw,
+                        lineage: vec![],
                         source_columns: vec!["customer_id".to_string()],
                         expression: "customer_id as customer_id_raw (raw)".to_string(),
                         data_type: None,
@@ -1350,6 +1353,7 @@ mod tests {
                     output_fields: vec![plan::OutputFieldSpec {
                         name: "customer_id_raw".to_string(),
                         kind: plan::FieldKind::Raw,
+                        lineage: vec![],
                         source_columns: vec!["customer_id".to_string()],
                         expression: "customer_id as customer_id_raw (raw)".to_string(),
                         data_type: None,
@@ -1466,6 +1470,7 @@ mod tests {
                     output_fields: vec![plan::OutputFieldSpec {
                         name: "customer_id".to_string(),
                         kind: plan::FieldKind::Clean,
+                        lineage: vec![],
                         source_columns: vec!["customer_id".to_string()],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,
@@ -1476,7 +1481,15 @@ mod tests {
                     evidence_claim_refs: observed_customer_key_claim(),
                 }),
                 source_schema: vec![],
-                grounded_inputs: vec![],
+                grounded_inputs: vec![plan::GroundedModelInput {
+                    input_name: "stg_test_raw_raw_customers".to_string(),
+                    model_rel_path: "models/staging/stg_test_raw_raw_customers.sql".to_string(),
+                    relation_fqn: "db.schema.stg_test_raw_raw_customers".to_string(),
+                    source_schema: vec![plan::SourceColumnDef {
+                        name: "customer_id".to_string(),
+                        data_type: "string".to_string(),
+                    }],
+                }],
                 status: plan::TaskStatus::InProgress,
                 checklist,
             }],
@@ -1561,6 +1574,7 @@ mod tests {
                     output_fields: vec![plan::OutputFieldSpec {
                         name: "customer_id".to_string(),
                         kind: plan::FieldKind::Clean,
+                        lineage: vec![],
                         source_columns: vec!["customer_id".to_string()],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,
@@ -1571,7 +1585,15 @@ mod tests {
                     evidence_claim_refs: observed_customer_key_claim(),
                 }),
                 source_schema: vec![],
-                grounded_inputs: vec![],
+                grounded_inputs: vec![plan::GroundedModelInput {
+                    input_name: "stg_test_raw_raw_customers".to_string(),
+                    model_rel_path: "models/staging/stg_test_raw_raw_customers.sql".to_string(),
+                    relation_fqn: "db.schema.stg_test_raw_raw_customers".to_string(),
+                    source_schema: vec![plan::SourceColumnDef {
+                        name: "customer_id".to_string(),
+                        data_type: "string".to_string(),
+                    }],
+                }],
                 status: plan::TaskStatus::InProgress,
                 checklist,
             }],
@@ -1683,6 +1705,7 @@ mod tests {
                     output_fields: vec![plan::OutputFieldSpec {
                         name: "customer_id".to_string(),
                         kind: plan::FieldKind::Clean,
+                        lineage: vec![],
                         source_columns: vec!["customer_id".to_string()],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,
@@ -1693,7 +1716,15 @@ mod tests {
                     evidence_claim_refs: observed_customer_key_claim(),
                 }),
                 source_schema: vec![],
-                grounded_inputs: vec![],
+                grounded_inputs: vec![plan::GroundedModelInput {
+                    input_name: "stg_test_raw_raw_customers".to_string(),
+                    model_rel_path: "models/staging/stg_test_raw_raw_customers.sql".to_string(),
+                    relation_fqn: "db.schema.stg_test_raw_raw_customers".to_string(),
+                    source_schema: vec![plan::SourceColumnDef {
+                        name: "customer_id".to_string(),
+                        data_type: "string".to_string(),
+                    }],
+                }],
                 status: plan::TaskStatus::InProgress,
                 checklist,
             }],
@@ -1803,6 +1834,7 @@ mod tests {
                     output_fields: vec![plan::OutputFieldSpec {
                         name: "customer_id".to_string(),
                         kind: plan::FieldKind::Clean,
+                        lineage: vec![],
                         source_columns: vec!["customer_id".to_string()],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,
@@ -1813,7 +1845,15 @@ mod tests {
                     evidence_claim_refs: observed_customer_key_claim(),
                 }),
                 source_schema: vec![],
-                grounded_inputs: vec![],
+                grounded_inputs: vec![plan::GroundedModelInput {
+                    input_name: "stg_test_raw_raw_customers".to_string(),
+                    model_rel_path: "models/staging/stg_test_raw_raw_customers.sql".to_string(),
+                    relation_fqn: "db.schema.stg_test_raw_raw_customers".to_string(),
+                    source_schema: vec![plan::SourceColumnDef {
+                        name: "customer_id".to_string(),
+                        data_type: "string".to_string(),
+                    }],
+                }],
                 status: plan::TaskStatus::InProgress,
                 checklist,
             }],
@@ -1902,6 +1942,7 @@ mod tests {
                     output_fields: vec![plan::OutputFieldSpec {
                         name: "customer_id".to_string(),
                         kind: plan::FieldKind::Clean,
+                        lineage: vec![],
                         source_columns: vec!["customer_id".to_string()],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,
@@ -1912,7 +1953,15 @@ mod tests {
                     evidence_claim_refs: observed_customer_key_claim(),
                 }),
                 source_schema: vec![],
-                grounded_inputs: vec![],
+                grounded_inputs: vec![plan::GroundedModelInput {
+                    input_name: "stg_test_raw_raw_customers".to_string(),
+                    model_rel_path: "models/staging/stg_test_raw_raw_customers.sql".to_string(),
+                    relation_fqn: "db.schema.stg_test_raw_raw_customers".to_string(),
+                    source_schema: vec![plan::SourceColumnDef {
+                        name: "customer_id".to_string(),
+                        data_type: "string".to_string(),
+                    }],
+                }],
                 status: plan::TaskStatus::InProgress,
                 checklist,
             }],

@@ -77,6 +77,312 @@ fn duplicate_values(values: &[String]) -> Vec<String> {
         .collect()
 }
 
+fn model_lineage_resolve_source_column(
+    relation: Option<&str>,
+    column: &str,
+    per_input: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    task_source: &std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    let col = column.trim();
+    if col.is_empty() {
+        return Err("empty column name".to_string());
+    }
+    let any_nonempty_schema = per_input.values().any(|s| !s.is_empty());
+    if let Some(rel) = relation.map(str::trim).filter(|r| !r.is_empty()) {
+        let Some(set) = per_input.get(rel) else {
+            return Err(format!("unknown lineage.source.relation '{rel}'"));
+        };
+        if !set.is_empty() && !set.contains(col) {
+            return Err(format!(
+                "lineage references column '{col}' not present on relation '{rel}'"
+            ));
+        }
+        return Ok(());
+    }
+    if !any_nonempty_schema {
+        if task_source.contains(col) {
+            return Ok(());
+        }
+        for set in per_input.values() {
+            if set.contains(col) {
+                return Ok(());
+            }
+        }
+        return Err(format!(
+            "lineage references unknown column '{col}' (no non-empty grounded schemas to disambiguate)"
+        ));
+    }
+    let mut hits: Vec<&str> = Vec::new();
+    for (inp, set) in per_input {
+        if set.contains(col) {
+            hits.push(inp.as_str());
+        }
+    }
+    match hits.len() {
+        0 => {
+            if task_source.contains(col) {
+                Ok(())
+            } else {
+                Err(format!(
+                    "lineage references unknown column '{col}' (not found on any grounded input schema)"
+                ))
+            }
+        }
+        1 => Ok(()),
+        _ => Err(format!(
+            "lineage column '{col}' is ambiguous across inputs {:?}; set lineage.source.relation",
+            hits
+        )),
+    }
+}
+
+fn validate_output_field_lineage_cleanse(
+    tid: &str,
+    field: &crate::plan_types::OutputFieldSpec,
+    known: &std::collections::BTreeSet<String>,
+    issues: &mut Vec<PlanSemanticIssue>,
+) {
+    use crate::plan_types::{FieldKind, LineageRole};
+    use PlanSemanticIssueCode::MissingImplementationSpec;
+
+    if field.lineage.is_empty() && field.kind == FieldKind::Raw {
+        let nonempty = field
+            .source_columns
+            .iter()
+            .filter(|s| !s.trim().is_empty())
+            .count();
+        if nonempty > 1 {
+            issues.push(sem_task(
+                MissingImplementationSpec,
+                tid,
+                format!(
+                    "{}: output_fields[{}] kind=raw lists multiple source_columns; declare explicit lineage with exactly one passthrough mapping",
+                    tid, field.name
+                ),
+            ));
+            return;
+        }
+    }
+
+    let effective = field.effective_lineage();
+    if effective.is_empty() {
+        issues.push(sem_task(
+            MissingImplementationSpec,
+            tid,
+            format!(
+                "{}: output_fields[{}] is missing lineage (populate lineage[] or source_columns for legacy migration)",
+                tid, field.name
+            ),
+        ));
+        return;
+    }
+
+    for ln in &effective {
+        if let Some(rel) = ln.source.relation.as_deref() {
+            if !rel.trim().is_empty() {
+                issues.push(sem_task(
+                    MissingImplementationSpec,
+                    tid,
+                    format!(
+                        "{}: output_fields[{}] lineage.source.relation must be omitted for cleanse tasks (got '{}')",
+                        tid, field.name, rel
+                    ),
+                ));
+            }
+        }
+        if !known.is_empty() && !known.contains(&ln.source.name) {
+            issues.push(sem_task(
+                MissingImplementationSpec,
+                tid,
+                format!(
+                    "{}: output_fields[{}] lineage references unknown source column '{}' (available: {})",
+                    tid,
+                    field.name,
+                    ln.source.name,
+                    known.iter().cloned().collect::<Vec<_>>().join(", ")
+                ),
+            ));
+        }
+    }
+
+    if field.kind == FieldKind::Raw {
+        if effective.len() != 1 || effective[0].role != LineageRole::Passthrough {
+            issues.push(sem_task(
+                MissingImplementationSpec,
+                tid,
+                format!(
+                    "{}: output_fields[{}] kind=raw requires exactly one lineage entry with role=passthrough",
+                    tid, field.name
+                ),
+            ));
+        }
+    }
+
+    if !known.is_empty() && field.name.contains('.') && known.contains(field.name.as_str()) {
+        if field.kind != FieldKind::Raw
+            || effective.len() != 1
+            || effective[0].role != LineageRole::Passthrough
+            || effective[0].source.name != field.name
+        {
+            issues.push(sem_task(
+                MissingImplementationSpec,
+                tid,
+                format!(
+                    "{}: output_fields[{}] publishes a dotted name that exists in source_schema; require kind=raw and a single passthrough lineage from that exact field",
+                    tid, field.name
+                ),
+            ));
+        }
+    }
+
+    for ln in &effective {
+        let role_ok = match field.kind {
+            FieldKind::Raw => ln.role == LineageRole::Passthrough,
+            FieldKind::Clean => {
+                matches!(ln.role, LineageRole::Normalized | LineageRole::Parsed)
+            }
+            FieldKind::Derived => {
+                matches!(
+                    ln.role,
+                    LineageRole::DerivedInput | LineageRole::Parsed | LineageRole::Normalized
+                )
+            }
+            FieldKind::QualityFlag => matches!(ln.role, LineageRole::QualityInput),
+        };
+        if !role_ok {
+            issues.push(sem_task(
+                MissingImplementationSpec,
+                tid,
+                format!(
+                    "{}: output_fields[{}] has kind={:?} but lineage role {:?} is inconsistent with mapping expectations",
+                    tid, field.name, field.kind, ln.role
+                ),
+            ));
+        }
+    }
+}
+
+fn validate_output_field_lineage_model(
+    tid: &str,
+    field: &crate::plan_types::OutputFieldSpec,
+    per_input: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    task_source: &std::collections::BTreeSet<String>,
+    issues: &mut Vec<PlanSemanticIssue>,
+) {
+    use crate::plan_types::{FieldKind, LineageRole};
+    use PlanSemanticIssueCode::MissingImplementationSpec;
+
+    if field.lineage.is_empty() && field.kind == FieldKind::Raw {
+        let nonempty = field
+            .source_columns
+            .iter()
+            .filter(|s| !s.trim().is_empty())
+            .count();
+        if nonempty > 1 {
+            issues.push(sem_task(
+                MissingImplementationSpec,
+                tid,
+                format!(
+                    "{}: output_fields[{}] kind=raw lists multiple source_columns; declare explicit lineage with exactly one passthrough mapping",
+                    tid, field.name
+                ),
+            ));
+            return;
+        }
+    }
+
+    let effective = field.effective_lineage();
+    if effective.is_empty() {
+        issues.push(sem_task(
+            MissingImplementationSpec,
+            tid,
+            format!(
+                "{}: output_fields[{}] is missing lineage (populate lineage[] or source_columns for legacy migration)",
+                tid, field.name
+            ),
+        ));
+        return;
+    }
+
+    for ln in &effective {
+        let rel = ln
+            .source
+            .relation
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty());
+        if let Err(msg) =
+            model_lineage_resolve_source_column(rel, &ln.source.name, per_input, task_source)
+        {
+            issues.push(sem_task(
+                MissingImplementationSpec,
+                tid,
+                format!("{}: output_fields[{}] {}", tid, field.name, msg),
+            ));
+        }
+    }
+
+    if field.kind == FieldKind::Raw {
+        if effective.len() != 1 || effective[0].role != LineageRole::Passthrough {
+            issues.push(sem_task(
+                MissingImplementationSpec,
+                tid,
+                format!(
+                    "{}: output_fields[{}] kind=raw requires exactly one lineage entry with role=passthrough",
+                    tid, field.name
+                ),
+            ));
+        }
+    }
+
+    let mut union_known: std::collections::BTreeSet<String> = task_source.clone();
+    for set in per_input.values() {
+        union_known.extend(set.iter().cloned());
+    }
+    if field.name.contains('.') && union_known.contains(field.name.as_str()) {
+        if field.kind != FieldKind::Raw
+            || effective.len() != 1
+            || effective[0].role != LineageRole::Passthrough
+            || effective[0].source.name != field.name
+        {
+            issues.push(sem_task(
+                MissingImplementationSpec,
+                tid,
+                format!(
+                    "{}: output_fields[{}] publishes a dotted name that exists on an upstream schema; require kind=raw and a single passthrough lineage from that exact field",
+                    tid, field.name
+                ),
+            ));
+        }
+    }
+
+    for ln in &effective {
+        let role_ok = match field.kind {
+            FieldKind::Raw => ln.role == LineageRole::Passthrough,
+            FieldKind::Clean => {
+                matches!(ln.role, LineageRole::Normalized | LineageRole::Parsed)
+            }
+            FieldKind::Derived => {
+                matches!(
+                    ln.role,
+                    LineageRole::DerivedInput | LineageRole::Parsed | LineageRole::Normalized
+                )
+            }
+            FieldKind::QualityFlag => matches!(ln.role, LineageRole::QualityInput),
+        };
+        if !role_ok {
+            issues.push(sem_task(
+                MissingImplementationSpec,
+                tid,
+                format!(
+                    "{}: output_fields[{}] has kind={:?} but lineage role {:?} is inconsistent with mapping expectations",
+                    tid, field.name, field.kind, ln.role
+                ),
+            ));
+        }
+    }
+}
+
 fn duplicate_workgroup_refs(groups: &[PlanWorkGroup]) -> Vec<(String, String)> {
     let mut counts = std::collections::BTreeMap::<(String, String), usize>::new();
     for g in groups.iter() {
@@ -547,9 +853,9 @@ pub fn validate_cleanse_plan_semantics(plan: &CleansePlan) -> PlanSemanticValida
                 ),
             ));
         }
-        if !t.source_schema.is_empty() {
-            let known: std::collections::BTreeSet<String> =
-                t.source_schema.iter().map(|c| c.name.clone()).collect();
+        let known: std::collections::BTreeSet<String> =
+            t.source_schema.iter().map(|c| c.name.clone()).collect();
+        if !known.is_empty() {
             for field in &spec.output_fields {
                 for sc in &field.source_columns {
                     if !known.contains(sc.as_str()) {
@@ -563,6 +869,9 @@ pub fn validate_cleanse_plan_semantics(plan: &CleansePlan) -> PlanSemanticValida
                     }
                 }
             }
+        }
+        for field in &spec.output_fields {
+            validate_output_field_lineage_cleanse(tid, field, &known, &mut issues);
         }
     }
     validation_result(issues)
@@ -647,6 +956,26 @@ pub fn validate_model_plan_semantics(
                     .collect::<Vec<_>>()
             }))
             .collect();
+        let mut per_input: std::collections::BTreeMap<String, std::collections::BTreeSet<String>> =
+            std::collections::BTreeMap::new();
+        for gi in &t.grounded_inputs {
+            let cols: std::collections::BTreeSet<String> = gi
+                .source_schema
+                .iter()
+                .map(|c| c.name.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            per_input.insert(gi.input_name.trim().to_string(), cols);
+        }
+        for field in &spec.output_fields {
+            validate_output_field_lineage_model(
+                tid,
+                field,
+                &per_input,
+                &source_field_names,
+                &mut issues,
+            );
+        }
         for metric in &spec.metrics {
             let metric_id = if metric.name.trim().is_empty() {
                 "<unnamed>"
@@ -772,6 +1101,7 @@ pub fn ensure_model_plan_semantically_valid_or_repaired(
     allowed_staging_models: &std::collections::BTreeSet<String>,
 ) -> PlanSemanticValidation {
     crate::plan_grounding::ensure_expected_model_paths_model(plan);
+    crate::plan_grounding::materialize_output_lineage_from_legacy_model(plan);
     normalize_model_metric_source_fields(plan);
     validate_model_plan_semantics(plan, Some(allowed_staging_models))
 }
@@ -805,6 +1135,7 @@ mod tests {
                     output_fields: vec![OutputFieldSpec {
                         name: "customer_id".to_string(),
                         kind: FieldKind::Clean,
+                        lineage: vec![],
                         source_columns: vec!["customer_id".to_string()],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,
@@ -936,10 +1267,16 @@ mod tests {
             status: EvidenceStatus::Observed,
         }]);
         plan.tasks[0].source_schema.clear();
-        plan.tasks[0].grounded_inputs[0].source_schema = vec![SourceColumnDef {
-            name: "order_id".to_string(),
-            data_type: "number".to_string(),
-        }];
+        plan.tasks[0].grounded_inputs[0].source_schema = vec![
+            SourceColumnDef {
+                name: "customer_id".to_string(),
+                data_type: "string".to_string(),
+            },
+            SourceColumnDef {
+                name: "order_id".to_string(),
+                data_type: "number".to_string(),
+            },
+        ];
         plan.tasks[0]
             .implementation_spec
             .as_mut()
@@ -968,10 +1305,16 @@ mod tests {
             status: EvidenceStatus::Observed,
         }]);
         plan.tasks[0].source_schema.clear();
-        plan.tasks[0].grounded_inputs[0].source_schema = vec![SourceColumnDef {
-            name: "order_id".to_string(),
-            data_type: "number".to_string(),
-        }];
+        plan.tasks[0].grounded_inputs[0].source_schema = vec![
+            SourceColumnDef {
+                name: "customer_id".to_string(),
+                data_type: "string".to_string(),
+            },
+            SourceColumnDef {
+                name: "order_id".to_string(),
+                data_type: "number".to_string(),
+            },
+        ];
         plan.tasks[0]
             .implementation_spec
             .as_mut()
@@ -1008,14 +1351,26 @@ mod tests {
             kind: SemanticClaimKind::CandidateKey,
             status: EvidenceStatus::Observed,
         }]);
-        plan.tasks[0].source_schema = vec![SourceColumnDef {
-            name: "order_id".to_string(),
-            data_type: "number".to_string(),
-        }];
-        plan.tasks[0].grounded_inputs[0].source_schema = vec![SourceColumnDef {
-            name: "ORDER_ID".to_string(),
-            data_type: "NUMBER".to_string(),
-        }];
+        plan.tasks[0].source_schema = vec![
+            SourceColumnDef {
+                name: "customer_id".to_string(),
+                data_type: "string".to_string(),
+            },
+            SourceColumnDef {
+                name: "order_id".to_string(),
+                data_type: "number".to_string(),
+            },
+        ];
+        plan.tasks[0].grounded_inputs[0].source_schema = vec![
+            SourceColumnDef {
+                name: "customer_id".to_string(),
+                data_type: "STRING".to_string(),
+            },
+            SourceColumnDef {
+                name: "ORDER_ID".to_string(),
+                data_type: "NUMBER".to_string(),
+            },
+        ];
         plan.tasks[0]
             .implementation_spec
             .as_mut()
@@ -1077,5 +1432,234 @@ mod tests {
             .errors
             .iter()
             .any(|err| err.contains("MISSING_FIELD")));
+    }
+
+    fn minimal_cleanse_plan(
+        dataset_id: &str,
+        source_schema: Vec<SourceColumnDef>,
+        output_fields: Vec<OutputFieldSpec>,
+    ) -> CleansePlan {
+        let dataset_id = dataset_id.to_string();
+        let batches = vec![vec![dataset_id.clone()]];
+        CleansePlan {
+            plan_key: "cleanse:test_lineage".to_string(),
+            status: PlanStatus::Draft,
+            project_snapshot: Default::default(),
+            tasks: vec![CleanseTask {
+                dataset_id: dataset_id.clone(),
+                expected_model_path: Some("models/staging/stg_test.sql".to_string()),
+                invariants: vec![],
+                implementation_spec: Some(CleanseImplementationSpec {
+                    spec_version: 1,
+                    row_preserving: true,
+                    output_fields,
+                    prohibited_ops: vec![],
+                }),
+                source_schema,
+                status: TaskStatus::Pending,
+                checklist: canonical_task_checklist(TrackKind::Cleanse),
+            }],
+            batches: batches.clone(),
+            work_groups: crate::plan_progress::canonical_work_groups_from_batches(
+                &batches, "cleanse",
+            ),
+            mutations: vec![],
+            progress: Default::default(),
+        }
+    }
+
+    #[test]
+    fn cleanse_accepts_dotted_source_mapped_to_flat_outputs_via_lineage() {
+        let schema = vec![
+            SourceColumnDef {
+                name: "context.session.id".to_string(),
+                data_type: "string".to_string(),
+            },
+            SourceColumnDef {
+                name: "event_type".to_string(),
+                data_type: "string".to_string(),
+            },
+        ];
+        let fields = vec![
+            OutputFieldSpec {
+                name: "session_id".to_string(),
+                kind: FieldKind::Clean,
+                lineage: vec![FieldLineage {
+                    source: SourceFieldRef {
+                        relation: None,
+                        name: "context.session.id".to_string(),
+                    },
+                    role: LineageRole::Normalized,
+                }],
+                source_columns: vec![],
+                expression: "cast session as varchar".to_string(),
+                data_type: None,
+                nullable: true,
+                description: None,
+            },
+            OutputFieldSpec {
+                name: "event_type".to_string(),
+                kind: FieldKind::Raw,
+                lineage: vec![FieldLineage {
+                    source: SourceFieldRef {
+                        relation: None,
+                        name: "event_type".to_string(),
+                    },
+                    role: LineageRole::Passthrough,
+                }],
+                source_columns: vec![],
+                expression: "passthrough".to_string(),
+                data_type: None,
+                nullable: false,
+                description: None,
+            },
+        ];
+        let plan = minimal_cleanse_plan("ds.events", schema, fields);
+        let r = validate_cleanse_plan_semantics(&plan);
+        assert!(r.ok, "{:?}", r.errors);
+    }
+
+    #[test]
+    fn cleanse_rejects_publishing_dotted_source_name_as_clean_field() {
+        let schema = vec![SourceColumnDef {
+            name: "context.session.id".to_string(),
+            data_type: "string".to_string(),
+        }];
+        let fields = vec![OutputFieldSpec {
+            name: "context.session.id".to_string(),
+            kind: FieldKind::Clean,
+            lineage: vec![FieldLineage {
+                source: SourceFieldRef {
+                    relation: None,
+                    name: "context.session.id".to_string(),
+                },
+                role: LineageRole::Normalized,
+            }],
+            source_columns: vec![],
+            expression: "oops".to_string(),
+            data_type: None,
+            nullable: true,
+            description: None,
+        }];
+        let plan = minimal_cleanse_plan("ds.events", schema, fields);
+        let r = validate_cleanse_plan_semantics(&plan);
+        assert!(!r.ok);
+        assert!(r.errors.iter().any(|e| e.contains("kind=raw")));
+    }
+
+    #[test]
+    fn cleanse_accepts_dotted_published_name_when_raw_passthrough() {
+        let schema = vec![SourceColumnDef {
+            name: "context.session.id".to_string(),
+            data_type: "string".to_string(),
+        }];
+        let fields = vec![OutputFieldSpec {
+            name: "context.session.id".to_string(),
+            kind: FieldKind::Raw,
+            lineage: vec![FieldLineage {
+                source: SourceFieldRef {
+                    relation: None,
+                    name: "context.session.id".to_string(),
+                },
+                role: LineageRole::Passthrough,
+            }],
+            source_columns: vec![],
+            expression: "passthrough".to_string(),
+            data_type: None,
+            nullable: true,
+            description: None,
+        }];
+        let plan = minimal_cleanse_plan("ds.events", schema, fields);
+        let r = validate_cleanse_plan_semantics(&plan);
+        assert!(r.ok, "{:?}", r.errors);
+    }
+
+    #[test]
+    fn cleanse_rejects_orphan_output_without_lineage_or_sources() {
+        let schema = vec![SourceColumnDef {
+            name: "a".to_string(),
+            data_type: "string".to_string(),
+        }];
+        let fields = vec![OutputFieldSpec {
+            name: "orphan".to_string(),
+            kind: FieldKind::Derived,
+            lineage: vec![],
+            source_columns: vec![],
+            expression: "constant".to_string(),
+            data_type: None,
+            nullable: true,
+            description: None,
+        }];
+        let plan = minimal_cleanse_plan("ds.t", schema, fields);
+        let r = validate_cleanse_plan_semantics(&plan);
+        assert!(!r.ok);
+        assert!(r.errors.iter().any(|e| e.contains("missing lineage")));
+    }
+
+    #[test]
+    fn cleanse_legacy_source_columns_derives_lineage_for_validation() {
+        let schema = vec![SourceColumnDef {
+            name: "event_ts".to_string(),
+            data_type: "timestamp".to_string(),
+        }];
+        let fields = vec![OutputFieldSpec {
+            name: "event_ts_clean".to_string(),
+            kind: FieldKind::Clean,
+            lineage: vec![],
+            source_columns: vec!["event_ts".to_string()],
+            expression: "cast to timestamptz".to_string(),
+            data_type: None,
+            nullable: false,
+            description: None,
+        }];
+        let plan = minimal_cleanse_plan("ds.t", schema, fields);
+        let r = validate_cleanse_plan_semantics(&plan);
+        assert!(r.ok, "{:?}", r.errors);
+    }
+
+    #[test]
+    fn cleanse_rejects_raw_with_multiple_legacy_source_columns_without_lineage() {
+        let schema = vec![
+            SourceColumnDef {
+                name: "a".to_string(),
+                data_type: "string".to_string(),
+            },
+            SourceColumnDef {
+                name: "b".to_string(),
+                data_type: "string".to_string(),
+            },
+        ];
+        let fields = vec![OutputFieldSpec {
+            name: "x".to_string(),
+            kind: FieldKind::Raw,
+            lineage: vec![],
+            source_columns: vec!["a".to_string(), "b".to_string()],
+            expression: "composite".to_string(),
+            data_type: None,
+            nullable: true,
+            description: None,
+        }];
+        let plan = minimal_cleanse_plan("ds.t", schema, fields);
+        let r = validate_cleanse_plan_semantics(&plan);
+        assert!(!r.ok);
+        assert!(r
+            .errors
+            .iter()
+            .any(|e| e.contains("multiple source_columns")));
+    }
+
+    #[test]
+    fn output_field_spec_deserializes_legacy_json_without_lineage_key() {
+        let json = r#"{
+            "name": "id",
+            "kind": "clean",
+            "source_columns": ["id"],
+            "expression": "cast",
+            "nullable": false
+        }"#;
+        let f: OutputFieldSpec = serde_json::from_str(json).expect("parse");
+        assert!(f.lineage.is_empty());
+        assert_eq!(f.effective_lineage().len(), 1);
+        assert_eq!(f.effective_lineage()[0].role, LineageRole::Normalized);
     }
 }

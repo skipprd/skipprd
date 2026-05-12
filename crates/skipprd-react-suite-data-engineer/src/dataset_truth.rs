@@ -438,7 +438,7 @@ pub fn render_source_schema_prompt_block(schema: &crate::plan_types::SourceSchem
         return String::new();
     }
     let mut out =
-        String::from("\n\nAUTHORITATIVE SCHEMAS (warehouse/database-reported source columns \u{2014} output_fields.source_columns MUST reference only these exact names and casing):\n");
+        String::from("\n\nAUTHORITATIVE SCHEMAS (warehouse/database-reported source columns \u{2014} output_fields.lineage[].source.name and legacy output_fields.source_columns MUST reference only these exact names and casing):\n");
     for (ds_id, cols) in schema.iter() {
         let cols_str: Vec<String> = cols
             .iter()

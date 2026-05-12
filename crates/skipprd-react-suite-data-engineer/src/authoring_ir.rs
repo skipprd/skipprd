@@ -197,6 +197,7 @@ mod tests {
                 OutputFieldSpec {
                     name: "order_id".to_string(),
                     kind: crate::plan_types::FieldKind::Clean,
+                    lineage: vec![],
                     source_columns: vec!["order_id".to_string()],
                     expression: "order_id".to_string(),
                     data_type: None,
@@ -206,6 +207,7 @@ mod tests {
                 OutputFieldSpec {
                     name: "user_id".to_string(),
                     kind: crate::plan_types::FieldKind::Clean,
+                    lineage: vec![],
                     source_columns: vec!["user_id".to_string()],
                     expression: "user_id".to_string(),
                     data_type: None,
@@ -227,6 +229,7 @@ mod tests {
             &[OutputFieldSpec {
                 name: "order_id".to_string(),
                 kind: crate::plan_types::FieldKind::Clean,
+                lineage: vec![],
                 source_columns: vec!["order_id".to_string()],
                 expression: "order_id".to_string(),
                 data_type: None,

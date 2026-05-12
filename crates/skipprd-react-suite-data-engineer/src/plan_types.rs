@@ -360,12 +360,49 @@ pub enum FieldKind {
     QualityFlag,
 }
 
+/// How an output field relates to an upstream source column (or relation column).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LineageRole {
+    /// Published output mirrors this source field (typically `FieldKind::Raw`).
+    Passthrough,
+    /// Normalized / cast / cleaned representation of this source field.
+    Normalized,
+    /// Parsed representation (e.g. extracted component) of this source field.
+    Parsed,
+    /// Non-quality derived logic that reads this source field.
+    DerivedInput,
+    /// Quality flag / validation signal derived from this source field.
+    QualityInput,
+}
+
+/// Identifies a column on an upstream relation. For cleanse tasks `relation` is always omitted.
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SourceFieldRef {
+    /// Grounded model input name (e.g. `stg_orders`) when the task has multiple inputs.
+    #[serde(default)]
+    pub relation: Option<String>,
+    /// Warehouse-reported column name on that relation (may contain dots for nested paths).
+    pub name: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FieldLineage {
+    pub source: SourceFieldRef,
+    pub role: LineageRole,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct OutputFieldSpec {
     /// Output column name.
     pub name: String,
     pub kind: FieldKind,
+    /// Explicit lineage from authoritative source columns to this published output.
+    #[serde(default)]
+    pub lineage: Vec<FieldLineage>,
     /// Upstream source columns (or prior-stage columns) this field depends on.
     #[serde(default)]
     pub source_columns: Vec<String>,
@@ -382,6 +419,71 @@ pub struct OutputFieldSpec {
     /// Optional one-line meaning / usage guidance.
     #[serde(default)]
     pub description: Option<String>,
+}
+
+impl OutputFieldSpec {
+    /// When `lineage` is empty, derives lineage from legacy `source_columns` + `kind`.
+    ///
+    /// Returns `None` when legacy data is ambiguous (e.g. `FieldKind::Raw` with multiple
+    /// `source_columns` and no explicit `lineage`); callers should surface a plan validation error.
+    pub fn try_derive_legacy_lineage(&self) -> Option<Vec<FieldLineage>> {
+        if !self.lineage.is_empty() {
+            return Some(self.lineage.clone());
+        }
+        let nonempty: Vec<String> = self
+            .source_columns
+            .iter()
+            .filter_map(|s| {
+                let t = s.trim();
+                if t.is_empty() {
+                    None
+                } else {
+                    Some(t.to_string())
+                }
+            })
+            .collect();
+        if nonempty.is_empty() {
+            return Some(vec![]);
+        }
+        if self.kind == FieldKind::Raw && nonempty.len() > 1 {
+            return None;
+        }
+        let role = match self.kind {
+            FieldKind::Raw => LineageRole::Passthrough,
+            FieldKind::Clean => LineageRole::Normalized,
+            FieldKind::Derived => LineageRole::DerivedInput,
+            FieldKind::QualityFlag => LineageRole::QualityInput,
+        };
+        Some(
+            nonempty
+                .into_iter()
+                .map(|name| FieldLineage {
+                    source: SourceFieldRef {
+                        relation: None,
+                        name,
+                    },
+                    role,
+                })
+                .collect(),
+        )
+    }
+
+    /// Lineage used for validation and authoring: explicit `lineage`, or legacy-derived mapping.
+    pub fn effective_lineage(&self) -> Vec<FieldLineage> {
+        self.try_derive_legacy_lineage().unwrap_or_default()
+    }
+
+    /// Fills `lineage` from legacy `source_columns` when `lineage` is empty and derivation is unambiguous.
+    pub fn materialize_lineage_from_legacy_if_missing(&mut self) {
+        if !self.lineage.is_empty() {
+            return;
+        }
+        if let Some(v) = self.try_derive_legacy_lineage() {
+            if !v.is_empty() {
+                self.lineage = v;
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]

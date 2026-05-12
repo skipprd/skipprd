@@ -480,6 +480,7 @@ mod tests {
         OutputFieldSpec {
             name: name.to_string(),
             kind: FieldKind::Clean,
+            lineage: vec![],
             source_columns: vec![name.to_string()],
             expression: name.to_string(),
             data_type: None,

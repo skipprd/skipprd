@@ -336,7 +336,7 @@ impl DataEngineerSuite {
                     continue;
                 }
                 out.push_str(&format!(
-                    "\nAVAILABLE COLUMNS FOR {} (source_columns MUST reference ONLY these):\n",
+                    "\nAVAILABLE COLUMNS FOR {} (lineage[].source.name and legacy source_columns MUST reference ONLY these):\n",
                     tid
                 ));
                 for c in cols {
@@ -1236,6 +1236,7 @@ mod tests {
                     output_fields: vec![crate::plan::OutputFieldSpec {
                         name: "order_id".to_string(),
                         kind: crate::plan::FieldKind::Raw,
+                        lineage: vec![],
                         source_columns: vec!["order_id".to_string()],
                         expression: "order_id".to_string(),
                         data_type: None,

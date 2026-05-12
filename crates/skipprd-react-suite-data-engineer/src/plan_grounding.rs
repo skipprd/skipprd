@@ -217,6 +217,23 @@ pub fn normalize_cleanse_plan_defaults(plan: &mut CleansePlan) {
                 }
             }
         }
+        if let Some(spec) = t.implementation_spec.as_mut() {
+            for field in spec.output_fields.iter_mut() {
+                field.materialize_lineage_from_legacy_if_missing();
+            }
+        }
+    }
+}
+
+/// Fills `output_fields[].lineage` from legacy `source_columns` for model tasks.
+pub fn materialize_output_lineage_from_legacy_model(plan: &mut ModelPlan) {
+    for t in plan.tasks.iter_mut() {
+        let Some(spec) = t.implementation_spec.as_mut() else {
+            continue;
+        };
+        for field in spec.output_fields.iter_mut() {
+            field.materialize_lineage_from_legacy_if_missing();
+        }
     }
 }
 

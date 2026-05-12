@@ -326,6 +326,7 @@ mod tests {
                     output_fields: vec![crate::plan::OutputFieldSpec {
                         name: "customer_id".to_string(),
                         kind: crate::plan::FieldKind::Clean,
+                        lineage: vec![],
                         source_columns: vec!["customer_id".to_string()],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,

@@ -188,9 +188,16 @@ ROW-PRESERVING SILVER CONTRACT:\n\
   An EMPTY output_fields is NEVER valid — the design memo always specifies transformation work.\n\
 - Raw passthrough columns (kind=raw) should also be listed explicitly if the plan references them.\n\
 COLUMN GROUNDING (CRITICAL):\n\
-- output_fields[].source_columns MUST reference ONLY columns listed in the AUTHORITATIVE SCHEMAS section; those names are warehouse/database-reported and canonical.\n\
-- Do NOT invent, abbreviate, or rename source column names.\n\
-- If AUTHORITATIVE SCHEMAS lists a column as 'customer_id (bigint)', use exactly 'customer_id'.\n\
+- source_schema lists warehouse-reported column names for READING raw source data (including dotted nested paths when present).\n\
+- output_fields[].name is the published SILVER contract: these are the final column names in the staging model.\n\
+- output_fields[].lineage[] connects each published output to one or more authoritative source columns via {source: {name, relation?}, role}.\n\
+  - kind=raw: exactly one lineage entry with role=passthrough from the source field being published as-is.\n\
+  - kind=clean: use role=normalized (or parsed) from each upstream column that contributes to the cleaned output.\n\
+  - kind=derived / quality_flag: use role=derived_input or quality_input respectively.\n\
+- For legacy specs you may still include output_fields[].source_columns; the system derives lineage from source_columns + kind when lineage is omitted.\n\
+- lineage[].source.name MUST match an authoritative source_schema name exactly (casing included). Do NOT invent or abbreviate source names.\n\
+- If AUTHORITATIVE SCHEMAS lists a column as 'customer_id (bigint)', use exactly 'customer_id' in lineage.source.name.\n\
+- Do NOT instruct that dotted source paths must become dotted output names unless the plan explicitly publishes them as raw passthrough (kind=raw) with matching lineage.\n\
 Your specs must be complete enough for executable plan completion (author + validate checklist items can be finished without downstream guesswork)."
         .to_string()
 }
@@ -216,8 +223,10 @@ Each output_fields item MUST include: name, kind, expression.\n\
 Each metrics[] item MUST include source_fields with the exact fields used by the metric definition.\n\
 spec_version MUST be an integer number (not a string).\n\
 COLUMN GROUNDING (CRITICAL):\n\
-- output_fields[].source_columns and joins[].on MUST reference ONLY columns from the AUTHORITATIVE SCHEMAS or IMMUTABLE FACTS staging model columns; those names are warehouse/database-reported whenever relations are materialized.\n\
-- metrics[].source_fields MUST reference ONLY columns from the AUTHORITATIVE SCHEMAS, IMMUTABLE FACTS staging model columns, or output_fields.\n\
+- source_schema / IMMUTABLE FACTS list warehouse-reported names for READING upstream data; output_fields[].name is the published model contract.\n\
+- output_fields[].lineage[] maps each published column to authoritative inputs via {source: {name, relation?}, role} (relation names a grounded staging/gold input when multiple inputs exist).\n\
+- You may still include output_fields[].source_columns for legacy compatibility; lineage is preferred and may be derived from source_columns + kind when lineage is omitted.\n\
+- output_fields[].lineage, joins[].on, and metrics[].source_fields MUST reference ONLY columns from AUTHORITATIVE SCHEMAS, IMMUTABLE FACTS staging model columns, or output_fields contracts.\n\
 - Use the exact canonical field casing shown in AUTHORITATIVE SCHEMAS, IMMUTABLE FACTS, or output_fields. Do NOT invent, abbreviate, or rename column names.\n\
 - inputs[] MUST use exact staging model names from the IMMUTABLE FACTS section.\n\
 - evidence_claim_refs[] MUST reference only typed profile/user evidence with fields {claim_id, kind, status}. If proof is missing, include an `unverified` claim and keep assumptions explicit; downstream gates will request plan_change rather than speculative authoring.\n\
@@ -249,8 +258,10 @@ mod tests {
         let cleanse = cleanse_plan_enrichment_system_prompt();
         let model = model_plan_enrichment_system_prompt();
 
-        assert!(cleanse.contains("warehouse/database-reported"));
-        assert!(model.contains("warehouse/database-reported"));
+        assert!(cleanse.contains("warehouse-reported"));
+        assert!(model.contains("warehouse-reported"));
+        assert!(cleanse.contains("output_fields[].lineage"));
+        assert!(model.contains("output_fields[].lineage"));
         assert!(model.contains("exact canonical field casing"));
     }
 }

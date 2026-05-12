@@ -148,7 +148,8 @@ fn build_staging_sys_prompt(
            - If schema_columns contains a column name with dots (e.g. context.session.id), it represents a nested struct path. \
 Reference it using unquoted struct dereference syntax (e.g. context.session.id) or per-segment quoting (e.g. \"context\".\"session\".\"id\"). \
 Do NOT quote the entire dot-path as a single identifier — \"context.session.id\" will FAIL with COLUMN_NOT_FOUND.\n\
-           - When aliasing dotted columns in a CTE, alias them to a flat name (e.g. context.session.id as context_session_id) so downstream references in the outer SELECT use the flat alias.\n\
+           - Inside CTEs you may alias dotted source fields to flat intermediate names for readability.\n\
+           - The final SELECT column aliases MUST match plan_implementation_spec.output_fields[].name EXACTLY (the published contract). Do not flatten or rename outputs in the final projection unless output_fields declares that published name.\n\
          - If a column name is reserved (e.g. timestamp), quote the identifier (\"timestamp\").\n\
          - Keep changes aligned with the user's instructions, even if they are unconventional.\n"
         ,
@@ -980,6 +981,7 @@ mod tests {
         assert!(sys.contains("schema_columns as ground truth"));
         assert!(sys.contains("struct dereference syntax"));
         assert!(sys.contains("Do NOT quote the entire dot-path as a single identifier"));
+        assert!(sys.contains("output_fields[].name EXACTLY"));
     }
 
     #[test]
@@ -1384,6 +1386,7 @@ mod tests {
                     output_fields: vec![crate::plan::OutputFieldSpec {
                         name: "order_id_raw".to_string(),
                         kind: crate::plan::FieldKind::Raw,
+                        lineage: vec![],
                         source_columns: vec!["order_id".to_string()],
                         expression: "order_id as order_id_raw (raw passthrough)".to_string(),
                         data_type: None,

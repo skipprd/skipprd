@@ -470,6 +470,7 @@ data_sinks:
       s3_bucket: asgsdag-datalake
       athena_results_s3_bucket: asgsdag-datalake
       s3_prefix: /datalake
+      region: eu-west-1
   test_cube_events:
     schema_sink: schema_sinks.glue_test_cube_events
     Athena:

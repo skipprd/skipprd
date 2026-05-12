@@ -771,6 +771,7 @@ mod tests {
                     output_fields: vec![plan::OutputFieldSpec {
                         name: "customer_id_raw".to_string(),
                         kind: plan::FieldKind::Raw,
+                        lineage: vec![],
                         source_columns: vec!["customer_id".to_string()],
                         expression: "customer_id as customer_id_raw (raw)".to_string(),
                         data_type: None,
@@ -850,6 +851,7 @@ mod tests {
                     output_fields: vec![plan::OutputFieldSpec {
                         name: "customer_id".to_string(),
                         kind: plan::FieldKind::Clean,
+                        lineage: vec![],
                         source_columns: vec!["customer_id".to_string()],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,
