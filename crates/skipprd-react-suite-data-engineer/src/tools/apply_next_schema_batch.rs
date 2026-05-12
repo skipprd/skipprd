@@ -327,6 +327,12 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             .await
             .map_err(|e| format!("failed to persist cleanse schema batch start state: {e}"))?;
 
+        tracing::info!(
+            plan_key = %plan.plan_key,
+            datasets = ?batch,
+            "apply_next_cleanse_schema_batch: authoring models/staging/*.yml (silver schema) per dataset"
+        );
+
         let mut succeeded: Vec<String> = Vec::new();
         let mut failed: Vec<String> = Vec::new();
         let mut errors: Vec<String> = Vec::new();

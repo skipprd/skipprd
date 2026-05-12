@@ -216,6 +216,13 @@ impl Tool for ApplyNextCleanseBatchTool {
             .await
             .map_err(|e| format!("failed to save cleanse plan after marking in-progress: {e}"))?;
 
+        tracing::info!(
+            plan_key = %plan.plan_key,
+            checklist_item_id = %checklist_item_id,
+            datasets = ?batch,
+            "apply_next_cleanse_batch: invoking staging_model to author cleanse SQL"
+        );
+
         let mut inner_args = serde_json::json!({ "dataset_ids": batch.clone() });
         if let Some(i) = instructions {
             inner_args["instructions"] = Value::String(i);
