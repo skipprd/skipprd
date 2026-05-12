@@ -152,6 +152,25 @@ mod tests {
         }
     }
 
+    fn collect_unsupported_one_of_keywords(v: &Value, path: &str, out: &mut Vec<String>) {
+        match v {
+            Value::Array(items) => {
+                for (i, item) in items.iter().enumerate() {
+                    collect_unsupported_one_of_keywords(item, &format!("{path}[{i}]"), out);
+                }
+            }
+            Value::Object(map) => {
+                if map.contains_key("oneOf") {
+                    out.push(format!("{path}.oneOf"));
+                }
+                for (k, child) in map {
+                    collect_unsupported_one_of_keywords(child, &format!("{path}.{k}"), out);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn assert_openai_ref_compat(schema: &Value, name: &str) {
         let mut violations: Vec<String> = Vec::new();
         collect_ref_sibling_violations(schema, "$", &mut violations);
@@ -159,6 +178,13 @@ mod tests {
             violations.is_empty(),
             "{name} has OpenAI-incompatible $ref sibling nodes:\n{}",
             violations.join("\n")
+        );
+        let mut union_violations: Vec<String> = Vec::new();
+        collect_unsupported_one_of_keywords(schema, "$", &mut union_violations);
+        assert!(
+            union_violations.is_empty(),
+            "{name} has OpenAI-incompatible oneOf keywords:\n{}",
+            union_violations.join("\n")
         );
     }
 

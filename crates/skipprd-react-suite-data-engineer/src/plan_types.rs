@@ -382,6 +382,7 @@ pub enum LineageRole {
 pub struct SourceFieldRef {
     /// Grounded model input name (e.g. `stg_orders`) when the task has multiple inputs.
     #[serde(default)]
+    #[schemars(with = "String")]
     pub relation: Option<String>,
     /// Warehouse-reported column name on that relation (may contain dots for nested paths).
     pub name: String,
