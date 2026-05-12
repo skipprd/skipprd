@@ -1053,7 +1053,7 @@ pub async fn run_batched_review(
         Option<Value>,
     ) = match phase {
         Phase::CleanseReview => {
-            // Use the same plan-loading path as authoring (oldest active, non-terminal)
+            // Use the same plan-loading path as authoring (newest active, non-terminal)
             // to ensure review sees the exact same plan version.
             if let Some(p) = de_plan::load_cleanse_plan(&actx)
                 .await

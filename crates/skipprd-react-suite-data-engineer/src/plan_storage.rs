@@ -110,11 +110,13 @@ async fn list_plan_keys(ctx: &AgentCtx, suffix: &str) -> Result<Vec<String>, Pla
 
 /// Load the cleanse plan for this thread.
 ///
-/// Prefers the oldest non-terminal plan. If none exists (e.g. plan was marked Completed),
-/// falls back to the newest plan key so progress and context are always available.
+/// Prefers the **newest** deserializeable non-terminal plan (keys are UTC-sorted; we scan
+/// newest-first so a superseding draft wins over older broken or abandoned JSON).
+/// If none exists (e.g. every snapshot is terminal), falls back to the newest plan key so
+/// progress and context are always available.
 pub async fn load_cleanse_plan(ctx: &AgentCtx) -> Result<Option<CleansePlan>, PlanError> {
     let keys = list_plan_keys(ctx, "_cleanse.json").await?;
-    for k in &keys {
+    for k in keys.iter().rev() {
         let bytes = match retry_get_bytes(ctx.storage().as_ref(), k).await {
             Ok(b) => b,
             Err(e) => {
@@ -194,10 +196,11 @@ pub async fn save_cleanse_plan_grounded(
 
 /// Load the model plan for this thread.
 ///
-/// Prefers the oldest non-terminal plan. If none exists, falls back to the newest plan key.
+/// Prefers the **newest** deserializeable non-terminal plan. If none exists, falls back to the
+/// newest plan key.
 pub async fn load_model_plan(ctx: &AgentCtx) -> Result<Option<ModelPlan>, PlanError> {
     let keys = list_plan_keys(ctx, "_model.json").await?;
-    for k in &keys {
+    for k in keys.iter().rev() {
         let bytes = match retry_get_bytes(ctx.storage().as_ref(), k).await {
             Ok(b) => b,
             Err(e) => {
