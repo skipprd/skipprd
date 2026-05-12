@@ -1114,8 +1114,13 @@ mod tests {
                         plan::OutputFieldSpec {
                             name: "customer_id_raw".to_string(),
                             kind: plan::FieldKind::Raw,
-                            lineage: vec![],
-                            source_columns: vec!["customer_id".to_string()],
+                            lineage: vec![plan::FieldLineage::column(
+                                plan::SourceFieldRef {
+                                    relation: None,
+                                    name: "customer_id".to_string(),
+                                },
+                                plan::LineageRole::Passthrough,
+                            )],
                             expression: "customer_id as customer_id_raw (raw)".to_string(),
                             data_type: None,
                             nullable: true,
@@ -1124,8 +1129,13 @@ mod tests {
                         plan::OutputFieldSpec {
                             name: "email_raw".to_string(),
                             kind: plan::FieldKind::Raw,
-                            lineage: vec![],
-                            source_columns: vec!["email".to_string()],
+                            lineage: vec![plan::FieldLineage::column(
+                                plan::SourceFieldRef {
+                                    relation: None,
+                                    name: "email".to_string(),
+                                },
+                                plan::LineageRole::Passthrough,
+                            )],
                             expression: "email as email_raw (raw)".to_string(),
                             data_type: None,
                             nullable: true,
@@ -1242,8 +1252,13 @@ mod tests {
                     output_fields: vec![plan::OutputFieldSpec {
                         name: "customer_id_raw".to_string(),
                         kind: plan::FieldKind::Raw,
-                        lineage: vec![],
-                        source_columns: vec!["customer_id".to_string()],
+                        lineage: vec![plan::FieldLineage::column(
+                            plan::SourceFieldRef {
+                                relation: None,
+                                name: "customer_id".to_string(),
+                            },
+                            plan::LineageRole::Passthrough,
+                        )],
                         expression: "customer_id as customer_id_raw (raw)".to_string(),
                         data_type: None,
                         nullable: true,
@@ -1353,8 +1368,13 @@ mod tests {
                     output_fields: vec![plan::OutputFieldSpec {
                         name: "customer_id_raw".to_string(),
                         kind: plan::FieldKind::Raw,
-                        lineage: vec![],
-                        source_columns: vec!["customer_id".to_string()],
+                        lineage: vec![plan::FieldLineage::column(
+                            plan::SourceFieldRef {
+                                relation: None,
+                                name: "customer_id".to_string(),
+                            },
+                            plan::LineageRole::Passthrough,
+                        )],
                         expression: "customer_id as customer_id_raw (raw)".to_string(),
                         data_type: None,
                         nullable: true,
@@ -1470,8 +1490,13 @@ mod tests {
                     output_fields: vec![plan::OutputFieldSpec {
                         name: "customer_id".to_string(),
                         kind: plan::FieldKind::Clean,
-                        lineage: vec![],
-                        source_columns: vec!["customer_id".to_string()],
+                        lineage: vec![plan::FieldLineage::column(
+                            plan::SourceFieldRef {
+                                relation: None,
+                                name: "customer_id".to_string(),
+                            },
+                            plan::LineageRole::Normalized,
+                        )],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,
                         nullable: true,
@@ -1574,8 +1599,13 @@ mod tests {
                     output_fields: vec![plan::OutputFieldSpec {
                         name: "customer_id".to_string(),
                         kind: plan::FieldKind::Clean,
-                        lineage: vec![],
-                        source_columns: vec!["customer_id".to_string()],
+                        lineage: vec![plan::FieldLineage::column(
+                            plan::SourceFieldRef {
+                                relation: None,
+                                name: "customer_id".to_string(),
+                            },
+                            plan::LineageRole::Normalized,
+                        )],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,
                         nullable: true,
@@ -1705,8 +1735,13 @@ mod tests {
                     output_fields: vec![plan::OutputFieldSpec {
                         name: "customer_id".to_string(),
                         kind: plan::FieldKind::Clean,
-                        lineage: vec![],
-                        source_columns: vec!["customer_id".to_string()],
+                        lineage: vec![plan::FieldLineage::column(
+                            plan::SourceFieldRef {
+                                relation: None,
+                                name: "customer_id".to_string(),
+                            },
+                            plan::LineageRole::Normalized,
+                        )],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,
                         nullable: true,
@@ -1834,8 +1869,13 @@ mod tests {
                     output_fields: vec![plan::OutputFieldSpec {
                         name: "customer_id".to_string(),
                         kind: plan::FieldKind::Clean,
-                        lineage: vec![],
-                        source_columns: vec!["customer_id".to_string()],
+                        lineage: vec![plan::FieldLineage::column(
+                            plan::SourceFieldRef {
+                                relation: None,
+                                name: "customer_id".to_string(),
+                            },
+                            plan::LineageRole::Normalized,
+                        )],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,
                         nullable: true,
@@ -1942,8 +1982,13 @@ mod tests {
                     output_fields: vec![plan::OutputFieldSpec {
                         name: "customer_id".to_string(),
                         kind: plan::FieldKind::Clean,
-                        lineage: vec![],
-                        source_columns: vec!["customer_id".to_string()],
+                        lineage: vec![plan::FieldLineage::column(
+                            plan::SourceFieldRef {
+                                relation: None,
+                                name: "customer_id".to_string(),
+                            },
+                            plan::LineageRole::Normalized,
+                        )],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,
                         nullable: true,

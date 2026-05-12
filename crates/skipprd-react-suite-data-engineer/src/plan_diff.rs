@@ -109,9 +109,14 @@ mod tests {
                 output_fields: vec![crate::plan_types::OutputFieldSpec {
                     name: output_name.to_string(),
                     kind: crate::plan_types::FieldKind::Raw,
-                    lineage: vec![],
+                    lineage: vec![crate::plan_types::FieldLineage::column(
+                        crate::plan_types::SourceFieldRef {
+                            relation: None,
+                            name: output_name.to_string(),
+                        },
+                        crate::plan_types::LineageRole::Passthrough,
+                    )],
                     expression: output_name.to_string(),
-                    source_columns: vec![output_name.to_string()],
                     data_type: None,
                     nullable: false,
                     description: None,

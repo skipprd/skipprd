@@ -211,6 +211,14 @@ pub fn normalize_staging_model_name(raw: &str) -> Option<String> {
     }
 }
 
+/// `true` when this warehouse FQN should be treated as a **raw** cleanse source
+/// (excludes existing staging/silver projections whose table basename is `stg_*`).
+#[must_use]
+pub fn is_cleanse_raw_source_dataset_candidate(dataset_id: &str) -> bool {
+    let table = dataset_id.rsplit('.').next().unwrap_or("").trim();
+    !is_staging_model_name(table)
+}
+
 /// Check whether `input` is a valid gold-model dependency: either a staging
 /// model (`stg_*`) or another gold model in the same plan.
 pub fn is_valid_gold_input(input: &str, plan_task_names: &BTreeSet<String>) -> bool {
@@ -340,6 +348,25 @@ pub async fn discover_staging_models_from_storage(ctx: &AgentCtx) -> GroundedSta
     out
 }
 
+fn source_column_def_from_catalog_field(
+    f: &crate::providers::catalog_types::CatalogField,
+) -> crate::plan_types::SourceColumnDef {
+    let name = f
+        .field_path
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| f.name.trim())
+        .to_string();
+    crate::plan_types::SourceColumnDef {
+        name,
+        data_type: f
+            .data_type
+            .clone()
+            .unwrap_or_else(|| "unknown".to_string()),
+    }
+}
+
 /// Fetch column schemas for a set of raw/source dataset IDs.
 /// Returns both the typed `SourceSchema` map (for compile-time threading) and
 /// a rendered prompt block string (for LLM injection).
@@ -372,10 +399,7 @@ pub async fn build_catalog_column_context(
                     let cols: Vec<SourceColumnDef> = dc
                         .fields
                         .iter()
-                        .map(|f| SourceColumnDef {
-                            name: f.name.clone(),
-                            data_type: f.data_type.clone().unwrap_or_else(|| "unknown".to_string()),
-                        })
+                        .map(source_column_def_from_catalog_field)
                         .collect();
                     if !cols.is_empty() {
                         schema_map.insert(id.to_string(), cols);
@@ -438,7 +462,7 @@ pub fn render_source_schema_prompt_block(schema: &crate::plan_types::SourceSchem
         return String::new();
     }
     let mut out =
-        String::from("\n\nAUTHORITATIVE SCHEMAS (warehouse/database-reported source columns \u{2014} output_fields.lineage[].source.name and legacy output_fields.source_columns MUST reference only these exact names and casing):\n");
+        String::from("\n\nAUTHORITATIVE SCHEMAS (warehouse/database-reported source columns \u{2014} column lineage uses lineage_kind=column with lineage[].source.name; use nested leaf paths when listed here):\n");
     for (ds_id, cols) in schema.iter() {
         let cols_str: Vec<String> = cols
             .iter()
@@ -632,7 +656,8 @@ fn merge_staging_output_schema_result(
 pub struct PlanDiscoveryContext {
     /// Every dataset FQN returned by `list_datasets()`.
     pub dataset_fqns: Vec<String>,
-    /// Source tables to cleanse (all discovered datasets from the configured raw schema).
+    /// Source tables to cleanse: discovered datasets from the configured raw schema,
+    /// excluding warehouse relations whose basename is an existing staging model (`stg_*`).
     pub raw_dataset_ids: BTreeSet<String>,
     /// Column schemas keyed by dataset FQN (raw) or staging model name.
     pub source_schemas: crate::plan_types::SourceSchema,
@@ -663,6 +688,39 @@ mod tests {
     use super::merge_staging_output_schema_result;
     use crate::plan_types::SourceColumnDef;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn catalog_field_mapping_prefers_nested_field_path() {
+        use crate::providers::catalog_types::{CatalogField, StatsStatus};
+        let f = CatalogField {
+            entity: "e".to_string(),
+            name: "context".to_string(),
+            data_type: Some("struct".to_string()),
+            root_column: None,
+            field_path: Some("context.session.id".to_string()),
+            structure_kind: None,
+            access_descriptor: None,
+            description: None,
+            synonyms: None,
+            pii_sensitivity: None,
+            units_or_format: None,
+            role: None,
+            stats_status: StatsStatus::default(),
+            stats: None,
+        };
+        let col = super::source_column_def_from_catalog_field(&f);
+        assert_eq!(col.name, "context.session.id");
+    }
+
+    #[test]
+    fn cleanse_raw_source_dataset_candidate_rejects_stg_basename() {
+        assert!(!super::is_cleanse_raw_source_dataset_candidate(
+            "AwsDataCatalog.picnic.stg_orders"
+        ));
+        assert!(super::is_cleanse_raw_source_dataset_candidate(
+            "AwsDataCatalog.raw.events"
+        ));
+    }
 
     #[test]
     fn staging_output_schema_result_overwrites_inferred_schema_with_warehouse_names() {

@@ -474,14 +474,19 @@ fn normalize_set<'a>(values: impl IntoIterator<Item = &'a str>) -> BTreeSet<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::plan_types::{FieldKind, ModelFolder, ModelImplementationSpec};
+    use crate::plan_types::{FieldKind, FieldLineage, LineageRole, ModelFolder, ModelImplementationSpec, SourceFieldRef};
 
     fn field(name: &str) -> OutputFieldSpec {
         OutputFieldSpec {
             name: name.to_string(),
             kind: FieldKind::Clean,
-            lineage: vec![],
-            source_columns: vec![name.to_string()],
+            lineage: vec![FieldLineage::column(
+                SourceFieldRef {
+                    relation: None,
+                    name: name.to_string(),
+                },
+                LineageRole::Normalized,
+            )],
             expression: name.to_string(),
             data_type: None,
             nullable: true,

@@ -1095,8 +1095,13 @@ mod tests {
                     output_fields: vec![crate::plan::OutputFieldSpec {
                         name: "order_id".to_string(),
                         kind: crate::plan::FieldKind::Clean,
-                        lineage: vec![],
-                        source_columns: vec!["order_id".to_string()],
+                        lineage: vec![crate::plan::FieldLineage::column(
+                            crate::plan::SourceFieldRef {
+                                relation: None,
+                                name: "order_id".to_string(),
+                            },
+                            crate::plan::LineageRole::Normalized,
+                        )],
                         expression: "order_id passthrough from staging".to_string(),
                         data_type: None,
                         nullable: true,

@@ -142,76 +142,166 @@ fn validate_output_field_lineage_cleanse(
     known: &std::collections::BTreeSet<String>,
     issues: &mut Vec<PlanSemanticIssue>,
 ) {
-    use crate::plan_types::{FieldKind, LineageRole};
+    use crate::plan_types::{field_lineage_kind, FieldKind, LineageRole};
     use PlanSemanticIssueCode::MissingImplementationSpec;
 
-    if field.lineage.is_empty() && field.kind == FieldKind::Raw {
-        let nonempty = field
-            .source_columns
-            .iter()
-            .filter(|s| !s.trim().is_empty())
-            .count();
-        if nonempty > 1 {
-            issues.push(sem_task(
-                MissingImplementationSpec,
-                tid,
-                format!(
-                    "{}: output_fields[{}] kind=raw lists multiple source_columns; declare explicit lineage with exactly one passthrough mapping",
-                    tid, field.name
-                ),
-            ));
-            return;
-        }
-    }
-
-    let effective = field.effective_lineage();
-    if effective.is_empty() {
+    if field.lineage.is_empty() {
         issues.push(sem_task(
             MissingImplementationSpec,
             tid,
             format!(
-                "{}: output_fields[{}] is missing lineage (populate lineage[] or source_columns for legacy migration)",
+                "{}: output_fields[{}] is missing lineage (populate lineage[]; every output field requires explicit lineage)",
                 tid, field.name
             ),
         ));
         return;
     }
 
-    for ln in &effective {
-        if let Some(rel) = ln.source.relation.as_deref() {
-            if !rel.trim().is_empty() {
+    for ln in &field.lineage {
+        let lk = ln.lineage_kind.as_str().trim();
+        if lk == field_lineage_kind::COLUMN {
+            let Some(src) = ln.source.as_ref() else {
                 issues.push(sem_task(
                     MissingImplementationSpec,
                     tid,
                     format!(
-                        "{}: output_fields[{}] lineage.source.relation must be omitted for cleanse tasks (got '{}')",
-                        tid, field.name, rel
+                        "{}: output_fields[{}] lineage_kind=column requires source",
+                        tid, field.name
+                    ),
+                ));
+                continue;
+            };
+            let Some(role) = ln.role else {
+                issues.push(sem_task(
+                    MissingImplementationSpec,
+                    tid,
+                    format!(
+                        "{}: output_fields[{}] lineage_kind=column requires role",
+                        tid, field.name
+                    ),
+                ));
+                continue;
+            };
+            if let Some(rel) = src.relation.as_deref() {
+                if !rel.trim().is_empty() {
+                    issues.push(sem_task(
+                        MissingImplementationSpec,
+                        tid,
+                        format!(
+                            "{}: output_fields[{}] lineage.source.relation must be omitted for cleanse tasks (got '{}')",
+                            tid, field.name, rel
+                        ),
+                    ));
+                }
+            }
+            if !known.is_empty() && !known.contains(&src.name) {
+                issues.push(sem_task(
+                    MissingImplementationSpec,
+                    tid,
+                    format!(
+                        "{}: output_fields[{}] lineage references unknown source column '{}' (available: {})",
+                        tid,
+                        field.name,
+                        src.name,
+                        known.iter().cloned().collect::<Vec<_>>().join(", ")
                     ),
                 ));
             }
-        }
-        if !known.is_empty() && !known.contains(&ln.source.name) {
+            let role_ok = match field.kind {
+                FieldKind::Raw => role == LineageRole::Passthrough,
+                FieldKind::Clean => {
+                    matches!(role, LineageRole::Normalized | LineageRole::Parsed)
+                }
+                FieldKind::Derived => matches!(
+                    role,
+                    LineageRole::DerivedInput | LineageRole::Parsed | LineageRole::Normalized
+                ),
+                FieldKind::QualityFlag => matches!(role, LineageRole::QualityInput),
+            };
+            if !role_ok {
+                issues.push(sem_task(
+                    MissingImplementationSpec,
+                    tid,
+                    format!(
+                        "{}: output_fields[{}] has kind={:?} but lineage role {:?} is inconsistent with mapping expectations",
+                        tid, field.name, field.kind, role
+                    ),
+                ));
+            }
+        } else if lk == field_lineage_kind::SYSTEM || lk == field_lineage_kind::CONSTANT {
+            if field.kind == FieldKind::Raw {
+                issues.push(sem_task(
+                    MissingImplementationSpec,
+                    tid,
+                    format!(
+                        "{}: output_fields[{}] kind=raw may only use column lineage (passthrough from source)",
+                        tid, field.name
+                    ),
+                ));
+            }
+            if lk == field_lineage_kind::SYSTEM {
+                if ln
+                    .system_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .is_none()
+                {
+                    issues.push(sem_task(
+                        MissingImplementationSpec,
+                        tid,
+                        format!(
+                            "{}: output_fields[{}] lineage_kind=system requires non-empty system_key",
+                            tid, field.name
+                        ),
+                    ));
+                }
+            } else if ln
+                .constant_value
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_none()
+            {
+                issues.push(sem_task(
+                    MissingImplementationSpec,
+                    tid,
+                    format!(
+                        "{}: output_fields[{}] lineage_kind=constant requires non-empty constant_value",
+                        tid, field.name
+                    ),
+                ));
+            }
+        } else {
             issues.push(sem_task(
                 MissingImplementationSpec,
                 tid,
                 format!(
-                    "{}: output_fields[{}] lineage references unknown source column '{}' (available: {})",
-                    tid,
-                    field.name,
-                    ln.source.name,
-                    known.iter().cloned().collect::<Vec<_>>().join(", ")
+                    "{}: output_fields[{}] unknown lineage_kind '{}' (expected column, system, or constant)",
+                    tid, field.name, ln.lineage_kind
                 ),
             ));
         }
     }
 
     if field.kind == FieldKind::Raw {
-        if effective.len() != 1 || effective[0].role != LineageRole::Passthrough {
+        if field.lineage.len() != 1 {
             issues.push(sem_task(
                 MissingImplementationSpec,
                 tid,
                 format!(
-                    "{}: output_fields[{}] kind=raw requires exactly one lineage entry with role=passthrough",
+                    "{}: output_fields[{}] kind=raw requires exactly one lineage entry (column passthrough)",
+                    tid, field.name
+                ),
+            ));
+        } else if field.lineage[0].lineage_kind.as_str().trim() != field_lineage_kind::COLUMN
+            || field.lineage[0].role != Some(LineageRole::Passthrough)
+        {
+            issues.push(sem_task(
+                MissingImplementationSpec,
+                tid,
+                format!(
+                    "{}: output_fields[{}] kind=raw requires exactly one column lineage entry with role=passthrough",
                     tid, field.name
                 ),
             ));
@@ -219,43 +309,22 @@ fn validate_output_field_lineage_cleanse(
     }
 
     if !known.is_empty() && field.name.contains('.') && known.contains(field.name.as_str()) {
-        if field.kind != FieldKind::Raw
-            || effective.len() != 1
-            || effective[0].role != LineageRole::Passthrough
-            || effective[0].source.name != field.name
-        {
+        let ok = field.kind == FieldKind::Raw
+            && field.lineage.len() == 1
+            && field.lineage[0].lineage_kind.as_str().trim() == field_lineage_kind::COLUMN
+            && field.lineage[0].role == Some(LineageRole::Passthrough)
+            && field.lineage[0]
+                .source
+                .as_ref()
+                .map(|s| s.name == field.name)
+                .unwrap_or(false);
+        if !ok {
             issues.push(sem_task(
                 MissingImplementationSpec,
                 tid,
                 format!(
                     "{}: output_fields[{}] publishes a dotted name that exists in source_schema; require kind=raw and a single passthrough lineage from that exact field",
                     tid, field.name
-                ),
-            ));
-        }
-    }
-
-    for ln in &effective {
-        let role_ok = match field.kind {
-            FieldKind::Raw => ln.role == LineageRole::Passthrough,
-            FieldKind::Clean => {
-                matches!(ln.role, LineageRole::Normalized | LineageRole::Parsed)
-            }
-            FieldKind::Derived => {
-                matches!(
-                    ln.role,
-                    LineageRole::DerivedInput | LineageRole::Parsed | LineageRole::Normalized
-                )
-            }
-            FieldKind::QualityFlag => matches!(ln.role, LineageRole::QualityInput),
-        };
-        if !role_ok {
-            issues.push(sem_task(
-                MissingImplementationSpec,
-                tid,
-                format!(
-                    "{}: output_fields[{}] has kind={:?} but lineage role {:?} is inconsistent with mapping expectations",
-                    tid, field.name, field.kind, ln.role
                 ),
             ));
         }
@@ -269,66 +338,155 @@ fn validate_output_field_lineage_model(
     task_source: &std::collections::BTreeSet<String>,
     issues: &mut Vec<PlanSemanticIssue>,
 ) {
-    use crate::plan_types::{FieldKind, LineageRole};
+    use crate::plan_types::{field_lineage_kind, FieldKind, LineageRole};
     use PlanSemanticIssueCode::MissingImplementationSpec;
 
-    if field.lineage.is_empty() && field.kind == FieldKind::Raw {
-        let nonempty = field
-            .source_columns
-            .iter()
-            .filter(|s| !s.trim().is_empty())
-            .count();
-        if nonempty > 1 {
-            issues.push(sem_task(
-                MissingImplementationSpec,
-                tid,
-                format!(
-                    "{}: output_fields[{}] kind=raw lists multiple source_columns; declare explicit lineage with exactly one passthrough mapping",
-                    tid, field.name
-                ),
-            ));
-            return;
-        }
-    }
-
-    let effective = field.effective_lineage();
-    if effective.is_empty() {
+    if field.lineage.is_empty() {
         issues.push(sem_task(
             MissingImplementationSpec,
             tid,
             format!(
-                "{}: output_fields[{}] is missing lineage (populate lineage[] or source_columns for legacy migration)",
+                "{}: output_fields[{}] is missing lineage (populate lineage[]; every output field requires explicit lineage)",
                 tid, field.name
             ),
         ));
         return;
     }
 
-    for ln in &effective {
-        let rel = ln
-            .source
-            .relation
-            .as_deref()
-            .map(str::trim)
-            .filter(|r| !r.is_empty());
-        if let Err(msg) =
-            model_lineage_resolve_source_column(rel, &ln.source.name, per_input, task_source)
-        {
+    for ln in &field.lineage {
+        let lk = ln.lineage_kind.as_str().trim();
+        if lk == field_lineage_kind::COLUMN {
+            let Some(src) = ln.source.as_ref() else {
+                issues.push(sem_task(
+                    MissingImplementationSpec,
+                    tid,
+                    format!(
+                        "{}: output_fields[{}] lineage_kind=column requires source",
+                        tid, field.name
+                    ),
+                ));
+                continue;
+            };
+            let Some(role) = ln.role else {
+                issues.push(sem_task(
+                    MissingImplementationSpec,
+                    tid,
+                    format!(
+                        "{}: output_fields[{}] lineage_kind=column requires role",
+                        tid, field.name
+                    ),
+                ));
+                continue;
+            };
+            let rel = src
+                .relation
+                .as_deref()
+                .map(str::trim)
+                .filter(|r| !r.is_empty());
+            if let Err(msg) =
+                model_lineage_resolve_source_column(rel, &src.name, per_input, task_source)
+            {
+                issues.push(sem_task(
+                    MissingImplementationSpec,
+                    tid,
+                    format!("{}: output_fields[{}] {}", tid, field.name, msg),
+                ));
+            }
+            let role_ok = match field.kind {
+                FieldKind::Raw => role == LineageRole::Passthrough,
+                FieldKind::Clean => {
+                    matches!(role, LineageRole::Normalized | LineageRole::Parsed)
+                }
+                FieldKind::Derived => matches!(
+                    role,
+                    LineageRole::DerivedInput | LineageRole::Parsed | LineageRole::Normalized
+                ),
+                FieldKind::QualityFlag => matches!(role, LineageRole::QualityInput),
+            };
+            if !role_ok {
+                issues.push(sem_task(
+                    MissingImplementationSpec,
+                    tid,
+                    format!(
+                        "{}: output_fields[{}] has kind={:?} but lineage role {:?} is inconsistent with mapping expectations",
+                        tid, field.name, field.kind, role
+                    ),
+                ));
+            }
+        } else if lk == field_lineage_kind::SYSTEM || lk == field_lineage_kind::CONSTANT {
+            if field.kind == FieldKind::Raw {
+                issues.push(sem_task(
+                    MissingImplementationSpec,
+                    tid,
+                    format!(
+                        "{}: output_fields[{}] kind=raw may only use column lineage (passthrough from source)",
+                        tid, field.name
+                    ),
+                ));
+            }
+            if lk == field_lineage_kind::SYSTEM {
+                if ln
+                    .system_key
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .is_none()
+                {
+                    issues.push(sem_task(
+                        MissingImplementationSpec,
+                        tid,
+                        format!(
+                            "{}: output_fields[{}] lineage_kind=system requires non-empty system_key",
+                            tid, field.name
+                        ),
+                    ));
+                }
+            } else if ln
+                .constant_value
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .is_none()
+            {
+                issues.push(sem_task(
+                    MissingImplementationSpec,
+                    tid,
+                    format!(
+                        "{}: output_fields[{}] lineage_kind=constant requires non-empty constant_value",
+                        tid, field.name
+                    ),
+                ));
+            }
+        } else {
             issues.push(sem_task(
                 MissingImplementationSpec,
                 tid,
-                format!("{}: output_fields[{}] {}", tid, field.name, msg),
+                format!(
+                    "{}: output_fields[{}] unknown lineage_kind '{}' (expected column, system, or constant)",
+                    tid, field.name, ln.lineage_kind
+                ),
             ));
         }
     }
 
     if field.kind == FieldKind::Raw {
-        if effective.len() != 1 || effective[0].role != LineageRole::Passthrough {
+        if field.lineage.len() != 1 {
             issues.push(sem_task(
                 MissingImplementationSpec,
                 tid,
                 format!(
-                    "{}: output_fields[{}] kind=raw requires exactly one lineage entry with role=passthrough",
+                    "{}: output_fields[{}] kind=raw requires exactly one lineage entry (column passthrough)",
+                    tid, field.name
+                ),
+            ));
+        } else if field.lineage[0].lineage_kind.as_str().trim() != field_lineage_kind::COLUMN
+            || field.lineage[0].role != Some(LineageRole::Passthrough)
+        {
+            issues.push(sem_task(
+                MissingImplementationSpec,
+                tid,
+                format!(
+                    "{}: output_fields[{}] kind=raw requires exactly one column lineage entry with role=passthrough",
                     tid, field.name
                 ),
             ));
@@ -340,43 +498,22 @@ fn validate_output_field_lineage_model(
         union_known.extend(set.iter().cloned());
     }
     if field.name.contains('.') && union_known.contains(field.name.as_str()) {
-        if field.kind != FieldKind::Raw
-            || effective.len() != 1
-            || effective[0].role != LineageRole::Passthrough
-            || effective[0].source.name != field.name
-        {
+        let ok = field.kind == FieldKind::Raw
+            && field.lineage.len() == 1
+            && field.lineage[0].lineage_kind.as_str().trim() == field_lineage_kind::COLUMN
+            && field.lineage[0].role == Some(LineageRole::Passthrough)
+            && field.lineage[0]
+                .source
+                .as_ref()
+                .map(|s| s.name == field.name)
+                .unwrap_or(false);
+        if !ok {
             issues.push(sem_task(
                 MissingImplementationSpec,
                 tid,
                 format!(
                     "{}: output_fields[{}] publishes a dotted name that exists on an upstream schema; require kind=raw and a single passthrough lineage from that exact field",
                     tid, field.name
-                ),
-            ));
-        }
-    }
-
-    for ln in &effective {
-        let role_ok = match field.kind {
-            FieldKind::Raw => ln.role == LineageRole::Passthrough,
-            FieldKind::Clean => {
-                matches!(ln.role, LineageRole::Normalized | LineageRole::Parsed)
-            }
-            FieldKind::Derived => {
-                matches!(
-                    ln.role,
-                    LineageRole::DerivedInput | LineageRole::Parsed | LineageRole::Normalized
-                )
-            }
-            FieldKind::QualityFlag => matches!(ln.role, LineageRole::QualityInput),
-        };
-        if !role_ok {
-            issues.push(sem_task(
-                MissingImplementationSpec,
-                tid,
-                format!(
-                    "{}: output_fields[{}] has kind={:?} but lineage role {:?} is inconsistent with mapping expectations",
-                    tid, field.name, field.kind, ln.role
                 ),
             ));
         }
@@ -855,21 +992,6 @@ pub fn validate_cleanse_plan_semantics(plan: &CleansePlan) -> PlanSemanticValida
         }
         let known: std::collections::BTreeSet<String> =
             t.source_schema.iter().map(|c| c.name.clone()).collect();
-        if !known.is_empty() {
-            for field in &spec.output_fields {
-                for sc in &field.source_columns {
-                    if !known.contains(sc.as_str()) {
-                        issues.push(sem_task(MissingImplementationSpec, tid, format!(
-                            "{}: output_fields[{}].source_columns references '{}' which is not in the task's authoritative source_schema (available: {})",
-                            tid,
-                            field.name,
-                            sc,
-                            known.iter().cloned().collect::<Vec<_>>().join(", ")
-                        )));
-                    }
-                }
-            }
-        }
         for field in &spec.output_fields {
             validate_output_field_lineage_cleanse(tid, field, &known, &mut issues);
         }
@@ -1101,7 +1223,6 @@ pub fn ensure_model_plan_semantically_valid_or_repaired(
     allowed_staging_models: &std::collections::BTreeSet<String>,
 ) -> PlanSemanticValidation {
     crate::plan_grounding::ensure_expected_model_paths_model(plan);
-    crate::plan_grounding::materialize_output_lineage_from_legacy_model(plan);
     normalize_model_metric_source_fields(plan);
     validate_model_plan_semantics(plan, Some(allowed_staging_models))
 }
@@ -1135,8 +1256,13 @@ mod tests {
                     output_fields: vec![OutputFieldSpec {
                         name: "customer_id".to_string(),
                         kind: FieldKind::Clean,
-                        lineage: vec![],
-                        source_columns: vec!["customer_id".to_string()],
+                        lineage: vec![FieldLineage::column(
+                            SourceFieldRef {
+                                relation: None,
+                                name: "customer_id".to_string(),
+                            },
+                            LineageRole::Normalized,
+                        )],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,
                         nullable: false,
@@ -1484,14 +1610,13 @@ mod tests {
             OutputFieldSpec {
                 name: "session_id".to_string(),
                 kind: FieldKind::Clean,
-                lineage: vec![FieldLineage {
-                    source: SourceFieldRef {
+                lineage: vec![FieldLineage::column(
+                    SourceFieldRef {
                         relation: None,
                         name: "context.session.id".to_string(),
                     },
-                    role: LineageRole::Normalized,
-                }],
-                source_columns: vec![],
+                    LineageRole::Normalized,
+                )],
                 expression: "cast session as varchar".to_string(),
                 data_type: None,
                 nullable: true,
@@ -1500,14 +1625,13 @@ mod tests {
             OutputFieldSpec {
                 name: "event_type".to_string(),
                 kind: FieldKind::Raw,
-                lineage: vec![FieldLineage {
-                    source: SourceFieldRef {
+                lineage: vec![FieldLineage::column(
+                    SourceFieldRef {
                         relation: None,
                         name: "event_type".to_string(),
                     },
-                    role: LineageRole::Passthrough,
-                }],
-                source_columns: vec![],
+                    LineageRole::Passthrough,
+                )],
                 expression: "passthrough".to_string(),
                 data_type: None,
                 nullable: false,
@@ -1528,14 +1652,13 @@ mod tests {
         let fields = vec![OutputFieldSpec {
             name: "context.session.id".to_string(),
             kind: FieldKind::Clean,
-            lineage: vec![FieldLineage {
-                source: SourceFieldRef {
+            lineage: vec![FieldLineage::column(
+                SourceFieldRef {
                     relation: None,
                     name: "context.session.id".to_string(),
                 },
-                role: LineageRole::Normalized,
-            }],
-            source_columns: vec![],
+                LineageRole::Normalized,
+            )],
             expression: "oops".to_string(),
             data_type: None,
             nullable: true,
@@ -1556,14 +1679,13 @@ mod tests {
         let fields = vec![OutputFieldSpec {
             name: "context.session.id".to_string(),
             kind: FieldKind::Raw,
-            lineage: vec![FieldLineage {
-                source: SourceFieldRef {
+            lineage: vec![FieldLineage::column(
+                SourceFieldRef {
                     relation: None,
                     name: "context.session.id".to_string(),
                 },
-                role: LineageRole::Passthrough,
-            }],
-            source_columns: vec![],
+                LineageRole::Passthrough,
+            )],
             expression: "passthrough".to_string(),
             data_type: None,
             nullable: true,
@@ -1584,7 +1706,6 @@ mod tests {
             name: "orphan".to_string(),
             kind: FieldKind::Derived,
             lineage: vec![],
-            source_columns: vec![],
             expression: "constant".to_string(),
             data_type: None,
             nullable: true,
@@ -1597,7 +1718,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanse_legacy_source_columns_derives_lineage_for_validation() {
+    fn cleanse_accepts_explicit_column_lineage_for_clean_field() {
         let schema = vec![SourceColumnDef {
             name: "event_ts".to_string(),
             data_type: "timestamp".to_string(),
@@ -1605,8 +1726,13 @@ mod tests {
         let fields = vec![OutputFieldSpec {
             name: "event_ts_clean".to_string(),
             kind: FieldKind::Clean,
-            lineage: vec![],
-            source_columns: vec!["event_ts".to_string()],
+            lineage: vec![FieldLineage::column(
+                SourceFieldRef {
+                    relation: None,
+                    name: "event_ts".to_string(),
+                },
+                LineageRole::Normalized,
+            )],
             expression: "cast to timestamptz".to_string(),
             data_type: None,
             nullable: false,
@@ -1618,7 +1744,7 @@ mod tests {
     }
 
     #[test]
-    fn cleanse_rejects_raw_with_multiple_legacy_source_columns_without_lineage() {
+    fn cleanse_rejects_raw_with_multiple_column_lineage_entries() {
         let schema = vec![
             SourceColumnDef {
                 name: "a".to_string(),
@@ -1632,8 +1758,22 @@ mod tests {
         let fields = vec![OutputFieldSpec {
             name: "x".to_string(),
             kind: FieldKind::Raw,
-            lineage: vec![],
-            source_columns: vec!["a".to_string(), "b".to_string()],
+            lineage: vec![
+                FieldLineage::column(
+                    SourceFieldRef {
+                        relation: None,
+                        name: "a".to_string(),
+                    },
+                    LineageRole::Passthrough,
+                ),
+                FieldLineage::column(
+                    SourceFieldRef {
+                        relation: None,
+                        name: "b".to_string(),
+                    },
+                    LineageRole::Passthrough,
+                ),
+            ],
             expression: "composite".to_string(),
             data_type: None,
             nullable: true,
@@ -1645,21 +1785,77 @@ mod tests {
         assert!(r
             .errors
             .iter()
-            .any(|e| e.contains("multiple source_columns")));
+            .any(|e| e.contains("kind=raw") || e.contains("exactly one lineage")));
     }
 
     #[test]
-    fn output_field_spec_deserializes_legacy_json_without_lineage_key() {
+    fn cleanse_accepts_screen_name_with_system_lineage() {
+        let schema = vec![SourceColumnDef {
+            name: "id".to_string(),
+            data_type: "string".to_string(),
+        }];
+        let fields = vec![
+            OutputFieldSpec {
+                name: "id".to_string(),
+                kind: FieldKind::Raw,
+                lineage: vec![FieldLineage::column(
+                    SourceFieldRef {
+                        relation: None,
+                        name: "id".to_string(),
+                    },
+                    LineageRole::Passthrough,
+                )],
+                expression: "passthrough".to_string(),
+                data_type: None,
+                nullable: false,
+                description: None,
+            },
+            OutputFieldSpec {
+                name: "screen_name".to_string(),
+                kind: FieldKind::Derived,
+                lineage: vec![FieldLineage::system("screen_name")],
+                expression: "labeled display name".to_string(),
+                data_type: None,
+                nullable: true,
+                description: None,
+            },
+        ];
+        let plan = minimal_cleanse_plan("ds.t", schema, fields);
+        let r = validate_cleanse_plan_semantics(&plan);
+        assert!(r.ok, "{:?}", r.errors);
+    }
+
+    #[test]
+    fn cleanse_rejects_screen_name_without_lineage() {
+        let schema = vec![SourceColumnDef {
+            name: "id".to_string(),
+            data_type: "string".to_string(),
+        }];
+        let fields = vec![OutputFieldSpec {
+            name: "screen_name".to_string(),
+            kind: FieldKind::Derived,
+            lineage: vec![],
+            expression: "n/a".to_string(),
+            data_type: None,
+            nullable: true,
+            description: None,
+        }];
+        let plan = minimal_cleanse_plan("ds.t", schema, fields);
+        let r = validate_cleanse_plan_semantics(&plan);
+        assert!(!r.ok);
+        assert!(r.errors.iter().any(|e| e.contains("missing lineage")));
+    }
+
+    #[test]
+    fn output_field_spec_rejects_unknown_json_keys() {
         let json = r#"{
             "name": "id",
             "kind": "clean",
             "source_columns": ["id"],
             "expression": "cast",
-            "nullable": false
+            "nullable": false,
+            "lineage": []
         }"#;
-        let f: OutputFieldSpec = serde_json::from_str(json).expect("parse");
-        assert!(f.lineage.is_empty());
-        assert_eq!(f.effective_lineage().len(), 1);
-        assert_eq!(f.effective_lineage()[0].role, LineageRole::Normalized);
+        assert!(serde_json::from_str::<OutputFieldSpec>(json).is_err());
     }
 }

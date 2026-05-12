@@ -2907,7 +2907,6 @@ fn check_fail(msg: &str) {
 async fn prepare_engine_command(
     log: Option<String>,
     explicit_config: &Option<PathBuf>,
-    mode: skipprd::cli::Mode,
     pipeline: &str,
 ) {
     let path = config_path(explicit_config);
@@ -2949,7 +2948,6 @@ async fn prepare_engine_command(
     std::env::set_var("SKIPPR_CONFIG_FILE", &path);
     skipprd::helpers::logging::init_logging(log);
     skipprd::helpers::configuration::Config::build_config();
-    skipprd::cli::CLI_MODE.write().clone_from(&mode);
     skipprd::helpers::configuration::PIPELINE_NAME
         .write()
         .clear();
@@ -2964,11 +2962,7 @@ async fn cmd_discover(
     explicit_config: &Option<PathBuf>,
     args: EngineDiscoverArgs,
 ) {
-    let mode = skipprd::cli::Mode::Discover(skipprd::cli::DisocverOptions {
-        pipeline: Some(args.pipeline.clone()),
-        output: args.output.clone(),
-    });
-    prepare_engine_command(log, explicit_config, mode, &args.pipeline).await;
+    prepare_engine_command(log, explicit_config, &args.pipeline).await;
     if let Err(err) = skipprd::engine::run_discover(&args.output).await {
         eprintln!("[skippr] discover failed: {}", err);
         std::process::exit(1);
@@ -2976,14 +2970,9 @@ async fn cmd_discover(
 }
 
 async fn cmd_sync(log: Option<String>, explicit_config: &Option<PathBuf>, args: EngineSyncArgs) {
-    let mode = skipprd::cli::Mode::Sync(skipprd::cli::SyncOptions {
-        pipeline: Some(args.pipeline.clone()),
-        output: args.output.clone(),
-        once: args.once,
-    });
-    prepare_engine_command(log, explicit_config, mode, &args.pipeline).await;
+    prepare_engine_command(log, explicit_config, &args.pipeline).await;
     skipprd::metrics::Metrics::init_send_loop();
-    if let Err(err) = skipprd::engine::run_sync(&args.output).await {
+    if let Err(err) = skipprd::engine::run_sync(&args.output, args.once).await {
         eprintln!("[skippr] sync failed: {}", err);
         std::process::exit(1);
     }

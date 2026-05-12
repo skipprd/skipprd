@@ -376,6 +376,13 @@ pub enum LineageRole {
     QualityInput,
 }
 
+/// JSON / OpenAI structured-output values for [`FieldLineage::lineage_kind`].
+pub mod field_lineage_kind {
+    pub const COLUMN: &str = "column";
+    pub const SYSTEM: &str = "system";
+    pub const CONSTANT: &str = "constant";
+}
+
 /// Identifies a column on an upstream relation. For cleanse tasks `relation` is always omitted.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -388,11 +395,56 @@ pub struct SourceFieldRef {
     pub name: String,
 }
 
+/// One mapping row in `output_fields[].lineage`. `lineage_kind` is a plain string (not a JSON-Schema
+/// `oneOf` enum) so strict OpenAI structured-output schemas stay compatible.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FieldLineage {
-    pub source: SourceFieldRef,
-    pub role: LineageRole,
+    pub lineage_kind: String,
+    /// Set when `lineage_kind` is `column`.
+    #[serde(default)]
+    pub source: Option<SourceFieldRef>,
+    /// Set when `lineage_kind` is `column`.
+    #[serde(default)]
+    pub role: Option<LineageRole>,
+    /// Set when `lineage_kind` is `system` (stable key for tooling/prompts).
+    #[serde(default)]
+    pub system_key: Option<String>,
+    /// Set when `lineage_kind` is `constant` (literal value contract).
+    #[serde(default)]
+    pub constant_value: Option<String>,
+}
+
+impl FieldLineage {
+    pub fn column(source: SourceFieldRef, role: LineageRole) -> Self {
+        Self {
+            lineage_kind: field_lineage_kind::COLUMN.to_string(),
+            source: Some(source),
+            role: Some(role),
+            system_key: None,
+            constant_value: None,
+        }
+    }
+
+    pub fn system(system_key: impl Into<String>) -> Self {
+        Self {
+            lineage_kind: field_lineage_kind::SYSTEM.to_string(),
+            source: None,
+            role: None,
+            system_key: Some(system_key.into()),
+            constant_value: None,
+        }
+    }
+
+    pub fn constant(constant_value: impl Into<String>) -> Self {
+        Self {
+            lineage_kind: field_lineage_kind::CONSTANT.to_string(),
+            source: None,
+            role: None,
+            system_key: None,
+            constant_value: Some(constant_value.into()),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -401,12 +453,9 @@ pub struct OutputFieldSpec {
     /// Output column name.
     pub name: String,
     pub kind: FieldKind,
-    /// Explicit lineage from authoritative source columns to this published output.
+    /// Explicit lineage: every output field MUST have at least one entry.
     #[serde(default)]
     pub lineage: Vec<FieldLineage>,
-    /// Upstream source columns (or prior-stage columns) this field depends on.
-    #[serde(default)]
-    pub source_columns: Vec<String>,
     /// A concise, imperative expression or transformation contract.
     /// This is not required to be dialect-perfect SQL; it is the design contract that authoring
     /// should implement faithfully.
@@ -420,71 +469,6 @@ pub struct OutputFieldSpec {
     /// Optional one-line meaning / usage guidance.
     #[serde(default)]
     pub description: Option<String>,
-}
-
-impl OutputFieldSpec {
-    /// When `lineage` is empty, derives lineage from legacy `source_columns` + `kind`.
-    ///
-    /// Returns `None` when legacy data is ambiguous (e.g. `FieldKind::Raw` with multiple
-    /// `source_columns` and no explicit `lineage`); callers should surface a plan validation error.
-    pub fn try_derive_legacy_lineage(&self) -> Option<Vec<FieldLineage>> {
-        if !self.lineage.is_empty() {
-            return Some(self.lineage.clone());
-        }
-        let nonempty: Vec<String> = self
-            .source_columns
-            .iter()
-            .filter_map(|s| {
-                let t = s.trim();
-                if t.is_empty() {
-                    None
-                } else {
-                    Some(t.to_string())
-                }
-            })
-            .collect();
-        if nonempty.is_empty() {
-            return Some(vec![]);
-        }
-        if self.kind == FieldKind::Raw && nonempty.len() > 1 {
-            return None;
-        }
-        let role = match self.kind {
-            FieldKind::Raw => LineageRole::Passthrough,
-            FieldKind::Clean => LineageRole::Normalized,
-            FieldKind::Derived => LineageRole::DerivedInput,
-            FieldKind::QualityFlag => LineageRole::QualityInput,
-        };
-        Some(
-            nonempty
-                .into_iter()
-                .map(|name| FieldLineage {
-                    source: SourceFieldRef {
-                        relation: None,
-                        name,
-                    },
-                    role,
-                })
-                .collect(),
-        )
-    }
-
-    /// Lineage used for validation and authoring: explicit `lineage`, or legacy-derived mapping.
-    pub fn effective_lineage(&self) -> Vec<FieldLineage> {
-        self.try_derive_legacy_lineage().unwrap_or_default()
-    }
-
-    /// Fills `lineage` from legacy `source_columns` when `lineage` is empty and derivation is unambiguous.
-    pub fn materialize_lineage_from_legacy_if_missing(&mut self) {
-        if !self.lineage.is_empty() {
-            return;
-        }
-        if let Some(v) = self.try_derive_legacy_lineage() {
-            if !v.is_empty() {
-                self.lineage = v;
-            }
-        }
-    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]

@@ -1383,6 +1383,11 @@ impl DataEngineerSuite {
             if let Some(ds) = crate::ctx_ext::sctx_datasets(sctx).as_ref() {
                 if let Ok(items) = ds.list_datasets().await {
                     let mut tables: Vec<String> = items.into_iter().map(|d| d.fqn()).collect();
+                    if pctx.track.is_cleanse() {
+                        tables.retain(|fqn| {
+                            crate::dataset_truth::is_cleanse_raw_source_dataset_candidate(fqn)
+                        });
+                    }
                     tables.sort();
                     dataset_fqns = tables;
                 }

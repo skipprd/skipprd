@@ -2448,8 +2448,13 @@ mod tests {
             output_fields: vec![OutputFieldSpec {
                 name: "id_raw".to_string(),
                 kind: FieldKind::Raw,
-                lineage: vec![],
-                source_columns: vec!["id".to_string()],
+                lineage: vec![FieldLineage::column(
+                    SourceFieldRef {
+                        relation: None,
+                        name: "id".to_string(),
+                    },
+                    LineageRole::Passthrough,
+                )],
                 expression: "id as id_raw (raw)".to_string(),
                 data_type: None,
                 nullable: true,
@@ -2469,8 +2474,13 @@ mod tests {
             output_fields: vec![OutputFieldSpec {
                 name: "id".to_string(),
                 kind: FieldKind::Clean,
-                lineage: vec![],
-                source_columns: vec!["id".to_string()],
+                lineage: vec![FieldLineage::column(
+                    SourceFieldRef {
+                        relation: None,
+                        name: "id".to_string(),
+                    },
+                    LineageRole::Normalized,
+                )],
                 expression: "id passthrough".to_string(),
                 data_type: None,
                 nullable: true,

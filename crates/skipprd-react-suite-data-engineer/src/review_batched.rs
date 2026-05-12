@@ -1387,8 +1387,7 @@ mod tests {
                         output_fields: vec![de_plan::OutputFieldSpec {
                             name: "a".to_string(),
                             kind: de_plan::FieldKind::Derived,
-                            lineage: vec![],
-                            source_columns: vec![],
+                            lineage: vec![de_plan::FieldLineage::system("test_stub")],
                             expression: "select 1 as a (test stub)".to_string(),
                             data_type: None,
                             nullable: true,
@@ -1435,8 +1434,7 @@ mod tests {
                         output_fields: vec![de_plan::OutputFieldSpec {
                             name: "b".to_string(),
                             kind: de_plan::FieldKind::Derived,
-                            lineage: vec![],
-                            source_columns: vec![],
+                            lineage: vec![de_plan::FieldLineage::system("test_stub")],
                             expression: "select 1 as b (test stub)".to_string(),
                             data_type: None,
                             nullable: true,

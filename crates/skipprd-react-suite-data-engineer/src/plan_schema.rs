@@ -189,6 +189,15 @@ mod tests {
     }
 
     #[test]
+    fn strict_schema_cleanse_plan_enrichment_includes_lineage_kind_string_contract() {
+        let schema = strict_schema_for::<CleansePlanEnrichmentV1>().expect("schema");
+        let s = schema.to_string();
+        assert!(s.contains("lineage_kind"));
+        assert!(s.contains("constant"));
+        assert!(s.contains("system"));
+    }
+
+    #[test]
     fn strict_schema_cleanse_plan_enrichment_is_openai_compatible() {
         let schema = strict_schema_for::<CleansePlanEnrichmentV1>().expect("schema");
         assert_openai_ref_compat(&schema, "CleansePlanEnrichmentV1");

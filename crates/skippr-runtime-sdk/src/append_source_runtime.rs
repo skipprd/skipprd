@@ -10,7 +10,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use clap::Parser;
 use datafusion::execution::SendableRecordBatchStream;
-use skippr_core::cli::{Mode, SyncOptions, CLI_MODE};
 use skippr_core::discover::OutputMetadata as CoreOutputMetadata;
 use skippr_core::helpers::configuration::{Config, PIPELINE_NAME};
 use skippr_core::helpers::logging::init_logging;
@@ -67,19 +66,6 @@ fn configure_runtime_input_config(config: &RuntimePluginConfigEnvelope) {
 fn runtime_mode_suppresses_data_relay(execution_mode: RuntimeExecutionMode) -> bool {
     let _ = execution_mode;
     false
-}
-
-fn configure_runtime_source_cli_mode(start: &SourceStartRequest) {
-    let pipeline = Some(start.context.pipeline_name.clone());
-    // Runtime source children are extractors only. Even for host-side discover,
-    // the child must not enter core discovery/ingest_work; it relays raw source
-    // batches and the host process owns discovery, schema evolution, WAL, and offsets.
-    let mode = Mode::Sync(SyncOptions {
-        pipeline,
-        output: "json".to_string(),
-        once: start.once,
-    });
-    CLI_MODE.write().clone_from(&mode);
 }
 
 fn runtime_once_idle_timeout() -> Duration {
@@ -694,7 +680,6 @@ pub async fn run_append_data_source_main(
 
     configure_runtime_source_data_dir(&start.context.data_dir, plugin_name);
     configure_runtime_input_config(&start.config.0);
-    configure_runtime_source_cli_mode(&start);
     Config::reset_envcache();
     Config::build_config();
     Config::init().await;
@@ -787,19 +772,10 @@ pub async fn run_append_data_source_main(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, OnceLock};
-
     use serde_json::json;
-    use skippr_core::cli::Mode;
 
     use super::*;
     use crate::protocol::{RuntimeExecutionContext, RuntimeOutputLayout, RuntimeSourceConfig};
-
-    static CLI_MODE_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-
-    fn cli_mode_lock() -> std::sync::MutexGuard<'static, ()> {
-        CLI_MODE_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-    }
 
     fn source_start_request(once: bool) -> SourceStartRequest {
         SourceStartRequest {
@@ -816,18 +792,9 @@ mod tests {
     }
 
     #[test]
-    fn runtime_source_cli_mode_preserves_once_flag() {
-        let _guard = cli_mode_lock();
-        let previous = CLI_MODE.read().clone();
-
-        configure_runtime_source_cli_mode(&source_start_request(true));
-
-        match CLI_MODE.read().clone() {
-            Mode::Sync(options) => assert!(options.once),
-            _ => panic!("expected sync CLI mode"),
-        }
-
-        CLI_MODE.write().clone_from(&previous);
+    fn runtime_source_start_preserves_once_flag() {
+        assert!(source_start_request(true).once);
+        assert!(!source_start_request(false).once);
     }
 
     #[test]

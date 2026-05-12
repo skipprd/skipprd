@@ -1386,8 +1386,13 @@ mod tests {
                     output_fields: vec![crate::plan::OutputFieldSpec {
                         name: "order_id_raw".to_string(),
                         kind: crate::plan::FieldKind::Raw,
-                        lineage: vec![],
-                        source_columns: vec!["order_id".to_string()],
+                        lineage: vec![crate::plan::FieldLineage::column(
+                            crate::plan::SourceFieldRef {
+                                relation: None,
+                                name: "order_id".to_string(),
+                            },
+                            crate::plan::LineageRole::Passthrough,
+                        )],
                         expression: "order_id as order_id_raw (raw passthrough)".to_string(),
                         data_type: None,
                         nullable: true,

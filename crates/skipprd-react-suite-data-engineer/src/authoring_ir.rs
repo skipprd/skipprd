@@ -197,8 +197,13 @@ mod tests {
                 OutputFieldSpec {
                     name: "order_id".to_string(),
                     kind: crate::plan_types::FieldKind::Clean,
-                    lineage: vec![],
-                    source_columns: vec!["order_id".to_string()],
+                    lineage: vec![crate::plan_types::FieldLineage::column(
+                        crate::plan_types::SourceFieldRef {
+                            relation: None,
+                            name: "order_id".to_string(),
+                        },
+                        crate::plan_types::LineageRole::Normalized,
+                    )],
                     expression: "order_id".to_string(),
                     data_type: None,
                     nullable: false,
@@ -207,8 +212,13 @@ mod tests {
                 OutputFieldSpec {
                     name: "user_id".to_string(),
                     kind: crate::plan_types::FieldKind::Clean,
-                    lineage: vec![],
-                    source_columns: vec!["user_id".to_string()],
+                    lineage: vec![crate::plan_types::FieldLineage::column(
+                        crate::plan_types::SourceFieldRef {
+                            relation: None,
+                            name: "user_id".to_string(),
+                        },
+                        crate::plan_types::LineageRole::Normalized,
+                    )],
                     expression: "user_id".to_string(),
                     data_type: None,
                     nullable: false,
@@ -229,8 +239,13 @@ mod tests {
             &[OutputFieldSpec {
                 name: "order_id".to_string(),
                 kind: crate::plan_types::FieldKind::Clean,
-                lineage: vec![],
-                source_columns: vec!["order_id".to_string()],
+                lineage: vec![crate::plan_types::FieldLineage::column(
+                    crate::plan_types::SourceFieldRef {
+                        relation: None,
+                        name: "order_id".to_string(),
+                    },
+                    crate::plan_types::LineageRole::Normalized,
+                )],
                 expression: "order_id".to_string(),
                 data_type: None,
                 nullable: false,
