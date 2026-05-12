@@ -412,6 +412,9 @@ pub struct Ingest {
     tx: Sender<u64>,
     active_count: Arc<AtomicUsize>, // Track total number of active threads
     queue_length: Arc<AtomicUsize>, // Track total number of queued tasks
+    /// Sum of `IngestBatch::bytes` for tasks not yet signaled complete on `tx`
+    /// (queued or running). Paired with completion messages on `tx`.
+    outstanding_bytes: Arc<AtomicUsize>,
     schema_hashes: DashMap<String, SchemaHash>,
     analyse_schema: AnalyseSchema,
     throughput_window: Arc<RwLock<VecDeque<(Instant, u64)>>>,
@@ -616,6 +619,103 @@ impl Ingest {
     fn read_mem_available_mib() -> Option<u64> {
         Self::read_meminfo_kib("MemAvailable:").map(|kib| kib / 1024)
     }
+
+    #[cfg(target_os = "macos")]
+    fn darwin_total_ram_bytes() -> Option<usize> {
+        use std::mem;
+        use std::ptr;
+        let mut mib: [i32; 2] = [libc::CTL_HW, libc::HW_MEMSIZE];
+        let mut out: u64 = 0;
+        let mut sz = mem::size_of_val(&out);
+        let rc = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                mib.len() as libc::c_uint,
+                &mut out as *mut u64 as *mut libc::c_void,
+                &mut sz,
+                ptr::null_mut(),
+                0,
+            )
+        };
+        (rc == 0).then_some(out as usize)
+    }
+
+    /// Best-effort RAM hint for ingest admission (MemAvailable on Linux, total on macOS).
+    fn host_memory_hint_bytes() -> Option<usize> {
+        #[cfg(target_os = "linux")]
+        {
+            return Self::read_meminfo_kib("MemAvailable:")
+                .or_else(|| Self::read_meminfo_kib("MemFree:"))
+                .or_else(|| Self::read_meminfo_kib("MemTotal:"))
+                .map(|kib| (kib as usize).saturating_mul(1024));
+        }
+        #[cfg(target_os = "macos")]
+        {
+            return Self::darwin_total_ram_bytes();
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            None
+        }
+    }
+
+    /// Autotuned cap on summed in-flight ingest payload bytes (queued + active).
+    /// Tighter when `WAL_STORAGE=s3` because WAL persist holds extra buffers and is network-bound.
+    fn compute_admission_budget_bytes(
+        hint_bytes: usize,
+        wal_s3: bool,
+        num_ingest_threads: usize,
+    ) -> usize {
+        let mut budget = hint_bytes.saturating_mul(25) / 100;
+        if wal_s3 {
+            budget = budget.saturating_mul(2) / 5;
+        }
+        let n = num_ingest_threads.max(1);
+        budget = budget.saturating_mul(n.saturating_add(2)) / 4;
+        const MIN_B: usize = 256 * 1024 * 1024;
+        const MAX_B: usize = 12 * 1024 * 1024 * 1024;
+        budget.clamp(MIN_B, MAX_B)
+    }
+
+    fn autotuned_ingest_admission_budget_bytes(num_ingest_threads: usize) -> usize {
+        let hint = Self::host_memory_hint_bytes().unwrap_or(2 * 1024 * 1024 * 1024);
+        let wal_s3 = Config::get_wal_storage().eq_ignore_ascii_case("s3");
+        Self::compute_admission_budget_bytes(hint, wal_s3, num_ingest_threads)
+    }
+
+    /// `LOG_WAL`: snapshot of ingest byte admission vs autotuned budget.
+    pub(crate) fn log_wal_ingest_pressure_snapshot(&self) {
+        if !Config::log_wal_enabled() {
+            return;
+        }
+        let outstanding = self.outstanding_bytes.load(Ordering::Acquire);
+        let budget = Self::autotuned_ingest_admission_budget_bytes(self.num_cpus);
+        let ql = self.queue_length.load(Ordering::Acquire);
+        let active = self.active_count.load(Ordering::Acquire);
+        info!(
+            "ingest core WAL pressure: outstanding_bytes={} admission_budget_bytes={} queue_len={} active_threads={}/{} max_queue_len={}",
+            outstanding,
+            budget,
+            ql,
+            active,
+            self.num_cpus,
+            self.max_queue_length
+        );
+    }
+
+    #[cfg(test)]
+    pub(crate) fn admission_budget_for_tests(
+        hint_bytes: usize,
+        wal_s3: bool,
+        num_ingest_threads: usize,
+    ) -> usize {
+        Self::compute_admission_budget_bytes(hint_bytes, wal_s3, num_ingest_threads)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn outstanding_payload_bytes_for_tests(&self) -> usize {
+        self.outstanding_bytes.load(Ordering::Acquire)
+    }
     #[allow(dead_code)]
     fn infer_required_type(value: &serde_json::Value) -> (String, Option<String>) {
         use serde_json::Value as V;
@@ -755,6 +855,8 @@ impl Ingest {
         let active_count = Arc::new(AtomicUsize::new(0));
         let active_count_clone = active_count.clone();
         let queue_length = Arc::new(AtomicUsize::new(0));
+        let outstanding_bytes = Arc::new(AtomicUsize::new(0));
+        let outstanding_bytes_clone = outstanding_bytes.clone();
         let start_chunk: usize = Config::getenv("INGEST_START_CHUNK_BYTES", "5000000")
             .parse::<usize>()
             .unwrap_or(5_000_000);
@@ -798,7 +900,7 @@ impl Ingest {
                 .unwrap_or(if is_ci { 1 } else { 2 });
         let max_queue_length = (num_cpus * queue_factor).max(num_cpus);
         std::thread::spawn(move || {
-            while let Ok(_) = rx.recv() {
+            while let Ok(completed_bytes) = rx.recv() {
                 // Check if we're shutting down
                 // if is_shutting_down_clone.load(Ordering::SeqCst) > 0 {
                 //     self.wait_for_completion();
@@ -808,6 +910,7 @@ impl Ingest {
 
                 active_count_clone.fetch_sub(1, AcqRel);
                 queue_length_clone.fetch_sub(1, AcqRel);
+                outstanding_bytes_clone.fetch_sub(completed_bytes as usize, AcqRel);
                 // Wake any producers waiting on queue capacity
                 let (lock, cv) = &*queue_cv_clone;
                 if let Ok(_g) = lock.lock() {
@@ -868,6 +971,7 @@ impl Ingest {
                         // and the task was already counted in queue_length when it was added to the queue
 
                         let queued_handle = shared_handle.clone();
+                        let completed_bytes: u64 = datas_clone.iter().map(|b| b.bytes as u64).sum();
                         thread_pool_clone.execute(move || {
                             let result =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -882,7 +986,7 @@ impl Ingest {
                             if result.is_err() {
                                 error!("Queued ingest task panicked; forcing completion signal");
                             }
-                            let _ = tx.send(0);
+                            let _ = tx.send(completed_bytes);
                         });
                     }
                 }
@@ -922,6 +1026,7 @@ impl Ingest {
             tx,
             active_count,
             queue_length,
+            outstanding_bytes,
             schema_hashes,
             analyse_schema,
             throughput_window,
@@ -944,12 +1049,15 @@ impl Ingest {
         }
 
         let mut last_report_time = Instant::now();
-        while self.queue_length.load(Ordering::SeqCst) > 0 {
+        while self.queue_length.load(Ordering::SeqCst) > 0
+            || self.outstanding_bytes.load(Ordering::SeqCst) > 0
+        {
             if last_report_time.elapsed() > Duration::from_secs(5) {
                 info!(
-                    "Draining ingest queue: {} tasks outstanding ({} active)",
+                    "Draining ingest queue: {} tasks outstanding ({} active), outstanding_bytes={}",
                     self.queue_length.load(Ordering::SeqCst),
-                    self.active_count.load(Ordering::SeqCst)
+                    self.active_count.load(Ordering::SeqCst),
+                    self.outstanding_bytes.load(Ordering::SeqCst),
                 );
                 last_report_time = Instant::now();
             }
@@ -1118,15 +1226,37 @@ impl Ingest {
 
             for datas in ingest_batches.tasks.iter() {
                 Self::wait_for_data_dir_capacity();
-                let task_bytes: u64 = datas.datas.iter().map(|d| d.bytes as u64).sum();
-                // Per-task queue gating: block with Condvar until queue depth below max
-                if self.queue_length.load(Ordering::Acquire) >= self.max_queue_length {
-                    let (lock, cv) = &*self.queue_cv;
-                    let mut guard = lock.lock().unwrap();
-                    while self.queue_length.load(Ordering::Acquire) >= self.max_queue_length {
-                        guard = cv.wait(guard).unwrap();
+                let task_bytes: usize = datas.datas.iter().map(|v| v.bytes).sum();
+                let byte_budget =
+                    Self::autotuned_ingest_admission_budget_bytes(self.num_cpus).max(task_bytes);
+                let (lock, cv) = &*self.queue_cv;
+                let mut guard = lock.lock().unwrap();
+                let mut pressure_logged = false;
+                loop {
+                    let ql = self.queue_length.load(Ordering::Acquire);
+                    let ob = self.outstanding_bytes.load(Ordering::Acquire);
+                    if ql < self.max_queue_length && ob.saturating_add(task_bytes) <= byte_budget {
+                        break;
                     }
+                    if Config::log_wal_enabled() && !pressure_logged {
+                        pressure_logged = true;
+                        info!(
+                            "ingest admission backpressure: ql={}/{} outstanding_bytes={} task_bytes={} byte_budget={} active={}/{}",
+                            ql,
+                            self.max_queue_length,
+                            ob,
+                            task_bytes,
+                            byte_budget,
+                            self.active_count.load(Ordering::Acquire),
+                            self.num_cpus,
+                        );
+                    }
+                    guard = cv.wait(guard).unwrap();
                 }
+                drop(guard);
+                self.outstanding_bytes
+                    .fetch_add(task_bytes, Ordering::AcqRel);
+
                 // Refresh snapshot each iteration to avoid spawning beyond capacity
                 _active_threads_snapshot = self.active_count.load(Ordering::SeqCst);
                 if _active_threads_snapshot < self.num_cpus {
@@ -1136,6 +1266,7 @@ impl Ingest {
                     let mut schema_hashes = self.schema_hashes.clone();
                     let handle = runtime::Handle::current();
                     let shared_output_clone = shared_output.clone();
+                    let completed_bytes: u64 = datas_clone.iter().map(|b| b.bytes as u64).sum();
 
                     // Increment active count and queue length before spawning
                     self.active_count.fetch_add(1, Ordering::Acquire);
@@ -1162,10 +1293,10 @@ impl Ingest {
                         if result.is_err() {
                             error!("Active ingest task panicked; forcing completion signal");
                         }
-                        let _ = tx.send(0);
+                        let _ = tx.send(completed_bytes);
                     });
 
-                    self.update_throughput(task_bytes);
+                    self.update_throughput(completed_bytes);
                 } else {
                     // Queue the task for later processing
                     let _lock = self.queue_lock.write().unwrap();
@@ -1181,7 +1312,7 @@ impl Ingest {
                         self.queue_length.load(Ordering::Acquire),
                     );
 
-                    self.update_throughput(task_bytes);
+                    self.update_throughput(task_bytes as u64);
                 }
             }
 
@@ -1256,6 +1387,14 @@ impl Ingest {
                 self.num_cpus,
                 queued_tasks
             );
+            if Config::log_wal_enabled() {
+                let outstanding = self.outstanding_bytes.load(Ordering::Acquire);
+                let budget = Self::autotuned_ingest_admission_budget_bytes(self.num_cpus);
+                info!(
+                    "ingest WAL pressure (post-submit): outstanding_bytes={} admission_budget_bytes={}",
+                    outstanding, budget
+                );
+            }
 
             // Return throughput metrics
             ThroughputMetrics {
@@ -2254,6 +2393,7 @@ mod empty_ingest_tasks_tests {
 
     #[test]
     fn remote_source_process_relays_raw_batches_without_arrow_serialization() {
+        std::env::set_var("DATA_DIR_HIGH_WATERMARK_PCT", "0");
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -2299,6 +2439,131 @@ mod empty_ingest_tasks_tests {
             schema_hashes.is_empty(),
             "source child must not prepare Arrow schemas before relaying raw batches"
         );
+    }
+}
+
+#[cfg(test)]
+mod ingest_admission_tests {
+    use super::*;
+    use crate::cli::{Mode, SyncOptions, CLI_MODE};
+    use crate::helpers::offsets::{OffsetTransport, RuntimeOffsetOperation, RuntimeOffsetValue};
+    use crate::plugins::{DataSink, RuntimeIngestRelay};
+    use datafusion::execution::SendableRecordBatchStream;
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct AuthoritativeOffsetReader;
+
+    impl OffsetTransport for AuthoritativeOffsetReader {
+        fn call(&self, operation: RuntimeOffsetOperation) -> Result<RuntimeOffsetValue, String> {
+            match operation {
+                RuntimeOffsetOperation::Validate { .. } => {
+                    Ok(RuntimeOffsetValue::Validate(Some(false)))
+                }
+                RuntimeOffsetOperation::LoadCheckpointEnvelope { .. } => {
+                    Ok(RuntimeOffsetValue::LoadCheckpointEnvelope(None))
+                }
+            }
+        }
+    }
+
+    struct CapturingRawRelay {
+        tasks: Arc<Mutex<Vec<Vec<RuntimeRawIngestBatch>>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl DataSink for CapturingRawRelay {
+        async fn sync(
+            &self,
+            _stream: SendableRecordBatchStream,
+            _filename: String,
+            _cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
+        ) -> Result<(), std::io::Error> {
+            Ok(())
+        }
+
+        fn runtime_ingest_relay(&self) -> Option<&dyn RuntimeIngestRelay> {
+            Some(self)
+        }
+    }
+
+    impl RuntimeIngestRelay for CapturingRawRelay {
+        fn relay_raw_ingest_tasks(
+            &self,
+            tasks: Vec<Vec<RuntimeRawIngestBatch>>,
+        ) -> Result<(), std::io::Error> {
+            self.tasks.lock().unwrap().extend(tasks);
+            Ok(())
+        }
+
+        fn relay_ingest_batches(
+            &self,
+            _batches: Vec<RuntimeIngestPartitionBatch>,
+        ) -> Result<(), std::io::Error> {
+            panic!("runtime source children must not relay prepared Arrow ingest batches")
+        }
+
+        fn relay_offset_hints(
+            &self,
+            _offsets: Vec<RuntimeOffsetMaterializationHint>,
+        ) -> Result<(), std::io::Error> {
+            panic!("runtime source children must not materialize offsets")
+        }
+    }
+
+    #[test]
+    fn admission_budget_disk_is_looser_than_s3_for_same_hint() {
+        let hint = 4_usize * 1024 * 1024 * 1024;
+        let threads = 4;
+        let disk = Ingest::admission_budget_for_tests(hint, false, threads);
+        let s3 = Ingest::admission_budget_for_tests(hint, true, threads);
+        assert!(
+            disk > s3,
+            "expected disk budget > s3 budget, got disk={disk} s3={s3}"
+        );
+    }
+
+    #[test]
+    fn ingest_file_remote_relay_clears_outstanding_byte_counter() {
+        std::env::set_var("DATA_DIR_HIGH_WATERMARK_PCT", "0");
+        *CLI_MODE.write() = Mode::Sync(SyncOptions {
+            pipeline: None,
+            output: "progress".to_string(),
+            once: false,
+        });
+        let ingest = Ingest::new();
+        let offsets = Arc::new(crate::helpers::offsets::Offsets::from_transport(Arc::new(
+            AuthoritativeOffsetReader,
+        )));
+        let captured_tasks = Arc::new(Mutex::new(Vec::new()));
+        let relay: Box<dyn DataSink + Send + Sync> = Box::new(CapturingRawRelay {
+            tasks: captured_tasks.clone(),
+        });
+        let output = Arc::new(relay);
+        let records = serde_json::json!([{"a": 1}]).to_string();
+        let batch = IngestBatch::new(
+            OffsetKey::new("source", "partition"),
+            records.clone(),
+            records.len(),
+            "test://remote".to_string(),
+            None,
+            None,
+        );
+        let mut tasks = IngestTasks::new();
+        tasks.add(IngestTask::new(
+            vec![batch],
+            offsets.clone(),
+            output.clone(),
+        ));
+        let tasks_arc = Arc::new(tasks);
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("tokio runtime");
+        let _enter = rt.enter();
+        ingest.ingest_file(&tasks_arc, &offsets, output);
+        ingest.wait_for_completion();
+        assert_eq!(ingest.outstanding_payload_bytes_for_tests(), 0);
     }
 }
 

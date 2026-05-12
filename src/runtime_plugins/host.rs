@@ -643,6 +643,44 @@ fn ingest_raw_runtime_tasks_into_core(
     }
     let ingest_tasks = Arc::new(ingest_tasks);
     let _ = ingest.ingest_file(&ingest_tasks, &offsets, shared_output);
+    ingest.log_wal_ingest_pressure_snapshot();
+    Ok(())
+}
+
+fn runtime_source_blocking_spawn_cap() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| n.get().clamp(2, 8))
+        .unwrap_or(4)
+}
+
+/// Join any finished blocking tasks, then wait if too many are still in-flight.
+async fn runtime_source_throttle_blocking_tasks(
+    pending_tasks: &mut JoinSet<io::Result<()>>,
+) -> io::Result<()> {
+    while let Some(joined) = pending_tasks.try_join_next() {
+        match joined {
+            Ok(Ok(())) => {}
+            Ok(Err(err)) => return Err(err),
+            Err(err) => {
+                return Err(io::Error::other(format!(
+                    "runtime source task failed: {err}"
+                )))
+            }
+        }
+    }
+    let cap = runtime_source_blocking_spawn_cap();
+    while pending_tasks.len() >= cap {
+        match pending_tasks.join_next().await {
+            Some(Ok(Ok(()))) => {}
+            Some(Ok(Err(err))) => return Err(err),
+            Some(Err(err)) => {
+                return Err(io::Error::other(format!(
+                    "runtime source task failed: {err}"
+                )))
+            }
+            None => return Ok(()),
+        }
+    }
     Ok(())
 }
 
@@ -794,14 +832,26 @@ pub async fn sync_runtime_input_plugin(
             match data_frame {
                 PluginDataFrame::RawIngestTasks { tasks } => {
                     if !tasks.is_empty() {
+                        let raw_frame_bytes: usize =
+                            tasks.iter().flat_map(|t| t.iter()).map(|b| b.bytes).sum();
                         if Config::debug_enabled() || Config::log_wal_enabled() {
                             let total_batches: usize = tasks.iter().map(Vec::len).sum();
                             info!(
-                                "runtime source host: received {} raw ingest tasks ({} batches)",
+                                "runtime source host: received {} raw ingest tasks ({} batches, {} bytes)",
                                 tasks.len(),
-                                total_batches
+                                total_batches,
+                                raw_frame_bytes
                             );
                         }
+                        if Config::log_wal_enabled() {
+                            info!(
+                                "runtime source host WAL: raw_frame_bytes={} pending_blocking_tasks={}/{}",
+                                raw_frame_bytes,
+                                pending_source_tasks.len(),
+                                runtime_source_blocking_spawn_cap()
+                            );
+                        }
+                        runtime_source_throttle_blocking_tasks(&mut pending_source_tasks).await?;
                         let offsets = offsets.clone();
                         let shared_output = shared_output.clone();
                         let ingest = ingest.clone();
@@ -842,6 +892,7 @@ pub async fn sync_runtime_input_plugin(
                                 offset_sample
                             );
                         }
+                        runtime_source_throttle_blocking_tasks(&mut pending_source_tasks).await?;
                         let offsets = offsets.clone();
                         let shared_output = shared_output.clone();
                         pending_source_tasks.spawn_blocking(move || {
