@@ -21,7 +21,7 @@ use crate::buffer::BufferChunker;
 use crate::discover::{Metadata, OutputMetadata, PipelineMetadata};
 use crate::helpers::configuration::{Config, PIPELINE_NAME};
 use crate::helpers::logger::LogLevel;
-use crate::helpers::offsets::Offsets;
+use crate::helpers::offsets::{Offsets, SLED_NAME};
 use crate::helpers::sync_reporter::SyncReporter;
 use crate::ingest::deadletter;
 use crate::ingest_work::Ingest;
@@ -60,15 +60,57 @@ async fn cleanup_discover_ingest_artifacts() {
         }
     }
 
-    let data_dir = Config::get_data_dir();
-    if let Err(err) = std::fs::remove_dir_all(&data_dir) {
-        if err.kind() != io::ErrorKind::NotFound {
-            warn!(
-                "Discover cleanup: failed to remove local data dir {}: {}",
-                data_dir, err
-            );
+    // Do not `remove_dir_all(DATA_DIR)`: for `SKIPPRD_EL_STORAGE_MODE=local`, pipeline metadata
+    // and config live under DATA_DIR (`{tenant}/{workspace}/{pipeline}/...`). Only strip
+    // transient ingest/WAL/runtime-child paths so implicit discover cannot leave recoverable
+    // WAL/offsets while keeping persisted metadata intact.
+    cleanup_discover_local_pipeline_artifacts(&Config::get_data_dir());
+}
+
+fn cleanup_discover_local_pipeline_artifacts(data_dir: &str) {
+    use std::path::Path;
+
+    fn best_effort_remove_dir(path: &Path) {
+        match std::fs::remove_dir_all(path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => warn!(
+                "Discover cleanup: failed to remove dir {}: {}",
+                path.display(),
+                err
+            ),
         }
     }
+
+    fn best_effort_remove_file(path: &Path) {
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => warn!(
+                "Discover cleanup: failed to remove file {}: {}",
+                path.display(),
+                err
+            ),
+        }
+    }
+
+    let paths: [&str; 5] = [
+        "ingest_buffer",
+        "output_buffer",
+        "segment_buffer",
+        "runtime_source_children",
+        SLED_NAME,
+    ];
+    for rel in paths {
+        best_effort_remove_dir(Path::new(data_dir).join(rel).as_path());
+    }
+    best_effort_remove_file(
+        Path::new(data_dir)
+            .join(format!("{SLED_NAME}.tmp"))
+            .as_path(),
+    );
+    best_effort_remove_file(Path::new(data_dir).join("wal-debug-trace.log").as_path());
+    best_effort_remove_file(Path::new(data_dir).join("LASTRAN").as_path());
 }
 
 fn chaos_mode_delay() -> Duration {
