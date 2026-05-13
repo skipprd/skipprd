@@ -631,48 +631,10 @@ impl Ingest {
         Self::read_meminfo_kib("MemAvailable:").map(|kib| kib / 1024)
     }
 
-    #[cfg(target_os = "macos")]
-    fn darwin_total_ram_bytes() -> Option<usize> {
-        use std::mem;
-        use std::ptr;
-        let mut mib: [i32; 2] = [libc::CTL_HW, libc::HW_MEMSIZE];
-        let mut out: u64 = 0;
-        let mut sz = mem::size_of_val(&out);
-        let rc = unsafe {
-            libc::sysctl(
-                mib.as_mut_ptr(),
-                mib.len() as libc::c_uint,
-                &mut out as *mut u64 as *mut libc::c_void,
-                &mut sz,
-                ptr::null_mut(),
-                0,
-            )
-        };
-        (rc == 0).then_some(out as usize)
-    }
-
-    /// Best-effort RAM hint for ingest admission (MemAvailable on Linux, total on macOS).
-    fn host_memory_hint_bytes() -> Option<usize> {
-        #[cfg(target_os = "linux")]
-        {
-            return Self::read_meminfo_kib("MemAvailable:")
-                .or_else(|| Self::read_meminfo_kib("MemFree:"))
-                .or_else(|| Self::read_meminfo_kib("MemTotal:"))
-                .map(|kib| (kib as usize).saturating_mul(1024));
-        }
-        #[cfg(target_os = "macos")]
-        {
-            return Self::darwin_total_ram_bytes();
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-        {
-            None
-        }
-    }
-
     /// Autotuned cap on summed in-flight ingest payload bytes (queued + active).
-    /// With `WAL_STORAGE=s3`, allow up to **half** of the memory hint so ingest can overlap
-    /// network-bound WAL I/O without being capped as aggressively as before (~15% RSS on typical cores).
+    /// With `WAL_STORAGE=s3`, uses this process’s share of the **combined** S3 WAL memory
+    /// envelope (see `buffer::s3_wal_memory_budget`): admission + S3 body LRU never exceed
+    /// ~70% of MemAvailable (Linux) / total RAM (macOS) together.
     /// Disk WAL keeps a lower base fraction plus mild scaling with ingest thread count.
     fn compute_admission_budget_bytes(
         hint_bytes: usize,
@@ -680,22 +642,24 @@ impl Ingest {
         num_ingest_threads: usize,
     ) -> usize {
         let budget = if wal_s3 {
-            hint_bytes / 2
+            crate::buffer::s3_wal_memory_budget::split_s3_wal_memory_budget(hint_bytes).0
         } else {
             let n = num_ingest_threads.max(1);
-            hint_bytes
+            let raw = hint_bytes
                 .saturating_mul(25)
                 .saturating_div(100)
                 .saturating_mul(n.saturating_add(2))
-                .saturating_div(4)
+                .saturating_div(4);
+            const MIN_B: usize = 256 * 1024 * 1024;
+            const MAX_B: usize = 64 * 1024 * 1024 * 1024;
+            raw.clamp(MIN_B, MAX_B)
         };
-        const MIN_B: usize = 256 * 1024 * 1024;
-        const MAX_B: usize = 12 * 1024 * 1024 * 1024;
-        budget.clamp(MIN_B, MAX_B)
+        budget
     }
 
     fn autotuned_ingest_admission_budget_bytes(num_ingest_threads: usize) -> usize {
-        let hint = Self::host_memory_hint_bytes().unwrap_or(2 * 1024 * 1024 * 1024);
+        let hint = crate::buffer::s3_wal_memory_budget::memory_hint_bytes()
+            .unwrap_or(crate::buffer::s3_wal_memory_budget::FALLBACK_MEMORY_HINT_BYTES);
         let wal_s3 = Config::get_wal_storage().eq_ignore_ascii_case("s3");
         Self::compute_admission_budget_bytes(hint, wal_s3, num_ingest_threads)
     }
@@ -2531,13 +2495,15 @@ mod ingest_admission_tests {
     }
 
     #[test]
-    fn admission_budget_s3_is_half_memory_hint() {
+    fn admission_budget_s3_fits_shared_70pct_envelope() {
         let hint = 8_usize * 1024 * 1024 * 1024;
-        let s3 = Ingest::admission_budget_for_tests(hint, true, 4);
-        assert_eq!(
-            s3,
-            hint / 2,
-            "S3 WAL ingest admission should allow half of memory hint before global clamp"
+        let pool = crate::buffer::s3_wal_memory_budget::combined_pool_bytes(hint);
+        let (adm, lru) = crate::buffer::s3_wal_memory_budget::split_s3_wal_memory_budget(hint);
+        let ingest_adm = Ingest::admission_budget_for_tests(hint, true, 4);
+        assert_eq!(ingest_adm, adm);
+        assert!(
+            adm.saturating_add(lru) <= pool,
+            "admission={adm} lru={lru} pool={pool}"
         );
     }
 

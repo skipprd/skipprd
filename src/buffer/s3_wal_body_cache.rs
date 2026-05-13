@@ -1,8 +1,9 @@
 //! Bounded in-memory cache for S3 WAL segment bodies (compaction reads).
 //! Bodies are not retained in `SEGMENT_CACHE` after durable S3 commit; this LRU
-//! holds fetched bytes between compaction runs. Byte and entry caps are **autotuned**
-//! from host memory (no env knobs).
+//! holds fetched bytes between compaction runs. Byte cap is autotuned from the same
+//! **shared 70% MemAvailable envelope** as S3 WAL ingest admission (`s3_wal_memory_budget`).
 
+use crate::buffer::s3_wal_memory_budget;
 use crate::helpers::s3::get_object_bytes_for_bucket;
 use dashmap::DashSet;
 use once_cell::sync::Lazy;
@@ -14,8 +15,6 @@ use std::sync::Mutex;
 /// Segment IDs currently being compacted — bodies for these keys are never evicted.
 pub static S3_BODY_CACHE_PINS: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 
-const MIN_CACHE_BYTES: usize = 32 * 1024 * 1024;
-const MAX_CACHE_BYTES: usize = 2 * 1024 * 1024 * 1024;
 const MIN_CACHE_ENTRIES: usize = 8;
 const MAX_CACHE_ENTRIES: usize = 256;
 
@@ -24,77 +23,10 @@ pub fn autotuned_caps() -> (usize, usize) {
     autotune_limits()
 }
 
-#[cfg(target_os = "linux")]
-fn linux_meminfo_kb(label: &str) -> Option<usize> {
-    let data = std::fs::read_to_string("/proc/meminfo").ok()?;
-    for line in data.lines() {
-        let line = line.trim_start();
-        if line.starts_with(label) {
-            return line.split_whitespace().nth(1)?.parse().ok();
-        }
-    }
-    None
-}
-
-#[cfg(target_os = "linux")]
-fn linux_memory_hint_bytes() -> Option<usize> {
-    const KIB: usize = 1024;
-    // Values in /proc/meminfo are kiB
-    linux_meminfo_kb("MemAvailable:")
-        .or_else(|| linux_meminfo_kb("MemFree:"))
-        .or_else(|| linux_meminfo_kb("MemTotal:"))
-        .map(|kb| kb.saturating_mul(KIB))
-}
-
-#[cfg(target_os = "macos")]
-fn darwin_total_ram_bytes() -> Option<usize> {
-    use std::mem;
-    use std::ptr;
-    let mut mib: [i32; 2] = [libc::CTL_HW, libc::HW_MEMSIZE];
-    let mut out: u64 = 0;
-    let mut sz = mem::size_of_val(&out);
-    let rc = unsafe {
-        libc::sysctl(
-            mib.as_mut_ptr(),
-            mib.len() as libc::c_uint,
-            &mut out as *mut u64 as *mut libc::c_void,
-            &mut sz,
-            ptr::null_mut(),
-            0,
-        )
-    };
-    (rc == 0).then_some(out as usize)
-}
-
-fn system_memory_hint_bytes() -> Option<usize> {
-    #[cfg(target_os = "linux")]
-    {
-        return linux_memory_hint_bytes();
-    }
-    #[cfg(target_os = "macos")]
-    {
-        return darwin_total_ram_bytes();
-    }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-    {
-        None
-    }
-}
-
 fn autotune_limits() -> (usize, usize) {
-    let n = num_cpus::get().max(1);
-
-    let max_bytes = if let Some(hint) = system_memory_hint_bytes() {
-        // ~12% of reported RAM / MemAvailable, clamped (single-process LRU, not whole-machine cache)
-        hint.saturating_div(100)
-            .saturating_mul(12)
-            .clamp(MIN_CACHE_BYTES, MAX_CACHE_BYTES)
-    } else {
-        // No OS hint: scale with CPU count (common CI / embedded layouts)
-        (96usize * 1024 * 1024)
-            .saturating_add(n.saturating_mul(48 * 1024 * 1024))
-            .clamp(MIN_CACHE_BYTES, MAX_CACHE_BYTES)
-    };
+    let hint =
+        s3_wal_memory_budget::memory_hint_bytes().unwrap_or(s3_wal_memory_budget::FALLBACK_MEMORY_HINT_BYTES);
+    let max_bytes = s3_wal_memory_budget::split_s3_wal_memory_budget(hint).1;
 
     // Entry budget: ~one slot per ~40 MiB of byte budget, bounded
     let max_entries = (max_bytes / (40 * 1024 * 1024))
@@ -285,8 +217,11 @@ mod tests {
 
     #[test]
     fn autotune_limits_in_sane_range() {
+        let hint = s3_wal_memory_budget::memory_hint_bytes()
+            .unwrap_or(s3_wal_memory_budget::FALLBACK_MEMORY_HINT_BYTES);
+        let pool = s3_wal_memory_budget::combined_pool_bytes(hint);
         let (b, e) = autotune_limits();
-        assert!(b >= MIN_CACHE_BYTES && b <= MAX_CACHE_BYTES);
+        assert!(b <= pool);
         assert!(e >= MIN_CACHE_ENTRIES && e <= MAX_CACHE_ENTRIES);
     }
 }
