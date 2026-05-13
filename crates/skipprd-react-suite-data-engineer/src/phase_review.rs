@@ -44,6 +44,26 @@ fn model_review_needs_plan_change_targets(
         && meta.target_task_ids.is_empty()
 }
 
+async fn persist_publish_approval_for_review_proceed(
+    thread_store: &ThreadStore,
+    thread_id: &str,
+) -> Result<(), PhaseError> {
+    crate::state_manager::apply_execution_event(
+        &thread_store.control_store(),
+        thread_id,
+        crate::progress_controller::DataEngineerEvent::PublishApprovalSet {
+            decision: crate::progress_controller::PublishApprovalDecision::Approved,
+        },
+    )
+    .await
+    .map_err(|e| {
+        PhaseError::Fatal(format!(
+            "failed to persist explicit publish approval on model review proceed: {e}"
+        ))
+    })?;
+    Ok(())
+}
+
 fn model_plan_change_target_retry_question(review_q: &str, prior_answer: &str) -> String {
     format!(
         "{review_q}\n\nMODEL PLAN CHANGE TARGET RETRY:\n\
@@ -95,6 +115,10 @@ fn review_answer_and_meta(first: FlowFrame) -> Result<(String, ReviewDecisionMet
 #[cfg(test)]
 mod tests {
     use super::*;
+    use react_core::keyspace::DefaultKeyspace;
+    use react_core::scope::RequestScope;
+    use react_module_storage_memory::InMemoryStorageAdapter;
+    use std::sync::Arc;
 
     fn meta(target_task_ids: Vec<&str>) -> ReviewDecisionMeta {
         ReviewDecisionMeta {
@@ -161,6 +185,35 @@ mod tests {
             crate::progress_controller::PlanRevisionStrategy::Rewrite
         );
     }
+
+    #[tokio::test]
+    async fn model_review_proceed_publish_approval_satisfies_publish_gate() {
+        let storage = Arc::new(InMemoryStorageAdapter::default());
+        let scope = RequestScope::parse("t", "w", "p").expect("valid test scope");
+        let keyspace = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let store = ThreadStore::new(storage, scope, keyspace);
+        let tid = "tid-model-review-proceed-publish-approval";
+
+        persist_publish_approval_for_review_proceed(&store, tid)
+            .await
+            .expect("persist publish approval");
+        let state =
+            crate::progress_controller::ExecutionState::load_strict(&store.control_store(), tid)
+                .await
+                .expect("load state")
+                .expect("state exists");
+
+        assert!(crate::progress_controller::gate_publish_progress(
+            &state,
+            control_flow::Phase::PublishAwaitApproval
+        )
+        .is_ok());
+        assert!(crate::progress_controller::gate_publish_progress(
+            &state,
+            control_flow::Phase::Publish
+        )
+        .is_ok());
+    }
 }
 
 impl DataEngineerSuite {
@@ -201,6 +254,10 @@ impl DataEngineerSuite {
                         ),
                         meta: None,
                     });
+                    if next == control_flow::Phase::PublishAwaitApproval {
+                        persist_publish_approval_for_review_proceed(thread_store, thread_id)
+                            .await?;
+                    }
                     commit_phase_decision(
                         thread_store,
                         thread_id,
@@ -390,19 +447,7 @@ impl DataEngineerSuite {
                     _ => control_flow::Phase::Done,
                 };
                 if next == control_flow::Phase::PublishAwaitApproval {
-                    crate::state_manager::apply_execution_event(
-                        &thread_store.control_store(),
-                        thread_id,
-                        crate::progress_controller::DataEngineerEvent::PublishApprovalSet {
-                            decision: crate::progress_controller::PublishApprovalDecision::Approved,
-                        },
-                    )
-                    .await
-                    .map_err(|e| {
-                        format!(
-                            "failed to persist explicit publish approval on model review proceed: {e}"
-                        )
-                    })?;
+                    persist_publish_approval_for_review_proceed(thread_store, thread_id).await?;
                 }
                 commit_phase_decision(
                     thread_store,
