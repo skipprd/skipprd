@@ -251,6 +251,12 @@ impl Tool for DbtValidateTool {
         // If profiles_dir not provided, try generating one from resolved config for the active warehouse provider.
         // Keep the tempdir alive for the duration of this call.
         let mut _tmp: Option<tempfile::TempDir> = None;
+        let mut tier_routing = if let Some(cfg) = crate::resolved_config_from_ctx(ctx) {
+            crate::de_config::de_config_from_resolved(cfg)
+                .map(|providers| crate::dbt::profile::tier_routing(cfg, &providers))
+        } else {
+            None
+        };
         if profiles_dir.is_none() {
             if let Some(cfg) = crate::resolved_config_from_ctx(ctx) {
                 let threads = crate::ctx_ext::actx_warehouse(ctx)
@@ -267,6 +273,7 @@ impl Tool for DbtValidateTool {
                     if target.is_none() {
                         target = Some(gen.target);
                     }
+                    tier_routing = Some(gen.tier_routing);
                 }
             }
         }
@@ -302,6 +309,7 @@ impl Tool for DbtValidateTool {
                     Some(select_terms.clone())
                 },
                 exclude: None,
+                tier_routing: tier_routing.clone(),
             };
             let res1 =
                 crate::transient_retry::retry_transient_default("dbt_validate_compile", || async {
@@ -345,6 +353,7 @@ impl Tool for DbtValidateTool {
                     build: true,
                     select: Some(select_terms.clone()),
                     exclude: None,
+                    tier_routing: tier_routing.clone(),
                 };
                 let res2 = crate::transient_retry::retry_transient_default(
                     "dbt_validate_selective",
@@ -371,6 +380,7 @@ impl Tool for DbtValidateTool {
                         build: true,
                         select: None,
                         exclude: None,
+                        tier_routing: tier_routing.clone(),
                     };
                     let res3 = crate::transient_retry::retry_transient_default(
                         "dbt_validate_full",
@@ -397,6 +407,7 @@ impl Tool for DbtValidateTool {
                     build: true,
                     select: None,
                     exclude: None,
+                    tier_routing: tier_routing.clone(),
                 };
                 let res3 = crate::transient_retry::retry_transient_default(
                     "dbt_validate_full",
@@ -423,6 +434,7 @@ impl Tool for DbtValidateTool {
                 build,
                 select: None,
                 exclude: None,
+                tier_routing: tier_routing.clone(),
             };
             let res =
                 crate::transient_retry::retry_transient_default("dbt_validate_default", || async {

@@ -491,13 +491,20 @@ fn effective_target_schema(
 }
 
 fn dbt_relation_catalog_schema(ctx: &AgentCtx, suffix: &str) -> Option<(String, String)> {
-    let (base_schema, p) = effective_target_schema(ctx)?;
+    let (_, p) = effective_target_schema(ctx)?;
     let container = p.warehouse.container.trim().to_string();
     let suffix = suffix.trim();
     if container.is_empty() || suffix.is_empty() {
         return None;
     }
-    Some((container, format!("{}_{}", base_schema, suffix)))
+    let cfg = crate::resolved_config_from_ctx(ctx)?;
+    let routing = crate::dbt::profile::tier_routing(cfg, &p);
+    let tier = if suffix == p.dbt.naming.silver_suffix.trim() {
+        crate::providers::DbtTier::Silver
+    } else {
+        crate::providers::DbtTier::Gold
+    };
+    routing.relation_catalog_schema(tier, &container)
 }
 
 /// Canonical warehouse prefix for staged silver relations, e.g.

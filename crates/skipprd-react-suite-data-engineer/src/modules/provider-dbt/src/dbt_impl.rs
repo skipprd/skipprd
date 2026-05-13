@@ -12,7 +12,10 @@ use std::{io::BufRead, process::Stdio};
 use crate::adapters::storage::StorageAdapter;
 use crate::providers::{Keyspace, RequestScope};
 
-use react_suite_data_engineer::providers::{DbtProvider, DbtValidateArgs, DbtValidateResult};
+use react_suite_data_engineer::providers::{
+    DbtProvider, DbtValidateArgs, DbtValidateResult, DBT_GOLD_DATABASE_ENV, DBT_GOLD_SCHEMA_ENV,
+    DBT_SILVER_DATABASE_ENV, DBT_SILVER_SCHEMA_ENV,
+};
 
 #[derive(Clone)]
 pub struct DbtProjectProvider {
@@ -109,9 +112,13 @@ fn resolve_dbt_project_name(scope: &RequestScope, requested: &str) -> Result<Str
 /// [`sanitize_dbt_project_yaml`] on every save and reported back as a `StrippedArtifact`.
 fn render_dbt_project_yaml(project_name: &str, profile_name: &str) -> String {
     format!(
-        "name: {name}\nversion: '1.0'\nprofile: '{profile_name}'\nmodel-paths: ['models']\nseed-paths: ['seeds']\nmacro-paths: ['macros']\ntarget-path: 'target'\n\nmodels:\n  {name}:\n    # Suffix strategy: dbt materializes schemas as <DBT_TARGET_SCHEMA>_<suffix>.\n    # Default all models into GOLD by setting their custom schema name to the gold suffix.\n    +schema: \"{{{{ env_var('DBT_GOLD_SUFFIX', 'gold') }}}}\"\n    # Force staging models under models/staging into SILVER.\n    staging:\n      +schema: \"{{{{ env_var('DBT_SILVER_SUFFIX', 'silver') }}}}\"\n",
+        "name: {name}\nversion: '1.0'\nprofile: '{profile_name}'\nmodel-paths: ['models']\nseed-paths: ['seeds']\nmacro-paths: ['macros']\ntarget-path: 'target'\n\non-run-start:\n  # Snowflake needs the target databases to exist before dbt creates schemas inside them.\n  - \"{{% if target.type == 'snowflake' %}}create database if not exists {{{{ env_var('{silver_db_env}', target.database) }}}}{{% else %}}select 1{{% endif %}}\"\n  - \"{{% if target.type == 'snowflake' %}}create database if not exists {{{{ env_var('{gold_db_env}', target.database) }}}}{{% else %}}select 1{{% endif %}}\"\n\nmodels:\n  {name}:\n    # Default gold models into the configured gold tier namespace.\n    +database: \"{{{{ env_var('{gold_db_env}', target.database) }}}}\"\n    +schema: \"{{{{ env_var('{gold_schema_env}', target.schema) }}}}\"\n    # Force staging models under models/staging into the configured silver tier namespace.\n    staging:\n      +database: \"{{{{ env_var('{silver_db_env}', target.database) }}}}\"\n      +schema: \"{{{{ env_var('{silver_schema_env}', target.schema) }}}}\"\n",
         name = project_name,
-        profile_name = profile_name
+        profile_name = profile_name,
+        silver_db_env = DBT_SILVER_DATABASE_ENV,
+        silver_schema_env = DBT_SILVER_SCHEMA_ENV,
+        gold_db_env = DBT_GOLD_DATABASE_ENV,
+        gold_schema_env = DBT_GOLD_SCHEMA_ENV
     )
 }
 
@@ -140,8 +147,8 @@ fn truncate_value_summary(yaml: &str) -> String {
 /// system-managed values for structural keys like `name`, `profile`, `model-paths`. When the
 /// existing file's value for such a key matches the canonical value, we treat it as
 /// system-rendered and silently keep it. When it diverges, we emit a strip artifact and restore
-/// the canonical value. For pure-strip keys (e.g. `on-run-start`) the canonical template has no
-/// value and any LLM-authored presence emits an artifact.
+/// the canonical value. For pure-strip keys (canonical template has no value), any LLM-authored
+/// presence emits an artifact.
 fn sanitize_dbt_project_yaml(
     raw: &str,
     project_name: &str,
@@ -1458,6 +1465,13 @@ impl DbtProvider for DbtProjectProvider {
         if let Some(pd) = profiles_dir.as_ref() {
             envs.push(("DBT_PROFILES_DIR", pd.clone()));
         }
+        if let Some(tier_routing) = args.tier_routing.as_ref() {
+            for (key, value) in tier_routing.env_vars() {
+                if !value.trim().is_empty() {
+                    envs.push((key, value));
+                }
+            }
+        }
 
         let profiles_path = profiles_dir.as_ref().map(|s| Path::new(s));
 
@@ -1653,8 +1667,10 @@ mod tests {
         assert!(y.contains("profile: 'project_a'"));
         assert!(y.contains("seed-paths: ['seeds']"));
         assert!(y.contains("macro-paths: ['macros']"));
-        assert!(y.contains("DBT_GOLD_SUFFIX"));
-        assert!(y.contains("DBT_SILVER_SUFFIX"));
+        assert!(y.contains("DBT_GOLD_DATABASE"));
+        assert!(y.contains("DBT_GOLD_SCHEMA"));
+        assert!(y.contains("DBT_SILVER_DATABASE"));
+        assert!(y.contains("DBT_SILVER_SCHEMA"));
     }
 
     #[test]
@@ -1679,7 +1695,8 @@ mod tests {
             "name: demo\nprofile: demo\non-run-start:\n  - '{{ validate_athena_work_group() }}'\n";
         let out = sanitize_dbt_project_yaml(raw, "demo", "demo");
         assert!(out.changed);
-        assert!(!out.text.contains("on-run-start"));
+        assert!(!out.text.contains("validate_athena_work_group"));
+        assert!(out.text.contains("create database if not exists"));
         let artifact = out
             .stripped
             .iter()

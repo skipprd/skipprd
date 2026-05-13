@@ -1,3 +1,4 @@
+use crate::providers::{DbtNamespaceShape, DbtTierNamespace, DbtTierRouting};
 use react_core::resolved_config::ReactResolvedConfig;
 
 #[derive(Clone, Debug)]
@@ -18,6 +19,7 @@ pub enum ActiveWarehouse {
 pub struct GeneratedProfiles {
     pub target: String,
     pub profiles_yml: String,
+    pub tier_routing: DbtTierRouting,
 }
 
 /// Determine which warehouse provider is active for publishing.
@@ -60,6 +62,7 @@ pub fn generate_profiles_yml(
     let active = active_warehouse(cfg)?;
     let providers = crate::de_config::de_config_from_resolved(cfg)
         .ok_or_else(|| "suite_config missing or invalid for data_engineer".to_string())?;
+    let tier_routing = tier_routing(cfg, &providers);
     match active {
         ActiveWarehouse::Athena => {
             let wh = &providers.warehouse;
@@ -166,6 +169,7 @@ pub fn generate_profiles_yml(
             Ok(GeneratedProfiles {
                 target,
                 profiles_yml: out,
+                tier_routing: tier_routing.clone(),
             })
         }
         ActiveWarehouse::Postgres => {
@@ -208,6 +212,7 @@ pub fn generate_profiles_yml(
             Ok(GeneratedProfiles {
                 target,
                 profiles_yml: out,
+                tier_routing: tier_routing.clone(),
             })
         }
         ActiveWarehouse::Snowflake => {
@@ -314,6 +319,7 @@ pub fn generate_profiles_yml(
             Ok(GeneratedProfiles {
                 target,
                 profiles_yml: out,
+                tier_routing: tier_routing.clone(),
             })
         }
         ActiveWarehouse::Bigquery => {
@@ -379,6 +385,7 @@ pub fn generate_profiles_yml(
             Ok(GeneratedProfiles {
                 target,
                 profiles_yml: out,
+                tier_routing: tier_routing.clone(),
             })
         }
         ActiveWarehouse::Mssql => {
@@ -421,6 +428,7 @@ pub fn generate_profiles_yml(
             Ok(GeneratedProfiles {
                 target,
                 profiles_yml: out,
+                tier_routing: tier_routing.clone(),
             })
         }
         ActiveWarehouse::Databricks => {
@@ -461,6 +469,7 @@ pub fn generate_profiles_yml(
             Ok(GeneratedProfiles {
                 target,
                 profiles_yml: out,
+                tier_routing: tier_routing.clone(),
             })
         }
         ActiveWarehouse::Synapse => {
@@ -494,6 +503,7 @@ pub fn generate_profiles_yml(
             Ok(GeneratedProfiles {
                 target,
                 profiles_yml: out,
+                tier_routing: tier_routing.clone(),
             })
         }
         ActiveWarehouse::Redshift => {
@@ -533,6 +543,7 @@ pub fn generate_profiles_yml(
             Ok(GeneratedProfiles {
                 target,
                 profiles_yml: out,
+                tier_routing: tier_routing.clone(),
             })
         }
         ActiveWarehouse::Clickhouse => {
@@ -565,6 +576,7 @@ pub fn generate_profiles_yml(
             Ok(GeneratedProfiles {
                 target,
                 profiles_yml: out,
+                tier_routing: tier_routing.clone(),
             })
         }
         ActiveWarehouse::Motherduck => {
@@ -602,6 +614,7 @@ pub fn generate_profiles_yml(
             Ok(GeneratedProfiles {
                 target,
                 profiles_yml: out,
+                tier_routing,
             })
         }
     }
@@ -640,6 +653,79 @@ fn sanitize_ident(s: &str) -> String {
     out.trim_matches('_').to_string()
 }
 
+fn tier_name(base: &str, suffix: &str) -> String {
+    let suffix = suffix.trim();
+    if suffix.is_empty() {
+        base.to_string()
+    } else {
+        format!("{}_{}", base, suffix)
+    }
+}
+
+fn tier_names(
+    cfg: &ReactResolvedConfig,
+    providers: &crate::de_config::ProvidersResolved,
+) -> (String, String, String) {
+    let base_schema = if providers.dbt.naming.target_schema.trim().is_empty() {
+        derive_scope_db_name(cfg)
+    } else {
+        providers.dbt.naming.target_schema.trim().to_string()
+    };
+    let silver = tier_name(&base_schema, &providers.dbt.naming.silver_suffix);
+    let gold = tier_name(&base_schema, &providers.dbt.naming.gold_suffix);
+    (base_schema, silver, gold)
+}
+
+pub(crate) fn tier_routing(
+    cfg: &ReactResolvedConfig,
+    providers: &crate::de_config::ProvidersResolved,
+) -> DbtTierRouting {
+    use crate::de_config::WarehouseKind;
+
+    let (base_schema, silver, gold) = tier_names(cfg, providers);
+    let shape = match providers.warehouse.kind {
+        WarehouseKind::Snowflake => DbtNamespaceShape::DatabaseAndSchema,
+        WarehouseKind::Athena | WarehouseKind::Bigquery | WarehouseKind::Databricks => {
+            DbtNamespaceShape::CatalogAndSchema
+        }
+        WarehouseKind::Postgres
+        | WarehouseKind::Mssql
+        | WarehouseKind::Synapse
+        | WarehouseKind::Redshift
+        | WarehouseKind::Clickhouse
+        | WarehouseKind::Motherduck => DbtNamespaceShape::ConnectionDatabaseAndSchema,
+    };
+    let (silver, gold) = match shape {
+        DbtNamespaceShape::DatabaseAndSchema => (
+            DbtTierNamespace {
+                database: Some(silver),
+                schema: base_schema.clone(),
+            },
+            DbtTierNamespace {
+                database: Some(gold),
+                schema: base_schema.clone(),
+            },
+        ),
+        DbtNamespaceShape::CatalogAndSchema | DbtNamespaceShape::ConnectionDatabaseAndSchema => (
+            DbtTierNamespace {
+                database: None,
+                schema: silver,
+            },
+            DbtTierNamespace {
+                database: None,
+                schema: gold,
+            },
+        ),
+    };
+
+    DbtTierRouting {
+        base_schema,
+        silver,
+        gold,
+        shape,
+    }
+}
+
 fn resolve_to_absolute_path(raw: &str) -> String {
     let p = std::path::Path::new(raw);
     let abs = if p.is_absolute() {
@@ -673,6 +759,10 @@ fn yaml_escape_scalar<S: AsRef<str>>(s: S) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::de_config::{
+        DbtNamingResolved, DbtResolved, ProvidersResolved, WarehouseKind, WarehouseResolved,
+    };
+    use crate::providers::DbtNamespaceShape;
     use react_core::scope::RequestScope;
 
     #[test]
@@ -729,6 +819,168 @@ mod tests {
         assert!(result.contains('/'));
     }
 
+    fn cfg_for_tier_tests() -> ReactResolvedConfig {
+        ReactResolvedConfig {
+            server: react_core::resolved_config::ServerResolved { port: 1 },
+            storage: react_core::resolved_config::StorageResolved {
+                mode: react_core::resolved_config::StorageMode::Local,
+                bucket: None,
+                path: Some("/tmp/react".to_string()),
+                s3_credentials: None,
+            },
+            scope: RequestScope::parse("t", "w", "fallback").expect("valid test scope"),
+            llm: react_core::resolved_config::LlmResolved::default(),
+            suite_config: serde_json::Value::Null,
+        }
+    }
+
+    fn providers_for_tier_tests(kind: WarehouseKind) -> ProvidersResolved {
+        ProvidersResolved {
+            warehouse: WarehouseResolved {
+                kind,
+                container: "WAREHOUSE_CONTAINER".to_string(),
+                namespace: "bronze".to_string(),
+                extras: serde_json::Value::Null,
+            },
+            dbt: DbtResolved {
+                naming: DbtNamingResolved {
+                    target_schema: "proj".to_string(),
+                    silver_suffix: "silver".to_string(),
+                    gold_suffix: "gold".to_string(),
+                },
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn tier_routing_maps_all_warehouse_kinds() {
+        let cfg = cfg_for_tier_tests();
+        let cases = [
+            (
+                WarehouseKind::Snowflake,
+                DbtNamespaceShape::DatabaseAndSchema,
+                Some("proj_silver"),
+                "proj",
+                "proj",
+                "proj_silver",
+                "proj",
+            ),
+            (
+                WarehouseKind::Athena,
+                DbtNamespaceShape::CatalogAndSchema,
+                None,
+                "proj_silver",
+                "proj_gold",
+                "WAREHOUSE_CONTAINER",
+                "proj_silver",
+            ),
+            (
+                WarehouseKind::Bigquery,
+                DbtNamespaceShape::CatalogAndSchema,
+                None,
+                "proj_silver",
+                "proj_gold",
+                "WAREHOUSE_CONTAINER",
+                "proj_silver",
+            ),
+            (
+                WarehouseKind::Databricks,
+                DbtNamespaceShape::CatalogAndSchema,
+                None,
+                "proj_silver",
+                "proj_gold",
+                "WAREHOUSE_CONTAINER",
+                "proj_silver",
+            ),
+            (
+                WarehouseKind::Postgres,
+                DbtNamespaceShape::ConnectionDatabaseAndSchema,
+                None,
+                "proj_silver",
+                "proj_gold",
+                "WAREHOUSE_CONTAINER",
+                "proj_silver",
+            ),
+            (
+                WarehouseKind::Mssql,
+                DbtNamespaceShape::ConnectionDatabaseAndSchema,
+                None,
+                "proj_silver",
+                "proj_gold",
+                "WAREHOUSE_CONTAINER",
+                "proj_silver",
+            ),
+            (
+                WarehouseKind::Synapse,
+                DbtNamespaceShape::ConnectionDatabaseAndSchema,
+                None,
+                "proj_silver",
+                "proj_gold",
+                "WAREHOUSE_CONTAINER",
+                "proj_silver",
+            ),
+            (
+                WarehouseKind::Redshift,
+                DbtNamespaceShape::ConnectionDatabaseAndSchema,
+                None,
+                "proj_silver",
+                "proj_gold",
+                "WAREHOUSE_CONTAINER",
+                "proj_silver",
+            ),
+            (
+                WarehouseKind::Clickhouse,
+                DbtNamespaceShape::ConnectionDatabaseAndSchema,
+                None,
+                "proj_silver",
+                "proj_gold",
+                "WAREHOUSE_CONTAINER",
+                "proj_silver",
+            ),
+            (
+                WarehouseKind::Motherduck,
+                DbtNamespaceShape::ConnectionDatabaseAndSchema,
+                None,
+                "proj_silver",
+                "proj_gold",
+                "WAREHOUSE_CONTAINER",
+                "proj_silver",
+            ),
+        ];
+
+        for (
+            kind,
+            shape,
+            silver_database,
+            silver_schema,
+            gold_schema,
+            relation_catalog,
+            relation_schema,
+        ) in cases
+        {
+            let providers = providers_for_tier_tests(kind);
+            let routing = tier_routing(&cfg, &providers);
+            assert_eq!(routing.shape, shape, "{kind:?}");
+            assert_eq!(
+                routing.silver.database.as_deref(),
+                silver_database,
+                "{kind:?}"
+            );
+            assert_eq!(routing.silver.schema, silver_schema, "{kind:?}");
+            assert_eq!(routing.gold.schema, gold_schema, "{kind:?}");
+            assert_eq!(
+                routing.relation_catalog_schema(
+                    crate::providers::DbtTier::Silver,
+                    "WAREHOUSE_CONTAINER"
+                ),
+                Some((relation_catalog.to_string(), relation_schema.to_string())),
+                "{kind:?}"
+            );
+        }
+    }
+
     #[test]
     fn snowflake_profile_uses_resolved_config_values_before_env_vars() {
         let cfg = ReactResolvedConfig {
@@ -772,5 +1024,58 @@ mod tests {
             .profiles_yml
             .contains("private_key_path: \"/tmp/snowflake_key.p8\""));
         assert!(!profile.profiles_yml.contains("SNOWFLAKE_ACCOUNT"));
+        assert_eq!(
+            profile.tier_routing.silver.database.as_deref(),
+            Some("proj_silver")
+        );
+        assert_eq!(
+            profile.tier_routing.gold.database.as_deref(),
+            Some("proj_gold")
+        );
+        assert_eq!(profile.tier_routing.silver.schema, "proj");
+    }
+
+    #[test]
+    fn athena_profile_routes_tiers_to_glue_databases_not_catalogs() {
+        let cfg = ReactResolvedConfig {
+            server: react_core::resolved_config::ServerResolved { port: 1 },
+            storage: react_core::resolved_config::StorageResolved {
+                mode: react_core::resolved_config::StorageMode::Local,
+                bucket: None,
+                path: Some("/tmp/react".to_string()),
+                s3_credentials: None,
+            },
+            scope: react_core::scope::RequestScope::parse("t", "w", "proj").unwrap(),
+            llm: react_core::resolved_config::LlmResolved::default(),
+            suite_config: serde_json::json!({
+                "warehouse": {
+                    "kind": "athena",
+                    "container": "AwsDataCatalog",
+                    "namespace": "raw",
+                    "extras": {
+                        "region": "eu-west-1",
+                        "result_s3": "s3://bucket/results/",
+                        "workgroup": "primary"
+                    }
+                },
+                "dbt": {
+                    "enabled": true,
+                    "target": "athena",
+                    "naming": { "target_schema": "proj", "silver_suffix": "silver", "gold_suffix": "gold" }
+                },
+                "catalog": { "enabled": false },
+                "vector": { "enabled": false }
+            }),
+        };
+
+        let profile = generate_profiles_yml(&cfg, None).expect("profile");
+
+        assert!(profile
+            .profiles_yml
+            .contains("database: \"AwsDataCatalog\""));
+        assert!(profile.profiles_yml.contains("schema: \"proj\""));
+        assert_eq!(profile.tier_routing.silver.schema, "proj_silver");
+        assert_eq!(profile.tier_routing.gold.schema, "proj_gold");
+        assert!(profile.tier_routing.silver.database.is_none());
     }
 }

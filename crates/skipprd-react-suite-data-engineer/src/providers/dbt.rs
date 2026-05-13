@@ -3,6 +3,99 @@ use serde::{Deserialize, Serialize};
 
 use react_core::scope::RequestScope;
 
+pub const DBT_SILVER_DATABASE_ENV: &str = "DBT_SILVER_DATABASE";
+pub const DBT_SILVER_SCHEMA_ENV: &str = "DBT_SILVER_SCHEMA";
+pub const DBT_GOLD_DATABASE_ENV: &str = "DBT_GOLD_DATABASE";
+pub const DBT_GOLD_SCHEMA_ENV: &str = "DBT_GOLD_SCHEMA";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DbtTier {
+    Silver,
+    Gold,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DbtNamespaceShape {
+    /// Warehouse supports dbt `database` + `schema` relation placement.
+    DatabaseAndSchema,
+    /// Warehouse uses a catalog/project/database as container plus a schema/dataset namespace.
+    CatalogAndSchema,
+    /// Warehouse connects to one database; dbt tier routing is schema-level.
+    ConnectionDatabaseAndSchema,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DbtTierNamespace {
+    pub database: Option<String>,
+    pub schema: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DbtTierRouting {
+    pub base_schema: String,
+    pub silver: DbtTierNamespace,
+    pub gold: DbtTierNamespace,
+    pub shape: DbtNamespaceShape,
+}
+
+impl DbtTierRouting {
+    pub fn namespace(&self, tier: DbtTier) -> &DbtTierNamespace {
+        match tier {
+            DbtTier::Silver => &self.silver,
+            DbtTier::Gold => &self.gold,
+        }
+    }
+
+    pub fn env_vars(&self) -> Vec<(&'static str, String)> {
+        let mut vars = Vec::new();
+        if let Some(database) = self
+            .silver
+            .database
+            .as_ref()
+            .filter(|v| !v.trim().is_empty())
+        {
+            vars.push((DBT_SILVER_DATABASE_ENV, database.clone()));
+        }
+        vars.push((DBT_SILVER_SCHEMA_ENV, self.silver.schema.clone()));
+        if let Some(database) = self.gold.database.as_ref().filter(|v| !v.trim().is_empty()) {
+            vars.push((DBT_GOLD_DATABASE_ENV, database.clone()));
+        }
+        vars.push((DBT_GOLD_SCHEMA_ENV, self.gold.schema.clone()));
+        vars
+    }
+
+    pub fn relation_prefix(&self, tier: DbtTier, warehouse_container: &str) -> Option<String> {
+        let (catalog, schema) = self.relation_catalog_schema(tier, warehouse_container)?;
+        Some(format!("{}.{}", catalog, schema))
+    }
+
+    pub fn relation_catalog_schema(
+        &self,
+        tier: DbtTier,
+        warehouse_container: &str,
+    ) -> Option<(String, String)> {
+        let ns = self.namespace(tier);
+        match self.shape {
+            DbtNamespaceShape::DatabaseAndSchema => ns
+                .database
+                .as_ref()
+                .filter(|db| !db.trim().is_empty())
+                .map(|db| (db.clone(), ns.schema.clone())),
+            DbtNamespaceShape::CatalogAndSchema
+            | DbtNamespaceShape::ConnectionDatabaseAndSchema => {
+                let container = warehouse_container.trim();
+                if container.is_empty() {
+                    None
+                } else {
+                    Some((container.to_string(), ns.schema.clone()))
+                }
+            }
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct DbtValidateArgs {
     pub project_name: String,
@@ -14,6 +107,11 @@ pub struct DbtValidateArgs {
     pub select: Option<Vec<String>>,
     #[serde(default)]
     pub exclude: Option<Vec<String>>,
+    /// Tier namespace routing required by the system-rendered dbt project.
+    ///
+    /// This is derived from resolved Skippr config, not authored by the LLM.
+    #[serde(default)]
+    pub tier_routing: Option<DbtTierRouting>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

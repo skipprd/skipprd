@@ -344,6 +344,7 @@ impl DeterministicDbtValidateOnce {
             build,
             select: select.map(|s| s.to_vec()),
             exclude: None,
+            tier_routing: Some(gen.tier_routing),
         };
         let res = crate::transient_retry::retry_transient_default(
             "deterministic_dbt_validate",

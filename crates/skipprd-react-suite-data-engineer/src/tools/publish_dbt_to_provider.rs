@@ -73,6 +73,7 @@ impl Tool for PublishDbtToProviderTool {
             build: false,
             select: None,
             exclude: None,
+            tier_routing: Some(gen.tier_routing.clone()),
         };
         let compile_res =
             crate::transient_retry::retry_transient_default("publish_compile", || async {
@@ -202,6 +203,7 @@ impl Tool for PublishDbtToProviderTool {
             build: true,
             select: None,
             exclude: None,
+            tier_routing: Some(gen.tier_routing.clone()),
         };
         let build_res =
             crate::transient_retry::retry_transient_default("publish_build", || async {
