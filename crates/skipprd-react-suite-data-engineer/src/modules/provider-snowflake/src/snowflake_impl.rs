@@ -177,13 +177,35 @@ impl SnowflakeProvider {
         self.ensure_session().await?;
         tracing::info!(target: "snowflake", sql_len = sql.len(), "query_started");
 
-        let rows = {
+        let first_attempt = {
             let guard = self.inner.session.lock().await;
             let session = guard.as_ref().expect("session ensured above");
             session
                 .query(sql)
                 .await
-                .map_err(|e| format!("Snowflake query failed: {}", e))?
+                .map_err(|e| format!("Snowflake query failed: {}", e))
+        };
+        let rows = match first_attempt {
+            Ok(rows) => rows,
+            Err(err) if Self::is_session_expired_error(&err) => {
+                tracing::warn!(
+                    target: "snowflake",
+                    error = %err,
+                    "snowflake session expired; recreating session and retrying query once"
+                );
+                {
+                    let mut guard = self.inner.session.lock().await;
+                    *guard = None;
+                }
+                self.ensure_session().await?;
+                let guard = self.inner.session.lock().await;
+                let session = guard.as_ref().expect("session recreated above");
+                session
+                    .query(sql)
+                    .await
+                    .map_err(|e| format!("Snowflake query failed after session refresh: {}", e))?
+            }
+            Err(err) => return Err(err),
         };
 
         let header: Vec<String> = if let Some(first) = rows.first() {
@@ -219,6 +241,10 @@ impl SnowflakeProvider {
             rows: out_rows,
             meta: Some(serde_json::json!({"engine": "snowflake"})),
         })
+    }
+
+    fn is_session_expired_error(msg: &str) -> bool {
+        msg.to_ascii_lowercase().contains("session expired")
     }
 
     fn quote_ident_sf(ident: &str) -> String {
@@ -641,5 +667,18 @@ mod tests {
         assert_eq!(lookup.catalog, "ANALYTICS");
         assert_eq!(lookup.database, "EXAMPLE_SILVER");
         assert_eq!(lookup.table, "STG_ORDERS");
+    }
+
+    #[test]
+    fn detects_session_expired_errors_case_insensitively() {
+        assert!(SnowflakeProvider::is_session_expired_error(
+            "Snowflake query failed: session expired"
+        ));
+        assert!(SnowflakeProvider::is_session_expired_error(
+            "SNOWFLAKE QUERY FAILED: SESSION EXPIRED"
+        ));
+        assert!(!SnowflakeProvider::is_session_expired_error(
+            "Snowflake query failed: syntax error"
+        ));
     }
 }

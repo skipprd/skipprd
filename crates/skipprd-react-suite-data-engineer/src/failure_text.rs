@@ -46,6 +46,8 @@ pub fn is_infra_transient(s: &str) -> bool {
             "slow down",
             "request limit",
             "provisioned throughput",
+            // Warehouse/session lifecycle
+            "session expired",
         ],
     )
 }
@@ -156,6 +158,12 @@ mod tests {
     #[test]
     fn classify_dbt_failure_internal_server_is_transient() {
         let errors = vec!["InternalServerException: An internal error occurred".to_string()];
+        assert_eq!(classify_dbt_failure(&errors), FailureKind::InfraTransient);
+    }
+
+    #[test]
+    fn classify_dbt_failure_session_expired_is_transient() {
+        let errors = vec!["Snowflake query failed: session expired".to_string()];
         assert_eq!(classify_dbt_failure(&errors), FailureKind::InfraTransient);
     }
 
