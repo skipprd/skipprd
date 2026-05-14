@@ -1,7 +1,7 @@
 use crate::auth::StoredCredentials;
 use react_suite_data_engineer::metering::TokenProvider;
 use reqwest::StatusCode;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::sync::Arc;
 
@@ -44,13 +44,13 @@ impl fmt::Display for ApiError {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct DailyCost {
     pub date: String,
     pub cost: f64,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct AccountResponse {
     pub profile: AccountProfile,
     pub balance: Balance,
@@ -65,14 +65,14 @@ pub struct AccountResponse {
     pub eula: EulaAcceptance,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 pub struct EulaAcceptance {
     pub accepted_at: Option<String>,
     pub version: Option<String>,
     pub accepted_via: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Subscription {
     #[serde(default)]
     pub status: String,
@@ -80,12 +80,12 @@ pub struct Subscription {
     pub price_id: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct AccountProfile {
     pub plan: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct Balance {
     #[serde(default)]
     pub balance: f64,
@@ -417,14 +417,14 @@ struct TokenExchangeResponse {
     pub refresh_token: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct CreateApiKeyResponse {
     pub key_id: String,
     pub raw_key: String,
     pub name: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Serialize)]
 pub struct ApiKeyInfo {
     pub key_id: String,
     pub name: String,

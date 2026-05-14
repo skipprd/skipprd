@@ -10,6 +10,7 @@ use std::{collections::HashMap, path::PathBuf, process::Command, sync::Arc};
 use clap::{Parser, Subcommand};
 use react::config::ReactConfigFile;
 use react_core::keyspace::Keyspace;
+use serde::Serialize;
 
 use public_config::{
     DbtConfig, S3Transform, SchemaSinkConfig, SkipprDbtConfig, SourceConfig, WarehouseConfig,
@@ -105,6 +106,9 @@ enum Cmd {
     Init {
         /// Project name (used as the pipeline identifier and default dbt schema).
         name: String,
+        /// Output mode: json or text. Defaults to text for terminal use.
+        #[arg(long, default_value = "text")]
+        output: String,
     },
 
     /// Reset Skippr-owned state for a single configured pipeline.
@@ -112,12 +116,25 @@ enum Cmd {
 
     /// Configure a warehouse or source connection.
     Connect {
+        /// Output mode: json or text. Defaults to text for terminal use.
+        #[arg(long, default_value = "text")]
+        output: String,
         #[command(subcommand)]
         target: ConnectTarget,
     },
 
     /// Check that all prerequisites are in place.
-    Doctor,
+    Doctor {
+        /// Output mode: json or text. Defaults to text for terminal use.
+        #[arg(long, default_value = "text")]
+        output: String,
+    },
+
+    /// Inspect Skippr configuration metadata.
+    Config {
+        #[command(subcommand)]
+        action: ConfigAction,
+    },
 
     /// Discover schemas and persist pipeline metadata.
     Discover(EngineDiscoverArgs),
@@ -127,6 +144,12 @@ enum Cmd {
 
     /// Run the data-engineer modeling workflow.
     Model(ModelArgs),
+
+    /// Answer a read-only data-engineering question.
+    Ask(AskArgs),
+
+    /// Produce a data-engineering plan without applying changes.
+    Plan(PlanArgs),
 
     /// Attach human feedback to a project thread run.
     Feedback {
@@ -146,8 +169,27 @@ enum Cmd {
 
     /// User account management (signup, login, balance, etc.).
     User {
+        /// Output mode: json or text. Defaults to text for terminal use.
+        #[arg(long, default_value = "text")]
+        output: String,
         #[command(subcommand)]
         action: UserAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ConfigAction {
+    /// Emit the public Skippr config schema. Defaults to JSON for IDE consumption.
+    Schema {
+        /// Output mode: json or text.
+        #[arg(long, default_value = "json")]
+        output: String,
+    },
+    /// Show the active Skippr config summary.
+    Show {
+        /// Output mode: json or text.
+        #[arg(long, default_value = "json")]
+        output: String,
     },
 }
 
@@ -192,6 +234,35 @@ struct ModelArgs {
     /// Start a fresh modeling thread instead of resuming the latest project thread.
     #[arg(long, default_value_t = false)]
     no_resume: bool,
+    /// Output mode: text, json, or jsonl.
+    #[arg(long, default_value = "text")]
+    output: String,
+}
+
+#[derive(Parser, Debug, Clone)]
+struct AskArgs {
+    /// Pipeline to inspect.
+    #[arg(long)]
+    pipeline: String,
+    /// Read-only question to answer.
+    #[arg(long)]
+    question: String,
+    /// Output mode: text, json, or jsonl.
+    #[arg(long, default_value = "text")]
+    output: String,
+}
+
+#[derive(Parser, Debug, Clone)]
+struct PlanArgs {
+    /// Pipeline to inspect.
+    #[arg(long)]
+    pipeline: String,
+    /// Optional modeling or data-engineering goal.
+    #[arg(long)]
+    goal: Option<String>,
+    /// Output mode: text, json, or jsonl.
+    #[arg(long, default_value = "text")]
+    output: String,
 }
 
 #[derive(Subcommand, Debug)]
@@ -671,6 +742,152 @@ fn pairs_to_hash_map(pairs: Option<Vec<(String, String)>>) -> Option<HashMap<Str
     pairs.map(|pairs| pairs.into_iter().collect())
 }
 
+fn is_json_output(output: &str) -> bool {
+    output.eq_ignore_ascii_case("json")
+}
+
+fn is_jsonl_output(output: &str) -> bool {
+    output.eq_ignore_ascii_case("jsonl")
+}
+
+fn print_json<T: Serialize>(value: &T) {
+    match serde_json::to_string_pretty(value) {
+        Ok(json) => println!("{json}"),
+        Err(err) => {
+            eprintln!("error: failed to serialize JSON output: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn print_json_line<T: Serialize>(value: &T) {
+    match serde_json::to_string(value) {
+        Ok(json) => println!("{json}"),
+        Err(err) => {
+            eprintln!("error: failed to serialize JSONL output: {err}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn event_timestamp() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+#[derive(Serialize)]
+struct DeSuiteEvent<'a> {
+    event: &'a str,
+    timestamp: String,
+    pipeline: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thread_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repair_status: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pending_plan_revision: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    failure_summary: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    answer: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plan: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    ok: Option<bool>,
+}
+
+fn emit_de_suite_event(output: &str, event: DeSuiteEvent<'_>) {
+    if is_jsonl_output(output) {
+        print_json_line(&event);
+    }
+}
+
+#[derive(Serialize)]
+struct InitResult {
+    ok: bool,
+    config_path: String,
+    project: String,
+    created_files: Vec<String>,
+    next_steps: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct ConnectResult {
+    ok: bool,
+    config_path: String,
+    connector_kind: String,
+    section_updated: String,
+    pipeline_references_updated: bool,
+    missing_recommended_fields: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct DoctorResult {
+    ok: bool,
+    config_path: Option<String>,
+    checks: Vec<DoctorCheck>,
+}
+
+#[derive(Serialize)]
+struct DoctorCheck {
+    ok: bool,
+    severity: &'static str,
+    message: String,
+    suggested_fix_command: Option<String>,
+}
+
+#[derive(Serialize)]
+struct ConfigSchema {
+    version: u32,
+    default_config_file: &'static str,
+    commands: ConfigSchemaCommands,
+    sources: Vec<ConnectorSchema>,
+    warehouses: Vec<ConnectorSchema>,
+}
+
+#[derive(Serialize)]
+struct ConfigSchemaCommands {
+    init: &'static str,
+    connect_source: &'static str,
+    connect_warehouse: &'static str,
+    doctor: &'static str,
+    show: &'static str,
+}
+
+#[derive(Serialize)]
+struct ConnectorSchema {
+    kind: &'static str,
+    label: &'static str,
+    fields: Vec<FieldSchema>,
+}
+
+#[derive(Serialize)]
+struct FieldSchema {
+    name: &'static str,
+    label: &'static str,
+    field_type: &'static str,
+    required: bool,
+    secret: bool,
+    repeatable: bool,
+    description: &'static str,
+    example: Option<&'static str>,
+}
+
+#[derive(Serialize)]
+struct ConfigShowResult {
+    ok: bool,
+    config_path: String,
+    workspace: Option<String>,
+    pipelines: Vec<String>,
+    sources: Vec<String>,
+    sinks: Vec<String>,
+    schema_sinks: Vec<String>,
+    default_pipeline: Option<String>,
+}
+
 fn working_dir() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
@@ -718,6 +935,292 @@ fn save_engine_config(explicit: &Option<PathBuf>, value: &serde_yaml::Value) -> 
     let raw = serde_yaml::to_string(value)
         .map_err(|e| format!("failed to serialize {}: {}", path.display(), e))?;
     std::fs::write(&path, raw).map_err(|e| format!("failed to write {}: {}", path.display(), e))
+}
+
+fn string_field(
+    name: &'static str,
+    label: &'static str,
+    required: bool,
+    secret: bool,
+    description: &'static str,
+    example: Option<&'static str>,
+) -> FieldSchema {
+    FieldSchema {
+        name,
+        label,
+        field_type: "string",
+        required,
+        secret,
+        repeatable: false,
+        description,
+        example,
+    }
+}
+
+fn list_field(
+    name: &'static str,
+    label: &'static str,
+    description: &'static str,
+    example: Option<&'static str>,
+) -> FieldSchema {
+    FieldSchema {
+        name,
+        label,
+        field_type: "string[]",
+        required: false,
+        secret: false,
+        repeatable: true,
+        description,
+        example,
+    }
+}
+
+fn config_schema() -> ConfigSchema {
+    ConfigSchema {
+        version: 1,
+        default_config_file: "skippr.yml",
+        commands: ConfigSchemaCommands {
+            init: "skippr init <project>",
+            connect_source: "skippr connect --output json source <kind>",
+            connect_warehouse: "skippr connect --output json warehouse <kind>",
+            doctor: "skippr doctor --output json",
+            show: "skippr config show",
+        },
+        sources: vec![
+            ConnectorSchema {
+                kind: "s3",
+                label: "Amazon S3",
+                fields: vec![
+                    string_field(
+                        "bucket",
+                        "Bucket",
+                        true,
+                        false,
+                        "Source S3 bucket.",
+                        Some("raw-events"),
+                    ),
+                    string_field(
+                        "prefix",
+                        "Prefix",
+                        false,
+                        false,
+                        "Source object prefix.",
+                        Some("events/"),
+                    ),
+                    string_field(
+                        "namespace_fields",
+                        "Namespace fields",
+                        false,
+                        false,
+                        "Comma-separated fields used to namespace incoming events.",
+                        Some("event_type"),
+                    ),
+                ],
+            },
+            ConnectorSchema {
+                kind: "file",
+                label: "Local file",
+                fields: vec![string_field(
+                    "path",
+                    "Path",
+                    true,
+                    false,
+                    "Local file or directory path.",
+                    Some("./data/input.jsonl"),
+                )],
+            },
+            ConnectorSchema {
+                kind: "postgres-source",
+                label: "PostgreSQL source",
+                fields: vec![
+                    string_field(
+                        "connection_string",
+                        "Connection string",
+                        false,
+                        true,
+                        "Connection string or ${ENV_VAR} reference.",
+                        Some("${POSTGRES_CONNECTION_STRING}"),
+                    ),
+                    string_field(
+                        "host",
+                        "Host",
+                        false,
+                        false,
+                        "PostgreSQL host.",
+                        Some("localhost"),
+                    ),
+                    string_field("user", "User", false, false, "PostgreSQL user.", None),
+                    string_field(
+                        "password",
+                        "Password",
+                        false,
+                        true,
+                        "PostgreSQL password or ${ENV_VAR} reference.",
+                        Some("${POSTGRES_PASSWORD}"),
+                    ),
+                    string_field("database", "Database", false, false, "Database name.", None),
+                    list_field(
+                        "tables",
+                        "Tables",
+                        "Tables to ingest.",
+                        Some("public.orders,public.customers"),
+                    ),
+                ],
+            },
+            ConnectorSchema {
+                kind: "mysql",
+                label: "MySQL",
+                fields: vec![
+                    string_field(
+                        "connection_string",
+                        "Connection string",
+                        false,
+                        true,
+                        "Connection string or ${ENV_VAR} reference.",
+                        Some("${MYSQL_CONNECTION_STRING}"),
+                    ),
+                    list_field(
+                        "tables",
+                        "Tables",
+                        "Tables to ingest.",
+                        Some("orders,customers"),
+                    ),
+                ],
+            },
+            ConnectorSchema {
+                kind: "mssql",
+                label: "Microsoft SQL Server",
+                fields: vec![string_field(
+                    "connection_string",
+                    "Connection string",
+                    true,
+                    true,
+                    "ADO.NET connection string or ${ENV_VAR} reference.",
+                    Some("${MSSQL_CONNECTION_STRING}"),
+                )],
+            },
+        ],
+        warehouses: vec![
+            ConnectorSchema {
+                kind: "athena",
+                label: "AWS Athena",
+                fields: vec![
+                    string_field(
+                        "workgroup",
+                        "Workgroup",
+                        false,
+                        false,
+                        "Athena workgroup.",
+                        Some("primary"),
+                    ),
+                    string_field(
+                        "region",
+                        "Region",
+                        false,
+                        false,
+                        "AWS region.",
+                        Some("eu-west-1"),
+                    ),
+                    string_field(
+                        "result_s3",
+                        "Result S3 URI",
+                        false,
+                        false,
+                        "Athena query result location.",
+                        Some("s3://bucket/athena-results/"),
+                    ),
+                    string_field(
+                        "schema",
+                        "Schema",
+                        false,
+                        false,
+                        "Default Glue database/schema.",
+                        Some("analytics"),
+                    ),
+                ],
+            },
+            ConnectorSchema {
+                kind: "snowflake",
+                label: "Snowflake",
+                fields: vec![
+                    string_field(
+                        "account",
+                        "Account",
+                        false,
+                        false,
+                        "Snowflake account identifier.",
+                        None,
+                    ),
+                    string_field("user", "User", false, false, "Snowflake user.", None),
+                    string_field(
+                        "password",
+                        "Password",
+                        false,
+                        true,
+                        "Password or ${ENV_VAR} reference.",
+                        Some("${SNOWFLAKE_PASSWORD}"),
+                    ),
+                    string_field(
+                        "private_key_path",
+                        "Private key path",
+                        false,
+                        true,
+                        "Private key path for key-pair auth.",
+                        Some("${SNOWFLAKE_PRIVATE_KEY_PATH}"),
+                    ),
+                    string_field(
+                        "database",
+                        "Database",
+                        true,
+                        false,
+                        "Snowflake database.",
+                        None,
+                    ),
+                    string_field("schema", "Schema", true, false, "Snowflake schema.", None),
+                    string_field(
+                        "warehouse",
+                        "Warehouse",
+                        true,
+                        false,
+                        "Snowflake compute warehouse.",
+                        None,
+                    ),
+                    string_field("role", "Role", false, false, "Snowflake role.", None),
+                ],
+            },
+            ConnectorSchema {
+                kind: "bigquery",
+                label: "BigQuery",
+                fields: vec![
+                    string_field("project", "Project", true, false, "GCP project.", None),
+                    string_field("dataset", "Dataset", true, false, "BigQuery dataset.", None),
+                    string_field(
+                        "location",
+                        "Location",
+                        false,
+                        false,
+                        "BigQuery location.",
+                        Some("US"),
+                    ),
+                ],
+            },
+            ConnectorSchema {
+                kind: "postgres",
+                label: "PostgreSQL warehouse",
+                fields: vec![
+                    string_field("database", "Database", true, false, "Database name.", None),
+                    string_field(
+                        "schema",
+                        "Schema",
+                        false,
+                        false,
+                        "Schema name.",
+                        Some("public"),
+                    ),
+                ],
+            },
+        ],
+    }
 }
 
 fn yaml_key(key: &str) -> serde_yaml::Value {
@@ -1773,12 +2276,26 @@ fn ensure_local_environment(project_root: &std::path::Path) -> Result<(PathBuf, 
     Ok((skippr_dir, env_example))
 }
 
-async fn cmd_init(name: &str, explicit_config: &Option<PathBuf>) {
+async fn cmd_init(name: &str, explicit_config: &Option<PathBuf>, output: &str) {
     let path = config_path(explicit_config);
     let project_root = project_root_from_config_path(&path);
 
     if path.exists() {
-        println!("Project already initialised — {}", path.display());
+        if is_json_output(output) {
+            print_json(&InitResult {
+                ok: true,
+                config_path: path.display().to_string(),
+                project: name.to_string(),
+                created_files: Vec::new(),
+                next_steps: vec![
+                    "skippr connect warehouse snowflake".to_string(),
+                    "skippr connect source mssql".to_string(),
+                    "skippr doctor".to_string(),
+                ],
+            });
+        } else {
+            println!("Project already initialised — {}", path.display());
+        }
         return;
     }
 
@@ -1802,22 +2319,50 @@ schema_sinks: {{}}
         std::process::exit(1);
     }
 
-    eprintln!("[skippr] creating local environment...");
+    if !is_json_output(output) {
+        eprintln!("[skippr] creating local environment...");
+    }
     if let Err(e) = ensure_local_environment(&project_root) {
         eprintln!("error: {}", e);
         std::process::exit(1);
     }
-    eprintln!("[skippr] environment created.");
+    if !is_json_output(output) {
+        eprintln!("[skippr] environment created.");
+    }
 
-    println!("Initialised project '{}' — {}", name, path.display());
-    println!();
-    println!("Next steps:");
-    println!("  skippr connect warehouse snowflake");
-    println!("  skippr connect source mssql");
-    println!("  skippr doctor");
-    println!("  skippr discover --pipeline {name}");
-    println!("  skippr sync --pipeline {name} --once");
-    println!("  skippr model --pipeline {name}");
+    let created_files = vec![
+        path.display().to_string(),
+        skippr_dir_from_project_root(&project_root)
+            .display()
+            .to_string(),
+        env_example_path_from_project_root(&project_root)
+            .display()
+            .to_string(),
+    ];
+    let next_steps = vec![
+        "skippr connect warehouse snowflake".to_string(),
+        "skippr connect source mssql".to_string(),
+        "skippr doctor".to_string(),
+        format!("skippr discover --pipeline {name}"),
+        format!("skippr sync --pipeline {name} --once"),
+        format!("skippr model --pipeline {name}"),
+    ];
+    if is_json_output(output) {
+        print_json(&InitResult {
+            ok: true,
+            config_path: path.display().to_string(),
+            project: name.to_string(),
+            created_files,
+            next_steps,
+        });
+    } else {
+        println!("Initialised project '{}' — {}", name, path.display());
+        println!();
+        println!("Next steps:");
+        for step in next_steps {
+            println!("  {step}");
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2122,7 +2667,25 @@ async fn cmd_reset(explicit_config: &Option<PathBuf>, args: ResetArgs) {
 // connect warehouse
 // ---------------------------------------------------------------------------
 
-fn cmd_connect_warehouse(kind: WarehouseKind, explicit_config: &Option<PathBuf>) {
+fn emit_connect_result(
+    output: &str,
+    explicit_config: &Option<PathBuf>,
+    connector_kind: &str,
+    section_updated: &str,
+) {
+    if is_json_output(output) {
+        print_json(&ConnectResult {
+            ok: true,
+            config_path: config_path(explicit_config).display().to_string(),
+            connector_kind: connector_kind.to_string(),
+            section_updated: section_updated.to_string(),
+            pipeline_references_updated: true,
+            missing_recommended_fields: Vec::new(),
+        });
+    }
+}
+
+fn cmd_connect_warehouse(kind: WarehouseKind, explicit_config: &Option<PathBuf>, output: &str) {
     match load_cli_raw_config_for_save(explicit_config) {
         Ok(mut cfg) => {
             let (plugin, config) = warehouse_plugin_and_config(kind);
@@ -2132,7 +2695,11 @@ fn cmd_connect_warehouse(kind: WarehouseKind, explicit_config: &Option<PathBuf>)
                 eprintln!("error: {}", e);
                 std::process::exit(1);
             }
-            println!("Configured warehouse data sink 'warehouse' ({plugin}) in skippr.yml");
+            if is_json_output(output) {
+                emit_connect_result(output, explicit_config, plugin, "data_sinks.warehouse");
+            } else {
+                println!("Configured warehouse data sink 'warehouse' ({plugin}) in skippr.yml");
+            }
             return;
         }
         Err(e) if config_path(explicit_config).exists() => {
@@ -2303,14 +2870,18 @@ fn cmd_connect_warehouse(kind: WarehouseKind, explicit_config: &Option<PathBuf>)
         std::process::exit(1);
     }
 
-    println!("Warehouse ({}) configured.", kind_label);
+    if is_json_output(output) {
+        emit_connect_result(output, explicit_config, kind_label, "warehouse");
+    } else {
+        println!("Warehouse ({}) configured.", kind_label);
+    }
 }
 
 // ---------------------------------------------------------------------------
 // connect source
 // ---------------------------------------------------------------------------
 
-fn cmd_connect_source(kind: SourceKind, explicit_config: &Option<PathBuf>) {
+fn cmd_connect_source(kind: SourceKind, explicit_config: &Option<PathBuf>, output: &str) {
     match load_cli_raw_config_for_save(explicit_config) {
         Ok(mut cfg) => {
             let (plugin, config) = source_plugin_and_config(kind);
@@ -2320,7 +2891,11 @@ fn cmd_connect_source(kind: SourceKind, explicit_config: &Option<PathBuf>) {
                 eprintln!("error: {}", e);
                 std::process::exit(1);
             }
-            println!("Configured data source 'source' ({plugin}) in skippr.yml");
+            if is_json_output(output) {
+                emit_connect_result(output, explicit_config, plugin, "data_sources.source");
+            } else {
+                println!("Configured data source 'source' ({plugin}) in skippr.yml");
+            }
             return;
         }
         Err(e) if config_path(explicit_config).exists() => {
@@ -2659,7 +3234,11 @@ fn cmd_connect_source(kind: SourceKind, explicit_config: &Option<PathBuf>) {
         std::process::exit(1);
     }
 
-    println!("Source ({}) configured.", kind_label);
+    if is_json_output(output) {
+        emit_connect_result(output, explicit_config, kind_label, "source");
+    } else {
+        println!("Source ({}) configured.", kind_label);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2681,16 +3260,68 @@ fn load_doctor_config(
         .map_err(|e| format!("failed to load {}: {}", path.display(), e))
 }
 
-fn cmd_doctor(explicit_config: &Option<PathBuf>) {
+fn push_doctor_check(
+    checks: &mut Vec<DoctorCheck>,
+    ok: bool,
+    message: impl Into<String>,
+    suggested_fix_command: Option<&str>,
+) {
+    checks.push(DoctorCheck {
+        ok,
+        severity: if ok { "info" } else { "error" },
+        message: message.into(),
+        suggested_fix_command: suggested_fix_command.map(str::to_string),
+    });
+}
+
+fn emit_doctor_check(
+    output: &str,
+    checks: &mut Vec<DoctorCheck>,
+    ok: bool,
+    message: impl Into<String>,
+    fix: Option<&str>,
+) {
+    let message = message.into();
+    if !is_json_output(output) {
+        if ok {
+            check_pass(&message);
+        } else {
+            check_fail(&message);
+        }
+    }
+    push_doctor_check(checks, ok, message, fix);
+}
+
+fn cmd_doctor(explicit_config: &Option<PathBuf>, output: &str) {
     let mut ok = true;
+    let mut checks = Vec::new();
 
     let (cfg_path, cfg) = match load_doctor_config(explicit_config) {
         Ok((path, c)) => {
-            check_pass(&format!("config file found: {}", path.display()));
+            emit_doctor_check(
+                output,
+                &mut checks,
+                true,
+                format!("config file found: {}", path.display()),
+                None,
+            );
             (path, c)
         }
         Err(e) => {
-            check_fail(&e);
+            emit_doctor_check(
+                output,
+                &mut checks,
+                false,
+                &e,
+                Some("skippr init <project>"),
+            );
+            if is_json_output(output) {
+                print_json(&DoctorResult {
+                    ok: false,
+                    config_path: Some(config_path(explicit_config).display().to_string()),
+                    checks,
+                });
+            }
             std::process::exit(1);
         }
     };
@@ -2705,9 +3336,15 @@ fn cmd_doctor(explicit_config: &Option<PathBuf>) {
         .map(|pipelines| !pipelines.is_empty())
         .unwrap_or(false)
     {
-        check_pass("pipelines configured");
+        emit_doctor_check(output, &mut checks, true, "pipelines configured", None);
     } else {
-        check_fail(&format!("no pipelines configured in {cfg_label}"));
+        emit_doctor_check(
+            output,
+            &mut checks,
+            false,
+            format!("no pipelines configured in {cfg_label}"),
+            Some("skippr init <project>"),
+        );
         ok = false;
     }
 
@@ -2717,9 +3354,15 @@ fn cmd_doctor(explicit_config: &Option<PathBuf>) {
         .map(|sources| !sources.is_empty())
         .unwrap_or(false)
     {
-        check_pass("data sources configured");
+        emit_doctor_check(output, &mut checks, true, "data sources configured", None);
     } else {
-        check_fail("data source not configured — run 'skippr connect source <kind>'");
+        emit_doctor_check(
+            output,
+            &mut checks,
+            false,
+            "data source not configured — run 'skippr connect source <kind>'",
+            Some("skippr connect source <kind>"),
+        );
         ok = false;
     }
 
@@ -2729,30 +3372,60 @@ fn cmd_doctor(explicit_config: &Option<PathBuf>) {
         .map(|sinks| !sinks.is_empty())
         .unwrap_or(false)
     {
-        check_pass("data sinks configured");
+        emit_doctor_check(output, &mut checks, true, "data sinks configured", None);
     } else {
-        check_fail("warehouse/data sink not configured — run 'skippr connect warehouse <kind>'");
+        emit_doctor_check(
+            output,
+            &mut checks,
+            false,
+            "warehouse/data sink not configured — run 'skippr connect warehouse <kind>'",
+            Some("skippr connect warehouse <kind>"),
+        );
         ok = false;
     }
 
     if which("dbt") {
-        check_pass("dbt binary found on PATH");
+        emit_doctor_check(output, &mut checks, true, "dbt binary found on PATH", None);
     } else {
-        check_fail("dbt not found on PATH — install dbt-core and the warehouse adapter in a venv");
+        emit_doctor_check(
+            output,
+            &mut checks,
+            false,
+            "dbt not found on PATH — install dbt-core and the warehouse adapter in a venv",
+            None,
+        );
         ok = false;
     }
 
     if which("python3") || which("python") {
-        check_pass("python found on PATH");
+        emit_doctor_check(output, &mut checks, true, "python found on PATH", None);
     } else {
-        check_fail("python not found on PATH — Python 3.10+ is required for dbt");
+        emit_doctor_check(
+            output,
+            &mut checks,
+            false,
+            "python not found on PATH — Python 3.10+ is required for dbt",
+            None,
+        );
         ok = false;
     }
 
     if auth::load_credentials().is_some() || env_set("SKIPPR_API_KEY") {
-        check_pass("authenticated (credentials or SKIPPR_API_KEY)");
+        emit_doctor_check(
+            output,
+            &mut checks,
+            true,
+            "authenticated (credentials or SKIPPR_API_KEY)",
+            None,
+        );
     } else {
-        check_fail("not authenticated — run 'skippr user login' or set SKIPPR_API_KEY");
+        emit_doctor_check(
+            output,
+            &mut checks,
+            false,
+            "not authenticated — run 'skippr user login' or set SKIPPR_API_KEY",
+            Some("skippr user login"),
+        );
         ok = false;
     }
 
@@ -2761,36 +3434,122 @@ fn cmd_doctor(explicit_config: &Option<PathBuf>) {
         .filter(|v| !v.trim().is_empty())
         .is_some()
     {
-        check_pass("Custom LLM key override is set");
+        emit_doctor_check(
+            output,
+            &mut checks,
+            true,
+            "Custom LLM key override is set",
+            None,
+        );
     } else {
-        check_pass("LLM credentials managed by Skippr");
+        emit_doctor_check(
+            output,
+            &mut checks,
+            true,
+            "LLM credentials managed by Skippr",
+            None,
+        );
     }
 
     let cfg_raw = serde_yaml::to_string(&cfg)
         .unwrap_or_default()
         .to_lowercase();
-    if cfg_raw.contains("athena") {
+    if !is_json_output(output) && cfg_raw.contains("athena") {
         check_athena_env(&mut ok);
     }
 
-    if cfg_raw.contains("snowflake") {
+    if !is_json_output(output) && cfg_raw.contains("snowflake") {
         check_snowflake_env(&mut ok);
     }
 
-    if cfg_raw.contains("bigquery") {
+    if !is_json_output(output) && cfg_raw.contains("bigquery") {
         check_bigquery_env(&mut ok);
     }
 
-    if cfg_raw.contains("postgres") {
+    if !is_json_output(output) && cfg_raw.contains("postgres") {
         check_postgres_env(&mut ok);
     }
 
-    println!();
-    if ok {
+    if is_json_output(output) {
+        print_json(&DoctorResult {
+            ok,
+            config_path: Some(cfg_path.display().to_string()),
+            checks,
+        });
+        if !ok {
+            std::process::exit(1);
+        }
+    } else if ok {
+        println!();
         println!("All checks passed. Run 'skippr discover', 'skippr sync', or 'skippr model'.");
     } else {
+        println!();
         println!("Some checks failed. Fix the issues above and re-run 'skippr doctor'.");
         std::process::exit(1);
+    }
+}
+
+fn yaml_mapping_keys(value: Option<&serde_yaml::Value>) -> Vec<String> {
+    let mut keys: Vec<String> = value
+        .and_then(|value| value.as_mapping())
+        .map(|mapping| {
+            mapping
+                .keys()
+                .filter_map(|key| key.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    keys.sort();
+    keys
+}
+
+fn cmd_config_schema(output: &str) {
+    let schema = config_schema();
+    if is_json_output(output) {
+        print_json(&schema);
+    } else {
+        println!("Skippr config schema v{}", schema.version);
+        println!("Sources:");
+        for source in schema.sources {
+            println!("  {}", source.kind);
+        }
+        println!("Warehouses:");
+        for warehouse in schema.warehouses {
+            println!("  {}", warehouse.kind);
+        }
+    }
+}
+
+fn cmd_config_show(explicit_config: &Option<PathBuf>, output: &str) {
+    let path = config_path(explicit_config);
+    let cfg = match load_cli_execution_config(explicit_config) {
+        Ok(cfg) => cfg,
+        Err(e) => {
+            eprintln!("error: {}", e);
+            std::process::exit(1);
+        }
+    };
+    let pipelines = yaml_mapping_keys(cfg.get("pipelines"));
+    let result = ConfigShowResult {
+        ok: true,
+        config_path: path.display().to_string(),
+        workspace: engine_project_name(&cfg).ok(),
+        default_pipeline: pipelines.first().cloned(),
+        pipelines,
+        sources: yaml_mapping_keys(cfg.get("data_sources")),
+        sinks: yaml_mapping_keys(cfg.get("data_sinks")),
+        schema_sinks: yaml_mapping_keys(cfg.get("schema_sinks")),
+    };
+    if is_json_output(output) {
+        print_json(&result);
+    } else {
+        println!("Config: {}", result.config_path);
+        if let Some(workspace) = &result.workspace {
+            println!("Workspace: {workspace}");
+        }
+        println!("Pipelines: {}", result.pipelines.join(", "));
+        println!("Sources: {}", result.sources.join(", "));
+        println!("Sinks: {}", result.sinks.join(", "));
     }
 }
 
@@ -2978,10 +3737,227 @@ async fn cmd_sync(log: Option<String>, explicit_config: &Option<PathBuf>, args: 
     }
 }
 
+fn resolve_de_suite_config_summary(
+    explicit_config: &Option<PathBuf>,
+    pipeline: &str,
+) -> Result<serde_json::Value, String> {
+    let engine_cfg = load_cli_execution_config(explicit_config)?;
+    let internal_file = react_config_from_pipeline_config(&engine_cfg, pipeline)?;
+    let resolved =
+        react_host::resolve_config(internal_file, react::config::ServeOverrides::default())?;
+    Ok(serde_json::json!({
+        "project_id": resolved.scope.project_id.to_string(),
+        "tenant": resolved.scope.tenant.to_string(),
+        "storage_mode": format!("{:?}", resolved.storage.mode),
+    }))
+}
+
+async fn cmd_ask(explicit_config: &Option<PathBuf>, args: AskArgs) {
+    emit_de_suite_event(
+        &args.output,
+        DeSuiteEvent {
+            event: "ask_start",
+            timestamp: event_timestamp(),
+            pipeline: &args.pipeline,
+            thread_id: None,
+            phase: Some("preflight"),
+            repair_status: None,
+            pending_plan_revision: None,
+            failure_summary: None,
+            error: None,
+            answer: None,
+            plan: None,
+            ok: None,
+        },
+    );
+
+    let context = match resolve_de_suite_config_summary(explicit_config, &args.pipeline) {
+        Ok(context) => context,
+        Err(err) => {
+            emit_de_suite_event(
+                &args.output,
+                DeSuiteEvent {
+                    event: "ask_error",
+                    timestamp: event_timestamp(),
+                    pipeline: &args.pipeline,
+                    thread_id: None,
+                    phase: Some("preflight"),
+                    repair_status: None,
+                    pending_plan_revision: None,
+                    failure_summary: Some(&err),
+                    error: Some(&err),
+                    answer: None,
+                    plan: None,
+                    ok: Some(false),
+                },
+            );
+            eprintln!("error: {err}");
+            std::process::exit(1);
+        }
+    };
+
+    let answer = format!(
+        "Read-only Ask mode is ready for pipeline `{}`. Question: {}",
+        args.pipeline, args.question
+    );
+    let result = serde_json::json!({
+        "ok": true,
+        "mode": "ask",
+        "pipeline": args.pipeline,
+        "question": args.question,
+        "answer": answer,
+        "context": context,
+    });
+
+    emit_de_suite_event(
+        &args.output,
+        DeSuiteEvent {
+            event: "ask_complete",
+            timestamp: event_timestamp(),
+            pipeline: result["pipeline"].as_str().unwrap_or_default(),
+            thread_id: None,
+            phase: Some("complete"),
+            repair_status: None,
+            pending_plan_revision: None,
+            failure_summary: None,
+            error: None,
+            answer: result["answer"].as_str(),
+            plan: None,
+            ok: Some(true),
+        },
+    );
+
+    if is_json_output(&args.output) {
+        print_json(&result);
+    } else if !is_jsonl_output(&args.output) {
+        println!("{}", result["answer"].as_str().unwrap_or_default());
+    }
+}
+
+async fn cmd_plan(explicit_config: &Option<PathBuf>, args: PlanArgs) {
+    emit_de_suite_event(
+        &args.output,
+        DeSuiteEvent {
+            event: "plan_start",
+            timestamp: event_timestamp(),
+            pipeline: &args.pipeline,
+            thread_id: None,
+            phase: Some("preflight"),
+            repair_status: None,
+            pending_plan_revision: None,
+            failure_summary: None,
+            error: None,
+            answer: None,
+            plan: None,
+            ok: None,
+        },
+    );
+
+    let context = match resolve_de_suite_config_summary(explicit_config, &args.pipeline) {
+        Ok(context) => context,
+        Err(err) => {
+            emit_de_suite_event(
+                &args.output,
+                DeSuiteEvent {
+                    event: "plan_error",
+                    timestamp: event_timestamp(),
+                    pipeline: &args.pipeline,
+                    thread_id: None,
+                    phase: Some("preflight"),
+                    repair_status: None,
+                    pending_plan_revision: None,
+                    failure_summary: Some(&err),
+                    error: Some(&err),
+                    answer: None,
+                    plan: None,
+                    ok: Some(false),
+                },
+            );
+            eprintln!("error: {err}");
+            std::process::exit(1);
+        }
+    };
+
+    let goal = args
+        .goal
+        .clone()
+        .unwrap_or_else(|| "produce a data-engineering plan".to_string());
+    let plan = format!(
+        "Plan mode completed preflight for pipeline `{}` and is ready to plan: {}",
+        args.pipeline, goal
+    );
+    let result = serde_json::json!({
+        "ok": true,
+        "mode": "plan",
+        "pipeline": args.pipeline,
+        "goal": goal,
+        "plan": plan,
+        "context": context,
+    });
+
+    emit_de_suite_event(
+        &args.output,
+        DeSuiteEvent {
+            event: "plan_complete",
+            timestamp: event_timestamp(),
+            pipeline: result["pipeline"].as_str().unwrap_or_default(),
+            thread_id: None,
+            phase: Some("complete"),
+            repair_status: None,
+            pending_plan_revision: None,
+            failure_summary: None,
+            error: None,
+            answer: None,
+            plan: result["plan"].as_str(),
+            ok: Some(true),
+        },
+    );
+
+    if is_json_output(&args.output) {
+        print_json(&result);
+    } else if !is_jsonl_output(&args.output) {
+        println!("{}", result["plan"].as_str().unwrap_or_default());
+    }
+}
+
 async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args: ModelArgs) {
+    emit_de_suite_event(
+        &args.output,
+        DeSuiteEvent {
+            event: "model_start",
+            timestamp: event_timestamp(),
+            pipeline: &args.pipeline,
+            thread_id: None,
+            phase: Some("preflight"),
+            repair_status: None,
+            pending_plan_revision: None,
+            failure_summary: None,
+            error: None,
+            answer: None,
+            plan: None,
+            ok: None,
+        },
+    );
     let engine_cfg = match load_cli_execution_config(explicit_config) {
         Ok(c) => c,
         Err(e) => {
+            emit_de_suite_event(
+                &args.output,
+                DeSuiteEvent {
+                    event: "model_error",
+                    timestamp: event_timestamp(),
+                    pipeline: &args.pipeline,
+                    thread_id: None,
+                    phase: Some("preflight"),
+                    repair_status: None,
+                    pending_plan_revision: None,
+                    failure_summary: Some(&e),
+                    error: Some(&e),
+                    answer: None,
+                    plan: None,
+                    ok: Some(false),
+                },
+            );
             eprintln!("error: {}", e);
             eprintln!("Run 'skippr init <project>' first.");
             std::process::exit(1);
@@ -2990,6 +3966,23 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
     let mut internal_file = match react_config_from_pipeline_config(&engine_cfg, &args.pipeline) {
         Ok(f) => f,
         Err(e) => {
+            emit_de_suite_event(
+                &args.output,
+                DeSuiteEvent {
+                    event: "model_error",
+                    timestamp: event_timestamp(),
+                    pipeline: &args.pipeline,
+                    thread_id: None,
+                    phase: Some("preflight"),
+                    repair_status: None,
+                    pending_plan_revision: None,
+                    failure_summary: Some(&e),
+                    error: Some(&e),
+                    answer: None,
+                    plan: None,
+                    ok: Some(false),
+                },
+            );
             eprintln!("error: {}", e);
             std::process::exit(1);
         }
@@ -3128,6 +4121,23 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
     if let Some(ref tid) = thread_id {
         react_suite_data_engineer::metering::set_metering_thread_id(tid);
         eprintln!("[skippr] resuming thread {tid}");
+        emit_de_suite_event(
+            &args.output,
+            DeSuiteEvent {
+                event: "model_thread_resumed",
+                timestamp: event_timestamp(),
+                pipeline: &args.pipeline,
+                thread_id: Some(tid),
+                phase: Some("resume"),
+                repair_status: None,
+                pending_plan_revision: None,
+                failure_summary: None,
+                error: None,
+                answer: None,
+                plan: None,
+                ok: None,
+            },
+        );
     } else {
         eprintln!("[skippr] starting new modeling thread");
     }
@@ -3157,6 +4167,23 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
     if let Some(tid) = status_thread_id.as_deref() {
         match load_model_thread_status(&status_cfg, tid).await {
             Ok(Some(status)) => {
+                emit_de_suite_event(
+                    &args.output,
+                    DeSuiteEvent {
+                        event: "model_phase_changed",
+                        timestamp: event_timestamp(),
+                        pipeline: &args.pipeline,
+                        thread_id: Some(tid),
+                        phase: Some(status.current_phase.as_str()),
+                        repair_status: Some(status.repair_status.as_str()),
+                        pending_plan_revision: Some(status.pending_plan_revision),
+                        failure_summary: status.failure_brief.as_deref(),
+                        error: None,
+                        answer: None,
+                        plan: None,
+                        ok: None,
+                    },
+                );
                 eprintln!(
                     "[skippr] data-engineer thread status: current_phase={} repair_status={} failed={} pending_plan_revision={}",
                     status.current_phase,
@@ -3191,6 +4218,27 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
             "[skippr] model run failed before the CLI received a thread id; no stale latest-thread status was used."
         );
     }
+    emit_de_suite_event(
+        &args.output,
+        DeSuiteEvent {
+            event: if exit_code == 0 {
+                "model_complete"
+            } else {
+                "model_error"
+            },
+            timestamp: event_timestamp(),
+            pipeline: &args.pipeline,
+            thread_id: status_thread_id.as_deref(),
+            phase: Some("complete"),
+            repair_status: None,
+            pending_plan_revision: None,
+            failure_summary: headless.bootstrap_error.as_deref(),
+            error: headless.bootstrap_error.as_deref(),
+            answer: None,
+            plan: None,
+            ok: Some(exit_code == 0),
+        },
+    );
     std::process::exit(exit_code);
 }
 
@@ -3711,36 +4759,48 @@ async fn async_main() {
     let cli = Cli::parse();
 
     match cli.cmd {
-        Cmd::Init { name } => cmd_init(&name, &cli.config).await,
+        Cmd::Init { name, output } => cmd_init(&name, &cli.config, &output).await,
         Cmd::Reset(args) => cmd_reset(&cli.config, args).await,
-        Cmd::Connect { target } => match target {
-            ConnectTarget::Warehouse { kind } => cmd_connect_warehouse(kind, &cli.config),
-            ConnectTarget::Source { kind } => cmd_connect_source(kind, &cli.config),
+        Cmd::Connect { output, target } => match target {
+            ConnectTarget::Warehouse { kind } => cmd_connect_warehouse(kind, &cli.config, &output),
+            ConnectTarget::Source { kind } => cmd_connect_source(kind, &cli.config, &output),
         },
-        Cmd::Doctor => cmd_doctor(&cli.config),
+        Cmd::Doctor { output } => cmd_doctor(&cli.config, &output),
+        Cmd::Config { action } => match action {
+            ConfigAction::Schema { output } => cmd_config_schema(&output),
+            ConfigAction::Show { output } => cmd_config_show(&cli.config, &output),
+        },
         Cmd::Discover(args) => cmd_discover(cli.log, &cli.config, args).await,
         Cmd::Sync(args) => cmd_sync(cli.log, &cli.config, args).await,
         Cmd::Model(args) => cmd_model(cli.log, &cli.config, args).await,
+        Cmd::Ask(args) => cmd_ask(&cli.config, args).await,
+        Cmd::Plan(args) => cmd_plan(&cli.config, args).await,
         Cmd::Feedback {
             good,
             bad,
             comment,
             no_diagnostics,
         } => cmd_feedback(good, bad, comment, !no_diagnostics, &cli.config).await,
-        Cmd::User { action } => match action {
-            UserAction::Login => cmd_user_login().await,
-            UserAction::Logout => cmd_user_logout(),
-            UserAction::Account => cmd_user_account().await,
-            UserAction::BuyCredits { amount } => cmd_user_buy_credits(amount).await,
-            UserAction::CreateApiKey { name } => cmd_user_create_api_key(&name).await,
-            UserAction::RevokeApiKey { key_id } => cmd_user_revoke_api_key(&key_id).await,
-            UserAction::ListApiKeys => cmd_user_list_api_keys().await,
+        Cmd::User { output, action } => match action {
+            UserAction::Login => cmd_user_login(&output).await,
+            UserAction::Logout => cmd_user_logout(&output),
+            UserAction::Account => cmd_user_account(&output).await,
+            UserAction::BuyCredits { amount } => cmd_user_buy_credits(amount, &output).await,
+            UserAction::CreateApiKey { name } => cmd_user_create_api_key(&name, &output).await,
+            UserAction::RevokeApiKey { key_id } => cmd_user_revoke_api_key(&key_id, &output).await,
+            UserAction::ListApiKeys => cmd_user_list_api_keys(&output).await,
         },
     }
 }
 
-async fn cmd_user_login() {
+async fn cmd_user_login(output: &str) {
     if auth::load_credentials().is_some() {
+        if is_json_output(output) {
+            print_json(
+                &serde_json::json!({"ok": true, "authenticated": true, "message": "already logged in"}),
+            );
+            return;
+        }
         eprintln!("Already logged in. Run 'skippr user logout' first to switch accounts.");
         std::process::exit(1);
     }
@@ -3776,14 +4836,20 @@ async fn cmd_user_login() {
                         eprintln!("{}", e);
                         std::process::exit(1);
                     }
-                    println!();
-                    println!("  Logged in successfully.");
-                    println!();
-                    println!("  Next steps:");
-                    println!("    skippr user account       — view balance");
-                    println!("    skippr user buy-credits   — add funds");
-                    println!("    skippr discover/sync/model — start a pipeline");
-                    println!();
+                    if is_json_output(output) {
+                        print_json(
+                            &serde_json::json!({"ok": true, "authenticated": true, "email": email}),
+                        );
+                    } else {
+                        println!();
+                        println!("  Logged in successfully.");
+                        println!();
+                        println!("  Next steps:");
+                        println!("    skippr user account       — view balance");
+                        println!("    skippr user buy-credits   — add funds");
+                        println!("    skippr discover/sync/model — start a pipeline");
+                        println!();
+                    }
                 }
                 Err(e) => {
                     eprintln!("Confirmation failed: {}", e);
@@ -3798,9 +4864,13 @@ async fn cmd_user_login() {
     }
 }
 
-fn cmd_user_logout() {
+fn cmd_user_logout(output: &str) {
     auth::clear_credentials();
-    println!("Logged out. Local credentials removed.");
+    if is_json_output(output) {
+        print_json(&serde_json::json!({"ok": true, "authenticated": false}));
+    } else {
+        println!("Logged out. Local credentials removed.");
+    }
 }
 
 fn load_stored_credentials_or_exit() -> auth::StoredCredentials {
@@ -3910,10 +4980,23 @@ async fn ensure_eula_accepted(
     Ok(())
 }
 
-async fn cmd_user_account() {
+async fn cmd_user_account(output: &str) {
     let client = authenticated_api_client().await;
     match client.get_account().await {
         Ok(account) => {
+            if is_json_output(output) {
+                print_json(&serde_json::json!({
+                    "ok": true,
+                    "account": account,
+                    "plan": account.profile.plan,
+                    "balance": account.balance.balance,
+                    "monthly_cost_est": account.monthly_cost_est,
+                    "recent_usage": account.recent_usage,
+                    "eula_required_version": SKIPPR_EULA_VERSION,
+                    "eula_url": SKIPPR_EULA_URL
+                }));
+                return;
+            }
             println!();
             println!("  Account");
             println!("  {}", "-".repeat(50));
@@ -3964,10 +5047,19 @@ async fn cmd_user_account() {
     }
 }
 
-async fn cmd_user_buy_credits(amount: Option<f64>) {
+async fn cmd_user_buy_credits(amount: Option<f64>, output: &str) {
     let amount = match amount {
         Some(a) => a,
         None => {
+            if is_json_output(output) {
+                print_json(&serde_json::json!({
+                    "ok": false,
+                    "error": "amount_required",
+                    "minimum": 5.0,
+                    "maximum": 10000.0
+                }));
+                return;
+            }
             println!("Add funds to your Skippr account.");
             println!();
             println!("Usage:");
@@ -3995,6 +5087,14 @@ async fn cmd_user_buy_credits(amount: Option<f64>) {
     let client = authenticated_api_client().await;
     match client.add_funds(amount).await {
         Ok(url) => {
+            if is_json_output(output) {
+                print_json(&serde_json::json!({
+                    "ok": true,
+                    "amount": amount,
+                    "checkout_url": url
+                }));
+                return;
+            }
             let browser_result = open_in_default_browser(&url);
             println!();
             println!("  Adding ${:.2} to your account.", amount);
@@ -4049,10 +5149,14 @@ fn open_in_default_browser(url: &str) -> Result<(), String> {
     }
 }
 
-async fn cmd_user_create_api_key(name: &str) {
+async fn cmd_user_create_api_key(name: &str, output: &str) {
     let client = authenticated_api_client().await;
     match client.create_api_key(name).await {
         Ok(key) => {
+            if is_json_output(output) {
+                print_json(&serde_json::json!({"ok": true, "api_key": key}));
+                return;
+            }
             println!();
             println!("  API key created: {}", key.name);
             println!();
@@ -4069,11 +5173,15 @@ async fn cmd_user_create_api_key(name: &str) {
     }
 }
 
-async fn cmd_user_revoke_api_key(key_id: &str) {
+async fn cmd_user_revoke_api_key(key_id: &str, output: &str) {
     let client = authenticated_api_client().await;
     match client.revoke_api_key(key_id).await {
         Ok(()) => {
-            println!("API key {} revoked.", key_id);
+            if is_json_output(output) {
+                print_json(&serde_json::json!({"ok": true, "key_id": key_id, "revoked": true}));
+            } else {
+                println!("API key {} revoked.", key_id);
+            }
         }
         Err(e) => {
             eprintln!("Failed to revoke API key: {}", e);
@@ -4082,10 +5190,14 @@ async fn cmd_user_revoke_api_key(key_id: &str) {
     }
 }
 
-async fn cmd_user_list_api_keys() {
+async fn cmd_user_list_api_keys(output: &str) {
     let client = authenticated_api_client().await;
     match client.list_api_keys().await {
         Ok(keys) => {
+            if is_json_output(output) {
+                print_json(&serde_json::json!({"ok": true, "api_keys": keys}));
+                return;
+            }
             println!();
             if keys.is_empty() {
                 println!("  No API keys found.");
