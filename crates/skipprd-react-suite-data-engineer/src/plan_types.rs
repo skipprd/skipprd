@@ -411,6 +411,7 @@ pub struct FieldLineage {
 }
 
 impl FieldLineage {
+    #[allow(dead_code)]
     pub fn column(source: SourceFieldRef, role: impl Into<String>) -> Self {
         Self {
             lineage_kind: field_lineage_kind::COLUMN.to_string(),
@@ -421,6 +422,7 @@ impl FieldLineage {
         }
     }
 
+    #[allow(dead_code)]
     pub fn system(system_key: impl Into<String>) -> Self {
         Self {
             lineage_kind: field_lineage_kind::SYSTEM.to_string(),
@@ -431,6 +433,7 @@ impl FieldLineage {
         }
     }
 
+    #[allow(dead_code)]
     pub fn constant(constant_value: impl Into<String>) -> Self {
         Self {
             lineage_kind: field_lineage_kind::CONSTANT.to_string(),

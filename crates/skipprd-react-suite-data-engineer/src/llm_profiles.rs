@@ -6,7 +6,9 @@ use super::DataEngineerSuite;
 pub(super) enum PlanningLlmProfile {
     DiscoveryCleanse,
     DiscoveryModel,
+    #[allow(dead_code)]
     DesignMemo,
+    #[allow(dead_code)]
     DesignCritique,
     SkeletonOrCandidates,
     EnrichmentCompile,

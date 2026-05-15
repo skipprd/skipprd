@@ -245,6 +245,7 @@ pub fn canonical_work_groups_from_batches(
     out
 }
 
+#[cfg(test)]
 pub fn canonical_sequential_work_groups_from_batches(
     batches: &[Vec<String>],
     item_prefix: &str,

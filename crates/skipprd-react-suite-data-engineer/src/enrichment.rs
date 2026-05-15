@@ -5,7 +5,9 @@ use serde::de::DeserializeOwned;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum DesignCritiqueDisposition {
     Accepted,
+    #[allow(dead_code)]
     AcceptedWithNovelBlockers,
+    #[allow(dead_code)]
     Rejected,
 }
 
@@ -57,6 +59,7 @@ trait EnrichableTask: crate::plan::PlanTask + Sized + Send + Sync + 'static {
     fn retry_hint(failure_errors: &[String]) -> String;
 }
 
+#[allow(dead_code)]
 fn resolve_design_critique_disposition(
     prior: &crate::plan_schema::PlanDesignCritiqueV1,
     revised: &crate::plan_schema::PlanDesignCritiqueV1,
@@ -770,6 +773,7 @@ impl DataEngineerSuite {
         .await
     }
 
+    #[allow(dead_code)]
     pub(super) async fn generate_design_memo(
         ctx: &AgentCtx,
         track: TrackKind,
@@ -808,6 +812,7 @@ impl DataEngineerSuite {
         .map_err(|e| e.to_string())
     }
 
+    #[allow(dead_code)]
     pub(super) async fn critique_design_memo(
         ctx: &AgentCtx,
         track: TrackKind,
@@ -870,6 +875,7 @@ impl DataEngineerSuite {
         Ok(critique)
     }
 
+    #[allow(dead_code)]
     pub(super) async fn revise_design_memo(
         ctx: &AgentCtx,
         track: TrackKind,
@@ -912,6 +918,7 @@ impl DataEngineerSuite {
         .map_err(|e| e.to_string())
     }
 
+    #[allow(dead_code)]
     pub(super) async fn produce_critiqued_design_memo(
         ctx: &AgentCtx,
         track: TrackKind,

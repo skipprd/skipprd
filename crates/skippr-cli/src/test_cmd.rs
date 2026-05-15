@@ -521,6 +521,7 @@ pub async fn cmd_test_run(
 }
 
 /// Used by unit tests: build the list JSON shape from a manifest file on disk.
+#[cfg(test)]
 pub fn tests_document_from_manifest_file(
     pipeline: &str,
     tenant: &str,
@@ -537,6 +538,7 @@ pub fn tests_document_from_manifest_file(
 }
 
 /// Stable ordering helper for tests (exported for Rust tests).
+#[cfg(test)]
 pub fn sort_tests_json_tests_array(doc: &mut serde_json::Value) {
     let Some(tests) = doc.get_mut("tests").and_then(|t| t.as_array_mut()) else {
         return;

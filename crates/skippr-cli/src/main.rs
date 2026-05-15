@@ -4458,6 +4458,7 @@ struct FeedbackStoreBundle {
     keyspace: Arc<dyn react_core::keyspace::Keyspace>,
 }
 
+#[cfg(test)]
 fn find_latest_thread_in_skippr_dir(skippr_dir: &std::path::Path, project: &str) -> Option<String> {
     let scope = react_core::scope::RequestScope::parse("_", "dev", project.trim()).ok()?;
     find_latest_thread_in_local_storage(skippr_dir, &scope)

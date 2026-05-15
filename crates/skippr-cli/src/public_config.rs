@@ -589,9 +589,6 @@ impl SkipprProjectConfig {
         }
     }
 
-    pub fn uses_postgres(&self) -> bool {
-        matches!(&self.warehouse, Some(WarehouseConfig::Postgres { .. }))
-    }
 }
 
 impl WarehouseConfig {

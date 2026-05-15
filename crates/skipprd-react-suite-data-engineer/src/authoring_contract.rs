@@ -128,9 +128,11 @@ impl fmt::Display for ContractDrift {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum ArtifactContractStatus {
+    #[allow(dead_code)]
     Current,
     Missing,
     OffContract(Vec<ContractDrift>),
+    #[allow(dead_code)]
     External,
 }
 
@@ -139,7 +141,9 @@ pub(crate) enum RepairRoute {
     ReconcileToPlan,
     RepairImplementation,
     CleanStaleArtifact,
+    #[allow(dead_code)]
     RequestPlanRevision,
+    #[allow(dead_code)]
     FatalInfraOrConfig,
 }
 

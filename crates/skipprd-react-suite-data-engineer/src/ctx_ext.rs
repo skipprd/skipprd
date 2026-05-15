@@ -65,10 +65,6 @@ pub(crate) fn sctx_skippr(ctx: &SuiteCtx) -> Option<Arc<dyn SkipprProvider>> {
     ctx.capability::<SkipprCap>().map(|c| c.0.clone())
 }
 
-pub(crate) fn actx_skippr(ctx: &AgentCtx) -> Option<Arc<dyn SkipprProvider>> {
-    ctx.capability::<SkipprCap>().map(|c| c.0.clone())
-}
-
 pub(crate) fn actx_providers_cfg(ctx: &AgentCtx) -> Option<ProvidersResolved> {
     ctx.capability::<ProvidersCfgCap>().map(|c| c.0.clone())
 }

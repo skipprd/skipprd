@@ -316,11 +316,13 @@ pub async fn load_manifest_indexes(ctx: &AgentCtx) -> ManifestIndexes {
 }
 
 /// Build a minimal manifest index mapping model name -> (fqn, original_file_path).
+#[cfg(test)]
 pub async fn load_manifest_index(ctx: &AgentCtx) -> BTreeMap<String, (String, String)> {
     load_manifest_indexes(ctx).await.models
 }
 
 /// Build a minimal manifest index mapping (source_name, table_name) -> fqn.
+#[allow(dead_code)]
 pub async fn load_manifest_source_index(ctx: &AgentCtx) -> BTreeMap<(String, String), String> {
     load_manifest_indexes(ctx).await.sources
 }

@@ -92,11 +92,6 @@ pub struct Balance {
 }
 
 #[derive(Debug, Deserialize)]
-struct SignInResponse {
-    pub message: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
 struct TokenResponse {
     pub token: Option<String>,
     pub refresh_token: Option<String>,

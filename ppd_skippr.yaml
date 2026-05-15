@@ -1,0 +1,25 @@
+skippr:
+  workspace: paul
+
+pipelines:
+  pauls-test:
+    data_source: data_sources.mssql
+    data_sink: data_sinks.snowflake
+
+data_sources:
+  mssql:
+    Mssql:
+      connection_string: ${MSSQL_CONNECTION_STRING}
+
+data_sinks:
+  snowflake:
+    Snowflake:
+      account: ${SNOWFLAKE_ACCOUNT}
+      user: ${SNOWFLAKE_USER}
+      database: ${SNOWFLAKE_DATABASE}
+      schema: ${SNOWFLAKE_SCHEMA}
+      warehouse: ${SNOWFLAKE_WAREHOUSE}
+      role: ${SNOWFLAKE_ROLE}
+      private_key_path: ${SNOWFLAKE_PRIVATE_KEY_PATH}
+
+schema_sinks: {}

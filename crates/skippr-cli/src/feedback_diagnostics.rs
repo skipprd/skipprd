@@ -24,10 +24,12 @@ const MAX_DEPTH: usize = 5;
 pub struct Sensitive<T>(T);
 
 impl<T> Sensitive<T> {
+    #[cfg(test)]
     pub fn new(value: T) -> Self {
         Self(value)
     }
 
+    #[allow(dead_code)]
     pub fn expose(&self) -> &T {
         &self.0
     }

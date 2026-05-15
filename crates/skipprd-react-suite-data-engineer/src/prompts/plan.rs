@@ -77,6 +77,7 @@ When finished:
     .to_string()
 }
 
+#[allow(dead_code)]
 pub fn plan_design_memo_system_prompt(kind: &str) -> String {
     let layer_guidance = if kind == "cleanse" || kind == "cleanse_plan" {
         "LAYER SCOPE — SILVER/CLEANSE ONLY:\n\
@@ -109,6 +110,7 @@ Be specific and grounded; do not output JSON.\n\
     )
 }
 
+#[allow(dead_code)]
 pub fn plan_design_critique_system_prompt(kind: &str) -> String {
     format!(
         "You are a pragmatic design reviewer for {kind} planning.\n\

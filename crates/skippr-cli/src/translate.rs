@@ -935,6 +935,7 @@ pub fn to_internal(cfg: &SkipprProjectConfig) -> Result<ReactConfigFile, String>
 }
 
 /// Set the skippr binary path in the EL provider config.
+#[allow(dead_code)]
 pub fn set_skippr_binary(cfg: &mut ReactConfigFile, binary_path: &str) {
     if let Some(ref mut providers) = cfg.providers {
         if let Some(el) = providers.get_mut("el") {

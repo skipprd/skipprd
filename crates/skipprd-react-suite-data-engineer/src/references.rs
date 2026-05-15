@@ -9,6 +9,7 @@ macro_rules! non_empty_string_newtype {
         pub struct $name(String);
 
         impl $name {
+            #[allow(dead_code)]
             pub fn new(value: impl Into<String>) -> Option<Self> {
                 let value = value.into().trim().to_string();
                 if value.is_empty() {
@@ -17,6 +18,7 @@ macro_rules! non_empty_string_newtype {
                 Some(Self(value))
             }
 
+            #[allow(dead_code)]
             pub fn as_str(&self) -> &str {
                 &self.0
             }
@@ -39,6 +41,7 @@ non_empty_string_newtype!(ModelRelPath);
 pub struct StagingModelName(DbtModelName);
 
 impl StagingModelName {
+    #[allow(dead_code)]
     pub fn new(value: impl Into<String>) -> Option<Self> {
         let value = value.into().trim().to_ascii_lowercase();
         if !value.starts_with("stg_") {
@@ -47,6 +50,7 @@ impl StagingModelName {
         DbtModelName::new(value).map(Self)
     }
 
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -57,6 +61,7 @@ impl StagingModelName {
 pub struct GoldModelName(DbtModelName);
 
 impl GoldModelName {
+    #[allow(dead_code)]
     pub fn new(value: impl Into<String>) -> Option<Self> {
         let value = value.into().trim().to_ascii_lowercase();
         if value.is_empty() || value.starts_with("stg_") {
@@ -65,6 +70,7 @@ impl GoldModelName {
         DbtModelName::new(value).map(Self)
     }
 
+    #[allow(dead_code)]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }

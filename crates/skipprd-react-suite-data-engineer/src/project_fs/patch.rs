@@ -49,6 +49,7 @@ pub fn create_patch_text(old: &str, new: &str) -> String {
 ///
 /// This avoids line-number hunks entirely and is intended for deterministic/internal authors that
 /// already produced final file text but still want to go through the unified patch apply path.
+#[allow(dead_code)]
 pub fn hunks_only_full_replace_patch(old: &str, new: &str) -> String {
     let (old_lines, _old_nl) = split_lines_preserve_trailing_newline(old);
     let (new_lines, _new_nl) = split_lines_preserve_trailing_newline(new);
