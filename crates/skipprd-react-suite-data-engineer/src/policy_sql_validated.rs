@@ -14,8 +14,8 @@ pub struct DatasetCandidate {
     pub score: f32,
 }
 
-/// Policy for analytics-style suites: accept a model-emitted complete step only after validating that
-/// Ask-mode `complete.payload.sql` runs successfully (via the `run_sql` tool) and returns at least one row.
+/// Policy for analytics-style suites: accept direct Ask completions, but validate any
+/// Ask-mode `complete.payload.sql` by running it through the `run_sql` tool.
 ///
 /// This policy also supports user/approval interrupts by configured tool names.
 pub struct SqlValidatedPolicy {
@@ -258,7 +258,8 @@ impl AgentPolicy for SqlValidatedPolicy {
             return Ok(CompleteDecision::Accept { result });
         }
 
-        // Ask mode: require and validate SQL+data before completing.
+        // Ask mode: direct answers are allowed. If the answer includes SQL, validate it
+        // against the warehouse before accepting the completion.
         if !is_ask {
             let reason =
                 "invalid_complete_kind; only ask/model/cleanse agents may complete in this suite."
@@ -291,9 +292,31 @@ impl AgentPolicy for SqlValidatedPolicy {
         let sql_for_run = match sql_opt.as_ref() {
             Some(s) if !s.trim().is_empty() => s.clone(),
             _ => {
-                let reason = "complete requires a valid SQL and data; please provide SQL and call run_sql before completing.".to_string();
-                transcript.push(format!("Observation: {reason}"));
-                return Ok(CompleteDecision::Reject { reason });
+                let result = ThreadResult {
+                    kind: complete_env.kind.clone(),
+                    payload: complete_env.payload.clone(),
+                    display: complete_env.display.clone(),
+                };
+                if let Some(store) = store {
+                    let agent = ctx
+                        .agent_name()
+                        .clone()
+                        .unwrap_or_else(|| "unknown".to_string());
+                    let _ = store
+                        .append_step(
+                            thread_id,
+                            ThreadStep::Complete {
+                                kind: result.kind.clone(),
+                                payload: result.payload.clone(),
+                                display: result.display.clone(),
+                                observation: Observation::ok(),
+                                ts: chrono::Utc::now().to_rfc3339(),
+                                agent,
+                            },
+                        )
+                        .await;
+                }
+                return Ok(CompleteDecision::Accept { result });
             }
         };
         let obs = if let Some(store) = store {

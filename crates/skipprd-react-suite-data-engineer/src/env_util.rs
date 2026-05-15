@@ -122,6 +122,8 @@ pub mod env_keys {
     pub const LLM_AUTHOR_REASONING_EFFORT_MODEL: &str = "LLM_AUTHOR_REASONING_EFFORT_MODEL";
 
     // Review LLM tokens
+    pub const LLM_ASK_REASONING_EFFORT: &str = "LLM_ASK_REASONING_EFFORT";
+    pub const LLM_ASK_MAX_TOKENS: &str = "LLM_ASK_MAX_TOKENS";
     pub const LLM_REVIEW_REASONING_EFFORT: &str = "LLM_REVIEW_REASONING_EFFORT";
     pub const LLM_REVIEW_MAX_TOKENS: &str = "LLM_REVIEW_MAX_TOKENS";
     pub const LLM_REVIEW_MAX_TOKENS_UNIFY: &str = "LLM_REVIEW_MAX_TOKENS_UNIFY";
@@ -218,6 +220,17 @@ pub fn model_plan_min_score() -> i32 {
 pub fn headless_mode_enabled() -> bool {
     static CACHE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *CACHE.get_or_init(|| env_bool_truthy(env_keys::REACT_HEADLESS).unwrap_or(false))
+}
+
+pub fn ask_reasoning_effort() -> react_core::llm::ReasoningEffort {
+    parse_reasoning_effort_env(env_keys::LLM_ASK_REASONING_EFFORT)
+        .unwrap_or(react_core::llm::ReasoningEffort::None)
+}
+
+pub fn ask_max_tokens() -> u32 {
+    env_u32(env_keys::LLM_ASK_MAX_TOKENS)
+        .unwrap_or(2_000)
+        .clamp(256, 8_000)
 }
 
 pub fn catalog_bootstrap_timeout_secs() -> u64 {

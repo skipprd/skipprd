@@ -452,6 +452,8 @@ impl DataEngineerSuite {
                 LlmCallOptions {
                     prompt_id: "data_engineer.ask_user_parse",
                     expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                    max_output_tokens: Some(env_util::ask_max_tokens()),
+                    reasoning_effort: Some(env_util::ask_reasoning_effort()),
                     ..Default::default()
                 },
             )
