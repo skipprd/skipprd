@@ -1,7 +1,10 @@
 mod api_client;
 mod auth;
+mod chat_cmd;
 mod feedback_diagnostics;
+mod headless_prep;
 mod public_config;
+mod public_docs_search;
 mod react_host;
 mod run_results_parse;
 mod test_cmd;
@@ -159,6 +162,12 @@ enum Cmd {
 
     /// Produce a data-engineering plan without applying changes.
     Plan(PlanArgs),
+
+    /// Chat with the data-engineer agent (react threads): ask / plan / agent, list threads, docs search.
+    Chat {
+        #[command(subcommand)]
+        action: chat_cmd::ChatAction,
+    },
 
     /// Attach human feedback to a project thread run.
     Feedback {
@@ -795,11 +804,11 @@ pub(crate) fn is_json_output(output: &str) -> bool {
     output.eq_ignore_ascii_case("json")
 }
 
-fn is_jsonl_output(output: &str) -> bool {
+pub(crate) fn is_jsonl_output(output: &str) -> bool {
     output.eq_ignore_ascii_case("jsonl")
 }
 
-fn print_json<T: Serialize>(value: &T) {
+pub(crate) fn print_json<T: Serialize>(value: &T) {
     match serde_json::to_string_pretty(value) {
         Ok(json) => println!("{json}"),
         Err(err) => {
@@ -809,7 +818,7 @@ fn print_json<T: Serialize>(value: &T) {
     }
 }
 
-fn print_json_line<T: Serialize>(value: &T) {
+pub(crate) fn print_json_line<T: Serialize>(value: &T) {
     match serde_json::to_string(value) {
         Ok(json) => println!("{json}"),
         Err(err) => {
@@ -1355,7 +1364,7 @@ fn warn_and_normalize_legacy_cli_config(value: &mut serde_yaml::Value) -> Result
     Ok(())
 }
 
-fn load_cli_execution_config(explicit: &Option<PathBuf>) -> Result<serde_yaml::Value, String> {
+pub(crate) fn load_cli_execution_config(explicit: &Option<PathBuf>) -> Result<serde_yaml::Value, String> {
     let mut value = load_resolved_engine_config(explicit)?;
     warn_and_normalize_legacy_cli_config(&mut value)?;
     Ok(value)
@@ -1633,7 +1642,7 @@ fn dbt_schema_name(project: &str) -> String {
     }
 }
 
-fn react_config_from_pipeline_config(
+pub(crate) fn react_config_from_pipeline_config(
     value: &serde_yaml::Value,
     pipeline: &str,
 ) -> Result<ReactConfigFile, String> {
@@ -3902,187 +3911,38 @@ async fn cmd_sync(log: Option<String>, explicit_config: &Option<PathBuf>, args: 
     }
 }
 
-fn resolve_de_suite_config_summary(
-    explicit_config: &Option<PathBuf>,
-    pipeline: &str,
-) -> Result<serde_json::Value, String> {
-    let engine_cfg = load_cli_execution_config(explicit_config)?;
-    let internal_file = react_config_from_pipeline_config(&engine_cfg, pipeline)?;
-    let resolved =
-        react_host::resolve_config(internal_file, react::config::ServeOverrides::default())?;
-    Ok(serde_json::json!({
-        "project_id": resolved.scope.project_id.to_string(),
-        "tenant": resolved.scope.tenant.to_string(),
-        "storage_mode": format!("{:?}", resolved.storage.mode),
-    }))
+async fn cmd_ask(log: Option<String>, explicit_config: &Option<PathBuf>, args: AskArgs) {
+    chat_cmd::run_chat(
+        log,
+        explicit_config,
+        chat_cmd::ChatAction::Send(chat_cmd::ChatSendArgs {
+            pipeline: args.pipeline,
+            mode: chat_cmd::ChatModeCli::Ask,
+            message: args.question,
+            thread: None,
+            output: args.output,
+        }),
+    )
+    .await;
 }
 
-async fn cmd_ask(explicit_config: &Option<PathBuf>, args: AskArgs) {
-    emit_de_suite_event(
-        &args.output,
-        DeSuiteEvent {
-            event: "ask_start",
-            timestamp: event_timestamp(),
-            pipeline: &args.pipeline,
-            thread_id: None,
-            phase: Some("preflight"),
-            repair_status: None,
-            pending_plan_revision: None,
-            failure_summary: None,
-            error: None,
-            answer: None,
-            plan: None,
-            ok: None,
-        },
-    );
-
-    let context = match resolve_de_suite_config_summary(explicit_config, &args.pipeline) {
-        Ok(context) => context,
-        Err(err) => {
-            emit_de_suite_event(
-                &args.output,
-                DeSuiteEvent {
-                    event: "ask_error",
-                    timestamp: event_timestamp(),
-                    pipeline: &args.pipeline,
-                    thread_id: None,
-                    phase: Some("preflight"),
-                    repair_status: None,
-                    pending_plan_revision: None,
-                    failure_summary: Some(&err),
-                    error: Some(&err),
-                    answer: None,
-                    plan: None,
-                    ok: Some(false),
-                },
-            );
-            eprintln!("error: {err}");
-            std::process::exit(1);
-        }
-    };
-
-    let answer = format!(
-        "Read-only Ask mode is ready for pipeline `{}`. Question: {}",
-        args.pipeline, args.question
-    );
-    let result = serde_json::json!({
-        "ok": true,
-        "mode": "ask",
-        "pipeline": args.pipeline,
-        "question": args.question,
-        "answer": answer,
-        "context": context,
-    });
-
-    emit_de_suite_event(
-        &args.output,
-        DeSuiteEvent {
-            event: "ask_complete",
-            timestamp: event_timestamp(),
-            pipeline: result["pipeline"].as_str().unwrap_or_default(),
-            thread_id: None,
-            phase: Some("complete"),
-            repair_status: None,
-            pending_plan_revision: None,
-            failure_summary: None,
-            error: None,
-            answer: result["answer"].as_str(),
-            plan: None,
-            ok: Some(true),
-        },
-    );
-
-    if is_json_output(&args.output) {
-        print_json(&result);
-    } else if !is_jsonl_output(&args.output) {
-        println!("{}", result["answer"].as_str().unwrap_or_default());
-    }
-}
-
-async fn cmd_plan(explicit_config: &Option<PathBuf>, args: PlanArgs) {
-    emit_de_suite_event(
-        &args.output,
-        DeSuiteEvent {
-            event: "plan_start",
-            timestamp: event_timestamp(),
-            pipeline: &args.pipeline,
-            thread_id: None,
-            phase: Some("preflight"),
-            repair_status: None,
-            pending_plan_revision: None,
-            failure_summary: None,
-            error: None,
-            answer: None,
-            plan: None,
-            ok: None,
-        },
-    );
-
-    let context = match resolve_de_suite_config_summary(explicit_config, &args.pipeline) {
-        Ok(context) => context,
-        Err(err) => {
-            emit_de_suite_event(
-                &args.output,
-                DeSuiteEvent {
-                    event: "plan_error",
-                    timestamp: event_timestamp(),
-                    pipeline: &args.pipeline,
-                    thread_id: None,
-                    phase: Some("preflight"),
-                    repair_status: None,
-                    pending_plan_revision: None,
-                    failure_summary: Some(&err),
-                    error: Some(&err),
-                    answer: None,
-                    plan: None,
-                    ok: Some(false),
-                },
-            );
-            eprintln!("error: {err}");
-            std::process::exit(1);
-        }
-    };
-
+async fn cmd_plan(log: Option<String>, explicit_config: &Option<PathBuf>, args: PlanArgs) {
     let goal = args
         .goal
         .clone()
         .unwrap_or_else(|| "produce a data-engineering plan".to_string());
-    let plan = format!(
-        "Plan mode completed preflight for pipeline `{}` and is ready to plan: {}",
-        args.pipeline, goal
-    );
-    let result = serde_json::json!({
-        "ok": true,
-        "mode": "plan",
-        "pipeline": args.pipeline,
-        "goal": goal,
-        "plan": plan,
-        "context": context,
-    });
-
-    emit_de_suite_event(
-        &args.output,
-        DeSuiteEvent {
-            event: "plan_complete",
-            timestamp: event_timestamp(),
-            pipeline: result["pipeline"].as_str().unwrap_or_default(),
-            thread_id: None,
-            phase: Some("complete"),
-            repair_status: None,
-            pending_plan_revision: None,
-            failure_summary: None,
-            error: None,
-            answer: None,
-            plan: result["plan"].as_str(),
-            ok: Some(true),
-        },
-    );
-
-    if is_json_output(&args.output) {
-        print_json(&result);
-    } else if !is_jsonl_output(&args.output) {
-        println!("{}", result["plan"].as_str().unwrap_or_default());
-    }
+    chat_cmd::run_chat(
+        log,
+        explicit_config,
+        chat_cmd::ChatAction::Send(chat_cmd::ChatSendArgs {
+            pipeline: args.pipeline,
+            mode: chat_cmd::ChatModeCli::Plan,
+            message: goal,
+            thread: None,
+            output: args.output,
+        }),
+    )
+    .await;
 }
 
 async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args: ModelArgs) {
@@ -4828,6 +4688,102 @@ async fn find_latest_thread_in_s3_storage(
     Ok(latest_primary_thread_id_from_s3_objects(&objects, &prefix))
 }
 
+pub(crate) fn list_threads_in_local_storage(
+    storage_root: &std::path::Path,
+    scope: &react_core::scope::RequestScope,
+) -> Result<Vec<(String, std::time::SystemTime)>, String> {
+    let keyspace = react_core::keyspace::LocalKeyspace::new(storage_root.display().to_string());
+    let threads_dir = storage_root.join(keyspace.threads_prefix(scope).trim_end_matches('/'));
+    let entries = match std::fs::read_dir(&threads_dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(format!(
+                "failed to read local threads directory {}: {e}",
+                threads_dir.display()
+            ));
+        }
+    };
+
+    let mut out: Vec<(String, std::time::SystemTime)> = Vec::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some(thread_id) = primary_thread_id_from_filename(&name) else {
+            continue;
+        };
+        let modified = entry
+            .metadata()
+            .map_err(|e| format!("failed to read metadata for {name}: {e}"))?
+            .modified()
+            .map_err(|e| format!("failed to read modified time for {name}: {e}"))?;
+        out.push((thread_id, modified));
+    }
+    Ok(out)
+}
+
+async fn list_all_threads_in_s3_storage(
+    cfg: &react_core::resolved_config::ReactResolvedConfig,
+) -> Result<Vec<(String, chrono::DateTime<chrono::Utc>)>, String> {
+    let bucket = cfg
+        .storage
+        .bucket
+        .clone()
+        .ok_or_else(|| "missing storage.bucket for s3 mode".to_string())?;
+    let keyspace = react_core::keyspace::DefaultKeyspace::new(bucket.clone());
+    let prefix = keyspace.threads_prefix(&cfg.scope);
+    let adapter = if let Some(creds) = cfg.storage.s3_credentials.as_ref() {
+        react_module_storage_s3::S3StorageAdapter::from_resolved_credentials(bucket, creds).await
+    } else {
+        react_module_storage_s3::S3StorageAdapter::from_env(bucket).await
+    };
+    let objects = adapter
+        .list_prefix_meta(&prefix)
+        .await
+        .map_err(|e| format!("failed to list thread objects from s3: {e}"))?;
+
+    let mut best: HashMap<String, chrono::DateTime<chrono::Utc>> = HashMap::new();
+    for object in objects {
+        let Some(thread_id) = primary_thread_id_from_key(&object.key, &prefix) else {
+            continue;
+        };
+        let Some(last_modified) = object.last_modified else {
+            continue;
+        };
+        best.entry(thread_id)
+            .and_modify(|t| {
+                if last_modified > *t {
+                    *t = last_modified;
+                }
+            })
+            .or_insert(last_modified);
+    }
+
+    let mut v: Vec<_> = best.into_iter().collect();
+    v.sort_by(|a, b| b.1.cmp(&a.1));
+    Ok(v)
+}
+
+pub(crate) async fn list_threads_for_resolved_config(
+    cfg: &react_core::resolved_config::ReactResolvedConfig,
+) -> Result<Vec<(String, chrono::DateTime<chrono::Utc>)>, String> {
+    match cfg.storage.mode {
+        react_core::resolved_config::StorageMode::Local => {
+            let root = cfg
+                .storage
+                .path
+                .as_ref()
+                .ok_or_else(|| "missing storage.path for local mode".to_string())?;
+            let mut rows = list_threads_in_local_storage(std::path::Path::new(root), &cfg.scope)?;
+            rows.sort_by(|a, b| b.1.cmp(&a.1));
+            Ok(rows
+                .into_iter()
+                .map(|(tid, st)| (tid, chrono::DateTime::<chrono::Utc>::from(st)))
+                .collect())
+        }
+        react_core::resolved_config::StorageMode::S3 => list_all_threads_in_s3_storage(cfg).await,
+    }
+}
+
 fn latest_primary_thread_id_from_s3_objects(
     objects: &[react_module_storage_s3::ObjectMeta],
     prefix: &str,
@@ -4954,8 +4910,9 @@ async fn async_main() {
                 }
             }
         },
-        Cmd::Ask(args) => cmd_ask(&cli.config, args).await,
-        Cmd::Plan(args) => cmd_plan(&cli.config, args).await,
+        Cmd::Ask(args) => cmd_ask(cli.log, &cli.config, args).await,
+        Cmd::Plan(args) => cmd_plan(cli.log, &cli.config, args).await,
+        Cmd::Chat { action } => chat_cmd::run_chat(cli.log, &cli.config, action).await,
         Cmd::Feedback {
             good,
             bad,

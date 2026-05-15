@@ -173,3 +173,15 @@ nix = "0.26.2"
 [profile.profiling]
 inherits = "release"
 debug = true
+
+# Use the sibling `react` repo so skippr-cli can ship headless/chat improvements with the same
+# version pins as `react-cargo` crates.io releases.
+[patch.react-cargo]
+react = { path = "../react/src/runtime" }
+react-core = { path = "../react/src/core" }
+react-http-protocol = { path = "../react/src/http-protocol" }
+react-module-storage-local = { path = "../react/src/modules/adaptors/storage-local" }
+react-module-storage-s3 = { path = "../react/src/modules/adaptors/storage-s3" }
+react-module-provider-vector-lance = { path = "../react/src/modules/providers/vector-lance" }
+react-transport = { path = "../react/src/transport" }
+react-view = { path = "../react/src/view" }

@@ -30,7 +30,7 @@ impl react::host::HostComposition for SkipprHost {
         suite_ctx: &mut SuiteCtx,
     ) -> Result<(), String> {
         let keyspace = suite_ctx.keyspace().clone();
-        let (lance_uri_prefix, lance_storage_opts) = lance_storage(cfg)?;
+        let (lance_uri_prefix, lance_storage_opts) = lance_storage_for_resolved(cfg)?;
         data_engineer::wire_providers(suite_ctx, &keyspace, &lance_uri_prefix, lance_storage_opts)
             .await?;
 
@@ -51,6 +51,8 @@ pub fn resolve_config(
 pub(crate) struct HeadlessRunDetail {
     pub exit_code: i32,
     pub bootstrap_error: Option<String>,
+    pub thread_id: Option<String>,
+    pub failure_summary: Option<String>,
 }
 
 pub async fn run_headless_detailed(
@@ -64,17 +66,23 @@ pub async fn run_headless_detailed(
             return HeadlessRunDetail {
                 exit_code: 1,
                 bootstrap_error: Some(e),
+                thread_id: None,
+                failure_summary: None,
             };
         }
     };
-    let exit_code = react::run_engine::run_headless_with_ctx(cfg, registry, suite_ctx, opts).await;
+    let outcome = react::run_engine::run_headless_with_ctx(cfg, registry, suite_ctx, opts).await;
     HeadlessRunDetail {
-        exit_code,
+        exit_code: outcome.exit_code,
         bootstrap_error: None,
+        thread_id: outcome.thread_id,
+        failure_summary: outcome.failure_summary,
     }
 }
 
-fn lance_storage(cfg: &ReactResolvedConfig) -> Result<(String, LanceStorageOptions), String> {
+pub(crate) fn lance_storage_for_resolved(
+    cfg: &ReactResolvedConfig,
+) -> Result<(String, LanceStorageOptions), String> {
     match cfg.storage.mode {
         StorageMode::Local => {
             let root = cfg
