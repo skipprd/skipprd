@@ -6,6 +6,7 @@ mod react_host;
 mod run_results_parse;
 mod test_cmd;
 mod translate;
+mod vector_ingest_docs;
 
 use std::{collections::HashMap, path::{Path, PathBuf}, process::Command, sync::Arc};
 
@@ -70,7 +71,7 @@ impl react_core::resolved_config::S3CredentialsProvider for AuthS3CredentialsPro
     }
 }
 
-fn attach_s3_credentials_provider(
+pub(crate) fn attach_s3_credentials_provider(
     resolved: &mut react_core::resolved_config::ReactResolvedConfig,
     client: api_client::ApiClient,
 ) {
@@ -175,6 +176,12 @@ enum Cmd {
         no_diagnostics: bool,
     },
 
+    /// Vector store operations (e.g. documentation ingest to Lance).
+    Vector {
+        #[command(subcommand)]
+        action: VectorAction,
+    },
+
     /// User account management (signup, login, balance, etc.).
     User {
         /// Output mode: json or text. Defaults to text for terminal use.
@@ -182,6 +189,40 @@ enum Cmd {
         output: String,
         #[command(subcommand)]
         action: UserAction,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum VectorAction {
+    /// Chunk, embed, and upsert declarative doc trees into tenant Lance storage (DE path).
+    IngestDocs {
+        /// Pipeline entry under `pipelines:` with `vector_source` (default: `vector_ingest`).
+        #[arg(long, default_value = "vector_ingest")]
+        pipeline: String,
+        /// Override `pipelines.<name>.vector_source` for this run (must match a `vector_sources` key).
+        #[arg(long)]
+        vector_source: Option<String>,
+        /// Override scan root for this run (default: `root` from the selected vector source).
+        #[arg(long)]
+        src_path: Option<PathBuf>,
+        /// Override chunk size in characters.
+        #[arg(long)]
+        chunk_chars: Option<usize>,
+        /// Override chunk overlap in characters.
+        #[arg(long)]
+        chunk_overlap: Option<usize>,
+        /// Extra include glob (repeatable); merged after YAML includes.
+        #[arg(long = "include-glob")]
+        include_glob: Vec<String>,
+        /// Extra exclude glob (repeatable); merged after YAML excludes.
+        #[arg(long = "exclude-glob")]
+        exclude_glob: Vec<String>,
+        /// Resolve files and chunk counts only (no embed / no Lance writes).
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        /// Output mode: text or json.
+        #[arg(long, default_value = "text")]
+        output: String,
     },
 }
 
@@ -750,7 +791,7 @@ fn pairs_to_hash_map(pairs: Option<Vec<(String, String)>>) -> Option<HashMap<Str
     pairs.map(|pairs| pairs.into_iter().collect())
 }
 
-fn is_json_output(output: &str) -> bool {
+pub(crate) fn is_json_output(output: &str) -> bool {
     output.eq_ignore_ascii_case("json")
 }
 
@@ -900,7 +941,7 @@ fn working_dir() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
-fn config_path(explicit: &Option<PathBuf>) -> PathBuf {
+pub(crate) fn config_path(explicit: &Option<PathBuf>) -> PathBuf {
     explicit.clone().unwrap_or_else(|| {
         let cwd = working_dir();
         let yml = cwd.join("skippr.yml");
@@ -919,7 +960,7 @@ fn config_path(explicit: &Option<PathBuf>) -> PathBuf {
 /// - **`.env`** — [`dotenvy::from_path`]: only sets variables not already present in the process environment.
 /// - **`.env.local`** (optional) — [`dotenvy::from_path_override`]: overrides every variable **named in that file**
 ///   (typical gitignored local overrides).
-fn load_dotenv_for_skippr_config_yaml_path(config_yaml_path: &Path) {
+pub(crate) fn load_dotenv_for_skippr_config_yaml_path(config_yaml_path: &Path) {
     let dir = config_yaml_path
         .parent()
         .filter(|p| !p.as_os_str().is_empty())
@@ -954,7 +995,7 @@ fn save_config(cfg: &SkipprDbtConfig, explicit: &Option<PathBuf>) -> Result<(), 
     cfg.save_to(&config_path(explicit))
 }
 
-fn load_engine_config(explicit: &Option<PathBuf>) -> Result<serde_yaml::Value, String> {
+pub(crate) fn load_engine_config(explicit: &Option<PathBuf>) -> Result<serde_yaml::Value, String> {
     let path = config_path(explicit);
     load_dotenv_for_skippr_config_yaml_path(&path);
     let raw = std::fs::read_to_string(&path)
@@ -1608,6 +1649,7 @@ fn react_config_from_pipeline_config(
             gold_suffix: Some("gold".to_string()),
         }),
         schema_sink,
+        ..Default::default()
     };
     translate::to_internal(&cfg)
 }
@@ -2428,7 +2470,10 @@ struct PipelineResetReport {
     deleted_model_remote: Vec<String>,
 }
 
-fn yaml_string_at<'a>(value: &'a serde_yaml::Value, path: &[&str]) -> Option<&'a str> {
+pub(crate) fn yaml_string_at<'a>(
+    value: &'a serde_yaml::Value,
+    path: &[&str],
+) -> Option<&'a str> {
     let mut cur = value;
     for key in path {
         cur = cur.get(*key)?;
@@ -4275,6 +4320,8 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
             suite_id: Some("data_engineer".to_string()),
             agent: "agent".to_string(),
             skip_logging_init: false,
+            headless_prompt: None,
+            stream_jsonl: false,
         },
     )
     .await;
@@ -4915,6 +4962,33 @@ async fn async_main() {
             comment,
             no_diagnostics,
         } => cmd_feedback(good, bad, comment, !no_diagnostics, &cli.config).await,
+        Cmd::Vector { action } => match action {
+            VectorAction::IngestDocs {
+                pipeline,
+                vector_source,
+                src_path,
+                chunk_chars,
+                chunk_overlap,
+                include_glob,
+                exclude_glob,
+                dry_run,
+                output,
+            } => {
+                vector_ingest_docs::run_vector_ingest_docs(vector_ingest_docs::VectorIngestDocsArgs {
+                    config: cli.config.clone(),
+                    pipeline,
+                    vector_source,
+                    src_path,
+                    chunk_chars,
+                    chunk_overlap,
+                    include_glob,
+                    exclude_glob,
+                    dry_run,
+                    output,
+                })
+                .await;
+            }
+        },
         Cmd::User { output, action } => match action {
             UserAction::Login => cmd_user_login(&output).await,
             UserAction::Logout => cmd_user_logout(&output),
@@ -5017,7 +5091,7 @@ fn load_stored_credentials_or_exit() -> auth::StoredCredentials {
     }
 }
 
-async fn refresh_user_credentials_or_exit(
+pub(crate) async fn refresh_user_credentials_or_exit(
     client: &api_client::ApiClient,
     creds: auth::StoredCredentials,
 ) -> auth::StoredCredentials {
@@ -5045,7 +5119,7 @@ async fn load_authenticated_user_credentials(
     refresh_user_credentials_or_exit(client, creds).await
 }
 
-fn create_token_provider(
+pub(crate) fn create_token_provider(
     creds: &auth::StoredCredentials,
 ) -> std::sync::Arc<react_suite_data_engineer::metering::TokenProvider> {
     let base_url = auth::auth_base_url();
@@ -5074,7 +5148,7 @@ async fn authenticated_api_client() -> api_client::ApiClient {
     client
 }
 
-async fn ensure_eula_accepted(
+pub(crate) async fn ensure_eula_accepted(
     client: &api_client::ApiClient,
     allow_prompt: bool,
 ) -> Result<(), String> {
@@ -5924,6 +5998,8 @@ data_sources:
             tenant_id: "auth-tenant".to_string(),
             llm_api_key: String::new(),
             accounting_url: String::new(),
+            knowledge_credentials: None,
+            public_vectors_bucket: None,
         }
     }
 

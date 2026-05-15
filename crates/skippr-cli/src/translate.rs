@@ -1049,6 +1049,57 @@ pub fn apply_authenticated_overlay(
     Ok(())
 }
 
+/// Minimal internal react config for `skippr vector ingest-docs` (vector + metering only).
+/// Uses a placeholder Postgres warehouse so suite YAML resolves; warehouse providers are never started
+/// because the CLI builds [`react::bootstrap::build_base_suite_ctx`] and attaches Lance only.
+pub fn react_config_file_for_vector_doc_ingest(
+    project_id: impl AsRef<str>,
+    workspace: impl AsRef<str>,
+) -> ReactConfigFile {
+    let project_id = project_id.as_ref();
+    let workspace = workspace.as_ref();
+    let providers = serde_json::json!({
+        "warehouse": {
+            "kind": "postgres",
+            "database": "_skippr_vector_ingest_noop",
+            "schema": "public"
+        },
+        "catalog": { "enabled": false },
+        "dbt": { "enabled": false },
+        "vector": { "enabled": true },
+        "el": { "enabled": false },
+    });
+    ReactConfigFile {
+        version: Some(1),
+        server: None,
+        storage: Some(StorageFile {
+            mode: Some("local".into()),
+            bucket: None,
+            path: Some("./.skippr".into()),
+            s3_credentials: None,
+        }),
+        scope: Some(ScopeFile {
+            tenant: Some("_".into()),
+            workspace: Some(workspace.to_string()),
+            project_id: Some(project_id.to_string()),
+        }),
+        llm: Some(LlmFile {
+            provider: Some("OPENAI_COMPAT".into()),
+            base_url: Some(DEFAULT_LLM_BASE_URL.into()),
+            reason_model: Some("gpt-5.4".into()),
+            task_model: Some("gpt-5.4".into()),
+            embed_model: Some("text-embedding-3-small".into()),
+            context_length: Some(8192),
+            http_timeout_secs: Some(120),
+            max_tokens: Some(8192),
+            temperature: Some(0.2),
+            top_p: Some(1.0),
+            ..Default::default()
+        }),
+        providers: Some(providers),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1104,6 +1155,7 @@ mod tests {
             }),
             dbt: None,
             schema_sink: None,
+            ..Default::default()
         }
     }
 
@@ -1119,6 +1171,8 @@ mod tests {
             tenant_id: "c3471188-8965-4c52-b486-7dbbd7a2d329".into(),
             llm_api_key: llm_api_key.into(),
             accounting_url: String::new(),
+            knowledge_credentials: None,
+            public_vectors_bucket: None,
         }
     }
 
@@ -1155,6 +1209,7 @@ mod tests {
             }),
             dbt: None,
             schema_sink: None,
+            ..Default::default()
         };
 
         let internal = to_internal(&cfg).unwrap();
@@ -1179,6 +1234,7 @@ mod tests {
             source: None,
             dbt: None,
             schema_sink: None,
+            ..Default::default()
         };
         assert!(to_internal(&cfg).is_err());
     }
@@ -1196,6 +1252,7 @@ mod tests {
             }),
             dbt: None,
             schema_sink: None,
+            ..Default::default()
         };
 
         let internal = to_internal(&cfg).unwrap();
@@ -1233,6 +1290,7 @@ mod tests {
             source: None,
             dbt: None,
             schema_sink: None,
+            ..Default::default()
         };
         assert!(to_internal(&cfg).is_err());
     }
@@ -1244,6 +1302,7 @@ mod tests {
             source: Some(source),
             dbt: None,
             schema_sink: None,
+            ..Default::default()
         }
     }
 
@@ -1559,6 +1618,7 @@ mod tests {
             schema_sink: Some(SchemaSinkConfig::Glue {
                 glue_database_name: "my_glue_db".into(),
             }),
+            ..Default::default()
         };
         let internal = to_internal(&cfg).unwrap();
         let p = internal.providers.unwrap();

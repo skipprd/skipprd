@@ -401,6 +401,11 @@ pub struct CredentialsResponse {
     pub tenant_id: String,
     pub llm_api_key: String,
     pub accounting_url: String,
+    /// STS for read-only access to `public_vectors_bucket` / `skippr-docs/*` (when returned by auth).
+    #[serde(default)]
+    pub knowledge_credentials: Option<StsCreds>,
+    #[serde(default)]
+    pub public_vectors_bucket: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
