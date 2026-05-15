@@ -3,6 +3,7 @@ use serde::de::Deserializer;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::{BTreeSet, HashMap};
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::providers::DatasetCatalogProvider;
@@ -91,6 +92,31 @@ where
         } else {
             Some(t)
         }
+    }))
+}
+
+fn get_external_file(path: &str, max_chars: usize) -> Result<Value, String> {
+    let p = Path::new(path);
+    if !p.is_absolute() {
+        return Err("external file read requires an absolute attached file path".to_string());
+    }
+    let meta = std::fs::metadata(p).map_err(|e| format!("external file metadata failed: {e}"))?;
+    if !meta.is_file() {
+        return Err("external file read requires a regular file".to_string());
+    }
+    let text = std::fs::read_to_string(p).map_err(|e| format!("external file read failed: {e}"))?;
+    let truncated = max_chars > 0 && text.chars().count() > max_chars;
+    let content = if max_chars > 0 {
+        text.chars().take(max_chars).collect::<String>()
+    } else {
+        text
+    };
+    Ok(serde_json::json!({
+        "ok": true,
+        "path": path,
+        "content": content,
+        "truncated": truncated,
+        "source": "external_file"
     }))
 }
 
@@ -556,6 +582,9 @@ impl Tool for FilesTool {
                 }
                 let max_chars =
                     args.get("max_chars").and_then(|x| x.as_u64()).unwrap_or(0) as usize;
+                if Path::new(path).is_absolute() {
+                    return get_external_file(path, max_chars);
+                }
                 project_fs::get_file(ctx, path, max_chars).await
             }
             "rm" => {

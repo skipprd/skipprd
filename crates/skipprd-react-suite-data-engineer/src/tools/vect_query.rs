@@ -13,6 +13,7 @@ struct QueryHit {
     kind: String,
     dataset_id: Option<String>,
     field: Option<String>,
+    path: Option<String>,
     text: String,
     score: f32,
 }
@@ -32,6 +33,11 @@ fn parse_query_hit(
                 kind: meta.kind,
                 dataset_id: meta.dataset_id,
                 field: meta.field,
+                path: meta
+                    .extra
+                    .get("path")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
                 text: item.text,
                 score,
             })
@@ -46,6 +52,7 @@ fn parse_query_hit(
                 kind: "catalog_note".to_string(),
                 dataset_id: Some(meta.dataset_id),
                 field: meta.field,
+                path: None,
                 text: item.text,
                 score,
             })
@@ -55,6 +62,7 @@ fn parse_query_hit(
             kind: "repair_memory".to_string(),
             dataset_id: None,
             field: None,
+            path: None,
             text: item.text,
             score,
         }),
@@ -72,6 +80,11 @@ fn parse_query_hit(
                 field: meta
                     .as_ref()
                     .and_then(|m| m.get("field"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                path: meta
+                    .as_ref()
+                    .and_then(|m| m.get("path"))
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
                 text: item.text,
@@ -98,6 +111,11 @@ fn parse_query_hit(
                 field: meta
                     .as_ref()
                     .and_then(|m| m.get("field"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string()),
+                path: meta
+                    .as_ref()
+                    .and_then(|m| m.get("path"))
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string()),
                 text: item.text,
@@ -196,8 +214,10 @@ impl Tool for VectQueryTool {
             .map(|h| {
                 serde_json::json!({
                     "kind": h.kind,
+                    "id": h.id,
                     "dataset_id": h.dataset_id,
                     "field": h.field,
+                    "path": h.path,
                     "text": h.text,
                     "score": h.score
                 })

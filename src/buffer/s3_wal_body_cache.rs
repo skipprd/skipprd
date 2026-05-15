@@ -24,8 +24,8 @@ pub fn autotuned_caps() -> (usize, usize) {
 }
 
 fn autotune_limits() -> (usize, usize) {
-    let hint =
-        s3_wal_memory_budget::memory_hint_bytes().unwrap_or(s3_wal_memory_budget::FALLBACK_MEMORY_HINT_BYTES);
+    let hint = s3_wal_memory_budget::memory_hint_bytes()
+        .unwrap_or(s3_wal_memory_budget::FALLBACK_MEMORY_HINT_BYTES);
     let max_bytes = s3_wal_memory_budget::split_s3_wal_memory_budget(hint).1;
 
     // Entry budget: ~one slot per ~40 MiB of byte budget, bounded

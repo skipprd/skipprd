@@ -1,5 +1,6 @@
 pub mod ask;
 pub mod cleanse;
+pub mod ide_agent;
 pub mod model;
 pub mod patch_contract;
 pub mod plan;
@@ -9,6 +10,10 @@ pub mod shared;
 
 pub fn ask_system_prompt() -> String {
     ask::system_prompt()
+}
+
+pub fn ide_agent_system_prompt() -> String {
+    ide_agent::system_prompt()
 }
 
 pub fn cleanse_system_prompt() -> String {
@@ -65,6 +70,7 @@ mod tests {
     fn suite_prompts_do_not_include_legacy_or_format_pollution_strings() {
         let prompts: Vec<(&str, String)> = vec![
             ("ask.system_prompt", super::ask::system_prompt()),
+            ("ide_agent.system_prompt", super::ide_agent::system_prompt()),
             (
                 "cleanse.system_prompt",
                 super::cleanse::cleanse_system_prompt(),

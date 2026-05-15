@@ -377,6 +377,56 @@ async fn run_agent_is_non_interactive_on_missing_providers() {
 }
 
 #[test]
+fn ide_agent_runner_is_only_selected_for_ide_agent_mode() {
+    assert!(DataEngineerSuite::should_use_ide_agent_runner(
+        AgentMode::Agent,
+        true
+    ));
+    assert!(!DataEngineerSuite::should_use_ide_agent_runner(
+        AgentMode::Agent,
+        false
+    ));
+    assert!(!DataEngineerSuite::should_use_ide_agent_runner(
+        AgentMode::Ask,
+        true
+    ));
+    assert!(!DataEngineerSuite::should_use_ide_agent_runner(
+        AgentMode::Review,
+        true
+    ));
+}
+
+#[tokio::test]
+async fn ide_agent_tools_are_local_first_without_query_provider() {
+    let sctx = test_sctx();
+    let reg = DataEngineerSuite::build_ide_agent_tools(&sctx)
+        .expect("ide agent tools should not require warehouse providers");
+    let card = DataEngineerSuite::build_ide_agent_tools_card(&sctx);
+    let actx = DataEngineerSuite::agent_tool_ctx("t", &sctx);
+
+    assert!(card.contains("local_ide"));
+    assert!(card.contains("patch"));
+    assert!(!card.contains("run_sql"));
+    let err = reg
+        .call("run_sql", serde_json::json!({"sql":"select 1"}), &actx)
+        .await
+        .expect_err("run_sql should not be registered without a query provider");
+    assert!(err.contains("unknown tool"));
+}
+
+#[test]
+fn local_ide_mutations_remain_agent_only() {
+    let ask_caps = DataEngineerSuite::agent_capability_profile(AgentMode::Ask, true, true);
+    let review_caps = DataEngineerSuite::agent_capability_profile(AgentMode::Review, true, true);
+    let agent_caps = DataEngineerSuite::agent_capability_profile(AgentMode::Agent, true, true);
+
+    assert!(ask_caps.contains(&AgentToolCapability::LocalIdeTools));
+    assert!(!ask_caps.contains(&AgentToolCapability::LocalIdeMutations));
+    assert!(!review_caps.contains(&AgentToolCapability::LocalIdeTools));
+    assert!(agent_caps.contains(&AgentToolCapability::LocalIdeMutations));
+}
+
+#[test]
 fn non_interactive_contract_rejects_await_user_for_agent_type() {
     let frames = vec![FlowFrame::Interrupt {
         kind: FlowKind::new("await_user"),

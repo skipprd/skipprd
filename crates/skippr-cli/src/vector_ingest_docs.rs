@@ -37,7 +37,8 @@ fn build_glob_set(patterns: &[String], root_label: &str) -> Result<GlobSet, Stri
         let g = Glob::new(t).map_err(|e| format!("invalid glob in {root_label}: {e}"))?;
         b.add(g);
     }
-    b.build().map_err(|e| format!("invalid glob set ({root_label}): {e}"))
+    b.build()
+        .map_err(|e| format!("invalid glob set ({root_label}): {e}"))
 }
 
 fn chunk_text(text: &str, size: usize, overlap: usize) -> Vec<String> {
@@ -245,11 +246,7 @@ pub async fn run_vector_ingest_docs(args: VectorIngestDocsArgs) {
         let text = match std::fs::read_to_string(path) {
             Ok(t) => t,
             Err(e) => {
-                eprintln!(
-                    "[skippr] WARNING: skip {}: {}",
-                    path.display(),
-                    e
-                );
+                eprintln!("[skippr] WARNING: skip {}: {}", path.display(), e);
                 continue;
             }
         };
@@ -415,7 +412,13 @@ pub async fn run_vector_ingest_docs(args: VectorIngestDocsArgs) {
     let epoch = chrono::Utc::now().timestamp() as u64;
     let mut total = 0usize;
     for batch in work_items.chunks(EMBED_BATCH) {
-        let texts: Vec<String> = batch.iter().map(|(_, t, _)| t.clone()).collect();
+        let texts: Vec<String> = batch
+            .iter()
+            .map(|(path, text, _)| {
+                let rel = posix_rel(path, &scan_root);
+                format!("file: {rel}\n\n{text}")
+            })
+            .collect();
         let embeddings = match sctx.llm_embed(&texts) {
             Ok(v) => v,
             Err(e) => {
@@ -427,6 +430,7 @@ pub async fn run_vector_ingest_docs(args: VectorIngestDocsArgs) {
         for (i, (path, text, chunk_idx)) in batch.iter().enumerate() {
             let rel = posix_rel(path, &scan_root);
             let id = format!("docs:{source_key}:{rel}:{chunk_idx}");
+            let doc_text = texts.get(i).cloned().unwrap_or_else(|| text.clone());
             let vec = embeddings.get(i).cloned().unwrap_or_default();
             let meta = serde_json::json!({
                 "path": rel,
@@ -435,7 +439,7 @@ pub async fn run_vector_ingest_docs(args: VectorIngestDocsArgs) {
             });
             docs.push(ManualVectorDocument::new(
                 id,
-                text.clone(),
+                doc_text,
                 vec,
                 epoch,
                 react_suite_data_engineer::vector_docs::ManualVectorMetadata {

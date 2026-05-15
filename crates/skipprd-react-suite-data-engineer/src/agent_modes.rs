@@ -50,6 +50,9 @@ pub(super) enum AgentToolCapability {
     SqlRegister,
     CatalogNote,
     Artifacts,
+    SkipprCli,
+    LocalIdeTools,
+    LocalIdeMutations,
 }
 
 struct DataEngineerExecutor<'a> {
@@ -296,6 +299,7 @@ impl DataEngineerSuite {
     pub(super) fn agent_capability_profile(
         agent_mode: AgentMode,
         allow_user_interrupt_tools: bool,
+        allow_local_ide_tools: bool,
     ) -> BTreeSet<AgentToolCapability> {
         let mut caps = BTreeSet::new();
         match agent_mode {
@@ -304,10 +308,11 @@ impl DataEngineerSuite {
                 caps.insert(AgentToolCapability::Artifacts);
             }
             AgentMode::Ask => {
-                caps.insert(AgentToolCapability::MutableFile);
+                caps.insert(AgentToolCapability::ReadOnlyFile);
                 caps.insert(AgentToolCapability::RunSql);
                 caps.insert(AgentToolCapability::AskApproval);
                 caps.insert(AgentToolCapability::Artifacts);
+                caps.insert(AgentToolCapability::SkipprCli);
             }
             AgentMode::Agent => {
                 caps.insert(AgentToolCapability::MutableFile);
@@ -326,11 +331,30 @@ impl DataEngineerSuite {
         if allow_user_interrupt_tools && agent_mode != AgentMode::Review {
             caps.insert(AgentToolCapability::AskUser);
         }
+        if allow_local_ide_tools && matches!(agent_mode, AgentMode::Ask | AgentMode::Agent) {
+            caps.insert(AgentToolCapability::LocalIdeTools);
+            if agent_mode == AgentMode::Agent {
+                caps.insert(AgentToolCapability::LocalIdeMutations);
+            }
+        }
         caps
     }
 
     pub(super) fn headless_mode_enabled() -> bool {
         env_util::headless_mode_enabled()
+    }
+
+    pub(super) fn ide_chat_surface_enabled() -> bool {
+        std::env::var("SKIPPR_EXECUTION_SURFACE")
+            .map(|v| v == "ide_chat")
+            .unwrap_or(false)
+    }
+
+    pub(super) fn should_use_ide_agent_runner(
+        agent_mode: AgentMode,
+        ide_chat_surface: bool,
+    ) -> bool {
+        agent_mode == AgentMode::Agent && ide_chat_surface
     }
 
     pub(super) fn enforce_non_interactive_contract(
@@ -416,26 +440,13 @@ impl DataEngineerSuite {
         let sys = prompts::with_time_context(prompts::ask_system_prompt());
         let tools_card = Self::build_tools_card_for_agent_type(AgentMode::Ask);
 
-        let pf = preflight::CatalogPreflightProvider {
-            discovery_limits: preflight::discovery::DiscoveryLimits::default(),
-        };
-        let bundle = pf.run(thread_id, question, "ask", sctx).await.discovery;
-
         let registry = Self::build_tools(AgentMode::Ask, sctx)?;
         let actx = Self::build_agent_ctx(
             sctx,
             thread_id,
             "ask",
             std::sync::Arc::new(SqlValidatedPolicy {
-                dataset_candidates: bundle
-                    .datasets
-                    .iter()
-                    .take(8)
-                    .map(|(ds, sc)| DatasetCandidate {
-                        dataset_id: ds.clone(),
-                        score: *sc,
-                    })
-                    .collect(),
+                dataset_candidates: Vec::new(),
                 ..SqlValidatedPolicy::default()
             }),
             env_util::ASK_MAX_STEPS,
@@ -492,6 +503,43 @@ impl DataEngineerSuite {
                 LlmCallOptions {
                     prompt_id: "data_engineer.ask_approval_parse",
                     expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| e.to_string()),
+        )
+    }
+
+    pub(super) async fn run_ide_agent(
+        thread_id: &str,
+        question: &str,
+        sctx: &SuiteCtx,
+    ) -> Result<Vec<FlowFrame>, String> {
+        let sys = prompts::with_time_context(prompts::ide_agent_system_prompt());
+        let tools_card = Self::build_ide_agent_tools_card(sctx);
+        let registry = Self::build_ide_agent_tools(sctx)?;
+        let actx = Self::build_agent_ctx(
+            sctx,
+            thread_id,
+            "ide_agent",
+            std::sync::Arc::new(react_core::agent::DefaultPolicy),
+            env_util::ASK_MAX_STEPS,
+            10,
+        );
+
+        Self::run_outcome_to_frames(
+            Agent::run_until_block(
+                &registry,
+                &actx,
+                &sys,
+                &tools_card,
+                question,
+                LlmCallOptions {
+                    prompt_id: "data_engineer.ide_agent",
+                    expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                    max_output_tokens: Some(env_util::ask_max_tokens()),
+                    reasoning_effort: Some(env_util::ask_reasoning_effort()),
                     ..Default::default()
                 },
             )
@@ -592,6 +640,10 @@ impl DataEngineerSuite {
         sctx: &SuiteCtx,
     ) -> Result<Vec<FlowFrame>, String> {
         use control_flow::Phase;
+
+        if Self::should_use_ide_agent_runner(AgentMode::Agent, Self::ide_chat_surface_enabled()) {
+            return Self::run_ide_agent(thread_id, question, sctx).await;
+        }
 
         let has_el = Self::el_enabled(sctx);
 

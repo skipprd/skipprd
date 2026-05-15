@@ -36,7 +36,11 @@ impl DataEngineerSuite {
         registry.register(VectQueryTool);
 
         let allow_user_interrupt_tools = !Self::headless_mode_enabled();
-        let caps = Self::agent_capability_profile(agent_mode, allow_user_interrupt_tools);
+        let caps = Self::agent_capability_profile(
+            agent_mode,
+            allow_user_interrupt_tools,
+            Self::ide_chat_surface_enabled(),
+        );
 
         if caps.contains(&AgentToolCapability::ReadOnlyFile) {
             registry.register(PolicyFilesTool {
@@ -44,7 +48,7 @@ impl DataEngineerSuite {
                     datasets: crate::ctx_ext::sctx_datasets(sctx),
                 },
                 policy: FileAccessPolicy::ReadOnly {
-                    error_message: "file is read-only for review; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)",
+                    error_message: "file is read-only in this mode; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)",
                 },
             });
         } else if caps.contains(&AgentToolCapability::MutableFile) {
@@ -100,13 +104,68 @@ impl DataEngineerSuite {
         if caps.contains(&AgentToolCapability::Artifacts) {
             registry.register(ArtifactsTool);
         }
+        if caps.contains(&AgentToolCapability::SkipprCli) {
+            registry.register(tools::skippr_cli::SkipprCliTool);
+        }
+        if caps.contains(&AgentToolCapability::LocalIdeTools) {
+            registry.register(tools::local_ide::LocalIdeTool {
+                allow_patch: caps.contains(&AgentToolCapability::LocalIdeMutations),
+            });
+        }
 
         Ok(registry)
     }
 
+    pub(super) fn build_ide_agent_tools(sctx: &SuiteCtx) -> Result<ToolRegistry, String> {
+        use crate::tools::{
+            artifacts::ArtifactsTool, sql_run::SqlRunTool, vect_query::VectQueryTool,
+        };
+
+        let mut registry = ToolRegistry::new();
+        let caps = Self::agent_capability_profile(AgentMode::Agent, true, true);
+
+        registry.register(VectQueryTool);
+        if let Some(query) = crate::ctx_ext::sctx_query(sctx) {
+            registry.register(SqlRunTool { query });
+        }
+        if caps.contains(&AgentToolCapability::AskApproval) {
+            registry.register(tools::ask_approval::AskApprovalTool);
+        }
+        if caps.contains(&AgentToolCapability::Artifacts) {
+            registry.register(ArtifactsTool);
+        }
+        registry.register(tools::skippr_cli::SkipprCliTool);
+        if caps.contains(&AgentToolCapability::LocalIdeTools) {
+            registry.register(tools::local_ide::LocalIdeTool {
+                allow_patch: caps.contains(&AgentToolCapability::LocalIdeMutations),
+            });
+        }
+
+        Ok(registry)
+    }
+
+    pub(super) fn build_ide_agent_tools_card(sctx: &SuiteCtx) -> String {
+        let mut lines = vec![
+            "- local_ide(args:{op:\"list\"|\"read\"|\"grep\"|\"head\"|\"tail\"|\"patch\", path?:string, pattern?:string, patch_text?:string, limit?:int, max_chars?:int}) for bounded local IDE file/search/patch work. For explicit local file edits, use local_ide read -> patch directly and skip vector lookup.".to_string(),
+            "- local_ide patch_text must be hunks-only Cursor/Aider format, e.g. {\"op\":\"patch\",\"path\":\"src/app.ts\",\"patch_text\":\"@@ ... @@\\n- old\\n+ new\\n\"}; never include *** Begin Patch envelopes, *** Update File headers, diff --git, or ---/+++ file headers.".to_string(),
+            "- ask_approval(args:{prompt:string}) for user consent before workflow escalation only; do not use routine approval before explicit local file edits because the IDE inline diff review is the approval surface.".to_string(),
+            "- vect_query(args:{scope?:string, query_text:string, k?:int}) for docs/artifact lookup when local file evidence is not enough".to_string(),
+            "- skippr_cli(args:{command:\"user\"|\"doctor\"|\"test\"|\"connect\", action?:string, pipeline?:string, select?:string[]})".to_string(),
+            "- artifacts".to_string(),
+        ];
+        if crate::ctx_ext::sctx_query(sctx).is_some() {
+            lines.push("- run_sql(args:{sql:string}) for explicit warehouse questions".to_string());
+        }
+        Self::build_tools_card("Allowed tools (IDE agent mode):", lines, Vec::new(), None)
+    }
+
     pub(super) fn build_tools_card_for_agent_type(agent_mode: AgentMode) -> String {
         let allow_user_interrupt_tools = !Self::headless_mode_enabled();
-        let caps = Self::agent_capability_profile(agent_mode, allow_user_interrupt_tools);
+        let caps = Self::agent_capability_profile(
+            agent_mode,
+            allow_user_interrupt_tools,
+            Self::ide_chat_surface_enabled(),
+        );
         match agent_mode {
             AgentMode::Review => Self::build_tools_card(
                 "Allowed tools (review mode, read-only):",
@@ -122,7 +181,7 @@ impl DataEngineerSuite {
                 ),
             ),
             AgentMode::Ask => {
-                let mut lines = vec!["- file(args:{op:\"list\"|\"get\"|\"patch\"|\"rm\"|\"mv\", ...})".to_string(),
+                let mut lines = vec!["- file(args:{op:\"list\"|\"get\", prefix?:string, path?:string, limit?:int, max_chars?:int})".to_string(),
                     "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)".to_string()];
                 if caps.contains(&AgentToolCapability::RunSql) {
                     lines.push("- run_sql(args:{sql:string})".to_string());
@@ -132,6 +191,12 @@ impl DataEngineerSuite {
                 }
                 if caps.contains(&AgentToolCapability::Artifacts) {
                     lines.push("- artifacts".to_string());
+                }
+                if caps.contains(&AgentToolCapability::SkipprCli) {
+                    lines.push("- skippr_cli(args:{command:\"user\"|\"doctor\"|\"test\"|\"connect\", action?:string, pipeline?:string, select?:string[]})".to_string());
+                }
+                if caps.contains(&AgentToolCapability::LocalIdeTools) {
+                    lines.push("- local_ide(args:{op:\"list\"|\"read\"|\"grep\"|\"head\"|\"tail\", path?:string, pattern?:string, limit?:int, max_chars?:int}) for bounded read-only local IDE file/search work".to_string());
                 }
                 if caps.contains(&AgentToolCapability::AskUser) {
                     lines.push("- ask_user(args:{prompt:string})".to_string());
@@ -163,7 +228,11 @@ impl DataEngineerSuite {
                 if caps.contains(&AgentToolCapability::AskUser) {
                     lines.push("- ask_user(args:{prompt:string})".to_string());
                 }
-                Self::build_tools_card("Allowed tools (model mode):", lines, Vec::new(), None)
+                if caps.contains(&AgentToolCapability::LocalIdeTools) {
+                    lines.push("- local_ide(args:{op:\"list\"|\"read\"|\"grep\"|\"head\"|\"tail\"|\"patch\", path?:string, pattern?:string, patch_text?:string, limit?:int, max_chars?:int}) for bounded local IDE file/search/patch work. For explicit local file edits, use local_ide read -> patch directly and skip vector lookup.".to_string());
+                    lines.push("- local_ide patch_text must be hunks-only Cursor/Aider format, e.g. {\"op\":\"patch\",\"path\":\"src/app.ts\",\"patch_text\":\"@@ ... @@\\n- old\\n+ new\\n\"}; never include *** Begin Patch envelopes, *** Update File headers, diff --git, or ---/+++ file headers.".to_string());
+                }
+                Self::build_tools_card("Allowed tools (agent mode):", lines, Vec::new(), None)
             }
         }
     }

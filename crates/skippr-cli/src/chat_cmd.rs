@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 
 use clap::{Parser, Subcommand, ValueEnum};
+use serde::Deserialize;
 
 use crate::headless_prep;
 
@@ -26,7 +27,7 @@ pub enum ChatModeCli {
 #[derive(Parser, Debug, Clone)]
 pub struct ChatSendArgs {
     #[arg(long)]
-    pub pipeline: String,
+    pub pipeline: Option<String>,
     #[arg(long, value_enum)]
     pub mode: ChatModeCli,
     #[arg(long)]
@@ -59,11 +60,43 @@ pub struct ChatDocsSearchArgs {
     pub output: String,
 }
 
-pub async fn run_chat(
-    log: Option<String>,
-    explicit_config: &Option<PathBuf>,
-    action: ChatAction,
-) {
+#[derive(Debug, Deserialize)]
+struct ChatContextEnvelope {
+    user: String,
+    #[serde(default)]
+    context: serde_json::Value,
+    #[serde(default)]
+    execution_surface: Option<String>,
+}
+
+fn parse_chat_message(raw: &str) -> (String, Option<serde_json::Value>, Option<String>) {
+    let trimmed = raw.trim();
+    let Ok(envelope) = serde_json::from_str::<ChatContextEnvelope>(trimmed) else {
+        return (raw.to_string(), None, None);
+    };
+    if envelope.user.trim().is_empty() {
+        return (raw.to_string(), None, None);
+    }
+    let context = if envelope.context.is_null() {
+        None
+    } else {
+        Some(envelope.context)
+    };
+    (envelope.user, context, envelope.execution_surface)
+}
+
+fn render_structured_chat_prompt(user: &str, context: Option<&serde_json::Value>) -> String {
+    let Some(context) = context else {
+        return user.to_string();
+    };
+    format!(
+        "User request:\n{}\n\nStructured context JSON:\n{}\n\nUse this context only if it is relevant. For explicit local or attached file edits, read the named file directly and patch it; do not use vector retrieval first. Use vector retrieval only for broad documentation or artifact lookup when no concrete local file is named.",
+        user,
+        serde_json::to_string_pretty(context).unwrap_or_else(|_| context.to_string())
+    )
+}
+
+pub async fn run_chat(log: Option<String>, explicit_config: &Option<PathBuf>, action: ChatAction) {
     match action {
         ChatAction::Send(args) => cmd_chat_send(log, explicit_config, args).await,
         ChatAction::Threads(args) => cmd_chat_threads(explicit_config, args).await,
@@ -71,13 +104,15 @@ pub async fn run_chat(
     }
 }
 
-async fn cmd_chat_send(
-    log: Option<String>,
-    explicit_config: &Option<PathBuf>,
-    args: ChatSendArgs,
-) {
-    let ctx = match headless_prep::authenticate_headless_for_pipeline(explicit_config, &args.pipeline)
-        .await
+async fn cmd_chat_send(log: Option<String>, explicit_config: &Option<PathBuf>, args: ChatSendArgs) {
+    if let (Some(_pipeline), Some(path)) = (args.pipeline.as_deref(), explicit_config.as_ref()) {
+        std::env::set_var("SKIPPR_CONFIG_FILE", path);
+    }
+    let ctx = match headless_prep::authenticate_headless_for_chat(
+        explicit_config,
+        args.pipeline.as_deref(),
+    )
+    .await
     {
         Ok(c) => c,
         Err(e) => {
@@ -85,6 +120,7 @@ async fn cmd_chat_send(
             std::process::exit(1);
         }
     };
+    let project_id = args.pipeline.as_deref().unwrap_or("ide-chat");
 
     let run_id = uuid::Uuid::new_v4().to_string();
     react_suite_data_engineer::metering::set_metering_run_id(&run_id);
@@ -94,21 +130,29 @@ async fn cmd_chat_send(
     let _ = metering
         .record_batch(&[
             react_suite_data_engineer::metering::UsageEvent::PipelineRun {
-                project_id: args.pipeline.clone(),
+                project_id: project_id.to_string(),
             },
         ])
         .await;
 
+    let (user_message, structured_context, execution_surface) = parse_chat_message(&args.message);
+    if execution_surface.as_deref() == Some("ide_chat") {
+        std::env::set_var("SKIPPR_EXECUTION_SURFACE", "ide_chat");
+    } else {
+        std::env::remove_var("SKIPPR_EXECUTION_SURFACE");
+    }
+    let rendered_prompt = render_structured_chat_prompt(&user_message, structured_context.as_ref());
+
     let (agent, prompt) = match args.mode {
-        ChatModeCli::Ask => ("ask", args.message.clone()),
+        ChatModeCli::Ask => ("ask", rendered_prompt.clone()),
         ChatModeCli::Plan => (
             "ask",
             format!(
                 "[plan mode — produce a data-engineering plan only; do not apply mutations]\n{}",
-                args.message
+                rendered_prompt
             ),
         ),
-        ChatModeCli::Agent => ("agent", args.message.clone()),
+        ChatModeCli::Agent => ("agent", rendered_prompt.clone()),
     };
 
     let mode_str = match args.mode {
@@ -145,7 +189,7 @@ async fn cmd_chat_send(
     if stream_jsonl {
         let summary = serde_json::json!({
             "type": "ChatSummary",
-            "pipeline": args.pipeline,
+            "pipeline": args.pipeline.as_deref().unwrap_or("ide-chat"),
             "mode": mode_str,
             "thread_id": headless.thread_id,
             "ok": headless.exit_code == 0,
@@ -163,7 +207,7 @@ async fn cmd_chat_send(
             "bootstrap_error": headless.bootstrap_error,
             "failure_summary": headless.failure_summary,
             "thread_id": headless.thread_id,
-            "pipeline": args.pipeline,
+            "pipeline": args.pipeline.as_deref().unwrap_or("ide-chat"),
             "mode": mode_str,
         });
         crate::print_json(&body);
@@ -183,15 +227,16 @@ async fn cmd_chat_send(
 }
 
 async fn cmd_chat_threads(explicit_config: &Option<PathBuf>, args: ChatThreadsArgs) {
-    let ctx = match headless_prep::authenticate_headless_for_pipeline(explicit_config, &args.pipeline)
-        .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[skippr] ERROR: {e}");
-            std::process::exit(1);
-        }
-    };
+    let ctx =
+        match headless_prep::authenticate_headless_for_pipeline(explicit_config, &args.pipeline)
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[skippr] ERROR: {e}");
+                std::process::exit(1);
+            }
+        };
 
     let list = match crate::list_threads_for_resolved_config(&ctx.resolved).await {
         Ok(v) => v,
@@ -220,20 +265,24 @@ async fn cmd_chat_threads(explicit_config: &Option<PathBuf>, args: ChatThreadsAr
     if crate::is_json_output(&args.output) || args.output == "json" {
         crate::print_json(&body);
     } else {
-        println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&body).unwrap_or_default()
+        );
     }
 }
 
 async fn cmd_chat_docs_search(explicit_config: &Option<PathBuf>, args: ChatDocsSearchArgs) {
-    let ctx = match headless_prep::authenticate_headless_for_pipeline(explicit_config, &args.pipeline)
-        .await
-    {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("[skippr] ERROR: {e}");
-            std::process::exit(1);
-        }
-    };
+    let ctx =
+        match headless_prep::authenticate_headless_for_pipeline(explicit_config, &args.pipeline)
+            .await
+        {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("[skippr] ERROR: {e}");
+                std::process::exit(1);
+            }
+        };
 
     let srv = match ctx.client.get_credentials().await {
         Ok(c) => c,
@@ -267,6 +316,9 @@ async fn cmd_chat_docs_search(explicit_config: &Option<PathBuf>, args: ChatDocsS
     if crate::is_json_output(&args.output) || args.output == "json" {
         crate::print_json(&body);
     } else {
-        println!("{}", serde_json::to_string_pretty(&body).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&body).unwrap_or_default()
+        );
     }
 }

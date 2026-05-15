@@ -11,11 +11,11 @@ use react_core::storage::StorageAdapter;
 use react_module_provider_dbt::{DbtProjectProvider, DbtRunnerConfig, DbtRunnerMode};
 
 use crate::run_results_parse::{parse_run_results_json, ParsedDbtRunResult};
-use crate::{
-    attach_s3_credentials_provider, config_path, load_cli_execution_config, project_root_from_config_path,
-    react_config_from_pipeline_config, react_host, translate,
-};
 use crate::{api_client, auth};
+use crate::{
+    attach_s3_credentials_provider, config_path, load_cli_execution_config,
+    project_root_from_config_path, react_config_from_pipeline_config, react_host, translate,
+};
 
 #[derive(Debug, Clone, clap::Subcommand)]
 pub enum TestSubcommand {
@@ -55,7 +55,10 @@ fn is_jsonl_output(output: &str) -> bool {
 }
 
 fn print_json(value: &serde_json::Value) {
-    println!("{}", serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_string()));
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_string())
+    );
 }
 
 fn emit_jsonl(output: &str, line: &serde_json::Value) {
@@ -78,7 +81,8 @@ async fn storage_and_keyspace(
                 react_module_storage_local::LocalFileStorageAdapter::new(root)
                     .map_err(|e| e.to_string())?,
             );
-            let keyspace: Arc<dyn Keyspace> = Arc::new(react_core::keyspace::LocalKeyspace::new(root.clone()));
+            let keyspace: Arc<dyn Keyspace> =
+                Arc::new(react_core::keyspace::LocalKeyspace::new(root.clone()));
             Ok((storage, keyspace))
         }
         StorageMode::S3 => {
@@ -87,14 +91,21 @@ async fn storage_and_keyspace(
                 .bucket
                 .clone()
                 .ok_or_else(|| "missing storage.bucket for s3 mode".to_string())?;
-            let storage: Arc<dyn StorageAdapter> = if let Some(creds) = cfg.storage.s3_credentials.as_ref() {
+            let storage: Arc<dyn StorageAdapter> = if let Some(creds) =
+                cfg.storage.s3_credentials.as_ref()
+            {
                 Arc::new(
-                    react_module_storage_s3::S3StorageAdapter::from_resolved_credentials(bucket.clone(), creds).await,
+                    react_module_storage_s3::S3StorageAdapter::from_resolved_credentials(
+                        bucket.clone(),
+                        creds,
+                    )
+                    .await,
                 )
             } else {
                 Arc::new(react_module_storage_s3::S3StorageAdapter::from_env(bucket.clone()).await)
             };
-            let keyspace: Arc<dyn Keyspace> = Arc::new(react_core::keyspace::DefaultKeyspace::new(bucket));
+            let keyspace: Arc<dyn Keyspace> =
+                Arc::new(react_core::keyspace::DefaultKeyspace::new(bucket));
             Ok((storage, keyspace))
         }
     }
@@ -105,11 +116,14 @@ fn dbt_provider_for_resolved(
     storage: Arc<dyn StorageAdapter>,
     keyspace: Arc<dyn Keyspace>,
 ) -> Result<DbtProjectProvider, String> {
-    let providers = react_suite_data_engineer::de_config::de_config_from_resolved(cfg).ok_or_else(|| {
-        "suite_config missing or invalid for data_engineer (cannot run skippr test)".to_string()
-    })?;
+    let providers =
+        react_suite_data_engineer::de_config::de_config_from_resolved(cfg).ok_or_else(|| {
+            "suite_config missing or invalid for data_engineer (cannot run skippr test)".to_string()
+        })?;
     if !providers.dbt.enabled {
-        return Err("dbt is disabled in resolved configuration (providers.dbt.enabled=false)".to_string());
+        return Err(
+            "dbt is disabled in resolved configuration (providers.dbt.enabled=false)".to_string(),
+        );
     }
     let runner_mode = DbtRunnerMode::parse(&providers.dbt.runner).map_err(|e| e.to_string())?;
     let runner = DbtRunnerConfig {
@@ -154,8 +168,11 @@ async fn prepare_resolved_pipeline(
             .await
             .map_err(|e| format!("API key authentication failed: {e}"))?
     } else if let Some(creds) = auth::load_credentials() {
-        crate::refresh_user_credentials_or_exit(&api_client::ApiClient::new(&auth::auth_base_url()), creds)
-            .await
+        crate::refresh_user_credentials_or_exit(
+            &api_client::ApiClient::new(&auth::auth_base_url()),
+            creds,
+        )
+        .await
     } else {
         return Err(
             "authentication required: run `skippr user login` or set SKIPPR_API_KEY".to_string(),
@@ -305,7 +322,13 @@ fn run_dbt_deps_parse(
             deps.code, deps.stdout, deps.stderr
         ));
     }
-    let parse = dbt.invoke_dbt_cli(project_dir, profiles_path, &["parse", "--target", target], &base_env, "parse");
+    let parse = dbt.invoke_dbt_cli(
+        project_dir,
+        profiles_path,
+        &["parse", "--target", target],
+        &base_env,
+        "parse",
+    );
     if !parse.status_ok {
         return Err(format!(
             "dbt parse failed (code {})\nstdout:\n{}\nstderr:\n{}",
@@ -327,12 +350,16 @@ pub async fn cmd_test_list(
     let project_dir = cache_root.join("data_engineer");
     std::fs::create_dir_all(&project_dir).map_err(|e| e.to_string())?;
 
-    let scope = RequestScope::parse(&tenant, "dev", &args.pipeline).map_err(|e| format!("scope: {e}"))?;
+    let scope =
+        RequestScope::parse(&tenant, "dev", &args.pipeline).map_err(|e| format!("scope: {e}"))?;
     let (storage, keyspace) = storage_and_keyspace(&resolved).await?;
     let dbt = dbt_provider_for_resolved(&resolved, storage, keyspace)?;
 
     let n = materialize_project(&dbt, &scope, &project_dir).await?;
-    eprintln!("[skippr] materialized {n} files under {}", project_dir.display());
+    eprintln!(
+        "[skippr] materialized {n} files under {}",
+        project_dir.display()
+    );
 
     let gen = react_suite_data_engineer::skippr_cli_generate_dbt_profiles_yml(&resolved, None)?;
     let profiles_dir = write_profiles_dir(&cache_root, &gen.profiles_yml)?;
@@ -354,7 +381,11 @@ pub async fn cmd_test_list(
     if is_json_output(&args.output) {
         print_json(&doc);
     } else if !is_jsonl_output(&args.output) {
-        println!("{} test node(s) — project {}", tests.len(), project_root.display());
+        println!(
+            "{} test node(s) — project {}",
+            tests.len(),
+            project_root.display()
+        );
         for t in &tests {
             if let Some(uid) = t.get("unique_id").and_then(|x| x.as_str()) {
                 println!("  {}", uid);
@@ -402,12 +433,16 @@ pub async fn cmd_test_run(
     let project_dir = cache_root.join("data_engineer");
     std::fs::create_dir_all(&project_dir).map_err(|e| e.to_string())?;
 
-    let scope = RequestScope::parse(&tenant, "dev", &args.pipeline).map_err(|e| format!("scope: {e}"))?;
+    let scope =
+        RequestScope::parse(&tenant, "dev", &args.pipeline).map_err(|e| format!("scope: {e}"))?;
     let (storage, keyspace) = storage_and_keyspace(&resolved).await?;
     let dbt = dbt_provider_for_resolved(&resolved, storage, keyspace)?;
 
     let n = materialize_project(&dbt, &scope, &project_dir).await?;
-    eprintln!("[skippr] materialized {n} files under {}", project_dir.display());
+    eprintln!(
+        "[skippr] materialized {n} files under {}",
+        project_dir.display()
+    );
 
     let gen = react_suite_data_engineer::skippr_cli_generate_dbt_profiles_yml(&resolved, None)?;
     let profiles_dir = write_profiles_dir(&cache_root, &gen.profiles_yml)?;
@@ -440,7 +475,9 @@ pub async fn cmd_test_run(
     );
 
     let run_results_path = project_dir.join("target").join("run_results.json");
-    let rr_path_abs = run_results_path.canonicalize().unwrap_or(run_results_path.clone());
+    let rr_path_abs = run_results_path
+        .canonicalize()
+        .unwrap_or(run_results_path.clone());
 
     let parsed: Vec<ParsedDbtRunResult> = if run_results_path.is_file() {
         let txt = std::fs::read_to_string(&run_results_path).unwrap_or_default();
@@ -573,7 +610,8 @@ mod tests {
           }
         }"#;
         std::fs::write(&manifest, raw).unwrap();
-        let mut doc = tests_document_from_manifest_file("pipe1", "t1", dir.path(), &manifest).unwrap();
+        let mut doc =
+            tests_document_from_manifest_file("pipe1", "t1", dir.path(), &manifest).unwrap();
         sort_tests_json_tests_array(&mut doc);
         let tests = doc["tests"].as_array().unwrap();
         assert_eq!(tests.len(), 1);

@@ -66,9 +66,7 @@ pub fn memory_hint_bytes() -> Option<usize> {
 /// Hard ceiling for S3 WAL-related byte budgets: `hint * 70 / 100`.
 #[inline]
 pub fn combined_pool_bytes(hint_bytes: usize) -> usize {
-    hint_bytes
-        .saturating_mul(COMBINED_PCT)
-        .saturating_div(100)
+    hint_bytes.saturating_mul(COMBINED_PCT).saturating_div(100)
 }
 
 /// `(admission_cap_bytes, lru_max_bytes)` with `admission + lru <= combined_pool_bytes(hint)`.

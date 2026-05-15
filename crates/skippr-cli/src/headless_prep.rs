@@ -3,6 +3,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use react::config::{LlmFile, ReactConfigFile, ScopeFile, StorageFile};
 use react_core::resolved_config::ReactResolvedConfig;
 
 use crate::api_client::ApiClient;
@@ -23,10 +24,40 @@ pub async fn authenticate_headless_for_pipeline(
     explicit_config: &Option<PathBuf>,
     pipeline: &str,
 ) -> Result<HeadlessAuthContext, String> {
+    authenticate_headless(explicit_config, Some(pipeline)).await
+}
+
+/// Authenticate and resolve a headless chat config. When `pipeline` is absent,
+/// build a minimal data-engineer runtime so chat can answer general/local-code
+/// questions and create a new `skippr.yml` before a project config exists.
+pub async fn authenticate_headless_for_chat(
+    explicit_config: &Option<PathBuf>,
+    pipeline: Option<&str>,
+) -> Result<HeadlessAuthContext, String> {
+    if pipeline.is_none() {
+        return authenticate_headless(&None, None).await;
+    }
+    authenticate_headless(explicit_config, pipeline).await
+}
+
+async fn authenticate_headless(
+    explicit_config: &Option<PathBuf>,
+    pipeline: Option<&str>,
+) -> Result<HeadlessAuthContext, String> {
     let engine_cfg = crate::load_cli_execution_config(explicit_config)
-        .map_err(|e| format!("{e}\nRun 'skippr init <project>' first."))?;
-    let mut internal_file =
-        crate::react_config_from_pipeline_config(&engine_cfg, pipeline).map_err(|e| e)?;
+        .map_err(|e| format!("{e}\nRun 'skippr init <project>' first."))
+        .ok();
+    let mut internal_file = match (engine_cfg.as_ref(), pipeline) {
+        (Some(engine_cfg), Some(pipeline)) => {
+            crate::react_config_from_pipeline_config(engine_cfg, pipeline).map_err(|e| e)?
+        }
+        (_, Some(pipeline)) => {
+            return Err(format!(
+                "missing Skippr config for pipeline '{pipeline}'. Run 'skippr init <project>' first."
+            ));
+        }
+        (_, None) => generic_chat_config(),
+    };
 
     let authenticated_with_api_key = std::env::var("SKIPPR_API_KEY")
         .ok()
@@ -94,12 +125,70 @@ pub async fn authenticate_headless_for_pipeline(
     )
     .map_err(|e| e.to_string())?;
 
-    let mut resolved = react_host::resolve_config(internal_file, react::config::ServeOverrides::default())?;
+    let mut resolved =
+        react_host::resolve_config(internal_file, react::config::ServeOverrides::default())?;
     crate::attach_s3_credentials_provider(&mut resolved, client.clone());
 
     Ok(HeadlessAuthContext {
         resolved,
         client,
-        pipeline: pipeline.to_string(),
+        pipeline: pipeline.unwrap_or("ide-chat").to_string(),
     })
+}
+
+fn generic_chat_config() -> ReactConfigFile {
+    let providers = serde_json::json!({
+        "warehouse": {
+            "kind": "postgres",
+            "database": "_skippr_ide_chat_noop",
+            "schema": "public"
+        },
+        "catalog": { "enabled": false },
+        "dbt": { "enabled": false },
+        "vector": { "enabled": false },
+        "el": { "enabled": false },
+    });
+    ReactConfigFile {
+        version: Some(1),
+        storage: Some(StorageFile {
+            mode: Some("local".into()),
+            bucket: None,
+            path: Some("./.skippr".into()),
+            s3_credentials: None,
+        }),
+        scope: Some(ScopeFile {
+            tenant: Some("_".to_string()),
+            workspace: Some("ide".to_string()),
+            project_id: Some("ide-chat".to_string()),
+        }),
+        llm: Some(LlmFile {
+            provider: Some("OPENAI_COMPAT".into()),
+            base_url: Some("https://api.openai.com".into()),
+            reason_model: Some("gpt-5.4".into()),
+            task_model: Some("gpt-5.4".into()),
+            embed_model: Some("text-embedding-3-small".into()),
+            context_length: Some(8192),
+            http_timeout_secs: Some(120),
+            max_tokens: Some(8192),
+            temperature: Some(0.2),
+            top_p: Some(1.0),
+            ..Default::default()
+        }),
+        providers: Some(providers),
+        ..Default::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn generic_chat_config_resolves_for_data_engineer_suite() {
+        crate::react_host::resolve_config(
+            generic_chat_config(),
+            react::config::ServeOverrides::default(),
+        )
+        .expect("generic IDE chat config must satisfy data-engineer suite config resolution");
+    }
 }

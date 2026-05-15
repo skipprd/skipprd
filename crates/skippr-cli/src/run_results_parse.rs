@@ -19,7 +19,8 @@ pub struct ParsedDbtRunResult {
 
 /// Extract per-node test outcomes from dbt `run_results.json`.
 pub fn parse_run_results_json(text: &str) -> Result<Vec<ParsedDbtRunResult>, String> {
-    let v: Value = serde_json::from_str(text).map_err(|e| format!("invalid run_results json: {e}"))?;
+    let v: Value =
+        serde_json::from_str(text).map_err(|e| format!("invalid run_results json: {e}"))?;
     let results = v
         .get("results")
         .and_then(|r| r.as_array())

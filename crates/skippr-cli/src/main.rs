@@ -11,7 +11,12 @@ mod test_cmd;
 mod translate;
 mod vector_ingest_docs;
 
-use std::{collections::HashMap, path::{Path, PathBuf}, process::Command, sync::Arc};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::Arc,
+};
 
 use clap::{Parser, Subcommand};
 use react::config::ReactConfigFile;
@@ -986,10 +991,7 @@ pub(crate) fn load_dotenv_for_skippr_config_yaml_path(config_yaml_path: &Path) {
     let local = dir.join(".env.local");
     if local.is_file() {
         if let Err(e) = dotenvy::from_path_override(&local) {
-            eprintln!(
-                "skippr: warning: failed to load {}: {e}",
-                local.display()
-            );
+            eprintln!("skippr: warning: failed to load {}: {e}", local.display());
         }
     }
 }
@@ -1364,7 +1366,9 @@ fn warn_and_normalize_legacy_cli_config(value: &mut serde_yaml::Value) -> Result
     Ok(())
 }
 
-pub(crate) fn load_cli_execution_config(explicit: &Option<PathBuf>) -> Result<serde_yaml::Value, String> {
+pub(crate) fn load_cli_execution_config(
+    explicit: &Option<PathBuf>,
+) -> Result<serde_yaml::Value, String> {
     let mut value = load_resolved_engine_config(explicit)?;
     warn_and_normalize_legacy_cli_config(&mut value)?;
     Ok(value)
@@ -1399,7 +1403,10 @@ fn plugin_mapping_key(map: &serde_yaml::Mapping) -> Option<String> {
         .next()
 }
 
-pub(crate) fn validate_pipeline_exists(engine_cfg: &serde_yaml::Value, pipeline: &str) -> Result<(), String> {
+pub(crate) fn validate_pipeline_exists(
+    engine_cfg: &serde_yaml::Value,
+    pipeline: &str,
+) -> Result<(), String> {
     let pipelines = engine_cfg
         .get("pipelines")
         .and_then(|pipelines| pipelines.as_mapping())
@@ -2479,10 +2486,7 @@ struct PipelineResetReport {
     deleted_model_remote: Vec<String>,
 }
 
-pub(crate) fn yaml_string_at<'a>(
-    value: &'a serde_yaml::Value,
-    path: &[&str],
-) -> Option<&'a str> {
+pub(crate) fn yaml_string_at<'a>(value: &'a serde_yaml::Value, path: &[&str]) -> Option<&'a str> {
     let mut cur = value;
     for key in path {
         cur = cur.get(*key)?;
@@ -3916,7 +3920,7 @@ async fn cmd_ask(log: Option<String>, explicit_config: &Option<PathBuf>, args: A
         log,
         explicit_config,
         chat_cmd::ChatAction::Send(chat_cmd::ChatSendArgs {
-            pipeline: args.pipeline,
+            pipeline: Some(args.pipeline),
             mode: chat_cmd::ChatModeCli::Ask,
             message: args.question,
             thread: None,
@@ -3935,7 +3939,7 @@ async fn cmd_plan(log: Option<String>, explicit_config: &Option<PathBuf>, args: 
         log,
         explicit_config,
         chat_cmd::ChatAction::Send(chat_cmd::ChatSendArgs {
-            pipeline: args.pipeline,
+            pipeline: Some(args.pipeline),
             mode: chat_cmd::ChatModeCli::Plan,
             message: goal,
             thread: None,
@@ -4932,18 +4936,20 @@ async fn async_main() {
                 dry_run,
                 output,
             } => {
-                vector_ingest_docs::run_vector_ingest_docs(vector_ingest_docs::VectorIngestDocsArgs {
-                    config: cli.config.clone(),
-                    pipeline,
-                    vector_source,
-                    src_path,
-                    chunk_chars,
-                    chunk_overlap,
-                    include_glob,
-                    exclude_glob,
-                    dry_run,
-                    output,
-                })
+                vector_ingest_docs::run_vector_ingest_docs(
+                    vector_ingest_docs::VectorIngestDocsArgs {
+                        config: cli.config.clone(),
+                        pipeline,
+                        vector_source,
+                        src_path,
+                        chunk_chars,
+                        chunk_overlap,
+                        include_glob,
+                        exclude_glob,
+                        dry_run,
+                        output,
+                    },
+                )
                 .await;
             }
         },

@@ -497,8 +497,8 @@ impl SkipprProjectConfig {
     pub fn load_resolved_from(path: &Path) -> Result<Self, String> {
         let raw = std::fs::read_to_string(path)
             .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
-        let value: serde_yaml::Value =
-            serde_yaml::from_str(&raw).map_err(|e| format!("failed to parse {}: {}", path.display(), e))?;
+        let value: serde_yaml::Value = serde_yaml::from_str(&raw)
+            .map_err(|e| format!("failed to parse {}: {}", path.display(), e))?;
         let mut json_value = serde_json::to_value(&value)
             .map_err(|e| format!("failed to normalize {}: {}", path.display(), e))?;
         skipprd::helpers::configuration::Config::resolve_env_refs_in_json_value(&mut json_value)?;
@@ -509,7 +509,10 @@ impl SkipprProjectConfig {
     }
 
     /// Read `pipelines.<pipeline_name>.vector_source` (and optional chunk fields) for `vector ingest-docs`.
-    pub fn vector_ingest_pipeline_spec(&self, pipeline_name: &str) -> Result<VectorIngestPipelineSpec, String> {
+    pub fn vector_ingest_pipeline_spec(
+        &self,
+        pipeline_name: &str,
+    ) -> Result<VectorIngestPipelineSpec, String> {
         let name = pipeline_name.trim();
         if name.is_empty() {
             return Err("pipeline name must not be empty".to_string());
@@ -519,9 +522,9 @@ impl SkipprProjectConfig {
                 "skippr.yml has no pipelines.{name} entry; add a mapping with vector_source: <vector_sources key>, or pass --pipeline <name>"
             )
         })?;
-        let m = raw.as_mapping().ok_or_else(|| {
-            format!("pipelines.{name} must be a mapping (got non-object YAML)")
-        })?;
+        let m = raw
+            .as_mapping()
+            .ok_or_else(|| format!("pipelines.{name} must be a mapping (got non-object YAML)"))?;
         let vector_source = yaml_mapping_get_str(m, "vector_source")
             .ok_or_else(|| {
                 format!(
@@ -588,7 +591,6 @@ impl SkipprProjectConfig {
             None => None,
         }
     }
-
 }
 
 impl WarehouseConfig {
