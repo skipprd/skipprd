@@ -19,7 +19,7 @@ use react_core::keyspace::Keyspace;
 use serde::Serialize;
 
 use public_config::{
-    DbtConfig, S3Transform, SchemaSinkConfig, SkipprDbtConfig, SourceConfig, WarehouseConfig,
+    DbtConfig, S3Transform, SchemaSinkConfig, SkipprProjectConfig, SourceConfig, WarehouseConfig,
 };
 
 const SKIPPR_EULA_VERSION: &str = "skippr-eula-2026-04-29";
@@ -994,13 +994,13 @@ pub(crate) fn load_dotenv_for_skippr_config_yaml_path(config_yaml_path: &Path) {
     }
 }
 
-fn load_config(explicit: &Option<PathBuf>) -> Result<SkipprDbtConfig, String> {
+fn load_config(explicit: &Option<PathBuf>) -> Result<SkipprProjectConfig, String> {
     let path = config_path(explicit);
     load_dotenv_for_skippr_config_yaml_path(&path);
-    SkipprDbtConfig::load_from(&path)
+    SkipprProjectConfig::load_from(&path)
 }
 
-fn save_config(cfg: &SkipprDbtConfig, explicit: &Option<PathBuf>) -> Result<(), String> {
+fn save_config(cfg: &SkipprProjectConfig, explicit: &Option<PathBuf>) -> Result<(), String> {
     cfg.save_to(&config_path(explicit))
 }
 
@@ -1648,7 +1648,7 @@ pub(crate) fn react_config_from_pipeline_config(
 ) -> Result<ReactConfigFile, String> {
     let data_sink_name = pipeline_data_sink_name(value, pipeline)?;
     let (warehouse, schema_sink) = warehouse_config_from_data_sink(value, &data_sink_name)?;
-    let cfg = SkipprDbtConfig {
+    let cfg = SkipprProjectConfig {
         project: pipeline.to_string(),
         warehouse: Some(warehouse),
         source: None,
@@ -4625,7 +4625,7 @@ fn support_diagnostics_key(
 }
 
 fn resolve_feedback_runtime_config(
-    cfg: &SkipprDbtConfig,
+    cfg: &SkipprProjectConfig,
     srv_creds: &api_client::CredentialsResponse,
 ) -> Result<react_core::resolved_config::ReactResolvedConfig, String> {
     let mut internal_file = translate::to_internal(cfg)?;

@@ -1,12 +1,12 @@
 use react::config::{LlmFile, ReactConfigFile, ScopeFile, StorageFile};
 use react_core::resolved_config::S3Credentials;
 
-use crate::public_config::{SkipprDbtConfig, SourceConfig, WarehouseConfig};
+use crate::public_config::{SkipprProjectConfig, SourceConfig, WarehouseConfig};
 
 const DEFAULT_LLM_BASE_URL: &str = "https://api.openai.com";
 
 /// Translate the public `skippr` config into the internal runtime config.
-pub fn to_internal(cfg: &SkipprDbtConfig) -> Result<ReactConfigFile, String> {
+pub fn to_internal(cfg: &SkipprProjectConfig) -> Result<ReactConfigFile, String> {
     let project = cfg.project.trim();
     if project.is_empty() {
         return Err("project name is required in skippr.yaml".to_string());
@@ -1131,8 +1131,8 @@ mod tests {
         }
     }
 
-    fn mssql_snowflake_config() -> SkipprDbtConfig {
-        SkipprDbtConfig {
+    fn mssql_snowflake_config() -> SkipprProjectConfig {
+        SkipprProjectConfig {
             project: "tes".into(),
             warehouse: Some(WarehouseConfig::Snowflake {
                 account: None,
@@ -1186,7 +1186,7 @@ mod tests {
 
     #[test]
     fn translate_minimal_snowflake() {
-        let cfg = SkipprDbtConfig {
+        let cfg = SkipprProjectConfig {
             project: "my_project".into(),
             warehouse: Some(WarehouseConfig::Snowflake {
                 account: None,
@@ -1228,7 +1228,7 @@ mod tests {
 
     #[test]
     fn translate_missing_warehouse_errors() {
-        let cfg = SkipprDbtConfig {
+        let cfg = SkipprProjectConfig {
             project: "test".into(),
             warehouse: None,
             source: None,
@@ -1241,7 +1241,7 @@ mod tests {
 
     #[test]
     fn translate_postgres_warehouse() {
-        let cfg = SkipprDbtConfig {
+        let cfg = SkipprProjectConfig {
             project: "pg_project".into(),
             warehouse: Some(WarehouseConfig::Postgres {
                 database: Some("analytics".into()),
@@ -1269,7 +1269,7 @@ mod tests {
 
     #[test]
     fn translate_empty_project_errors() {
-        let cfg = SkipprDbtConfig {
+        let cfg = SkipprProjectConfig {
             project: "".into(),
             warehouse: Some(WarehouseConfig::Snowflake {
                 account: None,
@@ -1295,8 +1295,8 @@ mod tests {
         assert!(to_internal(&cfg).is_err());
     }
 
-    fn make_cfg(warehouse: WarehouseConfig, source: SourceConfig) -> SkipprDbtConfig {
-        SkipprDbtConfig {
+    fn make_cfg(warehouse: WarehouseConfig, source: SourceConfig) -> SkipprProjectConfig {
+        SkipprProjectConfig {
             project: "test_proj".into(),
             warehouse: Some(warehouse),
             source: Some(source),
@@ -1306,13 +1306,13 @@ mod tests {
         }
     }
 
-    fn el_input(cfg: &SkipprDbtConfig) -> serde_json::Value {
+    fn el_input(cfg: &SkipprProjectConfig) -> serde_json::Value {
         let internal = to_internal(cfg).unwrap();
         let p = internal.providers.unwrap();
         p["el"]["skippr_input"].clone()
     }
 
-    fn wh_json(cfg: &SkipprDbtConfig) -> serde_json::Value {
+    fn wh_json(cfg: &SkipprProjectConfig) -> serde_json::Value {
         let internal = to_internal(cfg).unwrap();
         let p = internal.providers.unwrap();
         p["warehouse"].clone()
@@ -1591,7 +1591,7 @@ mod tests {
 
     #[test]
     fn translate_glue_schema_sink() {
-        let cfg = SkipprDbtConfig {
+        let cfg = SkipprProjectConfig {
             project: "test_proj".into(),
             warehouse: Some(WarehouseConfig::Snowflake {
                 account: None,

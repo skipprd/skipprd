@@ -7,7 +7,7 @@ use std::path::Path;
 /// This is the only config surface exposed to product users.
 /// It maps to the internal runtime config shape silently.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
-pub struct SkipprDbtConfig {
+pub struct SkipprProjectConfig {
     pub project: String,
 
     #[serde(default)]
@@ -485,7 +485,7 @@ pub enum SchemaSinkConfig {
     Glue { glue_database_name: String },
 }
 
-impl SkipprDbtConfig {
+impl SkipprProjectConfig {
     pub fn load_from(path: &Path) -> Result<Self, String> {
         let bytes =
             std::fs::read(path).map_err(|e| format!("failed to read {}: {}", path.display(), e))?;

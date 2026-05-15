@@ -8,7 +8,7 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::json;
 
-use crate::public_config::SkipprDbtConfig;
+use crate::public_config::SkipprProjectConfig;
 
 const MAX_INVENTORY_FILES: usize = 80;
 const MAX_LOG_FILES: usize = 5;
@@ -108,7 +108,7 @@ struct LogExcerpt {
 }
 
 pub fn collect(
-    cfg: &SkipprDbtConfig,
+    cfg: &SkipprProjectConfig,
     config_path: &Path,
     thread_id: &str,
     feedback_id: &str,
@@ -181,7 +181,7 @@ pub fn collect(
 }
 
 fn config_diagnostics(
-    cfg: &SkipprDbtConfig,
+    cfg: &SkipprProjectConfig,
     config_path: &Path,
     normalizer: &PathNormalizer,
 ) -> ConfigDiagnostics {
@@ -660,7 +660,7 @@ source:
             "failed with password=secret and email user@example.com",
         )
         .unwrap();
-        let cfg = SkipprDbtConfig::load_from(&config).unwrap();
+        let cfg = SkipprProjectConfig::load_from(&config).unwrap();
 
         let value = collect(&cfg, &config, "thread-1", "feedback-1");
         let serialized = serde_json::to_string(&value).unwrap();

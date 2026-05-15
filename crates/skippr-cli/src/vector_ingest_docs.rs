@@ -10,7 +10,7 @@ use react_suite_data_engineer::vector_docs::ManualVectorDocument;
 use walkdir::WalkDir;
 
 use crate::api_client;
-use crate::public_config::SkipprDbtConfig;
+use crate::public_config::SkipprProjectConfig;
 use crate::react_host::vector::LanceVectorStore;
 use crate::translate;
 
@@ -92,7 +92,7 @@ pub async fn run_vector_ingest_docs(args: VectorIngestDocsArgs) {
         }
     };
 
-    let public_cfg = match SkipprDbtConfig::load_resolved_from(&cfg_path) {
+    let public_cfg = match SkipprProjectConfig::load_resolved_from(&cfg_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("[skippr] ERROR: {e}");
