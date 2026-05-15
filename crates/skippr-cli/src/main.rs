@@ -3,9 +3,11 @@ mod auth;
 mod feedback_diagnostics;
 mod public_config;
 mod react_host;
+mod run_results_parse;
+mod test_cmd;
 mod translate;
 
-use std::{collections::HashMap, path::PathBuf, process::Command, sync::Arc};
+use std::{collections::HashMap, path::{Path, PathBuf}, process::Command, sync::Arc};
 
 use clap::{Parser, Subcommand};
 use react::config::ReactConfigFile;
@@ -144,6 +146,12 @@ enum Cmd {
 
     /// Run the data-engineer modeling workflow.
     Model(ModelArgs),
+
+    /// List or run dbt tests for a pipeline (materializes dbt from cloud storage, same runner as modeling).
+    Test {
+        #[command(subcommand)]
+        action: test_cmd::TestSubcommand,
+    },
 
     /// Answer a read-only data-engineering question.
     Ask(AskArgs),
@@ -905,8 +913,41 @@ fn config_path(explicit: &Option<PathBuf>) -> PathBuf {
     })
 }
 
+/// Loads dotenv files next to the Skippr manifest so whole-scalar `${VAR}` references in YAML resolve.
+///
+/// Reads from the directory containing `skippr.yml` / `skippr.yaml` (the `--config` file when passed):
+/// - **`.env`** — [`dotenvy::from_path`]: only sets variables not already present in the process environment.
+/// - **`.env.local`** (optional) — [`dotenvy::from_path_override`]: overrides every variable **named in that file**
+///   (typical gitignored local overrides).
+fn load_dotenv_for_skippr_config_yaml_path(config_yaml_path: &Path) {
+    let dir = config_yaml_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let env_path = dir.join(".env");
+    if env_path.is_file() {
+        if let Err(e) = dotenvy::from_path(&env_path) {
+            eprintln!(
+                "skippr: warning: failed to load {}: {e}",
+                env_path.display()
+            );
+        }
+    }
+    let local = dir.join(".env.local");
+    if local.is_file() {
+        if let Err(e) = dotenvy::from_path_override(&local) {
+            eprintln!(
+                "skippr: warning: failed to load {}: {e}",
+                local.display()
+            );
+        }
+    }
+}
+
 fn load_config(explicit: &Option<PathBuf>) -> Result<SkipprDbtConfig, String> {
-    SkipprDbtConfig::load_from(&config_path(explicit))
+    let path = config_path(explicit);
+    load_dotenv_for_skippr_config_yaml_path(&path);
+    SkipprDbtConfig::load_from(&path)
 }
 
 fn save_config(cfg: &SkipprDbtConfig, explicit: &Option<PathBuf>) -> Result<(), String> {
@@ -915,6 +956,7 @@ fn save_config(cfg: &SkipprDbtConfig, explicit: &Option<PathBuf>) -> Result<(), 
 
 fn load_engine_config(explicit: &Option<PathBuf>) -> Result<serde_yaml::Value, String> {
     let path = config_path(explicit);
+    load_dotenv_for_skippr_config_yaml_path(&path);
     let raw = std::fs::read_to_string(&path)
         .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
     serde_yaml::from_str(&raw).map_err(|e| format!("failed to parse {}: {}", path.display(), e))
@@ -1307,7 +1349,7 @@ fn plugin_mapping_key(map: &serde_yaml::Mapping) -> Option<String> {
         .next()
 }
 
-fn validate_pipeline_exists(engine_cfg: &serde_yaml::Value, pipeline: &str) -> Result<(), String> {
+pub(crate) fn validate_pipeline_exists(engine_cfg: &serde_yaml::Value, pipeline: &str) -> Result<(), String> {
     let pipelines = engine_cfg
         .get("pipelines")
         .and_then(|pipelines| pipelines.as_mapping())
@@ -3245,6 +3287,75 @@ fn cmd_connect_source(kind: SourceKind, explicit_config: &Option<PathBuf>, outpu
 // doctor
 // ---------------------------------------------------------------------------
 
+/// Walk YAML for whole-scalar `${VAR}` references that are unset or empty (mirrors
+/// `skipprd::helpers::configuration::Config::resolve_env_ref` rules) for diagnostics only.
+fn collect_missing_env_scalar_messages_yaml(
+    value: &serde_yaml::Value,
+    path: &str,
+    out: &mut Vec<String>,
+) {
+    match value {
+        serde_yaml::Value::String(s) => {
+            if let Some(msg) = missing_env_scalar_message_if_unset(s, path) {
+                out.push(msg);
+            }
+        }
+        serde_yaml::Value::Mapping(map) => {
+            for (k, v) in map.iter() {
+                let key = k.as_str().unwrap_or("?");
+                let child_path = if path.is_empty() {
+                    key.to_string()
+                } else {
+                    format!("{}.{}", path, key)
+                };
+                collect_missing_env_scalar_messages_yaml(v, &child_path, out);
+            }
+        }
+        serde_yaml::Value::Sequence(seq) => {
+            for (i, v) in seq.iter().enumerate() {
+                let child_path = if path.is_empty() {
+                    format!("[{}]", i)
+                } else {
+                    format!("{}[{}]", path, i)
+                };
+                collect_missing_env_scalar_messages_yaml(v, &child_path, out);
+            }
+        }
+        serde_yaml::Value::Null | serde_yaml::Value::Bool(_) | serde_yaml::Value::Number(_) => {}
+        serde_yaml::Value::Tagged(t) => {
+            collect_missing_env_scalar_messages_yaml(&t.value, path, out);
+        }
+    }
+}
+
+fn missing_env_scalar_message_if_unset(value: &str, path: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if !(trimmed.starts_with("${") && trimmed.ends_with('}')) {
+        return None;
+    }
+    if trimmed.len() <= 3 || trimmed[2..trimmed.len() - 1].contains("${") {
+        return None;
+    }
+    if trimmed != value {
+        return None;
+    }
+    let var_name = &trimmed[2..trimmed.len() - 1];
+    if var_name.trim().is_empty() {
+        return None;
+    }
+    match std::env::var(var_name) {
+        Ok(v) if !v.trim().is_empty() => None,
+        Ok(_) => Some(format!(
+            "skippr.yml references ${{{}}} at {}, but that environment variable is empty",
+            var_name, path
+        )),
+        Err(_) => Some(format!(
+            "skippr.yml references ${{{}}} at {}, but that environment variable is not set",
+            var_name, path
+        )),
+    }
+}
+
 fn load_doctor_config(
     explicit_config: &Option<PathBuf>,
 ) -> Result<(PathBuf, serde_yaml::Value), String> {
@@ -3255,9 +3366,9 @@ fn load_doctor_config(
             path.display()
         ));
     }
-    load_cli_execution_config(explicit_config)
-        .map(|cfg| (path.clone(), cfg))
-        .map_err(|e| format!("failed to load {}: {}", path.display(), e))
+    let mut cfg = load_engine_config(explicit_config)?;
+    warn_and_normalize_legacy_cli_config(&mut cfg)?;
+    Ok((path.clone(), cfg))
 }
 
 fn push_doctor_check(
@@ -3329,6 +3440,13 @@ fn cmd_doctor(explicit_config: &Option<PathBuf>, output: &str) {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("config file");
+
+    let mut missing_env_refs = Vec::new();
+    collect_missing_env_scalar_messages_yaml(&cfg, "", &mut missing_env_refs);
+    for msg in missing_env_refs {
+        emit_doctor_check(output, &mut checks, false, msg, None);
+        ok = false;
+    }
 
     if cfg
         .get("pipelines")
@@ -3522,7 +3640,9 @@ fn cmd_config_schema(output: &str) {
 
 fn cmd_config_show(explicit_config: &Option<PathBuf>, output: &str) {
     let path = config_path(explicit_config);
-    let cfg = match load_cli_execution_config(explicit_config) {
+    let cfg = match load_engine_config(explicit_config)
+        .and_then(|mut v| warn_and_normalize_legacy_cli_config(&mut v).map(|_| v))
+    {
         Ok(cfg) => cfg,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -4773,6 +4893,20 @@ async fn async_main() {
         Cmd::Discover(args) => cmd_discover(cli.log, &cli.config, args).await,
         Cmd::Sync(args) => cmd_sync(cli.log, &cli.config, args).await,
         Cmd::Model(args) => cmd_model(cli.log, &cli.config, args).await,
+        Cmd::Test { action } => match action {
+            test_cmd::TestSubcommand::List(args) => {
+                if let Err(e) = test_cmd::cmd_test_list(cli.log, &cli.config, args).await {
+                    eprintln!("[skippr] ERROR: {e}");
+                    std::process::exit(1);
+                }
+            }
+            test_cmd::TestSubcommand::Run(args) => {
+                if let Err(e) = test_cmd::cmd_test_run(cli.log, &cli.config, args).await {
+                    eprintln!("[skippr] ERROR: {e}");
+                    std::process::exit(1);
+                }
+            }
+        },
         Cmd::Ask(args) => cmd_ask(&cli.config, args).await,
         Cmd::Plan(args) => cmd_plan(&cli.config, args).await,
         Cmd::Feedback {
@@ -5227,7 +5361,7 @@ async fn cmd_user_list_api_keys(output: &str) {
     }
 }
 
-const LOW_BALANCE_USD_THRESHOLD: f64 = 5.0;
+pub(crate) const LOW_BALANCE_USD_THRESHOLD: f64 = 5.0;
 
 fn print_low_balance_warning(balance: &api_client::Balance) {
     if balance.balance <= 0.0 {
@@ -5282,6 +5416,10 @@ async fn delete_skipprd_storage_prefix(
 
 fn env_example_template() -> &'static str {
     "\
+# Copy this file to `.env` in the same folder as skippr.yml (or merge into an existing `.env`).
+# Skippr loads `.env` then `.env.local` before resolving ${VAR} placeholders in skippr.yml.
+# Variables already set in your shell are not overwritten by `.env` (use `.env.local` to force overrides).
+
 # Authentication (required — choose one)
 # Interactive: skippr user login
 # CI/CD: set SKIPPR_API_KEY
@@ -5318,7 +5456,7 @@ mod tests {
     async fn init_creates_config_file() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("skippr.yaml");
-        cmd_init("test-project", &Some(config.clone())).await;
+        cmd_init("test-project", &Some(config.clone()), "json").await;
         assert!(config.exists());
         let contents = fs::read_to_string(&config).unwrap();
         assert!(contents.contains("test-project"));
@@ -5331,12 +5469,12 @@ mod tests {
     async fn init_is_idempotent_when_already_initialised() {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("skippr.yaml");
-        cmd_init("my-pipeline", &Some(config.clone())).await;
+        cmd_init("my-pipeline", &Some(config.clone()), "json").await;
         assert!(config.exists());
         let original = fs::read_to_string(&config).unwrap();
 
         // Second init should not fail or change anything
-        cmd_init("my-pipeline", &Some(config.clone())).await;
+        cmd_init("my-pipeline", &Some(config.clone()), "json").await;
         let after = fs::read_to_string(&config).unwrap();
         assert_eq!(original, after);
     }
@@ -5355,6 +5493,58 @@ mod tests {
         assert_eq!(
             postgres_schema_or_default(Some("analytics".into())).as_deref(),
             Some("analytics")
+        );
+    }
+
+    /// `config show` must not require `${VAR}` to be set; it only lists structural keys for the IDE.
+    #[test]
+    fn config_show_introspection_loads_yaml_with_unset_env_scalar_refs() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("skippr.yml");
+        const UNSET: &str = "SKIPPR_CLI_TEST_UNSET_ENV_REF_9f3e2a1b";
+        let yaml = format!(
+            r#"
+skippr:
+  workspace: test_ws
+pipelines:
+  pl1:
+    data_source: data_sources.src1
+    data_sink: data_sinks.sf1
+data_sources:
+  src1:
+    Mssql:
+      connection_string: server=tcp:127.0.0.1;database=db
+      tables: [dbo.t]
+data_sinks:
+  sf1:
+    Snowflake:
+      account: ${{{unset}}}
+      user: u
+      database: d
+      schema: s
+      warehouse: wh
+      role: r
+      private_key_path: /tmp/k
+"#,
+            unset = UNSET
+        );
+        fs::write(&config, yaml).unwrap();
+        std::env::remove_var(UNSET);
+
+        let mut cfg = load_engine_config(&Some(config.clone())).expect("parse yaml");
+        warn_and_normalize_legacy_cli_config(&mut cfg).expect("normalize");
+
+        let pipelines = yaml_mapping_keys(cfg.get("pipelines"));
+        assert!(pipelines.contains(&"pl1".to_string()));
+        let sinks = yaml_mapping_keys(cfg.get("data_sinks"));
+        assert!(sinks.contains(&"sf1".to_string()));
+
+        let mut missing = Vec::new();
+        collect_missing_env_scalar_messages_yaml(&cfg, "", &mut missing);
+        assert!(
+            missing.iter().any(|m| m.contains(UNSET)),
+            "expected unset env diagnostic, got: {:?}",
+            missing
         );
     }
 
@@ -5603,6 +5793,83 @@ data_sources:
         );
 
         std::env::remove_var("SKIPPR_TEST_RAW_SECRET");
+    }
+
+    #[test]
+    fn load_resolved_engine_config_interpolates_from_dot_env() {
+        const VAR: &str = "SKIPPR_CLI_DOTENV_INTERP_TEST";
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("skippr.yml");
+        std::fs::write(
+            dir.path().join(".env"),
+            format!("{VAR}=secret-from-env-file\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            &config,
+            format!(
+                r#"
+skippr:
+  workspace: demo
+pipelines: {{}}
+data_sources:
+  source:
+    Mssql:
+      connection_string: ${{{VAR}}}
+"#
+            ),
+        )
+        .unwrap();
+
+        std::env::remove_var(VAR);
+        let resolved = load_resolved_engine_config(&Some(config.clone())).expect("resolved");
+        std::env::remove_var(VAR);
+
+        let cs = resolved
+            .get("data_sources")
+            .and_then(|s| s.get("source"))
+            .and_then(|s| s.get("Mssql"))
+            .and_then(|m| m.get("connection_string"))
+            .and_then(|v| v.as_str())
+            .expect("connection_string");
+        assert_eq!(cs, "secret-from-env-file");
+    }
+
+    #[test]
+    fn load_resolved_engine_config_dot_env_local_overrides_dot_env() {
+        const VAR: &str = "SKIPPR_CLI_DOTENV_LOCAL_TEST";
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("skippr.yml");
+        std::fs::write(dir.path().join(".env"), format!("{VAR}=from-dot-env\n")).unwrap();
+        std::fs::write(dir.path().join(".env.local"), format!("{VAR}=from-local\n")).unwrap();
+        std::fs::write(
+            &config,
+            format!(
+                r#"
+skippr:
+  workspace: demo
+pipelines: {{}}
+data_sources:
+  source:
+    Mssql:
+      connection_string: ${{{VAR}}}
+"#
+            ),
+        )
+        .unwrap();
+
+        std::env::remove_var(VAR);
+        let resolved = load_resolved_engine_config(&Some(config)).expect("resolved");
+        std::env::remove_var(VAR);
+
+        let cs = resolved
+            .get("data_sources")
+            .and_then(|s| s.get("source"))
+            .and_then(|s| s.get("Mssql"))
+            .and_then(|m| m.get("connection_string"))
+            .and_then(|v| v.as_str())
+            .expect("connection_string");
+        assert_eq!(cs, "from-local");
     }
 
     #[test]

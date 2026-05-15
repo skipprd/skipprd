@@ -1349,6 +1349,92 @@ impl DbtProjectProvider {
         }
         Ok(uploaded)
     }
+
+    /// Download the scoped dbt tree from object storage into `root` (the dbt project directory).
+    ///
+    /// Used by `skippr test` to materialize the same S3 keyspace as modeling before running dbt.
+    pub async fn materialize_scoped_dbt_tree(
+        &self,
+        scope: &RequestScope,
+        project_name: &str,
+        root: &Path,
+    ) -> Result<(usize, Vec<react_suite_data_engineer::StrippedArtifact>), String> {
+        let project_name = resolve_dbt_project_name(scope, project_name)?;
+        let s3_prefix_base = {
+            let pref = self.keyspace.scoped_prefix(scope, &["dbt"]);
+            if pref.ends_with('/') {
+                pref
+            } else {
+                format!("{}/", pref)
+            }
+        };
+
+        std::fs::create_dir_all(root).map_err(|e| e.to_string())?;
+
+        let keys = self
+            .storage
+            .list_prefix(&s3_prefix_base)
+            .await
+            .map_err(|e| e.to_string())?;
+        let mut file_count = 0usize;
+        for key in keys {
+            if key.ends_with('/') {
+                continue;
+            }
+            let rel = key.strip_prefix(&s3_prefix_base).unwrap_or(&key);
+            let dest = root.join(rel);
+            if let Some(parent) = dest.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let bytes = self
+                .storage
+                .get_bytes(&key)
+                .await
+                .map_err(|e| e.to_string())?;
+            write_file(&dest, &bytes)?;
+            file_count += 1;
+        }
+
+        let proj = root.join("dbt_project.yml");
+        let stripped = self
+            .ensure_local_project_yaml(scope, &project_name, &proj)
+            .await?;
+        Ok((file_count, stripped))
+    }
+
+    /// Run dbt with the same host/docker runner wiring as [`DbtProvider::validate_project`].
+    pub fn invoke_dbt_cli(
+        &self,
+        project_dir: &Path,
+        profiles_dir: Option<&Path>,
+        dbt_argv: &[&str],
+        env_pairs: &[(&str, String)],
+        label: &str,
+    ) -> DbtCliRunOutcome {
+        let out = run_cmd_for_runner_labeled(
+            &self.runner,
+            project_dir,
+            profiles_dir,
+            dbt_argv,
+            env_pairs,
+            label,
+        );
+        DbtCliRunOutcome {
+            status_ok: out.status_ok,
+            code: out.code,
+            stdout: out.stdout,
+            stderr: out.stderr,
+        }
+    }
+}
+
+/// Result of a single `dbt …` invocation (stdout/stderr preserved for IDE / CLI reporting).
+#[derive(Clone, Debug)]
+pub struct DbtCliRunOutcome {
+    pub status_ok: bool,
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
 }
 
 #[async_trait]

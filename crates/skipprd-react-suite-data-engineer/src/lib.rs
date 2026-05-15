@@ -171,6 +171,17 @@ use llm_profiles::PlanningLlmProfile;
 pub use plan_types::{StrippedArtifact, MAX_STRIPPED_ARTIFACTS};
 pub(crate) use track_spec::TrackKind;
 
+/// dbt `profiles.yml` bundle for Skippr CLI / IDE (`skippr test`), same rendering as `dbt_validate`.
+pub use crate::dbt::profile::GeneratedProfiles;
+
+/// Generate `profiles.yml` for Skippr CLI / IDE (`skippr test`), mirroring `dbt_validate`.
+pub fn skippr_cli_generate_dbt_profiles_yml(
+    cfg: &react_core::resolved_config::ReactResolvedConfig,
+    threads: Option<usize>,
+) -> Result<GeneratedProfiles, String> {
+    crate::dbt::profile::generate_profiles_yml(cfg, threads)
+}
+
 pub(crate) use react_core::workflow::PhaseOutcome;
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
