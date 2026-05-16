@@ -237,7 +237,7 @@ jobs:
       - name: Run data-engineer suite tests
         shell: bash
         run: |
-          cargo test -p react-suite-data-engineer data_engineer::tests::control_state_thread_log_read_guardrails_are_enforced_in_rust_tests -- --nocapture
+          cargo test -p react-suite-data-engineer control_state_thread_log_read_guardrails_are_enforced_in_rust_tests -- --nocapture
           cargo test -p react-suite-data-engineer --test sql_cte -- --nocapture
       - name: Run provider parity tests
         shell: bash

@@ -4184,8 +4184,6 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
             suite_id: Some("data_engineer".to_string()),
             agent: "agent".to_string(),
             skip_logging_init: false,
-            headless_prompt: None,
-            stream_jsonl: false,
         },
     )
     .await;
