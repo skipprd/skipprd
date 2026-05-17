@@ -1,5 +1,6 @@
 use chrono::Utc;
 use serde::Serialize;
+use serde_json::{json, Value};
 use std::io::Write;
 
 use super::progress::ProgressUi;
@@ -7,6 +8,10 @@ use super::progress::ProgressUi;
 #[derive(Serialize)]
 struct SyncEvent {
     event: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pipeline: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -39,6 +44,20 @@ struct SyncEvent {
     uploads_in_flight: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metrics: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metric_points: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema_diff: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    freshness: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    deadletters: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    affected_assets: Option<Value>,
     timestamp: String,
 }
 
@@ -46,6 +65,8 @@ impl SyncEvent {
     fn new(event: &str) -> Self {
         SyncEvent {
             event: event.to_string(),
+            run_id: None,
+            phase: None,
             pipeline: None,
             namespace: None,
             field_count: None,
@@ -62,8 +83,42 @@ impl SyncEvent {
             error: None,
             uploads_in_flight: None,
             ok: None,
+            metrics: None,
+            metric_points: None,
+            schema: None,
+            schema_diff: None,
+            freshness: None,
+            deadletters: None,
+            affected_assets: None,
             timestamp: Utc::now().to_rfc3339(),
         }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct RunTelemetry {
+    pub run_id: Option<String>,
+    pub phase: Option<String>,
+    pub metrics: Option<Value>,
+    pub metric_points: Option<Value>,
+    pub schema: Option<Value>,
+    pub schema_diff: Option<Value>,
+    pub freshness: Option<Value>,
+    pub deadletters: Option<Value>,
+    pub affected_assets: Option<Value>,
+}
+
+impl RunTelemetry {
+    fn apply_to(self, ev: &mut SyncEvent) {
+        ev.run_id = self.run_id;
+        ev.phase = self.phase;
+        ev.metrics = self.metrics;
+        ev.metric_points = self.metric_points;
+        ev.schema = self.schema;
+        ev.schema_diff = self.schema_diff;
+        ev.freshness = self.freshness;
+        ev.deadletters = self.deadletters;
+        ev.affected_assets = self.affected_assets;
     }
 }
 
@@ -118,11 +173,12 @@ impl SyncReporter {
         }
     }
 
-    pub fn sync_start(&self, pipeline: &str) {
+    pub fn sync_start(&self, pipeline: &str, telemetry: RunTelemetry) {
         match self {
             SyncReporter::Json => {
                 let mut ev = SyncEvent::new("sync_start");
                 ev.pipeline = Some(pipeline.to_string());
+                telemetry.apply_to(&mut ev);
                 emit_json(&ev);
             }
             SyncReporter::Text => println!("Sync started: pipeline={}", pipeline),
@@ -130,12 +186,18 @@ impl SyncReporter {
         }
     }
 
-    pub fn namespace_discovered(&self, namespace: &str, field_count: usize) {
+    pub fn namespace_discovered(
+        &self,
+        namespace: &str,
+        field_count: usize,
+        telemetry: RunTelemetry,
+    ) {
         match self {
             SyncReporter::Json => {
                 let mut ev = SyncEvent::new("namespace_discovered");
                 ev.namespace = Some(namespace.to_string());
                 ev.field_count = Some(field_count);
+                telemetry.apply_to(&mut ev);
                 emit_json(&ev);
             }
             SyncReporter::Text => {
@@ -148,12 +210,18 @@ impl SyncReporter {
         }
     }
 
-    pub fn schema_evolved(&self, namespace: &str, fields_added: Vec<String>) {
+    pub fn schema_evolved(
+        &self,
+        namespace: &str,
+        fields_added: Vec<String>,
+        telemetry: RunTelemetry,
+    ) {
         match self {
             SyncReporter::Json => {
                 let mut ev = SyncEvent::new("schema_evolved");
                 ev.namespace = Some(namespace.to_string());
                 ev.fields_added = Some(fields_added);
+                telemetry.apply_to(&mut ev);
                 emit_json(&ev);
             }
             SyncReporter::Text => {
@@ -218,6 +286,7 @@ impl SyncReporter {
         namespaces_synced: usize,
         total_rows: u64,
         elapsed_ms: u64,
+        telemetry: RunTelemetry,
     ) {
         match self {
             SyncReporter::Json => {
@@ -226,6 +295,7 @@ impl SyncReporter {
                 ev.namespaces_synced = Some(namespaces_synced);
                 ev.total_rows = Some(total_rows);
                 ev.elapsed_ms = Some(elapsed_ms);
+                telemetry.apply_to(&mut ev);
                 emit_json(&ev);
             }
             SyncReporter::Text => {
@@ -238,11 +308,12 @@ impl SyncReporter {
         }
     }
 
-    pub fn discover_start(&self, pipeline: &str) {
+    pub fn discover_start(&self, pipeline: &str, telemetry: RunTelemetry) {
         match self {
             SyncReporter::Json => {
                 let mut ev = SyncEvent::new("discover_start");
                 ev.pipeline = Some(pipeline.to_string());
+                telemetry.apply_to(&mut ev);
                 emit_json(&ev);
             }
             SyncReporter::Text => println!("Discover started: pipeline={}", pipeline),
@@ -256,6 +327,7 @@ impl SyncReporter {
         namespaces_discovered: usize,
         total_fields: u64,
         elapsed_ms: u64,
+        telemetry: RunTelemetry,
     ) {
         match self {
             SyncReporter::Json => {
@@ -265,6 +337,7 @@ impl SyncReporter {
                 ev.namespaces_discovered = Some(namespaces_discovered);
                 ev.total_fields = Some(total_fields);
                 ev.elapsed_ms = Some(elapsed_ms);
+                telemetry.apply_to(&mut ev);
                 emit_json(&ev);
             }
             SyncReporter::Text => {
@@ -285,6 +358,7 @@ impl SyncReporter {
         rows_written: u64,
         elapsed_ms: u64,
         uploads_in_flight: u64,
+        telemetry: RunTelemetry,
     ) {
         if let SyncReporter::Json = self {
             let mut ev = SyncEvent::new("sync_status");
@@ -294,6 +368,7 @@ impl SyncReporter {
             ev.rows_written = Some(rows_written);
             ev.elapsed_ms = Some(elapsed_ms);
             ev.uploads_in_flight = Some(uploads_in_flight);
+            telemetry.apply_to(&mut ev);
             emit_json(&ev);
         }
     }
@@ -313,6 +388,23 @@ impl SyncReporter {
             SyncReporter::Progress(_) => {}
         }
     }
+}
+
+pub fn affected_assets_stub(pipeline: &str) -> Value {
+    json!([
+        {
+            "kind": "model",
+            "name": pipeline,
+            "status": "unknown",
+            "source": "local_stub"
+        },
+        {
+            "kind": "dashboard",
+            "name": pipeline,
+            "status": "unknown",
+            "source": "local_stub"
+        }
+    ])
 }
 
 fn emit_json(event: &SyncEvent) {

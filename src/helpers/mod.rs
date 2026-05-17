@@ -17,6 +17,7 @@ use std::path::PathBuf;
 
 pub mod athena_admin;
 pub mod configuration;
+pub mod dotenv;
 pub mod logger;
 pub mod logging;
 pub mod manifest;

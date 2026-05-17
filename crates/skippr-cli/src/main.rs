@@ -955,6 +955,23 @@ fn working_dir() -> PathBuf {
     std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
 }
 
+/// Set the process working directory to the folder containing the Skippr manifest.
+pub(crate) fn ensure_project_working_dir(explicit: &Option<PathBuf>) {
+    let path = config_path(explicit);
+    let Some(parent) = path
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+    else {
+        return;
+    };
+    if let Err(err) = std::env::set_current_dir(parent) {
+        eprintln!(
+            "skippr: warning: could not set working directory to {}: {err}",
+            parent.display()
+        );
+    }
+}
+
 pub(crate) fn config_path(explicit: &Option<PathBuf>) -> PathBuf {
     explicit.clone().unwrap_or_else(|| {
         let cwd = working_dir();
@@ -975,25 +992,7 @@ pub(crate) fn config_path(explicit: &Option<PathBuf>) -> PathBuf {
 /// - **`.env.local`** (optional) — [`dotenvy::from_path_override`]: overrides every variable **named in that file**
 ///   (typical gitignored local overrides).
 pub(crate) fn load_dotenv_for_skippr_config_yaml_path(config_yaml_path: &Path) {
-    let dir = config_yaml_path
-        .parent()
-        .filter(|p| !p.as_os_str().is_empty())
-        .unwrap_or_else(|| Path::new("."));
-    let env_path = dir.join(".env");
-    if env_path.is_file() {
-        if let Err(e) = dotenvy::from_path(&env_path) {
-            eprintln!(
-                "skippr: warning: failed to load {}: {e}",
-                env_path.display()
-            );
-        }
-    }
-    let local = dir.join(".env.local");
-    if local.is_file() {
-        if let Err(e) = dotenvy::from_path_override(&local) {
-            eprintln!("skippr: warning: failed to load {}: {e}", local.display());
-        }
-    }
+    skipprd::helpers::dotenv::load_dotenv_for_config_yaml_path(config_yaml_path);
 }
 
 fn load_config(explicit: &Option<PathBuf>) -> Result<SkipprProjectConfig, String> {
@@ -2516,6 +2515,28 @@ fn configured_skippr_s3_bucket(engine_cfg: &serde_yaml::Value) -> Option<String>
         })
 }
 
+fn cli_pipeline_data_dir(
+    project_root: &std::path::Path,
+    tenant: &str,
+    pipeline: &str,
+    workspace: &str,
+    pipeline_cfg: &serde_yaml::Value,
+) -> PathBuf {
+    let has_custom_data_dir = pipeline_cfg
+        .get("data_dir")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    if has_custom_data_dir {
+        data_root_for_pipeline(project_root, pipeline_cfg)
+            .join(format!("{workspace}_{pipeline}"))
+    } else {
+        skippr_dir_from_project_root(project_root)
+            .join(tenant)
+            .join(pipeline)
+    }
+}
+
 fn data_root_for_pipeline(
     project_root: &std::path::Path,
     pipeline_cfg: &serde_yaml::Value,
@@ -2577,7 +2598,7 @@ fn derive_pipeline_reset_target(
     }
 
     let local_runtime_dir =
-        data_root_for_pipeline(&project_root, pipeline_cfg).join(format!("{workspace}_{pipeline}"));
+        cli_pipeline_data_dir(&project_root, &skipprd_tenant, pipeline, &workspace, pipeline_cfg);
     let skippr_dir = skippr_dir_from_project_root(&project_root);
     let local_model_dirs = dedupe_paths(vec![
         skippr_dir.join(format!("_/dev/{pipeline}")),
@@ -3891,6 +3912,24 @@ async fn prepare_engine_command(
     skipprd::helpers::configuration::PIPELINE_NAME
         .write()
         .push_str(pipeline);
+    let project_root = project_root_from_config_path(&path);
+    let workspace = yaml_string_at(&engine_cfg, &["skippr", "workspace"]).unwrap_or("default");
+    let pipeline_cfg = pipeline_config(&engine_cfg, pipeline).expect("pipeline validated above");
+    let data_dir = cli_pipeline_data_dir(&project_root, tenant, pipeline, workspace, pipeline_cfg);
+    if let Err(err) = std::fs::create_dir_all(&data_dir) {
+        eprintln!(
+            "[skippr] failed to create pipeline data directory '{}': {}",
+            data_dir.display(),
+            err
+        );
+        std::process::exit(1);
+    }
+    skipprd::helpers::configuration::Config::setenv(
+        "DATA_DIR",
+        &data_dir.to_string_lossy(),
+    );
+    skipprd::helpers::configuration::Config::setenv("SKIPPR_PIPELINE_DATA_ROOT", "true");
+    load_dotenv_for_skippr_config_yaml_path(&path);
     skipprd::helpers::configuration::Config::init().await;
 }
 
@@ -4883,6 +4922,7 @@ fn main() {
 
 async fn async_main() {
     let cli = Cli::parse();
+    ensure_project_working_dir(&cli.config);
 
     match cli.cmd {
         Cmd::Init { name, output } => cmd_init(&name, &cli.config, &output).await,
@@ -5872,6 +5912,46 @@ data_sources:
     }
 
     #[test]
+    fn load_resolved_engine_config_dot_env_fills_empty_process_env() {
+        const VAR: &str = "SKIPPR_CLI_DOTENV_EMPTY_ENV_TEST";
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("skippr.yml");
+        std::fs::write(
+            dir.path().join(".env"),
+            format!("{VAR}=secret-from-env-file\n"),
+        )
+        .unwrap();
+        std::fs::write(
+            &config,
+            format!(
+                r#"
+skippr:
+  workspace: demo
+pipelines: {{}}
+data_sources:
+  source:
+    Mssql:
+      connection_string: ${{{VAR}}}
+"#
+            ),
+        )
+        .unwrap();
+
+        std::env::set_var(VAR, "");
+        let resolved = load_resolved_engine_config(&Some(config.clone())).expect("resolved");
+        std::env::remove_var(VAR);
+
+        let cs = resolved
+            .get("data_sources")
+            .and_then(|s| s.get("source"))
+            .and_then(|s| s.get("Mssql"))
+            .and_then(|m| m.get("connection_string"))
+            .and_then(|v| v.as_str())
+            .expect("connection_string");
+        assert_eq!(cs, "secret-from-env-file");
+    }
+
+    #[test]
     fn load_resolved_engine_config_dot_env_local_overrides_dot_env() {
         const VAR: &str = "SKIPPR_CLI_DOTENV_LOCAL_TEST";
         let dir = tempfile::tempdir().unwrap();
@@ -5963,6 +6043,33 @@ data_sources:
             knowledge_credentials: None,
             public_vectors_bucket: None,
         }
+    }
+
+    #[test]
+    fn derive_pipeline_reset_target_defaults_to_project_skippr_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("skippr.yaml");
+        fs::write(
+            &config,
+            r#"
+skippr:
+  workspace: analytics
+pipelines:
+  orders:
+    data_source: data_sources.src
+    data_sink: data_sinks.sink
+"#,
+        )
+        .unwrap();
+        let cfg = load_resolved_engine_config(&Some(config.clone())).expect("config");
+
+        let target =
+            derive_pipeline_reset_target(&cfg, &config, "orders", &test_credentials()).unwrap();
+
+        assert_eq!(
+            target.local_runtime_dir,
+            dir.path().join(".skippr/auth-tenant/orders")
+        );
     }
 
     #[test]

@@ -357,48 +357,77 @@ impl Config {
     }
 
     pub fn build_config() {
+        if let Err(err) = Self::try_build_config() {
+            eprintln!("[skippr] config failed: {}", err);
+            std::process::exit(1);
+        }
+    }
+
+    pub fn try_build_config() -> Result<(), String> {
         let file_path = Config::find_config_file();
+        if !file_path.is_empty() {
+            crate::helpers::dotenv::load_dotenv_for_config_yaml_path(std::path::Path::new(
+                &file_path,
+            ));
+        }
 
         let mut file = match File::open(&file_path) {
             Ok(file) => file,
             Err(_error) => {
+                if !file_path.is_empty() {
+                    return Err(format!("Config file '{}' could not be opened.", file_path));
+                }
                 {
                     let mut app_config = APP_CONFIG.write();
                     app_config.replace(Config::new());
                 }
-                return;
+                return Ok(());
             }
         };
 
         let mut contents = String::new();
         file.read_to_string(&mut contents)
-            .expect("Something went wrong reading the file");
+            .map_err(|err| format!("Failed to read config file '{}': {}", file_path, err))?;
 
         let config: serde_value::Value = if file_path.ends_with(".json") {
-            serde_json::from_str(&contents).unwrap()
+            serde_json::from_str(&contents)
+                .map_err(|err| format!("Failed to parse JSON config '{}': {}", file_path, err))?
         } else if file_path.ends_with(".yml") || file_path.ends_with(".yaml") {
-            serde_yaml::from_str(&contents).unwrap()
+            serde_yaml::from_str(&contents)
+                .map_err(|err| format!("Failed to parse YAML config '{}': {}", file_path, err))?
         } else if file_path.ends_with(".toml") {
-            toml::from_str(&contents).unwrap()
+            toml::from_str(&contents)
+                .map_err(|err| format!("Failed to parse TOML config '{}': {}", file_path, err))?
         } else {
-            panic!("Unsupported file format");
+            return Err(format!(
+                "Unsupported config file format '{}'. Supported formats: .json, .yml, .yaml, .toml.",
+                file_path
+            ));
         };
 
         // Serialize the serde_value::Value into a String
-        let string_val = serde_json::to_string(&config).unwrap();
+        let string_val = serde_json::to_string(&config)
+            .map_err(|err| format!("Failed to normalize config '{}': {}", file_path, err))?;
 
         // Deserialize the String back into serde_json::Value
-        let mut config: Value = serde_json::from_str(&string_val).unwrap();
+        let mut config: Value = serde_json::from_str(&string_val)
+            .map_err(|err| format!("Failed to normalize config '{}': {}", file_path, err))?;
 
-        Config::resolve_env_refs_in_json_value(&mut config)
-            .unwrap_or_else(|err| panic!("Invalid environment reference in config: {}", err));
+        Config::resolve_env_refs_in_json_value(&mut config).map_err(|err| {
+            format!(
+                "Invalid environment reference in config '{}': {}",
+                file_path, err
+            )
+        })?;
 
         // recursively merge config with any set ENV vars
         // let config = Config::merge_config_with_env(config);
 
-        let string_val = serde_json::to_string(&config).unwrap();
+        let string_val = serde_json::to_string(&config)
+            .map_err(|err| format!("Failed to normalize config '{}': {}", file_path, err))?;
         // Deserialize the String back into Config
-        let config: Config = serde_json::from_str(&string_val).unwrap();
+        let config: Config = serde_json::from_str(&string_val)
+            .map_err(|err| format!("Invalid Skippr configuration in '{}': {}", file_path, err))?;
 
         // println!("config: {:?}", config);
 
@@ -425,6 +454,7 @@ impl Config {
         Config::setenv("SKIPPR_S3_BUCKET", &bucket);
 
         // panic!("test");
+        Ok(())
     }
 
     fn merge_env_vars(val: &mut Value, prefix: String) {
@@ -532,6 +562,120 @@ impl Config {
         Ok(parts[1].to_string())
     }
 
+    fn validate_registry_ref_exists<T>(
+        registry: Option<&HashMap<String, T>>,
+        reference: &str,
+        expected_prefix: &str,
+        pipeline_name: &str,
+        field_name: &str,
+    ) -> Result<String, String> {
+        let entry_name = Self::parse_registry_ref(reference, expected_prefix).map_err(|err| {
+            format!(
+                "Invalid configuration for pipeline '{}': {} must be a {} reference. {}",
+                pipeline_name, field_name, expected_prefix, err
+            )
+        })?;
+
+        if registry.is_some_and(|entries| entries.contains_key(&entry_name)) {
+            Ok(entry_name)
+        } else {
+            Err(format!(
+                "Invalid configuration for pipeline '{}': {} references '{}', but '{}' is not defined.",
+                pipeline_name, field_name, reference, entry_name
+            ))
+        }
+    }
+
+    pub fn validate_pipeline_registry_refs_for(
+        config: &Config,
+        pipeline_name: &str,
+        pipeline: &Pipeline,
+    ) -> Result<(), String> {
+        let data_source_ref = pipeline.data_source.as_ref().ok_or_else(|| {
+            format!(
+                "Invalid configuration for pipeline '{}': data_source is required.",
+                pipeline_name
+            )
+        })?;
+        Self::validate_registry_ref_exists(
+            config.data_sources.as_ref(),
+            data_source_ref,
+            "data_sources",
+            pipeline_name,
+            "data_source",
+        )?;
+
+        let data_sink_ref = pipeline.data_sink.as_ref().ok_or_else(|| {
+            format!(
+                "Invalid configuration for pipeline '{}': data_sink is required.",
+                pipeline_name
+            )
+        })?;
+        let data_sink_name = Self::validate_registry_ref_exists(
+            config.data_sinks.as_ref(),
+            data_sink_ref,
+            "data_sinks",
+            pipeline_name,
+            "data_sink",
+        )?;
+
+        if let Some(schema_ref) = config
+            .data_sinks
+            .as_ref()
+            .and_then(|sinks| sinks.get(&data_sink_name))
+            .and_then(|entry| entry.schema_sink.as_ref())
+        {
+            Self::validate_registry_ref_exists(
+                config.schema_sinks.as_ref(),
+                schema_ref,
+                "schema_sinks",
+                pipeline_name,
+                "data_sink.schema_sink",
+            )?;
+        }
+
+        if let Some(deadletter_ref) = pipeline.deadletter_sink.as_ref() {
+            let deadletter_name = Self::validate_registry_ref_exists(
+                config.deadletter_sinks.as_ref(),
+                deadletter_ref,
+                "deadletter_sinks",
+                pipeline_name,
+                "deadletter_sink",
+            )?;
+            if let Some(schema_ref) = config
+                .deadletter_sinks
+                .as_ref()
+                .and_then(|sinks| sinks.get(&deadletter_name))
+                .and_then(|entry| entry.schema_sink.as_ref())
+            {
+                Self::validate_registry_ref_exists(
+                    config.schema_sinks.as_ref(),
+                    schema_ref,
+                    "schema_sinks",
+                    pipeline_name,
+                    "deadletter_sink.schema_sink",
+                )?;
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn validate_current_pipeline_registry_refs() -> Result<(), String> {
+        let config = Config::get();
+        let pipeline_name = PIPELINE_NAME.read().clone();
+        let pipeline = config
+            .pipelines
+            .get(pipeline_name.as_str())
+            .ok_or_else(|| {
+                format!(
+                    "Invalid configuration: pipeline '{}' is not defined.",
+                    pipeline_name
+                )
+            })?;
+        Self::validate_pipeline_registry_refs_for(&config, &pipeline_name, pipeline)
+    }
+
     /// Resolve the schema sink for a `DataSinkEntry` and merge inherited
     /// fields into its `DataSinkPluginConfig`. This is the single point where
     /// a data sink inherits control-plane config (database name, etc.) from
@@ -575,23 +719,16 @@ impl Config {
                 }
             };
 
-            if pipline.data_source.is_some() {
-                // split dot string
-                let input_plugin_name = pipline
-                    .data_source
-                    .as_ref()
-                    .unwrap()
-                    .split('.')
-                    .collect::<Vec<&str>>()[1]
-                    .to_string();
+            if let Some(data_source_ref) = pipline.data_source.as_ref() {
+                let input_plugin_name =
+                    match Self::parse_registry_ref(data_source_ref, "data_sources") {
+                        Ok(name) => name,
+                        Err(_) => Config::getenv("DATA_SOURCE_PLUGIN_NAME", ""),
+                    };
 
                 let res = match config.data_sources.as_ref() {
                     Some(data_sources) => match data_sources.get(&input_plugin_name) {
-                        Some(plugin_config) => plugin_config
-                            .plugin_name()
-                            .clone()
-                            .or(Some("".to_string()))
-                            .unwrap(),
+                        Some(plugin_config) => plugin_config.plugin_name().unwrap_or_default(),
                         None => Config::getenv("DATA_SOURCE_PLUGIN_NAME", ""),
                     },
                     None => Config::getenv("DATA_SOURCE_PLUGIN_NAME", ""),
@@ -622,24 +759,16 @@ impl Config {
                 }
             };
 
-            if pipline.data_sink.is_some() {
-                // split dot string
-                let output_plugin_name = pipline
-                    .data_sink
-                    .as_ref()
-                    .unwrap()
-                    .split('.')
-                    .collect::<Vec<&str>>()[1]
-                    .to_string();
+            if let Some(data_sink_ref) = pipline.data_sink.as_ref() {
+                let output_plugin_name = match Self::parse_registry_ref(data_sink_ref, "data_sinks")
+                {
+                    Ok(name) => name,
+                    Err(_) => Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""),
+                };
 
                 let res = match config.data_sinks.as_ref() {
                     Some(data_sinks) => match data_sinks.get(&output_plugin_name) {
-                        Some(entry) => entry
-                            .config
-                            .plugin_name()
-                            .clone()
-                            .or(Some("".to_string()))
-                            .unwrap(),
+                        Some(entry) => entry.config.plugin_name().unwrap_or_default(),
                         None => Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""),
                     },
                     None => Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""),
@@ -881,25 +1010,34 @@ impl Config {
     // Target WAL object size in bytes (default 4 MiB)
     pub fn get_wal_bytes_per_file() -> u64 {
         if Config::get_envcache("WAL_BYTES_PER_FILE") != "" {
-            return Config::get_envcache("WAL_BYTES_PER_FILE")
-                .parse::<u64>()
-                .unwrap_or(4 * 1024 * 1024);
+            return Self::parse_cached_u64("WAL_BYTES_PER_FILE", 4 * 1024 * 1024);
         } else {
             let val = Config::getenv("WAL_BYTES_PER_FILE", &(4 * 1024 * 1024).to_string());
             Config::set_evncache("WAL_BYTES_PER_FILE", &val);
-            val.parse::<u64>().unwrap_or(4 * 1024 * 1024)
+            val.parse::<u64>().unwrap_or_else(|_| {
+                warn!(
+                    "Invalid 'WAL_BYTES_PER_FILE' value '{}'. Falling back to default {}.",
+                    val,
+                    4 * 1024 * 1024
+                );
+                4 * 1024 * 1024
+            })
         }
     }
 
     pub fn get_wal_max_delay_seconds() -> u64 {
         if Config::get_envcache("WAL_MAX_DELAY_SECONDS") != "" {
-            return Config::get_envcache("WAL_MAX_DELAY_SECONDS")
-                .parse::<u64>()
-                .unwrap_or(60);
+            return Self::parse_cached_u64("WAL_MAX_DELAY_SECONDS", 60);
         } else {
             let val = Config::getenv("WAL_MAX_DELAY_SECONDS", "60");
             Config::set_evncache("WAL_MAX_DELAY_SECONDS", &val);
-            val.parse::<u64>().unwrap_or(60)
+            val.parse::<u64>().unwrap_or_else(|_| {
+                warn!(
+                    "Invalid 'WAL_MAX_DELAY_SECONDS' value '{}'. Falling back to default 60.",
+                    val
+                );
+                60
+            })
         }
     }
 
@@ -1216,6 +1354,46 @@ impl Config {
         }
     }
 
+    fn validate_env_u64(name: &str, violations: &mut Vec<String>) {
+        let value = Config::getenv(name, "");
+        if value.trim().is_empty() {
+            return;
+        }
+        if value.parse::<u64>().is_err() {
+            violations.push(format!(
+                "Invalid '{}' value '{}'. Expected an unsigned integer.",
+                name, value
+            ));
+        }
+    }
+
+    fn validate_env_u8(name: &str, violations: &mut Vec<String>) {
+        let value = Config::getenv(name, "");
+        if value.trim().is_empty() {
+            return;
+        }
+        if value.parse::<u8>().is_err() {
+            violations.push(format!(
+                "Invalid '{}' value '{}'. Expected an integer between 0 and 255.",
+                name, value
+            ));
+        }
+    }
+
+    fn parse_cached_u64(name: &str, default: u64) -> u64 {
+        let cached = Config::get_envcache(name);
+        if cached == DEFAULT_CONFIG {
+            return default;
+        }
+        cached.parse::<u64>().unwrap_or_else(|_| {
+            warn!(
+                "Invalid '{}' value '{}'. Falling back to default {}.",
+                name, cached, default
+            );
+            default
+        })
+    }
+
     pub fn get_config_dependency_violations() -> Vec<String> {
         let mut violations: Vec<String> = Vec::new();
 
@@ -1255,6 +1433,25 @@ impl Config {
         let config = Config::get();
         let pipeline = Config::get_pipeline_config();
         violations.extend(Self::deadletter_config_violations_for(&config, &pipeline));
+        let pipeline_name = Config::get_pipeline_name();
+        if config.pipelines.contains_key(&pipeline_name) {
+            if let Err(err) =
+                Self::validate_pipeline_registry_refs_for(&config, &pipeline_name, &pipeline)
+            {
+                violations.push(err);
+            }
+        }
+
+        Self::validate_env_u64("SYNC_FREQUENCY", &mut violations);
+        Self::validate_env_u64("BUFFER_THRESHOLD_BYTES", &mut violations);
+        Self::validate_env_u64("BUFFER_THRESHOLD_SECONDS", &mut violations);
+        Self::validate_env_u64("WAL_BYTES_PER_FILE", &mut violations);
+        Self::validate_env_u64("WAL_MAX_DELAY_SECONDS", &mut violations);
+        Self::validate_env_u64("STATS_FLUSH_SECONDS", &mut violations);
+        Self::validate_env_u64("SCHEMA_SYNC_DEBOUNCE_MS", &mut violations);
+        Self::validate_env_u64("SCHEMA_SYNC_DRAIN_TIMEOUT_SECONDS", &mut violations);
+        Self::validate_env_u64("SCHEMA_SYNC_TIMEOUT_SECONDS", &mut violations);
+        Self::validate_env_u8("STATS_HLL_PRECISION", &mut violations);
 
         violations
     }
@@ -1311,18 +1508,19 @@ impl Config {
         const DEFAULT: u64 = 900;
 
         if Config::get_envcache("SYNC_FREQUENCY") != "" {
-            if Config::get_envcache("SYNC_FREQUENCY") == DEFAULT_CONFIG {
-                return DEFAULT;
-            }
-            return Config::get_envcache("SYNC_FREQUENCY")
-                .parse::<u64>()
-                .unwrap();
+            return Self::parse_cached_u64("SYNC_FREQUENCY", DEFAULT);
         } else {
             let pipline = Config::get_pipeline_config();
 
             let default_sync_frequency = &Config::getenv("SYNC_FREQUENCY", &DEFAULT.to_string())
                 .parse::<u64>()
-                .unwrap();
+                .unwrap_or_else(|_| {
+                    warn!(
+                        "Invalid 'SYNC_FREQUENCY' value. Falling back to default {}.",
+                        DEFAULT
+                    );
+                    DEFAULT
+                });
 
             let sync_frequency = pipline
                 .sync_frequency_seconds
@@ -1465,15 +1663,18 @@ impl Config {
 
     pub fn get_pipeline_buffer_threshold_bytes() -> u64 {
         if Config::get_envcache("BUFFER_THRESHOLD_BYTES") != "" {
-            return Config::get_envcache("BUFFER_THRESHOLD_BYTES")
-                .parse::<u64>()
-                .unwrap();
+            return Self::parse_cached_u64("BUFFER_THRESHOLD_BYTES", 10_485_760);
         } else {
             let pipline = Config::get_pipeline_config();
 
             let default = Config::getenv("BUFFER_THRESHOLD_BYTES", "10485760")
                 .parse::<u64>()
-                .unwrap();
+                .unwrap_or_else(|_| {
+                    warn!(
+                        "Invalid 'BUFFER_THRESHOLD_BYTES' value. Falling back to default 10485760."
+                    );
+                    10_485_760
+                });
 
             let buffer_threshold_bytes = match pipline.buffer_threshold_bytes.as_ref() {
                 Some(buffer_threshold_bytes) => buffer_threshold_bytes,
@@ -1490,15 +1691,16 @@ impl Config {
 
     pub fn get_pipeline_buffer_threshold_seconds() -> u64 {
         if Config::get_envcache("BUFFER_THRESHOLD_SECONDS") != "" {
-            return Config::get_envcache("BUFFER_THRESHOLD_SECONDS")
-                .parse::<u64>()
-                .unwrap();
+            return Self::parse_cached_u64("BUFFER_THRESHOLD_SECONDS", 60);
         } else {
             let pipline = Config::get_pipeline_config();
 
             let default = Config::getenv("BUFFER_THRESHOLD_SECONDS", "60")
                 .parse::<u64>()
-                .unwrap();
+                .unwrap_or_else(|_| {
+                    warn!("Invalid 'BUFFER_THRESHOLD_SECONDS' value. Falling back to default 60.");
+                    60
+                });
 
             let buffer_threshold_seconds = match pipline.buffer_threshold_seconds.as_ref() {
                 Some(buffer_threshold_seconds) => buffer_threshold_seconds,
@@ -1528,9 +1730,20 @@ impl Config {
 
         let pipeline_config = Config::get_pipeline_config();
         let config = Config::get();
+        let pipeline_name = Config::get_pipeline_name();
         let input_name = match pipeline_config.data_source.as_ref() {
-            Some(input) => Self::parse_registry_ref(input, "data_sources")?,
-            None => return Err("Input not found".to_string()),
+            Some(input) => Self::parse_registry_ref(input, "data_sources").map_err(|err| {
+                format!(
+                    "Invalid configuration for pipeline '{}': data_source must reference data_sources.<name>. {}",
+                    pipeline_name, err
+                )
+            })?,
+            None => {
+                return Err(format!(
+                    "Invalid configuration for pipeline '{}': data_source is required.",
+                    pipeline_name
+                ));
+            }
         };
 
         config
@@ -1538,22 +1751,43 @@ impl Config {
             .as_ref()
             .and_then(|registry| registry.get(&input_name))
             .cloned()
-            .ok_or_else(|| "Input not found".to_string())
+            .ok_or_else(|| {
+                format!(
+                    "Invalid configuration for pipeline '{}': data_source references 'data_sources.{}', but '{}' is not defined in data_sources.",
+                    pipeline_name, input_name, input_name
+                )
+            })
     }
 
     pub fn get_pipeline_output_plugin_config() -> Result<DataSinkPluginConfig, String> {
         let pipeline_config = Config::get_pipeline_config();
         let config = Config::get();
+        let pipeline_name = Config::get_pipeline_name();
         let output_name = match pipeline_config.data_sink.as_ref() {
-            Some(output) => Self::parse_registry_ref(output, "data_sinks")?,
-            None => return Err("Output not found".to_string()),
+            Some(output) => Self::parse_registry_ref(output, "data_sinks").map_err(|err| {
+                format!(
+                    "Invalid configuration for pipeline '{}': data_sink must reference data_sinks.<name>. {}",
+                    pipeline_name, err
+                )
+            })?,
+            None => {
+                return Err(format!(
+                    "Invalid configuration for pipeline '{}': data_sink is required.",
+                    pipeline_name
+                ));
+            }
         };
 
         let entry = config
             .data_sinks
             .as_ref()
             .and_then(|registry| registry.get(&output_name))
-            .ok_or_else(|| "Output not found".to_string())?;
+            .ok_or_else(|| {
+                format!(
+                    "Invalid configuration for pipeline '{}': data_sink references 'data_sinks.{}', but '{}' is not defined in data_sinks.",
+                    pipeline_name, output_name, output_name
+                )
+            })?;
 
         Ok(Self::inherit_schema_sink_fields(&config, entry))
     }
@@ -1567,61 +1801,117 @@ impl Config {
     pub fn get_pipeline_schema_plugin_config() -> Result<SchemaSinkConfig, String> {
         let pipeline_config = Config::get_pipeline_config();
         let config = Config::get();
+        let pipeline_name = Config::get_pipeline_name();
 
-        let sink_ref = pipeline_config
-            .data_sink
-            .as_ref()
-            .ok_or_else(|| "Data sink not found".to_string())?;
-        let sink_name = Self::parse_registry_ref(sink_ref, "data_sinks")?;
+        let sink_ref = pipeline_config.data_sink.as_ref().ok_or_else(|| {
+            format!(
+                "Invalid configuration for pipeline '{}': data_sink is required.",
+                pipeline_name
+            )
+        })?;
+        let sink_name = Self::parse_registry_ref(sink_ref, "data_sinks").map_err(|err| {
+            format!(
+                "Invalid configuration for pipeline '{}': data_sink must reference data_sinks.<name>. {}",
+                pipeline_name, err
+            )
+        })?;
 
         let entry = config
             .data_sinks
             .as_ref()
             .and_then(|registry| registry.get(&sink_name))
-            .ok_or_else(|| "Data sink entry not found".to_string())?;
+            .ok_or_else(|| {
+                format!(
+                    "Invalid configuration for pipeline '{}': data_sink references '{}', but '{}' is not defined in data_sinks.",
+                    pipeline_name, sink_ref, sink_name
+                )
+            })?;
 
         let schema_ref = entry
             .schema_sink
             .as_ref()
-            .ok_or_else(|| "Schema sink not configured on data sink entry".to_string())?;
-        let schema_name = Self::parse_registry_ref(schema_ref, "schema_sinks")?;
+            .ok_or_else(|| {
+                format!(
+                    "Invalid configuration for pipeline '{}': data sink '{}' does not configure schema_sink.",
+                    pipeline_name, sink_ref
+                )
+            })?;
+        let schema_name = Self::parse_registry_ref(schema_ref, "schema_sinks").map_err(|err| {
+            format!(
+                "Invalid configuration for pipeline '{}': data sink '{}' schema_sink must reference schema_sinks.<name>. {}",
+                pipeline_name, sink_ref, err
+            )
+        })?;
 
         config
             .schema_sinks
             .as_ref()
             .and_then(|registry| registry.get(&schema_name))
             .cloned()
-            .ok_or_else(|| "Schema sink not found".to_string())
+            .ok_or_else(|| {
+                format!(
+                    "Invalid configuration for pipeline '{}': schema_sink references '{}', but '{}' is not defined in schema_sinks.",
+                    pipeline_name, schema_ref, schema_name
+                )
+            })
     }
 
     pub fn get_pipeline_deadletter_schema_config() -> Result<SchemaSinkConfig, String> {
         let pipeline_config = Config::get_pipeline_config();
         let config = Config::get();
+        let pipeline_name = Config::get_pipeline_name();
 
-        let sink_ref = pipeline_config
-            .deadletter_sink
-            .as_ref()
-            .ok_or_else(|| "Deadletter sink not configured".to_string())?;
-        let sink_name = Self::parse_registry_ref(sink_ref, "deadletter_sinks")?;
+        let sink_ref = pipeline_config.deadletter_sink.as_ref().ok_or_else(|| {
+            format!(
+                "Invalid configuration for pipeline '{}': deadletter_sink is not configured.",
+                pipeline_name
+            )
+        })?;
+        let sink_name = Self::parse_registry_ref(sink_ref, "deadletter_sinks").map_err(|err| {
+            format!(
+                "Invalid configuration for pipeline '{}': deadletter_sink must reference deadletter_sinks.<name>. {}",
+                pipeline_name, err
+            )
+        })?;
 
         let entry = config
             .deadletter_sinks
             .as_ref()
             .and_then(|registry| registry.get(&sink_name))
-            .ok_or_else(|| "Deadletter sink entry not found".to_string())?;
+            .ok_or_else(|| {
+                format!(
+                    "Invalid configuration for pipeline '{}': deadletter_sink references '{}', but '{}' is not defined in deadletter_sinks.",
+                    pipeline_name, sink_ref, sink_name
+                )
+            })?;
 
         let schema_ref = entry
             .schema_sink
             .as_ref()
-            .ok_or_else(|| "Schema sink not configured on deadletter sink entry".to_string())?;
-        let schema_name = Self::parse_registry_ref(schema_ref, "schema_sinks")?;
+            .ok_or_else(|| {
+                format!(
+                    "Invalid configuration for pipeline '{}': deadletter sink '{}' does not configure schema_sink.",
+                    pipeline_name, sink_ref
+                )
+            })?;
+        let schema_name = Self::parse_registry_ref(schema_ref, "schema_sinks").map_err(|err| {
+            format!(
+                "Invalid configuration for pipeline '{}': deadletter sink '{}' schema_sink must reference schema_sinks.<name>. {}",
+                pipeline_name, sink_ref, err
+            )
+        })?;
 
         config
             .schema_sinks
             .as_ref()
             .and_then(|registry| registry.get(&schema_name))
             .cloned()
-            .ok_or_else(|| "Schema sink not found".to_string())
+            .ok_or_else(|| {
+                format!(
+                    "Invalid configuration for pipeline '{}': schema_sink references '{}', but '{}' is not defined in schema_sinks.",
+                    pipeline_name, schema_ref, schema_name
+                )
+            })
     }
 
     pub fn deserialize_pipeline_input_plugin_config<T: DeserializeOwned>() -> Result<T, String> {
@@ -1680,8 +1970,9 @@ impl Config {
                 let path = entry.path();
                 if path.is_dir() {
                     debug!("Directory: {}", path.display());
-                    Config::list_dir_contents(path.clone())
-                        .expect(format!("Couldn't list dir {}", path.display()).as_str());
+                    if let Err(err) = Config::list_dir_contents(path.clone()) {
+                        warn!("Couldn't list dir {}: {}", path.display(), err);
+                    }
                 } else {
                     debug!("File: {}", path.display());
                 }
@@ -1696,15 +1987,19 @@ impl Config {
             data_dir.pop();
         }
 
-        let pipeline_name = Config::get_full_namespace_name();
-
-        let data_dir = format!("{}/{}", data_dir, pipeline_name);
+        if !Config::truth_value(&Config::getenv("SKIPPR_PIPELINE_DATA_ROOT", "false")) {
+            let pipeline_name = Config::get_full_namespace_name();
+            data_dir = format!("{}/{}", data_dir, pipeline_name);
+        }
         match fs::create_dir_all(&data_dir) {
             Ok(_g) => {}
-            Err(err) => panic!(
-                "Error creating data dir {}, does the host path exist? {:?}",
-                data_dir, err
-            ),
+            Err(err) => {
+                eprintln!(
+                    "[skippr] config failed: failed to create data directory '{}': {}",
+                    data_dir, err
+                );
+                std::process::exit(1);
+            }
         }
 
         data_dir
@@ -1736,10 +2031,12 @@ impl Config {
 
             let default_token = Config::getenv("WORKSPACE_NAME", "default");
 
-            let workspace_name = match config.skippr.unwrap().workspace.as_ref() {
-                Some(workspace) => workspace.to_string(),
-                None => default_token,
-            };
+            let workspace_name = config
+                .skippr
+                .as_ref()
+                .and_then(|skippr| skippr.workspace.as_ref())
+                .map(ToString::to_string)
+                .unwrap_or(default_token);
 
             Config::set_evncache("WORKSPACE_NAME", &workspace_name.clone());
             workspace_name
@@ -2584,8 +2881,7 @@ impl Config {
     }
 
     pub fn get_pipeline_cache_dir() -> String {
-        // get_data_dir() already resolves to ./data/<workspace>_<pipeline>
-        // Use it directly to avoid nested <workspace>_<pipeline>/<workspace>_<pipeline>
+        // get_data_dir() is already the per-pipeline root (no extra suffix).
         let path = Self::get_data_dir();
         let _ = std::fs::create_dir_all(&path);
         path
@@ -2948,6 +3244,129 @@ data_sinks:
 
         assert!(Config::resolve_deadletter_plugin_config_for(&config, &pipeline).is_err());
         assert!(!Config::deadletter_config_violations_for(&config, &pipeline).is_empty());
+    }
+
+    #[test]
+    fn malformed_pipeline_registry_ref_returns_friendly_error() {
+        let config: Config = serde_json::from_value(json!({
+            "skippr": {
+                "workspace": "default"
+            },
+            "pipelines": {
+                "bike_hire": {
+                    "data_source": "s3_bike_hire",
+                    "data_sink": "data_sinks.snowflake"
+                }
+            },
+            "data_sources": {
+                "s3_bike_hire": {
+                    "S3": {
+                        "s3_bucket": "bucket",
+                        "s3_prefix": "prefix/"
+                    }
+                }
+            },
+            "data_sinks": {
+                "snowflake": {
+                    "Snowflake": {
+                        "account": "acct"
+                    }
+                }
+            }
+        }))
+        .unwrap();
+        let pipeline = config.pipelines.get("bike_hire").unwrap();
+
+        let err = Config::validate_pipeline_registry_refs_for(&config, "bike_hire", pipeline)
+            .expect_err("unqualified data_source should be rejected");
+
+        assert!(err.contains("pipeline 'bike_hire'"));
+        assert!(err.contains("data_source"));
+        assert!(err.contains("Expected 'data_sources.<name>'"));
+    }
+
+    #[test]
+    fn missing_pipeline_input_config_names_missing_registry_entry() {
+        let original_config = APP_CONFIG.read().clone();
+        let original_pipeline_name = PIPELINE_NAME.read().clone();
+        ENV_CACHE.write().clear();
+
+        let config: Config = serde_json::from_value(json!({
+            "skippr": {
+                "workspace": "default"
+            },
+            "pipelines": {
+                "bike_hire": {
+                    "data_source": "data_sources.missing",
+                    "data_sink": "data_sinks.output"
+                }
+            },
+            "data_sources": {},
+            "data_sinks": {
+                "output": {
+                    "Snowflake": {
+                        "account": "acct"
+                    }
+                }
+            }
+        }))
+        .unwrap();
+
+        *APP_CONFIG.write() = Some(config);
+        *PIPELINE_NAME.write() = "bike_hire".to_string();
+
+        let err = Config::get_pipeline_input_plugin_config()
+            .expect_err("missing input registry entry should be rejected");
+
+        assert!(err.contains("pipeline 'bike_hire'"));
+        assert!(err.contains("data_sources.missing"));
+        assert!(err.contains("not defined in data_sources"));
+
+        *APP_CONFIG.write() = original_config;
+        *PIPELINE_NAME.write() = original_pipeline_name;
+        ENV_CACHE.write().clear();
+    }
+
+    #[test]
+    #[serial]
+    fn invalid_numeric_env_is_reported_as_config_violation() {
+        let original = std::env::var("BUFFER_THRESHOLD_BYTES").ok();
+        ENV_CACHE.write().clear();
+        std::env::set_var("BUFFER_THRESHOLD_BYTES", "lots");
+
+        let violations = Config::get_config_dependency_violations();
+
+        assert!(violations.iter().any(|violation| {
+            violation.contains("BUFFER_THRESHOLD_BYTES")
+                && violation.contains("Expected an unsigned integer")
+        }));
+
+        match original {
+            Some(value) => std::env::set_var("BUFFER_THRESHOLD_BYTES", value),
+            None => std::env::remove_var("BUFFER_THRESHOLD_BYTES"),
+        }
+        ENV_CACHE.write().clear();
+    }
+
+    #[test]
+    #[serial]
+    fn invalid_config_file_parse_returns_friendly_error() {
+        let original_config_file = std::env::var("SKIPPR_CONFIG_FILE").ok();
+        let tempdir = tempfile::tempdir().expect("create tempdir");
+        let config_path = tempdir.path().join("skippr.yml");
+        std::fs::write(&config_path, "skippr:\n  workspace: [").expect("write config");
+        std::env::set_var("SKIPPR_CONFIG_FILE", &config_path);
+
+        let err = Config::try_build_config().expect_err("invalid yaml should be rejected");
+
+        assert!(err.contains("Failed to parse YAML config"));
+        assert!(err.contains(config_path.to_string_lossy().as_ref()));
+
+        match original_config_file {
+            Some(value) => std::env::set_var("SKIPPR_CONFIG_FILE", value),
+            None => std::env::remove_var("SKIPPR_CONFIG_FILE"),
+        }
+        ENV_CACHE.write().clear();
     }
 
     #[test]

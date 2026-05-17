@@ -12,8 +12,10 @@ use nix::sys::signal::{kill, Signal};
 #[cfg(unix)]
 use nix::unistd::Pid;
 
+use chrono::TimeZone;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::prelude::*;
+use serde_json::{json, Value};
 use tracing::{error, info, warn};
 
 use crate::buffer::ingest_buffer::{wal_recover, Buffers};
@@ -22,7 +24,7 @@ use crate::discover::{Metadata, OutputMetadata, PipelineMetadata};
 use crate::helpers::configuration::{Config, PIPELINE_NAME};
 use crate::helpers::logger::LogLevel;
 use crate::helpers::offsets::{Offsets, SLED_NAME};
-use crate::helpers::sync_reporter::SyncReporter;
+use crate::helpers::sync_reporter::{affected_assets_stub, RunTelemetry, SyncReporter};
 use crate::ingest::deadletter;
 use crate::ingest_work::Ingest;
 use crate::metrics::{Metrics, MetricsStatus};
@@ -41,6 +43,201 @@ use crate::runtime_plugins::schema_state::{
 };
 use crate::sqlrt::query::{query_with_options, QueryExecutionMode, QueryExecutionOptions};
 use crate::{LOGGER, METADATA, METRICS, RUNNING};
+
+fn current_run_id() -> String {
+    METRICS.read().run_id.clone()
+}
+
+fn schema_fields_json(metadata: &Metadata) -> Value {
+    let mut fields = metadata.field_details();
+    fields.sort_by(|a, b| a.0.cmp(&b.0));
+    json!(fields
+        .into_iter()
+        .map(|(name, field_type, nullable)| {
+            json!({
+                "name": name,
+                "field_type": field_type,
+                "nullable": nullable
+            })
+        })
+        .collect::<Vec<_>>())
+}
+
+fn metadata_schema_json(namespace: &str, metadata: &Metadata) -> Value {
+    json!({
+        "namespace": namespace,
+        "fields": schema_fields_json(metadata)
+    })
+}
+
+fn schema_diff_json(before: Option<&Metadata>, after: &Metadata) -> Value {
+    let before_fields: HashMap<String, (String, bool)> = before
+        .map(|metadata| {
+            metadata
+                .field_details()
+                .into_iter()
+                .map(|(name, field_type, nullable)| (name, (field_type, nullable)))
+                .collect()
+        })
+        .unwrap_or_default();
+    let after_fields: HashMap<String, (String, bool)> = after
+        .field_details()
+        .into_iter()
+        .map(|(name, field_type, nullable)| (name, (field_type, nullable)))
+        .collect();
+
+    let mut added: Vec<_> = after_fields
+        .keys()
+        .filter(|name| !before_fields.contains_key(*name))
+        .cloned()
+        .collect();
+    added.sort();
+    let mut removed: Vec<_> = before_fields
+        .keys()
+        .filter(|name| !after_fields.contains_key(*name))
+        .cloned()
+        .collect();
+    removed.sort();
+    let mut changed: Vec<_> = after_fields
+        .iter()
+        .filter_map(|(name, (field_type, nullable))| {
+            before_fields
+                .get(name)
+                .and_then(|(before_type, before_nullable)| {
+                    if before_type != field_type || before_nullable != nullable {
+                        Some(json!({
+                            "name": name,
+                            "before": {
+                                "field_type": before_type,
+                                "nullable": before_nullable
+                            },
+                            "after": {
+                                "field_type": field_type,
+                                "nullable": nullable
+                            }
+                        }))
+                    } else {
+                        None
+                    }
+                })
+        })
+        .collect();
+    changed.sort_by(|a, b| {
+        a.get("name")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .cmp(b.get("name").and_then(Value::as_str).unwrap_or_default())
+    });
+
+    json!({
+        "added": added,
+        "removed": removed,
+        "changed": changed
+    })
+}
+
+fn schema_diff_has_changes(diff: &Value) -> bool {
+    ["added", "removed", "changed"].iter().any(|key| {
+        diff.get(key)
+            .and_then(Value::as_array)
+            .is_some_and(|items| !items.is_empty())
+    })
+}
+
+fn freshness_json() -> Option<Value> {
+    let fields = Config::get_transform_batch_time_fields();
+    let configured_fields: Vec<String> = fields
+        .split(',')
+        .map(str::trim)
+        .filter(|field| !field.is_empty())
+        .map(ToString::to_string)
+        .collect();
+    if configured_fields.is_empty() {
+        return None;
+    }
+    let latest_timestamp =
+        crate::metrics::counters::LATEST_TIMESTAMP.load(std::sync::atomic::Ordering::Relaxed);
+    let latest_iso = if latest_timestamp > 0 {
+        chrono::Utc
+            .timestamp_opt(latest_timestamp as i64, 0)
+            .single()
+            .map(|dt| dt.to_rfc3339())
+    } else {
+        None
+    };
+    let lag_seconds = latest_timestamp.gt(&0).then(|| {
+        chrono::Utc::now()
+            .timestamp()
+            .saturating_sub(latest_timestamp as i64)
+    });
+
+    Some(json!({
+        "field_names": configured_fields,
+        "latest_timestamp": latest_timestamp,
+        "latest_iso": latest_iso,
+        "lag_seconds": lag_seconds
+    }))
+}
+
+fn deadletters_json() -> Value {
+    json!({
+        "configured": Config::get_pipeline_deadletters_ref().is_some(),
+        "total": crate::metrics::counters::DEADLETTERS_TOTAL.load(std::sync::atomic::Ordering::Relaxed)
+    })
+}
+
+fn sync_metrics_json(
+    messages_total: u64,
+    bytes_total: u64,
+    rows_written: u64,
+    uploads_in_flight: u64,
+    elapsed_ms: u64,
+) -> Value {
+    json!({
+        "messages_total": messages_total,
+        "bytes_total": bytes_total,
+        "rows_written": rows_written,
+        "uploads_in_flight": uploads_in_flight,
+        "elapsed_ms": elapsed_ms,
+        "wal_write_rows_total": crate::metrics::counters::WAL_WRITE_ROWS_TOTAL.load(std::sync::atomic::Ordering::Relaxed),
+        "wal_compacted_rows_total": crate::metrics::counters::WAL_COMPACTED_ROWS_TOTAL.load(std::sync::atomic::Ordering::Relaxed),
+        "parquet_persisted_rows_total": crate::metrics::counters::PARQUET_PERSISTED_ROWS_TOTAL.load(std::sync::atomic::Ordering::Relaxed),
+        "parquet_persisted_bytes_total": crate::metrics::counters::PARQUET_PERSISTED_BYTES_TOTAL.load(std::sync::atomic::Ordering::Relaxed)
+    })
+}
+
+fn run_telemetry(pipeline: &str, phase: &str) -> RunTelemetry {
+    RunTelemetry {
+        run_id: Some(current_run_id()),
+        phase: Some(phase.to_string()),
+        freshness: freshness_json(),
+        deadletters: Some(deadletters_json()),
+        affected_assets: Some(affected_assets_stub(pipeline)),
+        ..RunTelemetry::default()
+    }
+}
+
+fn sync_status_telemetry(
+    pipeline: &str,
+    messages_total: u64,
+    bytes_total: u64,
+    rows_written: u64,
+    uploads_in_flight: u64,
+    elapsed_ms: u64,
+) -> RunTelemetry {
+    let metrics = sync_metrics_json(
+        messages_total,
+        bytes_total,
+        rows_written,
+        uploads_in_flight,
+        elapsed_ms,
+    );
+    RunTelemetry {
+        metrics: Some(metrics.clone()),
+        metric_points: Some(metrics),
+        ..run_telemetry(pipeline, "syncing")
+    }
+}
 
 async fn cleanup_discover_ingest_artifacts() {
     if Config::get_wal_storage().eq_ignore_ascii_case("s3") {
@@ -257,6 +454,7 @@ pub async fn run_schema(pipeline: &str) {
 
 pub async fn run_discover(output_mode: &str) -> io::Result<()> {
     let pipeline_name = Config::get_pipeline_name();
+    Config::validate_current_pipeline_registry_refs().map_err(io::Error::other)?;
     Ingest::reset_discovery_progress();
     let start_time = Instant::now();
 
@@ -266,7 +464,7 @@ pub async fn run_discover(output_mode: &str) -> io::Result<()> {
     if reporter.enabled() {
         reporter.add_tasks(&["Discovering"]);
     }
-    reporter.discover_start(&pipeline_name);
+    reporter.discover_start(&pipeline_name, run_telemetry(&pipeline_name, "discovering"));
 
     info!(
         "Analysing data and generating Skippr metadata for pipeline: {}",
@@ -381,12 +579,54 @@ pub async fn run_discover(output_mode: &str) -> io::Result<()> {
         .map(|ns_metadata| ns_metadata.field_details().len() as u64)
         .sum();
 
+    for (namespace, metadata) in updated_metadata.metadata.iter() {
+        reporter.namespace_discovered(
+            namespace,
+            metadata.field_details().len(),
+            RunTelemetry {
+                schema: Some(metadata_schema_json(namespace, metadata)),
+                ..run_telemetry(&pipeline_name, "schema")
+            },
+        );
+        let diff = schema_diff_json(pipeline_metadata.metadata.get(namespace), metadata);
+        if schema_diff_has_changes(&diff) {
+            let fields_added = diff
+                .get("added")
+                .and_then(Value::as_array)
+                .map(|items| {
+                    items
+                        .iter()
+                        .filter_map(Value::as_str)
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .unwrap_or_default();
+            reporter.schema_evolved(
+                namespace,
+                fields_added,
+                RunTelemetry {
+                    schema: Some(metadata_schema_json(namespace, metadata)),
+                    schema_diff: Some(diff),
+                    ..run_telemetry(&pipeline_name, "schema")
+                },
+            );
+        }
+    }
+
     let elapsed_ms = start_time.elapsed().as_millis() as u64;
     reporter.discover_complete(
         &pipeline_name,
         namespaces_discovered,
         total_fields,
         elapsed_ms,
+        RunTelemetry {
+            metrics: Some(json!({
+                "namespaces_discovered": namespaces_discovered,
+                "total_fields": total_fields,
+                "elapsed_ms": elapsed_ms
+            })),
+            ..run_telemetry(&pipeline_name, "complete")
+        },
     );
 
     if reporter.enabled() {
@@ -398,6 +638,7 @@ pub async fn run_discover(output_mode: &str) -> io::Result<()> {
 
 pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
     let pipeline_name = Config::get_pipeline_name();
+    Config::validate_current_pipeline_registry_refs().map_err(io::Error::other)?;
     let sync_started = Instant::now();
 
     let stdout_is_tty = std::io::stdout().is_terminal();
@@ -409,7 +650,7 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
     if reporter.enabled() {
         reporter.add_tasks(&["Ingesting", "Finalising"]);
     }
-    reporter.sync_start(&pipeline_name);
+    reporter.sync_start(&pipeline_name, run_telemetry(&pipeline_name, "starting"));
 
     {
         let mut counter_lock = METRICS.write();
@@ -652,7 +893,25 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
                 flatten,
             ) {
                 Ok(schema) => {
-                    reporter.namespace_discovered(namespace, schema.fields().len());
+                    reporter.namespace_discovered(
+                        namespace,
+                        schema.fields().len(),
+                        RunTelemetry {
+                            schema: Some(json!({
+                                "namespace": namespace,
+                                "fields": schema
+                                    .fields()
+                                    .iter()
+                                    .map(|field| json!({
+                                        "name": field.name(),
+                                        "field_type": format!("{:?}", field.data_type()),
+                                        "nullable": field.is_nullable()
+                                    }))
+                                    .collect::<Vec<_>>()
+                            })),
+                            ..run_telemetry(&pipeline_name, "schema")
+                        },
+                    );
                 }
                 Err(e) => {
                     return Err(io::Error::other(format!(
@@ -686,7 +945,22 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
                         let uploads = crate::metrics::counters::UPLOADS_IN_FLIGHT.load(Relaxed) as u64;
                         let elapsed = heartbeat_started.elapsed().as_millis() as u64;
                         let r = SyncReporter::Json;
-                        r.sync_status(&heartbeat_pipeline, msgs, bytes, rows, elapsed, uploads);
+                        r.sync_status(
+                            &heartbeat_pipeline,
+                            msgs,
+                            bytes,
+                            rows,
+                            elapsed,
+                            uploads,
+                            sync_status_telemetry(
+                                &heartbeat_pipeline,
+                                msgs,
+                                bytes,
+                                rows,
+                                uploads,
+                                elapsed,
+                            ),
+                        );
                     }
                     _ = heartbeat_rx.changed() => break,
                 }
@@ -868,7 +1142,25 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
         let total_rows =
             counters::PARQUET_PERSISTED_ROWS_TOTAL.load(std::sync::atomic::Ordering::Relaxed);
         let elapsed_ms = sync_started.elapsed().as_millis() as u64;
-        reporter.sync_complete(&pipeline_name, namespaces_synced, total_rows, elapsed_ms);
+        reporter.sync_complete(
+            &pipeline_name,
+            namespaces_synced,
+            total_rows,
+            elapsed_ms,
+            RunTelemetry {
+                metrics: Some(sync_metrics_json(
+                    crate::metrics::counters::MESSAGES_TOTAL
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    crate::metrics::counters::SOURCE_BYTES_TOTAL
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                    total_rows,
+                    crate::metrics::counters::UPLOADS_IN_FLIGHT
+                        .load(std::sync::atomic::Ordering::Relaxed) as u64,
+                    elapsed_ms,
+                )),
+                ..run_telemetry(&pipeline_name, "complete")
+            },
+        );
     }
 
     if reporter.enabled() {
@@ -1088,4 +1380,50 @@ pub async fn sync_input_plugin(
     )
     .await
     .map_err(|err| io::Error::other(format!("Runtime data source sync failed: {}", err)))
+}
+
+#[cfg(test)]
+mod observability_tests {
+    use super::*;
+    use crate::discover::SkipprDataType;
+
+    #[test]
+    fn schema_diff_reports_added_and_changed_fields() {
+        let mut before = Metadata::new().unwrap();
+        before.set_field("id", Metadata::new_with_type(SkipprDataType::String, "id"));
+        before.set_field(
+            "amount",
+            Metadata::new_with_type(SkipprDataType::Long, "amount"),
+        );
+
+        let mut after = Metadata::new().unwrap();
+        after.set_field("id", Metadata::new_with_type(SkipprDataType::String, "id"));
+        after.set_field(
+            "amount",
+            Metadata::new_with_type(SkipprDataType::Double, "amount"),
+        );
+        after.set_field(
+            "created_at",
+            Metadata::new_with_type(SkipprDataType::Date, "created_at"),
+        );
+
+        let diff = schema_diff_json(Some(&before), &after);
+
+        assert!(schema_diff_has_changes(&diff));
+        assert_eq!(
+            diff.get("added")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(Value::as_str),
+            Some("created_at")
+        );
+        assert_eq!(
+            diff.get("changed")
+                .and_then(Value::as_array)
+                .and_then(|items| items.first())
+                .and_then(|item| item.get("name"))
+                .and_then(Value::as_str),
+            Some("amount")
+        );
+    }
 }
