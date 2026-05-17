@@ -11,6 +11,7 @@ pub(super) enum AgentMode {
     Ask,
     Review,
     Agent,
+    Direct,
 }
 
 impl std::str::FromStr for AgentMode {
@@ -21,8 +22,9 @@ impl std::str::FromStr for AgentMode {
             "ask" => Ok(Self::Ask),
             "review" => Ok(Self::Review),
             "agent" => Ok(Self::Agent),
+            "direct" => Ok(Self::Direct),
             _ => Err(format!(
-                "invalid agent_type '{}' for suite 'data_engineer' (expected 'ask' | 'review' | 'agent')",
+                "invalid agent_type '{}' for suite 'data_engineer' (expected 'ask' | 'review' | 'agent' | 'direct')",
                 s
             )),
         }
@@ -327,13 +329,28 @@ impl DataEngineerSuite {
                 caps.insert(AgentToolCapability::CatalogNote);
                 caps.insert(AgentToolCapability::Artifacts);
             }
+            AgentMode::Direct => {
+                caps.insert(AgentToolCapability::RunSql);
+                caps.insert(AgentToolCapability::AskApproval);
+                caps.insert(AgentToolCapability::SearchDbtExamples);
+                caps.insert(AgentToolCapability::DbtValidate);
+                caps.insert(AgentToolCapability::PublishDbt);
+                caps.insert(AgentToolCapability::Artifacts);
+            }
         }
-        if allow_user_interrupt_tools && agent_mode != AgentMode::Review {
+        if allow_user_interrupt_tools
+            && !matches!(agent_mode, AgentMode::Review | AgentMode::Direct)
+        {
             caps.insert(AgentToolCapability::AskUser);
         }
-        if allow_local_ide_tools && matches!(agent_mode, AgentMode::Ask | AgentMode::Agent) {
+        if allow_local_ide_tools
+            && matches!(
+                agent_mode,
+                AgentMode::Ask | AgentMode::Agent | AgentMode::Direct
+            )
+        {
             caps.insert(AgentToolCapability::LocalIdeTools);
-            if agent_mode == AgentMode::Agent {
+            if matches!(agent_mode, AgentMode::Agent | AgentMode::Direct) {
                 caps.insert(AgentToolCapability::LocalIdeMutations);
             }
         }
@@ -545,6 +562,86 @@ impl DataEngineerSuite {
             )
             .await
             .map_err(|e| e.to_string()),
+        )
+    }
+
+    pub(super) async fn run_direct(
+        thread_id: &str,
+        question: &str,
+        sctx: &SuiteCtx,
+    ) -> Result<Vec<FlowFrame>, String> {
+        Self::prepare_direct_dbt_workspace(sctx).await?;
+        let sys = prompts::with_time_context(prompts::direct_system_prompt());
+        let tools_card = Self::build_direct_agent_tools_card();
+        let registry = Self::build_direct_agent_tools(sctx)?;
+        let actx = Self::build_agent_ctx(
+            sctx,
+            thread_id,
+            "direct",
+            std::sync::Arc::new(react_core::agent::DefaultPolicy),
+            env_util::ASK_MAX_STEPS,
+            10,
+        );
+
+        Self::run_outcome_to_frames(
+            Agent::run_until_block(
+                &registry,
+                &actx,
+                &sys,
+                &tools_card,
+                question,
+                LlmCallOptions {
+                    prompt_id: "data_engineer.direct",
+                    expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
+                    max_output_tokens: Some(env_util::direct_max_tokens()),
+                    reasoning_effort: Some(env_util::ask_reasoning_effort()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| e.to_string()),
+        )
+    }
+
+    async fn prepare_direct_dbt_workspace(sctx: &SuiteCtx) -> Result<(), String> {
+        let Some(root) = std::env::var("SKIPPR_DIRECT_DBT_OUTPUT_PATH")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .map(std::path::PathBuf::from)
+        else {
+            return Ok(());
+        };
+
+        std::fs::create_dir_all(&root).map_err(|e| {
+            format!(
+                "failed to create direct dbt output path {}: {e}",
+                root.display()
+            )
+        })?;
+
+        let project_yml = root.join("dbt_project.yml");
+        if !project_yml.exists() {
+            std::fs::write(
+                &project_yml,
+                Self::direct_dbt_project_yaml(sctx.scope().project_id.as_str()),
+            )
+            .map_err(|e| {
+                format!(
+                    "failed to initialize direct dbt project {}: {e}",
+                    project_yml.display()
+                )
+            })?;
+        }
+
+        std::env::set_var("SKIPPR_LOCAL_IDE_ROOT", &root);
+        tracing::info!("direct dbt project root: {}", root.display());
+        Ok(())
+    }
+
+    fn direct_dbt_project_yaml(profile_name: &str) -> String {
+        format!(
+            "name: data_engineer\nversion: '1.0'\nprofile: '{profile_name}'\nmodel-paths: ['models']\nseed-paths: ['seeds']\nmacro-paths: ['macros']\ntarget-path: 'target'\n\non-run-start:\n  - \"{{% if target.type == 'snowflake' %}}create database if not exists {{{{ env_var('DBT_SILVER_DATABASE', target.database) }}}}{{% else %}}select 1{{% endif %}}\"\n  - \"{{% if target.type == 'snowflake' %}}create database if not exists {{{{ env_var('DBT_GOLD_DATABASE', target.database) }}}}{{% else %}}select 1{{% endif %}}\"\n\nmodels:\n  data_engineer:\n    +database: \"{{{{ env_var('DBT_GOLD_DATABASE', target.database) }}}}\"\n    +schema: \"{{{{ env_var('DBT_GOLD_SCHEMA', target.schema) }}}}\"\n    staging:\n      +database: \"{{{{ env_var('DBT_SILVER_DATABASE', target.database) }}}}\"\n      +schema: \"{{{{ env_var('DBT_SILVER_SCHEMA', target.schema) }}}}\"\n"
         )
     }
 
@@ -998,6 +1095,7 @@ impl DataEngineerSuite {
             AgentMode::Agent => Self::run_agent(thread_id, question, ctx).await,
             AgentMode::Review => Self::run_review(thread_id, question, ctx).await,
             AgentMode::Ask => Self::run_ask(thread_id, question, ctx).await,
+            AgentMode::Direct => Self::run_direct(thread_id, question, ctx).await,
         }?;
         Self::enforce_non_interactive_contract(agent_mode, frames)
     }

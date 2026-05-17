@@ -121,6 +121,12 @@ async fn probe_compiled_model_sql(
     _project_name: &str,
     select_terms: &[String],
 ) -> Result<serde_json::Value, String> {
+    if let Some(root) = direct_dbt_project_root() {
+        let compiled_root = root.join("target").join("compiled");
+        let files = list_local_compiled_model_sql(&compiled_root, select_terms);
+        return probe_sql_files(ctx, files).await;
+    }
+
     let compiled_prefix = format!(
         "{}target/compiled/",
         ctx.keyspace().scoped_prefix(ctx.scope(), &["dbt"])
@@ -206,6 +212,109 @@ async fn probe_compiled_model_sql(
     }
 }
 
+fn direct_dbt_project_root() -> Option<PathBuf> {
+    std::env::var("SKIPPR_DIRECT_DBT_OUTPUT_PATH")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn list_local_compiled_model_sql(
+    root: &std::path::Path,
+    select_terms: &[String],
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let Ok(entries) = fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+                continue;
+            }
+            if !path.is_file() || path.extension().and_then(|s| s.to_str()) != Some("sql") {
+                continue;
+            }
+            let display = path.to_string_lossy().replace('\\', "/");
+            if !display.contains("/models/") || display.contains(".yml/") {
+                continue;
+            }
+            if !key_matches_select_terms(&display, select_terms) {
+                continue;
+            }
+            let Ok(sql) = fs::read_to_string(&path) else {
+                continue;
+            };
+            out.push((display, sql));
+        }
+    }
+    out.sort_by(|a, b| a.0.cmp(&b.0));
+    out
+}
+
+async fn probe_sql_files(
+    ctx: &AgentCtx,
+    files: Vec<(String, String)>,
+) -> Result<serde_json::Value, String> {
+    if files.is_empty() {
+        return Ok(serde_json::json!({
+            "ok": true,
+            "probed_models": 0,
+            "skipped_reason": "no_compiled_model_sql_found_for_scope"
+        }));
+    }
+
+    let mut failures: Vec<serde_json::Value> = Vec::new();
+    let mut probed = 0usize;
+    for (key, sql) in files {
+        let probe_sql = crate::sql_first::wrap_sql_for_validation(&sql, 1);
+        let wh = crate::ctx_ext::actx_warehouse(ctx).unwrap();
+        let probe_result =
+            crate::transient_retry::retry_transient_default("compiled_sql_probe", || async {
+                wh.query(&probe_sql).await
+            })
+            .await;
+        match probe_result {
+            Ok(qr) => {
+                probed = probed.saturating_add(1);
+                let dups = crate::sql_first::detect_duplicate_output_columns(&qr.header);
+                if !dups.is_empty() {
+                    failures.push(serde_json::json!({
+                        "key": key,
+                        "model_name": model_name_from_compiled_key(&key),
+                        "error": "duplicate_output_columns",
+                        "duplicate_columns": dups,
+                    }));
+                }
+            }
+            Err(e) => {
+                failures.push(serde_json::json!({
+                    "key": key,
+                    "model_name": model_name_from_compiled_key(&key),
+                    "error": format!("warehouse_probe_failed: {}", e),
+                }));
+            }
+        }
+    }
+    if failures.is_empty() {
+        Ok(serde_json::json!({
+            "ok": true,
+            "probed_models": probed,
+            "failed_models": []
+        }))
+    } else {
+        Ok(serde_json::json!({
+            "ok": false,
+            "probed_models": probed,
+            "failed_models": failures
+        }))
+    }
+}
+
 #[async_trait]
 impl Tool for DbtValidateTool {
     fn name(&self) -> &'static str {
@@ -236,6 +345,7 @@ impl Tool for DbtValidateTool {
             .and_then(|x| x.as_str())
             .map(|s| s.to_string());
         let mut target: Option<String> = explicit_target.clone();
+        let fast = args.get("fast").and_then(|x| x.as_bool()).unwrap_or(false);
         let run = args.get("run").and_then(|x| x.as_bool()).unwrap_or(false);
         let build = args.get("build").and_then(|x| x.as_bool()).unwrap_or(false);
         let _dataset_ids: Option<Vec<String>> = args
@@ -296,7 +406,7 @@ impl Tool for DbtValidateTool {
         let mut ladder: Vec<ValidationLadderPhase> = Vec::new();
         let mut final_res: crate::providers::DbtValidateResult;
 
-        if build {
+        if fast || build {
             let compile_args = crate::providers::DbtValidateArgs {
                 project_name: requested_project_name.to_string(),
                 profiles_dir: profiles_dir.clone(),
@@ -328,7 +438,23 @@ impl Tool for DbtValidateTool {
                 error_count: res1.errors.len(),
                 probe: Some(probe.clone()),
             });
-            if !res1.ok || !probe_ok {
+            if fast {
+                final_res = res1;
+                if !probe_ok {
+                    let mut errs = final_res.errors.clone();
+                    errs.push("compiled_sql_probe_failed: one or more compiled model queries failed warehouse probe or projected duplicate output columns".to_string());
+                    if let Some(arr) = probe.get("failed_models").and_then(|v| v.as_array()) {
+                        for f in arr.iter().take(20) {
+                            errs.push(format!(
+                                "compiled_probe: {}",
+                                serde_json::to_string(f).unwrap_or_else(|_| "{}".to_string())
+                            ));
+                        }
+                    }
+                    final_res.ok = false;
+                    final_res.errors = errs;
+                }
+            } else if !res1.ok || !probe_ok {
                 final_res = res1;
                 if !probe_ok {
                     let mut errs = final_res.errors.clone();
@@ -470,6 +596,7 @@ impl Tool for DbtValidateTool {
                 "validation_scope".to_string(),
                 serde_json::to_value(validation_scope).unwrap_or(Value::Null),
             );
+            obj.insert("fast".to_string(), serde_json::json!(fast));
             obj.insert(
                 "validation_ladder".to_string(),
                 serde_json::to_value(ladder).unwrap_or(Value::Null),

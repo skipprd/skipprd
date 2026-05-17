@@ -691,7 +691,12 @@ impl Suite for DataEngineerSuite {
     }
 
     fn supported_agent_types(&self) -> Vec<String> {
-        vec!["ask".to_string(), "agent".to_string(), "review".to_string()]
+        vec![
+            "ask".to_string(),
+            "agent".to_string(),
+            "review".to_string(),
+            "direct".to_string(),
+        ]
     }
 
     fn default_agent_type(&self) -> &'static str {

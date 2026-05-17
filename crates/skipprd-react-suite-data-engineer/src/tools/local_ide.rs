@@ -15,9 +15,12 @@ const DEFAULT_MAX_CHARS: usize = 20_000;
 const HARD_MAX_CHARS: usize = 60_000;
 const DEFAULT_LIMIT: usize = 100;
 const HARD_LIMIT: usize = 500;
+const PATCH_OBSERVATION_MAX_CHARS: usize = 12_000;
 
 pub struct LocalIdeTool {
     pub allow_patch: bool,
+    pub metadata_namespace: Option<&'static str>,
+    pub mirror_dbt_to_storage: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -43,7 +46,7 @@ impl Tool for LocalIdeTool {
         "local_ide"
     }
 
-    async fn call(&self, args: Value, _ctx: &AgentCtx) -> Result<Value, String> {
+    async fn call(&self, args: Value, ctx: &AgentCtx) -> Result<Value, String> {
         let parsed: LocalIdeArgs =
             serde_json::from_value(args).map_err(|e| format!("local_ide args error: {e}"))?;
         match parsed.op.as_str() {
@@ -52,7 +55,16 @@ impl Tool for LocalIdeTool {
             "grep" => op_grep(&parsed),
             "head" => op_head_tail(&parsed, true),
             "tail" => op_head_tail(&parsed, false),
-            "patch" if self.allow_patch => op_patch(&parsed),
+            "patch" if self.allow_patch => {
+                let out = op_patch(&parsed)?;
+                if self.mirror_dbt_to_storage {
+                    mirror_dbt_patch_to_storage(ctx, &out).await?;
+                }
+                if let Some(namespace) = self.metadata_namespace {
+                    persist_patch_metadata(ctx, namespace, &out).await;
+                }
+                Ok(out)
+            }
             "patch" => Err(
                 "local_ide patch is not available in this mode; switch to agent mode for local file mutations"
                     .to_string(),
@@ -62,6 +74,124 @@ impl Tool for LocalIdeTool {
                 if self.allow_patch { "|patch" } else { "" }
             )),
         }
+    }
+}
+
+async fn mirror_dbt_patch_to_storage(ctx: &AgentCtx, patch_result: &Value) -> Result<(), String> {
+    if patch_result
+        .get("no_op")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+    let rel = patch_result
+        .get("path")
+        .and_then(|v| v.as_str())
+        .and_then(dbt_storage_rel_path);
+    let Some(rel) = rel else {
+        return Ok(());
+    };
+    let content = patch_result
+        .get("after_content")
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| {
+            patch_result
+                .get("absolute_path")
+                .and_then(|v| v.as_str())
+                .and_then(|path| fs::read_to_string(path).ok())
+        })
+        .ok_or_else(|| format!("local_ide direct mirror missing content for {rel}"))?;
+    let key = ctx.keyspace().scoped_key(ctx.scope(), &["dbt", &rel]);
+    ctx.storage()
+        .put_bytes(&key, content.as_bytes(), content_type_for_path(&rel))
+        .await
+        .map_err(|e| format!("local_ide direct mirror failed for {rel}: {e}"))?;
+    Ok(())
+}
+
+fn dbt_storage_rel_path(path: &str) -> Option<String> {
+    let rel = path.trim().trim_start_matches("./").replace('\\', "/");
+    if rel.is_empty()
+        || rel.starts_with('/')
+        || rel == "."
+        || rel
+            .split('/')
+            .any(|part| part.is_empty() || part == "." || part == "..")
+    {
+        return None;
+    }
+    let is_dbt_file = rel == "dbt_project.yml"
+        || rel == "dbt_project.yaml"
+        || rel == "packages.yml"
+        || rel == "packages.yaml"
+        || rel.starts_with("models/")
+        || rel.starts_with("macros/")
+        || rel.starts_with("seeds/")
+        || rel.starts_with("snapshots/")
+        || rel.starts_with("tests/");
+    if is_dbt_file {
+        Some(rel)
+    } else {
+        None
+    }
+}
+
+fn content_type_for_path(path: &str) -> &'static str {
+    if path.ends_with(".sql") {
+        "text/sql"
+    } else if path.ends_with(".yml") || path.ends_with(".yaml") {
+        "text/yaml"
+    } else if path.ends_with(".csv") {
+        "text/csv"
+    } else {
+        "text/plain"
+    }
+}
+
+async fn persist_patch_metadata(ctx: &AgentCtx, namespace: &str, patch_result: &Value) {
+    if patch_result
+        .get("no_op")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return;
+    }
+    let Some(thread_id) = ctx.thread_id().as_deref() else {
+        return;
+    };
+    let ts = chrono::Utc::now();
+    let key = ctx.keyspace().scoped_key(
+        ctx.scope(),
+        &[
+            "direct",
+            "local_diffs",
+            namespace,
+            thread_id,
+            &format!(
+                "{}_{}.json",
+                ts.format("%Y%m%dT%H%M%SZ"),
+                uuid::Uuid::new_v4()
+            ),
+        ],
+    );
+    let metadata = serde_json::json!({
+        "schema_version": 1,
+        "thread_id": thread_id,
+        "ts": ts.to_rfc3339(),
+        "kind": "local_ide_patch",
+        "namespace": namespace,
+        "path": patch_result.get("path"),
+        "absolute_path": patch_result.get("absolute_path"),
+        "before_sha256": patch_result.get("before_sha256"),
+        "after_sha256": patch_result.get("after_sha256"),
+        "lines_added": patch_result.get("lines_added"),
+        "lines_removed": patch_result.get("lines_removed"),
+        "applied_patch_text": patch_result.get("applied_patch_text"),
+    });
+    if let Err(e) = ctx.storage().put_json(&key, &metadata).await {
+        tracing::warn!(key = %key, error = %e, "failed to persist local IDE patch metadata");
     }
 }
 
@@ -90,20 +220,29 @@ fn path_arg(args: &LocalIdeArgs) -> Result<PathBuf, String> {
     if path.is_absolute() {
         Ok(path)
     } else {
-        std::env::current_dir()
-            .map(|cwd| cwd.join(path))
-            .map_err(|e| format!("failed to resolve current dir: {e}"))
+        local_ide_root()
+            .or_else(|| std::env::current_dir().ok())
+            .map(|root| root.join(path))
+            .ok_or_else(|| "failed to resolve local_ide root".to_string())
     }
 }
 
 fn display_path(path: &Path) -> String {
     let abs = path.to_string_lossy().replace('\\', "/");
-    if let Ok(cwd) = std::env::current_dir() {
-        if let Ok(rel) = path.strip_prefix(cwd) {
+    if let Some(root) = local_ide_root().or_else(|| std::env::current_dir().ok()) {
+        if let Ok(rel) = path.strip_prefix(root) {
             return rel.to_string_lossy().replace('\\', "/");
         }
     }
     abs
+}
+
+fn local_ide_root() -> Option<PathBuf> {
+    std::env::var("SKIPPR_LOCAL_IDE_ROOT")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
 }
 
 fn hash_text(text: &str) -> String {
@@ -308,16 +447,20 @@ fn op_patch(args: &LocalIdeArgs) -> Result<Value, String> {
     } else {
         create_local_git_patch_text(&old, &new, &shown, existed)
     };
+    let (applied_patch_text, applied_patch_truncated) =
+        bounded_text(&applied_patch_text, PATCH_OBSERVATION_MAX_CHARS);
+    let (normalized_patch_text, normalized_patch_truncated) =
+        bounded_text(&normalized.patch_text, PATCH_OBSERVATION_MAX_CHARS);
     Ok(serde_json::json!({
         "ok": true,
         "path": shown,
         "absolute_path": path.to_string_lossy().replace('\\', "/"),
         "before_sha256": before_sha256,
         "after_sha256": after_sha256,
-        "before_content": old,
-        "after_content": new,
         "applied_patch_text": applied_patch_text,
-        "normalized_patch_text": normalized.patch_text,
+        "applied_patch_truncated": applied_patch_truncated,
+        "normalized_patch_text": normalized_patch_text,
+        "normalized_patch_truncated": normalized_patch_truncated,
         "lines_added": lines_added,
         "lines_removed": lines_removed,
         "no_op": no_op,
@@ -357,12 +500,7 @@ fn apply_cursor_hunks(old: &str, patch_text: &str) -> Result<String, String> {
     Ok(out)
 }
 
-fn create_local_git_patch_text(
-    old: &str,
-    new: &str,
-    display_path: &str,
-    existed: bool,
-) -> String {
+fn create_local_git_patch_text(old: &str, new: &str, display_path: &str, existed: bool) -> String {
     let rel = display_path.trim_start_matches("./").replace('\\', "/");
     let base = diffy::create_patch(old, new).to_string();
     if base.lines().take(2).count() < 2 {
@@ -420,7 +558,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn patch_returns_canonical_diff_and_before_after_content() {
+    fn patch_returns_canonical_diff_without_full_file_payloads() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("example.txt");
         fs::write(&path, "alpha\nbeta\n").expect("write seed");
@@ -438,18 +576,29 @@ mod tests {
 
         assert_eq!(result["ok"], true);
         assert_eq!(result["path"], path.to_string_lossy().replace('\\', "/"));
-        assert_eq!(result["absolute_path"], path.to_string_lossy().replace('\\', "/"));
-        assert_eq!(result["before_content"], "alpha\nbeta\n");
-        assert_eq!(result["after_content"], "alpha\ngamma\n");
+        assert_eq!(
+            result["absolute_path"],
+            path.to_string_lossy().replace('\\', "/")
+        );
+        assert!(result.get("before_content").is_none());
+        assert!(result.get("after_content").is_none());
         assert_eq!(result["lines_added"], 1);
         assert_eq!(result["lines_removed"], 1);
         assert_eq!(result["no_op"], false);
-        assert_eq!(result["normalized_patch_text"], "@@ ... @@\n alpha\n-beta\n+gamma");
-        let applied = result["applied_patch_text"].as_str().expect("applied patch text");
+        assert_eq!(
+            result["normalized_patch_text"],
+            "@@ ... @@\n alpha\n-beta\n+gamma"
+        );
+        let applied = result["applied_patch_text"]
+            .as_str()
+            .expect("applied patch text");
         assert!(applied.contains("diff --git"));
         assert!(applied.contains("-beta"));
         assert!(applied.contains("+gamma"));
-        assert_eq!(fs::read_to_string(&path).expect("read updated"), "alpha\ngamma\n");
+        assert_eq!(
+            fs::read_to_string(&path).expect("read updated"),
+            "alpha\ngamma\n"
+        );
     }
 
     #[test]

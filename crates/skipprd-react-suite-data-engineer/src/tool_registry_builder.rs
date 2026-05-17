@@ -110,6 +110,8 @@ impl DataEngineerSuite {
         if caps.contains(&AgentToolCapability::LocalIdeTools) {
             registry.register(tools::local_ide::LocalIdeTool {
                 allow_patch: caps.contains(&AgentToolCapability::LocalIdeMutations),
+                metadata_namespace: None,
+                mirror_dbt_to_storage: false,
             });
         }
 
@@ -138,10 +140,81 @@ impl DataEngineerSuite {
         if caps.contains(&AgentToolCapability::LocalIdeTools) {
             registry.register(tools::local_ide::LocalIdeTool {
                 allow_patch: caps.contains(&AgentToolCapability::LocalIdeMutations),
+                metadata_namespace: None,
+                mirror_dbt_to_storage: false,
             });
         }
 
         Ok(registry)
+    }
+
+    pub(super) fn build_direct_agent_tools(sctx: &SuiteCtx) -> Result<ToolRegistry, String> {
+        use crate::tools::{
+            artifacts::ArtifactsTool, sql_run::SqlRunTool, sql_sample::SqlSampleTool,
+            sql_schema::SqlSchemaTool, sql_stats::SqlStatsTool, vect_query::VectQueryTool,
+        };
+
+        let mut registry = ToolRegistry::new();
+        let caps = Self::agent_capability_profile(AgentMode::Direct, true, true);
+        let query =
+            crate::ctx_ext::sctx_query(sctx).ok_or_else(|| "query provider missing".to_string())?;
+
+        registry.register(tools::local_ide::LocalIdeTool {
+            allow_patch: caps.contains(&AgentToolCapability::LocalIdeMutations),
+            metadata_namespace: Some("dbt"),
+            mirror_dbt_to_storage: false,
+        });
+        registry.register(SqlSchemaTool {
+            query: query.clone(),
+            datasets: crate::ctx_ext::sctx_datasets(sctx),
+            catalog: crate::ctx_ext::sctx_catalog(sctx),
+        });
+        registry.register(SqlStatsTool {
+            catalog: crate::ctx_ext::sctx_catalog(sctx),
+            datasets: crate::ctx_ext::sctx_datasets(sctx),
+        });
+        registry.register(SqlSampleTool {
+            query: query.clone(),
+        });
+        registry.register(SqlRunTool { query });
+        registry.register(VectQueryTool);
+        registry.register(ArtifactsTool);
+        registry.register(tools::dbt_examples::SearchDbtExamplesTool);
+        registry.register(tools::dbt_validate::DbtValidateTool {
+            datasets: crate::ctx_ext::sctx_datasets(sctx),
+            catalog: crate::ctx_ext::sctx_catalog(sctx),
+        });
+        registry.register(tools::publish_dbt_to_provider::PublishDbtToProviderTool {
+            datasets: crate::ctx_ext::sctx_datasets(sctx),
+            catalog: crate::ctx_ext::sctx_catalog(sctx),
+        });
+        registry.register(tools::ask_approval::AskApprovalTool);
+
+        Ok(registry)
+    }
+
+    pub(super) fn build_direct_agent_tools_card() -> String {
+        Self::build_tools_card(
+            "Allowed tools (direct dbt mode):",
+            vec![
+                "- local_ide(args:{op:\"list\"|\"read\"|\"grep\"|\"head\"|\"tail\"|\"patch\", path?:string, pattern?:string, patch_text?:string, limit?:int, max_chars?:int}) for local dbt file edits that produce IDE-reviewable diffs.".to_string(),
+                "- local_ide patch_text must be hunks-only Cursor/Aider format; never include *** Begin Patch envelopes, diff --git, or ---/+++ file headers.".to_string(),
+                "- dbt_validate(args:{fast?:bool, build?:bool, run?:bool, select?:string[]}) where fast:true runs parse/compile plus compiled-SQL probes without full build; build:true is the full validation gate.".to_string(),
+                "- sql_schema(args:{table?:\"<catalog>.<schema>.<table>\"}) lists warehouse tables when table is omitted or returns columns for a warehouse table; do not pass local file paths.".to_string(),
+                "- sql_stats(args:{table:\"<catalog>.<schema>.<table>\", field:\"<column>\"}) returns stats for a single warehouse column; do not pass local file paths.".to_string(),
+                "- sql_sample(args:{table:\"<catalog>.<schema>.<table>\", field:\"<column>\", k?:int}) samples a single warehouse column; for row samples use run_sql with LIMIT.".to_string(),
+                "- run_sql(args:{sql:string}) runs explicit warehouse SQL only. Use local_ide read/head for local CSV/file sources.".to_string(),
+                "- artifacts and vect_query for persisted dbt artifacts or supporting documentation.".to_string(),
+                "- search_dbt_examples for dbt pattern lookup.".to_string(),
+                "- publish_dbt_to_provider only after full validation passes and user approval is appropriate.".to_string(),
+                "- ask_approval(args:{prompt:string}) for publish or destructive workflow escalation only.".to_string(),
+            ],
+            vec![
+                "Direct mode edits local dbt files first, validates quickly with compiled SQL probes, then runs full dbt validation before publish.".to_string(),
+                "Plans and reviews are quality aids, not hard gates; unresolved review findings should be addressed only when requested.".to_string(),
+            ],
+            Some("Not available: staging_model, gold_model, apply_next_* batch tools, catalog_note, sql_register, phase repair loops.".to_string()),
+        )
     }
 
     pub(super) fn build_ide_agent_tools_card(sctx: &SuiteCtx) -> String {
@@ -234,6 +307,7 @@ impl DataEngineerSuite {
                 }
                 Self::build_tools_card("Allowed tools (agent mode):", lines, Vec::new(), None)
             }
+            AgentMode::Direct => Self::build_direct_agent_tools_card(),
         }
     }
 

@@ -5,6 +5,7 @@
 //   - dbt_parsing.rs (manifest/result JSON parsing, failure classification)
 //   - dbt_progress.rs (progress state machine)
 use async_trait::async_trait;
+use serde::Serialize;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::{io::BufRead, process::Stdio};
@@ -101,6 +102,33 @@ fn resolve_dbt_project_name(scope: &RequestScope, requested: &str) -> Result<Str
     Err(format!(
         "dbt project_name is system-managed for the data_engineer suite: expected '{canonical}', got '{requested}'"
     ))
+}
+
+fn direct_dbt_project_root() -> Option<PathBuf> {
+    std::env::var("SKIPPR_DIRECT_DBT_OUTPUT_PATH")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+}
+
+fn count_project_files(root: &Path) -> usize {
+    let mut count = 0usize;
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(path) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                stack.push(path);
+            } else if path.is_file() {
+                count = count.saturating_add(1);
+            }
+        }
+    }
+    count
 }
 
 /// Canonical template for the **shared** `dbt_project.yml`.
@@ -846,15 +874,21 @@ fn run_cmd_labeled(
     run_spawned_cmd_labeled(c, "host", cmd, args.join(" "), label)
 }
 
-fn resolve_host_dbt_command() -> String {
+fn resolve_host_dbt_command(cwd: &Path) -> String {
     if let Ok(path) = std::env::var("DBT_BIN") {
         let path = path.trim();
         if !path.is_empty() {
             return path.to_string();
         }
     }
-    if let Ok(cwd) = std::env::current_dir() {
-        let candidate = cwd.join(".venv").join("bin").join("dbt");
+    if let Ok(venv) = std::env::var("VIRTUAL_ENV") {
+        let candidate = Path::new(venv.trim()).join("bin").join("dbt");
+        if candidate.is_file() {
+            return candidate.display().to_string();
+        }
+    }
+    for dir in cwd.ancestors() {
+        let candidate = dir.join(".venv").join("bin").join("dbt");
         if candidate.is_file() {
             return candidate.display().to_string();
         }
@@ -868,7 +902,7 @@ fn run_dbt_host_labeled(
     envs: &[(&str, String)],
     label: &str,
 ) -> CmdOut {
-    let cmd = resolve_host_dbt_command();
+    let cmd = resolve_host_dbt_command(cwd);
     run_cmd_labeled(&cmd, dbt_args, cwd, envs, label)
 }
 
@@ -1298,12 +1332,14 @@ impl DbtProjectProvider {
         let sanitized = sanitize_dbt_project_yaml(&raw, project_name, scope.project_id.as_str());
         if sanitized.changed {
             write_file(proj_path, sanitized.text.as_bytes())?;
-            // Best-effort persistence back to storage for future runs.
-            let project_key = self.keyspace.scoped_key(scope, &["dbt", "dbt_project.yml"]);
-            let _ = self
-                .storage
-                .put_bytes(&project_key, sanitized.text.as_bytes(), "text/yaml")
-                .await;
+            if direct_dbt_project_root().is_none() {
+                // Best-effort persistence back to storage for future non-direct runs.
+                let project_key = self.keyspace.scoped_key(scope, &["dbt", "dbt_project.yml"]);
+                let _ = self
+                    .storage
+                    .put_bytes(&project_key, sanitized.text.as_bytes(), "text/yaml")
+                    .await;
+            }
         }
         Ok(sanitized.stripped)
     }
@@ -1426,6 +1462,57 @@ impl DbtProjectProvider {
             stderr: out.stderr,
         }
     }
+
+    pub fn preflight_dbt_environment(
+        &self,
+        project_dir: &Path,
+        profiles_dir: Option<&Path>,
+        env_pairs: &[(&str, String)],
+    ) -> DbtPreflightResult {
+        preflight_dbt_environment_for_runner(&self.runner, project_dir, profiles_dir, env_pairs)
+    }
+}
+
+pub fn preflight_dbt_environment_for_runner(
+    runner: &DbtRunnerConfig,
+    project_dir: &Path,
+    profiles_dir: Option<&Path>,
+    env_pairs: &[(&str, String)],
+) -> DbtPreflightResult {
+    let command = match runner.mode {
+        DbtRunnerMode::Host => resolve_host_dbt_command(project_dir),
+        DbtRunnerMode::Docker => "docker".to_string(),
+    };
+    let out = run_cmd_for_runner_labeled(
+        runner,
+        project_dir,
+        profiles_dir,
+        &["--version"],
+        env_pairs,
+        "preflight",
+    );
+    let remediation = if out.status_ok {
+        None
+    } else if runner.mode == DbtRunnerMode::Host {
+        Some(format!(
+            "Fix the host dbt executable used by Skippr. Set DBT_BIN to your pip/venv dbt path, launch the IDE from an active VIRTUAL_ENV, or create .venv/bin/dbt in the project. Current command: {}.",
+            command
+        ))
+    } else {
+        Some("Fix the configured dbt Docker runner/image so `dbt --version` succeeds.".to_string())
+    };
+    DbtPreflightResult {
+        ok: out.status_ok,
+        runner: match runner.mode {
+            DbtRunnerMode::Host => "host".to_string(),
+            DbtRunnerMode::Docker => "docker".to_string(),
+        },
+        command,
+        code: out.code,
+        stdout: out.stdout,
+        stderr: out.stderr,
+        remediation,
+    }
 }
 
 /// Result of a single `dbt …` invocation (stdout/stderr preserved for IDE / CLI reporting).
@@ -1435,6 +1522,17 @@ pub struct DbtCliRunOutcome {
     pub code: i32,
     pub stdout: String,
     pub stderr: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+pub struct DbtPreflightResult {
+    pub ok: bool,
+    pub runner: String,
+    pub command: String,
+    pub code: i32,
+    pub stdout: String,
+    pub stderr: String,
+    pub remediation: Option<String>,
 }
 
 #[async_trait]
@@ -1513,34 +1611,47 @@ impl DbtProvider for DbtProjectProvider {
         let select_terms = args.select.as_ref().filter(|v| !v.is_empty());
         let exclude_terms = args.exclude.as_ref().filter(|v| !v.is_empty());
 
-        let tmp = tempfile::tempdir().map_err(|e| e.to_string())?;
-        let root = tmp.path().join(project_name.clone());
-        std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+        let direct_root = direct_dbt_project_root();
+        let _tmp = if direct_root.is_some() {
+            None
+        } else {
+            Some(tempfile::tempdir().map_err(|e| e.to_string())?)
+        };
+        let root = if let Some(root) = direct_root {
+            std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
+            root
+        } else {
+            let tmp = _tmp
+                .as_ref()
+                .expect("tempdir exists for storage-backed validation");
+            let root = tmp.path().join(project_name.clone());
+            std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
 
-        // Populate temp project from storage prefix
-        let keys = self
-            .storage
-            .list_prefix(&s3_prefix_base)
-            .await
-            .map_err(|e| e.to_string())?;
-        let mut file_count = 0usize;
-        for key in keys {
-            if key.ends_with('/') {
-                continue;
-            }
-            let rel = key.strip_prefix(&s3_prefix_base).unwrap_or(&key);
-            let dest = root.join(rel);
-            if let Some(parent) = dest.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let bytes = self
+            // Populate temp project from storage prefix for non-direct runs.
+            let keys = self
                 .storage
-                .get_bytes(&key)
+                .list_prefix(&s3_prefix_base)
                 .await
                 .map_err(|e| e.to_string())?;
-            write_file(&dest, &bytes)?;
-            file_count += 1;
-        }
+            for key in keys {
+                if key.ends_with('/') {
+                    continue;
+                }
+                let rel = key.strip_prefix(&s3_prefix_base).unwrap_or(&key);
+                let dest = root.join(rel);
+                if let Some(parent) = dest.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let bytes = self
+                    .storage
+                    .get_bytes(&key)
+                    .await
+                    .map_err(|e| e.to_string())?;
+                write_file(&dest, &bytes)?;
+            }
+            root
+        };
+        let file_count = count_project_files(&root);
 
         let proj = root.join("dbt_project.yml");
         let stripped = self
@@ -1883,8 +1994,21 @@ mod tests {
     #[test]
     fn host_dbt_command_prefers_explicit_env() {
         std::env::set_var("DBT_BIN", "/tmp/custom-dbt");
-        assert_eq!(resolve_host_dbt_command(), "/tmp/custom-dbt");
+        assert_eq!(resolve_host_dbt_command(Path::new(".")), "/tmp/custom-dbt");
         std::env::remove_var("DBT_BIN");
+    }
+
+    #[test]
+    fn host_dbt_command_discovers_project_venv_from_nested_project() {
+        let tmp = tempfile::tempdir().unwrap();
+        let bin = tmp.path().join(".venv").join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let dbt = bin.join("dbt");
+        std::fs::write(&dbt, "#!/bin/sh\n").unwrap();
+        let nested = tmp.path().join("dbt").join("bank");
+        std::fs::create_dir_all(&nested).unwrap();
+
+        assert_eq!(resolve_host_dbt_command(&nested), dbt.display().to_string());
     }
 
     #[test]

@@ -183,7 +183,7 @@ impl SnowflakeProvider {
             session
                 .query(sql)
                 .await
-                .map_err(|e| format!("Snowflake query failed: {}", e))
+                .map_err(|e| format!("Snowflake query failed: {}", Self::sanitize_error(e)))
         };
         let rows = match first_attempt {
             Ok(rows) => rows,
@@ -200,10 +200,12 @@ impl SnowflakeProvider {
                 self.ensure_session().await?;
                 let guard = self.inner.session.lock().await;
                 let session = guard.as_ref().expect("session recreated above");
-                session
-                    .query(sql)
-                    .await
-                    .map_err(|e| format!("Snowflake query failed after session refresh: {}", e))?
+                session.query(sql).await.map_err(|e| {
+                    format!(
+                        "Snowflake query failed after session refresh: {}",
+                        Self::sanitize_error(e)
+                    )
+                })?
             }
             Err(err) => return Err(err),
         };
@@ -245,6 +247,19 @@ impl SnowflakeProvider {
 
     fn is_session_expired_error(msg: &str) -> bool {
         msg.to_ascii_lowercase().contains("session expired")
+    }
+
+    fn sanitize_error(error: impl std::fmt::Display) -> String {
+        let raw = error.to_string();
+        let lower = raw.to_ascii_lowercase();
+        if lower.contains("<!doctype html") || lower.contains("<html") {
+            let title = html_title(&raw).unwrap_or_else(|| "HTTP error response".to_string());
+            return format!(
+                "{title}; Snowflake returned an HTML error page instead of JSON. Check account/region URL, network/proxy settings, and credentials."
+            );
+        }
+        let compact = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+        bounded_error(&compact, 2_000)
     }
 
     fn quote_ident_sf(ident: &str) -> String {
@@ -622,13 +637,42 @@ fn getenv_nonempty(key: &str) -> Option<String> {
         .and_then(|v| if v.trim().is_empty() { None } else { Some(v) })
 }
 
+fn html_title(text: &str) -> Option<String> {
+    let lower = text.to_ascii_lowercase();
+    let start_tag = lower.find("<title>")?;
+    let content_start = start_tag + "<title>".len();
+    let rel_end = lower[content_start..].find("</title>")?;
+    let title = text[content_start..content_start + rel_end]
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    if title.trim().is_empty() {
+        None
+    } else {
+        Some(title)
+    }
+}
+
+fn bounded_error(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    format!(
+        "{}... [truncated {} chars]",
+        text.chars().take(max_chars).collect::<String>(),
+        text.chars().count().saturating_sub(max_chars)
+    )
+}
+
 fn is_skippr_internal_table(table: &str) -> bool {
     table.trim().to_ascii_lowercase().starts_with("_skippr_")
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_skippr_internal_table, DatasetId, SnowflakeProvider};
+    use super::{
+        bounded_error, html_title, is_skippr_internal_table, DatasetId, SnowflakeProvider,
+    };
 
     #[test]
     fn skippr_internal_tables_are_excluded_from_discovery() {
@@ -680,5 +724,31 @@ mod tests {
         assert!(!SnowflakeProvider::is_session_expired_error(
             "Snowflake query failed: syntax error"
         ));
+    }
+
+    #[test]
+    fn sanitizes_html_transport_errors() {
+        let raw = "communication error: <!DOCTYPE html><html><head><title>Bad Request</title></head><body><img src=\"data:image/png;base64,abc\"></body></html>";
+        let sanitized = SnowflakeProvider::sanitize_error(raw);
+
+        assert!(sanitized.contains("Bad Request"));
+        assert!(sanitized.contains("HTML error page"));
+        assert!(!sanitized.contains("base64"));
+        assert!(!sanitized.contains("<html"));
+    }
+
+    #[test]
+    fn extracts_html_title() {
+        assert_eq!(
+            html_title("<html><title>\nBad Request\n</title></html>").as_deref(),
+            Some("Bad Request")
+        );
+    }
+
+    #[test]
+    fn bounds_non_html_errors() {
+        let bounded = bounded_error(&"x".repeat(2100), 2000);
+        assert!(bounded.len() < 2050);
+        assert!(bounded.contains("truncated"));
     }
 }

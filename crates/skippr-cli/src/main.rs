@@ -18,7 +18,7 @@ use std::{
     sync::Arc,
 };
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use react::config::ReactConfigFile;
 use react_core::keyspace::Keyspace;
 use serde::Serialize;
@@ -294,12 +294,33 @@ struct ModelArgs {
     /// Pipeline to model. The modeling warehouse is derived from this pipeline's data sink.
     #[arg(long)]
     pipeline: String,
+    /// Data-engineer agent path to use.
+    #[arg(long = "agent-type", value_enum, default_value_t = ModelAgentType::Agent)]
+    agent_type: ModelAgentType,
     /// Start a fresh modeling thread instead of resuming the latest project thread.
     #[arg(long, default_value_t = false)]
     no_resume: bool,
+    /// Local dbt project output path for direct mode. Defaults to ./dbt/<pipeline> when --agent-type direct.
+    #[arg(long = "dbt-output-path")]
+    dbt_output_path: Option<PathBuf>,
     /// Output mode: text, json, or jsonl.
     #[arg(long, default_value = "text")]
     output: String,
+}
+
+#[derive(Clone, Debug, ValueEnum)]
+enum ModelAgentType {
+    Agent,
+    Direct,
+}
+
+impl ModelAgentType {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Direct => "direct",
+        }
+    }
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -843,6 +864,8 @@ struct DeSuiteEvent<'a> {
     timestamp: String,
     pipeline: &'a str,
     #[serde(skip_serializing_if = "Option::is_none")]
+    run_kind: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     thread_id: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     phase: Option<&'a str>,
@@ -860,6 +883,12 @@ struct DeSuiteEvent<'a> {
     plan: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     ok: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    model_preflight: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    changed_files: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    validation: Option<serde_json::Value>,
 }
 
 fn emit_de_suite_event(output: &str, event: DeSuiteEvent<'_>) {
@@ -958,10 +987,7 @@ fn working_dir() -> PathBuf {
 /// Set the process working directory to the folder containing the Skippr manifest.
 pub(crate) fn ensure_project_working_dir(explicit: &Option<PathBuf>) {
     let path = config_path(explicit);
-    let Some(parent) = path
-        .parent()
-        .filter(|dir| !dir.as_os_str().is_empty())
-    else {
+    let Some(parent) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) else {
         return;
     };
     if let Err(err) = std::env::set_current_dir(parent) {
@@ -2528,8 +2554,7 @@ fn cli_pipeline_data_dir(
         .map(str::trim)
         .is_some_and(|value| !value.is_empty());
     if has_custom_data_dir {
-        data_root_for_pipeline(project_root, pipeline_cfg)
-            .join(format!("{workspace}_{pipeline}"))
+        data_root_for_pipeline(project_root, pipeline_cfg).join(format!("{workspace}_{pipeline}"))
     } else {
         skippr_dir_from_project_root(project_root)
             .join(tenant)
@@ -2597,8 +2622,13 @@ fn derive_pipeline_reset_target(
         return Err("missing storage.bucket for reset".to_string());
     }
 
-    let local_runtime_dir =
-        cli_pipeline_data_dir(&project_root, &skipprd_tenant, pipeline, &workspace, pipeline_cfg);
+    let local_runtime_dir = cli_pipeline_data_dir(
+        &project_root,
+        &skipprd_tenant,
+        pipeline,
+        &workspace,
+        pipeline_cfg,
+    );
     let skippr_dir = skippr_dir_from_project_root(&project_root);
     let local_model_dirs = dedupe_paths(vec![
         skippr_dir.join(format!("_/dev/{pipeline}")),
@@ -3924,10 +3954,7 @@ async fn prepare_engine_command(
         );
         std::process::exit(1);
     }
-    skipprd::helpers::configuration::Config::setenv(
-        "DATA_DIR",
-        &data_dir.to_string_lossy(),
-    );
+    skipprd::helpers::configuration::Config::setenv("DATA_DIR", &data_dir.to_string_lossy());
     skipprd::helpers::configuration::Config::setenv("SKIPPR_PIPELINE_DATA_ROOT", "true");
     load_dotenv_for_skippr_config_yaml_path(&path);
     skipprd::helpers::configuration::Config::init().await;
@@ -3988,6 +4015,96 @@ async fn cmd_plan(log: Option<String>, explicit_config: &Option<PathBuf>, args: 
     .await;
 }
 
+struct DirectDbtPreflightRun {
+    result: react_module_provider_dbt::DbtPreflightResult,
+    profiles_temp: Option<tempfile::TempDir>,
+}
+
+fn failed_dbt_preflight(message: String) -> DirectDbtPreflightRun {
+    DirectDbtPreflightRun {
+        result: react_module_provider_dbt::DbtPreflightResult {
+            ok: false,
+            runner: "unknown".to_string(),
+            command: "dbt".to_string(),
+            code: -1,
+            stdout: String::new(),
+            stderr: message.clone(),
+            remediation: Some(message),
+        },
+        profiles_temp: None,
+    }
+}
+
+fn run_direct_dbt_preflight(
+    resolved: &react_core::resolved_config::ReactResolvedConfig,
+    direct_project_dir: Option<&Path>,
+) -> DirectDbtPreflightRun {
+    let Some(providers) = react_suite_data_engineer::de_config::de_config_from_resolved(resolved)
+    else {
+        return failed_dbt_preflight(
+            "suite_config missing or invalid for dbt preflight".to_string(),
+        );
+    };
+    if !providers.dbt.enabled {
+        return failed_dbt_preflight("dbt is disabled in the resolved Skippr config".to_string());
+    }
+    let runner_mode = match react_module_provider_dbt::DbtRunnerMode::parse(&providers.dbt.runner) {
+        Ok(mode) => mode,
+        Err(err) => return failed_dbt_preflight(err),
+    };
+    let runner = react_module_provider_dbt::DbtRunnerConfig {
+        mode: runner_mode,
+        docker_image: providers.dbt.docker_image.clone(),
+        docker_platform: providers.dbt.docker_platform.clone(),
+        docker_network: providers.dbt.docker_network.clone(),
+        docker_mount_aws_dir: providers.dbt.docker_mount_aws_dir,
+    };
+    let project_dir = direct_project_dir.unwrap_or_else(|| Path::new("."));
+    if let Err(err) = std::fs::create_dir_all(project_dir) {
+        return failed_dbt_preflight(format!(
+            "failed to create dbt project directory {}: {err}",
+            project_dir.display()
+        ));
+    }
+
+    let generated =
+        match react_suite_data_engineer::skippr_cli_generate_dbt_profiles_yml(resolved, None) {
+            Ok(generated) => generated,
+            Err(err) => return failed_dbt_preflight(err),
+        };
+    let profiles_temp = match tempfile::tempdir() {
+        Ok(dir) => dir,
+        Err(err) => {
+            return failed_dbt_preflight(format!("failed to create profiles tempdir: {err}"))
+        }
+    };
+    let profiles_path = profiles_temp.path().join("profiles.yml");
+    if let Err(err) = std::fs::write(&profiles_path, generated.profiles_yml.as_bytes()) {
+        return failed_dbt_preflight(format!(
+            "failed to write generated profiles.yml for preflight: {err}"
+        ));
+    }
+    let mut env_pairs = vec![(
+        "DBT_PROFILES_DIR",
+        profiles_temp.path().to_string_lossy().to_string(),
+    )];
+    for (key, value) in generated.tier_routing.env_vars() {
+        if !value.trim().is_empty() {
+            env_pairs.push((key, value));
+        }
+    }
+    let result = react_module_provider_dbt::preflight_dbt_environment_for_runner(
+        &runner,
+        project_dir,
+        Some(profiles_temp.path()),
+        &env_pairs,
+    );
+    DirectDbtPreflightRun {
+        result,
+        profiles_temp: Some(profiles_temp),
+    }
+}
+
 async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args: ModelArgs) {
     emit_de_suite_event(
         &args.output,
@@ -3995,6 +4112,7 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
             event: "model_start",
             timestamp: event_timestamp(),
             pipeline: &args.pipeline,
+            run_kind: Some(args.agent_type.as_str()),
             thread_id: None,
             phase: Some("preflight"),
             repair_status: None,
@@ -4004,6 +4122,9 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
             answer: None,
             plan: None,
             ok: None,
+            model_preflight: None,
+            changed_files: None,
+            validation: None,
         },
     );
     let engine_cfg = match load_cli_execution_config(explicit_config) {
@@ -4015,6 +4136,7 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
                     event: "model_error",
                     timestamp: event_timestamp(),
                     pipeline: &args.pipeline,
+                    run_kind: Some(args.agent_type.as_str()),
                     thread_id: None,
                     phase: Some("preflight"),
                     repair_status: None,
@@ -4024,6 +4146,9 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
                     answer: None,
                     plan: None,
                     ok: Some(false),
+                    model_preflight: None,
+                    changed_files: None,
+                    validation: None,
                 },
             );
             eprintln!("error: {}", e);
@@ -4040,6 +4165,7 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
                     event: "model_error",
                     timestamp: event_timestamp(),
                     pipeline: &args.pipeline,
+                    run_kind: Some(args.agent_type.as_str()),
                     thread_id: None,
                     phase: Some("preflight"),
                     repair_status: None,
@@ -4049,6 +4175,9 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
                     answer: None,
                     plan: None,
                     ok: Some(false),
+                    model_preflight: None,
+                    changed_files: None,
+                    validation: None,
                 },
             );
             eprintln!("error: {}", e);
@@ -4195,6 +4324,7 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
                 event: "model_thread_resumed",
                 timestamp: event_timestamp(),
                 pipeline: &args.pipeline,
+                run_kind: Some(args.agent_type.as_str()),
                 thread_id: Some(tid),
                 phase: Some("resume"),
                 repair_status: None,
@@ -4204,6 +4334,9 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
                 answer: None,
                 plan: None,
                 ok: None,
+                model_preflight: None,
+                changed_files: None,
+                validation: None,
             },
         );
     } else {
@@ -4212,7 +4345,130 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
 
     let status_cfg = resolved.clone();
     let run_thread_id = thread_id.clone();
-    eprintln!("[skippr] starting headless data-engineer workflow");
+    let agent_type = args.agent_type.as_str();
+    let mut direct_dbt_output_path: Option<PathBuf> = None;
+    if matches!(args.agent_type, ModelAgentType::Direct) {
+        let dbt_output_path = args.dbt_output_path.clone().unwrap_or_else(|| {
+            project_root_from_config_path(&config_path(explicit_config))
+                .join("dbt")
+                .join(&args.pipeline)
+        });
+        let dbt_output_path = if dbt_output_path.is_absolute() {
+            dbt_output_path
+        } else {
+            project_root_from_config_path(&config_path(explicit_config)).join(dbt_output_path)
+        };
+        eprintln!(
+            "[skippr] direct dbt output path: {}",
+            dbt_output_path.display()
+        );
+        std::env::set_var("SKIPPR_DIRECT_DBT_OUTPUT_PATH", &dbt_output_path);
+        std::env::set_var("SKIPPR_LOCAL_IDE_ROOT", &dbt_output_path);
+        direct_dbt_output_path = Some(dbt_output_path);
+    }
+    let mut preflight_profiles_temp: Option<tempfile::TempDir> = None;
+    if matches!(args.agent_type, ModelAgentType::Direct) {
+        let preflight = run_direct_dbt_preflight(&resolved, direct_dbt_output_path.as_deref());
+        let preflight_value = serde_json::to_value(&preflight.result).unwrap_or_else(|_| {
+            serde_json::json!({
+                "ok": false,
+                "remediation": "Failed to serialize dbt preflight result."
+            })
+        });
+        emit_de_suite_event(
+            &args.output,
+            DeSuiteEvent {
+                event: "model_preflight",
+                timestamp: event_timestamp(),
+                pipeline: &args.pipeline,
+                run_kind: Some(agent_type),
+                thread_id: run_thread_id.as_deref(),
+                phase: Some("preflight"),
+                repair_status: None,
+                pending_plan_revision: None,
+                failure_summary: preflight.result.remediation.as_deref(),
+                error: if preflight.result.ok {
+                    None
+                } else {
+                    preflight.result.remediation.as_deref()
+                },
+                answer: None,
+                plan: None,
+                ok: Some(preflight.result.ok),
+                model_preflight: Some(preflight_value),
+                changed_files: None,
+                validation: None,
+            },
+        );
+        if !preflight.result.ok {
+            if let Some(remediation) = preflight.result.remediation.as_deref() {
+                eprintln!("[skippr] dbt preflight failed: {remediation}");
+            }
+            emit_de_suite_event(
+                &args.output,
+                DeSuiteEvent {
+                    event: "model_error",
+                    timestamp: event_timestamp(),
+                    pipeline: &args.pipeline,
+                    run_kind: Some(agent_type),
+                    thread_id: run_thread_id.as_deref(),
+                    phase: Some("preflight"),
+                    repair_status: None,
+                    pending_plan_revision: None,
+                    failure_summary: preflight.result.remediation.as_deref(),
+                    error: preflight.result.remediation.as_deref(),
+                    answer: None,
+                    plan: None,
+                    ok: Some(false),
+                    model_preflight: None,
+                    changed_files: None,
+                    validation: None,
+                },
+            );
+            std::process::exit(1);
+        }
+        preflight_profiles_temp = preflight.profiles_temp;
+    }
+    let headless_prompt = if matches!(args.agent_type, ModelAgentType::Direct) {
+        Some(format!(
+            "Build or update the complete local dbt project for pipeline `{pipeline}`. \
+The local dbt project root is `{dbt_root}` and is the editable source of truth. \
+The Skippr config is `{config_path}`. Inspect the local dbt files, the Skippr config, and warehouse/source facts, then create or update the needed dbt files under the local dbt root using local_ide patches so the IDE shows diffs. \
+Do not stop after only listing files or reading dbt_project.yml. If models/sources/tests are missing, author them. \
+Run focused fast validation when possible and run full dbt validation before claiming the project is complete.",
+            pipeline = args.pipeline,
+            dbt_root = direct_dbt_output_path
+                .as_ref()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
+            config_path = config_path(explicit_config).display()
+        ))
+    } else {
+        None
+    };
+    let _preflight_profiles_temp = preflight_profiles_temp;
+    emit_de_suite_event(
+        &args.output,
+        DeSuiteEvent {
+            event: "model_authoring_start",
+            timestamp: event_timestamp(),
+            pipeline: &args.pipeline,
+            run_kind: Some(agent_type),
+            thread_id: run_thread_id.as_deref(),
+            phase: Some("authoring"),
+            repair_status: None,
+            pending_plan_revision: None,
+            failure_summary: None,
+            error: None,
+            answer: None,
+            plan: None,
+            ok: None,
+            model_preflight: None,
+            changed_files: None,
+            validation: None,
+        },
+    );
+    eprintln!("[skippr] starting headless data-engineer workflow ({agent_type})");
     let headless = react_host::run_headless_detailed(
         resolved,
         react::run_engine::HeadlessRunOpts {
@@ -4221,8 +4477,10 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
             terminal: false,
             thread_id,
             suite_id: Some("data_engineer".to_string()),
-            agent: "agent".to_string(),
+            agent: agent_type.to_string(),
             skip_logging_init: false,
+            headless_prompt,
+            stream_jsonl: is_jsonl_output(&args.output),
         },
     )
     .await;
@@ -4241,6 +4499,7 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
                         event: "model_phase_changed",
                         timestamp: event_timestamp(),
                         pipeline: &args.pipeline,
+                        run_kind: Some(agent_type),
                         thread_id: Some(tid),
                         phase: Some(status.current_phase.as_str()),
                         repair_status: Some(status.repair_status.as_str()),
@@ -4250,6 +4509,9 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
                         answer: None,
                         plan: None,
                         ok: None,
+                        model_preflight: None,
+                        changed_files: None,
+                        validation: None,
                     },
                 );
                 eprintln!(
@@ -4296,6 +4558,7 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
             },
             timestamp: event_timestamp(),
             pipeline: &args.pipeline,
+            run_kind: Some(agent_type),
             thread_id: status_thread_id.as_deref(),
             phase: Some("complete"),
             repair_status: None,
@@ -4305,6 +4568,9 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
             answer: None,
             plan: None,
             ok: Some(exit_code == 0),
+            model_preflight: None,
+            changed_files: None,
+            validation: None,
         },
     );
     std::process::exit(exit_code);

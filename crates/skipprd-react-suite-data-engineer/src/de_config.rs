@@ -145,6 +145,10 @@ pub(crate) struct VectorFile {
 
 use super::env_util::{env_keys, getenv_nonempty, resolve_env_ref};
 
+fn resolve_opt_env_ref(value: Option<String>) -> Option<String> {
+    value.map(|v| resolve_env_ref(&v))
+}
+
 fn resolve_warehouse(w: WarehouseFile) -> WarehouseResolved {
     match w {
         WarehouseFile::Athena {
@@ -213,18 +217,18 @@ fn resolve_warehouse(w: WarehouseFile) -> WarehouseResolved {
             container: resolve_env_ref(&database.unwrap_or_default()),
             namespace: resolve_env_ref(&schema.unwrap_or_default()),
             extras: serde_json::json!({
-                "account": account,
-                "user": user,
-                "password": password,
-                "private_key_path": private_key_path,
-                "stage": stage,
-                "staging_uri": staging_uri,
-                "staging_storage_integration": staging_storage_integration,
-                "staging_azure_sas_token": staging_azure_sas_token,
-                "staging_azure_account_key": staging_azure_account_key,
-                "staging_gcs_service_account_key_path": staging_gcs_service_account_key_path,
-                "warehouse": warehouse,
-                "role": role,
+                "account": resolve_opt_env_ref(account),
+                "user": resolve_opt_env_ref(user),
+                "password": resolve_opt_env_ref(password),
+                "private_key_path": resolve_opt_env_ref(private_key_path),
+                "stage": resolve_opt_env_ref(stage),
+                "staging_uri": resolve_opt_env_ref(staging_uri),
+                "staging_storage_integration": resolve_opt_env_ref(staging_storage_integration),
+                "staging_azure_sas_token": resolve_opt_env_ref(staging_azure_sas_token),
+                "staging_azure_account_key": resolve_opt_env_ref(staging_azure_account_key),
+                "staging_gcs_service_account_key_path": resolve_opt_env_ref(staging_gcs_service_account_key_path),
+                "warehouse": resolve_opt_env_ref(warehouse),
+                "role": resolve_opt_env_ref(role),
                 "max_concurrency": max_concurrency,
                 "discovery_cache_ttl_secs": discovery_cache_ttl_secs,
             }),
@@ -577,5 +581,60 @@ mod tests {
         assert_eq!(providers.warehouse.kind, WarehouseKind::Postgres);
         assert_eq!(providers.warehouse.container, "skippr_test");
         assert_eq!(providers.warehouse.namespace, "public");
+    }
+
+    #[test]
+    fn snowflake_extras_resolve_env_refs() {
+        const ACCOUNT: &str = "SKIPPR_TEST_SNOWFLAKE_ACCOUNT_DE_CONFIG";
+        const USER: &str = "SKIPPR_TEST_SNOWFLAKE_USER_DE_CONFIG";
+        const KEY: &str = "SKIPPR_TEST_SNOWFLAKE_KEY_DE_CONFIG";
+        std::env::set_var(ACCOUNT, "ORG-ACCT");
+        std::env::set_var(USER, "user@example.com");
+        std::env::set_var(KEY, "/tmp/snowflake_key.p8");
+
+        let resolved = resolve_providers_from_yaml(serde_json::json!({
+            "warehouse": {
+                "kind": "snowflake",
+                "account": format!("${{{ACCOUNT}}}"),
+                "user": format!("${{{USER}}}"),
+                "private_key_path": format!("${{{KEY}}}"),
+                "database": "ANALYTICS",
+                "schema": "RAW",
+                "warehouse": "COMPUTE_WH",
+                "role": "ACCOUNTADMIN"
+            }
+        }))
+        .expect("providers should resolve");
+
+        std::env::remove_var(ACCOUNT);
+        std::env::remove_var(USER);
+        std::env::remove_var(KEY);
+
+        let providers: ProvidersResolved =
+            serde_json::from_value(resolved).expect("resolved providers should deserialize");
+        assert_eq!(
+            providers
+                .warehouse
+                .extras
+                .get("account")
+                .and_then(|v| v.as_str()),
+            Some("ORG-ACCT")
+        );
+        assert_eq!(
+            providers
+                .warehouse
+                .extras
+                .get("user")
+                .and_then(|v| v.as_str()),
+            Some("user@example.com")
+        );
+        assert_eq!(
+            providers
+                .warehouse
+                .extras
+                .get("private_key_path")
+                .and_then(|v| v.as_str()),
+            Some("/tmp/snowflake_key.p8")
+        );
     }
 }

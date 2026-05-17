@@ -143,7 +143,7 @@ async fn cmd_chat_send(log: Option<String>, explicit_config: &Option<PathBuf>, a
     }
     let rendered_prompt = render_structured_chat_prompt(&user_message, structured_context.as_ref());
 
-    let (agent, _prompt) = match args.mode {
+    let (agent, prompt) = match args.mode {
         ChatModeCli::Ask => ("ask", rendered_prompt.clone()),
         ChatModeCli::Plan => (
             "ask",
@@ -180,6 +180,8 @@ async fn cmd_chat_send(log: Option<String>, explicit_config: &Option<PathBuf>, a
             suite_id: Some("data_engineer".to_string()),
             agent: agent.to_string(),
             skip_logging_init: false,
+            headless_prompt: Some(prompt),
+            stream_jsonl,
         },
     )
     .await;

@@ -29,7 +29,9 @@ fn run_skippr(args: Vec<String>) -> Result<Value, String> {
         .map_err(|e| format!("failed to run skippr: {e}"))?;
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-    let parsed = serde_json::from_str::<Value>(&stdout).ok();
+    let parsed = serde_json::from_str::<Value>(&stdout)
+        .ok()
+        .map(|value| compact_skippr_json(&args, value));
     let stdout_text = if parsed.is_some() {
         String::new()
     } else {
@@ -43,6 +45,37 @@ fn run_skippr(args: Vec<String>) -> Result<Value, String> {
         "stdout": stdout_text,
         "stderr": stderr.chars().take(12000).collect::<String>(),
     }))
+}
+
+fn compact_skippr_json(args: &[String], value: Value) -> Value {
+    if args.ends_with(&[
+        "user".to_string(),
+        "--output".to_string(),
+        "json".to_string(),
+        "account".to_string(),
+    ]) {
+        return compact_account_json(value);
+    }
+    value
+}
+
+fn compact_account_json(value: Value) -> Value {
+    let Some(account) = value.get("account") else {
+        return value;
+    };
+    serde_json::json!({
+        "account": {
+            "balance": account.get("balance").cloned(),
+            "profile": account.get("profile").cloned(),
+            "monthly_cost_est": account.get("monthly_cost_est").cloned(),
+            "daily_costs_est": account.get("daily_costs_est").cloned(),
+            "recent_usage_count": account
+                .get("recent_usage")
+                .and_then(|v| v.as_array())
+                .map(|rows| rows.len())
+                .unwrap_or(0),
+        }
+    })
 }
 
 #[async_trait]
