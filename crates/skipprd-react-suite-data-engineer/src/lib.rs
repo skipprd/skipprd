@@ -153,6 +153,7 @@ mod review_prompts;
 pub(crate) mod schema_policy;
 mod semantic_profile;
 pub(crate) mod sql_first;
+pub mod sql_prepare;
 pub(crate) mod state_manager;
 pub(crate) mod thread_cache;
 pub(crate) mod tool_ops;

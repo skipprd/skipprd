@@ -168,6 +168,9 @@ enum Cmd {
     /// Produce a data-engineering plan without applying changes.
     Plan(PlanArgs),
 
+    /// Run a read-only SQL query against the configured warehouse.
+    Query(QueryArgs),
+
     /// Chat with the data-engineer agent (react threads): ask / plan / agent, list threads, docs search.
     Chat {
         #[command(subcommand)]
@@ -346,6 +349,19 @@ struct PlanArgs {
     goal: Option<String>,
     /// Output mode: text, json, or jsonl.
     #[arg(long, default_value = "text")]
+    output: String,
+}
+
+#[derive(Parser, Debug, Clone)]
+struct QueryArgs {
+    /// Pipeline whose configured warehouse should execute the query.
+    #[arg(long)]
+    pipeline: String,
+    /// Read-only SQL to execute. Only SELECT/WITH queries are accepted.
+    #[arg(long)]
+    sql: String,
+    /// Output mode: json or jsonl.
+    #[arg(long, default_value = "json")]
     output: String,
 }
 
@@ -4015,6 +4031,110 @@ async fn cmd_plan(log: Option<String>, explicit_config: &Option<PathBuf>, args: 
     .await;
 }
 
+async fn cmd_query(_log: Option<String>, explicit_config: &Option<PathBuf>, args: QueryArgs) {
+    let emit = |body: &serde_json::Value| {
+        if is_jsonl_output(&args.output) {
+            print_json_line(body);
+        } else {
+            print_json(body);
+        }
+    };
+
+    let auth_ctx =
+        match headless_prep::authenticate_headless_for_pipeline(explicit_config, &args.pipeline)
+            .await
+        {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                let body = serde_json::json!({
+                    "ok": false,
+                    "error": e,
+                    "pipeline": args.pipeline.clone(),
+                });
+                emit(&body);
+                std::process::exit(1);
+            }
+        };
+
+    let suite_ctx =
+        match react::bootstrap::build_suite_ctx_with(&auth_ctx.resolved, &react_host::SkipprHost)
+            .await
+        {
+            Ok(ctx) => ctx,
+            Err(e) => {
+                let body = serde_json::json!({
+                    "ok": false,
+                    "error": e,
+                    "pipeline": args.pipeline.clone(),
+                });
+                emit(&body);
+                std::process::exit(1);
+            }
+        };
+
+    let Some(query) = suite_ctx
+        .capability::<react_suite_data_engineer::ctx_ext::QueryCap>()
+        .map(|cap| cap.0.clone())
+    else {
+        let body = serde_json::json!({
+            "ok": false,
+            "error": "query provider missing",
+            "pipeline": args.pipeline.clone(),
+        });
+        emit(&body);
+        std::process::exit(1);
+    };
+
+    let prepared =
+        match react_suite_data_engineer::sql_prepare::prepare_read_only_sql(&args.sql, 50) {
+            Ok(prepared) => prepared,
+            Err(e) => {
+                let body = serde_json::json!({
+                    "ok": false,
+                    "error": e,
+                    "pipeline": args.pipeline.clone(),
+                });
+                emit(&body);
+                std::process::exit(1);
+            }
+        };
+
+    let started_at = std::time::Instant::now();
+    match query.query(&prepared.sql).await {
+        Ok(qr) => {
+            let body = serde_json::json!({
+                "ok": true,
+                "pipeline": args.pipeline.clone(),
+                "sql": prepared.sql,
+                "data": {
+                    "header": qr.header,
+                    "rows": qr.rows,
+                },
+                "meta": qr.meta,
+                "elapsed_ms": started_at.elapsed().as_millis() as u64,
+                "probe": {
+                    "normalized_sql": prepared.normalized_sql,
+                },
+            });
+            emit(&body);
+        }
+        Err(e) => {
+            let body = serde_json::json!({
+                "ok": false,
+                "pipeline": args.pipeline.clone(),
+                "sql": prepared.sql,
+                "error": e,
+                "elapsed_ms": started_at.elapsed().as_millis() as u64,
+                "probe": {
+                    "normalized_sql": prepared.normalized_sql,
+                },
+            });
+            emit(&body);
+            std::process::exit(1);
+        }
+    }
+}
+
 struct DirectDbtPreflightRun {
     result: react_module_provider_dbt::DbtPreflightResult,
     profiles_temp: Option<tempfile::TempDir>,
@@ -5221,6 +5341,7 @@ async fn async_main() {
         },
         Cmd::Ask(args) => cmd_ask(cli.log, &cli.config, args).await,
         Cmd::Plan(args) => cmd_plan(cli.log, &cli.config, args).await,
+        Cmd::Query(args) => cmd_query(cli.log, &cli.config, args).await,
         Cmd::Chat { action } => chat_cmd::run_chat(cli.log, &cli.config, action).await,
         Cmd::Feedback {
             good,
