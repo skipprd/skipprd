@@ -2,7 +2,6 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
-use tokio::task::JoinSet;
 use tracing::info;
 
 use react_core::agent::AgentCtx;
@@ -10,7 +9,7 @@ use react_core::keyspace::encode_key_component;
 use react_core::tools::Tool;
 
 use crate::dialect::active_provider_dialect;
-use crate::{naming, plan, sql_first};
+use crate::{naming, plan, project_fs, sql_first};
 
 use super::model_authoring_engine::{self as engine, build_provider_prompt_rules, dedup_notes};
 
@@ -182,11 +181,6 @@ impl Tool for GoldModelTool {
             .ok()
             .unwrap_or(serde_json::Value::Null);
 
-        let base = ctx
-            .keyspace()
-            .scoped_prefix(ctx.scope(), &["dbt"])
-            .trim_end_matches('/')
-            .to_string();
         let query = crate::ctx_ext::actx_warehouse(ctx)
             .expect("warehouse provider required for gold_model");
         let mut written: Vec<String> = Vec::new();
@@ -217,16 +211,12 @@ impl Tool for GoldModelTool {
             let requested_folder = normalize_folder(it.folder.as_deref());
             let core_rel = gold_model_rel_path("core", name);
             let marts_rel = gold_model_rel_path("marts", name);
-            let core_exists = ctx
-                .storage()
-                .get_bytes(&format!("{}/{}", base, core_rel))
+            let core_exists = project_fs::project_file_exists(ctx, &core_rel)
                 .await
-                .is_ok();
-            let marts_exists = ctx
-                .storage()
-                .get_bytes(&format!("{}/{}", base, marts_rel))
+                .unwrap_or(false);
+            let marts_exists = project_fs::project_file_exists(ctx, &marts_rel)
                 .await
-                .is_ok();
+                .unwrap_or(false);
             let existing_rel =
                 match existing_gold_model_path_for_name(name, core_exists, marts_exists) {
                     Ok(v) => v,
@@ -298,10 +288,6 @@ impl Tool for GoldModelTool {
                 .cloned()
                 .map(|g| (g.input_name.trim().to_string(), g))
                 .collect();
-            let max_fetch_concurrency = 3usize;
-            let storage = ctx.storage().clone();
-            let mut set: JoinSet<(usize, String, String, String, String, Vec<(String, String)>)> =
-                JoinSet::new();
             // (idx, input, rel_path, content, relation_fqn, schema_cols)
             let mut fetched: Vec<(usize, String, String, String, String, Vec<(String, String)>)> =
                 Vec::new();
@@ -312,38 +298,17 @@ impl Tool for GoldModelTool {
                     ));
                     continue;
                 };
-                while set.len() >= max_fetch_concurrency {
-                    if let Some(res) = set.join_next().await {
-                        if let Ok(v) = res {
-                            fetched.push(v);
-                        }
-                    }
-                }
-                let storage2 = storage.clone();
                 let rel = grounded.model_rel_path.clone();
-                let key = format!("{}/{}", base, rel);
                 let relation_fqn = grounded.relation_fqn.clone();
                 let schema_cols: Vec<(String, String)> = grounded
                     .source_schema
                     .iter()
                     .map(|c| (c.name.clone(), c.data_type.clone()))
                     .collect();
-                set.spawn(async move {
-                    let content = storage2
-                        .get_bytes(&key)
-                        .await
-                        .ok()
-                        .map(|b| String::from_utf8_lossy(&b).to_string())
-                        .unwrap_or_default();
-
-                    (idx, inp, rel, content, relation_fqn, schema_cols)
-                });
-            }
-
-            while let Some(res) = set.join_next().await {
-                if let Ok(v) = res {
-                    fetched.push(v);
-                }
+                let content = project_fs::read_project_file_text(ctx, &rel)
+                    .await?
+                    .unwrap_or_default();
+                fetched.push((idx, inp, rel, content, relation_fqn, schema_cols));
             }
             fetched.sort_by_key(|(idx, _, _, _, _, _)| *idx);
             let mut input_blocks: Vec<Value> = Vec::new();
@@ -410,12 +375,8 @@ impl Tool for GoldModelTool {
             }
             let plan_instr = render_plan_driven_instructions(&plan_invariants, &plan_checklist);
             let effective_instructions = combine_instructions(&it.instructions, &plan_instr);
-            let existing_model_sql = ctx
-                .storage()
-                .get_bytes(&format!("{}/{}", base, rel_path))
-                .await
-                .ok()
-                .map(|b| String::from_utf8_lossy(&b).to_string())
+            let existing_model_sql = project_fs::read_project_file_text(ctx, &rel_path)
+                .await?
                 .unwrap_or_default();
             let drift_reasons = plan_task_opt
                 .map(|t| {

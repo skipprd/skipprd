@@ -7,19 +7,41 @@ use react_core::tools::Tool;
 
 pub struct SkipprCliTool;
 
-fn configured_skippr() -> String {
+pub(crate) fn configured_skippr() -> String {
     std::env::current_exe()
         .ok()
         .and_then(|p| p.to_str().map(|s| s.to_string()))
         .unwrap_or_else(|| "skippr".to_string())
 }
 
-fn config_args() -> Vec<String> {
+pub(crate) fn config_args() -> Vec<String> {
     std::env::var("SKIPPR_CONFIG_FILE")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .map(|s| vec!["--config".to_string(), s])
         .unwrap_or_default()
+}
+
+pub(crate) fn ide_chat_surface_enabled() -> bool {
+    std::env::var("SKIPPR_EXECUTION_SURFACE")
+        .map(|v| v == "ide_chat")
+        .unwrap_or(false)
+}
+
+pub(crate) fn ide_model_bridge_request(args: &Value) -> Result<Value, String> {
+    let pipeline = args
+        .get("pipeline")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "model_subagent requires pipeline".to_string())?;
+    Ok(serde_json::json!({
+        "ok": true,
+        "ide_model_run_requested": true,
+        "pipeline": pipeline,
+        "dbt_output_path": args.get("dbt_output_path").and_then(|v| v.as_str()),
+        "no_resume": args.get("no_resume").and_then(|v| v.as_bool()).unwrap_or(false),
+    }))
 }
 
 fn run_skippr(args: Vec<String>) -> Result<Value, String> {
@@ -44,6 +66,86 @@ fn run_skippr(args: Vec<String>) -> Result<Value, String> {
         "json": parsed,
         "stdout": stdout_text,
         "stderr": stderr.chars().take(12000).collect::<String>(),
+    }))
+}
+
+pub(crate) fn build_model_args(args: &Value) -> Result<Vec<String>, String> {
+    let pipeline = args
+        .get("pipeline")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "model_subagent requires pipeline".to_string())?;
+    let mut cli_args = config_args();
+    cli_args.extend(
+        ["model", "--pipeline", pipeline, "--output", "jsonl"]
+            .into_iter()
+            .map(str::to_string),
+    );
+    if let Some(dbt_output_path) = args
+        .get("dbt_output_path")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        cli_args.push("--dbt-output-path".to_string());
+        cli_args.push(dbt_output_path.to_string());
+    }
+    if args
+        .get("no_resume")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        cli_args.push("--no-resume".to_string());
+    }
+    Ok(cli_args)
+}
+
+pub(crate) fn run_skippr_model(args: Vec<String>) -> Result<Value, String> {
+    let output = Command::new(configured_skippr())
+        .args(&args)
+        .output()
+        .map_err(|e| format!("failed to run skippr model: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let events: Vec<Value> = stdout
+        .lines()
+        .filter_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+        .collect();
+    let terminal_event = events.iter().rev().find(|event| {
+        event
+            .get("event")
+            .and_then(|v| v.as_str())
+            .map(|event| matches!(event, "model_complete" | "model_error"))
+            .unwrap_or(false)
+    });
+    let failure_summary = terminal_event
+        .and_then(|event| event.get("failure_summary"))
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            events.iter().rev().find_map(|event| {
+                event
+                    .get("error")
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.trim().is_empty())
+            })
+        });
+    let changed_files = events
+        .iter()
+        .filter(|event| event.get("event").and_then(|v| v.as_str()) == Some("model_file_changed"))
+        .filter_map(|event| event.get("changed_files").cloned())
+        .collect::<Vec<_>>();
+    Ok(serde_json::json!({
+        "ok": output.status.success(),
+        "status": output.status.code(),
+        "args": args,
+        "event_count": events.len(),
+        "terminal_event": terminal_event.cloned(),
+        "failure_summary": failure_summary,
+        "changed_files": changed_files,
+        "events_tail": events.iter().rev().take(40).cloned().collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>(),
+        "stdout_tail": stdout.chars().rev().take(12000).collect::<String>().chars().rev().collect::<String>(),
+        "stderr_tail": stderr.chars().rev().take(12000).collect::<String>().chars().rev().collect::<String>(),
     }))
 }
 
@@ -156,9 +258,16 @@ impl Tool for SkipprCliTool {
             "connect" => {
                 cli_args.extend(["connect", "--help"].into_iter().map(str::to_string));
             }
+            "model" => {
+                if ide_chat_surface_enabled() {
+                    return ide_model_bridge_request(&args);
+                }
+                return run_skippr_model(build_model_args(&args)?);
+            }
             _ => {
                 return Err(
-                    "skippr_cli command must be one of: user, doctor, test, connect".to_string(),
+                    "skippr_cli command must be one of: user, doctor, test, connect, model"
+                        .to_string(),
                 )
             }
         }

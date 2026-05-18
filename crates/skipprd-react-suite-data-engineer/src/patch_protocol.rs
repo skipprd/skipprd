@@ -54,12 +54,15 @@ pub struct PatchBaseState {
 
 pub async fn read_patch_base_state(ctx: &AgentCtx, rel_path: &str) -> PatchBaseState {
     let key = project_fs::join_storage_key(ctx, rel_path);
-    let existing_opt = ctx
-        .storage()
-        .get_bytes(&key)
-        .await
-        .ok()
-        .map(|b| String::from_utf8_lossy(&b).to_string());
+    let existing_opt = match project_fs::read_file_text_sync(rel_path) {
+        Ok(Some(text)) => Some(text),
+        _ => ctx
+            .storage()
+            .get_bytes(&key)
+            .await
+            .ok()
+            .map(|b| String::from_utf8_lossy(&b).to_string()),
+    };
     let base_exists = existing_opt.is_some();
     let existing = existing_opt.unwrap_or_default();
     PatchBaseState {

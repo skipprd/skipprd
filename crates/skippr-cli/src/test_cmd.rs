@@ -301,6 +301,75 @@ fn tests_from_manifest(manifest_path: &Path) -> Result<Vec<serde_json::Value>, S
     Ok(tests)
 }
 
+/// Materialized dbt project session (profiles, runner, cache layout) for CLI dbt/test commands.
+pub(crate) struct OpenDbtProject {
+    pub tenant: String,
+    pub project_dir: PathBuf,
+    pub profiles_dir: PathBuf,
+    pub target: String,
+    pub tier_env: Vec<(&'static str, String)>,
+    pub dbt: DbtProjectProvider,
+}
+
+/// Materialize pipeline dbt from storage, write profiles, and run `dbt deps` + `dbt parse`.
+pub(crate) async fn open_materialized_dbt_project(
+    explicit_config: &Option<PathBuf>,
+    pipeline: &str,
+    clear_target: bool,
+) -> Result<OpenDbtProject, String> {
+    let resolved = prepare_resolved_pipeline(explicit_config, pipeline).await?;
+    let cfg_path = config_path(explicit_config);
+    let tenant = resolved.scope.tenant.to_string();
+    let cache_root = pipeline_cache_root(&cfg_path, &tenant, pipeline);
+    let project_dir = cache_root.join("data_engineer");
+    std::fs::create_dir_all(&project_dir).map_err(|e| e.to_string())?;
+
+    let scope = RequestScope::parse(&tenant, "dev", pipeline).map_err(|e| format!("scope: {e}"))?;
+    let (storage, keyspace) = storage_and_keyspace(&resolved).await?;
+    let dbt = dbt_provider_for_resolved(&resolved, storage, keyspace)?;
+
+    let n = materialize_project(&dbt, &scope, &project_dir).await?;
+    eprintln!(
+        "[skippr] materialized {n} files under {}",
+        project_dir.display()
+    );
+
+    let gen = react_suite_data_engineer::skippr_cli_generate_dbt_profiles_yml(&resolved, None)?;
+    let profiles_dir = write_profiles_dir(&cache_root, &gen.profiles_yml)?;
+    let target = gen.target.clone();
+    let tier_env = tier_env_pairs(&gen);
+
+    if clear_target {
+        let _ = std::fs::remove_dir_all(project_dir.join("target"));
+    }
+    run_dbt_deps_parse_on_project(
+        &dbt,
+        &project_dir,
+        &profiles_dir,
+        target.as_str(),
+        &tier_env,
+    )?;
+
+    Ok(OpenDbtProject {
+        tenant,
+        project_dir,
+        profiles_dir,
+        target,
+        tier_env,
+        dbt,
+    })
+}
+
+pub(crate) fn run_dbt_deps_parse_on_project(
+    dbt: &DbtProjectProvider,
+    project_dir: &Path,
+    profiles_dir: &Path,
+    target: &str,
+    tier_env: &[(&'static str, String)],
+) -> Result<(), String> {
+    run_dbt_deps_parse(dbt, project_dir, profiles_dir, target, tier_env)
+}
+
 fn run_dbt_deps_parse(
     dbt: &DbtProjectProvider,
     project_dir: &Path,
@@ -343,38 +412,15 @@ pub async fn cmd_test_list(
     explicit_config: &Option<PathBuf>,
     args: TestListArgs,
 ) -> Result<(), String> {
-    let resolved = prepare_resolved_pipeline(explicit_config, &args.pipeline).await?;
-    let cfg_path = config_path(explicit_config);
-    let tenant = resolved.scope.tenant.to_string();
-    let cache_root = pipeline_cache_root(&cfg_path, &tenant, &args.pipeline);
-    let project_dir = cache_root.join("data_engineer");
-    std::fs::create_dir_all(&project_dir).map_err(|e| e.to_string())?;
-
-    let scope =
-        RequestScope::parse(&tenant, "dev", &args.pipeline).map_err(|e| format!("scope: {e}"))?;
-    let (storage, keyspace) = storage_and_keyspace(&resolved).await?;
-    let dbt = dbt_provider_for_resolved(&resolved, storage, keyspace)?;
-
-    let n = materialize_project(&dbt, &scope, &project_dir).await?;
-    eprintln!(
-        "[skippr] materialized {n} files under {}",
-        project_dir.display()
-    );
-
-    let gen = react_suite_data_engineer::skippr_cli_generate_dbt_profiles_yml(&resolved, None)?;
-    let profiles_dir = write_profiles_dir(&cache_root, &gen.profiles_yml)?;
-    let target = gen.target.as_str();
-    let tier_env = tier_env_pairs(&gen);
-
-    let _ = std::fs::remove_dir_all(project_dir.join("target"));
-    run_dbt_deps_parse(&dbt, &project_dir, &profiles_dir, target, &tier_env)?;
+    let session = open_materialized_dbt_project(explicit_config, &args.pipeline, true).await?;
+    let project_dir = &session.project_dir;
 
     let manifest_path = project_dir.join("target").join("manifest.json");
     let tests = tests_from_manifest(&manifest_path)?;
     let project_root = project_dir.canonicalize().unwrap_or(project_dir.clone());
     let doc = serde_json::json!({
         "pipeline": args.pipeline,
-        "tenant": tenant,
+        "tenant": session.tenant,
         "project_root": project_root.to_string_lossy(),
         "tests": tests,
     });
@@ -426,37 +472,16 @@ pub async fn cmd_test_run(
     explicit_config: &Option<PathBuf>,
     args: TestRunArgs,
 ) -> Result<(), String> {
-    let resolved = prepare_resolved_pipeline(explicit_config, &args.pipeline).await?;
-    let cfg_path = config_path(explicit_config);
-    let tenant = resolved.scope.tenant.to_string();
-    let cache_root = pipeline_cache_root(&cfg_path, &tenant, &args.pipeline);
-    let project_dir = cache_root.join("data_engineer");
-    std::fs::create_dir_all(&project_dir).map_err(|e| e.to_string())?;
-
-    let scope =
-        RequestScope::parse(&tenant, "dev", &args.pipeline).map_err(|e| format!("scope: {e}"))?;
-    let (storage, keyspace) = storage_and_keyspace(&resolved).await?;
-    let dbt = dbt_provider_for_resolved(&resolved, storage, keyspace)?;
-
-    let n = materialize_project(&dbt, &scope, &project_dir).await?;
-    eprintln!(
-        "[skippr] materialized {n} files under {}",
-        project_dir.display()
-    );
-
-    let gen = react_suite_data_engineer::skippr_cli_generate_dbt_profiles_yml(&resolved, None)?;
-    let profiles_dir = write_profiles_dir(&cache_root, &gen.profiles_yml)?;
-    let target = gen.target.clone();
-    let tier_env = tier_env_pairs(&gen);
-    let profiles_pd = profiles_dir.as_path();
+    let session = open_materialized_dbt_project(explicit_config, &args.pipeline, true).await?;
+    let project_dir = &session.project_dir;
+    let target = session.target.clone();
+    let tier_env = session.tier_env.as_slice();
+    let profiles_pd = session.profiles_dir.as_path();
     let mut base_env: Vec<(&str, String)> = vec![(
         "DBT_PROFILES_DIR",
         profiles_pd.to_string_lossy().to_string(),
     )];
     base_env.extend(tier_env.iter().cloned());
-
-    let _ = std::fs::remove_dir_all(project_dir.join("target"));
-    run_dbt_deps_parse(&dbt, &project_dir, profiles_pd, target.as_str(), &tier_env)?;
 
     let mut argv: Vec<String> = vec!["test".into(), "--target".into(), target.clone()];
     for s in &args.select {
@@ -466,8 +491,8 @@ pub async fn cmd_test_run(
         }
     }
     let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-    let test_out = dbt.invoke_dbt_cli(
-        &project_dir,
+    let test_out = session.dbt.invoke_dbt_cli(
+        project_dir,
         Some(profiles_pd),
         &argv_refs,
         &base_env,

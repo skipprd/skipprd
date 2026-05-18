@@ -6,7 +6,6 @@ use std::sync::Arc;
 use crate::naming;
 use crate::providers::DatasetCatalogProvider;
 use react_core::agent::AgentCtx;
-use react_core::storage::{retry_get_bytes, retry_list_prefix};
 
 pub const PACKAGES_YML: &str = "packages.yml";
 pub const MODELS_SCHEMA_YML: &str = "models/schema.yml";
@@ -221,20 +220,12 @@ async fn postprocess_schema_yml(
     }
 
     {
-        let base = ctx
-            .keyspace()
-            .scoped_prefix(ctx.scope(), &["dbt"])
-            .trim_end_matches('/')
-            .to_string()
-            + "/";
-        let staging_prefix = format!("{}models/staging/", base);
-        if let Ok(keys) = retry_list_prefix(ctx.storage().as_ref(), &staging_prefix).await {
-            for k in keys {
-                if !k.ends_with(".sql") || k.contains("/_versions/") {
+        if let Ok(rels) = super::list_project_files(ctx, "models/staging/").await {
+            for rel in rels {
+                if !rel.ends_with(".sql") || rel.contains("/_versions/") {
                     continue;
                 }
-                if let Ok(bytes) = retry_get_bytes(ctx.storage().as_ref(), &k).await {
-                    let sql = String::from_utf8_lossy(&bytes).to_string();
+                if let Ok(Some(sql)) = super::read_project_file_text(ctx, &rel).await {
                     for (schema, table) in crate::naming::extract_source_calls(&sql).into_iter() {
                         if schema == want_schema && !table.trim().is_empty() {
                             candidates.insert(format!("{}.{}.{}", want_catalog, schema, table));

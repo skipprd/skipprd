@@ -76,6 +76,7 @@ impl GoldModelName {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "name", rename_all = "snake_case")]
 pub enum ModelInput {
@@ -83,6 +84,7 @@ pub enum ModelInput {
     IntraPlan(GoldModelName),
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "dataset", rename_all = "snake_case")]
 pub enum SemanticProfileKey {

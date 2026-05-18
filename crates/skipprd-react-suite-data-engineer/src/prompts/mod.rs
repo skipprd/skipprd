@@ -1,6 +1,5 @@
 pub mod ask;
 pub mod cleanse;
-pub mod direct;
 pub mod ide_agent;
 pub mod model;
 pub mod patch_contract;
@@ -15,10 +14,6 @@ pub fn ask_system_prompt() -> String {
 
 pub fn ide_agent_system_prompt() -> String {
     ide_agent::system_prompt()
-}
-
-pub fn direct_system_prompt() -> String {
-    direct::system_prompt()
 }
 
 pub fn cleanse_system_prompt() -> String {
@@ -76,7 +71,6 @@ mod tests {
         let prompts: Vec<(&str, String)> = vec![
             ("ask.system_prompt", super::ask::system_prompt()),
             ("ide_agent.system_prompt", super::ide_agent::system_prompt()),
-            ("direct.system_prompt", super::direct::system_prompt()),
             (
                 "cleanse.system_prompt",
                 super::cleanse::cleanse_system_prompt(),

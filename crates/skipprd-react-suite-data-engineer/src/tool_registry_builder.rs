@@ -124,7 +124,7 @@ impl DataEngineerSuite {
         };
 
         let mut registry = ToolRegistry::new();
-        let caps = Self::agent_capability_profile(AgentMode::Agent, true, true);
+        let caps = Self::agent_capability_profile(AgentMode::Model, true, true);
 
         registry.register(VectQueryTool);
         if let Some(query) = crate::ctx_ext::sctx_query(sctx) {
@@ -136,6 +136,7 @@ impl DataEngineerSuite {
         if caps.contains(&AgentToolCapability::Artifacts) {
             registry.register(ArtifactsTool);
         }
+        registry.register(tools::model_subagent::ModelSubagentTool);
         registry.register(tools::skippr_cli::SkipprCliTool);
         if caps.contains(&AgentToolCapability::LocalIdeTools) {
             registry.register(tools::local_ide::LocalIdeTool {
@@ -148,82 +149,14 @@ impl DataEngineerSuite {
         Ok(registry)
     }
 
-    pub(super) fn build_direct_agent_tools(sctx: &SuiteCtx) -> Result<ToolRegistry, String> {
-        use crate::tools::{
-            artifacts::ArtifactsTool, sql_run::SqlRunTool, sql_sample::SqlSampleTool,
-            sql_schema::SqlSchemaTool, sql_stats::SqlStatsTool, vect_query::VectQueryTool,
-        };
-
-        let mut registry = ToolRegistry::new();
-        let caps = Self::agent_capability_profile(AgentMode::Direct, true, true);
-        let query =
-            crate::ctx_ext::sctx_query(sctx).ok_or_else(|| "query provider missing".to_string())?;
-
-        registry.register(tools::local_ide::LocalIdeTool {
-            allow_patch: caps.contains(&AgentToolCapability::LocalIdeMutations),
-            metadata_namespace: Some("dbt"),
-            mirror_dbt_to_storage: false,
-        });
-        registry.register(SqlSchemaTool {
-            query: query.clone(),
-            datasets: crate::ctx_ext::sctx_datasets(sctx),
-            catalog: crate::ctx_ext::sctx_catalog(sctx),
-        });
-        registry.register(SqlStatsTool {
-            catalog: crate::ctx_ext::sctx_catalog(sctx),
-            datasets: crate::ctx_ext::sctx_datasets(sctx),
-        });
-        registry.register(SqlSampleTool {
-            query: query.clone(),
-        });
-        registry.register(SqlRunTool { query });
-        registry.register(VectQueryTool);
-        registry.register(ArtifactsTool);
-        registry.register(tools::dbt_examples::SearchDbtExamplesTool);
-        registry.register(tools::dbt_validate::DbtValidateTool {
-            datasets: crate::ctx_ext::sctx_datasets(sctx),
-            catalog: crate::ctx_ext::sctx_catalog(sctx),
-        });
-        registry.register(tools::publish_dbt_to_provider::PublishDbtToProviderTool {
-            datasets: crate::ctx_ext::sctx_datasets(sctx),
-            catalog: crate::ctx_ext::sctx_catalog(sctx),
-        });
-        registry.register(tools::ask_approval::AskApprovalTool);
-
-        Ok(registry)
-    }
-
-    pub(super) fn build_direct_agent_tools_card() -> String {
-        Self::build_tools_card(
-            "Allowed tools (direct dbt mode):",
-            vec![
-                "- local_ide(args:{op:\"list\"|\"read\"|\"grep\"|\"head\"|\"tail\"|\"patch\", path?:string, pattern?:string, patch_text?:string, limit?:int, max_chars?:int}) for local dbt file edits that produce IDE-reviewable diffs.".to_string(),
-                "- local_ide patch_text must be hunks-only Cursor/Aider format; never include *** Begin Patch envelopes, diff --git, or ---/+++ file headers.".to_string(),
-                "- dbt_validate(args:{fast?:bool, build?:bool, run?:bool, select?:string[]}) where fast:true runs parse/compile plus compiled-SQL probes without full build; build:true is the full validation gate.".to_string(),
-                "- sql_schema(args:{table?:\"<catalog>.<schema>.<table>\"}) lists warehouse tables when table is omitted or returns columns for a warehouse table; do not pass local file paths.".to_string(),
-                "- sql_stats(args:{table:\"<catalog>.<schema>.<table>\", field:\"<column>\"}) returns stats for a single warehouse column; do not pass local file paths.".to_string(),
-                "- sql_sample(args:{table:\"<catalog>.<schema>.<table>\", field:\"<column>\", k?:int}) samples a single warehouse column; for row samples use run_sql with LIMIT.".to_string(),
-                "- run_sql(args:{sql:string}) runs explicit warehouse SQL only. Use local_ide read/head for local CSV/file sources.".to_string(),
-                "- artifacts and vect_query for persisted dbt artifacts or supporting documentation.".to_string(),
-                "- search_dbt_examples for dbt pattern lookup.".to_string(),
-                "- publish_dbt_to_provider only after full validation passes and user approval is appropriate.".to_string(),
-                "- ask_approval(args:{prompt:string}) for publish or destructive workflow escalation only.".to_string(),
-            ],
-            vec![
-                "Direct mode edits local dbt files first, validates quickly with compiled SQL probes, then runs full dbt validation before publish.".to_string(),
-                "Plans and reviews are quality aids, not hard gates; unresolved review findings should be addressed only when requested.".to_string(),
-            ],
-            Some("Not available: staging_model, gold_model, apply_next_* batch tools, catalog_note, sql_register, phase repair loops.".to_string()),
-        )
-    }
-
     pub(super) fn build_ide_agent_tools_card(sctx: &SuiteCtx) -> String {
         let mut lines = vec![
             "- local_ide(args:{op:\"list\"|\"read\"|\"grep\"|\"head\"|\"tail\"|\"patch\", path?:string, pattern?:string, patch_text?:string, limit?:int, max_chars?:int}) for bounded local IDE file/search/patch work. For explicit local file edits, use local_ide read -> patch directly and skip vector lookup.".to_string(),
             "- local_ide patch_text must be hunks-only Cursor/Aider format, e.g. {\"op\":\"patch\",\"path\":\"src/app.ts\",\"patch_text\":\"@@ ... @@\\n- old\\n+ new\\n\"}; never include *** Begin Patch envelopes, *** Update File headers, diff --git, or ---/+++ file headers.".to_string(),
             "- ask_approval(args:{prompt:string}) for user consent before workflow escalation only; do not use routine approval before explicit local file edits because the IDE inline diff review is the approval surface.".to_string(),
+            "- model_subagent(args:{pipeline:string, dbt_output_path?:string, no_resume?:bool}) runs the full Skippr DBT model workflow as a sub-agent and returns parsed model progress/events.".to_string(),
             "- vect_query(args:{scope?:string, query_text:string, k?:int}) for docs/artifact lookup when local file evidence is not enough".to_string(),
-            "- skippr_cli(args:{command:\"user\"|\"doctor\"|\"test\"|\"connect\", action?:string, pipeline?:string, select?:string[]})".to_string(),
+            "- skippr_cli(args:{command:\"user\"|\"doctor\"|\"test\"|\"connect\"|\"model\", action?:string, pipeline?:string, dbt_output_path?:string, no_resume?:bool, select?:string[]})".to_string(),
             "- artifacts".to_string(),
         ];
         if crate::ctx_ext::sctx_query(sctx).is_some() {
@@ -266,7 +199,7 @@ impl DataEngineerSuite {
                     lines.push("- artifacts".to_string());
                 }
                 if caps.contains(&AgentToolCapability::SkipprCli) {
-                    lines.push("- skippr_cli(args:{command:\"user\"|\"doctor\"|\"test\"|\"connect\", action?:string, pipeline?:string, select?:string[]})".to_string());
+                    lines.push("- skippr_cli(args:{command:\"user\"|\"doctor\"|\"test\"|\"connect\"|\"model\", action?:string, pipeline?:string, dbt_output_path?:string, no_resume?:bool, select?:string[]})".to_string());
                 }
                 if caps.contains(&AgentToolCapability::LocalIdeTools) {
                     lines.push("- local_ide(args:{op:\"list\"|\"read\"|\"grep\"|\"head\"|\"tail\", path?:string, pattern?:string, limit?:int, max_chars?:int}) for bounded read-only local IDE file/search work".to_string());
@@ -276,7 +209,7 @@ impl DataEngineerSuite {
                 }
                 Self::build_tools_card("Allowed tools (ask mode):", lines, Vec::new(), None)
             }
-            AgentMode::Agent => {
+            AgentMode::Model => {
                 let mut lines = vec!["- file(args:{op:\"list\"|\"get\"|\"patch\"|\"rm\"|\"mv\", ...})".to_string(),
                     "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)".to_string()];
                 if caps.contains(&AgentToolCapability::RunSql) {
@@ -305,9 +238,8 @@ impl DataEngineerSuite {
                     lines.push("- local_ide(args:{op:\"list\"|\"read\"|\"grep\"|\"head\"|\"tail\"|\"patch\", path?:string, pattern?:string, patch_text?:string, limit?:int, max_chars?:int}) for bounded local IDE file/search/patch work. For explicit local file edits, use local_ide read -> patch directly and skip vector lookup.".to_string());
                     lines.push("- local_ide patch_text must be hunks-only Cursor/Aider format, e.g. {\"op\":\"patch\",\"path\":\"src/app.ts\",\"patch_text\":\"@@ ... @@\\n- old\\n+ new\\n\"}; never include *** Begin Patch envelopes, *** Update File headers, diff --git, or ---/+++ file headers.".to_string());
                 }
-                Self::build_tools_card("Allowed tools (agent mode):", lines, Vec::new(), None)
+                Self::build_tools_card("Allowed tools (model mode):", lines, Vec::new(), None)
             }
-            AgentMode::Direct => Self::build_direct_agent_tools_card(),
         }
     }
 

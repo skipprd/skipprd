@@ -19,6 +19,7 @@ pub mod gold_model;
 pub mod json_file;
 pub mod local_ide;
 pub(crate) mod model_authoring_engine;
+pub mod model_subagent;
 pub(crate) mod plan_prompt_helpers;
 pub mod publish_dbt_to_provider;
 pub mod skippr_cli;

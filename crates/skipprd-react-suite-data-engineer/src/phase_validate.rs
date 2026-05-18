@@ -460,7 +460,7 @@ impl DataEngineerSuite {
         validate_ctx.set("build", serde_json::Value::Bool(true));
         let obs = {
             let meta = react_core::session::ToolStepMeta {
-                agent: "agent".to_string(),
+                agent: crate::env_util::DEFAULT_AGENT_NAME.to_string(),
                 phase: phase.as_str().to_string(),
                 name: "dbt_validate".to_string(),
                 clean_name: "Validate DBT".to_string(),

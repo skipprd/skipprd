@@ -208,12 +208,15 @@ pub async fn apply_patch(
 ) -> Result<PatchOutcome, String> {
     let rel = normalize_rel_path(path)?;
     let key = super::join_storage_key(ctx, &rel);
-    let existing = ctx
-        .storage()
-        .get_bytes(&key)
-        .await
-        .ok()
-        .map(|b| String::from_utf8_lossy(&b).to_string());
+    let existing = if super::local_dbt_project_root().is_some() {
+        super::read_file_text_sync(&rel)?
+    } else {
+        ctx.storage()
+            .get_bytes(&key)
+            .await
+            .ok()
+            .map(|b| String::from_utf8_lossy(&b).to_string())
+    };
     let existed = existing.is_some();
     let old = existing.unwrap_or_default();
     let base_hash = super::sha256_hex(&old);

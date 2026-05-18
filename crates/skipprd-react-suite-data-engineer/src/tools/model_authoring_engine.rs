@@ -53,7 +53,7 @@ pub(crate) struct CompileAndWriteResult {
 
 /// Compile a SQL-first draft through authoring IR, apply placeholder
 /// replacements to produce dbt SQL, run an optional validator, then
-/// write to storage via patch.
+/// write through the local-or-storage DBT project route via patch.
 pub(crate) async fn compile_and_write_model<V>(
     ctx: &AgentCtx,
     draft: &sql_first::SqlFirstDraft,
@@ -100,8 +100,7 @@ where
     )
     .await?;
 
-    ctx.storage()
-        .put_bytes(&outcome.key, outcome.content.as_bytes(), "text/sql")
+    project_fs::persist_patch_outcome(ctx, &outcome, "text/sql")
         .await
         .map_err(|e| format!("failed to write model {rel_path}: {e}"))?;
 

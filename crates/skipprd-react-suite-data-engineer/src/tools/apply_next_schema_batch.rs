@@ -5,7 +5,6 @@ use std::sync::Arc;
 use crate::providers::DatasetCatalogProvider;
 use react_core::agent::AgentCtx;
 use react_core::llm::LlmCallOptions;
-use react_core::storage::{retry_get_bytes, retry_put_bytes};
 use react_core::tools::Tool;
 
 use crate::chunk_progress_contract;
@@ -355,10 +354,9 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             let sql_rel = naming::canonical_staging_rel_path(&schema, &table);
             let yml_rel = format!("models/staging/{}.yml", model_name);
 
-            let sql_key = project_fs::join_storage_key(ctx, &sql_rel);
-            let sql_text = match retry_get_bytes(ctx.storage().as_ref(), &sql_key).await {
-                Ok(b) => String::from_utf8_lossy(&b).to_string(),
-                Err(_) => {
+            let sql_text = match project_fs::read_project_file_text(ctx, &sql_rel).await {
+                Ok(Some(text)) => text,
+                Ok(None) | Err(_) => {
                     failed.push(ds.clone());
                     errors.push(format!("{ds}: missing sibling SQL {sql_rel}"));
                     continue;
@@ -392,10 +390,11 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
                             rewrite_final_select_wildcard(&sql_text, &from_plan)
                         {
                             if rewritten_sql != sql_text {
-                                if let Err(write_err) = retry_put_bytes(
-                                    ctx.storage().as_ref(),
-                                    &sql_key,
-                                    rewritten_sql.as_bytes(),
+                                if let Err(write_err) = project_fs::write_project_file_via_patch(
+                                    ctx,
+                                    self.datasets.as_ref(),
+                                    &sql_rel,
+                                    &rewritten_sql,
                                     "text/sql",
                                 )
                                 .await
@@ -492,11 +491,11 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
                 continue;
             }
 
-            let yml_key = project_fs::join_storage_key(ctx, &yml_rel);
-            if let Err(e) = retry_put_bytes(
-                ctx.storage().as_ref(),
-                &yml_key,
-                outcome.content.as_bytes(),
+            if let Err(e) = project_fs::write_project_file_via_patch(
+                ctx,
+                self.datasets.as_ref(),
+                &yml_rel,
+                &outcome.content,
                 "text/yaml",
             )
             .await
@@ -742,10 +741,8 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                 // Derive allowed columns from the model SQL output projection (best-effort).
                 let mut allowed = schema_policy::ModelAllowedColumns::default();
                 if let Some(ref rel) = t.expected_model_path {
-                    let key_sql = project_fs::join_storage_key(ctx, rel);
-                    match retry_get_bytes(ctx.storage().as_ref(), &key_sql).await {
-                        Ok(b) => {
-                            let sql_text = String::from_utf8_lossy(&b).to_string();
+                    match project_fs::read_project_file_text(ctx, rel).await {
+                        Ok(Some(sql_text)) => {
                             match files_tool::extract_final_select_output_columns(&sql_text) {
                                 Ok(cols) => {
                                     allowed.allowed_columns =
@@ -755,6 +752,9 @@ impl Tool for ApplyNextModelSchemaBatchTool {
                                     allowed.error = Some(e);
                                 }
                             }
+                        }
+                        Ok(None) => {
+                            allowed.error = Some(format!("missing model SQL at {rel}"));
                         }
                         Err(e) => {
                             allowed.error = Some(format!("missing model SQL at {rel}: {e}"));
@@ -836,11 +836,11 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             }
         };
 
-        let key = project_fs::join_storage_key(ctx, expected_rel);
-        if let Err(e) = retry_put_bytes(
-            ctx.storage().as_ref(),
-            &key,
-            sanitized_text.as_bytes(),
+        if let Err(e) = project_fs::write_project_file_via_patch(
+            ctx,
+            self.datasets.as_ref(),
+            expected_rel,
+            &sanitized_text,
             "text/yaml",
         )
         .await

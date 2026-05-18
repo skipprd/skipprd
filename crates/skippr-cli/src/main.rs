@@ -1,6 +1,7 @@
 mod api_client;
 mod auth;
 mod chat_cmd;
+mod dbt_cmd;
 mod feedback_diagnostics;
 mod headless_prep;
 mod public_config;
@@ -18,7 +19,7 @@ use std::{
     sync::Arc,
 };
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use react::config::ReactConfigFile;
 use react_core::keyspace::Keyspace;
 use serde::Serialize;
@@ -162,6 +163,12 @@ enum Cmd {
         action: test_cmd::TestSubcommand,
     },
 
+    /// dbt helpers (compile model SQL for IDE query runs).
+    Dbt {
+        #[command(subcommand)]
+        action: dbt_cmd::DbtSubcommand,
+    },
+
     /// Answer a read-only data-engineering question.
     Ask(AskArgs),
 
@@ -297,33 +304,15 @@ struct ModelArgs {
     /// Pipeline to model. The modeling warehouse is derived from this pipeline's data sink.
     #[arg(long)]
     pipeline: String,
-    /// Data-engineer agent path to use.
-    #[arg(long = "agent-type", value_enum, default_value_t = ModelAgentType::Agent)]
-    agent_type: ModelAgentType,
     /// Start a fresh modeling thread instead of resuming the latest project thread.
     #[arg(long, default_value_t = false)]
     no_resume: bool,
-    /// Local dbt project output path for direct mode. Defaults to ./dbt/<pipeline> when --agent-type direct.
+    /// Local dbt project output path for model authoring. Defaults to ./dbt/<pipeline>.
     #[arg(long = "dbt-output-path")]
     dbt_output_path: Option<PathBuf>,
     /// Output mode: text, json, or jsonl.
     #[arg(long, default_value = "text")]
     output: String,
-}
-
-#[derive(Clone, Debug, ValueEnum)]
-enum ModelAgentType {
-    Agent,
-    Direct,
-}
-
-impl ModelAgentType {
-    fn as_str(&self) -> &'static str {
-        match self {
-            Self::Agent => "agent",
-            Self::Direct => "direct",
-        }
-    }
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -4155,6 +4144,89 @@ fn failed_dbt_preflight(message: String) -> DirectDbtPreflightRun {
     }
 }
 
+fn is_dbt_diff_file(path: &Path) -> bool {
+    matches!(
+        path.extension().and_then(|ext| ext.to_str()),
+        Some("sql" | "yml" | "yaml" | "csv" | "md" | "txt")
+    )
+}
+
+fn snapshot_dbt_diff_files(root: &Path) -> HashMap<String, String> {
+    fn visit(root: &Path, dir: &Path, out: &mut HashMap<String, String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let name = path.file_name().and_then(|s| s.to_str()).unwrap_or("");
+                if matches!(name, "target" | "logs" | "dbt_packages" | ".git") {
+                    continue;
+                }
+                visit(root, &path, out);
+                continue;
+            }
+            if !path.is_file() || !is_dbt_diff_file(&path) {
+                continue;
+            }
+            let Ok(content) = std::fs::read_to_string(&path) else {
+                continue;
+            };
+            let rel = path
+                .strip_prefix(root)
+                .unwrap_or(&path)
+                .to_string_lossy()
+                .replace('\\', "/");
+            out.insert(rel, content);
+        }
+    }
+
+    let mut out = HashMap::new();
+    if root.is_dir() {
+        visit(root, root, &mut out);
+    }
+    out
+}
+
+fn changed_dbt_diff_files(
+    before: &HashMap<String, String>,
+    after: &HashMap<String, String>,
+) -> Vec<serde_json::Value> {
+    let mut paths: Vec<String> = before
+        .keys()
+        .chain(after.keys())
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter(|path| before.get(path) != after.get(path))
+        .collect();
+    paths.sort();
+    paths
+        .into_iter()
+        .map(|path| {
+            let before_text = before.get(&path).map(String::as_str).unwrap_or("");
+            let after_text = after.get(&path).map(String::as_str).unwrap_or("");
+            let before_lines: std::collections::BTreeSet<&str> = before_text.lines().collect();
+            let after_lines: std::collections::BTreeSet<&str> = after_text.lines().collect();
+            let lines_added = after_lines.difference(&before_lines).count();
+            let lines_removed = before_lines.difference(&after_lines).count();
+            let change_kind = if !before.contains_key(&path) {
+                "created"
+            } else if !after.contains_key(&path) {
+                "deleted"
+            } else {
+                "modified"
+            };
+            serde_json::json!({
+                "path": path,
+                "change_kind": change_kind,
+                "lines_added": lines_added,
+                "lines_removed": lines_removed,
+            })
+        })
+        .collect()
+}
+
 fn run_direct_dbt_preflight(
     resolved: &react_core::resolved_config::ReactResolvedConfig,
     direct_project_dir: Option<&Path>,
@@ -4226,13 +4298,15 @@ fn run_direct_dbt_preflight(
 }
 
 async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args: ModelArgs) {
+    let agent_type = "model";
+    let transport_agent_type = "agent";
     emit_de_suite_event(
         &args.output,
         DeSuiteEvent {
             event: "model_start",
             timestamp: event_timestamp(),
             pipeline: &args.pipeline,
-            run_kind: Some(args.agent_type.as_str()),
+            run_kind: Some(agent_type),
             thread_id: None,
             phase: Some("preflight"),
             repair_status: None,
@@ -4256,7 +4330,7 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
                     event: "model_error",
                     timestamp: event_timestamp(),
                     pipeline: &args.pipeline,
-                    run_kind: Some(args.agent_type.as_str()),
+                    run_kind: Some(agent_type),
                     thread_id: None,
                     phase: Some("preflight"),
                     repair_status: None,
@@ -4285,7 +4359,7 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
                     event: "model_error",
                     timestamp: event_timestamp(),
                     pipeline: &args.pipeline,
-                    run_kind: Some(args.agent_type.as_str()),
+                    run_kind: Some(agent_type),
                     thread_id: None,
                     phase: Some("preflight"),
                     repair_status: None,
@@ -4418,6 +4492,36 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
         };
     attach_s3_credentials_provider(&mut resolved, client.clone());
 
+    if resolved.scope.project_id.as_str() != args.pipeline {
+        let msg = format!(
+            "resolved model scope project '{}' does not match requested pipeline '{}'; refusing to run to avoid writing dbt artifacts under the wrong pipeline prefix",
+            resolved.scope.project_id, args.pipeline
+        );
+        emit_de_suite_event(
+            &args.output,
+            DeSuiteEvent {
+                event: "model_error",
+                timestamp: event_timestamp(),
+                pipeline: &args.pipeline,
+                run_kind: Some(agent_type),
+                thread_id: None,
+                phase: Some("preflight"),
+                repair_status: None,
+                pending_plan_revision: None,
+                failure_summary: Some(&msg),
+                error: Some(&msg),
+                answer: None,
+                plan: None,
+                ok: Some(false),
+                model_preflight: None,
+                changed_files: None,
+                validation: None,
+            },
+        );
+        eprintln!("[skippr] ERROR: {msg}");
+        std::process::exit(1);
+    }
+
     eprintln!(
         "[skippr] model config: project={} tenant={} storage={:?}",
         resolved.scope.project_id, resolved.scope.tenant, resolved.storage.mode
@@ -4444,7 +4548,7 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
                 event: "model_thread_resumed",
                 timestamp: event_timestamp(),
                 pipeline: &args.pipeline,
-                run_kind: Some(args.agent_type.as_str()),
+                run_kind: Some(agent_type),
                 thread_id: Some(tid),
                 phase: Some("resume"),
                 repair_status: None,
@@ -4465,30 +4569,22 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
 
     let status_cfg = resolved.clone();
     let run_thread_id = thread_id.clone();
-    let agent_type = args.agent_type.as_str();
-    let mut direct_dbt_output_path: Option<PathBuf> = None;
-    if matches!(args.agent_type, ModelAgentType::Direct) {
-        let dbt_output_path = args.dbt_output_path.clone().unwrap_or_else(|| {
-            project_root_from_config_path(&config_path(explicit_config))
-                .join("dbt")
-                .join(&args.pipeline)
-        });
-        let dbt_output_path = if dbt_output_path.is_absolute() {
-            dbt_output_path
-        } else {
-            project_root_from_config_path(&config_path(explicit_config)).join(dbt_output_path)
-        };
-        eprintln!(
-            "[skippr] direct dbt output path: {}",
-            dbt_output_path.display()
-        );
-        std::env::set_var("SKIPPR_DIRECT_DBT_OUTPUT_PATH", &dbt_output_path);
-        std::env::set_var("SKIPPR_LOCAL_IDE_ROOT", &dbt_output_path);
-        direct_dbt_output_path = Some(dbt_output_path);
-    }
-    let mut preflight_profiles_temp: Option<tempfile::TempDir> = None;
-    if matches!(args.agent_type, ModelAgentType::Direct) {
-        let preflight = run_direct_dbt_preflight(&resolved, direct_dbt_output_path.as_deref());
+    let dbt_output_path = args.dbt_output_path.clone().unwrap_or_else(|| {
+        project_root_from_config_path(&config_path(explicit_config))
+            .join("dbt")
+            .join(&args.pipeline)
+    });
+    let dbt_output_path = if dbt_output_path.is_absolute() {
+        dbt_output_path
+    } else {
+        project_root_from_config_path(&config_path(explicit_config)).join(dbt_output_path)
+    };
+    eprintln!("[skippr] dbt output path: {}", dbt_output_path.display());
+    let dbt_diff_before = snapshot_dbt_diff_files(&dbt_output_path);
+    std::env::set_var("SKIPPR_LOCAL_DBT_PROJECT_ROOT", &dbt_output_path);
+    std::env::set_var("SKIPPR_LOCAL_IDE_ROOT", &dbt_output_path);
+    let preflight_profiles_temp: Option<tempfile::TempDir> = {
+        let preflight = run_direct_dbt_preflight(&resolved, Some(dbt_output_path.as_path()));
         let preflight_value = serde_json::to_value(&preflight.result).unwrap_or_else(|_| {
             serde_json::json!({
                 "ok": false,
@@ -4547,25 +4643,17 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
             );
             std::process::exit(1);
         }
-        preflight_profiles_temp = preflight.profiles_temp;
-    }
-    let headless_prompt = if matches!(args.agent_type, ModelAgentType::Direct) {
-        Some(format!(
-            "Build or update the complete local dbt project for pipeline `{pipeline}`. \
-The local dbt project root is `{dbt_root}` and is the editable source of truth. \
-The Skippr config is `{config_path}`. Inspect the local dbt files, the Skippr config, and warehouse/source facts, then create or update the needed dbt files under the local dbt root using local_ide patches so the IDE shows diffs. \
-Do not stop after only listing files or reading dbt_project.yml. If models/sources/tests are missing, author them. \
-Run focused fast validation when possible and run full dbt validation before claiming the project is complete.",
-            pipeline = args.pipeline,
-            dbt_root = direct_dbt_output_path
-                .as_ref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_default(),
-            config_path = config_path(explicit_config).display()
-        ))
-    } else {
-        None
+        preflight.profiles_temp
     };
+    let headless_prompt = Some(format!(
+        "Build or update the complete local dbt project for pipeline `{pipeline}` using the phased data-engineer workflow. \
+The local dbt project root is `{dbt_root}` and is the editable source of truth for authoring; phase file edits must land there so the IDE can show diffs. \
+The Skippr config is `{config_path}`. Use the existing phased cleanse and gold workflow: discover sources of truth, design and review cleanse/silver, author and validate, then design and review gold models, author and validate, and finish with project status. \
+Do not bypass phase validation/review gates. If dbt, warehouse, or source prerequisites block completion, persist the phase blocker with the concrete validation or source error.",
+        pipeline = args.pipeline,
+        dbt_root = dbt_output_path.display(),
+        config_path = config_path(explicit_config).display()
+    ));
     let _preflight_profiles_temp = preflight_profiles_temp;
     emit_de_suite_event(
         &args.output,
@@ -4588,7 +4676,9 @@ Run focused fast validation when possible and run full dbt validation before cla
             validation: None,
         },
     );
-    eprintln!("[skippr] starting headless data-engineer workflow ({agent_type})");
+    eprintln!(
+        "[skippr] starting headless data-engineer workflow ({agent_type} via {transport_agent_type})"
+    );
     let headless = react_host::run_headless_detailed(
         resolved,
         react::run_engine::HeadlessRunOpts {
@@ -4597,7 +4687,7 @@ Run focused fast validation when possible and run full dbt validation before cla
             terminal: false,
             thread_id,
             suite_id: Some("data_engineer".to_string()),
-            agent: agent_type.to_string(),
+            agent: transport_agent_type.to_string(),
             skip_logging_init: false,
             headless_prompt,
             stream_jsonl: is_jsonl_output(&args.output),
@@ -4605,14 +4695,69 @@ Run focused fast validation when possible and run full dbt validation before cla
     )
     .await;
     let exit_code = headless.exit_code;
+    let status_thread_id = run_thread_id;
+    let dbt_diff_after = snapshot_dbt_diff_files(&dbt_output_path);
+    let changed_dbt_files = changed_dbt_diff_files(&dbt_diff_before, &dbt_diff_after);
+    let changed_dbt_files_value = if changed_dbt_files.is_empty() {
+        None
+    } else {
+        Some(serde_json::Value::Array(changed_dbt_files.clone()))
+    };
+    if !changed_dbt_files.is_empty() {
+        let count_kind = |kind: &str| {
+            changed_dbt_files
+                .iter()
+                .filter(|file| {
+                    file.get("change_kind").and_then(serde_json::Value::as_str) == Some(kind)
+                })
+                .count()
+        };
+        let sum_numeric = |field: &str| {
+            changed_dbt_files
+                .iter()
+                .filter_map(|file| file.get(field).and_then(serde_json::Value::as_u64))
+                .sum::<u64>() as usize
+        };
+        emit_de_suite_event(
+            &args.output,
+            DeSuiteEvent {
+                event: "model_file_changed",
+                timestamp: event_timestamp(),
+                pipeline: &args.pipeline,
+                run_kind: Some(agent_type),
+                thread_id: status_thread_id.as_deref(),
+                phase: Some("file_changes"),
+                repair_status: None,
+                pending_plan_revision: None,
+                failure_summary: None,
+                error: None,
+                answer: None,
+                plan: None,
+                ok: Some(exit_code == 0),
+                model_preflight: None,
+                changed_files: changed_dbt_files_value.clone(),
+                validation: None,
+            },
+        );
+        eprintln!(
+            "[skippr] model changed files: total={} created={} modified={} deleted={} +{} -{}",
+            changed_dbt_files.len(),
+            count_kind("created"),
+            count_kind("modified"),
+            count_kind("deleted"),
+            sum_numeric("lines_added"),
+            sum_numeric("lines_removed")
+        );
+    }
     eprintln!("[skippr] headless data-engineer workflow exited with code {exit_code}");
     if let Some(err) = headless.bootstrap_error.as_deref() {
         eprintln!("[skippr] data-engineer bootstrap failed before a thread was created: {err}");
     }
-    let status_thread_id = run_thread_id;
+    let mut model_failure_summary: Option<String> = None;
     if let Some(tid) = status_thread_id.as_deref() {
         match load_model_thread_status(&status_cfg, tid).await {
             Ok(Some(status)) => {
+                model_failure_summary = status.failure_brief.clone();
                 emit_de_suite_event(
                     &args.output,
                     DeSuiteEvent {
@@ -4630,7 +4775,7 @@ Run focused fast validation when possible and run full dbt validation before cla
                         plan: None,
                         ok: None,
                         model_preflight: None,
-                        changed_files: None,
+                        changed_files: changed_dbt_files_value.clone(),
                         validation: None,
                     },
                 );
@@ -4683,13 +4828,19 @@ Run focused fast validation when possible and run full dbt validation before cla
             phase: Some("complete"),
             repair_status: None,
             pending_plan_revision: None,
-            failure_summary: headless.bootstrap_error.as_deref(),
-            error: headless.bootstrap_error.as_deref(),
+            failure_summary: headless
+                .bootstrap_error
+                .as_deref()
+                .or(model_failure_summary.as_deref()),
+            error: headless
+                .bootstrap_error
+                .as_deref()
+                .or(model_failure_summary.as_deref()),
             answer: None,
             plan: None,
             ok: Some(exit_code == 0),
             model_preflight: None,
-            changed_files: None,
+            changed_files: changed_dbt_files_value,
             validation: None,
         },
     );
@@ -5334,6 +5485,14 @@ async fn async_main() {
             }
             test_cmd::TestSubcommand::Run(args) => {
                 if let Err(e) = test_cmd::cmd_test_run(cli.log, &cli.config, args).await {
+                    eprintln!("[skippr] ERROR: {e}");
+                    std::process::exit(1);
+                }
+            }
+        },
+        Cmd::Dbt { action } => match action {
+            dbt_cmd::DbtSubcommand::CompileSql(args) => {
+                if let Err(e) = dbt_cmd::cmd_dbt_compile_sql(cli.log, &cli.config, args).await {
                     eprintln!("[skippr] ERROR: {e}");
                     std::process::exit(1);
                 }

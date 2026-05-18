@@ -3,7 +3,6 @@ use serde_yaml::Value as YamlValue;
 use std::collections::{HashMap, HashSet};
 
 use react_core::agent::AgentCtx;
-use react_core::storage::{retry_get_bytes, retry_list_prefix, retry_put_bytes};
 
 use crate::project_fs;
 
@@ -120,25 +119,15 @@ async fn collect_sql_model_name_collisions(
     limit: usize,
 ) -> Result<Vec<(String, Vec<String>)>, String> {
     let limit = limit.max(1).min(2000);
-    let base = ctx
-        .keyspace()
-        .scoped_prefix(ctx.scope(), &["dbt"])
-        .trim_end_matches('/')
-        .to_string();
-    let pref = format!("{}/models/", base);
-    let mut keys = retry_list_prefix(ctx.storage().as_ref(), &pref)
+    let mut rels = project_fs::list_project_files(ctx, "models/")
         .await
         .unwrap_or_default();
-    keys.sort();
+    rels.sort();
     let mut by_stem: HashMap<String, Vec<String>> = HashMap::new();
-    for key in keys.into_iter().filter(|k| k.ends_with(".sql")).take(limit) {
-        if key.contains("/_versions/") {
+    for rel in rels.into_iter().filter(|k| k.ends_with(".sql")).take(limit) {
+        if rel.contains("/_versions/") {
             continue;
         }
-        let rel = key
-            .strip_prefix(&(base.clone() + "/"))
-            .unwrap_or(key.as_str())
-            .to_string();
         let stem = std::path::Path::new(&rel)
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())
@@ -171,23 +160,15 @@ async fn collect_staging_model_names_from_ymls(
     limit: usize,
 ) -> Result<HashSet<String>, String> {
     let limit = limit.max(1).min(500);
-    let base = ctx
-        .keyspace()
-        .scoped_prefix(ctx.scope(), &["dbt"])
-        .trim_end_matches('/')
-        .to_string();
-    let pref = format!("{}/models/staging/", base);
-    let mut keys = retry_list_prefix(ctx.storage().as_ref(), &pref)
+    let mut rels = project_fs::list_project_files(ctx, "models/staging/")
         .await
         .unwrap_or_default();
-    keys.sort();
+    rels.sort();
     let mut out: HashSet<String> = HashSet::new();
-    for k in keys.into_iter().filter(|k| k.ends_with(".yml")).take(limit) {
-        let bytes = match retry_get_bytes(ctx.storage().as_ref(), &k).await {
-            Ok(b) => b,
-            Err(_) => continue,
+    for rel in rels.into_iter().filter(|k| k.ends_with(".yml")).take(limit) {
+        let Some(text) = project_fs::read_project_file_text(ctx, &rel).await? else {
+            continue;
         };
-        let text = String::from_utf8_lossy(&bytes).to_string();
         let names = extract_model_names_from_yml_text(&text)?;
         out.extend(names);
     }
@@ -589,15 +570,14 @@ pub async fn normalize_schema_artifacts_for_validate(
 ) -> Result<Vec<String>, String> {
     let mut notes: Vec<String> = Vec::new();
     let schema_rel = project_fs::MODELS_SCHEMA_YML;
-    let schema_key = project_fs::join_storage_key(ctx, schema_rel);
-    if let Ok(bytes) = retry_get_bytes(ctx.storage().as_ref(), &schema_key).await {
-        let text = String::from_utf8_lossy(&bytes).to_string();
+    if let Some(text) = project_fs::read_project_file_text(ctx, schema_rel).await? {
         let (normalized, mut warn) = normalize_model_yaml_doc_for_dedupe(&text, schema_rel)?;
         if normalized != text {
-            retry_put_bytes(
-                ctx.storage().as_ref(),
-                &schema_key,
-                normalized.as_bytes(),
+            project_fs::write_project_file_via_patch(
+                ctx,
+                None,
+                schema_rel,
+                &normalized,
                 "text/yaml",
             )
             .await
@@ -609,36 +589,19 @@ pub async fn normalize_schema_artifacts_for_validate(
         notes.append(&mut warn);
     }
 
-    let base = ctx
-        .keyspace()
-        .scoped_prefix(ctx.scope(), &["dbt"])
-        .trim_end_matches('/')
-        .to_string();
-    let pref = format!("{}/models/staging/", base);
-    let mut keys = retry_list_prefix(ctx.storage().as_ref(), &pref)
+    let mut rels = project_fs::list_project_files(ctx, "models/staging/")
         .await
         .unwrap_or_default();
-    keys.sort();
-    for key in keys.into_iter().filter(|k| k.ends_with(".yml")) {
-        let rel = key
-            .strip_prefix(&(base.clone() + "/"))
-            .unwrap_or(key.as_str())
-            .to_string();
-        let bytes = match retry_get_bytes(ctx.storage().as_ref(), &key).await {
-            Ok(b) => b,
-            Err(_) => continue,
+    rels.sort();
+    for rel in rels.into_iter().filter(|k| k.ends_with(".yml")) {
+        let Some(text) = project_fs::read_project_file_text(ctx, &rel).await? else {
+            continue;
         };
-        let text = String::from_utf8_lossy(&bytes).to_string();
         let (normalized, mut warn) = normalize_model_yaml_doc_for_dedupe(&text, &rel)?;
         if normalized != text {
-            retry_put_bytes(
-                ctx.storage().as_ref(),
-                &key,
-                normalized.as_bytes(),
-                "text/yaml",
-            )
-            .await
-            .map_err(|e| format!("failed to write {rel}: {e}"))?;
+            project_fs::write_project_file_via_patch(ctx, None, &rel, &normalized, "text/yaml")
+                .await
+                .map_err(|e| format!("failed to write {rel}: {e}"))?;
             notes.push(format!("normalized duplicate model/test entries in {rel}"));
         }
         notes.append(&mut warn);
@@ -681,11 +644,9 @@ pub async fn prevalidate_dbt_schema_artifacts(ctx: &AgentCtx) -> Result<(), Prec
         });
     }
 
-    let key = project_fs::join_storage_key(ctx, project_fs::MODELS_SCHEMA_YML);
     let schema_map: Option<serde_yaml::Mapping> =
-        match retry_get_bytes(ctx.storage().as_ref(), &key).await {
-            Ok(bytes) => {
-                let text = String::from_utf8_lossy(&bytes).to_string();
+        match project_fs::read_project_file_text(ctx, project_fs::MODELS_SCHEMA_YML).await {
+            Ok(Some(text)) => {
                 let root: YamlValue = serde_yaml::from_str(&text).map_err(|e| PrecheckFailure {
                     kind: PrecheckFailureKind::Other,
                     brief: format!("models/schema.yml parse error: {e}"),
@@ -700,7 +661,7 @@ pub async fn prevalidate_dbt_schema_artifacts(ctx: &AgentCtx) -> Result<(), Prec
                 };
                 Some(map)
             }
-            Err(_) => None, // missing schema.yml is fine for early projects
+            _ => None, // missing schema.yml is fine for early projects
         };
     let staging_yml_model_names = collect_staging_model_names_from_ymls(ctx, 200)
         .await
@@ -786,29 +747,19 @@ pub async fn prevalidate_dbt_schema_artifacts(ctx: &AgentCtx) -> Result<(), Prec
 
     // Staging schema guards: parse each staging YAML and ensure declared columns exist
     // in the corresponding staging SQL output.
-    let base = ctx
-        .keyspace()
-        .scoped_prefix(ctx.scope(), &["dbt"])
-        .trim_end_matches('/')
-        .to_string();
-    let pref = format!("{}/models/staging/", base);
-    let mut keys = retry_list_prefix(ctx.storage().as_ref(), &pref)
+    let mut rels = project_fs::list_project_files(ctx, "models/staging/")
         .await
         .unwrap_or_default();
-    keys.sort();
-    for key in keys.into_iter().filter(|k| k.ends_with(".yml")) {
-        let rel = key
-            .strip_prefix(&(base.clone() + "/"))
-            .unwrap_or(key.as_str())
-            .to_string();
-        let bytes = retry_get_bytes(ctx.storage().as_ref(), &key)
+    rels.sort();
+    for rel in rels.into_iter().filter(|k| k.ends_with(".yml")) {
+        let text = project_fs::read_project_file_text(ctx, &rel)
             .await
             .map_err(|e| PrecheckFailure {
                 kind: PrecheckFailureKind::Other,
                 brief: format!("failed to read {rel}: {e}"),
                 suggested_targets: vec![rel.clone()],
-            })?;
-        let text = String::from_utf8_lossy(&bytes).to_string();
+            })?
+            .unwrap_or_default();
         let root: YamlValue = serde_yaml::from_str(&text).map_err(|e| PrecheckFailure {
             kind: PrecheckFailureKind::Other,
             brief: format!("invalid YAML in {rel}: {e}"),
@@ -831,8 +782,7 @@ pub async fn prevalidate_dbt_schema_artifacts(ctx: &AgentCtx) -> Result<(), Prec
                 continue;
             }
             let sql_rel = format!("models/staging/{name}.sql");
-            let sql_key = project_fs::join_storage_key(ctx, &sql_rel);
-            let sql_bytes = retry_get_bytes(ctx.storage().as_ref(), &sql_key)
+            let sql_text = project_fs::read_project_file_text(ctx, &sql_rel)
                 .await
                 .map_err(|_| PrecheckFailure {
                     kind: PrecheckFailureKind::StagingSchemaColumnMismatch,
@@ -840,8 +790,14 @@ pub async fn prevalidate_dbt_schema_artifacts(ctx: &AgentCtx) -> Result<(), Prec
                         "cannot validate {rel}: missing staging SQL {sql_rel} for model '{name}'"
                     ),
                     suggested_targets: vec![rel.clone(), sql_rel.clone()],
+                })?
+                .ok_or_else(|| PrecheckFailure {
+                    kind: PrecheckFailureKind::StagingSchemaColumnMismatch,
+                    brief: format!(
+                        "cannot validate {rel}: missing staging SQL {sql_rel} for model '{name}'"
+                    ),
+                    suggested_targets: vec![rel.clone(), sql_rel.clone()],
                 })?;
-            let sql_text = String::from_utf8_lossy(&sql_bytes).to_string();
             let allowed = crate::tools::files_tool::extract_final_select_output_columns(&sql_text)
                 .map_err(|e| PrecheckFailure {
                     kind: PrecheckFailureKind::StagingSchemaColumnMismatch,

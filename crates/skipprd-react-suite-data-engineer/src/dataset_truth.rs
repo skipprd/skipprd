@@ -9,7 +9,7 @@
 use crate::providers::{DatasetId, WarehouseProvider};
 use crate::references::DatasetRef;
 use react_core::agent::AgentCtx;
-use react_core::storage::{retry_get_bytes, retry_list_prefix};
+use react_core::storage::retry_get_bytes;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -284,24 +284,22 @@ pub async fn discover_staging_models_from_storage(ctx: &AgentCtx) -> GroundedSta
         + "/";
 
     // 1) models/staging/*.sql
-    let staging_prefix = format!("{}models/staging/", base);
-    let keys = match retry_list_prefix(ctx.storage().as_ref(), &staging_prefix).await {
+    let rels = match crate::project_fs::list_project_files(ctx, "models/staging/").await {
         Ok(k) => k,
         Err(e) => {
             tracing::warn!(
-                "discover_staging_models_from_storage: list_prefix({}) failed: {e}",
-                staging_prefix
+                "discover_staging_models_from_storage: list_project_files(models/staging/) failed: {e}",
             );
-            out.warnings
-                .push(format!("list_prefix failed for {staging_prefix}: {e}"));
+            out.warnings.push(format!(
+                "list_project_files failed for models/staging/: {e}"
+            ));
             Vec::new()
         }
     };
-    for k in keys {
-        if !k.ends_with(".sql") || k.contains("/_versions/") {
+    for rel in rels {
+        if !rel.ends_with(".sql") || rel.contains("/_versions/") {
             continue;
         }
-        let rel = k.strip_prefix(&base).unwrap_or(&k).to_string();
         let name = std::path::Path::new(&rel)
             .file_stem()
             .map(|s| s.to_string_lossy().to_string())

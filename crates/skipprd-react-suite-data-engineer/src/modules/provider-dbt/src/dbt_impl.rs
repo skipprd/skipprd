@@ -104,8 +104,8 @@ fn resolve_dbt_project_name(scope: &RequestScope, requested: &str) -> Result<Str
     ))
 }
 
-fn direct_dbt_project_root() -> Option<PathBuf> {
-    std::env::var("SKIPPR_DIRECT_DBT_OUTPUT_PATH")
+fn local_dbt_project_root() -> Option<PathBuf> {
+    std::env::var("SKIPPR_LOCAL_DBT_PROJECT_ROOT")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
@@ -1332,8 +1332,8 @@ impl DbtProjectProvider {
         let sanitized = sanitize_dbt_project_yaml(&raw, project_name, scope.project_id.as_str());
         if sanitized.changed {
             write_file(proj_path, sanitized.text.as_bytes())?;
-            if direct_dbt_project_root().is_none() {
-                // Best-effort persistence back to storage for future non-direct runs.
+            if local_dbt_project_root().is_none() {
+                // Best-effort persistence back to storage for future storage-backed runs.
                 let project_key = self.keyspace.scoped_key(scope, &["dbt", "dbt_project.yml"]);
                 let _ = self
                     .storage
@@ -1542,6 +1542,13 @@ impl DbtProvider for DbtProjectProvider {
         scope: &RequestScope,
     ) -> Result<Vec<react_suite_data_engineer::StrippedArtifact>, String> {
         let name = canonical_dbt_project_name(scope);
+        if let Some(root) = local_dbt_project_root() {
+            std::fs::create_dir_all(&root)
+                .map_err(|e| format!("failed to create local dbt root {}: {e}", root.display()))?;
+            return self
+                .ensure_local_project_yaml(scope, &name, &root.join("dbt_project.yml"))
+                .await;
+        }
         self.ensure_storage_project_yaml(scope, &name).await
     }
 
@@ -1556,6 +1563,15 @@ impl DbtProvider for DbtProjectProvider {
             return Err("model rel_path must be a safe models/*.sql path".to_string());
         }
         let key = format!("{}{}", self.keyspace.scoped_prefix(scope, &["dbt"]), rel);
+        if let Some(root) = local_dbt_project_root() {
+            let path = root.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+            }
+            write_file(&path, sql.as_bytes())?;
+            return Ok(key);
+        }
         self.storage
             .put_bytes(&key, sql.as_bytes(), "text/sql")
             .await
@@ -1574,6 +1590,15 @@ impl DbtProvider for DbtProjectProvider {
             return Err("metric rel_path must be a safe metrics/*.yaml path".to_string());
         }
         let key = format!("{}{}", self.keyspace.scoped_prefix(scope, &["dbt"]), rel);
+        if let Some(root) = local_dbt_project_root() {
+            let path = root.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+            }
+            write_file(&path, yaml_text.as_bytes())?;
+            return Ok(key);
+        }
         self.storage
             .put_bytes(&key, yaml_text.as_bytes(), "text/yaml")
             .await
@@ -1611,13 +1636,13 @@ impl DbtProvider for DbtProjectProvider {
         let select_terms = args.select.as_ref().filter(|v| !v.is_empty());
         let exclude_terms = args.exclude.as_ref().filter(|v| !v.is_empty());
 
-        let direct_root = direct_dbt_project_root();
-        let _tmp = if direct_root.is_some() {
+        let local_root = local_dbt_project_root();
+        let _tmp = if local_root.is_some() {
             None
         } else {
             Some(tempfile::tempdir().map_err(|e| e.to_string())?)
         };
-        let root = if let Some(root) = direct_root {
+        let root = if let Some(root) = local_root {
             std::fs::create_dir_all(&root).map_err(|e| e.to_string())?;
             root
         } else {

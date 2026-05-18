@@ -406,6 +406,7 @@ pub struct RecentFailedFileOp {
     pub count: usize,
 }
 
+#[allow(dead_code)]
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PublishPlanState {
@@ -721,6 +722,7 @@ pub enum PublishApprovalDecision {
     Rejected,
 }
 
+#[allow(dead_code)]
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PublishApprovalState {
@@ -735,6 +737,7 @@ pub enum PublishRetryKind {
     PublishFailureLoop,
 }
 
+#[allow(dead_code)]
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct PublishRetryState {

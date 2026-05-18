@@ -8,7 +8,7 @@ use std::sync::Arc;
 
 use crate::providers::DatasetCatalogProvider;
 use react_core::agent::AgentCtx;
-use react_core::storage::{retry_delete_object, retry_get_bytes, retry_put_bytes};
+use react_core::storage::retry_delete_object;
 use react_core::tools::Tool;
 
 use crate::patch_contract::{normalize_hunks_only_patch_text, SingleFilePatchArgs};
@@ -332,17 +332,20 @@ pub(crate) async fn validate_staging_schema_ymls(
             let sql_text = if let Some(s) = new_by_rel.get(&sql_rel) {
                 s.clone()
             } else {
-                // Fall back to existing staging SQL in storage.
-                let key = project_fs::join_storage_key(ctx, &sql_rel);
-                let bytes = retry_get_bytes(ctx.storage().as_ref(), &key)
+                project_fs::read_project_file_text(ctx, &sql_rel)
                     .await
                     .map_err(|_| {
                         format!(
                             "cannot validate {}: missing staging model SQL {} (for model '{}')",
                             rel, sql_rel, model_name
                         )
-                    })?;
-                String::from_utf8_lossy(&bytes).to_string()
+                    })?
+                    .ok_or_else(|| {
+                        format!(
+                            "cannot validate {}: missing staging model SQL {} (for model '{}')",
+                            rel, sql_rel, model_name
+                        )
+                    })?
             };
 
             let allowed_cols = extract_final_select_output_columns(&sql_text).map_err(|e| {
@@ -721,13 +724,16 @@ impl Tool for FilesTool {
                     Ok(o) => o,
                     Err(e) if e.contains("patch_hunk_context_miss") => {
                         let key = crate::project_fs::join_storage_key(ctx, &want_rel);
-                        let current = ctx
-                            .storage()
-                            .get_bytes(&key)
-                            .await
-                            .ok()
-                            .and_then(|b| String::from_utf8(b.to_vec()).ok())
-                            .unwrap_or_default();
+                        let current = match crate::project_fs::read_file_text_sync(&want_rel) {
+                            Ok(Some(text)) => text,
+                            _ => ctx
+                                .storage()
+                                .get_bytes(&key)
+                                .await
+                                .ok()
+                                .and_then(|b| String::from_utf8(b.to_vec()).ok())
+                                .unwrap_or_default(),
+                        };
                         let preview_len = current.len().min(6000);
                         let preview = &current[..preview_len];
                         return Err(format!(
@@ -766,14 +772,9 @@ impl Tool for FilesTool {
                 // the sibling staging SQL output (prevents COLUMN_NOT_FOUND runtime errors).
                 validate_staging_schema_ymls(ctx, std::slice::from_ref(&outcome)).await?;
 
-                retry_put_bytes(
-                    ctx.storage().as_ref(),
-                    &outcome.key,
-                    outcome.content.as_bytes(),
-                    "text/plain",
-                )
-                .await
-                .map_err(|e| e.to_string())?;
+                crate::project_fs::persist_patch_outcome(ctx, &outcome, "text/plain")
+                    .await
+                    .map_err(|e| e.to_string())?;
 
                 // Best-effort cleanup: if the patch targeted an alias path like models/silver/,
                 // delete the alias object after writing the canonical object.

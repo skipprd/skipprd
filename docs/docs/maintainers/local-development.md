@@ -14,7 +14,34 @@ CI also installs additional platform-specific dependencies on macOS and Windows 
 ## Fast feedback loop
 
 `skipprd` consumes generic React crates from the private CodeArtifact Cargo registry `skippr/react-cargo`.
-Before local builds that need to resolve those crates, authenticate Cargo:
+
+### Local IDE / agent (no CodeArtifact token)
+
+When `skipprd` and `react` are sibling checkouts (for example `skippr/skipprd` and `skippr/react`), the Skippr IDE and Skippr Agent patch those crates from disk instead of downloading from `react-cargo`.
+
+One-time build (recommended — the IDE reuses `skipprd/target/debug/skippr` and avoids `cargo run` on every command):
+
+```bash
+cd skipprd
+./scripts/cargo-with-local-react.sh build -p skippr-cli
+```
+
+Optional overrides:
+
+- `SKIPPR_REACT_ROOT` — path to the `react` repo if it is not `../react`
+- `SKIPPRD_MANIFEST_PATH` — path to `skipprd/Cargo.toml` if the IDE cannot find skipprd in the workspace
+- `SKIPPR_USE_LOCAL_SKIPPRD=0` — use an installed `skippr` on PATH instead of building from source
+
+Any other cargo invocation can use the same wrapper:
+
+```bash
+./scripts/cargo-with-local-react.sh check -p skippr-cli
+./scripts/cargo-with-local-react.sh test -p skippr-cli sql_prepare
+```
+
+### CodeArtifact token (CI and release builds)
+
+Before local builds that must resolve published React crate versions from the registry, authenticate Cargo:
 
 ```bash
 export CARGO_REGISTRIES_REACT_CARGO_TOKEN="$(

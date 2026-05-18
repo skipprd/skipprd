@@ -121,10 +121,9 @@ pub mod env_keys {
     pub const LLM_AUTHOR_REASONING_EFFORT_CLEANSE: &str = "LLM_AUTHOR_REASONING_EFFORT_CLEANSE";
     pub const LLM_AUTHOR_REASONING_EFFORT_MODEL: &str = "LLM_AUTHOR_REASONING_EFFORT_MODEL";
 
-    // Review LLM tokens
+    // Ask/review LLM tokens
     pub const LLM_ASK_REASONING_EFFORT: &str = "LLM_ASK_REASONING_EFFORT";
     pub const LLM_ASK_MAX_TOKENS: &str = "LLM_ASK_MAX_TOKENS";
-    pub const LLM_DIRECT_MAX_TOKENS: &str = "LLM_DIRECT_MAX_TOKENS";
     pub const LLM_REVIEW_REASONING_EFFORT: &str = "LLM_REVIEW_REASONING_EFFORT";
     pub const LLM_REVIEW_MAX_TOKENS: &str = "LLM_REVIEW_MAX_TOKENS";
     pub const LLM_REVIEW_MAX_TOKENS_UNIFY: &str = "LLM_REVIEW_MAX_TOKENS_UNIFY";
@@ -234,12 +233,6 @@ pub fn ask_max_tokens() -> u32 {
         .clamp(256, 8_000)
 }
 
-pub fn direct_max_tokens() -> u32 {
-    env_u32(env_keys::LLM_DIRECT_MAX_TOKENS)
-        .unwrap_or(8_000)
-        .clamp(2_000, 16_000)
-}
-
 pub fn catalog_bootstrap_timeout_secs() -> u64 {
     static CACHE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *CACHE.get_or_init(|| {
@@ -345,7 +338,7 @@ pub const TOOL_TIMEOUT_EXTRA_SLOW_SECS: u64 = 900;
 // ---------------------------------------------------------------------------
 
 pub const SUITE_PROJECT_NAME: &str = "data_engineer";
-pub const DEFAULT_AGENT_NAME: &str = "agent";
+pub const DEFAULT_AGENT_NAME: &str = "model";
 pub const UNKNOWN_AGENT: &str = "unknown";
 
 // ---------------------------------------------------------------------------

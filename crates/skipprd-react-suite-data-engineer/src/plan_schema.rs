@@ -20,12 +20,14 @@ pub struct CleansePlanSkeletonV1 {
     pub batches: Vec<Vec<String>>,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ModelPlanSkeletonTaskV1 {
     pub name: String,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ModelPlanSkeletonV1 {

@@ -2,16 +2,15 @@ use super::*;
 
 /// External-facing interaction modes for the data_engineer suite.
 ///
-/// The suite README lists five agent *types* (ask, review, agent, plan, validate),
-/// but plan/validate/author/publish are internal phases driven by the `Agent` mode's
+/// The suite README lists user-facing agent *types* (ask, review, model, plan, validate),
+/// but plan/validate/author/publish are internal phases driven by the `Model` mode's
 /// phase loop (see `execute_phase`). Only these three represent distinct entry points
 /// that callers can select via `dispatch_agent`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) enum AgentMode {
     Ask,
     Review,
-    Agent,
-    Direct,
+    Model,
 }
 
 impl std::str::FromStr for AgentMode {
@@ -21,10 +20,9 @@ impl std::str::FromStr for AgentMode {
         match s {
             "ask" => Ok(Self::Ask),
             "review" => Ok(Self::Review),
-            "agent" => Ok(Self::Agent),
-            "direct" => Ok(Self::Direct),
+            "model" | "agent" => Ok(Self::Model),
             _ => Err(format!(
-                "invalid agent_type '{}' for suite 'data_engineer' (expected 'ask' | 'review' | 'agent' | 'direct')",
+                "invalid agent_type '{}' for suite 'data_engineer' (expected 'ask' | 'review' | 'agent')",
                 s
             )),
         }
@@ -316,7 +314,7 @@ impl DataEngineerSuite {
                 caps.insert(AgentToolCapability::Artifacts);
                 caps.insert(AgentToolCapability::SkipprCli);
             }
-            AgentMode::Agent => {
+            AgentMode::Model => {
                 caps.insert(AgentToolCapability::MutableFile);
                 caps.insert(AgentToolCapability::RunSql);
                 caps.insert(AgentToolCapability::AskApproval);
@@ -329,28 +327,13 @@ impl DataEngineerSuite {
                 caps.insert(AgentToolCapability::CatalogNote);
                 caps.insert(AgentToolCapability::Artifacts);
             }
-            AgentMode::Direct => {
-                caps.insert(AgentToolCapability::RunSql);
-                caps.insert(AgentToolCapability::AskApproval);
-                caps.insert(AgentToolCapability::SearchDbtExamples);
-                caps.insert(AgentToolCapability::DbtValidate);
-                caps.insert(AgentToolCapability::PublishDbt);
-                caps.insert(AgentToolCapability::Artifacts);
-            }
         }
-        if allow_user_interrupt_tools
-            && !matches!(agent_mode, AgentMode::Review | AgentMode::Direct)
-        {
+        if allow_user_interrupt_tools && !matches!(agent_mode, AgentMode::Review) {
             caps.insert(AgentToolCapability::AskUser);
         }
-        if allow_local_ide_tools
-            && matches!(
-                agent_mode,
-                AgentMode::Ask | AgentMode::Agent | AgentMode::Direct
-            )
-        {
+        if allow_local_ide_tools && matches!(agent_mode, AgentMode::Ask | AgentMode::Model) {
             caps.insert(AgentToolCapability::LocalIdeTools);
-            if matches!(agent_mode, AgentMode::Agent | AgentMode::Direct) {
+            if matches!(agent_mode, AgentMode::Model) {
                 caps.insert(AgentToolCapability::LocalIdeMutations);
             }
         }
@@ -371,7 +354,7 @@ impl DataEngineerSuite {
         agent_mode: AgentMode,
         ide_chat_surface: bool,
     ) -> bool {
-        agent_mode == AgentMode::Agent && ide_chat_surface
+        agent_mode == AgentMode::Model && ide_chat_surface
     }
 
     pub(super) fn enforce_non_interactive_contract(
@@ -383,7 +366,7 @@ impl DataEngineerSuite {
             _ => None,
         });
         if let Some(prompt) = await_user_prompt {
-            if agent_mode == AgentMode::Agent {
+            if agent_mode == AgentMode::Model {
                 return Err(format!("agent_mode_await_user_forbidden: {}", prompt));
             }
             if Self::headless_mode_enabled() {
@@ -565,57 +548,14 @@ impl DataEngineerSuite {
         )
     }
 
-    pub(super) async fn run_direct(
-        thread_id: &str,
-        question: &str,
-        sctx: &SuiteCtx,
-    ) -> Result<Vec<FlowFrame>, String> {
-        Self::prepare_direct_dbt_workspace(sctx).await?;
-        let sys = prompts::with_time_context(prompts::direct_system_prompt());
-        let tools_card = Self::build_direct_agent_tools_card();
-        let registry = Self::build_direct_agent_tools(sctx)?;
-        let actx = Self::build_agent_ctx(
-            sctx,
-            thread_id,
-            "direct",
-            std::sync::Arc::new(react_core::agent::DefaultPolicy),
-            env_util::ASK_MAX_STEPS,
-            10,
-        );
-
-        Self::run_outcome_to_frames(
-            Agent::run_until_block(
-                &registry,
-                &actx,
-                &sys,
-                &tools_card,
-                question,
-                LlmCallOptions {
-                    prompt_id: "data_engineer.direct",
-                    expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
-                    max_output_tokens: Some(env_util::direct_max_tokens()),
-                    reasoning_effort: Some(env_util::ask_reasoning_effort()),
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|e| e.to_string()),
-        )
-    }
-
-    async fn prepare_direct_dbt_workspace(sctx: &SuiteCtx) -> Result<(), String> {
-        let Some(root) = std::env::var("SKIPPR_DIRECT_DBT_OUTPUT_PATH")
-            .ok()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .map(std::path::PathBuf::from)
-        else {
+    async fn prepare_local_dbt_workspace(sctx: &SuiteCtx) -> Result<(), String> {
+        let Some(root) = crate::project_fs::local_dbt_project_root() else {
             return Ok(());
         };
 
         std::fs::create_dir_all(&root).map_err(|e| {
             format!(
-                "failed to create direct dbt output path {}: {e}",
+                "failed to create local dbt output path {}: {e}",
                 root.display()
             )
         })?;
@@ -628,14 +568,15 @@ impl DataEngineerSuite {
             )
             .map_err(|e| {
                 format!(
-                    "failed to initialize direct dbt project {}: {e}",
+                    "failed to initialize local dbt project {}: {e}",
                     project_yml.display()
                 )
             })?;
         }
 
+        std::env::set_var("SKIPPR_LOCAL_DBT_PROJECT_ROOT", &root);
         std::env::set_var("SKIPPR_LOCAL_IDE_ROOT", &root);
-        tracing::info!("direct dbt project root: {}", root.display());
+        tracing::info!("local dbt project root: {}", root.display());
         Ok(())
     }
 
@@ -738,9 +679,11 @@ impl DataEngineerSuite {
     ) -> Result<Vec<FlowFrame>, String> {
         use control_flow::Phase;
 
-        if Self::should_use_ide_agent_runner(AgentMode::Agent, Self::ide_chat_surface_enabled()) {
+        if Self::should_use_ide_agent_runner(AgentMode::Model, Self::ide_chat_surface_enabled()) {
             return Self::run_ide_agent(thread_id, question, sctx).await;
         }
+
+        Self::prepare_local_dbt_workspace(sctx).await?;
 
         let has_el = Self::el_enabled(sctx);
 
@@ -1092,10 +1035,9 @@ impl DataEngineerSuite {
     ) -> Result<Vec<FlowFrame>, String> {
         let agent_mode = Self::validate_agent_type(agent_type)?;
         let frames = match agent_mode {
-            AgentMode::Agent => Self::run_agent(thread_id, question, ctx).await,
+            AgentMode::Model => Self::run_agent(thread_id, question, ctx).await,
             AgentMode::Review => Self::run_review(thread_id, question, ctx).await,
             AgentMode::Ask => Self::run_ask(thread_id, question, ctx).await,
-            AgentMode::Direct => Self::run_direct(thread_id, question, ctx).await,
         }?;
         Self::enforce_non_interactive_contract(agent_mode, frames)
     }

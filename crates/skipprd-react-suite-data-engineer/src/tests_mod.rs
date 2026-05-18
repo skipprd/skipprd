@@ -379,11 +379,11 @@ async fn run_agent_is_non_interactive_on_missing_providers() {
 #[test]
 fn ide_agent_runner_is_only_selected_for_ide_agent_mode() {
     assert!(DataEngineerSuite::should_use_ide_agent_runner(
-        AgentMode::Agent,
+        AgentMode::Model,
         true
     ));
     assert!(!DataEngineerSuite::should_use_ide_agent_runner(
-        AgentMode::Agent,
+        AgentMode::Model,
         false
     ));
     assert!(!DataEngineerSuite::should_use_ide_agent_runner(
@@ -418,7 +418,7 @@ async fn ide_agent_tools_are_local_first_without_query_provider() {
 fn local_ide_mutations_remain_agent_only() {
     let ask_caps = DataEngineerSuite::agent_capability_profile(AgentMode::Ask, true, true);
     let review_caps = DataEngineerSuite::agent_capability_profile(AgentMode::Review, true, true);
-    let agent_caps = DataEngineerSuite::agent_capability_profile(AgentMode::Agent, true, true);
+    let agent_caps = DataEngineerSuite::agent_capability_profile(AgentMode::Model, true, true);
 
     assert!(ask_caps.contains(&AgentToolCapability::LocalIdeTools));
     assert!(!ask_caps.contains(&AgentToolCapability::LocalIdeMutations));
@@ -432,7 +432,7 @@ fn non_interactive_contract_rejects_await_user_for_agent_type() {
         kind: FlowKind::new("await_user"),
         prompt: "x".to_string(),
     }];
-    let err = DataEngineerSuite::enforce_non_interactive_contract(AgentMode::Agent, frames)
+    let err = DataEngineerSuite::enforce_non_interactive_contract(AgentMode::Model, frames)
         .expect_err("agent type must reject await_user interrupt");
     assert!(err.contains("agent_mode_await_user_forbidden"));
 }

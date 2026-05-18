@@ -1,0 +1,377 @@
+//! `skippr dbt compile-sql` — compile a dbt model SQL file and return warehouse-ready SQL.
+
+use std::path::{Path, PathBuf};
+
+use react_module_provider_dbt::DbtProjectProvider;
+use serde::Serialize;
+
+use crate::test_cmd;
+use crate::{config_path, project_root_from_config_path};
+
+#[derive(Debug, Clone, clap::Subcommand)]
+pub enum DbtSubcommand {
+    /// Compile a dbt SQL resource and return compiled SQL (plus model/test metadata).
+    CompileSql(CompileSqlArgs),
+}
+
+#[derive(Debug, Clone, clap::Args)]
+pub struct CompileSqlArgs {
+    #[arg(long)]
+    pub pipeline: String,
+    /// Absolute or workspace-relative path to a dbt `.sql` resource (under `models/`, `snapshots/`, or `analyses/`).
+    #[arg(long)]
+    pub file: PathBuf,
+    /// Only run `dbt parse` (no `dbt compile`). Faster probe for test metadata.
+    #[arg(long, default_value_t = false)]
+    pub parse_only: bool,
+    /// Output: json or text.
+    #[arg(long, default_value = "json")]
+    pub output: String,
+}
+
+#[derive(Debug, Serialize)]
+struct CompileSqlResponse<'a> {
+    ok: bool,
+    pipeline: &'a str,
+    rel_path: String,
+    project_dir: String,
+    model_name: Option<String>,
+    model_unique_id: Option<String>,
+    test_select: Option<String>,
+    has_tests: bool,
+    compiled_sql: Option<String>,
+    compiled_path: Option<String>,
+    dbt_select: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compile: Option<serde_json::Value>,
+}
+
+fn is_json_output(output: &str) -> bool {
+    output.trim().eq_ignore_ascii_case("json")
+}
+
+fn print_json(value: &serde_json::Value) {
+    println!(
+        "{}",
+        serde_json::to_string_pretty(value).unwrap_or_else(|_| "{}".to_string())
+    );
+}
+
+fn is_dbt_sql_resource_rel(rel: &str) -> bool {
+    rel.starts_with("models/") || rel.starts_with("snapshots/") || rel.starts_with("analyses/")
+}
+
+/// Walk ancestors for `dbt_project.yml` and return `(project_root, rel_path)` when `file` is a dbt SQL resource.
+pub fn find_dbt_project_and_rel(file: &Path) -> Result<(PathBuf, String), String> {
+    let file = file
+        .canonicalize()
+        .map_err(|e| format!("file not found: {e}"))?;
+    let mut dir = file
+        .parent()
+        .ok_or_else(|| "file has no parent directory".to_string())?;
+    loop {
+        if dir.join("dbt_project.yml").is_file() {
+            let rel = file
+                .strip_prefix(dir)
+                .map_err(|_| "file is outside dbt project root".to_string())?;
+            let rel_str = rel.to_string_lossy().replace('\\', "/");
+            if !is_dbt_sql_resource_rel(&rel_str) {
+                return Err(format!(
+                    "not a dbt SQL resource (expected models/, snapshots/, or analyses/): {rel_str}"
+                ));
+            }
+            return Ok((dir.to_path_buf(), rel_str));
+        }
+        dir = dir
+            .parent()
+            .ok_or_else(|| "no dbt_project.yml found in parent directories".to_string())?;
+    }
+}
+
+fn read_dbt_project_name(project_dir: &Path) -> Result<String, String> {
+    let raw = std::fs::read_to_string(project_dir.join("dbt_project.yml"))
+        .map_err(|e| format!("read dbt_project.yml: {e}"))?;
+    for line in raw.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("name:") {
+            let name = trimmed
+                .strip_prefix("name:")
+                .map(|s| s.trim().trim_matches('"').trim_matches('\''))
+                .unwrap_or("")
+                .to_string();
+            if !name.is_empty() {
+                return Ok(name);
+            }
+        }
+    }
+    Err("dbt_project.yml: missing name:".to_string())
+}
+
+fn model_and_tests_from_manifest(
+    manifest_path: &Path,
+    rel_path: &str,
+) -> Result<(Option<String>, Option<String>, Option<String>, bool), String> {
+    let raw = std::fs::read_to_string(manifest_path).map_err(|e| e.to_string())?;
+    let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
+    let nodes = v
+        .get("nodes")
+        .and_then(|n| n.as_object())
+        .ok_or_else(|| "manifest.json: missing nodes object".to_string())?;
+
+    let mut model_unique_id: Option<String> = None;
+    let mut model_name: Option<String> = None;
+    for (_k, node) in nodes {
+        if node.get("resource_type").and_then(|x| x.as_str()) != Some("model") {
+            continue;
+        }
+        let original = node
+            .get("original_file_path")
+            .and_then(|x| x.as_str())
+            .or_else(|| node.get("path").and_then(|x| x.as_str()))
+            .unwrap_or("");
+        if original.replace('\\', "/") != rel_path {
+            continue;
+        }
+        model_unique_id = node
+            .get("unique_id")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string());
+        model_name = node
+            .get("name")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string());
+        break;
+    }
+
+    let Some(model_uid) = model_unique_id.clone() else {
+        return Ok((model_name, model_unique_id, None, false));
+    };
+
+    let mut test_count = 0usize;
+    for (_k, node) in nodes {
+        if node.get("resource_type").and_then(|x| x.as_str()) != Some("test") {
+            continue;
+        }
+        let depends = node
+            .get("depends_on")
+            .and_then(|d| d.get("nodes"))
+            .and_then(|n| n.as_array());
+        let Some(deps) = depends else {
+            continue;
+        };
+        if deps
+            .iter()
+            .filter_map(|x| x.as_str())
+            .any(|id| id == model_uid)
+        {
+            test_count += 1;
+        }
+    }
+
+    let test_select = model_name.clone();
+    Ok((model_name, model_unique_id, test_select, test_count > 0))
+}
+
+fn resolve_project_dir(
+    explicit_config: &Option<PathBuf>,
+    pipeline: &str,
+    file: &Path,
+    dbt_root: &Path,
+) -> PathBuf {
+    let cfg_path = config_path(explicit_config);
+    let project_root = project_root_from_config_path(&cfg_path);
+    let local_direct = project_root.join("dbt").join(pipeline.trim());
+    if file.starts_with(&local_direct) && local_direct.join("dbt_project.yml").is_file() {
+        return local_direct;
+    }
+    if dbt_root.join("dbt_project.yml").is_file() {
+        return dbt_root.to_path_buf();
+    }
+    local_direct
+}
+
+fn read_compiled_sql(
+    project_dir: &Path,
+    project_name: &str,
+    rel_path: &str,
+) -> Result<(String, PathBuf), String> {
+    let compiled_path = project_dir
+        .join("target")
+        .join("compiled")
+        .join(project_name)
+        .join(rel_path);
+    if !compiled_path.is_file() {
+        return Err(format!(
+            "compiled SQL not found at {}",
+            compiled_path.display()
+        ));
+    }
+    let sql = std::fs::read_to_string(&compiled_path).map_err(|e| e.to_string())?;
+    Ok((sql, compiled_path))
+}
+
+fn run_dbt_compile(
+    dbt: &DbtProjectProvider,
+    project_dir: &Path,
+    profiles_dir: &Path,
+    target: &str,
+    tier_env: &[(&str, String)],
+    dbt_select: &str,
+) -> Result<serde_json::Value, String> {
+    let profiles_path = Some(profiles_dir);
+    let mut base_env: Vec<(&str, String)> = vec![(
+        "DBT_PROFILES_DIR",
+        profiles_dir.to_string_lossy().to_string(),
+    )];
+    base_env.extend(tier_env.iter().cloned());
+
+    let compile = dbt.invoke_dbt_cli(
+        project_dir,
+        profiles_path,
+        &["compile", "--target", target, "--select", dbt_select],
+        &base_env,
+        "compile",
+    );
+    let body = serde_json::json!({
+        "code": compile.code,
+        "status_ok": compile.status_ok,
+        "stdout": compile.stdout,
+        "stderr": compile.stderr,
+    });
+    if !compile.status_ok {
+        return Err(format!(
+            "dbt compile failed (code {})\nstdout:\n{}\nstderr:\n{}",
+            compile.code, compile.stdout, compile.stderr
+        ));
+    }
+    Ok(body)
+}
+
+pub async fn cmd_dbt_compile_sql(
+    _log: Option<String>,
+    explicit_config: &Option<PathBuf>,
+    args: CompileSqlArgs,
+) -> Result<(), String> {
+    let file = if args.file.is_absolute() {
+        args.file.clone()
+    } else {
+        std::env::current_dir()
+            .map_err(|e| e.to_string())?
+            .join(&args.file)
+    };
+
+    let (dbt_root, rel_path) = find_dbt_project_and_rel(&file)?;
+    let dbt_select = format!("path:{rel_path}");
+
+    let session =
+        test_cmd::open_materialized_dbt_project(explicit_config, &args.pipeline, true).await?;
+    let mut project_dir = resolve_project_dir(explicit_config, &args.pipeline, &file, &dbt_root);
+
+    let use_local = project_dir.join("dbt_project.yml").is_file() && file.starts_with(&project_dir);
+    if !use_local {
+        project_dir = session.project_dir.clone();
+    }
+
+    let profiles_dir = session.profiles_dir.clone();
+    let target = session.target.as_str();
+    let tier_env = session.tier_env.as_slice();
+
+    if use_local {
+        test_cmd::run_dbt_deps_parse_on_project(
+            &session.dbt,
+            &project_dir,
+            &profiles_dir,
+            target,
+            tier_env,
+        )?;
+    }
+
+    let manifest_path = project_dir.join("target").join("manifest.json");
+    let (model_name, model_unique_id, test_select, has_tests) =
+        model_and_tests_from_manifest(&manifest_path, &rel_path)
+            .unwrap_or((None, None, None, false));
+
+    let mut compile_meta: Option<serde_json::Value> = None;
+    let mut compiled_sql: Option<String> = None;
+    let mut compiled_path: Option<String> = None;
+    let mut error: Option<String> = None;
+
+    if !args.parse_only {
+        match run_dbt_compile(
+            &session.dbt,
+            &project_dir,
+            &profiles_dir,
+            target,
+            tier_env,
+            &dbt_select,
+        ) {
+            Ok(meta) => compile_meta = Some(meta),
+            Err(e) => error = Some(e),
+        }
+
+        if error.is_none() {
+            match read_compiled_sql(
+                &project_dir,
+                &read_dbt_project_name(&project_dir)?,
+                &rel_path,
+            ) {
+                Ok((sql, path)) => {
+                    compiled_sql = Some(sql);
+                    compiled_path = Some(path.to_string_lossy().to_string());
+                }
+                Err(e) => error = Some(e),
+            }
+        }
+    }
+
+    let ok = error.is_none();
+    let err_message = error.clone();
+    let resp = CompileSqlResponse {
+        ok,
+        pipeline: &args.pipeline,
+        rel_path,
+        project_dir: project_dir.to_string_lossy().to_string(),
+        model_name,
+        model_unique_id,
+        test_select,
+        has_tests,
+        compiled_sql: compiled_sql.clone(),
+        compiled_path: compiled_path.clone(),
+        dbt_select,
+        error,
+        compile: compile_meta,
+    };
+    let value = serde_json::to_value(&resp).map_err(|e| e.to_string())?;
+    if is_json_output(&args.output) {
+        print_json(&value);
+    } else if !ok {
+        return Err(err_message.unwrap_or_else(|| "dbt compile-sql failed".to_string()));
+    } else {
+        println!(
+            "compiled {} (tests: {})",
+            compiled_path.as_deref().unwrap_or("?"),
+            has_tests
+        );
+        if let Some(sql) = &compiled_sql {
+            println!("{sql}");
+        }
+    }
+    if !ok {
+        return Err(err_message.unwrap_or_else(|| "dbt compile-sql failed".to_string()));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dbt_resource_rel_requires_models_prefix() {
+        assert!(is_dbt_sql_resource_rel("models/staging/orders.sql"));
+        assert!(is_dbt_sql_resource_rel("snapshots/orders_snapshot.sql"));
+        assert!(!is_dbt_sql_resource_rel("macros/foo.sql"));
+    }
+}

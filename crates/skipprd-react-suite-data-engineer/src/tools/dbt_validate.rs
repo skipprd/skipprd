@@ -121,7 +121,7 @@ async fn probe_compiled_model_sql(
     _project_name: &str,
     select_terms: &[String],
 ) -> Result<serde_json::Value, String> {
-    if let Some(root) = direct_dbt_project_root() {
+    if let Some(root) = local_dbt_project_root() {
         let compiled_root = root.join("target").join("compiled");
         let files = list_local_compiled_model_sql(&compiled_root, select_terms);
         return probe_sql_files(ctx, files).await;
@@ -212,8 +212,8 @@ async fn probe_compiled_model_sql(
     }
 }
 
-fn direct_dbt_project_root() -> Option<PathBuf> {
-    std::env::var("SKIPPR_DIRECT_DBT_OUTPUT_PATH")
+fn local_dbt_project_root() -> Option<PathBuf> {
+    std::env::var("SKIPPR_LOCAL_DBT_PROJECT_ROOT")
         .ok()
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())

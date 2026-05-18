@@ -43,17 +43,27 @@ impl DataEngineerSuite {
         let key = sctx
             .keyspace()
             .scoped_key(sctx.scope(), &["dbt", "dbt_project.yml"]);
-        match retry_head_etag(sctx.storage().as_ref(), &key).await {
-            Ok(Some(_)) => {}
-            Ok(None) => {
+        if let Some(root) = crate::project_fs::local_dbt_project_root() {
+            let local_project = root.join("dbt_project.yml");
+            if !local_project.is_file() {
                 return Err(format!(
-                    "dbt project is incomplete: dbt_project.yml is missing in storage. expected file: {key}. without this file the suite cannot validate/build."
+                    "dbt project is incomplete: dbt_project.yml is missing at local dbt root. expected file: {}.",
+                    local_project.display()
                 ).into());
             }
-            Err(e) => {
-                return Err(format!(
-                    "unable to verify presence of dbt_project.yml in storage. expected file: {key}. error: {e}"
-                ).into());
+        } else {
+            match retry_head_etag(sctx.storage().as_ref(), &key).await {
+                Ok(Some(_)) => {}
+                Ok(None) => {
+                    return Err(format!(
+                        "dbt project is incomplete: dbt_project.yml is missing in storage. expected file: {key}. without this file the suite cannot validate/build."
+                    ).into());
+                }
+                Err(e) => {
+                    return Err(format!(
+                        "unable to verify presence of dbt_project.yml in storage. expected file: {key}. error: {e}"
+                    ).into());
+                }
             }
         }
         crate::phase_contract::commit_phase_decision(

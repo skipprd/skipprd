@@ -165,7 +165,7 @@ async fn persist_patch_metadata(ctx: &AgentCtx, namespace: &str, patch_result: &
     let key = ctx.keyspace().scoped_key(
         ctx.scope(),
         &[
-            "direct",
+            "local_ide",
             "local_diffs",
             namespace,
             thread_id,

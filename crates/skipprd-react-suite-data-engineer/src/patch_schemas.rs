@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// The suite enforces "EXACTLY ONE primitive" in logic, but this schema provides
 /// a provider-compatible contract and a validator target for fallback backends.
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PatchSingleFileV1 {
@@ -18,6 +19,7 @@ pub struct PatchSingleFileV1 {
     pub notes: Vec<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PatchReplaceFileV1 {
@@ -25,6 +27,7 @@ pub struct PatchReplaceFileV1 {
     pub new_text: String,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PatchReplaceRangeV1 {
@@ -34,6 +37,7 @@ pub struct PatchReplaceRangeV1 {
     pub new_text: String,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PatchReplaceListEditV1 {
@@ -42,6 +46,7 @@ pub struct PatchReplaceListEditV1 {
     pub new_text: String,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct PatchReplaceListV1 {

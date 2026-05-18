@@ -692,12 +692,7 @@ impl Suite for DataEngineerSuite {
     }
 
     fn supported_agent_types(&self) -> Vec<String> {
-        vec![
-            "ask".to_string(),
-            "agent".to_string(),
-            "review".to_string(),
-            "direct".to_string(),
-        ]
+        vec!["ask".to_string(), "model".to_string(), "review".to_string()]
     }
 
     fn default_agent_type(&self) -> &'static str {
@@ -705,8 +700,8 @@ impl Suite for DataEngineerSuite {
     }
 
     fn phase_order(&self, agent_type: &str) -> Vec<String> {
-        // Only expose phases for agent-mode; other modes are single-pass.
-        if AgentMode::parse(agent_type).ok() != Some(AgentMode::Agent) {
+        // Only expose phases for model-mode; other modes are single-pass.
+        if AgentMode::parse(agent_type).ok() != Some(AgentMode::Model) {
             return Vec::new();
         }
         use crate::control_flow::Phase;

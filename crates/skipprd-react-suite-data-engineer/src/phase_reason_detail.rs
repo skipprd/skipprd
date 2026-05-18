@@ -3,6 +3,7 @@ use serde_json::Value;
 
 use crate::domain_types::{ReviewDecision, ReviewDecisionMeta};
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AutoApprovalSource {
@@ -19,6 +20,7 @@ impl std::fmt::Display for AutoApprovalSource {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ValidateToAuthoringSignal {
@@ -32,6 +34,7 @@ pub enum ValidateToAuthoringNextAction {
     ResumeAuthoringForRemainingPlanWork,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlanAutoApprovedDetail {
     pub auto_approved_in_agent_mode: bool,
@@ -64,11 +67,13 @@ pub struct CleanseDraftUngroundedDetail {
     pub removed_non_raw: usize,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlanPrunedEmptyDetail {
     pub plan_key: String,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlanSemanticInvalidErrorsDetail {
     pub plan_key: String,

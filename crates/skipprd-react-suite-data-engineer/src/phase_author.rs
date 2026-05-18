@@ -1,6 +1,6 @@
 use super::*;
 use crate::control_flow::Phase;
-use react_core::storage::{retry_get_bytes, retry_list_prefix};
+use react_core::storage::retry_get_bytes;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum AuthorValidateTrigger {
@@ -230,11 +230,6 @@ async fn append_review_patch_target_contents(
     if review_target_paths.is_empty() {
         return;
     }
-    let base = actx
-        .keyspace()
-        .scoped_prefix(actx.scope(), &["dbt"])
-        .trim_end_matches('/')
-        .to_string();
     let mut rendered = 0usize;
     for path in review_target_paths {
         if rendered >= 3 {
@@ -244,11 +239,9 @@ async fn append_review_patch_target_contents(
         if rel.is_empty() {
             continue;
         }
-        let key = format!("{}/{}", base, rel);
-        let Ok(bytes) = retry_get_bytes(actx.storage().as_ref(), &key).await else {
+        let Ok(Some(content)) = crate::project_fs::read_project_file_text(actx, &rel).await else {
             continue;
         };
-        let content = String::from_utf8_lossy(&bytes).to_string();
         let fence_lang = if rel.ends_with(".yml") || rel.ends_with(".yaml") {
             "yaml"
         } else {
@@ -705,10 +698,8 @@ async fn reconcile_existing_model_sql_from_storage(
         let Some(expected_path) = task.expected_model_path.clone() else {
             continue;
         };
-        let key = crate::project_fs::join_storage_key(actx, &expected_path);
-        match retry_get_bytes(actx.storage().as_ref(), &key).await {
-            Ok(bytes) => {
-                let sql = String::from_utf8_lossy(&bytes).to_string();
+        match crate::project_fs::read_project_file_text(actx, &expected_path).await {
+            Ok(Some(sql)) => {
                 let check = crate::authoring_contract::verify_model_sql_contract(
                     &plan.plan_key,
                     task,
@@ -725,6 +716,13 @@ async fn reconcile_existing_model_sql_from_storage(
                         "model SQL reconciliation refused stale/off-contract file"
                     );
                 }
+            }
+            Ok(None) => {
+                tracing::info!(
+                    item_name = %item_name,
+                    expected_model_path = %expected_path,
+                    "model SQL reconciliation found no existing file; item will be authored"
+                );
             }
             Err(e) => {
                 let error_text = e.to_string();
@@ -1009,10 +1007,8 @@ async fn mark_off_contract_model_artifacts_from_storage(
         let Some(expected_path) = task.expected_model_path.as_deref() else {
             continue;
         };
-        let key = crate::project_fs::join_storage_key(actx, expected_path);
-        match retry_get_bytes(actx.storage().as_ref(), &key).await {
-            Ok(bytes) => {
-                let sql = String::from_utf8_lossy(&bytes).to_string();
+        match crate::project_fs::read_project_file_text(actx, expected_path).await {
+            Ok(Some(sql)) => {
                 let check = crate::authoring_contract::verify_model_sql_contract(
                     &plan.plan_key,
                     task,
@@ -1037,11 +1033,8 @@ async fn mark_off_contract_model_artifacts_from_storage(
                     }
                 }
             }
-            Err(e) => {
-                let error_text = e.to_string();
-                if storage_error_is_missing_object(&error_text)
-                    && model_checklist_is_done(task, crate::plan::CHECKLIST_SQL_MODEL)
-                {
+            Ok(None) => {
+                if model_checklist_is_done(task, crate::plan::CHECKLIST_SQL_MODEL) {
                     let status = crate::authoring_contract::ArtifactContractStatus::Missing;
                     if status.repair_route()
                         == crate::authoring_contract::RepairRoute::ReconcileToPlan
@@ -1054,15 +1047,15 @@ async fn mark_off_contract_model_artifacts_from_storage(
                     }
                 }
             }
+            Err(_) => {}
         }
     }
 
     let mut schema_updates: Vec<(String, String)> = Vec::new();
-    let schema_key =
-        crate::project_fs::join_storage_key(actx, crate::project_fs::MODELS_SCHEMA_YML);
-    match retry_get_bytes(actx.storage().as_ref(), &schema_key).await {
-        Ok(bytes) => {
-            let schema = String::from_utf8_lossy(&bytes).to_string();
+    match crate::project_fs::read_project_file_text(actx, crate::project_fs::MODELS_SCHEMA_YML)
+        .await
+    {
+        Ok(Some(schema)) => {
             for task in plan.tasks.iter() {
                 let Some(spec) = task.implementation_spec.as_ref() else {
                     continue;
@@ -1085,20 +1078,18 @@ async fn mark_off_contract_model_artifacts_from_storage(
                 }
             }
         }
-        Err(e) => {
-            if storage_error_is_missing_object(&e.to_string()) {
-                for task in plan.tasks.iter() {
-                    if !model_checklist_is_done(task, crate::plan::CHECKLIST_SCHEMA_CONTRACT) {
-                        continue;
-                    }
-                    schema_updates.push((
-                        task.name.clone(),
-                        "models/schema.yml is missing and must be authored before repair."
-                            .to_string(),
-                    ));
+        Ok(None) => {
+            for task in plan.tasks.iter() {
+                if !model_checklist_is_done(task, crate::plan::CHECKLIST_SCHEMA_CONTRACT) {
+                    continue;
                 }
+                schema_updates.push((
+                    task.name.clone(),
+                    "models/schema.yml is missing and must be authored before repair.".to_string(),
+                ));
             }
         }
+        Err(_) => {}
     }
 
     let changed = !sql_updates.is_empty() || !schema_updates.is_empty();
@@ -1455,10 +1446,12 @@ async fn load_model_author_context(
             // pending models, mark the checklist items done and report progress.
             // Otherwise fall through to present the schema batch tool to the LLM.
             {
-                let key =
-                    crate::project_fs::join_storage_key(actx, crate::project_fs::MODELS_SCHEMA_YML);
-                if let Ok(bytes) = retry_get_bytes(actx.storage().as_ref(), &key).await {
-                    let content = String::from_utf8_lossy(&bytes).to_string();
+                if let Ok(Some(content)) = crate::project_fs::read_project_file_text(
+                    actx,
+                    crate::project_fs::MODELS_SCHEMA_YML,
+                )
+                .await
+                {
                     if collect_model_names_from_schema_yml(&content).is_ok() {
                         let mut all_contract_valid = true;
                         for n in ids.iter() {
@@ -1636,17 +1629,10 @@ async fn build_author_prompt(
         DataEngineerSuite::inject_model_question(question)
     };
     if !params.track.is_cleanse() {
-        let base = actx
-            .keyspace()
-            .scoped_prefix(actx.scope(), &["dbt"])
-            .trim_end_matches('/')
-            .to_string();
-        let pref = format!("{}/models/staging/", base);
-        if let Ok(keys) = retry_list_prefix(actx.storage().as_ref(), &pref).await {
-            let mut rels: Vec<String> = keys
+        if let Ok(rels) = crate::project_fs::list_project_files(actx, "models/staging/").await {
+            let mut rels: Vec<String> = rels
                 .into_iter()
                 .filter(|k| k.ends_with(".sql") && !k.contains("/_versions/"))
-                .filter_map(|k| k.strip_prefix(&(base.clone() + "/")).map(|s| s.to_string()))
                 .collect();
             rels.sort();
             rels.dedup();

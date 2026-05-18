@@ -1,6 +1,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CleanseSqlBatchContract {
@@ -36,6 +37,7 @@ pub(crate) struct CleanseSqlBatchContract {
     pub inner: Option<Value>,
 }
 
+#[allow(dead_code)]
 #[derive(Clone, Debug, Serialize, Deserialize, Default)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ModelSqlBatchContract {
