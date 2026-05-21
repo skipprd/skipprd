@@ -64,10 +64,6 @@ fn yaml_as_mapping_mut(v: &mut YamlValue) -> Option<&mut serde_yaml::Mapping> {
     }
 }
 
-fn yaml_get_str<'a>(v: &'a YamlValue, key: &str) -> Option<&'a str> {
-    v.get(key).and_then(|x| x.as_str())
-}
-
 fn yaml_is_staging_model_name(name: &str) -> bool {
     crate::dataset_truth::is_staging_model_name(name)
 }
@@ -369,7 +365,9 @@ pub fn sanitize_models_schema_yml(
                 let YamlValue::Mapping(ref mut cm) = c else {
                     continue;
                 };
-                let col_name = yaml_get_str(&YamlValue::Mapping(cm.clone()), "name")
+                let col_name = cm
+                    .get(YamlValue::String("name".to_string()))
+                    .and_then(|value| value.as_str())
                     .unwrap_or("")
                     .trim()
                     .to_string();

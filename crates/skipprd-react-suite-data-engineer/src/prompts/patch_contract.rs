@@ -1,4 +1,5 @@
 /// Canonical patch contract (semantic rules only — JSON structure is enforced by the schema).
+#[cfg(test)]
 pub fn llm_patch_response_contract() -> String {
     format!(
         r#"Patch rules:

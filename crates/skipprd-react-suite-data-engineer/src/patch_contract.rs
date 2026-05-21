@@ -7,6 +7,7 @@ pub struct SingleFilePatchArgs {
     pub patch_text: String,
 }
 
+#[cfg(test)]
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema, Default)]
 #[serde(deny_unknown_fields)]
 pub struct LlmSingleFilePatchResponse {

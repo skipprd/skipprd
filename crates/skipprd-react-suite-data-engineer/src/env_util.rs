@@ -141,6 +141,7 @@ pub mod env_keys {
     pub const LLM_REPAIR_REASONING_EFFORT: &str = "LLM_REPAIR_REASONING_EFFORT";
 
     // Patch protocol
+    #[cfg(test)]
     pub const REACT_PATCH_LOOP_MAX_OUTPUT_TOKENS: &str = "REACT_PATCH_LOOP_MAX_OUTPUT_TOKENS";
 
     // dbt policy

@@ -1067,6 +1067,35 @@ struct ConfigShowResult {
     sources: Vec<String>,
     sinks: Vec<String>,
     schema_sinks: Vec<String>,
+    connections: ConfigShowConnections,
+}
+
+#[derive(Serialize)]
+struct ConfigShowConnections {
+    sources: Vec<ConfigShowConnection>,
+    sinks: Vec<ConfigShowConnection>,
+    schema_sinks: Vec<ConfigShowConnection>,
+}
+
+#[derive(Serialize)]
+struct ConfigShowConnection {
+    name: String,
+    provider: Option<String>,
+    label: String,
+    fields: Vec<ConfigShowConnectionField>,
+    pipelines: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    schema_sink: Option<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    linked_sinks: Vec<String>,
+    supports_sql: bool,
+}
+
+#[derive(Serialize)]
+struct ConfigShowConnectionField {
+    name: String,
+    value: String,
+    secret: bool,
 }
 
 fn working_dir() -> PathBuf {
@@ -3899,6 +3928,233 @@ fn yaml_mapping_keys(value: Option<&serde_yaml::Value>) -> Vec<String> {
     keys
 }
 
+fn yaml_string(value: &serde_yaml::Value) -> Option<&str> {
+    value.as_str()
+}
+
+fn yaml_mapping(value: Option<&serde_yaml::Value>) -> Option<&serde_yaml::Mapping> {
+    value.and_then(|value| value.as_mapping())
+}
+
+fn mapping_get<'a>(mapping: &'a serde_yaml::Mapping, key: &str) -> Option<&'a serde_yaml::Value> {
+    mapping.get(serde_yaml::Value::String(key.to_string()))
+}
+
+fn registry_ref_name(value: Option<&serde_yaml::Value>, section: &str) -> Option<String> {
+    let raw = value.and_then(yaml_string)?.trim();
+    raw.strip_prefix(&format!("{section}."))
+        .filter(|name| !name.trim().is_empty())
+        .map(str::to_string)
+}
+
+fn plugin_config_mapping<'a>(
+    entry: &'a serde_yaml::Value,
+    provider: &str,
+) -> Option<&'a serde_yaml::Mapping> {
+    entry
+        .as_mapping()
+        .and_then(|mapping| mapping_get(mapping, provider).and_then(|value| value.as_mapping()))
+}
+
+fn provider_label(provider: Option<&str>) -> String {
+    let Some(provider) = provider.filter(|value| !value.trim().is_empty()) else {
+        return "Unknown".to_string();
+    };
+    provider
+        .chars()
+        .enumerate()
+        .flat_map(|(idx, ch)| {
+            if idx > 0 && ch.is_uppercase() {
+                vec![' ', ch]
+            } else {
+                vec![ch]
+            }
+        })
+        .collect()
+}
+
+fn is_secret_field_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.contains("password")
+        || lower.contains("secret")
+        || lower.contains("token")
+        || lower.contains("credential")
+        || lower.contains("private_key")
+        || lower.contains("connection_string")
+        || lower.contains("dsn")
+}
+
+fn display_config_value(value: &serde_yaml::Value) -> String {
+    match value {
+        serde_yaml::Value::Null => "null".to_string(),
+        serde_yaml::Value::Bool(value) => value.to_string(),
+        serde_yaml::Value::Number(value) => value.to_string(),
+        serde_yaml::Value::String(value) => {
+            if value.starts_with("${") && value.ends_with('}') {
+                value.clone()
+            } else {
+                value.chars().take(120).collect()
+            }
+        }
+        serde_yaml::Value::Sequence(values) => format!("{} item(s)", values.len()),
+        serde_yaml::Value::Mapping(values) => format!("{} field(s)", values.len()),
+        serde_yaml::Value::Tagged(tagged) => display_config_value(&tagged.value),
+    }
+}
+
+fn redacted_config_fields(
+    entry: &serde_yaml::Value,
+    provider: Option<&str>,
+) -> Vec<ConfigShowConnectionField> {
+    let Some(provider) = provider else {
+        return Vec::new();
+    };
+    let Some(mapping) = plugin_config_mapping(entry, provider) else {
+        return Vec::new();
+    };
+    let mut fields: Vec<ConfigShowConnectionField> = mapping
+        .iter()
+        .filter_map(|(key, value)| {
+            let name = key.as_str()?.to_string();
+            let secret = is_secret_field_name(&name);
+            Some(ConfigShowConnectionField {
+                name,
+                value: if secret {
+                    "********".to_string()
+                } else {
+                    display_config_value(value)
+                },
+                secret,
+            })
+        })
+        .collect();
+    fields.sort_by(|left, right| left.name.cmp(&right.name));
+    fields
+}
+
+fn supports_sql_provider(provider: Option<&str>) -> bool {
+    matches!(
+        provider.map(|value| value.to_ascii_lowercase()).as_deref(),
+        Some("athena")
+            | Some("snowflake")
+            | Some("bigquery")
+            | Some("postgres")
+            | Some("databricks")
+            | Some("synapse")
+            | Some("redshift")
+            | Some("clickhouse")
+            | Some("motherduck")
+    )
+}
+
+fn direct_pipeline_refs(cfg: &serde_yaml::Value, section: &str, name: &str) -> Vec<String> {
+    let Some(pipelines) = yaml_mapping(cfg.get("pipelines")) else {
+        return Vec::new();
+    };
+    let data_key = match section {
+        "data_sources" => "data_source",
+        "data_sinks" => "data_sink",
+        _ => return Vec::new(),
+    };
+    let mut refs: Vec<String> = pipelines
+        .iter()
+        .filter_map(|(pipeline_name, pipeline_value)| {
+            let pipeline_name = pipeline_name.as_str()?;
+            let pipeline_mapping = pipeline_value.as_mapping()?;
+            let ref_name = registry_ref_name(mapping_get(pipeline_mapping, data_key), section)?;
+            (ref_name == name).then(|| pipeline_name.to_string())
+        })
+        .collect();
+    refs.sort();
+    refs
+}
+
+fn linked_sinks_for_schema_sink(cfg: &serde_yaml::Value, schema_sink_name: &str) -> Vec<String> {
+    let Some(sinks) = yaml_mapping(cfg.get("data_sinks")) else {
+        return Vec::new();
+    };
+    let mut linked: Vec<String> = sinks
+        .iter()
+        .filter_map(|(sink_name, sink_value)| {
+            let sink_name = sink_name.as_str()?;
+            let mapping = sink_value.as_mapping()?;
+            let schema_sink =
+                registry_ref_name(mapping_get(mapping, "schema_sink"), "schema_sinks")?;
+            (schema_sink == schema_sink_name).then(|| sink_name.to_string())
+        })
+        .collect();
+    linked.sort();
+    linked
+}
+
+fn schema_sink_pipeline_refs(cfg: &serde_yaml::Value, schema_sink_name: &str) -> Vec<String> {
+    let mut pipelines: Vec<String> = linked_sinks_for_schema_sink(cfg, schema_sink_name)
+        .into_iter()
+        .flat_map(|sink_name| direct_pipeline_refs(cfg, "data_sinks", &sink_name))
+        .collect();
+    pipelines.sort();
+    pipelines.dedup();
+    pipelines
+}
+
+fn config_show_section_connections(
+    cfg: &serde_yaml::Value,
+    section: &str,
+    pipeline_section: Option<&str>,
+) -> Vec<ConfigShowConnection> {
+    let Some(entries) = yaml_mapping(cfg.get(section)) else {
+        return Vec::new();
+    };
+    let mut connections: Vec<ConfigShowConnection> = entries
+        .iter()
+        .filter_map(|(name, entry)| {
+            let name = name.as_str()?.to_string();
+            let provider = entry.as_mapping().and_then(plugin_mapping_key);
+            let schema_sink = if section == "data_sinks" {
+                entry.as_mapping().and_then(|mapping| {
+                    registry_ref_name(mapping_get(mapping, "schema_sink"), "schema_sinks")
+                })
+            } else {
+                None
+            };
+            let linked_sinks = if section == "schema_sinks" {
+                linked_sinks_for_schema_sink(cfg, &name)
+            } else {
+                Vec::new()
+            };
+            let pipelines = if section == "schema_sinks" {
+                schema_sink_pipeline_refs(cfg, &name)
+            } else {
+                pipeline_section
+                    .map(|pipeline_section| direct_pipeline_refs(cfg, pipeline_section, &name))
+                    .unwrap_or_default()
+            };
+            let supports_sql =
+                section == "data_sinks" && supports_sql_provider(provider.as_deref());
+            Some(ConfigShowConnection {
+                name,
+                label: provider_label(provider.as_deref()),
+                fields: redacted_config_fields(entry, provider.as_deref()),
+                provider,
+                pipelines,
+                schema_sink,
+                linked_sinks,
+                supports_sql,
+            })
+        })
+        .collect();
+    connections.sort_by(|left, right| left.name.cmp(&right.name));
+    connections
+}
+
+fn config_show_connections(cfg: &serde_yaml::Value) -> ConfigShowConnections {
+    ConfigShowConnections {
+        sources: config_show_section_connections(cfg, "data_sources", Some("data_sources")),
+        sinks: config_show_section_connections(cfg, "data_sinks", Some("data_sinks")),
+        schema_sinks: config_show_section_connections(cfg, "schema_sinks", None),
+    }
+}
+
 fn cmd_config_schema(output: &str) {
     let schema = config_schema();
     if is_json_output(output) {
@@ -3928,6 +4184,7 @@ fn cmd_config_show(explicit_config: &Option<PathBuf>, output: &str) {
         }
     };
     let pipelines = yaml_mapping_keys(cfg.get("pipelines"));
+    let connections = config_show_connections(&cfg);
     let result = ConfigShowResult {
         ok: true,
         config_path: path.display().to_string(),
@@ -3936,6 +4193,7 @@ fn cmd_config_show(explicit_config: &Option<PathBuf>, output: &str) {
         sources: yaml_mapping_keys(cfg.get("data_sources")),
         sinks: yaml_mapping_keys(cfg.get("data_sinks")),
         schema_sinks: yaml_mapping_keys(cfg.get("schema_sinks")),
+        connections,
     };
     if is_json_output(output) {
         print_json(&result);
@@ -6690,6 +6948,62 @@ data_sinks:
             "expected unset env diagnostic, got: {:?}",
             missing
         );
+    }
+
+    #[test]
+    fn config_show_connections_include_redacted_details_and_refs() {
+        let cfg: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+skippr:
+  workspace: test_ws
+pipelines:
+  pl1:
+    data_source: data_sources.src1
+    data_sink: data_sinks.sf1
+data_sources:
+  src1:
+    Mssql:
+      connection_string: server=tcp:127.0.0.1;database=db
+      tables: [dbo.t]
+data_sinks:
+  sf1:
+    Snowflake:
+      account: acct
+      user: user
+      password: super-secret
+      database: analytics
+    schema_sink: schema_sinks.glue1
+schema_sinks:
+  glue1:
+    Glue:
+      glue_database_name: analytics
+"#,
+        )
+        .expect("yaml");
+
+        let connections = config_show_connections(&cfg);
+        assert_eq!(connections.sources[0].name, "src1");
+        assert_eq!(connections.sources[0].provider.as_deref(), Some("Mssql"));
+        assert_eq!(connections.sources[0].pipelines, vec!["pl1"]);
+
+        let sink = &connections.sinks[0];
+        assert_eq!(sink.name, "sf1");
+        assert_eq!(sink.provider.as_deref(), Some("Snowflake"));
+        assert!(sink.supports_sql);
+        assert_eq!(sink.schema_sink.as_deref(), Some("glue1"));
+        assert_eq!(sink.pipelines, vec!["pl1"]);
+        let password = sink
+            .fields
+            .iter()
+            .find(|field| field.name == "password")
+            .expect("password field");
+        assert!(password.secret);
+        assert_eq!(password.value, "********");
+
+        let schema_sink = &connections.schema_sinks[0];
+        assert_eq!(schema_sink.name, "glue1");
+        assert_eq!(schema_sink.linked_sinks, vec!["sf1"]);
+        assert_eq!(schema_sink.pipelines, vec!["pl1"]);
     }
 
     #[test]
