@@ -19,6 +19,19 @@ from runtime_plugin_catalog import (
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_MANIFEST_DIR = REPO_ROOT / ".skippr" / "local-runtime-plugins" / "manifests"
+REACT_CARGO_REGISTRY_INDEX = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
+REACT_CARGO_PATCHES = [
+    ("react", "src/runtime"),
+    ("react-core", "src/core"),
+    ("react-http-protocol", "src/http-protocol"),
+    ("react-transport", "src/transport"),
+    ("react-view", "src/view"),
+    ("react-module-storage-s3", "src/modules/adaptors/storage-s3"),
+    ("react-module-storage-local", "src/modules/adaptors/storage-local"),
+    ("react-module-storage-memory", "src/modules/adaptors/storage-memory"),
+    ("react-module-provider-vector-lance", "src/modules/providers/vector-lance"),
+    ("react-suite-debugger", "src/suites/suite_debugger"),
+]
 PLUGIN_COLLECTIONS = {
     "data_sources": "DataSource",
     "data_sinks": "DataSink",
@@ -66,6 +79,33 @@ def ensure_tool(name: str) -> str:
 def run_command(command: list[str], *, env: dict[str, str] | None = None) -> None:
     print_step("+ " + " ".join(command))
     subprocess.run(command, cwd=REPO_ROOT, env=env, check=True)
+
+
+def local_react_root() -> Path | None:
+    configured = os.environ.get("SKIPPR_REACT_ROOT", "").strip()
+    candidates = []
+    if configured:
+        candidates.append(Path(configured))
+    candidates.extend([REPO_ROOT.parent / "react", REPO_ROOT.parent.parent / "react"])
+    for candidate in candidates:
+        if (candidate / "Cargo.toml").exists():
+            return candidate.resolve()
+    return None
+
+
+def react_cargo_config_args() -> list[str]:
+    args = ["--config", f'registries.react-cargo.index="{REACT_CARGO_REGISTRY_INDEX}"']
+    react_root = local_react_root()
+    if react_root is None:
+        return args
+    for crate_name, relative_path in REACT_CARGO_PATCHES:
+        args.extend(
+            [
+                "--config",
+                f'patch."react-cargo".{crate_name}.path="{(react_root / relative_path).resolve()}"',
+            ]
+        )
+    return args
 
 
 def sha256(path: Path) -> str:
@@ -248,7 +288,7 @@ def build_local_runtime_plugins(
 
     entries = [catalog[ref] for ref in sorted(selected)]
     packages = sorted({entry["package_name"] for entry in entries})
-    build_command = [ensure_tool("cargo"), "build"]
+    build_command = [ensure_tool("cargo"), "build", *react_cargo_config_args()]
     if release:
         build_command.append("--release")
     for package in packages:

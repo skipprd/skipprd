@@ -50,6 +50,7 @@ pub(crate) fn output_metadata() -> OutputMetadata {
     fn field(name: &str, dt: SkipprDataType) -> OutputMetadata {
         let mut field = OutputMetadata::new();
         field.out_field_name = name.to_string();
+        field.source_field_name = name.to_string();
         field.determined_type = dt;
         field
     }

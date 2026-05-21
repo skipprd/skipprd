@@ -337,6 +337,7 @@ fn metadata_from_runtime_output(output: &OutputMetadata) -> Metadata {
     let mut metadata = Metadata::new().expect("new metadata");
     metadata.enabled = true;
     metadata.out_field_name = output.out_field_name().to_string();
+    metadata.source_field_name = output.source_field_name().to_string();
     metadata.determined_type = output.determined_type().clone();
     metadata.determined_type_values = output.determined_type_values().cloned();
     metadata.field_id = output.field_id();

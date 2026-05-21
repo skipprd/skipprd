@@ -502,6 +502,7 @@ fn skippr_type_for_arrow(data_type: &ArrowDataType) -> SkipprDataType {
 fn output_metadata_for_arrow_field(field: &ArrowField) -> OutputMetadata {
     let mut metadata = OutputMetadata::new();
     metadata.out_field_name = field.name().clone();
+    metadata.source_field_name = field.name().clone();
     metadata.determined_type = skippr_type_for_arrow(field.data_type());
     metadata.nullable = field.is_nullable();
     if let ArrowDataType::Struct(fields) = field.data_type() {

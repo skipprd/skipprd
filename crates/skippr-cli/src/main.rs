@@ -406,9 +406,9 @@ struct LineageRefreshArgs {
 
 #[derive(Parser, Debug, Clone)]
 struct LineageGraphArgs {
-    /// Pipeline whose configured DE suite scope should be read.
+    /// Pipeline whose configured DE suite scope should be read. Omit to merge all persisted pipeline lineage graphs.
     #[arg(long)]
-    pipeline: PipelineName,
+    pipeline: Option<PipelineName>,
     /// Asset/node/dataset id to center the graph on.
     #[arg(long)]
     asset: Option<String>,
@@ -4280,32 +4280,44 @@ async fn cmd_lineage(
                 field: args.field.clone(),
                 direction: lineage_direction(&args.direction),
             };
-            let pipeline = args.pipeline.as_str();
-            let suite_ctx = match build_lineage_suite_ctx(explicit_config, pipeline).await {
-                Ok(ctx) => ctx,
-                Err(e) => {
-                    emit_lineage_json(
+            if let Some(pipeline) = args.pipeline.as_ref() {
+                let pipeline = pipeline.as_str();
+                let suite_ctx = match build_lineage_suite_ctx(explicit_config, pipeline).await {
+                    Ok(ctx) => ctx,
+                    Err(e) => {
+                        emit_lineage_json(
+                            &output,
+                            &serde_json::json!({"ok": false, "pipeline": pipeline, "error": e}),
+                        );
+                        std::process::exit(1);
+                    }
+                };
+                match react_suite_data_engineer::lineage_builder::load_lineage_graph_for_suite(
+                    &suite_ctx, query,
+                )
+                .await
+                {
+                    Ok(graph) => emit_lineage_json(
                         &output,
-                        &serde_json::json!({"ok": false, "pipeline": pipeline, "error": e}),
-                    );
-                    std::process::exit(1);
+                        &serde_json::json!({"ok": true, "pipeline": pipeline, "graph": graph}),
+                    ),
+                    Err(e) => {
+                        emit_lineage_json(
+                            &output,
+                            &serde_json::json!({"ok": false, "pipeline": pipeline, "error": e}),
+                        );
+                        std::process::exit(1);
+                    }
                 }
-            };
-            match react_suite_data_engineer::lineage_builder::load_lineage_graph_for_suite(
-                &suite_ctx, query,
-            )
-            .await
-            {
-                Ok(graph) => emit_lineage_json(
-                    &output,
-                    &serde_json::json!({"ok": true, "pipeline": pipeline, "graph": graph}),
-                ),
-                Err(e) => {
-                    emit_lineage_json(
-                        &output,
-                        &serde_json::json!({"ok": false, "pipeline": pipeline, "error": e}),
-                    );
-                    std::process::exit(1);
+            } else {
+                match load_all_lineage_graphs(explicit_config, query).await {
+                    Ok(graph) => {
+                        emit_lineage_json(&output, &serde_json::json!({"ok": true, "graph": graph}))
+                    }
+                    Err(e) => {
+                        emit_lineage_json(&output, &serde_json::json!({"ok": false, "error": e}));
+                        std::process::exit(1);
+                    }
                 }
             }
         }

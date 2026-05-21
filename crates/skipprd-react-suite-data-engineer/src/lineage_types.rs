@@ -56,6 +56,7 @@ impl LineageEdgeId {
 #[serde(rename_all = "snake_case")]
 pub enum LineageNodeKind {
     RawSource,
+    Pipeline,
     IngestTable,
     DbtSource,
     DbtModel,
@@ -330,6 +331,7 @@ pub fn now_epoch_secs() -> Option<u64> {
 pub fn dataset_node_id(dataset_id: &str, kind: LineageNodeKind) -> LineageNodeId {
     let prefix = match kind {
         LineageNodeKind::RawSource => "raw",
+        LineageNodeKind::Pipeline => "pipeline",
         LineageNodeKind::IngestTable => "ingest",
         LineageNodeKind::DbtSource => "dbt_source",
         LineageNodeKind::DbtModel => "dbt_model",
@@ -347,11 +349,59 @@ pub fn dataset_node_id(dataset_id: &str, kind: LineageNodeKind) -> LineageNodeId
     ))
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CanonicalRelationId(String);
+
+impl CanonicalRelationId {
+    pub fn new(value: impl AsRef<str>) -> Option<Self> {
+        let value = canonical_dataset_id(value.as_ref());
+        (!value.is_empty()).then_some(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for CanonicalRelationId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CanonicalFieldPath(String);
+
+impl CanonicalFieldPath {
+    pub fn new(value: impl AsRef<str>) -> Option<Self> {
+        let value = canonical_field_path(value.as_ref());
+        (!value.is_empty()).then_some(Self(value))
+    }
+
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    pub fn into_string(self) -> String {
+        self.0
+    }
+}
+
+impl std::fmt::Display for CanonicalFieldPath {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 pub fn field_node_id(dataset_id: &str, field_path: &str) -> LineageNodeId {
     LineageNodeId::generated(format!(
         "field:{}#{}",
         canonical_dataset_id(dataset_id),
-        field_path.trim()
+        canonical_field_path(field_path)
     ))
 }
 
@@ -361,6 +411,23 @@ pub fn canonical_dataset_id(dataset_id: &str) -> String {
         .trim_matches('"')
         .split('.')
         .map(|part| part.trim().trim_matches('"').to_ascii_lowercase())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
+pub fn canonical_field_path(field_path: &str) -> String {
+    field_path
+        .trim()
+        .split('.')
+        .map(|part| {
+            part.trim()
+                .trim_matches('`')
+                .trim_matches('"')
+                .trim_start_matches('[')
+                .trim_end_matches(']')
+                .to_ascii_lowercase()
+        })
+        .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join(".")
 }

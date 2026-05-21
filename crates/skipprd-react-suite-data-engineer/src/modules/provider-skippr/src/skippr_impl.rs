@@ -1848,6 +1848,22 @@ impl SkipprProvider for SkipprCliProvider {
                                                 .get("nullable")
                                                 .and_then(|v| v.as_bool())
                                                 .unwrap_or(true),
+                                            source_field_name: f
+                                                .get("source_field_name")
+                                                .and_then(|v| v.as_str())
+                                                .map(str::to_string),
+                                            out_field_name: f
+                                                .get("out_field_name")
+                                                .and_then(|v| v.as_str())
+                                                .map(str::to_string),
+                                            field_id: f
+                                                .get("field_id")
+                                                .and_then(|v| v.as_i64())
+                                                .and_then(|value| i32::try_from(value).ok()),
+                                            lineage_id: f
+                                                .get("lineage_id")
+                                                .and_then(|v| v.as_str())
+                                                .map(str::to_string),
                                         })
                                     })
                                     .collect()

@@ -1808,13 +1808,33 @@ async fn show_pipeline(pipeline_name: &str) {
     let mut namespaces = Vec::new();
     for (ns_name, ns_metadata) in pipeline_metadata.metadata.iter() {
         let fields: Vec<serde_json::Value> = ns_metadata
-            .field_details()
-            .into_iter()
-            .map(|(name, type_name, nullable)| {
+            .fields
+            .iter()
+            .map(|(key, field_metadata)| {
+                let name = if field_metadata.out_field_name.is_empty() {
+                    key.clone()
+                } else {
+                    field_metadata.out_field_name.clone()
+                };
+                let source_field_name = if field_metadata.source_field_name.is_empty() {
+                    key.clone()
+                } else {
+                    field_metadata.source_field_name.clone()
+                };
+                let type_name =
+                    if field_metadata.determined_type == crate::discover::SkipprDataType::Unknown {
+                        "Unknown".to_string()
+                    } else {
+                        field_metadata.determined_type.as_str().to_string()
+                    };
                 serde_json::json!({
                     "name": name,
+                    "out_field_name": name,
+                    "source_field_name": source_field_name,
                     "type": type_name,
-                    "nullable": nullable,
+                    "nullable": field_metadata.nullable,
+                    "field_id": field_metadata.field_id,
+                    "lineage_id": field_metadata.lineage_id,
                 })
             })
             .collect();

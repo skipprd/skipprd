@@ -5,17 +5,18 @@ use react_core::suite::SuiteCtx;
 use serde_json::Value;
 
 use crate::ctx_ext::{sctx_catalog, sctx_datasets, sctx_skippr, sctx_warehouse, ProvidersCfgCap};
-use crate::lineage_sql::analyze_select_sql;
-use crate::lineage_store::{slice_graph, LineageStore};
+use crate::lineage_sql::{analyze_select_sql, SqlSelectedOutput};
+use crate::lineage_store::{merge_lineage_node, slice_graph, LineageStore};
 use crate::lineage_types::{
-    canonical_dataset_id, dataset_node_id, edge_id, field_node_id, LineageDiagnostic,
-    LineageDiagnosticSeverity, LineageDirection, LineageEdge, LineageEdgeKind,
+    canonical_dataset_id, canonical_field_path, dataset_node_id, edge_id, field_node_id,
+    LineageDiagnostic, LineageDiagnosticSeverity, LineageDirection, LineageEdge, LineageEdgeKind,
     LineageEvidenceSource, LineageFieldRef, LineageGraphQuery, LineageGraphSnapshot, LineageNode,
     LineageNodeId, LineageNodeKind, LineageProvenance, LineageRefreshResult,
     QueryHistoryImportSummary,
 };
 use crate::providers::{
     DataCatalog, DatasetCatalogProvider, EvidenceStatus, QueryHistoryRecord, QueryHistoryRequest,
+    SkipprFieldSchema, SkipprNamespaceStatus, SkipprPipelineStatus,
 };
 use crate::PipelineName;
 
@@ -39,7 +40,7 @@ impl GraphBuilder {
         let id = node.id.clone();
         self.nodes
             .entry(id.clone())
-            .and_modify(|existing| merge_node(existing, &node))
+            .and_modify(|existing| merge_lineage_node(existing, &node))
             .or_insert(node);
         id
     }
@@ -49,7 +50,7 @@ impl GraphBuilder {
     }
 
     fn warn(&mut self, message: impl Into<String>, source: Option<LineageEvidenceSource>) {
-        self.diagnostics.push(LineageDiagnostic {
+        self.add_diagnostic(LineageDiagnostic {
             severity: LineageDiagnosticSeverity::Warning,
             message: message.into(),
             source,
@@ -57,11 +58,30 @@ impl GraphBuilder {
     }
 
     fn info(&mut self, message: impl Into<String>, source: Option<LineageEvidenceSource>) {
-        self.diagnostics.push(LineageDiagnostic {
+        self.add_diagnostic(LineageDiagnostic {
             severity: LineageDiagnosticSeverity::Info,
             message: message.into(),
             source,
         });
+    }
+
+    fn add_diagnostic(&mut self, diagnostic: LineageDiagnostic) {
+        if !self.diagnostics.contains(&diagnostic) {
+            self.diagnostics.push(diagnostic);
+        }
+    }
+
+    fn field_paths_for_dataset(&self, dataset_id: &str) -> Vec<String> {
+        let dataset_id = canonical_dataset_id(dataset_id);
+        self.nodes
+            .values()
+            .filter(|node| node.kind == LineageNodeKind::Field)
+            .filter_map(|node| node.field.as_ref())
+            .filter(|field| canonical_dataset_id(&field.dataset_id) == dataset_id)
+            .map(|field| canonical_field_path(&field.field_path))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     fn finish(self) -> LineageGraphSnapshot {
@@ -74,24 +94,191 @@ impl GraphBuilder {
     }
 }
 
-fn merge_node(existing: &mut LineageNode, incoming: &LineageNode) {
-    if existing.label.trim().is_empty() {
-        existing.label = incoming.label.clone();
+fn add_field_node(
+    builder: &mut GraphBuilder,
+    dataset_id: &str,
+    field_path: &str,
+    label: impl Into<String>,
+    path: Option<String>,
+    metadata: BTreeMap<String, String>,
+) -> LineageNodeId {
+    let dataset_id = canonical_dataset_id(dataset_id);
+    let field_path = canonical_field_path(field_path);
+    let id = field_node_id(&dataset_id, &field_path);
+    builder.add_node(LineageNode {
+        id: id.clone(),
+        label: label.into(),
+        kind: LineageNodeKind::Field,
+        dataset_id: Some(dataset_id.clone()),
+        field: Some(LineageFieldRef {
+            dataset_id,
+            field_path,
+            field_id: None,
+        }),
+        path,
+        metadata,
+    });
+    id
+}
+
+fn add_contains_field_edge(
+    builder: &mut GraphBuilder,
+    entity_id: &LineageNodeId,
+    field_id: &LineageNodeId,
+    provenance: LineageProvenance,
+) {
+    builder.add_edge(LineageEdge {
+        id: edge_id(LineageEdgeKind::ContainsField, entity_id, field_id),
+        from_node_id: entity_id.clone(),
+        to_node_id: field_id.clone(),
+        kind: LineageEdgeKind::ContainsField,
+        provenance,
+        metadata: BTreeMap::new(),
+    });
+}
+
+fn add_field_lineage_edge(
+    builder: &mut GraphBuilder,
+    kind: LineageEdgeKind,
+    from_field_id: &LineageNodeId,
+    to_field_id: &LineageNodeId,
+    provenance: LineageProvenance,
+    metadata: BTreeMap<String, String>,
+) {
+    builder.add_edge(LineageEdge {
+        id: edge_id(kind.clone(), from_field_id, to_field_id),
+        from_node_id: from_field_id.clone(),
+        to_node_id: to_field_id.clone(),
+        kind,
+        provenance,
+        metadata,
+    });
+}
+
+#[derive(Clone, Debug, Default)]
+struct RelationResolver {
+    aliases: BTreeMap<String, String>,
+    default_container: Option<String>,
+    default_namespace: Option<String>,
+    warehouse_metadata: BTreeMap<String, String>,
+}
+
+impl RelationResolver {
+    fn new(cfg: Option<&crate::de_config::ProvidersResolved>, manifest: Option<&Value>) -> Self {
+        let mut resolver = Self {
+            aliases: BTreeMap::new(),
+            default_container: cfg
+                .map(|cfg| canonical_dataset_id(&cfg.warehouse.container))
+                .filter(|value| !value.is_empty()),
+            default_namespace: cfg
+                .map(|cfg| canonical_dataset_id(&cfg.warehouse.namespace))
+                .filter(|value| !value.is_empty()),
+            warehouse_metadata: warehouse_node_metadata(cfg),
+        };
+        if let Some(manifest) = manifest {
+            resolver.add_manifest(manifest);
+        }
+        resolver
     }
-    if existing.dataset_id.is_none() {
-        existing.dataset_id = incoming.dataset_id.clone();
+
+    fn add_manifest(&mut self, manifest: &Value) {
+        for root in ["sources", "nodes"] {
+            let Some(items) = manifest.get(root).and_then(Value::as_object) else {
+                continue;
+            };
+            for (unique_id, value) in items {
+                let Some(fqn) = manifest_relation_fqn(value).map(|fqn| canonical_dataset_id(&fqn))
+                else {
+                    continue;
+                };
+                self.add_alias(unique_id, &fqn);
+                self.add_alias(&fqn, &fqn);
+                if let Some(name) = value.get("name").and_then(Value::as_str) {
+                    self.add_alias(name, &fqn);
+                }
+                if let Some(alias) = value.get("alias").and_then(Value::as_str) {
+                    self.add_alias(alias, &fqn);
+                }
+                if let Some(identifier) = value.get("identifier").and_then(Value::as_str) {
+                    self.add_alias(identifier, &fqn);
+                }
+                if let Some(short_name) = fqn.rsplit('.').next() {
+                    self.add_alias(short_name, &fqn);
+                }
+            }
+        }
     }
-    if existing.field.is_none() {
-        existing.field = incoming.field.clone();
+
+    fn add_graph(&mut self, graph: &LineageGraphSnapshot) {
+        for node in &graph.nodes {
+            if !matches!(
+                node.kind,
+                LineageNodeKind::WarehouseTable | LineageNodeKind::IngestTable
+            ) {
+                continue;
+            }
+            if let Some(dataset_id) = node.dataset_id.as_deref() {
+                self.add_alias(dataset_id, dataset_id);
+                if let Some(short_name) = canonical_dataset_id(dataset_id).rsplit('.').next() {
+                    self.add_alias(short_name, dataset_id);
+                }
+            }
+        }
     }
-    if existing.path.is_none() {
-        existing.path = incoming.path.clone();
+
+    fn add_alias(&mut self, raw: &str, fqn: &str) {
+        let key = canonical_dataset_id(raw);
+        let fqn = canonical_dataset_id(fqn);
+        if key.is_empty() || fqn.is_empty() {
+            return;
+        }
+        self.aliases
+            .entry(key)
+            .and_modify(|existing| {
+                if existing != &fqn {
+                    existing.clear();
+                }
+            })
+            .or_insert(fqn);
     }
-    for (key, value) in &incoming.metadata {
-        existing
-            .metadata
-            .entry(key.clone())
-            .or_insert_with(|| value.clone());
+
+    fn resolve_relation(&self, raw: &str) -> Option<String> {
+        let value = canonical_dataset_id(raw);
+        if value.is_empty() {
+            return None;
+        }
+        if let Some(alias) = self.aliases.get(&value) {
+            return (!alias.is_empty()).then_some(alias.clone());
+        }
+        let parts = value.split('.').filter(|part| !part.is_empty()).count();
+        if parts >= 3 {
+            return Some(value);
+        }
+        match (
+            parts,
+            self.default_container.as_deref(),
+            self.default_namespace.as_deref(),
+        ) {
+            (2, Some(container), _) => Some(format!("{container}.{value}")),
+            (1, Some(container), Some(namespace)) => {
+                Some(format!("{container}.{namespace}.{value}"))
+            }
+            _ => None,
+        }
+    }
+
+    fn resolve_or_canonical(&self, raw: &str) -> String {
+        self.resolve_relation(raw)
+            .unwrap_or_else(|| canonical_dataset_id(raw))
+    }
+
+    fn resolve_tables(&self, tables: &[String]) -> Vec<String> {
+        tables
+            .iter()
+            .map(|table| self.resolve_or_canonical(table))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 }
 
@@ -100,16 +287,22 @@ pub async fn refresh_lineage_graph_for_suite(
     options: LineageBuildOptions,
 ) -> Result<LineageRefreshResult, String> {
     let mut builder = GraphBuilder::default();
-    build_catalog_lineage(sctx, &mut builder).await;
-    build_skipprd_metadata_lineage(sctx, &options.pipeline, &mut builder).await;
-    build_dbt_manifest_lineage(sctx, &mut builder).await;
-    build_plan_contract_lineage(sctx, &mut builder).await;
+    let cfg = sctx
+        .capability::<ProvidersCfgCap>()
+        .map(|cap| cap.0.clone());
+    let manifest = load_manifest_value(sctx).await;
+    let mut resolver = RelationResolver::new(cfg.as_ref(), manifest.as_ref());
+    build_catalog_lineage(sctx, &mut builder, &mut resolver).await;
+    build_skipprd_metadata_lineage(sctx, &options.pipeline, &mut builder, &mut resolver).await;
+    build_dbt_manifest_lineage(manifest.as_ref(), &mut builder, &resolver);
+    build_plan_contract_lineage(sctx, &mut builder, &resolver).await;
     if options.include_query_history {
         build_query_history_lineage(
             sctx,
             options.query_history_since.as_deref(),
             options.query_history_limit,
             &mut builder,
+            &resolver,
         )
         .await;
     }
@@ -127,11 +320,18 @@ pub async fn import_query_history_for_suite(
     limit: usize,
 ) -> Result<LineageRefreshResult, String> {
     let mut builder = GraphBuilder::default();
-    build_query_history_lineage(sctx, since.as_deref(), limit, &mut builder).await;
+    let cfg = sctx
+        .capability::<ProvidersCfgCap>()
+        .map(|cap| cap.0.clone());
+    let manifest = load_manifest_value(sctx).await;
+    let store = LineageStore::new(sctx.storage().clone(), sctx.keyspace().clone());
+    let current_graph = store.read_graph(sctx.scope()).await?.unwrap_or_default();
+    let mut resolver = RelationResolver::new(cfg.as_ref(), manifest.as_ref());
+    resolver.add_graph(&current_graph);
+    build_query_history_lineage(sctx, since.as_deref(), limit, &mut builder, &resolver).await;
     let next = builder.finish();
     next.validate()?;
-    let store = LineageStore::new(sctx.storage().clone(), sctx.keyspace().clone());
-    let mut current = store.read_graph(sctx.scope()).await?.unwrap_or_default();
+    let mut current = current_graph;
     current.diagnostics.retain(|diagnostic| {
         diagnostic.source != Some(LineageEvidenceSource::WarehouseQueryHistory)
     });
@@ -209,7 +409,11 @@ fn query_history_summary(graph: &LineageGraphSnapshot) -> QueryHistoryImportSumm
     }
 }
 
-async fn build_catalog_lineage(sctx: &SuiteCtx, builder: &mut GraphBuilder) {
+async fn build_catalog_lineage(
+    sctx: &SuiteCtx,
+    builder: &mut GraphBuilder,
+    resolver: &mut RelationResolver,
+) {
     let Some(datasets) = sctx_datasets(sctx) else {
         builder.warn(
             "dataset catalog provider is unavailable; catalog lineage skipped",
@@ -237,8 +441,10 @@ async fn build_catalog_lineage(sctx: &SuiteCtx, builder: &mut GraphBuilder) {
     for dataset in dataset_ids {
         let fqn = dataset.fqn();
         match catalog.read_catalog(sctx.scope(), &fqn).await {
-            Ok(Some(data_catalog)) => add_catalog_dataset(&data_catalog, builder),
-            Ok(None) => add_dataset_schema_fallback(datasets.as_ref(), &fqn, builder).await,
+            Ok(Some(data_catalog)) => add_catalog_dataset(&data_catalog, builder, resolver),
+            Ok(None) => {
+                add_dataset_schema_fallback(datasets.as_ref(), &fqn, builder, resolver).await
+            }
             Err(e) => builder.warn(
                 format!("catalog read failed for {fqn}: {e}"),
                 Some(LineageEvidenceSource::Catalog),
@@ -247,22 +453,28 @@ async fn build_catalog_lineage(sctx: &SuiteCtx, builder: &mut GraphBuilder) {
     }
 }
 
-fn add_catalog_dataset(catalog: &DataCatalog, builder: &mut GraphBuilder) {
-    let dataset_id = canonical_dataset_id(&catalog.dataset_id);
-    let table_id = dataset_node_id(&dataset_id, LineageNodeKind::WarehouseTable);
-    builder.add_node(LineageNode {
-        id: table_id.clone(),
-        label: dataset_id.clone(),
-        kind: LineageNodeKind::WarehouseTable,
-        dataset_id: Some(dataset_id.clone()),
-        field: None,
-        path: None,
-        metadata: BTreeMap::from([
-            ("catalog".to_string(), catalog.catalog.clone()),
-            ("database".to_string(), catalog.database.clone()),
-            ("table".to_string(), catalog.table.clone()),
-        ]),
-    });
+fn add_catalog_dataset(
+    catalog: &DataCatalog,
+    builder: &mut GraphBuilder,
+    resolver: &mut RelationResolver,
+) {
+    let dataset_id = resolver.resolve_or_canonical(&catalog.dataset_id);
+    resolver.add_alias(&catalog.dataset_id, &dataset_id);
+    if let Some(short_name) = dataset_id.rsplit('.').next() {
+        resolver.add_alias(short_name, &dataset_id);
+    }
+    let table_id = ensure_warehouse_node(
+        builder,
+        &dataset_id,
+        merge_metadata(
+            resolver.warehouse_metadata.clone(),
+            BTreeMap::from([
+                ("catalog".to_string(), catalog.catalog.clone()),
+                ("database".to_string(), catalog.database.clone()),
+                ("table".to_string(), catalog.table.clone()),
+            ]),
+        ),
+    );
     for field in &catalog.fields {
         let field_path = field
             .field_path
@@ -270,37 +482,29 @@ fn add_catalog_dataset(catalog: &DataCatalog, builder: &mut GraphBuilder) {
             .map(str::trim)
             .filter(|value| !value.is_empty())
             .unwrap_or(field.name.as_str());
-        let field_id = field_node_id(&dataset_id, field_path);
-        builder.add_node(LineageNode {
-            id: field_id.clone(),
-            label: field_path.to_string(),
-            kind: LineageNodeKind::Field,
-            dataset_id: Some(dataset_id.clone()),
-            field: Some(LineageFieldRef {
-                dataset_id: dataset_id.clone(),
-                field_path: field_path.to_string(),
-                field_id: None,
-            }),
-            path: None,
-            metadata: BTreeMap::from([(
+        let field_id = add_field_node(
+            builder,
+            &dataset_id,
+            field_path,
+            field_path.to_string(),
+            None,
+            BTreeMap::from([(
                 "type".to_string(),
                 field
                     .data_type
                     .clone()
                     .unwrap_or_else(|| "unknown".to_string()),
             )]),
-        });
-        builder.add_edge(LineageEdge {
-            id: edge_id(LineageEdgeKind::ContainsField, &table_id, &field_id),
-            from_node_id: table_id.clone(),
-            to_node_id: field_id,
-            kind: LineageEdgeKind::ContainsField,
-            provenance: LineageProvenance::observed(
+        );
+        add_contains_field_edge(
+            builder,
+            &table_id,
+            &field_id,
+            LineageProvenance::observed(
                 LineageEvidenceSource::Catalog,
                 Some(catalog.dataset_id.clone()),
             ),
-            metadata: BTreeMap::new(),
-        });
+        );
     }
 }
 
@@ -308,51 +512,39 @@ async fn add_dataset_schema_fallback(
     datasets: &dyn DatasetCatalogProvider,
     dataset_id: &str,
     builder: &mut GraphBuilder,
+    resolver: &mut RelationResolver,
 ) {
     let Ok(parsed) = crate::providers::DatasetId::parse_fqn_strict(dataset_id) else {
         return;
     };
-    let dataset_id = canonical_dataset_id(dataset_id);
-    let table_id = dataset_node_id(&dataset_id, LineageNodeKind::WarehouseTable);
-    builder.add_node(LineageNode {
-        id: table_id.clone(),
-        label: dataset_id.clone(),
-        kind: LineageNodeKind::WarehouseTable,
-        dataset_id: Some(dataset_id.clone()),
-        field: None,
-        path: None,
-        metadata: BTreeMap::new(),
-    });
+    let dataset_id = resolver.resolve_or_canonical(dataset_id);
+    resolver.add_alias(dataset_id.as_str(), dataset_id.as_str());
+    if let Some(short_name) = dataset_id.rsplit('.').next() {
+        resolver.add_alias(short_name, &dataset_id);
+    }
+    let table_id = ensure_warehouse_node(builder, &dataset_id, resolver.warehouse_metadata.clone());
     let Ok(cols) = datasets.get_dataset_schema(&parsed).await else {
         return;
     };
     for (name, ty) in cols {
-        let field_id = field_node_id(&dataset_id, &name);
-        builder.add_node(LineageNode {
-            id: field_id.clone(),
-            label: name.clone(),
-            kind: LineageNodeKind::Field,
-            dataset_id: Some(dataset_id.clone()),
-            field: Some(LineageFieldRef {
-                dataset_id: dataset_id.clone(),
-                field_path: name.clone(),
-                field_id: None,
-            }),
-            path: None,
-            metadata: BTreeMap::from([("type".to_string(), ty)]),
-        });
-        builder.add_edge(LineageEdge {
-            id: edge_id(LineageEdgeKind::ContainsField, &table_id, &field_id),
-            from_node_id: table_id.clone(),
-            to_node_id: field_id,
-            kind: LineageEdgeKind::ContainsField,
-            provenance: LineageProvenance::unverified(
+        let field_id = add_field_node(
+            builder,
+            &dataset_id,
+            &name,
+            name.clone(),
+            None,
+            BTreeMap::from([("type".to_string(), ty)]),
+        );
+        add_contains_field_edge(
+            builder,
+            &table_id,
+            &field_id,
+            LineageProvenance::unverified(
                 LineageEvidenceSource::Catalog,
                 Some(dataset_id.to_string()),
                 80,
             ),
-            metadata: BTreeMap::new(),
-        });
+        );
     }
 }
 
@@ -369,7 +561,7 @@ impl SourceDescriptor {
     fn namespace(namespace: &str) -> Self {
         let label = namespace.trim().to_string();
         Self {
-            node_id: LineageNodeId::generated(format!("raw:{}", label)),
+            node_id: LineageNodeId::generated(format!("raw:{label}")),
             label: label.clone(),
             dataset_id: label,
             path: None,
@@ -491,6 +683,7 @@ async fn build_skipprd_metadata_lineage(
     sctx: &SuiteCtx,
     pipeline: &PipelineName,
     builder: &mut GraphBuilder,
+    resolver: &mut RelationResolver,
 ) {
     let pipeline = pipeline.as_str();
     let cfg = sctx
@@ -509,7 +702,7 @@ async fn build_skipprd_metadata_lineage(
         .and_then(source_descriptor_from_providers_cfg)
         .unwrap_or_else(|| SourceDescriptor::namespace(pipeline));
 
-    let status = if let Some(skippr) = sctx_skippr(sctx) {
+    let mut status = if let Some(skippr) = sctx_skippr(sctx) {
         match skippr.show_pipeline(sctx.scope(), pipeline).await {
             Ok(status) => Some(status),
             Err(e) => {
@@ -527,6 +720,13 @@ async fn build_skipprd_metadata_lineage(
         );
         None
     };
+    if skippr_status_missing_fields(status.as_ref()) {
+        if let Some(persisted) =
+            load_persisted_skipprd_metadata_status(sctx, pipeline, status.as_ref()).await
+        {
+            status = Some(persisted);
+        }
+    }
 
     let namespaces = status
         .as_ref()
@@ -544,6 +744,7 @@ async fn build_skipprd_metadata_lineage(
 
     for namespace in namespaces {
         let raw_id = source.node_id.clone();
+        let pipeline_id = LineageNodeId::generated(format!("pipeline:{pipeline}"));
         let mut source_metadata = source.metadata.clone();
         source_metadata.insert("pipeline".to_string(), pipeline.to_string());
         builder.add_node(LineageNode {
@@ -563,6 +764,28 @@ async fn build_skipprd_metadata_lineage(
                 default_catalog, default_schema, namespace.namespace
             ))
         };
+        resolver.add_alias(&dataset_id, &dataset_id);
+        resolver.add_alias(&namespace.namespace, &dataset_id);
+        builder.add_node(LineageNode {
+            id: pipeline_id.clone(),
+            label: pipeline.to_string(),
+            kind: LineageNodeKind::Pipeline,
+            dataset_id: Some(pipeline.to_string()),
+            field: None,
+            path: None,
+            metadata: BTreeMap::from([
+                ("provider_brand".to_string(), "skippr".to_string()),
+                ("provider_label".to_string(), "Skippr".to_string()),
+                (
+                    "transform_key".to_string(),
+                    format!("warehouse:{dataset_id}"),
+                ),
+                (
+                    "transform_source".to_string(),
+                    "skipprd_metadata".to_string(),
+                ),
+            ]),
+        });
         let ingest_id = dataset_node_id(&dataset_id, LineageNodeKind::IngestTable);
         builder.add_node(LineageNode {
             id: ingest_id.clone(),
@@ -584,8 +807,19 @@ async fn build_skipprd_metadata_lineage(
             metadata: warehouse_node_metadata(cfg.as_ref()),
         });
         builder.add_edge(LineageEdge {
-            id: edge_id(LineageEdgeKind::Ingests, &raw_id, &ingest_id),
+            id: edge_id(LineageEdgeKind::Ingests, &raw_id, &pipeline_id),
             from_node_id: raw_id.clone(),
+            to_node_id: pipeline_id.clone(),
+            kind: LineageEdgeKind::Ingests,
+            provenance: LineageProvenance::observed(
+                LineageEvidenceSource::SkipprdMetadata,
+                source_ref.clone(),
+            ),
+            metadata: BTreeMap::new(),
+        });
+        builder.add_edge(LineageEdge {
+            id: edge_id(LineageEdgeKind::Ingests, &pipeline_id, &ingest_id),
+            from_node_id: pipeline_id.clone(),
             to_node_id: ingest_id.clone(),
             kind: LineageEdgeKind::Ingests,
             provenance: LineageProvenance::observed(
@@ -606,77 +840,287 @@ async fn build_skipprd_metadata_lineage(
             metadata: BTreeMap::new(),
         });
         for field in namespace.fields {
-            let raw_field_id = LineageNodeId::generated(format!(
-                "raw_field:{pipeline}:{}#{}",
-                namespace.namespace, field.name
-            ));
-            builder.add_node(LineageNode {
-                id: raw_field_id.clone(),
-                label: field.name.clone(),
-                kind: LineageNodeKind::Field,
-                dataset_id: None,
-                field: None,
-                path: None,
-                metadata: BTreeMap::from([("type".to_string(), field.field_type.clone())]),
-            });
-            let output_field_id = field_node_id(&dataset_id, &field.name);
-            builder.add_node(LineageNode {
-                id: output_field_id.clone(),
-                label: field.name.clone(),
-                kind: LineageNodeKind::Field,
-                dataset_id: Some(dataset_id.clone()),
-                field: Some(LineageFieldRef {
-                    dataset_id: dataset_id.clone(),
-                    field_path: field.name.clone(),
-                    field_id: None,
-                }),
-                path: None,
-                metadata: BTreeMap::from([
-                    ("type".to_string(), field.field_type),
+            let output_field_name = field
+                .out_field_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(field.name.as_str());
+            let source_field_name = field
+                .source_field_name
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .unwrap_or(output_field_name);
+            let mut field_metadata = BTreeMap::from([
+                ("type".to_string(), field.field_type.clone()),
+                ("nullable".to_string(), field.nullable.to_string()),
+                (
+                    "source_field_name".to_string(),
+                    source_field_name.to_string(),
+                ),
+                ("out_field_name".to_string(), output_field_name.to_string()),
+            ]);
+            field_metadata.insert("pipeline".to_string(), pipeline.to_string());
+            if let Some(field_id) = field.field_id {
+                field_metadata.insert("field_id".to_string(), field_id.to_string());
+            }
+            if let Some(lineage_id) = field.lineage_id.as_deref() {
+                if !lineage_id.trim().is_empty() {
+                    field_metadata.insert("lineage_id".to_string(), lineage_id.to_string());
+                }
+            }
+            let source_field_id = add_field_node(
+                builder,
+                &source.dataset_id,
+                source_field_name,
+                source_field_name.to_string(),
+                None,
+                field_metadata.clone(),
+            );
+            let pipeline_field_id = add_field_node(
+                builder,
+                pipeline,
+                output_field_name,
+                output_field_name.to_string(),
+                None,
+                field_metadata,
+            );
+            let output_field_id = add_field_node(
+                builder,
+                &dataset_id,
+                output_field_name,
+                output_field_name.to_string(),
+                None,
+                BTreeMap::from([
+                    ("type".to_string(), field.field_type.clone()),
                     ("nullable".to_string(), field.nullable.to_string()),
+                    (
+                        "source_field_name".to_string(),
+                        source_field_name.to_string(),
+                    ),
+                    ("out_field_name".to_string(), output_field_name.to_string()),
                 ]),
-            });
-            builder.add_edge(LineageEdge {
-                id: edge_id(LineageEdgeKind::ContainsField, &raw_id, &raw_field_id),
-                from_node_id: raw_id.clone(),
-                to_node_id: raw_field_id.clone(),
-                kind: LineageEdgeKind::ContainsField,
-                provenance: LineageProvenance::observed(
+            );
+            add_contains_field_edge(
+                builder,
+                &raw_id,
+                &source_field_id,
+                LineageProvenance::observed(
                     LineageEvidenceSource::SkipprdMetadata,
                     source_ref.clone(),
                 ),
-                metadata: BTreeMap::new(),
-            });
-            builder.add_edge(LineageEdge {
-                id: edge_id(
-                    LineageEdgeKind::FieldDerivesFrom,
-                    &raw_field_id,
-                    &output_field_id,
-                ),
-                from_node_id: raw_field_id,
-                to_node_id: output_field_id,
-                kind: LineageEdgeKind::FieldDerivesFrom,
-                provenance: LineageProvenance::observed(
+            );
+            add_contains_field_edge(
+                builder,
+                &pipeline_id,
+                &pipeline_field_id,
+                LineageProvenance::observed(
                     LineageEvidenceSource::SkipprdMetadata,
                     source_ref.clone(),
                 ),
-                metadata: BTreeMap::new(),
-            });
+            );
+            add_contains_field_edge(
+                builder,
+                &ingest_id,
+                &output_field_id,
+                LineageProvenance::observed(
+                    LineageEvidenceSource::SkipprdMetadata,
+                    source_ref.clone(),
+                ),
+            );
+            add_field_lineage_edge(
+                builder,
+                LineageEdgeKind::FieldDerivesFrom,
+                &source_field_id,
+                &pipeline_field_id,
+                LineageProvenance::observed(
+                    LineageEvidenceSource::SkipprdMetadata,
+                    source_ref.clone(),
+                ),
+                BTreeMap::new(),
+            );
+            add_field_lineage_edge(
+                builder,
+                LineageEdgeKind::FieldDerivesFrom,
+                &pipeline_field_id,
+                &output_field_id,
+                LineageProvenance::observed(
+                    LineageEvidenceSource::SkipprdMetadata,
+                    source_ref.clone(),
+                ),
+                BTreeMap::new(),
+            );
         }
     }
 }
 
-async fn build_dbt_manifest_lineage(sctx: &SuiteCtx, builder: &mut GraphBuilder) {
-    let Some(manifest) = load_manifest_value(sctx).await else {
+fn skippr_status_missing_fields(status: Option<&SkipprPipelineStatus>) -> bool {
+    status
+        .map(|status| {
+            status.namespaces.is_empty()
+                || status
+                    .namespaces
+                    .iter()
+                    .all(|namespace| namespace.fields.is_empty())
+        })
+        .unwrap_or(true)
+}
+
+async fn load_persisted_skipprd_metadata_status(
+    sctx: &SuiteCtx,
+    pipeline: &str,
+    current: Option<&SkipprPipelineStatus>,
+) -> Option<SkipprPipelineStatus> {
+    let mut keys = BTreeSet::new();
+    if let Some(key) = current
+        .and_then(|status| status.metadata_location.as_deref())
+        .and_then(metadata_location_storage_key)
+    {
+        keys.insert(key);
+    }
+    keys.insert(
+        sctx.keyspace()
+            .scoped_key(sctx.scope(), &["metadata", "metadata.json"]),
+    );
+    keys.insert(format!(
+        "{}/{}/{}/metadata/metadata.json",
+        sctx.scope().tenant,
+        sctx.scope().workspace,
+        pipeline
+    ));
+
+    for key in keys {
+        let Ok(bytes) = retry_get_bytes(sctx.storage().as_ref(), &key).await else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+            continue;
+        };
+        if let Some(status) = skippr_status_from_metadata_value(pipeline, &key, &value) {
+            return Some(status);
+        }
+    }
+    None
+}
+
+fn metadata_location_storage_key(location: &str) -> Option<String> {
+    let location = location.trim();
+    if location.is_empty() {
+        return None;
+    }
+    if let Some(rest) = location.strip_prefix("s3://") {
+        return rest
+            .split_once('/')
+            .map(|(_, key)| key.to_string())
+            .filter(|key| !key.trim().is_empty());
+    }
+    Some(location.to_string())
+}
+
+fn skippr_status_from_metadata_value(
+    pipeline: &str,
+    source_ref: &str,
+    value: &Value,
+) -> Option<SkipprPipelineStatus> {
+    let metadata = value.get("metadata")?.as_object()?;
+    let namespaces = metadata
+        .iter()
+        .filter_map(|(namespace, value)| skippr_namespace_from_metadata_value(namespace, value))
+        .collect::<Vec<_>>();
+    (!namespaces.is_empty()).then(|| SkipprPipelineStatus {
+        pipeline: value
+            .get("name")
+            .and_then(Value::as_str)
+            .unwrap_or(pipeline)
+            .to_string(),
+        status: if value
+            .get("enabled")
+            .and_then(Value::as_bool)
+            .unwrap_or(true)
+        {
+            "active".to_string()
+        } else {
+            "disabled".to_string()
+        },
+        namespaces,
+        metadata_location: Some(source_ref.to_string()),
+    })
+}
+
+fn skippr_namespace_from_metadata_value(
+    namespace: &str,
+    value: &Value,
+) -> Option<SkipprNamespaceStatus> {
+    let fields = value
+        .get("fields")
+        .and_then(Value::as_object)?
+        .iter()
+        .filter_map(|(key, value)| skippr_field_from_metadata_value(key, value))
+        .collect::<Vec<_>>();
+    (!fields.is_empty()).then(|| SkipprNamespaceStatus {
+        namespace: namespace.to_string(),
+        fields,
+        offset: None,
+        cdc_enabled: false,
+        last_checkpoint: None,
+    })
+}
+
+fn skippr_field_from_metadata_value(key: &str, value: &Value) -> Option<SkipprFieldSchema> {
+    let out_field_name = value
+        .get("out_field_name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(key);
+    let source_field_name = value
+        .get("source_field_name")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or(key);
+    let field_type = value
+        .get("determined_type")
+        .or_else(|| value.get("type"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| "Unknown".to_string());
+    Some(SkipprFieldSchema {
+        name: out_field_name.to_string(),
+        field_type,
+        nullable: value
+            .get("nullable")
+            .and_then(Value::as_bool)
+            .unwrap_or(true),
+        source_field_name: Some(source_field_name.to_string()),
+        out_field_name: Some(out_field_name.to_string()),
+        field_id: value
+            .get("field_id")
+            .and_then(Value::as_i64)
+            .and_then(|value| i32::try_from(value).ok()),
+        lineage_id: value
+            .get("lineage_id")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
+fn build_dbt_manifest_lineage(
+    manifest: Option<&Value>,
+    builder: &mut GraphBuilder,
+    resolver: &RelationResolver,
+) {
+    let Some(manifest) = manifest else {
         builder.info(
             "target/manifest.json was not available; DBT lineage skipped",
             Some(LineageEvidenceSource::DbtManifest),
         );
         return;
     };
-    add_manifest_sources(&manifest, builder);
-    add_manifest_models(&manifest, builder);
-    add_manifest_exposures_and_metrics(&manifest, builder);
+    add_manifest_sources(manifest, builder, resolver);
+    add_manifest_models(manifest, builder, resolver);
+    add_manifest_exposures_and_metrics(manifest, builder);
 }
 
 async fn load_manifest_value(sctx: &SuiteCtx) -> Option<Value> {
@@ -686,23 +1130,24 @@ async fn load_manifest_value(sctx: &SuiteCtx) -> Option<Value> {
         .trim_end_matches('/')
         .to_string()
         + "/";
-    let key = format!("{}target/manifest.json", base);
+    let key = format!("{base}target/manifest.json");
     let bytes = retry_get_bytes(sctx.storage().as_ref(), &key).await.ok()?;
     serde_json::from_slice::<Value>(&bytes).ok()
 }
 
-fn add_manifest_sources(manifest: &Value, builder: &mut GraphBuilder) {
+fn add_manifest_sources(manifest: &Value, builder: &mut GraphBuilder, resolver: &RelationResolver) {
     let Some(sources) = manifest.get("sources").and_then(|value| value.as_object()) else {
         return;
     };
     for (unique_id, source) in sources {
-        let fqn = canonical_dataset_id(&manifest_relation_fqn(source).unwrap_or_else(|| {
-            source
-                .get("name")
-                .and_then(Value::as_str)
-                .unwrap_or(unique_id)
-                .to_string()
-        }));
+        let fqn =
+            resolver.resolve_or_canonical(&manifest_relation_fqn(source).unwrap_or_else(|| {
+                source
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or(unique_id)
+                    .to_string()
+            }));
         let id = LineageNodeId::generated(format!("dbt_source:{unique_id}"));
         builder.add_node(LineageNode {
             id: id.clone(),
@@ -713,16 +1158,7 @@ fn add_manifest_sources(manifest: &Value, builder: &mut GraphBuilder) {
             path: None,
             metadata: manifest_common_metadata(unique_id, source),
         });
-        let table_id = dataset_node_id(&fqn, LineageNodeKind::WarehouseTable);
-        builder.add_node(LineageNode {
-            id: table_id.clone(),
-            label: fqn.clone(),
-            kind: LineageNodeKind::WarehouseTable,
-            dataset_id: Some(fqn),
-            field: None,
-            path: None,
-            metadata: BTreeMap::new(),
-        });
+        let table_id = ensure_warehouse_node(builder, &fqn, resolver.warehouse_metadata.clone());
         builder.add_edge(LineageEdge {
             id: edge_id(LineageEdgeKind::SelectsFrom, &table_id, &id),
             from_node_id: table_id,
@@ -737,10 +1173,278 @@ fn add_manifest_sources(manifest: &Value, builder: &mut GraphBuilder) {
     }
 }
 
-fn add_manifest_models(manifest: &Value, builder: &mut GraphBuilder) {
+fn manifest_relation_map(manifest: &Value) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for root in ["sources", "nodes"] {
+        let Some(items) = manifest.get(root).and_then(Value::as_object) else {
+            continue;
+        };
+        for (unique_id, value) in items {
+            if let Some(fqn) = manifest_relation_fqn(value).map(|fqn| canonical_dataset_id(&fqn)) {
+                out.insert(unique_id.clone(), fqn);
+            }
+        }
+    }
+    out
+}
+
+fn manifest_column_paths(node: &Value) -> Vec<String> {
+    node.get("columns")
+        .and_then(Value::as_object)
+        .map(|columns| {
+            columns
+                .iter()
+                .map(|(key, value)| {
+                    value
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or(key.as_str())
+                })
+                .map(canonical_field_path)
+                .filter(|field| !field.is_empty())
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn manifest_sql(node: &Value) -> Option<&str> {
+    ["compiled_sql", "compiled_code", "raw_sql", "raw_code"]
+        .into_iter()
+        .find_map(|key| {
+            node.get(key)
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+        })
+}
+
+fn merge_metadata(
+    mut base: BTreeMap<String, String>,
+    incoming: BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
+    for (key, value) in incoming {
+        base.entry(key).or_insert(value);
+    }
+    base
+}
+
+fn ensure_warehouse_node(
+    builder: &mut GraphBuilder,
+    dataset_id: &str,
+    metadata: BTreeMap<String, String>,
+) -> LineageNodeId {
+    let dataset_id = canonical_dataset_id(dataset_id);
+    let table_id = dataset_node_id(&dataset_id, LineageNodeKind::WarehouseTable);
+    builder.add_node(LineageNode {
+        id: table_id.clone(),
+        label: dataset_id.clone(),
+        kind: LineageNodeKind::WarehouseTable,
+        dataset_id: Some(dataset_id),
+        field: None,
+        path: None,
+        metadata,
+    });
+    table_id
+}
+
+fn field_leaf(field_path: &str) -> String {
+    canonical_field_path(field_path)
+        .rsplit('.')
+        .next()
+        .unwrap_or_default()
+        .to_string()
+}
+
+fn wildcard_source_dataset(output: &SqlSelectedOutput, input_tables: &[String]) -> Option<String> {
+    if !output.wildcard {
+        return None;
+    }
+    output
+        .source_fields
+        .iter()
+        .find_map(|source| {
+            source
+                .strip_suffix(".*")
+                .map(canonical_dataset_id)
+                .filter(|dataset| !dataset.is_empty())
+        })
+        .or_else(|| (input_tables.len() == 1).then(|| input_tables[0].clone()))
+}
+
+struct SqlFieldLineageTarget<'a> {
+    transform_entity_id: &'a LineageNodeId,
+    output_entity_id: Option<&'a LineageNodeId>,
+    output_dataset: &'a str,
+    input_tables: &'a [String],
+    fallback_output_fields: &'a [String],
+    evidence_source: LineageEvidenceSource,
+    source_ref: Option<String>,
+    warehouse_metadata: BTreeMap<String, String>,
+}
+
+fn add_sql_selected_output_lineage(
+    builder: &mut GraphBuilder,
+    target: SqlFieldLineageTarget<'_>,
+    selected_outputs: &[SqlSelectedOutput],
+) {
+    let mut added = false;
+    for output in selected_outputs {
+        if output.wildcard {
+            let Some(source_dataset) = wildcard_source_dataset(output, target.input_tables) else {
+                continue;
+            };
+            let output_fields = if target.fallback_output_fields.is_empty() {
+                builder.field_paths_for_dataset(&source_dataset)
+            } else {
+                target.fallback_output_fields.to_vec()
+            };
+            for field in output_fields {
+                add_sql_field_lineage(
+                    builder,
+                    &target,
+                    &source_dataset,
+                    &field,
+                    &field,
+                    LineageEdgeKind::FieldDerivesFrom,
+                );
+                added = true;
+            }
+            continue;
+        }
+
+        let Some(output_field) = output
+            .output_field
+            .as_deref()
+            .map(canonical_field_path)
+            .filter(|field| !field.is_empty())
+            .or_else(|| {
+                (output.source_fields.len() == 1).then(|| field_leaf(&output.source_fields[0]))
+            })
+        else {
+            continue;
+        };
+        for source_field in &output.source_fields {
+            let Some((source_dataset, source_field)) =
+                resolve_query_field_source(source_field, target.input_tables)
+            else {
+                continue;
+            };
+            add_sql_field_lineage(
+                builder,
+                &target,
+                &source_dataset,
+                &source_field,
+                &output_field,
+                if output.aggregate {
+                    LineageEdgeKind::AggregatesFrom
+                } else {
+                    LineageEdgeKind::FieldDerivesFrom
+                },
+            );
+            added = true;
+        }
+    }
+
+    if !added && target.input_tables.len() == 1 {
+        for output_field in target.fallback_output_fields {
+            add_sql_field_lineage(
+                builder,
+                &target,
+                &target.input_tables[0],
+                output_field,
+                output_field,
+                LineageEdgeKind::FieldDerivesFrom,
+            );
+        }
+    }
+}
+
+fn add_sql_field_lineage(
+    builder: &mut GraphBuilder,
+    target: &SqlFieldLineageTarget<'_>,
+    source_dataset: &str,
+    source_field: &str,
+    output_field: &str,
+    edge_kind: LineageEdgeKind,
+) {
+    let source_dataset = canonical_dataset_id(source_dataset);
+    let output_dataset = canonical_dataset_id(target.output_dataset);
+    let source_table_id =
+        ensure_warehouse_node(builder, &source_dataset, target.warehouse_metadata.clone());
+    let source_field = canonical_field_path(source_field);
+    let output_field = canonical_field_path(output_field);
+    if source_field.is_empty() || output_field.is_empty() {
+        return;
+    }
+    let source_field_id = add_field_node(
+        builder,
+        &source_dataset,
+        &source_field,
+        source_field.clone(),
+        None,
+        BTreeMap::new(),
+    );
+    add_contains_field_edge(
+        builder,
+        &source_table_id,
+        &source_field_id,
+        LineageProvenance::unverified(
+            target.evidence_source.clone(),
+            target.source_ref.clone(),
+            70,
+        ),
+    );
+    let output_field_id = add_field_node(
+        builder,
+        &output_dataset,
+        &output_field,
+        output_field.clone(),
+        None,
+        BTreeMap::new(),
+    );
+    add_contains_field_edge(
+        builder,
+        target.transform_entity_id,
+        &output_field_id,
+        LineageProvenance::unverified(
+            target.evidence_source.clone(),
+            target.source_ref.clone(),
+            75,
+        ),
+    );
+    if let Some(output_entity_id) = target.output_entity_id {
+        add_contains_field_edge(
+            builder,
+            output_entity_id,
+            &output_field_id,
+            LineageProvenance::unverified(
+                target.evidence_source.clone(),
+                target.source_ref.clone(),
+                75,
+            ),
+        );
+    }
+    add_field_lineage_edge(
+        builder,
+        edge_kind,
+        &source_field_id,
+        &output_field_id,
+        LineageProvenance::unverified(
+            target.evidence_source.clone(),
+            target.source_ref.clone(),
+            70,
+        ),
+        BTreeMap::new(),
+    );
+}
+
+fn add_manifest_models(manifest: &Value, builder: &mut GraphBuilder, resolver: &RelationResolver) {
     let Some(nodes) = manifest.get("nodes").and_then(|value| value.as_object()) else {
         return;
     };
+    let relation_by_unique_id = manifest_relation_map(manifest);
     for (unique_id, node) in nodes {
         if node.get("resource_type").and_then(Value::as_str) != Some("model") {
             continue;
@@ -750,7 +1454,9 @@ fn add_manifest_models(manifest: &Value, builder: &mut GraphBuilder) {
             .and_then(Value::as_str)
             .unwrap_or(unique_id);
         let id = LineageNodeId::generated(format!("dbt_model:{unique_id}"));
-        let relation_fqn = manifest_relation_fqn(node).map(|fqn| canonical_dataset_id(&fqn));
+        let relation_fqn =
+            manifest_relation_fqn(node).and_then(|fqn| resolver.resolve_relation(&fqn));
+        let metadata = manifest_model_metadata(unique_id, node, relation_fqn.as_deref());
         builder.add_node(LineageNode {
             id: id.clone(),
             label: name.to_string(),
@@ -758,24 +1464,16 @@ fn add_manifest_models(manifest: &Value, builder: &mut GraphBuilder) {
             dataset_id: relation_fqn.clone(),
             field: None,
             path: manifest_path(node),
-            metadata: manifest_common_metadata(unique_id, node),
+            metadata,
         });
 
-        if let Some(fqn) = relation_fqn {
-            let relation_id = dataset_node_id(&fqn, LineageNodeKind::WarehouseTable);
-            builder.add_node(LineageNode {
-                id: relation_id.clone(),
-                label: fqn.clone(),
-                kind: LineageNodeKind::WarehouseTable,
-                dataset_id: Some(fqn),
-                field: None,
-                path: None,
-                metadata: BTreeMap::new(),
-            });
+        let relation_id = if let Some(fqn) = relation_fqn.as_ref() {
+            let relation_id =
+                ensure_warehouse_node(builder, fqn, resolver.warehouse_metadata.clone());
             builder.add_edge(LineageEdge {
                 id: edge_id(LineageEdgeKind::Materializes, &id, &relation_id),
                 from_node_id: id.clone(),
-                to_node_id: relation_id,
+                to_node_id: relation_id.clone(),
                 kind: LineageEdgeKind::Materializes,
                 provenance: LineageProvenance::observed(
                     LineageEvidenceSource::DbtManifest,
@@ -783,15 +1481,19 @@ fn add_manifest_models(manifest: &Value, builder: &mut GraphBuilder) {
                 ),
                 metadata: BTreeMap::new(),
             });
-        }
+            Some(relation_id)
+        } else {
+            None
+        };
 
         for dep in manifest_depends_on(node) {
             let dep_id = manifest_dep_node_id(&dep);
+            let dep_dataset_id = relation_by_unique_id.get(&dep).cloned();
             builder.add_node(LineageNode {
                 id: dep_id.clone(),
                 label: dep.clone(),
                 kind: manifest_dep_node_kind(&dep),
-                dataset_id: None,
+                dataset_id: dep_dataset_id,
                 field: None,
                 path: None,
                 metadata: BTreeMap::new(),
@@ -807,6 +1509,29 @@ fn add_manifest_models(manifest: &Value, builder: &mut GraphBuilder) {
                 ),
                 metadata: BTreeMap::new(),
             });
+        }
+        if let (Some(output_dataset), Some(output_entity_id), Some(sql)) = (
+            relation_fqn.as_deref(),
+            relation_id.as_ref(),
+            manifest_sql(node),
+        ) {
+            let analysis = analyze_select_sql(sql);
+            let input_tables = resolver.resolve_tables(&analysis.tables);
+            let fallback_output_fields = manifest_column_paths(node);
+            add_sql_selected_output_lineage(
+                builder,
+                SqlFieldLineageTarget {
+                    transform_entity_id: &id,
+                    output_entity_id: Some(output_entity_id),
+                    output_dataset,
+                    input_tables: &input_tables,
+                    fallback_output_fields: &fallback_output_fields,
+                    evidence_source: LineageEvidenceSource::DbtManifest,
+                    source_ref: Some("target/manifest.json".to_string()),
+                    warehouse_metadata: resolver.warehouse_metadata.clone(),
+                },
+                &analysis.selected_outputs,
+            );
         }
     }
 }
@@ -861,7 +1586,11 @@ fn add_manifest_exposures_and_metrics(manifest: &Value, builder: &mut GraphBuild
     }
 }
 
-async fn build_plan_contract_lineage(sctx: &SuiteCtx, builder: &mut GraphBuilder) {
+async fn build_plan_contract_lineage(
+    sctx: &SuiteCtx,
+    builder: &mut GraphBuilder,
+    resolver: &RelationResolver,
+) {
     let root = sctx
         .keyspace()
         .threads_prefix(sctx.scope())
@@ -889,11 +1618,16 @@ async fn build_plan_contract_lineage(sctx: &SuiteCtx, builder: &mut GraphBuilder
         let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
             continue;
         };
-        add_plan_value_lineage(&key, &value, builder);
+        add_plan_value_lineage(&key, &value, builder, resolver);
     }
 }
 
-fn add_plan_value_lineage(plan_key: &str, value: &Value, builder: &mut GraphBuilder) {
+fn add_plan_value_lineage(
+    plan_key: &str,
+    value: &Value,
+    builder: &mut GraphBuilder,
+    resolver: &RelationResolver,
+) {
     let Some(tasks) = value.get("tasks").and_then(Value::as_array) else {
         return;
     };
@@ -903,16 +1637,21 @@ fn add_plan_value_lineage(plan_key: &str, value: &Value, builder: &mut GraphBuil
             .or_else(|| task.get("dataset_id"))
             .and_then(Value::as_str)
             .unwrap_or("unknown_task");
-        let output_dataset = task
-            .get("grounded_inputs")
-            .and_then(Value::as_array)
-            .and_then(|inputs| inputs.first())
-            .and_then(|input| input.get("relation_fqn"))
-            .and_then(Value::as_str)
-            .unwrap_or(task_name);
-        if output_dataset.trim().is_empty() {
+        let output_dataset = plan_task_output_dataset(task)
+            .and_then(|dataset| resolver.resolve_relation(dataset))
+            .or_else(|| resolver.resolve_relation(task_name));
+        let Some(output_dataset) = output_dataset else {
+            builder.warn(
+                format!("plan lineage skipped unresolved output relation for task '{task_name}'"),
+                Some(LineageEvidenceSource::DbtPlanContract),
+            );
             continue;
-        }
+        };
+        let output_table_id = ensure_warehouse_node(
+            builder,
+            &output_dataset,
+            resolver.warehouse_metadata.clone(),
+        );
         let Some(output_fields) = task
             .get("implementation_spec")
             .and_then(|spec| spec.get("output_fields"))
@@ -924,23 +1663,26 @@ fn add_plan_value_lineage(plan_key: &str, value: &Value, builder: &mut GraphBuil
             let Some(output_name) = output.get("name").and_then(Value::as_str) else {
                 continue;
             };
-            let output_node = field_node_id(output_dataset, output_name);
-            builder.add_node(LineageNode {
-                id: output_node.clone(),
-                label: output_name.to_string(),
-                kind: LineageNodeKind::Field,
-                dataset_id: Some(output_dataset.to_string()),
-                field: Some(LineageFieldRef {
-                    dataset_id: output_dataset.to_string(),
-                    field_path: output_name.to_string(),
-                    field_id: None,
-                }),
-                path: task
-                    .get("expected_model_path")
+            let output_node = add_field_node(
+                builder,
+                &output_dataset,
+                output_name,
+                output_name.to_string(),
+                task.get("expected_model_path")
                     .and_then(Value::as_str)
                     .map(str::to_string),
-                metadata: BTreeMap::from([("plan_task".to_string(), task_name.to_string())]),
-            });
+                BTreeMap::from([("plan_task".to_string(), task_name.to_string())]),
+            );
+            add_contains_field_edge(
+                builder,
+                &output_table_id,
+                &output_node,
+                LineageProvenance::unverified(
+                    LineageEvidenceSource::DbtPlanContract,
+                    Some(plan_key.to_string()),
+                    95,
+                ),
+            );
             let Some(lineage) = output.get("lineage").and_then(Value::as_array) else {
                 continue;
             };
@@ -961,51 +1703,94 @@ fn add_plan_value_lineage(plan_key: &str, value: &Value, builder: &mut GraphBuil
                 let source_relation = source
                     .get("relation")
                     .and_then(Value::as_str)
-                    .unwrap_or(task_name);
-                if source_relation.trim().is_empty() {
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .or_else(|| plan_task_input_dataset(task))
+                    .unwrap_or(output_dataset.as_str());
+                let Some(source_relation) = resolver.resolve_relation(source_relation) else {
+                    builder.warn(
+                        format!(
+                            "plan lineage skipped unresolved source relation '{source_relation}' for task '{task_name}'"
+                        ),
+                        Some(LineageEvidenceSource::DbtPlanContract),
+                    );
                     continue;
-                }
-                let source_node = field_node_id(source_relation, source_name);
-                builder.add_node(LineageNode {
-                    id: source_node.clone(),
-                    label: source_name.to_string(),
-                    kind: LineageNodeKind::Field,
-                    dataset_id: Some(source_relation.to_string()),
-                    field: Some(LineageFieldRef {
-                        dataset_id: source_relation.to_string(),
-                        field_path: source_name.to_string(),
-                        field_id: None,
-                    }),
-                    path: None,
-                    metadata: BTreeMap::new(),
-                });
-                builder.add_edge(LineageEdge {
-                    id: edge_id(
-                        LineageEdgeKind::FieldDerivesFrom,
-                        &source_node,
-                        &output_node,
-                    ),
-                    from_node_id: source_node,
-                    to_node_id: output_node.clone(),
-                    kind: LineageEdgeKind::FieldDerivesFrom,
-                    provenance: LineageProvenance {
-                        source: LineageEvidenceSource::DbtPlanContract,
-                        status: EvidenceStatus::UserProvided,
-                        confidence: 95,
-                        source_ref: Some(plan_key.to_string()),
-                        run_id: None,
-                        thread_id: None,
-                        observed_at_epoch_secs: crate::lineage_types::now_epoch_secs(),
-                    },
-                    metadata: item
-                        .get("role")
+                };
+                let source_table_id = ensure_warehouse_node(
+                    builder,
+                    &source_relation,
+                    resolver.warehouse_metadata.clone(),
+                );
+                let source_node = add_field_node(
+                    builder,
+                    &source_relation,
+                    source_name,
+                    source_name.to_string(),
+                    None,
+                    BTreeMap::new(),
+                );
+                let provenance = LineageProvenance {
+                    source: LineageEvidenceSource::DbtPlanContract,
+                    status: EvidenceStatus::UserProvided,
+                    confidence: 95,
+                    source_ref: Some(plan_key.to_string()),
+                    run_id: None,
+                    thread_id: None,
+                    observed_at_epoch_secs: crate::lineage_types::now_epoch_secs(),
+                };
+                add_contains_field_edge(
+                    builder,
+                    &source_table_id,
+                    &source_node,
+                    provenance.clone(),
+                );
+                add_field_lineage_edge(
+                    builder,
+                    LineageEdgeKind::FieldDerivesFrom,
+                    &source_node,
+                    &output_node,
+                    provenance,
+                    item.get("role")
                         .and_then(Value::as_str)
                         .map(|role| BTreeMap::from([("role".to_string(), role.to_string())]))
                         .unwrap_or_default(),
-                });
+                );
             }
         }
     }
+}
+
+fn plan_task_output_dataset(task: &Value) -> Option<&str> {
+    task.get("output_relation_fqn")
+        .or_else(|| task.get("relation_fqn"))
+        .or_else(|| task.get("expected_relation_fqn"))
+        .or_else(|| task.get("dataset_id"))
+        .and_then(Value::as_str)
+        .or_else(|| {
+            task.get("grounded_output")
+                .and_then(|value| value.get("relation_fqn"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            task.get("output")
+                .and_then(|value| value.get("relation_fqn"))
+                .and_then(Value::as_str)
+        })
+        .or_else(|| {
+            task.get("grounded_outputs")
+                .and_then(Value::as_array)
+                .and_then(|outputs| outputs.first())
+                .and_then(|output| output.get("relation_fqn"))
+                .and_then(Value::as_str)
+        })
+}
+
+fn plan_task_input_dataset(task: &Value) -> Option<&str> {
+    task.get("grounded_inputs")
+        .and_then(Value::as_array)
+        .and_then(|inputs| inputs.first())
+        .and_then(|input| input.get("relation_fqn"))
+        .and_then(Value::as_str)
 }
 
 async fn build_query_history_lineage(
@@ -1013,6 +1798,7 @@ async fn build_query_history_lineage(
     since: Option<&str>,
     limit: usize,
     builder: &mut GraphBuilder,
+    resolver: &RelationResolver,
 ) {
     let Some(warehouse) = sctx_warehouse(sctx) else {
         builder.warn(
@@ -1054,11 +1840,15 @@ async fn build_query_history_lineage(
         );
     }
     for record in result.records {
-        add_query_lineage(&record, builder);
+        add_query_lineage(&record, builder, resolver);
     }
 }
 
-fn add_query_lineage(record: &QueryHistoryRecord, builder: &mut GraphBuilder) {
+fn add_query_lineage(
+    record: &QueryHistoryRecord,
+    builder: &mut GraphBuilder,
+    resolver: &RelationResolver,
+) {
     let analysis = analyze_select_sql(&record.sql);
     if analysis.tables.is_empty()
         && analysis.output_tables.is_empty()
@@ -1079,28 +1869,33 @@ fn add_query_lineage(record: &QueryHistoryRecord, builder: &mut GraphBuilder) {
     {
         return;
     }
-    let query_node_id = LineageNodeId::generated(format!("query:{}", record.query_id));
+    let query_dataset_id = format!("query:{}", record.query_id);
+    let query_node_id = LineageNodeId::generated(query_dataset_id.clone());
+    let output_tables = resolver.resolve_tables(&analysis.output_tables);
+    let mut query_metadata = query_node_metadata(record);
+    if output_tables.len() == 1 {
+        query_metadata.insert(
+            "transform_key".to_string(),
+            format!("warehouse:{}", output_tables[0]),
+        );
+        query_metadata.insert(
+            "transform_source".to_string(),
+            "warehouse_query_history".to_string(),
+        );
+    }
     builder.add_node(LineageNode {
         id: query_node_id.clone(),
         label: record.query_id.clone(),
         kind: LineageNodeKind::Query,
-        dataset_id: None,
+        dataset_id: Some(query_dataset_id.clone()),
         field: None,
         path: None,
-        metadata: query_node_metadata(record),
+        metadata: query_metadata,
     });
-    for table in analysis.tables {
-        let table = canonical_dataset_id(&table);
-        let table_node_id = dataset_node_id(&table, LineageNodeKind::WarehouseTable);
-        builder.add_node(LineageNode {
-            id: table_node_id.clone(),
-            label: table.clone(),
-            kind: LineageNodeKind::WarehouseTable,
-            dataset_id: Some(table),
-            field: None,
-            path: None,
-            metadata: query_warehouse_node_metadata(record),
-        });
+    let input_tables = resolver.resolve_tables(&analysis.tables);
+    for table in &input_tables {
+        let table_node_id =
+            ensure_warehouse_node(builder, table, query_warehouse_node_metadata(record));
         builder.add_edge(LineageEdge {
             id: edge_id(LineageEdgeKind::SelectsFrom, &table_node_id, &query_node_id),
             from_node_id: table_node_id,
@@ -1119,18 +1914,108 @@ fn add_query_lineage(record: &QueryHistoryRecord, builder: &mut GraphBuilder) {
             metadata: BTreeMap::new(),
         });
     }
-    for table in analysis.output_tables {
-        let table = canonical_dataset_id(&table);
-        let table_node_id = dataset_node_id(&table, LineageNodeKind::WarehouseTable);
-        builder.add_node(LineageNode {
-            id: table_node_id.clone(),
-            label: table.clone(),
-            kind: LineageNodeKind::WarehouseTable,
-            dataset_id: Some(table),
-            field: None,
-            path: None,
-            metadata: query_warehouse_node_metadata(record),
-        });
+    let aggregate_fields = analysis
+        .aggregate_fields
+        .iter()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let query_field_usages = analysis
+        .selected_fields
+        .iter()
+        .chain(analysis.aggregate_fields.iter())
+        .chain(analysis.join_fields.iter())
+        .chain(analysis.filter_fields.iter())
+        .filter(|field| field.trim() != "*")
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    for field in query_field_usages {
+        let Some((source_dataset, field_path)) = resolve_query_field_source(&field, &input_tables)
+        else {
+            continue;
+        };
+        let query_field_id = add_field_node(
+            builder,
+            &query_dataset_id,
+            &field_path,
+            field_path.clone(),
+            None,
+            BTreeMap::from([
+                ("query_id".to_string(), record.query_id.clone()),
+                ("source_field".to_string(), field.clone()),
+            ]),
+        );
+        add_contains_field_edge(
+            builder,
+            &query_node_id,
+            &query_field_id,
+            LineageProvenance::unverified(
+                LineageEvidenceSource::WarehouseQueryHistory,
+                Some(
+                    record
+                        .source_ref
+                        .clone()
+                        .unwrap_or_else(|| record.query_id.clone()),
+                ),
+                70,
+            ),
+        );
+        let source_field_id = add_field_node(
+            builder,
+            &source_dataset,
+            &field_path,
+            field_path.clone(),
+            None,
+            BTreeMap::from([
+                ("query_id".to_string(), record.query_id.clone()),
+                ("source_field".to_string(), field.clone()),
+            ]),
+        );
+        let source_table_id = ensure_warehouse_node(
+            builder,
+            &source_dataset,
+            query_warehouse_node_metadata(record),
+        );
+        add_contains_field_edge(
+            builder,
+            &source_table_id,
+            &source_field_id,
+            LineageProvenance::unverified(
+                LineageEvidenceSource::WarehouseQueryHistory,
+                Some(
+                    record
+                        .source_ref
+                        .clone()
+                        .unwrap_or_else(|| record.query_id.clone()),
+                ),
+                60,
+            ),
+        );
+        let edge_kind = if aggregate_fields.contains(&field) {
+            LineageEdgeKind::AggregatesFrom
+        } else {
+            LineageEdgeKind::FieldDerivesFrom
+        };
+        add_field_lineage_edge(
+            builder,
+            edge_kind,
+            &source_field_id,
+            &query_field_id,
+            LineageProvenance::unverified(
+                LineageEvidenceSource::WarehouseQueryHistory,
+                Some(
+                    record
+                        .source_ref
+                        .clone()
+                        .unwrap_or_else(|| record.query_id.clone()),
+                ),
+                60,
+            ),
+            BTreeMap::new(),
+        );
+    }
+    for table in output_tables {
+        let table_node_id =
+            ensure_warehouse_node(builder, &table, query_warehouse_node_metadata(record));
         builder.add_edge(LineageEdge {
             id: edge_id(
                 LineageEdgeKind::Materializes,
@@ -1138,7 +2023,7 @@ fn add_query_lineage(record: &QueryHistoryRecord, builder: &mut GraphBuilder) {
                 &table_node_id,
             ),
             from_node_id: query_node_id.clone(),
-            to_node_id: table_node_id,
+            to_node_id: table_node_id.clone(),
             kind: LineageEdgeKind::Materializes,
             provenance: LineageProvenance::unverified(
                 LineageEvidenceSource::WarehouseQueryHistory,
@@ -1152,40 +2037,23 @@ fn add_query_lineage(record: &QueryHistoryRecord, builder: &mut GraphBuilder) {
             ),
             metadata: BTreeMap::new(),
         });
-    }
-    for field in analysis.aggregate_fields {
-        let field_node_id =
-            LineageNodeId::generated(format!("query_field:{}:{field}", record.query_id));
-        builder.add_node(LineageNode {
-            id: field_node_id.clone(),
-            label: field,
-            kind: LineageNodeKind::Field,
-            dataset_id: None,
-            field: None,
-            path: None,
-            metadata: BTreeMap::new(),
-        });
-        builder.add_edge(LineageEdge {
-            id: edge_id(
-                LineageEdgeKind::AggregatesFrom,
-                &field_node_id,
-                &query_node_id,
-            ),
-            from_node_id: field_node_id,
-            to_node_id: query_node_id.clone(),
-            kind: LineageEdgeKind::AggregatesFrom,
-            provenance: LineageProvenance::unverified(
-                LineageEvidenceSource::WarehouseQueryHistory,
-                Some(
-                    record
-                        .source_ref
-                        .clone()
-                        .unwrap_or_else(|| record.query_id.clone()),
-                ),
-                60,
-            ),
-            metadata: BTreeMap::new(),
-        });
+        add_sql_selected_output_lineage(
+            builder,
+            SqlFieldLineageTarget {
+                transform_entity_id: &query_node_id,
+                output_entity_id: Some(&table_node_id),
+                output_dataset: &table,
+                input_tables: &input_tables,
+                fallback_output_fields: &[],
+                evidence_source: LineageEvidenceSource::WarehouseQueryHistory,
+                source_ref: record
+                    .source_ref
+                    .clone()
+                    .or_else(|| Some(record.query_id.clone())),
+                warehouse_metadata: query_warehouse_node_metadata(record),
+            },
+            &analysis.selected_outputs,
+        );
     }
     for diagnostic in analysis
         .diagnostics
@@ -1197,6 +2065,29 @@ fn add_query_lineage(record: &QueryHistoryRecord, builder: &mut GraphBuilder) {
             Some(LineageEvidenceSource::WarehouseQueryHistory),
         );
     }
+}
+
+fn resolve_query_field_source(field: &str, input_tables: &[String]) -> Option<(String, String)> {
+    let field = field.trim();
+    if field.is_empty() || field == "*" {
+        return None;
+    }
+    let parts = field
+        .split('.')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    let field_name = parts.last()?;
+    if parts.len() == 1 {
+        return (input_tables.len() == 1)
+            .then(|| (input_tables[0].clone(), canonical_field_path(field_name)));
+    }
+    let relation = canonical_dataset_id(&parts[..parts.len() - 1].join("."));
+    input_tables
+        .iter()
+        .find(|table| **table == relation || table.ends_with(&format!(".{relation}")))
+        .cloned()
+        .map(|table| (table, canonical_field_path(field_name)))
 }
 
 fn is_low_value_query_history_diagnostic(diagnostic: &str) -> bool {
@@ -1299,9 +2190,47 @@ fn manifest_path(node: &Value) -> Option<String> {
 }
 
 fn manifest_common_metadata(unique_id: &str, node: &Value) -> BTreeMap<String, String> {
-    let mut out = BTreeMap::from([("unique_id".to_string(), unique_id.to_string())]);
+    let mut out = BTreeMap::from([
+        ("unique_id".to_string(), unique_id.to_string()),
+        ("provider_brand".to_string(), "dbt".to_string()),
+        ("provider_label".to_string(), "dbt".to_string()),
+    ]);
     if let Some(resource_type) = node.get("resource_type").and_then(Value::as_str) {
         out.insert("resource_type".to_string(), resource_type.to_string());
+    }
+    out
+}
+
+fn manifest_model_metadata(
+    unique_id: &str,
+    node: &Value,
+    relation_fqn: Option<&str>,
+) -> BTreeMap<String, String> {
+    let mut out = manifest_common_metadata(unique_id, node);
+    out.insert("transform_source".to_string(), "dbt_manifest".to_string());
+    out.insert(
+        "transform_key".to_string(),
+        relation_fqn
+            .map(|fqn| format!("warehouse:{fqn}"))
+            .unwrap_or_else(|| format!("dbt_model:{unique_id}")),
+    );
+    for (metadata_key, manifest_key) in [
+        ("compiled_sql", "compiled_sql"),
+        ("raw_sql", "raw_sql"),
+        ("compiled_sql", "compiled_code"),
+        ("raw_sql", "raw_code"),
+    ] {
+        if out.contains_key(metadata_key) {
+            continue;
+        }
+        if let Some(sql) = node
+            .get(manifest_key)
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            out.insert(metadata_key.to_string(), sql.chars().take(4000).collect());
+        }
     }
     out
 }
@@ -1441,6 +2370,60 @@ mod tests {
     }
 
     #[test]
+    fn graph_builder_deduplicates_matching_diagnostics() {
+        let mut builder = GraphBuilder::default();
+        builder.warn(
+            "plan lineage skipped unresolved source relation",
+            Some(LineageEvidenceSource::DbtPlanContract),
+        );
+        builder.warn(
+            "plan lineage skipped unresolved source relation",
+            Some(LineageEvidenceSource::DbtPlanContract),
+        );
+        builder.info(
+            "plan lineage skipped unresolved source relation",
+            Some(LineageEvidenceSource::DbtPlanContract),
+        );
+
+        let graph = builder.finish();
+        assert_eq!(graph.diagnostics.len(), 2);
+    }
+
+    #[test]
+    fn persisted_skipprd_metadata_preserves_original_source_field_name() {
+        let value = serde_json::json!({
+            "name": "bike_hire",
+            "enabled": true,
+            "metadata": {
+                "bike_hire": {
+                    "fields": {
+                        "bike_id": {
+                            "source_field_name": "BIKE_ID",
+                            "out_field_name": "bike_id",
+                            "determined_type": "Long",
+                            "nullable": false,
+                            "field_id": 7,
+                            "lineage_id": "bike_hire:bike_id"
+                        }
+                    }
+                }
+            }
+        });
+
+        let status =
+            skippr_status_from_metadata_value("bike_hire", "metadata/metadata.json", &value)
+                .expect("metadata status parses");
+        let field = &status.namespaces[0].fields[0];
+
+        assert_eq!(field.name, "bike_id");
+        assert_eq!(field.out_field_name.as_deref(), Some("bike_id"));
+        assert_eq!(field.source_field_name.as_deref(), Some("BIKE_ID"));
+        assert_eq!(field.field_id, Some(7));
+        assert_eq!(field.lineage_id.as_deref(), Some("bike_hire:bike_id"));
+        assert!(!field.nullable);
+    }
+
+    #[test]
     fn graph_builder_merges_duplicate_case_warehouse_nodes_without_losing_metadata() {
         let mut builder = GraphBuilder::default();
         let upper_id = dataset_node_id("ANALYTICS.RAW.BIKE_HIRE", LineageNodeKind::WarehouseTable);
@@ -1478,6 +2461,313 @@ mod tests {
     }
 
     #[test]
+    fn manifest_model_metadata_includes_bounded_sql_and_transform_key() {
+        let node = serde_json::json!({
+            "resource_type": "model",
+            "database": "bike_hire_gold",
+            "schema": "bike_hire",
+            "alias": "fct_bike_hire_events",
+            "compiled_sql": "select * from analytics.raw.bike_hire",
+            "raw_sql": "{{ ref('stg_raw_bike_hire') }}"
+        });
+
+        let metadata = manifest_model_metadata(
+            "model.project.fct_bike_hire_events",
+            &node,
+            Some("bike_hire_gold.bike_hire.fct_bike_hire_events"),
+        );
+
+        assert_eq!(
+            metadata.get("transform_key").map(String::as_str),
+            Some("warehouse:bike_hire_gold.bike_hire.fct_bike_hire_events")
+        );
+        assert_eq!(
+            metadata.get("transform_source").map(String::as_str),
+            Some("dbt_manifest")
+        );
+        assert_eq!(
+            metadata.get("compiled_sql").map(String::as_str),
+            Some("select * from analytics.raw.bike_hire")
+        );
+        assert_eq!(
+            metadata.get("raw_sql").map(String::as_str),
+            Some("{{ ref('stg_raw_bike_hire') }}")
+        );
+    }
+
+    #[test]
+    fn manifest_compiled_sql_adds_field_lineage_edges() {
+        let manifest = serde_json::json!({
+            "sources": {
+                "source.project.raw_bike_hire": {
+                    "resource_type": "source",
+                    "database": "analytics",
+                    "schema": "raw",
+                    "identifier": "bike_hire",
+                    "name": "bike_hire"
+                }
+            },
+            "nodes": {
+                "model.project.stg_raw_bike_hire": {
+                    "resource_type": "model",
+                    "name": "stg_raw_bike_hire",
+                    "database": "bike_hire_silver",
+                    "schema": "bike_hire",
+                    "alias": "stg_raw_bike_hire",
+                    "compiled_sql": "select EVENT_DATE as RIDE_DATE from analytics.raw.bike_hire",
+                    "columns": {
+                        "RIDE_DATE": { "name": "RIDE_DATE", "data_type": "date" }
+                    },
+                    "depends_on": {
+                        "nodes": ["source.project.raw_bike_hire"]
+                    }
+                }
+            }
+        });
+        let mut builder = GraphBuilder::default();
+        let resolver = RelationResolver::new(None, Some(&manifest));
+
+        add_manifest_sources(&manifest, &mut builder, &resolver);
+        add_manifest_models(&manifest, &mut builder, &resolver);
+
+        let graph = builder.finish();
+        graph.validate().expect("manifest field lineage validates");
+        let source_field = field_node_id("analytics.raw.bike_hire", "event_date");
+        let output_field =
+            field_node_id("bike_hire_silver.bike_hire.stg_raw_bike_hire", "ride_date");
+        let model = LineageNodeId::generated("dbt_model:model.project.stg_raw_bike_hire");
+        let output_table = dataset_node_id(
+            "bike_hire_silver.bike_hire.stg_raw_bike_hire",
+            LineageNodeKind::WarehouseTable,
+        );
+
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == LineageEdgeKind::FieldDerivesFrom
+                && edge.from_node_id == source_field
+                && edge.to_node_id == output_field
+        }));
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == LineageEdgeKind::ContainsField
+                && edge.from_node_id == model
+                && edge.to_node_id == output_field
+        }));
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == LineageEdgeKind::ContainsField
+                && edge.from_node_id == output_table
+                && edge.to_node_id == output_field
+        }));
+    }
+
+    #[test]
+    fn manifest_resolver_prevents_short_name_orphan_plan_nodes() {
+        let manifest = serde_json::json!({
+            "nodes": {
+                "model.project.dim_rider": {
+                    "resource_type": "model",
+                    "name": "dim_rider",
+                    "database": "bike_hire_gold",
+                    "schema": "bike_hire",
+                    "alias": "dim_rider"
+                },
+                "model.project.fct_events": {
+                    "resource_type": "model",
+                    "name": "fct_events",
+                    "database": "bike_hire_gold",
+                    "schema": "bike_hire",
+                    "alias": "fct_events"
+                }
+            }
+        });
+        let plan = serde_json::json!({
+            "tasks": [{
+                "name": "fct_events",
+                "implementation_spec": {
+                    "output_fields": [{
+                        "name": "rider_id",
+                        "lineage": [{
+                            "lineage_kind": "column",
+                            "source": {
+                                "relation": "dim_rider",
+                                "name": "rider_id"
+                            }
+                        }]
+                    }]
+                }
+            }]
+        });
+        let resolver = RelationResolver::new(None, Some(&manifest));
+        let mut builder = GraphBuilder::default();
+
+        add_plan_value_lineage("plans/model.json", &plan, &mut builder, &resolver);
+
+        let graph = builder.finish();
+        graph.validate().expect("resolved plan graph validates");
+        assert!(!graph.nodes.iter().any(|node| {
+            node.id == dataset_node_id("dim_rider", LineageNodeKind::WarehouseTable)
+        }));
+        assert!(graph.nodes.iter().any(|node| {
+            node.id
+                == dataset_node_id(
+                    "bike_hire_gold.bike_hire.dim_rider",
+                    LineageNodeKind::WarehouseTable,
+                )
+        }));
+        assert!(graph.nodes.iter().any(|node| {
+            node.id
+                == dataset_node_id(
+                    "bike_hire_gold.bike_hire.fct_events",
+                    LineageNodeKind::WarehouseTable,
+                )
+        }));
+    }
+
+    #[test]
+    fn query_history_short_refs_resolve_through_manifest_aliases() {
+        let manifest = serde_json::json!({
+            "nodes": {
+                "model.project.fct_bike_hire_events": {
+                    "resource_type": "model",
+                    "name": "fct_bike_hire_events",
+                    "database": "bike_hire_gold",
+                    "schema": "bike_hire",
+                    "alias": "fct_bike_hire_events"
+                }
+            }
+        });
+        let record = QueryHistoryRecord {
+            provider: crate::de_config::WarehouseKind::Snowflake,
+            query_id: "aggregate-query".to_string(),
+            sql: "select count(bike_id) from fct_bike_hire_events".to_string(),
+            normalized_sql: "select count(bike_id) from fct_bike_hire_events".to_string(),
+            sql_hash: "hash".to_string(),
+            started_at_epoch_ms: None,
+            ended_at_epoch_ms: None,
+            user: None,
+            application: None,
+            warehouse: None,
+            database: None,
+            schema: None,
+            status: Default::default(),
+            error: None,
+            source_ref: None,
+            raw_metadata: BTreeMap::new(),
+        };
+        let resolver = RelationResolver::new(None, Some(&manifest));
+        let mut builder = GraphBuilder::default();
+
+        add_query_lineage(&record, &mut builder, &resolver);
+
+        let graph = builder.finish();
+        graph.validate().expect("resolved query graph validates");
+        let short_table = dataset_node_id("fct_bike_hire_events", LineageNodeKind::WarehouseTable);
+        let canonical_table = dataset_node_id(
+            "bike_hire_gold.bike_hire.fct_bike_hire_events",
+            LineageNodeKind::WarehouseTable,
+        );
+        let query = LineageNodeId::generated("query:aggregate-query");
+        assert!(!graph.nodes.iter().any(|node| node.id == short_table));
+        assert!(graph.nodes.iter().any(|node| node.id == canonical_table));
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == LineageEdgeKind::SelectsFrom
+                && edge.from_node_id == canonical_table
+                && edge.to_node_id == query
+        }));
+    }
+
+    #[test]
+    fn query_history_ctas_connects_source_fields_to_output_table_fields() {
+        let record = QueryHistoryRecord {
+            provider: crate::de_config::WarehouseKind::Snowflake,
+            query_id: "ctas-query".to_string(),
+            sql: "create table bike_hire_gold.bike_hire.events as select EVENT_DATE as RIDE_DATE from analytics.raw.bike_hire".to_string(),
+            normalized_sql: "create table bike_hire_gold.bike_hire.events as select event_date as ride_date from analytics.raw.bike_hire".to_string(),
+            sql_hash: "hash".to_string(),
+            started_at_epoch_ms: None,
+            ended_at_epoch_ms: None,
+            user: None,
+            application: None,
+            warehouse: None,
+            database: None,
+            schema: None,
+            status: Default::default(),
+            error: None,
+            source_ref: None,
+            raw_metadata: BTreeMap::new(),
+        };
+        let mut builder = GraphBuilder::default();
+        let resolver = RelationResolver::default();
+
+        add_query_lineage(&record, &mut builder, &resolver);
+
+        let graph = builder.finish();
+        graph
+            .validate()
+            .expect("query CTAS field lineage validates");
+        let source_field = field_node_id("analytics.raw.bike_hire", "event_date");
+        let output_field = field_node_id("bike_hire_gold.bike_hire.events", "ride_date");
+        let output_table = dataset_node_id(
+            "bike_hire_gold.bike_hire.events",
+            LineageNodeKind::WarehouseTable,
+        );
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == LineageEdgeKind::FieldDerivesFrom
+                && edge.from_node_id == source_field
+                && edge.to_node_id == output_field
+        }));
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == LineageEdgeKind::ContainsField
+                && edge.from_node_id == output_table
+                && edge.to_node_id == output_field
+        }));
+    }
+
+    #[test]
+    fn plan_contract_field_lineage_uses_output_relation_and_contains_fields() {
+        let plan = serde_json::json!({
+            "tasks": [{
+                "name": "model_project_events",
+                "relation_fqn": "bike_hire_gold.bike_hire.events",
+                "implementation_spec": {
+                    "output_fields": [{
+                        "name": "EVENT_DATE",
+                        "lineage": [{
+                            "lineage_kind": "column",
+                            "source": {
+                                "relation": "analytics.raw.bike_hire",
+                                "name": "EVENT_DATE"
+                            },
+                            "role": "projection"
+                        }]
+                    }]
+                }
+            }]
+        });
+        let mut builder = GraphBuilder::default();
+        let resolver = RelationResolver::default();
+
+        add_plan_value_lineage("plans/model.json", &plan, &mut builder, &resolver);
+
+        let graph = builder.finish();
+        graph.validate().expect("plan field lineage validates");
+        let source_field = field_node_id("analytics.raw.bike_hire", "event_date");
+        let output_field = field_node_id("bike_hire_gold.bike_hire.events", "event_date");
+        let output_table = dataset_node_id(
+            "bike_hire_gold.bike_hire.events",
+            LineageNodeKind::WarehouseTable,
+        );
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == LineageEdgeKind::FieldDerivesFrom
+                && edge.from_node_id == source_field
+                && edge.to_node_id == output_field
+        }));
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == LineageEdgeKind::ContainsField
+                && edge.from_node_id == output_table
+                && edge.to_node_id == output_field
+        }));
+    }
+
+    #[test]
     fn query_history_skips_metadata_introspection_queries() {
         let record = QueryHistoryRecord {
             provider: crate::de_config::WarehouseKind::Snowflake,
@@ -1498,8 +2788,9 @@ mod tests {
             raw_metadata: BTreeMap::new(),
         };
         let mut builder = GraphBuilder::default();
+        let resolver = RelationResolver::default();
 
-        add_query_lineage(&record, &mut builder);
+        add_query_lineage(&record, &mut builder, &resolver);
 
         let graph = builder.finish();
         assert!(graph.nodes.is_empty());
@@ -1527,13 +2818,65 @@ mod tests {
             raw_metadata: BTreeMap::new(),
         };
         let mut builder = GraphBuilder::default();
+        let resolver = RelationResolver::default();
 
-        add_query_lineage(&record, &mut builder);
+        add_query_lineage(&record, &mut builder, &resolver);
 
         let graph = builder.finish();
         assert!(graph.nodes.is_empty());
         assert!(graph.edges.is_empty());
         assert!(graph.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn query_history_field_lineage_graph_validates_independently() {
+        let record = QueryHistoryRecord {
+            provider: crate::de_config::WarehouseKind::Snowflake,
+            query_id: "01c47dc1-0003-542f-0003-40a600225d1e".to_string(),
+            sql: "select count(bike_id) from bike_hire_gold.bike_hire.fct_bike_hire_events"
+                .to_string(),
+            normalized_sql:
+                "select count(bike_id) from bike_hire_gold.bike_hire.fct_bike_hire_events"
+                    .to_string(),
+            sql_hash: "hash".to_string(),
+            started_at_epoch_ms: None,
+            ended_at_epoch_ms: None,
+            user: None,
+            application: None,
+            warehouse: None,
+            database: None,
+            schema: None,
+            status: Default::default(),
+            error: None,
+            source_ref: None,
+            raw_metadata: BTreeMap::new(),
+        };
+        let mut builder = GraphBuilder::default();
+        let resolver = RelationResolver::default();
+
+        add_query_lineage(&record, &mut builder, &resolver);
+
+        let graph = builder.finish();
+        graph.validate().expect("query lineage graph validates");
+        let source_field_id =
+            field_node_id("bike_hire_gold.bike_hire.fct_bike_hire_events", "bike_id");
+        let query_field_id = field_node_id("query:01c47dc1-0003-542f-0003-40a600225d1e", "bike_id");
+        let table_id = dataset_node_id(
+            "bike_hire_gold.bike_hire.fct_bike_hire_events",
+            LineageNodeKind::WarehouseTable,
+        );
+        assert!(graph.nodes.iter().any(|node| node.id == source_field_id));
+        assert!(graph.nodes.iter().any(|node| node.id == query_field_id));
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == LineageEdgeKind::ContainsField
+                && edge.from_node_id == table_id
+                && edge.to_node_id == source_field_id
+        }));
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == LineageEdgeKind::AggregatesFrom
+                && edge.from_node_id == source_field_id
+                && edge.to_node_id == query_field_id
+        }));
     }
 
     #[test]

@@ -123,6 +123,8 @@ pub fn discover_ingest(
  */
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct OutputMetadata {
+    #[serde(default)]
+    pub(crate) source_field_name: String,
     pub(crate) out_field_name: String,
     pub(crate) determined_type: SkipprDataType,
     #[serde(with = "serde_opt_data_type")]
@@ -146,6 +148,7 @@ impl OutputMetadata {
     pub fn new() -> Self {
         Self {
             out_field_name: "".to_string(),
+            source_field_name: "".to_string(),
             determined_type: SkipprDataType::Unknown,
             determined_type_values: None,
             field_id: 0,
@@ -159,6 +162,10 @@ impl OutputMetadata {
 
     pub fn out_field_name(&self) -> &str {
         &self.out_field_name
+    }
+
+    pub fn source_field_name(&self) -> &str {
+        &self.source_field_name
     }
 
     pub fn determined_type(&self) -> &SkipprDataType {
@@ -201,6 +208,7 @@ impl OutputMetadata {
         let mut output_metadata = OutputMetadata::new();
 
         output_metadata.out_field_name = metadata.out_field_name.clone();
+        output_metadata.source_field_name = metadata.source_field_name.clone();
         output_metadata.determined_type = metadata.determined_type.clone();
         output_metadata.determined_type_values = metadata.determined_type_values.clone();
         output_metadata.field_id = metadata.field_id;
@@ -333,6 +341,8 @@ pub struct Metadata {
     pub(crate) timezone: bool,
     pub(crate) evolution: Box<HashMap<String, Evolution>>,
     pub(crate) enabled: bool,
+    #[serde(default)]
+    pub(crate) source_field_name: String,
     pub(crate) out_field_name: String,
     pub(crate) determined_type: SkipprDataType,
     #[serde(with = "serde_opt_data_type")]
@@ -364,6 +374,7 @@ impl Metadata {
             timezone: false,
             evolution: Box::new(Default::default()),
             enabled: true,
+            source_field_name: "".to_string(),
             out_field_name: "".to_string(),
             determined_type: SkipprDataType::Unknown,
             determined_type_values: None,
@@ -379,6 +390,7 @@ impl Metadata {
     pub fn new_with_type(data_type: SkipprDataType, field_name: &str) -> Self {
         let mut m = Self::new().unwrap();
         m.determined_type = data_type;
+        m.source_field_name = field_name.to_string();
         m.out_field_name = field_name.to_string();
         m.enabled = true;
         m
@@ -447,6 +459,10 @@ impl Metadata {
         } else {
             metadata.out_field_name.clone()
         };
+        if metadata.source_field_name.is_empty() {
+            metadata.source_field_name = path.last().cloned().unwrap_or_else(|| name.clone());
+            changed = true;
+        }
         if !name.is_empty() && path.last() != Some(&name) {
             path.push(name);
         }
@@ -529,6 +545,7 @@ impl Metadata {
                             // Add primitive type to flattened fields
                             let mut el = OutputMetadata::new();
                             el.out_field_name = field_element_path.clone();
+                            el.source_field_name = sub_val.source_field_name.clone();
                             el.determined_type = sub_val.determined_type.clone();
                             el.determined_type_values = sub_val.determined_type_values.clone();
                             el.field_id = sub_val.field_id;
@@ -557,6 +574,7 @@ impl Metadata {
                 // Add the primitive array to the flattened fields
                 let mut el = OutputMetadata::new();
                 el.out_field_name = new_field_path.clone();
+                el.source_field_name = val.source_field_name.clone();
                 el.determined_type = val.determined_type.clone();
                 el.determined_type_values = val.determined_type_values.clone();
                 el.field_id = val.field_id;
@@ -586,6 +604,7 @@ impl Metadata {
                 } else {
                     let mut el = OutputMetadata::new();
                     el.out_field_name = new_field_path.clone();
+                    el.source_field_name = val.source_field_name.clone();
                     el.determined_type = val.determined_type.clone();
                     el.determined_type_values = val.determined_type_values.clone();
                     el.field_id = val.field_id;
@@ -2037,6 +2056,9 @@ impl AnalyseSchema {
                 field.parent_type = Some(SkipprDataType::from_str(parent_type));
             }
 
+            if field.source_field_name.is_empty() {
+                field.source_field_name = field_name.to_string();
+            }
             field.out_field_name = Helpers::clean_field_name(field_name.to_string());
 
             if field.determined_type == SkipprDataType::Unknown {

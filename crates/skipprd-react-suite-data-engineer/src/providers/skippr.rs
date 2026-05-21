@@ -42,6 +42,14 @@ pub struct SkipprFieldSchema {
     #[serde(rename = "type")]
     pub field_type: String,
     pub nullable: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_field_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub out_field_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub field_id: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lineage_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

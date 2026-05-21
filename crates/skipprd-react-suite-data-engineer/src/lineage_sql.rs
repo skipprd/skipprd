@@ -20,6 +20,8 @@ pub struct SqlLineageAnalysis {
     #[serde(default)]
     pub selected_fields: Vec<String>,
     #[serde(default)]
+    pub selected_outputs: Vec<SqlSelectedOutput>,
+    #[serde(default)]
     pub aggregate_fields: Vec<String>,
     #[serde(default)]
     pub join_fields: Vec<String>,
@@ -27,6 +29,19 @@ pub struct SqlLineageAnalysis {
     pub filter_fields: Vec<String>,
     #[serde(default)]
     pub diagnostics: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
+#[serde(deny_unknown_fields)]
+pub struct SqlSelectedOutput {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_field: Option<String>,
+    #[serde(default)]
+    pub source_fields: Vec<String>,
+    #[serde(default)]
+    pub aggregate: bool,
+    #[serde(default)]
+    pub wildcard: bool,
 }
 
 pub fn analyze_select_sql(sql: &str) -> SqlLineageAnalysis {
@@ -69,6 +84,19 @@ impl SqlLineageAnalysis {
             })
             .collect();
         self.selected_fields = sorted_unique(std::mem::take(&mut self.selected_fields));
+        self.selected_outputs = std::mem::take(&mut self.selected_outputs)
+            .into_iter()
+            .map(|mut output| {
+                output.output_field = output
+                    .output_field
+                    .map(|field| normalize_field_path(&field))
+                    .filter(|field| !field.is_empty());
+                output.source_fields = sorted_unique(output.source_fields);
+                output
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect();
         self.aggregate_fields = sorted_unique(std::mem::take(&mut self.aggregate_fields));
         self.join_fields = sorted_unique(std::mem::take(&mut self.join_fields));
         self.filter_fields = sorted_unique(std::mem::take(&mut self.filter_fields));
@@ -129,21 +157,81 @@ fn visit_select(select: &Select, out: &mut SqlLineageAnalysis) {
     for item in &select.projection {
         match item {
             SelectItem::UnnamedExpr(expr) => {
-                collect_expr_fields(expr, &out.table_aliases, &mut out.selected_fields)
-            }
-            SelectItem::ExprWithAlias { expr, .. } => {
                 collect_expr_fields(expr, &out.table_aliases, &mut out.selected_fields);
                 collect_aggregate_fields(expr, &out.table_aliases, &mut out.aggregate_fields);
+                out.selected_outputs.push(selected_output_from_expr(
+                    expr,
+                    None,
+                    &out.table_aliases,
+                ));
             }
-            SelectItem::QualifiedWildcard(name, _) => out.selected_fields.push(
-                resolve_relation_or_alias(&name_to_string(name), &out.table_aliases),
-            ),
-            SelectItem::Wildcard(_) => out.selected_fields.push("*".to_string()),
+            SelectItem::ExprWithAlias { expr, alias } => {
+                collect_expr_fields(expr, &out.table_aliases, &mut out.selected_fields);
+                collect_aggregate_fields(expr, &out.table_aliases, &mut out.aggregate_fields);
+                out.selected_outputs.push(selected_output_from_expr(
+                    expr,
+                    Some(&alias.value),
+                    &out.table_aliases,
+                ));
+            }
+            SelectItem::QualifiedWildcard(name, _) => {
+                let relation = resolve_relation_or_alias(&name_to_string(name), &out.table_aliases);
+                out.selected_fields.push(relation.clone());
+                out.selected_outputs.push(SqlSelectedOutput {
+                    output_field: None,
+                    source_fields: vec![format!("{relation}.*")],
+                    aggregate: false,
+                    wildcard: true,
+                });
+            }
+            SelectItem::Wildcard(_) => {
+                out.selected_fields.push("*".to_string());
+                out.selected_outputs.push(SqlSelectedOutput {
+                    output_field: None,
+                    source_fields: vec!["*".to_string()],
+                    aggregate: false,
+                    wildcard: true,
+                });
+            }
         }
     }
 
     if let Some(selection) = select.selection.as_ref() {
         collect_expr_fields(selection, &out.table_aliases, &mut out.filter_fields);
+    }
+}
+
+fn selected_output_from_expr(
+    expr: &Expr,
+    alias: Option<&str>,
+    aliases: &BTreeMap<String, String>,
+) -> SqlSelectedOutput {
+    let mut source_fields = Vec::new();
+    collect_expr_fields(expr, aliases, &mut source_fields);
+    let mut aggregate_fields = Vec::new();
+    collect_aggregate_fields(expr, aliases, &mut aggregate_fields);
+    SqlSelectedOutput {
+        output_field: alias
+            .map(normalize_field_path)
+            .filter(|field| !field.is_empty())
+            .or_else(|| inferred_output_field(expr)),
+        source_fields,
+        aggregate: !aggregate_fields.is_empty(),
+        wildcard: false,
+    }
+}
+
+fn inferred_output_field(expr: &Expr) -> Option<String> {
+    match expr {
+        Expr::Identifier(ident) => Some(normalize_field_path(&ident.value)),
+        Expr::CompoundIdentifier(idents) => idents
+            .last()
+            .map(|ident| normalize_field_path(&ident.value))
+            .filter(|field| !field.is_empty()),
+        Expr::Nested(expr) | Expr::Cast { expr, .. } | Expr::TryCast { expr, .. } => {
+            inferred_output_field(expr)
+        }
+        _ => None,
     }
 }
 
@@ -381,6 +469,15 @@ fn normalize_relation_name(value: &str) -> String {
         .join(".")
 }
 
+fn normalize_field_path(value: &str) -> String {
+    value
+        .split('.')
+        .map(normalize_ident_part)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(".")
+}
+
 fn normalize_ident_part(value: &str) -> String {
     value
         .trim()
@@ -418,6 +515,13 @@ mod tests {
         assert!(got
             .aggregate_fields
             .contains(&"db.sales.orders.amount".to_string()));
+        assert!(got.selected_outputs.iter().any(|output| {
+            output.output_field.as_deref() == Some("total")
+                && output
+                    .source_fields
+                    .contains(&"db.sales.orders.amount".to_string())
+                && output.aggregate
+        }));
     }
 
     #[test]
