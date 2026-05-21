@@ -179,6 +179,12 @@ enum Cmd {
     /// Run a read-only SQL query against the configured warehouse.
     Query(QueryArgs),
 
+    /// Build and inspect the DE-suite catalog lineage graph.
+    Lineage {
+        #[command(subcommand)]
+        action: LineageAction,
+    },
+
     /// Chat with the data-engineer agent (react threads): ask / plan / agent, list threads, docs search.
     Chat {
         #[command(subcommand)]
@@ -360,6 +366,70 @@ struct QueryArgs {
     /// Read-only SQL to execute. Only SELECT/WITH queries are accepted.
     #[arg(long, allow_hyphen_values = true)]
     sql: String,
+    /// Output mode: json or jsonl.
+    #[arg(long, default_value = "json")]
+    output: String,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+enum LineageAction {
+    /// Rebuild and persist the catalog lineage graph.
+    Refresh(LineageRefreshArgs),
+    /// Read the persisted lineage graph, optionally sliced around an asset or field.
+    Graph(LineageGraphArgs),
+    /// Analyze warehouse query history and merge query/dashboard evidence into lineage.
+    ImportQueryHistory(LineageImportQueryHistoryArgs),
+}
+
+#[derive(Parser, Debug, Clone)]
+struct LineageRefreshArgs {
+    /// Pipeline whose configured DE suite scope should hold lineage.
+    #[arg(long)]
+    pipeline: String,
+    /// Also import recent warehouse query history while refreshing.
+    #[arg(long, default_value_t = false)]
+    include_query_history: bool,
+    /// Query history lower bound. Provider-specific timestamp string.
+    #[arg(long)]
+    since: Option<String>,
+    /// Maximum query history rows to inspect.
+    #[arg(long, default_value_t = 100)]
+    limit: usize,
+    /// Output mode: json or jsonl.
+    #[arg(long, default_value = "json")]
+    output: String,
+}
+
+#[derive(Parser, Debug, Clone)]
+struct LineageGraphArgs {
+    /// Pipeline whose configured DE suite scope should be read. Omit to merge all persisted pipeline lineage graphs.
+    #[arg(long)]
+    pipeline: Option<String>,
+    /// Asset/node/dataset id to center the graph on.
+    #[arg(long)]
+    asset: Option<String>,
+    /// Field path to center the graph on.
+    #[arg(long)]
+    field: Option<String>,
+    /// Direction: upstream, downstream, or both.
+    #[arg(long, default_value = "both")]
+    direction: String,
+    /// Output mode: json or jsonl.
+    #[arg(long, default_value = "json")]
+    output: String,
+}
+
+#[derive(Parser, Debug, Clone)]
+struct LineageImportQueryHistoryArgs {
+    /// Pipeline whose configured warehouse query history should be inspected.
+    #[arg(long)]
+    pipeline: String,
+    /// Query history lower bound. Provider-specific timestamp string.
+    #[arg(long)]
+    since: Option<String>,
+    /// Maximum query history rows to inspect.
+    #[arg(long, default_value_t = 100)]
+    limit: usize,
     /// Output mode: json or jsonl.
     #[arg(long, default_value = "json")]
     output: String,
@@ -1484,6 +1554,44 @@ fn pipeline_data_sink_name(
         .to_string())
 }
 
+fn pipeline_data_source_name(
+    engine_cfg: &serde_yaml::Value,
+    pipeline: &str,
+) -> Result<Option<String>, String> {
+    let pipeline_cfg = pipeline_config(engine_cfg, pipeline)?;
+    let Some(data_source_ref) = pipeline_cfg
+        .get("data_source")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    Ok(Some(
+        data_source_ref
+            .strip_prefix("data_sources.")
+            .unwrap_or(data_source_ref)
+            .to_string(),
+    ))
+}
+
+fn selected_data_source_mapping<'a>(
+    engine_cfg: &'a serde_yaml::Value,
+    data_source_name: &str,
+) -> Result<&'a serde_yaml::Mapping, String> {
+    engine_cfg
+        .get("data_sources")
+        .and_then(|data_sources| data_sources.get(data_source_name))
+        .ok_or_else(|| {
+            format!(
+                "skippr.yml does not define data source '{}'. Use one of the data_sources keys.",
+                data_source_name
+            )
+        })?
+        .as_mapping()
+        .ok_or_else(|| format!("data_sources.{} must be a mapping", data_source_name))
+}
+
 fn selected_data_sink_mapping<'a>(
     engine_cfg: &'a serde_yaml::Value,
     data_sink_name: &str,
@@ -1556,6 +1664,44 @@ fn result_s3_from_athena_results_bucket(bucket: Option<String>) -> Option<String
             format!("s3://{}/", bucket.trim_matches('/'))
         }
     })
+}
+
+fn source_config_from_data_source(
+    engine_cfg: &serde_yaml::Value,
+    data_source_name: &str,
+) -> Result<SourceConfig, String> {
+    let source = selected_data_source_mapping(engine_cfg, data_source_name)?;
+    let plugin = plugin_mapping_key(source).ok_or_else(|| {
+        format!(
+            "data_sources.{} must contain a runtime plugin config such as S3:",
+            data_source_name
+        )
+    })?;
+    let plugin_cfg = source
+        .get(yaml_key(&plugin))
+        .and_then(|value| value.as_mapping())
+        .ok_or_else(|| {
+            format!(
+                "data_sources.{} did not contain mapping config '{}'",
+                data_source_name, plugin
+            )
+        })?;
+    match plugin.as_str() {
+        "S3" => Ok(SourceConfig::S3 {
+            s3_bucket: yaml_str(plugin_cfg, "s3_bucket"),
+            s3_prefix: yaml_str(plugin_cfg, "s3_prefix"),
+            transform: None,
+        }),
+        "File" => Ok(SourceConfig::File {
+            path: yaml_str(plugin_cfg, "path"),
+        }),
+        "Mssql" => Ok(SourceConfig::Mssql {
+            connection_string: yaml_str(plugin_cfg, "connection_string"),
+        }),
+        other => Err(format!(
+            "data_sources.{data_source_name}.{other} is not supported by lineage config translation"
+        )),
+    }
 }
 
 fn warehouse_config_from_data_sink(
@@ -1696,10 +1842,14 @@ pub(crate) fn react_config_from_pipeline_config(
 ) -> Result<ReactConfigFile, String> {
     let data_sink_name = pipeline_data_sink_name(value, pipeline)?;
     let (warehouse, schema_sink) = warehouse_config_from_data_sink(value, &data_sink_name)?;
+    let source = pipeline_data_source_name(value, pipeline)?
+        .as_deref()
+        .map(|source_name| source_config_from_data_source(value, source_name))
+        .transpose()?;
     let cfg = SkipprProjectConfig {
         project: pipeline.to_string(),
         warehouse: Some(warehouse),
-        source: None,
+        source,
         dbt: Some(DbtConfig {
             target_schema: Some(dbt_schema_name(pipeline)),
             silver_suffix: Some("silver".to_string()),
@@ -4031,6 +4181,175 @@ async fn cmd_plan(log: Option<String>, explicit_config: &Option<PathBuf>, args: 
     .await;
 }
 
+async fn build_lineage_suite_ctx(
+    explicit_config: &Option<PathBuf>,
+    pipeline: &str,
+) -> Result<react_core::suite::SuiteCtx, String> {
+    let auth_ctx = headless_prep::authenticate_headless_for_pipeline(explicit_config, pipeline)
+        .await
+        .map_err(|e| e.to_string())?;
+    react::bootstrap::build_suite_ctx_with(&auth_ctx.resolved, &react_host::SkipprHost)
+        .await
+        .map_err(|e| e.to_string())
+}
+
+async fn load_all_lineage_graphs(
+    explicit_config: &Option<PathBuf>,
+    query: react_suite_data_engineer::lineage_types::LineageGraphQuery,
+) -> Result<react_suite_data_engineer::lineage_types::LineageGraphSnapshot, String> {
+    let cfg = load_engine_config(explicit_config)
+        .and_then(|mut v| warn_and_normalize_legacy_cli_config(&mut v).map(|_| v))?;
+    let pipelines = yaml_mapping_keys(cfg.get("pipelines"));
+    let mut merged = react_suite_data_engineer::lineage_types::LineageGraphSnapshot::default();
+    for pipeline in pipelines {
+        let suite_ctx = build_lineage_suite_ctx(explicit_config, &pipeline).await?;
+        let store = react_suite_data_engineer::lineage_store::LineageStore::new(
+            suite_ctx.storage().clone(),
+            suite_ctx.keyspace().clone(),
+        );
+        if let Some(graph) = store.read_graph(suite_ctx.scope()).await? {
+            merged = react_suite_data_engineer::lineage_store::merge_graphs(merged, graph)?;
+        }
+    }
+    Ok(react_suite_data_engineer::lineage_store::slice_graph(
+        &merged, &query,
+    ))
+}
+
+fn emit_lineage_json<T: Serialize>(output: &str, value: &T) {
+    if is_jsonl_output(output) {
+        print_json_line(value);
+    } else {
+        print_json(value);
+    }
+}
+
+fn lineage_direction(raw: &str) -> react_suite_data_engineer::lineage_types::LineageDirection {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "upstream" => react_suite_data_engineer::lineage_types::LineageDirection::Upstream,
+        "downstream" => react_suite_data_engineer::lineage_types::LineageDirection::Downstream,
+        _ => react_suite_data_engineer::lineage_types::LineageDirection::Both,
+    }
+}
+
+async fn cmd_lineage(
+    _log: Option<String>,
+    explicit_config: &Option<PathBuf>,
+    action: LineageAction,
+) {
+    match action {
+        LineageAction::Refresh(args) => {
+            let output = args.output.clone();
+            let suite_ctx = match build_lineage_suite_ctx(explicit_config, &args.pipeline).await {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    emit_lineage_json(
+                        &output,
+                        &serde_json::json!({"ok": false, "pipeline": args.pipeline, "error": e}),
+                    );
+                    std::process::exit(1);
+                }
+            };
+            match react_suite_data_engineer::lineage_builder::refresh_lineage_graph_for_suite(
+                &suite_ctx,
+                react_suite_data_engineer::lineage_builder::LineageBuildOptions {
+                    pipeline: Some(args.pipeline.clone()),
+                    include_query_history: args.include_query_history,
+                    query_history_since: args.since.clone(),
+                    query_history_limit: args.limit,
+                },
+            )
+            .await
+            {
+                Ok(result) => emit_lineage_json(&output, &result),
+                Err(e) => {
+                    emit_lineage_json(
+                        &output,
+                        &serde_json::json!({"ok": false, "pipeline": args.pipeline, "error": e}),
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+        LineageAction::Graph(args) => {
+            let output = args.output.clone();
+            let query = react_suite_data_engineer::lineage_types::LineageGraphQuery {
+                asset: args.asset.clone(),
+                field: args.field.clone(),
+                direction: lineage_direction(&args.direction),
+            };
+            if let Some(pipeline) = args.pipeline.as_deref() {
+                let suite_ctx = match build_lineage_suite_ctx(explicit_config, pipeline).await {
+                    Ok(ctx) => ctx,
+                    Err(e) => {
+                        emit_lineage_json(
+                            &output,
+                            &serde_json::json!({"ok": false, "pipeline": pipeline, "error": e}),
+                        );
+                        std::process::exit(1);
+                    }
+                };
+                match react_suite_data_engineer::lineage_builder::load_lineage_graph_for_suite(
+                    &suite_ctx, query,
+                )
+                .await
+                {
+                    Ok(graph) => emit_lineage_json(
+                        &output,
+                        &serde_json::json!({"ok": true, "pipeline": pipeline, "graph": graph}),
+                    ),
+                    Err(e) => {
+                        emit_lineage_json(
+                            &output,
+                            &serde_json::json!({"ok": false, "pipeline": pipeline, "error": e}),
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            } else {
+                match load_all_lineage_graphs(explicit_config, query).await {
+                    Ok(graph) => {
+                        emit_lineage_json(&output, &serde_json::json!({"ok": true, "graph": graph}))
+                    }
+                    Err(e) => {
+                        emit_lineage_json(&output, &serde_json::json!({"ok": false, "error": e}));
+                        std::process::exit(1);
+                    }
+                }
+            }
+        }
+        LineageAction::ImportQueryHistory(args) => {
+            let output = args.output.clone();
+            let suite_ctx = match build_lineage_suite_ctx(explicit_config, &args.pipeline).await {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    emit_lineage_json(
+                        &output,
+                        &serde_json::json!({"ok": false, "pipeline": args.pipeline, "error": e}),
+                    );
+                    std::process::exit(1);
+                }
+            };
+            match react_suite_data_engineer::lineage_builder::import_query_history_for_suite(
+                &suite_ctx,
+                args.since.clone(),
+                args.limit,
+            )
+            .await
+            {
+                Ok(result) => emit_lineage_json(&output, &result),
+                Err(e) => {
+                    emit_lineage_json(
+                        &output,
+                        &serde_json::json!({"ok": false, "pipeline": args.pipeline, "error": e}),
+                    );
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
+}
+
 async fn cmd_query(_log: Option<String>, explicit_config: &Option<PathBuf>, args: QueryArgs) {
     let emit = |body: &serde_json::Value| {
         if is_jsonl_output(&args.output) {
@@ -5694,6 +6013,7 @@ async fn async_main() {
         Cmd::Ask(args) => cmd_ask(cli.log, &cli.config, args).await,
         Cmd::Plan(args) => cmd_plan(cli.log, &cli.config, args).await,
         Cmd::Query(args) => cmd_query(cli.log, &cli.config, args).await,
+        Cmd::Lineage { action } => cmd_lineage(cli.log, &cli.config, action).await,
         Cmd::Chat { action } => chat_cmd::run_chat(cli.log, &cli.config, action).await,
         Cmd::Feedback {
             good,
@@ -6466,6 +6786,22 @@ schema_sinks:
         assert_eq!(
             wh.get("result_s3").and_then(|v| v.as_str()),
             Some("s3://asgsdag-datalake/")
+        );
+        assert_eq!(
+            providers
+                .get("el")
+                .and_then(|el| el.get("skippr_input"))
+                .and_then(|input| input.get("kind"))
+                .and_then(|kind| kind.as_str()),
+            Some("s3")
+        );
+        assert_eq!(
+            providers
+                .get("el")
+                .and_then(|el| el.get("skippr_input"))
+                .and_then(|input| input.get("s3_bucket"))
+                .and_then(|bucket| bucket.as_str()),
+            Some("circles-analytics-prod")
         );
     }
 

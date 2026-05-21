@@ -151,6 +151,29 @@ impl DataEngineerSuite {
         .await
         .map_err(|e| format!("catalog bootstrap failed while building semantic profiles: {e}"))?;
 
+        match crate::lineage_builder::refresh_lineage_graph_for_suite(
+            sctx,
+            crate::lineage_builder::LineageBuildOptions {
+                pipeline: None,
+                include_query_history: false,
+                query_history_since: None,
+                query_history_limit: 100,
+            },
+        )
+        .await
+        {
+            Ok(result) => tracing::info!(
+                "data_engineer: lineage graph refreshed nodes={} edges={} diagnostics={}",
+                result.node_count,
+                result.edge_count,
+                result.diagnostic_count
+            ),
+            Err(e) => tracing::warn!(
+                "data_engineer: lineage graph refresh failed during catalog bootstrap; continuing: {}",
+                e
+            ),
+        }
+
         let enrich_report = if bootstrap_catalog_llm_enrichment_enabled() {
             let enrich_timeout_secs = enrichment_timeout_secs(all.len());
             match tokio::time::timeout(

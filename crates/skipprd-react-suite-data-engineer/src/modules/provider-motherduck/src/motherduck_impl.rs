@@ -8,8 +8,9 @@ use react_core::discover::stats::FieldStats;
 use react_suite_data_engineer::providers::warehouse_utils;
 use react_suite_data_engineer::providers::{
     finalize_provider_field_stats, parse_provider_u64, DatasetCatalogProvider, DatasetFieldStats,
-    DatasetId, DatasetStats, ProviderEvidenceCapabilities, QueryProvider, QueryResult,
-    WarehouseNaming,
+    DatasetId, DatasetStats, ProviderEvidenceCapabilities, QueryHistoryCapability,
+    QueryHistoryProviderError, QueryHistoryRequest, QueryHistoryResult, QueryProvider, QueryResult,
+    WarehouseNaming, WarehouseQueryHistoryProvider,
 };
 
 const MOTHERDUCK_API_URL: &str = "https://api.motherduck.com/v1/sql";
@@ -455,6 +456,82 @@ impl DatasetCatalogProvider for MotherDuckProvider {
 
     fn max_concurrency(&self) -> usize {
         self.inner.max_concurrency
+    }
+}
+
+#[async_trait]
+impl WarehouseQueryHistoryProvider for MotherDuckProvider {
+    fn query_history_capability(&self) -> QueryHistoryCapability {
+        QueryHistoryCapability::Supported
+    }
+
+    async fn list_query_history(
+        &self,
+        request: &QueryHistoryRequest,
+    ) -> Result<QueryHistoryResult, QueryHistoryProviderError> {
+        let limit = request.bounded_limit(100, 500);
+        let mut predicates = Vec::new();
+        if !request.include_non_select {
+            predicates.push("lower(trim(query_text)) like 'select%'".to_string());
+        }
+        if !request.include_failed {
+            predicates.push(
+                "(status is null or lower(status) in ('success','succeeded','completed'))"
+                    .to_string(),
+            );
+        }
+        if let Some(since) = request
+            .since
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            predicates.push(format!(
+                "start_time >= cast({} as timestamp)",
+                react_suite_data_engineer::providers::sql_literal(since)
+            ));
+        }
+        let where_clause = if predicates.is_empty() {
+            String::new()
+        } else {
+            format!(" where {}", predicates.join(" and "))
+        };
+        let sql = format!(
+            "select query_id, query_text, user_name, start_time, end_time, status as execution_status, error as error_message \
+             from md_information_schema.query_history{where_clause} order by start_time desc limit {limit}"
+        );
+        let result = self.execute_sql(&sql).await.map_err(|raw| {
+            if react_suite_data_engineer::providers::lower_ascii_contains(
+                &raw,
+                "md_information_schema",
+            ) || react_suite_data_engineer::providers::lower_ascii_contains(
+                &raw,
+                "query_history",
+            ) {
+                QueryHistoryProviderError::requires_configuration(
+                    "MotherDuck query history requires MD_INFORMATION_SCHEMA.QUERY_HISTORY access",
+                    Some(raw),
+                )
+            } else if react_suite_data_engineer::providers::lower_ascii_contains(&raw, "permission")
+            {
+                QueryHistoryProviderError::requires_privileges(
+                    "MotherDuck query history lookup requires account query-history privileges",
+                    Some(raw),
+                )
+            } else {
+                QueryHistoryProviderError::provider(
+                    "MotherDuck query history lookup failed",
+                    Some(raw),
+                )
+            }
+        })?;
+        Ok(react_suite_data_engineer::providers::supported_result(
+            react_suite_data_engineer::de_config::WarehouseKind::Motherduck,
+            react_suite_data_engineer::providers::records_from_query_result(
+                react_suite_data_engineer::de_config::WarehouseKind::Motherduck,
+                result,
+            ),
+        ))
     }
 }
 

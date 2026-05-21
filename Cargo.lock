@@ -10095,6 +10095,7 @@ name = "react-module-provider-snowflake"
 version = "0.0.0-git"
 dependencies = [
  "async-trait",
+ "chrono",
  "react-core",
  "react-suite-data-engineer",
  "serde_json",
@@ -10183,6 +10184,7 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
+ "sqlparser 0.43.1",
  "tempfile",
  "thiserror 2.0.17",
  "tokio",

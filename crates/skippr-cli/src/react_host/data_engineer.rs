@@ -487,7 +487,8 @@ pub(crate) async fn wire_providers(
                 .extras
                 .get("location")
                 .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
+                .map(|s| s.to_string())
+                .or_else(|| getenv_nonempty("BIGQUERY_LOCATION"));
             let max_conc = providers
                 .warehouse
                 .extras

@@ -4,8 +4,9 @@ use tokio::sync::Semaphore;
 
 use react_suite_data_engineer::providers::{
     DatasetCatalogProvider, DatasetFieldStats, DatasetId, DatasetStats,
-    ProviderEvidenceCapabilities, QueryProvider, QueryResult, WarehouseNaming,
-    DEFAULT_MAX_CONCURRENCY,
+    ProviderEvidenceCapabilities, QueryHistoryCapability, QueryHistoryProviderError,
+    QueryHistoryRequest, QueryHistoryResult, QueryProvider, QueryResult, WarehouseNaming,
+    WarehouseQueryHistoryProvider, DEFAULT_MAX_CONCURRENCY,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -301,6 +302,86 @@ impl DatasetCatalogProvider for PostgresProvider {
 
     fn max_concurrency(&self) -> usize {
         self.inner.settings.max_concurrency.max(1).min(64)
+    }
+}
+
+#[async_trait]
+impl WarehouseQueryHistoryProvider for PostgresProvider {
+    fn query_history_capability(&self) -> QueryHistoryCapability {
+        QueryHistoryCapability::Supported
+    }
+
+    async fn list_query_history(
+        &self,
+        request: &QueryHistoryRequest,
+    ) -> Result<QueryHistoryResult, QueryHistoryProviderError> {
+        let limit = request.bounded_limit(100, 500);
+        let mut predicates = vec!["s.query is not null".to_string()];
+        if !request.include_non_select {
+            predicates.push("trim(lower(s.query)) like 'select%'".to_string());
+        }
+        let db_filter = self.dbname().ok().map(|db| {
+            format!(
+                "d.datname = {}",
+                react_suite_data_engineer::providers::sql_literal(&db)
+            )
+        });
+        if let Some(filter) = db_filter {
+            predicates.push(filter);
+        }
+        if let Some(since) = request
+            .since
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            predicates.push(format!(
+                "s.last_exec_time >= {}::timestamptz",
+                react_suite_data_engineer::providers::sql_literal(since)
+            ));
+        }
+        let sql = format!(
+            "select s.queryid::text as query_id, s.query as query_text, r.rolname as user_name, d.datname as database_name, s.last_exec_time as start_time, 'SUCCEEDED' as execution_status, s.calls::text as calls \
+             from pg_stat_statements s \
+             join pg_database d on d.oid = s.dbid \
+             join pg_roles r on r.oid = s.userid \
+             where {} order by s.last_exec_time desc nulls last limit {}",
+            predicates.join(" and "),
+            limit
+        );
+        let result = <Self as QueryProvider>::query(self, &sql)
+            .await
+            .map_err(|raw| {
+                if react_suite_data_engineer::providers::lower_ascii_contains(
+                    &raw,
+                    "pg_stat_statements",
+                ) {
+                    QueryHistoryProviderError::requires_configuration(
+                        "Postgres query history requires pg_stat_statements",
+                        Some(raw),
+                    )
+                } else if react_suite_data_engineer::providers::lower_ascii_contains(
+                    &raw,
+                    "permission",
+                ) {
+                    QueryHistoryProviderError::requires_privileges(
+                        "Postgres query history lookup requires access to pg_stat_statements",
+                        Some(raw),
+                    )
+                } else {
+                    QueryHistoryProviderError::provider(
+                        "Postgres query history lookup failed",
+                        Some(raw),
+                    )
+                }
+            })?;
+        Ok(react_suite_data_engineer::providers::supported_result(
+            react_suite_data_engineer::de_config::WarehouseKind::Postgres,
+            react_suite_data_engineer::providers::records_from_query_result(
+                react_suite_data_engineer::de_config::WarehouseKind::Postgres,
+                result,
+            ),
+        ))
     }
 }
 

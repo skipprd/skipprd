@@ -12,8 +12,9 @@ use react_core::discover::stats::FieldStats;
 use react_suite_data_engineer::providers::warehouse_utils;
 use react_suite_data_engineer::providers::{
     finalize_provider_field_stats, parse_provider_u64, DatasetCatalogProvider, DatasetFieldStats,
-    DatasetId, DatasetStats, ProviderEvidenceCapabilities, QueryProvider, QueryResult,
-    WarehouseNaming,
+    DatasetId, DatasetStats, ProviderEvidenceCapabilities, QueryHistoryCapability,
+    QueryHistoryProviderError, QueryHistoryRequest, QueryHistoryResult, QueryProvider, QueryResult,
+    WarehouseNaming, WarehouseQueryHistoryProvider,
 };
 
 const DEFAULT_MAX_CONCURRENCY: usize = 15;
@@ -527,6 +528,74 @@ impl DatasetCatalogProvider for SynapseProvider {
 
     fn max_concurrency(&self) -> usize {
         self.inner.max_concurrency
+    }
+}
+
+#[async_trait]
+impl WarehouseQueryHistoryProvider for SynapseProvider {
+    fn query_history_capability(&self) -> QueryHistoryCapability {
+        QueryHistoryCapability::Supported
+    }
+
+    async fn list_query_history(
+        &self,
+        request: &QueryHistoryRequest,
+    ) -> Result<QueryHistoryResult, QueryHistoryProviderError> {
+        let limit = request.bounded_limit(100, 500);
+        let mut predicates = Vec::new();
+        if !request.include_non_select {
+            predicates.push("ltrim(lower(command)) like 'select%'".to_string());
+        }
+        if !request.include_failed {
+            predicates.push("status in ('Completed', 'Succeeded')".to_string());
+        }
+        if let Some(since) = request
+            .since
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            predicates.push(format!(
+                "submit_time >= convert(datetime2, {}, 126)",
+                react_suite_data_engineer::providers::sql_literal(since)
+            ));
+        }
+        let where_clause = if predicates.is_empty() {
+            String::new()
+        } else {
+            format!(" where {}", predicates.join(" and "))
+        };
+        let sql = format!(
+            "select top ({limit}) request_id as query_id, command as query_text, submit_time as start_time, total_elapsed_time, status as execution_status, label as query_tag \
+             from sys.dm_pdw_exec_requests{where_clause} order by submit_time desc"
+        );
+        let result = self.run_query(&sql).await.map_err(|raw| {
+            if react_suite_data_engineer::providers::lower_ascii_contains(&raw, "invalid object")
+                || react_suite_data_engineer::providers::lower_ascii_contains(&raw, "dm_pdw_exec_requests")
+            {
+                QueryHistoryProviderError::requires_configuration(
+                    "Synapse query history requires a dedicated SQL pool with sys.dm_pdw_exec_requests",
+                    Some(raw),
+                )
+            } else if react_suite_data_engineer::providers::lower_ascii_contains(&raw, "permission") {
+                QueryHistoryProviderError::requires_privileges(
+                    "Synapse query history lookup requires DMV privileges",
+                    Some(raw),
+                )
+            } else {
+                QueryHistoryProviderError::provider(
+                    "Synapse query history lookup failed",
+                    Some(raw),
+                )
+            }
+        })?;
+        Ok(react_suite_data_engineer::providers::supported_result(
+            react_suite_data_engineer::de_config::WarehouseKind::Synapse,
+            react_suite_data_engineer::providers::records_from_query_result(
+                react_suite_data_engineer::de_config::WarehouseKind::Synapse,
+                result,
+            ),
+        ))
     }
 }
 

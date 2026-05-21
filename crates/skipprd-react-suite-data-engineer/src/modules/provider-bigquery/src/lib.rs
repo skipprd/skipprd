@@ -19,8 +19,9 @@ use tokio::sync::Semaphore;
 use react_core::discover::stats::FieldStats;
 use react_suite_data_engineer::providers::{
     finalize_provider_field_stats, parse_provider_u64, DatasetCatalogProvider, DatasetFieldStats,
-    DatasetId, DatasetStats, ProviderEvidenceCapabilities, QueryProvider, QueryResult,
-    WarehouseNaming,
+    DatasetId, DatasetStats, ProviderEvidenceCapabilities, QueryHistoryCapability,
+    QueryHistoryProviderError, QueryHistoryRequest, QueryHistoryResult, QueryProvider, QueryResult,
+    WarehouseNaming, WarehouseQueryHistoryProvider,
 };
 
 use react_suite_data_engineer::providers::warehouse_utils;
@@ -503,5 +504,93 @@ impl DatasetCatalogProvider for BigQueryProvider {
 
     fn max_concurrency(&self) -> usize {
         self.inner.max_concurrency
+    }
+}
+
+#[async_trait]
+impl WarehouseQueryHistoryProvider for BigQueryProvider {
+    fn query_history_capability(&self) -> QueryHistoryCapability {
+        if self
+            .inner
+            .location
+            .as_deref()
+            .map(str::trim)
+            .unwrap_or("")
+            .is_empty()
+        {
+            return QueryHistoryCapability::RequiresConfiguration {
+                reason: "BigQuery query history requires providers.warehouse.location or BIGQUERY_LOCATION".to_string(),
+                raw_error: None,
+            };
+        }
+        QueryHistoryCapability::Supported
+    }
+
+    async fn list_query_history(
+        &self,
+        request: &QueryHistoryRequest,
+    ) -> Result<QueryHistoryResult, QueryHistoryProviderError> {
+        let Some(location) = self
+            .inner
+            .location
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            return Err(QueryHistoryProviderError::requires_configuration(
+                "BigQuery query history requires providers.warehouse.location or BIGQUERY_LOCATION",
+                None,
+            ));
+        };
+        let limit = request.bounded_limit(100, 500);
+        let mut predicates = Vec::new();
+        if !request.include_non_select {
+            predicates.push("statement_type = 'SELECT'".to_string());
+        }
+        if !request.include_failed {
+            predicates.push("state = 'DONE' and error_result is null".to_string());
+        }
+        if let Some(since) = request
+            .since
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            predicates.push(format!(
+                "creation_time >= TIMESTAMP({})",
+                react_suite_data_engineer::providers::sql_literal(since)
+            ));
+        }
+        let where_clause = if predicates.is_empty() {
+            String::new()
+        } else {
+            format!(" where {}", predicates.join(" and "))
+        };
+        let sql = format!(
+            "select job_id as query_id, query as query_text, user_email, creation_time as start_time, start_time as execution_start_time, end_time, statement_type, state as execution_status, cast(error_result as string) as error_message, cast(labels as string) as query_tag \
+             from `region-{location}`.INFORMATION_SCHEMA.JOBS_BY_PROJECT{where_clause} order by creation_time desc limit {limit}"
+        );
+        let result = self.run_query(&sql).await.map_err(|raw| {
+            if react_suite_data_engineer::providers::lower_ascii_contains(&raw, "access denied")
+                || react_suite_data_engineer::providers::lower_ascii_contains(&raw, "permission")
+            {
+                QueryHistoryProviderError::requires_privileges(
+                    "BigQuery query history lookup requires access to INFORMATION_SCHEMA.JOBS_BY_PROJECT",
+                    Some(raw),
+                )
+            } else {
+                QueryHistoryProviderError::provider(
+                    "BigQuery query history lookup failed",
+                    Some(raw),
+                )
+            }
+        })?;
+        Ok(react_suite_data_engineer::providers::supported_result(
+            react_suite_data_engineer::de_config::WarehouseKind::Bigquery,
+            react_suite_data_engineer::providers::records_from_query_result(
+                react_suite_data_engineer::de_config::WarehouseKind::Bigquery,
+                result,
+            ),
+        ))
     }
 }

@@ -3,6 +3,7 @@ pub mod catalog_types;
 pub mod dataset_catalog;
 pub mod dbt;
 pub mod query;
+pub mod query_history;
 pub mod skippr;
 pub mod stats;
 pub mod type_parse;
@@ -31,6 +32,13 @@ pub use dbt::{
     DBT_SILVER_DATABASE_ENV, DBT_SILVER_SCHEMA_ENV,
 };
 pub use query::{QueryProvider, QueryResult};
+pub use query_history::{
+    lower_ascii_contains, normalize_sql, parse_epoch_ms, query_result_header,
+    record_from_query_result_row, records_from_query_result, row_value, sql_literal,
+    stable_sql_hash, supported_result, QueryHistoryCapability, QueryHistoryProviderError,
+    QueryHistoryProviderErrorKind, QueryHistoryRecord, QueryHistoryRequest, QueryHistoryResult,
+    QueryHistoryStatus, WarehouseQueryHistoryProvider,
+};
 pub use skippr::{
     SchemaSinkResolvedConfig, SkipprDiscoverResult, SkipprFieldSchema, SkipprNamespaceStatus,
     SkipprOutputConfig, SkipprPipelineConfig, SkipprPipelineStatus, SkipprProvider,

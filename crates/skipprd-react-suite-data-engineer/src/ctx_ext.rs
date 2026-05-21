@@ -33,6 +33,10 @@ pub(crate) fn actx_warehouse(ctx: &AgentCtx) -> Option<Arc<dyn WarehouseProvider
     ctx.capability::<WarehouseCap>().map(|c| c.0.clone())
 }
 
+pub(crate) fn sctx_warehouse(ctx: &SuiteCtx) -> Option<Arc<dyn WarehouseProvider>> {
+    ctx.capability::<WarehouseCap>().map(|c| c.0.clone())
+}
+
 pub(crate) fn sctx_dbt(ctx: &SuiteCtx) -> Option<Arc<dyn DbtProvider>> {
     ctx.capability::<DbtCap>().map(|c| c.0.clone())
 }

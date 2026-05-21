@@ -12,8 +12,9 @@ use react_core::discover::stats::FieldStats;
 use react_suite_data_engineer::providers::warehouse_utils;
 use react_suite_data_engineer::providers::{
     finalize_provider_field_stats, parse_provider_u64, DatasetCatalogProvider, DatasetFieldStats,
-    DatasetId, DatasetStats, ProviderEvidenceCapabilities, QueryProvider, QueryResult,
-    WarehouseNaming,
+    DatasetId, DatasetStats, ProviderEvidenceCapabilities, QueryHistoryCapability,
+    QueryHistoryProviderError, QueryHistoryRequest, QueryHistoryResult, QueryProvider, QueryResult,
+    WarehouseNaming, WarehouseQueryHistoryProvider,
 };
 
 const DEFAULT_MSSQL_MAX_CONCURRENCY: usize = 15;
@@ -530,6 +531,67 @@ impl DatasetCatalogProvider for MssqlProvider {
 
     fn max_concurrency(&self) -> usize {
         self.inner.max_concurrency
+    }
+}
+
+#[async_trait]
+impl WarehouseQueryHistoryProvider for MssqlProvider {
+    fn query_history_capability(&self) -> QueryHistoryCapability {
+        QueryHistoryCapability::Supported
+    }
+
+    async fn list_query_history(
+        &self,
+        request: &QueryHistoryRequest,
+    ) -> Result<QueryHistoryResult, QueryHistoryProviderError> {
+        let limit = request.bounded_limit(100, 500);
+        let mut predicates = vec![format!(
+            "st.dbid = DB_ID({})",
+            react_suite_data_engineer::providers::sql_literal(&self.inner.database)
+        )];
+        if let Some(since) = request
+            .since
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            predicates.push(format!(
+                "qs.last_execution_time >= convert(datetime2, {}, 126)",
+                react_suite_data_engineer::providers::sql_literal(since)
+            ));
+        }
+        if !request.include_non_select {
+            predicates.push("ltrim(lower(st.text)) like 'select%'".to_string());
+        }
+        let sql = format!(
+            "select top ({limit}) convert(varchar(64), qs.query_hash, 1) as query_id, \
+             substring(st.text, (qs.statement_start_offset/2)+1, \
+               case when qs.statement_end_offset = -1 then len(convert(nvarchar(max), st.text)) \
+                    else ((qs.statement_end_offset - qs.statement_start_offset)/2)+1 end) as query_text, \
+             qs.last_execution_time as start_time, qs.creation_time, qs.execution_count, DB_NAME(st.dbid) as database_name, 'SUCCEEDED' as execution_status \
+             from sys.dm_exec_query_stats qs cross apply sys.dm_exec_sql_text(qs.sql_handle) st \
+             where {} order by qs.last_execution_time desc",
+            predicates.join(" and ")
+        );
+        let result = self.run_query(&sql).await.map_err(|raw| {
+            if react_suite_data_engineer::providers::lower_ascii_contains(&raw, "VIEW SERVER STATE")
+                || react_suite_data_engineer::providers::lower_ascii_contains(&raw, "permission")
+            {
+                QueryHistoryProviderError::requires_privileges(
+                    "MSSQL query history lookup requires VIEW SERVER STATE or equivalent DMV privileges",
+                    Some(raw),
+                )
+            } else {
+                QueryHistoryProviderError::provider("MSSQL query history lookup failed", Some(raw))
+            }
+        })?;
+        Ok(react_suite_data_engineer::providers::supported_result(
+            react_suite_data_engineer::de_config::WarehouseKind::Mssql,
+            react_suite_data_engineer::providers::records_from_query_result(
+                react_suite_data_engineer::de_config::WarehouseKind::Mssql,
+                result,
+            ),
+        ))
     }
 }
 

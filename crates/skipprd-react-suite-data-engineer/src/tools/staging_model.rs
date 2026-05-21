@@ -1228,6 +1228,28 @@ mod tests {
                 format!("\"{}\"", ident.replace('"', "\"\""))
             }
         }
+        #[async_trait]
+        impl crate::providers::WarehouseQueryHistoryProvider for MockWarehouse {
+            fn query_history_capability(&self) -> crate::providers::QueryHistoryCapability {
+                crate::providers::QueryHistoryCapability::Unavailable {
+                    reason: "mock warehouse query history unavailable".to_string(),
+                    raw_error: None,
+                }
+            }
+
+            async fn list_query_history(
+                &self,
+                _request: &crate::providers::QueryHistoryRequest,
+            ) -> Result<
+                crate::providers::QueryHistoryResult,
+                crate::providers::QueryHistoryProviderError,
+            > {
+                Err(crate::providers::QueryHistoryProviderError::provider(
+                    "mock warehouse query history unavailable",
+                    None,
+                ))
+            }
+        }
 
         #[derive(Clone)]
         struct CapturingLlm {
@@ -1260,7 +1282,6 @@ mod tests {
                 Ok(vec![])
             }
         }
-
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
         let scope = RequestScope::parse("t", "w", "p").expect("valid test scope");
@@ -1570,6 +1591,28 @@ mod tests {
                 format!("\"{}\"", ident.replace('"', "\"\""))
             }
         }
+        #[async_trait]
+        impl crate::providers::WarehouseQueryHistoryProvider for MockWarehouse {
+            fn query_history_capability(&self) -> crate::providers::QueryHistoryCapability {
+                crate::providers::QueryHistoryCapability::Unavailable {
+                    reason: "mock warehouse query history unavailable".to_string(),
+                    raw_error: None,
+                }
+            }
+
+            async fn list_query_history(
+                &self,
+                _request: &crate::providers::QueryHistoryRequest,
+            ) -> Result<
+                crate::providers::QueryHistoryResult,
+                crate::providers::QueryHistoryProviderError,
+            > {
+                Err(crate::providers::QueryHistoryProviderError::provider(
+                    "mock warehouse query history unavailable",
+                    None,
+                ))
+            }
+        }
 
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
@@ -1824,6 +1867,28 @@ mod tests {
             }
             fn quote_ident(&self, ident: &str) -> String {
                 format!("\"{}\"", ident.replace('"', "\"\""))
+            }
+        }
+        #[async_trait]
+        impl crate::providers::WarehouseQueryHistoryProvider for MockWarehouse {
+            fn query_history_capability(&self) -> crate::providers::QueryHistoryCapability {
+                crate::providers::QueryHistoryCapability::Unavailable {
+                    reason: "mock warehouse query history unavailable".to_string(),
+                    raw_error: None,
+                }
+            }
+
+            async fn list_query_history(
+                &self,
+                _request: &crate::providers::QueryHistoryRequest,
+            ) -> Result<
+                crate::providers::QueryHistoryResult,
+                crate::providers::QueryHistoryProviderError,
+            > {
+                Err(crate::providers::QueryHistoryProviderError::provider(
+                    "mock warehouse query history unavailable",
+                    None,
+                ))
             }
         }
 

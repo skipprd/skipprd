@@ -3,6 +3,10 @@ use async_trait::async_trait;
 use super::catalog_types::DatasetStats;
 use super::dataset_catalog::{DatasetCatalogProvider, DatasetId, ProviderEvidenceCapabilities};
 use super::query::{QueryProvider, QueryResult};
+use super::query_history::{
+    QueryHistoryCapability, QueryHistoryProviderError, QueryHistoryRequest, QueryHistoryResult,
+    WarehouseQueryHistoryProvider,
+};
 use super::stats::DatasetFieldStats;
 
 // TODO(item-67): All provider traits return `Result<..., String>`. Replace with a
@@ -58,8 +62,14 @@ pub trait WarehouseNaming: Send + Sync {
 // - BigQuery: `async from_settings() -> Result` (GCP client can fail)
 // - Postgres: `from_settings()` (sync; connection is deferred to first query)
 // These differences reflect underlying SDK requirements, not an inconsistency.
-pub trait WarehouseProvider: QueryProvider + DatasetCatalogProvider + WarehouseNaming {}
-impl<T> WarehouseProvider for T where T: QueryProvider + DatasetCatalogProvider + WarehouseNaming {}
+pub trait WarehouseProvider:
+    QueryProvider + DatasetCatalogProvider + WarehouseNaming + WarehouseQueryHistoryProvider
+{
+}
+impl<T> WarehouseProvider for T where
+    T: QueryProvider + DatasetCatalogProvider + WarehouseNaming + WarehouseQueryHistoryProvider
+{
+}
 
 #[derive(Clone, Default)]
 pub struct NullWarehouseProvider;
@@ -112,5 +122,25 @@ impl WarehouseNaming for NullWarehouseProvider {
 
     fn quote_ident(&self, ident: &str) -> String {
         format!("\"{}\"", ident.replace('"', "\"\""))
+    }
+}
+
+#[async_trait]
+impl WarehouseQueryHistoryProvider for NullWarehouseProvider {
+    fn query_history_capability(&self) -> QueryHistoryCapability {
+        QueryHistoryCapability::RequiresConfiguration {
+            reason: "warehouse provider not configured".to_string(),
+            raw_error: Some("warehouse provider not configured".to_string()),
+        }
+    }
+
+    async fn list_query_history(
+        &self,
+        _request: &QueryHistoryRequest,
+    ) -> Result<QueryHistoryResult, QueryHistoryProviderError> {
+        Err(QueryHistoryProviderError::requires_configuration(
+            "warehouse provider not configured",
+            Some("warehouse provider not configured".to_string()),
+        ))
     }
 }

@@ -865,6 +865,27 @@ pub(crate) mod test_helpers {
         }
     }
 
+    #[async_trait]
+    impl crate::providers::WarehouseQueryHistoryProvider for MockWarehouse {
+        fn query_history_capability(&self) -> crate::providers::QueryHistoryCapability {
+            crate::providers::QueryHistoryCapability::Unavailable {
+                reason: "mock warehouse query history unavailable".to_string(),
+                raw_error: None,
+            }
+        }
+
+        async fn list_query_history(
+            &self,
+            _request: &crate::providers::QueryHistoryRequest,
+        ) -> Result<crate::providers::QueryHistoryResult, crate::providers::QueryHistoryProviderError>
+        {
+            Err(crate::providers::QueryHistoryProviderError::provider(
+                "mock warehouse query history unavailable",
+                None,
+            ))
+        }
+    }
+
     pub fn make_ctx(
         storage: Arc<dyn StorageAdapter>,
         query: Option<Arc<dyn QueryProvider>>,

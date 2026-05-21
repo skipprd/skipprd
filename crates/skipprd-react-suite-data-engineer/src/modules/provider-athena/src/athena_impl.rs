@@ -2,7 +2,7 @@ use async_trait::async_trait;
 use aws_sdk_athena::types::{QueryExecutionState, ResultConfiguration};
 use aws_sdk_athena::Client as AthenaClient;
 use aws_sdk_glue::Client as GlueClient;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -18,6 +18,11 @@ use react_suite_data_engineer::providers::finalize_provider_field_stats;
 use react_suite_data_engineer::providers::parse_provider_u64;
 use react_suite_data_engineer::providers::warehouse_utils::{
     clamp_cache_ttl_secs, clamp_concurrency,
+};
+use react_suite_data_engineer::providers::{
+    normalize_sql, stable_sql_hash, QueryHistoryCapability, QueryHistoryProviderError,
+    QueryHistoryRecord, QueryHistoryRequest, QueryHistoryResult, QueryHistoryStatus,
+    WarehouseQueryHistoryProvider,
 };
 
 const DEFAULT_ATHENA_MAX_CONCURRENCY: usize = 15;
@@ -729,6 +734,168 @@ impl DatasetCatalogProvider for AthenaProvider {
 
     fn max_concurrency(&self) -> usize {
         self.inner.max_concurrency
+    }
+}
+
+#[async_trait]
+impl WarehouseQueryHistoryProvider for AthenaProvider {
+    fn query_history_capability(&self) -> QueryHistoryCapability {
+        QueryHistoryCapability::Supported
+    }
+
+    async fn list_query_history(
+        &self,
+        request: &QueryHistoryRequest,
+    ) -> Result<QueryHistoryResult, QueryHistoryProviderError> {
+        let limit = request.bounded_limit(100, 500);
+        let mut list = self
+            .inner
+            .athena
+            .list_query_executions()
+            .max_results(limit as i32);
+        if let Some(workgroup) = self.inner.workgroup.as_deref() {
+            list = list.work_group(workgroup);
+        }
+        let listed = list.send().await.map_err(|e| {
+            let raw = e.to_string();
+            if react_suite_data_engineer::providers::lower_ascii_contains(&raw, "AccessDenied")
+                || react_suite_data_engineer::providers::lower_ascii_contains(
+                    &raw,
+                    "not authorized",
+                )
+            {
+                QueryHistoryProviderError::requires_privileges(
+                    "Athena query history lookup requires athena:ListQueryExecutions",
+                    Some(raw),
+                )
+            } else {
+                QueryHistoryProviderError::provider("Athena query history lookup failed", Some(raw))
+            }
+        })?;
+        let ids = listed.query_execution_ids().to_vec();
+        if ids.is_empty() {
+            return Ok(QueryHistoryResult {
+                provider: react_suite_data_engineer::de_config::WarehouseKind::Athena,
+                capability: QueryHistoryCapability::Supported,
+                records: Vec::new(),
+                diagnostics: Vec::new(),
+                raw_error: None,
+            });
+        }
+        let fetched = self
+            .inner
+            .athena
+            .batch_get_query_execution()
+            .set_query_execution_ids(Some(ids))
+            .send()
+            .await
+            .map_err(|e| {
+                let raw = e.to_string();
+                if react_suite_data_engineer::providers::lower_ascii_contains(&raw, "AccessDenied")
+                    || react_suite_data_engineer::providers::lower_ascii_contains(
+                        &raw,
+                        "not authorized",
+                    )
+                {
+                    QueryHistoryProviderError::requires_privileges(
+                        "Athena query history lookup requires athena:BatchGetQueryExecution",
+                        Some(raw),
+                    )
+                } else {
+                    QueryHistoryProviderError::provider(
+                        "Athena query history lookup failed",
+                        Some(raw),
+                    )
+                }
+            })?;
+        let since_ms = request
+            .since
+            .as_deref()
+            .and_then(react_suite_data_engineer::providers::parse_epoch_ms);
+        let mut records = Vec::new();
+        for qe in fetched.query_executions() {
+            let query_id = qe
+                .query_execution_id()
+                .unwrap_or("athena_query")
+                .to_string();
+            let sql = qe.query().unwrap_or("").trim().to_string();
+            if sql.is_empty() {
+                continue;
+            }
+            if !request.include_non_select
+                && !sql.trim_start().to_ascii_lowercase().starts_with("select")
+            {
+                continue;
+            }
+            let status = qe.status();
+            let started_at_epoch_ms = status
+                .and_then(|status| status.submission_date_time())
+                .and_then(|dt| dt.to_millis().ok());
+            if let (Some(since_ms), Some(started_at_epoch_ms)) = (since_ms, started_at_epoch_ms) {
+                if started_at_epoch_ms < since_ms {
+                    continue;
+                }
+            }
+            let state = status.and_then(|status| status.state()).map(athena_status);
+            if !request.include_failed
+                && !matches!(
+                    state,
+                    Some(QueryHistoryStatus::Succeeded) | Some(QueryHistoryStatus::Unknown) | None
+                )
+            {
+                continue;
+            }
+            let ended_at_epoch_ms = status
+                .and_then(|status| status.completion_date_time())
+                .and_then(|dt| dt.to_millis().ok());
+            let mut raw_metadata = BTreeMap::new();
+            if let Some(workgroup) = qe.work_group() {
+                raw_metadata.insert("workgroup".to_string(), workgroup.to_string());
+            }
+            if let Some(output) = qe
+                .result_configuration()
+                .and_then(ResultConfiguration::output_location)
+            {
+                raw_metadata.insert("output_location".to_string(), output.to_string());
+            }
+            records.push(QueryHistoryRecord {
+                provider: react_suite_data_engineer::de_config::WarehouseKind::Athena,
+                query_id: query_id.clone(),
+                sql_hash: stable_sql_hash(&sql),
+                normalized_sql: normalize_sql(&sql),
+                sql,
+                started_at_epoch_ms,
+                ended_at_epoch_ms,
+                user: None,
+                application: None,
+                warehouse: qe.work_group().map(ToString::to_string),
+                database: None,
+                schema: None,
+                status: state.unwrap_or_default(),
+                error: status
+                    .and_then(|status| status.state_change_reason())
+                    .map(ToString::to_string),
+                source_ref: Some(query_id),
+                raw_metadata,
+            });
+        }
+        Ok(QueryHistoryResult {
+            provider: react_suite_data_engineer::de_config::WarehouseKind::Athena,
+            capability: QueryHistoryCapability::Supported,
+            records,
+            diagnostics: Vec::new(),
+            raw_error: None,
+        })
+    }
+}
+
+fn athena_status(state: &QueryExecutionState) -> QueryHistoryStatus {
+    match state {
+        QueryExecutionState::Succeeded => QueryHistoryStatus::Succeeded,
+        QueryExecutionState::Failed => QueryHistoryStatus::Failed,
+        QueryExecutionState::Cancelled => QueryHistoryStatus::Canceled,
+        QueryExecutionState::Running | QueryExecutionState::Queued => QueryHistoryStatus::Running,
+        _ => QueryHistoryStatus::Unknown,
     }
 }
 

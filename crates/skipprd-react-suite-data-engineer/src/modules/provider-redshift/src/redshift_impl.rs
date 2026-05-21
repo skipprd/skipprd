@@ -10,8 +10,9 @@ use react_core::discover::stats::FieldStats;
 use react_suite_data_engineer::providers::warehouse_utils;
 use react_suite_data_engineer::providers::{
     finalize_provider_field_stats, parse_provider_u64, DatasetCatalogProvider, DatasetFieldStats,
-    DatasetId, DatasetStats, ProviderEvidenceCapabilities, QueryProvider, QueryResult,
-    WarehouseNaming,
+    DatasetId, DatasetStats, ProviderEvidenceCapabilities, QueryHistoryCapability,
+    QueryHistoryProviderError, QueryHistoryRequest, QueryHistoryResult, QueryProvider, QueryResult,
+    WarehouseNaming, WarehouseQueryHistoryProvider,
 };
 
 const DEFAULT_MAX_CONCURRENCY: usize = 15;
@@ -552,6 +553,72 @@ impl DatasetCatalogProvider for RedshiftProvider {
 
     fn max_concurrency(&self) -> usize {
         self.inner.max_concurrency
+    }
+}
+
+#[async_trait]
+impl WarehouseQueryHistoryProvider for RedshiftProvider {
+    fn query_history_capability(&self) -> QueryHistoryCapability {
+        QueryHistoryCapability::Supported
+    }
+
+    async fn list_query_history(
+        &self,
+        request: &QueryHistoryRequest,
+    ) -> Result<QueryHistoryResult, QueryHistoryProviderError> {
+        let limit = request.bounded_limit(100, 500);
+        let mut predicates = vec![format!(
+            "database_name = {}",
+            react_suite_data_engineer::providers::sql_literal(&self.inner.database)
+        )];
+        if !request.include_non_select {
+            predicates.push("trim(lower(query_text)) like 'select%'".to_string());
+        }
+        if !request.include_failed {
+            predicates.push("status in ('success', 'finished', 'done')".to_string());
+        }
+        if let Some(since) = request
+            .since
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            predicates.push(format!(
+                "start_time >= {}::timestamp",
+                react_suite_data_engineer::providers::sql_literal(since)
+            ));
+        }
+        let sql = format!(
+            "select query_id::varchar as query_id, query_text, user_id::varchar as user_name, database_name, start_time, end_time, status as execution_status, error_message \
+             from sys_query_history where {} order by start_time desc limit {}",
+            predicates.join(" and "),
+            limit
+        );
+        let result = self.execute_sql(&sql).await.map_err(|raw| {
+            if react_suite_data_engineer::providers::lower_ascii_contains(&raw, "permission")
+                || react_suite_data_engineer::providers::lower_ascii_contains(
+                    &raw,
+                    "not authorized",
+                )
+            {
+                QueryHistoryProviderError::requires_privileges(
+                    "Redshift query history lookup requires access to SYS_QUERY_HISTORY",
+                    Some(raw),
+                )
+            } else {
+                QueryHistoryProviderError::provider(
+                    "Redshift query history lookup failed",
+                    Some(raw),
+                )
+            }
+        })?;
+        Ok(react_suite_data_engineer::providers::supported_result(
+            react_suite_data_engineer::de_config::WarehouseKind::Redshift,
+            react_suite_data_engineer::providers::records_from_query_result(
+                react_suite_data_engineer::de_config::WarehouseKind::Redshift,
+                result,
+            ),
+        ))
     }
 }
 

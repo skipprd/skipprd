@@ -8,8 +8,9 @@ use react_core::discover::stats::FieldStats;
 use react_suite_data_engineer::providers::warehouse_utils;
 use react_suite_data_engineer::providers::{
     finalize_provider_field_stats, parse_provider_u64, DatasetCatalogProvider, DatasetFieldStats,
-    DatasetId, DatasetStats, ProviderEvidenceCapabilities, QueryProvider, QueryResult,
-    WarehouseNaming,
+    DatasetId, DatasetStats, ProviderEvidenceCapabilities, QueryHistoryCapability,
+    QueryHistoryProviderError, QueryHistoryRequest, QueryHistoryResult, QueryProvider, QueryResult,
+    WarehouseNaming, WarehouseQueryHistoryProvider,
 };
 
 const DEFAULT_MAX_CONCURRENCY: usize = 15;
@@ -557,6 +558,80 @@ impl DatasetCatalogProvider for DatabricksProvider {
 
     fn max_concurrency(&self) -> usize {
         self.inner.max_concurrency
+    }
+}
+
+#[async_trait]
+impl WarehouseQueryHistoryProvider for DatabricksProvider {
+    fn query_history_capability(&self) -> QueryHistoryCapability {
+        QueryHistoryCapability::Supported
+    }
+
+    async fn list_query_history(
+        &self,
+        request: &QueryHistoryRequest,
+    ) -> Result<QueryHistoryResult, QueryHistoryProviderError> {
+        let limit = request.bounded_limit(100, 500);
+        let mut predicates = vec![format!(
+            "compute.warehouse_id = {}",
+            react_suite_data_engineer::providers::sql_literal(&self.inner.warehouse_id)
+        )];
+        if !request.include_non_select {
+            predicates.push("statement_type = 'SELECT'".to_string());
+        }
+        if !request.include_failed {
+            predicates.push("execution_status = 'FINISHED'".to_string());
+        }
+        if let Some(since) = request
+            .since
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            predicates.push(format!(
+                "start_time >= timestamp({})",
+                react_suite_data_engineer::providers::sql_literal(since)
+            ));
+        }
+        let sql = format!(
+            "select statement_id as query_id, statement_text as query_text, executed_by as user_name, client_application, compute.warehouse_id as warehouse_id, start_time, end_time, statement_type, execution_status, error_message \
+             from system.query.history where {} order by start_time desc limit {}",
+            predicates.join(" and "),
+            limit
+        );
+        let result = self.execute_sql(&sql).await.map_err(|raw| {
+            if react_suite_data_engineer::providers::lower_ascii_contains(&raw, "permission")
+                || react_suite_data_engineer::providers::lower_ascii_contains(
+                    &raw,
+                    "not authorized",
+                )
+            {
+                QueryHistoryProviderError::requires_privileges(
+                    "Databricks query history lookup requires access to system.query.history",
+                    Some(raw),
+                )
+            } else if react_suite_data_engineer::providers::lower_ascii_contains(
+                &raw,
+                "system.query.history",
+            ) {
+                QueryHistoryProviderError::requires_configuration(
+                    "Databricks system query history table is unavailable",
+                    Some(raw),
+                )
+            } else {
+                QueryHistoryProviderError::provider(
+                    "Databricks query history lookup failed",
+                    Some(raw),
+                )
+            }
+        })?;
+        Ok(react_suite_data_engineer::providers::supported_result(
+            react_suite_data_engineer::de_config::WarehouseKind::Databricks,
+            react_suite_data_engineer::providers::records_from_query_result(
+                react_suite_data_engineer::de_config::WarehouseKind::Databricks,
+                result,
+            ),
+        ))
     }
 }
 

@@ -11,8 +11,9 @@ use react_core::discover::stats::FieldStats;
 use react_suite_data_engineer::providers::warehouse_utils;
 use react_suite_data_engineer::providers::{
     finalize_provider_field_stats, parse_provider_u64, DatasetCatalogProvider, DatasetFieldStats,
-    DatasetId, DatasetStats, ProviderEvidenceCapabilities, QueryProvider, QueryResult,
-    WarehouseNaming,
+    DatasetId, DatasetStats, ProviderEvidenceCapabilities, QueryHistoryCapability,
+    QueryHistoryProviderError, QueryHistoryRequest, QueryHistoryResult, QueryProvider, QueryResult,
+    WarehouseNaming, WarehouseQueryHistoryProvider,
 };
 
 const DEFAULT_SNOWFLAKE_MAX_CONCURRENCY: usize = 15;
@@ -643,6 +644,102 @@ impl DatasetCatalogProvider for SnowflakeProvider {
     fn max_concurrency(&self) -> usize {
         self.inner.max_concurrency
     }
+}
+
+#[async_trait]
+impl WarehouseQueryHistoryProvider for SnowflakeProvider {
+    fn query_history_capability(&self) -> QueryHistoryCapability {
+        QueryHistoryCapability::Supported
+    }
+
+    async fn list_query_history(
+        &self,
+        request: &QueryHistoryRequest,
+    ) -> Result<QueryHistoryResult, QueryHistoryProviderError> {
+        let limit = request.bounded_limit(100, 500);
+        let (start, diagnostics) = snowflake_history_start_expr(request.since.as_deref());
+        let end = request
+            .until
+            .as_deref()
+            .map(|value| format!("to_timestamp_ltz('{}')", value.replace('\'', "''")))
+            .unwrap_or_else(|| "current_timestamp()".to_string());
+        let mut predicates = Vec::new();
+        if !request.include_non_select {
+            predicates.push("query_type = 'SELECT'".to_string());
+        }
+        if !request.include_failed {
+            predicates.push(
+                "(execution_status is null or upper(execution_status) in ('SUCCESS', 'SUCCEEDED'))"
+                    .to_string(),
+            );
+        }
+        let where_clause = if predicates.is_empty() {
+            String::new()
+        } else {
+            format!(" where {}", predicates.join(" and "))
+        };
+        let sql = format!(
+            "select query_id, query_text, user_name, role_name, warehouse_name, database_name, schema_name, start_time, end_time, query_type, execution_status, error_message, query_tag \
+             from table(information_schema.query_history(end_time_range_start=>{start}, end_time_range_end=>{end}, result_limit=>{limit}))\
+             {where_clause} order by start_time desc"
+        );
+        let result = self.run_query(&sql).await.map_err(|raw| {
+            let kind = if react_suite_data_engineer::providers::lower_ascii_contains(
+                &raw,
+                "Cannot retrieve data from more than 7 days ago",
+            ) {
+                QueryHistoryProviderError::retention_window(
+                    "Snowflake query history is limited to 7 days",
+                    Some(raw),
+                )
+            } else {
+                QueryHistoryProviderError::provider(
+                    "Snowflake query history lookup failed",
+                    Some(raw),
+                )
+            };
+            kind
+        })?;
+        let records = react_suite_data_engineer::providers::records_from_query_result(
+            react_suite_data_engineer::de_config::WarehouseKind::Snowflake,
+            result,
+        );
+        Ok(QueryHistoryResult {
+            provider: react_suite_data_engineer::de_config::WarehouseKind::Snowflake,
+            capability: QueryHistoryCapability::Supported,
+            records,
+            diagnostics,
+            raw_error: None,
+        })
+    }
+}
+
+fn snowflake_history_start_expr(since: Option<&str>) -> (String, Vec<String>) {
+    // Snowflake rejects query_history windows even microscopically older than
+    // seven days. Use a conservative absolute timestamp inside retention
+    // instead of a warehouse-relative expression.
+    let retention_floor = chrono::Utc::now() - chrono::Duration::days(6);
+    let floor_expr = format!("to_timestamp_ltz('{}')", retention_floor.to_rfc3339());
+    let Some(raw_since) = since.map(str::trim).filter(|value| !value.is_empty()) else {
+        return (floor_expr, Vec::new());
+    };
+    let parsed = chrono::DateTime::parse_from_rfc3339(raw_since)
+        .map(|dt| dt.with_timezone(&chrono::Utc))
+        .ok();
+    if parsed.map(|dt| dt < retention_floor).unwrap_or(false) {
+        return (
+            floor_expr,
+            vec![format!(
+                "Snowflake query history is limited to 7 days; clamped since from {} to {}",
+                raw_since,
+                retention_floor.to_rfc3339()
+            )],
+        );
+    }
+    (
+        format!("to_timestamp_ltz('{}')", raw_since.replace('\'', "''")),
+        Vec::new(),
+    )
 }
 
 fn getenv_nonempty(key: &str) -> Option<String> {

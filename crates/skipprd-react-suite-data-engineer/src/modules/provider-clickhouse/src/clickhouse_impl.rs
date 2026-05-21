@@ -8,8 +8,9 @@ use react_core::discover::stats::FieldStats;
 use react_suite_data_engineer::providers::warehouse_utils;
 use react_suite_data_engineer::providers::{
     finalize_provider_field_stats, parse_provider_u64, DatasetCatalogProvider, DatasetFieldStats,
-    DatasetId, DatasetStats, ProviderEvidenceCapabilities, QueryProvider, QueryResult,
-    WarehouseNaming,
+    DatasetId, DatasetStats, ProviderEvidenceCapabilities, QueryHistoryCapability,
+    QueryHistoryProviderError, QueryHistoryRequest, QueryHistoryResult, QueryProvider, QueryResult,
+    WarehouseNaming, WarehouseQueryHistoryProvider,
 };
 
 const DEFAULT_MAX_CONCURRENCY: usize = 15;
@@ -462,6 +463,61 @@ impl DatasetCatalogProvider for ClickHouseProvider {
 
     fn max_concurrency(&self) -> usize {
         self.inner.max_concurrency
+    }
+}
+
+#[async_trait]
+impl WarehouseQueryHistoryProvider for ClickHouseProvider {
+    fn query_history_capability(&self) -> QueryHistoryCapability {
+        QueryHistoryCapability::Supported
+    }
+
+    async fn list_query_history(
+        &self,
+        request: &QueryHistoryRequest,
+    ) -> Result<QueryHistoryResult, QueryHistoryProviderError> {
+        let limit = request.bounded_limit(100, 500);
+        let mut predicates = vec!["type = 'QueryFinish'".to_string()];
+        if !request.include_non_select {
+            predicates.push("lower(trim(query)) like 'select%'".to_string());
+        }
+        if let Some(since) = request
+            .since
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            predicates.push(format!(
+                "event_time >= parseDateTimeBestEffort({})",
+                react_suite_data_engineer::providers::sql_literal(since)
+            ));
+        }
+        let sql = format!(
+            "select query_id, query as query_text, user as user_name, client_name as client_application, event_time as start_time, query_duration_ms, type as execution_status, exception as error_message \
+             from system.query_log where {} order by event_time desc limit {}",
+            predicates.join(" and "),
+            limit
+        );
+        let result = self.execute_sql(&sql).await.map_err(|raw| {
+            if react_suite_data_engineer::providers::lower_ascii_contains(&raw, "query_log") {
+                QueryHistoryProviderError::requires_configuration(
+                    "ClickHouse query history requires system.query_log to be enabled",
+                    Some(raw),
+                )
+            } else {
+                QueryHistoryProviderError::provider(
+                    "ClickHouse query history lookup failed",
+                    Some(raw),
+                )
+            }
+        })?;
+        Ok(react_suite_data_engineer::providers::supported_result(
+            react_suite_data_engineer::de_config::WarehouseKind::Clickhouse,
+            react_suite_data_engineer::providers::records_from_query_result(
+                react_suite_data_engineer::de_config::WarehouseKind::Clickhouse,
+                result,
+            ),
+        ))
     }
 }
 
