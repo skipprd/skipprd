@@ -619,9 +619,10 @@ impl DataEngineerSuite {
 
         let project_yml = root.join("dbt_project.yml");
         if !project_yml.exists() {
+            let pipeline = crate::ctx_ext::sctx_pipeline(sctx)?;
             std::fs::write(
                 &project_yml,
-                Self::direct_dbt_project_yaml(sctx.scope().project_id.as_str()),
+                Self::direct_dbt_project_yaml(pipeline.as_str()),
             )
             .map_err(|e| {
                 format!(

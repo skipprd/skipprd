@@ -151,10 +151,11 @@ impl DataEngineerSuite {
         .await
         .map_err(|e| format!("catalog bootstrap failed while building semantic profiles: {e}"))?;
 
+        let pipeline = crate::ctx_ext::sctx_pipeline(sctx)?;
         match crate::lineage_builder::refresh_lineage_graph_for_suite(
             sctx,
             crate::lineage_builder::LineageBuildOptions {
-                pipeline: None,
+                pipeline,
                 include_query_history: false,
                 query_history_since: None,
                 query_history_limit: 100,

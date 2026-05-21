@@ -226,7 +226,8 @@ async fn selected_pipeline_raw_tables(
     let Some(skippr) = crate::ctx_ext::sctx_skippr(sctx) else {
         return Ok(None);
     };
-    let pipeline = sctx.scope().project_id.as_str();
+    let pipeline = crate::ctx_ext::sctx_pipeline(sctx)?;
+    let pipeline = pipeline.as_str();
     let status = skippr
         .show_pipeline(sctx.scope(), pipeline)
         .await
@@ -388,11 +389,12 @@ async fn run_plan_bootstrap(
                 .collect()
         })
         .unwrap_or_default();
+    let pipeline_name = crate::ctx_ext::sctx_pipeline(sctx)?;
     let pipeline_raw_tables = selected_pipeline_raw_tables(sctx).await?;
     let tables = filter_tables_to_pipeline_raw_tables(
         discovered_tables.clone(),
         pipeline_raw_tables.as_ref(),
-        sctx.scope().project_id.as_str(),
+        pipeline_name.as_str(),
     )?;
     let pipeline_filter_summary = pipeline_raw_tables
         .as_ref()
@@ -1556,10 +1558,11 @@ impl DataEngineerSuite {
                 if let Ok(items) = ds.list_datasets().await {
                     let mut tables: Vec<String> = items.into_iter().map(|d| d.fqn()).collect();
                     if let Some(raw_tables) = selected_pipeline_raw_tables(sctx).await? {
+                        let pipeline_name = crate::ctx_ext::sctx_pipeline(sctx)?;
                         tables = filter_tables_to_pipeline_raw_tables(
                             tables,
                             Some(&raw_tables),
-                            sctx.scope().project_id.as_str(),
+                            pipeline_name.as_str(),
                         )?;
                     }
                     if pctx.track.is_cleanse() {

@@ -17,10 +17,11 @@ use crate::lineage_types::{
 use crate::providers::{
     DataCatalog, DatasetCatalogProvider, EvidenceStatus, QueryHistoryRecord, QueryHistoryRequest,
 };
+use crate::PipelineName;
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct LineageBuildOptions {
-    pub pipeline: Option<String>,
+    pub pipeline: PipelineName,
     pub include_query_history: bool,
     pub query_history_since: Option<String>,
     pub query_history_limit: usize,
@@ -100,7 +101,7 @@ pub async fn refresh_lineage_graph_for_suite(
 ) -> Result<LineageRefreshResult, String> {
     let mut builder = GraphBuilder::default();
     build_catalog_lineage(sctx, &mut builder).await;
-    build_skipprd_metadata_lineage(sctx, options.pipeline.as_deref(), &mut builder).await;
+    build_skipprd_metadata_lineage(sctx, &options.pipeline, &mut builder).await;
     build_dbt_manifest_lineage(sctx, &mut builder).await;
     build_plan_contract_lineage(sctx, &mut builder).await;
     if options.include_query_history {
@@ -432,6 +433,7 @@ fn source_descriptor_from_providers_cfg(
 fn provider_brand_for_source_kind(kind: &str) -> Option<&'static str> {
     match kind.trim().to_ascii_lowercase().as_str() {
         "s3" => Some("s3"),
+        "file" | "files" | "csv" | "local" | "local_file" => Some("file"),
         _ => None,
     }
 }
@@ -454,6 +456,7 @@ fn provider_brand_for_warehouse_kind(kind: crate::de_config::WarehouseKind) -> &
 fn provider_label_for_brand(brand: &str) -> &'static str {
     match brand {
         "s3" => "Amazon S3",
+        "file" => "File",
         "athena" => "Amazon Athena",
         "postgres" => "PostgreSQL",
         "mssql" => "Microsoft SQL Server",
@@ -486,16 +489,10 @@ fn warehouse_node_metadata(
 
 async fn build_skipprd_metadata_lineage(
     sctx: &SuiteCtx,
-    pipeline: Option<&str>,
+    pipeline: &PipelineName,
     builder: &mut GraphBuilder,
 ) {
-    let Some(pipeline) = pipeline.map(str::trim).filter(|value| !value.is_empty()) else {
-        builder.info(
-            "pipeline was not provided; skipprd metadata lineage skipped",
-            Some(LineageEvidenceSource::SkipprdMetadata),
-        );
-        return;
-    };
+    let pipeline = pipeline.as_str();
     let cfg = sctx
         .capability::<ProvidersCfgCap>()
         .map(|cap| cap.0.clone());
@@ -1414,6 +1411,32 @@ mod tests {
         assert_eq!(
             source.metadata.get("provider_label").map(String::as_str),
             Some("Amazon S3")
+        );
+    }
+
+    #[test]
+    fn source_descriptor_from_file_config_includes_file_branding() {
+        let cfg = crate::de_config::ProvidersResolved {
+            el: crate::de_config::ElToolResolved {
+                skippr_input: serde_json::json!({
+                    "kind": "file",
+                    "name": "local/customers.csv"
+                }),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+
+        let source = source_descriptor_from_providers_cfg(&cfg).expect("file source descriptor");
+
+        assert_eq!(source.label, "local/customers.csv");
+        assert_eq!(
+            source.metadata.get("provider_brand").map(String::as_str),
+            Some("file")
+        );
+        assert_eq!(
+            source.metadata.get("provider_label").map(String::as_str),
+            Some("File")
         );
     }
 

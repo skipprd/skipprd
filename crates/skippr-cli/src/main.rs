@@ -22,6 +22,7 @@ use std::{
 use clap::{Parser, Subcommand};
 use react::config::ReactConfigFile;
 use react_core::keyspace::Keyspace;
+use react_suite_data_engineer::PipelineName;
 use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
@@ -193,6 +194,9 @@ enum Cmd {
 
     /// Attach human feedback to a project thread run.
     Feedback {
+        /// Pipeline whose thread scope should receive feedback.
+        #[arg(long)]
+        pipeline: PipelineName,
         /// Mark the most recent thread run as good.
         #[arg(long, conflicts_with = "bad", required_unless_present = "bad")]
         good: bool,
@@ -229,7 +233,7 @@ enum VectorAction {
     IngestDocs {
         /// Pipeline entry under `pipelines:` with `vector_source` (default: `vector_ingest`).
         #[arg(long, default_value = "vector_ingest")]
-        pipeline: String,
+        pipeline: PipelineName,
         /// Override `pipelines.<name>.vector_source` for this run (must match a `vector_sources` key).
         #[arg(long)]
         vector_source: Option<String>,
@@ -287,7 +291,7 @@ struct EngineDiscoverArgs {
 struct EngineSyncArgs {
     /// The pipeline to use.
     #[arg(short, long)]
-    pipeline: String,
+    pipeline: PipelineName,
     /// Output mode: progress, json, or text.
     #[arg(long, default_value = "progress")]
     output: String,
@@ -300,7 +304,7 @@ struct EngineSyncArgs {
 struct ResetArgs {
     /// The configured pipeline to reset.
     #[arg(short, long)]
-    pipeline: String,
+    pipeline: PipelineName,
     /// Skip the interactive confirmation prompt.
     #[arg(long, default_value_t = false)]
     yes: bool,
@@ -310,7 +314,7 @@ struct ResetArgs {
 struct ModelArgs {
     /// Pipeline to model. The modeling warehouse is derived from this pipeline's data sink.
     #[arg(long)]
-    pipeline: String,
+    pipeline: PipelineName,
     /// Start a fresh modeling thread instead of resuming the latest project thread.
     #[arg(long, default_value_t = false)]
     no_resume: bool,
@@ -336,7 +340,7 @@ struct ModelThreadBinding {
 struct AskArgs {
     /// Pipeline to inspect.
     #[arg(long)]
-    pipeline: String,
+    pipeline: PipelineName,
     /// Read-only question to answer.
     #[arg(long)]
     question: String,
@@ -349,7 +353,7 @@ struct AskArgs {
 struct PlanArgs {
     /// Pipeline to inspect.
     #[arg(long)]
-    pipeline: String,
+    pipeline: PipelineName,
     /// Optional modeling or data-engineering goal.
     #[arg(long)]
     goal: Option<String>,
@@ -362,7 +366,7 @@ struct PlanArgs {
 struct QueryArgs {
     /// Pipeline whose configured warehouse should execute the query.
     #[arg(long)]
-    pipeline: String,
+    pipeline: PipelineName,
     /// Read-only SQL to execute. Only SELECT/WITH queries are accepted.
     #[arg(long, allow_hyphen_values = true)]
     sql: String,
@@ -385,7 +389,7 @@ enum LineageAction {
 struct LineageRefreshArgs {
     /// Pipeline whose configured DE suite scope should hold lineage.
     #[arg(long)]
-    pipeline: String,
+    pipeline: PipelineName,
     /// Also import recent warehouse query history while refreshing.
     #[arg(long, default_value_t = false)]
     include_query_history: bool,
@@ -402,9 +406,9 @@ struct LineageRefreshArgs {
 
 #[derive(Parser, Debug, Clone)]
 struct LineageGraphArgs {
-    /// Pipeline whose configured DE suite scope should be read. Omit to merge all persisted pipeline lineage graphs.
+    /// Pipeline whose configured DE suite scope should be read.
     #[arg(long)]
-    pipeline: Option<String>,
+    pipeline: PipelineName,
     /// Asset/node/dataset id to center the graph on.
     #[arg(long)]
     asset: Option<String>,
@@ -423,7 +427,7 @@ struct LineageGraphArgs {
 struct LineageImportQueryHistoryArgs {
     /// Pipeline whose configured warehouse query history should be inspected.
     #[arg(long)]
-    pipeline: String,
+    pipeline: PipelineName,
     /// Query history lower bound. Provider-specific timestamp string.
     #[arg(long)]
     since: Option<String>,
@@ -1063,7 +1067,6 @@ struct ConfigShowResult {
     sources: Vec<String>,
     sinks: Vec<String>,
     schema_sinks: Vec<String>,
-    default_pipeline: Option<String>,
 }
 
 fn working_dir() -> PathBuf {
@@ -3929,7 +3932,6 @@ fn cmd_config_show(explicit_config: &Option<PathBuf>, output: &str) {
         ok: true,
         config_path: path.display().to_string(),
         workspace: engine_project_name(&cfg).ok(),
-        default_pipeline: pipelines.first().cloned(),
         pipelines,
         sources: yaml_mapping_keys(cfg.get("data_sources")),
         sinks: yaml_mapping_keys(cfg.get("data_sinks")),
@@ -4152,7 +4154,7 @@ async fn cmd_ask(log: Option<String>, explicit_config: &Option<PathBuf>, args: A
         log,
         explicit_config,
         chat_cmd::ChatAction::Send(chat_cmd::ChatSendArgs {
-            pipeline: Some(args.pipeline),
+            pipeline: args.pipeline,
             mode: chat_cmd::ChatModeCli::Ask,
             message: args.question,
             thread: None,
@@ -4171,7 +4173,7 @@ async fn cmd_plan(log: Option<String>, explicit_config: &Option<PathBuf>, args: 
         log,
         explicit_config,
         chat_cmd::ChatAction::Send(chat_cmd::ChatSendArgs {
-            pipeline: Some(args.pipeline),
+            pipeline: args.pipeline,
             mode: chat_cmd::ChatModeCli::Plan,
             message: goal,
             thread: None,
@@ -4245,7 +4247,7 @@ async fn cmd_lineage(
                 Err(e) => {
                     emit_lineage_json(
                         &output,
-                        &serde_json::json!({"ok": false, "pipeline": args.pipeline, "error": e}),
+                        &serde_json::json!({"ok": false, "pipeline": args.pipeline.as_str(), "error": e}),
                     );
                     std::process::exit(1);
                 }
@@ -4253,7 +4255,7 @@ async fn cmd_lineage(
             match react_suite_data_engineer::lineage_builder::refresh_lineage_graph_for_suite(
                 &suite_ctx,
                 react_suite_data_engineer::lineage_builder::LineageBuildOptions {
-                    pipeline: Some(args.pipeline.clone()),
+                    pipeline: args.pipeline.clone(),
                     include_query_history: args.include_query_history,
                     query_history_since: args.since.clone(),
                     query_history_limit: args.limit,
@@ -4265,7 +4267,7 @@ async fn cmd_lineage(
                 Err(e) => {
                     emit_lineage_json(
                         &output,
-                        &serde_json::json!({"ok": false, "pipeline": args.pipeline, "error": e}),
+                        &serde_json::json!({"ok": false, "pipeline": args.pipeline.as_str(), "error": e}),
                     );
                     std::process::exit(1);
                 }
@@ -4278,43 +4280,32 @@ async fn cmd_lineage(
                 field: args.field.clone(),
                 direction: lineage_direction(&args.direction),
             };
-            if let Some(pipeline) = args.pipeline.as_deref() {
-                let suite_ctx = match build_lineage_suite_ctx(explicit_config, pipeline).await {
-                    Ok(ctx) => ctx,
-                    Err(e) => {
-                        emit_lineage_json(
-                            &output,
-                            &serde_json::json!({"ok": false, "pipeline": pipeline, "error": e}),
-                        );
-                        std::process::exit(1);
-                    }
-                };
-                match react_suite_data_engineer::lineage_builder::load_lineage_graph_for_suite(
-                    &suite_ctx, query,
-                )
-                .await
-                {
-                    Ok(graph) => emit_lineage_json(
+            let pipeline = args.pipeline.as_str();
+            let suite_ctx = match build_lineage_suite_ctx(explicit_config, pipeline).await {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    emit_lineage_json(
                         &output,
-                        &serde_json::json!({"ok": true, "pipeline": pipeline, "graph": graph}),
-                    ),
-                    Err(e) => {
-                        emit_lineage_json(
-                            &output,
-                            &serde_json::json!({"ok": false, "pipeline": pipeline, "error": e}),
-                        );
-                        std::process::exit(1);
-                    }
+                        &serde_json::json!({"ok": false, "pipeline": pipeline, "error": e}),
+                    );
+                    std::process::exit(1);
                 }
-            } else {
-                match load_all_lineage_graphs(explicit_config, query).await {
-                    Ok(graph) => {
-                        emit_lineage_json(&output, &serde_json::json!({"ok": true, "graph": graph}))
-                    }
-                    Err(e) => {
-                        emit_lineage_json(&output, &serde_json::json!({"ok": false, "error": e}));
-                        std::process::exit(1);
-                    }
+            };
+            match react_suite_data_engineer::lineage_builder::load_lineage_graph_for_suite(
+                &suite_ctx, query,
+            )
+            .await
+            {
+                Ok(graph) => emit_lineage_json(
+                    &output,
+                    &serde_json::json!({"ok": true, "pipeline": pipeline, "graph": graph}),
+                ),
+                Err(e) => {
+                    emit_lineage_json(
+                        &output,
+                        &serde_json::json!({"ok": false, "pipeline": pipeline, "error": e}),
+                    );
+                    std::process::exit(1);
                 }
             }
         }
@@ -4325,7 +4316,7 @@ async fn cmd_lineage(
                 Err(e) => {
                     emit_lineage_json(
                         &output,
-                        &serde_json::json!({"ok": false, "pipeline": args.pipeline, "error": e}),
+                        &serde_json::json!({"ok": false, "pipeline": args.pipeline.as_str(), "error": e}),
                     );
                     std::process::exit(1);
                 }
@@ -4341,7 +4332,7 @@ async fn cmd_lineage(
                 Err(e) => {
                     emit_lineage_json(
                         &output,
-                        &serde_json::json!({"ok": false, "pipeline": args.pipeline, "error": e}),
+                        &serde_json::json!({"ok": false, "pipeline": args.pipeline.as_str(), "error": e}),
                     );
                     std::process::exit(1);
                 }
@@ -4807,7 +4798,7 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
     let _ = metering
         .record_batch(&[
             react_suite_data_engineer::metering::UsageEvent::PipelineRun {
-                project_id: args.pipeline.clone(),
+                project_id: args.pipeline.as_str().to_string(),
             },
         ])
         .await;
@@ -4822,7 +4813,7 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
         };
     attach_s3_credentials_provider(&mut resolved, client.clone());
 
-    if resolved.scope.project_id.as_str() != args.pipeline {
+    if resolved.scope.project_id.as_str() != args.pipeline.as_str() {
         let msg = format!(
             "resolved model scope project '{}' does not match requested pipeline '{}'; refusing to run to avoid writing dbt artifacts under the wrong pipeline prefix",
             resolved.scope.project_id, args.pipeline
@@ -4902,7 +4893,7 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
     let run_thread_id = thread_id.clone();
     let dbt_output_path = args.dbt_output_path.clone().unwrap_or_else(|| {
         project_root_from_config_path(&model_config_path)
-            .join(&args.pipeline)
+            .join(args.pipeline.as_str())
             .join("dbt")
     });
     let dbt_output_path = if dbt_output_path.is_absolute() {
@@ -5416,6 +5407,7 @@ fn model_thread_binding_matches(
 }
 
 async fn cmd_feedback(
+    pipeline: PipelineName,
     good: bool,
     bad: bool,
     comment: Option<String>,
@@ -5430,7 +5422,7 @@ async fn cmd_feedback(
             std::process::exit(1);
         }
     };
-    let project = cfg.project.trim();
+    let project = pipeline.as_str();
     let srv_creds = match load_reset_server_credentials().await {
         Ok(creds) => creds,
         Err(e) => {
@@ -5438,7 +5430,8 @@ async fn cmd_feedback(
             std::process::exit(1);
         }
     };
-    let resolved_cfg = match resolve_feedback_runtime_config(&cfg, &srv_creds) {
+    let resolved_cfg = match resolve_feedback_runtime_config(explicit_config, &pipeline, &srv_creds)
+    {
         Ok(cfg) => cfg,
         Err(e) => {
             eprintln!("[skippr] ERROR: {e}");
@@ -5716,10 +5709,13 @@ fn support_diagnostics_key(
 }
 
 fn resolve_feedback_runtime_config(
-    cfg: &SkipprProjectConfig,
+    explicit_config: &Option<PathBuf>,
+    pipeline: &PipelineName,
     srv_creds: &api_client::CredentialsResponse,
 ) -> Result<react_core::resolved_config::ReactResolvedConfig, String> {
-    let mut internal_file = translate::to_internal(cfg)?;
+    let engine_cfg = load_cli_execution_config(explicit_config)?;
+    validate_pipeline_exists(&engine_cfg, pipeline.as_str())?;
+    let mut internal_file = react_config_from_pipeline_config(&engine_cfg, pipeline.as_str())?;
     apply_feedback_storage_overlay(&mut internal_file, srv_creds);
     react_host::resolve_config(internal_file, react::config::ServeOverrides::default())
 }
@@ -6016,11 +6012,12 @@ async fn async_main() {
         Cmd::Lineage { action } => cmd_lineage(cli.log, &cli.config, action).await,
         Cmd::Chat { action } => chat_cmd::run_chat(cli.log, &cli.config, action).await,
         Cmd::Feedback {
+            pipeline,
             good,
             bad,
             comment,
             no_diagnostics,
-        } => cmd_feedback(good, bad, comment, !no_diagnostics, &cli.config).await,
+        } => cmd_feedback(pipeline, good, bad, comment, !no_diagnostics, &cli.config).await,
         Cmd::Vector { action } => match action {
             VectorAction::IngestDocs {
                 pipeline,
@@ -7217,6 +7214,28 @@ data_sources:
             }
             other => panic!("unexpected command: {other:?}"),
         }
+    }
+
+    #[test]
+    fn chat_send_requires_pipeline() {
+        let err = Cli::try_parse_from([
+            "skippr",
+            "chat",
+            "send",
+            "--mode",
+            "ask",
+            "--message",
+            "status?",
+        ])
+        .expect_err("chat send without pipeline must not parse");
+        assert!(err.to_string().contains("--pipeline"));
+    }
+
+    #[test]
+    fn feedback_requires_pipeline() {
+        let err = Cli::try_parse_from(["skippr", "feedback", "--good", "--comment", "nice"])
+            .expect_err("feedback without pipeline must not parse");
+        assert!(err.to_string().contains("--pipeline"));
     }
 
     fn test_credentials() -> api_client::CredentialsResponse {

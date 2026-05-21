@@ -16,7 +16,7 @@ use react_module_provider_redshift::{RedshiftProvider, RedshiftSettings};
 use react_module_provider_snowflake::{SnowflakeProvider, SnowflakeSettings};
 use react_module_provider_synapse::{SynapseProvider, SynapseSettings};
 use react_suite_data_engineer::ctx_ext::{
-    CatalogCap, DatasetsCap, DbtCap, ProvidersCfgCap, QueryCap, WarehouseCap,
+    CatalogCap, DatasetsCap, DbtCap, PipelineCap, ProvidersCfgCap, QueryCap, WarehouseCap,
 };
 use react_suite_data_engineer::de_config::{self as de_cfg, WarehouseKind};
 
@@ -625,6 +625,9 @@ pub(crate) async fn wire_providers(
         )))));
     }
 
+    let pipeline = react_suite_data_engineer::PipelineName::parse(sctx.scope().project_id.as_str())
+        .map_err(|e| format!("invalid data-engineer pipeline scope: {e}"))?;
+    sctx.set_capability(Arc::new(PipelineCap(pipeline)));
     sctx.set_capability(Arc::new(ProvidersCfgCap(providers)));
     Ok(())
 }

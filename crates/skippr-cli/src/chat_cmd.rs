@@ -6,6 +6,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Deserialize;
 
 use crate::headless_prep;
+use react_suite_data_engineer::PipelineName;
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum ChatAction {
@@ -27,7 +28,7 @@ pub enum ChatModeCli {
 #[derive(Parser, Debug, Clone)]
 pub struct ChatSendArgs {
     #[arg(long)]
-    pub pipeline: Option<String>,
+    pub pipeline: PipelineName,
     #[arg(long, value_enum)]
     pub mode: ChatModeCli,
     #[arg(long)]
@@ -43,7 +44,7 @@ pub struct ChatSendArgs {
 #[derive(Parser, Debug, Clone)]
 pub struct ChatThreadsArgs {
     #[arg(long)]
-    pub pipeline: String,
+    pub pipeline: PipelineName,
     #[arg(long, default_value = "json")]
     pub output: String,
 }
@@ -51,7 +52,7 @@ pub struct ChatThreadsArgs {
 #[derive(Parser, Debug, Clone)]
 pub struct ChatDocsSearchArgs {
     #[arg(long)]
-    pub pipeline: String,
+    pub pipeline: PipelineName,
     #[arg(long)]
     pub query: String,
     #[arg(long, default_value_t = 8)]
@@ -105,12 +106,12 @@ pub async fn run_chat(log: Option<String>, explicit_config: &Option<PathBuf>, ac
 }
 
 async fn cmd_chat_send(log: Option<String>, explicit_config: &Option<PathBuf>, args: ChatSendArgs) {
-    if let (Some(_pipeline), Some(path)) = (args.pipeline.as_deref(), explicit_config.as_ref()) {
+    if let Some(path) = explicit_config.as_ref() {
         std::env::set_var("SKIPPR_CONFIG_FILE", path);
     }
     let ctx = match headless_prep::authenticate_headless_for_chat(
         explicit_config,
-        args.pipeline.as_deref(),
+        headless_prep::ChatTarget::Pipeline(args.pipeline.clone()),
     )
     .await
     {
@@ -120,7 +121,7 @@ async fn cmd_chat_send(log: Option<String>, explicit_config: &Option<PathBuf>, a
             std::process::exit(1);
         }
     };
-    let project_id = args.pipeline.as_deref().unwrap_or("ide-chat");
+    let project_id = args.pipeline.as_str();
 
     let run_id = uuid::Uuid::new_v4().to_string();
     react_suite_data_engineer::metering::set_metering_run_id(&run_id);
@@ -189,7 +190,7 @@ async fn cmd_chat_send(log: Option<String>, explicit_config: &Option<PathBuf>, a
     if stream_jsonl {
         let summary = serde_json::json!({
             "type": "ChatSummary",
-            "pipeline": args.pipeline.as_deref().unwrap_or("ide-chat"),
+            "pipeline": args.pipeline.as_str(),
             "mode": mode_str,
             "thread_id": headless.thread_id,
             "ok": headless.exit_code == 0,
@@ -207,7 +208,7 @@ async fn cmd_chat_send(log: Option<String>, explicit_config: &Option<PathBuf>, a
             "bootstrap_error": headless.bootstrap_error,
             "failure_summary": headless.failure_summary,
             "thread_id": headless.thread_id,
-            "pipeline": args.pipeline.as_deref().unwrap_or("ide-chat"),
+            "pipeline": args.pipeline.as_str(),
             "mode": mode_str,
         });
         crate::print_json(&body);

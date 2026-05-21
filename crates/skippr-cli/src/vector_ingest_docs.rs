@@ -7,6 +7,7 @@ use globset::{Glob, GlobSet, GlobSetBuilder};
 use react_core::provider_traits::upsert_typed_documents;
 use react_core::scope::RequestScope;
 use react_suite_data_engineer::vector_docs::ManualVectorDocument;
+use react_suite_data_engineer::PipelineName;
 use walkdir::WalkDir;
 
 use crate::api_client;
@@ -69,7 +70,7 @@ fn chunk_text(text: &str, size: usize, overlap: usize) -> Vec<String> {
 pub struct VectorIngestDocsArgs {
     pub config: Option<PathBuf>,
     /// `pipelines.<name>` that defines `vector_source` (default pipeline name: `vector_ingest`).
-    pub pipeline: String,
+    pub pipeline: PipelineName,
     pub vector_source: Option<String>,
     pub src_path: Option<PathBuf>,
     pub chunk_chars: Option<usize>,

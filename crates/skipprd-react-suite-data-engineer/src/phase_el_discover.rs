@@ -21,7 +21,8 @@ impl DataEngineerSuite {
             .and_then(|c| crate::de_config::de_config_from_resolved(c))
             .ok_or_else(|| "resolved config missing for EL discover".to_string())?;
 
-        let pipeline_name = sctx.scope().project_id.as_str();
+        let pipeline = crate::ctx_ext::sctx_pipeline(sctx)?;
+        let pipeline_name = pipeline.as_str();
 
         let output_config = warehouse_to_output_config(&cfg.warehouse);
 

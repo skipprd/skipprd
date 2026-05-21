@@ -12,7 +12,8 @@ impl DataEngineerSuite {
         let skippr = crate::ctx_ext::sctx_skippr(sctx)
             .ok_or_else(|| "skippr provider not configured for EL verify".to_string())?;
 
-        let pipeline_name = sctx.scope().project_id.as_str();
+        let pipeline = crate::ctx_ext::sctx_pipeline(sctx)?;
+        let pipeline_name = pipeline.as_str();
 
         let pipeline_status = skippr
             .show_pipeline(sctx.scope(), pipeline_name)

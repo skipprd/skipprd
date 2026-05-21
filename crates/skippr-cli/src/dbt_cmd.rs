@@ -3,6 +3,7 @@
 use std::path::{Path, PathBuf};
 
 use react_module_provider_dbt::DbtProjectProvider;
+use react_suite_data_engineer::PipelineName;
 use serde::Serialize;
 
 use crate::test_cmd;
@@ -17,7 +18,7 @@ pub enum DbtSubcommand {
 #[derive(Debug, Clone, clap::Args)]
 pub struct CompileSqlArgs {
     #[arg(long)]
-    pub pipeline: String,
+    pub pipeline: PipelineName,
     /// Absolute or workspace-relative path to a dbt `.sql` resource (under `models/`, `snapshots/`, or `analyses/`).
     #[arg(long)]
     pub file: PathBuf,

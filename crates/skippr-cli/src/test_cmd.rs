@@ -9,6 +9,7 @@ use react_core::resolved_config::{ReactResolvedConfig, StorageMode};
 use react_core::scope::RequestScope;
 use react_core::storage::StorageAdapter;
 use react_module_provider_dbt::{DbtProjectProvider, DbtRunnerConfig, DbtRunnerMode};
+use react_suite_data_engineer::PipelineName;
 
 use crate::run_results_parse::{parse_run_results_json, ParsedDbtRunResult};
 use crate::{api_client, auth};
@@ -28,7 +29,7 @@ pub enum TestSubcommand {
 #[derive(Debug, Clone, clap::Args)]
 pub struct TestListArgs {
     #[arg(long)]
-    pub pipeline: String,
+    pub pipeline: PipelineName,
     /// Output: json or text.
     #[arg(long, default_value = "json")]
     pub output: String,
@@ -37,7 +38,7 @@ pub struct TestListArgs {
 #[derive(Debug, Clone, clap::Args)]
 pub struct TestRunArgs {
     #[arg(long)]
-    pub pipeline: String,
+    pub pipeline: PipelineName,
     /// dbt `--select` expression (repeatable).
     #[arg(long = "select")]
     pub select: Vec<String>,

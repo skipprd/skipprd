@@ -4,6 +4,7 @@ use react_core::agent::AgentCtx;
 use react_core::suite::SuiteCtx;
 
 use super::de_config::ProvidersResolved;
+use super::pipeline_identity::PipelineName;
 use super::providers::{
     CatalogProvider, DatasetCatalogProvider, DbtProvider, QueryProvider, SkipprProvider,
     WarehouseProvider,
@@ -28,6 +29,7 @@ pub struct DatasetsCap(pub Arc<dyn DatasetCatalogProvider>);
 pub struct CatalogCap(pub Arc<dyn CatalogProvider>);
 pub struct SkipprCap(pub Arc<dyn SkipprProvider>);
 pub struct ProvidersCfgCap(pub ProvidersResolved);
+pub struct PipelineCap(pub PipelineName);
 
 pub(crate) fn actx_warehouse(ctx: &AgentCtx) -> Option<Arc<dyn WarehouseProvider>> {
     ctx.capability::<WarehouseCap>().map(|c| c.0.clone())
@@ -73,6 +75,23 @@ pub(crate) fn actx_providers_cfg(ctx: &AgentCtx) -> Option<ProvidersResolved> {
     ctx.capability::<ProvidersCfgCap>().map(|c| c.0.clone())
 }
 
+pub(crate) fn sctx_pipeline(ctx: &SuiteCtx) -> Result<PipelineName, String> {
+    let pipeline = ctx
+        .capability::<PipelineCap>()
+        .map(|cap| cap.0.clone())
+        .ok_or_else(|| {
+            "pipeline capability missing from data-engineer suite context".to_string()
+        })?;
+    if pipeline.as_str() != ctx.scope().project_id.as_str() {
+        return Err(format!(
+            "pipeline capability '{}' does not match suite scope project '{}'",
+            pipeline,
+            ctx.scope().project_id
+        ));
+    }
+    Ok(pipeline)
+}
+
 /// Wire data_engineer capabilities into a SuiteCtx from a ProvidersResolved.
 pub fn wire_sctx_capabilities(
     sctx: &mut SuiteCtx,
@@ -100,6 +119,9 @@ pub fn wire_sctx_capabilities(
     if let Some(s) = skippr {
         sctx.set_capability(Arc::new(SkipprCap(s)));
     }
+    let pipeline = PipelineName::parse(sctx.scope().project_id.as_str())
+        .expect("suite scope project_id is non-empty");
+    sctx.set_capability(Arc::new(PipelineCap(pipeline)));
     sctx.set_capability(Arc::new(ProvidersCfgCap(providers_cfg)));
 }
 
@@ -128,5 +150,8 @@ pub fn copy_capabilities_to_actx(sctx: &SuiteCtx, actx: &mut AgentCtx) {
     }
     if let Some(cfg) = sctx.capability::<ProvidersCfgCap>() {
         actx.set_capability(cfg);
+    }
+    if let Some(pipeline) = sctx.capability::<PipelineCap>() {
+        actx.set_capability(pipeline);
     }
 }

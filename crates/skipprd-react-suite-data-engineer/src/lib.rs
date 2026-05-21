@@ -131,6 +131,7 @@ mod phase_publish;
 pub(crate) mod phase_reason_detail;
 mod phase_review;
 mod phase_validate;
+pub mod pipeline_identity;
 pub(crate) mod plan;
 pub(crate) mod plan_diff;
 mod plan_grounding;
@@ -177,6 +178,7 @@ pub(crate) mod ws_plans;
 use agent_modes::{AgentMode, AgentToolCapability};
 pub use ctx_ext::copy_capabilities_to_actx;
 use llm_profiles::PlanningLlmProfile;
+pub use pipeline_identity::PipelineName;
 pub use plan_types::{StrippedArtifact, MAX_STRIPPED_ARTIFACTS};
 pub(crate) use track_spec::TrackKind;
 

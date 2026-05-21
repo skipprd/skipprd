@@ -10,12 +10,18 @@ use crate::api_client::ApiClient;
 use crate::auth;
 use crate::react_host;
 use crate::translate;
+use react_suite_data_engineer::PipelineName;
+
+#[derive(Clone, Debug)]
+pub enum ChatTarget {
+    Pipeline(PipelineName),
+    GenericIdeBootstrap,
+}
 
 pub struct HeadlessAuthContext {
     pub resolved: ReactResolvedConfig,
     pub client: ApiClient,
-    #[allow(dead_code)]
-    pub pipeline: String,
+    pub pipeline: PipelineName,
 }
 
 /// Authenticate, overlay server credentials, resolve react config, and attach the refreshable S3
@@ -24,7 +30,8 @@ pub async fn authenticate_headless_for_pipeline(
     explicit_config: &Option<PathBuf>,
     pipeline: &str,
 ) -> Result<HeadlessAuthContext, String> {
-    authenticate_headless(explicit_config, Some(pipeline)).await
+    let pipeline = PipelineName::parse(pipeline)?;
+    authenticate_headless(explicit_config, HeadlessTarget::Pipeline(pipeline)).await
 }
 
 /// Authenticate and resolve a headless chat config. When `pipeline` is absent,
@@ -32,31 +39,46 @@ pub async fn authenticate_headless_for_pipeline(
 /// questions and create a new `skippr.yml` before a project config exists.
 pub async fn authenticate_headless_for_chat(
     explicit_config: &Option<PathBuf>,
-    pipeline: Option<&str>,
+    target: ChatTarget,
 ) -> Result<HeadlessAuthContext, String> {
-    if pipeline.is_none() {
-        return authenticate_headless(&None, None).await;
+    match target {
+        ChatTarget::Pipeline(pipeline) => {
+            authenticate_headless(explicit_config, HeadlessTarget::Pipeline(pipeline)).await
+        }
+        ChatTarget::GenericIdeBootstrap => {
+            authenticate_headless(&None, HeadlessTarget::GenericIdeBootstrap).await
+        }
     }
-    authenticate_headless(explicit_config, pipeline).await
+}
+
+#[derive(Clone, Debug)]
+enum HeadlessTarget {
+    Pipeline(PipelineName),
+    GenericIdeBootstrap,
 }
 
 async fn authenticate_headless(
     explicit_config: &Option<PathBuf>,
-    pipeline: Option<&str>,
+    target: HeadlessTarget,
 ) -> Result<HeadlessAuthContext, String> {
     let engine_cfg = crate::load_cli_execution_config(explicit_config)
         .map_err(|e| format!("{e}\nRun 'skippr init <project>' first."))
         .ok();
-    let mut internal_file = match (engine_cfg.as_ref(), pipeline) {
-        (Some(engine_cfg), Some(pipeline)) => {
-            crate::react_config_from_pipeline_config(engine_cfg, pipeline).map_err(|e| e)?
+    let pipeline = match &target {
+        HeadlessTarget::Pipeline(pipeline) => Some(pipeline.clone()),
+        HeadlessTarget::GenericIdeBootstrap => None,
+    };
+    let mut internal_file = match (engine_cfg.as_ref(), &target) {
+        (Some(engine_cfg), HeadlessTarget::Pipeline(pipeline)) => {
+            crate::react_config_from_pipeline_config(engine_cfg, pipeline.as_str())
+                .map_err(|e| e)?
         }
-        (_, Some(pipeline)) => {
+        (_, HeadlessTarget::Pipeline(pipeline)) => {
             return Err(format!(
                 "missing Skippr config for pipeline '{pipeline}'. Run 'skippr init <project>' first."
             ));
         }
-        (_, None) => generic_chat_config(),
+        (_, HeadlessTarget::GenericIdeBootstrap) => generic_chat_config(),
     };
 
     let authenticated_with_api_key = std::env::var("SKIPPR_API_KEY")
@@ -132,7 +154,9 @@ async fn authenticate_headless(
     Ok(HeadlessAuthContext {
         resolved,
         client,
-        pipeline: pipeline.unwrap_or("ide-chat").to_string(),
+        pipeline: pipeline.unwrap_or_else(|| {
+            PipelineName::parse("ide-chat").expect("static generic IDE chat pipeline is valid")
+        }),
     })
 }
 
