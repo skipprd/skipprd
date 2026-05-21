@@ -1,4 +1,6 @@
-use crate::providers::{DbtNamespaceShape, DbtTierNamespace, DbtTierRouting};
+use crate::providers::{
+    DbtCustomSchemaPolicy, DbtNamespaceShape, DbtTierNamespace, DbtTierRouting,
+};
 use react_core::resolved_config::ReactResolvedConfig;
 
 #[derive(Clone, Debug)]
@@ -695,6 +697,10 @@ pub(crate) fn tier_routing(
         | WarehouseKind::Clickhouse
         | WarehouseKind::Motherduck => DbtNamespaceShape::ConnectionDatabaseAndSchema,
     };
+    let custom_schema_policy = match providers.warehouse.kind {
+        WarehouseKind::Snowflake => DbtCustomSchemaPolicy::Exact,
+        _ => DbtCustomSchemaPolicy::AdapterDefault,
+    };
     let (silver, gold) = match shape {
         DbtNamespaceShape::DatabaseAndSchema => (
             DbtTierNamespace {
@@ -723,6 +729,7 @@ pub(crate) fn tier_routing(
         silver,
         gold,
         shape,
+        custom_schema_policy,
     }
 }
 
@@ -964,6 +971,15 @@ mod tests {
             let routing = tier_routing(&cfg, &providers);
             assert_eq!(routing.shape, shape, "{kind:?}");
             assert_eq!(
+                routing.custom_schema_policy,
+                if kind == WarehouseKind::Snowflake {
+                    DbtCustomSchemaPolicy::Exact
+                } else {
+                    DbtCustomSchemaPolicy::AdapterDefault
+                },
+                "{kind:?}"
+            );
+            assert_eq!(
                 routing.silver.database.as_deref(),
                 silver_database,
                 "{kind:?}"
@@ -1033,6 +1049,43 @@ mod tests {
             Some("proj_gold")
         );
         assert_eq!(profile.tier_routing.silver.schema, "proj");
+        assert_eq!(
+            profile.tier_routing.custom_schema_policy,
+            DbtCustomSchemaPolicy::Exact
+        );
+    }
+
+    #[test]
+    fn snowflake_tier_routing_uses_exact_database_and_schema_names() {
+        let mut providers = providers_for_tier_tests(WarehouseKind::Snowflake);
+        providers.dbt.naming.target_schema = "bike_hire".to_string();
+        let cfg = cfg_for_tier_tests();
+
+        let routing = tier_routing(&cfg, &providers);
+
+        assert_eq!(routing.custom_schema_policy, DbtCustomSchemaPolicy::Exact);
+        assert_eq!(routing.silver.database.as_deref(), Some("bike_hire_silver"));
+        assert_eq!(routing.silver.schema, "bike_hire");
+        assert_eq!(routing.gold.database.as_deref(), Some("bike_hire_gold"));
+        assert_eq!(routing.gold.schema, "bike_hire");
+        assert_eq!(
+            routing
+                .relation_prefix(crate::providers::DbtTier::Silver, "ANALYTICS")
+                .expect("silver prefix")
+                .to_ascii_uppercase(),
+            "BIKE_HIRE_SILVER.BIKE_HIRE"
+        );
+        assert_eq!(
+            format!(
+                "{}.{}",
+                routing
+                    .relation_prefix(crate::providers::DbtTier::Gold, "ANALYTICS")
+                    .expect("gold prefix")
+                    .to_ascii_uppercase(),
+                "FCT_BIKE_HIRE_EVENT"
+            ),
+            "BIKE_HIRE_GOLD.BIKE_HIRE.FCT_BIKE_HIRE_EVENT"
+        );
     }
 
     #[test]

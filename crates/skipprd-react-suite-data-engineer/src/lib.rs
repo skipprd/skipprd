@@ -93,6 +93,7 @@ pub mod ctx_ext;
 pub(crate) mod dataset_truth;
 pub(crate) mod dbt;
 pub(crate) mod dbt_error;
+pub(crate) mod dbt_project_snapshot;
 pub mod de_config;
 pub mod debug;
 pub(crate) mod dialect;
@@ -100,6 +101,7 @@ pub(crate) mod domain_types;
 mod enrichment;
 pub(crate) mod enrichment_concurrency;
 pub(crate) mod env_util;
+pub(crate) mod evaluation;
 pub(crate) mod facts;
 pub mod failure_kind;
 pub mod failure_text;
@@ -132,6 +134,7 @@ pub(crate) mod plan_kind;
 pub(crate) mod plan_progress;
 mod plan_review_helpers;
 pub(crate) mod plan_schema;
+pub(crate) mod plan_semantic_gate;
 mod plan_storage;
 mod plan_types;
 mod plan_validation;
@@ -150,6 +153,7 @@ pub(crate) mod retry_budget;
 mod review_batched;
 mod review_persistence;
 mod review_prompts;
+pub(crate) mod runtime_prereqs;
 pub(crate) mod schema_policy;
 mod semantic_profile;
 pub(crate) mod sql_first;
@@ -163,6 +167,7 @@ pub mod tools;
 mod track_spec;
 pub(crate) mod transient_retry;
 pub(crate) mod transition_dispatcher;
+pub(crate) mod truth_snapshot;
 pub mod vector_docs;
 pub(crate) mod ws_plans;
 use agent_modes::{AgentMode, AgentToolCapability};
@@ -190,7 +195,7 @@ pub struct DataEngineerThreadStatus {
     pub is_done: bool,
     pub has_failure_context: bool,
     pub failure_brief: Option<String>,
-    pub repair_status: String,
+    pub last_evaluation: Option<String>,
     pub pending_plan_revision: bool,
 }
 
@@ -215,15 +220,9 @@ pub async fn load_thread_status(
         is_done: current_phase == control_flow::Phase::Done,
         has_failure_context: failure_brief.is_some(),
         failure_brief,
-        repair_status: match &state.repair.status {
-            progress_controller::RepairStatus::Idle => "idle".to_string(),
-            progress_controller::RepairStatus::Pending { cycle } => {
-                format!("pending(cycle={cycle})")
-            }
-            progress_controller::RepairStatus::Exhausted { cycles_used } => {
-                format!("exhausted(cycles_used={cycles_used})")
-            }
-        },
+        last_evaluation: state
+            .last_evaluation()
+            .map(|summary| summary.message.clone()),
         pending_plan_revision: state.phase.pending_plan_revision.is_some(),
     }))
 }
@@ -345,21 +344,37 @@ mod interrupt_only_policy_tests {
     }
 }
 
-// TODO(item-93): PlanState encodes track + mode in variant names. Consider restructuring as
-// a struct with `track: TrackKind` + `mode: AuthoringMode` fields, with `AuthoringMode` being
-// an enum { Sql(Vec<String>), Schema(Vec<String>), Unconstrained }. This would eliminate the
-// combinatorial explosion as new tracks are added. Deferred due to widespread pattern matching.
 #[derive(Clone, Debug)]
-enum PlanState {
-    CleanseSqlDatasetIds(Vec<String>),
-    CleanseSchemaDatasetIds(Vec<String>),
-    ModelSqlItemNames(Vec<String>),
+struct PlanState {
+    track: Option<TrackKind>,
+    mode: AuthoringMode,
+}
+
+#[derive(Clone, Debug)]
+enum AuthoringMode {
+    Sql { targets: Vec<String> },
+    Schema { targets: Vec<String> },
     Unconstrained,
-    /// Post-validation-failure or review-patch: only surgical file/SQL tools,
-    /// no bulk authoring or batch tools.
-    Repair,
-    /// Read-only planning phases: discovery tools only, no mutations.
+    Repair { evidence_hash: Option<String> },
     ReadOnly,
+}
+
+impl PlanState {
+    fn new(track: Option<TrackKind>, mode: AuthoringMode) -> Self {
+        Self { track, mode }
+    }
+
+    fn read_only() -> Self {
+        Self::new(None, AuthoringMode::ReadOnly)
+    }
+
+    fn unconstrained(track: Option<TrackKind>) -> Self {
+        Self::new(track, AuthoringMode::Unconstrained)
+    }
+
+    fn repair(track: Option<TrackKind>, evidence_hash: Option<String>) -> Self {
+        Self::new(track, AuthoringMode::Repair { evidence_hash })
+    }
 }
 
 #[derive(Clone, Debug)]

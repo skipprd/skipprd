@@ -106,48 +106,6 @@ impl DataEngineerSuite {
             return Ok(true);
         }
 
-        // Auto-heal (semantic): reuse the grounding computed above.
-        let v = match &mut doc {
-            TrackPlanDoc::Cleanse(p) => {
-                crate::plan::ensure_cleanse_plan_semantically_valid_or_repaired(p)
-            }
-            TrackPlanDoc::Model(p) => {
-                let stg = staging_grounding
-                    .as_ref()
-                    .expect("pre-computed for model track");
-                crate::plan::ensure_model_plan_semantically_valid_or_repaired(
-                    p,
-                    &stg.allowed_models,
-                )
-            }
-        };
-        if !v.ok {
-            doc.cancel()
-                .map_err(|e| format!("plan cancel failed: {e}"))?;
-            save_plan(actx, &doc).await.map_err(|e| {
-                format!(
-                    "failed to persist semantically-invalid {} plan: {e}",
-                    track.as_str()
-                )
-            })?;
-            commit_phase_decision(
-                thread_store,
-                thread_id,
-                Some(phase),
-                PhaseDecision::annotation(
-                    phase,
-                    Some(
-                        crate::progress_controller::PhaseTransition::PlanSemanticInvalid {
-                            plan_key: doc.plan_key().to_string(),
-                            errors: v.errors.clone(),
-                        },
-                    ),
-                ),
-            )
-            .await?;
-            return Ok(true);
-        }
-
         doc.approve()
             .map_err(|e| format!("plan approval failed: {e}"))?;
         doc.progress_mut().last_applied_step_idx = log_len;

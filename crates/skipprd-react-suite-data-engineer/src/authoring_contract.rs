@@ -126,37 +126,6 @@ impl fmt::Display for ContractDrift {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ArtifactContractStatus {
-    #[allow(dead_code)]
-    Current,
-    Missing,
-    OffContract(Vec<ContractDrift>),
-    #[allow(dead_code)]
-    External,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RepairRoute {
-    ReconcileToPlan,
-    RepairImplementation,
-    CleanStaleArtifact,
-    #[allow(dead_code)]
-    RequestPlanRevision,
-    #[allow(dead_code)]
-    FatalInfraOrConfig,
-}
-
-impl ArtifactContractStatus {
-    pub(crate) fn repair_route(&self) -> RepairRoute {
-        match self {
-            Self::Current => RepairRoute::RepairImplementation,
-            Self::Missing | Self::OffContract(_) => RepairRoute::ReconcileToPlan,
-            Self::External => RepairRoute::CleanStaleArtifact,
-        }
-    }
-}
-
 pub(crate) fn add_sql_spec_digest(sql: &str, digest: Option<&str>) -> String {
     let Some(digest) = digest.map(str::trim).filter(|d| !d.is_empty()) else {
         return sql.to_string();
@@ -550,7 +519,7 @@ fn normalize_set<'a>(values: impl IntoIterator<Item = &'a str>) -> BTreeSet<Stri
 mod tests {
     use super::*;
     use crate::plan_types::{
-        lineage_role, CleanseImplementationSpec, CleanseTask, FieldKind, FieldLineage, ModelFolder,
+        CleanseImplementationSpec, CleanseTask, FieldKind, FieldLineage, LineageRole, ModelFolder,
         ModelImplementationSpec, ModelTask, OutputFieldSpec, SourceFieldRef, TaskStatus,
     };
 
@@ -563,7 +532,7 @@ mod tests {
                     relation: None,
                     name: name.to_string(),
                 },
-                lineage_role::NORMALIZED,
+                LineageRole::Normalized,
             )],
             expression: name.to_string(),
             data_type: None,
@@ -731,7 +700,7 @@ models:
                             relation: None,
                             name: "order_id".to_string(),
                         },
-                        lineage_role::PASSTHROUGH,
+                        LineageRole::Passthrough,
                     )],
                     expression: "order_id".to_string(),
                     data_type: None,

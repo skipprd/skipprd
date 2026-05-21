@@ -296,10 +296,16 @@ pub(crate) fn extract_final_select_output_columns(sql: &str) -> Result<BTreeSet<
             }
             i += 1;
         }
-        let from_kw_start = from_kw_start
-            .ok_or_else(|| "unable to find FROM for final SELECT in staging SQL".to_string())?;
-        let from_list_end = from_list_end
-            .ok_or_else(|| "unable to find FROM for final SELECT in staging SQL".to_string())?;
+        let from_list_end = from_list_end.unwrap_or_else(|| {
+            let mut end = sql.len();
+            while end > after_sel && sql.as_bytes()[end.saturating_sub(1)].is_ascii_whitespace() {
+                end = end.saturating_sub(1);
+            }
+            if end > after_sel && sql.as_bytes()[end.saturating_sub(1)] == b';' {
+                end = end.saturating_sub(1);
+            }
+            end
+        });
 
         fn strip_sql_line_comments_outside_quotes_full_text(s: &str) -> String {
             // Remove `-- ...` line comments (outside quotes/backticks) from the full select-list
@@ -374,6 +380,8 @@ pub(crate) fn extract_final_select_output_columns(sql: &str) -> Result<BTreeSet<
             None
         };
         if let Some(wc) = wildcard_item {
+            let from_kw_start = from_kw_start
+                .ok_or_else(|| "staging SQL uses '*' without a FROM target; cannot safely validate schema YAML (use an explicit select list)".to_string())?;
             let from_kw_end = from_kw_start + "from".len();
             let from_rest = &sql[from_kw_end..];
             let (target, alias) = parse_from_target_and_alias(from_rest).ok_or_else(|| {

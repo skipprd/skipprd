@@ -147,7 +147,7 @@ impl EnrichableTask for crate::plan::CleanseTask {
 
     fn retry_hint(failure_errors: &[String]) -> String {
         format!(
-            "You previously returned invalid implementation_spec.\nErrors:\n{}\nOnly emit implementation_spec object with keys: spec_version,row_preserving,output_fields,prohibited_ops.\noutput_fields[].kind MUST be exactly one of: raw, clean, derived, quality_flag.\nEach output_fields item MUST include name, kind, expression.\nDo not use synonyms like passthrough/source/base/quality.\nNo wrappers, no extra fields.",
+            "You previously returned invalid implementation_spec.\nErrors:\n{}\nOnly emit implementation_spec object with keys: spec_version,row_preserving,output_fields,prohibited_ops.\noutput_fields[].kind MUST be exactly one of: raw, clean, derived, quality_flag.\nEach output_fields item MUST include name, kind, expression, and a non-empty lineage array.\nFor lineage_kind=column, set source.name to an exact source_schema column and role to one of passthrough, normalized, parsed, derived_input, quality_input.\nDo not use synonyms like source/base/quality.\nNo wrappers, no extra fields.",
             failure_errors.join("\n")
         )
     }
@@ -237,7 +237,7 @@ impl EnrichableTask for crate::plan::ModelTask {
 
     fn retry_hint(failure_errors: &[String]) -> String {
         format!(
-            "You previously returned invalid implementation_spec.\nErrors:\n{}\nOnly emit implementation_spec object with keys: spec_version,grain,inputs,joins,metrics,output_fields,assumptions,evidence_claim_refs.\noutput_fields[].kind MUST be exactly one of: raw, clean, derived, quality_flag.\nEach output_fields item MUST include name, kind, expression. Each metrics[] item MUST include source_fields.\nDo not use synonyms like passthrough/source/base/quality.\nNo wrappers, no extra fields.",
+            "You previously returned invalid implementation_spec.\nErrors:\n{}\nOnly emit implementation_spec object with keys: spec_version,grain,inputs,joins,metrics,output_fields,assumptions,evidence_claim_refs.\noutput_fields[].kind MUST be exactly one of: raw, clean, derived, quality_flag.\nEach output_fields item MUST include name, kind, expression, and a non-empty lineage array. Each metrics[] item MUST include source_fields.\nFor lineage_kind=column, set source.name to an exact upstream column, set source.relation when multiple inputs exist, and role to one of passthrough, normalized, parsed, derived_input, quality_input.\nDo not use synonyms like source/base/quality.\nNo wrappers, no extra fields.",
             failure_errors.join("\n")
         )
     }
@@ -1248,7 +1248,7 @@ mod tests {
                                 relation: None,
                                 name: "order_id".to_string(),
                             },
-                            crate::plan::lineage_role::PASSTHROUGH,
+                            crate::plan::LineageRole::Passthrough,
                         )],
                         expression: "order_id".to_string(),
                         data_type: None,

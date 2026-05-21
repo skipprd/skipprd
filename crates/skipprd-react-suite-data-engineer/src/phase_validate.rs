@@ -9,74 +9,7 @@ enum ValidatePassTransition {
     ToReview,
 }
 
-enum ValidateEscalation {
-    LoopbackToAuthor {
-        guard_kind: GuardBlockKind,
-        reason: String,
-        transition: crate::progress_controller::PhaseTransition,
-        failure_context: crate::progress_controller::ValidationFailureContext,
-    },
-    Fatal(String),
-}
-
 impl DataEngineerSuite {
-    async fn finish_validate_failure(
-        actx: &AgentCtx,
-        thread_store: &ThreadStore,
-        thread_id: &str,
-        phase: Phase,
-        guard_kind: GuardBlockKind,
-        reason: String,
-    ) -> Result<PhaseOutcome, PhaseError> {
-        Self::cancel_active_plan_for_phase(actx, phase, "validate retry exhausted").await?;
-        apply_guard_block(thread_store, thread_id, phase, guard_kind, reason.clone()).await?;
-        crate::state_manager::apply_execution_event(
-            &thread_store.control_store(),
-            thread_id,
-            crate::progress_controller::DataEngineerEvent::MarkedFailed {
-                reason: reason.clone(),
-            },
-        )
-        .await
-        .map_err(|e| {
-            format!("failed to persist mark_failed after validate terminal failure: {e}")
-        })?;
-        Ok(PhaseOutcome::Failed { reason })
-    }
-
-    async fn cancel_active_plan_for_phase(
-        actx: &AgentCtx,
-        phase: Phase,
-        reason: &str,
-    ) -> Result<(), String> {
-        if phase == Phase::CleanseValidate {
-            if let Some(mut p) = crate::plan::load_cleanse_plan(actx)
-                .await
-                .map_err(|e| e.to_string())?
-            {
-                if !p.status.is_terminal() {
-                    tracing::warn!(plan_key = %p.plan_key, reason = %reason, "cancelling active cleanse plan before terminal failure");
-                    p.status = crate::plan::PlanStatus::Cancelled;
-                    crate::plan::save_cleanse_plan(actx, &p)
-                        .await
-                        .map_err(|e| format!("failed to cancel active cleanse plan: {e}"))?;
-                }
-            }
-        } else if let Some(mut p) = crate::plan::load_model_plan(actx)
-            .await
-            .map_err(|e| e.to_string())?
-        {
-            if !p.status.is_terminal() {
-                tracing::warn!(plan_key = %p.plan_key, reason = %reason, "cancelling active model plan before terminal failure");
-                p.status = crate::plan::PlanStatus::Cancelled;
-                crate::plan::save_model_plan(actx, &p)
-                    .await
-                    .map_err(|e| format!("failed to cancel active model plan: {e}"))?;
-            }
-        }
-        Ok(())
-    }
-
     fn model_validate_failure_plan_binding(
         plan: &crate::plan::ModelPlan,
     ) -> crate::facts::ValidateFailurePlanBinding {
@@ -94,77 +27,9 @@ impl DataEngineerSuite {
         }
     }
 
-    async fn apply_validate_escalation(
-        thread_store: &ThreadStore,
-        thread_id: &str,
-        phase: Phase,
-        escalation: ValidateEscalation,
-    ) -> Result<PhaseOutcome, PhaseError> {
-        match escalation {
-            ValidateEscalation::LoopbackToAuthor {
-                guard_kind,
-                reason,
-                transition,
-                failure_context,
-            } => {
-                crate::state_manager::apply_execution_event(
-                    &thread_store.control_store(),
-                    thread_id,
-                    crate::progress_controller::DataEngineerEvent::ValidateCheckFailed {
-                        failure_context,
-                    },
-                )
-                .await
-                .map_err(|e| format!("failed to record failure context before loopback: {e}"))?;
-                crate::retry_budget::guard_block_loopback_to_author(
-                    thread_store,
-                    thread_id,
-                    phase,
-                    guard_kind,
-                    reason,
-                    transition,
-                )
-                .await
-                .map_err(PhaseError::from)
-            }
-            ValidateEscalation::Fatal(reason) => Err(PhaseError::Fatal(reason)),
-        }
-    }
-
-    fn validate_execution_failure_escalation(
-        reason: String,
-        transition: crate::progress_controller::PhaseTransition,
-        retry_outcome: crate::retry_budget::SubjectiveRetryOutcome,
-    ) -> ValidateEscalation {
-        match retry_outcome {
-            crate::retry_budget::SubjectiveRetryOutcome::Exhausted(tries) => {
-                ValidateEscalation::Fatal(format!(
-                    "dbt_validate execution failed {tries} times; manual intervention required.\n\n{reason}"
-                ))
-            }
-            crate::retry_budget::SubjectiveRetryOutcome::WithinBudget(_) => {
-                ValidateEscalation::LoopbackToAuthor {
-                    guard_kind: GuardBlockKind::ValidateExecutionFailed,
-                    failure_context: crate::progress_controller::ValidationFailureContext {
-                        brief: reason.clone(),
-                        log_excerpts: None,
-                        compile_ok: false,
-                        run_ok: false,
-                    },
-                    reason,
-                    transition,
-                }
-            }
-        }
-    }
-
-    /// Route a structured precheck failure into the repair subroutine via the existing
-    /// loopback-then-repair mechanism. The repair phase consumes `failure_context.brief` and
-    /// `failure_context.log_excerpts` to scope its gather pass; we encode the suggested target
-    /// files in `log_excerpts` so the LLM can read them in the first iteration without guessing.
-    fn precheck_failure_to_repair_escalation(
+    fn precheck_failure_to_evidence(
         precheck: crate::schema_policy::PrecheckFailure,
-    ) -> ValidateEscalation {
+    ) -> crate::evaluation::Evidence {
         let crate::schema_policy::PrecheckFailure {
             kind,
             brief,
@@ -198,42 +63,145 @@ impl DataEngineerSuite {
                 suggested_targets.join("\n- ")
             ))
         };
-        let reason = format!(
-            "Pre-validation failed; fix DBT YAML/SQL artifacts before re-validating.\n\n{brief}"
-        );
-        let failure_context = crate::progress_controller::ValidationFailureContext {
-            brief: brief.clone(),
+        crate::evaluation::Evidence::SchemaPrecheck(crate::evaluation::PrecheckEvidence {
+            brief,
             log_excerpts,
-            compile_ok: false,
-            run_ok: false,
-        };
-        let transition = crate::progress_controller::PhaseTransition::PrecheckFailed {
-            reason: reason.clone(),
-        };
-        ValidateEscalation::LoopbackToAuthor {
-            guard_kind: GuardBlockKind::PrecheckFailed,
-            failure_context,
-            reason,
-            transition,
-        }
+            suggested_targets,
+        })
     }
 
-    async fn handle_validate_execution_failure(
+    async fn build_evaluation_input(
+        actx: &AgentCtx,
+        phase: Phase,
+        evidence: crate::evaluation::Evidence,
+        execution_state: &crate::progress_controller::ExecutionState,
+    ) -> Result<crate::evaluation::EvaluationInput, PhaseError> {
+        crate::evaluation::build_input(actx, phase, evidence, execution_state)
+            .await
+            .map_err(Into::into)
+    }
+
+    pub(super) async fn apply_evaluation_verdict(
         thread_store: &ThreadStore,
         thread_id: &str,
         phase: Phase,
-        reason: String,
-        transition: crate::progress_controller::PhaseTransition,
+        sctx: &SuiteCtx,
+        execution_state: &crate::progress_controller::ExecutionState,
+        evidence: crate::evaluation::Evidence,
+        verdict: crate::evaluation::EvaluationVerdict,
     ) -> Result<PhaseOutcome, PhaseError> {
-        let retry_outcome = Self::check_subjective_retry_budget(
-            thread_store,
+        let evidence_hash = evidence.hash();
+        let key = crate::evaluation::AttemptKey {
+            phase: phase.as_str().to_string(),
+            verdict_kind: verdict.kind(),
+            evidence_hash: evidence_hash.clone(),
+        };
+        let next_attempt = execution_state
+            .attempt_ledger()
+            .count(&key)
+            .saturating_add(1);
+
+        crate::state_manager::apply_execution_event(
+            &thread_store.control_store(),
             thread_id,
-            crate::progress_controller::SubjectiveRetryKind::ValidateExecutionFailed,
+            crate::progress_controller::DataEngineerEvent::AttemptRecorded { key },
         )
-        .await?;
-        let escalation =
-            Self::validate_execution_failure_escalation(reason, transition, retry_outcome);
-        Self::apply_validate_escalation(thread_store, thread_id, phase, escalation).await
+        .await
+        .map_err(|e| format!("failed to record evaluation attempt: {e}"))?;
+        crate::state_manager::apply_execution_event(
+            &thread_store.control_store(),
+            thread_id,
+            crate::progress_controller::DataEngineerEvent::EvaluationVerdictRecorded {
+                verdict: verdict.summary(),
+                evidence_hash: evidence_hash.clone(),
+            },
+        )
+        .await
+        .map_err(|e| format!("failed to record evaluation verdict: {e}"))?;
+
+        if next_attempt > crate::evaluation::DEFAULT_ATTEMPT_CAP {
+            return Err(PhaseError::Fatal(format!(
+                "evaluation verdict {:?} repeated {} times for the same evidence; manual intervention required.\n\n{}",
+                verdict.kind(),
+                next_attempt,
+                evidence.brief()
+            )));
+        }
+
+        match verdict {
+            crate::evaluation::EvaluationVerdict::Accepted => Ok(PhaseOutcome::Return(vec![])),
+            crate::evaluation::EvaluationVerdict::Fatal { reason } => {
+                Err(PhaseError::Fatal(reason))
+            }
+            crate::evaluation::EvaluationVerdict::RefreshTruth { reason: _ } => {
+                crate::phase_contract::commit_phase_decision(
+                    thread_store,
+                    thread_id,
+                    Some(phase),
+                    crate::phase_contract::PhaseDecision::loopback(
+                        phase,
+                        Some(crate::progress_controller::PhaseTransition::PhaseBlocked),
+                    ),
+                )
+                .await?;
+                Ok(PhaseOutcome::TransitionCommitted)
+            }
+            crate::evaluation::EvaluationVerdict::RevisePlan {
+                violations,
+                strategy,
+            } => {
+                crate::phase_contract::commit_plan_revision_loopback(
+                    thread_store,
+                    thread_id,
+                    phase,
+                    violations,
+                    strategy,
+                )
+                .await?;
+                Ok(PhaseOutcome::TransitionCommitted)
+            }
+            crate::evaluation::EvaluationVerdict::RepairImplementation { evidence } => {
+                let actx = Self::agent_tool_ctx(thread_id, sctx);
+                let cfg = crate::resolved_config_from_ctx(&actx);
+                let dispatch = cfg
+                    .map(|c| crate::model_dispatch::ModelDispatch::from_resolved(&c.llm))
+                    .unwrap_or_else(|| crate::model_dispatch::ModelDispatch {
+                        reason_model: "gpt-4o-mini".into(),
+                        task_model: "gpt-4o-mini".into(),
+                    });
+                let repair_result = crate::repair_subroutine::run_repair(
+                    sctx,
+                    thread_store,
+                    thread_id,
+                    &dispatch,
+                    evidence.repair_context(),
+                    None,
+                    next_attempt,
+                )
+                .await;
+                match repair_result {
+                    Ok(_) => {
+                        crate::phase_contract::commit_metered_decision(
+                            thread_store,
+                            thread_id,
+                            Some(phase),
+                            crate::phase_contract::PhaseDecision::loopback(
+                                phase,
+                                Some(crate::progress_controller::PhaseTransition::RepairCompleted),
+                            ),
+                            vec![crate::metering::UsageEvent::RepairCycle {
+                                cycle: next_attempt as u64,
+                                project_id: thread_id.to_string(),
+                            }],
+                            crate::metering::global_metering(),
+                        )
+                        .await?;
+                        Ok(PhaseOutcome::TransitionCommitted)
+                    }
+                    Err(e) => Err(PhaseError::Fatal(format!("repair failed: {e}"))),
+                }
+            }
+        }
     }
     fn decide_validate_pass_transition(
         completion_snapshot: Option<&crate::plan::PlanCompletionSnapshot>,
@@ -398,7 +366,7 @@ impl DataEngineerSuite {
         phase: crate::control_flow::Phase,
         _question: &str,
         sctx: &SuiteCtx,
-        _execution_state: &crate::progress_controller::ExecutionState,
+        execution_state: &crate::progress_controller::ExecutionState,
         thread_state_step_count: usize,
     ) -> Result<PhaseOutcome, PhaseError> {
         let actx = Self::agent_tool_ctx(thread_id, sctx);
@@ -411,9 +379,21 @@ impl DataEngineerSuite {
             let precheck = crate::schema_policy::PrecheckFailure::other(format!(
                 "Pre-validation normalization failed; fix DBT YAML artifacts before re-validating.\n\n{e}"
             ));
-            let escalation = Self::precheck_failure_to_repair_escalation(precheck);
-            return Self::apply_validate_escalation(&thread_store, thread_id, phase, escalation)
-                .await;
+            let evidence = Self::precheck_failure_to_evidence(precheck);
+            let input =
+                Self::build_evaluation_input(&actx, phase, evidence.clone(), execution_state)
+                    .await?;
+            let verdict = crate::evaluation::evaluate(input);
+            return Self::apply_evaluation_verdict(
+                thread_store,
+                thread_id,
+                phase,
+                sctx,
+                execution_state,
+                evidence,
+                verdict,
+            )
+            .await;
         }
 
         // Cheap structural prechecks: fail fast on malformed/duplicated schema artifacts
@@ -424,15 +404,26 @@ impl DataEngineerSuite {
         // gather→reason→apply cycle. We deliberately do NOT consume the `ValidatePrecheckFailed`
         // subjective retry budget here — the repair loop owns its own retry budget and an
         // overly aggressive precheck budget was previously causing premature Fatal escalations.
-        // The structured [`PrecheckFailure`] is carried into the repair prompt via the
-        // `ValidationFailureContext.brief`/`log_excerpts` so the LLM gets the failure kind and
-        // the list of files to look at first.
+        // The structured [`PrecheckFailure`] becomes evaluation evidence so the repair prompt gets
+        // the failure kind and the list of files to look at first.
         if let Err(precheck_failure) =
             crate::schema_policy::prevalidate_dbt_schema_artifacts(&actx).await
         {
-            let escalation = Self::precheck_failure_to_repair_escalation(precheck_failure);
-            return Self::apply_validate_escalation(&thread_store, thread_id, phase, escalation)
-                .await;
+            let evidence = Self::precheck_failure_to_evidence(precheck_failure);
+            let input =
+                Self::build_evaluation_input(&actx, phase, evidence.clone(), execution_state)
+                    .await?;
+            let verdict = crate::evaluation::evaluate(input);
+            return Self::apply_evaluation_verdict(
+                thread_store,
+                thread_id,
+                phase,
+                sctx,
+                execution_state,
+                evidence,
+                verdict,
+            )
+            .await;
         }
 
         // Deterministic full validate (NO repair loop / no mutation).
@@ -458,6 +449,24 @@ impl DataEngineerSuite {
             serde_json::Value::String("deterministic_full_build".to_string()),
         );
         validate_ctx.set("build", serde_json::Value::Bool(true));
+        if let Err(failure) = crate::runtime_prereqs::ensure_dbt_runtime_prerequisites(&actx).await
+        {
+            let evidence = failure.into_evidence();
+            let input =
+                Self::build_evaluation_input(&actx, phase, evidence.clone(), execution_state)
+                    .await?;
+            let verdict = crate::evaluation::evaluate(input);
+            return Self::apply_evaluation_verdict(
+                thread_store,
+                thread_id,
+                phase,
+                sctx,
+                execution_state,
+                evidence,
+                verdict,
+            )
+            .await;
+        }
         let obs = {
             let meta = react_core::session::ToolStepMeta {
                 agent: crate::env_util::DEFAULT_AGENT_NAME.to_string(),
@@ -481,29 +490,31 @@ impl DataEngineerSuite {
             {
                 Ok(contract) => contract,
                 Err(e) => {
-                    let is_transient = crate::failure_text::is_infra_transient(
-                        &crate::failure_text::normalize_text(&e),
-                    );
-                    if is_transient {
-                        return Err(PhaseError::Fatal(format!(
-                    "dbt_validate execution failed due to transient infrastructure error: {e}"
-                )));
-                    }
                     tracing::warn!(
                         "data_engineer: validate execution failed (thread_id={} phase={}): {}",
                         thread_id,
                         phase.as_str(),
                         e
                     );
-                    let reason = format!("dbt_validate execution failed: {}", e);
-                    return Self::handle_validate_execution_failure(
+                    let evidence = crate::evaluation::Evidence::DbtValidateExecution {
+                        error: format!("dbt_validate execution failed: {e}"),
+                    };
+                    let input = Self::build_evaluation_input(
+                        &actx,
+                        phase,
+                        evidence.clone(),
+                        execution_state,
+                    )
+                    .await?;
+                    let verdict = crate::evaluation::evaluate(input);
+                    return Self::apply_evaluation_verdict(
                         thread_store,
                         thread_id,
                         phase,
-                        reason.clone(),
-                        crate::progress_controller::PhaseTransition::ValidateExecutionFailed {
-                            reason,
-                        },
+                        sctx,
+                        execution_state,
+                        evidence,
+                        verdict,
                     )
                     .await;
                 }
@@ -572,14 +583,20 @@ impl DataEngineerSuite {
                 );
                 let err_reason =
                     format!("validate_outcome_v2_contract_error: {} ({})", reason, brief);
-                return Self::handle_validate_execution_failure(
+                let evidence =
+                    crate::evaluation::Evidence::DbtValidateExecution { error: err_reason };
+                let input =
+                    Self::build_evaluation_input(&actx, phase, evidence.clone(), execution_state)
+                        .await?;
+                let verdict = crate::evaluation::evaluate(input);
+                return Self::apply_evaluation_verdict(
                     thread_store,
                     thread_id,
                     phase,
-                    err_reason.clone(),
-                    crate::progress_controller::PhaseTransition::ValidateContractError {
-                        reason: err_reason,
-                    },
+                    sctx,
+                    execution_state,
+                    evidence,
+                    verdict,
                 )
                 .await;
             }
@@ -592,61 +609,30 @@ impl DataEngineerSuite {
             .get("errors")
             .and_then(|v| serde_json::from_value(v.clone()).ok())
             .unwrap_or_default();
-        let failure_class = crate::failure_text::classify_dbt_failure(&errs);
-        if failure_class.is_transient() {
-            return Err(PhaseError::Fatal(format!(
-        "dbt_validate failed due to a transient infrastructure error (service outage, throttling, or network issue). \
-         This is not a code defect — retry after the upstream service recovers.\n\n{}",
-        brief
-    )));
-        }
-        if failure_class.is_config() {
-            return Err(PhaseError::Fatal(format!(
-        "dbt_validate failed due to an environment/configuration error (missing credentials, broken profiles.yml, \
-         or auth misconfiguration). This cannot be fixed by re-authoring models — fix the runtime environment.\n\n{}",
-        brief
-    )));
-        }
-
-        // Update canonical execution state (hard-cutover: primary decision source).
-        {
-            let tier = if phase == Phase::CleanseValidate {
-                crate::progress_controller::ExecutionTier::Cleanse
-            } else {
-                crate::progress_controller::ExecutionTier::Model
-            };
-            let log_excerpts = {
-                let raw = crate::dbt_error::extract_log_excerpts(&obs.observation, 3, 6000);
-                if raw.trim().is_empty() {
-                    None
-                } else {
-                    Some(raw)
-                }
-            };
-            crate::state_manager::apply_execution_event(
-                &thread_store.control_store(),
+        if let Some(failure) = crate::runtime_prereqs::failure_from_dbt_errors(&brief, &errs) {
+            let evidence = failure.into_evidence();
+            let input =
+                Self::build_evaluation_input(&actx, phase, evidence.clone(), execution_state)
+                    .await?;
+            let verdict = crate::evaluation::evaluate(input);
+            return Self::apply_evaluation_verdict(
+                thread_store,
                 thread_id,
-                crate::progress_controller::DataEngineerEvent::ValidateFailed {
-                    tier,
-                    brief: brief.clone(),
-                    failure_hash: failure_hash.clone(),
-                    compile_ok,
-                    run_ok,
-                    log_excerpts,
-                },
+                phase,
+                sctx,
+                execution_state,
+                evidence,
+                verdict,
             )
-            .await
-            .map_err(|e| {
-                format!("failed to persist execution state after validate failure: {e}")
-            })?;
+            .await;
         }
-
-        // Validation failed -> go back to corresponding author phase.
-        let _trigger_step_idx = thread_state_step_count.saturating_sub(1);
-        let to_phase = if phase == Phase::CleanseValidate {
-            Phase::CleanseAuthor
-        } else {
-            Phase::ModelAuthor
+        let log_excerpts = {
+            let raw = crate::dbt_error::extract_log_excerpts(&obs.observation, 3, 6000);
+            if raw.trim().is_empty() {
+                None
+            } else {
+                Some(raw)
+            }
         };
         // Attach authoritative schema facts for the next authoring turn. This ensures the LLM
         // never needs to guess relation columns after a deterministic validate failure.
@@ -702,40 +688,28 @@ impl DataEngineerSuite {
                 })?;
             }
         }
-
-        let retry_outcome = Self::check_subjective_retry_budget(
-            &thread_store,
+        let evidence =
+            crate::evaluation::Evidence::DbtValidate(crate::evaluation::DbtValidateEvidence {
+                brief,
+                failure_hash,
+                compile_ok,
+                run_ok,
+                log_excerpts,
+                errors: errs,
+            });
+        let input =
+            Self::build_evaluation_input(&actx, phase, evidence.clone(), execution_state).await?;
+        let verdict = crate::evaluation::evaluate(input);
+        Self::apply_evaluation_verdict(
+            thread_store,
             thread_id,
-            crate::progress_controller::SubjectiveRetryKind::ValidateFailedRetry,
+            phase,
+            sctx,
+            execution_state,
+            evidence,
+            verdict,
         )
-        .await?;
-        if let crate::retry_budget::SubjectiveRetryOutcome::Exhausted(tries) = retry_outcome {
-            let reason = format!(
-                "dbt_validate has hit the same failure {tries} consecutive times without progress; \
-                 manual intervention required.\n\n{brief}"
-            );
-            return Self::finish_validate_failure(
-                &actx,
-                thread_store,
-                thread_id,
-                phase,
-                GuardBlockKind::ValidateRetryExhausted,
-                reason,
-            )
-            .await;
-        }
-
-        crate::phase_contract::commit_phase_decision(
-            &thread_store,
-            thread_id,
-            Some(phase),
-            crate::phase_contract::PhaseDecision::loopback(
-                to_phase,
-                Some(crate::progress_controller::PhaseTransition::ValidateFail { errors: errs }),
-            ),
-        )
-        .await?;
-        return Ok(PhaseOutcome::TransitionCommitted);
+        .await
     }
 }
 
@@ -770,24 +744,7 @@ mod tests {
     }
 
     #[test]
-    fn validate_execution_failure_exhaustion_is_not_plan_rewrite() {
-        let escalation = DataEngineerSuite::validate_execution_failure_escalation(
-            "dbt_validate execution failed".to_string(),
-            crate::progress_controller::PhaseTransition::ValidateExecutionFailed {
-                reason: "dbt_validate execution failed".to_string(),
-            },
-            crate::retry_budget::SubjectiveRetryOutcome::Exhausted(3),
-        );
-        match escalation {
-            ValidateEscalation::Fatal(reason) => {
-                assert!(reason.contains("manual intervention required"));
-            }
-            _ => panic!("expected fatal escalation"),
-        }
-    }
-
-    #[test]
-    fn precheck_failure_routes_into_repair_loopback_with_kind_label() {
+    fn precheck_failure_becomes_schema_precheck_evidence() {
         let precheck = crate::schema_policy::PrecheckFailure {
             kind: crate::schema_policy::PrecheckFailureKind::SchemaModelMisplacement,
             brief: "models/schema.yml contains staging model 'stg_picnic_screen_birthdate'."
@@ -797,24 +754,15 @@ mod tests {
                 "models/staging/stg_picnic_screen_birthdate.yml".to_string(),
             ],
         };
-        let escalation = DataEngineerSuite::precheck_failure_to_repair_escalation(precheck);
-        match escalation {
-            ValidateEscalation::LoopbackToAuthor {
-                guard_kind,
-                failure_context,
-                reason,
-                ..
-            } => {
-                assert!(matches!(guard_kind, GuardBlockKind::PrecheckFailed));
-                assert!(reason.contains("Pre-validation failed"));
-                assert!(failure_context
-                    .brief
-                    .contains("stg_picnic_screen_birthdate"));
-                let excerpts = failure_context.log_excerpts.expect("log_excerpts");
+        let evidence = DataEngineerSuite::precheck_failure_to_evidence(precheck);
+        match evidence {
+            crate::evaluation::Evidence::SchemaPrecheck(evidence) => {
+                assert!(evidence.brief.contains("stg_picnic_screen_birthdate"));
+                let excerpts = evidence.log_excerpts.expect("log_excerpts");
                 assert!(excerpts.contains("schema_model_misplacement"));
                 assert!(excerpts.contains("models/staging/stg_picnic_screen_birthdate.yml"));
             }
-            _ => panic!("expected loopback-to-author (which routes through the repair phase)"),
+            _ => panic!("expected schema precheck evidence"),
         }
     }
 }

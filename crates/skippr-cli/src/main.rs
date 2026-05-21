@@ -22,7 +22,8 @@ use std::{
 use clap::{Parser, Subcommand};
 use react::config::ReactConfigFile;
 use react_core::keyspace::Keyspace;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
+use sha2::Digest;
 
 use public_config::{
     DbtConfig, S3Transform, SchemaSinkConfig, SkipprProjectConfig, SourceConfig, WarehouseConfig,
@@ -307,12 +308,22 @@ struct ModelArgs {
     /// Start a fresh modeling thread instead of resuming the latest project thread.
     #[arg(long, default_value_t = false)]
     no_resume: bool,
-    /// Local dbt project output path for model authoring. Defaults to ./dbt/<pipeline>.
+    /// Local dbt project output path for model authoring. Defaults to ./<pipeline>/dbt.
     #[arg(long = "dbt-output-path")]
     dbt_output_path: Option<PathBuf>,
     /// Output mode: text, json, or jsonl.
     #[arg(long, default_value = "text")]
     output: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ModelThreadBinding {
+    schema_version: u32,
+    pipeline: String,
+    config_fingerprint: String,
+    config_path: String,
+    thread_id: String,
+    updated_at: String,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -347,7 +358,7 @@ struct QueryArgs {
     #[arg(long)]
     pipeline: String,
     /// Read-only SQL to execute. Only SELECT/WITH queries are accepted.
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     sql: String,
     /// Output mode: json or jsonl.
     #[arg(long, default_value = "json")]
@@ -4527,14 +4538,15 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
         resolved.scope.project_id, resolved.scope.tenant, resolved.storage.mode
     );
 
+    let model_config_path = config_path(explicit_config);
     let thread_id = if args.no_resume {
         eprintln!("[skippr] not resuming previous thread (--no-resume)");
         None
     } else {
-        match find_latest_thread_for_resolved_config(&resolved).await {
+        match load_model_thread_for_pipeline(&resolved, &model_config_path, &args.pipeline).await {
             Ok(thread_id) => thread_id,
             Err(e) => {
-                eprintln!("[skippr] WARNING: failed to discover latest thread: {e}");
+                eprintln!("[skippr] WARNING: failed to load model thread: {e}");
                 None
             }
         }
@@ -4570,14 +4582,14 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
     let status_cfg = resolved.clone();
     let run_thread_id = thread_id.clone();
     let dbt_output_path = args.dbt_output_path.clone().unwrap_or_else(|| {
-        project_root_from_config_path(&config_path(explicit_config))
-            .join("dbt")
+        project_root_from_config_path(&model_config_path)
             .join(&args.pipeline)
+            .join("dbt")
     });
     let dbt_output_path = if dbt_output_path.is_absolute() {
         dbt_output_path
     } else {
-        project_root_from_config_path(&config_path(explicit_config)).join(dbt_output_path)
+        project_root_from_config_path(&model_config_path).join(dbt_output_path)
     };
     eprintln!("[skippr] dbt output path: {}", dbt_output_path.display());
     let dbt_diff_before = snapshot_dbt_diff_files(&dbt_output_path);
@@ -4652,7 +4664,7 @@ The Skippr config is `{config_path}`. Use the existing phased cleanse and gold w
 Do not bypass phase validation/review gates. If dbt, warehouse, or source prerequisites block completion, persist the phase blocker with the concrete validation or source error.",
         pipeline = args.pipeline,
         dbt_root = dbt_output_path.display(),
-        config_path = config_path(explicit_config).display()
+        config_path = model_config_path.display()
     ));
     let _preflight_profiles_temp = preflight_profiles_temp;
     emit_de_suite_event(
@@ -4695,7 +4707,7 @@ Do not bypass phase validation/review gates. If dbt, warehouse, or source prereq
     )
     .await;
     let exit_code = headless.exit_code;
-    let status_thread_id = run_thread_id;
+    let status_thread_id = headless.thread_id.clone().or(run_thread_id);
     let dbt_diff_after = snapshot_dbt_diff_files(&dbt_output_path);
     let changed_dbt_files = changed_dbt_diff_files(&dbt_diff_before, &dbt_diff_after);
     let changed_dbt_files_value = if changed_dbt_files.is_empty() {
@@ -4753,8 +4765,16 @@ Do not bypass phase validation/review gates. If dbt, warehouse, or source prereq
     if let Some(err) = headless.bootstrap_error.as_deref() {
         eprintln!("[skippr] data-engineer bootstrap failed before a thread was created: {err}");
     }
+    if let Some(err) = headless.failure_summary.as_deref() {
+        eprintln!("[skippr] data-engineer workflow failed: {err}");
+    }
     let mut model_failure_summary: Option<String> = None;
     if let Some(tid) = status_thread_id.as_deref() {
+        if let Err(e) =
+            persist_model_thread_binding(&status_cfg, &model_config_path, &args.pipeline, tid).await
+        {
+            eprintln!("[skippr] WARNING: failed to persist model thread binding: {e}");
+        }
         match load_model_thread_status(&status_cfg, tid).await {
             Ok(Some(status)) => {
                 model_failure_summary = status.failure_brief.clone();
@@ -4767,7 +4787,7 @@ Do not bypass phase validation/review gates. If dbt, warehouse, or source prereq
                         run_kind: Some(agent_type),
                         thread_id: Some(tid),
                         phase: Some(status.current_phase.as_str()),
-                        repair_status: Some(status.repair_status.as_str()),
+                        repair_status: status.last_evaluation.as_deref(),
                         pending_plan_revision: Some(status.pending_plan_revision),
                         failure_summary: status.failure_brief.as_deref(),
                         error: None,
@@ -4780,9 +4800,9 @@ Do not bypass phase validation/review gates. If dbt, warehouse, or source prereq
                     },
                 );
                 eprintln!(
-                    "[skippr] data-engineer thread status: current_phase={} repair_status={} failed={} pending_plan_revision={}",
+                    "[skippr] data-engineer thread status: current_phase={} last_evaluation={} failed={} pending_plan_revision={}",
                     status.current_phase,
-                    status.repair_status,
+                    status.last_evaluation.as_deref().unwrap_or("none"),
                     status.has_failure_context,
                     status.pending_plan_revision
                 );
@@ -4808,11 +4828,19 @@ Do not bypass phase validation/review gates. If dbt, warehouse, or source prereq
                 eprintln!("[skippr] WARNING: failed to load data-engineer thread status: {e}");
             }
         }
-    } else if exit_code != 0 && headless.bootstrap_error.is_none() {
+    } else if exit_code != 0
+        && headless.bootstrap_error.is_none()
+        && headless.failure_summary.is_none()
+    {
         eprintln!(
-            "[skippr] model run failed before the CLI received a thread id; no stale latest-thread status was used."
+            "[skippr] model run failed before the CLI received a thread id or failure summary; no stale latest-thread status was used."
         );
     }
+    let final_failure_summary = headless
+        .bootstrap_error
+        .as_deref()
+        .or(headless.failure_summary.as_deref())
+        .or(model_failure_summary.as_deref());
     emit_de_suite_event(
         &args.output,
         DeSuiteEvent {
@@ -4828,14 +4856,8 @@ Do not bypass phase validation/review gates. If dbt, warehouse, or source prereq
             phase: Some("complete"),
             repair_status: None,
             pending_plan_revision: None,
-            failure_summary: headless
-                .bootstrap_error
-                .as_deref()
-                .or(model_failure_summary.as_deref()),
-            error: headless
-                .bootstrap_error
-                .as_deref()
-                .or(model_failure_summary.as_deref()),
+            failure_summary: final_failure_summary,
+            error: final_failure_summary,
             answer: None,
             plan: None,
             ok: Some(exit_code == 0),
@@ -4851,6 +4873,134 @@ async fn load_model_thread_status(
     cfg: &react_core::resolved_config::ReactResolvedConfig,
     thread_id: &str,
 ) -> Result<Option<react_suite_data_engineer::DataEngineerThreadStatus>, String> {
+    let (storage, keyspace) = model_storage_handles(cfg).await?;
+    let control = react_core::session::ControlStateStore::new(storage, cfg.scope.clone(), keyspace);
+    react_suite_data_engineer::load_thread_status(&control, thread_id).await
+}
+
+async fn load_model_thread_for_pipeline(
+    cfg: &react_core::resolved_config::ReactResolvedConfig,
+    config_path: &Path,
+    pipeline: &str,
+) -> Result<Option<String>, String> {
+    if let Some(thread_id) = load_bound_model_thread(cfg, config_path, pipeline).await? {
+        return Ok(Some(thread_id));
+    }
+
+    let Some(thread_id) = find_latest_thread_for_resolved_config(cfg).await? else {
+        eprintln!("[skippr] no previous model thread found for pipeline {pipeline}");
+        return Ok(None);
+    };
+    match load_model_thread_status(cfg, &thread_id).await {
+        Ok(Some(_)) => {
+            eprintln!(
+                "[skippr] resuming latest scoped model thread {} for pipeline {}",
+                thread_id, pipeline
+            );
+            if let Err(e) =
+                persist_model_thread_binding(cfg, config_path, pipeline, &thread_id).await
+            {
+                eprintln!("[skippr] WARNING: failed to persist model thread binding: {e}");
+            }
+            Ok(Some(thread_id))
+        }
+        Ok(None) => {
+            eprintln!(
+                "[skippr] latest scoped thread {thread_id} has no data-engineer status; starting fresh"
+            );
+            Ok(None)
+        }
+        Err(e) => Err(format!(
+            "failed to validate latest scoped model thread {thread_id}: {e}"
+        )),
+    }
+}
+
+async fn load_bound_model_thread(
+    cfg: &react_core::resolved_config::ReactResolvedConfig,
+    config_path: &Path,
+    pipeline: &str,
+) -> Result<Option<String>, String> {
+    let fingerprint = model_thread_config_fingerprint(cfg, config_path, pipeline);
+    let (storage, keyspace) = model_storage_handles(cfg).await?;
+    let key = model_thread_binding_key(keyspace.as_ref(), &cfg.scope, &fingerprint);
+    let value = match react_core::storage::retry_get_json(storage.as_ref(), &key).await {
+        Ok(value) => value,
+        Err(e) if react_core::storage::is_storage_not_found_error(&e) => {
+            eprintln!(
+                "[skippr] no bound model thread for pipeline {pipeline}; checking latest scoped thread"
+            );
+            return Ok(None);
+        }
+        Err(e) => return Err(format!("failed to read model thread binding {key}: {e}")),
+    };
+
+    let binding: ModelThreadBinding = serde_json::from_value(value)
+        .map_err(|e| format!("failed to parse model thread binding {key}: {e}"))?;
+    if !model_thread_binding_matches(&binding, pipeline, &fingerprint) {
+        eprintln!(
+            "[skippr] model thread binding did not match requested pipeline/config; starting fresh"
+        );
+        return Ok(None);
+    }
+    if uuid::Uuid::parse_str(&binding.thread_id).is_err() {
+        eprintln!("[skippr] model thread binding contains invalid thread id; starting fresh");
+        return Ok(None);
+    }
+    match load_model_thread_status(cfg, &binding.thread_id).await {
+        Ok(Some(_)) => {
+            eprintln!(
+                "[skippr] resuming bound model thread {} for pipeline {}",
+                binding.thread_id, pipeline
+            );
+            Ok(Some(binding.thread_id))
+        }
+        Ok(None) => {
+            eprintln!(
+                "[skippr] bound model thread has no persisted data-engineer status; starting fresh"
+            );
+            Ok(None)
+        }
+        Err(e) => Err(format!(
+            "failed to validate bound model thread {}: {e}",
+            binding.thread_id
+        )),
+    }
+}
+
+async fn persist_model_thread_binding(
+    cfg: &react_core::resolved_config::ReactResolvedConfig,
+    config_path: &Path,
+    pipeline: &str,
+    thread_id: &str,
+) -> Result<(), String> {
+    let fingerprint = model_thread_config_fingerprint(cfg, config_path, pipeline);
+    let (storage, keyspace) = model_storage_handles(cfg).await?;
+    let key = model_thread_binding_key(keyspace.as_ref(), &cfg.scope, &fingerprint);
+    let binding = ModelThreadBinding {
+        schema_version: 1,
+        pipeline: pipeline.to_string(),
+        config_fingerprint: fingerprint,
+        config_path: stable_config_path(config_path),
+        thread_id: thread_id.to_string(),
+        updated_at: chrono::Utc::now().to_rfc3339(),
+    };
+    let value = serde_json::to_value(binding)
+        .map_err(|e| format!("failed to serialize model thread binding: {e}"))?;
+    react_core::storage::retry_put_json(storage.as_ref(), &key, &value)
+        .await
+        .map_err(|e| format!("failed to write model thread binding {key}: {e}"))
+}
+
+async fn model_storage_handles(
+    cfg: &react_core::resolved_config::ReactResolvedConfig,
+) -> Result<
+    (
+        Arc<dyn react_core::storage::StorageAdapter>,
+        Arc<dyn react_core::keyspace::Keyspace>,
+    ),
+    String,
+> {
     let storage: Arc<dyn react_core::storage::StorageAdapter> = match cfg.storage.mode {
         react_core::resolved_config::StorageMode::Local => {
             let root = cfg
@@ -4899,8 +5049,51 @@ async fn load_model_thread_status(
             Arc::new(react_core::keyspace::DefaultKeyspace::new(bucket))
         }
     };
-    let control = react_core::session::ControlStateStore::new(storage, cfg.scope.clone(), keyspace);
-    react_suite_data_engineer::load_thread_status(&control, thread_id).await
+    Ok((storage, keyspace))
+}
+
+fn model_thread_binding_key(
+    keyspace: &dyn react_core::keyspace::Keyspace,
+    scope: &react_core::scope::RequestScope,
+    fingerprint: &str,
+) -> String {
+    let filename = format!("{fingerprint}.json");
+    keyspace.scoped_key(scope, &["model_thread_bindings", &filename])
+}
+
+fn model_thread_config_fingerprint(
+    cfg: &react_core::resolved_config::ReactResolvedConfig,
+    config_path: &Path,
+    pipeline: &str,
+) -> String {
+    let input = format!(
+        "model-thread-v1\0tenant={}\0workspace={}\0project={}\0pipeline={}\0config={}",
+        cfg.scope.tenant,
+        cfg.scope.workspace,
+        cfg.scope.project_id,
+        pipeline,
+        stable_config_path(config_path)
+    );
+    let digest = sha2::Sha256::digest(input.as_bytes());
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
+fn stable_config_path(config_path: &Path) -> String {
+    std::fs::canonicalize(config_path)
+        .unwrap_or_else(|_| config_path.to_path_buf())
+        .display()
+        .to_string()
+}
+
+fn model_thread_binding_matches(
+    binding: &ModelThreadBinding,
+    pipeline: &str,
+    config_fingerprint: &str,
+) -> bool {
+    binding.schema_version == 1
+        && binding.pipeline == pipeline
+        && binding.config_fingerprint == config_fingerprint
+        && !binding.thread_id.trim().is_empty()
 }
 
 async fn cmd_feedback(
@@ -6545,6 +6738,27 @@ data_sources:
     }
 
     #[test]
+    fn query_sql_accepts_leading_line_comment() {
+        let sql = "-- skippr-plan-spec-digest: abc\nselect 1";
+        let cli = Cli::try_parse_from([
+            "skippr",
+            "query",
+            "--pipeline",
+            "bike_hire",
+            "--sql",
+            sql,
+            "--output",
+            "json",
+        ])
+        .expect("parse query with leading SQL comment");
+
+        match cli.cmd {
+            Cmd::Query(args) => assert_eq!(args.sql, sql),
+            _ => panic!("expected query command"),
+        }
+    }
+
+    #[test]
     fn model_requires_pipeline_and_rejects_data_sink() {
         let err = Cli::try_parse_from(["skippr", "model"]).expect_err("missing pipeline");
         assert!(err.to_string().contains("--pipeline"));
@@ -6552,6 +6766,101 @@ data_sources:
         let err = Cli::try_parse_from(["skippr", "model", "--data-sink", "warehouse"])
             .expect_err("removed data sink flag");
         assert!(err.to_string().contains("--data-sink"));
+    }
+
+    fn test_model_resolved_config(
+        storage_root: &Path,
+        project: &str,
+    ) -> react_core::resolved_config::ReactResolvedConfig {
+        react_core::resolved_config::ReactResolvedConfig {
+            server: react_core::resolved_config::ServerResolved { port: 0 },
+            storage: react_core::resolved_config::StorageResolved {
+                mode: react_core::resolved_config::StorageMode::Local,
+                bucket: None,
+                path: Some(storage_root.display().to_string()),
+                s3_credentials: None,
+            },
+            scope: react_core::scope::RequestScope::parse("_", "dev", project)
+                .expect("valid test scope"),
+            llm: react_core::resolved_config::LlmResolved::default(),
+            suite_config: serde_json::json!({}),
+        }
+    }
+
+    fn write_model_thread_with_status(storage_root: &Path, project: &str, thread_id: &str) {
+        let threads_dir = storage_root.join(format!("_/dev/{project}/threads"));
+        fs::create_dir_all(&threads_dir).unwrap();
+        fs::write(threads_dir.join(format!("{thread_id}.json")), "{}").unwrap();
+
+        let state_dir = storage_root.join(format!("_/dev/{project}/state/{thread_id}"));
+        fs::create_dir_all(&state_dir).unwrap();
+        let control = serde_json::json!({
+            "schema_version": 1,
+            "suite_id": "data_engineer",
+            "payload": {
+                "schema_version": 2,
+                "phase": {
+                    "current_phase": "model_plan"
+                }
+            }
+        });
+        fs::write(
+            state_dir.join("control.json"),
+            serde_json::to_vec(&control).unwrap(),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn model_thread_identity_is_pipeline_and_config_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("skippr.yml");
+        fs::write(&config, "skippr: {}\n").unwrap();
+        let cfg = test_model_resolved_config(dir.path(), "bank");
+
+        let bank_fingerprint = model_thread_config_fingerprint(&cfg, &config, "bank");
+        let bike_fingerprint = model_thread_config_fingerprint(&cfg, &config, "bike_hire");
+        assert_ne!(bank_fingerprint, bike_fingerprint);
+
+        let binding = ModelThreadBinding {
+            schema_version: 1,
+            pipeline: "bike_hire".to_string(),
+            config_fingerprint: bike_fingerprint,
+            config_path: stable_config_path(&config),
+            thread_id: "11111111-1111-1111-1111-111111111111".to_string(),
+            updated_at: "2026-05-19T00:00:00Z".to_string(),
+        };
+
+        assert!(
+            !model_thread_binding_matches(&binding, "bank", &bank_fingerprint),
+            "a bike_hire model thread binding must not satisfy a bank model run"
+        );
+    }
+
+    #[tokio::test]
+    async fn model_resume_uses_latest_thread_in_requested_pipeline_scope() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("skippr.yml");
+        fs::write(&config, "skippr: {}\n").unwrap();
+        write_model_thread_with_status(dir.path(), "bank", "22222222-2222-2222-2222-222222222222");
+        write_model_thread_with_status(
+            dir.path(),
+            "bike_hire",
+            "33333333-3333-3333-3333-333333333333",
+        );
+
+        let cfg = test_model_resolved_config(dir.path(), "bank");
+        let thread = load_model_thread_for_pipeline(&cfg, &config, "bank")
+            .await
+            .expect("model thread lookup");
+
+        assert!(
+            matches!(
+                thread.as_deref(),
+                Some("22222222-2222-2222-2222-222222222222")
+            ),
+            "model runs must resume only the newest thread under the requested pipeline scope"
+        );
     }
 
     #[test]

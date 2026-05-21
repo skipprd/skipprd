@@ -1,7 +1,7 @@
 use crate::domain_types::GuardBlockKind;
 
 use crate::control_flow::Phase;
-use crate::progress_controller::{ExecutionState, RepairStatus, MAX_REPAIR_CYCLES};
+use crate::progress_controller::ExecutionState;
 
 pub type PreTurnDirective = react_core::workflow::PreTurnDirective<GuardBlockKind>;
 
@@ -20,39 +20,6 @@ pub fn evaluate_pre_turn_directive(
     max_replan_backtracks: usize,
 ) -> PreTurnDirective {
     let phase_state = execution_state.phase_state();
-    let repair_state = execution_state.repair_state();
-
-    if matches!(repair_state.status, RepairStatus::Exhausted { .. })
-        && matches!(phase, Phase::CleanseAuthor | Phase::ModelAuthor)
-    {
-        return PreTurnDirective::FailFast {
-            kind: GuardBlockKind::AuthoringToValidate,
-            reason: guard_reason(
-                "repair_subroutine_exhausted",
-                &[
-                    ("cycles_used", &repair_state.cycle_count().to_string()),
-                    ("phase", phase.as_str()),
-                ],
-            ),
-        };
-    }
-
-    if repair_state.cycle_count() >= MAX_REPAIR_CYCLES
-        && matches!(phase, Phase::CleanseAuthor | Phase::ModelAuthor)
-    {
-        return PreTurnDirective::FailFast {
-            kind: GuardBlockKind::AuthoringToValidate,
-            reason: guard_reason(
-                "repair_cycles_exhausted",
-                &[
-                    ("repair_cycles", &repair_state.cycle_count().to_string()),
-                    ("max_repair_cycles", &MAX_REPAIR_CYCLES.to_string()),
-                    ("phase", phase.as_str()),
-                ],
-            ),
-        };
-    }
-
     if phase_state.replan_backtracks >= max_replan_backtracks {
         return PreTurnDirective::FailFast {
             kind: GuardBlockKind::BatchLocked,
@@ -88,22 +55,6 @@ pub fn patch_impl_intent_unsatisfied(execution_state: &ExecutionState, phase: Ph
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::progress_controller::RepairStatus;
-
-    #[test]
-    fn preturn_gate_repair_cycles_exhausted() {
-        let mut st = ExecutionState::new();
-        st.repair.status = RepairStatus::Pending {
-            cycle: MAX_REPAIR_CYCLES,
-        };
-        let d = evaluate_pre_turn_directive(&st, Phase::CleanseAuthor, 3);
-        match d {
-            PreTurnDirective::FailFast { kind, .. } => {
-                assert_eq!(kind, GuardBlockKind::AuthoringToValidate)
-            }
-            _ => panic!("expected failfast"),
-        }
-    }
 
     #[test]
     fn set_patch_impl_intent_sets_intent() {
@@ -151,18 +102,6 @@ mod tests {
                 expect_kind: None,
             },
             Case {
-                name: "repair_cycles_has_priority_over_replan",
-                phase: Phase::ModelAuthor,
-                setup: |st| {
-                    st.repair.status = RepairStatus::Pending {
-                        cycle: MAX_REPAIR_CYCLES,
-                    };
-                    st.phase.replan_backtracks = 10;
-                },
-                expect_fail: true,
-                expect_kind: Some(GuardBlockKind::AuthoringToValidate),
-            },
-            Case {
                 name: "replan_failfast_when_no_stall",
                 phase: Phase::ModelPlan,
                 setup: |st| {
@@ -170,27 +109,6 @@ mod tests {
                 },
                 expect_fail: true,
                 expect_kind: Some(GuardBlockKind::BatchLocked),
-            },
-            Case {
-                name: "repair_cycles_ignored_on_non_author_phase",
-                phase: Phase::ModelPlan,
-                setup: |st| {
-                    st.repair.status = RepairStatus::Pending {
-                        cycle: MAX_REPAIR_CYCLES,
-                    };
-                },
-                expect_fail: false,
-                expect_kind: None,
-            },
-            Case {
-                name: "repair_exhausted_has_priority_over_replan",
-                phase: Phase::CleanseAuthor,
-                setup: |st| {
-                    st.repair.status = RepairStatus::Exhausted { cycles_used: 1 };
-                    st.phase.replan_backtracks = 10;
-                },
-                expect_fail: true,
-                expect_kind: Some(GuardBlockKind::AuthoringToValidate),
             },
         ];
 
@@ -206,28 +124,6 @@ mod tests {
                 _ => panic!("unexpected directive for case={}", c.name),
             }
         }
-    }
-
-    #[test]
-    fn preturn_gate_repair_exhausted_failfast() {
-        let mut st = ExecutionState::new();
-        st.repair.status = RepairStatus::Exhausted { cycles_used: 2 };
-        let d = evaluate_pre_turn_directive(&st, Phase::ModelAuthor, 3);
-        match d {
-            PreTurnDirective::FailFast { kind, reason } => {
-                assert_eq!(kind, GuardBlockKind::AuthoringToValidate);
-                assert!(reason.contains("repair_subroutine_exhausted"));
-            }
-            _ => panic!("expected failfast for Exhausted status"),
-        }
-    }
-
-    #[test]
-    fn preturn_gate_repair_exhausted_ignored_on_non_author_phase() {
-        let mut st = ExecutionState::new();
-        st.repair.status = RepairStatus::Exhausted { cycles_used: 2 };
-        let d = evaluate_pre_turn_directive(&st, Phase::ModelPlan, 3);
-        assert!(matches!(d, PreTurnDirective::Proceed));
     }
 
     #[test]

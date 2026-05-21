@@ -26,9 +26,9 @@ pub use dataset_catalog::{
     DatasetCatalogProvider, DatasetId, EvidenceCapability, ProviderEvidenceCapabilities,
 };
 pub use dbt::{
-    DbtNamespaceShape, DbtProvider, DbtTier, DbtTierNamespace, DbtTierRouting, DbtValidateArgs,
-    DbtValidateResult, DBT_GOLD_DATABASE_ENV, DBT_GOLD_SCHEMA_ENV, DBT_SILVER_DATABASE_ENV,
-    DBT_SILVER_SCHEMA_ENV,
+    DbtCustomSchemaPolicy, DbtNamespaceShape, DbtProvider, DbtTier, DbtTierNamespace,
+    DbtTierRouting, DbtValidateArgs, DbtValidateResult, DBT_GOLD_DATABASE_ENV, DBT_GOLD_SCHEMA_ENV,
+    DBT_SILVER_DATABASE_ENV, DBT_SILVER_SCHEMA_ENV,
 };
 pub use query::{QueryProvider, QueryResult};
 pub use skippr::{

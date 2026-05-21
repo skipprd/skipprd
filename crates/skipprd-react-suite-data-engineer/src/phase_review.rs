@@ -1,39 +1,10 @@
-use crate::domain_types::{ReviewDecision, ReviewDecisionMeta, ReviewTier};
+use crate::domain_types::{ReviewDecision, ReviewDecisionMeta};
 use crate::phase_contract::{commit_phase_decision, PhaseDecision};
 use crate::progress_controller::PhaseTransition;
 use crate::review_batched;
 use crate::{control_flow, DataEngineerSuite, PhaseError, PhaseOutcome};
 use react_core::session::ThreadStore;
 use react_core::suite::{FlowFrame, FlowKind, SuiteCtx};
-
-fn effective_review_tier(phase: control_flow::Phase, tier: ReviewTier) -> ReviewTier {
-    if tier != ReviewTier::Unknown {
-        return tier;
-    }
-    match phase {
-        control_flow::Phase::CleanseReview => ReviewTier::Silver,
-        control_flow::Phase::ModelReview => ReviewTier::Gold,
-        _ => ReviewTier::Unknown,
-    }
-}
-
-fn patch_impl_target_phase(phase: control_flow::Phase, tier: ReviewTier) -> control_flow::Phase {
-    match effective_review_tier(phase, tier) {
-        ReviewTier::Silver => control_flow::Phase::CleanseAuthor,
-        ReviewTier::Gold | ReviewTier::Unknown => control_flow::Phase::ModelAuthor,
-    }
-}
-
-fn plan_change_revision_strategy(
-    phase: control_flow::Phase,
-    meta: &ReviewDecisionMeta,
-) -> crate::progress_controller::PlanRevisionStrategy {
-    if phase == control_flow::Phase::ModelReview && !meta.target_task_ids.is_empty() {
-        crate::progress_controller::PlanRevisionStrategy::Amend
-    } else {
-        crate::progress_controller::PlanRevisionStrategy::Rewrite
-    }
-}
 
 fn model_review_needs_plan_change_targets(
     phase: control_flow::Phase,
@@ -115,6 +86,7 @@ fn review_answer_and_meta(first: FlowFrame) -> Result<(String, ReviewDecisionMet
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain_types::ReviewTier;
     use react_core::keyspace::DefaultKeyspace;
     use react_core::scope::RequestScope;
     use react_module_storage_memory::InMemoryStorageAdapter;
@@ -127,14 +99,6 @@ mod tests {
             target_task_ids: target_task_ids.into_iter().map(str::to_string).collect(),
             review_ref: None,
         }
-    }
-
-    #[test]
-    fn model_plan_change_without_targets_rewrites_instead_of_unscoped_amend() {
-        assert_eq!(
-            plan_change_revision_strategy(control_flow::Phase::ModelReview, &meta(vec![])),
-            crate::progress_controller::PlanRevisionStrategy::Rewrite
-        );
     }
 
     #[test]
@@ -162,28 +126,6 @@ mod tests {
         assert!(prompt.contains("Leave target_task_ids empty only if"));
         assert!(prompt.contains("complete rewrite"));
         assert!(prompt.contains("prior answer"));
-    }
-
-    #[test]
-    fn model_plan_change_with_targets_uses_targeted_amendment() {
-        assert_eq!(
-            plan_change_revision_strategy(
-                control_flow::Phase::ModelReview,
-                &meta(vec!["target_task"])
-            ),
-            crate::progress_controller::PlanRevisionStrategy::Amend
-        );
-    }
-
-    #[test]
-    fn cleanse_plan_change_still_rewrites() {
-        assert_eq!(
-            plan_change_revision_strategy(
-                control_flow::Phase::CleanseReview,
-                &meta(vec!["raw.orders"])
-            ),
-            crate::progress_controller::PlanRevisionStrategy::Rewrite
-        );
     }
 
     #[tokio::test]
@@ -287,9 +229,7 @@ impl DataEngineerSuite {
             })?,
             other => return Ok(PhaseOutcome::Return(vec![other])),
         };
-        let mut unscoped_model_plan_change_retry_used = false;
         if model_review_needs_plan_change_targets(phase, &meta) {
-            unscoped_model_plan_change_retry_used = true;
             tracing::warn!(
                 "data_engineer: model review requested plan change without model targets; retrying once for surgical target ids"
             );
@@ -362,56 +302,8 @@ impl DataEngineerSuite {
         if meta.review_ref.is_none() {
             meta.review_ref = review_ref_from_trigger;
         }
-        let review_retry_count;
-        let mut forced_proceed_by_patch_exhaustion = false;
-        let subjective_kind = match meta.decision {
-            ReviewDecision::PatchImpl => {
-                Some(crate::progress_controller::SubjectiveRetryKind::ReviewPatchImpl)
-            }
-            ReviewDecision::PlanChange => {
-                Some(crate::progress_controller::SubjectiveRetryKind::ReviewPlanChange)
-            }
-            _ => None,
-        };
-        if let Some(kind) = subjective_kind {
-            use crate::retry_budget::SubjectiveRetryOutcome;
-            match Self::check_subjective_retry_budget(thread_store, thread_id, kind).await? {
-                SubjectiveRetryOutcome::Exhausted(tries) => {
-                    tracing::warn!(
-                        "data_engineer: review {:?} retry budget exhausted; forcing proceed phase={} tries={}",
-                        kind,
-                        phase.as_str(),
-                        tries
-                    );
-                    Self::clear_subjective_retries(
-                        thread_store,
-                        thread_id,
-                        vec![
-                            crate::progress_controller::SubjectiveRetryKind::ReviewPatchImpl,
-                            crate::progress_controller::SubjectiveRetryKind::ReviewPlanChange,
-                        ],
-                    )
-                    .await?;
-                    review_retry_count = tries;
-                    meta.decision = ReviewDecision::Proceed;
-                    forced_proceed_by_patch_exhaustion = true;
-                }
-                SubjectiveRetryOutcome::WithinBudget(tries) => {
-                    review_retry_count = tries;
-                }
-            }
-        } else {
-            review_retry_count = 0;
-            Self::clear_subjective_retries(
-                thread_store,
-                thread_id,
-                vec![
-                    crate::progress_controller::SubjectiveRetryKind::ReviewPatchImpl,
-                    crate::progress_controller::SubjectiveRetryKind::ReviewPlanChange,
-                ],
-            )
-            .await?;
-        }
+        let review_retry_count = 0;
+        let forced_proceed_by_patch_exhaustion = false;
         out_frames.push(FlowFrame::Review {
             text: answer.clone(),
             meta: Some(
@@ -459,7 +351,6 @@ impl DataEngineerSuite {
                 Ok(PhaseOutcome::TransitionCommitted)
             }
             ReviewDecision::PatchImpl => {
-                let back = patch_impl_target_phase(phase, meta.tier);
                 let review_brief = {
                     let cleaned = Self::strip_meta_line(&answer);
                     let max = 4_000usize;
@@ -469,52 +360,29 @@ impl DataEngineerSuite {
                         format!("Review feedback:\n{cleaned}")
                     }
                 };
-                crate::state_manager::apply_execution_event(
-                    &thread_store.control_store(),
-                    thread_id,
-                    crate::progress_controller::DataEngineerEvent::ValidateCheckFailed {
-                        failure_context: crate::progress_controller::ValidationFailureContext {
-                            brief: review_brief,
-                            log_excerpts: None,
-                            compile_ok: true,
-                            run_ok: true,
-                        },
-                    },
-                )
-                .await
-                .map_err(|e| format!("failed to record review feedback as failure context: {e}"))?;
-                crate::state_manager::apply_execution_event(
-                    &thread_store.control_store(),
-                    thread_id,
-                    crate::progress_controller::DataEngineerEvent::PatchImplIntentSet {
-                        phase: back,
-                    },
-                )
-                .await
-                .map(|_| ())?;
-                commit_phase_decision(
+                let evidence =
+                    crate::evaluation::Evidence::Review(crate::evaluation::ReviewEvidence {
+                        brief: review_brief,
+                        target_task_ids: meta.target_task_ids.clone(),
+                        requests_plan_change: false,
+                    });
+                let actx = Self::agent_tool_ctx(thread_id, sctx);
+                let input =
+                    crate::evaluation::build_input(&actx, phase, evidence.clone(), execution_state)
+                        .await?;
+                let verdict = crate::evaluation::evaluate(input);
+                Self::apply_evaluation_verdict(
                     thread_store,
                     thread_id,
-                    Some(phase),
-                    PhaseDecision::loopback(
-                        back,
-                        Some(PhaseTransition::ReviewPatchImpl {
-                            meta: meta.clone(),
-                            target_task_ids: meta.target_task_ids.clone(),
-                        }),
-                    ),
-                )
-                .await?;
-                Ok(PhaseOutcome::TransitionCommitted)
-            }
-            ReviewDecision::PlanChange => {
-                crate::state_manager::apply_execution_event(
-                    &thread_store.control_store(),
-                    thread_id,
-                    crate::progress_controller::DataEngineerEvent::PatchImplIntentCleared,
+                    phase,
+                    sctx,
+                    execution_state,
+                    evidence,
+                    verdict,
                 )
                 .await
-                .map(|_| ())?;
+            }
+            ReviewDecision::PlanChange => {
                 let cleaned = DataEngineerSuite::strip_meta_line(&answer);
                 let evidence = {
                     let trimmed = cleaned.trim();
@@ -525,46 +393,27 @@ impl DataEngineerSuite {
                         trimmed.to_string()
                     }
                 };
-                let violations = if phase == control_flow::Phase::ModelReview
-                    && !meta.target_task_ids.is_empty()
-                {
-                    meta.target_task_ids
-                        .iter()
-                        .map(|id| {
-                            crate::progress_controller::PlanViolation::new(
-                                phase,
-                                Some(id.trim().to_string()),
-                                format!("Review requested plan change: {evidence}"),
-                            )
-                        })
-                        .collect()
-                } else {
-                    vec![crate::progress_controller::PlanViolation::new(
-                        phase,
-                        None,
-                        format!("Review requested plan change: {evidence}"),
-                    )]
-                };
-                let strategy = plan_change_revision_strategy(phase, &meta);
-                crate::phase_contract::commit_plan_revision_loopback(
+                let evidence =
+                    crate::evaluation::Evidence::Review(crate::evaluation::ReviewEvidence {
+                        brief: evidence,
+                        target_task_ids: meta.target_task_ids.clone(),
+                        requests_plan_change: true,
+                    });
+                let actx = Self::agent_tool_ctx(thread_id, sctx);
+                let input =
+                    crate::evaluation::build_input(&actx, phase, evidence.clone(), execution_state)
+                        .await?;
+                let verdict = crate::evaluation::evaluate(input);
+                Self::apply_evaluation_verdict(
                     thread_store,
                     thread_id,
                     phase,
-                    violations,
-                    strategy,
+                    sctx,
+                    execution_state,
+                    evidence,
+                    verdict,
                 )
-                .await?;
-                if unscoped_model_plan_change_retry_used
-                    && model_review_needs_plan_change_targets(phase, &meta)
-                {
-                    Self::clear_subjective_retries(
-                        thread_store,
-                        thread_id,
-                        vec![crate::progress_controller::SubjectiveRetryKind::ReviewPlanChange],
-                    )
-                    .await?;
-                }
-                Ok(PhaseOutcome::TransitionCommitted)
+                .await
             }
         }
     }

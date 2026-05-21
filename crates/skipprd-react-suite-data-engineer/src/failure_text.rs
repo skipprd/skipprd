@@ -12,7 +12,7 @@ pub fn normalize_errors(errors: &[String]) -> String {
     normalize_text(&errors.join("\n"))
 }
 
-pub fn is_infra_transient(s: &str) -> bool {
+pub fn matches_infra_transient(s: &str) -> bool {
     contains_any(
         s,
         &[
@@ -79,12 +79,12 @@ pub fn is_infra_config(s: &str) -> bool {
     )
 }
 
-pub fn classify_dbt_failure(errors: &[String]) -> FailureKind {
+pub fn classify_dbt_error_kind(errors: &[String]) -> FailureKind {
     if errors.is_empty() {
         return FailureKind::Unknown;
     }
     let s = normalize_errors(errors);
-    if is_infra_transient(&s) {
+    if matches_infra_transient(&s) {
         FailureKind::InfraTransient
     } else if is_infra_config(&s) {
         FailureKind::InfraConfig
@@ -98,35 +98,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn classify_dbt_failure_non_infra_is_unknown() {
+    fn classify_dbt_error_kind_non_infra_is_unknown() {
         let errors = vec!["Runtime Error: syntax error at or near FROM".to_string()];
-        assert_eq!(classify_dbt_failure(&errors), FailureKind::Unknown);
+        assert_eq!(classify_dbt_error_kind(&errors), FailureKind::Unknown);
     }
 
     #[test]
-    fn classify_dbt_failure_missing_source_is_unknown() {
+    fn classify_dbt_error_kind_missing_source_is_unknown() {
         let errors = vec![
             "Compilation Error: depends on a source named 'x.y' which was not found".to_string(),
         ];
-        assert_eq!(classify_dbt_failure(&errors), FailureKind::Unknown);
+        assert_eq!(classify_dbt_error_kind(&errors), FailureKind::Unknown);
     }
 
     #[test]
-    fn classify_dbt_failure_schema_error_is_unknown() {
+    fn classify_dbt_error_kind_schema_error_is_unknown() {
         let errors = vec!["Compilation Error: schema.yml parse failure".to_string()];
-        assert_eq!(classify_dbt_failure(&errors), FailureKind::Unknown);
+        assert_eq!(classify_dbt_error_kind(&errors), FailureKind::Unknown);
     }
 
     #[test]
-    fn classify_dbt_failure_warehouse_auth_is_config() {
+    fn classify_dbt_error_kind_warehouse_auth_is_config() {
         let errors = vec!["accessdenied: user is not authorized".to_string()];
-        assert_eq!(classify_dbt_failure(&errors), FailureKind::InfraConfig);
+        assert_eq!(classify_dbt_error_kind(&errors), FailureKind::InfraConfig);
     }
 
     #[test]
     fn classify_missing_key_file_is_config() {
         let errors = vec!["[Errno 2] No such file or directory: 'snowflake_key.p8'".to_string()];
-        assert_eq!(classify_dbt_failure(&errors), FailureKind::InfraConfig);
+        assert_eq!(classify_dbt_error_kind(&errors), FailureKind::InfraConfig);
     }
 
     #[test]
@@ -134,64 +134,80 @@ mod tests {
         let errors = vec![
             "dbt failed before compilation/build: invalid YAML/Jinja in profiles.yml".to_string(),
         ];
-        assert_eq!(classify_dbt_failure(&errors), FailureKind::InfraConfig);
+        assert_eq!(classify_dbt_error_kind(&errors), FailureKind::InfraConfig);
     }
 
     #[test]
     fn classify_yaml_flow_mapping_error_is_config() {
         let errors = vec!["did not find expected ',' or '}'".to_string()];
-        assert_eq!(classify_dbt_failure(&errors), FailureKind::InfraConfig);
+        assert_eq!(classify_dbt_error_kind(&errors), FailureKind::InfraConfig);
     }
 
     #[test]
-    fn classify_dbt_failure_service_error_is_transient() {
+    fn classify_dbt_error_kind_service_error_is_transient() {
         let errors = vec!["sql validation failed: service error".to_string()];
-        assert_eq!(classify_dbt_failure(&errors), FailureKind::InfraTransient);
+        assert_eq!(
+            classify_dbt_error_kind(&errors),
+            FailureKind::InfraTransient
+        );
     }
 
     #[test]
-    fn classify_dbt_failure_throttling_is_transient() {
+    fn classify_dbt_error_kind_throttling_is_transient() {
         let errors = vec!["ThrottlingException: rate exceeded".to_string()];
-        assert_eq!(classify_dbt_failure(&errors), FailureKind::InfraTransient);
+        assert_eq!(
+            classify_dbt_error_kind(&errors),
+            FailureKind::InfraTransient
+        );
     }
 
     #[test]
-    fn classify_dbt_failure_internal_server_is_transient() {
+    fn classify_dbt_error_kind_internal_server_is_transient() {
         let errors = vec!["InternalServerException: An internal error occurred".to_string()];
-        assert_eq!(classify_dbt_failure(&errors), FailureKind::InfraTransient);
+        assert_eq!(
+            classify_dbt_error_kind(&errors),
+            FailureKind::InfraTransient
+        );
     }
 
     #[test]
-    fn classify_dbt_failure_session_expired_is_transient() {
+    fn classify_dbt_error_kind_session_expired_is_transient() {
         let errors = vec!["Snowflake query failed: session expired".to_string()];
-        assert_eq!(classify_dbt_failure(&errors), FailureKind::InfraTransient);
+        assert_eq!(
+            classify_dbt_error_kind(&errors),
+            FailureKind::InfraTransient
+        );
     }
 
     #[test]
-    fn is_infra_transient_covers_aws_patterns() {
-        assert!(is_infra_transient("service error"));
-        assert!(is_infra_transient("internal server error"));
-        assert!(is_infra_transient("internalserverexception"));
-        assert!(is_infra_transient("serviceexception: something went wrong"));
-        assert!(is_infra_transient("throttlingexception: rate exceeded"));
-        assert!(is_infra_transient("toomanyrequestsexception"));
-        assert!(is_infra_transient("slow down"));
-        assert!(is_infra_transient("request limit exceeded"));
-        assert!(is_infra_transient("timed out waiting for response"));
-        assert!(is_infra_transient("bad gateway"));
-        assert!(is_infra_transient("gateway timeout"));
-        assert!(is_infra_transient("service unavailable"));
+    fn matches_infra_transient_covers_aws_patterns() {
+        assert!(matches_infra_transient("service error"));
+        assert!(matches_infra_transient("internal server error"));
+        assert!(matches_infra_transient("internalserverexception"));
+        assert!(matches_infra_transient(
+            "serviceexception: something went wrong"
+        ));
+        assert!(matches_infra_transient(
+            "throttlingexception: rate exceeded"
+        ));
+        assert!(matches_infra_transient("toomanyrequestsexception"));
+        assert!(matches_infra_transient("slow down"));
+        assert!(matches_infra_transient("request limit exceeded"));
+        assert!(matches_infra_transient("timed out waiting for response"));
+        assert!(matches_infra_transient("bad gateway"));
+        assert!(matches_infra_transient("gateway timeout"));
+        assert!(matches_infra_transient("service unavailable"));
     }
 
     #[test]
-    fn is_infra_transient_does_not_match_sql_errors() {
-        assert!(!is_infra_transient("syntax error at or near select"));
-        assert!(!is_infra_transient("compilation error in model"));
+    fn matches_infra_transient_does_not_match_sql_errors() {
+        assert!(!matches_infra_transient("syntax error at or near select"));
+        assert!(!matches_infra_transient("compilation error in model"));
     }
 
     #[test]
-    fn classify_dbt_failure_empty_is_unknown() {
-        assert_eq!(classify_dbt_failure(&[]), FailureKind::Unknown);
+    fn classify_dbt_error_kind_empty_is_unknown() {
+        assert_eq!(classify_dbt_error_kind(&[]), FailureKind::Unknown);
     }
 
     #[test]

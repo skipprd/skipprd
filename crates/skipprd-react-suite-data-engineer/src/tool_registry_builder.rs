@@ -261,6 +261,11 @@ impl DataEngineerSuite {
         let datasets_opt = crate::ctx_ext::sctx_datasets(sctx);
 
         let mut reg = ToolRegistry::new();
+        let _active_track = plan_state.track;
+        let _repair_evidence_hash = match &plan_state.mode {
+            AuthoringMode::Repair { evidence_hash } => evidence_hash.as_deref(),
+            _ => None,
+        };
 
         // Common read tools (safe in most phases)
         reg.register(SqlSchemaTool {
@@ -334,8 +339,8 @@ impl DataEngineerSuite {
                 reg.register(tools::dbt_examples::SearchDbtExamplesTool);
                 reg.register(JsonFileTool);
 
-                match plan_state {
-                    PlanState::Unconstrained => {
+                match &plan_state.mode {
+                    AuthoringMode::Unconstrained => {
                         reg.register(PolicyFilesTool {
                             inner: FilesTool {
                                 datasets: crate::ctx_ext::sctx_datasets(sctx),
@@ -371,14 +376,14 @@ impl DataEngineerSuite {
                             lines.push("- staging_model(args:{dataset_ids:[string], instructions?:string, sql?:string|staging_model?:string|expression?:string})".to_string());
                             lines.push("  - IMPORTANT: you MUST provide dataset_ids. This tool will NOT default to all datasets.".to_string());
                             lines.push(
-                                "- apply_next_cleanse_schema_batch(args:{instructions?:string})"
+                                "- apply_next_cleanse_schema_batch(args:{instructions?:string}) (deterministically generates models/staging/*.yml from sibling SQL columns)"
                                     .to_string(),
                             );
                         } else {
                             lines.push("- gold_model(args:{items:[{name:string, folder?:\"marts\"|\"core\", goal?:string, description?:string, inputs:[string], instructions?:string}]})".to_string());
                             lines.push(format!("  - IMPORTANT: max {} items per call. Gold uses ref() for inputs (stg_* or intra-plan gold models); NO source().", crate::plan_progress::MAX_BATCH_SIZE));
                             lines.push(
-                                "- apply_next_model_schema_batch(args:{instructions?:string})"
+                                "- apply_next_model_schema_batch(args:{instructions?:string}) (deterministically updates models/schema.yml from gold SQL columns)"
                                     .to_string(),
                             );
                         }
@@ -393,7 +398,7 @@ impl DataEngineerSuite {
                             Some("Not available in this phase: dbt_validate, publish_dbt_to_provider (suite handles these deterministically).".to_string()),
                         );
                     }
-                    PlanState::Repair => {
+                    AuthoringMode::Repair { .. } => {
                         reg.register(PolicyFilesTool {
                             inner: FilesTool {
                                 datasets: crate::ctx_ext::sctx_datasets(sctx),
@@ -414,7 +419,7 @@ impl DataEngineerSuite {
                             Some("Not available: gold_model, staging_model, apply_next_*_batch, dbt_validate, publish_dbt_to_provider. Use file(op:\"patch\") for targeted SQL/YAML fixes.".to_string()),
                         );
                     }
-                    PlanState::ReadOnly => {
+                    AuthoringMode::ReadOnly => {
                         reg.register(PolicyFilesTool {
                             inner: FilesTool {
                                 datasets: crate::ctx_ext::sctx_datasets(sctx),
@@ -437,9 +442,7 @@ impl DataEngineerSuite {
                             Some("Not available: staging_model, gold_model, apply_next_*_batch, file patch/rm/mv, dbt_validate, publish_dbt_to_provider.".to_string()),
                         );
                     }
-                    PlanState::CleanseSqlDatasetIds(_)
-                    | PlanState::CleanseSchemaDatasetIds(_)
-                    | PlanState::ModelSqlItemNames(_) => {
+                    AuthoringMode::Sql { .. } | AuthoringMode::Schema { .. } => {
                         reg.register(PolicyFilesTool {
                             inner: FilesTool {
                                 datasets: crate::ctx_ext::sctx_datasets(sctx),

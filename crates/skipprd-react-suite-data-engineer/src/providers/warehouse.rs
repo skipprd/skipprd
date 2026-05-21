@@ -19,6 +19,14 @@ pub trait WarehouseNaming: Send + Sync {
 
     fn quote_ident(&self, ident: &str) -> String;
 
+    fn dbt_runtime_namespace_ident(&self, ident: &str) -> String {
+        self.quote_ident(ident)
+    }
+
+    fn dbt_custom_schema_policy(&self) -> crate::providers::DbtCustomSchemaPolicy {
+        crate::providers::DbtCustomSchemaPolicy::AdapterDefault
+    }
+
     fn quote_fqn(&self, id: &DatasetId) -> String {
         format!(
             "{}.{}.{}",

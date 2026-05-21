@@ -778,19 +778,19 @@ mod tests {
     }
 
     #[test]
-    fn review_unknown_tier_routing_is_phase_aware() {
+    fn review_patch_impl_routes_through_evaluation() {
         let src = include_str!("phase_review.rs");
         assert!(
-            src.contains("effective_review_tier"),
-            "phase_review should use phase-aware review tier normalization"
+            src.contains("Evidence::Review"),
+            "phase_review should produce review evidence instead of phase-aware repair routing"
         );
         assert!(
-            src.contains("patch_impl_target_phase"),
-            "phase_review should route patch-impl through centralized helper"
+            src.contains("apply_evaluation_verdict"),
+            "phase_review should apply central evaluation verdicts"
         );
         assert!(
-            src.contains("effective_review_tier(phase, tier)"),
-            "unknown review tier should normalize through phase-aware helper"
+            !src.contains("patch_impl_target_phase"),
+            "patch-impl should no longer route through global repair-mode helpers"
         );
     }
 
@@ -916,11 +916,11 @@ mod tests {
     }
 
     #[test]
-    fn repair_state_uses_status_enum() {
+    fn repair_state_no_longer_uses_status_enum() {
         let src = include_str!("progress_controller.rs");
         assert!(
-            src.contains("pub status: RepairStatus"),
-            "RepairState should use a RepairStatus enum"
+            !src.contains(&format!("{}{}", "Repair", "Status")),
+            "repair status enum should be gone; verdicts and attempt ledger drive loops"
         );
         assert!(
             !src.contains("pub repair_active: bool"),

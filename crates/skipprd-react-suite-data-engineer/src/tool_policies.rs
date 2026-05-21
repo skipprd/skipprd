@@ -5,14 +5,14 @@ pub(super) fn register_batch_tool_for_plan_state(
     plan_state: &PlanState,
     datasets: &Option<std::sync::Arc<dyn crate::providers::DatasetCatalogProvider>>,
 ) -> Option<&'static str> {
-    match (phase, plan_state) {
-        (control_flow::Phase::CleanseAuthor, PlanState::CleanseSqlDatasetIds(_)) => {
+    match (phase, &plan_state.mode) {
+        (control_flow::Phase::CleanseAuthor, AuthoringMode::Sql { .. }) => {
             reg.register(tools::apply_next_batch::ApplyNextCleanseBatchTool {
                 datasets: datasets.clone(),
             });
             Some("apply_next_cleanse_batch")
         }
-        (control_flow::Phase::CleanseAuthor, PlanState::CleanseSchemaDatasetIds(_)) => {
+        (control_flow::Phase::CleanseAuthor, AuthoringMode::Schema { .. }) => {
             reg.register(
                 tools::apply_next_schema_batch::ApplyNextCleanseSchemaBatchTool {
                     datasets: datasets.clone(),
@@ -20,13 +20,15 @@ pub(super) fn register_batch_tool_for_plan_state(
             );
             Some("apply_next_cleanse_schema_batch")
         }
-        (control_flow::Phase::ModelAuthor, PlanState::ModelSqlItemNames(_)) => {
+        (control_flow::Phase::ModelAuthor, AuthoringMode::Sql { .. }) => {
             reg.register(tools::apply_next_batch::ApplyNextModelBatchTool);
             Some("apply_next_model_batch")
         }
-        (_, PlanState::Unconstrained | PlanState::Repair | PlanState::ReadOnly) => None,
-        (_, PlanState::ModelSqlItemNames(_)) => None,
-        (_, PlanState::CleanseSqlDatasetIds(_) | PlanState::CleanseSchemaDatasetIds(_)) => None,
+        (
+            _,
+            AuthoringMode::Unconstrained | AuthoringMode::Repair { .. } | AuthoringMode::ReadOnly,
+        ) => None,
+        (_, AuthoringMode::Sql { .. } | AuthoringMode::Schema { .. }) => None,
     }
 }
 

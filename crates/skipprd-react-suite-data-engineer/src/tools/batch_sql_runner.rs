@@ -17,7 +17,7 @@ pub(crate) fn extract_batch_failure_kind(res: &Value) -> Result<FailureKind, Str
 
 pub(crate) fn classify_schema_batch_failure_kind(msg: &str) -> FailureKind {
     let s = crate::failure_text::normalize_text(msg);
-    if crate::failure_text::is_infra_transient(&s) {
+    if crate::failure_text::matches_infra_transient(&s) {
         return FailureKind::InfraTransient;
     }
     FailureKind::Unknown
@@ -25,7 +25,7 @@ pub(crate) fn classify_schema_batch_failure_kind(msg: &str) -> FailureKind {
 
 pub(crate) fn classify_authoring_batch_failure_kind(msg: &str) -> FailureKind {
     let s = crate::failure_text::normalize_text(msg);
-    if crate::failure_text::is_infra_transient(&s) {
+    if crate::failure_text::matches_infra_transient(&s) {
         return FailureKind::InfraTransient;
     }
     FailureKind::Unknown

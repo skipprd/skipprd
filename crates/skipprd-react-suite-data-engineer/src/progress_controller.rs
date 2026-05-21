@@ -1,4 +1,3 @@
-use crate::failure_kind::FailureKind;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -10,32 +9,6 @@ use react_core::session::ControlStateStore;
 use crate::control_flow::Phase;
 
 pub const EXECUTION_STATE_SCHEMA_VERSION: u32 = 2;
-pub const MAX_REPAIR_CYCLES: usize = 8;
-
-// ── New typed enums (state machine hard cutover) ──
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "snake_case", tag = "status")]
-pub enum RepairStatus {
-    Idle,
-    Pending { cycle: usize },
-    Exhausted { cycles_used: usize },
-}
-
-impl Default for RepairStatus {
-    fn default() -> Self {
-        Self::Idle
-    }
-}
-
-#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
-pub struct ValidationFailureContext {
-    pub brief: String,
-    pub log_excerpts: Option<String>,
-    pub compile_ok: bool,
-    pub run_ok: bool,
-}
-
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(rename_all = "snake_case", tag = "status")]
 pub enum PublishStatus {
@@ -300,8 +273,7 @@ pub enum PlanStatus {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct RepairContext {
-    pub failure: Option<ValidationFailureContext>,
-    pub status: RepairStatus,
+    pub failure: Option<crate::evaluation::RepairEvidenceContext>,
     pub recent_failed_file_ops: Vec<RecentFailedFileOp>,
 }
 
@@ -317,11 +289,7 @@ impl RepairContext {
     }
 
     pub fn repair_cycles(&self) -> usize {
-        match &self.status {
-            RepairStatus::Idle => 0,
-            RepairStatus::Pending { cycle } => *cycle,
-            RepairStatus::Exhausted { cycles_used } => *cycles_used,
-        }
+        0
     }
 
     pub fn has_context(&self) -> bool {
@@ -386,13 +354,6 @@ impl RepairContext {
                  the SQL model to produce correct values (filter NULLs, fix joins, cast types, etc.).\n\
                  - Use your tools (file list, file read) to identify which model(s) or test(s) need fixing.\n",
             );
-        }
-        if self.repair_cycles() >= 2 {
-            out.push_str(&format!(
-                "\nWARNING: Repair cycle {} of {}. Previous attempts did NOT fully resolve the issue. \
-                 You MUST take a materially different approach.\n",
-                self.repair_cycles(), MAX_REPAIR_CYCLES,
-            ));
         }
         out
     }
@@ -707,11 +668,6 @@ pub enum SubjectiveRetryKind {
     PlanSemanticInvalid,
     PlanGroundingEmptyAfterPrune,
     PlanGroundingStagingDiscoveryEmpty,
-    ReviewPatchImpl,
-    ReviewPlanChange,
-    ValidatePrecheckFailed,
-    ValidateExecutionFailed,
-    ValidateFailedRetry,
 }
 
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -869,6 +825,12 @@ pub struct ExecutionState {
     pub(crate) telemetry: TelemetryState,
     #[serde(default)]
     pub(crate) subjective_retries: BTreeMap<SubjectiveRetryKind, usize>,
+    #[serde(default)]
+    pub(crate) attempt_ledger: crate::evaluation::AttemptLedger,
+    #[serde(default)]
+    pub(crate) last_evaluation: Option<crate::evaluation::EvaluationVerdictSummary>,
+    #[serde(default)]
+    pub(crate) last_evidence_hash: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
@@ -897,9 +859,7 @@ pub struct PhaseState {
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq)]
 pub struct RepairState {
     #[serde(default)]
-    pub status: RepairStatus,
-    #[serde(default)]
-    pub failure_context: Option<ValidationFailureContext>,
+    pub failure_context: Option<crate::evaluation::RepairEvidenceContext>,
     #[serde(default)]
     pub last_failure_hash: Option<String>,
     #[serde(default)]
@@ -908,20 +868,6 @@ pub struct RepairState {
     pub pending_patch_impl: Option<PatchImplIntent>,
     #[serde(default)]
     pub infra_transient: bool,
-}
-
-impl RepairState {
-    pub fn hard_mutation_repair_mode(&self) -> bool {
-        matches!(self.status, RepairStatus::Pending { .. })
-    }
-
-    pub fn cycle_count(&self) -> usize {
-        match &self.status {
-            RepairStatus::Idle => 0,
-            RepairStatus::Pending { cycle } => *cycle,
-            RepairStatus::Exhausted { cycles_used } => *cycles_used,
-        }
-    }
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, Default, PartialEq, Eq)]
@@ -940,23 +886,14 @@ pub enum DataEngineerEvent {
     ValidatePassed {
         tier: ExecutionTier,
     },
-    ValidateFailed {
-        tier: ExecutionTier,
-        brief: String,
-        failure_hash: String,
-        compile_ok: bool,
-        run_ok: bool,
-        log_excerpts: Option<String>,
+    EvaluationVerdictRecorded {
+        verdict: crate::evaluation::EvaluationVerdictSummary,
+        evidence_hash: String,
     },
-    BatchAuthoringFailed {
-        tier: ExecutionTier,
-        kind: FailureKind,
-        brief: String,
+    AttemptRecorded {
+        key: crate::evaluation::AttemptKey,
     },
     BatchAuthoringRecovered,
-
-    RepairSucceeded,
-    RepairExhausted,
 
     MutationRecorded {
         op: MutationOp,
@@ -1022,27 +959,18 @@ pub enum DataEngineerEvent {
 
     PlanRevisionConsumed,
     InfraTransientCleared,
-
-    ValidateCheckFailed {
-        failure_context: ValidationFailureContext,
-    },
 }
 
 impl ExecutionState {
     pub fn repair_context(&self) -> RepairContext {
         RepairContext {
             failure: self.repair.failure_context.clone(),
-            status: self.repair.status.clone(),
             recent_failed_file_ops: Vec::new(),
         }
     }
 
     pub fn last_validate_failed(&self) -> bool {
         self.repair.failure_context.is_some()
-    }
-
-    pub fn hard_mutation_repair_mode(&self) -> bool {
-        self.repair_state().hard_mutation_repair_mode()
     }
 
     pub fn new() -> Self {
@@ -1054,8 +982,8 @@ impl ExecutionState {
 
     pub fn apply_validate_success(&mut self) {
         self.phase.pending_plan_revision = None;
+        self.clear_last_evaluation();
 
-        self.repair.status = RepairStatus::Idle;
         self.repair.failure_context = None;
         self.repair.last_failure_hash = None;
         self.repair.mutated_since_fail = false;
@@ -1066,14 +994,11 @@ impl ExecutionState {
 
         self.telemetry.probe = ProbeStatus::NotRequired;
 
-        self.clear_subjective_retry_kind(SubjectiveRetryKind::ValidatePrecheckFailed);
-        self.clear_subjective_retry_kind(SubjectiveRetryKind::ValidateExecutionFailed);
-        self.clear_subjective_retry_kind(SubjectiveRetryKind::ValidateFailedRetry);
         self.debug_assert_invariants();
     }
 
     pub fn apply_repair_succeeded(&mut self) {
-        self.repair.status = RepairStatus::Idle;
+        self.clear_last_evaluation();
         self.repair.failure_context = None;
         self.repair.last_failure_hash = None;
         self.repair.mutated_since_fail = false;
@@ -1119,6 +1044,35 @@ impl ExecutionState {
 
     pub fn subjective_retries(&self) -> &BTreeMap<SubjectiveRetryKind, usize> {
         &self.subjective_retries
+    }
+
+    pub fn attempt_ledger(&self) -> &crate::evaluation::AttemptLedger {
+        &self.attempt_ledger
+    }
+
+    pub fn last_evaluation(&self) -> Option<&crate::evaluation::EvaluationVerdictSummary> {
+        self.last_evaluation.as_ref()
+    }
+
+    pub fn record_evaluation_verdict(
+        &mut self,
+        verdict: crate::evaluation::EvaluationVerdictSummary,
+        evidence_hash: String,
+    ) {
+        self.last_evaluation = Some(verdict);
+        self.last_evidence_hash = Some(evidence_hash);
+        self.debug_assert_invariants();
+    }
+
+    pub fn clear_last_evaluation(&mut self) {
+        self.last_evaluation = None;
+        self.last_evidence_hash = None;
+    }
+
+    pub fn record_attempt(&mut self, key: crate::evaluation::AttemptKey) -> usize {
+        let count = self.attempt_ledger.record(key);
+        self.debug_assert_invariants();
+        count
     }
 
     fn with_manifest_state_mut(&mut self, mutate: impl FnOnce(&mut ManifestState)) {
@@ -1220,15 +1174,7 @@ impl ExecutionState {
         run_ok: bool,
         log_excerpts: Option<String>,
     ) {
-        let repeated_failure =
-            self.repair.last_failure_hash.as_deref() == Some(failure_hash.as_str());
-        let next_cycle = if repeated_failure {
-            self.repair.cycle_count().saturating_add(1)
-        } else {
-            self.clear_subjective_retry_kind(SubjectiveRetryKind::ValidateFailedRetry);
-            1
-        };
-        self.repair.failure_context = Some(ValidationFailureContext {
+        self.repair.failure_context = Some(crate::evaluation::RepairEvidenceContext {
             brief: brief.clone(),
             log_excerpts,
             compile_ok,
@@ -1236,7 +1182,6 @@ impl ExecutionState {
         });
         self.repair.last_failure_hash = Some(failure_hash);
         self.repair.mutated_since_fail = false;
-        self.repair.status = RepairStatus::Pending { cycle: next_cycle };
         self.publish = PublishStatus::NotRequested;
         self.telemetry.probe = if compile_ok {
             ProbeStatus::Required {
@@ -1358,6 +1303,7 @@ impl ExecutionState {
     }
 
     pub fn clear_pending_patch_impl(&mut self) {
+        self.clear_last_evaluation();
         self.with_repair_state_mut(|repair| {
             repair.pending_patch_impl = None;
         });
@@ -1366,6 +1312,7 @@ impl ExecutionState {
     pub fn set_publish_approval(&mut self, decision: PublishApprovalDecision) {
         match decision {
             PublishApprovalDecision::Approved => {
+                self.clear_last_evaluation();
                 let sha = self.publish.plan_sha256().map(|s| s.to_string());
                 self.publish = PublishStatus::Approved { plan_sha256: sha };
             }
@@ -1453,7 +1400,7 @@ impl ExecutionState {
 
     pub fn mark_failed(&mut self, brief: impl Into<String>) {
         let brief_str = brief.into();
-        self.repair.failure_context = Some(ValidationFailureContext {
+        self.repair.failure_context = Some(crate::evaluation::RepairEvidenceContext {
             brief: brief_str,
             log_excerpts: None,
             compile_ok: false,
@@ -1493,6 +1440,7 @@ impl ExecutionState {
     }
 
     pub fn mark_publish_complete(&mut self, plan_sha256: String) {
+        self.clear_last_evaluation();
         self.publish = PublishStatus::Succeeded { plan_sha256 };
         self.debug_assert_invariants();
     }
@@ -1541,49 +1489,18 @@ impl ExecutionState {
     pub fn apply_event(&mut self, event: DataEngineerEvent) {
         match event {
             DataEngineerEvent::ValidatePassed { tier: _ } => self.apply_validate_success(),
-            DataEngineerEvent::ValidateFailed {
-                tier: _,
-                brief,
-                failure_hash,
-                compile_ok,
-                run_ok,
-                log_excerpts,
-            } => {
-                self.apply_validate_failure(brief, failure_hash, compile_ok, run_ok, log_excerpts);
-            }
-            DataEngineerEvent::BatchAuthoringFailed {
-                tier: _,
-                kind,
-                brief,
-            } => {
-                if kind == FailureKind::InfraTransient {
-                    self.repair.infra_transient = true;
-                    self.repair.failure_context = Some(ValidationFailureContext {
-                        brief,
-                        log_excerpts: None,
-                        compile_ok: false,
-                        run_ok: false,
-                    });
-                    self.debug_assert_invariants();
-                    return;
-                }
-                let hash = sha256_hex(brief.trim());
-                self.apply_validate_failure(brief, hash, false, false, None);
+            DataEngineerEvent::EvaluationVerdictRecorded {
+                verdict,
+                evidence_hash,
+            } => self.record_evaluation_verdict(verdict, evidence_hash),
+            DataEngineerEvent::AttemptRecorded { key } => {
+                self.record_attempt(key);
             }
             DataEngineerEvent::BatchAuthoringRecovered => {
-                self.repair.status = RepairStatus::Idle;
+                self.clear_last_evaluation();
                 self.repair.failure_context = None;
                 self.repair.pending_patch_impl = None;
                 self.telemetry.probe = ProbeStatus::NotRequired;
-            }
-            DataEngineerEvent::RepairSucceeded => {
-                self.apply_repair_succeeded();
-            }
-            DataEngineerEvent::RepairExhausted => {
-                let cycles = self.repair.cycle_count();
-                self.repair.status = RepairStatus::Exhausted {
-                    cycles_used: cycles,
-                };
             }
             DataEngineerEvent::MutationRecorded {
                 op,
@@ -1652,16 +1569,10 @@ impl ExecutionState {
             }
             DataEngineerEvent::PlanRevisionConsumed => {
                 self.phase.pending_plan_revision = None;
+                self.clear_last_evaluation();
             }
             DataEngineerEvent::InfraTransientCleared => {
                 self.repair.infra_transient = false;
-            }
-            DataEngineerEvent::ValidateCheckFailed { failure_context } => {
-                let next_cycle = self.repair.cycle_count().saturating_add(1);
-                self.repair.failure_context = Some(failure_context);
-                self.repair.last_failure_hash = None;
-                self.repair.mutated_since_fail = false;
-                self.repair.status = RepairStatus::Pending { cycle: next_cycle };
             }
         }
         self.debug_assert_invariants();
@@ -1821,7 +1732,6 @@ mod tests {
     fn repair_context_includes_recent_failed_file_ops() {
         let ctx = RepairContext {
             failure: None,
-            status: RepairStatus::Idle,
             recent_failed_file_ops: vec![RecentFailedFileOp {
                 op: "patch".to_string(),
                 path: "models/staging/stg_orders.yml".to_string(),
@@ -1834,90 +1744,6 @@ mod tests {
         assert!(rendered.contains("Recent failed file mutations"));
         assert!(rendered.contains("stg_orders.yml"));
         assert!(rendered.contains("duplicate entry with key"));
-    }
-
-    #[test]
-    fn validate_success_resets_repair_and_retry_state() {
-        let mut st = ExecutionState::new();
-        st.repair.status = RepairStatus::Pending { cycle: 1 };
-        st.repair.failure_context = Some(ValidationFailureContext {
-            brief: "some error".to_string(),
-            log_excerpts: None,
-            compile_ok: false,
-            run_ok: false,
-        });
-        st.subjective_retries
-            .insert(SubjectiveRetryKind::PlanSemanticInvalid, 3);
-        st.subjective_retries
-            .insert(SubjectiveRetryKind::ValidatePrecheckFailed, 2);
-        st.apply_validate_success();
-        assert_eq!(st.phase.current_phase.tier(), ExecutionTier::Unknown);
-        assert!(!st.hard_mutation_repair_mode());
-        assert_eq!(
-            st.subjective_retries
-                .get(&SubjectiveRetryKind::PlanSemanticInvalid),
-            Some(&3)
-        );
-        assert_eq!(
-            st.subjective_retries
-                .get(&SubjectiveRetryKind::ValidatePrecheckFailed),
-            None
-        );
-    }
-
-    #[test]
-    fn repair_succeeded_preserves_subjective_retry_counters() {
-        let mut st = ExecutionState::new();
-        st.repair.status = RepairStatus::Pending { cycle: 2 };
-        st.repair.failure_context = Some(ValidationFailureContext {
-            brief: "precheck error".to_string(),
-            log_excerpts: None,
-            compile_ok: false,
-            run_ok: false,
-        });
-        st.subjective_retries
-            .insert(SubjectiveRetryKind::ValidatePrecheckFailed, 2);
-        st.subjective_retries
-            .insert(SubjectiveRetryKind::ValidateExecutionFailed, 1);
-
-        st.apply_repair_succeeded();
-
-        assert_eq!(st.repair.status, RepairStatus::Idle);
-        assert!(st.repair.failure_context.is_none());
-        assert_eq!(
-            st.subjective_retries
-                .get(&SubjectiveRetryKind::ValidatePrecheckFailed),
-            Some(&2),
-            "precheck retry counter must survive repair_succeeded"
-        );
-        assert_eq!(
-            st.subjective_retries
-                .get(&SubjectiveRetryKind::ValidateExecutionFailed),
-            Some(&1),
-            "execution-failed retry counter must survive repair_succeeded"
-        );
-    }
-
-    #[test]
-    fn validate_failure_activates_repair() {
-        let mut st = ExecutionState::new();
-        st.apply_validate_failure(
-            "schema fail".to_string(),
-            sha256_hex("schema fail"),
-            true,
-            false,
-            None,
-        );
-        assert!(st.hard_mutation_repair_mode());
-        assert!(matches!(
-            st.repair.status,
-            RepairStatus::Pending { cycle: 1 }
-        ));
-        assert_eq!(
-            st.repair.failure_context.as_ref().unwrap().brief,
-            "schema fail"
-        );
-        assert_eq!(st.repair.cycle_count(), 1);
     }
 
     #[test]
@@ -1991,7 +1817,7 @@ mod tests {
     #[test]
     fn gate_authoring_probe_rejects_when_probe_required() {
         let mut st = ExecutionState::new();
-        st.repair.failure_context = Some(ValidationFailureContext {
+        st.repair.failure_context = Some(crate::evaluation::RepairEvidenceContext {
             brief: "test".to_string(),
             log_excerpts: None,
             compile_ok: true,
@@ -2006,7 +1832,6 @@ mod tests {
     #[test]
     fn gate_authoring_probe_accepts_when_no_probe_required() {
         let mut st = ExecutionState::new();
-        st.repair.status = RepairStatus::Pending { cycle: 1 };
         st.telemetry.probe = ProbeStatus::NotRequired;
         assert!(gate_authoring_probe(&st).is_ok());
     }
@@ -2014,7 +1839,7 @@ mod tests {
     #[test]
     fn probe_status_allows_multiple_meaningful_probes_and_exhausts_on_repeats() {
         let mut st = ExecutionState::new();
-        st.repair.failure_context = Some(ValidationFailureContext {
+        st.repair.failure_context = Some(crate::evaluation::RepairEvidenceContext {
             brief: "test".to_string(),
             log_excerpts: None,
             compile_ok: true,
@@ -2066,7 +1891,7 @@ mod tests {
     #[test]
     fn successful_mutation_unblocks_exhausted_probe_cycle() {
         let mut st = ExecutionState::new();
-        st.repair.failure_context = Some(ValidationFailureContext {
+        st.repair.failure_context = Some(crate::evaluation::RepairEvidenceContext {
             brief: "test".to_string(),
             log_excerpts: None,
             compile_ok: true,
@@ -2134,80 +1959,9 @@ mod tests {
     }
 
     #[test]
-    fn validate_failures_increment_repair_cycles() {
-        let mut st = ExecutionState::new();
-
-        st.apply_validate_failure(
-            "error A".to_string(),
-            sha256_hex("error A"),
-            true,
-            false,
-            None,
-        );
-        assert_eq!(st.repair.cycle_count(), 1);
-
-        st.apply_validate_failure(
-            "error A".to_string(),
-            sha256_hex("error A"),
-            true,
-            false,
-            None,
-        );
-        assert_eq!(st.repair.cycle_count(), 2);
-
-        st.apply_validate_failure(
-            "error B".to_string(),
-            sha256_hex("error B"),
-            true,
-            false,
-            None,
-        );
-        assert_eq!(
-            st.repair.cycle_count(),
-            1,
-            "a new failure signature should reset the repair-cycle stall counter"
-        );
-    }
-
-    #[test]
-    fn new_validate_failure_signature_clears_validate_retry_budget() {
-        let mut st = ExecutionState::new();
-
-        st.apply_validate_failure(
-            "error A".to_string(),
-            sha256_hex("error A"),
-            true,
-            false,
-            None,
-        );
-        st.bump_subjective_retry(SubjectiveRetryKind::ValidateFailedRetry, 4);
-        st.bump_subjective_retry(SubjectiveRetryKind::ValidateFailedRetry, 4);
-        assert_eq!(
-            st.subjective_retries()
-                .get(&SubjectiveRetryKind::ValidateFailedRetry)
-                .copied(),
-            Some(2)
-        );
-
-        st.apply_validate_failure(
-            "error B".to_string(),
-            sha256_hex("error B"),
-            true,
-            false,
-            None,
-        );
-        assert!(
-            st.subjective_retries()
-                .get(&SubjectiveRetryKind::ValidateFailedRetry)
-                .is_none(),
-            "new failure signatures should reset the validate retry budget"
-        );
-    }
-
-    #[test]
     fn probe_attempt_recorded_advances_probe_requirement() {
         let mut st = ExecutionState::new();
-        st.repair.failure_context = Some(ValidationFailureContext {
+        st.repair.failure_context = Some(crate::evaluation::RepairEvidenceContext {
             brief: "test".to_string(),
             log_excerpts: None,
             compile_ok: true,
@@ -2232,98 +1986,75 @@ mod tests {
     }
 
     #[test]
-    fn apply_event_batch_authoring_failed_activates_repair() {
-        let mut st = ExecutionState::new();
-        st.apply_event(DataEngineerEvent::BatchAuthoringFailed {
-            tier: ExecutionTier::Cleanse,
-            kind: FailureKind::Unknown,
-            brief: "sql validation failed".to_string(),
-        });
-        assert!(st.hard_mutation_repair_mode());
-        assert!(st.last_validate_failed());
-    }
-
-    #[test]
-    fn apply_event_batch_authoring_failed_infra_transient_skips_repair() {
-        let mut st = ExecutionState::new();
-        st.apply_event(DataEngineerEvent::BatchAuthoringFailed {
-            tier: ExecutionTier::Cleanse,
-            kind: FailureKind::InfraTransient,
-            brief: "service error".to_string(),
-        });
-        assert!(
-            !st.hard_mutation_repair_mode(),
-            "infra-transient must not enter repair mode"
-        );
-        assert!(
-            st.repair.infra_transient,
-            "flag must be set for step-boundary short-circuit"
-        );
-        assert_eq!(
-            st.repair.cycle_count(),
-            0,
-            "repair_cycles must not increment"
-        );
-        assert_eq!(
-            st.repair.failure_context.as_ref().unwrap().brief,
-            "service error"
-        );
-    }
-
-    #[test]
-    fn apply_event_infra_transient_cleared() {
-        let mut st = ExecutionState::new();
-        st.repair.infra_transient = true;
-        st.apply_event(DataEngineerEvent::InfraTransientCleared);
-        assert!(!st.repair.infra_transient);
-    }
-
-    #[test]
-    fn apply_event_validate_check_failed_sets_failure_context() {
-        let mut st = ExecutionState::new();
-        assert!(st.repair.failure_context.is_none());
-        assert_eq!(st.repair.status, RepairStatus::Idle);
-        st.apply_event(DataEngineerEvent::ValidateCheckFailed {
-            failure_context: ValidationFailureContext {
-                brief: "YAML references unknown columns".to_string(),
-                log_excerpts: None,
-                compile_ok: false,
-                run_ok: false,
-            },
-        });
-        assert!(st.repair.failure_context.is_some());
-        assert_eq!(
-            st.repair.failure_context.as_ref().unwrap().brief,
-            "YAML references unknown columns"
-        );
-        assert_eq!(st.repair.status, RepairStatus::Pending { cycle: 1 });
-        assert!(!st.repair.mutated_since_fail);
-    }
-
-    #[test]
     fn apply_event_plan_revision_consumed() {
         let mut st = ExecutionState::new();
         st.phase.pending_plan_revision = Some(PlanRevisionIntent {
             violations: vec![],
             strategy: PlanRevisionStrategy::Rewrite,
         });
+        st.record_evaluation_verdict(
+            crate::evaluation::EvaluationVerdictSummary {
+                kind: crate::evaluation::VerdictKind::RevisePlan,
+                message: "PLAN REVISION REQUIRED".to_string(),
+            },
+            "hash".to_string(),
+        );
         st.apply_event(DataEngineerEvent::PlanRevisionConsumed);
         assert!(st.phase.pending_plan_revision.is_none());
+        assert!(st.last_evaluation().is_none());
+        assert!(st.last_evidence_hash.is_none());
     }
 
     #[test]
     fn apply_event_batch_authoring_recovered_clears_repair() {
         let mut st = ExecutionState::new();
-        st.repair.status = RepairStatus::Pending { cycle: 1 };
-        st.repair.failure_context = Some(ValidationFailureContext {
+        st.repair.failure_context = Some(crate::evaluation::RepairEvidenceContext {
             brief: "some error".to_string(),
             log_excerpts: None,
             compile_ok: false,
             run_ok: false,
         });
+        st.record_evaluation_verdict(
+            crate::evaluation::EvaluationVerdictSummary {
+                kind: crate::evaluation::VerdictKind::RepairImplementation,
+                message: "repair".to_string(),
+            },
+            "hash".to_string(),
+        );
         st.apply_event(DataEngineerEvent::BatchAuthoringRecovered);
-        assert!(!st.hard_mutation_repair_mode());
         assert!(st.repair.failure_context.is_none());
+        assert!(st.last_evaluation().is_none());
+    }
+
+    #[test]
+    fn successful_validate_and_publish_clear_last_evaluation() {
+        let mut st = ExecutionState::new();
+        st.record_evaluation_verdict(
+            crate::evaluation::EvaluationVerdictSummary {
+                kind: crate::evaluation::VerdictKind::RevisePlan,
+                message: "PLAN REVISION REQUIRED".to_string(),
+            },
+            "hash".to_string(),
+        );
+
+        st.apply_event(DataEngineerEvent::ValidatePassed {
+            tier: ExecutionTier::Model,
+        });
+        assert!(st.last_evaluation().is_none());
+        assert!(st.last_evidence_hash.is_none());
+
+        st.record_evaluation_verdict(
+            crate::evaluation::EvaluationVerdictSummary {
+                kind: crate::evaluation::VerdictKind::RepairImplementation,
+                message: "repair".to_string(),
+            },
+            "hash2".to_string(),
+        );
+        st.apply_event(DataEngineerEvent::PublishCompleted {
+            sha256: "sha".to_string(),
+        });
+        assert!(st.last_evaluation().is_none());
+        assert!(st.last_evidence_hash.is_none());
     }
 
     #[test]

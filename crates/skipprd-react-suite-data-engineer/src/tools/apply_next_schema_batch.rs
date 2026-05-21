@@ -1,10 +1,11 @@
 use async_trait::async_trait;
+use serde::Serialize;
 use serde_json::Value;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use crate::providers::DatasetCatalogProvider;
 use react_core::agent::AgentCtx;
-use react_core::llm::LlmCallOptions;
 use react_core::tools::Tool;
 
 use crate::chunk_progress_contract;
@@ -13,179 +14,283 @@ use crate::naming;
 use crate::plan;
 use crate::project_fs;
 use crate::references::DatasetRef;
-use crate::schema_policy;
 use crate::tools::files_tool;
+
+#[derive(Clone, Debug, Default)]
+struct ExistingModelMeta {
+    description: Option<String>,
+    columns: BTreeMap<String, ExistingColumnMeta>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct ExistingColumnMeta {
+    description: Option<String>,
+    data_type: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SchemaDoc {
+    version: i32,
+    models: Vec<SchemaModelDoc>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SchemaModelDoc {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    config: Option<SchemaModelConfig>,
+    columns: Vec<SchemaColumnDoc>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SchemaModelConfig {
+    contract: SchemaContractConfig,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SchemaContractConfig {
+    enforced: bool,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct SchemaColumnDoc {
+    name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    data_type: Option<String>,
+}
 
 fn escape_yaml_doc_preamble(s: String) -> String {
     // serde_yaml may emit a leading `---\n`; keep stored files clean and consistent.
     s.trim_start_matches("---\n").to_string()
 }
 
-fn strip_where_keys(v: &mut serde_yaml::Value) {
-    // Deterministic sanitization: remove `where:` keys anywhere in the YAML subtree.
-    // This avoids schema-yml validation failures due to referencing *_raw columns that are not present
-    // in the sibling staging SQL output. (Tests are optional; correctness > strictness here.)
-    match v {
-        serde_yaml::Value::Mapping(m) => {
-            m.remove(&serde_yaml::Value::String("where".to_string()));
-            for (_k, vv) in m.iter_mut() {
-                strip_where_keys(vv);
-            }
+fn yaml_str<'a>(mapping: &'a serde_yaml::Mapping, key: &str) -> Option<&'a str> {
+    mapping
+        .get(serde_yaml::Value::String(key.to_string()))
+        .and_then(|value| value.as_str())
+}
+
+fn existing_model_meta(yml_text: Option<&str>, model_name: &str) -> ExistingModelMeta {
+    let Some(yml_text) = yml_text else {
+        return ExistingModelMeta::default();
+    };
+    let Ok(root) = serde_yaml::from_str::<serde_yaml::Value>(yml_text) else {
+        return ExistingModelMeta::default();
+    };
+    let Some(models) = root
+        .as_mapping()
+        .and_then(|mapping| mapping.get(serde_yaml::Value::String("models".to_string())))
+        .and_then(|value| value.as_sequence())
+    else {
+        return ExistingModelMeta::default();
+    };
+    for model in models {
+        let Some(mapping) = model.as_mapping() else {
+            continue;
+        };
+        if yaml_str(mapping, "name").map(str::trim) != Some(model_name) {
+            continue;
         }
-        serde_yaml::Value::Sequence(seq) => {
-            for vv in seq.iter_mut() {
-                strip_where_keys(vv);
-            }
+        let mut meta = ExistingModelMeta {
+            description: yaml_str(mapping, "description")
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string()),
+            columns: BTreeMap::new(),
+        };
+        let Some(columns) = mapping
+            .get(serde_yaml::Value::String("columns".to_string()))
+            .and_then(|value| value.as_sequence())
+        else {
+            return meta;
+        };
+        for column in columns {
+            let Some(column_map) = column.as_mapping() else {
+                continue;
+            };
+            let Some(name) = yaml_str(column_map, "name")
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+            else {
+                continue;
+            };
+            meta.columns.insert(
+                name.to_string(),
+                ExistingColumnMeta {
+                    description: yaml_str(column_map, "description")
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(|value| value.to_string()),
+                    data_type: yaml_str(column_map, "data_type")
+                        .map(str::trim)
+                        .filter(|value| !value.is_empty())
+                        .map(|value| value.to_string()),
+                },
+            );
         }
-        _ => {}
+        return meta;
+    }
+    ExistingModelMeta::default()
+}
+
+fn output_field_meta(
+    fields: &[crate::plan_types::OutputFieldSpec],
+) -> BTreeMap<String, ExistingColumnMeta> {
+    fields
+        .iter()
+        .map(|field| {
+            (
+                field.name.trim().to_string(),
+                ExistingColumnMeta {
+                    description: field
+                        .description
+                        .as_ref()
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty()),
+                    data_type: field
+                        .data_type
+                        .as_ref()
+                        .map(|value| value.trim().to_string())
+                        .filter(|value| !value.is_empty()),
+                },
+            )
+        })
+        .filter(|(name, _)| !name.is_empty())
+        .collect()
+}
+
+fn schema_model_doc(
+    model_name: &str,
+    description: Option<String>,
+    columns: &[String],
+    existing: &ExistingModelMeta,
+    planned: &BTreeMap<String, ExistingColumnMeta>,
+    staging_contract_config: bool,
+) -> SchemaModelDoc {
+    SchemaModelDoc {
+        name: model_name.to_string(),
+        description: description.or_else(|| existing.description.clone()),
+        config: staging_contract_config.then_some(SchemaModelConfig {
+            contract: SchemaContractConfig { enforced: false },
+        }),
+        columns: columns
+            .iter()
+            .map(|name| {
+                let existing_col = existing.columns.get(name);
+                let planned_col = planned.get(name);
+                SchemaColumnDoc {
+                    name: name.clone(),
+                    description: existing_col
+                        .and_then(|meta| meta.description.clone())
+                        .or_else(|| planned_col.and_then(|meta| meta.description.clone())),
+                    data_type: existing_col
+                        .and_then(|meta| meta.data_type.clone())
+                        .or_else(|| planned_col.and_then(|meta| meta.data_type.clone())),
+                }
+            })
+            .collect(),
     }
 }
 
-fn sanitize_staging_schema_yml_to_allowed_columns(
-    yml_text: &str,
+fn render_staging_schema_yml(
     model_name: &str,
-    allowed_columns: &[String],
+    dataset_id: &str,
+    columns: &[String],
+    existing_text: Option<&str>,
+    planned_fields: &[crate::plan_types::OutputFieldSpec],
 ) -> Result<String, String> {
-    let allowed: std::collections::HashSet<String> = allowed_columns
-        .iter()
-        .cloned()
-        .collect::<std::collections::HashSet<_>>();
-    let mut root: serde_yaml::Value =
-        serde_yaml::from_str(yml_text).map_err(|e| format!("invalid YAML: {}", e))?;
-
-    // Remove problematic `where:` keys (tests) first.
-    strip_where_keys(&mut root);
-
-    // Filter models[].columns[].name to allowed set for the specific model.
-    let Some(root_map) = root.as_mapping_mut() else {
-        return Ok(yml_text.to_string());
+    let existing = existing_model_meta(existing_text, model_name);
+    let planned = output_field_meta(planned_fields);
+    let doc = SchemaDoc {
+        version: 2,
+        models: vec![schema_model_doc(
+            model_name,
+            Some(format!("Staging model for {dataset_id}.")),
+            columns,
+            &existing,
+            &planned,
+            true,
+        )],
     };
-    let Some(models) = root_map
-        .get_mut(&serde_yaml::Value::String("models".to_string()))
-        .and_then(|v| v.as_sequence_mut())
-    else {
-        return Ok(yml_text.to_string());
-    };
+    serde_yaml::to_string(&doc)
+        .map(escape_yaml_doc_preamble)
+        .map_err(|e| format!("failed to render staging schema YAML: {e}"))
+}
 
-    for m in models.iter_mut() {
-        let Some(mm) = m.as_mapping_mut() else {
-            continue;
-        };
-        let name = mm
-            .get(&serde_yaml::Value::String("name".to_string()))
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .trim();
-        if name != model_name {
-            continue;
-        }
-        let Some(cols) = mm
-            .get_mut(&serde_yaml::Value::String("columns".to_string()))
-            .and_then(|v| v.as_sequence_mut())
-        else {
-            continue;
-        };
-        cols.retain(|c| {
-            let Some(cm) = c.as_mapping() else {
-                return true;
-            };
-            let col = cm
-                .get(&serde_yaml::Value::String("name".to_string()))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .trim();
-            if col.is_empty() {
-                return false;
-            }
-            allowed.contains(col)
-        });
+fn schema_model_value(model: SchemaModelDoc) -> Result<serde_yaml::Value, String> {
+    serde_yaml::to_value(model).map_err(|e| format!("failed to encode model schema entry: {e}"))
+}
+
+fn merge_models_schema_yml(
+    existing_text: Option<&str>,
+    models: Vec<SchemaModelDoc>,
+) -> Result<String, String> {
+    let touched: HashSet<String> = models.iter().map(|model| model.name.clone()).collect();
+    let mut root = existing_text
+        .and_then(|text| serde_yaml::from_str::<serde_yaml::Value>(text).ok())
+        .unwrap_or_else(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()));
+    if !root.is_mapping() {
+        root = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
     }
-
+    let Some(root_map) = root.as_mapping_mut() else {
+        return Err("failed to initialize models/schema.yml root mapping".to_string());
+    };
+    root_map
+        .entry(serde_yaml::Value::String("version".to_string()))
+        .or_insert_with(|| serde_yaml::Value::Number(2.into()));
+    let models_key = serde_yaml::Value::String("models".to_string());
+    if !root_map.contains_key(&models_key) {
+        root_map.insert(models_key.clone(), serde_yaml::Value::Sequence(Vec::new()));
+    }
+    let Some(sequence) = root_map
+        .get_mut(&models_key)
+        .and_then(|value| value.as_sequence_mut())
+    else {
+        return Err("models/schema.yml top-level models key must be a sequence".to_string());
+    };
+    sequence.retain(|value| {
+        value
+            .as_mapping()
+            .and_then(|mapping| yaml_str(mapping, "name"))
+            .map(|name| !touched.contains(name.trim()))
+            .unwrap_or(true)
+    });
+    for model in models {
+        sequence.push(schema_model_value(model)?);
+    }
     serde_yaml::to_string(&root)
         .map(escape_yaml_doc_preamble)
-        .map_err(|e| format!("failed to re-serialize YAML: {}", e))
+        .map_err(|e| format!("failed to render models/schema.yml: {e}"))
 }
 
-fn rewrite_final_select_wildcard(sql_text: &str, allowed_columns: &[String]) -> Option<String> {
-    if allowed_columns.is_empty() {
-        return None;
-    }
-    let lowered = sql_text.to_ascii_lowercase();
-    let select_idx = lowered.rfind("select")?;
-    let from_search_start = select_idx + "select".len();
-    let from_rel = lowered[from_search_start..].find("from")?;
-    let from_idx = from_search_start + from_rel;
-    let select_expr = sql_text[from_search_start..from_idx].trim();
-    let wildcard = select_expr == "*" || select_expr.ends_with(".*");
-    if !wildcard {
-        return None;
-    }
-
-    let projected = allowed_columns
-        .iter()
-        .map(|c| c.trim())
-        .filter(|c| !c.is_empty())
-        .map(|c| format!("  {c}"))
-        .collect::<Vec<_>>();
-    if projected.is_empty() {
-        return None;
-    }
-
-    let mut out = String::with_capacity(sql_text.len() + projected.len() * 8);
-    out.push_str(&sql_text[..select_idx]);
-    out.push_str("select\n");
-    out.push_str(&projected.join(",\n"));
-    out.push('\n');
-    out.push_str(&sql_text[from_idx..]);
-    Some(out)
+fn validation_patch_outcome(
+    ctx: &AgentCtx,
+    rel: &str,
+    old: &str,
+    new: &str,
+    existed: bool,
+) -> Result<project_fs::PatchOutcome, String> {
+    Ok(project_fs::PatchOutcome {
+        rel_path: rel.to_string(),
+        key: project_fs::join_storage_key(ctx, rel),
+        existed,
+        base_sha256: project_fs::sha256_hex(old),
+        new_sha256: project_fs::sha256_hex(new),
+        git_patch: project_fs::create_git_patch_text(old, new, rel, existed)?,
+        diff: String::new(),
+        lines_added: 0,
+        lines_removed: 0,
+        content: new.to_string(),
+        apply_result_code: project_fs::PatchApplyResultCode::AppliedUnifiedDirect,
+        apply_repairs: Vec::new(),
+    })
 }
 
 use super::model_authoring_engine::extract_string_arg;
-
-fn schema_yml_sys_prompt_staging() -> String {
-    vec![
-        "You are an expert analytics engineer.".to_string(),
-        "Task: author a dbt *silver schema* YAML for ONE silver model file under models/staging/.".to_string(),
-        "Requirements:".to_string(),
-        "- Return a single-file patch as `patch_text` using Cursor/Aider hunks-only format (MUST).".to_string(),
-        "- Patch MUST modify ONLY expected_rel_path (no other files).".to_string(),
-        "- Do NOT add or reference columns not present in allowed_columns.".to_string(),
-        "- Do NOT re-declare sources; source definitions belong in models/schema.yml or other authorized files.".to_string(),
-        "- IMPORTANT: contract enforcement is disabled. Do NOT set models[].config.contract.enforced=true.".to_string(),
-        "- Prefer including all allowed_columns under models[].columns, but it is OK if some are missing while iterating.".to_string(),
-        "- data_type is optional (preferred when known, omit rather than guessing).".to_string(),
-        "- Column names must match allowed_columns exactly (no comments or helper markers as column names).".to_string(),
-        "".to_string(),
-        crate::prompts::patch_contract::llm_patch_response_contract(),
-    ]
-    .join("\n")
-}
-
-fn schema_yml_sys_prompt_models_schema_yml() -> String {
-    vec![
-        "You are an expert analytics engineer.".to_string(),
-        "Task: update models/schema.yml to add or update dbt model documentation/tests for a small set of gold models.".to_string(),
-        "Requirements:".to_string(),
-        "- Return a single-file patch as `patch_text` using Cursor/Aider hunks-only format (MUST).".to_string(),
-        "- Patch MUST modify ONLY expected_rel_path (no other files).".to_string(),
-        "- Do NOT create additional YAML files; use models/schema.yml only.".to_string(),
-        "- IMPORTANT (ownership): do NOT add staging (stg_*) models to models/schema.yml. Staging docs/tests must be in models/staging/*.yml.".to_string(),
-        "- IMPORTANT (grounding): For each model, you will be given allowed_columns derived from its SQL. Do NOT create tests or where: predicates that reference columns not in allowed_columns.".to_string(),
-        "- If allowed_columns is empty/unavailable for a model, you MAY update docs/descriptions, but you MUST NOT add tests for that model.".to_string(),
-        "- Keep output concise: only touch the specified model names; preserve existing content unrelated to those models.".to_string(),
-        "".to_string(),
-        "Business-grade documentation (CRITICAL):".to_string(),
-        "- For each touched model, the model description MUST include:".to_string(),
-        "  - Grain (one sentence).".to_string(),
-        "  - Business question / decision it supports (one sentence).".to_string(),
-        "  - Time axis semantics if the model is time-based (what the date/timestamp means).".to_string(),
-        "- For key metric columns, include a concrete definition + caveats (in plain English).".to_string(),
-        "- Prefer a few high-signal tests (unique/not_null/relationships) only when grounded by allowed_columns; do not add speculative tests.".to_string(),
-        "".to_string(),
-        crate::prompts::patch_contract::llm_patch_response_contract(),
-    ]
-    .join("\n")
-}
 
 #[derive(Clone)]
 pub struct ApplyNextCleanseSchemaBatchTool {
@@ -212,8 +317,7 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             ));
         }
 
-        // Plan auto-heal (semantic): validate + single repair attempt before executing.
-        let v = plan::ensure_cleanse_plan_semantically_valid_or_repaired(&mut plan);
+        let v = crate::plan_semantic_gate::gate_cleanse_plan(&mut plan).into_validation();
         if !v.ok {
             return crate::tools::batch_contracts::to_json_value(
                 crate::tools::batch_contracts::CleanseSchemaBatchContract {
@@ -315,7 +419,7 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             );
         }
 
-        let instructions = extract_string_arg(&args, "instructions")
+        let _instructions = extract_string_arg(&args, "instructions")
             .or_else(|| extract_string_arg(&args, "user_instructions"))
             .unwrap_or_default();
 
@@ -335,7 +439,7 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
         let mut succeeded: Vec<String> = Vec::new();
         let mut failed: Vec<String> = Vec::new();
         let mut errors: Vec<String> = Vec::new();
-        let mut auto_healed_wildcard_sql_dataset_ids: Vec<String> = Vec::new();
+        let auto_healed_wildcard_sql_dataset_ids: Vec<String> = Vec::new();
         let mut plan_violations: Vec<crate::tools::batch_contracts::PlanViolationBrief> =
             Vec::new();
 
@@ -365,122 +469,61 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
             let allowed_cols = match files_tool::extract_final_select_output_columns(&sql_text) {
                 Ok(s) => s.into_iter().collect::<Vec<_>>(),
                 Err(e) => {
-                    let from_plan = plan
-                        .tasks
-                        .iter()
-                        .find(|t| t.dataset_id == *ds)
-                        .and_then(|t| {
-                            t.implementation_spec.as_ref().map(|spec| {
-                                spec.output_fields
-                                    .iter()
-                                    .map(|f| f.name.trim().to_string())
-                                    .filter(|n| !n.is_empty())
-                                    .collect::<Vec<String>>()
-                            })
-                        })
-                        .unwrap_or_default();
-                    if !from_plan.is_empty() {
-                        tracing::warn!(
-                            "{ds}: SQL parser could not extract columns from {sql_rel} ({e}); \
-                             using plan output_fields as source of truth ({} cols)",
-                            from_plan.len()
-                        );
-                        // Best-effort auto-heal: rewrite SELECT * to explicit columns if possible.
-                        if let Some(rewritten_sql) =
-                            rewrite_final_select_wildcard(&sql_text, &from_plan)
-                        {
-                            if rewritten_sql != sql_text {
-                                if let Err(write_err) = project_fs::write_project_file_via_patch(
-                                    ctx,
-                                    self.datasets.as_ref(),
-                                    &sql_rel,
-                                    &rewritten_sql,
-                                    "text/sql",
-                                )
-                                .await
-                                {
-                                    tracing::warn!(
-                                        "{ds}: auto-heal wildcard rewrite failed: {write_err}"
-                                    );
-                                } else {
-                                    auto_healed_wildcard_sql_dataset_ids.push(ds.clone());
-                                }
-                            }
-                        }
-                        from_plan
-                    } else {
-                        failed.push(ds.clone());
-                        let msg = format!(
-                            "{ds}: cannot determine output columns — SQL parser failed ({e}) \
-                             and plan output_fields are empty or generic. \
-                             The plan must provide concrete output_fields for this dataset."
-                        );
-                        errors.push(msg.clone());
-                        plan_violations.push(crate::tools::batch_contracts::PlanViolationBrief {
-                            task_id: ds.clone(),
-                            evidence: msg,
-                        });
-                        continue;
-                    }
+                    failed.push(ds.clone());
+                    let msg = format!(
+                        "{ds}: cannot determine output columns from sibling SQL {sql_rel}; schema YAML is generated from SQL output columns only ({e})"
+                    );
+                    errors.push(msg.clone());
+                    plan_violations.push(crate::tools::batch_contracts::PlanViolationBrief {
+                        task_id: ds.clone(),
+                        evidence: msg,
+                    });
+                    continue;
                 }
             };
             let mut allowed_cols = allowed_cols;
             allowed_cols.sort();
             allowed_cols.dedup();
 
-            let user_payload = serde_json::json!({
-                "dataset_id": ds,
-                "model_name": model_name,
-                "expected_model_sql_path": sql_rel,
-                "allowed_columns": allowed_cols,
-                "instructions": instructions,
-            })
-            .to_string();
-
-            let (outcome, _notes) = match crate::patch_protocol::llm_patch_loop_single_file(
-                ctx,
-                self.datasets.as_ref(),
-                schema_yml_sys_prompt_staging(),
-                user_payload,
-                &yml_rel,
-                6,
-                Some(LlmCallOptions {
-                    prompt_id: "data_engineer.apply_next_schema_batch.staging_schema_patch",
-                    thread_id: ctx.thread_id().clone(),
-                    max_output_tokens: Some(
-                        crate::patch_protocol::default_patch_loop_max_output_tokens(),
-                    ),
-                    reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
-                    ..Default::default()
-                }),
-            )
-            .await
-            {
-                Ok(v) => v,
+            let existing_yml = project_fs::read_project_file_text(ctx, &yml_rel)
+                .await
+                .unwrap_or_default();
+            let planned_fields = plan
+                .tasks
+                .iter()
+                .find(|t| t.dataset_id == *ds)
+                .and_then(|task| task.implementation_spec.as_ref())
+                .map(|spec| spec.output_fields.as_slice())
+                .unwrap_or(&[]);
+            let rendered = match render_staging_schema_yml(
+                &model_name,
+                ds,
+                &allowed_cols,
+                existing_yml.as_deref(),
+                planned_fields,
+            ) {
+                Ok(rendered) => rendered,
                 Err(e) => {
                     failed.push(ds.clone());
-                    errors.push(format!("{ds}: schema patch failed: {e}"));
+                    errors.push(format!("{ds}: schema generation failed: {e}"));
                     continue;
                 }
             };
-
-            // Deterministic safety net: even with `allowed_columns` grounding, models sometimes invent
-            // column names (e.g. *_norm) that are not actually produced by the sibling SQL. Rather than
-            // failing the whole batch repeatedly, sanitize the YAML to only allowed columns and retry validation.
-            let mut outcome = outcome;
-            if outcome.rel_path.starts_with("models/staging/") && outcome.rel_path.ends_with(".yml")
-            {
-                match sanitize_staging_schema_yml_to_allowed_columns(
-                    &outcome.content,
-                    &model_name,
-                    &allowed_cols,
-                ) {
-                    Ok(s) => outcome.content = s,
-                    Err(_) => {
-                        // If sanitization fails (e.g. invalid YAML), validation will surface the error.
-                    }
+            let old = existing_yml.clone().unwrap_or_default();
+            let outcome = match validation_patch_outcome(
+                ctx,
+                &yml_rel,
+                &old,
+                &rendered,
+                existing_yml.is_some(),
+            ) {
+                Ok(outcome) => outcome,
+                Err(e) => {
+                    failed.push(ds.clone());
+                    errors.push(format!("{ds}: schema generation failed: {e}"));
+                    continue;
                 }
-            }
+            };
 
             // Validate schema contract against sibling SQL output columns.
             if let Err(e) =
@@ -491,14 +534,9 @@ impl Tool for ApplyNextCleanseSchemaBatchTool {
                 continue;
             }
 
-            if let Err(e) = project_fs::write_project_file_via_patch(
-                ctx,
-                self.datasets.as_ref(),
-                &yml_rel,
-                &outcome.content,
-                "text/yaml",
-            )
-            .await
+            if let Err(e) =
+                project_fs::write_file(ctx, self.datasets.as_ref(), &yml_rel, &outcome.content)
+                    .await
             {
                 failed.push(ds.clone());
                 errors.push(format!("{ds}: failed to write {yml_rel}: {e}"));
@@ -609,10 +647,9 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             ));
         }
 
-        // Plan auto-heal (semantic): validate + single repair attempt before executing.
         let stg = crate::dataset_truth::discover_staging_models_from_storage(ctx).await;
-        let v =
-            plan::ensure_model_plan_semantically_valid_or_repaired(&mut plan, &stg.allowed_models);
+        let v = crate::plan_semantic_gate::gate_model_plan(&mut plan, &stg.allowed_models)
+            .into_validation();
         if !v.ok {
             return crate::tools::batch_contracts::to_json_value(
                 crate::tools::batch_contracts::ModelSchemaBatchContract {
@@ -714,7 +751,7 @@ impl Tool for ApplyNextModelSchemaBatchTool {
             );
         }
 
-        let instructions = extract_string_arg(&args, "instructions")
+        let _instructions = extract_string_arg(&args, "instructions")
             .or_else(|| extract_string_arg(&args, "user_instructions"))
             .unwrap_or_default();
 
@@ -728,122 +765,98 @@ impl Tool for ApplyNextModelSchemaBatchTool {
         let attempted_names = names.clone();
         let expected_rel = project_fs::MODELS_SCHEMA_YML;
 
-        // Provide just the model names + expected SQL rel paths to keep the patch focused.
-        let mut models: Vec<Value> = Vec::new();
-        let mut touched: std::collections::HashSet<String> = std::collections::HashSet::new();
-        let mut allowed_by_model: std::collections::HashMap<
-            String,
-            schema_policy::ModelAllowedColumns,
-        > = std::collections::HashMap::new();
+        let existing_models_schema = project_fs::read_project_file_text(ctx, expected_rel)
+            .await
+            .unwrap_or_default();
+        let mut generated_models: Vec<SchemaModelDoc> = Vec::new();
+        let mut generation_errors = Vec::new();
         for n in names.iter() {
             if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
-                touched.insert(t.name.clone());
                 // Derive allowed columns from the model SQL output projection (best-effort).
-                let mut allowed = schema_policy::ModelAllowedColumns::default();
-                if let Some(ref rel) = t.expected_model_path {
+                let columns = if let Some(ref rel) = t.expected_model_path {
                     match project_fs::read_project_file_text(ctx, rel).await {
                         Ok(Some(sql_text)) => {
                             match files_tool::extract_final_select_output_columns(&sql_text) {
-                                Ok(cols) => {
-                                    allowed.allowed_columns =
-                                        cols.into_iter().collect::<std::collections::HashSet<_>>();
-                                }
+                                Ok(cols) => cols.into_iter().collect::<Vec<_>>(),
                                 Err(e) => {
-                                    allowed.error = Some(e);
+                                    generation_errors.push(format!(
+                                        "{}: cannot determine output columns from {} ({})",
+                                        t.name, rel, e
+                                    ));
+                                    Vec::new()
                                 }
                             }
                         }
                         Ok(None) => {
-                            allowed.error = Some(format!("missing model SQL at {rel}"));
+                            generation_errors
+                                .push(format!("{}: missing model SQL at {rel}", t.name));
+                            Vec::new()
                         }
                         Err(e) => {
-                            allowed.error = Some(format!("missing model SQL at {rel}: {e}"));
+                            generation_errors.push(format!(
+                                "{}: failed to read model SQL at {rel}: {e}",
+                                t.name
+                            ));
+                            Vec::new()
                         }
                     }
                 } else {
-                    allowed.error = Some("expected_model_path missing in plan task".to_string());
+                    generation_errors.push(format!(
+                        "{}: expected_model_path missing in plan task",
+                        t.name
+                    ));
+                    Vec::new()
+                };
+                if columns.is_empty() {
+                    continue;
                 }
-                allowed_by_model.insert(t.name.clone(), allowed.clone());
-                models.push(serde_json::json!({
-                    "name": t.name,
-                    "folder": t.folder,
-                    "expected_model_path": t.expected_model_path,
-                    "goal": t.goal,
-                    "inputs": t.inputs,
-                    "invariants": t.invariants,
-                    "allowed_columns": allowed.allowed_columns.iter().cloned().collect::<Vec<_>>(),
-                    "allowed_columns_error": allowed.error,
-                }));
+                let existing = existing_model_meta(existing_models_schema.as_deref(), &t.name);
+                let planned = t
+                    .implementation_spec
+                    .as_ref()
+                    .map(|spec| output_field_meta(&spec.output_fields))
+                    .unwrap_or_default();
+                generated_models.push(schema_model_doc(
+                    &t.name,
+                    (!t.goal.trim().is_empty()).then(|| t.goal.trim().to_string()),
+                    &columns,
+                    &existing,
+                    &planned,
+                    false,
+                ));
             } else {
-                models.push(serde_json::json!({ "name": n }));
+                generation_errors.push(format!("{n}: model task missing from active plan"));
             }
         }
-        let user_payload = serde_json::json!({
-            "models": models,
-            "instructions": instructions,
-            "instruction": "Add or update entries under top-level 'models:' for these names only. Keep other models untouched.",
-        })
-        .to_string();
+        if !generation_errors.is_empty() {
+            return crate::tools::batch_schema_runner::fail_model_schema_batch(
+                ctx,
+                &mut plan,
+                &attempted_names,
+                &checklist_item_id,
+                generation_errors.join("\n"),
+            )
+            .await;
+        }
 
-        let (outcome, _notes) = match crate::patch_protocol::llm_patch_loop_single_file(
-            ctx,
-            self.datasets.as_ref(),
-            schema_yml_sys_prompt_models_schema_yml(),
-            user_payload,
-            expected_rel,
-            6,
-            Some(LlmCallOptions {
-                prompt_id: "data_engineer.apply_next_schema_batch.models_schema_patch",
-                thread_id: ctx.thread_id().clone(),
-                max_output_tokens: Some(
-                    crate::patch_protocol::default_patch_loop_max_output_tokens(),
-                ),
-                reasoning_effort: Some(react_core::llm::ReasoningEffort::Low),
-                ..Default::default()
-            }),
-        )
-        .await
-        {
-            Ok(v) => v,
-            Err(e) => {
-                return crate::tools::batch_schema_runner::fail_model_schema_batch(
-                    ctx,
-                    &mut plan,
-                    &attempted_names,
-                    &checklist_item_id,
-                    format!("models/schema.yml patch failed: {e}"),
-                )
-                .await;
-            }
-        };
+        let sanitized_text =
+            match merge_models_schema_yml(existing_models_schema.as_deref(), generated_models) {
+                Ok(text) => text,
+                Err(e) => {
+                    return crate::tools::batch_schema_runner::fail_model_schema_batch(
+                        ctx,
+                        &mut plan,
+                        &attempted_names,
+                        &checklist_item_id,
+                        format!("models/schema.yml generation failed: {e}"),
+                    )
+                    .await;
+                }
+            };
+        let warnings = Vec::new();
 
-        // Deterministic post-check: enforce schema ownership + strip unsafe tests for touched models.
-        let (sanitized_text, warnings) = match schema_policy::sanitize_models_schema_yml(
-            &outcome.content,
-            &touched,
-            &allowed_by_model,
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                return crate::tools::batch_schema_runner::fail_model_schema_batch(
-                    ctx,
-                    &mut plan,
-                    &attempted_names,
-                    &checklist_item_id,
-                    format!("models/schema.yml post-check failed: {e}"),
-                )
-                .await;
-            }
-        };
-
-        if let Err(e) = project_fs::write_project_file_via_patch(
-            ctx,
-            self.datasets.as_ref(),
-            expected_rel,
-            &sanitized_text,
-            "text/yaml",
-        )
-        .await
+        if let Err(e) =
+            project_fs::write_file(ctx, self.datasets.as_ref(), expected_rel, &sanitized_text).await
         {
             return crate::tools::batch_schema_runner::fail_model_schema_batch(
                 ctx,
@@ -1125,7 +1138,7 @@ mod tests {
                                     relation: None,
                                     name: "customer_id".to_string(),
                                 },
-                                plan::lineage_role::PASSTHROUGH,
+                                plan::LineageRole::Passthrough,
                             )],
                             expression: "customer_id as customer_id_raw (raw)".to_string(),
                             data_type: None,
@@ -1140,7 +1153,7 @@ mod tests {
                                     relation: None,
                                     name: "email".to_string(),
                                 },
-                                plan::lineage_role::PASSTHROUGH,
+                                plan::LineageRole::Passthrough,
                             )],
                             expression: "email as email_raw (raw)".to_string(),
                             data_type: None,
@@ -1161,11 +1174,10 @@ mod tests {
         };
         plan::save_cleanse_plan(&ctx, &p).await.unwrap();
 
-        // Seed staging SQL with wildcard final projection so the tool exercises deterministic
-        // wildcard auto-heal before writing schema YAML.
+        // Seed staging SQL with explicit output columns; schema YAML is generated from this SQL.
         let sql_rel = "models/staging/stg_test_raw_raw_customers.sql";
         let sql_key = project_fs::join_storage_key(&ctx, sql_rel);
-        let sql = "with source as (\n  select * from {{ source('test_raw','raw_customers') }}\n)\nselect * from source\n";
+        let sql = "select\n  customer_id_raw,\n  email_raw\nfrom {{ source('test_raw','raw_customers') }}\n";
         ctx.storage()
             .put_bytes(&sql_key, sql.as_bytes(), "text/sql")
             .await
@@ -1185,21 +1197,17 @@ mod tests {
         let got = String::from_utf8_lossy(&got).to_string();
         assert!(got.contains("stg_test_raw_raw_customers"));
 
-        let healed_sql = ctx.storage().get_bytes(&sql_key).await.unwrap();
-        let healed_sql = String::from_utf8_lossy(&healed_sql).to_string();
         assert!(
-            healed_sql.contains("customer_id_raw") && healed_sql.contains("email_raw"),
-            "expected wildcard auto-heal to expand final SELECT columns, got: {}",
-            healed_sql
+            got.contains("customer_id_raw") && got.contains("email_raw"),
+            "expected generated YAML to use SQL output columns, got: {}",
+            got
         );
         let healed_ds = res
             .get("auto_healed_wildcard_sql_dataset_ids")
             .and_then(|v| v.as_array())
             .cloned()
             .unwrap_or_default();
-        assert!(healed_ds
-            .iter()
-            .any(|v| v.as_str() == Some("AwsDataCatalog.test_raw.raw_customers")));
+        assert!(healed_ds.is_empty());
     }
 
     #[tokio::test]
@@ -1263,7 +1271,7 @@ mod tests {
                                 relation: None,
                                 name: "customer_id".to_string(),
                             },
-                            plan::lineage_role::PASSTHROUGH,
+                            plan::LineageRole::Passthrough,
                         )],
                         expression: "customer_id as customer_id_raw (raw)".to_string(),
                         data_type: None,
@@ -1379,7 +1387,7 @@ mod tests {
                                 relation: None,
                                 name: "customer_id".to_string(),
                             },
-                            plan::lineage_role::PASSTHROUGH,
+                            plan::LineageRole::Passthrough,
                         )],
                         expression: "customer_id as customer_id_raw (raw)".to_string(),
                         data_type: None,
@@ -1501,7 +1509,7 @@ mod tests {
                                 relation: None,
                                 name: "customer_id".to_string(),
                             },
-                            plan::lineage_role::NORMALIZED,
+                            plan::LineageRole::Normalized,
                         )],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,
@@ -1530,6 +1538,14 @@ mod tests {
             progress: plan::PlanProgress::default(),
         };
         plan::save_model_plan(&ctx, &p).await.unwrap();
+        ctx.storage()
+            .put_bytes(
+                &project_fs::join_storage_key(&ctx, "models/marts/dim_customers.sql"),
+                b"select\n  customer_id\nfrom {{ ref('stg_test_raw_raw_customers') }}\n",
+                "text/sql",
+            )
+            .await
+            .unwrap();
 
         let tool = ApplyNextModelSchemaBatchTool { datasets: None };
         let res = tool.call(serde_json::json!({}), &ctx).await.unwrap();
@@ -1610,7 +1626,7 @@ mod tests {
                                 relation: None,
                                 name: "customer_id".to_string(),
                             },
-                            plan::lineage_role::NORMALIZED,
+                            plan::LineageRole::Normalized,
                         )],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,
@@ -1639,6 +1655,14 @@ mod tests {
             progress,
         };
         plan::save_model_plan(&ctx, &p).await.unwrap();
+        ctx.storage()
+            .put_bytes(
+                &project_fs::join_storage_key(&ctx, "models/marts/dim_customers.sql"),
+                b"select\n  customer_id\nfrom {{ ref('stg_test_raw_raw_customers') }}\n",
+                "text/sql",
+            )
+            .await
+            .unwrap();
 
         let tool = ApplyNextModelSchemaBatchTool { datasets: None };
         let res = tool.call(serde_json::json!({}), &ctx).await.unwrap();
@@ -1746,7 +1770,7 @@ mod tests {
                                 relation: None,
                                 name: "customer_id".to_string(),
                             },
-                            plan::lineage_role::NORMALIZED,
+                            plan::LineageRole::Normalized,
                         )],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,
@@ -1775,6 +1799,14 @@ mod tests {
             progress: plan::PlanProgress::default(),
         };
         plan::save_model_plan(&ctx, &p).await.unwrap();
+        ctx.storage()
+            .put_bytes(
+                &project_fs::join_storage_key(&ctx, "models/marts/dim_customers.sql"),
+                b"select\n  customer_id\nfrom {{ ref('stg_test_raw_raw_customers') }}\n",
+                "text/sql",
+            )
+            .await
+            .unwrap();
 
         let tool = ApplyNextModelSchemaBatchTool { datasets: None };
         let res = tool.call(serde_json::json!({}), &ctx).await.unwrap();
@@ -1880,7 +1912,7 @@ mod tests {
                                 relation: None,
                                 name: "customer_id".to_string(),
                             },
-                            plan::lineage_role::NORMALIZED,
+                            plan::LineageRole::Normalized,
                         )],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,
@@ -1909,6 +1941,14 @@ mod tests {
             progress: plan::PlanProgress::default(),
         };
         plan::save_model_plan(&ctx, &p).await.unwrap();
+        ctx.storage()
+            .put_bytes(
+                &project_fs::join_storage_key(&ctx, "models/marts/dim_customers.sql"),
+                b"select\n  customer_id\nfrom {{ ref('stg_test_raw_raw_customers') }}\n",
+                "text/sql",
+            )
+            .await
+            .unwrap();
 
         let tool = ApplyNextModelSchemaBatchTool { datasets: None };
         let res = tool.call(serde_json::json!({}), &ctx).await.unwrap();
@@ -1918,12 +1958,19 @@ mod tests {
             res
         );
 
-        let saw = *llm
-            .saw_allowed_columns
-            .lock()
-            .map_err(|_| "mutex poisoned".to_string())
+        let got = ctx
+            .storage()
+            .get_bytes(&project_fs::join_storage_key(
+                &ctx,
+                project_fs::MODELS_SCHEMA_YML,
+            ))
+            .await
             .unwrap();
-        assert!(saw, "expected LLM payload to include allowed_columns");
+        let got = String::from_utf8_lossy(&got).to_string();
+        assert!(
+            got.contains("customer_id"),
+            "expected generated schema YAML to include SQL output column, got: {got}"
+        );
     }
 
     #[tokio::test]
@@ -1993,7 +2040,7 @@ mod tests {
                                 relation: None,
                                 name: "customer_id".to_string(),
                             },
-                            plan::lineage_role::NORMALIZED,
+                            plan::LineageRole::Normalized,
                         )],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,
@@ -2022,6 +2069,14 @@ mod tests {
             progress: plan::PlanProgress::default(),
         };
         plan::save_model_plan(&ctx, &p).await.unwrap();
+        ctx.storage()
+            .put_bytes(
+                &project_fs::join_storage_key(&ctx, "models/marts/dim_customers.sql"),
+                b"select\n  customer_id\nfrom {{ ref('stg_test_raw_raw_customers') }}\n",
+                "text/sql",
+            )
+            .await
+            .unwrap();
 
         let tool = ApplyNextModelSchemaBatchTool { datasets: None };
         let res = tool.call(serde_json::json!({}), &ctx).await.unwrap();

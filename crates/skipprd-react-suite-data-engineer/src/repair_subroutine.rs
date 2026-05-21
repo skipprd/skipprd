@@ -9,15 +9,6 @@ use serde::Deserialize;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
-/// Column contract for one upstream model, extracted from investigation results.
-#[derive(Clone, Debug, serde::Serialize, Deserialize, schemars::JsonSchema)]
-struct UpstreamModelSchema {
-    /// Relative path (e.g. "models/marts/gold_dim_customers.sql").
-    model_path: String,
-    /// Exact column names exposed by this model's final SELECT.
-    columns: Vec<String>,
-}
-
 /// Structured diagnosis output from the gather stage.
 ///
 /// Sent to the LLM as an OpenAI Strict Schema so the response is guaranteed to
@@ -31,7 +22,7 @@ struct GatherDiagnosisV1 {
     affected_files: Vec<String>,
     /// Column schemas of upstream models referenced via ref() by the failing model(s).
     /// Extracted from file contents or sql_schema tool observations.
-    upstream_schemas: Vec<UpstreamModelSchema>,
+    upstream_schemas: Vec<crate::truth_snapshot::RelationTruth>,
     /// True when ALL original errors (from the Error Context) have been resolved by
     /// prior iterations, even if the latest validation reveals NEW errors (e.g. cascade
     /// failures from previously-skipped downstream models).  Always false on the first
@@ -40,8 +31,8 @@ struct GatherDiagnosisV1 {
 }
 
 use crate::control_flow::DeterministicDbtValidateOnce;
+use crate::evaluation::RepairEvidenceContext;
 use crate::model_dispatch::ModelDispatch;
-use crate::progress_controller::ValidationFailureContext;
 use crate::repair_session::{
     ApplyResult, FileOp, GatheredFile, PlannedFix, RepairIteration, RepairSessionLog,
     ValidateOutcome,
@@ -198,7 +189,7 @@ pub async fn run_repair(
     _thread_store: &ThreadStore,
     thread_id: &str,
     dispatch: &ModelDispatch,
-    error_context: ValidationFailureContext,
+    error_context: RepairEvidenceContext,
     max_iterations: Option<usize>,
     repair_cycle: usize,
 ) -> Result<Vec<FlowFrame>, String> {
@@ -480,8 +471,8 @@ async fn extract_diagnosis_structured(
                    Include BOTH .sql and .yml files when the issue involves column mismatches \
                    between SQL outputs and YAML schema declarations.\n\
                  - \"upstream_schemas\": for each upstream model referenced via ref() by the \
-                   failing model(s), list the model_path and the exact column names from its \
-                   final SELECT statement\n\
+                   failing model(s), return RelationTruth entries with name, optional path, \
+                   exact final SELECT columns, and provenance=\"dbt_sql\"\n\
                  - \"original_errors_resolved\": set to true ONLY when ALL of these hold: \
                    (1) there are Prior Repair Attempts in the history above, \
                    (2) the most recent validation outcome shows the ORIGINAL errors from the \
@@ -586,8 +577,17 @@ async fn run_reason(
                 .to_string(),
         ];
         for schema in &gathered.upstream_schemas {
-            lines.push(format!("\n### {}", schema.model_path));
-            lines.push(format!("Columns: {}", schema.columns.join(", ")));
+            lines.push(format!(
+                "\n### {}",
+                schema.path.as_deref().unwrap_or(schema.name.as_str())
+            ));
+            let cols = schema
+                .columns
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            lines.push(format!("Columns: {}", cols));
         }
         lines.join("\n")
     } else {
@@ -842,7 +842,7 @@ struct GatheredContext {
     /// Root-cause analysis from the diagnosis LLM call.
     diagnosis: String,
     /// Column schemas extracted from upstream models.
-    upstream_schemas: Vec<UpstreamModelSchema>,
+    upstream_schemas: Vec<crate::truth_snapshot::RelationTruth>,
     /// LLM assessment: original errors resolved but new cascade errors appeared.
     original_errors_resolved: bool,
 }
@@ -925,7 +925,7 @@ mod tests {
 
     #[test]
     fn compact_repair_history_keeps_recent_attempts() {
-        let mut log = RepairSessionLog::new(ValidationFailureContext {
+        let mut log = RepairSessionLog::new(crate::evaluation::RepairEvidenceContext {
             brief: "initial dbt failure".to_string(),
             log_excerpts: None,
             compile_ok: false,

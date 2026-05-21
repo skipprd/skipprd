@@ -6,6 +6,7 @@ use react_core::agent::AgentCtx;
 
 use crate::project_fs;
 
+#[cfg(test)]
 #[derive(Clone, Debug, Default)]
 pub struct ModelAllowedColumns {
     /// If empty, we cannot safely author tests; docs-only changes are allowed.
@@ -21,8 +22,7 @@ pub struct ModelAllowedColumns {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PrecheckFailure {
     pub kind: PrecheckFailureKind,
-    /// Human-readable summary of the structural issue (used as the `ValidationFailureContext`
-    /// brief).
+    /// Human-readable summary of the structural issue carried as evaluation evidence.
     pub brief: String,
     /// Relative paths the agent should examine first when repairing. Empty when the failure does
     /// not point at specific files (rare).
@@ -175,6 +175,7 @@ async fn collect_staging_model_names_from_ymls(
     Ok(out)
 }
 
+#[cfg(test)]
 fn conservative_identifiers_in_where(where_sql: &str) -> HashSet<String> {
     // Very conservative tokenization: split on non [A-Za-z0-9_], keep identifier-like tokens.
     // This is intended only to catch obvious invented columns (raw_*, *_id_raw, etc).
@@ -213,6 +214,7 @@ fn test_mapping_has_single_key(v: &YamlValue) -> bool {
     }
 }
 
+#[cfg(test)]
 fn mapping_single_key_name(v: &YamlValue) -> Option<String> {
     let YamlValue::Mapping(m) = v else {
         return None;
@@ -227,6 +229,7 @@ fn mapping_single_key_name(v: &YamlValue) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+#[cfg(test)]
 fn mapping_single_key_value<'a>(v: &'a YamlValue) -> Option<&'a YamlValue> {
     let YamlValue::Mapping(m) = v else {
         return None;
@@ -237,6 +240,7 @@ fn mapping_single_key_value<'a>(v: &'a YamlValue) -> Option<&'a YamlValue> {
     m.values().next()
 }
 
+#[cfg(test)]
 fn sanitize_tests_seq(
     tests: &mut Vec<YamlValue>,
     allowed_cols: &HashSet<String>,
@@ -294,6 +298,7 @@ fn sanitize_tests_seq(
 /// Safe rules:
 /// - Remove any `stg_*` model entries (schema ownership).
 /// - For touched models, remove tests that reference ungrounded columns/where predicates.
+#[cfg(test)]
 pub fn sanitize_models_schema_yml(
     yml_text: &str,
     touched: &HashSet<String>,
@@ -573,15 +578,7 @@ pub async fn normalize_schema_artifacts_for_validate(
     if let Some(text) = project_fs::read_project_file_text(ctx, schema_rel).await? {
         let (normalized, mut warn) = normalize_model_yaml_doc_for_dedupe(&text, schema_rel)?;
         if normalized != text {
-            project_fs::write_project_file_via_patch(
-                ctx,
-                None,
-                schema_rel,
-                &normalized,
-                "text/yaml",
-            )
-            .await
-            .map_err(|e| format!("failed to write {schema_rel}: {e}"))?;
+            persist_normalized_schema_doc(ctx, schema_rel, &normalized).await?;
             notes.push(format!(
                 "normalized duplicate model/test entries in {schema_rel}"
             ));
@@ -599,14 +596,34 @@ pub async fn normalize_schema_artifacts_for_validate(
         };
         let (normalized, mut warn) = normalize_model_yaml_doc_for_dedupe(&text, &rel)?;
         if normalized != text {
-            project_fs::write_project_file_via_patch(ctx, None, &rel, &normalized, "text/yaml")
-                .await
-                .map_err(|e| format!("failed to write {rel}: {e}"))?;
+            persist_normalized_schema_doc(ctx, &rel, &normalized).await?;
             notes.push(format!("normalized duplicate model/test entries in {rel}"));
         }
         notes.append(&mut warn);
     }
     Ok(notes)
+}
+
+async fn persist_normalized_schema_doc(
+    ctx: &AgentCtx,
+    rel: &str,
+    normalized: &str,
+) -> Result<(), String> {
+    match project_fs::write_project_file_via_patch(ctx, None, rel, normalized, "text/yaml").await {
+        Ok(_) => Ok(()),
+        Err(e) if e.contains("warehouse provider missing") => {
+            let key = project_fs::join_storage_key(ctx, rel);
+            ctx.storage()
+                .put_bytes(&key, normalized.as_bytes(), "text/yaml")
+                .await
+                .map_err(|storage_err| {
+                    format!(
+                        "failed to write {rel}: {e}; fallback storage write failed: {storage_err}"
+                    )
+                })
+        }
+        Err(e) => Err(format!("failed to write {rel}: {e}")),
+    }
 }
 
 /// Cheap structural prechecks to avoid burning dbt_validate cycles on trivial YAML issues.

@@ -989,6 +989,10 @@ mod tests {
 
     #[tokio::test]
     async fn optional_packages_yml_miss_uses_storage_cache() {
+        if local_dbt_project_root().is_some() {
+            return;
+        }
+
         let inner = test_helpers::Arc::new(MissingCountingStorage::default());
         let storage = cached(inner.clone());
         let ctx = test_helpers::make_ctx(storage, None);

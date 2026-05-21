@@ -55,11 +55,7 @@ mod tests {
         const VAR: &str = "SKIPPR_DOTENV_EMPTY_OVERRIDE_TEST";
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("skippr.yml");
-        std::fs::write(
-            dir.path().join(".env"),
-            format!("{VAR}=from-dot-env\n"),
-        )
-        .unwrap();
+        std::fs::write(dir.path().join(".env"), format!("{VAR}=from-dot-env\n")).unwrap();
         std::fs::write(&config, "skippr:\n  workspace: demo\npipelines: {}\n").unwrap();
 
         std::env::set_var(VAR, "");
@@ -78,11 +74,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("skippr.yml");
         std::fs::write(dir.path().join(".env"), format!("{VAR}=from-dot-env\n")).unwrap();
-        std::fs::write(
-            dir.path().join(".env.local"),
-            format!("{VAR}=from-local\n"),
-        )
-        .unwrap();
+        std::fs::write(dir.path().join(".env.local"), format!("{VAR}=from-local\n")).unwrap();
         std::fs::write(&config, "skippr:\n  workspace: demo\npipelines: {}\n").unwrap();
 
         std::env::remove_var(VAR);
@@ -96,11 +88,7 @@ mod tests {
         const VAR: &str = "SKIPPR_DOTENV_KEEP_PROCESS_TEST";
         let dir = tempfile::tempdir().unwrap();
         let config = dir.path().join("skippr.yml");
-        std::fs::write(
-            dir.path().join(".env"),
-            format!("{VAR}=from-dot-env\n"),
-        )
-        .unwrap();
+        std::fs::write(dir.path().join(".env"), format!("{VAR}=from-dot-env\n")).unwrap();
         std::fs::write(&config, "skippr:\n  workspace: demo\npipelines: {}\n").unwrap();
 
         std::env::set_var(VAR, "from-shell");

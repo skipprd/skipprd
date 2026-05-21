@@ -277,7 +277,12 @@ async fn hard_mutation_mode_exposes_batch_tool_from_plan_state() {
         crate::control_flow::Phase::CleanseAuthor,
         true,
         &sctx,
-        &super::PlanState::CleanseSqlDatasetIds(vec!["AwsDataCatalog.db.t1".to_string()]),
+        &super::PlanState::new(
+            Some(super::TrackKind::Cleanse),
+            super::AuthoringMode::Sql {
+                targets: vec!["AwsDataCatalog.db.t1".to_string()],
+            },
+        ),
         false,
     )
     .expect("build_tools_for_phase should succeed");
@@ -296,7 +301,7 @@ async fn hard_mutation_mode_single_target_repair_rejects_other_paths() {
         crate::control_flow::Phase::ModelAuthor,
         true,
         &sctx,
-        &super::PlanState::Unconstrained,
+        &super::PlanState::unconstrained(Some(super::TrackKind::Model)),
         false,
     )
     .expect("build_tools_for_phase should succeed");
@@ -304,14 +309,12 @@ async fn hard_mutation_mode_single_target_repair_rejects_other_paths() {
     // Seed valid hard-repair execution state for deterministic single-target tool calls.
     if let Some(store) = actx.thread_store().as_ref() {
         let mut seeded = crate::progress_controller::ExecutionState::new();
-        seeded.repair.failure_context =
-            Some(crate::progress_controller::ValidationFailureContext {
-                brief: "test".to_string(),
-                log_excerpts: None,
-                compile_ok: false,
-                run_ok: false,
-            });
-        seeded.repair.status = crate::progress_controller::RepairStatus::Pending { cycle: 1 };
+        seeded.repair.failure_context = Some(crate::evaluation::RepairEvidenceContext {
+            brief: "test".to_string(),
+            log_excerpts: None,
+            compile_ok: false,
+            run_ok: false,
+        });
         seeded
             .save(&store.control_store(), "t")
             .await
@@ -350,7 +353,7 @@ async fn agent_phase_tool_card_and_registry_never_expose_ask_user() {
         crate::control_flow::Phase::CleansePlan,
         true,
         &sctx,
-        &super::PlanState::ReadOnly,
+        &super::PlanState::read_only(),
         false,
     )
     .expect("build_tools_for_phase should succeed");
@@ -458,7 +461,12 @@ async fn plan_batched_staging_model_is_not_exposed_to_agent() {
         crate::control_flow::Phase::CleanseAuthor,
         true,
         &sctx,
-        &super::PlanState::CleanseSqlDatasetIds(vec!["AwsDataCatalog.db.t1".to_string()]),
+        &super::PlanState::new(
+            Some(super::TrackKind::Cleanse),
+            super::AuthoringMode::Sql {
+                targets: vec!["AwsDataCatalog.db.t1".to_string()],
+            },
+        ),
         false,
     )
     .expect("build_tools_for_phase should succeed");
@@ -490,7 +498,12 @@ async fn plan_batched_cleanse_schema_mode_exposes_only_schema_batch_tool() {
         crate::control_flow::Phase::CleanseAuthor,
         true,
         &sctx,
-        &super::PlanState::CleanseSchemaDatasetIds(vec!["AwsDataCatalog.db.t1".to_string()]),
+        &super::PlanState::new(
+            Some(super::TrackKind::Cleanse),
+            super::AuthoringMode::Schema {
+                targets: vec!["AwsDataCatalog.db.t1".to_string()],
+            },
+        ),
         false,
     )
     .expect("build_tools_for_phase should succeed");
@@ -516,7 +529,12 @@ async fn plan_batched_gold_model_is_not_exposed_to_agent() {
         crate::control_flow::Phase::ModelAuthor,
         true,
         &sctx,
-        &super::PlanState::ModelSqlItemNames(vec!["fct_orders".to_string()]),
+        &super::PlanState::new(
+            Some(super::TrackKind::Model),
+            super::AuthoringMode::Sql {
+                targets: vec!["fct_orders".to_string()],
+            },
+        ),
         false,
     )
     .expect("build_tools_for_phase should succeed");
@@ -651,7 +669,7 @@ async fn authoring_complete_reason_detail_uses_latest_log_state() {
 
     // Seed failing validate state directly in canonical control state.
     let mut state = crate::progress_controller::ExecutionState::new();
-    state.repair.failure_context = Some(crate::progress_controller::ValidationFailureContext {
+    state.repair.failure_context = Some(crate::evaluation::RepairEvidenceContext {
         brief: "test".to_string(),
         log_excerpts: None,
         compile_ok: false,
@@ -671,7 +689,6 @@ async fn authoring_complete_reason_detail_uses_latest_log_state() {
         Some(false)
     );
 
-    state.repair.status = crate::progress_controller::RepairStatus::Pending { cycle: 1 };
     state.set_last_mutation_summary(
         crate::progress_controller::MutationOp::Patch,
         vec!["models/staging/stg_orders.sql".to_string()],
@@ -715,7 +732,7 @@ async fn model_plan_can_disable_json_file_after_manifest_retry_suppression() {
         crate::control_flow::Phase::ModelPlan,
         true,
         &sctx,
-        &super::PlanState::ReadOnly,
+        &super::PlanState::read_only(),
         true,
     )
     .expect("build_tools_for_phase should succeed");
@@ -855,7 +872,7 @@ fn billable_phases_use_metered_commit() {
         ("phase_el_discover.rs", include_str!("phase_el_discover.rs")),
         ("phase_el_sync.rs", include_str!("phase_el_sync.rs")),
         ("phase_author.rs", include_str!("phase_author.rs")),
-        ("agent_modes.rs", include_str!("agent_modes.rs")),
+        ("phase_validate.rs", include_str!("phase_validate.rs")),
         (
             "plan_review_helpers.rs",
             include_str!("plan_review_helpers.rs"),
@@ -887,8 +904,8 @@ fn billable_phases_construct_usage_events() {
             "UsageEvent::ModelsAuthored",
         ),
         (
-            "agent_modes.rs",
-            include_str!("agent_modes.rs"),
+            "phase_validate.rs",
+            include_str!("phase_validate.rs"),
             "UsageEvent::RepairCycle",
         ),
         (

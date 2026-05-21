@@ -324,7 +324,7 @@ mod tests {
                                 relation: None,
                                 name: "customer_id".to_string(),
                             },
-                            crate::plan::lineage_role::NORMALIZED,
+                            crate::plan::LineageRole::Normalized,
                         )],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,
@@ -840,6 +840,13 @@ async fn check_batch_lock_and_loopback(
     if consecutive_batch_failures < crate::controller_kernel::max_consecutive_batch_failures() {
         return Ok(None);
     }
+    if reconcile_schema_contracts_from_project_snapshot(actx, track, next_ids, expected_paths)
+        .await?
+    {
+        return Ok(Some(PhaseOutcome::stayed_with_progress(
+            "reconciled schema checklist from actual dbt project artifacts before batch lock",
+        )));
+    }
     let reason = crate::controller_kernel::build_batch_lock_prompt(
         track,
         plan_key,
@@ -867,6 +874,87 @@ This is an implementation/authoring failure, not an implicit plan rewrite.\n\n{r
         )
         .await?,
     ))
+}
+
+async fn reconcile_schema_contracts_from_project_snapshot(
+    actx: &AgentCtx,
+    track: TrackKind,
+    next_ids: &[String],
+    expected_paths: &[String],
+) -> Result<bool, PhaseError> {
+    if next_ids.is_empty() || expected_paths.is_empty() {
+        return Ok(false);
+    }
+    let snapshot = crate::evaluation::DbtProjectSnapshot::build(actx).await?;
+    let mut proven = Vec::new();
+    for (idx, id) in next_ids.iter().enumerate() {
+        let Some(path) = expected_paths.get(idx).map(String::as_str) else {
+            continue;
+        };
+        let Some(model_name) = std::path::Path::new(path)
+            .file_stem()
+            .and_then(|value| value.to_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        else {
+            continue;
+        };
+        if schema_contract_is_proven(&snapshot, model_name) {
+            proven.push(id.clone());
+        }
+    }
+    if proven.is_empty() {
+        return Ok(false);
+    }
+
+    if track.is_cleanse() {
+        let Some(mut plan) = crate::plan::load_cleanse_plan(actx).await? else {
+            return Ok(false);
+        };
+        for id in &proven {
+            crate::plan::cleanse_schema_contract_mark_done(&mut plan, id);
+        }
+        plan.progress.consecutive_batch_failures = 0;
+        crate::plan::save_cleanse_plan(actx, &plan).await?;
+    } else {
+        let Some(mut plan) = crate::plan::load_model_plan(actx).await? else {
+            return Ok(false);
+        };
+        for id in &proven {
+            crate::plan::model_schema_contract_mark_done(&mut plan, id);
+        }
+        plan.progress.consecutive_batch_failures = 0;
+        crate::plan::save_model_plan(actx, &plan).await?;
+    }
+    Ok(true)
+}
+
+fn schema_contract_is_proven(
+    snapshot: &crate::evaluation::DbtProjectSnapshot,
+    model_name: &str,
+) -> bool {
+    let Some(sql) = snapshot.sql_models.get(model_name) else {
+        return false;
+    };
+    if sql.columns.is_empty() {
+        return false;
+    }
+    snapshot
+        .schema_models
+        .values()
+        .filter(|schema| schema.model_name == model_name)
+        .any(|schema| {
+            if model_name.starts_with("stg_") && !schema.in_staging_dir {
+                return false;
+            }
+            let mut sql_columns = sql.columns.clone();
+            sql_columns.sort();
+            sql_columns.dedup();
+            let mut schema_columns = schema.columns.clone();
+            schema_columns.sort();
+            schema_columns.dedup();
+            sql_columns == schema_columns
+        })
 }
 
 async fn cancel_active_plan_for_track(
@@ -1017,34 +1105,21 @@ async fn mark_off_contract_model_artifacts_from_storage(
                 );
                 if !check.is_ok() && model_checklist_is_done(task, crate::plan::CHECKLIST_SQL_MODEL)
                 {
-                    let status = crate::authoring_contract::ArtifactContractStatus::OffContract(
-                        check.drifts.clone(),
-                    );
-                    if status.repair_route()
-                        == crate::authoring_contract::RepairRoute::ReconcileToPlan
-                    {
-                        sql_updates.push((
-                            task.name.clone(),
-                            format!(
-                                "Plan-owned SQL is stale/off-contract and must be reconciled before repair: {}",
-                                check.drift_reasons.join("; ")
-                            ),
-                        ));
-                    }
+                    sql_updates.push((
+                        task.name.clone(),
+                        format!(
+                            "Plan-owned SQL is stale/off-contract and must be reconciled before repair: {}",
+                            check.drift_reasons.join("; ")
+                        ),
+                    ));
                 }
             }
             Ok(None) => {
                 if model_checklist_is_done(task, crate::plan::CHECKLIST_SQL_MODEL) {
-                    let status = crate::authoring_contract::ArtifactContractStatus::Missing;
-                    if status.repair_route()
-                        == crate::authoring_contract::RepairRoute::ReconcileToPlan
-                    {
-                        sql_updates.push((
-                            task.name.clone(),
-                            "Plan-owned SQL is missing and must be authored before repair."
-                                .to_string(),
-                        ));
-                    }
+                    sql_updates.push((
+                        task.name.clone(),
+                        "Plan-owned SQL is missing and must be authored before repair.".to_string(),
+                    ));
                 }
             }
             Err(_) => {}
@@ -1216,7 +1291,10 @@ async fn load_cleanse_author_context(
                 &plan.plan_key,
                 &review_target_paths,
             ),
-            plan_state: PlanState::Repair,
+            plan_state: PlanState::repair(
+                Some(params.track),
+                params.execution_state.last_evidence_hash.clone(),
+            ),
         });
     }
 
@@ -1239,7 +1317,12 @@ async fn load_cleanse_author_context(
             );
             Ok(AuthorPlanLoadResult::Ready {
                 plan_context: ctx,
-                plan_state: PlanState::CleanseSchemaDatasetIds(ids.clone()),
+                plan_state: PlanState::new(
+                    Some(params.track),
+                    AuthoringMode::Schema {
+                        targets: ids.clone(),
+                    },
+                ),
             })
         } else {
             let completion_snapshot = crate::plan::snapshot_cleanse_completion(&plan);
@@ -1277,7 +1360,10 @@ async fn load_cleanse_author_context(
                         &plan.plan_key,
                         params.repair_ctx,
                     ),
-                    plan_state: PlanState::Repair,
+                    plan_state: PlanState::repair(
+                        Some(params.track),
+                        params.execution_state.last_evidence_hash.clone(),
+                    ),
                 })
             } else {
                 Ok(AuthorPlanLoadResult::EarlyReturn(
@@ -1299,7 +1385,12 @@ async fn load_cleanse_author_context(
                 plan.plan_key,
                 next.join("\n- ")
             ),
-            plan_state: PlanState::CleanseSqlDatasetIds(next.clone()),
+            plan_state: PlanState::new(
+                Some(params.track),
+                AuthoringMode::Sql {
+                    targets: next.clone(),
+                },
+            ),
         })
     }
 }
@@ -1436,7 +1527,10 @@ async fn load_model_author_context(
                 &plan.plan_key,
                 &review_target_paths,
             ),
-            plan_state: PlanState::Repair,
+            plan_state: PlanState::repair(
+                Some(params.track),
+                params.execution_state.last_evidence_hash.clone(),
+            ),
         });
     }
 
@@ -1535,7 +1629,7 @@ async fn load_model_author_context(
             );
             Ok(AuthorPlanLoadResult::Ready {
                 plan_context: ctx,
-                plan_state: PlanState::Unconstrained,
+                plan_state: PlanState::unconstrained(Some(params.track)),
             })
         } else {
             let completion_snapshot = crate::plan::snapshot_model_completion(&plan);
@@ -1573,7 +1667,10 @@ async fn load_model_author_context(
                         &plan.plan_key,
                         params.repair_ctx,
                     ),
-                    plan_state: PlanState::Repair,
+                    plan_state: PlanState::repair(
+                        Some(params.track),
+                        params.execution_state.last_evidence_hash.clone(),
+                    ),
                 })
             } else {
                 Ok(AuthorPlanLoadResult::EarlyReturn(
@@ -1588,7 +1685,12 @@ async fn load_model_author_context(
             }
         }
     } else {
-        let allowed = PlanState::ModelSqlItemNames(next_names.clone());
+        let allowed = PlanState::new(
+            Some(params.track),
+            AuthoringMode::Sql {
+                targets: next_names.clone(),
+            },
+        );
         let mut details: Vec<String> = Vec::new();
         for n in next_names.iter() {
             if let Some(t) = plan.tasks.iter().find(|t| t.name == *n) {
@@ -1674,17 +1776,18 @@ async fn build_author_prompt(
         let mut prior_validate_facts: Option<serde_json::Value> = None;
         if params.track.is_cleanse() {
             if let Some(p) = crate::plan::load_cleanse_plan(actx).await? {
-                if let PlanState::CleanseSqlDatasetIds(ds)
-                | PlanState::CleanseSchemaDatasetIds(ds) = plan_state
-                {
-                    batch_relations = crate::facts::dataset_ids_to_fqns(ds);
+                match &plan_state.mode {
+                    AuthoringMode::Sql { targets } | AuthoringMode::Schema { targets } => {
+                        batch_relations = crate::facts::dataset_ids_to_fqns(targets);
+                    }
+                    _ => {}
                 }
                 prior_validate_facts =
                     extract_validate_fail_context_for_cleanse(&p.plan_key, &p.project_snapshot);
             }
         } else {
             if let Some(p) = crate::plan::load_model_plan(actx).await? {
-                if let PlanState::ModelSqlItemNames(names) = plan_state {
+                if let AuthoringMode::Sql { targets: names } = &plan_state.mode {
                     {
                         let mut want_names: Vec<String> = names.clone();
                         for n in names.iter() {

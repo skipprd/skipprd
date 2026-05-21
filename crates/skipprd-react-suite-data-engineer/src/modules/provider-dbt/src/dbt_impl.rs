@@ -14,8 +14,8 @@ use crate::adapters::storage::StorageAdapter;
 use crate::providers::{Keyspace, RequestScope};
 
 use react_suite_data_engineer::providers::{
-    DbtProvider, DbtValidateArgs, DbtValidateResult, DBT_GOLD_DATABASE_ENV, DBT_GOLD_SCHEMA_ENV,
-    DBT_SILVER_DATABASE_ENV, DBT_SILVER_SCHEMA_ENV,
+    DbtCustomSchemaPolicy, DbtProvider, DbtValidateArgs, DbtValidateResult, DBT_GOLD_DATABASE_ENV,
+    DBT_GOLD_SCHEMA_ENV, DBT_SILVER_DATABASE_ENV, DBT_SILVER_SCHEMA_ENV,
 };
 
 #[derive(Clone)]
@@ -148,6 +148,26 @@ fn render_dbt_project_yaml(project_name: &str, profile_name: &str) -> String {
         gold_db_env = DBT_GOLD_DATABASE_ENV,
         gold_schema_env = DBT_GOLD_SCHEMA_ENV
     )
+}
+
+const GENERATE_SCHEMA_NAME_REL_PATH: &str = "macros/generate_schema_name.sql";
+
+fn render_exact_custom_schema_macro() -> &'static str {
+    r#"{% macro generate_schema_name(custom_schema_name, node) -%}
+    {%- if custom_schema_name is none -%}
+        {{ target.schema }}
+    {%- else -%}
+        {{ custom_schema_name | trim }}
+    {%- endif -%}
+{%- endmacro %}
+"#
+}
+
+fn schema_macro_for_policy(policy: DbtCustomSchemaPolicy) -> Option<&'static str> {
+    match policy {
+        DbtCustomSchemaPolicy::AdapterDefault => None,
+        DbtCustomSchemaPolicy::Exact => Some(render_exact_custom_schema_macro()),
+    }
 }
 
 /// Truncate a serialized YAML value to keep prompt size bounded while still conveying the intent
@@ -1318,6 +1338,57 @@ impl DbtProjectProvider {
         Ok(sanitized.stripped)
     }
 
+    async fn ensure_storage_schema_macro(
+        &self,
+        scope: &RequestScope,
+        policy: DbtCustomSchemaPolicy,
+    ) -> Result<(), String> {
+        let key = self
+            .keyspace
+            .scoped_key(scope, &["dbt", GENERATE_SCHEMA_NAME_REL_PATH]);
+        match schema_macro_for_policy(policy) {
+            Some(expected) => {
+                let existing = if self
+                    .storage
+                    .head_etag(&key)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .is_some()
+                {
+                    Some(
+                        self.storage
+                            .get_bytes(&key)
+                            .await
+                            .map_err(|e| e.to_string())?,
+                    )
+                } else {
+                    None
+                };
+                if existing.as_deref() != Some(expected.as_bytes()) {
+                    self.storage
+                        .put_bytes(&key, expected.as_bytes(), "text/sql")
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+            None => {
+                if self
+                    .storage
+                    .head_etag(&key)
+                    .await
+                    .map_err(|e| e.to_string())?
+                    .is_some()
+                {
+                    self.storage
+                        .delete_object(&key)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
     async fn ensure_local_project_yaml(
         &self,
         scope: &RequestScope,
@@ -1342,6 +1413,38 @@ impl DbtProjectProvider {
             }
         }
         Ok(sanitized.stripped)
+    }
+
+    async fn ensure_local_schema_macro(
+        &self,
+        scope: &RequestScope,
+        root: &Path,
+        policy: DbtCustomSchemaPolicy,
+    ) -> Result<(), String> {
+        let path = root.join(GENERATE_SCHEMA_NAME_REL_PATH);
+        match schema_macro_for_policy(policy) {
+            Some(expected) => {
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+                }
+                let existing = std::fs::read(&path).ok();
+                if existing.as_deref() != Some(expected.as_bytes()) {
+                    write_file(&path, expected.as_bytes())?;
+                }
+                if local_dbt_project_root().is_none() {
+                    self.ensure_storage_schema_macro(scope, policy).await?;
+                }
+            }
+            None => {
+                if path.exists() {
+                    std::fs::remove_file(&path).map_err(|e| e.to_string())?;
+                }
+                if local_dbt_project_root().is_none() {
+                    self.ensure_storage_schema_macro(scope, policy).await?;
+                }
+            }
+        }
+        Ok(())
     }
 
     async fn upload_dir_to_storage(&self, local_dir: &Path, prefix: &str) -> Result<usize, String> {
@@ -1682,6 +1785,13 @@ impl DbtProvider for DbtProjectProvider {
         let stripped = self
             .ensure_local_project_yaml(scope, &project_name, &proj)
             .await?;
+        let custom_schema_policy = args
+            .tier_routing
+            .as_ref()
+            .map(|routing| routing.custom_schema_policy)
+            .unwrap_or_default();
+        self.ensure_local_schema_macro(scope, &root, custom_schema_policy)
+            .await?;
 
         let mut envs: Vec<(&str, String)> = Vec::new();
         if let Some(pd) = profiles_dir.as_ref() {
@@ -1854,7 +1964,7 @@ impl DbtProvider for DbtProjectProvider {
             errs_vec.push(e);
         }
         let failure_class =
-            react_suite_data_engineer::failure_text::classify_dbt_failure(&errs_vec);
+            react_suite_data_engineer::failure_text::classify_dbt_error_kind(&errs_vec);
 
         Ok(DbtValidateResult {
             ok,
@@ -1893,6 +2003,16 @@ mod tests {
         assert!(y.contains("DBT_GOLD_SCHEMA"));
         assert!(y.contains("DBT_SILVER_DATABASE"));
         assert!(y.contains("DBT_SILVER_SCHEMA"));
+    }
+
+    #[test]
+    fn exact_custom_schema_macro_does_not_prefix_target_schema() {
+        let macro_sql = schema_macro_for_policy(DbtCustomSchemaPolicy::Exact).expect("exact macro");
+        assert!(macro_sql.contains("macro generate_schema_name"));
+        assert!(macro_sql.contains("custom_schema_name | trim"));
+        assert!(macro_sql.contains("target.schema"));
+        assert!(!macro_sql.contains("target.schema ~ '_'"));
+        assert!(schema_macro_for_policy(DbtCustomSchemaPolicy::AdapterDefault).is_none());
     }
 
     #[test]

@@ -26,6 +26,14 @@ pub enum DbtNamespaceShape {
     ConnectionDatabaseAndSchema,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DbtCustomSchemaPolicy {
+    #[default]
+    AdapterDefault,
+    Exact,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DbtTierNamespace {
     pub database: Option<String>,
@@ -38,6 +46,8 @@ pub struct DbtTierRouting {
     pub silver: DbtTierNamespace,
     pub gold: DbtTierNamespace,
     pub shape: DbtNamespaceShape,
+    #[serde(default)]
+    pub custom_schema_policy: DbtCustomSchemaPolicy,
 }
 
 impl DbtTierRouting {

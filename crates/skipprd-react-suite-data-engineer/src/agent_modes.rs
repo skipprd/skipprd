@@ -63,6 +63,69 @@ struct DataEngineerExecutor<'a> {
     max_replan_backtracks: usize,
 }
 
+async fn persist_terminal_failure_result(
+    thread_store: &ThreadStore,
+    thread_id: &str,
+    phase: crate::control_flow::Phase,
+    guard_kind: crate::domain_types::GuardBlockKind,
+    reason: &str,
+) {
+    let reason = reason.to_string();
+    let evidence_hash = react_core::llm_observability::sha256_hex_str(&format!(
+        "{}:{}:{}",
+        phase.as_str(),
+        guard_kind.as_str(),
+        reason
+    ));
+    if let Err(e) = crate::state_manager::apply_execution_event(
+        &thread_store.control_store(),
+        thread_id,
+        crate::progress_controller::DataEngineerEvent::EvaluationVerdictRecorded {
+            verdict: crate::evaluation::EvaluationVerdictSummary {
+                kind: crate::evaluation::VerdictKind::Fatal,
+                message: reason.clone(),
+            },
+            evidence_hash,
+        },
+    )
+    .await
+    {
+        tracing::error!("failed to persist terminal evaluation verdict: {e}");
+    }
+    if let Err(e) = crate::state_manager::apply_execution_event(
+        &thread_store.control_store(),
+        thread_id,
+        crate::progress_controller::DataEngineerEvent::MarkedFailed {
+            reason: reason.clone(),
+        },
+    )
+    .await
+    {
+        tracing::error!("failed to persist mark_failed terminal result: {e}");
+    }
+    if let Err(e) = thread_store
+        .append_step(
+            thread_id,
+            react_core::session::ThreadStep::Complete {
+                kind: "data_engineer_terminal".to_string(),
+                payload: serde_json::json!({
+                    "status": "failed",
+                    "phase": phase.as_str(),
+                    "guard_kind": guard_kind.as_str(),
+                    "reason": reason.clone(),
+                }),
+                display: Some(format!("{}: {}", phase.as_str(), reason)),
+                observation: react_core::session::Observation::fail(vec![reason.clone()]),
+                ts: chrono::Utc::now().to_rfc3339(),
+                agent: env_util::DEFAULT_AGENT_NAME.to_string(),
+            },
+        )
+        .await
+    {
+        tracing::error!("failed to append terminal thread result: {e}");
+    }
+}
+
 #[async_trait::async_trait]
 impl<'a> react_core::workflow::PhaseExecutor for DataEngineerExecutor<'a> {
     async fn execute_turn(&self, out_frames: &mut Vec<FlowFrame>) -> PhaseOutcome {
@@ -109,17 +172,14 @@ impl<'a> react_core::workflow::PhaseExecutor for DataEngineerExecutor<'a> {
                 {
                     tracing::error!("failed to persist guard block on FailFast: {e}");
                 }
-                if let Err(e) = crate::state_manager::apply_execution_event(
-                    &self.thread_store.control_store(),
+                persist_terminal_failure_result(
+                    &self.thread_store,
                     self.thread_id,
-                    crate::progress_controller::DataEngineerEvent::MarkedFailed {
-                        reason: reason.clone(),
-                    },
+                    phase,
+                    kind,
+                    &reason,
                 )
-                .await
-                {
-                    tracing::error!("failed to persist mark_failed on FailFast: {e}");
-                }
+                .await;
                 return PhaseOutcome::Failed { reason };
             }
         }
@@ -167,14 +227,11 @@ impl<'a> react_core::workflow::PhaseExecutor for DataEngineerExecutor<'a> {
             None
         }) {
             let detail = format!(
-                "{}\n\nExecution state at exhaustion:\n- current_phase={}\n- phase_reason_code={}\n- replan_backtracks={}\n- repair_cycles={}/{}\n- hard_mutation_repair_mode={}",
+                "{}\n\nExecution state at exhaustion:\n- current_phase={}\n- phase_reason_code={}\n- replan_backtracks={}",
                 budget_msg,
                 es.phase.current_phase.as_str(),
                 es.phase.transition.as_ref().map(|t| t.as_reason_str().to_string()).unwrap_or_else(|| "null".to_string()),
                 es.phase.replan_backtracks,
-                es.repair.cycle_count(),
-                crate::progress_controller::MAX_REPAIR_CYCLES,
-                es.hard_mutation_repair_mode(),
             );
             es.mark_failed(&detail);
             if let Err(e) = es
@@ -732,6 +789,14 @@ impl DataEngineerSuite {
                     reason.clone(),
                 )
                 .await;
+                persist_terminal_failure_result(
+                    &thread_store,
+                    thread_id,
+                    Phase::Preflight,
+                    GuardBlockKind::PrecheckFailed,
+                    &reason,
+                )
+                .await;
                 return Err(format!("agent_mode_await_user_forbidden: {}", reason));
             }
         }
@@ -817,17 +882,14 @@ impl DataEngineerSuite {
                     &reason,
                 )
                 .await;
-                if let Err(e) = crate::state_manager::apply_execution_event(
-                    &thread_store.control_store(),
+                persist_terminal_failure_result(
+                    thread_store,
                     thread_id,
-                    crate::progress_controller::DataEngineerEvent::MarkedFailed {
-                        reason: reason.clone(),
-                    },
+                    phase,
+                    GuardBlockKind::PhaseExecutionError,
+                    &reason,
                 )
-                .await
-                {
-                    tracing::error!("failed to persist mark_failed after phase error: {e}");
-                }
+                .await;
                 PhaseOutcome::Failed { reason }
             }
         }
@@ -866,28 +928,17 @@ impl DataEngineerSuite {
                 .await
             }
             Phase::CleanseAuthor | Phase::ModelAuthor => {
-                if execution_state.hard_mutation_repair_mode() {
-                    Self::execute_repair_phase(
-                        thread_store,
-                        thread_id,
-                        sctx,
-                        execution_state,
-                        repair_ctx,
-                    )
-                    .await
-                } else {
-                    Self::execute_author_phase(
-                        thread_store,
-                        thread_id,
-                        phase,
-                        question,
-                        sctx,
-                        execution_state,
-                        thread_state_step_count,
-                        repair_ctx,
-                    )
-                    .await
-                }
+                Self::execute_author_phase(
+                    thread_store,
+                    thread_id,
+                    phase,
+                    question,
+                    sctx,
+                    execution_state,
+                    thread_state_step_count,
+                    repair_ctx,
+                )
+                .await
             }
             Phase::CleanseValidate | Phase::ModelValidate => {
                 Self::execute_validate_phase(
@@ -922,110 +973,6 @@ impl DataEngineerSuite {
         }
     }
 
-    async fn execute_repair_phase(
-        thread_store: &ThreadStore,
-        thread_id: &str,
-        sctx: &SuiteCtx,
-        execution_state: &crate::progress_controller::ExecutionState,
-        _repair_ctx: &crate::progress_controller::RepairContext,
-    ) -> Result<PhaseOutcome, PhaseError> {
-        let current_phase = execution_state.phase.current_phase;
-        let track = crate::track_spec::TrackKind::from_any_phase(current_phase)
-            .ok_or_else(|| format!("repair phase has no track: {}", current_phase.as_str()))?;
-        let validate_phase = track.validate_phase();
-
-        let actx = Self::agent_tool_ctx(thread_id, sctx);
-        let cfg = crate::resolved_config_from_ctx(&actx);
-        let dispatch = cfg
-            .map(|c| crate::model_dispatch::ModelDispatch::from_resolved(&c.llm))
-            .unwrap_or_else(|| crate::model_dispatch::ModelDispatch {
-                reason_model: "gpt-4o-mini".into(),
-                task_model: "gpt-4o-mini".into(),
-            });
-
-        let error_context = execution_state
-            .repair
-            .failure_context
-            .clone()
-            .unwrap_or_else(|| crate::progress_controller::ValidationFailureContext {
-                brief: String::new(),
-                log_excerpts: None,
-                compile_ok: false,
-                run_ok: false,
-            });
-
-        let repair_cycle = execution_state.repair.cycle_count();
-        let result = crate::repair_subroutine::run_repair(
-            sctx,
-            thread_store,
-            thread_id,
-            &dispatch,
-            error_context,
-            None,
-            repair_cycle,
-        )
-        .await;
-
-        match result {
-            Ok(_) => {
-                crate::state_manager::apply_execution_event(
-                    &thread_store.control_store(),
-                    thread_id,
-                    crate::progress_controller::DataEngineerEvent::RepairSucceeded,
-                )
-                .await
-                .map_err(|e| format!("failed to clear repair state after success: {e}"))?;
-
-                crate::phase_contract::commit_metered_decision(
-                    thread_store,
-                    thread_id,
-                    Some(current_phase),
-                    crate::phase_contract::PhaseDecision::forward(
-                        validate_phase,
-                        Some(crate::progress_controller::PhaseTransition::RepairCompleted),
-                    ),
-                    vec![crate::metering::UsageEvent::RepairCycle {
-                        cycle: 1,
-                        project_id: thread_id.to_string(),
-                    }],
-                    crate::metering::global_metering(),
-                )
-                .await?;
-                Ok(PhaseOutcome::TransitionCommitted)
-            }
-            Err(e) => {
-                crate::state_manager::apply_execution_event(
-                    &thread_store.control_store(),
-                    thread_id,
-                    crate::progress_controller::DataEngineerEvent::RepairExhausted,
-                )
-                .await
-                .map_err(|e2| format!("failed to mark repair exhausted: {e2}"))?;
-
-                crate::phase_contract::commit_metered_decision(
-                    thread_store,
-                    thread_id,
-                    Some(current_phase),
-                    crate::phase_contract::PhaseDecision::forward(
-                        validate_phase,
-                        Some(
-                            crate::progress_controller::PhaseTransition::RepairExhausted {
-                                reason: e.clone(),
-                            },
-                        ),
-                    ),
-                    vec![crate::metering::UsageEvent::RepairCycle {
-                        cycle: 1,
-                        project_id: thread_id.to_string(),
-                    }],
-                    crate::metering::global_metering(),
-                )
-                .await?;
-                Ok(PhaseOutcome::TransitionCommitted)
-            }
-        }
-    }
-
     pub(super) async fn dispatch_agent(
         &self,
         thread_id: &str,
@@ -1040,5 +987,50 @@ impl DataEngineerSuite {
             AgentMode::Ask => Self::run_ask(thread_id, question, ctx).await,
         }?;
         Self::enforce_non_interactive_contract(agent_mode, frames)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::persist_terminal_failure_result;
+    use crate::control_flow::Phase;
+    use crate::domain_types::GuardBlockKind;
+    use react_core::keyspace::{DefaultKeyspace, Keyspace};
+    use react_core::scope::RequestScope;
+    use react_core::session::ThreadStore;
+    use react_core::storage::StorageAdapter;
+    use react_module_storage_memory::InMemoryStorageAdapter;
+    use std::sync::Arc;
+
+    #[tokio::test]
+    async fn terminal_failure_persists_control_state_and_thread_result() {
+        let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
+        let keyspace: Arc<dyn Keyspace> = Arc::new(DefaultKeyspace::new("b".to_string()));
+        let scope = RequestScope::parse("t", "w", "p").expect("valid test scope");
+        let store = ThreadStore::new(storage, scope, keyspace);
+        let tid = "tid-terminal-failure";
+
+        persist_terminal_failure_result(
+            &store,
+            tid,
+            Phase::ModelPlan,
+            GuardBlockKind::PlanSemanticInvalid,
+            "plan failed semantic validation",
+        )
+        .await;
+
+        let state = crate::state_manager::load_execution_state_strict(&store.control_store(), tid)
+            .await
+            .expect("load state")
+            .expect("execution state");
+        let verdict = state.last_evaluation.expect("last evaluation");
+        assert_eq!(verdict.kind, crate::evaluation::VerdictKind::Fatal);
+        assert!(state.repair.failure_context.is_some());
+
+        let log = store.get(tid).await.expect("thread log");
+        let result = log.result.expect("thread result");
+        assert_eq!(result.kind, "data_engineer_terminal");
+        assert_eq!(result.payload["phase"], "model_plan");
+        assert_eq!(result.payload["guard_kind"], "plan_semantic_invalid");
     }
 }

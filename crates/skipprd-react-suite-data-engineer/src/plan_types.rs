@@ -360,21 +360,34 @@ pub enum FieldKind {
     QualityFlag,
 }
 
-/// Canonical `lineage[].role` values when `lineage_kind` is `column` (plain strings — not a
-/// JSON-Schema `oneOf` enum — for OpenAI strict structured output).
-pub mod lineage_role {
-    pub const PASSTHROUGH: &str = "passthrough";
-    pub const NORMALIZED: &str = "normalized";
-    pub const PARSED: &str = "parsed";
-    pub const DERIVED_INPUT: &str = "derived_input";
-    pub const QUALITY_INPUT: &str = "quality_input";
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LineageRole {
+    Passthrough,
+    Normalized,
+    Parsed,
+    DerivedInput,
+    QualityInput,
 }
 
-/// JSON / OpenAI structured-output values for [`FieldLineage::lineage_kind`].
-pub mod field_lineage_kind {
-    pub const COLUMN: &str = "column";
-    pub const SYSTEM: &str = "system";
-    pub const CONSTANT: &str = "constant";
+impl LineageRole {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Passthrough => "passthrough",
+            Self::Normalized => "normalized",
+            Self::Parsed => "parsed",
+            Self::DerivedInput => "derived_input",
+            Self::QualityInput => "quality_input",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LineageKind {
+    Column,
+    System,
+    Constant,
 }
 
 /// Identifies a column on an upstream relation. For cleanse tasks `relation` is always omitted.
@@ -389,19 +402,17 @@ pub struct SourceFieldRef {
     pub name: String,
 }
 
-/// One mapping row in `output_fields[].lineage`. `lineage_kind` is a plain string (not a JSON-Schema
-/// `oneOf` enum) so strict OpenAI structured-output schemas stay compatible.
+/// One mapping row in `output_fields[].lineage`.
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct FieldLineage {
-    pub lineage_kind: String,
+    pub lineage_kind: LineageKind,
     /// Set when `lineage_kind` is `column`.
     #[serde(default)]
     pub source: Option<SourceFieldRef>,
-    /// Set when `lineage_kind` is `column` (snake_case string: `passthrough`, `normalized`, `parsed`,
-    /// `derived_input`, `quality_input` — not a JSON-schema enum, for OpenAI strict mode).
+    /// Set when `lineage_kind` is `column`.
     #[serde(default)]
-    pub role: Option<String>,
+    pub role: Option<LineageRole>,
     /// Set when `lineage_kind` is `system` (stable key for tooling/prompts).
     #[serde(default)]
     pub system_key: Option<String>,
@@ -412,11 +423,11 @@ pub struct FieldLineage {
 
 impl FieldLineage {
     #[allow(dead_code)]
-    pub fn column(source: SourceFieldRef, role: impl Into<String>) -> Self {
+    pub fn column(source: SourceFieldRef, role: LineageRole) -> Self {
         Self {
-            lineage_kind: field_lineage_kind::COLUMN.to_string(),
+            lineage_kind: LineageKind::Column,
             source: Some(source),
-            role: Some(role.into()),
+            role: Some(role),
             system_key: None,
             constant_value: None,
         }
@@ -425,7 +436,7 @@ impl FieldLineage {
     #[allow(dead_code)]
     pub fn system(system_key: impl Into<String>) -> Self {
         Self {
-            lineage_kind: field_lineage_kind::SYSTEM.to_string(),
+            lineage_kind: LineageKind::System,
             source: None,
             role: None,
             system_key: Some(system_key.into()),
@@ -436,11 +447,129 @@ impl FieldLineage {
     #[allow(dead_code)]
     pub fn constant(constant_value: impl Into<String>) -> Self {
         Self {
-            lineage_kind: field_lineage_kind::CONSTANT.to_string(),
+            lineage_kind: LineageKind::Constant,
             source: None,
             role: None,
             system_key: None,
             constant_value: Some(constant_value.into()),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LineageDisplayNode {
+    pub id: String,
+    pub label: String,
+    pub kind: LineageDisplayNodeKind,
+    #[serde(default)]
+    pub relation: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum LineageDisplayNodeKind {
+    OutputField,
+    SourceColumn,
+    System,
+    Constant,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LineageDisplayEdge {
+    pub from_node_id: String,
+    pub to_node_id: String,
+    pub lineage_kind: LineageKind,
+    #[serde(default)]
+    pub role: Option<LineageRole>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct LineageDisplayGraph {
+    pub output_field: String,
+    pub nodes: Vec<LineageDisplayNode>,
+    pub edges: Vec<LineageDisplayEdge>,
+}
+
+impl OutputFieldSpec {
+    #[allow(dead_code)]
+    pub fn lineage_display_graph(&self, task_id: &str) -> LineageDisplayGraph {
+        let output_id = format!("output:{task_id}:{}", self.name);
+        let mut nodes = vec![LineageDisplayNode {
+            id: output_id.clone(),
+            label: self.name.clone(),
+            kind: LineageDisplayNodeKind::OutputField,
+            relation: None,
+        }];
+        let mut edges = Vec::new();
+
+        for (idx, lineage) in self.lineage.iter().enumerate() {
+            match lineage.lineage_kind {
+                LineageKind::Column => {
+                    let Some(source) = lineage.source.as_ref() else {
+                        continue;
+                    };
+                    let relation = source.relation.clone();
+                    let id = match relation.as_deref() {
+                        Some(rel) if !rel.trim().is_empty() => {
+                            format!("source:{rel}:{}", source.name)
+                        }
+                        _ => format!("source:{task_id}:{}", source.name),
+                    };
+                    nodes.push(LineageDisplayNode {
+                        id: id.clone(),
+                        label: source.name.clone(),
+                        kind: LineageDisplayNodeKind::SourceColumn,
+                        relation,
+                    });
+                    edges.push(LineageDisplayEdge {
+                        from_node_id: id,
+                        to_node_id: output_id.clone(),
+                        lineage_kind: lineage.lineage_kind,
+                        role: lineage.role,
+                    });
+                }
+                LineageKind::System => {
+                    let label = lineage.system_key.clone().unwrap_or_default();
+                    let id = format!("system:{task_id}:{idx}:{label}");
+                    nodes.push(LineageDisplayNode {
+                        id: id.clone(),
+                        label,
+                        kind: LineageDisplayNodeKind::System,
+                        relation: None,
+                    });
+                    edges.push(LineageDisplayEdge {
+                        from_node_id: id,
+                        to_node_id: output_id.clone(),
+                        lineage_kind: lineage.lineage_kind,
+                        role: None,
+                    });
+                }
+                LineageKind::Constant => {
+                    let label = lineage.constant_value.clone().unwrap_or_default();
+                    let id = format!("constant:{task_id}:{idx}");
+                    nodes.push(LineageDisplayNode {
+                        id: id.clone(),
+                        label,
+                        kind: LineageDisplayNodeKind::Constant,
+                        relation: None,
+                    });
+                    edges.push(LineageDisplayEdge {
+                        from_node_id: id,
+                        to_node_id: output_id.clone(),
+                        lineage_kind: lineage.lineage_kind,
+                        role: None,
+                    });
+                }
+            }
+        }
+
+        LineageDisplayGraph {
+            output_field: self.name.clone(),
+            nodes,
+            edges,
         }
     }
 }
@@ -452,7 +581,8 @@ pub struct OutputFieldSpec {
     pub name: String,
     pub kind: FieldKind,
     /// Explicit lineage: every output field MUST have at least one entry.
-    #[serde(default)]
+    #[serde(deserialize_with = "deserialize_non_empty_lineage")]
+    #[schemars(length(min = 1))]
     pub lineage: Vec<FieldLineage>,
     /// A concise, imperative expression or transformation contract.
     /// This is not required to be dialect-perfect SQL; it is the design contract that authoring
@@ -467,6 +597,19 @@ pub struct OutputFieldSpec {
     /// Optional one-line meaning / usage guidance.
     #[serde(default)]
     pub description: Option<String>,
+}
+
+fn deserialize_non_empty_lineage<'de, D>(deserializer: D) -> Result<Vec<FieldLineage>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let lineage = Vec::<FieldLineage>::deserialize(deserializer)?;
+    if lineage.is_empty() {
+        return Err(serde::de::Error::custom(
+            "lineage must contain at least one entry",
+        ));
+    }
+    Ok(lineage)
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, schemars::JsonSchema)]
@@ -647,28 +790,48 @@ impl ModelTask {
         }
     }
 
-    /// Build grounded input relations for **staging** inputs only.
-    /// Intra-plan gold deps are handled separately by
-    /// [`apply_intra_plan_grounded_inputs`].
-    pub fn apply_grounded_inputs_from(
+    pub fn apply_grounded_inputs_from_truth(
         &mut self,
-        schemas: &SourceSchema,
+        truth: &crate::truth_snapshot::TruthSnapshot,
         staging_prefix: Option<&str>,
     ) {
-        let Some(prefix) = staging_prefix.map(str::trim).filter(|p| !p.is_empty()) else {
-            return;
-        };
+        let default_prefix = staging_prefix
+            .map(str::trim)
+            .filter(|prefix| !prefix.is_empty())
+            .map(|prefix| prefix.to_string());
         let mut grounded: Vec<GroundedModelInput> = Vec::new();
         for inp in &self.inputs {
             let input_name = inp.trim();
             if input_name.is_empty() || !input_name.starts_with("stg_") {
                 continue;
             }
-            let source_schema = schemas.get(input_name).cloned().unwrap_or_default();
+            let Some(relation) = truth.relation(input_name) else {
+                continue;
+            };
+            let source_schema = relation.to_source_columns();
+            if source_schema.is_empty() {
+                continue;
+            }
+            let relation_fqn = relation
+                .relation_fqn
+                .as_deref()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(|value| value.to_string())
+                .or_else(|| {
+                    default_prefix
+                        .as_deref()
+                        .map(|prefix| format!("{}.{}", prefix, input_name))
+                })
+                .unwrap_or_default();
+            let model_rel_path = relation
+                .path
+                .clone()
+                .unwrap_or_else(|| format!("models/staging/{}.sql", input_name));
             grounded.push(GroundedModelInput {
                 input_name: input_name.to_string(),
-                model_rel_path: format!("models/staging/{}.sql", input_name),
-                relation_fqn: format!("{}.{}", prefix, input_name),
+                model_rel_path,
+                relation_fqn,
                 source_schema,
             });
         }
@@ -699,7 +862,7 @@ impl PlanTask for ModelTask {
 
 /// Populate [`GroundedModelInput`] entries for intra-plan gold dependencies
 /// (inputs that reference another task in the same plan, not a staging model).
-/// Must be called **after** [`ModelTask::apply_grounded_inputs_from`] so that
+/// Must be called **after** [`ModelTask::apply_grounded_inputs_from_truth`] so that
 /// staging entries are already in place.
 pub fn apply_intra_plan_grounded_inputs(tasks: &mut [ModelTask], gold_prefix: Option<&str>) {
     let Some(prefix) = gold_prefix.map(str::trim).filter(|p| !p.is_empty()) else {

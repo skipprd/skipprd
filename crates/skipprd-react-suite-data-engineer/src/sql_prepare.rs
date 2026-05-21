@@ -19,11 +19,12 @@ pub fn prepare_read_only_sql(
     }
 
     let statement = trim_single_trailing_semicolon(trimmed)?;
-    if contains_semicolon_outside_quotes(statement) {
+    let validation_sql = strip_comments_outside_quotes(statement);
+    if contains_semicolon_outside_quotes(&validation_sql) {
         return Err("Only a single read-only SQL statement is allowed.".to_string());
     }
 
-    let tokens = sql_tokens(statement);
+    let tokens = sql_tokens(&validation_sql);
     let Some(first) = tokens.first() else {
         return Err("SQL cannot be empty.".to_string());
     };
@@ -88,6 +89,61 @@ fn contains_semicolon_outside_quotes(sql: &str) -> bool {
         }
     }
     false
+}
+
+fn strip_comments_outside_quotes(sql: &str) -> String {
+    let mut out = String::with_capacity(sql.len());
+    let mut in_single_quote = false;
+    let mut in_double_quote = false;
+    let mut chars = sql.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\'' if !in_double_quote => {
+                out.push(ch);
+                if in_single_quote && chars.peek() == Some(&'\'') {
+                    if let Some(escaped) = chars.next() {
+                        out.push(escaped);
+                    }
+                } else {
+                    in_single_quote = !in_single_quote;
+                }
+            }
+            '"' if !in_single_quote => {
+                out.push(ch);
+                if in_double_quote && chars.peek() == Some(&'"') {
+                    if let Some(escaped) = chars.next() {
+                        out.push(escaped);
+                    }
+                } else {
+                    in_double_quote = !in_double_quote;
+                }
+            }
+            '-' if !in_single_quote && !in_double_quote && chars.peek() == Some(&'-') => {
+                let _ = chars.next();
+                out.push('\n');
+                for next in chars.by_ref() {
+                    if next == '\n' {
+                        out.push('\n');
+                        break;
+                    }
+                }
+            }
+            '/' if !in_single_quote && !in_double_quote && chars.peek() == Some(&'*') => {
+                let _ = chars.next();
+                out.push(' ');
+                let mut prev = '\0';
+                for next in chars.by_ref() {
+                    if prev == '*' && next == '/' {
+                        break;
+                    }
+                    prev = next;
+                }
+                out.push(' ');
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn sql_tokens(sql: &str) -> Vec<String> {
@@ -183,5 +239,19 @@ mod tests {
     fn ignores_mutating_keywords_inside_string_literals() {
         let prepared = prepare_read_only_sql("select 'delete' as word", 50).unwrap();
         assert_eq!(prepared.sql, "select 'delete' as word LIMIT 50");
+    }
+
+    #[test]
+    fn allows_leading_line_comment() {
+        let sql = "-- skippr-plan-spec-digest: abc\nselect * from orders";
+        let prepared = prepare_read_only_sql(sql, 50).unwrap();
+        assert_eq!(prepared.sql, format!("{sql} LIMIT 50"));
+    }
+
+    #[test]
+    fn ignores_mutating_keywords_inside_comments() {
+        let sql = "/* drop table orders */\nselect * from orders -- delete everything";
+        let prepared = prepare_read_only_sql(sql, 50).unwrap();
+        assert_eq!(prepared.sql, format!("{sql} LIMIT 50"));
     }
 }

@@ -266,6 +266,10 @@ impl SnowflakeProvider {
         format!("\"{}\"", ident.replace('"', "\"\""))
     }
 
+    fn dbt_runtime_namespace_ident_sf(ident: &str) -> String {
+        ident.trim().to_ascii_uppercase()
+    }
+
     fn quote_table(database: &str, schema: &str, table: &str) -> String {
         format!(
             "{}.{}.{}",
@@ -411,6 +415,16 @@ impl WarehouseNaming for SnowflakeProvider {
 
     fn quote_ident(&self, ident: &str) -> String {
         Self::quote_ident_sf(ident)
+    }
+
+    fn dbt_runtime_namespace_ident(&self, ident: &str) -> String {
+        Self::dbt_runtime_namespace_ident_sf(ident)
+    }
+
+    fn dbt_custom_schema_policy(
+        &self,
+    ) -> react_suite_data_engineer::providers::DbtCustomSchemaPolicy {
+        react_suite_data_engineer::providers::DbtCustomSchemaPolicy::Exact
     }
 
     fn quote_fqn(&self, id: &DatasetId) -> String {
@@ -711,6 +725,18 @@ mod tests {
         assert_eq!(lookup.catalog, "ANALYTICS");
         assert_eq!(lookup.database, "EXAMPLE_SILVER");
         assert_eq!(lookup.table, "STG_ORDERS");
+    }
+
+    #[test]
+    fn dbt_runtime_namespace_ident_matches_snowflake_unquoted_identifier_fold() {
+        assert_eq!(
+            SnowflakeProvider::dbt_runtime_namespace_ident_sf("bank_silver"),
+            "BANK_SILVER"
+        );
+        assert_eq!(
+            SnowflakeProvider::dbt_runtime_namespace_ident_sf("bank"),
+            "BANK"
+        );
     }
 
     #[test]

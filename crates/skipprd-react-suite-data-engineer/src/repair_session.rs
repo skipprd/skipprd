@@ -1,4 +1,4 @@
-use crate::progress_controller::ValidationFailureContext;
+use crate::evaluation::RepairEvidenceContext;
 use serde::{Deserialize, Serialize};
 
 /// Accumulated history of a repair session, ensuring every iteration builds on all prior context.
@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 /// iterations — the LLM always sees prior attempts and their outcomes.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RepairSessionLog {
-    pub error_context: ValidationFailureContext,
+    pub error_context: RepairEvidenceContext,
     pub iterations: Vec<RepairIteration>,
 }
 
@@ -58,7 +58,7 @@ pub struct ValidateOutcome {
 }
 
 impl RepairSessionLog {
-    pub fn new(error_context: ValidationFailureContext) -> Self {
+    pub fn new(error_context: RepairEvidenceContext) -> Self {
         Self {
             error_context,
             iterations: Vec::new(),
@@ -193,7 +193,7 @@ mod tests {
 
     #[test]
     fn format_for_prompt_includes_iterations() {
-        let mut log = RepairSessionLog::new(ValidationFailureContext {
+        let mut log = RepairSessionLog::new(RepairEvidenceContext {
             brief: "dbt test failed: 2 failures".into(),
             log_excerpts: None,
             compile_ok: false,
@@ -228,7 +228,7 @@ mod tests {
 
     #[test]
     fn empty_session_produces_context_only() {
-        let log = RepairSessionLog::new(ValidationFailureContext {
+        let log = RepairSessionLog::new(RepairEvidenceContext {
             brief: "compile error".into(),
             log_excerpts: None,
             compile_ok: false,

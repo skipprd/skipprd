@@ -197,6 +197,10 @@ mod tests {
         assert!(s.contains("lineage_kind"));
         assert!(s.contains("constant"));
         assert!(s.contains("system"));
+        assert!(s.contains("passthrough"));
+        assert!(s.contains("normalized"));
+        assert!(s.contains("quality_input"));
+        assert!(s.contains("minItems"));
     }
 
     #[test]

@@ -108,10 +108,85 @@ async fn handle_plan_semantic_failure(
             sem.messages().join(" | ")
         )
         .into()),
-        SubjectiveRetryOutcome::WithinBudget(_) => Ok(PhaseOutcome::stayed_waiting(
+        SubjectiveRetryOutcome::WithinBudget => Ok(PhaseOutcome::stayed_waiting(
             "plan semantic validation failed but remains within retry budget",
         )),
     }
+}
+
+fn plan_semantic_evidence(
+    brief: impl Into<String>,
+    errors: Vec<String>,
+) -> crate::evaluation::Evidence {
+    let brief = brief.into();
+    let log_excerpts =
+        (!errors.is_empty()).then(|| format!("plan_semantic_errors:\n- {}", errors.join("\n- ")));
+    crate::evaluation::Evidence::PlanSemantic(crate::evaluation::PlanSemanticEvidence {
+        brief,
+        log_excerpts,
+        errors,
+    })
+}
+
+fn truth_incomplete_evidence(
+    brief: impl Into<String>,
+    missing_inputs: Vec<String>,
+    warnings: &[String],
+) -> crate::evaluation::Evidence {
+    let brief = brief.into();
+    let mut lines = Vec::new();
+    if !missing_inputs.is_empty() {
+        lines.push(format!(
+            "missing_inputs:\n- {}",
+            missing_inputs.join("\n- ")
+        ));
+    }
+    if !warnings.is_empty() {
+        lines.push(format!("warnings:\n- {}", warnings.join("\n- ")));
+    }
+    crate::evaluation::Evidence::TruthIncomplete(crate::evaluation::TruthIncompleteEvidence {
+        brief,
+        log_excerpts: (!lines.is_empty()).then(|| lines.join("\n\n")),
+        missing_inputs,
+    })
+}
+
+async fn apply_model_plan_evidence(
+    pctx: &PlanPhaseCtx<'_>,
+    sctx: &SuiteCtx,
+    execution_state: &crate::progress_controller::ExecutionState,
+    evidence: crate::evaluation::Evidence,
+) -> Result<PhaseOutcome, PhaseError> {
+    let input =
+        crate::evaluation::build_input(&pctx.actx, pctx.phase, evidence.clone(), execution_state)
+            .await?;
+    let verdict = crate::evaluation::evaluate(input);
+    DataEngineerSuite::apply_evaluation_verdict(
+        pctx.thread_store,
+        pctx.thread_id,
+        pctx.phase,
+        sctx,
+        execution_state,
+        evidence,
+        verdict,
+    )
+    .await
+}
+
+fn collect_truth_incomplete_staging_inputs(
+    truth: &crate::truth_snapshot::TruthSnapshot,
+    input_names: &std::collections::BTreeSet<String>,
+) -> Vec<String> {
+    input_names
+        .iter()
+        .filter(|input_name| {
+            truth
+                .relation(input_name)
+                .map(|relation| relation.columns.is_empty())
+                .unwrap_or(false)
+        })
+        .cloned()
+        .collect()
 }
 
 /// Stamp design-review details from the critique pass into the plan's project_snapshot.
@@ -143,6 +218,68 @@ struct PlanBootstrapOutcome {
     /// True when deterministic bootstrap gathered sufficient evidence to skip
     /// the ReAct discovery loop (tables discovered, models/ empty).
     discovery_sufficient: bool,
+}
+
+async fn selected_pipeline_raw_tables(
+    sctx: &SuiteCtx,
+) -> Result<Option<std::collections::BTreeSet<String>>, String> {
+    let Some(skippr) = crate::ctx_ext::sctx_skippr(sctx) else {
+        return Ok(None);
+    };
+    let pipeline = sctx.scope().project_id.as_str();
+    let status = skippr
+        .show_pipeline(sctx.scope(), pipeline)
+        .await
+        .map_err(|e| format!("failed to load selected pipeline '{pipeline}' status: {e}"))?;
+    Ok(Some(pipeline_raw_tables_from_status(&status)))
+}
+
+fn pipeline_raw_tables_from_status(
+    status: &crate::providers::SkipprPipelineStatus,
+) -> std::collections::BTreeSet<String> {
+    status
+        .namespaces
+        .iter()
+        .map(|ns| crate::phase_el_verify::namespace_to_snowflake_table(&ns.namespace))
+        .collect()
+}
+
+fn table_leaf_name(table: &str) -> String {
+    table
+        .trim()
+        .trim_matches('"')
+        .rsplit('.')
+        .next()
+        .unwrap_or(table)
+        .trim()
+        .trim_matches('"')
+        .to_ascii_lowercase()
+}
+
+fn filter_tables_to_pipeline_raw_tables(
+    tables: Vec<String>,
+    raw_tables: Option<&std::collections::BTreeSet<String>>,
+    pipeline: &str,
+) -> Result<Vec<String>, String> {
+    let Some(raw_tables) = raw_tables else {
+        return Ok(tables);
+    };
+    let filtered: Vec<String> = tables
+        .iter()
+        .filter(|table| raw_tables.contains(&table_leaf_name(table)))
+        .cloned()
+        .collect();
+    if filtered.is_empty() {
+        let mut expected: Vec<&str> = raw_tables.iter().map(String::as_str).collect();
+        expected.truncate(10);
+        let mut discovered = tables;
+        discovered.truncate(10);
+        return Err(format!(
+            "pipeline '{pipeline}' has no matching raw warehouse tables from its Skippr pipeline status; expected raw table names {:?}, discovered warehouse tables {:?}. Run `skippr sync --pipeline {pipeline} --once` before `skippr model --pipeline {pipeline}`.",
+            expected, discovered
+        ));
+    }
+    Ok(filtered)
 }
 
 async fn run_plan_bootstrap(
@@ -242,7 +379,7 @@ async fn run_plan_bootstrap(
         sql_schema_timeout,
     )
     .await;
-    let tables: Vec<String> = tables_obs
+    let discovered_tables: Vec<String> = tables_obs
         .get("tables")
         .and_then(|v| v.as_array())
         .map(|a| {
@@ -251,6 +388,23 @@ async fn run_plan_bootstrap(
                 .collect()
         })
         .unwrap_or_default();
+    let pipeline_raw_tables = selected_pipeline_raw_tables(sctx).await?;
+    let tables = filter_tables_to_pipeline_raw_tables(
+        discovered_tables.clone(),
+        pipeline_raw_tables.as_ref(),
+        sctx.scope().project_id.as_str(),
+    )?;
+    let pipeline_filter_summary = pipeline_raw_tables
+        .as_ref()
+        .map(|raw_tables| {
+            format!(
+                "pipeline raw table filter: expected_raw_tables={} discovered_tables={} matched_tables={}",
+                raw_tables.len(),
+                discovered_tables.len(),
+                tables.len()
+            )
+        })
+        .unwrap_or_else(|| "pipeline raw table filter: not available".to_string());
 
     let mut probed: Option<String> = None;
     let mut probed_field: Option<String> = None;
@@ -338,7 +492,7 @@ async fn run_plan_bootstrap(
     head_tables.truncate(10);
     let bootstrap_sufficient = models_list_ok && tables_ok;
     let summary = format!(
-        "Deterministic bootstrap (suite-provided):\n- models/ listed: {} item(s)\n- models_list_ok: {}\n- sql_schema_ok: {}\n- tables discovered (head): {:?}\n- probed table for evidence: {:?}\n- probed field: {:?}\n- probe_ok: {}\n- {}\n- bootstrap_sufficient: {}\n\nIf models/ is empty, that's OK; proceed using sql_schema discovery. Use only aggregate semantic_profile statuses/counts/claim refs as semantic evidence; never raw row values.",
+        "Deterministic bootstrap (suite-provided):\n- models/ listed: {} item(s)\n- models_list_ok: {}\n- sql_schema_ok: {}\n- tables discovered (head): {:?}\n- probed table for evidence: {:?}\n- probed field: {:?}\n- probe_ok: {}\n- {}\n- {}\n- bootstrap_sufficient: {}\n\nIf models/ is empty, that's OK; proceed using sql_schema discovery. Use only aggregate semantic_profile statuses/counts/claim refs as semantic evidence; never raw row values.",
         model_count,
         models_list_ok,
         tables_ok,
@@ -346,6 +500,7 @@ async fn run_plan_bootstrap(
         probed,
         probed_field,
         probe_ok,
+        pipeline_filter_summary,
         profile_summary,
         bootstrap_sufficient
     );
@@ -691,7 +846,8 @@ async fn build_plan_query(
 /// validate → persist → finalize.
 async fn compile_and_ground_cleanse_plan(
     pctx: &PlanPhaseCtx<'_>,
-    _sctx: &SuiteCtx,
+    sctx: &SuiteCtx,
+    execution_state: &crate::progress_controller::ExecutionState,
     q: &str,
     design_memo: &str,
     design_critique: &crate::plan_schema::PlanDesignCritiqueV1,
@@ -826,7 +982,7 @@ async fn compile_and_ground_cleanse_plan(
 
     // Semantic validation (with one targeted-enrichment retry).
     tracing::info!("data_engineer: [cleanse] validating plan semantics");
-    let sem = crate::plan::ensure_cleanse_plan_semantically_valid_or_repaired(&mut plan);
+    let sem = crate::plan_semantic_gate::gate_cleanse_plan(&mut plan).into_validation();
     let sem = if sem.ok {
         sem
     } else {
@@ -843,11 +999,19 @@ async fn compile_and_ground_cleanse_plan(
                 &targeted,
             )
             .await?;
-            crate::plan::ensure_cleanse_plan_semantically_valid_or_repaired(&mut plan)
+            crate::plan_semantic_gate::gate_cleanse_plan(&mut plan).into_validation()
         } else {
             sem
         }
     };
+
+    if !sem.ok {
+        let evidence = plan_semantic_evidence(
+            "cleanse plan failed semantic validation against the current truth snapshot",
+            sem.messages(),
+        );
+        return apply_model_plan_evidence(pctx, sctx, execution_state, evidence).await;
+    }
 
     let _grounded_proof =
         crate::plan::save_cleanse_plan_grounded(&pctx.actx, &plan, &grounded.allowed)
@@ -883,44 +1047,44 @@ async fn compile_and_ground_cleanse_plan(
 /// for staging model output schemas and records them on each `ModelTask.source_schema`.
 async fn compile_and_ground_model_plan(
     pctx: &PlanPhaseCtx<'_>,
+    sctx: &SuiteCtx,
+    execution_state: &crate::progress_controller::ExecutionState,
     q: &str,
     design_memo: &str,
     design_critique: &crate::plan_schema::PlanDesignCritiqueV1,
     critique_disposition: crate::enrichment::DesignCritiqueDisposition,
     discovery: &crate::dataset_truth::PlanDiscoveryContext,
 ) -> Result<PhaseOutcome, PhaseError> {
-    let staged = discovery
+    let mut staged = discovery
         .staging
         .as_ref()
-        .expect("compile_and_ground_model_plan requires discovery.staging to be populated");
+        .expect("compile_and_ground_model_plan requires discovery.staging to be populated")
+        .clone();
+    let planning_truth =
+        crate::truth_snapshot::TruthSnapshot::build_for_phase(&pctx.actx, pctx.phase).await?;
+    staged
+        .allowed_models
+        .extend(planning_truth.staging_models.keys().cloned());
     if staged.allowed_models.is_empty() {
-        use crate::retry_budget::SubjectiveRetryOutcome;
-        match DataEngineerSuite::check_subjective_retry_budget(
-            pctx.thread_store,
-            pctx.thread_id,
-            crate::progress_controller::SubjectiveRetryKind::PlanGroundingStagingDiscoveryEmpty,
-        )
-        .await?
-        {
-            SubjectiveRetryOutcome::Exhausted(tries) => {
-                return Err(format!(
-                    "no staging models discovered in storage after {} retries (expected stg_*.sql files under models/staging/); warnings: [{}]",
-                    tries,
-                    staged.warnings.join("; ")
-                ).into());
-            }
-            SubjectiveRetryOutcome::WithinBudget(_) => {
-                return Ok(PhaseOutcome::stayed_waiting(
-                    "model planning is waiting for staging model discovery to yield grounded inputs",
-                ));
-            }
-        }
+        let evidence = truth_incomplete_evidence(
+            "model planning could not resolve any staging models from warehouse, manifest, schema YAML, or staging SQL",
+            Vec::new(),
+            &planning_truth.warnings,
+        );
+        return apply_model_plan_evidence(pctx, sctx, execution_state, evidence).await;
     }
+    let planning_schemas = planning_truth.source_schema_for_model_inputs(&staged.allowed_models);
+    let planning_context =
+        crate::dataset_truth::enrich_query_with_staging_models(q, &staged, &planning_schemas);
 
     tracing::info!("data_engineer: [model] compiling plan from candidate models");
-    let candidates =
-        DataEngineerSuite::generate_model_candidates(&pctx.actx, q, design_memo, design_critique)
-            .await?;
+    let candidates = DataEngineerSuite::generate_model_candidates(
+        &pctx.actx,
+        &planning_context,
+        design_memo,
+        design_critique,
+    )
+    .await?;
     let mut plan = DataEngineerSuite::compile_model_candidates_plan(&candidates);
 
     for t in plan.tasks.iter_mut() {
@@ -971,8 +1135,8 @@ async fn compile_and_ground_model_plan(
         .collect();
     DataEngineerSuite::enrich_model_tasks(
         &pctx.actx,
-        q,
-        &discovery.source_schemas,
+        &planning_context,
+        &planning_schemas,
         design_memo,
         design_critique,
         &mut plan,
@@ -981,10 +1145,9 @@ async fn compile_and_ground_model_plan(
     .await?;
 
     // Record staging model output schemas on the plan. Enrichment has now
-    // populated task.inputs with stg_* names, so we query the warehouse for
-    // their output columns and stamp each ModelTask with both merged schemas
-    // and grounded per-input relation facts.
-    let mut staging_schemas = discovery.source_schemas.clone();
+    // populated task.inputs with stg_* names, so we resolve them from the
+    // consolidated planning truth instead of assuming warehouse lookup is the
+    // only source of columns.
     let staging_prefix = crate::dataset_truth::staging_relation_prefix(&pctx.actx);
     let gold_prefix = crate::dataset_truth::gold_relation_prefix(&pctx.actx);
     {
@@ -994,15 +1157,20 @@ async fn compile_and_ground_model_plan(
             .flat_map(|t| t.inputs.iter().map(|s| s.trim().to_string()))
             .filter(|s| !s.is_empty() && s.starts_with("stg_"))
             .collect();
-        crate::dataset_truth::record_staging_output_schemas(
-            &pctx.actx,
-            &all_stg_inputs,
-            &mut staging_schemas,
-        )
-        .await;
+        let staging_schemas = planning_truth.source_schema_for_model_inputs(&all_stg_inputs);
         for t in plan.tasks.iter_mut() {
             t.apply_source_schema_from(&staging_schemas);
-            t.apply_grounded_inputs_from(&staging_schemas, staging_prefix.as_deref());
+            t.apply_grounded_inputs_from_truth(&planning_truth, staging_prefix.as_deref());
+        }
+        let missing_truth_inputs =
+            collect_truth_incomplete_staging_inputs(&planning_truth, &all_stg_inputs);
+        if !missing_truth_inputs.is_empty() {
+            let evidence = truth_incomplete_evidence(
+                "model planning found staging models but some required staging columns are still unavailable",
+                missing_truth_inputs,
+                &planning_truth.warnings,
+            );
+            return apply_model_plan_evidence(pctx, sctx, execution_state, evidence).await;
         }
         crate::plan_types::apply_intra_plan_grounded_inputs(
             &mut plan.tasks,
@@ -1022,86 +1190,33 @@ async fn compile_and_ground_model_plan(
     crate::plan::prune_model_plan_to_grounded_staging_models(&mut plan, &staged.allowed_models);
 
     if plan.tasks.is_empty() || plan.batches.is_empty() {
-        use crate::retry_budget::SubjectiveRetryOutcome;
-        match DataEngineerSuite::check_subjective_retry_budget(
-            pctx.thread_store,
-            pctx.thread_id,
-            crate::progress_controller::SubjectiveRetryKind::PlanGroundingEmptyAfterPrune,
-        )
-        .await?
-        {
-            SubjectiveRetryOutcome::Exhausted(tries) => {
-                let allowed: Vec<&str> = staged.allowed_models.iter().map(|s| s.as_str()).collect();
-                return Err(format!(
-                    "model plan grounding pruned all tasks after {} retries; LLM candidates did not reference existing staging models. allowed_models={:?}",
-                    tries, allowed
-                ).into());
-            }
-            SubjectiveRetryOutcome::WithinBudget(_) => {
-                return Ok(PhaseOutcome::stayed_waiting(
-                    "model planning pruned to empty and is retrying within grounding budget",
-                ));
-            }
-        }
+        let allowed: Vec<&str> = staged.allowed_models.iter().map(|s| s.as_str()).collect();
+        let evidence = plan_semantic_evidence(
+            "model plan grounding pruned all tasks because the plan did not reference grounded staging inputs",
+            vec![format!(
+                "model plan grounding pruned all tasks; allowed_models={allowed:?}"
+            )],
+        );
+        return apply_model_plan_evidence(pctx, sctx, execution_state, evidence).await;
     }
 
-    // Semantic validation (with one targeted-enrichment retry).
+    // Semantic validation now routes through evaluation instead of a private
+    // enrichment retry loop.
     tracing::info!("data_engineer: [model] validating plan semantics");
-    let sem = crate::plan::ensure_model_plan_semantically_valid_or_repaired(
-        &mut plan,
-        &staged.allowed_models,
-    );
-    let sem = if sem.ok {
-        sem
-    } else {
-        let candidates: Vec<String> = plan.tasks.iter().map(|t| t.name.clone()).collect();
-        let targeted = DataEngineerSuite::collect_targeted_semantic_tasks(&sem.issues, &candidates);
-        if !targeted.is_empty() {
-            DataEngineerSuite::enrich_model_tasks(
-                &pctx.actx,
-                q,
-                &staging_schemas,
-                design_memo,
-                design_critique,
-                &mut plan,
-                &targeted,
-            )
-            .await?;
-            for t in plan.tasks.iter_mut() {
-                t.apply_source_schema_from(&staging_schemas);
-                t.apply_grounded_inputs_from(&staging_schemas, staging_prefix.as_deref());
-            }
-            crate::plan_types::apply_intra_plan_grounded_inputs(
-                &mut plan.tasks,
-                gold_prefix.as_deref(),
-            );
-            crate::plan_types::reconcile_model_batches_and_work_groups(&mut plan);
-            let attached =
-                crate::semantic_profile::attach_semantic_profile_claim_refs_to_model_plan(
-                    &pctx.actx, &mut plan,
-                )
-                .await?;
-            tracing::info!(
-                "data_engineer: [model] reattached {} semantic_profile evidence claim ref(s)",
-                attached
-            );
-            crate::plan::ensure_model_plan_semantically_valid_or_repaired(
-                &mut plan,
-                &staged.allowed_models,
-            )
-        } else {
-            sem
-        }
-    };
-
-    if sem.ok {
-        let _grounded_proof =
-            crate::plan::save_model_plan_grounded(&pctx.actx, &plan, &staged.allowed_models)
-                .await
-                .map_err(|e| format!("failed to checkpoint normalized model plan: {e}"))?;
+    let sem = crate::plan_semantic_gate::gate_model_plan(&mut plan, &staged.allowed_models)
+        .into_validation();
+    if !sem.ok {
+        let evidence = plan_semantic_evidence(
+            "model plan failed semantic validation against the current truth snapshot",
+            sem.messages(),
+        );
+        return apply_model_plan_evidence(pctx, sctx, execution_state, evidence).await;
     }
+    let _grounded_proof =
+        crate::plan::save_model_plan_grounded(&pctx.actx, &plan, &staged.allowed_models)
+            .await
+            .map_err(|e| format!("failed to checkpoint normalized model plan: {e}"))?;
 
-    use crate::progress_controller::SubjectiveRetryKind;
     finalize_plan_and_approve(
         pctx.thread_store,
         pctx.thread_id,
@@ -1113,11 +1228,7 @@ async fn compile_and_ground_model_plan(
         critique_disposition,
         &sem,
         &mut plan.project_snapshot,
-        vec![
-            SubjectiveRetryKind::PlanSemanticInvalid,
-            SubjectiveRetryKind::PlanGroundingEmptyAfterPrune,
-            SubjectiveRetryKind::PlanGroundingStagingDiscoveryEmpty,
-        ],
+        vec![],
     )
     .await
 }
@@ -1179,16 +1290,24 @@ fn mark_model_amendment_targets_needs_update(
 
 async fn amend_and_ground_model_plan(
     pctx: &PlanPhaseCtx<'_>,
+    sctx: &SuiteCtx,
+    execution_state: &crate::progress_controller::ExecutionState,
     q: &str,
     design_memo: &str,
     design_critique: &crate::plan_schema::PlanDesignCritiqueV1,
     discovery: &crate::dataset_truth::PlanDiscoveryContext,
     violations: &[crate::progress_controller::PlanViolation],
 ) -> Result<PhaseOutcome, PhaseError> {
-    let staged = discovery
+    let mut staged = discovery
         .staging
         .as_ref()
-        .expect("amend_and_ground_model_plan requires discovery.staging to be populated");
+        .expect("amend_and_ground_model_plan requires discovery.staging to be populated")
+        .clone();
+    let planning_truth =
+        crate::truth_snapshot::TruthSnapshot::build_for_phase(&pctx.actx, pctx.phase).await?;
+    staged
+        .allowed_models
+        .extend(planning_truth.staging_models.keys().cloned());
     let mut plan = crate::plan::load_model_plan(&pctx.actx)
         .await?
         .ok_or_else(|| {
@@ -1200,19 +1319,16 @@ async fn amend_and_ground_model_plan(
         return Err("model plan amendment requested without targeted task_id(s); refusing full-plan regeneration to avoid contract churn".to_string().into());
     }
 
-    let mut staging_schemas = discovery.source_schemas.clone();
+    let mut staging_schemas = planning_truth.source_schema_for_model_inputs(&staged.allowed_models);
     let existing_stg_inputs: std::collections::BTreeSet<String> = plan
         .tasks
         .iter()
         .flat_map(|t| t.inputs.iter().map(|s| s.trim().to_string()))
         .filter(|s| !s.is_empty() && s.starts_with("stg_"))
         .collect();
-    crate::dataset_truth::record_staging_output_schemas(
-        &pctx.actx,
-        &existing_stg_inputs,
-        &mut staging_schemas,
-    )
-    .await;
+    let existing_truth_schemas =
+        planning_truth.source_schema_for_model_inputs(&existing_stg_inputs);
+    staging_schemas.extend(existing_truth_schemas);
 
     let amend_q = format!(
         "{q}\n\nAMENDMENT MODE:\n{MODEL_PLAN_AMENDMENT_CHURN_WARNING}\n\nTarget task_ids:\n{}\n",
@@ -1237,17 +1353,22 @@ async fn amend_and_ground_model_plan(
         .flat_map(|t| t.inputs.iter().map(|s| s.trim().to_string()))
         .filter(|s| !s.is_empty() && s.starts_with("stg_"))
         .collect();
-    crate::dataset_truth::record_staging_output_schemas(
-        &pctx.actx,
-        &all_stg_inputs,
-        &mut staging_schemas,
-    )
-    .await;
+    staging_schemas = planning_truth.source_schema_for_model_inputs(&all_stg_inputs);
     let staging_prefix = crate::dataset_truth::staging_relation_prefix(&pctx.actx);
     let gold_prefix = crate::dataset_truth::gold_relation_prefix(&pctx.actx);
     for t in plan.tasks.iter_mut() {
         t.apply_source_schema_from(&staging_schemas);
-        t.apply_grounded_inputs_from(&staging_schemas, staging_prefix.as_deref());
+        t.apply_grounded_inputs_from_truth(&planning_truth, staging_prefix.as_deref());
+    }
+    let missing_truth_inputs =
+        collect_truth_incomplete_staging_inputs(&planning_truth, &all_stg_inputs);
+    if !missing_truth_inputs.is_empty() {
+        let evidence = truth_incomplete_evidence(
+            "model plan amendment still lacks deterministic staging column truth for one or more inputs",
+            missing_truth_inputs,
+            &planning_truth.warnings,
+        );
+        return apply_model_plan_evidence(pctx, sctx, execution_state, evidence).await;
     }
     crate::plan_types::apply_intra_plan_grounded_inputs(&mut plan.tasks, gold_prefix.as_deref());
     let _ = crate::semantic_profile::attach_semantic_profile_claim_refs_to_model_plan(
@@ -1261,23 +1382,18 @@ async fn amend_and_ground_model_plan(
     mark_model_amendment_targets_needs_update(&mut plan, &target_ids);
     crate::plan_types::reconcile_model_batches_and_work_groups(&mut plan);
 
-    let sem = crate::plan::ensure_model_plan_semantically_valid_or_repaired(
-        &mut plan,
-        &staged.allowed_models,
-    );
+    let sem = crate::plan_semantic_gate::gate_model_plan(&mut plan, &staged.allowed_models)
+        .into_validation();
     if !sem.ok {
-        return handle_plan_semantic_failure(&sem, pctx.thread_store, pctx.thread_id, pctx.phase)
-            .await;
+        let evidence = plan_semantic_evidence(
+            "amended model plan failed semantic validation against the current truth snapshot",
+            sem.messages(),
+        );
+        return apply_model_plan_evidence(pctx, sctx, execution_state, evidence).await;
     }
     crate::plan::save_model_plan_grounded(&pctx.actx, &plan, &staged.allowed_models)
         .await
         .map_err(|e| format!("failed to checkpoint amended model plan: {e}"))?;
-    DataEngineerSuite::clear_subjective_retries(
-        pctx.thread_store,
-        pctx.thread_id,
-        vec![crate::progress_controller::SubjectiveRetryKind::PlanSemanticInvalid],
-    )
-    .await?;
     crate::phase_contract::commit_phase_decision(
         pctx.thread_store,
         pctx.thread_id,
@@ -1322,6 +1438,62 @@ mod tests {
         assert!(super::MODEL_PLAN_AMENDMENT_CHURN_WARNING.contains("Unnecessary byte diffs"));
         assert!(super::MODEL_PLAN_AMENDMENT_CHURN_WARNING.contains("expensive re-authoring churn"));
         assert!(super::MODEL_PLAN_AMENDMENT_CHURN_WARNING.contains("surgically edit"));
+    }
+
+    #[test]
+    fn pipeline_raw_table_filter_rejects_other_pipeline_tables() {
+        let status = crate::providers::SkipprPipelineStatus {
+            pipeline: "bank".to_string(),
+            status: "ready".to_string(),
+            namespaces: vec![crate::providers::SkipprNamespaceStatus {
+                namespace: "bank".to_string(),
+                fields: Vec::new(),
+                offset: None,
+                cdc_enabled: false,
+                last_checkpoint: None,
+            }],
+            metadata_location: None,
+        };
+        let raw_tables = super::pipeline_raw_tables_from_status(&status);
+
+        let filtered = super::filter_tables_to_pipeline_raw_tables(
+            vec![
+                "ANALYTICS.RAW.BIKE_HIRE".to_string(),
+                "ANALYTICS.RAW.BANK".to_string(),
+            ],
+            Some(&raw_tables),
+            "bank",
+        )
+        .expect("bank table should match");
+
+        assert_eq!(filtered, vec!["ANALYTICS.RAW.BANK".to_string()]);
+    }
+
+    #[test]
+    fn pipeline_raw_table_filter_fails_when_status_has_no_matching_tables() {
+        let status = crate::providers::SkipprPipelineStatus {
+            pipeline: "bank".to_string(),
+            status: "ready".to_string(),
+            namespaces: vec![crate::providers::SkipprNamespaceStatus {
+                namespace: "bank".to_string(),
+                fields: Vec::new(),
+                offset: None,
+                cdc_enabled: false,
+                last_checkpoint: None,
+            }],
+            metadata_location: None,
+        };
+        let raw_tables = super::pipeline_raw_tables_from_status(&status);
+
+        let err = super::filter_tables_to_pipeline_raw_tables(
+            vec!["ANALYTICS.RAW.BIKE_HIRE".to_string()],
+            Some(&raw_tables),
+            "bank",
+        )
+        .expect_err("bike_hire must not satisfy bank pipeline status");
+
+        assert!(err.contains("pipeline 'bank' has no matching raw warehouse tables"));
+        assert!(err.contains("skippr sync --pipeline bank --once"));
     }
 }
 
@@ -1376,13 +1548,20 @@ impl DataEngineerSuite {
 
         // 4. Single-discovery pass — all downstream functions read from this,
         //    no duplicate list_datasets / catalog / staging lookups.
-        //    list_datasets() is already scoped to the configured source schema,
-        //    so all returned tables are source/raw tables by definition.
+        //    list_datasets() is warehouse-scoped; filter it through the selected
+        //    Skippr pipeline status before exposing raw/source tables to planning.
         let mut discovery = {
             let mut dataset_fqns: Vec<String> = Vec::new();
             if let Some(ds) = crate::ctx_ext::sctx_datasets(sctx).as_ref() {
                 if let Ok(items) = ds.list_datasets().await {
                     let mut tables: Vec<String> = items.into_iter().map(|d| d.fqn()).collect();
+                    if let Some(raw_tables) = selected_pipeline_raw_tables(sctx).await? {
+                        tables = filter_tables_to_pipeline_raw_tables(
+                            tables,
+                            Some(&raw_tables),
+                            sctx.scope().project_id.as_str(),
+                        )?;
+                    }
                     if pctx.track.is_cleanse() {
                         tables.retain(|fqn| {
                             crate::dataset_truth::is_cleanse_raw_source_dataset_candidate(fqn)
@@ -1428,6 +1607,7 @@ impl DataEngineerSuite {
             return compile_and_ground_cleanse_plan(
                 &pctx,
                 sctx,
+                execution_state,
                 &q,
                 &critiqued.memo,
                 &critiqued.critique,
@@ -1476,6 +1656,8 @@ impl DataEngineerSuite {
                 {
                     return amend_and_ground_model_plan(
                         &pctx,
+                        sctx,
+                        execution_state,
                         &q_memo,
                         &critiqued.memo,
                         &critiqued.critique,
@@ -1486,6 +1668,8 @@ impl DataEngineerSuite {
                 }
                 return compile_and_ground_model_plan(
                     &pctx,
+                    sctx,
+                    execution_state,
                     &q_memo,
                     &critiqued.memo,
                     &critiqued.critique,
@@ -1505,7 +1689,7 @@ impl DataEngineerSuite {
             phase,
             false,
             sctx,
-            &PlanState::ReadOnly,
+            &PlanState::read_only(),
             manifest_retry_signal.retry_suppressed,
         )?;
         let llm_options = if track.is_cleanse() {
@@ -1579,6 +1763,7 @@ impl DataEngineerSuite {
                     compile_and_ground_cleanse_plan(
                         &pctx,
                         sctx,
+                        execution_state,
                         &q,
                         &critiqued.memo,
                         &critiqued.critique,
@@ -1589,6 +1774,8 @@ impl DataEngineerSuite {
                 } else {
                     compile_and_ground_model_plan(
                         &pctx,
+                        sctx,
+                        execution_state,
                         &q_memo,
                         &critiqued.memo,
                         &critiqued.critique,
@@ -1625,6 +1812,7 @@ impl DataEngineerSuite {
                     compile_and_ground_cleanse_plan(
                         &pctx,
                         sctx,
+                        execution_state,
                         &q,
                         &critiqued.memo,
                         &critiqued.critique,
@@ -1635,6 +1823,8 @@ impl DataEngineerSuite {
                 } else {
                     compile_and_ground_model_plan(
                         &pctx,
+                        sctx,
+                        execution_state,
                         &q_memo,
                         &critiqued.memo,
                         &critiqued.critique,

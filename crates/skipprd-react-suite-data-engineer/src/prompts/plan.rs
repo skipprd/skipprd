@@ -199,6 +199,7 @@ COLUMN GROUNDING (CRITICAL):\n\
   - kind=raw: exactly one lineage entry: column + role=passthrough from the source field being published as-is.\n\
   - kind=clean: use column lineage with role=normalized (or parsed) from each upstream column that contributes.\n\
   - kind=derived / quality_flag: use column lineage with role=derived_input or quality_input respectively; you may combine with system/constant lineage rows when needed.\n\
+- Valid examples: raw={\"kind\":\"raw\",\"lineage\":[{\"lineage_kind\":\"column\",\"source\":{\"name\":\"order_id\"},\"role\":\"passthrough\"}]}; clean={\"kind\":\"clean\",\"lineage\":[{\"lineage_kind\":\"column\",\"source\":{\"name\":\"amount\"},\"role\":\"normalized\"}]}; quality flag={\"kind\":\"quality_flag\",\"lineage\":[{\"lineage_kind\":\"column\",\"source\":{\"name\":\"amount\"},\"role\":\"quality_input\"}]}.\n\
 - lineage_kind=column: lineage[].source.name MUST match an authoritative source_schema name exactly (casing included). Do NOT invent or abbreviate source names.\n\
 - If AUTHORITATIVE SCHEMAS lists a column as 'customer_id (bigint)', use exactly 'customer_id' in lineage.source.name.\n\
 - Do NOT instruct that dotted source paths must become dotted output names unless the plan explicitly publishes them as raw passthrough (kind=raw) with matching column lineage.\n\
@@ -230,6 +231,7 @@ COLUMN GROUNDING (CRITICAL):\n\
 - source_schema / IMMUTABLE FACTS list warehouse-reported names for READING upstream data; output_fields[].name is the published model contract.\n\
 - output_fields[].lineage[] is mandatory for every output field. Use lineage_kind=column with {source, role} for column mappings; relation names a grounded staging/gold input when multiple inputs exist and is \"\" otherwise.\n\
   Use lineage_kind=system (system_key) or lineage_kind=constant (constant_value) for intentional non-column or literal outputs when needed.\n\
+- Valid examples: raw={\"kind\":\"raw\",\"lineage\":[{\"lineage_kind\":\"column\",\"source\":{\"relation\":\"stg_orders\",\"name\":\"order_id\"},\"role\":\"passthrough\"}]}; derived={\"kind\":\"derived\",\"lineage\":[{\"lineage_kind\":\"column\",\"source\":{\"relation\":\"stg_orders\",\"name\":\"amount\"},\"role\":\"derived_input\"},{\"lineage_kind\":\"constant\",\"constant_value\":\"100\"}]}; quality flag={\"kind\":\"quality_flag\",\"lineage\":[{\"lineage_kind\":\"column\",\"source\":{\"relation\":\"stg_orders\",\"name\":\"amount\"},\"role\":\"quality_input\"}]}.\n\
 - output_fields[].lineage, joins[].on, and metrics[].source_fields MUST reference ONLY columns from AUTHORITATIVE SCHEMAS, IMMUTABLE FACTS staging model columns, or output_fields contracts.\n\
 - Use the exact canonical field casing shown in AUTHORITATIVE SCHEMAS, IMMUTABLE FACTS, or output_fields. Do NOT invent, abbreviate, or rename column names.\n\
 - inputs[] MUST use exact staging model names from the IMMUTABLE FACTS section.\n\

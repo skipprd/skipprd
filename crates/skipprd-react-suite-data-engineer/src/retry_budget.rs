@@ -72,7 +72,7 @@ pub fn note_batch_result_with_failure_kind(
 }
 
 pub(crate) enum SubjectiveRetryOutcome {
-    WithinBudget(usize),
+    WithinBudget,
     Exhausted(usize),
 }
 
@@ -94,7 +94,7 @@ pub(crate) async fn check_subjective_retry_budget(
     if retries > subjective_retry_limit() {
         Ok(SubjectiveRetryOutcome::Exhausted(retries))
     } else {
-        Ok(SubjectiveRetryOutcome::WithinBudget(retries))
+        Ok(SubjectiveRetryOutcome::WithinBudget)
     }
 }
 

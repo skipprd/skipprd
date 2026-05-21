@@ -49,26 +49,22 @@ async fn was_recently_removed_in_repair(ctx: &AgentCtx, rel_path: &str) -> bool 
         .unwrap_or_else(|| rel_path.trim().to_string());
     match crate::state_manager::load_execution_state_strict(&store.control_store(), thread_id).await
     {
-        Ok(Some(st)) => {
-            if !st.hard_mutation_repair_mode() {
-                return false;
-            }
-            st.telemetry
-                .last_mutation_summary
-                .and_then(|m| {
-                    if m.op != crate::progress_controller::MutationOp::Remove {
-                        return None;
-                    }
-                    let matched = m.affected_paths.into_iter().any(|p| {
-                        project_fs::normalize_rel_path(&p)
-                            .ok()
-                            .map(|n| n == want)
-                            .unwrap_or_else(|| p.trim() == want)
-                    });
-                    Some(matched)
-                })
-                .unwrap_or(false)
-        }
+        Ok(Some(st)) => st
+            .telemetry
+            .last_mutation_summary
+            .and_then(|m| {
+                if m.op != crate::progress_controller::MutationOp::Remove {
+                    return None;
+                }
+                let matched = m.affected_paths.into_iter().any(|p| {
+                    project_fs::normalize_rel_path(&p)
+                        .ok()
+                        .map(|n| n == want)
+                        .unwrap_or_else(|| p.trim() == want)
+                });
+                Some(matched)
+            })
+            .unwrap_or(false),
         Ok(None) => false,
         Err(e) => {
             tracing::warn!(
@@ -1089,7 +1085,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dbt_files_get_blocked_for_recently_removed_path_in_hard_mutation_repair_mode() {
+    async fn dbt_files_get_blocked_for_recently_removed_path_after_mutation() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let mut ctx = make_ctx(storage.clone());
         let store = ThreadStore::new(
@@ -1099,7 +1095,6 @@ mod tests {
         );
         let tid = "tid-hard-mutation-files-get-blocked".to_string();
         let mut es = ExecutionState::new();
-        es.repair.status = crate::progress_controller::RepairStatus::Pending { cycle: 1 };
         es.set_last_mutation_summary(
             crate::progress_controller::MutationOp::Remove,
             vec!["models/staging/m.sql".to_string()],
@@ -1126,7 +1121,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn dbt_files_list_allowed_in_hard_mutation_repair_mode() {
+    async fn dbt_files_list_allowed_after_mutation() {
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let mut ctx = make_ctx(storage.clone());
         let store = ThreadStore::new(
@@ -1136,7 +1131,6 @@ mod tests {
         );
         let tid = "tid-hard-mutation-files-list-allowed".to_string();
         let mut es = ExecutionState::new();
-        es.repair.status = crate::progress_controller::RepairStatus::Pending { cycle: 1 };
         es.set_last_mutation_summary(
             crate::progress_controller::MutationOp::Remove,
             vec!["models/staging/m.sql".to_string()],

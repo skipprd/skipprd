@@ -46,10 +46,12 @@ async fn emit_batch_failure(ctx: &AgentCtx, tier: ExecutionTier, err: &str) -> R
     };
     crate::tools::batch_sql_runner::emit_batch_event(
         ctx,
-        DataEngineerEvent::BatchAuthoringFailed {
-            tier,
-            kind: FailureKind::Unknown,
-            brief,
+        DataEngineerEvent::EvaluationVerdictRecorded {
+            verdict: crate::evaluation::EvaluationVerdictSummary {
+                kind: crate::evaluation::VerdictKind::RepairImplementation,
+                message: brief.clone(),
+            },
+            evidence_hash: react_core::llm_observability::sha256_hex_str(&brief),
         },
     )
     .await
@@ -107,8 +109,7 @@ impl Tool for ApplyNextCleanseBatchTool {
             ));
         }
 
-        // Plan auto-heal (semantic): validate + single repair attempt before executing.
-        let v = plan::ensure_cleanse_plan_semantically_valid_or_repaired(&mut plan);
+        let v = crate::plan_semantic_gate::gate_cleanse_plan(&mut plan).into_validation();
         if !v.ok {
             return Ok(serde_json::json!({
                 "ok": false,
@@ -303,10 +304,12 @@ impl Tool for ApplyNextCleanseBatchTool {
             };
             crate::tools::batch_sql_runner::emit_batch_event(
                 ctx,
-                DataEngineerEvent::BatchAuthoringFailed {
-                    tier: ExecutionTier::Cleanse,
-                    kind,
-                    brief,
+                DataEngineerEvent::EvaluationVerdictRecorded {
+                    verdict: crate::evaluation::EvaluationVerdictSummary {
+                        kind: crate::evaluation::VerdictKind::RepairImplementation,
+                        message: brief.clone(),
+                    },
+                    evidence_hash: react_core::llm_observability::sha256_hex_str(&brief),
                 },
             )
             .await?;
@@ -375,10 +378,9 @@ impl Tool for ApplyNextModelBatchTool {
             ));
         }
 
-        // Plan auto-heal (semantic): validate + single repair attempt before executing.
         let stg = dataset_truth::discover_staging_models_from_storage(ctx).await;
-        let v =
-            plan::ensure_model_plan_semantically_valid_or_repaired(&mut plan, &stg.allowed_models);
+        let v = crate::plan_semantic_gate::gate_model_plan(&mut plan, &stg.allowed_models)
+            .into_validation();
         if !v.ok {
             return Ok(serde_json::json!({
                 "ok": false,
@@ -590,10 +592,12 @@ impl Tool for ApplyNextModelBatchTool {
             };
             crate::tools::batch_sql_runner::emit_batch_event(
                 ctx,
-                DataEngineerEvent::BatchAuthoringFailed {
-                    tier: ExecutionTier::Model,
-                    kind,
-                    brief,
+                DataEngineerEvent::EvaluationVerdictRecorded {
+                    verdict: crate::evaluation::EvaluationVerdictSummary {
+                        kind: crate::evaluation::VerdictKind::RepairImplementation,
+                        message: brief.clone(),
+                    },
+                    evidence_hash: react_core::llm_observability::sha256_hex_str(&brief),
                 },
             )
             .await?;
@@ -783,7 +787,7 @@ mod tests {
                                 relation: None,
                                 name: "customer_id".to_string(),
                             },
-                            plan::lineage_role::PASSTHROUGH,
+                            plan::LineageRole::Passthrough,
                         )],
                         expression: "customer_id as customer_id_raw (raw)".to_string(),
                         data_type: None,
@@ -868,7 +872,7 @@ mod tests {
                                 relation: None,
                                 name: "customer_id".to_string(),
                             },
-                            plan::lineage_role::NORMALIZED,
+                            plan::LineageRole::Normalized,
                         )],
                         expression: "customer_id passthrough".to_string(),
                         data_type: None,

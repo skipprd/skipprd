@@ -1,13 +1,15 @@
-use serde_json::{Map, Value};
 use std::sync::Arc;
 
 use crate::providers::DatasetCatalogProvider;
 use react_core::agent::AgentCtx;
-use react_core::llm::LlmCallOptions;
-use react_core::llm::{ChatMessage, ChatRole};
+#[cfg(test)]
+use react_core::llm::{ChatMessage, ChatRole, LlmCallOptions};
 
+#[cfg(test)]
 use crate::patch_contract::{normalize_hunks_only_patch_text, LlmSingleFilePatchResponse};
 use crate::project_fs;
+#[cfg(test)]
+use serde_json::{Map, Value};
 
 fn sha256_hex(s: &str) -> String {
     use sha2::Digest;
@@ -16,6 +18,7 @@ fn sha256_hex(s: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
+#[cfg(test)]
 fn excerpt_for_error(s: &str, max_chars: usize) -> String {
     let t = s.trim();
     if max_chars == 0 || t.is_empty() {
@@ -40,6 +43,7 @@ fn excerpt_for_error(s: &str, max_chars: usize) -> String {
     out
 }
 
+#[cfg(test)]
 pub fn default_patch_loop_max_output_tokens() -> u32 {
     crate::env_util::env_u32(crate::env_util::env_keys::REACT_PATCH_LOOP_MAX_OUTPUT_TOKENS)
         .filter(|v| *v >= 512)
@@ -101,6 +105,7 @@ pub async fn apply_single_file_patch_with_base(
     .map_err(normalize_patch_apply_error)
 }
 
+#[cfg(test)]
 fn has_required_analyst_notes(notes: &[String]) -> Result<(), String> {
     // Contract: require these sections (case-insensitive) somewhere in notes as distinct entries.
     // We enforce this only when the caller opts-in via a sys_prompt sentinel.
@@ -145,6 +150,7 @@ Include each as a separate notes entry prefixed like:\n\
     ))
 }
 
+#[cfg(test)]
 fn split_lines_preserve_trailing_newline_for_prompt(s: &str) -> (Vec<String>, bool) {
     // Keep prompt line counting deterministic.
     let had_trailing_newline = s.ends_with('\n');
@@ -160,6 +166,7 @@ fn split_lines_preserve_trailing_newline_for_prompt(s: &str) -> (Vec<String>, bo
     (lines, had_trailing_newline)
 }
 
+#[cfg(test)]
 fn format_with_line_numbers(s: &str, max_chars: usize) -> (String, bool, usize, bool) {
     let (lines, had_trailing_newline) = split_lines_preserve_trailing_newline_for_prompt(s);
     let line_count = lines.len();
@@ -185,6 +192,7 @@ fn format_with_line_numbers(s: &str, max_chars: usize) -> (String, bool, usize, 
     (out, truncated, line_count, had_trailing_newline)
 }
 
+#[cfg(test)]
 fn parse_json_object_from_llm(text: &str) -> Result<Map<String, Value>, String> {
     let v: Value = react_core::json_repair::resilient_parse(text)?;
     v.as_object()
@@ -192,11 +200,13 @@ fn parse_json_object_from_llm(text: &str) -> Result<Map<String, Value>, String> 
         .ok_or_else(|| "LLM response was not a JSON object".to_string())
 }
 
+#[cfg(test)]
 fn looks_like_patch_object(v: &Value) -> bool {
     let Some(m) = v.as_object() else { return false };
     m.contains_key("patch_text")
 }
 
+#[cfg(test)]
 fn parse_patch_json_from_llm(text: &str) -> Result<Map<String, Value>, String> {
     if let Ok(v) = serde_json::from_str::<Value>(text) {
         if v.is_object() && looks_like_patch_object(&v) {
@@ -226,6 +236,7 @@ fn parse_patch_json_from_llm(text: &str) -> Result<Map<String, Value>, String> {
     Err("LLM response did not contain valid JSON object".to_string())
 }
 
+#[cfg(test)]
 fn parse_llm_patch_response(
     text: &str,
     expected_rel_path: &str,
@@ -250,6 +261,7 @@ fn parse_llm_patch_response(
 ///
 /// - The LLM must return JSON containing `patch_text`.
 /// - The patch must target exactly `expected_rel_path` (no other files).
+#[cfg(test)]
 pub async fn llm_patch_loop_single_file(
     ctx: &AgentCtx,
     datasets: Option<&Arc<dyn DatasetCatalogProvider>>,

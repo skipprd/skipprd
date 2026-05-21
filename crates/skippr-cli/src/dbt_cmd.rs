@@ -174,6 +174,96 @@ fn model_and_tests_from_manifest(
     Ok((model_name, model_unique_id, test_select, test_count > 0))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ManagedDbtLayout {
+    Canonical,
+}
+
+impl ManagedDbtLayout {
+    fn label(self) -> &'static str {
+        match self {
+            ManagedDbtLayout::Canonical => "<project>/<pipeline>/dbt",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ManagedDbtProject {
+    pipeline: String,
+    layout: ManagedDbtLayout,
+}
+
+fn managed_dbt_project_from_root(
+    project_root: &Path,
+    dbt_root: &Path,
+) -> Option<ManagedDbtProject> {
+    if dbt_root.file_name().and_then(|s| s.to_str()) != Some("dbt") {
+        return None;
+    }
+    let pipeline_dir = dbt_root.parent()?;
+    if pipeline_dir.parent() == Some(project_root) {
+        let pipeline = pipeline_dir.file_name()?.to_str()?.trim();
+        if !pipeline.is_empty() {
+            return Some(ManagedDbtProject {
+                pipeline: pipeline.to_string(),
+                layout: ManagedDbtLayout::Canonical,
+            });
+        }
+    }
+
+    None
+}
+
+fn non_canonical_managed_dbt_root(
+    project_root: &Path,
+    dbt_root: &Path,
+) -> Option<(String, PathBuf)> {
+    let non_canonical_parent = dbt_root.parent()?;
+    if non_canonical_parent.file_name().and_then(|s| s.to_str()) == Some("dbt")
+        && non_canonical_parent.parent() == Some(project_root)
+    {
+        let pipeline = dbt_root.file_name()?.to_str()?.trim();
+        if !pipeline.is_empty() {
+            return Some((
+                pipeline.to_string(),
+                project_root.join(pipeline).join("dbt"),
+            ));
+        }
+    }
+    None
+}
+
+fn validate_managed_dbt_project_pipeline(
+    explicit_config: &Option<PathBuf>,
+    requested_pipeline: &str,
+    dbt_root: &Path,
+) -> Result<(), String> {
+    let cfg_path = config_path(explicit_config);
+    let project_root = project_root_from_config_path(&cfg_path);
+    let project_root = project_root.canonicalize().unwrap_or(project_root);
+    if let Some((_pipeline, canonical_root)) =
+        non_canonical_managed_dbt_root(&project_root, dbt_root)
+    {
+        return Err(format!(
+            "dbt project path must use managed layout {}; expected {}",
+            ManagedDbtLayout::Canonical.label(),
+            canonical_root.display()
+        ));
+    }
+    let Some(managed) = managed_dbt_project_from_root(&project_root, dbt_root) else {
+        return Ok(());
+    };
+    if managed.pipeline == requested_pipeline.trim() {
+        return Ok(());
+    }
+    Err(format!(
+        "dbt project path implies pipeline '{}' via managed layout {}, but --pipeline was '{}'",
+        managed.pipeline,
+        managed.layout.label(),
+        requested_pipeline.trim()
+    ))
+}
+
 fn resolve_project_dir(
     explicit_config: &Option<PathBuf>,
     pipeline: &str,
@@ -182,7 +272,7 @@ fn resolve_project_dir(
 ) -> PathBuf {
     let cfg_path = config_path(explicit_config);
     let project_root = project_root_from_config_path(&cfg_path);
-    let local_direct = project_root.join("dbt").join(pipeline.trim());
+    let local_direct = project_root.join(pipeline.trim()).join("dbt");
     if file.starts_with(&local_direct) && local_direct.join("dbt_project.yml").is_file() {
         return local_direct;
     }
@@ -263,6 +353,7 @@ pub async fn cmd_dbt_compile_sql(
     };
 
     let (dbt_root, rel_path) = find_dbt_project_and_rel(&file)?;
+    validate_managed_dbt_project_pipeline(explicit_config, &args.pipeline, &dbt_root)?;
     let dbt_select = format!("path:{rel_path}");
 
     let session =
@@ -373,5 +464,49 @@ mod tests {
         assert!(is_dbt_sql_resource_rel("models/staging/orders.sql"));
         assert!(is_dbt_sql_resource_rel("snapshots/orders_snapshot.sql"));
         assert!(!is_dbt_sql_resource_rel("macros/foo.sql"));
+    }
+
+    #[test]
+    fn managed_dbt_project_detects_canonical_pipeline() {
+        let project_root = PathBuf::from("/tmp/skippr_project");
+        let dbt_root = project_root.join("bike_hire").join("dbt");
+
+        let managed = managed_dbt_project_from_root(&project_root, &dbt_root).unwrap();
+
+        assert_eq!(managed.pipeline, "bike_hire");
+        assert_eq!(managed.layout, ManagedDbtLayout::Canonical);
+    }
+
+    #[test]
+    fn managed_dbt_project_rejects_canonical_pipeline_mismatch() {
+        let project_root = PathBuf::from("/tmp/skippr_project");
+        let config = Some(project_root.join("skippr.yml"));
+        let dbt_root = project_root.join("bike_hire").join("dbt");
+
+        let err = validate_managed_dbt_project_pipeline(&config, "bank", &dbt_root).unwrap_err();
+
+        assert!(err.contains("implies pipeline 'bike_hire'"));
+        assert!(err.contains("--pipeline was 'bank'"));
+    }
+
+    #[test]
+    fn managed_dbt_project_rejects_non_canonical_layout() {
+        let project_root = PathBuf::from("/tmp/skippr_project");
+        let config = Some(project_root.join("skippr.yml"));
+        let dbt_root = project_root.join("dbt").join("bike_hire");
+
+        let err = validate_managed_dbt_project_pipeline(&config, "bank", &dbt_root).unwrap_err();
+
+        assert!(err.contains("must use managed layout <project>/<pipeline>/dbt"));
+        assert!(err.contains("/tmp/skippr_project/bike_hire/dbt"));
+    }
+
+    #[test]
+    fn managed_dbt_project_allows_non_managed_root() {
+        let project_root = PathBuf::from("/tmp/skippr_project");
+        let config = Some(project_root.join("skippr.yml"));
+        let dbt_root = PathBuf::from("/tmp/external_dbt_project");
+
+        validate_managed_dbt_project_pipeline(&config, "bank", &dbt_root).unwrap();
     }
 }

@@ -112,6 +112,6 @@ impl DataEngineerSuite {
     }
 }
 
-fn namespace_to_snowflake_table(namespace: &str) -> String {
+pub(crate) fn namespace_to_snowflake_table(namespace: &str) -> String {
     namespace.replace('.', "_").to_lowercase()
 }

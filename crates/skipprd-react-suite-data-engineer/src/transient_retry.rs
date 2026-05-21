@@ -6,7 +6,7 @@ const BACKOFF_BASE_MS: u64 = 500;
 /// Retry an async fallible operation when the error is a transient infrastructure issue.
 ///
 /// The operation `f` is called once. If it returns `Err` and the error text is classified
-/// as transient by [`crate::failure_text::is_infra_transient`], it is retried up to
+/// as transient by [`crate::failure_text::matches_infra_transient`], it is retried up to
 /// `max_retries` additional times with exponential backoff (500ms, 1s, 2s, ...).
 ///
 /// Non-transient errors are returned immediately without retry.
@@ -24,8 +24,9 @@ where
     }
 
     for attempt in 1..=max_retries {
-        if !crate::failure_text::is_infra_transient(&crate::failure_text::normalize_text(&last_err))
-        {
+        if !crate::failure_text::matches_infra_transient(&crate::failure_text::normalize_text(
+            &last_err,
+        )) {
             return Err(last_err);
         }
         let backoff_ms = BACKOFF_BASE_MS * (1u64 << (attempt - 1).min(4));
