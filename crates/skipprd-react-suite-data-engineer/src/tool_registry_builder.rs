@@ -16,7 +16,43 @@ impl DataEngineerSuite {
             vect_query::VectQueryTool,
         };
 
+        let allow_user_interrupt_tools = !Self::headless_mode_enabled();
+        let caps = Self::agent_capability_profile(
+            agent_mode,
+            allow_user_interrupt_tools,
+            Self::ide_chat_surface_enabled(),
+        );
         let mut registry = ToolRegistry::new();
+
+        if agent_mode == AgentMode::Ask && Self::workspace_scoped_chat_enabled() {
+            if caps.contains(&AgentToolCapability::ReadOnlyFile) {
+                registry.register(PolicyFilesTool {
+                    inner: FilesTool {
+                        datasets: crate::ctx_ext::sctx_datasets(sctx),
+                    },
+                    policy: FileAccessPolicy::ReadOnly {
+                        error_message: "file is read-only in this mode; use op='get' or op='list' (mutating ops are disabled: patch/rm/mv)",
+                    },
+                });
+            }
+            if caps.contains(&AgentToolCapability::AskApproval) {
+                registry.register(tools::ask_approval::AskApprovalTool);
+            }
+            if caps.contains(&AgentToolCapability::Artifacts) {
+                registry.register(ArtifactsTool);
+            }
+            if caps.contains(&AgentToolCapability::SkipprCli) {
+                registry.register(tools::skippr_cli::SkipprCliTool);
+            }
+            if caps.contains(&AgentToolCapability::LocalIdeTools) {
+                registry.register(tools::local_ide::LocalIdeTool {
+                    allow_patch: false,
+                    metadata_namespace: None,
+                    mirror_dbt_to_storage: false,
+                });
+            }
+            return Ok(registry);
+        }
 
         let query =
             crate::ctx_ext::sctx_query(sctx).ok_or_else(|| "query provider missing".to_string())?;
@@ -34,13 +70,6 @@ impl DataEngineerSuite {
             query: query.clone(),
         });
         registry.register(VectQueryTool);
-
-        let allow_user_interrupt_tools = !Self::headless_mode_enabled();
-        let caps = Self::agent_capability_profile(
-            agent_mode,
-            allow_user_interrupt_tools,
-            Self::ide_chat_surface_enabled(),
-        );
 
         if caps.contains(&AgentToolCapability::ReadOnlyFile) {
             registry.register(PolicyFilesTool {
@@ -187,6 +216,24 @@ impl DataEngineerSuite {
                 ),
             ),
             AgentMode::Ask => {
+                if Self::workspace_scoped_chat_enabled() {
+                    let mut lines = vec![
+                        "- file(args:{op:\"list\"|\"get\", prefix?:string, path?:string, limit?:int, max_chars?:int})".to_string(),
+                        "- skippr_cli top-level args JSON. Config example: {\"command\":\"config\",\"action\":\"show\"}. Query example: {\"command\":\"query\",\"pipeline\":\"bike_hire\",\"sql\":\"SELECT table_schema, table_name FROM INFORMATION_SCHEMA.TABLES LIMIT 50\"}. Lineage example: {\"command\":\"lineage\",\"action\":\"graph\",\"pipeline\":\"bike_hire\",\"direction\":\"both\"}.".to_string(),
+                    ];
+                    if caps.contains(&AgentToolCapability::LocalIdeTools) {
+                        lines.push("- local_ide(args:{op:\"list\"|\"read\"|\"grep\"|\"head\"|\"tail\", path?:string, pattern?:string, limit?:int, max_chars?:int}) for bounded read-only local IDE file/search work".to_string());
+                    }
+                    if caps.contains(&AgentToolCapability::AskApproval) {
+                        lines.push("- ask_approval(args:{prompt:string})".to_string());
+                    }
+                    return Self::build_tools_card(
+                        "Allowed tools (workspace ask mode):",
+                        lines,
+                        Vec::new(),
+                        Some("Not available in workspace ask: run_sql, sql_schema, sql_stats, sql_sample, staging_model, gold_model, file patch/rm/mv, dbt_validate, publish_dbt_to_provider. Use skippr_cli query/lineage with an explicit pipeline for data access; do not wrap tool args unless the runtime does it for you.".to_string()),
+                    );
+                }
                 let mut lines = vec!["- file(args:{op:\"list\"|\"get\", prefix?:string, path?:string, limit?:int, max_chars?:int})".to_string(),
                     "- sql_schema / sql_stats / sql_sample / vect_query (discovery context)".to_string()];
                 if caps.contains(&AgentToolCapability::RunSql) {
@@ -199,7 +246,7 @@ impl DataEngineerSuite {
                     lines.push("- artifacts".to_string());
                 }
                 if caps.contains(&AgentToolCapability::SkipprCli) {
-                    lines.push("- skippr_cli(args:{command:\"user\"|\"doctor\"|\"test\"|\"connect\"|\"model\", action?:string, pipeline?:string, dbt_output_path?:string, no_resume?:bool, select?:string[]})".to_string());
+                    lines.push("- skippr_cli(args:{command:\"config\"|\"user\"|\"doctor\"|\"test\"|\"lineage\"|\"query\"|\"connect\"|\"model\", action?:string, pipeline?:string, sql?:string, asset?:string, field?:string, direction?:\"upstream\"|\"downstream\"|\"both\", dbt_output_path?:string, no_resume?:bool, select?:string[]})".to_string());
                 }
                 if caps.contains(&AgentToolCapability::LocalIdeTools) {
                     lines.push("- local_ide(args:{op:\"list\"|\"read\"|\"grep\"|\"head\"|\"tail\", path?:string, pattern?:string, limit?:int, max_chars?:int}) for bounded read-only local IDE file/search work".to_string());

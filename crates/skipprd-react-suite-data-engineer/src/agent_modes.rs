@@ -1,4 +1,5 @@
 use super::*;
+use react_core::session::ThreadStep;
 
 /// External-facing interaction modes for the data_engineer suite.
 ///
@@ -33,6 +34,24 @@ impl AgentMode {
     pub(super) fn parse(raw: &str) -> Result<Self, String> {
         raw.parse()
     }
+}
+
+fn truncate_for_prompt(value: &str, max_chars: usize) -> String {
+    let mut out = value.chars().take(max_chars).collect::<String>();
+    if value.chars().count() > max_chars {
+        out.push_str("...");
+    }
+    out
+}
+
+fn ask_answer_from_payload(payload: &serde_json::Value, display: Option<&str>) -> Option<String> {
+    payload
+        .get("answer")
+        .and_then(|value| value.as_str())
+        .or(display)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -407,6 +426,12 @@ impl DataEngineerSuite {
             .unwrap_or(false)
     }
 
+    pub(super) fn workspace_scoped_chat_enabled() -> bool {
+        std::env::var("SKIPPR_WORKSPACE_SCOPED_CHAT")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false)
+    }
+
     pub(super) fn should_use_ide_agent_runner(
         agent_mode: AgentMode,
         ide_chat_surface: bool,
@@ -489,6 +514,75 @@ impl DataEngineerSuite {
         prompts::shared::user_goal_line("Cleansing goal:", question)
     }
 
+    fn recent_ask_conversation_prompt(
+        log: &react_core::session::ThreadLog,
+        current_question: &str,
+    ) -> Option<String> {
+        const MAX_TURNS: usize = 32;
+        const MAX_CHARS_PER_ITEM: usize = 1200;
+
+        let current_question = current_question.trim();
+        let end = match log.steps.last() {
+            Some(ThreadStep::User { .. }) => log.steps.len().saturating_sub(1),
+            _ => log.steps.len(),
+        };
+        let mut items: Vec<String> = Vec::new();
+
+        for step in log.steps[..end].iter().rev() {
+            match step {
+                ThreadStep::User { text, .. } => {
+                    if !text.trim().is_empty() {
+                        items.push(format!(
+                            "User: {}",
+                            truncate_for_prompt(text.trim(), MAX_CHARS_PER_ITEM)
+                        ));
+                    }
+                }
+                ThreadStep::Complete {
+                    payload, display, ..
+                } => {
+                    if let Some(answer) = ask_answer_from_payload(payload, display.as_deref()) {
+                        items.push(format!(
+                            "Assistant: {}",
+                            truncate_for_prompt(&answer, MAX_CHARS_PER_ITEM)
+                        ));
+                    }
+                }
+                _ => {}
+            }
+            if items.len() >= MAX_TURNS {
+                break;
+            }
+        }
+
+        if items.is_empty() {
+            return None;
+        }
+        items.reverse();
+        Some(format!(
+            "Chat context from this thread:\n{}\n\nNew user prompt:\n{}\n\nUse the chat context naturally when the new prompt refers to earlier turns. If the new prompt is standalone, answer it on its own. Prefer fresh tool evidence for data claims.",
+            items.join("\n"),
+            current_question
+        ))
+    }
+
+    async fn ask_prompt_with_thread_context(
+        thread_id: &str,
+        question: &str,
+        sctx: &SuiteCtx,
+    ) -> String {
+        let store = ThreadStore::new(
+            sctx.storage().clone(),
+            sctx.scope().clone(),
+            sctx.keyspace().clone(),
+        );
+        match store.get(thread_id).await {
+            Ok(log) => Self::recent_ask_conversation_prompt(&log, question)
+                .unwrap_or_else(|| question.to_string()),
+            Err(_) => question.to_string(),
+        }
+    }
+
     pub(super) async fn run_ask(
         thread_id: &str,
         question: &str,
@@ -496,6 +590,7 @@ impl DataEngineerSuite {
     ) -> Result<Vec<FlowFrame>, String> {
         let sys = prompts::with_time_context(prompts::ask_system_prompt());
         let tools_card = Self::build_tools_card_for_agent_type(AgentMode::Ask);
+        let prompt = Self::ask_prompt_with_thread_context(thread_id, question, sctx).await;
 
         let registry = Self::build_tools(AgentMode::Ask, sctx)?;
         let actx = Self::build_agent_ctx(
@@ -516,7 +611,7 @@ impl DataEngineerSuite {
                 &actx,
                 &sys,
                 &tools_card,
-                question,
+                &prompt,
                 LlmCallOptions {
                     prompt_id: "data_engineer.ask_user_parse",
                     expected_format: react_core::llm::LlmExpectedFormat::JsonObject,
@@ -993,14 +1088,15 @@ impl DataEngineerSuite {
 
 #[cfg(test)]
 mod tests {
-    use super::persist_terminal_failure_result;
+    use super::{persist_terminal_failure_result, DataEngineerSuite};
     use crate::control_flow::Phase;
     use crate::domain_types::GuardBlockKind;
     use react_core::keyspace::{DefaultKeyspace, Keyspace};
     use react_core::scope::RequestScope;
-    use react_core::session::ThreadStore;
+    use react_core::session::{Observation, ThreadLog, ThreadStep, ThreadStore};
     use react_core::storage::StorageAdapter;
     use react_module_storage_memory::InMemoryStorageAdapter;
+    use serde_json::json;
     use std::sync::Arc;
 
     #[tokio::test]
@@ -1033,5 +1129,77 @@ mod tests {
         assert_eq!(result.kind, "data_engineer_terminal");
         assert_eq!(result.payload["phase"], "model_plan");
         assert_eq!(result.payload["guard_kind"], "plan_semantic_invalid");
+    }
+
+    #[test]
+    fn recent_ask_conversation_context_resolves_followup_prompts() {
+        let log = ThreadLog {
+            steps: vec![
+                ThreadStep::User {
+                    text: "how many bikes in total?".to_string(),
+                    observation: Observation::ok(),
+                    ts: "2026-05-21T21:00:00Z".to_string(),
+                    agent: "ask".to_string(),
+                },
+                ThreadStep::Complete {
+                    kind: "final".to_string(),
+                    payload: json!({}),
+                    display: Some(
+                        "There are 10,300,000 bikes in total.\n\nSource: pipeline `bike_hire`."
+                            .to_string(),
+                    ),
+                    observation: Observation::ok(),
+                    ts: "2026-05-21T21:00:01Z".to_string(),
+                    agent: "ask".to_string(),
+                },
+                ThreadStep::User {
+                    text: "unique though?".to_string(),
+                    observation: Observation::ok(),
+                    ts: "2026-05-21T21:00:02Z".to_string(),
+                    agent: "ask".to_string(),
+                },
+            ],
+            ..ThreadLog::default()
+        };
+
+        let prompt = DataEngineerSuite::recent_ask_conversation_prompt(&log, "unique though?")
+            .expect("conversation context");
+
+        assert!(prompt.contains("how many bikes in total?"));
+        assert!(prompt.contains("10,300,000 bikes in total."));
+        assert!(prompt.contains("Source: pipeline `bike_hire`."));
+        assert!(prompt.contains("New user prompt:\nunique though?"));
+    }
+
+    #[test]
+    fn recent_ask_conversation_context_wraps_standalone_questions_as_background() {
+        let log = ThreadLog {
+            steps: vec![
+                ThreadStep::User {
+                    text: "unique though?".to_string(),
+                    observation: Observation::ok(),
+                    ts: "2026-05-21T21:00:00Z".to_string(),
+                    agent: "ask".to_string(),
+                },
+                ThreadStep::Complete {
+                    kind: "ask".to_string(),
+                    payload: json!({"answer": "Which field should be unique?"}),
+                    display: None,
+                    observation: Observation::ok(),
+                    ts: "2026-05-21T21:00:01Z".to_string(),
+                    agent: "ask".to_string(),
+                },
+            ],
+            ..ThreadLog::default()
+        };
+
+        let prompt =
+            DataEngineerSuite::recent_ask_conversation_prompt(&log, "how many bikes in total?")
+                .expect("conversation rollup");
+
+        assert!(prompt.contains("Chat context from this thread"));
+        assert!(prompt.contains("Which field should be unique?"));
+        assert!(prompt.contains("New user prompt:\nhow many bikes in total?"));
+        assert!(prompt.contains("If the new prompt is standalone"));
     }
 }

@@ -417,6 +417,30 @@ async fn ide_agent_tools_are_local_first_without_query_provider() {
     assert!(err.contains("unknown tool"));
 }
 
+#[tokio::test]
+async fn workspace_ask_tools_do_not_expose_generic_sql_provider() {
+    std::env::set_var("SKIPPR_WORKSPACE_SCOPED_CHAT", "1");
+    std::env::set_var("SKIPPR_EXECUTION_SURFACE", "ide_chat");
+    let sctx = test_sctx();
+    let reg = DataEngineerSuite::build_tools(AgentMode::Ask, &sctx)
+        .expect("workspace ask tools should not require warehouse providers");
+    let card = DataEngineerSuite::build_tools_card_for_agent_type(AgentMode::Ask);
+    let actx = DataEngineerSuite::agent_tool_ctx("t", &sctx);
+
+    assert!(card.contains("workspace ask mode"));
+    assert!(card.contains("skippr_cli"));
+    assert!(card.contains("query"));
+    assert!(!card.contains("- run_sql("));
+    let err = reg
+        .call("run_sql", serde_json::json!({"sql":"select 1"}), &actx)
+        .await
+        .expect_err("workspace ask must not expose generic run_sql");
+    assert!(err.contains("unknown tool"));
+
+    std::env::remove_var("SKIPPR_WORKSPACE_SCOPED_CHAT");
+    std::env::remove_var("SKIPPR_EXECUTION_SURFACE");
+}
+
 #[test]
 fn local_ide_mutations_remain_agent_only() {
     let ask_caps = DataEngineerSuite::agent_capability_profile(AgentMode::Ask, true, true);

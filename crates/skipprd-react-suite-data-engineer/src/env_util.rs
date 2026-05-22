@@ -225,7 +225,7 @@ pub fn headless_mode_enabled() -> bool {
 
 pub fn ask_reasoning_effort() -> react_core::llm::ReasoningEffort {
     parse_reasoning_effort_env(env_keys::LLM_ASK_REASONING_EFFORT)
-        .unwrap_or(react_core::llm::ReasoningEffort::None)
+        .unwrap_or(react_core::llm::ReasoningEffort::Medium)
 }
 
 pub fn ask_max_tokens() -> u32 {

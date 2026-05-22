@@ -44,6 +44,13 @@ pub(crate) fn ide_model_bridge_request(args: &Value) -> Result<Value, String> {
     }))
 }
 
+fn normalized_tool_args(args: &Value) -> &Value {
+    match args.get("args") {
+        Some(nested) if nested.is_object() => nested,
+        _ => args,
+    }
+}
+
 fn run_skippr(args: Vec<String>) -> Result<Value, String> {
     let output = Command::new(configured_skippr())
         .args(&args)
@@ -187,6 +194,7 @@ impl Tool for SkipprCliTool {
     }
 
     async fn call(&self, args: Value, _ctx: &AgentCtx) -> Result<Value, String> {
+        let args = normalized_tool_args(&args);
         let command = args
             .get("command")
             .and_then(|v| v.as_str())
@@ -199,6 +207,17 @@ impl Tool for SkipprCliTool {
             .trim();
         let mut cli_args = config_args();
         match command {
+            "config" => {
+                let action = if action.is_empty() { "show" } else { action };
+                if action != "show" {
+                    return Err("skippr_cli config action must be show".to_string());
+                }
+                cli_args.extend(
+                    ["config", "show", "--output", "json"]
+                        .into_iter()
+                        .map(str::to_string),
+                );
+            }
             "user" => {
                 let action = if action.is_empty() { "account" } else { action };
                 match action {
@@ -255,6 +274,80 @@ impl Tool for SkipprCliTool {
                     _ => return Err("skippr_cli test action must be list or run".to_string()),
                 }
             }
+            "lineage" => {
+                let action = if action.is_empty() { "graph" } else { action };
+                if action != "graph" {
+                    return Err("skippr_cli lineage action must be graph".to_string());
+                }
+                cli_args.extend(
+                    ["lineage", "graph", "--output", "json"]
+                        .into_iter()
+                        .map(str::to_string),
+                );
+                if let Some(pipeline) = args
+                    .get("pipeline")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    cli_args.push("--pipeline".to_string());
+                    cli_args.push(pipeline.to_string());
+                }
+                if let Some(asset) = args
+                    .get("asset")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    cli_args.push("--asset".to_string());
+                    cli_args.push(asset.to_string());
+                }
+                if let Some(field) = args
+                    .get("field")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    cli_args.push("--field".to_string());
+                    cli_args.push(field.to_string());
+                }
+                if let Some(direction) = args
+                    .get("direction")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                {
+                    cli_args.push("--direction".to_string());
+                    cli_args.push(direction.to_string());
+                }
+            }
+            "query" => {
+                let pipeline = args
+                    .get("pipeline")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| "skippr_cli query requires pipeline".to_string())?;
+                let sql = args
+                    .get("sql")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| "skippr_cli query requires sql".to_string())?;
+                cli_args.extend(
+                    [
+                        "query",
+                        "--pipeline",
+                        pipeline,
+                        "--sql",
+                        sql,
+                        "--output",
+                        "json",
+                    ]
+                    .into_iter()
+                    .map(str::to_string),
+                );
+            }
             "connect" => {
                 cli_args.extend(["connect", "--help"].into_iter().map(str::to_string));
             }
@@ -264,13 +357,46 @@ impl Tool for SkipprCliTool {
                 }
                 return run_skippr_model(build_model_args(&args)?);
             }
-            _ => {
-                return Err(
-                    "skippr_cli command must be one of: user, doctor, test, connect, model"
-                        .to_string(),
-                )
-            }
+            _ => return Err(
+                "skippr_cli command must be one of: config, user, doctor, test, lineage, query, connect, model"
+                    .to_string(),
+            ),
         }
         run_skippr(cli_args)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn normalized_tool_args_accepts_nested_args_object() {
+        let input = json!({
+            "args": {
+                "command": "query",
+                "pipeline": "bike_hire",
+                "sql": "select count(*) from analytics.raw.bikes"
+            }
+        });
+        let args = normalized_tool_args(&input);
+
+        assert_eq!(args["command"], "query");
+        assert_eq!(args["pipeline"], "bike_hire");
+        assert_eq!(args["sql"], "select count(*) from analytics.raw.bikes");
+    }
+
+    #[test]
+    fn normalized_tool_args_preserves_top_level_args() {
+        let input = json!({
+            "command": "query",
+            "pipeline": "bike_hire",
+            "sql": "select count(*) from analytics.raw.bikes"
+        });
+        let args = normalized_tool_args(&input);
+
+        assert_eq!(args["command"], "query");
+        assert_eq!(args["pipeline"], "bike_hire");
     }
 }

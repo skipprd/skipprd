@@ -28,7 +28,7 @@ pub enum ChatModeCli {
 #[derive(Parser, Debug, Clone)]
 pub struct ChatSendArgs {
     #[arg(long)]
-    pub pipeline: PipelineName,
+    pub pipeline: Option<PipelineName>,
     #[arg(long, value_enum)]
     pub mode: ChatModeCli,
     #[arg(long)]
@@ -97,6 +97,19 @@ fn render_structured_chat_prompt(user: &str, context: Option<&serde_json::Value>
     )
 }
 
+fn render_workspace_chat_prompt(user_prompt: &str) -> String {
+    format!(
+        "Workspace-scoped ask mode:\n\
+         - The user did not select a single pipeline.\n\
+         - Use skippr_cli(command:\"config\", action:\"show\") first to inspect configured pipelines and connections.\n\
+         - For data questions, choose one or more relevant configured pipelines from the user's intent and config metadata.\n\
+         - Use skippr_cli(command:\"lineage\", action:\"graph\", pipeline:<pipeline>) and skippr_cli(command:\"query\", pipeline:<pipeline>, sql:<read-only SELECT/WITH>) as needed.\n\
+         - Every data-bearing tool call must include an explicit pipeline.\n\
+         - Cite which pipeline(s) and dataset(s) support the answer. Ask a clarification only when the configured context is insufficient or materially ambiguous.\n\n\
+         {user_prompt}"
+    )
+}
+
 pub async fn run_chat(log: Option<String>, explicit_config: &Option<PathBuf>, action: ChatAction) {
     match action {
         ChatAction::Send(args) => cmd_chat_send(log, explicit_config, args).await,
@@ -109,19 +122,24 @@ async fn cmd_chat_send(log: Option<String>, explicit_config: &Option<PathBuf>, a
     if let Some(path) = explicit_config.as_ref() {
         std::env::set_var("SKIPPR_CONFIG_FILE", path);
     }
-    let ctx = match headless_prep::authenticate_headless_for_chat(
-        explicit_config,
-        headless_prep::ChatTarget::Pipeline(args.pipeline.clone()),
-    )
-    .await
-    {
+    let workspace_scoped = args.pipeline.is_none();
+    let target = args
+        .pipeline
+        .clone()
+        .map(headless_prep::ChatTarget::Pipeline)
+        .unwrap_or(headless_prep::ChatTarget::GenericIdeBootstrap);
+    let ctx = match headless_prep::authenticate_headless_for_chat(explicit_config, target).await {
         Ok(c) => c,
         Err(e) => {
             eprintln!("[skippr] ERROR: {e}");
             std::process::exit(1);
         }
     };
-    let project_id = args.pipeline.as_str();
+    let project_id = args
+        .pipeline
+        .as_ref()
+        .map(|pipeline| pipeline.as_str())
+        .unwrap_or("workspace-chat");
 
     let run_id = uuid::Uuid::new_v4().to_string();
     react_suite_data_engineer::metering::set_metering_run_id(&run_id);
@@ -142,7 +160,17 @@ async fn cmd_chat_send(log: Option<String>, explicit_config: &Option<PathBuf>, a
     } else {
         std::env::remove_var("SKIPPR_EXECUTION_SURFACE");
     }
+    if workspace_scoped {
+        std::env::set_var("SKIPPR_WORKSPACE_SCOPED_CHAT", "1");
+    } else {
+        std::env::remove_var("SKIPPR_WORKSPACE_SCOPED_CHAT");
+    }
     let rendered_prompt = render_structured_chat_prompt(&user_message, structured_context.as_ref());
+    let rendered_prompt = if workspace_scoped {
+        render_workspace_chat_prompt(&rendered_prompt)
+    } else {
+        rendered_prompt
+    };
 
     let (agent, prompt) = match args.mode {
         ChatModeCli::Ask => ("ask", rendered_prompt.clone()),
@@ -190,7 +218,8 @@ async fn cmd_chat_send(log: Option<String>, explicit_config: &Option<PathBuf>, a
     if stream_jsonl {
         let summary = serde_json::json!({
             "type": "ChatSummary",
-            "pipeline": args.pipeline.as_str(),
+            "pipeline": args.pipeline.as_ref().map(|pipeline| pipeline.as_str()),
+            "workspace_scoped": workspace_scoped,
             "mode": mode_str,
             "thread_id": headless.thread_id,
             "ok": headless.exit_code == 0,
@@ -208,7 +237,8 @@ async fn cmd_chat_send(log: Option<String>, explicit_config: &Option<PathBuf>, a
             "bootstrap_error": headless.bootstrap_error,
             "failure_summary": headless.failure_summary,
             "thread_id": headless.thread_id,
-            "pipeline": args.pipeline.as_str(),
+            "pipeline": args.pipeline.as_ref().map(|pipeline| pipeline.as_str()),
+            "workspace_scoped": workspace_scoped,
             "mode": mode_str,
         });
         crate::print_json(&body);

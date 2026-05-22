@@ -4412,7 +4412,7 @@ async fn cmd_ask(log: Option<String>, explicit_config: &Option<PathBuf>, args: A
         log,
         explicit_config,
         chat_cmd::ChatAction::Send(chat_cmd::ChatSendArgs {
-            pipeline: args.pipeline,
+            pipeline: Some(args.pipeline),
             mode: chat_cmd::ChatModeCli::Ask,
             message: args.question,
             thread: None,
@@ -4431,7 +4431,7 @@ async fn cmd_plan(log: Option<String>, explicit_config: &Option<PathBuf>, args: 
         log,
         explicit_config,
         chat_cmd::ChatAction::Send(chat_cmd::ChatSendArgs {
-            pipeline: args.pipeline,
+            pipeline: Some(args.pipeline),
             mode: chat_cmd::ChatModeCli::Plan,
             message: goal,
             thread: None,
@@ -7543,8 +7543,8 @@ data_sources:
     }
 
     #[test]
-    fn chat_send_requires_pipeline() {
-        let err = Cli::try_parse_from([
+    fn chat_send_accepts_optional_pipeline() {
+        let cli = Cli::try_parse_from([
             "skippr",
             "chat",
             "send",
@@ -7553,8 +7553,16 @@ data_sources:
             "--message",
             "status?",
         ])
-        .expect_err("chat send without pipeline must not parse");
-        assert!(err.to_string().contains("--pipeline"));
+        .expect("chat send without pipeline should parse");
+        match cli.cmd {
+            Cmd::Chat {
+                action: chat_cmd::ChatAction::Send(args),
+            } => {
+                assert!(args.pipeline.is_none());
+                assert_eq!(args.mode, chat_cmd::ChatModeCli::Ask);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
     }
 
     #[test]
@@ -7834,6 +7842,8 @@ pipelines:
         let cli = Cli::try_parse_from([
             "skippr",
             "feedback",
+            "--pipeline",
+            "orders",
             "--bad",
             "--comment",
             "timed out in repair loop",
@@ -7845,11 +7855,13 @@ pipelines:
                 bad,
                 comment,
                 no_diagnostics,
+                pipeline,
             } => {
                 assert!(!good);
                 assert!(bad);
                 assert_eq!(comment.as_deref(), Some("timed out in repair loop"));
                 assert!(!no_diagnostics);
+                assert_eq!(pipeline.as_str(), "orders");
             }
             other => panic!("unexpected command: {other:?}"),
         }
@@ -7857,19 +7869,28 @@ pipelines:
 
     #[test]
     fn feedback_cli_accepts_no_diagnostics_flag() {
-        let cli = Cli::try_parse_from(["skippr", "feedback", "--bad", "--no-diagnostics"])
-            .expect("parse feedback args");
+        let cli = Cli::try_parse_from([
+            "skippr",
+            "feedback",
+            "--pipeline",
+            "orders",
+            "--bad",
+            "--no-diagnostics",
+        ])
+        .expect("parse feedback args");
         match cli.cmd {
             Cmd::Feedback {
                 good,
                 bad,
                 comment,
                 no_diagnostics,
+                pipeline,
             } => {
                 assert!(!good);
                 assert!(bad);
                 assert!(comment.is_none());
                 assert!(no_diagnostics);
+                assert_eq!(pipeline.as_str(), "orders");
             }
             other => panic!("unexpected command: {other:?}"),
         }

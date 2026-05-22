@@ -1,5 +1,5 @@
 use async_trait::async_trait;
-use serde_json::Value;
+use serde_json::{json, Map, Value};
 
 use crate::thread_cache::ThreadCacheStore;
 use react_core::agent::{
@@ -32,6 +32,145 @@ impl Default for SqlValidatedPolicy {
             approval_tool: "ask_approval",
         }
     }
+}
+
+fn workspace_scoped_chat_enabled() -> bool {
+    std::env::var("SKIPPR_WORKSPACE_SCOPED_CHAT")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
+async fn latest_matching_run_sql_observation(
+    store: Option<&ThreadStore>,
+    thread_id: &str,
+    sql: &str,
+) -> Option<Value> {
+    let store = store?;
+    let log = store.get(thread_id).await.ok()?;
+    for step in log.steps.iter().rev() {
+        if let ThreadStep::ToolEnd {
+            name,
+            args,
+            observation,
+            ..
+        } = step
+        {
+            if name == "run_sql"
+                && args.get("sql").and_then(|v| v.as_str()).map(str::trim) == Some(sql.trim())
+                && observation.ok
+            {
+                let object = observation
+                    .extra
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect();
+                return Some(Value::Object(object));
+            }
+        }
+    }
+    None
+}
+
+fn enrich_ask_payload_with_sql_result(payload: &Value, sql: &str, obs: &Value) -> Value {
+    let mut out = match payload.as_object() {
+        Some(map) => map.clone(),
+        None => Map::new(),
+    };
+    out.insert("sql".to_string(), Value::String(sql.to_string()));
+    let data = json!({
+        "header": obs.get("header").cloned().unwrap_or_else(|| json!([])),
+        "rows": obs.get("rows").cloned().unwrap_or_else(|| json!([])),
+    });
+    out.insert("data".to_string(), data);
+
+    let header = obs
+        .get("header")
+        .and_then(|v| serde_json::from_value::<Vec<String>>(v.clone()).ok())
+        .unwrap_or_default();
+    let rows = obs
+        .get("rows")
+        .and_then(|v| serde_json::from_value::<Vec<Vec<String>>>(v.clone()).ok())
+        .unwrap_or_default();
+    let chart = out
+        .get("chart")
+        .and_then(|chart| normalize_chart(chart, &header))
+        .or_else(|| infer_chart(&header, &rows));
+    match chart {
+        Some(chart) => {
+            out.insert("chart".to_string(), chart);
+        }
+        None => {
+            out.remove("chart");
+        }
+    }
+
+    Value::Object(out)
+}
+
+fn normalize_chart(chart: &Value, header: &[String]) -> Option<Value> {
+    let chart_type = chart.get("type").and_then(|v| v.as_str())?;
+    if !matches!(chart_type, "line" | "bar" | "area") {
+        return None;
+    }
+    let x = chart.get("x").and_then(|v| v.as_str())?;
+    if !header.iter().any(|h| h.as_str() == x) {
+        return None;
+    }
+    let y: Vec<String> = chart
+        .get("y")
+        .and_then(|v| v.as_array())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|v| v.as_str())
+                .filter(|name| header.iter().any(|h| h.as_str() == *name) && *name != x)
+                .map(ToString::to_string)
+                .collect()
+        })
+        .unwrap_or_default();
+    if y.is_empty() {
+        return None;
+    }
+    Some(json!({ "type": chart_type, "x": x, "y": y }))
+}
+
+fn infer_chart(header: &[String], rows: &[Vec<String>]) -> Option<Value> {
+    if header.len() < 2 || rows.is_empty() {
+        return None;
+    }
+    let numeric: Vec<&String> = header
+        .iter()
+        .filter(|name| {
+            let Some(idx) = header.iter().position(|h| h == *name) else {
+                return false;
+            };
+            rows.iter()
+                .any(|row| row.get(idx).and_then(|v| v.parse::<f64>().ok()).is_some())
+        })
+        .collect();
+    let x = header
+        .iter()
+        .find(|name| !numeric.iter().any(|n| *n == *name))
+        .or_else(|| header.first())?;
+    let y: Vec<String> = numeric
+        .into_iter()
+        .filter(|name| *name != x)
+        .take(3)
+        .cloned()
+        .collect();
+    if y.is_empty() {
+        return None;
+    }
+    let lower = x.to_ascii_lowercase();
+    let chart_type = if ["date", "time", "day", "week", "month", "year", "timestamp"]
+        .iter()
+        .any(|needle| lower.contains(needle))
+    {
+        "line"
+    } else {
+        "bar"
+    };
+    Some(json!({ "type": chart_type, "x": x, "y": y }))
 }
 
 #[async_trait]
@@ -275,6 +414,33 @@ impl AgentPolicy for SqlValidatedPolicy {
             transcript.push(format!("Observation: {reason}"));
             return Ok(CompleteDecision::Reject { reason });
         }
+        if workspace_scoped_chat_enabled() {
+            let result = ThreadResult {
+                kind: complete_env.kind.clone(),
+                payload: complete_env.payload.clone(),
+                display: complete_env.display.clone(),
+            };
+            if let Some(store) = store {
+                let agent = ctx
+                    .agent_name()
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string());
+                let _ = store
+                    .append_step(
+                        thread_id,
+                        ThreadStep::Complete {
+                            kind: result.kind.clone(),
+                            payload: result.payload.clone(),
+                            display: result.display.clone(),
+                            observation: Observation::ok(),
+                            ts: chrono::Utc::now().to_rfc3339(),
+                            agent,
+                        },
+                    )
+                    .await;
+            }
+            return Ok(CompleteDecision::Accept { result });
+        }
 
         let sql_opt = complete_env
             .payload
@@ -319,7 +485,11 @@ impl AgentPolicy for SqlValidatedPolicy {
                 return Ok(CompleteDecision::Accept { result });
             }
         };
-        let obs = if let Some(store) = store {
+        let obs = if let Some(existing) =
+            latest_matching_run_sql_observation(store, thread_id, &sql_for_run).await
+        {
+            existing
+        } else if let Some(store) = store {
             let meta = ToolStepMeta {
                 agent: ctx
                     .agent_name()
@@ -372,6 +542,7 @@ impl AgentPolicy for SqlValidatedPolicy {
                 .and_then(|x| x.as_array())
                 .and_then(|a| a.get(0))
                 .and_then(|v| v.as_str())
+                .or_else(|| obs.get("error").and_then(|v| v.as_str()))
                 .unwrap_or("no data");
             let reason = format!(
                 "data_validation_failed reason='{}'; fix SQL and try again.",
@@ -380,9 +551,10 @@ impl AgentPolicy for SqlValidatedPolicy {
             transcript.push(format!("Observation: {reason}"));
             return Ok(CompleteDecision::Reject { reason });
         }
+        let payload = enrich_ask_payload_with_sql_result(&complete_env.payload, &sql_for_run, &obs);
         let result = ThreadResult {
             kind: complete_env.kind.clone(),
-            payload: complete_env.payload.clone(),
+            payload,
             display: complete_env.display.clone(),
         };
         if let Some(store) = store {
@@ -590,6 +762,53 @@ mod tests {
         assert!(
             transcript.iter().any(|l| l.contains("dbt_validate_failed")),
             "expected dbt_validate_failed in transcript; got: {transcript:?}"
+        );
+    }
+
+    #[test]
+    fn ask_payload_is_enriched_with_validated_rows_and_valid_chart() {
+        let payload = serde_json::json!({
+            "answer": "Revenue rose by day.",
+            "chart": {"type": "line", "x": "day", "y": ["revenue"]}
+        });
+        let obs = serde_json::json!({
+            "ok": true,
+            "header": ["day", "revenue"],
+            "rows": [["2026-05-20", "10"], ["2026-05-21", "20"]]
+        });
+
+        let out = enrich_ask_payload_with_sql_result(&payload, "select day, revenue from t", &obs);
+
+        assert_eq!(out["sql"], "select day, revenue from t");
+        assert_eq!(out["data"]["header"], serde_json::json!(["day", "revenue"]));
+        assert_eq!(
+            out["data"]["rows"],
+            serde_json::json!([["2026-05-20", "10"], ["2026-05-21", "20"]])
+        );
+        assert_eq!(
+            out["chart"],
+            serde_json::json!({"type": "line", "x": "day", "y": ["revenue"]})
+        );
+    }
+
+    #[test]
+    fn ask_payload_removes_invalid_chart_and_infers_safe_default() {
+        let payload = serde_json::json!({
+            "answer": "Top customers by revenue.",
+            "chart": {"type": "pie", "x": "missing", "y": ["also_missing"]}
+        });
+        let obs = serde_json::json!({
+            "ok": true,
+            "header": ["customer", "revenue"],
+            "rows": [["A", "10"], ["B", "20"]]
+        });
+
+        let out =
+            enrich_ask_payload_with_sql_result(&payload, "select customer, revenue from t", &obs);
+
+        assert_eq!(
+            out["chart"],
+            serde_json::json!({"type": "bar", "x": "customer", "y": ["revenue"]})
         );
     }
 }
