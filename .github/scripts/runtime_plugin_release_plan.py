@@ -9,7 +9,10 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from runtime_plugin_catalog import load_workspace_plugin_catalog
+from runtime_plugin_catalog import (
+    load_workspace_plugin_catalog,
+    workspace_runtime_protocol_version,
+)
 from runtime_plugin_targets import (
     artifact_matches_build_environment,
     published_runtime_plugin_targets,
@@ -91,10 +94,11 @@ def published_artifacts_with_stale_build_environment(
 
 
 def published_manifest_matches_catalog(
-    published: dict, plugin: dict, publish_targets: list
+    published: dict, plugin: dict, publish_targets: list, protocol_version: int
 ) -> bool:
     return (
         published.get("version") == plugin["package_version"]
+        and published.get("protocol_version") == protocol_version
         and published.get("build_checksum") == plugin["checksum"]
         and not published_artifacts_with_stale_build_environment(
             published, publish_targets
@@ -113,6 +117,7 @@ def main() -> int:
     workspace = Path(args.workspace).resolve()
     catalog = load_workspace_plugin_catalog(workspace)
     publish_targets = published_runtime_plugin_targets(workspace)
+    protocol_version = workspace_runtime_protocol_version(workspace)
     _published_index, published_manifests = load_latest_published_manifests(
         args.published_index_url
     )
@@ -127,12 +132,21 @@ def main() -> int:
             continue
 
         published_version = published.get("version", "")
+        published_protocol_version = published.get("protocol_version")
         published_checksum = published.get("build_checksum", "")
         if published_version != plugin["package_version"]:
             selected.append(plugin["package_name"])
             decision_reasons[plugin["package_name"]] = (
                 f"version changed from {published_version or '<missing>'} to "
                 f"{plugin['package_version']}"
+            )
+            continue
+
+        if published_protocol_version != protocol_version:
+            selected.append(plugin["package_name"])
+            decision_reasons[plugin["package_name"]] = (
+                "runtime protocol changed from "
+                f"{published_protocol_version or '<missing>'} to {protocol_version}"
             )
             continue
 
@@ -158,11 +172,14 @@ def main() -> int:
     if not published_manifests:
         reason = "no published runtime plugin baseline found; build every runtime plugin"
     elif not selected:
-        reason = "all runtime plugins already published at matching version and build checksum"
+        reason = (
+            "all runtime plugins already published at matching version, protocol, "
+            "build checksum, and build environment"
+        )
     else:
         reason = (
-            "build runtime plugins whose published version, build checksum, "
-            "or build environment is stale"
+            "build runtime plugins whose published version, protocol, "
+            "build checksum, or build environment is stale"
         )
 
     json.dump(

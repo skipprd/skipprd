@@ -53,7 +53,7 @@ class RuntimePluginCatalogTests(unittest.TestCase):
 
             self.assertNotEqual(initial, updated)
 
-    def test_package_build_checksum_ignores_unrelated_workspace_changes(self) -> None:
+    def test_package_build_checksum_changes_when_runtime_abi_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
             plugin_dir = workspace / "plugins" / "data_source" / "s3"
@@ -74,8 +74,39 @@ class RuntimePluginCatalogTests(unittest.TestCase):
             )
             self.write_workspace_file(
                 workspace,
+                "crates/skippr-runtime-sdk/src/lib.rs",
+                "pub fn runtime_entry() {}\n",
+            )
+
+            initial = runtime_plugin_catalog.package_build_checksum(plugin_dir, workspace)
+
+            self.write_workspace_file(
+                workspace,
+                "crates/skippr-runtime-sdk/src/lib.rs",
+                "pub fn runtime_entry() { println!(\"updated\"); }\n",
+            )
+            updated = runtime_plugin_catalog.package_build_checksum(plugin_dir, workspace)
+
+            self.assertNotEqual(initial, updated)
+
+    def test_package_build_checksum_changes_when_cargo_lock_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            plugin_dir = workspace / "plugins" / "data_source" / "s3"
+            self.write_workspace_file(
+                workspace,
+                "plugins/data_source/s3/Cargo.toml",
+                "[package]\nname = 'skippr-plugin-data-source-s3'\n",
+            )
+            self.write_workspace_file(
+                workspace,
+                "plugins/data_source/s3/src/main.rs",
+                "fn main() {}\n",
+            )
+            self.write_workspace_file(
+                workspace,
                 "Cargo.lock",
-                "unrelated lock contents\n",
+                "lock contents\n",
             )
 
             initial = runtime_plugin_catalog.package_build_checksum(plugin_dir, workspace)
@@ -83,16 +114,88 @@ class RuntimePluginCatalogTests(unittest.TestCase):
             self.write_workspace_file(
                 workspace,
                 "Cargo.lock",
-                "changed unrelated lock contents\n",
+                "changed lock contents\n",
+            )
+            updated = runtime_plugin_catalog.package_build_checksum(plugin_dir, workspace)
+
+            self.assertNotEqual(initial, updated)
+
+    def test_package_build_checksum_ignores_unrelated_workspace_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            plugin_dir = workspace / "plugins" / "data_source" / "s3"
+            self.write_workspace_file(
+                workspace,
+                "plugins/data_source/s3/Cargo.toml",
+                "[package]\nname = 'skippr-plugin-data-source-s3'\n",
             )
             self.write_workspace_file(
                 workspace,
-                "crates/skippr-runtime-sdk/src/lib.rs",
-                "pub fn unrelated() {}\n",
+                "plugins/data_source/s3/src/main.rs",
+                "fn main() {}\n",
+            )
+            self.write_workspace_file(
+                workspace,
+                "docs/notes.md",
+                "notes\n",
+            )
+
+            initial = runtime_plugin_catalog.package_build_checksum(plugin_dir, workspace)
+
+            self.write_workspace_file(
+                workspace,
+                "docs/notes.md",
+                "changed notes\n",
+            )
+            self.write_workspace_file(
+                workspace,
+                "unrelated.txt",
+                "unrelated\n",
             )
             updated = runtime_plugin_catalog.package_build_checksum(plugin_dir, workspace)
 
             self.assertEqual(initial, updated)
+
+    def test_package_build_checksum_includes_plugin_path_dependencies(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            plugin_dir = workspace / "plugins" / "schema_sink" / "glue"
+            dependency_dir = workspace / "plugins" / "data_sink" / "athena"
+            self.write_workspace_file(
+                workspace,
+                "plugins/schema_sink/glue/Cargo.toml",
+                "[package]\nname = 'skippr-plugin-schema-sink-glue'\n",
+            )
+            self.write_workspace_file(
+                workspace,
+                "plugins/schema_sink/glue/src/main.rs",
+                "fn main() {}\n",
+            )
+            self.write_workspace_file(
+                workspace,
+                "plugins/data_sink/athena/Cargo.toml",
+                "[package]\nname = 'skippr-plugin-data-sink-athena'\n",
+            )
+            self.write_workspace_file(
+                workspace,
+                "plugins/data_sink/athena/src/lib.rs",
+                "pub fn athena() {}\n",
+            )
+
+            initial = runtime_plugin_catalog.package_build_checksum(
+                plugin_dir, workspace, [dependency_dir]
+            )
+
+            self.write_workspace_file(
+                workspace,
+                "plugins/data_sink/athena/src/lib.rs",
+                "pub fn athena() { println!(\"updated\"); }\n",
+            )
+            updated = runtime_plugin_catalog.package_build_checksum(
+                plugin_dir, workspace, [dependency_dir]
+            )
+
+            self.assertNotEqual(initial, updated)
 
     def test_manifest_names_are_derived_from_plugin_dir_and_kind(self) -> None:
         self.assertEqual(

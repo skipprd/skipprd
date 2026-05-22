@@ -20,6 +20,13 @@ RUNTIME_PROTOCOL_VERSION_CANDIDATES = (
     Path("crates/skippr-core/src/runtime_plugins/protocol.rs"),
 )
 SHARED_PLUGIN_DIR = Path("plugins/shared")
+RUNTIME_PLUGIN_BUILD_INPUTS = (
+    Path("Cargo.lock"),
+    Path("src/runtime_plugins/protocol.rs"),
+    Path("src/runtime_plugins/wire.rs"),
+    Path("crates/skippr-runtime-sdk/Cargo.toml"),
+    Path("crates/skippr-runtime-sdk/src"),
+)
 PLUGIN_KIND_SUFFIX = {
     "DataSource": "source",
     "DataSink": "sink",
@@ -52,6 +59,14 @@ def plugin_dir_checksum(plugin_dir: Path) -> str:
     return digest.hexdigest()
 
 
+def path_checksum(path: Path) -> str:
+    if path.is_dir():
+        return plugin_dir_checksum(path)
+    if path.is_file():
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    return ""
+
+
 def combined_checksum(entries: list[tuple[str, str]]) -> str:
     digest = hashlib.sha256()
     for key, value in sorted(entries):
@@ -62,7 +77,9 @@ def combined_checksum(entries: list[tuple[str, str]]) -> str:
     return digest.hexdigest()
 
 
-def package_build_checksum(package_dir: Path, workspace: Path) -> str:
+def package_build_checksum(
+    package_dir: Path, workspace: Path, extra_input_paths: list[Path] | None = None
+) -> str:
     package_dir = package_dir.resolve()
     workspace = workspace.resolve()
     entries = [
@@ -79,7 +96,48 @@ def package_build_checksum(package_dir: Path, workspace: Path) -> str:
                 plugin_dir_checksum(shared_dir),
             )
         )
+    for relative_path in RUNTIME_PLUGIN_BUILD_INPUTS:
+        path = workspace / relative_path
+        checksum = path_checksum(path)
+        if checksum:
+            entries.append((relative_path.as_posix(), checksum))
+    for path in sorted(extra_input_paths or []):
+        resolved = path.resolve()
+        if not resolved.exists():
+            continue
+        entries.append(
+            (
+                resolved.relative_to(workspace).as_posix(),
+                path_checksum(resolved),
+            )
+        )
     return combined_checksum(entries)
+
+
+def package_path_dependency_dirs(
+    package: dict, packages_by_name: dict[str, dict], workspace: Path
+) -> list[Path]:
+    dirs = []
+    package_name = package["name"]
+    for dependency in package.get("dependencies", []):
+        dependency_name = dependency.get("name")
+        dependency_path = dependency.get("path")
+        if not dependency_path:
+            continue
+        dependency_package = packages_by_name.get(dependency_name)
+        if dependency_package is None:
+            continue
+        dependency_manifest_path = Path(dependency_package["manifest_path"]).resolve()
+        try:
+            relative_manifest_path = dependency_manifest_path.relative_to(workspace).as_posix()
+        except ValueError:
+            continue
+        if dependency_name == package_name:
+            continue
+        if not relative_manifest_path.startswith(PLUGIN_ROOT_PREFIXES):
+            continue
+        dirs.append(dependency_manifest_path.parent)
+    return sorted(set(dirs))
 
 
 def runtime_protocol_version_from_file(path: Path) -> int | None:
@@ -279,6 +337,7 @@ def manifest_payload_for_catalog_entry(
 
 def load_workspace_plugin_catalog(workspace: Path) -> list[dict]:
     metadata = cargo_metadata(workspace)
+    packages_by_name = {package["name"]: package for package in metadata["packages"]}
     catalog = []
 
     for package in metadata["packages"]:
@@ -309,7 +368,11 @@ def load_workspace_plugin_catalog(workspace: Path) -> list[dict]:
                 "package_name": package["name"],
                 "package_dir": relative_dir,
                 "package_version": package["version"],
-                "checksum": package_build_checksum(manifest_path.parent, workspace),
+                "checksum": package_build_checksum(
+                    manifest_path.parent,
+                    workspace,
+                    package_path_dependency_dirs(package, packages_by_name, workspace),
+                ),
                 "binary_name": package["name"],
                 "manifest_filename": manifest_filename,
                 "manifest_stem": manifest_filename.removesuffix('.json'),

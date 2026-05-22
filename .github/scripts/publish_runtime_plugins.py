@@ -126,10 +126,11 @@ def published_artifacts_match_build_environment(
 
 
 def published_manifest_matches_catalog(
-    published: dict, plugin: dict, publish_targets: list
+    published: dict, plugin: dict, publish_targets: list, protocol_version: int
 ) -> bool:
     return (
         published.get("version") == plugin["package_version"]
+        and published.get("protocol_version") == protocol_version
         and published.get("build_checksum") == plugin["checksum"]
         and published_artifacts_match_build_environment(published, publish_targets)
     )
@@ -181,6 +182,7 @@ def main() -> None:
             published_manifest or {},
             entry,
             publish_targets,
+            protocol_version,
         )
         artifacts = {}
 

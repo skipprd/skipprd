@@ -74,6 +74,7 @@ class PublishRuntimePluginsTests(unittest.TestCase):
         )
         published = {
             "version": "0.1.1",
+            "protocol_version": 9,
             "build_checksum": "abc123",
             "artifacts": {
                 "x86_64-unknown-linux-gnu": {
@@ -87,13 +88,41 @@ class PublishRuntimePluginsTests(unittest.TestCase):
         }
         self.assertTrue(
             publish_runtime_plugins.published_manifest_matches_catalog(
-                published, plugin, [target]
+                published, plugin, [target], 9
             )
         )
         plugin["checksum"] = "def456"
         self.assertFalse(
             publish_runtime_plugins.published_manifest_matches_catalog(
-                published, plugin, [target]
+                published, plugin, [target], 9
+            )
+        )
+
+    def test_published_manifest_requires_matching_protocol_version(self) -> None:
+        target = RuntimePluginTarget(
+            triple="x86_64-unknown-linux-gnu",
+            aliases=("linux-x86_64",),
+            publish_artifact_dir="runtime-plugin-binaries-linux_x86",
+            build_environment={"runner_baseline": "depot-ubuntu-22.04"},
+        )
+        published = {
+            "version": "0.1.1",
+            "protocol_version": 8,
+            "build_checksum": "abc123",
+            "artifacts": {
+                "x86_64-unknown-linux-gnu": {
+                    "build_environment": {"runner_baseline": "depot-ubuntu-22.04"}
+                }
+            },
+        }
+        plugin = {
+            "package_version": "0.1.1",
+            "checksum": "abc123",
+        }
+
+        self.assertFalse(
+            publish_runtime_plugins.published_manifest_matches_catalog(
+                published, plugin, [target], 9
             )
         )
 
@@ -106,6 +135,7 @@ class PublishRuntimePluginsTests(unittest.TestCase):
         )
         published = {
             "version": "0.1.1",
+            "protocol_version": 9,
             "build_checksum": "abc123",
             "artifacts": {
                 "x86_64-unknown-linux-gnu": {
@@ -120,7 +150,7 @@ class PublishRuntimePluginsTests(unittest.TestCase):
 
         self.assertFalse(
             publish_runtime_plugins.published_manifest_matches_catalog(
-                published, plugin, [target]
+                published, plugin, [target], 9
             )
         )
 
