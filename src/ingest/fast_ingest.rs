@@ -1605,20 +1605,26 @@ mod tests_match_scalar_value_fast {
     }
 
     #[test]
-    #[should_panic(expected = "Unknown data type 'unknown'")]
     fn test_match_scalar_value_fast_unknown() {
         let mut metadata = HashMap::new();
         metadata.insert("field".to_string(), Metadata::new().unwrap());
         let flatten = false;
 
-        get_or_panic(match_scalar_value_fast(
+        let result = match_scalar_value_fast(
             "field",
             "unknown",
             &str_to_val("hello"),
             &metadata,
             true,
             flatten,
-        ));
+        );
+
+        assert!(result.is_err(), "unknown data type should error");
+        let err_msg = result.unwrap_err().to_string();
+        assert!(
+            err_msg.contains("Unknown data type"),
+            "error should mention unknown type"
+        );
     }
 }
 

@@ -166,22 +166,16 @@ async fn cmd_chat_send(log: Option<String>, explicit_config: &Option<PathBuf>, a
         std::env::remove_var("SKIPPR_WORKSPACE_SCOPED_CHAT");
     }
     let rendered_prompt = render_structured_chat_prompt(&user_message, structured_context.as_ref());
-    let rendered_prompt = if workspace_scoped {
+    let _rendered_prompt = if workspace_scoped {
         render_workspace_chat_prompt(&rendered_prompt)
     } else {
         rendered_prompt
     };
 
-    let (agent, prompt) = match args.mode {
-        ChatModeCli::Ask => ("ask", rendered_prompt.clone()),
-        ChatModeCli::Plan => (
-            "ask",
-            format!(
-                "[plan mode — produce a data-engineering plan only; do not apply mutations]\n{}",
-                rendered_prompt
-            ),
-        ),
-        ChatModeCli::Agent => ("agent", rendered_prompt.clone()),
+    let agent = match args.mode {
+        ChatModeCli::Ask => "ask",
+        ChatModeCli::Plan => "ask",
+        ChatModeCli::Agent => "agent",
     };
 
     let mode_str = match args.mode {
@@ -209,8 +203,6 @@ async fn cmd_chat_send(log: Option<String>, explicit_config: &Option<PathBuf>, a
             suite_id: Some("data_engineer".to_string()),
             agent: agent.to_string(),
             skip_logging_init: false,
-            headless_prompt: Some(prompt),
-            stream_jsonl,
         },
     )
     .await;

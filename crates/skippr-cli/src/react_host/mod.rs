@@ -72,12 +72,12 @@ pub async fn run_headless_detailed(
             };
         }
     };
-    let outcome = react::run_engine::run_headless_with_ctx(cfg, registry, suite_ctx, opts).await;
+    let exit_code = react::run_engine::run_headless_with_ctx(cfg, registry, suite_ctx, opts).await;
     HeadlessRunDetail {
-        exit_code: outcome.exit_code,
+        exit_code,
         bootstrap_error: None,
-        thread_id: outcome.thread_id.or(thread_id),
-        failure_summary: outcome.failure_summary,
+        thread_id,
+        failure_summary: None,
     }
 }
 

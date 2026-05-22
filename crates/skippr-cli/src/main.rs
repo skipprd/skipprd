@@ -5237,7 +5237,7 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
         }
         preflight.profiles_temp
     };
-    let headless_prompt = Some(format!(
+    let _headless_prompt = Some(format!(
         "Build or update the complete local dbt project for pipeline `{pipeline}` using the phased data-engineer workflow. \
 The local dbt project root is `{dbt_root}` and is the editable source of truth for authoring; phase file edits must land there so the IDE can show diffs. \
 The Skippr config is `{config_path}`. Use the existing phased cleanse and gold workflow: discover sources of truth, design and review cleanse/silver, author and validate, then design and review gold models, author and validate, and finish with project status. \
@@ -5281,8 +5281,6 @@ Do not bypass phase validation/review gates. If dbt, warehouse, or source prereq
             suite_id: Some("data_engineer".to_string()),
             agent: transport_agent_type.to_string(),
             skip_logging_init: false,
-            headless_prompt,
-            stream_jsonl: is_jsonl_output(&args.output),
         },
     )
     .await;
