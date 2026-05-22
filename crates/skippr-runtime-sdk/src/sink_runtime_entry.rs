@@ -56,6 +56,10 @@ impl ControlWriter {
     }
 }
 
+fn with_io_context(err: io::Error, context: impl AsRef<str>) -> io::Error {
+    io::Error::new(err.kind(), format!("{}: {}", context.as_ref(), err))
+}
+
 async fn connect_runtime_channel(addr_env: &str) -> io::Result<TcpStream> {
     let addr = std::env::var(addr_env)
         .map_err(|_| io::Error::other(format!("missing runtime channel env {addr_env}")))?;
@@ -93,7 +97,15 @@ async fn write_schema_refresh_required(
 }
 
 async fn read_sink_payload(reader: &mut OwnedReadHalf, request_id: u64) -> io::Result<Vec<u8>> {
-    match read_frame_or_eof::<_, HostDataFrame>(reader).await? {
+    let frame = read_frame_or_eof::<_, HostDataFrame>(reader)
+        .await
+        .map_err(|err| {
+            with_io_context(
+                err,
+                format!("runtime sink request {request_id} payload read failed"),
+            )
+        })?;
+    match frame {
         Some(HostDataFrame::SinkPayload(payload)) if payload.request_id == request_id => {
             Ok(payload.arrow_stream_bytes)
         }
@@ -101,7 +113,9 @@ async fn read_sink_payload(reader: &mut OwnedReadHalf, request_id: u64) -> io::R
             "sink payload request id mismatch: expected {} got {}",
             request_id, payload.request_id
         ))),
-        None => Err(io::Error::other("runtime host closed sink data channel")),
+        None => Err(io::Error::other(format!(
+            "runtime host closed sink data channel before request {request_id} payload"
+        ))),
     }
 }
 
@@ -122,13 +136,19 @@ where
         std::env::var("SKIPPR_RUNTIME_LOG_LEVEL").unwrap_or_else(|_| "warn".to_string());
     init_logging(Some(log_level));
 
-    let control_stream = connect_runtime_channel(SKIPPR_RUNTIME_CONTROL_ADDR_ENV).await?;
-    let data_stream = connect_runtime_channel(SKIPPR_RUNTIME_DATA_ADDR_ENV).await?;
+    let control_stream = connect_runtime_channel(SKIPPR_RUNTIME_CONTROL_ADDR_ENV)
+        .await
+        .map_err(|err| with_io_context(err, "runtime sink control channel connect failed"))?;
+    let data_stream = connect_runtime_channel(SKIPPR_RUNTIME_DATA_ADDR_ENV)
+        .await
+        .map_err(|err| with_io_context(err, "runtime sink data channel connect failed"))?;
     let (mut control_reader, control_writer_raw) = control_stream.into_split();
     let (mut data_reader, _data_writer) = data_stream.into_split();
     let control_writer = ControlWriter::new(control_writer_raw);
 
-    let Some(handshake_frame) = read_frame_or_eof::<_, HostFrame>(&mut control_reader).await?
+    let Some(handshake_frame) = read_frame_or_eof::<_, HostFrame>(&mut control_reader)
+        .await
+        .map_err(|err| with_io_context(err, "runtime sink handshake read failed"))?
     else {
         return Ok(());
     };
@@ -167,14 +187,18 @@ where
             sink_capability,
             supports_schema,
         }))
-        .await?;
+        .await
+        .map_err(|err| with_io_context(err, "runtime sink handshake ack write failed"))?;
 
     let mut primary_plugin: Option<P> = None;
     let mut deadletter_plugin: Option<P> = None;
     let mut schema_state: Option<RuntimeSchemaState> = None;
 
     loop {
-        let Some(frame) = read_frame_or_eof::<_, HostFrame>(&mut control_reader).await? else {
+        let Some(frame) = read_frame_or_eof::<_, HostFrame>(&mut control_reader)
+            .await
+            .map_err(|err| with_io_context(err, "runtime sink control frame read failed"))?
+        else {
             return Ok(());
         };
         match frame {
@@ -187,8 +211,12 @@ where
                     schema_state.as_ref(),
                     &mut build,
                 )
-                .await?;
-                control_writer.write(&PluginFrame::Installed).await?;
+                .await
+                .map_err(|err| with_io_context(err, "runtime sink install failed"))?;
+                control_writer
+                    .write(&PluginFrame::Installed)
+                    .await
+                    .map_err(|err| with_io_context(err, "runtime sink install ack write failed"))?;
             }
             HostFrame::InstallSchemaState(request) => {
                 apply_schema_state_to_sinks(
@@ -197,8 +225,14 @@ where
                     &mut deadletter_plugin,
                     &mut schema_state,
                 )
-                .await?;
-                control_writer.write(&PluginFrame::Installed).await?;
+                .await
+                .map_err(|err| with_io_context(err, "runtime sink schema state install failed"))?;
+                control_writer
+                    .write(&PluginFrame::Installed)
+                    .await
+                    .map_err(|err| {
+                        with_io_context(err, "runtime sink schema state ack write failed")
+                    })?;
             }
             HostFrame::RunSink(request) => {
                 if schema_refresh_needed(&schema_state, request.required_schema_version) {
@@ -210,7 +244,16 @@ where
                         request.required_schema_version,
                         installed_schema_version(&schema_state),
                     )
-                    .await?;
+                    .await
+                    .map_err(|err| {
+                        with_io_context(
+                            err,
+                            format!(
+                                "runtime sink request {} schema refresh write failed",
+                                request.request_id
+                            ),
+                        )
+                    })?;
                     continue;
                 }
                 let arrow_stream_bytes =
@@ -236,7 +279,16 @@ where
                     .write(&PluginFrame::SinkAck(RuntimeRequestAck {
                         request_id: request.request_id,
                     }))
-                    .await?;
+                    .await
+                    .map_err(|err| {
+                        with_io_context(
+                            err,
+                            format!(
+                                "runtime sink request {} ack write failed",
+                                request.request_id
+                            ),
+                        )
+                    })?;
             }
             HostFrame::Shutdown => return Ok(()),
             other => {

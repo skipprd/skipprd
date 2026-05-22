@@ -16,6 +16,7 @@ use once_cell::sync::Lazy;
 use serde_derive::Deserialize;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
+use std::future::Future;
 use std::sync::Arc;
 use tracing::{error, info, warn};
 use url::Url;
@@ -69,6 +70,8 @@ impl super::cdc_apply::CdcApplyBackend for SnowflakeCdcBackend {
 
 const ASYNC_POLL_MAX: u32 = 600;
 const ASYNC_POLL_INTERVAL_MS: u64 = 500;
+const SNOWFLAKE_HTTP_MAX_ATTEMPTS: usize = 3;
+const SNOWFLAKE_HTTP_RETRY_BASE_MS: u64 = 250;
 
 const INSERT_CHUNK_STRUCTURED: usize = 100;
 const INSERT_CHUNK_FLAT: usize = 1000;
@@ -130,6 +133,103 @@ const SESSION_TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(3 
 impl DataSinkSnowflakePlugin {
     fn boxed_error(message: impl Into<String>) -> BoxError {
         std::io::Error::other(message.into()).into()
+    }
+
+    fn is_transient_http_message(message: &str) -> bool {
+        let message = message.to_ascii_lowercase();
+        [
+            "unexpected end of file",
+            "connection reset",
+            "connection aborted",
+            "connection closed",
+            "broken pipe",
+            "early eof",
+            "eof",
+            "operation timed out",
+            "timed out",
+        ]
+        .iter()
+        .any(|needle| message.contains(needle))
+    }
+
+    fn is_transient_snowflake_http_error(err: &reqwest::Error) -> bool {
+        if err.is_timeout() || err.is_connect() {
+            return true;
+        }
+
+        let mut source = Some(err as &dyn std::error::Error);
+        while let Some(err) = source {
+            if Self::is_transient_http_message(&err.to_string()) {
+                return true;
+            }
+            source = err.source();
+        }
+        false
+    }
+
+    async fn retry_snowflake_http<T, F, Fut>(
+        &self,
+        phase: &str,
+        mut request: F,
+    ) -> Result<T, BoxError>
+    where
+        F: FnMut() -> Fut,
+        Fut: Future<Output = Result<T, reqwest::Error>>,
+    {
+        let mut last_err = None;
+        for attempt in 1..=SNOWFLAKE_HTTP_MAX_ATTEMPTS {
+            match request().await {
+                Ok(value) => return Ok(value),
+                Err(err)
+                    if attempt < SNOWFLAKE_HTTP_MAX_ATTEMPTS
+                        && Self::is_transient_snowflake_http_error(&err) =>
+                {
+                    warn!(
+                        "Snowflake {} HTTP attempt {}/{} failed transiently: {}",
+                        phase, attempt, SNOWFLAKE_HTTP_MAX_ATTEMPTS, err
+                    );
+                    last_err = Some(err);
+                    tokio::time::sleep(std::time::Duration::from_millis(
+                        SNOWFLAKE_HTTP_RETRY_BASE_MS * attempt as u64,
+                    ))
+                    .await;
+                }
+                Err(err) => {
+                    return Err(Self::boxed_error(format!(
+                        "Snowflake {} HTTP: {}",
+                        phase, err
+                    )));
+                }
+            }
+        }
+
+        let err = last_err
+            .map(|err| err.to_string())
+            .unwrap_or_else(|| "request failed without an error".to_string());
+        Err(Self::boxed_error(format!(
+            "Snowflake {} HTTP: {}",
+            phase, err
+        )))
+    }
+
+    async fn retry_snowflake_json<F>(
+        &self,
+        phase: &str,
+        mut request: F,
+    ) -> Result<(reqwest::StatusCode, serde_json::Value), BoxError>
+    where
+        F: FnMut() -> reqwest::RequestBuilder,
+    {
+        self.retry_snowflake_http(phase, || {
+            let request = request();
+            async move {
+                let resp = request.send().await?;
+                let status = resp.status();
+                let body = resp.json().await?;
+                Ok((status, body))
+            }
+        })
+        .await
     }
 
     pub async fn new_with_config(
@@ -212,16 +312,15 @@ impl DataSinkSnowflakePlugin {
             }
         });
 
-        let resp = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json")
-            .json(&payload)
-            .send()
+        let (_status, body) = self
+            .retry_snowflake_json("password login", || {
+                self.client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .json(&payload)
+            })
             .await?;
-
-        let body: serde_json::Value = resp.json().await?;
         let token = body
             .pointer("/data/token")
             .and_then(|t| t.as_str())
@@ -319,15 +418,15 @@ impl DataSinkSnowflakePlugin {
                     "TOKEN": jwt,
                 }
             });
-            let resp = self
-                .client
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .header("Accept", "application/json")
-                .json(&payload)
-                .send()
+            let (_status, body) = self
+                .retry_snowflake_json("key-pair session login", || {
+                    self.client
+                        .post(&url)
+                        .header("Content-Type", "application/json")
+                        .header("Accept", "application/json")
+                        .json(&payload)
+                })
                 .await?;
-            let body: serde_json::Value = resp.json().await?;
             body.pointer("/data/token")
                 .and_then(|t| t.as_str())
                 .ok_or("No session token in JWT login response")?
@@ -367,20 +466,18 @@ impl DataSinkSnowflakePlugin {
 
         let (auth_header, token_type) = self.auth_headers(&token);
 
-        let resp = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json")
-            .header("User-Agent", "skippr/1.0")
-            .header("Authorization", &auth_header)
-            .header("X-Snowflake-Authorization-Token-Type", token_type)
-            .json(&payload)
-            .send()
+        let (status, body) = self
+            .retry_snowflake_json("SQL execution", || {
+                self.client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .header("User-Agent", "skippr/1.0")
+                    .header("Authorization", &auth_header)
+                    .header("X-Snowflake-Authorization-Token-Type", token_type)
+                    .json(&payload)
+            })
             .await?;
-
-        let status = resp.status();
-        let body: serde_json::Value = resp.json().await?;
 
         if !status.is_success() && status.as_u16() != 202 {
             let msg = body["message"].as_str().unwrap_or("unknown error");
@@ -428,17 +525,16 @@ impl DataSinkSnowflakePlugin {
         for attempt in 1..=ASYNC_POLL_MAX {
             tokio::time::sleep(std::time::Duration::from_millis(ASYNC_POLL_INTERVAL_MS)).await;
 
-            let resp = self
-                .client
-                .get(&poll_url)
-                .header("Accept", "application/json")
-                .header("User-Agent", "skippr/1.0")
-                .header("Authorization", auth_header)
-                .header("X-Snowflake-Authorization-Token-Type", token_type)
-                .send()
+            let (_status, body) = self
+                .retry_snowflake_json("SQL poll", || {
+                    self.client
+                        .get(&poll_url)
+                        .header("Accept", "application/json")
+                        .header("User-Agent", "skippr/1.0")
+                        .header("Authorization", auth_header)
+                        .header("X-Snowflake-Authorization-Token-Type", token_type)
+                })
                 .await?;
-
-            let body: serde_json::Value = resp.json().await?;
             let code = body.get("code").and_then(|c| c.as_str()).unwrap_or("");
 
             match code {
@@ -500,21 +596,20 @@ impl DataSinkSnowflakePlugin {
             payload["parameters"] = serde_json::json!({"SF_HEADER_ROLE": role});
         }
 
-        let resp = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("Accept", "application/json")
-            .header("User-Agent", "skippr/1.0")
-            .header(
-                "Authorization",
-                format!("Snowflake Token=\"{}\"", session_token),
-            )
-            .json(&payload)
-            .send()
+        let (_status, body) = self
+            .retry_snowflake_json("PUT initiation", || {
+                self.client
+                    .post(&url)
+                    .header("Content-Type", "application/json")
+                    .header("Accept", "application/json")
+                    .header("User-Agent", "skippr/1.0")
+                    .header(
+                        "Authorization",
+                        format!("Snowflake Token=\"{}\"", session_token),
+                    )
+                    .json(&payload)
+            })
             .await?;
-
-        let body: serde_json::Value = resp.json().await?;
         let success = body
             .get("success")
             .and_then(|s| s.as_bool())
@@ -2567,6 +2662,29 @@ mod tests {
         attrs
             .get(&DataSinkSnowflakePlugin::metadata_attribute(key))
             .map(|value| value.as_ref().to_string())
+    }
+
+    #[test]
+    fn snowflake_http_retry_classifier_matches_transient_transport_messages() {
+        assert!(DataSinkSnowflakePlugin::is_transient_http_message(
+            "io error: unexpected end of file"
+        ));
+        assert!(DataSinkSnowflakePlugin::is_transient_http_message(
+            "connection reset by peer"
+        ));
+        assert!(DataSinkSnowflakePlugin::is_transient_http_message(
+            "operation timed out"
+        ));
+    }
+
+    #[test]
+    fn snowflake_http_retry_classifier_ignores_api_errors() {
+        assert!(!DataSinkSnowflakePlugin::is_transient_http_message(
+            "Snowflake SQL error (002003): SQL compilation error"
+        ));
+        assert!(!DataSinkSnowflakePlugin::is_transient_http_message(
+            "Incorrect username or password"
+        ));
     }
 
     #[test]
