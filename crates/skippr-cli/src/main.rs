@@ -7050,9 +7050,18 @@ data_sinks:
         assert_eq!(
             providers
                 .get("el")
-                .and_then(|el| el.get("enabled"))
-                .and_then(|enabled| enabled.as_bool()),
-            Some(false)
+                .and_then(|el| el.get("skippr_input"))
+                .and_then(|input| input.get("kind"))
+                .and_then(|kind| kind.as_str()),
+            Some("mssql")
+        );
+        assert_eq!(
+            providers
+                .get("el")
+                .and_then(|el| el.get("skippr_input"))
+                .and_then(|input| input.get("connection_string"))
+                .and_then(|connection_string| connection_string.as_str()),
+            Some("server=tcp:127.0.0.1,1433;database=testdb")
         );
         assert_eq!(
             providers

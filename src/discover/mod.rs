@@ -459,8 +459,9 @@ impl Metadata {
         } else {
             metadata.out_field_name.clone()
         };
-        if metadata.source_field_name.is_empty() {
-            metadata.source_field_name = path.last().cloned().unwrap_or_else(|| name.clone());
+        let source_field_name = path.last().cloned().unwrap_or_else(|| name.clone());
+        if metadata.source_field_name.is_empty() && !source_field_name.is_empty() {
+            metadata.source_field_name = source_field_name;
             changed = true;
         }
         if !name.is_empty() && path.last() != Some(&name) {
