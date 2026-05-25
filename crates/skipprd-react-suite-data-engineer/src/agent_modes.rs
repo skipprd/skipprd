@@ -417,6 +417,9 @@ impl DataEngineerSuite {
     }
 
     pub(super) fn headless_mode_enabled() -> bool {
+        if Self::ide_chat_surface_enabled() {
+            return false;
+        }
         env_util::headless_mode_enabled()
     }
 

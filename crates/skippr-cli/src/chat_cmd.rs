@@ -166,7 +166,7 @@ async fn cmd_chat_send(log: Option<String>, explicit_config: &Option<PathBuf>, a
         std::env::remove_var("SKIPPR_WORKSPACE_SCOPED_CHAT");
     }
     let rendered_prompt = render_structured_chat_prompt(&user_message, structured_context.as_ref());
-    let _rendered_prompt = if workspace_scoped {
+    let headless_prompt = if workspace_scoped {
         render_workspace_chat_prompt(&rendered_prompt)
     } else {
         rendered_prompt
@@ -193,6 +193,7 @@ async fn cmd_chat_send(log: Option<String>, explicit_config: &Option<PathBuf>, a
     }
 
     let stream_jsonl = crate::is_jsonl_output(&args.output);
+    std::env::set_var("SKIPPR_HEADLESS_QUESTION", &headless_prompt);
     let headless = crate::react_host::run_headless_detailed(
         ctx.resolved,
         react::run_engine::HeadlessRunOpts {
@@ -203,9 +204,12 @@ async fn cmd_chat_send(log: Option<String>, explicit_config: &Option<PathBuf>, a
             suite_id: Some("data_engineer".to_string()),
             agent: agent.to_string(),
             skip_logging_init: false,
+            headless_prompt: Some(headless_prompt),
+            stream_jsonl,
         },
     )
     .await;
+    std::env::remove_var("SKIPPR_HEADLESS_QUESTION");
 
     if stream_jsonl {
         let summary = serde_json::json!({

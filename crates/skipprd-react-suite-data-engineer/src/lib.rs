@@ -702,6 +702,14 @@ impl DataEngineerSuite {
     }
 }
 
+fn headless_user_question(fallback: &str) -> String {
+    std::env::var("SKIPPR_HEADLESS_QUESTION")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| fallback.to_string())
+}
+
 #[async_trait]
 impl Suite for DataEngineerSuite {
     fn id(&self) -> &'static str {
@@ -763,6 +771,7 @@ impl Suite for DataEngineerSuite {
         agent_type: &str,
         ctx: &SuiteCtx,
     ) -> Result<Vec<FlowFrame>, String> {
+        let question = headless_user_question(question);
         let _ = ctx
             .log_writer()
             .ensure_preflight_phase_step(
@@ -773,7 +782,7 @@ impl Suite for DataEngineerSuite {
             )
             .await;
         let frames = self
-            .dispatch_agent(thread_id, question, agent_type, ctx)
+            .dispatch_agent(thread_id, &question, agent_type, ctx)
             .await?;
         ctx.record_flow_frames(thread_id, agent_type, &frames).await;
         Ok(frames)
@@ -786,6 +795,7 @@ impl Suite for DataEngineerSuite {
         agent_type: &str,
         ctx: &SuiteCtx,
     ) -> Result<Vec<FlowFrame>, String> {
+        let question = headless_user_question(question);
         let _ = ctx
             .log_writer()
             .ensure_preflight_phase_step(
@@ -796,7 +806,7 @@ impl Suite for DataEngineerSuite {
             )
             .await;
         let frames = self
-            .dispatch_agent(thread_id, question, agent_type, ctx)
+            .dispatch_agent(thread_id, &question, agent_type, ctx)
             .await?;
         ctx.record_flow_frames(thread_id, agent_type, &frames).await;
         Ok(frames)
@@ -809,6 +819,7 @@ impl Suite for DataEngineerSuite {
         agent_type: &str,
         ctx: &SuiteCtx,
     ) -> Result<Vec<FlowFrame>, String> {
+        let text = headless_user_question(text);
         let _ = ctx
             .log_writer()
             .ensure_preflight_phase_step(
@@ -819,7 +830,7 @@ impl Suite for DataEngineerSuite {
             )
             .await;
         let frames = self
-            .dispatch_agent(thread_id, text, agent_type, ctx)
+            .dispatch_agent(thread_id, &text, agent_type, ctx)
             .await?;
         ctx.record_flow_frames(thread_id, agent_type, &frames).await;
         Ok(frames)

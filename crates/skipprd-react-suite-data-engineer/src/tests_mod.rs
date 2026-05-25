@@ -475,6 +475,19 @@ fn non_interactive_contract_allows_await_user_for_non_agent_when_not_headless() 
     assert!(matches!(out.first(), Some(FlowFrame::Interrupt { .. })));
 }
 
+#[test]
+fn non_interactive_contract_allows_await_user_for_ask_in_ide_chat() {
+    std::env::set_var("SKIPPR_EXECUTION_SURFACE", "ide_chat");
+    let frames = vec![FlowFrame::Interrupt {
+        kind: FlowKind::new("await_user"),
+        prompt: "Which date range?".to_string(),
+    }];
+    let out = DataEngineerSuite::enforce_non_interactive_contract(AgentMode::Ask, frames)
+        .expect("ask in ide_chat should allow await_user");
+    assert!(matches!(out.first(), Some(FlowFrame::Interrupt { .. })));
+    std::env::remove_var("SKIPPR_EXECUTION_SURFACE");
+}
+
 #[tokio::test]
 async fn plan_batched_staging_model_is_not_exposed_to_agent() {
     let mut sctx = test_sctx();

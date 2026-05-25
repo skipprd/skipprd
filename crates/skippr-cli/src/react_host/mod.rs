@@ -59,7 +59,7 @@ pub async fn run_headless_detailed(
     cfg: ReactResolvedConfig,
     opts: react::run_engine::HeadlessRunOpts,
 ) -> HeadlessRunDetail {
-    let thread_id = opts.thread_id.clone();
+    let requested_thread_id = opts.thread_id.clone();
     let registry = react::host::registry_from_host(&SkipprHost);
     let suite_ctx = match react::bootstrap::build_suite_ctx_with(&cfg, &SkipprHost).await {
         Ok(ctx) => ctx,
@@ -72,12 +72,12 @@ pub async fn run_headless_detailed(
             };
         }
     };
-    let exit_code = react::run_engine::run_headless_with_ctx(cfg, registry, suite_ctx, opts).await;
+    let outcome = react::run_engine::run_headless_with_ctx(cfg, registry, suite_ctx, opts).await;
     HeadlessRunDetail {
-        exit_code,
+        exit_code: outcome.exit_code,
         bootstrap_error: None,
-        thread_id,
-        failure_summary: None,
+        thread_id: outcome.thread_id.or(requested_thread_id),
+        failure_summary: outcome.failure_summary,
     }
 }
 
