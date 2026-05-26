@@ -8,6 +8,8 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: Checkout react sibling dependency
+      uses: ./.github/actions/checkout-react-sibling
     - name: Install Build Dependencies
       shell: bash
       run: |

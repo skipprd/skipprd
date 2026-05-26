@@ -1,0 +1,20 @@
+name: Checkout react sibling
+description: Clone skipprd/react beside the workspace for ../react path dependencies
+runs:
+  using: composite
+  steps:
+    - name: Checkout react repository
+      shell: bash
+      env:
+        REACT_REPO: ${{ github.repository_owner }}/react
+        GITHUB_TOKEN: ${{ github.token }}
+      run: |
+        set -euo pipefail
+        react_dir="${GITHUB_WORKSPACE}/../react"
+        if [ -f "${react_dir}/src/runtime/Cargo.toml" ]; then
+          echo "react dependency already present at ${react_dir}"
+          exit 0
+        fi
+        git clone --depth 1 \
+          "https://x-access-token:${GITHUB_TOKEN}@github.com/${REACT_REPO}.git" \
+          "${react_dir}"

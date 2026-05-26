@@ -36,6 +36,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      - name: Install Rust for plugin catalog
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.88.0
       - id: plan
         shell: bash
         run: |
@@ -320,6 +324,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      - uses: ./.github/actions/checkout-react-sibling
       - name: Install system dependencies (macos)
         shell: bash
         run: |
@@ -412,6 +417,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      - uses: ./.github/actions/checkout-react-sibling
 
       - name: Configure CodeArtifact Cargo access
         shell: bash
@@ -690,6 +696,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      - uses: ./.github/actions/checkout-react-sibling
       - name: Configure CodeArtifact Cargo access
         shell: bash
         run: |
@@ -1118,6 +1125,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      - uses: ./.github/actions/checkout-react-sibling
 
       - name: Install Postgres client
         shell: bash
@@ -1247,6 +1255,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      - uses: ./.github/actions/checkout-react-sibling
 
       - name: Start MySQL with row binlog
         shell: bash
@@ -1369,6 +1378,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      - uses: ./.github/actions/checkout-react-sibling
 
       - name: Configure CodeArtifact Cargo access
         shell: bash
@@ -1465,6 +1475,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      - uses: ./.github/actions/checkout-react-sibling
 
       - name: Configure CodeArtifact Cargo access
         shell: bash
@@ -1560,6 +1571,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
+      - uses: ./.github/actions/checkout-react-sibling
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

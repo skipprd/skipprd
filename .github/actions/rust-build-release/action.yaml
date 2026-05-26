@@ -16,6 +16,8 @@ inputs:
 runs:
   using: "composite"
   steps:
+    - name: Checkout react sibling dependency
+      uses: ./.github/actions/checkout-react-sibling
     - name: Install system dependencies (linux)
       if: runner.os == 'Linux'
       shell: bash

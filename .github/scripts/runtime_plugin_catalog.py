@@ -44,6 +44,45 @@ def cargo_metadata(workspace: Path) -> dict:
     )
 
 
+def discover_plugin_manifest_paths(workspace: Path) -> list[Path]:
+    manifests: list[Path] = []
+    for prefix in PLUGIN_ROOT_PREFIXES:
+        plugin_root = workspace / prefix
+        if not plugin_root.exists():
+            continue
+        for manifest_path in sorted(plugin_root.glob("*/Cargo.toml")):
+            main_rs = manifest_path.parent / "src" / "main.rs"
+            if main_rs.exists():
+                manifests.append(manifest_path.resolve())
+    if not manifests:
+        raise SystemExit("no runtime plugin Cargo.toml manifests found under plugins/")
+    return manifests
+
+
+def read_plugin_package_manifest(manifest_path: Path, workspace: Path) -> dict:
+    package = json.loads(
+        subprocess.check_output(
+            [
+                "cargo",
+                "read-manifest",
+                "--manifest-path",
+                str(manifest_path),
+            ],
+            cwd=workspace,
+            text=True,
+        )
+    )
+    package["manifest_path"] = str(manifest_path.resolve())
+    return package
+
+
+def load_plugin_packages(workspace: Path) -> list[dict]:
+    return [
+        read_plugin_package_manifest(manifest_path, workspace)
+        for manifest_path in discover_plugin_manifest_paths(workspace)
+    ]
+
+
 def plugin_dir_checksum(plugin_dir: Path) -> str:
     digest = hashlib.sha256()
     for path in sorted(plugin_dir.rglob("*")):
@@ -124,10 +163,14 @@ def package_path_dependency_dirs(
         dependency_path = dependency.get("path")
         if not dependency_path:
             continue
-        dependency_package = packages_by_name.get(dependency_name)
-        if dependency_package is None:
-            continue
-        dependency_manifest_path = Path(dependency_package["manifest_path"]).resolve()
+        dependency_dir = Path(dependency_path).resolve()
+        dependency_manifest_path = dependency_dir / "Cargo.toml"
+        if not dependency_manifest_path.exists():
+            if dependency_dir.name == "Cargo.toml":
+                dependency_manifest_path = dependency_dir
+                dependency_dir = dependency_dir.parent
+            else:
+                continue
         try:
             relative_manifest_path = dependency_manifest_path.relative_to(workspace).as_posix()
         except ValueError:
@@ -136,7 +179,7 @@ def package_path_dependency_dirs(
             continue
         if not relative_manifest_path.startswith(PLUGIN_ROOT_PREFIXES):
             continue
-        dirs.append(dependency_manifest_path.parent)
+        dirs.append(dependency_dir)
     return sorted(set(dirs))
 
 
@@ -336,15 +379,13 @@ def manifest_payload_for_catalog_entry(
 
 
 def load_workspace_plugin_catalog(workspace: Path) -> list[dict]:
-    metadata = cargo_metadata(workspace)
-    packages_by_name = {package["name"]: package for package in metadata["packages"]}
+    packages = load_plugin_packages(workspace)
+    packages_by_name = {package["name"]: package for package in packages}
     catalog = []
 
-    for package in metadata["packages"]:
+    for package in packages:
         manifest_path = Path(package["manifest_path"]).resolve()
         rel_manifest_path = manifest_path.relative_to(workspace).as_posix()
-        if not rel_manifest_path.startswith(PLUGIN_ROOT_PREFIXES):
-            continue
 
         bin_targets = [target["name"] for target in package["targets"] if "bin" in target["kind"]]
         if not bin_targets:
