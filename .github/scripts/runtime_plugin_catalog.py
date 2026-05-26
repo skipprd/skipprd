@@ -2,17 +2,32 @@
 
 import hashlib
 import re
+import subprocess
 import sys
 from pathlib import Path
 
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
-    if sys.version_info < (3, 11):
-        raise SystemExit(
-            "runtime_plugin_catalog requires Python 3.11+ (tomllib) for plugin manifest parsing"
-        ) from None
-    raise
+
+def load_toml_document(path: Path) -> dict:
+    try:
+        import tomllib
+    except ModuleNotFoundError:
+        try:
+            import tomli as tomllib  # type: ignore[no-redef]
+        except ModuleNotFoundError:
+            subprocess.check_call(
+                [
+                    sys.executable,
+                    "-m",
+                    "pip",
+                    "install",
+                    "--disable-pip-version-check",
+                    "tomli",
+                ],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            import tomli as tomllib  # type: ignore[no-redef]
+    return tomllib.loads(path.read_text(encoding="utf-8"))
 
 
 PLUGIN_ROOT_PREFIXES = (
@@ -59,7 +74,7 @@ def discover_plugin_manifest_paths(workspace: Path) -> list[Path]:
 
 def read_plugin_package_manifest(manifest_path: Path, workspace: Path) -> dict:
     del workspace  # kept for call-site compatibility
-    document = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+    document = load_toml_document(manifest_path)
     package_section = document.get("package")
     if not isinstance(package_section, dict):
         raise SystemExit(f"plugin manifest {manifest_path} is missing [package]")
