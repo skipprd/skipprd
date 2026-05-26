@@ -23,7 +23,6 @@ env:
   SKIPPR_ADMIN_LATEST_POINTER: latest-skippr-admin.txt
   RUST_BUILD_CACHE_BUCKET: skippr-web-rust-cache-prod
   RUST_BUILD_CACHE_REGION: us-east-1
-  REACT_REPO_CHECKOUT_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
 
 jobs:
   plan_runtime_plugin_release:
@@ -324,7 +323,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - uses: ./.github/actions/checkout-react-sibling
       - name: Install system dependencies (macos)
         shell: bash
         run: |
@@ -417,8 +415,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - uses: ./.github/actions/checkout-react-sibling
-
       - name: Configure CodeArtifact Cargo access
         shell: bash
         run: |
@@ -696,7 +692,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - uses: ./.github/actions/checkout-react-sibling
       - name: Configure CodeArtifact Cargo access
         shell: bash
         run: |
@@ -1125,8 +1120,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - uses: ./.github/actions/checkout-react-sibling
-
       - name: Install Postgres client
         shell: bash
         run: |
@@ -1255,8 +1248,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - uses: ./.github/actions/checkout-react-sibling
-
       - name: Start MySQL with row binlog
         shell: bash
         run: |
@@ -1378,8 +1369,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - uses: ./.github/actions/checkout-react-sibling
-
       - name: Configure CodeArtifact Cargo access
         shell: bash
         env:
@@ -1475,8 +1464,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - uses: ./.github/actions/checkout-react-sibling
-
       - name: Configure CodeArtifact Cargo access
         shell: bash
         env:
@@ -1571,8 +1558,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - uses: ./.github/actions/checkout-react-sibling
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 

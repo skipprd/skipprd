@@ -6,7 +6,7 @@
 
 - `run_headless_detailed` now returns the thread id produced by the react headless runner, not only a pre-requested id.
 - `skippr chat send` passes the rendered user message as `headless_prompt`, enables `stream_jsonl` for `--output jsonl`, and sets `SKIPPR_HEADLESS_QUESTION` for the data-engineer suite entrypoints.
-- Workspace react dependencies point at in-tree `react` 1.3.0 (`../react`) so headless prompt and JSONL streaming are available in local builds.
+- Workspace react dependencies use published `react-cargo` 1.4.0; use `./scripts/cargo-with-local-react.sh` for sibling `../react` during local development.
 
 ### Ask routing (`skipprd-react-suite-data-engineer`)
 

@@ -56,4 +56,5 @@ crates/skipprd-react-suite-data-engineer/skippr-dbt-el-windows-snowflake.yaml
 crates/skipprd-react-suite-data-engineer/skippr-dbt-snowflake.yaml
 crates/skipprd-react-suite-data-engineer/snowflake_key.p8
 crates/skipprd-react-suite-data-engineer/snowflake_key.pub
-.cargo
+.cargo/*
+!.cargo/config.toml
