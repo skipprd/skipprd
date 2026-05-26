@@ -15,9 +15,10 @@ use serde::{Deserialize, Serialize};
 // separate from the skippr/React adapter's CLI subprocess JSON summaries.
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 9;
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 10;
 pub const SKIPPR_RUNTIME_CONTROL_ADDR_ENV: &str = "SKIPPR_RUNTIME_CONTROL_ADDR";
 pub const SKIPPR_RUNTIME_DATA_ADDR_ENV: &str = "SKIPPR_RUNTIME_DATA_ADDR";
+pub const SKIPPR_RUNTIME_OFFSET_ADDR_ENV: &str = "SKIPPR_RUNTIME_OFFSET_ADDR";
 pub const SKIPPR_RUNTIME_SESSION_TOKEN_ENV: &str = "SKIPPR_RUNTIME_SESSION_TOKEN";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -291,6 +292,38 @@ pub struct RuntimeOffsetMaterializationHint {
     pub closed: bool,
 }
 
+/// Generic offset validation entry for batched source offset checks.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeOffsetValidationEntry {
+    pub key: OffsetKey,
+    pub offset_type: crate::helpers::offsets::OffsetTypes,
+    pub offset_value: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum PluginOffsetFrame {
+    ValidateOffsetBatch {
+        request_id: u64,
+        entries: Vec<RuntimeOffsetValidationEntry>,
+    },
+    LoadCheckpoint {
+        request_id: u64,
+        key: String,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum HostOffsetFrame {
+    ValidateOffsetBatchResponse {
+        request_id: u64,
+        should_process: Vec<bool>,
+    },
+    LoadCheckpointResponse {
+        request_id: u64,
+        envelope: Option<CheckpointEnvelope>,
+    },
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RuntimeIngestPartitionBatch {
     pub sink_ref: String,
@@ -389,7 +422,8 @@ pub enum HostDataFrame {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum PluginDataFrame {
-    RawIngestTasks {
+    /// Host-owned ingest payloads emitted by runtime source plugins.
+    SourcePayloadBatches {
         tasks: Vec<Vec<RuntimeRawIngestBatch>>,
     },
     IngestBatches {

@@ -9,9 +9,12 @@ use tracing::{error, info};
 
 use crate::helpers::configuration::{Config, DataSourcePluginConfig};
 use async_trait::async_trait;
-use skippr_runtime_sdk::plugins::{DataSink, DataSource};
-use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes, Offsets};
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::plugins::DataSource;
+use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes};
+use skippr_runtime_sdk::source_compat::{
+    load_checkpoint_payload, submit_payload_batch_groups, submit_payload_batches,
+    validate_offset_key, IngestBatch, SourceSyncContext,
+};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceMssqlPluginConfig {
@@ -33,7 +36,6 @@ impl TryFrom<DataSourcePluginConfig> for DataSourceMssqlPluginConfig {
 }
 
 pub struct DataSourceMssqlPlugin {
-    pub(crate) ingest: Ingest,
     pub(crate) config: DataSourceMssqlPluginConfig,
 }
 
@@ -63,17 +65,11 @@ impl DataSourceMssqlPlugin {
             }
         };
 
-        DataSourceMssqlPlugin {
-            ingest: Ingest::new(),
-            config,
-        }
+        DataSourceMssqlPlugin { config }
     }
 
     pub fn with_runtime_config(config: DataSourceMssqlPluginConfig) -> Self {
-        Self {
-            ingest: Ingest::new(),
-            config,
-        }
+        Self { config }
     }
 
     async fn connect(
@@ -325,18 +321,17 @@ impl DataSourceMssqlPlugin {
         }
     }
 
-    pub async fn sync(
+    pub async fn run_sync(
         &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) {
+        ctx: Arc<dyn SourceSyncContext>,
+    ) -> Result<(), std::io::Error> {
         info!("MSSQL input plugin starting sync");
 
         let mut client = match Self::connect(&self.config).await {
             Ok(c) => c,
             Err(e) => {
                 error!("Failed to connect to MSSQL: {}", e);
-                return;
+                return Ok(());
             }
         };
 
@@ -351,7 +346,7 @@ impl DataSourceMssqlPlugin {
                 }
                 Err(e) => {
                     error!("Failed to discover MSSQL tables: {}", e);
-                    return;
+                    return Ok(());
                 }
             },
         };
@@ -372,7 +367,8 @@ impl DataSourceMssqlPlugin {
                 partition: table_fq.clone(),
             };
 
-            if offsets.validate(&offset_key, OffsetTypes::Closed, 1) == Some(true) {
+            if validate_offset_key(ctx.as_ref(), &offset_key, OffsetTypes::Closed, 1) == Some(true)
+            {
                 info!("Skipping already-ingested table: {}", table_fq);
                 continue;
             }
@@ -410,7 +406,7 @@ impl DataSourceMssqlPlugin {
             info!("Read {} rows from {}", rows.len(), table_fq);
 
             let mut current_batch: Vec<IngestBatch> = Vec::new();
-            let mut ingest_tasks = IngestTasks::new();
+            let mut batch_groups: Vec<Vec<IngestBatch>> = Vec::new();
 
             for row in &rows {
                 let json_str = Self::row_to_json(row, &decimal_scales);
@@ -426,40 +422,28 @@ impl DataSourceMssqlPlugin {
                 });
 
                 if current_batch.len() >= batch_size {
-                    let batch = std::mem::take(&mut current_batch);
-                    ingest_tasks.add(IngestTask::new(
-                        batch,
-                        offsets.clone(),
-                        shared_output.clone(),
-                    ));
+                    batch_groups.push(std::mem::take(&mut current_batch));
                 }
             }
 
             if !current_batch.is_empty() {
-                ingest_tasks.add(IngestTask::new(
-                    current_batch,
-                    offsets.clone(),
-                    shared_output.clone(),
-                ));
+                batch_groups.push(current_batch);
             }
 
-            self.ingest
-                .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output.clone());
+            if !batch_groups.is_empty() {
+                submit_payload_batch_groups(ctx.as_ref(), batch_groups)?;
+            }
         }
 
         info!("MSSQL input plugin sync complete");
+        Ok(())
     }
 }
 
 #[async_trait]
 impl DataSource for DataSourceMssqlPlugin {
-    async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
-        self.sync(offsets, output).await;
-        Ok(())
+    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
+        self.run_sync(ctx).await
     }
 
     fn execution_contract(&self) -> skippr_runtime_sdk::plugins::SourceExecutionContract {

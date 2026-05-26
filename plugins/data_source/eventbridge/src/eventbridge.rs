@@ -11,9 +11,9 @@ use tracing::info;
 use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::RUNNING;
-use skippr_runtime_sdk::plugins::{DataSink, DataSource};
-use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::plugins::DataSource;
+use skippr_runtime_sdk::progress::OffsetKey;
+use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch, SourceSyncContext};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceEventbridgePluginConfig {
@@ -36,7 +36,6 @@ impl TryFrom<PluginConfigEntry> for DataSourceEventbridgePluginConfig {
 }
 
 pub struct DataSourceEventbridgePlugin {
-    ingest: Ingest,
     config: DataSourceEventbridgePluginConfig,
     sqs_client: SqsClient,
 }
@@ -54,11 +53,7 @@ impl DataSourceEventbridgePlugin {
         }
         let sqs_client = SqsClient::from_conf(sqs_builder.build());
 
-        Self {
-            ingest: Ingest::new(),
-            config,
-            sqs_client,
-        }
+        Self { config, sqs_client }
     }
 
     pub async fn new() -> Self {
@@ -87,11 +82,7 @@ impl DataSourceEventbridgePlugin {
 
 #[async_trait]
 impl DataSource for DataSourceEventbridgePlugin {
-    async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
+    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         info!(
             "EventBridge: consuming from SQS queue for bus '{}'",
             self.config.event_bus_name
@@ -150,14 +141,7 @@ impl DataSource for DataSourceEventbridgePlugin {
             }
 
             if !pending.is_empty() {
-                let mut ingest_tasks = IngestTasks::new();
-                ingest_tasks.add(IngestTask::new(
-                    pending,
-                    offsets.clone(),
-                    shared_output.clone(),
-                ));
-                self.ingest
-                    .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output.clone());
+                submit_payload_batches(ctx.as_ref(), pending)?;
             }
 
             for msg in &messages {

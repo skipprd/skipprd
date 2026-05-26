@@ -11,9 +11,9 @@ use tracing::{error, info};
 use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::RUNNING;
-use skippr_runtime_sdk::plugins::{DataSink, DataSource};
-use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::plugins::DataSource;
+use skippr_runtime_sdk::progress::OffsetKey;
+use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch, SourceSyncContext};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceSocketPluginConfig {
@@ -34,7 +34,6 @@ impl TryFrom<PluginConfigEntry> for DataSourceSocketPluginConfig {
 }
 
 pub struct DataSourceSocketPlugin {
-    ingest: Ingest,
     config: DataSourceSocketPluginConfig,
 }
 
@@ -52,28 +51,21 @@ impl DataSourceSocketPlugin {
                 batch_size_seconds: None,
             },
         };
-        Self {
-            ingest: Ingest::new(),
-            config,
-        }
+        Self { config }
     }
 
     pub fn with_runtime_config(config: DataSourceSocketPluginConfig) -> Self {
-        Self {
-            ingest: Ingest::new(),
-            config,
-        }
+        Self { config }
     }
 
     fn ingest_line(
         &self,
         data: String,
         counter: &mut u64,
-        offsets: &Arc<Offsets>,
-        shared_output: &Arc<Box<dyn DataSink + Send + Sync>>,
-    ) {
+        ctx: &dyn SourceSyncContext,
+    ) -> Result<(), std::io::Error> {
         if data.is_empty() {
-            return;
+            return Ok(());
         }
         *counter += 1;
         let bytes = data.len();
@@ -82,8 +74,8 @@ impl DataSourceSocketPlugin {
             namespace: namespace.clone(),
             partition: counter.to_string(),
         };
-        let mut ingest_tasks = IngestTasks::new();
-        ingest_tasks.add(IngestTask::new(
+        submit_payload_batches(
+            ctx,
             vec![IngestBatch {
                 offset_key,
                 data,
@@ -92,21 +84,14 @@ impl DataSourceSocketPlugin {
                 namespace: Some(namespace),
                 cdc_rows: None,
             }],
-            offsets.clone(),
-            shared_output.clone(),
-        ));
-        self.ingest
-            .ingest_file(&Arc::new(ingest_tasks), offsets, shared_output.clone());
+        )
+        .map(|_| ())
     }
 }
 
 #[async_trait]
 impl DataSource for DataSourceSocketPlugin {
-    async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
+    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         let mut counter: u64 = 0;
 
         match self.config.mode.as_str() {
@@ -119,7 +104,7 @@ impl DataSource for DataSourceSocketPlugin {
                             let reader = tokio::io::BufReader::new(stream);
                             let mut lines = reader.lines();
                             while let Ok(Some(line)) = lines.next_line().await {
-                                self.ingest_line(line, &mut counter, &offsets, &shared_output);
+                                self.ingest_line(line, &mut counter, ctx.as_ref())?;
                                 if !RUNNING.read().load(Ordering::SeqCst) {
                                     break;
                                 }
@@ -141,12 +126,7 @@ impl DataSource for DataSourceSocketPlugin {
                         Ok(Ok((len, _addr))) => {
                             let data = String::from_utf8_lossy(&buf[..len]).into_owned();
                             for line in data.lines() {
-                                self.ingest_line(
-                                    line.to_string(),
-                                    &mut counter,
-                                    &offsets,
-                                    &shared_output,
-                                );
+                                self.ingest_line(line.to_string(), &mut counter, ctx.as_ref())?;
                             }
                         }
                         Ok(Err(e)) => error!("UDP recv error: {}", e),
@@ -164,7 +144,7 @@ impl DataSource for DataSourceSocketPlugin {
                             let reader = tokio::io::BufReader::new(stream);
                             let mut lines = reader.lines();
                             while let Ok(Some(line)) = lines.next_line().await {
-                                self.ingest_line(line, &mut counter, &offsets, &shared_output);
+                                self.ingest_line(line, &mut counter, ctx.as_ref())?;
                                 if !RUNNING.read().load(Ordering::SeqCst) {
                                     break;
                                 }

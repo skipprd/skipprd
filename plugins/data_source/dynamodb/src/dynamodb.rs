@@ -18,10 +18,13 @@ use skippr_runtime_sdk::plugins::cdc::{
     source_capabilities, DynamodbCheckpoint, MutationKind, WalRowMeta,
 };
 use skippr_runtime_sdk::plugins::{
-    DataSink, DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
+    DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
 };
-use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes, Offsets};
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes};
+use skippr_runtime_sdk::source_compat::{
+    load_checkpoint_payload, submit_payload_batch_groups, submit_payload_batches,
+    validate_offset_key, IngestBatch, SourceSyncContext,
+};
 
 /// CDC scan configuration passed to `sync_scan` when CDC tagging is needed.
 struct CdcScanConfig {
@@ -55,7 +58,6 @@ impl TryFrom<PluginConfigEntry> for DataSourceDynamodbPluginConfig {
 }
 
 pub struct DataSourceDynamodbPlugin {
-    pub(crate) ingest: Ingest,
     pub(crate) config: DataSourceDynamodbPluginConfig,
     client: Client,
     streams_client: StreamsClient,
@@ -82,7 +84,6 @@ impl DataSourceDynamodbPlugin {
         let streams_client = StreamsClient::from_conf(streams_config.build());
 
         DataSourceDynamodbPlugin {
-            ingest: Ingest::new(),
             config,
             client,
             streams_client,
@@ -187,16 +188,15 @@ impl DataSourceDynamodbPlugin {
 
     async fn sync_scan(
         &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        ctx: Arc<dyn SourceSyncContext>,
         cdc_config: Option<&CdcScanConfig>,
-    ) {
+    ) -> std::io::Result<()> {
         info!("DynamoDB input plugin starting sync");
 
         let table_name = self.config.table_name.clone();
         if table_name.is_empty() {
             error!("DynamoDB table_name is empty");
-            return;
+            return Ok(());
         }
 
         let namespace = format!("dynamodb.{}", table_name);
@@ -229,12 +229,13 @@ impl DataSourceDynamodbPlugin {
                     Ok(o) => o,
                     Err(e) => {
                         error!("DynamoDB scan failed (segment {}): {}", segment, e);
-                        return;
+                        return Ok(());
                     }
                 };
 
                 let skip_ingest =
-                    offsets.validate(&offset_key, OffsetTypes::Closed, 1) == Some(true);
+                    validate_offset_key(ctx.as_ref(), &offset_key, OffsetTypes::Closed, 1)
+                        == Some(true);
 
                 if !skip_ingest {
                     let items = out.items();
@@ -246,8 +247,7 @@ impl DataSourceDynamodbPlugin {
                     );
 
                     let mut current_batch: Vec<IngestBatch> = Vec::new();
-                    let mut ingest_tasks = IngestTasks::new();
-                    let mut wrote_tasks = false;
+                    let mut batch_groups: Vec<Vec<IngestBatch>> = Vec::new();
 
                     for item in items {
                         let json_str = Self::item_to_json(item);
@@ -280,31 +280,16 @@ impl DataSourceDynamodbPlugin {
                         });
 
                         if current_batch.len() >= batch_size {
-                            let batch = std::mem::take(&mut current_batch);
-                            ingest_tasks.add(IngestTask::new(
-                                batch,
-                                offsets.clone(),
-                                shared_output.clone(),
-                            ));
-                            wrote_tasks = true;
+                            batch_groups.push(std::mem::take(&mut current_batch));
                         }
                     }
 
                     if !current_batch.is_empty() {
-                        ingest_tasks.add(IngestTask::new(
-                            current_batch,
-                            offsets.clone(),
-                            shared_output.clone(),
-                        ));
-                        wrote_tasks = true;
+                        batch_groups.push(current_batch);
                     }
 
-                    if wrote_tasks {
-                        self.ingest.ingest_file(
-                            &Arc::new(ingest_tasks),
-                            &offsets,
-                            shared_output.clone(),
-                        );
+                    if !batch_groups.is_empty() {
+                        submit_payload_batch_groups(ctx.as_ref(), batch_groups)?;
                     }
                 }
 
@@ -317,6 +302,7 @@ impl DataSourceDynamodbPlugin {
         }
 
         info!("DynamoDB input plugin sync complete for {}", namespace);
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -325,8 +311,7 @@ impl DataSourceDynamodbPlugin {
 
     async fn sync_cdc(
         &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        ctx: Arc<dyn SourceSyncContext>,
         mode: SourceCdcMode,
     ) -> Result<(), std::io::Error> {
         let table_name = self.config.table_name.clone();
@@ -359,9 +344,11 @@ impl DataSourceDynamodbPlugin {
         // --- Phase 1: discover the stream ARN ---
         let stream_arn = self.discover_stream_arn(&table_name).await?;
         let snapshot_checkpoint_key = format!("dynamodb:{}:snapshot_complete", table_name);
-        let snapshot_done = offsets
-            .load_checkpoint_payload::<DynamodbSnapshotCheckpoint>(&snapshot_checkpoint_key)
-            .is_some();
+        let snapshot_done = load_checkpoint_payload::<DynamodbSnapshotCheckpoint>(
+            ctx.as_ref(),
+            &snapshot_checkpoint_key,
+        )
+        .is_some();
         let should_run_snapshot = mode.includes_initial_snapshot() && !snapshot_done;
 
         // --- Phase 2: anchored snapshot ---
@@ -377,8 +364,7 @@ impl DataSourceDynamodbPlugin {
                 key_attrs: key_attrs.clone(),
                 anchor_bytes,
             };
-            self.sync_scan(offsets.clone(), shared_output.clone(), Some(&cfg))
-                .await;
+            self.sync_scan(ctx.clone(), Some(&cfg)).await?;
             let _ = (&snapshot_checkpoint_key, &stream_arn);
         } else if snapshot_done {
             info!("DynamoDB CDC: skipping snapshot (bootstrap checkpoint exists)");
@@ -391,15 +377,8 @@ impl DataSourceDynamodbPlugin {
             "DynamoDB CDC: starting stream consumption from {}",
             stream_arn
         );
-        self.consume_stream(
-            &stream_arn,
-            &table_name,
-            &key_attrs,
-            offsets,
-            shared_output,
-            mode,
-        )
-        .await
+        self.consume_stream(&stream_arn, &table_name, &key_attrs, ctx, mode)
+            .await
     }
 
     async fn discover_stream_arn(&self, table_name: &str) -> Result<String, std::io::Error> {
@@ -432,8 +411,7 @@ impl DataSourceDynamodbPlugin {
         stream_arn: &str,
         table_name: &str,
         key_attrs: &[String],
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        ctx: Arc<dyn SourceSyncContext>,
         mode: SourceCdcMode,
     ) -> Result<(), std::io::Error> {
         let desc = self
@@ -472,8 +450,7 @@ impl DataSourceDynamodbPlugin {
                 shard_id,
                 table_name,
                 key_attrs,
-                offsets.clone(),
-                shared_output.clone(),
+                ctx.clone(),
                 mode,
             )
             .await?;
@@ -488,8 +465,7 @@ impl DataSourceDynamodbPlugin {
         shard_id: &str,
         table_name: &str,
         _key_attrs: &[String],
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        ctx: Arc<dyn SourceSyncContext>,
         mode: SourceCdcMode,
     ) -> Result<(), std::io::Error> {
         let namespace = format!("dynamodb.{}", table_name);
@@ -499,9 +475,9 @@ impl DataSourceDynamodbPlugin {
         };
 
         let shard_ckpt_key = format!("dynamodb-stream:{}:{}:seq", table_name, shard_id);
-        let stored_seq = offsets
-            .load_checkpoint_payload::<DynamodbCheckpoint>(&shard_ckpt_key)
-            .map(|checkpoint| checkpoint.sequence_number);
+        let stored_seq =
+            load_checkpoint_payload::<DynamodbCheckpoint>(ctx.as_ref(), &shard_ckpt_key)
+                .map(|checkpoint| checkpoint.sequence_number);
 
         let mut iter_builder = self
             .streams_client
@@ -633,17 +609,7 @@ impl DataSourceDynamodbPlugin {
                 }
 
                 if !batch.is_empty() {
-                    let mut ingest_tasks = IngestTasks::new();
-                    ingest_tasks.add(IngestTask::new(
-                        batch,
-                        offsets.clone(),
-                        shared_output.clone(),
-                    ));
-                    self.ingest.ingest_file(
-                        &Arc::new(ingest_tasks),
-                        &offsets,
-                        shared_output.clone(),
-                    );
+                    submit_payload_batches(ctx.as_ref(), batch)?;
 
                     if let Some(ref seq) = last_seq {
                         let checkpoint = DynamodbCheckpoint {
@@ -719,18 +685,11 @@ impl DataSourceDynamodbPlugin {
 
 #[async_trait]
 impl DataSource for DataSourceDynamodbPlugin {
-    async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
+    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         match self.cdc_mode() {
-            SourceCdcMode::Snapshot => {
-                self.sync_scan(offsets, output, None).await;
-                Ok(())
-            }
+            SourceCdcMode::Snapshot => self.sync_scan(ctx, None).await,
             mode @ (SourceCdcMode::SnapshotThenCdc | SourceCdcMode::CdcOnly) => {
-                self.sync_cdc(offsets, output, mode).await
+                self.sync_cdc(ctx, mode).await
             }
         }
     }

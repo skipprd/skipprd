@@ -14,14 +14,12 @@ use std::time::Duration;
 
 use serde_derive::Deserialize;
 
-use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes, Offsets};
-use skippr_runtime_sdk::source_compat::{
-    Ingest, IngestBatch, IngestTask, IngestTasks, ThroughputMetrics,
-};
+use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes};
+use skippr_runtime_sdk::source_compat::{IngestBatch, SourcePayloadTask, SourceSyncContext};
+use skippr_runtime_sdk::source_sync::offset_validation_entry;
 
 use crate::helpers::Helpers;
 use futures::stream::{self, StreamExt};
-use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::protocol::RuntimeExecutionContext;
 use std::io::BufRead as _;
@@ -102,7 +100,6 @@ impl TryFrom<PluginConfigEntry> for DataSourceS3PluginConfig {
 /// Plugin for ingesting data from Amazon S3
 pub struct DataSourceS3Plugin {
     s3_client: Client,
-    ingest: Ingest,
     config: DataSourceS3PluginConfig,
     #[allow(dead_code)]
     temp_dir: String,
@@ -128,7 +125,6 @@ impl DataSourceS3Plugin {
 
         DataSourceS3Plugin {
             s3_client: Client::from_conf(s3_client_config.build()),
-            ingest: Ingest::new(),
             config,
             temp_dir,
             prefixes: Vec::new(),
@@ -156,20 +152,11 @@ impl DataSourceS3Plugin {
     /// 1. Lists objects from the configured S3 bucket and prefix
     /// 2. For each batch of objects, downloads and processes them
     /// 3. Uses continuation tokens to resume listing where it left off
-    pub async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
-        // Use new stream-based pipeline implementation
-        self.sync_stream(offsets, shared_output).await
+    pub async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
+        self.sync_stream(ctx).await
     }
 
-    async fn sync_stream(
-        &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
+    async fn sync_stream(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         let s3_bucket = self.config.s3_bucket.clone();
         let s3_bucket_filter = s3_bucket.clone();
         let s3_bucket_dl = s3_bucket.clone();
@@ -213,9 +200,7 @@ impl DataSourceS3Plugin {
             Helpers::human_readable_size(chunk_size as u64)
         );
 
-        let offsets_clone = offsets.clone();
-        // Build keys iterator by pulling pages manually (compatible with SDK stream type)
-        let pager = self
+        let mut pager = self
             .s3_client
             .list_objects_v2()
             .bucket(s3_bucket.clone())
@@ -224,44 +209,50 @@ impl DataSourceS3Plugin {
             .page_size(1000)
             .send();
 
-        // Stream keys directly from the paginator without materializing all results
-        let keys_stream = stream::unfold(pager, |mut p| async move {
-            match p.next().await {
-                Some(Ok(page)) => {
-                    let items: Vec<(String, i64)> = page
-                        .contents
-                        .unwrap_or_default()
-                        .into_iter()
-                        .filter_map(|obj| {
-                            obj.key()
-                                .map(|k| (k.to_string(), obj.size().unwrap_or_default()))
-                        })
-                        .collect();
-                    Some((stream::iter(items), p))
-                }
-                _ => None,
+        let mut listed_keys = Vec::new();
+        while let Some(page_result) = pager.next().await {
+            let page = page_result.map_err(|err| {
+                std::io::Error::other(format!("failed to list S3 objects: {err}"))
+            })?;
+            let items: Vec<(String, i64)> = page
+                .contents
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|obj| {
+                    obj.key()
+                        .map(|k| (k.to_string(), obj.size().unwrap_or_default()))
+                })
+                .collect();
+            if items.is_empty() {
+                continue;
             }
-        })
-        .flatten()
-        .filter(move |(key, _size)| {
-            let offsets = offsets_clone.clone();
-            let ns = s3_bucket_filter.clone();
-            let key_clone = key.clone();
-            async move {
-                let offset_key = OffsetKey {
-                    namespace: ns,
-                    partition: key_clone,
-                };
-                let is_closed = Some(true) == offsets.validate(&offset_key, OffsetTypes::Closed, 1);
-                if is_closed && runtime_log_wal_enabled() {
-                    info!(
-                        "s3 source: skipping closed object namespace={} key={}",
-                        offset_key.namespace, offset_key.partition
-                    );
+            let validation_entries = items
+                .iter()
+                .map(|(key, _)| {
+                    offset_validation_entry(
+                        s3_bucket_filter.clone(),
+                        key.clone(),
+                        OffsetTypes::Closed,
+                        1,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let should_process = ctx.validate_offset_batch(&validation_entries)?;
+            for ((key, size), process) in items.into_iter().zip(should_process) {
+                if !process {
+                    if runtime_log_wal_enabled() {
+                        info!(
+                            "s3 source: skipping closed object namespace={} key={}",
+                            s3_bucket_filter, key
+                        );
+                    }
+                    continue;
                 }
-                !is_closed
+                listed_keys.push((key, size));
             }
-        });
+        }
+
+        let keys_stream = stream::iter(listed_keys);
 
         let dl_concurrency_env = env_string("S3_DOWNLOAD_CONCURRENCY").unwrap_or_default();
         let env_dl = dl_concurrency_env.parse::<usize>().ok().filter(|v| *v > 0);
@@ -488,7 +479,7 @@ impl DataSourceS3Plugin {
 
         let mut current_batch: Vec<IngestBatch> = Vec::new();
         let mut current_bytes: usize = 0;
-        let mut pending_tasks: Vec<IngestTask> = Vec::with_capacity(total_cpus);
+        let mut pending_tasks: Vec<SourcePayloadTask> = Vec::with_capacity(total_cpus);
         // Bound total bytes staged in memory before dispatching to ingest threads
         // Use dynamic pending cap if memory manager is active; fallback to env default
         let is_ci_pending = runtime_is_ci();
@@ -549,29 +540,19 @@ impl DataSourceS3Plugin {
                     }
                     current_bytes = 0;
                     pending_bytes_sum = pending_bytes_sum.saturating_add(batch_bytes);
-                    pending_tasks.push(IngestTask::new(
-                        batch,
-                        offsets.clone(),
-                        shared_output.clone(),
-                    ));
+                    pending_tasks.push(SourcePayloadTask { batches: batch });
                     if pending_tasks.len() >= total_cpus
                         || pending_bytes_sum >= pending_cap_arc.load(AtomicOrdering::Relaxed)
                     {
                         if runtime_log_wal_enabled() {
                             info!(
-                                "s3 source: dispatching {} pending ingest tasks total_bytes={}",
+                                "s3 source: dispatching {} pending source payload tasks total_bytes={}",
                                 pending_tasks.len(),
                                 pending_bytes_sum
                             );
                         }
-                        let mut tasks = IngestTasks::new();
-                        for t in pending_tasks.drain(..) {
-                            tasks.add(t);
-                        }
-                        let tasks_arc = Arc::new(tasks);
                         let metrics =
-                            self.ingest
-                                .ingest_file(&tasks_arc, &offsets, shared_output.clone());
+                            ctx.submit_payload_tasks(std::mem::take(&mut pending_tasks))?;
                         self.active_threads = metrics.active_cores;
                         self.optimal_chunk_size = metrics.optimal_chunk_size;
                         pending_bytes_sum = 0;
@@ -601,31 +582,19 @@ impl DataSourceS3Plugin {
                     last_key
                 );
             }
-            pending_tasks.push(IngestTask::new(
-                batch,
-                offsets.clone(),
-                shared_output.clone(),
-            ));
+            pending_tasks.push(SourcePayloadTask { batches: batch });
         }
         if !pending_tasks.is_empty() {
             if runtime_log_wal_enabled() {
                 info!(
-                    "s3 source: dispatching final {} pending ingest tasks",
+                    "s3 source: dispatching final {} pending source payload tasks",
                     pending_tasks.len()
                 );
             }
-            let mut tasks = IngestTasks::new();
-            for t in pending_tasks.drain(..) {
-                tasks.add(t);
-            }
-            let tasks_arc = Arc::new(tasks);
-            let _ = self
-                .ingest
-                .ingest_file(&tasks_arc, &offsets, shared_output.clone());
+            let _ = ctx.submit_payload_tasks(pending_tasks)?;
         }
 
-        self.ingest.wait_for_completion();
-        info!("S3 stream pipeline complete; ingest completed");
+        info!("S3 stream pipeline complete; source payloads submitted to host ingest");
         Ok(())
     }
 
@@ -691,42 +660,12 @@ impl DataSourceS3Plugin {
 
         Err(std::io::Error::other(last_error))
     }
-
-    /// Download and ingest a batch of S3 objects
-    ///
-    /// This method:
-    /// 1. Concurrently downloads all objects in the batch
-    /// 2. Processes downloaded objects in batches by file type (gzip vs regular)
-    /// 3. Submits the processed data to the ingestion pipeline
-    ///
-    /// Returns: Throughput metrics that can be used to adjust future batch sizes
-    #[allow(dead_code)]
-    async fn download_and_ingest(
-        &mut self,
-        _s3_bucket: &String,
-        _keys: &Vec<Vec<String>>,
-        _offsets: &Arc<Offsets>,
-        _shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-        _chunk_size_current: i64,
-    ) -> ThroughputMetrics {
-        // Deprecated in bounded pipeline path; keep a no-op metrics return for compatibility
-        ThroughputMetrics {
-            bytes_per_second: 0,
-            active_cores: self.active_threads,
-            queue_length: 0,
-            optimal_chunk_size: self.optimal_chunk_size,
-        }
-    }
 }
 
 #[async_trait]
 impl DataSource for DataSourceS3Plugin {
-    async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
-        self.sync(offsets, output).await
+    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
+        DataSourceS3Plugin::sync(self, ctx).await
     }
 
     fn execution_contract(&self) -> skippr_runtime_sdk::plugins::SourceExecutionContract {

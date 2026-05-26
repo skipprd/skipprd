@@ -97,6 +97,9 @@ FORBIDDEN_PLUGIN_PATTERNS = {
     ),
     "source checkpoint write": re.compile(r"\.store_checkpoint_(?:payload|envelope)\s*\("),
     "source offset write": re.compile(r"\boffsets\s*\.\s*set\s*\("),
+    "plugin ingest_file": re.compile(r"\.ingest_file\s*\("),
+    "runtime ingest relay": re.compile(r"\bRuntimeIngestRelay\b"),
+    "relay raw ingest": re.compile(r"\brelay_raw_ingest_tasks\b"),
 }
 
 

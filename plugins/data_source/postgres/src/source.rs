@@ -13,10 +13,12 @@ use skippr_runtime_sdk::plugins::cdc::{
     source_capabilities, MutationKind, PostgresCheckpoint, WalRowMeta,
 };
 use skippr_runtime_sdk::plugins::{
-    DataSink, DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
+    DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
 };
-use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::progress::OffsetKey;
+use skippr_runtime_sdk::source_compat::{
+    load_checkpoint_payload, submit_payload_batches, IngestBatch, SourceSyncContext,
+};
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct DataSourcePostgresPluginConfig {
@@ -41,16 +43,12 @@ pub struct DataSourcePostgresPluginConfig {
 }
 
 pub struct DataSourcePostgresPlugin {
-    ingest: Ingest,
     config: DataSourcePostgresPluginConfig,
 }
 
 impl DataSourcePostgresPlugin {
     pub fn with_runtime_config(config: DataSourcePostgresPluginConfig) -> Self {
-        Self {
-            ingest: Ingest::new(),
-            config,
-        }
+        Self { config }
     }
 
     fn connection_string(&self) -> String {
@@ -131,39 +129,30 @@ impl DataSourcePostgresPlugin {
         format!("postgres:{slot_name}:lsn")
     }
 
-    fn stored_resume_lsn(&self, offsets: &Offsets, slot_name: &str) -> Option<u64> {
-        offsets
-            .load_checkpoint_payload::<PostgresCheckpoint>(&Self::checkpoint_key(slot_name))
+    fn stored_resume_lsn(&self, ctx: &dyn SourceSyncContext, slot_name: &str) -> Option<u64> {
+        load_checkpoint_payload::<PostgresCheckpoint>(ctx, &Self::checkpoint_key(slot_name))
             .map(|checkpoint| checkpoint.lsn)
     }
 
     fn store_resume_checkpoint(
         &self,
-        offsets: &Offsets,
+        ctx: &dyn SourceSyncContext,
         slot_name: &str,
         lsn: u64,
     ) -> io::Result<()> {
-        let _ = (offsets, slot_name, lsn);
+        let _ = (ctx, slot_name, lsn);
         Ok(())
     }
 
     fn ingest_batches(
         &self,
         batches: Vec<IngestBatch>,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) {
+        ctx: &dyn SourceSyncContext,
+    ) -> io::Result<()> {
         if batches.is_empty() {
-            return;
+            return Ok(());
         }
-        let mut ingest_tasks = IngestTasks::new();
-        ingest_tasks.add(IngestTask::new(
-            batches,
-            offsets.clone(),
-            shared_output.clone(),
-        ));
-        self.ingest
-            .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output);
+        submit_payload_batches(ctx, batches).map(|_| ())
     }
 
     fn cdc_batch(
@@ -192,11 +181,7 @@ impl DataSourcePostgresPlugin {
         )
     }
 
-    async fn sync_snapshot(
-        &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> io::Result<()> {
+    async fn sync_snapshot(&mut self, ctx: Arc<dyn SourceSyncContext>) -> io::Result<()> {
         let conn_str = self.connection_string();
         let (client, conn) = tokio_postgres::connect(&conn_str, NoTls)
             .await
@@ -247,16 +232,12 @@ impl DataSourcePostgresPlugin {
                 ));
 
                 if current_batch.len() >= batch_size {
-                    self.ingest_batches(
-                        std::mem::take(&mut current_batch),
-                        offsets.clone(),
-                        shared_output.clone(),
-                    );
+                    self.ingest_batches(std::mem::take(&mut current_batch), ctx.as_ref())?;
                 }
             }
 
             if !current_batch.is_empty() {
-                self.ingest_batches(current_batch, offsets.clone(), shared_output.clone());
+                self.ingest_batches(current_batch, ctx.as_ref())?;
             }
         }
 
@@ -266,8 +247,7 @@ impl DataSourcePostgresPlugin {
 
     async fn sync_cdc(
         &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        ctx: Arc<dyn SourceSyncContext>,
         mode: SourceCdcMode,
     ) -> io::Result<()> {
         let conn_str = self.connection_string();
@@ -302,7 +282,7 @@ impl DataSourcePostgresPlugin {
             info!("Created publication {}", pub_name);
         }
 
-        let stored_lsn = self.stored_resume_lsn(offsets.as_ref(), &slot_name);
+        let stored_lsn = self.stored_resume_lsn(ctx.as_ref(), &slot_name);
         let resume_mode = stored_lsn.is_some();
 
         let snapshot_lsn: u64 = if let Some(lsn_val) = stored_lsn {
@@ -414,21 +394,17 @@ impl DataSourcePostgresPlugin {
                 ));
 
                 if current_batch.len() >= batch_size {
-                    self.ingest_batches(
-                        std::mem::take(&mut current_batch),
-                        offsets.clone(),
-                        shared_output.clone(),
-                    );
+                    self.ingest_batches(std::mem::take(&mut current_batch), ctx.as_ref())?;
                 }
             }
 
             if !current_batch.is_empty() {
-                self.ingest_batches(current_batch, offsets.clone(), shared_output.clone());
+                self.ingest_batches(current_batch, ctx.as_ref())?;
             }
         }
 
         if should_run_snapshot {
-            self.store_resume_checkpoint(offsets.as_ref(), &slot_name, snapshot_lsn)?;
+            self.store_resume_checkpoint(ctx.as_ref(), &slot_name, snapshot_lsn)?;
         }
 
         info!("Runtime Postgres CDC bootstrap complete, starting logical replication");
@@ -482,9 +458,8 @@ impl DataSourcePostgresPlugin {
                         if !pending_batches.is_empty() {
                             self.ingest_batches(
                                 std::mem::take(&mut pending_batches),
-                                offsets.clone(),
-                                shared_output.clone(),
-                            );
+                                ctx.as_ref(),
+                            )?;
                         }
                         break;
                     }
@@ -559,12 +534,8 @@ impl DataSourcePostgresPlugin {
                 ReplicationEvent::Commit { lsn, .. } => {
                     client.update_applied_lsn(lsn);
                     let lsn_u64: u64 = lsn.into();
-                    self.ingest_batches(
-                        std::mem::take(&mut pending_batches),
-                        offsets.clone(),
-                        shared_output.clone(),
-                    );
-                    self.store_resume_checkpoint(offsets.as_ref(), &slot_name, lsn_u64)?;
+                    self.ingest_batches(std::mem::take(&mut pending_batches), ctx.as_ref())?;
+                    self.store_resume_checkpoint(ctx.as_ref(), &slot_name, lsn_u64)?;
                 }
                 ReplicationEvent::KeepAlive { .. } => {}
                 ReplicationEvent::StoppedAt { .. } => {
@@ -581,15 +552,11 @@ impl DataSourcePostgresPlugin {
 
 #[async_trait]
 impl DataSource for DataSourcePostgresPlugin {
-    async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
+    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         match self.cdc_mode() {
-            SourceCdcMode::Snapshot => self.sync_snapshot(offsets, output).await,
+            SourceCdcMode::Snapshot => self.sync_snapshot(ctx).await,
             mode @ (SourceCdcMode::SnapshotThenCdc | SourceCdcMode::CdcOnly) => {
-                self.sync_cdc(offsets, output, mode).await
+                self.sync_cdc(ctx, mode).await
             }
         }
     }

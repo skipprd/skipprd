@@ -1,9 +1,11 @@
 pub mod cdc;
+pub mod source_sync;
 pub mod traits;
 
+pub use source_sync::{OffsetValidationEntry, SourcePayloadTask, SourceSyncContext};
 pub use traits::{
-    DataSink, DataSource, RuntimeIngestRelay, SchemaSink, SchemaSource, SchemaSyncRequest,
-    SourceCdcContract, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
+    DataSink, DataSource, SchemaSink, SchemaSource, SchemaSyncRequest, SourceCdcContract,
+    SourceCdcMode, SourceExecutionContract, SourceOnceContract,
 };
 
 /// No-op output plugin used by `discover` mode to run the input pipeline

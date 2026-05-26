@@ -31,6 +31,22 @@ fn runtime_source_plugins_stay_on_sdk_protocol_boundary() {
             "manual RunSource dispatch",
             Regex::new(r"\bHostFrame::RunSource\b").unwrap(),
         ),
+        (
+            "plugin ingest_file",
+            Regex::new(r"\.ingest_file\s*\(").unwrap(),
+        ),
+        (
+            "runtime ingest relay",
+            Regex::new(r"\bRuntimeIngestRelay\b").unwrap(),
+        ),
+        (
+            "relay raw ingest",
+            Regex::new(r"\brelay_raw_ingest_tasks\b").unwrap(),
+        ),
+        (
+            "plugin-owned ingest worker",
+            Regex::new(r"\bingest:\s*Ingest\b").unwrap(),
+        ),
     ];
 
     let mut source_files = Vec::new();

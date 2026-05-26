@@ -1,8 +1,6 @@
-use std::collections::HashMap;
 use std::future::Future;
 use std::io;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::mpsc::SyncSender;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -13,12 +11,8 @@ use datafusion::execution::SendableRecordBatchStream;
 use skippr_core::discover::OutputMetadata as CoreOutputMetadata;
 use skippr_core::helpers::configuration::{Config, PIPELINE_NAME};
 use skippr_core::helpers::logging::init_logging;
-use skippr_core::helpers::offsets::{
-    CheckpointTransport, OffsetTransport, Offsets, RuntimeOffsetOperation, RuntimeOffsetRpcRequest,
-    RuntimeOffsetRpcResponse, RuntimeOffsetValue,
-};
-use skippr_core::plugins::cdc::{CheckpointEnvelope, SyncContext};
-use skippr_core::plugins::{DataSink, DataSource, RuntimeIngestRelay};
+use skippr_core::plugins::source_sync::SourceSyncContext;
+use skippr_core::plugins::DataSource;
 use skippr_core::{METADATA, PIPELINE_SCHEMA_VERSION};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
@@ -33,7 +27,7 @@ use crate::protocol::{
     SourceStartRequest, RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV,
     SKIPPR_RUNTIME_DATA_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
-use crate::sdk::encode_record_batch_stream;
+use crate::source_sync::{run_offset_service_reader_loop, RuntimeSourceSyncContext};
 use crate::wire::{read_frame_or_eof, write_frame};
 
 #[derive(Debug, Parser)]
@@ -64,8 +58,7 @@ fn configure_runtime_input_config(config: &RuntimePluginConfigEnvelope) {
 }
 
 fn runtime_mode_suppresses_data_relay(execution_mode: RuntimeExecutionMode) -> bool {
-    let _ = execution_mode;
-    false
+    matches!(execution_mode, RuntimeExecutionMode::Discover)
 }
 
 fn runtime_once_idle_timeout() -> Duration {
@@ -148,7 +141,7 @@ fn compaction_id_for_filename(filename: &str) -> String {
         .unwrap_or_else(|| filename.to_string())
 }
 
-fn block_on_handle<F, T>(handle: &Handle, future: F) -> T
+pub(crate) fn block_on_handle<F, T>(handle: &Handle, future: F) -> T
 where
     F: Future<Output = T>,
 {
@@ -160,8 +153,8 @@ where
 }
 
 #[derive(Clone)]
-struct ControlWriter {
-    handle: Handle,
+pub(crate) struct ControlWriter {
+    pub(crate) handle: Handle,
     writer: Arc<Mutex<OwnedWriteHalf>>,
 }
 
@@ -173,14 +166,14 @@ impl ControlWriter {
         }
     }
 
-    async fn write(&self, frame: &PluginFrame) -> io::Result<()> {
+    pub(crate) async fn write(&self, frame: &PluginFrame) -> io::Result<()> {
         let mut guard = self.writer.lock().await;
         write_frame(&mut *guard, frame).await
     }
 }
 
 #[derive(Clone)]
-struct DataWriter {
+pub(crate) struct DataWriter {
     writer: Arc<Mutex<OwnedWriteHalf>>,
 }
 
@@ -191,15 +184,13 @@ impl DataWriter {
         }
     }
 
-    async fn write(&self, frame: &PluginDataFrame) -> io::Result<()> {
+    pub(crate) async fn write(&self, frame: &PluginDataFrame) -> io::Result<()> {
         let mut guard = self.writer.lock().await;
         write_frame(&mut *guard, frame).await
     }
 }
 
 struct RuntimeSourceControl {
-    pending: StdMutex<HashMap<u64, SyncSender<Result<RuntimeOffsetValue, String>>>>,
-    next_request_id: AtomicU64,
     shutdown_tx: watch::Sender<bool>,
     shutdown_error: StdMutex<Option<String>>,
 }
@@ -208,37 +199,9 @@ impl RuntimeSourceControl {
     fn new() -> Arc<Self> {
         let (shutdown_tx, _) = watch::channel(false);
         Arc::new(Self {
-            pending: StdMutex::new(HashMap::new()),
-            next_request_id: AtomicU64::new(1),
             shutdown_tx,
             shutdown_error: StdMutex::new(None),
         })
-    }
-
-    fn next_request_id(&self) -> u64 {
-        self.next_request_id.fetch_add(1, Ordering::Relaxed)
-    }
-
-    fn register_request(
-        &self,
-        request_id: u64,
-        response_tx: SyncSender<Result<RuntimeOffsetValue, String>>,
-    ) {
-        self.pending.lock().unwrap().insert(request_id, response_tx);
-    }
-
-    fn unregister_request(&self, request_id: u64) {
-        self.pending.lock().unwrap().remove(&request_id);
-    }
-
-    fn resolve_response(&self, response: RuntimeOffsetRpcResponse) {
-        let response_tx = {
-            let mut pending = self.pending.lock().unwrap();
-            pending.remove(&response.request_id)
-        };
-        if let Some(response_tx) = response_tx {
-            let _ = response_tx.send(response.result);
-        }
     }
 
     fn subscribe_shutdown(&self) -> watch::Receiver<bool> {
@@ -250,12 +213,6 @@ impl RuntimeSourceControl {
             *self.shutdown_error.lock().unwrap() = Some(error);
         }
         let _ = self.shutdown_tx.send(true);
-        let pending = std::mem::take(&mut *self.pending.lock().unwrap());
-        for (_, response_tx) in pending {
-            let _ = response_tx.send(Err(self
-                .shutdown_error()
-                .unwrap_or_else(|| "runtime source host closed control channel".to_string())));
-        }
     }
 
     fn shutdown_error(&self) -> Option<String> {
@@ -263,227 +220,16 @@ impl RuntimeSourceControl {
     }
 }
 
-struct RuntimeSourceOffsetTransport {
-    handle: Handle,
-    control_writer: ControlWriter,
-    control: Arc<RuntimeSourceControl>,
-}
-
-impl RuntimeSourceOffsetTransport {
-    fn new(control_writer: ControlWriter, control: Arc<RuntimeSourceControl>) -> Self {
-        Self {
-            handle: Handle::current(),
-            control_writer,
-            control,
-        }
+async fn publish_schema_state_if_needed(control_writer: &ControlWriter) -> io::Result<()> {
+    let schema_state = current_runtime_schema_state_from_core();
+    if schema_state.namespaces.is_empty() {
+        return Ok(());
     }
-
-    async fn send_request(&self, request: RuntimeOffsetRpcRequest) -> io::Result<()> {
-        self.control_writer
-            .write(&PluginFrame::OffsetRequest(request))
-            .await
-    }
-}
-
-impl OffsetTransport for RuntimeSourceOffsetTransport {
-    fn call(&self, operation: RuntimeOffsetOperation) -> Result<RuntimeOffsetValue, String> {
-        let request_id = self.control.next_request_id();
-        let (response_tx, response_rx) = std::sync::mpsc::sync_channel(1);
-        self.control.register_request(request_id, response_tx);
-        let request = RuntimeOffsetRpcRequest {
-            request_id,
-            operation,
-        };
-        if let Err(err) = block_on_handle(&self.handle, self.send_request(request)) {
-            self.control.unregister_request(request_id);
-            return Err(err.to_string());
-        }
-        response_rx.recv().map_err(|_| {
-            self.control
-                .shutdown_error()
-                .unwrap_or_else(|| "runtime source response channel closed".to_string())
-        })?
-    }
-}
-
-struct RuntimeSourceCheckpointTransport {
-    handle: Handle,
-    data_writer: DataWriter,
-    suppress_data_relay: bool,
-}
-
-impl RuntimeSourceCheckpointTransport {
-    fn new(data_writer: DataWriter, suppress_data_relay: bool) -> Self {
-        Self {
-            handle: Handle::current(),
-            data_writer,
-            suppress_data_relay,
-        }
-    }
-}
-
-impl CheckpointTransport for RuntimeSourceCheckpointTransport {
-    fn store_checkpoint(&self, key: &str, envelope: &CheckpointEnvelope) -> Result<(), String> {
-        if self.suppress_data_relay {
-            return Ok(());
-        }
-        let frame = PluginDataFrame::CheckpointUpdate {
-            update: RuntimeCheckpointUpdate {
-                key: key.to_string(),
-                envelope: envelope.clone(),
-            },
-        };
-        block_on_handle(&self.handle, async { self.data_writer.write(&frame).await })
-            .map_err(|err| err.to_string())
-    }
-}
-
-pub struct ArrowRelayToHostSink {
-    control_writer: ControlWriter,
-    data_writer: DataWriter,
-    activity: RuntimeSourceActivity,
-    suppress_data_relay: bool,
-    last_sent_schema_version: AtomicU64,
-    last_sent_schema_namespace_count: AtomicU64,
-    sent_schema_state: AtomicBool,
-}
-
-impl ArrowRelayToHostSink {
-    fn new(
-        control_writer: ControlWriter,
-        data_writer: DataWriter,
-        activity: RuntimeSourceActivity,
-        suppress_data_relay: bool,
-    ) -> Self {
-        Self {
-            control_writer,
-            data_writer,
-            activity,
-            suppress_data_relay,
-            last_sent_schema_version: AtomicU64::new(0),
-            last_sent_schema_namespace_count: AtomicU64::new(0),
-            sent_schema_state: AtomicBool::new(false),
-        }
-    }
-
-    async fn send_schema_state_if_needed(&self) -> io::Result<()> {
-        let schema_state = current_runtime_schema_state_from_core();
-        let last_sent = self.last_sent_schema_version.load(Ordering::Acquire);
-        let namespace_count = schema_state.namespaces.len() as u64;
-        let last_namespace_count = self
-            .last_sent_schema_namespace_count
-            .load(Ordering::Acquire);
-        let sent_schema_state = self.sent_schema_state.load(Ordering::Acquire);
-        if sent_schema_state
-            && schema_state.version <= last_sent
-            && namespace_count <= last_namespace_count
-        {
-            return Ok(());
-        }
-        self.control_writer
-            .write(&PluginFrame::SourceEvent(SourceEvent::SchemaStateUpdate(
-                schema_state.clone(),
-            )))
-            .await?;
-        self.last_sent_schema_version
-            .store(schema_state.version, Ordering::Release);
-        self.last_sent_schema_namespace_count
-            .store(namespace_count, Ordering::Release);
-        self.sent_schema_state.store(true, Ordering::Release);
-        Ok(())
-    }
-}
-
-#[async_trait]
-impl DataSink for ArrowRelayToHostSink {
-    async fn sync(
-        &self,
-        stream: SendableRecordBatchStream,
-        filename: String,
-        cdc_ctx: Option<&SyncContext>,
-    ) -> Result<(), io::Error> {
-        if self.suppress_data_relay {
-            return Ok(());
-        }
-        self.activity.mark_source_data();
-        self.send_schema_state_if_needed().await?;
-        let arrow_stream_bytes = encode_record_batch_stream(stream).await?;
-        self.data_writer
-            .write(&PluginDataFrame::SinkWrite(RuntimeSourceSinkWrite {
-                compaction_id: compaction_id_for_filename(&filename),
-                filename,
-                arrow_stream_bytes,
-                cdc_ctx: cdc_ctx.cloned(),
-            }))
-            .await?;
-        self.activity.mark_source_data();
-        Ok(())
-    }
-
-    fn runtime_ingest_relay(&self) -> Option<&dyn RuntimeIngestRelay> {
-        Some(self)
-    }
-}
-
-impl RuntimeIngestRelay for ArrowRelayToHostSink {
-    fn relay_raw_ingest_tasks(
-        &self,
-        tasks: Vec<Vec<RuntimeRawIngestBatch>>,
-    ) -> Result<(), std::io::Error> {
-        block_on_handle(&self.control_writer.handle, async {
-            if self.suppress_data_relay {
-                return Ok(());
-            }
-            let has_source_data = tasks.iter().any(|task| !task.is_empty());
-            if has_source_data {
-                self.activity.mark_source_data();
-            }
-            self.data_writer
-                .write(&PluginDataFrame::RawIngestTasks { tasks })
-                .await?;
-            if has_source_data {
-                self.activity.mark_source_data();
-            }
-            Ok(())
-        })
-    }
-
-    fn relay_ingest_batches(
-        &self,
-        batches: Vec<RuntimeIngestPartitionBatch>,
-    ) -> Result<(), std::io::Error> {
-        block_on_handle(&self.control_writer.handle, async {
-            if self.suppress_data_relay {
-                return Ok(());
-            }
-            let has_source_data = !batches.is_empty();
-            if has_source_data {
-                self.activity.mark_source_data();
-            }
-            self.send_schema_state_if_needed().await?;
-            self.data_writer
-                .write(&PluginDataFrame::IngestBatches { batches })
-                .await?;
-            if has_source_data {
-                self.activity.mark_source_data();
-            }
-            Ok(())
-        })
-    }
-
-    fn relay_offset_hints(
-        &self,
-        offsets: Vec<RuntimeOffsetMaterializationHint>,
-    ) -> Result<(), std::io::Error> {
-        block_on_handle(&self.control_writer.handle, async {
-            if self.suppress_data_relay {
-                return Ok(());
-            }
-            self.data_writer
-                .write(&PluginDataFrame::OffsetMaterializationHints { hints: offsets })
-                .await
-        })
-    }
+    control_writer
+        .write(&PluginFrame::SourceEvent(SourceEvent::SchemaStateUpdate(
+            schema_state,
+        )))
+        .await
 }
 
 async fn run_runtime_source_host_frame_loop(
@@ -492,7 +238,6 @@ async fn run_runtime_source_host_frame_loop(
 ) -> io::Result<()> {
     loop {
         match read_frame_or_eof::<_, HostFrame>(&mut reader).await? {
-            Some(HostFrame::OffsetResponse(response)) => control.resolve_response(response),
             Some(HostFrame::Shutdown) | None => {
                 control.shutdown(None);
                 return Ok(());
@@ -694,31 +439,21 @@ pub async fn run_append_data_source_main(
     });
 
     let mut source = build(start).await?;
-    let offsets = if suppress_data_relay {
-        Arc::new(Offsets::init().map_err(io::Error::other)?)
-    } else {
-        Arc::new(Offsets::from_runtime_transports(
-            Arc::new(RuntimeSourceOffsetTransport::new(
-                control_writer.clone(),
-                control.clone(),
-            )),
-            Some(Arc::new(RuntimeSourceCheckpointTransport::new(
-                data_writer.clone(),
-                suppress_data_relay,
-            ))),
-        ))
-    };
+    let (sync_ctx, offset_reader) = RuntimeSourceSyncContext::new(
+        control_writer.clone(),
+        data_writer.clone(),
+        suppress_data_relay,
+    )
+    .await?;
+    let offset_client = sync_ctx.offset_client();
+    tokio::spawn(async move {
+        let _ = run_offset_service_reader_loop(offset_reader, offset_client).await;
+    });
     let activity = RuntimeSourceActivity::new();
-    let relay: Arc<Box<dyn DataSink + Send + Sync>> =
-        Arc::new(Box::new(ArrowRelayToHostSink::new(
-            control_writer.clone(),
-            data_writer.clone(),
-            activity.clone(),
-            suppress_data_relay,
-        )));
 
+    let sync_ctx: Arc<dyn SourceSyncContext> = Arc::new(sync_ctx);
     let sync_result = {
-        let sync_fut = source.sync(offsets.clone(), relay.clone());
+        let sync_fut = source.sync(sync_ctx);
         tokio::pin!(sync_fut);
         tokio::select! {
             result = &mut sync_fut => Some(result),

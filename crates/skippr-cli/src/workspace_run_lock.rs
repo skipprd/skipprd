@@ -84,7 +84,12 @@ where
             std::process::exit(1);
         }
     };
-    let heartbeat = spawn_heartbeat(lock.client.clone(), lock.workspace.clone(), lock.run_id.clone(), lock.version);
+    let heartbeat = spawn_heartbeat(
+        lock.client.clone(),
+        lock.workspace.clone(),
+        lock.run_id.clone(),
+        lock.version,
+    );
     let result = f().await;
     heartbeat.abort();
     let status = if std::thread::panicking() {
@@ -147,12 +152,7 @@ async fn acquire_heavy_lock_with_client(
 impl ActiveLock {
     async fn complete(self, status: &str) -> Result<(), String> {
         self.client
-            .complete_run_lock(
-                &self.workspace,
-                &self.run_id,
-                self.version,
-                status,
-            )
+            .complete_run_lock(&self.workspace, &self.run_id, self.version, status)
             .await
             .map_err(|e| e.to_string())
     }
@@ -169,7 +169,10 @@ fn spawn_heartbeat(
         interval.tick().await;
         loop {
             interval.tick().await;
-            match client.heartbeat_run_lock(&workspace, &run_id, version).await {
+            match client
+                .heartbeat_run_lock(&workspace, &run_id, version)
+                .await
+            {
                 Ok(resp) => version = resp.version,
                 Err(e) => {
                     eprintln!("[skippr] run lock heartbeat failed: {e}");

@@ -780,11 +780,7 @@ fn schema_fields_from_graph_field_nodes(
                 .unwrap_or(candidate.label.as_str());
             SkipprFieldSchema {
                 name: field_path.to_string(),
-                field_type: candidate
-                    .metadata
-                    .get("type")
-                    .cloned()
-                    .unwrap_or_default(),
+                field_type: candidate.metadata.get("type").cloned().unwrap_or_default(),
                 nullable: candidate
                     .metadata
                     .get("nullable")
@@ -2561,10 +2557,8 @@ mod tests {
         assert_eq!(pipeline_fields[0].name, "bike_id");
 
         let json = encode_schema_fields_metadata(&source_fields).expect("schema json");
-        let parsed = parse_schema_fields_metadata(&BTreeMap::from([(
-            "schema_fields".to_string(),
-            json,
-        )]));
+        let parsed =
+            parse_schema_fields_metadata(&BTreeMap::from([("schema_fields".to_string(), json)]));
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0].name, "BIKE_ID");
         assert_eq!(parsed[0].field_type, "Long");
@@ -2604,21 +2598,27 @@ mod tests {
             path: None,
             metadata: BTreeMap::from([(
                 "schema_fields".to_string(),
-                encode_schema_fields_metadata(&schema_fields_for_source_side(&[SkipprFieldSchema {
-                    name: "ride_id".to_string(),
-                    field_type: "Long".to_string(),
-                    nullable: true,
-                    source_field_name: Some("RIDE_ID".to_string()),
-                    out_field_name: Some("ride_id".to_string()),
-                    field_id: None,
-                    lineage_id: None,
-                }]))
+                encode_schema_fields_metadata(&schema_fields_for_source_side(&[
+                    SkipprFieldSchema {
+                        name: "ride_id".to_string(),
+                        field_type: "Long".to_string(),
+                        nullable: true,
+                        source_field_name: Some("RIDE_ID".to_string()),
+                        out_field_name: Some("ride_id".to_string()),
+                        field_id: None,
+                        lineage_id: None,
+                    },
+                ]))
                 .expect("schema json"),
             )]),
         });
 
         let graph = builder.finish();
-        let node = graph.nodes.iter().find(|node| node.kind == LineageNodeKind::RawSource).expect("raw source");
+        let node = graph
+            .nodes
+            .iter()
+            .find(|node| node.kind == LineageNodeKind::RawSource)
+            .expect("raw source");
         let parsed = parse_schema_fields_metadata(&node.metadata);
         assert_eq!(parsed.len(), 2);
         assert!(parsed.iter().any(|field| field.name == "BIKE_ID"));

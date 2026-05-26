@@ -502,10 +502,7 @@ impl ApiClient {
     }
 
     pub async fn get_run_lock(&self, workspace: &str) -> Result<RunLockStatusResponse, ApiError> {
-        let url = format!(
-            "{}/auth/workspaces/{}/runs/lock",
-            self.base_url, workspace
-        );
+        let url = format!("{}/auth/workspaces/{}/runs/lock", self.base_url, workspace);
         let resp = self
             .send_with_auth("Get run lock failed", |token| {
                 self.http

@@ -99,7 +99,8 @@ fn emit_metadata_json<T: Serialize>(output: &str, value: &T) {
 }
 
 fn parse_schema_fields(raw: &str) -> Result<Vec<MetadataFieldRow>, String> {
-    let value: Value = serde_json::from_str(raw).map_err(|e| format!("invalid schema JSON: {e}"))?;
+    let value: Value =
+        serde_json::from_str(raw).map_err(|e| format!("invalid schema JSON: {e}"))?;
     let fields_value = match value.get("fields") {
         Some(fields) => fields,
         _ if value.is_array() => &value,

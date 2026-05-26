@@ -16,10 +16,13 @@ use skippr_runtime_sdk::plugins::cdc::{
     source_capabilities, MutationKind, MysqlCheckpoint, WalRowMeta,
 };
 use skippr_runtime_sdk::plugins::{
-    DataSink, DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
+    DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
 };
-use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes, Offsets};
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes};
+use skippr_runtime_sdk::source_compat::{
+    load_checkpoint_payload, submit_payload_batch_groups, submit_payload_batches,
+    validate_offset_key, IngestBatch, SourceSyncContext,
+};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceMysqlPluginConfig {
@@ -44,7 +47,6 @@ impl TryFrom<PluginConfigEntry> for DataSourceMysqlPluginConfig {
 }
 
 pub struct DataSourceMysqlPlugin {
-    pub(crate) ingest: Ingest,
     pub(crate) config: DataSourceMysqlPluginConfig,
 }
 
@@ -67,17 +69,11 @@ impl DataSourceMysqlPlugin {
             }
         };
 
-        DataSourceMysqlPlugin {
-            ingest: Ingest::new(),
-            config,
-        }
+        DataSourceMysqlPlugin { config }
     }
 
     pub fn with_runtime_config(config: DataSourceMysqlPluginConfig) -> Self {
-        Self {
-            ingest: Ingest::new(),
-            config,
-        }
+        Self { config }
     }
 
     async fn connect_pool(
@@ -217,8 +213,7 @@ impl DataSourceMysqlPlugin {
 
     async fn sync_cdc(
         &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        ctx: Arc<dyn SourceSyncContext>,
         mode: SourceCdcMode,
     ) -> Result<(), std::io::Error> {
         info!("MySQL CDC: starting binlog replication");
@@ -233,7 +228,8 @@ impl DataSourceMysqlPlugin {
 
         // Check for stored checkpoint to enable resume
         let checkpoint_key = format!("mysql:{}:binlog", db_name);
-        let stored_checkpoint = offsets.load_checkpoint_payload::<MysqlCheckpoint>(&checkpoint_key);
+        let stored_checkpoint =
+            load_checkpoint_payload::<MysqlCheckpoint>(ctx.as_ref(), &checkpoint_key);
         let resume_mode = stored_checkpoint.is_some();
 
         let (binlog_file, binlog_pos) = if let Some(ref ckpt) = stored_checkpoint {
@@ -293,7 +289,8 @@ impl DataSourceMysqlPlugin {
                 partition: table_fq.clone(),
             };
 
-            if offsets.validate(&offset_key, OffsetTypes::Closed, 1) == Some(true) {
+            if validate_offset_key(ctx.as_ref(), &offset_key, OffsetTypes::Closed, 1) == Some(true)
+            {
                 info!("CDC snapshot: skipping already-ingested {}", table_fq);
                 continue;
             }
@@ -315,7 +312,7 @@ impl DataSourceMysqlPlugin {
             info!("CDC snapshot: {} rows from {}", rows.len(), table_fq);
 
             let mut current_batch: Vec<IngestBatch> = Vec::new();
-            let mut ingest_tasks = IngestTasks::new();
+            let mut batch_groups: Vec<Vec<IngestBatch>> = Vec::new();
 
             for row in &rows {
                 let json_str = Self::row_to_json(row);
@@ -335,25 +332,17 @@ impl DataSourceMysqlPlugin {
                 });
 
                 if current_batch.len() >= SNAPSHOT_BATCH_ROWS {
-                    let batch = std::mem::take(&mut current_batch);
-                    ingest_tasks.add(IngestTask::new(
-                        batch,
-                        offsets.clone(),
-                        shared_output.clone(),
-                    ));
+                    batch_groups.push(std::mem::take(&mut current_batch));
                 }
             }
 
             if !current_batch.is_empty() {
-                ingest_tasks.add(IngestTask::new(
-                    current_batch,
-                    offsets.clone(),
-                    shared_output.clone(),
-                ));
+                batch_groups.push(current_batch);
             }
 
-            self.ingest
-                .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output.clone());
+            if !batch_groups.is_empty() {
+                submit_payload_batch_groups(ctx.as_ref(), batch_groups)?;
+            }
         }
 
         if should_run_snapshot {
@@ -520,14 +509,7 @@ impl DataSourceMysqlPlugin {
                     }]),
                 };
 
-                let mut ingest_tasks = IngestTasks::new();
-                ingest_tasks.add(IngestTask::new(
-                    vec![batch],
-                    offsets.clone(),
-                    shared_output.clone(),
-                ));
-                self.ingest
-                    .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output.clone());
+                submit_payload_batches(ctx.as_ref(), vec![batch])?;
             }
 
             let checkpoint = MysqlCheckpoint {
@@ -547,17 +529,16 @@ impl DataSourceMysqlPlugin {
 
     async fn sync_query(
         &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        ctx: Arc<dyn SourceSyncContext>,
         cdc_tag: bool,
-    ) {
+    ) -> std::io::Result<()> {
         info!("MySQL input plugin starting sync");
 
         let (_pool, mut conn) = match Self::connect_pool(&self.config).await {
             Ok(c) => c,
             Err(e) => {
                 error!("Failed to connect to MySQL: {}", e);
-                return;
+                return Ok(());
             }
         };
 
@@ -572,7 +553,7 @@ impl DataSourceMysqlPlugin {
                 }
                 Err(e) => {
                     error!("Failed to discover MySQL tables: {}", e);
-                    return;
+                    return Ok(());
                 }
             },
         };
@@ -594,7 +575,8 @@ impl DataSourceMysqlPlugin {
                 partition: table_fq.clone(),
             };
 
-            if offsets.validate(&offset_key, OffsetTypes::Closed, 1) == Some(true) {
+            if validate_offset_key(ctx.as_ref(), &offset_key, OffsetTypes::Closed, 1) == Some(true)
+            {
                 info!("Skipping already-ingested table: {}", table_fq);
                 continue;
             }
@@ -616,7 +598,7 @@ impl DataSourceMysqlPlugin {
             info!("Read {} rows from {}", rows.len(), table_fq);
 
             let mut current_batch: Vec<IngestBatch> = Vec::new();
-            let mut ingest_tasks = IngestTasks::new();
+            let mut batch_groups: Vec<Vec<IngestBatch>> = Vec::new();
 
             for (row_idx, row) in rows.iter().enumerate() {
                 let json_str = Self::row_to_json(row);
@@ -643,45 +625,34 @@ impl DataSourceMysqlPlugin {
                 });
 
                 if current_batch.len() >= batch_size {
-                    let batch = std::mem::take(&mut current_batch);
-                    ingest_tasks.add(IngestTask::new(
-                        batch,
-                        offsets.clone(),
-                        shared_output.clone(),
-                    ));
+                    batch_groups.push(std::mem::take(&mut current_batch));
                 }
             }
 
             if !current_batch.is_empty() {
-                ingest_tasks.add(IngestTask::new(
-                    current_batch,
-                    offsets.clone(),
-                    shared_output.clone(),
-                ));
+                batch_groups.push(current_batch);
             }
 
-            self.ingest
-                .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output.clone());
+            if !batch_groups.is_empty() {
+                submit_payload_batch_groups(ctx.as_ref(), batch_groups)?;
+            }
         }
 
         info!("MySQL input plugin sync complete");
+        Ok(())
     }
 }
 
 #[async_trait]
 impl DataSource for DataSourceMysqlPlugin {
-    async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
+    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         match self.cdc_mode() {
             SourceCdcMode::Snapshot => {
-                self.sync_query(offsets, output, false).await;
+                self.sync_query(ctx, false).await;
                 Ok(())
             }
             mode @ (SourceCdcMode::SnapshotThenCdc | SourceCdcMode::CdcOnly) => {
-                self.sync_cdc(offsets, output, mode).await
+                self.sync_cdc(ctx, mode).await
             }
         }
     }

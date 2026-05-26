@@ -17,9 +17,11 @@ use zip::ZipArchive;
 use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::serdes::input_format::InputFormat;
-use skippr_runtime_sdk::plugins::{DataSink, DataSource};
-use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes, Offsets};
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::plugins::DataSource;
+use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes};
+use skippr_runtime_sdk::source_compat::{
+    submit_payload_batch_groups, validate_offset_key, IngestBatch, SourceSyncContext,
+};
 
 type BatchSender = UnboundedSender<Vec<Vec<IngestBatch>>>;
 
@@ -40,7 +42,6 @@ impl TryFrom<PluginConfigEntry> for DataSourceLocalFilePluginConfig {
 }
 
 pub struct DataSourceLocalFilePlugin {
-    ingest: Ingest,
     #[allow(dead_code)]
     temp_dir: String,
     config: DataSourceLocalFilePluginConfig,
@@ -163,7 +164,6 @@ impl DataSourceLocalFilePlugin {
             };
 
         DataSourceLocalFilePlugin {
-            ingest: Ingest::new(),
             temp_dir: temp_dir.to_string(),
             config,
         }
@@ -173,46 +173,28 @@ impl DataSourceLocalFilePlugin {
         let data_dir = Config::get_data_dir();
         let temp_dir = format!("{}/source_buffer", data_dir);
         let _ = fs::create_dir(&temp_dir);
-        DataSourceLocalFilePlugin {
-            ingest: Ingest::new(),
-            temp_dir,
-            config,
-        }
+        DataSourceLocalFilePlugin { temp_dir, config }
     }
 
-    pub async fn sync(
+    pub async fn run_sync(
         &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) {
-        let offsets_clone = offsets.clone();
+        ctx: Arc<dyn SourceSyncContext>,
+    ) -> Result<(), std::io::Error> {
         let mut data_batches_stream = Box::pin(self.prepare_data_for_processing(
-            &offsets_clone,
+            ctx.clone(),
             self.config.path.clone(),
             self.config.batch_size_bytes.unwrap_or(1_000_000),
         ));
 
-        while let Some(batch) = data_batches_stream.next().await {
-            let offsets_clone = offsets_clone.clone();
-            let shared_output_clone = shared_output.clone();
-
-            let mut ingest_tasks = IngestTasks::new();
-            for b in batch {
-                ingest_tasks.add(IngestTask::new(
-                    b,
-                    offsets_clone.clone(),
-                    shared_output_clone.clone(),
-                ));
-            }
-
-            self.ingest
-                .ingest_file(&Arc::new(ingest_tasks), &offsets_clone, shared_output_clone);
+        while let Some(batch_groups) = data_batches_stream.next().await {
+            submit_payload_batch_groups(ctx.as_ref(), batch_groups)?;
         }
+        Ok(())
     }
 
     pub fn prepare_data_for_processing(
         &self,
-        offsets_clone: &Arc<Offsets>,
+        ctx: Arc<dyn SourceSyncContext>,
         source_dir: String,
         chunk_size: i64,
     ) -> impl futures::Stream<Item = Vec<Vec<IngestBatch>>> {
@@ -223,7 +205,6 @@ impl DataSourceLocalFilePlugin {
         };
 
         let (tx, rx) = futures::channel::mpsc::unbounded();
-        let offsets_clone = offsets_clone.clone();
         let input_format = InputFormat::from_option(self.config.format.as_deref());
 
         tokio::spawn(async move {
@@ -254,7 +235,9 @@ impl DataSourceLocalFilePlugin {
                     partition: path.to_str().unwrap().to_string(),
                 };
 
-                if Some(true) == offsets_clone.validate(&offset_key, OffsetTypes::Closed, 1) {
+                if validate_offset_key(ctx.as_ref(), &offset_key, OffsetTypes::Closed, 1)
+                    == Some(true)
+                {
                     continue;
                 }
 
@@ -352,13 +335,8 @@ impl DataSourceLocalFilePlugin {
 
 #[async_trait]
 impl DataSource for DataSourceLocalFilePlugin {
-    async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
-        self.sync(offsets, output).await;
-        Ok(())
+    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
+        self.run_sync(ctx).await
     }
 
     fn execution_contract(&self) -> skippr_runtime_sdk::plugins::SourceExecutionContract {

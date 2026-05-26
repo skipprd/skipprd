@@ -74,7 +74,7 @@ class PublishRuntimePluginsTests(unittest.TestCase):
         )
         published = {
             "version": "0.1.1",
-            "protocol_version": 9,
+            "protocol_version": 10,
             "build_checksum": "abc123",
             "artifacts": {
                 "x86_64-unknown-linux-gnu": {
@@ -135,7 +135,7 @@ class PublishRuntimePluginsTests(unittest.TestCase):
         )
         published = {
             "version": "0.1.1",
-            "protocol_version": 9,
+            "protocol_version": 10,
             "build_checksum": "abc123",
             "artifacts": {
                 "x86_64-unknown-linux-gnu": {

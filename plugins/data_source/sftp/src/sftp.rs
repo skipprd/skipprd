@@ -9,9 +9,9 @@ use tracing::info;
 
 use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
-use skippr_runtime_sdk::plugins::{DataSink, DataSource};
-use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::plugins::DataSource;
+use skippr_runtime_sdk::progress::OffsetKey;
+use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch, SourceSyncContext};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceSftpPluginConfig {
@@ -35,7 +35,6 @@ impl TryFrom<PluginConfigEntry> for DataSourceSftpPluginConfig {
 }
 
 pub struct DataSourceSftpPlugin {
-    ingest: Ingest,
     config: DataSourceSftpPluginConfig,
 }
 
@@ -55,17 +54,11 @@ impl DataSourceSftpPlugin {
                 batch_size_seconds: None,
             },
         };
-        Self {
-            ingest: Ingest::new(),
-            config,
-        }
+        Self { config }
     }
 
     pub fn with_runtime_config(config: DataSourceSftpPluginConfig) -> Self {
-        Self {
-            ingest: Ingest::new(),
-            config,
-        }
+        Self { config }
     }
 
     fn connect(&self) -> Result<Session, std::io::Error> {
@@ -95,11 +88,7 @@ impl DataSourceSftpPlugin {
 
 #[async_trait]
 impl DataSource for DataSourceSftpPlugin {
-    async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
+    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         let sess = self.connect()?;
         let sftp = sess
             .sftp()
@@ -158,8 +147,8 @@ impl DataSource for DataSourceSftpPlugin {
             };
 
             let bytes = contents.len();
-            let mut ingest_tasks = IngestTasks::new();
-            ingest_tasks.add(IngestTask::new(
+            submit_payload_batches(
+                ctx.as_ref(),
                 vec![IngestBatch {
                     offset_key,
                     data: contents,
@@ -168,11 +157,7 @@ impl DataSource for DataSourceSftpPlugin {
                     namespace: Some(namespace),
                     cdc_rows: None,
                 }],
-                offsets.clone(),
-                shared_output.clone(),
-            ));
-            self.ingest
-                .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output.clone());
+            )?;
         }
 
         Ok(())

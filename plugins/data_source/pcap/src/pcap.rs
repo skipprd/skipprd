@@ -5,8 +5,8 @@ use serde_derive::Deserialize;
 
 use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
-use skippr_runtime_sdk::plugins::{DataSink, DataSource};
-use skippr_runtime_sdk::progress::Offsets;
+use skippr_runtime_sdk::plugins::DataSource;
+use skippr_runtime_sdk::source_compat::SourceSyncContext;
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct DataSourcePcapPluginConfig {}
@@ -39,11 +39,7 @@ impl DataSourcePcapPlugin {
 
 #[async_trait]
 impl DataSource for DataSourcePcapPlugin {
-    async fn sync(
-        &mut self,
-        _offsets: Arc<Offsets>,
-        _output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
+    async fn sync(&mut self, _ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         Err(std::io::Error::other(
             "pcap support not compiled -- enable the pcap feature",
         ))

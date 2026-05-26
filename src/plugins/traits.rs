@@ -5,28 +5,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use crate::discover::OutputMetadata;
-use crate::helpers::offsets::Offsets;
 use crate::plugins::cdc::{SinkCapability, SourceCapability, SyncContext};
-use crate::runtime_plugins::protocol::{
-    RuntimeIngestPartitionBatch, RuntimeOffsetMaterializationHint, RuntimeRawIngestBatch,
-};
-
-pub trait RuntimeIngestRelay: Send + Sync {
-    fn relay_raw_ingest_tasks(
-        &self,
-        tasks: Vec<Vec<RuntimeRawIngestBatch>>,
-    ) -> Result<(), std::io::Error>;
-
-    fn relay_ingest_batches(
-        &self,
-        batches: Vec<RuntimeIngestPartitionBatch>,
-    ) -> Result<(), std::io::Error>;
-
-    fn relay_offset_hints(
-        &self,
-        offsets: Vec<RuntimeOffsetMaterializationHint>,
-    ) -> Result<(), std::io::Error>;
-}
+use crate::plugins::source_sync::SourceSyncContext;
 
 #[derive(Clone, Copy, Debug)]
 pub enum SourceCdcContract {
@@ -116,11 +96,7 @@ impl SourceExecutionContract {
 /// Reads records from an external system and feeds them into the pipeline.
 #[async_trait]
 pub trait DataSource: Send + Sync {
-    async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error>;
+    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error>;
 
     /// Return this source's typed execution contract.
     ///
@@ -184,10 +160,6 @@ pub trait DataSink: Send + Sync {
     /// Default returns `None` for backward compatibility with existing
     /// connectors that have not yet declared capabilities.
     fn capability(&self) -> Option<&'static SinkCapability> {
-        None
-    }
-
-    fn runtime_ingest_relay(&self) -> Option<&dyn RuntimeIngestRelay> {
         None
     }
 

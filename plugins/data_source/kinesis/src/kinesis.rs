@@ -14,11 +14,9 @@ use tracing::{error, info};
 use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::RUNNING;
-use skippr_runtime_sdk::plugins::{
-    DataSink, DataSource, SourceExecutionContract, SourceOnceContract,
-};
-use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::plugins::{DataSource, SourceExecutionContract, SourceOnceContract};
+use skippr_runtime_sdk::progress::OffsetKey;
+use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch, SourceSyncContext};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceKinesisPluginConfig {
@@ -32,7 +30,6 @@ pub struct DataSourceKinesisPluginConfig {
 }
 
 pub struct DataSourceKinesisPlugin {
-    pub(crate) ingest: Ingest,
     pub(crate) config: DataSourceKinesisPluginConfig,
     client: Client,
 }
@@ -115,11 +112,7 @@ impl DataSourceKinesisPlugin {
         }
         let client = Client::from_conf(client_config.build());
 
-        DataSourceKinesisPlugin {
-            ingest: Ingest::new(),
-            config,
-            client,
-        }
+        DataSourceKinesisPlugin { config, client }
     }
 
     pub async fn new() -> Self {
@@ -160,15 +153,14 @@ impl DataSourceKinesisPlugin {
     }
 
     fn flush_shard_buffer(
-        &mut self,
+        stream_name: &str,
         shard_id: &str,
         pending: &mut Vec<IngestBatch>,
         last_seq: &mut Option<String>,
-        offsets: &Arc<Offsets>,
-        output: &Arc<Box<dyn DataSink + Send + Sync>>,
-    ) {
+        ctx: &dyn SourceSyncContext,
+    ) -> Result<(), std::io::Error> {
         if pending.is_empty() {
-            return;
+            return Ok(());
         }
         let batch = std::mem::take(pending);
         if let Some(last) = batch.last().and_then(|b| {
@@ -181,19 +173,16 @@ impl DataSourceKinesisPlugin {
         }) {
             *last_seq = Some(last);
         }
-        let mut tasks = IngestTasks::new();
-        tasks.add(IngestTask::new(batch, offsets.clone(), output.clone()));
-        self.ingest
-            .ingest_file(&Arc::new(tasks), offsets, output.clone());
-        let stream = self.config.stream_name.clone();
+        submit_payload_batches(ctx, batch)?;
         let sid = shard_id.to_string();
         let seq = last_seq.clone().unwrap_or_default();
         if !seq.is_empty() {
             let h = tokio::runtime::Handle::try_current();
             if let Ok(handle) = h {
-                let _ = handle.block_on(Self::write_checkpoint(&stream, &sid, &seq));
+                let _ = handle.block_on(Self::write_checkpoint(stream_name, &sid, &seq));
             }
         }
+        Ok(())
     }
 
     async fn list_all_shards(&self) -> Result<Vec<String>, std::io::Error> {
@@ -221,15 +210,11 @@ impl DataSourceKinesisPlugin {
         Ok(shards)
     }
 
-    pub async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) {
+    async fn run_sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         let stream_name = self.config.stream_name.clone();
         if stream_name.is_empty() {
             error!("Kinesis stream_name is empty");
-            return;
+            return Ok(());
         }
 
         let stream_mode = self.config.mode.as_deref().unwrap_or("batch") == "stream";
@@ -240,13 +225,13 @@ impl DataSourceKinesisPlugin {
             Ok(s) => s,
             Err(e) => {
                 error!("Kinesis list_shards failed: {}", e);
-                return;
+                return Ok(());
             }
         };
 
         if shard_ids.is_empty() {
             info!("Kinesis stream {} has no shards", stream_name);
-            return;
+            return Ok(());
         }
 
         let mut iterators: HashMap<String, String> = HashMap::new();
@@ -349,7 +334,7 @@ impl DataSourceKinesisPlugin {
                     *last_seq = Some(seq);
 
                     if *bbytes >= batch_limit {
-                        self.flush_shard_buffer(sid, buf, last_seq, &offsets, &shared_output);
+                        Self::flush_shard_buffer(&stream_name, sid, buf, last_seq, ctx.as_ref())?;
                         *bbytes = 0;
                     }
                 }
@@ -360,7 +345,7 @@ impl DataSourceKinesisPlugin {
                     let buf = buffers.get_mut(sid).unwrap();
                     let last_seq = last_seq_per_shard.get_mut(sid).unwrap();
                     if !buf.is_empty() {
-                        self.flush_shard_buffer(sid, buf, last_seq, &offsets, &shared_output);
+                        Self::flush_shard_buffer(&stream_name, sid, buf, last_seq, ctx.as_ref())?;
                     }
                     *buffer_bytes.get_mut(sid).unwrap() = 0;
                 }
@@ -372,7 +357,7 @@ impl DataSourceKinesisPlugin {
                     let buf = buffers.get_mut(sid).unwrap();
                     let last_seq = last_seq_per_shard.get_mut(sid).unwrap();
                     if !buf.is_empty() {
-                        self.flush_shard_buffer(sid, buf, last_seq, &offsets, &shared_output);
+                        Self::flush_shard_buffer(&stream_name, sid, buf, last_seq, ctx.as_ref())?;
                     }
                     *buffer_bytes.get_mut(sid).unwrap() = 0;
                 }
@@ -391,23 +376,19 @@ impl DataSourceKinesisPlugin {
             let buf = buffers.get_mut(sid).unwrap();
             let last_seq = last_seq_per_shard.get_mut(sid).unwrap();
             if !buf.is_empty() {
-                self.flush_shard_buffer(sid, buf, last_seq, &offsets, &shared_output);
+                Self::flush_shard_buffer(&stream_name, sid, buf, last_seq, ctx.as_ref())?;
             }
         }
 
         info!("Kinesis input plugin sync complete");
+        Ok(())
     }
 }
 
 #[async_trait]
 impl DataSource for DataSourceKinesisPlugin {
-    async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
-        self.sync(offsets, output).await;
-        Ok(())
+    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
+        self.run_sync(ctx).await
     }
 
     fn execution_contract(&self) -> SourceExecutionContract {

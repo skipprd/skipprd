@@ -1,6 +1,5 @@
 mod api_client;
 mod auth;
-mod workspace_run_lock;
 mod chat_cmd;
 mod dbt_cmd;
 mod feedback_diagnostics;
@@ -13,6 +12,7 @@ mod run_results_parse;
 mod test_cmd;
 mod translate;
 mod vector_ingest_docs;
+mod workspace_run_lock;
 
 use std::{
     collections::HashMap,
@@ -4474,7 +4474,10 @@ async fn cmd_thread_resolve(
     } else if let Some(ref tid) = thread_id {
         println!("{tid}");
     } else {
-        eprintln!("[skippr] no thread found for pipeline {}", pipeline.as_str());
+        eprintln!(
+            "[skippr] no thread found for pipeline {}",
+            pipeline.as_str()
+        );
     }
     let _ = log;
 }
@@ -4486,12 +4489,17 @@ async fn cmd_discover(
 ) {
     prepare_engine_command(log, explicit_config, &args.pipeline).await;
     let workspace = std::env::var("SKIPPR_CLOUD_WORKSPACE").unwrap_or_else(|_| "default".into());
-    workspace_run_lock::with_heavy_run_lock(&workspace, "discover", Some(&args.pipeline), || async {
-        if let Err(err) = skipprd::engine::run_discover(&args.output).await {
-            eprintln!("[skippr] discover failed: {}", err);
-            std::process::exit(1);
-        }
-    })
+    workspace_run_lock::with_heavy_run_lock(
+        &workspace,
+        "discover",
+        Some(&args.pipeline),
+        || async {
+            if let Err(err) = skipprd::engine::run_discover(&args.output).await {
+                eprintln!("[skippr] discover failed: {}", err);
+                std::process::exit(1);
+            }
+        },
+    )
     .await;
 }
 
@@ -4711,13 +4719,12 @@ async fn cmd_lineage(
                     std::process::exit(1);
                 }
             };
-            let response =
-                react_suite_data_engineer::lineage_builder::resolve_lineage_node_schema(
-                    &suite_ctx,
-                    pipeline,
-                    &args.node_id,
-                )
-                .await;
+            let response = react_suite_data_engineer::lineage_builder::resolve_lineage_node_schema(
+                &suite_ctx,
+                pipeline,
+                &args.node_id,
+            )
+            .await;
             if !response.ok {
                 emit_lineage_json(&output, &response);
                 std::process::exit(1);

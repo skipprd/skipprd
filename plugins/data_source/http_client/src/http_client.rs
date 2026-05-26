@@ -13,11 +13,11 @@ use tracing::{error, info};
 use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::RUNNING;
-use skippr_runtime_sdk::plugins::{
-    DataSink, DataSource, SourceExecutionContract, SourceOnceContract,
+use skippr_runtime_sdk::plugins::{DataSource, SourceExecutionContract, SourceOnceContract};
+use skippr_runtime_sdk::progress::OffsetKey;
+use skippr_runtime_sdk::source_compat::{
+    submit_payload_batch_groups, IngestBatch, SourceSyncContext,
 };
-use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceHttpAuthConfig {
@@ -51,7 +51,6 @@ impl TryFrom<PluginConfigEntry> for DataSourceHttpClientPluginConfig {
 
 pub struct DataSourceHttpClientPlugin {
     client: Client,
-    ingest: Ingest,
     config: DataSourceHttpClientPluginConfig,
 }
 
@@ -84,7 +83,6 @@ impl DataSourceHttpClientPlugin {
 
         Self {
             client: Client::new(),
-            ingest: Ingest::new(),
             config,
         }
     }
@@ -92,16 +90,11 @@ impl DataSourceHttpClientPlugin {
     pub fn with_runtime_config(config: DataSourceHttpClientPluginConfig) -> Self {
         Self {
             client: Client::new(),
-            ingest: Ingest::new(),
             config,
         }
     }
 
-    async fn fetch_once(
-        &self,
-        offsets: &Arc<Offsets>,
-        shared_output: &Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
+    async fn fetch_once(&self, ctx: &dyn SourceSyncContext) -> Result<(), std::io::Error> {
         if self.config.url.is_empty() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -184,7 +177,7 @@ impl DataSourceHttpClientPlugin {
 
         let chunk_bytes = self.config.batch_size_bytes.unwrap_or(1_024_000) as usize;
         let source_uri = self.config.url.clone();
-        let mut ingest_tasks = IngestTasks::new();
+        let mut groups: Vec<Vec<IngestBatch>> = Vec::new();
         let mut buf = String::new();
 
         for line in text.lines() {
@@ -195,39 +188,32 @@ impl DataSourceHttpClientPlugin {
             if buf.len() >= chunk_bytes {
                 let data = std::mem::take(&mut buf);
                 let bytes = data.len();
-                ingest_tasks.add(IngestTask::new(
-                    vec![IngestBatch {
-                        offset_key: offset_key.clone(),
-                        data,
-                        bytes,
-                        source_uri: source_uri.clone(),
-                        namespace: Some("http".to_string()),
-                        cdc_rows: None,
-                    }],
-                    offsets.clone(),
-                    shared_output.clone(),
-                ));
+                groups.push(vec![IngestBatch {
+                    offset_key: offset_key.clone(),
+                    data,
+                    bytes,
+                    source_uri: source_uri.clone(),
+                    namespace: Some("http".to_string()),
+                    cdc_rows: None,
+                }]);
             }
         }
 
         if !buf.is_empty() {
             let bytes = buf.len();
-            ingest_tasks.add(IngestTask::new(
-                vec![IngestBatch {
-                    offset_key: offset_key.clone(),
-                    data: buf,
-                    bytes,
-                    source_uri: source_uri.clone(),
-                    namespace: Some("http".to_string()),
-                    cdc_rows: None,
-                }],
-                offsets.clone(),
-                shared_output.clone(),
-            ));
+            groups.push(vec![IngestBatch {
+                offset_key: offset_key.clone(),
+                data: buf,
+                bytes,
+                source_uri: source_uri.clone(),
+                namespace: Some("http".to_string()),
+                cdc_rows: None,
+            }]);
         }
 
-        self.ingest
-            .ingest_file(&Arc::new(ingest_tasks), offsets, shared_output.clone());
+        if !groups.is_empty() {
+            submit_payload_batch_groups(ctx, groups)?;
+        }
 
         Ok(())
     }
@@ -235,11 +221,7 @@ impl DataSourceHttpClientPlugin {
 
 #[async_trait]
 impl DataSource for DataSourceHttpClientPlugin {
-    async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
+    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         match self.config.scrape_interval_seconds {
             Some(interval) => {
                 info!(
@@ -247,14 +229,14 @@ impl DataSource for DataSourceHttpClientPlugin {
                     interval, self.config.url
                 );
                 while RUNNING.read().load(Ordering::SeqCst) {
-                    if let Err(e) = self.fetch_once(&offsets, &shared_output).await {
+                    if let Err(e) = self.fetch_once(ctx.as_ref()).await {
                         error!("HttpClient fetch error: {}", e);
                     }
                     sleep(Duration::from_secs(interval)).await;
                 }
                 Ok(())
             }
-            None => self.fetch_once(&offsets, &shared_output).await,
+            None => self.fetch_once(ctx.as_ref()).await,
         }
     }
 

@@ -12,11 +12,9 @@ use tracing::{error, info};
 use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::RUNNING;
-use skippr_runtime_sdk::plugins::{
-    DataSink, DataSource, SourceExecutionContract, SourceOnceContract,
-};
-use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::plugins::{DataSource, SourceExecutionContract, SourceOnceContract};
+use skippr_runtime_sdk::progress::OffsetKey;
+use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch, SourceSyncContext};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceWebsocketPluginConfig {
@@ -39,7 +37,6 @@ impl TryFrom<PluginConfigEntry> for DataSourceWebsocketPluginConfig {
 }
 
 pub struct DataSourceWebsocketPlugin {
-    ingest: Ingest,
     config: DataSourceWebsocketPluginConfig,
 }
 
@@ -59,27 +56,17 @@ impl DataSourceWebsocketPlugin {
                     batch_size_seconds: None,
                 },
             };
-        Self {
-            ingest: Ingest::new(),
-            config,
-        }
+        Self { config }
     }
 
     pub fn with_runtime_config(config: DataSourceWebsocketPluginConfig) -> Self {
-        Self {
-            ingest: Ingest::new(),
-            config,
-        }
+        Self { config }
     }
 }
 
 #[async_trait]
 impl DataSource for DataSourceWebsocketPlugin {
-    async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
+    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         let (ws_stream, _) = connect_async(&self.config.url)
             .await
             .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -119,8 +106,8 @@ impl DataSource for DataSourceWebsocketPlugin {
                         namespace: namespace.clone(),
                         partition: counter.to_string(),
                     };
-                    let mut ingest_tasks = IngestTasks::new();
-                    ingest_tasks.add(IngestTask::new(
+                    submit_payload_batches(
+                        ctx.as_ref(),
                         vec![IngestBatch {
                             offset_key,
                             data,
@@ -129,14 +116,7 @@ impl DataSource for DataSourceWebsocketPlugin {
                             namespace: Some(namespace.clone()),
                             cdc_rows: None,
                         }],
-                        offsets.clone(),
-                        shared_output.clone(),
-                    ));
-                    self.ingest.ingest_file(
-                        &Arc::new(ingest_tasks),
-                        &offsets,
-                        shared_output.clone(),
-                    );
+                    )?;
                 }
                 Ok(Some(Err(e))) => {
                     error!("WebSocket error: {}", e);

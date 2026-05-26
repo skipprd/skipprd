@@ -11,11 +11,9 @@ use tracing::{error, info};
 use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::RUNNING;
-use skippr_runtime_sdk::plugins::{
-    DataSink, DataSource, SourceExecutionContract, SourceOnceContract,
-};
-use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::plugins::{DataSource, SourceExecutionContract, SourceOnceContract};
+use skippr_runtime_sdk::progress::OffsetKey;
+use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch, SourceSyncContext};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceSqsPluginConfig {
@@ -29,7 +27,6 @@ pub struct DataSourceSqsPluginConfig {
 }
 
 pub struct DataSourceSqsPlugin {
-    pub(crate) ingest: Ingest,
     pub(crate) config: DataSourceSqsPluginConfig,
     client: Client,
 }
@@ -64,11 +61,7 @@ impl DataSourceSqsPlugin {
         }
         let client = Client::from_conf(client_config.build());
 
-        DataSourceSqsPlugin {
-            ingest: Ingest::new(),
-            config,
-            client,
-        }
+        DataSourceSqsPlugin { config, client }
     }
 
     pub async fn new() -> Self {
@@ -108,30 +101,21 @@ impl DataSourceSqsPlugin {
     }
 
     fn flush_pending(
-        &mut self,
         pending: &mut Vec<IngestBatch>,
-        offsets: &Arc<Offsets>,
-        output: &Arc<Box<dyn DataSink + Send + Sync>>,
-    ) {
+        ctx: &dyn SourceSyncContext,
+    ) -> Result<(), std::io::Error> {
         if pending.is_empty() {
-            return;
+            return Ok(());
         }
         let batch = std::mem::take(pending);
-        let mut tasks = IngestTasks::new();
-        tasks.add(IngestTask::new(batch, offsets.clone(), output.clone()));
-        self.ingest
-            .ingest_file(&Arc::new(tasks), offsets, output.clone());
+        submit_payload_batches(ctx, batch).map(|_| ())
     }
 
-    pub async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) {
+    async fn run_sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         let queue_url = self.config.queue_url.clone();
         if queue_url.is_empty() {
             error!("SQS queue_url is empty");
-            return;
+            return Ok(());
         }
 
         let stream_mode = self.config.mode.as_deref().unwrap_or("batch") == "stream";
@@ -174,7 +158,7 @@ impl DataSourceSqsPlugin {
             let messages = resp.messages.unwrap_or_default();
             if messages.is_empty() {
                 if !pending.is_empty() {
-                    self.flush_pending(&mut pending, &offsets, &shared_output);
+                    Self::flush_pending(&mut pending, ctx.as_ref())?;
                     pending_bytes = 0;
                 }
                 if stream_mode {
@@ -216,7 +200,7 @@ impl DataSourceSqsPlugin {
                 to_delete.push((msg_id, receipt));
 
                 if pending_bytes >= batch_limit {
-                    self.flush_pending(&mut pending, &offsets, &shared_output);
+                    Self::flush_pending(&mut pending, ctx.as_ref())?;
                     pending_bytes = 0;
                     if !to_delete.is_empty() {
                         if let Err(e) =
@@ -230,7 +214,7 @@ impl DataSourceSqsPlugin {
             }
 
             if !pending.is_empty() {
-                self.flush_pending(&mut pending, &offsets, &shared_output);
+                Self::flush_pending(&mut pending, ctx.as_ref())?;
                 pending_bytes = 0;
             }
 
@@ -242,10 +226,11 @@ impl DataSourceSqsPlugin {
         }
 
         if !pending.is_empty() {
-            self.flush_pending(&mut pending, &offsets, &shared_output);
+            Self::flush_pending(&mut pending, ctx.as_ref())?;
         }
 
         info!("SQS input plugin sync complete");
+        Ok(())
     }
 
     async fn delete_batch(
@@ -279,13 +264,8 @@ impl DataSourceSqsPlugin {
 
 #[async_trait]
 impl DataSource for DataSourceSqsPlugin {
-    async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
-        self.sync(offsets, output).await;
-        Ok(())
+    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
+        self.run_sync(ctx).await
     }
 
     fn execution_contract(&self) -> SourceExecutionContract {

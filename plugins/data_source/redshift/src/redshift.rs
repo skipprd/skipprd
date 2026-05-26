@@ -9,9 +9,9 @@ use tracing::info;
 
 use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
-use skippr_runtime_sdk::plugins::{DataSink, DataSource};
-use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::plugins::DataSource;
+use skippr_runtime_sdk::progress::OffsetKey;
+use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch, SourceSyncContext};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceRedshiftPluginConfig {
@@ -36,7 +36,6 @@ impl TryFrom<PluginConfigEntry> for DataSourceRedshiftPluginConfig {
 }
 
 pub struct DataSourceRedshiftPlugin {
-    ingest: Ingest,
     config: DataSourceRedshiftPluginConfig,
     client: RedshiftClient,
 }
@@ -50,11 +49,7 @@ impl DataSourceRedshiftPlugin {
         let aws_config = aws_builder.load().await;
         let client = RedshiftClient::new(&aws_config);
 
-        Self {
-            ingest: Ingest::new(),
-            config,
-            client,
-        }
+        Self { config, client }
     }
 
     pub async fn new() -> Self {
@@ -183,11 +178,7 @@ impl DataSourceRedshiftPlugin {
 
 #[async_trait]
 impl DataSource for DataSourceRedshiftPlugin {
-    async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
+    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         let queries: Vec<(String, String)> = if let Some(ref q) = self.config.query {
             vec![("query".to_string(), q.clone())]
         } else if let Some(ref tables) = self.config.tables {
@@ -228,14 +219,7 @@ impl DataSource for DataSourceRedshiftPlugin {
                 .collect();
 
             if !batches.is_empty() {
-                let mut ingest_tasks = IngestTasks::new();
-                ingest_tasks.add(IngestTask::new(
-                    batches,
-                    offsets.clone(),
-                    shared_output.clone(),
-                ));
-                self.ingest
-                    .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output.clone());
+                submit_payload_batches(ctx.as_ref(), batches)?;
             }
         }
 

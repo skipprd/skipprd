@@ -8,9 +8,9 @@ use tracing::info;
 
 use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
-use skippr_runtime_sdk::plugins::{DataSink, DataSource};
-use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::plugins::DataSource;
+use skippr_runtime_sdk::progress::OffsetKey;
+use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch, SourceSyncContext};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceDeltaLakePluginConfig {
@@ -34,7 +34,6 @@ impl TryFrom<PluginConfigEntry> for DataSourceDeltaLakePluginConfig {
 }
 
 pub struct DataSourceDeltaLakePlugin {
-    ingest: Ingest,
     config: DataSourceDeltaLakePluginConfig,
 }
 
@@ -54,17 +53,11 @@ impl DataSourceDeltaLakePlugin {
                     batch_size_seconds: None,
                 },
             };
-        Self {
-            ingest: Ingest::new(),
-            config,
-        }
+        Self { config }
     }
 
     pub fn with_runtime_config(config: DataSourceDeltaLakePluginConfig) -> Self {
-        Self {
-            ingest: Ingest::new(),
-            config,
-        }
+        Self { config }
     }
 
     fn batch_to_json_rows(
@@ -92,11 +85,7 @@ impl DataSourceDeltaLakePlugin {
 
 #[async_trait]
 impl DataSource for DataSourceDeltaLakePlugin {
-    async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
+    async fn sync(&mut self, sync_ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         let storage_options = self.config.storage_options.clone().unwrap_or_default();
 
         let table = if let Some(version) = self.config.version {
@@ -115,8 +104,9 @@ impl DataSource for DataSourceDeltaLakePlugin {
             table.version()
         );
 
-        let ctx = deltalake::datafusion::prelude::SessionContext::new();
-        ctx.register_table("delta_source", Arc::new(table))
+        let df_ctx = deltalake::datafusion::prelude::SessionContext::new();
+        df_ctx
+            .register_table("delta_source", Arc::new(table))
             .map_err(|e| std::io::Error::other(format!("Delta register: {}", e)))?;
 
         let sql = if let Some(ref filter) = self.config.filter {
@@ -125,7 +115,7 @@ impl DataSource for DataSourceDeltaLakePlugin {
             "SELECT * FROM delta_source".to_string()
         };
 
-        let df = ctx
+        let df = df_ctx
             .sql(&sql)
             .await
             .map_err(|e| std::io::Error::other(format!("Delta query: {}", e)))?;
@@ -162,30 +152,13 @@ impl DataSource for DataSourceDeltaLakePlugin {
                 });
 
                 if current_batch.len() >= batch_size {
-                    let mut ingest_tasks = IngestTasks::new();
-                    ingest_tasks.add(IngestTask::new(
-                        std::mem::take(&mut current_batch),
-                        offsets.clone(),
-                        shared_output.clone(),
-                    ));
-                    self.ingest.ingest_file(
-                        &Arc::new(ingest_tasks),
-                        &offsets,
-                        shared_output.clone(),
-                    );
+                    submit_payload_batches(sync_ctx.as_ref(), std::mem::take(&mut current_batch))?;
                 }
             }
         }
 
         if !current_batch.is_empty() {
-            let mut ingest_tasks = IngestTasks::new();
-            ingest_tasks.add(IngestTask::new(
-                current_batch,
-                offsets.clone(),
-                shared_output.clone(),
-            ));
-            self.ingest
-                .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output.clone());
+            submit_payload_batches(sync_ctx.as_ref(), current_batch)?;
         }
 
         info!("Delta Lake: sync complete for {}", self.config.table_uri);

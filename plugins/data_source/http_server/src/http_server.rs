@@ -17,9 +17,9 @@ use tracing::info;
 use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::RUNNING;
-use skippr_runtime_sdk::plugins::{DataSink, DataSource};
-use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::plugins::DataSource;
+use skippr_runtime_sdk::progress::OffsetKey;
+use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch, SourceSyncContext};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceHttpServerPluginConfig {
@@ -69,7 +69,6 @@ async fn ingest_handler(
 }
 
 pub struct DataSourceHttpServerPlugin {
-    ingest: Ingest,
     config: DataSourceHttpServerPluginConfig,
 }
 
@@ -87,27 +86,17 @@ impl DataSourceHttpServerPlugin {
                     batch_size_seconds: None,
                 },
             };
-        Self {
-            ingest: Ingest::new(),
-            config,
-        }
+        Self { config }
     }
 
     pub fn with_runtime_config(config: DataSourceHttpServerPluginConfig) -> Self {
-        Self {
-            ingest: Ingest::new(),
-            config,
-        }
+        Self { config }
     }
 }
 
 #[async_trait]
 impl DataSource for DataSourceHttpServerPlugin {
-    async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
+    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         let addr = self
             .config
             .listen_address
@@ -145,8 +134,8 @@ impl DataSource for DataSourceHttpServerPlugin {
                         namespace: "http_server".to_string(),
                         partition: counter.to_string(),
                     };
-                    let mut ingest_tasks = IngestTasks::new();
-                    ingest_tasks.add(IngestTask::new(
+                    submit_payload_batches(
+                        ctx.as_ref(),
                         vec![IngestBatch {
                             offset_key,
                             data,
@@ -155,14 +144,7 @@ impl DataSource for DataSourceHttpServerPlugin {
                             namespace: Some("http_server".to_string()),
                             cdc_rows: None,
                         }],
-                        offsets.clone(),
-                        shared_output.clone(),
-                    ));
-                    self.ingest.ingest_file(
-                        &Arc::new(ingest_tasks),
-                        &offsets,
-                        shared_output.clone(),
-                    );
+                    )?;
                 }
                 Ok(None) => break,
                 Err(_) => continue,

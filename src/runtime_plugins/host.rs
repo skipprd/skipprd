@@ -29,11 +29,12 @@ use crate::helpers::offsets::{
     OffsetTypes, Offsets, RuntimeOffsetOperation, RuntimeOffsetRpcRequest,
     RuntimeOffsetRpcResponse, RuntimeOffsetValue,
 };
-use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks, INGEST_RT};
 use crate::plugins::cdc;
 use crate::plugins::{DataSink, SchemaSink};
 use crate::runtime_plugins::artifact::resolve_plugin_executable;
 use crate::runtime_plugins::manifest::RuntimePluginManifest;
+use crate::runtime_plugins::offset_service::OffsetServiceEndpoint;
 use crate::runtime_plugins::protocol::{
     HandshakeRequest, HostDataFrame, HostFrame, PluginDataFrame, PluginFrame, RuntimeBinding,
     RuntimeCheckpointUpdate, RuntimeExecutionContext, RuntimeExecutionMode,
@@ -42,7 +43,7 @@ use crate::runtime_plugins::protocol::{
     RuntimeSessionHello, RuntimeSinkConfig, RuntimeSinkInstallRequest, RuntimeSinkPayload,
     RuntimeSourceConfig, SchemaRunRequest, SinkRunRequest, SourceEvent, SourceStartRequest,
     RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
-    SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
+    SKIPPR_RUNTIME_OFFSET_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use crate::runtime_plugins::schema_state::{
     apply_runtime_source_schema_state, bump_pipeline_schema_version,
@@ -173,14 +174,19 @@ impl RuntimeChildConnection {
         Ok(stream)
     }
 
-    async fn spawn(resolved: ResolvedRuntimePlugin, pipeline_name: String) -> io::Result<Self> {
+    async fn spawn(
+        resolved: ResolvedRuntimePlugin,
+        pipeline_name: String,
+        offset_addr: Option<String>,
+        session_token: Option<String>,
+    ) -> io::Result<Self> {
         let executable =
             resolve_plugin_executable(&resolved.manifest_path, &resolved.manifest).await?;
         let control_listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let data_listener = TcpListener::bind(("127.0.0.1", 0)).await?;
         let control_addr = control_listener.local_addr()?;
         let data_addr = data_listener.local_addr()?;
-        let session_token = Uuid::new_v4().to_string();
+        let session_token = session_token.unwrap_or_else(|| Uuid::new_v4().to_string());
         let mut command = Command::new(executable);
         command.kill_on_drop(true);
         #[cfg(target_os = "linux")]
@@ -205,7 +211,11 @@ impl RuntimeChildConnection {
             .env("DATA_DIR", Config::get_pipeline_data_dir())
             .env(SKIPPR_RUNTIME_CONTROL_ADDR_ENV, control_addr.to_string())
             .env(SKIPPR_RUNTIME_DATA_ADDR_ENV, data_addr.to_string())
-            .env(SKIPPR_RUNTIME_SESSION_TOKEN_ENV, &session_token)
+            .env(SKIPPR_RUNTIME_SESSION_TOKEN_ENV, &session_token);
+        if let Some(offset_addr) = offset_addr {
+            command.env(SKIPPR_RUNTIME_OFFSET_ADDR_ENV, offset_addr);
+        }
+        command
             .stdin(Stdio::null())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit());
@@ -243,7 +253,13 @@ impl RuntimeChildConnection {
         let child_pid = self.child.id();
         let _ = self.child.kill().await;
         unregister_runtime_plugin_child(child_pid);
-        let replacement = Self::spawn(self.resolved.clone(), self.pipeline_name.clone()).await?;
+        let replacement = Self::spawn(
+            self.resolved.clone(),
+            self.pipeline_name.clone(),
+            None,
+            None,
+        )
+        .await?;
         *self = replacement;
         Ok(())
     }
@@ -430,6 +446,46 @@ impl BufferedRuntimeFrameReader {
         self.consumed = payload_end;
         self.compact();
         Ok(Some(frame))
+    }
+
+    fn take_frame_payload(&mut self) -> io::Result<Option<Vec<u8>>> {
+        let available = self.available_bytes();
+        if available < 4 {
+            if self.eof && available > 0 {
+                return Err(io::Error::new(
+                    ErrorKind::UnexpectedEof,
+                    "runtime frame truncated while reading length prefix",
+                ));
+            }
+            return Ok(None);
+        }
+
+        let prefix = <[u8; 4]>::try_from(&self.buffer[self.consumed..self.consumed + 4]).unwrap();
+        let frame_len = u32::from_le_bytes(prefix) as usize;
+        if frame_len > MAX_RUNTIME_FRAME_BYTES {
+            return Err(io::Error::other(format!(
+                "runtime frame length {} exceeds limit {}",
+                frame_len, MAX_RUNTIME_FRAME_BYTES
+            )));
+        }
+
+        let total_frame_len = 4 + frame_len;
+        if available < total_frame_len {
+            if self.eof {
+                return Err(io::Error::new(
+                    ErrorKind::UnexpectedEof,
+                    "runtime frame truncated while reading payload",
+                ));
+            }
+            return Ok(None);
+        }
+
+        let payload_start = self.consumed + 4;
+        let payload_end = payload_start + frame_len;
+        let payload = self.buffer[payload_start..payload_end].to_vec();
+        self.consumed = payload_end;
+        self.compact();
+        Ok(Some(payload))
     }
 
     fn compact(&mut self) {
@@ -621,7 +677,11 @@ async fn ingest_runtime_batches_into_core(
         .map_err(|err| io::Error::other(err.to_string()))
 }
 
-fn ingest_raw_runtime_tasks_into_core(
+fn decode_plugin_data_frame(payload: Vec<u8>) -> io::Result<PluginDataFrame> {
+    bincode::deserialize(&payload).map_err(|err| io::Error::other(err.to_string()))
+}
+
+fn ingest_source_payload_batches_into_core(
     tasks: Vec<Vec<crate::runtime_plugins::protocol::RuntimeRawIngestBatch>>,
     offsets: Arc<Offsets>,
     shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
@@ -650,8 +710,11 @@ fn ingest_raw_runtime_tasks_into_core(
 }
 
 fn runtime_source_blocking_spawn_cap() -> usize {
-    std::thread::available_parallelism()
-        .map(|n| n.get().clamp(2, 8))
+    Config::getenv("INGEST_THREADS", "")
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .or_else(|| std::thread::available_parallelism().ok().map(|n| n.get()))
         .unwrap_or(4)
 }
 
@@ -762,7 +825,18 @@ pub async fn sync_runtime_input_plugin(
     offsets: Arc<Offsets>,
     shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
 ) -> io::Result<()> {
-    let mut connection = RuntimeChildConnection::spawn(resolved, pipeline_name).await?;
+    let session_token = Uuid::new_v4().to_string();
+    let _offset_service = OffsetServiceEndpoint::spawn(offsets.clone(), session_token.clone())
+        .map_err(|err| {
+            io::Error::other(format!("failed to start runtime offset service: {err}"))
+        })?;
+    let mut connection = RuntimeChildConnection::spawn(
+        resolved,
+        pipeline_name,
+        Some(_offset_service.env_value()),
+        Some(session_token),
+    )
+    .await?;
     let start_request = build_source_start_request_for_pipeline(
         &connection.pipeline_name,
         execution_mode,
@@ -817,11 +891,11 @@ pub async fn sync_runtime_input_plugin(
                         drain_runtime_source_ingest(&mut pending_source_tasks, ingest.clone())
                             .await?;
                     }
-                    PluginFrame::OffsetRequest(request) => {
-                        let response = handle_runtime_offset_request(&offsets, request);
-                        connection
-                            .send(&HostFrame::OffsetResponse(response))
-                            .await?;
+                    PluginFrame::OffsetRequest(_) => {
+                        pending_source_tasks.abort_all();
+                        return Err(io::Error::other(
+                            "runtime source offset requests must use the dedicated offset service channel",
+                        ));
                     }
                     PluginFrame::Error(err) => {
                         pending_source_tasks.abort_all();
@@ -852,16 +926,21 @@ pub async fn sync_runtime_input_plugin(
             }
         }
 
-        if let Some(data_frame) = data_reader.take_frame::<PluginDataFrame>()? {
+        if let Some(payload) = data_reader.take_frame_payload()? {
+            let data_frame = tokio::task::spawn_blocking(move || decode_plugin_data_frame(payload))
+                .await
+                .map_err(|err| {
+                    io::Error::other(format!("runtime data frame decode failed: {err}"))
+                })??;
             match data_frame {
-                PluginDataFrame::RawIngestTasks { tasks } => {
+                PluginDataFrame::SourcePayloadBatches { tasks } => {
                     if !tasks.is_empty() {
                         let raw_frame_bytes: usize =
                             tasks.iter().flat_map(|t| t.iter()).map(|b| b.bytes).sum();
                         if Config::debug_enabled() || Config::log_wal_enabled() {
                             let total_batches: usize = tasks.iter().map(Vec::len).sum();
                             info!(
-                                "runtime source host: received {} raw ingest tasks ({} batches, {} bytes)",
+                                "runtime source host: received {} source payload tasks ({} batches, {} bytes)",
                                 tasks.len(),
                                 total_batches,
                                 raw_frame_bytes
@@ -869,7 +948,7 @@ pub async fn sync_runtime_input_plugin(
                         }
                         if Config::log_wal_enabled() {
                             info!(
-                                "runtime source host WAL: raw_frame_bytes={} pending_blocking_tasks={}/{}",
+                                "runtime source host WAL: payload_frame_bytes={} pending_blocking_tasks={}/{}",
                                 raw_frame_bytes,
                                 pending_source_tasks.len(),
                                 runtime_source_blocking_spawn_cap()
@@ -880,7 +959,7 @@ pub async fn sync_runtime_input_plugin(
                         let shared_output = shared_output.clone();
                         let ingest = ingest.clone();
                         pending_source_tasks.spawn_blocking(move || {
-                            ingest_raw_runtime_tasks_into_core(
+                            ingest_source_payload_batches_into_core(
                                 tasks,
                                 offsets,
                                 shared_output,
@@ -920,11 +999,13 @@ pub async fn sync_runtime_input_plugin(
                         let offsets = offsets.clone();
                         let shared_output = shared_output.clone();
                         pending_source_tasks.spawn_blocking(move || {
-                            futures::executor::block_on(ingest_runtime_batches_into_core(
-                                batches,
-                                offsets,
-                                shared_output,
-                            ))
+                            INGEST_RT
+                                .handle()
+                                .block_on(ingest_runtime_batches_into_core(
+                                    batches,
+                                    offsets,
+                                    shared_output,
+                                ))
                         });
                         saw_unflushed_batches = true;
                     }
@@ -1128,7 +1209,7 @@ impl RuntimeDataSinkPlugin {
             binding,
             config,
         };
-        let connection = RuntimeChildConnection::spawn(resolved, pipeline_name).await?;
+        let connection = RuntimeChildConnection::spawn(resolved, pipeline_name, None, None).await?;
         let plugin = Self {
             install_request,
             connection: Mutex::new(connection),
@@ -1373,7 +1454,7 @@ impl RuntimeSchemaSinkPlugin {
             binding,
             config,
         };
-        let connection = RuntimeChildConnection::spawn(resolved, pipeline_name).await?;
+        let connection = RuntimeChildConnection::spawn(resolved, pipeline_name, None, None).await?;
         let plugin = Self {
             install_request,
             connection: Mutex::new(connection),

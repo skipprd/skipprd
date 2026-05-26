@@ -15,10 +15,13 @@ use skippr_runtime_sdk::plugins::cdc::{
     source_capabilities, MongodbCheckpoint, MutationKind, WalRowMeta,
 };
 use skippr_runtime_sdk::plugins::{
-    DataSink, DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
+    DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
 };
-use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::progress::OffsetKey;
+use skippr_runtime_sdk::source_compat::{
+    load_checkpoint_payload, submit_payload_batch_groups, submit_payload_batches,
+    validate_offset_key, IngestBatch, SourceSyncContext,
+};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceMongodbPluginConfig {
@@ -43,7 +46,6 @@ impl TryFrom<PluginConfigEntry> for DataSourceMongodbPluginConfig {
 }
 
 pub struct DataSourceMongodbPlugin {
-    ingest: Ingest,
     config: DataSourceMongodbPluginConfig,
 }
 
@@ -72,17 +74,11 @@ impl DataSourceMongodbPlugin {
                 cdc_mode: SourceCdcMode::Snapshot,
             },
         };
-        Self {
-            ingest: Ingest::new(),
-            config,
-        }
+        Self { config }
     }
 
     pub fn with_runtime_config(config: DataSourceMongodbPluginConfig) -> Self {
-        Self {
-            ingest: Ingest::new(),
-            config,
-        }
+        Self { config }
     }
 
     fn cdc_mode(&self) -> SourceCdcMode {
@@ -91,8 +87,7 @@ impl DataSourceMongodbPlugin {
 
     async fn sync_query(
         &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        ctx: Arc<dyn SourceSyncContext>,
         cdc_anchor: Option<&[u8]>,
     ) -> Result<(), std::io::Error> {
         let client_options = ClientOptions::parse(&self.config.connection_string)
@@ -186,27 +181,13 @@ impl DataSourceMongodbPlugin {
             row_idx += 1;
 
             if current_bytes >= chunk_bytes {
-                let mut ingest_tasks = IngestTasks::new();
-                ingest_tasks.add(IngestTask::new(
-                    std::mem::take(&mut current_batch),
-                    offsets.clone(),
-                    shared_output.clone(),
-                ));
-                self.ingest
-                    .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output.clone());
+                submit_payload_batches(ctx.as_ref(), std::mem::take(&mut current_batch))?;
                 current_bytes = 0;
             }
         }
 
         if !current_batch.is_empty() {
-            let mut ingest_tasks = IngestTasks::new();
-            ingest_tasks.add(IngestTask::new(
-                current_batch,
-                offsets.clone(),
-                shared_output.clone(),
-            ));
-            self.ingest
-                .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output.clone());
+            submit_payload_batches(ctx.as_ref(), current_batch)?;
         }
 
         Ok(())
@@ -218,8 +199,7 @@ impl DataSourceMongodbPlugin {
 
     async fn sync_cdc(
         &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        ctx: Arc<dyn SourceSyncContext>,
         mode: SourceCdcMode,
     ) -> Result<(), std::io::Error> {
         let client_options = ClientOptions::parse(&self.config.connection_string)
@@ -234,9 +214,9 @@ impl DataSourceMongodbPlugin {
             "mongodb:{}:{}:resume_token",
             self.config.database, self.config.collection
         );
-        let stored_token = offsets
-            .load_checkpoint_payload::<MongodbCheckpoint>(&checkpoint_key)
-            .map(|checkpoint| checkpoint.resume_token);
+        let stored_token =
+            load_checkpoint_payload::<MongodbCheckpoint>(ctx.as_ref(), &checkpoint_key)
+                .map(|checkpoint| checkpoint.resume_token);
         let resume_mode = stored_token.is_some();
 
         if resume_mode {
@@ -290,8 +270,7 @@ impl DataSourceMongodbPlugin {
         // Phase 1: Anchored snapshot (skipped on resume)
         if mode.includes_initial_snapshot() && !resume_mode {
             info!("MongoDB CDC: running initial snapshot");
-            self.sync_query(offsets.clone(), shared_output.clone(), Some(&anchor_bytes))
-                .await?;
+            self.sync_query(ctx.clone(), Some(&anchor_bytes)).await?;
         } else if mode == SourceCdcMode::CdcOnly && !resume_mode {
             info!("MongoDB CDC: cdc_only mode skips initial snapshot");
         }
@@ -382,14 +361,7 @@ impl DataSourceMongodbPlugin {
                 }]),
             };
 
-            let mut ingest_tasks = IngestTasks::new();
-            ingest_tasks.add(IngestTask::new(
-                vec![batch],
-                offsets.clone(),
-                shared_output.clone(),
-            ));
-            self.ingest
-                .ingest_file(&Arc::new(ingest_tasks), &offsets, shared_output.clone());
+            submit_payload_batches(ctx.as_ref(), vec![batch])?;
 
             if let Some(ref token) = stream.resume_token() {
                 if let Ok(token_bytes) = serde_json::to_vec(token) {
@@ -407,15 +379,11 @@ impl DataSourceMongodbPlugin {
 
 #[async_trait]
 impl DataSource for DataSourceMongodbPlugin {
-    async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
+    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         match self.cdc_mode() {
-            SourceCdcMode::Snapshot => self.sync_query(offsets, shared_output, None).await,
+            SourceCdcMode::Snapshot => self.sync_query(ctx.clone(), None).await,
             mode @ (SourceCdcMode::SnapshotThenCdc | SourceCdcMode::CdcOnly) => {
-                self.sync_cdc(offsets, shared_output, mode).await
+                self.sync_cdc(ctx, mode).await
             }
         }
     }

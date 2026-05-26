@@ -13,11 +13,9 @@ use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::helpers::Helpers;
 use crate::RUNNING;
-use skippr_runtime_sdk::plugins::{
-    DataSink, DataSource, SourceExecutionContract, SourceOnceContract,
-};
-use skippr_runtime_sdk::progress::{OffsetKey, Offsets};
-use skippr_runtime_sdk::source_compat::{Ingest, IngestBatch, IngestTask, IngestTasks};
+use skippr_runtime_sdk::plugins::{DataSource, SourceExecutionContract, SourceOnceContract};
+use skippr_runtime_sdk::progress::OffsetKey;
+use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch, SourceSyncContext};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSourceStdinPluginConfig {
@@ -36,7 +34,6 @@ impl TryFrom<PluginConfigEntry> for DataSourceStdinPluginConfig {
 }
 
 pub struct DataSourceStdinPlugin {
-    ingest: Ingest,
     config: DataSourceStdinPluginConfig,
 }
 
@@ -60,25 +57,18 @@ impl DataSourceStdinPlugin {
             },
         };
 
-        Self {
-            ingest: Ingest::new(),
-            config,
-        }
+        Self { config }
     }
 
     pub fn with_runtime_config(config: DataSourceStdinPluginConfig) -> Self {
-        Self {
-            ingest: Ingest::new(),
-            config,
-        }
+        Self { config }
     }
 
     fn dispatch_batch(
         &self,
+        ctx: &dyn SourceSyncContext,
         buffer: Vec<u8>,
-        offsets: &Arc<Offsets>,
-        shared_output: &Arc<Box<dyn DataSink + Send + Sync>>,
-    ) {
+    ) -> Result<(), io::Error> {
         let data = String::from_utf8_lossy(&buffer).into_owned();
         let batch = IngestBatch {
             offset_key: OffsetKey {
@@ -91,24 +81,13 @@ impl DataSourceStdinPlugin {
             namespace: None,
             cdc_rows: None,
         };
-        let mut tasks = IngestTasks::new();
-        tasks.add(IngestTask::new(
-            vec![batch],
-            offsets.clone(),
-            shared_output.clone(),
-        ));
-        self.ingest
-            .ingest_file(&Arc::new(tasks), offsets, shared_output.clone());
+        submit_payload_batches(ctx, vec![batch]).map(|_| ())
     }
 }
 
 #[async_trait]
 impl DataSource for DataSourceStdinPlugin {
-    async fn sync(
-        &mut self,
-        offsets: Arc<Offsets>,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), std::io::Error> {
+    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
 
         let buffer_size = self.config.batch_size_bytes.unwrap_or(
@@ -175,7 +154,7 @@ impl DataSource for DataSourceStdinPlugin {
             while RUNNING.read().load(Ordering::SeqCst) {
                 match rx.recv_timeout(poll) {
                     Ok(buffer) => {
-                        self.dispatch_batch(buffer, &offsets, &shared_output);
+                        self.dispatch_batch(ctx.as_ref(), buffer)?;
                     }
                     Err(RecvTimeoutError::Timeout) => {}
                     Err(RecvTimeoutError::Disconnected) => break,
@@ -185,7 +164,7 @@ impl DataSource for DataSourceStdinPlugin {
             loop {
                 match rx.recv() {
                     Ok(buffer) => {
-                        self.dispatch_batch(buffer, &offsets, &shared_output);
+                        self.dispatch_batch(ctx.as_ref(), buffer)?;
                     }
                     Err(_) => break,
                 }

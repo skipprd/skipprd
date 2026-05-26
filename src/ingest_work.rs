@@ -34,14 +34,15 @@ use crate::metrics::counters as metrics_hot;
 // Bounded concurrency for background metadata writes and Glue schema syncs
 static METADATA_WRITE_SEM: once_cell::sync::Lazy<Arc<tokio::sync::Semaphore>> =
     once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
-static INGEST_RT: once_cell::sync::Lazy<runtime::Runtime> = once_cell::sync::Lazy::new(|| {
-    runtime::Builder::new_multi_thread()
-        .worker_threads(1)
-        .enable_all()
-        .thread_name("skipprd-ingest-rt")
-        .build()
-        .expect("shared ingest runtime")
-});
+pub(crate) static INGEST_RT: once_cell::sync::Lazy<runtime::Runtime> =
+    once_cell::sync::Lazy::new(|| {
+        runtime::Builder::new_multi_thread()
+            .worker_threads(1)
+            .enable_all()
+            .thread_name("skipprd-ingest-rt")
+            .build()
+            .expect("shared ingest runtime")
+    });
 
 use once_cell::sync::Lazy;
 use serde_json::Value;
@@ -361,48 +362,6 @@ pub struct ThroughputMetrics {
     pub active_cores: usize,
     pub queue_length: usize,
     pub optimal_chunk_size: usize,
-}
-
-fn runtime_ingest_batches_from_buffer_batches(
-    batches: &[IngestBufferBatch],
-) -> Result<Vec<RuntimeIngestPartitionBatch>, std::io::Error> {
-    batches
-        .iter()
-        .map(|batch| {
-            let arrow_stream_bytes =
-                encode_record_batches(batch.record_batches.as_deref().unwrap_or(&[]))?;
-            Ok(RuntimeIngestPartitionBatch {
-                sink_ref: batch.sink_ref.clone(),
-                namespace: batch._namespace.clone(),
-                partition: batch._partition.clone(),
-                time: batch._time,
-                shard: batch._shard.clone(),
-                offsets: batch
-                    .offsets
-                    .iter()
-                    .map(|(key, position)| RuntimeOffsetPosition {
-                        key: key.clone(),
-                        position: *position,
-                    })
-                    .collect(),
-                arrow_stream_bytes,
-                cdc_rows: batch.cdc_rows.clone(),
-            })
-        })
-        .collect()
-}
-
-fn runtime_offset_hints_from_positions(
-    offsets: &HashMap<OffsetKey, u64>,
-) -> Vec<RuntimeOffsetMaterializationHint> {
-    offsets
-        .iter()
-        .map(|(key, position)| RuntimeOffsetMaterializationHint {
-            key: key.clone(),
-            position: *position,
-            closed: true,
-        })
-        .collect()
 }
 
 /// Main struct for managing ingestion of data
@@ -1407,29 +1366,7 @@ impl Ingest {
         let _guard = handle.enter();
 
         if offset_db_clone.is_remote() {
-            let raw_task = datas
-                .iter()
-                .cloned()
-                .map(RuntimeRawIngestBatch::from)
-                .collect::<Vec<_>>();
-            let relay_result = shared_output
-                .runtime_ingest_relay()
-                .ok_or_else(|| {
-                    std::io::Error::other(
-                        "runtime source offsets are remote but shared output is not a relay",
-                    )
-                })
-                .and_then(|relay| relay.relay_raw_ingest_tasks(vec![raw_task]));
-            if Config::debug_enabled() || Config::log_wal_enabled() {
-                match &relay_result {
-                    Ok(()) => info!("Ingest: relayed raw source task to runtime host"),
-                    Err(err) => error!("Ingest: raw runtime relay returned error: {}", err),
-                }
-            }
-            if let Err(err) = relay_result {
-                panic!("Ingest: raw runtime relay failed: {}", err);
-            }
-            return;
+            panic!("host ingest must use local offsets; runtime sources submit payloads through SourceSyncContext");
         }
 
         let allowed_values = Config::get_partition_allowed_values();
@@ -2011,31 +1948,13 @@ impl Ingest {
                 }
             }
             if !dl_offsets_committed && !dl_offsets.is_empty() {
-                if offset_db_clone.is_remote() {
-                    match shared_output.runtime_ingest_relay() {
-                        Some(relay) => {
-                            let hints = runtime_offset_hints_from_positions(&dl_offsets);
-                            if let Err(err) = relay.relay_offset_hints(hints) {
-                                error!(
-                                    "Ingest: failed to relay dropped-offset materialization hints: {}",
-                                    err
-                                );
-                            }
-                            dl_offsets.clear();
-                        }
-                        None => error!(
-                            "Ingest: runtime source generated dropped offsets without a relay sink"
-                        ),
-                    }
-                } else {
-                    for (ok, pos) in dl_offsets.drain() {
-                        let offset_key = OffsetKey {
-                            namespace: ok.namespace.clone(),
-                            partition: ok.partition.clone(),
-                        };
-                        offset_db_clone.set(&offset_key, OffsetTypes::Closed, 1);
-                        offset_db_clone.set(&offset_key, OffsetTypes::Position, pos);
-                    }
+                for (ok, pos) in dl_offsets.drain() {
+                    let offset_key = OffsetKey {
+                        namespace: ok.namespace.clone(),
+                        partition: ok.partition.clone(),
+                    };
+                    offset_db_clone.set(&offset_key, OffsetTypes::Closed, 1);
+                    offset_db_clone.set(&offset_key, OffsetTypes::Position, pos);
                 }
             }
         }
@@ -2077,39 +1996,18 @@ impl Ingest {
                     partition_sample
                 );
             }
-            if offset_db_clone.is_remote() {
-                let relay_result = shared_output
-                    .runtime_ingest_relay()
-                    .ok_or_else(|| {
-                        std::io::Error::other(
-                            "runtime source offsets are remote but shared output is not a relay",
-                        )
-                    })
-                    .and_then(|relay| {
-                        let runtime_batches =
-                            runtime_ingest_batches_from_buffer_batches(&all_batches)?;
-                        relay.relay_ingest_batches(runtime_batches)
-                    });
-                if Config::debug_enabled() || Config::log_wal_enabled() {
-                    match &relay_result {
-                        Ok(()) => info!("Ingest: relayed prepared batches to runtime host"),
-                        Err(err) => error!("Ingest: runtime relay returned error: {}", err),
-                    }
+            buffers_copy.write(all_batches);
+            let fut = buffers_copy.flush(offset_db_clone.clone(), shared_output.clone());
+            let h = tokio::runtime::Handle::try_current()
+                .expect("flush must run inside a tokio runtime");
+            let flush_result = h.block_on(fut);
+            if Config::debug_enabled() || Config::log_wal_enabled() {
+                match &flush_result {
+                    Ok(()) => info!("Ingest: WAL flush completed successfully"),
+                    Err(err) => error!("Ingest: WAL flush returned error: {}", err),
                 }
-            } else {
-                buffers_copy.write(all_batches);
-                let fut = buffers_copy.flush(offset_db_clone.clone(), shared_output.clone());
-                let h = tokio::runtime::Handle::try_current()
-                    .expect("flush must run inside a tokio runtime");
-                let flush_result = h.block_on(fut);
-                if Config::debug_enabled() || Config::log_wal_enabled() {
-                    match &flush_result {
-                        Ok(()) => info!("Ingest: WAL flush completed successfully"),
-                        Err(err) => error!("Ingest: WAL flush returned error: {}", err),
-                    }
-                }
-                let _ = flush_result;
             }
+            let _ = flush_result;
         }
     }
 
@@ -2297,10 +2195,6 @@ impl Ingest {
 #[cfg(test)]
 mod empty_ingest_tasks_tests {
     use super::*;
-    use crate::helpers::offsets::{OffsetTransport, RuntimeOffsetOperation, RuntimeOffsetValue};
-    use crate::plugins::{DataSink, RuntimeIngestRelay};
-    use datafusion::execution::SendableRecordBatchStream;
-    use std::sync::Mutex;
 
     #[test]
     fn ingest_file_empty_tasks_in_discover_mode_does_not_panic() {
@@ -2314,186 +2208,11 @@ mod empty_ingest_tasks_tests {
 
         ingest.ingest_file(&empty_tasks, &offsets, output);
     }
-
-    #[derive(Default)]
-    struct AuthoritativeOffsetReader;
-
-    impl OffsetTransport for AuthoritativeOffsetReader {
-        fn call(&self, operation: RuntimeOffsetOperation) -> Result<RuntimeOffsetValue, String> {
-            match operation {
-                RuntimeOffsetOperation::Validate { .. } => {
-                    Ok(RuntimeOffsetValue::Validate(Some(false)))
-                }
-                RuntimeOffsetOperation::LoadCheckpointEnvelope { .. } => {
-                    Ok(RuntimeOffsetValue::LoadCheckpointEnvelope(None))
-                }
-            }
-        }
-    }
-
-    struct CapturingRawRelay {
-        tasks: Arc<Mutex<Vec<Vec<RuntimeRawIngestBatch>>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl DataSink for CapturingRawRelay {
-        async fn sync(
-            &self,
-            _stream: SendableRecordBatchStream,
-            _filename: String,
-            _cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
-        ) -> Result<(), std::io::Error> {
-            Ok(())
-        }
-
-        fn runtime_ingest_relay(&self) -> Option<&dyn RuntimeIngestRelay> {
-            Some(self)
-        }
-    }
-
-    impl RuntimeIngestRelay for CapturingRawRelay {
-        fn relay_raw_ingest_tasks(
-            &self,
-            tasks: Vec<Vec<RuntimeRawIngestBatch>>,
-        ) -> Result<(), std::io::Error> {
-            self.tasks.lock().unwrap().extend(tasks);
-            Ok(())
-        }
-
-        fn relay_ingest_batches(
-            &self,
-            _batches: Vec<RuntimeIngestPartitionBatch>,
-        ) -> Result<(), std::io::Error> {
-            panic!("runtime source children must not relay prepared Arrow ingest batches")
-        }
-
-        fn relay_offset_hints(
-            &self,
-            _offsets: Vec<RuntimeOffsetMaterializationHint>,
-        ) -> Result<(), std::io::Error> {
-            panic!("runtime source children must not materialize offsets")
-        }
-    }
-
-    #[test]
-    fn remote_source_process_relays_raw_batches_without_arrow_serialization() {
-        std::env::set_var("DATA_DIR_HIGH_WATERMARK_PCT", "0");
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        let handle = rt.handle().clone();
-        let offsets = Arc::new(crate::helpers::offsets::Offsets::from_transport(Arc::new(
-            AuthoritativeOffsetReader,
-        )));
-        let captured_tasks = Arc::new(Mutex::new(Vec::new()));
-        let relay: Box<dyn DataSink + Send + Sync> = Box::new(CapturingRawRelay {
-            tasks: captured_tasks.clone(),
-        });
-        let output = Arc::new(relay);
-        let records = serde_json::json!([
-            {"type":"track","event":"app","context":{"app":"0.0.0"}},
-            {"type":"track","event":"app","context":{"app":{"version":"0.0.0"}}}
-        ])
-        .to_string();
-        let batch = IngestBatch::new(
-            OffsetKey::new("source", "partition"),
-            records.clone(),
-            records.len(),
-            "test://mixed-context-app".to_string(),
-            None,
-            None,
-        );
-        let batches = Arc::new(vec![batch]);
-        let mut schema_hashes = DashMap::new();
-
-        Ingest::process_batch(
-            &batches,
-            &offsets,
-            &mut schema_hashes,
-            handle,
-            output.clone(),
-        );
-
-        let captured = captured_tasks.lock().unwrap();
-        assert_eq!(captured.len(), 1);
-        assert_eq!(captured[0].len(), 1);
-        assert_eq!(captured[0][0].data, records);
-        assert!(
-            schema_hashes.is_empty(),
-            "source child must not prepare Arrow schemas before relaying raw batches"
-        );
-    }
 }
 
 #[cfg(test)]
 mod ingest_admission_tests {
     use super::*;
-    use crate::helpers::offsets::{OffsetTransport, RuntimeOffsetOperation, RuntimeOffsetValue};
-    use crate::plugins::{DataSink, RuntimeIngestRelay};
-    use datafusion::execution::SendableRecordBatchStream;
-    use std::sync::Mutex;
-
-    #[derive(Default)]
-    struct AuthoritativeOffsetReader;
-
-    impl OffsetTransport for AuthoritativeOffsetReader {
-        fn call(&self, operation: RuntimeOffsetOperation) -> Result<RuntimeOffsetValue, String> {
-            match operation {
-                RuntimeOffsetOperation::Validate { .. } => {
-                    Ok(RuntimeOffsetValue::Validate(Some(false)))
-                }
-                RuntimeOffsetOperation::LoadCheckpointEnvelope { .. } => {
-                    Ok(RuntimeOffsetValue::LoadCheckpointEnvelope(None))
-                }
-            }
-        }
-    }
-
-    struct CapturingRawRelay {
-        tasks: Arc<Mutex<Vec<Vec<RuntimeRawIngestBatch>>>>,
-    }
-
-    #[async_trait::async_trait]
-    impl DataSink for CapturingRawRelay {
-        async fn sync(
-            &self,
-            _stream: SendableRecordBatchStream,
-            _filename: String,
-            _cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
-        ) -> Result<(), std::io::Error> {
-            Ok(())
-        }
-
-        fn runtime_ingest_relay(&self) -> Option<&dyn RuntimeIngestRelay> {
-            Some(self)
-        }
-    }
-
-    impl RuntimeIngestRelay for CapturingRawRelay {
-        fn relay_raw_ingest_tasks(
-            &self,
-            tasks: Vec<Vec<RuntimeRawIngestBatch>>,
-        ) -> Result<(), std::io::Error> {
-            self.tasks.lock().unwrap().extend(tasks);
-            Ok(())
-        }
-
-        fn relay_ingest_batches(
-            &self,
-            _batches: Vec<RuntimeIngestPartitionBatch>,
-        ) -> Result<(), std::io::Error> {
-            panic!("runtime source children must not relay prepared Arrow ingest batches")
-        }
-
-        fn relay_offset_hints(
-            &self,
-            _offsets: Vec<RuntimeOffsetMaterializationHint>,
-        ) -> Result<(), std::io::Error> {
-            panic!("runtime source children must not materialize offsets")
-        }
-    }
-
     #[test]
     fn admission_budget_s3_fits_shared_70pct_envelope() {
         let hint = 8_usize * 1024 * 1024 * 1024;
@@ -2517,44 +2236,6 @@ mod ingest_admission_tests {
             s3 >= disk,
             "expected s3 WAL budget >= disk WAL budget, got disk={disk} s3={s3}"
         );
-    }
-
-    #[test]
-    fn ingest_file_remote_relay_clears_outstanding_byte_counter() {
-        std::env::set_var("DATA_DIR_HIGH_WATERMARK_PCT", "0");
-        let ingest = Ingest::new();
-        let offsets = Arc::new(crate::helpers::offsets::Offsets::from_transport(Arc::new(
-            AuthoritativeOffsetReader,
-        )));
-        let captured_tasks = Arc::new(Mutex::new(Vec::new()));
-        let relay: Box<dyn DataSink + Send + Sync> = Box::new(CapturingRawRelay {
-            tasks: captured_tasks.clone(),
-        });
-        let output = Arc::new(relay);
-        let records = serde_json::json!([{"a": 1}]).to_string();
-        let batch = IngestBatch::new(
-            OffsetKey::new("source", "partition"),
-            records.clone(),
-            records.len(),
-            "test://remote".to_string(),
-            None,
-            None,
-        );
-        let mut tasks = IngestTasks::new();
-        tasks.add(IngestTask::new(
-            vec![batch],
-            offsets.clone(),
-            output.clone(),
-        ));
-        let tasks_arc = Arc::new(tasks);
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("tokio runtime");
-        let _enter = rt.enter();
-        ingest.ingest_file(&tasks_arc, &offsets, output);
-        ingest.wait_for_completion();
-        assert_eq!(ingest.outstanding_payload_bytes_for_tests(), 0);
     }
 }
 

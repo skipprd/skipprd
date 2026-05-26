@@ -22,7 +22,8 @@ pub fn namespace_metadata_from_field_rows(
     fields: &[MetadataFieldRow],
     flatten: bool,
 ) -> Result<Metadata, String> {
-    let mut metadata = Metadata::new().map_err(|e| format!("failed to initialize metadata: {e}"))?;
+    let mut metadata =
+        Metadata::new().map_err(|e| format!("failed to initialize metadata: {e}"))?;
     for row in fields {
         let name = row.name.trim();
         if name.is_empty() {
@@ -100,8 +101,14 @@ mod tests {
         let mut details = metadata.field_details();
         details.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(details.len(), 3);
-        assert_eq!(details[0], ("amount".to_string(), "double".to_string(), true));
-        assert_eq!(details[1], ("created_at".to_string(), "date".to_string(), true));
+        assert_eq!(
+            details[0],
+            ("amount".to_string(), "double".to_string(), true)
+        );
+        assert_eq!(
+            details[1],
+            ("created_at".to_string(), "date".to_string(), true)
+        );
         assert_eq!(details[2], ("id".to_string(), "string".to_string(), false));
 
         let amount = metadata.fields.get("amount").expect("amount field");
