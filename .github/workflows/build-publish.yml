@@ -23,6 +23,7 @@ env:
   SKIPPR_ADMIN_LATEST_POINTER: latest-skippr-admin.txt
   RUST_BUILD_CACHE_BUCKET: skippr-web-rust-cache-prod
   RUST_BUILD_CACHE_REGION: us-east-1
+  REACT_REPO_CHECKOUT_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
 
 jobs:
   plan_runtime_plugin_release:

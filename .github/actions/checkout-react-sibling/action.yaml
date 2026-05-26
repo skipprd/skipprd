@@ -7,14 +7,18 @@ runs:
       shell: bash
       env:
         REACT_REPO: ${{ github.repository_owner }}/react
-        GITHUB_TOKEN: ${{ github.token }}
+        CHECKOUT_TOKEN: ${{ env.REACT_REPO_CHECKOUT_TOKEN }}
       run: |
         set -euo pipefail
+        if [ -z "${CHECKOUT_TOKEN}" ]; then
+          echo "REACT_REPO_CHECKOUT_TOKEN is not set; cannot clone private react repository" >&2
+          exit 1
+        fi
         react_dir="${GITHUB_WORKSPACE}/../react"
         if [ -f "${react_dir}/src/runtime/Cargo.toml" ]; then
           echo "react dependency already present at ${react_dir}"
           exit 0
         fi
         git clone --depth 1 \
-          "https://x-access-token:${GITHUB_TOKEN}@github.com/${REACT_REPO}.git" \
+          "https://x-access-token:${CHECKOUT_TOKEN}@github.com/${REACT_REPO}.git" \
           "${react_dir}"
