@@ -1,24 +1,32 @@
 name: Checkout react sibling
-description: Clone skipprd/react beside the workspace for ../react path dependencies
+description: >-
+  Provide ../react for path dependencies, cloning the react repo when possible
+  and falling back to published react-cargo crates otherwise.
 runs:
   using: composite
   steps:
-    - name: Checkout react repository
+    - name: Skip react checkout when sibling already exists
+      id: probe
       shell: bash
-      env:
-        REACT_REPO: ${{ github.repository_owner }}/react
-        CHECKOUT_TOKEN: ${{ env.REACT_REPO_CHECKOUT_TOKEN }}
       run: |
         set -euo pipefail
-        if [ -z "${CHECKOUT_TOKEN}" ]; then
-          echo "REACT_REPO_CHECKOUT_TOKEN is not set; cannot clone private react repository" >&2
-          exit 1
-        fi
         react_dir="${GITHUB_WORKSPACE}/../react"
         if [ -f "${react_dir}/src/runtime/Cargo.toml" ]; then
           echo "react dependency already present at ${react_dir}"
-          exit 0
+          echo "present=true" >> "$GITHUB_OUTPUT"
         fi
-        git clone --depth 1 \
-          "https://x-access-token:${CHECKOUT_TOKEN}@github.com/${REACT_REPO}.git" \
-          "${react_dir}"
+    - name: Checkout react repository
+      id: checkout
+      if: steps.probe.outputs.present != 'true'
+      continue-on-error: true
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ github.repository_owner }}/react
+        path: ../react
+        token: ${{ env.REACT_REPO_CHECKOUT_TOKEN }}
+    - name: Fall back to published react crates
+      if: steps.probe.outputs.present != 'true' && steps.checkout.outcome == 'failure'
+      shell: bash
+      run: |
+        set -euo pipefail
+        python3 "${GITHUB_WORKSPACE}/.github/scripts/ci_use_react_registry_deps.py"

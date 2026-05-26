@@ -1,10 +1,18 @@
 #!/usr/bin/env python3
 
 import hashlib
-import json
 import re
-import subprocess
+import sys
 from pathlib import Path
+
+try:
+    import tomllib
+except ModuleNotFoundError:  # pragma: no cover - Python 3.10 fallback
+    if sys.version_info < (3, 11):
+        raise SystemExit(
+            "runtime_plugin_catalog requires Python 3.11+ (tomllib) for plugin manifest parsing"
+        ) from None
+    raise
 
 
 PLUGIN_ROOT_PREFIXES = (
@@ -34,16 +42,6 @@ PLUGIN_KIND_SUFFIX = {
 }
 
 
-def cargo_metadata(workspace: Path) -> dict:
-    return json.loads(
-        subprocess.check_output(
-            ["cargo", "metadata", "--no-deps", "--format-version", "1"],
-            cwd=workspace,
-            text=True,
-        )
-    )
-
-
 def discover_plugin_manifest_paths(workspace: Path) -> list[Path]:
     manifests: list[Path] = []
     for prefix in PLUGIN_ROOT_PREFIXES:
@@ -60,20 +58,64 @@ def discover_plugin_manifest_paths(workspace: Path) -> list[Path]:
 
 
 def read_plugin_package_manifest(manifest_path: Path, workspace: Path) -> dict:
-    package = json.loads(
-        subprocess.check_output(
-            [
-                "cargo",
-                "read-manifest",
-                "--manifest-path",
-                str(manifest_path),
-            ],
-            cwd=workspace,
-            text=True,
-        )
-    )
-    package["manifest_path"] = str(manifest_path.resolve())
-    return package
+    del workspace  # kept for call-site compatibility
+    document = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+    package_section = document.get("package")
+    if not isinstance(package_section, dict):
+        raise SystemExit(f"plugin manifest {manifest_path} is missing [package]")
+
+    name = package_section.get("name")
+    version = package_section.get("version")
+    if not isinstance(name, str) or not name.strip():
+        raise SystemExit(f"plugin manifest {manifest_path} is missing package.name")
+    if not isinstance(version, str) or not version.strip():
+        raise SystemExit(f"plugin manifest {manifest_path} is missing package.version")
+
+    bin_sections = document.get("bin", [])
+    if isinstance(bin_sections, dict):
+        bin_sections = [bin_sections]
+    if not isinstance(bin_sections, list):
+        raise SystemExit(f"plugin manifest {manifest_path} has invalid [[bin]] tables")
+
+    targets = []
+    for bin_section in bin_sections:
+        if not isinstance(bin_section, dict):
+            continue
+        bin_name = bin_section.get("name")
+        if isinstance(bin_name, str) and bin_name.strip():
+            targets.append({"name": bin_name.strip(), "kind": ["bin"]})
+    if not targets:
+        targets.append({"name": name, "kind": ["bin"]})
+
+    dependencies = []
+    dependency_section = document.get("dependencies", {})
+    if isinstance(dependency_section, dict):
+        for dependency_name, dependency_spec in dependency_section.items():
+            if not isinstance(dependency_name, str) or not isinstance(dependency_spec, dict):
+                continue
+            dependency_path = dependency_spec.get("path")
+            if not isinstance(dependency_path, str) or not dependency_path.strip():
+                continue
+            resolved_path = (manifest_path.parent / dependency_path).resolve()
+            dependencies.append(
+                {
+                    "name": dependency_name,
+                    "path": str(resolved_path),
+                }
+            )
+
+    metadata = package_section.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+
+    return {
+        "name": name,
+        "version": version,
+        "targets": targets,
+        "dependencies": dependencies,
+        "metadata": metadata,
+        "manifest_path": str(manifest_path.resolve()),
+    }
 
 
 def load_plugin_packages(workspace: Path) -> list[dict]:

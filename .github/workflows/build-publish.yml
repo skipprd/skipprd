@@ -37,11 +37,9 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - uses: ./.github/actions/checkout-react-sibling
-      - name: Install Rust for plugin catalog
-        uses: dtolnay/rust-toolchain@stable
+      - uses: actions/setup-python@v5
         with:
-          toolchain: 1.88.0
+          python-version: "3.12"
       - id: plan
         shell: bash
         run: |
