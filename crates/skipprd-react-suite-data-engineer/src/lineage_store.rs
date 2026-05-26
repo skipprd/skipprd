@@ -78,6 +78,37 @@ impl LineageStore {
     }
 }
 
+/// Removes warehouse query-history evidence from a persisted graph before re-import.
+pub fn strip_query_history_evidence(mut graph: LineageGraphSnapshot) -> LineageGraphSnapshot {
+    let query_node_ids = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == LineageNodeKind::Query)
+        .map(|node| node.id.clone())
+        .collect::<BTreeSet<_>>();
+    graph.nodes.retain(|node| {
+        if node.kind == LineageNodeKind::Query {
+            return false;
+        }
+        if node.kind == LineageNodeKind::Field {
+            return !node
+                .dataset_id
+                .as_deref()
+                .is_some_and(|dataset_id| dataset_id.starts_with("query:"));
+        }
+        true
+    });
+    graph.edges.retain(|edge| {
+        edge.provenance.source != Some(LineageEvidenceSource::WarehouseQueryHistory)
+            && !query_node_ids.contains(&edge.from_node_id)
+            && !query_node_ids.contains(&edge.to_node_id)
+    });
+    graph.diagnostics.retain(|diagnostic| {
+        diagnostic.source != Some(LineageEvidenceSource::WarehouseQueryHistory)
+    });
+    graph
+}
+
 pub fn merge_graphs(
     mut current: LineageGraphSnapshot,
     mut next: LineageGraphSnapshot,
@@ -828,23 +859,61 @@ fn field_to_entity_map(graph: &LineageGraphSnapshot) -> BTreeMap<LineageNodeId, 
                 .map(|dataset| (dataset.clone(), node.id.clone()))
         })
         .collect::<BTreeMap<_, _>>();
+    let mut upstream_field = BTreeMap::<LineageNodeId, Vec<LineageNodeId>>::new();
+    for edge in &graph.edges {
+        if matches!(
+            edge.kind,
+            LineageEdgeKind::FieldDerivesFrom | LineageEdgeKind::AggregatesFrom
+        ) {
+            upstream_field
+                .entry(edge.to_node_id.clone())
+                .or_default()
+                .push(edge.from_node_id.clone());
+        }
+    }
     let mut out = BTreeMap::new();
-    for node in &graph.nodes {
-        if node.kind != LineageNodeKind::Field {
+    for edge in &graph.edges {
+        if edge.kind != LineageEdgeKind::ContainsField {
             continue;
         }
+        if display_ids.contains(&edge.from_node_id) {
+            out.insert(edge.to_node_id.clone(), edge.from_node_id.clone());
+        }
+    }
+    let mut pending: VecDeque<LineageNodeId> = graph
+        .nodes
+        .iter()
+        .filter(|node| node.kind == LineageNodeKind::Field)
+        .filter(|node| !out.contains_key(&node.id))
+        .map(|node| node.id.clone())
+        .collect();
+    while let Some(field_id) = pending.pop_front() {
+        if out.contains_key(&field_id) {
+            continue;
+        }
+        let mut resolved = None;
+        for parent in upstream_field.get(&field_id).into_iter().flatten() {
+            if let Some(entity_id) = out.get(parent) {
+                resolved = Some(entity_id.clone());
+                break;
+            }
+            if !pending.iter().any(|pending_id| pending_id == parent) {
+                pending.push_back(parent.clone());
+            }
+        }
+        if let Some(entity_id) = resolved {
+            out.insert(field_id, entity_id);
+            continue;
+        }
+        let Some(node) = graph.nodes.iter().find(|node| node.id == field_id) else {
+            continue;
+        };
         if let Some(entity_id) = node
             .field
             .as_ref()
             .and_then(|field| entity_by_dataset.get(&field.dataset_id))
         {
-            out.insert(node.id.clone(), entity_id.clone());
-        }
-    }
-    for edge in &graph.edges {
-        if edge.kind == LineageEdgeKind::ContainsField {
-            out.entry(edge.to_node_id.clone())
-                .or_insert_with(|| edge.from_node_id.clone());
+            out.insert(field_id, entity_id.clone());
         }
     }
     out
@@ -914,8 +983,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     use crate::lineage_types::{
-        edge_id, LineageDiagnostic, LineageDiagnosticSeverity, LineageEdge, LineageEdgeKind,
-        LineageEvidenceSource, LineageFieldRef, LineageNodeKind, LineageProvenance,
+        dataset_node_id, edge_id, LineageDiagnostic, LineageDiagnosticSeverity, LineageEdge,
+        LineageEdgeKind, LineageEvidenceSource, LineageFieldRef, LineageNodeKind,
+        LineageProvenance,
     };
 
     use super::*;
@@ -1319,6 +1389,127 @@ mod tests {
                 "expected {id} to be highlighted"
             );
         }
+    }
+
+    #[test]
+    fn strip_query_history_evidence_removes_query_nodes_and_edges() {
+        let query = typed_node("query:q1", LineageNodeKind::Query, Some("query:q1"));
+        let table = node("analytics.raw.bike_hire");
+        let graph = LineageGraphSnapshot {
+            nodes: vec![query.clone(), table.clone()],
+            edges: vec![LineageEdge {
+                id: edge_id(LineageEdgeKind::SelectsFrom, &table.id, &query.id),
+                from_node_id: table.id.clone(),
+                to_node_id: query.id.clone(),
+                kind: LineageEdgeKind::SelectsFrom,
+                provenance: LineageProvenance::unverified(
+                    LineageEvidenceSource::WarehouseQueryHistory,
+                    Some("q1".to_string()),
+                    70,
+                ),
+                metadata: BTreeMap::new(),
+            }],
+            diagnostics: vec![LineageDiagnostic {
+                severity: LineageDiagnosticSeverity::Warning,
+                message: "query history warning".to_string(),
+                source: Some(LineageEvidenceSource::WarehouseQueryHistory),
+            }],
+            ..Default::default()
+        };
+
+        let stripped = strip_query_history_evidence(graph);
+        assert!(!stripped
+            .nodes
+            .iter()
+            .any(|node| node.kind == LineageNodeKind::Query));
+        assert!(stripped.edges.is_empty());
+        assert!(stripped.diagnostics.is_empty());
+    }
+
+    #[test]
+    fn field_slice_highlights_pipeline_and_source_when_ingest_hidden() {
+        let source = typed_node(
+            "raw:source",
+            LineageNodeKind::RawSource,
+            Some("source:raw"),
+        );
+        let pipeline = typed_node(
+            "pipeline:bike_hire",
+            LineageNodeKind::Pipeline,
+            Some("bike_hire"),
+        );
+        let ingest = LineageNode {
+            id: dataset_node_id("analytics.raw.bike_hire", LineageNodeKind::IngestTable),
+            label: "analytics.raw.bike_hire".to_string(),
+            kind: LineageNodeKind::IngestTable,
+            dataset_id: Some("analytics.raw.bike_hire".to_string()),
+            field: None,
+            path: None,
+            metadata: BTreeMap::new(),
+        };
+        let warehouse = node("analytics.raw.bike_hire");
+        let source_field = field_node("source:raw", "event_date");
+        let pipeline_field = field_node("bike_hire", "event_date");
+        let warehouse_field = field_node("analytics.raw.bike_hire", "event_date");
+        let graph = LineageGraphSnapshot {
+            nodes: vec![
+                source.clone(),
+                pipeline.clone(),
+                ingest.clone(),
+                warehouse.clone(),
+                source_field.clone(),
+                pipeline_field.clone(),
+                warehouse_field.clone(),
+            ],
+            edges: vec![
+                edge(LineageEdgeKind::Ingests, &source.id, &pipeline.id),
+                edge(LineageEdgeKind::Ingests, &pipeline.id, &ingest.id),
+                edge(LineageEdgeKind::Materializes, &ingest.id, &warehouse.id),
+                edge(LineageEdgeKind::ContainsField, &source.id, &source_field.id),
+                edge(
+                    LineageEdgeKind::ContainsField,
+                    &pipeline.id,
+                    &pipeline_field.id,
+                ),
+                edge(
+                    LineageEdgeKind::ContainsField,
+                    &ingest.id,
+                    &warehouse_field.id,
+                ),
+                edge(
+                    LineageEdgeKind::FieldDerivesFrom,
+                    &source_field.id,
+                    &pipeline_field.id,
+                ),
+                edge(
+                    LineageEdgeKind::FieldDerivesFrom,
+                    &pipeline_field.id,
+                    &warehouse_field.id,
+                ),
+            ],
+            ..Default::default()
+        };
+
+        let got = slice_graph(
+            &graph,
+            &LineageGraphQuery {
+                asset: Some("analytics.raw.bike_hire".to_string()),
+                field: Some("event_date".to_string()),
+                direction: LineageDirection::Both,
+            },
+        );
+        for id in [&source.id, &pipeline.id, &warehouse.id] {
+            assert_eq!(
+                got.nodes
+                    .iter()
+                    .find(|node| &node.id == id)
+                    .and_then(|node| node.metadata.get("_lineage_state"))
+                    .map(String::as_str),
+                Some("highlighted"),
+                "expected {id} to be highlighted"
+            );
+        }
+        assert!(!got.nodes.iter().any(|node| node.id == ingest.id));
     }
 
     #[test]

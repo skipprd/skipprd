@@ -474,6 +474,9 @@ struct LineageImportQueryHistoryArgs {
     /// Maximum query history rows to inspect.
     #[arg(long, default_value_t = 100)]
     limit: usize,
+    /// Include non-SELECT warehouse statements (DDL, etc.) in query-history lineage.
+    #[arg(long, default_value_t = false)]
+    include_non_select: bool,
     /// Output mode: json or jsonl.
     #[arg(long, default_value = "json")]
     output: String,
@@ -4747,6 +4750,7 @@ async fn cmd_lineage(
                 &suite_ctx,
                 args.since.clone(),
                 args.limit,
+                args.include_non_select,
             )
             .await
             {

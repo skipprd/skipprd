@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::ctx_ext::{sctx_catalog, sctx_datasets, sctx_skippr, sctx_warehouse, ProvidersCfgCap};
 use crate::lineage_sql::{analyze_select_sql, SqlSelectedOutput};
-use crate::lineage_store::{merge_lineage_node, slice_graph, LineageStore};
+use crate::lineage_store::{merge_lineage_node, slice_graph, strip_query_history_evidence, LineageStore};
 use crate::lineage_types::{
     canonical_dataset_id, canonical_field_path, dataset_node_id, edge_id, field_node_id,
     LineageDiagnostic, LineageDiagnosticSeverity, LineageDirection, LineageEdge, LineageEdgeKind,
@@ -92,6 +92,23 @@ impl GraphBuilder {
             diagnostics: self.diagnostics,
             ..Default::default()
         }
+    }
+
+    fn from_snapshot(mut graph: LineageGraphSnapshot) -> Self {
+        let diagnostics = std::mem::take(&mut graph.diagnostics);
+        let mut builder = Self::default();
+        for node in graph.nodes {
+            builder.add_node(node);
+        }
+        for edge in graph.edges {
+            builder.add_edge(edge);
+        }
+        builder.diagnostics = diagnostics;
+        builder
+    }
+
+    fn has_edge_id(&self, edge_id: &str) -> bool {
+        self.edges.contains_key(edge_id)
     }
 }
 
@@ -210,18 +227,27 @@ impl RelationResolver {
         }
     }
 
-    fn add_graph(&mut self, graph: &LineageGraphSnapshot) {
+    fn seed_from_graph(&mut self, graph: &LineageGraphSnapshot) {
         for node in &graph.nodes {
-            if !matches!(
-                node.kind,
-                LineageNodeKind::WarehouseTable | LineageNodeKind::IngestTable
-            ) {
+            if node.kind == LineageNodeKind::Field {
                 continue;
             }
             if let Some(dataset_id) = node.dataset_id.as_deref() {
                 self.add_alias(dataset_id, dataset_id);
                 if let Some(short_name) = canonical_dataset_id(dataset_id).rsplit('.').next() {
                     self.add_alias(short_name, dataset_id);
+                }
+            }
+            if matches!(
+                node.kind,
+                LineageNodeKind::DbtModel | LineageNodeKind::DbtSource
+            ) {
+                self.add_alias(&node.label, dataset_id_from_node(node));
+                if let Some(unique_id) = node.metadata.get("unique_id") {
+                    self.add_alias(unique_id, dataset_id_from_node(node));
+                }
+                if let Some(name) = node.metadata.get("name") {
+                    self.add_alias(name, dataset_id_from_node(node));
                 }
             }
         }
@@ -283,6 +309,13 @@ impl RelationResolver {
     }
 }
 
+fn dataset_id_from_node(node: &LineageNode) -> &str {
+    node.dataset_id
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .unwrap_or(node.label.as_str())
+}
+
 pub async fn refresh_lineage_graph_for_suite(
     sctx: &SuiteCtx,
     options: LineageBuildOptions,
@@ -297,18 +330,22 @@ pub async fn refresh_lineage_graph_for_suite(
     build_skipprd_metadata_lineage(sctx, &options.pipeline, &mut builder, &mut resolver).await;
     build_dbt_manifest_lineage(manifest.as_ref(), &mut builder, &resolver);
     build_plan_contract_lineage(sctx, &mut builder, &resolver).await;
+    let mut graph = builder.finish();
     if options.include_query_history {
-        build_query_history_lineage(
+        let records = fetch_query_history_records(
             sctx,
             options.query_history_since.as_deref(),
             options.query_history_limit,
-            &mut builder,
-            &resolver,
+            false,
+            &mut graph.diagnostics,
         )
         .await;
+        let deduped = dedupe_query_history_records(records);
+        let mut evidence_resolver = RelationResolver::new(cfg.as_ref(), manifest.as_ref());
+        evidence_resolver.seed_from_graph(&graph);
+        apply_query_history_evidence(&mut graph, &deduped, &evidence_resolver);
     }
 
-    let graph = builder.finish();
     graph.validate()?;
     let store = LineageStore::new(sctx.storage().clone(), sctx.keyspace().clone());
     store.write_graph(sctx.scope(), &graph).await?;
@@ -319,26 +356,30 @@ pub async fn import_query_history_for_suite(
     sctx: &SuiteCtx,
     since: Option<String>,
     limit: usize,
+    include_non_select: bool,
 ) -> Result<LineageRefreshResult, String> {
-    let mut builder = GraphBuilder::default();
     let cfg = sctx
         .capability::<ProvidersCfgCap>()
         .map(|cap| cap.0.clone());
     let manifest = load_manifest_value(sctx).await;
     let store = LineageStore::new(sctx.storage().clone(), sctx.keyspace().clone());
-    let current_graph = store.read_graph(sctx.scope()).await?.unwrap_or_default();
+    let mut graph = store.read_graph(sctx.scope()).await?.unwrap_or_default();
+    graph = strip_query_history_evidence(graph);
     let mut resolver = RelationResolver::new(cfg.as_ref(), manifest.as_ref());
-    resolver.add_graph(&current_graph);
-    build_query_history_lineage(sctx, since.as_deref(), limit, &mut builder, &resolver).await;
-    let next = builder.finish();
-    next.validate()?;
-    let mut current = current_graph;
-    current.diagnostics.retain(|diagnostic| {
-        diagnostic.source != Some(LineageEvidenceSource::WarehouseQueryHistory)
-    });
-    let merged = crate::lineage_store::merge_graphs(current, next)?;
-    store.write_graph(sctx.scope(), &merged).await?;
-    Ok(refresh_result(merged))
+    resolver.seed_from_graph(&graph);
+    let records = fetch_query_history_records(
+        sctx,
+        since.as_deref(),
+        limit,
+        include_non_select,
+        &mut graph.diagnostics,
+    )
+    .await;
+    let deduped = dedupe_query_history_records(records);
+    apply_query_history_evidence(&mut graph, &deduped, &resolver);
+    graph.validate()?;
+    store.write_graph(sctx.scope(), &graph).await?;
+    Ok(refresh_result(graph))
 }
 
 pub async fn load_lineage_graph_for_suite(
@@ -371,14 +412,19 @@ fn refresh_result(graph: LineageGraphSnapshot) -> LineageRefreshResult {
 }
 
 fn query_history_summary(graph: &LineageGraphSnapshot) -> QueryHistoryImportSummary {
-    let query_nodes = graph
-        .nodes
+    let mut query_ids = BTreeSet::new();
+    for node in &graph.nodes {
+        if let Some(raw) = node.metadata.get("query_history_ids") {
+            if let Ok(ids) = serde_json::from_str::<Vec<String>>(raw) {
+                query_ids.extend(ids);
+            }
+        }
+    }
+    let provider = graph
+        .diagnostics
         .iter()
-        .filter(|node| node.kind == LineageNodeKind::Query)
-        .collect::<Vec<_>>();
-    let provider = query_nodes
-        .iter()
-        .find_map(|node| node.metadata.get("provider").cloned());
+        .find(|diagnostic| diagnostic.source == Some(LineageEvidenceSource::WarehouseQueryHistory))
+        .and_then(|_| Some("warehouse".to_string()));
     let raw_error = graph
         .diagnostics
         .iter()
@@ -395,6 +441,16 @@ fn query_history_summary(graph: &LineageGraphSnapshot) -> QueryHistoryImportSumm
                 .contains("failed to parse sql")
         })
         .count();
+    let queries_seen = graph
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic
+                .message
+                .starts_with("query history:")
+        })
+        .count()
+        + query_ids.len();
     QueryHistoryImportSummary {
         provider,
         capability: Some(if raw_error.is_some() {
@@ -403,9 +459,9 @@ fn query_history_summary(graph: &LineageGraphSnapshot) -> QueryHistoryImportSumm
             "supported".to_string()
         }),
         raw_error,
-        queries_seen: query_nodes.len(),
-        queries_imported: query_nodes.len(),
-        queries_skipped: 0,
+        queries_seen,
+        queries_imported: query_ids.len(),
+        queries_skipped: queries_seen.saturating_sub(query_ids.len()),
         parse_warnings,
     }
 }
@@ -2044,58 +2100,106 @@ fn plan_task_input_dataset(task: &Value) -> Option<&str> {
         .and_then(Value::as_str)
 }
 
-async fn build_query_history_lineage(
+async fn fetch_query_history_records(
     sctx: &SuiteCtx,
     since: Option<&str>,
     limit: usize,
-    builder: &mut GraphBuilder,
-    resolver: &RelationResolver,
-) {
+    include_non_select: bool,
+    diagnostics: &mut Vec<LineageDiagnostic>,
+) -> Vec<QueryHistoryRecord> {
     let Some(warehouse) = sctx_warehouse(sctx) else {
-        builder.warn(
+        push_query_history_diagnostic(
+            diagnostics,
             "warehouse provider unavailable; warehouse query-history lineage skipped",
-            Some(LineageEvidenceSource::WarehouseQueryHistory),
         );
-        return;
+        return Vec::new();
     };
     let capability = warehouse.query_history_capability();
     if let Some(message) = capability.diagnostic_message() {
-        builder.warn(message, Some(LineageEvidenceSource::WarehouseQueryHistory));
+        push_query_history_diagnostic(diagnostics, message);
     }
     if !capability.supported() {
-        return;
+        return Vec::new();
     }
     let request = QueryHistoryRequest {
         since: since.map(ToString::to_string),
         limit,
-        include_non_select: true,
+        include_non_select,
         ..QueryHistoryRequest::default()
     };
     let result = match warehouse.list_query_history(&request).await {
         Ok(result) => result,
         Err(e) => {
-            builder.warn(
+            push_query_history_diagnostic(
+                diagnostics,
                 format!(
                     "warehouse query history lookup failed: {}",
                     e.diagnostic_message()
                 ),
-                Some(LineageEvidenceSource::WarehouseQueryHistory),
             );
-            return;
+            return Vec::new();
         }
     };
     for diagnostic in result.diagnostics {
-        builder.warn(
-            diagnostic,
-            Some(LineageEvidenceSource::WarehouseQueryHistory),
-        );
+        push_query_history_diagnostic(diagnostics, diagnostic);
     }
-    for record in result.records {
-        add_query_lineage(&record, builder, resolver);
+    result.records
+}
+
+fn push_query_history_diagnostic(diagnostics: &mut Vec<LineageDiagnostic>, message: impl Into<String>) {
+    let diagnostic = LineageDiagnostic {
+        severity: LineageDiagnosticSeverity::Warning,
+        message: message.into(),
+        source: Some(LineageEvidenceSource::WarehouseQueryHistory),
+    };
+    if !diagnostics.contains(&diagnostic) {
+        diagnostics.push(diagnostic);
     }
 }
 
-fn add_query_lineage(
+fn dedupe_query_history_records(records: Vec<QueryHistoryRecord>) -> Vec<QueryHistoryRecord> {
+    let mut grouped: BTreeMap<String, QueryHistoryRecord> = BTreeMap::new();
+    for record in records {
+        let key = if !record.sql_hash.trim().is_empty() {
+            record.sql_hash.clone()
+        } else if !record.normalized_sql.trim().is_empty() {
+            record.normalized_sql.clone()
+        } else {
+            record.query_id.clone()
+        };
+        grouped
+            .entry(key)
+            .and_modify(|existing| {
+                if query_history_record_is_newer(&record, existing) {
+                    *existing = record.clone();
+                }
+            })
+            .or_insert(record);
+    }
+    grouped.into_values().collect()
+}
+
+fn query_history_record_is_newer(candidate: &QueryHistoryRecord, existing: &QueryHistoryRecord) -> bool {
+    match (candidate.ended_at_epoch_ms, existing.ended_at_epoch_ms) {
+        (Some(candidate), Some(existing)) => candidate > existing,
+        (Some(_), None) => true,
+        _ => false,
+    }
+}
+
+fn apply_query_history_evidence(
+    graph: &mut LineageGraphSnapshot,
+    records: &[QueryHistoryRecord],
+    resolver: &RelationResolver,
+) {
+    let mut builder = GraphBuilder::from_snapshot(std::mem::take(graph));
+    for record in records {
+        apply_query_record_evidence(record, &mut builder, resolver);
+    }
+    *graph = builder.finish();
+}
+
+fn apply_query_record_evidence(
     record: &QueryHistoryRecord,
     builder: &mut GraphBuilder,
     resolver: &RelationResolver,
@@ -2120,188 +2224,71 @@ fn add_query_lineage(
     {
         return;
     }
-    let query_dataset_id = format!("query:{}", record.query_id);
-    let query_node_id = LineageNodeId::generated(query_dataset_id.clone());
-    let output_tables = resolver.resolve_tables(&analysis.output_tables);
-    let mut query_metadata = query_node_metadata(record);
-    if output_tables.len() == 1 {
-        query_metadata.insert(
-            "transform_key".to_string(),
-            format!("warehouse:{}", output_tables[0]),
-        );
-        query_metadata.insert(
-            "transform_source".to_string(),
-            "warehouse_query_history".to_string(),
-        );
+    if analysis.output_tables.is_empty() {
+        return;
     }
-    builder.add_node(LineageNode {
-        id: query_node_id.clone(),
-        label: record.query_id.clone(),
-        kind: LineageNodeKind::Query,
-        dataset_id: Some(query_dataset_id.clone()),
-        field: None,
-        path: None,
-        metadata: query_metadata,
-    });
     let input_tables = resolver.resolve_tables(&analysis.tables);
-    for table in &input_tables {
-        let table_node_id =
-            ensure_warehouse_node(builder, table, query_warehouse_node_metadata(record));
-        builder.add_edge(LineageEdge {
-            id: edge_id(LineageEdgeKind::SelectsFrom, &table_node_id, &query_node_id),
-            from_node_id: table_node_id,
-            to_node_id: query_node_id.clone(),
-            kind: LineageEdgeKind::SelectsFrom,
-            provenance: LineageProvenance::unverified(
-                LineageEvidenceSource::WarehouseQueryHistory,
-                Some(
-                    record
-                        .source_ref
-                        .clone()
-                        .unwrap_or_else(|| record.query_id.clone()),
-                ),
-                75,
-            ),
-            metadata: BTreeMap::new(),
-        });
-    }
-    let aggregate_fields = analysis
-        .aggregate_fields
-        .iter()
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    let query_field_usages = analysis
-        .selected_fields
-        .iter()
-        .chain(analysis.aggregate_fields.iter())
-        .chain(analysis.join_fields.iter())
-        .chain(analysis.filter_fields.iter())
-        .filter(|field| field.trim() != "*")
-        .cloned()
-        .collect::<BTreeSet<_>>();
-    for field in query_field_usages {
-        let Some((source_dataset, field_path)) = resolve_query_field_source(&field, &input_tables)
-        else {
-            continue;
-        };
-        let query_field_id = add_field_node(
-            builder,
-            &query_dataset_id,
-            &field_path,
-            field_path.clone(),
-            None,
-            BTreeMap::from([
-                ("query_id".to_string(), record.query_id.clone()),
-                ("source_field".to_string(), field.clone()),
-            ]),
-        );
-        add_contains_field_edge(
-            builder,
-            &query_node_id,
-            &query_field_id,
-            LineageProvenance::unverified(
-                LineageEvidenceSource::WarehouseQueryHistory,
-                Some(
-                    record
-                        .source_ref
-                        .clone()
-                        .unwrap_or_else(|| record.query_id.clone()),
-                ),
-                70,
-            ),
-        );
-        let source_field_id = add_field_node(
-            builder,
-            &source_dataset,
-            &field_path,
-            field_path.clone(),
-            None,
-            BTreeMap::from([
-                ("query_id".to_string(), record.query_id.clone()),
-                ("source_field".to_string(), field.clone()),
-            ]),
-        );
-        let source_table_id = ensure_warehouse_node(
-            builder,
-            &source_dataset,
-            query_warehouse_node_metadata(record),
-        );
-        add_contains_field_edge(
-            builder,
-            &source_table_id,
-            &source_field_id,
-            LineageProvenance::unverified(
-                LineageEvidenceSource::WarehouseQueryHistory,
-                Some(
-                    record
-                        .source_ref
-                        .clone()
-                        .unwrap_or_else(|| record.query_id.clone()),
-                ),
-                60,
-            ),
-        );
-        let edge_kind = if aggregate_fields.contains(&field) {
-            LineageEdgeKind::AggregatesFrom
-        } else {
-            LineageEdgeKind::FieldDerivesFrom
-        };
-        add_field_lineage_edge(
-            builder,
-            edge_kind,
-            &source_field_id,
-            &query_field_id,
-            LineageProvenance::unverified(
-                LineageEvidenceSource::WarehouseQueryHistory,
-                Some(
-                    record
-                        .source_ref
-                        .clone()
-                        .unwrap_or_else(|| record.query_id.clone()),
-                ),
-                60,
-            ),
-            BTreeMap::new(),
-        );
-    }
+    let output_tables = resolver.resolve_tables(&analysis.output_tables);
+    let source_ref = record
+        .source_ref
+        .clone()
+        .or_else(|| Some(record.query_id.clone()));
+    let warehouse_metadata = query_warehouse_node_metadata(record);
     for table in output_tables {
-        let table_node_id =
-            ensure_warehouse_node(builder, &table, query_warehouse_node_metadata(record));
-        builder.add_edge(LineageEdge {
-            id: edge_id(
-                LineageEdgeKind::Materializes,
-                &query_node_id,
-                &table_node_id,
-            ),
-            from_node_id: query_node_id.clone(),
-            to_node_id: table_node_id.clone(),
-            kind: LineageEdgeKind::Materializes,
-            provenance: LineageProvenance::unverified(
-                LineageEvidenceSource::WarehouseQueryHistory,
-                Some(
-                    record
-                        .source_ref
-                        .clone()
-                        .unwrap_or_else(|| record.query_id.clone()),
-                ),
-                70,
-            ),
-            metadata: BTreeMap::new(),
-        });
+        let warehouse_id =
+            ensure_warehouse_node(builder, &table, warehouse_metadata.clone());
+        let transform_id = canonical_transform_for_builder(builder, &table)
+            .unwrap_or_else(|| warehouse_id.clone());
+        for input in &input_tables {
+            let input_id = ensure_warehouse_node(builder, input, warehouse_metadata.clone());
+            if input_id == transform_id {
+                continue;
+            }
+            let edge = edge_id(LineageEdgeKind::SelectsFrom, &input_id, &transform_id);
+            if !builder.has_edge_id(&edge.0) {
+                builder.add_edge(LineageEdge {
+                    id: edge,
+                    from_node_id: input_id,
+                    to_node_id: transform_id.clone(),
+                    kind: LineageEdgeKind::SelectsFrom,
+                    provenance: LineageProvenance::unverified(
+                        LineageEvidenceSource::WarehouseQueryHistory,
+                        source_ref.clone(),
+                        75,
+                    ),
+                    metadata: BTreeMap::new(),
+                });
+            }
+        }
+        if transform_id != warehouse_id {
+            let edge = edge_id(LineageEdgeKind::Materializes, &transform_id, &warehouse_id);
+            if !builder.has_edge_id(&edge.0) {
+                builder.add_edge(LineageEdge {
+                    id: edge,
+                    from_node_id: transform_id.clone(),
+                    to_node_id: warehouse_id.clone(),
+                    kind: LineageEdgeKind::Materializes,
+                    provenance: LineageProvenance::unverified(
+                        LineageEvidenceSource::WarehouseQueryHistory,
+                        source_ref.clone(),
+                        70,
+                    ),
+                    metadata: BTreeMap::new(),
+                });
+            }
+        }
+        append_query_history_refs(builder, &transform_id, record);
         add_sql_selected_output_lineage(
             builder,
             SqlFieldLineageTarget {
-                transform_entity_id: &query_node_id,
-                output_entity_id: Some(&table_node_id),
+                transform_entity_id: &transform_id,
+                output_entity_id: Some(&warehouse_id),
                 output_dataset: &table,
                 input_tables: &input_tables,
                 fallback_output_fields: &[],
                 evidence_source: LineageEvidenceSource::WarehouseQueryHistory,
-                source_ref: record
-                    .source_ref
-                    .clone()
-                    .or_else(|| Some(record.query_id.clone())),
-                warehouse_metadata: query_warehouse_node_metadata(record),
+                source_ref: source_ref.clone(),
+                warehouse_metadata: warehouse_metadata.clone(),
             },
             &analysis.selected_outputs,
         );
@@ -2315,6 +2302,77 @@ fn add_query_lineage(
             format!("query {}: {diagnostic}", record.query_id),
             Some(LineageEvidenceSource::WarehouseQueryHistory),
         );
+    }
+}
+
+fn canonical_transform_for_builder(
+    builder: &GraphBuilder,
+    dataset_id: &str,
+) -> Option<LineageNodeId> {
+    let dataset_id = canonical_dataset_id(dataset_id);
+    let warehouse_id = dataset_node_id(&dataset_id, LineageNodeKind::WarehouseTable);
+    for edge in builder.edges.values() {
+        if edge.kind != LineageEdgeKind::Materializes || edge.to_node_id != warehouse_id {
+            continue;
+        }
+        let Some(node) = builder.nodes.get(&edge.from_node_id) else {
+            continue;
+        };
+        if node.kind == LineageNodeKind::DbtModel {
+            return Some(edge.from_node_id.clone());
+        }
+    }
+    let transform_key = format!("warehouse:{dataset_id}");
+    for node in builder.nodes.values() {
+        if node.kind != LineageNodeKind::Pipeline {
+            continue;
+        }
+        if node
+            .metadata
+            .get("transform_key")
+            .is_some_and(|value| value == &transform_key)
+        {
+            return Some(node.id.clone());
+        }
+    }
+    None
+}
+
+fn append_query_history_refs(
+    builder: &mut GraphBuilder,
+    entity_id: &LineageNodeId,
+    record: &QueryHistoryRecord,
+) {
+    let Some(node) = builder.nodes.get_mut(entity_id) else {
+        return;
+    };
+    const MAX_QUERY_HISTORY_IDS: usize = 32;
+    let mut ids = node
+        .metadata
+        .get("query_history_ids")
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+        .unwrap_or_default();
+    if !ids.iter().any(|id| id == &record.query_id) {
+        ids.push(record.query_id.clone());
+    }
+    if !record.sql_hash.trim().is_empty() && !ids.iter().any(|id| id == &record.sql_hash) {
+        ids.push(record.sql_hash.clone());
+    }
+    ids.sort();
+    ids.dedup();
+    ids.truncate(MAX_QUERY_HISTORY_IDS);
+    if let Ok(json) = serde_json::to_string(&ids) {
+        node.metadata
+            .insert("query_history_ids".to_string(), json);
+    }
+    if node
+        .metadata
+        .get("provider")
+        .is_none()
+        && !record.provider.to_string().is_empty()
+    {
+        node.metadata
+            .insert("provider".to_string(), record.provider.to_string());
     }
 }
 
@@ -2373,47 +2431,6 @@ fn query_warehouse_node_metadata(record: &QueryHistoryRecord) -> BTreeMap<String
             provider_label_for_brand(brand).to_string(),
         ),
     ])
-}
-
-fn query_node_metadata(record: &QueryHistoryRecord) -> BTreeMap<String, String> {
-    let brand = provider_brand_for_warehouse_kind(record.provider);
-    let mut metadata = BTreeMap::from([
-        ("provider".to_string(), record.provider.to_string()),
-        ("provider_brand".to_string(), brand.to_string()),
-        (
-            "provider_label".to_string(),
-            provider_label_for_brand(brand).to_string(),
-        ),
-        ("query_id".to_string(), record.query_id.clone()),
-        ("sql_hash".to_string(), record.sql_hash.clone()),
-        ("sql".to_string(), record.sql.chars().take(4000).collect()),
-        ("status".to_string(), format!("{:?}", record.status)),
-    ]);
-    if let Some(value) = &record.user {
-        metadata.insert("user".to_string(), value.clone());
-    }
-    if let Some(value) = &record.application {
-        metadata.insert("application".to_string(), value.clone());
-    }
-    if let Some(value) = &record.warehouse {
-        metadata.insert("warehouse".to_string(), value.clone());
-    }
-    if let Some(value) = &record.database {
-        metadata.insert("database".to_string(), value.clone());
-    }
-    if let Some(value) = &record.schema {
-        metadata.insert("schema".to_string(), value.clone());
-    }
-    if let Some(value) = record.started_at_epoch_ms {
-        metadata.insert("started_at_epoch_ms".to_string(), value.to_string());
-    }
-    if let Some(value) = record.ended_at_epoch_ms {
-        metadata.insert("ended_at_epoch_ms".to_string(), value.to_string());
-    }
-    if let Some(value) = &record.error {
-        metadata.insert("error".to_string(), value.clone());
-    }
-    metadata
 }
 
 fn manifest_relation_fqn(node: &Value) -> Option<String> {
@@ -2640,17 +2657,40 @@ mod tests {
     fn query_history_summary_reports_query_counts() {
         let mut graph = LineageGraphSnapshot::default();
         graph.nodes.push(LineageNode {
-            id: LineageNodeId::generated("query:test"),
-            label: "test".to_string(),
-            kind: LineageNodeKind::Query,
-            dataset_id: None,
+            id: LineageNodeId::generated("warehouse:analytics.raw.bike_hire"),
+            label: "analytics.raw.bike_hire".to_string(),
+            kind: LineageNodeKind::WarehouseTable,
+            dataset_id: Some("analytics.raw.bike_hire".to_string()),
             field: None,
             path: None,
-            metadata: BTreeMap::from([("provider".to_string(), "snowflake".to_string())]),
+            metadata: BTreeMap::from([(
+                "query_history_ids".to_string(),
+                r#"["q-1","q-2"]"#.to_string(),
+            )]),
         });
         let summary = query_history_summary(&graph);
-        assert_eq!(summary.provider.as_deref(), Some("snowflake"));
-        assert_eq!(summary.queries_imported, 1);
+        assert_eq!(summary.queries_imported, 2);
+    }
+
+    #[test]
+    fn dedupe_query_history_records_keeps_latest_sql_hash() {
+        let records = vec![
+            QueryHistoryRecord {
+                query_id: "old".to_string(),
+                sql_hash: "same-hash".to_string(),
+                ended_at_epoch_ms: Some(1),
+                ..query_history_test_record("select 1")
+            },
+            QueryHistoryRecord {
+                query_id: "new".to_string(),
+                sql_hash: "same-hash".to_string(),
+                ended_at_epoch_ms: Some(2),
+                ..query_history_test_record("select 1")
+            },
+        ];
+        let deduped = dedupe_query_history_records(records);
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].query_id, "new");
     }
 
     #[test]
@@ -2974,8 +3014,8 @@ mod tests {
         let record = QueryHistoryRecord {
             provider: crate::de_config::WarehouseKind::Snowflake,
             query_id: "aggregate-query".to_string(),
-            sql: "select count(bike_id) from fct_bike_hire_events".to_string(),
-            normalized_sql: "select count(bike_id) from fct_bike_hire_events".to_string(),
+            sql: "create table bike_hire_gold.bike_hire.fct_bike_hire_events as select count(bike_id) from fct_bike_hire_events".to_string(),
+            normalized_sql: "create table bike_hire_gold.bike_hire.fct_bike_hire_events as select count(bike_id) from fct_bike_hire_events".to_string(),
             sql_hash: "hash".to_string(),
             started_at_epoch_ms: None,
             ended_at_epoch_ms: None,
@@ -2992,7 +3032,7 @@ mod tests {
         let resolver = RelationResolver::new(None, Some(&manifest));
         let mut builder = GraphBuilder::default();
 
-        add_query_lineage(&record, &mut builder, &resolver);
+        apply_query_record_evidence(&record, &mut builder, &resolver);
 
         let graph = builder.finish();
         graph.validate().expect("resolved query graph validates");
@@ -3001,14 +3041,9 @@ mod tests {
             "bike_hire_gold.bike_hire.fct_bike_hire_events",
             LineageNodeKind::WarehouseTable,
         );
-        let query = LineageNodeId::generated("query:aggregate-query");
         assert!(!graph.nodes.iter().any(|node| node.id == short_table));
         assert!(graph.nodes.iter().any(|node| node.id == canonical_table));
-        assert!(graph.edges.iter().any(|edge| {
-            edge.kind == LineageEdgeKind::SelectsFrom
-                && edge.from_node_id == canonical_table
-                && edge.to_node_id == query
-        }));
+        assert!(!graph.nodes.iter().any(|node| node.kind == LineageNodeKind::Query));
     }
 
     #[test]
@@ -3034,12 +3069,13 @@ mod tests {
         let mut builder = GraphBuilder::default();
         let resolver = RelationResolver::default();
 
-        add_query_lineage(&record, &mut builder, &resolver);
+        apply_query_record_evidence(&record, &mut builder, &resolver);
 
         let graph = builder.finish();
         graph
             .validate()
             .expect("query CTAS field lineage validates");
+        assert!(!graph.nodes.iter().any(|node| node.kind == LineageNodeKind::Query));
         let source_field = field_node_id("analytics.raw.bike_hire", "event_date");
         let output_field = field_node_id("bike_hire_gold.bike_hire.events", "ride_date");
         let output_table = dataset_node_id(
@@ -3127,7 +3163,7 @@ mod tests {
         let mut builder = GraphBuilder::default();
         let resolver = RelationResolver::default();
 
-        add_query_lineage(&record, &mut builder, &resolver);
+        apply_query_record_evidence(&record, &mut builder, &resolver);
 
         let graph = builder.finish();
         assert!(graph.nodes.is_empty());
@@ -3157,7 +3193,7 @@ mod tests {
         let mut builder = GraphBuilder::default();
         let resolver = RelationResolver::default();
 
-        add_query_lineage(&record, &mut builder, &resolver);
+        apply_query_record_evidence(&record, &mut builder, &resolver);
 
         let graph = builder.finish();
         assert!(graph.nodes.is_empty());
@@ -3170,10 +3206,10 @@ mod tests {
         let record = QueryHistoryRecord {
             provider: crate::de_config::WarehouseKind::Snowflake,
             query_id: "01c47dc1-0003-542f-0003-40a600225d1e".to_string(),
-            sql: "select count(bike_id) from bike_hire_gold.bike_hire.fct_bike_hire_events"
+            sql: "create table bike_hire_gold.bike_hire.fct_bike_hire_events_agg as select count(bike_id) as bike_id from bike_hire_gold.bike_hire.fct_bike_hire_events"
                 .to_string(),
             normalized_sql:
-                "select count(bike_id) from bike_hire_gold.bike_hire.fct_bike_hire_events"
+                "create table bike_hire_gold.bike_hire.fct_bike_hire_events_agg as select count(bike_id) as bike_id from bike_hire_gold.bike_hire.fct_bike_hire_events"
                     .to_string(),
             sql_hash: "hash".to_string(),
             started_at_epoch_ms: None,
@@ -3191,29 +3227,119 @@ mod tests {
         let mut builder = GraphBuilder::default();
         let resolver = RelationResolver::default();
 
-        add_query_lineage(&record, &mut builder, &resolver);
+        apply_query_record_evidence(&record, &mut builder, &resolver);
 
         let graph = builder.finish();
         graph.validate().expect("query lineage graph validates");
         let source_field_id =
             field_node_id("bike_hire_gold.bike_hire.fct_bike_hire_events", "bike_id");
-        let query_field_id = field_node_id("query:01c47dc1-0003-542f-0003-40a600225d1e", "bike_id");
-        let table_id = dataset_node_id(
-            "bike_hire_gold.bike_hire.fct_bike_hire_events",
+        let output_field_id =
+            field_node_id("bike_hire_gold.bike_hire.fct_bike_hire_events_agg", "bike_id");
+        let output_table = dataset_node_id(
+            "bike_hire_gold.bike_hire.fct_bike_hire_events_agg",
             LineageNodeKind::WarehouseTable,
         );
+        assert!(!graph.nodes.iter().any(|node| node.kind == LineageNodeKind::Query));
         assert!(graph.nodes.iter().any(|node| node.id == source_field_id));
-        assert!(graph.nodes.iter().any(|node| node.id == query_field_id));
+        assert!(graph.nodes.iter().any(|node| node.id == output_field_id));
         assert!(graph.edges.iter().any(|edge| {
             edge.kind == LineageEdgeKind::ContainsField
-                && edge.from_node_id == table_id
-                && edge.to_node_id == source_field_id
+                && edge.from_node_id == output_table
+                && edge.to_node_id == output_field_id
         }));
         assert!(graph.edges.iter().any(|edge| {
             edge.kind == LineageEdgeKind::AggregatesFrom
                 && edge.from_node_id == source_field_id
-                && edge.to_node_id == query_field_id
+                && edge.to_node_id == output_field_id
         }));
+    }
+
+    #[test]
+    fn query_history_attaches_to_dbt_model_when_present() {
+        let model_id = LineageNodeId::generated("dbt_model:model.project.events");
+        let warehouse_id = dataset_node_id(
+            "bike_hire_gold.bike_hire.events",
+            LineageNodeKind::WarehouseTable,
+        );
+        let mut builder = GraphBuilder::default();
+        builder.add_node(LineageNode {
+            id: model_id.clone(),
+            label: "events".to_string(),
+            kind: LineageNodeKind::DbtModel,
+            dataset_id: Some("bike_hire_gold.bike_hire.events".to_string()),
+            field: None,
+            path: None,
+            metadata: BTreeMap::new(),
+        });
+        builder.add_node(LineageNode {
+            id: warehouse_id.clone(),
+            label: "bike_hire_gold.bike_hire.events".to_string(),
+            kind: LineageNodeKind::WarehouseTable,
+            dataset_id: Some("bike_hire_gold.bike_hire.events".to_string()),
+            field: None,
+            path: None,
+            metadata: BTreeMap::new(),
+        });
+        builder.add_edge(LineageEdge {
+            id: edge_id(LineageEdgeKind::Materializes, &model_id, &warehouse_id),
+            from_node_id: model_id.clone(),
+            to_node_id: warehouse_id.clone(),
+            kind: LineageEdgeKind::Materializes,
+            provenance: LineageProvenance::observed(
+                LineageEvidenceSource::DbtManifest,
+                Some("manifest.json".to_string()),
+            ),
+            metadata: BTreeMap::new(),
+        });
+        let record = QueryHistoryRecord {
+            provider: crate::de_config::WarehouseKind::Snowflake,
+            query_id: "ctas-query".to_string(),
+            sql: "create table bike_hire_gold.bike_hire.events as select event_date from analytics.raw.bike_hire".to_string(),
+            normalized_sql: "create table bike_hire_gold.bike_hire.events as select event_date from analytics.raw.bike_hire".to_string(),
+            sql_hash: "hash".to_string(),
+            started_at_epoch_ms: None,
+            ended_at_epoch_ms: None,
+            user: None,
+            application: None,
+            warehouse: None,
+            database: None,
+            schema: None,
+            status: Default::default(),
+            error: None,
+            source_ref: None,
+            raw_metadata: BTreeMap::new(),
+        };
+        let resolver = RelationResolver::default();
+        apply_query_record_evidence(&record, &mut builder, &resolver);
+        let graph = builder.finish();
+        assert!(!graph.nodes.iter().any(|node| node.kind == LineageNodeKind::Query));
+        assert!(graph.edges.iter().any(|edge| {
+            edge.kind == LineageEdgeKind::SelectsFrom
+                && edge.from_node_id
+                    == dataset_node_id("analytics.raw.bike_hire", LineageNodeKind::WarehouseTable)
+                && edge.to_node_id == model_id
+        }));
+    }
+
+    fn query_history_test_record(sql: &str) -> QueryHistoryRecord {
+        QueryHistoryRecord {
+            provider: crate::de_config::WarehouseKind::Snowflake,
+            query_id: "test-query".to_string(),
+            sql: sql.to_string(),
+            normalized_sql: sql.to_string(),
+            sql_hash: String::new(),
+            started_at_epoch_ms: None,
+            ended_at_epoch_ms: None,
+            user: None,
+            application: None,
+            warehouse: None,
+            database: None,
+            schema: None,
+            status: Default::default(),
+            error: None,
+            source_ref: None,
+            raw_metadata: BTreeMap::new(),
+        }
     }
 
     #[test]
