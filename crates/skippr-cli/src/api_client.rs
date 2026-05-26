@@ -14,8 +14,9 @@ pub struct ApiClient {
 
 #[derive(Debug)]
 pub struct ApiError {
-    context: String,
-    body: String,
+    pub context: String,
+    pub body: String,
+    pub status: Option<StatusCode>,
 }
 
 impl ApiError {
@@ -23,13 +24,15 @@ impl ApiError {
         Self {
             context: context.to_string(),
             body: format!("Network error: {}", err),
+            status: None,
         }
     }
 
-    fn response(context: &str, _status: StatusCode, body: String) -> Self {
+    fn response(context: &str, status: StatusCode, body: String) -> Self {
         Self {
             context: context.to_string(),
             body,
+            status: Some(status),
         }
     }
 }
@@ -130,6 +133,7 @@ impl ApiClient {
         let tokens = self.tokens.as_ref().ok_or_else(|| ApiError {
             context: context.to_string(),
             body: "Not authenticated — call ApiClient::authenticated()".to_string(),
+            status: None,
         })?;
         tokens
             .send_authenticated(&self.http, build)
@@ -137,6 +141,7 @@ impl ApiClient {
             .map_err(|e| ApiError {
                 context: context.to_string(),
                 body: e,
+                status: None,
             })
     }
 
@@ -381,6 +386,260 @@ impl ApiClient {
             .await
             .map_err(|e| ApiError::network("Credentials parse failed", e))
     }
+
+    // -------------------------------------------------------------------
+    // Workspace run registry (discover / sync / model lock)
+    // -------------------------------------------------------------------
+
+    pub async fn acquire_run_lock(
+        &self,
+        workspace: &str,
+        command: &str,
+        pipeline: Option<&str>,
+        run_id: Option<&str>,
+    ) -> Result<AcquireLockResponse, ApiError> {
+        let url = format!(
+            "{}/auth/workspaces/{}/runs/lock/acquire",
+            self.base_url, workspace
+        );
+        let body = serde_json::json!({
+            "command": command,
+            "pipeline": pipeline,
+            "runId": run_id,
+        });
+        let resp = self
+            .send_with_auth("Acquire run lock failed", |token| {
+                self.http
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", token))
+                    .json(&body)
+            })
+            .await?;
+        if resp.status() == StatusCode::CONFLICT {
+            return Err(response_error("Acquire run lock failed", resp).await);
+        }
+        if !resp.status().is_success() {
+            return Err(response_error("Acquire run lock failed", resp).await);
+        }
+        resp.json()
+            .await
+            .map_err(|e| ApiError::network("Acquire run lock parse failed", e))
+    }
+
+    pub async fn heartbeat_run_lock(
+        &self,
+        workspace: &str,
+        run_id: &str,
+        version: i64,
+    ) -> Result<AcquireLockResponse, ApiError> {
+        let url = format!(
+            "{}/auth/workspaces/{}/runs/lock/heartbeat",
+            self.base_url, workspace
+        );
+        let body = serde_json::json!({ "runId": run_id, "version": version });
+        let resp = self
+            .send_with_auth("Run lock heartbeat failed", |token| {
+                self.http
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", token))
+                    .json(&body)
+            })
+            .await?;
+        if !resp.status().is_success() {
+            return Err(response_error("Run lock heartbeat failed", resp).await);
+        }
+        resp.json()
+            .await
+            .map_err(|e| ApiError::network("Run lock heartbeat parse failed", e))
+    }
+
+    pub async fn complete_run_lock(
+        &self,
+        workspace: &str,
+        run_id: &str,
+        version: i64,
+        status: &str,
+    ) -> Result<(), ApiError> {
+        let url = format!(
+            "{}/auth/workspaces/{}/runs/lock/complete",
+            self.base_url, workspace
+        );
+        let body = serde_json::json!({
+            "runId": run_id,
+            "version": version,
+            "status": status,
+        });
+        let resp = self
+            .send_with_auth("Complete run lock failed", |token| {
+                self.http
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", token))
+                    .json(&body)
+            })
+            .await?;
+        if !resp.status().is_success() {
+            return Err(response_error("Complete run lock failed", resp).await);
+        }
+        Ok(())
+    }
+
+    pub async fn cancel_run(&self, workspace: &str, run_id: &str) -> Result<(), ApiError> {
+        let url = format!(
+            "{}/auth/workspaces/{}/runs/{}/cancel",
+            self.base_url, workspace, run_id
+        );
+        let resp = self
+            .send_with_auth("Cancel run failed", |token| {
+                self.http
+                    .post(&url)
+                    .header("Authorization", format!("Bearer {}", token))
+            })
+            .await?;
+        if !resp.status().is_success() {
+            return Err(response_error("Cancel run failed", resp).await);
+        }
+        Ok(())
+    }
+
+    pub async fn get_run_lock(&self, workspace: &str) -> Result<RunLockStatusResponse, ApiError> {
+        let url = format!(
+            "{}/auth/workspaces/{}/runs/lock",
+            self.base_url, workspace
+        );
+        let resp = self
+            .send_with_auth("Get run lock failed", |token| {
+                self.http
+                    .get(&url)
+                    .header("Authorization", format!("Bearer {}", token))
+            })
+            .await?;
+        if !resp.status().is_success() {
+            return Err(response_error("Get run lock failed", resp).await);
+        }
+        resp.json()
+            .await
+            .map_err(|e| ApiError::network("Get run lock parse failed", e))
+    }
+
+    pub async fn put_run_record(
+        &self,
+        workspace: &str,
+        run_id: &str,
+        body: &serde_json::Value,
+    ) -> Result<(), ApiError> {
+        let url = format!(
+            "{}/auth/workspaces/{}/runs/{}",
+            self.base_url, workspace, run_id
+        );
+        let resp = self
+            .send_with_auth("Put run record failed", |token| {
+                self.http
+                    .put(&url)
+                    .header("Authorization", format!("Bearer {}", token))
+                    .json(body)
+            })
+            .await?;
+        if !resp.status().is_success() {
+            return Err(response_error("Put run record failed", resp).await);
+        }
+        Ok(())
+    }
+
+    pub async fn list_runs(&self, workspace: &str) -> Result<ListRunsResponse, ApiError> {
+        let url = format!("{}/auth/workspaces/{}/runs", self.base_url, workspace);
+        let resp = self
+            .send_with_auth("List runs failed", |token| {
+                self.http
+                    .get(&url)
+                    .header("Authorization", format!("Bearer {}", token))
+            })
+            .await?;
+        if !resp.status().is_success() {
+            return Err(response_error("List runs failed", resp).await);
+        }
+        resp.json()
+            .await
+            .map_err(|e| ApiError::network("List runs parse failed", e))
+    }
+
+    pub async fn get_run_record(
+        &self,
+        workspace: &str,
+        run_id: &str,
+    ) -> Result<RunRecordResponse, ApiError> {
+        let url = format!(
+            "{}/auth/workspaces/{}/runs/{}",
+            self.base_url, workspace, run_id
+        );
+        let resp = self
+            .send_with_auth("Get run record failed", |token| {
+                self.http
+                    .get(&url)
+                    .header("Authorization", format!("Bearer {}", token))
+            })
+            .await?;
+        if !resp.status().is_success() {
+            return Err(response_error("Get run record failed", resp).await);
+        }
+        resp.json()
+            .await
+            .map_err(|e| ApiError::network("Get run record parse failed", e))
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AcquireLockResponse {
+    pub run_id: String,
+    pub version: i64,
+    pub lease_expires_at: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunLockStatus {
+    pub run_id: String,
+    pub command: String,
+    #[serde(default)]
+    pub pipeline: Option<String>,
+    pub status: String,
+    pub version: i64,
+    pub cancel_requested: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunLockStatusResponse {
+    pub lock: Option<RunLockStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ListRunsResponse {
+    pub runs: Vec<RunSummary>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunSummary {
+    pub run_id: String,
+    pub command: String,
+    #[serde(default)]
+    pub pipeline: Option<String>,
+    pub status: String,
+    pub started_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunRecordResponse {
+    pub run_id: String,
+    pub command: String,
+    #[serde(default)]
+    pub pipeline: Option<String>,
+    pub status: String,
+    #[serde(default)]
+    pub payload: Option<serde_json::Value>,
 }
 
 async fn response_error(context: &str, resp: reqwest::Response) -> ApiError {

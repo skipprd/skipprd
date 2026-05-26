@@ -1,9 +1,11 @@
 mod api_client;
 mod auth;
+mod workspace_run_lock;
 mod chat_cmd;
 mod dbt_cmd;
 mod feedback_diagnostics;
 mod headless_prep;
+mod metadata_cmd;
 mod public_config;
 mod public_docs_search;
 mod react_host;
@@ -153,6 +155,12 @@ enum Cmd {
     /// Discover schemas and persist pipeline metadata.
     Discover(EngineDiscoverArgs),
 
+    /// Show or apply persisted pipeline metadata (schema fields per namespace).
+    Metadata {
+        #[command(subcommand)]
+        action: metadata_cmd::MetadataAction,
+    },
+
     /// Extract and load data into the configured destination.
     Sync(EngineSyncArgs),
 
@@ -217,6 +225,12 @@ enum Cmd {
         action: VectorAction,
     },
 
+    /// React thread utilities (resolve latest thread from S3/local storage).
+    Thread {
+        #[command(subcommand)]
+        action: ThreadAction,
+    },
+
     /// User account management (signup, login, balance, etc.).
     User {
         /// Output mode: json or text. Defaults to text for terminal use.
@@ -224,6 +238,17 @@ enum Cmd {
         output: String,
         #[command(subcommand)]
         action: UserAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum ThreadAction {
+    /// Resolve the latest react thread id for a pipeline (storage source of truth).
+    Resolve {
+        #[arg(long)]
+        pipeline: PipelineName,
+        #[arg(long, default_value = "json")]
+        output: String,
     },
 }
 
@@ -381,6 +406,8 @@ enum LineageAction {
     Refresh(LineageRefreshArgs),
     /// Read the persisted lineage graph, optionally sliced around an asset or field.
     Graph(LineageGraphArgs),
+    /// Resolve schema fields for a lineage node.
+    NodeSchema(LineageNodeSchemaArgs),
     /// Analyze warehouse query history and merge query/dashboard evidence into lineage.
     ImportQueryHistory(LineageImportQueryHistoryArgs),
 }
@@ -418,6 +445,19 @@ struct LineageGraphArgs {
     /// Direction: upstream, downstream, or both.
     #[arg(long, default_value = "both")]
     direction: String,
+    /// Output mode: json or jsonl.
+    #[arg(long, default_value = "json")]
+    output: String,
+}
+
+#[derive(Parser, Debug, Clone)]
+struct LineageNodeSchemaArgs {
+    /// Pipeline whose configured DE suite scope should be read.
+    #[arg(long)]
+    pipeline: PipelineName,
+    /// Lineage node id to resolve schema fields for.
+    #[arg(long)]
+    node_id: String,
     /// Output mode: json or jsonl.
     #[arg(long, default_value = "json")]
     output: String,
@@ -4384,6 +4424,59 @@ async fn prepare_engine_command(
     skipprd::helpers::configuration::Config::setenv("SKIPPR_PIPELINE_DATA_ROOT", "true");
     load_dotenv_for_skippr_config_yaml_path(&path);
     skipprd::helpers::configuration::Config::init().await;
+    std::env::set_var("SKIPPR_CLOUD_WORKSPACE", workspace);
+}
+
+async fn cmd_thread_resolve(
+    log: Option<String>,
+    explicit_config: &Option<PathBuf>,
+    pipeline: PipelineName,
+    output: &str,
+) {
+    let engine_cfg = match load_cli_execution_config(explicit_config) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+    if let Err(e) = validate_pipeline_exists(&engine_cfg, pipeline.as_str()) {
+        eprintln!("error: {e}");
+        std::process::exit(1);
+    }
+    let internal_file = match react_config_from_pipeline_config(&engine_cfg, pipeline.as_str()) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+    let resolved =
+        match react_host::resolve_config(internal_file, react::config::ServeOverrides::default()) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: {e}");
+                std::process::exit(1);
+            }
+        };
+    let thread_id = match find_latest_thread_for_resolved_config(&resolved).await {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("error: {e}");
+            std::process::exit(1);
+        }
+    };
+    if output == "json" {
+        println!(
+            "{}",
+            serde_json::json!({ "threadId": thread_id, "pipeline": pipeline.as_str() })
+        );
+    } else if let Some(ref tid) = thread_id {
+        println!("{tid}");
+    } else {
+        eprintln!("[skippr] no thread found for pipeline {}", pipeline.as_str());
+    }
+    let _ = log;
 }
 
 async fn cmd_discover(
@@ -4392,19 +4485,45 @@ async fn cmd_discover(
     args: EngineDiscoverArgs,
 ) {
     prepare_engine_command(log, explicit_config, &args.pipeline).await;
-    if let Err(err) = skipprd::engine::run_discover(&args.output).await {
-        eprintln!("[skippr] discover failed: {}", err);
-        std::process::exit(1);
-    };
+    let workspace = std::env::var("SKIPPR_CLOUD_WORKSPACE").unwrap_or_else(|_| "default".into());
+    workspace_run_lock::with_heavy_run_lock(&workspace, "discover", Some(&args.pipeline), || async {
+        if let Err(err) = skipprd::engine::run_discover(&args.output).await {
+            eprintln!("[skippr] discover failed: {}", err);
+            std::process::exit(1);
+        }
+    })
+    .await;
+}
+
+async fn cmd_metadata(
+    log: Option<String>,
+    explicit_config: &Option<PathBuf>,
+    action: metadata_cmd::MetadataAction,
+) {
+    match action {
+        metadata_cmd::MetadataAction::Show(args) => {
+            prepare_engine_command(log, explicit_config, &args.pipeline).await;
+            metadata_cmd::run_metadata_show(&args.output).await;
+        }
+        metadata_cmd::MetadataAction::Apply(args) => {
+            prepare_engine_command(log, explicit_config, &args.pipeline).await;
+            metadata_cmd::run_metadata_apply(&args).await;
+        }
+    }
 }
 
 async fn cmd_sync(log: Option<String>, explicit_config: &Option<PathBuf>, args: EngineSyncArgs) {
     prepare_engine_command(log, explicit_config, &args.pipeline).await;
-    skipprd::metrics::Metrics::init_send_loop();
-    if let Err(err) = skipprd::engine::run_sync(&args.output, args.once).await {
-        eprintln!("[skippr] sync failed: {}", err);
-        std::process::exit(1);
-    }
+    let workspace = std::env::var("SKIPPR_CLOUD_WORKSPACE").unwrap_or_else(|_| "default".into());
+    let command = workspace_run_lock::sync_api_command(args.once);
+    workspace_run_lock::with_heavy_run_lock(&workspace, command, Some(&args.pipeline), || async {
+        skipprd::metrics::Metrics::init_send_loop();
+        if let Err(err) = skipprd::engine::run_sync(&args.output, args.once).await {
+            eprintln!("[skippr] sync failed: {}", err);
+            std::process::exit(1);
+        }
+    })
+    .await;
 }
 
 async fn cmd_ask(log: Option<String>, explicit_config: &Option<PathBuf>, args: AskArgs) {
@@ -4578,6 +4697,32 @@ async fn cmd_lineage(
                     }
                 }
             }
+        }
+        LineageAction::NodeSchema(args) => {
+            let output = args.output.clone();
+            let pipeline = args.pipeline.as_str();
+            let suite_ctx = match build_lineage_suite_ctx(explicit_config, &args.pipeline).await {
+                Ok(ctx) => ctx,
+                Err(e) => {
+                    emit_lineage_json(
+                        &output,
+                        &serde_json::json!({"ok": false, "pipeline": pipeline, "error": e}),
+                    );
+                    std::process::exit(1);
+                }
+            };
+            let response =
+                react_suite_data_engineer::lineage_builder::resolve_lineage_node_schema(
+                    &suite_ctx,
+                    pipeline,
+                    &args.node_id,
+                )
+                .await;
+            if !response.ok {
+                emit_lineage_json(&output, &response);
+                std::process::exit(1);
+            }
+            emit_lineage_json(&output, &response);
         }
         LineageAction::ImportQueryHistory(args) => {
             let output = args.output.clone();
@@ -5060,6 +5205,40 @@ async fn cmd_model(log: Option<String>, explicit_config: &Option<PathBuf>, args:
         }
     }
 
+    let workspace =
+        yaml_string_at(&engine_cfg, &["skippr", "workspace"]).unwrap_or_else(|| "default".into());
+    workspace_run_lock::with_heavy_run_lock_client(
+        client.clone(),
+        &workspace,
+        "model",
+        Some(&args.pipeline),
+        || async {
+            run_model_body(
+                log,
+                explicit_config,
+                &args,
+                &engine_cfg,
+                agent_type,
+                transport_agent_type,
+                client,
+                internal_file,
+            )
+            .await;
+        },
+    )
+    .await;
+}
+
+async fn run_model_body(
+    log: Option<String>,
+    explicit_config: &Option<PathBuf>,
+    args: &ModelArgs,
+    engine_cfg: &serde_yaml::Value,
+    agent_type: &str,
+    transport_agent_type: &str,
+    client: api_client::ApiClient,
+    mut internal_file: react::config::ReactConfigFile,
+) {
     let run_id = uuid::Uuid::new_v4().to_string();
     react_suite_data_engineer::metering::set_metering_run_id(&run_id);
     eprintln!("[skippr] run {run_id}");
@@ -6252,6 +6431,7 @@ async fn async_main() {
             ConfigAction::Show { output } => cmd_config_show(&cli.config, &output),
         },
         Cmd::Discover(args) => cmd_discover(cli.log, &cli.config, args).await,
+        Cmd::Metadata { action } => cmd_metadata(cli.log, &cli.config, action).await,
         Cmd::Sync(args) => cmd_sync(cli.log, &cli.config, args).await,
         Cmd::Model(args) => cmd_model(cli.log, &cli.config, args).await,
         Cmd::Test { action } => match action {
@@ -6281,6 +6461,11 @@ async fn async_main() {
         Cmd::Query(args) => cmd_query(cli.log, &cli.config, args).await,
         Cmd::Lineage { action } => cmd_lineage(cli.log, &cli.config, action).await,
         Cmd::Chat { action } => chat_cmd::run_chat(cli.log, &cli.config, action).await,
+        Cmd::Thread { action } => match action {
+            ThreadAction::Resolve { pipeline, output } => {
+                cmd_thread_resolve(cli.log, &cli.config, pipeline, &output).await;
+            }
+        },
         Cmd::Feedback {
             pipeline,
             good,

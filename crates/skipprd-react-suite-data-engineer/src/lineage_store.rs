@@ -152,11 +152,42 @@ pub fn merge_lineage_node(existing: &mut LineageNode, incoming: &LineageNode) {
         if value.trim().is_empty() {
             continue;
         }
+        if key == "schema_fields" {
+            merge_schema_fields_metadata(&mut existing.metadata, value);
+            continue;
+        }
         existing
             .metadata
             .entry(key.clone())
             .or_insert_with(|| value.clone());
     }
+}
+
+fn merge_schema_fields_metadata(metadata: &mut BTreeMap<String, String>, incoming_json: &str) {
+    let incoming_fields = parse_schema_fields_json(incoming_json);
+    if incoming_fields.is_empty() {
+        return;
+    }
+    match metadata.get("schema_fields") {
+        None => {
+            metadata.insert("schema_fields".to_string(), incoming_json.to_string());
+        }
+        Some(existing_json) => {
+            let mut merged = parse_schema_fields_json(existing_json);
+            for field in incoming_fields {
+                if !merged.iter().any(|existing| existing.name == field.name) {
+                    merged.push(field);
+                }
+            }
+            if let Ok(json) = serde_json::to_string(&merged) {
+                metadata.insert("schema_fields".to_string(), json);
+            }
+        }
+    }
+}
+
+fn parse_schema_fields_json(raw: &str) -> Vec<crate::providers::SkipprFieldSchema> {
+    serde_json::from_str(raw).unwrap_or_default()
 }
 
 pub fn slice_graph(
