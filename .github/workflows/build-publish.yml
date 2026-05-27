@@ -121,6 +121,7 @@ jobs:
       - dynamodb_iceberg_types_cdc_test
       - mssql_iceberg_debug_linux_test
       - mssql_iceberg_debug_windows_test
+    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.snowflake_e2e_only == true) || (needs.linux_test_suite.result == 'success' && needs.data_engineer_test_suite.result == 'success' && needs.skippr_cli_test_suite.result == 'success' && needs.skippr_admin_test_suite.result == 'success' && needs.macos_arm64_test_compile.result == 'success' && needs.postgres_iceberg_types_cdc_test.result == 'success' && needs.mysql_iceberg_types_cdc_test.result == 'success' && needs.dynamodb_iceberg_types_cdc_test.result == 'success' && needs.mssql_iceberg_debug_linux_test.result == 'success' && needs.mssql_iceberg_debug_windows_test.result == 'success')) }}
     runs-on: macos-14
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
@@ -155,6 +156,7 @@ jobs:
       - dynamodb_iceberg_types_cdc_test
       - mssql_iceberg_debug_linux_test
       - mssql_iceberg_debug_windows_test
+    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.snowflake_e2e_only == true) || (needs.linux_test_suite.result == 'success' && needs.data_engineer_test_suite.result == 'success' && needs.skippr_cli_test_suite.result == 'success' && needs.skippr_admin_test_suite.result == 'success' && needs.postgres_iceberg_types_cdc_test.result == 'success' && needs.mysql_iceberg_types_cdc_test.result == 'success' && needs.dynamodb_iceberg_types_cdc_test.result == 'success' && needs.mssql_iceberg_debug_linux_test.result == 'success' && needs.mssql_iceberg_debug_windows_test.result == 'success')) }}
     runs-on:
       - depot-ubuntu-22.04-16
     env:
@@ -410,6 +412,7 @@ jobs:
       - dynamodb_iceberg_types_cdc_test
       - mssql_iceberg_debug_linux_test
       - mssql_iceberg_debug_windows_test
+    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.snowflake_e2e_only == true) || (needs.linux_test_suite.result == 'success' && needs.data_engineer_test_suite.result == 'success' && needs.skippr_cli_test_suite.result == 'success' && needs.skippr_admin_test_suite.result == 'success' && needs.windows_x86_test_compile.result == 'success' && needs.postgres_iceberg_types_cdc_test.result == 'success' && needs.mysql_iceberg_types_cdc_test.result == 'success' && needs.dynamodb_iceberg_types_cdc_test.result == 'success' && needs.mssql_iceberg_debug_linux_test.result == 'success' && needs.mssql_iceberg_debug_windows_test.result == 'success')) }}
     runs-on: depot-windows-2022-16
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
@@ -851,6 +854,7 @@ jobs:
       - linux_x86
       - macos_arm64
       - windows_x86
+    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.snowflake_e2e_only == true) || (needs.linux_x86.result == 'success' && needs.macos_arm64.result == 'success' && needs.windows_x86.result == 'success')) }}
     runs-on: depot-ubuntu-22.04-16
     steps:
       - uses: actions/checkout@v4
@@ -1709,6 +1713,7 @@ jobs:
       - publish_runtime_plugins
       - linux_x86
       - windows_x86
+    if: ${{ !failure() && !cancelled() && needs.publish_runtime_plugins.result == 'success' && needs.linux_x86.result == 'success' && needs.windows_x86.result == 'success' }}
     name: MSSQL to Snowflake (windows x86)
     runs-on: depot-windows-2022-16
     environment: Skippr
