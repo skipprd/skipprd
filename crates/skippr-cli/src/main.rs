@@ -1915,7 +1915,8 @@ pub(crate) fn react_config_from_pipeline_config(
         schema_sink,
         ..Default::default()
     };
-    translate::to_internal(&cfg)
+    let workspace = yaml_string_at(value, &["skippr", "workspace"]).unwrap_or("dev");
+    translate::to_internal(&cfg, Some(workspace))
 }
 
 fn section_mapping_mut<'a>(
@@ -5299,6 +5300,8 @@ async fn run_model_body(
     internal_file: react::config::ReactConfigFile,
 ) {
     set_public_cli_el_storage_default();
+    let model_config_path = config_path(explicit_config);
+    std::env::set_var("SKIPPR_CONFIG_FILE", &model_config_path);
     let run_id = uuid::Uuid::new_v4().to_string();
     react_suite_data_engineer::metering::set_metering_run_id(&run_id);
     eprintln!("[skippr] run {run_id}");

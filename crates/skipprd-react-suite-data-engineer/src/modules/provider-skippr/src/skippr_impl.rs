@@ -68,9 +68,14 @@ impl SkipprCliProvider {
             "DATA_DIR".into(),
             self.data_dir_path().to_string_lossy().to_string(),
         );
+        let config_file = std::env::var("SKIPPR_CONFIG_FILE")
+            .ok()
+            .map(PathBuf::from)
+            .filter(|path| path.is_file())
+            .unwrap_or_else(|| self.skippr_yml_path());
         env.insert(
             "SKIPPR_CONFIG_FILE".into(),
-            self.skippr_yml_path().to_string_lossy().to_string(),
+            config_file.to_string_lossy().to_string(),
         );
         if !self.tenant.is_empty() {
             env.insert("TENANT".into(), self.tenant.clone());

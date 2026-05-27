@@ -2,6 +2,12 @@ name: Rust CI/CD Pipeline
 
 on:
   workflow_dispatch:
+    inputs:
+      snowflake_e2e_only:
+        description: 'Only build release artifacts and run MSSQL→Snowflake e2e (skip tests and other e2es)'
+        required: false
+        default: false
+        type: boolean
   push:
     tags:
       - '*'
@@ -172,6 +178,7 @@ jobs:
           runtime_plugin_packages_json: ${{ needs.plan_runtime_plugin_release.outputs.runtime_plugin_packages_json }}
 
   linux_test_suite:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
     name: cargo test (linux host/packages)
     needs:
       - plan_runtime_plugin_release
@@ -215,6 +222,7 @@ jobs:
           cargo test -p skippr-plugin-data-sink-postgres -- --nocapture
 
   data_engineer_test_suite:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
     name: cargo test (data-engineer suite/providers)
     needs:
       - plan_runtime_plugin_release
@@ -248,6 +256,7 @@ jobs:
           cargo test -p react-module-provider-catalog --test catalog_provider_parity -- --nocapture
 
   skippr_cli_test_suite:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
     name: cargo test (skippr cli)
     needs:
       - data_engineer_test_suite
@@ -277,6 +286,7 @@ jobs:
           cargo test -p skippr-cli -- --nocapture
 
   skippr_admin_test_suite:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
     name: cargo test (skippr-admin)
     needs:
       - data_engineer_test_suite
@@ -306,6 +316,7 @@ jobs:
           cargo test -p skippr-admin -- --nocapture
 
   macos_arm64_test_compile:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
     name: cargo test --no-run (macos arm64)
     needs:
       - plan_runtime_plugin_release
@@ -675,6 +686,7 @@ jobs:
           retention-days: 30
 
   windows_x86_test_compile:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
     name: cargo test --no-run (windows x86)
     needs:
       - plan_runtime_plugin_release
@@ -954,6 +966,7 @@ jobs:
             --content-type "application/json"
 
   published_runtime_plugins_smoke_test:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
     needs:
       - linux_x86
       - publish_runtime_plugins
@@ -990,6 +1003,7 @@ jobs:
           runtime_plugin_release_subdir: ${{ env.RUNTIME_PLUGIN_RELEASE_SUBDIR }}
 
   bike_hire_test:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
     needs:
       - cleanup
       - purge_dynamodb
@@ -1015,6 +1029,7 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
   chaos_mode_test:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
     needs:
       - cleanup
       - purge_dynamodb
@@ -1040,6 +1055,7 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
   s3_wal_test:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
     needs:
       - cleanup
       - purge_dynamodb
@@ -1065,6 +1081,7 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
   deadletters_test:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
     needs:
       - cleanup
       - purge_dynamodb
@@ -1090,6 +1107,7 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
   postgres_iceberg_types_cdc_test:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
     needs:
       - cleanup
       - purge_dynamodb
@@ -1231,6 +1249,7 @@ jobs:
             --skip-dynamodb-purge
 
   mysql_iceberg_types_cdc_test:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
     needs:
       - cleanup
       - purge_dynamodb
@@ -1352,6 +1371,7 @@ jobs:
             --skip-dynamodb-purge
 
   dynamodb_iceberg_types_cdc_test:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
     needs:
       - cleanup
       - purge_dynamodb
@@ -1444,6 +1464,7 @@ jobs:
             --skipprd target/debug/skipprd
 
   mssql_iceberg_debug_linux_test:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
     needs:
       - cleanup
       - purge_dynamodb
@@ -1532,6 +1553,7 @@ jobs:
             --skip-dynamodb-purge
 
   mssql_iceberg_debug_windows_test:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
     needs:
       - cleanup
       - purge_dynamodb
@@ -1721,7 +1743,7 @@ jobs:
 
   publish_skipprd:
     name: Publish skipprd Release
-    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     needs:
       - bike_hire_test
       - chaos_mode_test
@@ -1764,7 +1786,7 @@ jobs:
 
   publish_skippr:
     name: Publish skippr Release
-    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     needs:
       - mssql_snowflake_test
       - linux_x86
@@ -1805,7 +1827,7 @@ jobs:
 
   publish_github_release:
     name: Publish GitHub Release
-    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     needs:
       - publish_skipprd
       - publish_skippr
@@ -1881,7 +1903,7 @@ jobs:
 
   skipprd_release_download_test:
     name: Installed skippr EL smoke test (linux x86)
-    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     needs:
       - publish_skippr
       - publish_runtime_plugins
@@ -1911,7 +1933,7 @@ jobs:
 
   skippr_release_download_test:
     name: Installed skippr MSSQL to Snowflake (windows x86)
-    if: startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test')
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     needs:
       - publish_skippr
       - publish_runtime_plugins

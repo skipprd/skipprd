@@ -6,11 +6,18 @@ use crate::public_config::{SkipprProjectConfig, SourceConfig, WarehouseConfig};
 const DEFAULT_LLM_BASE_URL: &str = "https://api.openai.com";
 
 /// Translate the public `skippr` config into the internal runtime config.
-pub fn to_internal(cfg: &SkipprProjectConfig) -> Result<ReactConfigFile, String> {
+pub fn to_internal(
+    cfg: &SkipprProjectConfig,
+    workspace: Option<&str>,
+) -> Result<ReactConfigFile, String> {
     let project = cfg.project.trim();
     if project.is_empty() {
         return Err("project name is required in skippr.yaml".to_string());
     }
+    let workspace = workspace
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .unwrap_or("dev");
 
     let warehouse_json = match &cfg.warehouse {
         Some(WarehouseConfig::Athena {
@@ -914,7 +921,7 @@ pub fn to_internal(cfg: &SkipprProjectConfig) -> Result<ReactConfigFile, String>
         }),
         scope: Some(ScopeFile {
             tenant: Some("_".into()),
-            workspace: Some("dev".into()),
+            workspace: Some(workspace.to_string()),
             project_id: Some(project.to_string()),
         }),
         llm: Some(LlmFile {
@@ -1213,7 +1220,7 @@ mod tests {
             ..Default::default()
         };
 
-        let internal = to_internal(&cfg).unwrap();
+        let internal = to_internal(&cfg, None).unwrap();
         assert_eq!(
             internal.scope.as_ref().unwrap().project_id.as_deref(),
             Some("my_project")
@@ -1237,7 +1244,7 @@ mod tests {
             schema_sink: None,
             ..Default::default()
         };
-        assert!(to_internal(&cfg).is_err());
+        assert!(to_internal(&cfg, None).is_err());
     }
 
     #[test]
@@ -1256,7 +1263,7 @@ mod tests {
             ..Default::default()
         };
 
-        let internal = to_internal(&cfg).unwrap();
+        let internal = to_internal(&cfg, None).unwrap();
         assert_eq!(
             internal.scope.as_ref().unwrap().project_id.as_deref(),
             Some("pg_project")
@@ -1293,7 +1300,7 @@ mod tests {
             schema_sink: None,
             ..Default::default()
         };
-        assert!(to_internal(&cfg).is_err());
+        assert!(to_internal(&cfg, None).is_err());
     }
 
     fn make_cfg(warehouse: WarehouseConfig, source: SourceConfig) -> SkipprProjectConfig {
@@ -1308,13 +1315,13 @@ mod tests {
     }
 
     fn el_input(cfg: &SkipprProjectConfig) -> serde_json::Value {
-        let internal = to_internal(cfg).unwrap();
+        let internal = to_internal(cfg, None).unwrap();
         let p = internal.providers.unwrap();
         p["el"]["skippr_input"].clone()
     }
 
     fn wh_json(cfg: &SkipprProjectConfig) -> serde_json::Value {
-        let internal = to_internal(cfg).unwrap();
+        let internal = to_internal(cfg, None).unwrap();
         let p = internal.providers.unwrap();
         p["warehouse"].clone()
     }
@@ -1621,7 +1628,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let internal = to_internal(&cfg).unwrap();
+        let internal = to_internal(&cfg, None).unwrap();
         let p = internal.providers.unwrap();
         assert_eq!(p["el"]["schema_sink"]["kind"], "glue");
         assert_eq!(p["el"]["schema_sink"]["glue_database_name"], "my_glue_db");
