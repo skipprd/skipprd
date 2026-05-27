@@ -25,10 +25,7 @@ use {
 use crate::buffer::ingest_buffer::{flush_all_segments, Buffers, IngestBufferBatch};
 use crate::discover::{OutputMetadata, SkipprDataType};
 use crate::helpers::configuration::Config;
-use crate::helpers::offsets::{
-    OffsetTypes, Offsets, RuntimeOffsetOperation, RuntimeOffsetRpcRequest,
-    RuntimeOffsetRpcResponse, RuntimeOffsetValue,
-};
+use crate::helpers::offsets::{OffsetTypes, Offsets};
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks, INGEST_RT};
 use crate::plugins::cdc;
 use crate::plugins::{DataSink, SchemaSink};
@@ -321,6 +318,7 @@ fn store_checkpoint_update(offsets: &Offsets, update: &RuntimeCheckpointUpdate) 
         .map_err(io::Error::other)
 }
 
+#[cfg(test)]
 fn handle_runtime_offset_request(
     offsets: &Offsets,
     request: RuntimeOffsetRpcRequest,

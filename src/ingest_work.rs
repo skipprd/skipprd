@@ -6,12 +6,8 @@ use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
-use crate::runtime_plugins::protocol::{
-    RuntimeExecutionMode, RuntimeIngestPartitionBatch, RuntimeOffsetMaterializationHint,
-    RuntimeOffsetPosition, RuntimeRawIngestBatch,
-};
+use crate::runtime_plugins::protocol::{RuntimeExecutionMode, RuntimeRawIngestBatch};
 use crate::runtime_plugins::schema_state::bump_pipeline_schema_version;
-use crate::runtime_plugins::sdk::encode_record_batches;
 use crate::serdes::decode::decode_records;
 use crate::{ARROW_SCHEMA, ARROW_SCHEMA_VERSION, METADATA, RUNNING};
 use dashmap::DashMap;

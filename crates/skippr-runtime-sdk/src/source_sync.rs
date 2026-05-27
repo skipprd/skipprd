@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::future::Future;
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
@@ -12,7 +11,7 @@ use skippr_core::plugins::source_sync::{
     OffsetValidationEntry, SourcePayloadTask, SourceSyncContext,
 };
 use skippr_core::runtime_plugins::protocol::{
-    HostOffsetFrame, PluginDataFrame, PluginFrame, PluginOffsetFrame, RuntimeCheckpointUpdate,
+    HostOffsetFrame, PluginDataFrame, PluginOffsetFrame, RuntimeCheckpointUpdate,
     RuntimeOffsetMaterializationHint, RuntimeOffsetValidationEntry, RuntimeRawIngestBatch,
     RuntimeSessionHello, RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_OFFSET_ADDR_ENV,
     SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
@@ -172,7 +171,7 @@ impl RuntimeOffsetClient {
     }
 }
 
-pub async fn run_offset_service_reader_loop(
+pub(crate) async fn run_offset_service_reader_loop(
     mut reader: tokio::net::tcp::OwnedReadHalf,
     client: Arc<RuntimeOffsetClient>,
 ) -> io::Result<()> {
@@ -195,7 +194,7 @@ pub struct RuntimeSourceSyncContext {
 }
 
 impl RuntimeSourceSyncContext {
-    pub async fn new(
+    pub(crate) async fn new(
         control_writer: ControlWriter,
         data_writer: DataWriter,
         suppress_payloads: bool,
@@ -219,12 +218,8 @@ impl RuntimeSourceSyncContext {
         ))
     }
 
-    pub fn offset_client(&self) -> Arc<RuntimeOffsetClient> {
+    pub(crate) fn offset_client(&self) -> Arc<RuntimeOffsetClient> {
         self.offset_client.clone()
-    }
-
-    fn record_metrics(&self, metrics: ThroughputMetrics) {
-        *self.metrics.lock().unwrap() = metrics;
     }
 
     pub fn last_metrics(&self) -> ThroughputMetrics {

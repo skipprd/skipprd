@@ -21,6 +21,7 @@ pub enum ChatTarget {
 pub struct HeadlessAuthContext {
     pub resolved: ReactResolvedConfig,
     pub client: ApiClient,
+    #[allow(dead_code)]
     pub pipeline: PipelineName,
 }
 

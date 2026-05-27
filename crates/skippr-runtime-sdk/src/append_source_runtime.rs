@@ -5,9 +5,7 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use async_trait::async_trait;
 use clap::Parser;
-use datafusion::execution::SendableRecordBatchStream;
 use skippr_core::discover::OutputMetadata as CoreOutputMetadata;
 use skippr_core::helpers::configuration::{Config, PIPELINE_NAME};
 use skippr_core::helpers::logging::init_logging;
@@ -20,10 +18,9 @@ use tokio::runtime::Handle;
 use tokio::sync::{watch, Mutex};
 
 use crate::protocol::{
-    HandshakeResponse, HostFrame, PluginDataFrame, PluginFrame, RuntimeCheckpointUpdate,
-    RuntimeExecutionMode, RuntimeIngestPartitionBatch, RuntimeOffsetMaterializationHint,
-    RuntimePluginConfigEnvelope, RuntimePluginKind, RuntimeRawIngestBatch, RuntimeSchemaState,
-    RuntimeSessionHello, RuntimeSourceCapabilityDescriptor, RuntimeSourceSinkWrite, SourceEvent,
+    HandshakeResponse, HostFrame, PluginDataFrame, PluginFrame, RuntimeExecutionMode,
+    RuntimePluginConfigEnvelope, RuntimePluginKind,
+    RuntimeSchemaState, RuntimeSessionHello, RuntimeSourceCapabilityDescriptor, SourceEvent,
     SourceStartRequest, RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV,
     SKIPPR_RUNTIME_DATA_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
@@ -89,6 +86,7 @@ impl RuntimeSourceActivity {
             .as_millis() as u64
     }
 
+    #[cfg(test)]
     fn mark_source_data(&self) {
         self.last_source_data_ms
             .store(Self::now_millis(), Ordering::Release);
@@ -132,13 +130,6 @@ fn current_runtime_schema_state_from_core() -> RuntimeSchemaState {
         version: PIPELINE_SCHEMA_VERSION.load(Ordering::Acquire),
         namespaces,
     }
-}
-
-fn compaction_id_for_filename(filename: &str) -> String {
-    filename
-        .rsplit_once("-c=")
-        .map(|(_, suffix)| suffix.to_string())
-        .unwrap_or_else(|| filename.to_string())
 }
 
 pub(crate) fn block_on_handle<F, T>(handle: &Handle, future: F) -> T
@@ -218,18 +209,6 @@ impl RuntimeSourceControl {
     fn shutdown_error(&self) -> Option<String> {
         self.shutdown_error.lock().unwrap().clone()
     }
-}
-
-async fn publish_schema_state_if_needed(control_writer: &ControlWriter) -> io::Result<()> {
-    let schema_state = current_runtime_schema_state_from_core();
-    if schema_state.namespaces.is_empty() {
-        return Ok(());
-    }
-    control_writer
-        .write(&PluginFrame::SourceEvent(SourceEvent::SchemaStateUpdate(
-            schema_state,
-        )))
-        .await
 }
 
 async fn run_runtime_source_host_frame_loop(

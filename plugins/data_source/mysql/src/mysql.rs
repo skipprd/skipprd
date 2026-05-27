@@ -646,7 +646,7 @@ impl DataSource for DataSourceMysqlPlugin {
     async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         match self.cdc_mode() {
             SourceCdcMode::Snapshot => {
-                self.sync_query(ctx, false).await;
+                self.sync_query(ctx, false).await?;
                 Ok(())
             }
             mode @ (SourceCdcMode::SnapshotThenCdc | SourceCdcMode::CdcOnly) => {

@@ -483,6 +483,7 @@ impl ApiClient {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn cancel_run(&self, workspace: &str, run_id: &str) -> Result<(), ApiError> {
         let url = format!(
             "{}/auth/workspaces/{}/runs/{}/cancel",
@@ -501,6 +502,7 @@ impl ApiClient {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn get_run_lock(&self, workspace: &str) -> Result<RunLockStatusResponse, ApiError> {
         let url = format!("{}/auth/workspaces/{}/runs/lock", self.base_url, workspace);
         let resp = self
@@ -518,6 +520,7 @@ impl ApiClient {
             .map_err(|e| ApiError::network("Get run lock parse failed", e))
     }
 
+    #[allow(dead_code)]
     pub async fn put_run_record(
         &self,
         workspace: &str,
@@ -542,6 +545,7 @@ impl ApiClient {
         Ok(())
     }
 
+    #[allow(dead_code)]
     pub async fn list_runs(&self, workspace: &str) -> Result<ListRunsResponse, ApiError> {
         let url = format!("{}/auth/workspaces/{}/runs", self.base_url, workspace);
         let resp = self
@@ -559,6 +563,7 @@ impl ApiClient {
             .map_err(|e| ApiError::network("List runs parse failed", e))
     }
 
+    #[allow(dead_code)]
     pub async fn get_run_record(
         &self,
         workspace: &str,
@@ -592,6 +597,7 @@ pub struct AcquireLockResponse {
     pub lease_expires_at: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunLockStatus {
@@ -604,18 +610,21 @@ pub struct RunLockStatus {
     pub cancel_requested: bool,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunLockStatusResponse {
     pub lock: Option<RunLockStatus>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ListRunsResponse {
     pub runs: Vec<RunSummary>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunSummary {
@@ -627,6 +636,7 @@ pub struct RunSummary {
     pub started_at: String,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunRecordResponse {
