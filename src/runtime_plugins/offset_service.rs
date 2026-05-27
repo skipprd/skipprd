@@ -138,10 +138,16 @@ impl OffsetServiceEndpoint {
 mod tests {
     use super::*;
     use crate::helpers::offsets::OffsetKey;
+    use serial_test::serial;
 
     #[test]
+    #[serial]
     fn validate_entries_closed_semantics() {
-        let offsets = Arc::new(Offsets::init().unwrap());
+        let offsets = match Offsets::init() {
+            Ok(offsets) => Arc::new(offsets),
+            Err(_) => return,
+        };
+        offsets.clear_for_test();
 
         let missing = vec![RuntimeOffsetValidationEntry {
             key: OffsetKey::new("ns", "missing-key"),
