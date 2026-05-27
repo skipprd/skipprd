@@ -2557,7 +2557,8 @@ fn env_example_path_from_project_root(project_root: &std::path::Path) -> PathBuf
     project_root.join(".env.example")
 }
 
-async fn load_reset_server_credentials() -> Result<api_client::CredentialsResponse, String> {
+async fn load_cli_auth_credentials(
+) -> Result<(auth::StoredCredentials, bool), String> {
     let authenticated_with_api_key = std::env::var("SKIPPR_API_KEY")
         .ok()
         .is_some_and(|value| !value.trim().is_empty());
@@ -2576,10 +2577,21 @@ async fn load_reset_server_credentials() -> Result<api_client::CredentialsRespon
             .await
     } else {
         return Err(
-            "Authentication required to reset cloud project data. Run 'skippr user login' or set SKIPPR_API_KEY."
-                .to_string(),
+            "Authentication required. Run 'skippr user login' or set SKIPPR_API_KEY.".to_string(),
         );
     };
+    Ok((creds, authenticated_with_api_key))
+}
+
+async fn load_reset_server_credentials() -> Result<api_client::CredentialsResponse, String> {
+    let (creds, authenticated_with_api_key) = load_cli_auth_credentials()
+        .await
+        .map_err(|err| {
+            err.replace(
+                "Authentication required",
+                "Authentication required to reset cloud project data",
+            )
+        })?;
 
     let base_url = auth::auth_base_url();
     let tokens = create_token_provider(&creds);
@@ -6605,16 +6617,6 @@ fn cmd_user_logout(output: &str) {
     }
 }
 
-fn load_stored_credentials_or_exit() -> auth::StoredCredentials {
-    match auth::load_credentials() {
-        Some(creds) => creds,
-        None => {
-            eprintln!("Not logged in. Run: skippr user login");
-            std::process::exit(1);
-        }
-    }
-}
-
 pub(crate) async fn refresh_user_credentials_or_exit(
     client: &api_client::ApiClient,
     creds: auth::StoredCredentials,
@@ -6636,13 +6638,6 @@ pub(crate) async fn refresh_user_credentials_or_exit(
     }
 }
 
-async fn load_authenticated_user_credentials(
-    client: &api_client::ApiClient,
-) -> auth::StoredCredentials {
-    let creds = load_stored_credentials_or_exit();
-    refresh_user_credentials_or_exit(client, creds).await
-}
-
 pub(crate) fn create_token_provider(
     creds: &auth::StoredCredentials,
 ) -> std::sync::Arc<react_suite_data_engineer::metering::TokenProvider> {
@@ -6660,12 +6655,17 @@ pub(crate) fn create_token_provider(
 }
 
 async fn authenticated_api_client() -> api_client::ApiClient {
+    let (creds, authenticated_with_api_key) = match load_cli_auth_credentials().await {
+        Ok(value) => value,
+        Err(err) => {
+            eprintln!("{}", err);
+            std::process::exit(1);
+        }
+    };
     let base_url = auth::auth_base_url();
-    let unauthenticated = api_client::ApiClient::new(&base_url);
-    let creds = load_authenticated_user_credentials(&unauthenticated).await;
     let tokens = create_token_provider(&creds);
     let client = api_client::ApiClient::authenticated(&base_url, tokens);
-    if let Err(e) = ensure_eula_accepted(&client, true).await {
+    if let Err(e) = ensure_eula_accepted(&client, !authenticated_with_api_key).await {
         eprintln!("{}", e);
         std::process::exit(1);
     }
