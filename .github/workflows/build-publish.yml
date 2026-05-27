@@ -208,7 +208,7 @@ jobs:
       - name: Run root host test suite
         shell: bash
         run: |
-          cargo test -p skipprd -- --nocapture
+          cargo test -p skipprd -- --nocapture --test-threads=1
       - name: Run postgres plugin tests
         shell: bash
         run: |

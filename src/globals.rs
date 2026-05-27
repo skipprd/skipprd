@@ -40,3 +40,15 @@ pub static ARROW_SCHEMA_VERSION: Lazy<dashmap::DashMap<String, AtomicU64>> =
 
 /// Monotonic latest-only schema version for the whole pipeline runtime.
 pub static PIPELINE_SCHEMA_VERSION: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+
+/// Serializes tests that mutate [`METADATA`] or other process-wide pipeline globals.
+#[cfg(test)]
+pub static METADATA_TEST_LOCK: Lazy<std::sync::Mutex<()>> =
+    Lazy::new(|| std::sync::Mutex::new(()));
+
+#[cfg(test)]
+pub fn metadata_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    METADATA_TEST_LOCK
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}

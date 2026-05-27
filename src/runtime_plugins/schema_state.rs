@@ -146,59 +146,67 @@ mod tests {
         clear_runtime_source_schema_state();
     }
 
+    fn with_metadata_test_lock<T>(f: impl FnOnce() -> T) -> T {
+        let _guard = crate::metadata_test_lock();
+        f()
+    }
+
     #[test]
     #[serial]
     fn identical_runtime_schema_state_reports_no_changed_namespaces() {
-        let namespace_metadata = root_record_with_field("id", SkipprDataType::String);
-        let output = OutputMetadata::from_metadata(&namespace_metadata);
-        install_metadata(HashMap::from([("events".to_string(), namespace_metadata)]));
+        with_metadata_test_lock(|| {
+            let namespace_metadata = root_record_with_field("id", SkipprDataType::String);
+            let output = OutputMetadata::from_metadata(&namespace_metadata);
+            install_metadata(HashMap::from([("events".to_string(), namespace_metadata)]));
 
-        let changed = apply_runtime_source_schema_state(RuntimeSchemaState {
-            version: 1,
-            namespaces: BTreeMap::from([("events".to_string(), output)]),
+            let changed = apply_runtime_source_schema_state(RuntimeSchemaState {
+                version: 1,
+                namespaces: BTreeMap::from([("events".to_string(), output)]),
+            });
+
+            assert!(changed.is_empty());
         });
-
-        assert!(changed.is_empty());
     }
 
     #[test]
     #[serial]
     fn schema_state_change_detection_ignores_non_published_ids() {
-        let namespace_metadata = root_record_with_field("id", SkipprDataType::String);
-        let mut output = OutputMetadata::from_metadata(&namespace_metadata);
-        output.field_id = 42;
-        output.schema_id = 99;
-        output.lineage_id = "runtime-lineage".to_string();
-        install_metadata(HashMap::from([("events".to_string(), namespace_metadata)]));
+        with_metadata_test_lock(|| {
+            let namespace_metadata = root_record_with_field("id", SkipprDataType::String);
+            let mut output = OutputMetadata::from_metadata(&namespace_metadata);
+            output.field_id = 42;
+            output.schema_id = 99;
+            output.lineage_id = "runtime-lineage".to_string();
+            install_metadata(HashMap::from([("events".to_string(), namespace_metadata)]));
 
-        let changed = apply_runtime_source_schema_state(RuntimeSchemaState {
-            version: 1,
-            namespaces: BTreeMap::from([("events".to_string(), output)]),
+            let changed = apply_runtime_source_schema_state(RuntimeSchemaState {
+                version: 1,
+                namespaces: BTreeMap::from([("events".to_string(), output)]),
+            });
+
+            assert!(changed.is_empty());
         });
-
-        assert!(changed.is_empty());
     }
 
     #[test]
     #[serial]
     fn changed_runtime_schema_state_reports_only_changed_namespaces() {
-        let metadata_output =
-            OutputMetadata::from_metadata(&root_record_with_field("id", SkipprDataType::String));
-        let changed_output =
-            OutputMetadata::from_metadata(&root_record_with_field("id", SkipprDataType::Long));
-        install_metadata(HashMap::from([(
-            "events".to_string(),
-            root_record_with_field("id", SkipprDataType::String),
-        )]));
+        with_metadata_test_lock(|| {
+            let events_metadata = root_record_with_field("id", SkipprDataType::String);
+            let metadata_output = OutputMetadata::from_metadata(&events_metadata);
+            let changed_output =
+                OutputMetadata::from_metadata(&root_record_with_field("id", SkipprDataType::Long));
+            install_metadata(HashMap::from([("events".to_string(), events_metadata)]));
 
-        let changed = apply_runtime_source_schema_state(RuntimeSchemaState {
-            version: 1,
-            namespaces: BTreeMap::from([
-                ("events".to_string(), metadata_output),
-                ("users".to_string(), changed_output),
-            ]),
+            let changed = apply_runtime_source_schema_state(RuntimeSchemaState {
+                version: 1,
+                namespaces: BTreeMap::from([
+                    ("events".to_string(), metadata_output),
+                    ("users".to_string(), changed_output),
+                ]),
+            });
+
+            assert_eq!(changed, vec!["users".to_string()]);
         });
-
-        assert_eq!(changed, vec!["users".to_string()]);
     }
 }
