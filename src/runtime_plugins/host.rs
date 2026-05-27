@@ -26,6 +26,10 @@ use crate::buffer::ingest_buffer::{flush_all_segments, Buffers, IngestBufferBatc
 use crate::discover::{OutputMetadata, SkipprDataType};
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetTypes, Offsets};
+#[cfg(test)]
+use crate::helpers::offsets::{
+    RuntimeOffsetOperation, RuntimeOffsetRpcRequest, RuntimeOffsetRpcResponse, RuntimeOffsetValue,
+};
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks, INGEST_RT};
 use crate::plugins::cdc;
 use crate::plugins::{DataSink, SchemaSink};
