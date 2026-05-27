@@ -10,10 +10,9 @@ use tracing::{error, info};
 use crate::helpers::configuration::{Config, DataSourcePluginConfig};
 use async_trait::async_trait;
 use skippr_runtime_sdk::plugins::DataSource;
-use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes};
+use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{
-    load_checkpoint_payload, submit_payload_batch_groups, submit_payload_batches,
-    partition_already_closed, IngestBatch, SourceSyncContext,
+    submit_payload_batch_groups, partition_already_closed, IngestBatch, SourceSyncContext,
 };
 
 #[derive(Debug, Deserialize, Clone)]

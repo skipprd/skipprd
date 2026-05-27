@@ -18,7 +18,7 @@ use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::serdes::input_format::InputFormat;
 use skippr_runtime_sdk::plugins::DataSource;
-use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes};
+use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{
     partition_already_closed, submit_payload_batch_groups, IngestBatch, SourceSyncContext,
 };

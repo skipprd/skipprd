@@ -99,7 +99,7 @@ pub fn strip_query_history_evidence(mut graph: LineageGraphSnapshot) -> LineageG
         true
     });
     graph.edges.retain(|edge| {
-        edge.provenance.source != Some(LineageEvidenceSource::WarehouseQueryHistory)
+        edge.provenance.source != LineageEvidenceSource::WarehouseQueryHistory
             && !query_node_ids.contains(&edge.from_node_id)
             && !query_node_ids.contains(&edge.to_node_id)
     });

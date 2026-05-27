@@ -20,7 +20,7 @@ use skippr_runtime_sdk::plugins::{
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{
     load_checkpoint_payload, submit_payload_batch_groups, submit_payload_batches,
-    validate_offset_key, IngestBatch, SourceSyncContext,
+    IngestBatch, SourceSyncContext,
 };
 
 #[derive(Debug, Deserialize, Clone)]

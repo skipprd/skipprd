@@ -20,7 +20,7 @@ use skippr_runtime_sdk::plugins::cdc::{
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
 };
-use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes};
+use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{
     load_checkpoint_payload, submit_payload_batch_groups, submit_payload_batches,
     partition_already_closed, IngestBatch, SourceSyncContext,
