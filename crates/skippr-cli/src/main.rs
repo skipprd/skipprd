@@ -404,10 +404,8 @@ struct QueryArgs {
 enum LineageAction {
     /// Rebuild and persist the catalog lineage graph.
     Refresh(LineageRefreshArgs),
-    /// Read the persisted lineage graph, optionally sliced around an asset or field.
+    /// Read the persisted lineage graph, optionally sliced around a field node.
     Graph(LineageGraphArgs),
-    /// Resolve schema fields for a lineage node.
-    NodeSchema(LineageNodeSchemaArgs),
     /// Analyze warehouse query history and merge query/dashboard evidence into lineage.
     ImportQueryHistory(LineageImportQueryHistoryArgs),
 }
@@ -436,28 +434,12 @@ struct LineageGraphArgs {
     /// Pipeline whose configured DE suite scope should be read. Omit to merge all persisted pipeline lineage graphs.
     #[arg(long)]
     pipeline: Option<PipelineName>,
-    /// Asset/node/dataset id to center the graph on.
+    /// Field node id to center the graph on.
     #[arg(long)]
-    asset: Option<String>,
-    /// Field path to center the graph on.
-    #[arg(long)]
-    field: Option<String>,
+    field_node_id: Option<String>,
     /// Direction: upstream, downstream, or both.
     #[arg(long, default_value = "both")]
     direction: String,
-    /// Output mode: json or jsonl.
-    #[arg(long, default_value = "json")]
-    output: String,
-}
-
-#[derive(Parser, Debug, Clone)]
-struct LineageNodeSchemaArgs {
-    /// Pipeline whose configured DE suite scope should be read.
-    #[arg(long)]
-    pipeline: PipelineName,
-    /// Lineage node id to resolve schema fields for.
-    #[arg(long)]
-    node_id: String,
     /// Output mode: json or jsonl.
     #[arg(long, default_value = "json")]
     output: String,
@@ -2557,8 +2539,7 @@ fn env_example_path_from_project_root(project_root: &std::path::Path) -> PathBuf
     project_root.join(".env.example")
 }
 
-async fn load_cli_auth_credentials(
-) -> Result<(auth::StoredCredentials, bool), String> {
+async fn load_cli_auth_credentials() -> Result<(auth::StoredCredentials, bool), String> {
     let authenticated_with_api_key = std::env::var("SKIPPR_API_KEY")
         .ok()
         .is_some_and(|value| !value.trim().is_empty());
@@ -2584,14 +2565,12 @@ async fn load_cli_auth_credentials(
 }
 
 async fn load_reset_server_credentials() -> Result<api_client::CredentialsResponse, String> {
-    let (creds, authenticated_with_api_key) = load_cli_auth_credentials()
-        .await
-        .map_err(|err| {
-            err.replace(
-                "Authentication required",
-                "Authentication required to reset cloud project data",
-            )
-        })?;
+    let (creds, authenticated_with_api_key) = load_cli_auth_credentials().await.map_err(|err| {
+        err.replace(
+            "Authentication required",
+            "Authentication required to reset cloud project data",
+        )
+    })?;
 
     let base_url = auth::auth_base_url();
     let tokens = create_token_provider(&creds);
@@ -4590,9 +4569,92 @@ async fn build_lineage_suite_ctx(
     let auth_ctx = headless_prep::authenticate_headless_for_pipeline(explicit_config, pipeline)
         .await
         .map_err(|e| e.to_string())?;
-    react::bootstrap::build_suite_ctx_with(&auth_ctx.resolved, &react_host::SkipprHost)
-        .await
-        .map_err(|e| e.to_string())
+    let lineage_env = prepare_lineage_engine_environment(
+        explicit_config,
+        pipeline,
+        auth_ctx.resolved.scope.tenant.as_str(),
+    )
+    .await?;
+    let mut suite_ctx =
+        react::bootstrap::build_suite_ctx_with(&auth_ctx.resolved, &react_host::SkipprHost)
+            .await
+            .map_err(|e| e.to_string())?;
+    suite_ctx.set_capability(std::sync::Arc::new(
+        react_suite_data_engineer::ctx_ext::SkipprdMetadataCap {
+            locations: lineage_env.metadata_locations,
+        },
+    ));
+    Ok(suite_ctx)
+}
+
+struct LineageEngineEnvironment {
+    metadata_locations: Vec<react_suite_data_engineer::ctx_ext::SkipprdMetadataLocation>,
+}
+
+async fn prepare_lineage_engine_environment(
+    explicit_config: &Option<PathBuf>,
+    pipeline: &str,
+    tenant: &str,
+) -> Result<LineageEngineEnvironment, String> {
+    use react_suite_data_engineer::ctx_ext::SkipprdMetadataLocation;
+
+    let path = config_path(explicit_config);
+    if !path.exists() {
+        return Err(format!("{} not found", path.display()));
+    }
+    let engine_cfg = load_cli_execution_config(explicit_config)?;
+    validate_pipeline_exists(&engine_cfg, pipeline)?;
+    set_public_cli_el_storage_default();
+    std::env::set_var("SKIPPR_CONFIG_FILE", &path);
+    skipprd::helpers::configuration::Config::setenv("TENANT", tenant);
+    skipprd::helpers::configuration::PIPELINE_NAME
+        .write()
+        .clear();
+    skipprd::helpers::configuration::PIPELINE_NAME
+        .write()
+        .push_str(pipeline);
+
+    let project_root = project_root_from_config_path(&path);
+    let workspace = yaml_string_at(&engine_cfg, &["skippr", "workspace"]).unwrap_or("default");
+    let pipeline_cfg = pipeline_config(&engine_cfg, pipeline)?;
+    let data_dir = cli_pipeline_data_dir(&project_root, tenant, pipeline, workspace, pipeline_cfg);
+    std::fs::create_dir_all(&data_dir).map_err(|err| {
+        format!(
+            "failed to create pipeline data directory '{}': {err}",
+            data_dir.display()
+        )
+    })?;
+    skipprd::helpers::configuration::Config::setenv("DATA_DIR", &data_dir.to_string_lossy());
+    skipprd::helpers::configuration::Config::setenv("SKIPPR_PIPELINE_DATA_ROOT", "true");
+    load_dotenv_for_skippr_config_yaml_path(&path);
+    skipprd::helpers::configuration::Config::init().await;
+    std::env::set_var("SKIPPR_CLOUD_WORKSPACE", workspace);
+
+    let mut metadata_locations = Vec::new();
+    metadata_locations.push(SkipprdMetadataLocation::LocalPath(
+        data_dir.join("metadata").join("metadata.json"),
+    ));
+    metadata_locations.push(SkipprdMetadataLocation::LocalPath(
+        data_dir
+            .join(tenant)
+            .join(workspace)
+            .join(pipeline)
+            .join("metadata")
+            .join("metadata.json"),
+    ));
+    metadata_locations.push(SkipprdMetadataLocation::LocalPath(
+        skippr_dir_from_project_root(&project_root)
+            .join(tenant)
+            .join(workspace)
+            .join(pipeline)
+            .join("metadata")
+            .join("metadata.json"),
+    ));
+    metadata_locations.push(SkipprdMetadataLocation::StorageKey(format!(
+        "{tenant}/{workspace}/{pipeline}/metadata/metadata.json"
+    )));
+
+    Ok(LineageEngineEnvironment { metadata_locations })
 }
 
 async fn load_all_lineage_graphs(
@@ -4676,8 +4738,7 @@ async fn cmd_lineage(
         LineageAction::Graph(args) => {
             let output = args.output.clone();
             let query = react_suite_data_engineer::lineage_types::LineageGraphQuery {
-                asset: args.asset.clone(),
-                field: args.field.clone(),
+                field_node_id: args.field_node_id.clone(),
                 direction: lineage_direction(&args.direction),
             };
             if let Some(pipeline) = args.pipeline.as_ref() {
@@ -4720,31 +4781,6 @@ async fn cmd_lineage(
                     }
                 }
             }
-        }
-        LineageAction::NodeSchema(args) => {
-            let output = args.output.clone();
-            let pipeline = args.pipeline.as_str();
-            let suite_ctx = match build_lineage_suite_ctx(explicit_config, &args.pipeline).await {
-                Ok(ctx) => ctx,
-                Err(e) => {
-                    emit_lineage_json(
-                        &output,
-                        &serde_json::json!({"ok": false, "pipeline": pipeline, "error": e}),
-                    );
-                    std::process::exit(1);
-                }
-            };
-            let response = react_suite_data_engineer::lineage_builder::resolve_lineage_node_schema(
-                &suite_ctx,
-                pipeline,
-                &args.node_id,
-            )
-            .await;
-            if !response.ok {
-                emit_lineage_json(&output, &response);
-                std::process::exit(1);
-            }
-            emit_lineage_json(&output, &response);
         }
         LineageAction::ImportQueryHistory(args) => {
             let output = args.output.clone();
@@ -5256,11 +5292,11 @@ async fn run_model_body(
     log: Option<String>,
     explicit_config: &Option<PathBuf>,
     args: &ModelArgs,
-    engine_cfg: &serde_yaml::Value,
+    _engine_cfg: &serde_yaml::Value,
     agent_type: &str,
     transport_agent_type: &str,
     client: api_client::ApiClient,
-    mut internal_file: react::config::ReactConfigFile,
+    internal_file: react::config::ReactConfigFile,
 ) {
     let run_id = uuid::Uuid::new_v4().to_string();
     react_suite_data_engineer::metering::set_metering_run_id(&run_id);

@@ -34,6 +34,7 @@ react-module-provider-bigquery = { path = "../skipprd-react-suite-data-engineer/
 react-module-provider-athena = { path = "../skipprd-react-suite-data-engineer/src/modules/provider-athena" }
 react-module-provider-dbt = { path = "../skipprd-react-suite-data-engineer/src/modules/provider-dbt" }
 react-module-provider-catalog = { path = "../skipprd-react-suite-data-engineer/src/modules/provider-catalog" }
+react-module-provider-skippr = { path = "../skipprd-react-suite-data-engineer/src/modules/provider-skippr" }
 react-module-provider-snowflake = { path = "../skipprd-react-suite-data-engineer/src/modules/provider-snowflake" }
 react-module-provider-mssql = { path = "../skipprd-react-suite-data-engineer/src/modules/provider-mssql" }
 react-module-provider-databricks = { path = "../skipprd-react-suite-data-engineer/src/modules/provider-databricks" }

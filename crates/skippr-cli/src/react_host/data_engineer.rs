@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use react::runtime_settings::{getenv_nonempty, getenv_u64, getenv_usize};
@@ -13,10 +14,12 @@ use react_module_provider_motherduck::{MotherDuckProvider, MotherDuckSettings};
 use react_module_provider_mssql::{MssqlProvider, MssqlSettings};
 use react_module_provider_postgres::{PostgresProvider, PostgresSettings};
 use react_module_provider_redshift::{RedshiftProvider, RedshiftSettings};
+use react_module_provider_skippr::SkipprCliProvider;
 use react_module_provider_snowflake::{SnowflakeProvider, SnowflakeSettings};
 use react_module_provider_synapse::{SynapseProvider, SynapseSettings};
 use react_suite_data_engineer::ctx_ext::{
-    CatalogCap, DatasetsCap, DbtCap, PipelineCap, ProvidersCfgCap, QueryCap, WarehouseCap,
+    CatalogCap, DatasetsCap, DbtCap, PipelineCap, ProvidersCfgCap, QueryCap, SkipprCap,
+    WarehouseCap,
 };
 use react_suite_data_engineer::de_config::{self as de_cfg, WarehouseKind};
 
@@ -623,6 +626,22 @@ pub(crate) async fn wire_providers(
             keyspace.clone(),
             runner,
         )))));
+    }
+
+    if providers.el.enabled {
+        let data_dir = std::env::var("DATA_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from(".skippr"));
+        let storage_mode = getenv_nonempty("SKIPPRD_EL_STORAGE_MODE");
+        let storage_bucket = getenv_nonempty("SKIPPR_S3_BUCKET");
+        let skippr = Arc::new(SkipprCliProvider::new(
+            providers.el.clone(),
+            providers.warehouse.clone(),
+            data_dir,
+            storage_mode,
+            storage_bucket,
+        ));
+        sctx.set_capability(Arc::new(SkipprCap(skippr)));
     }
 
     let pipeline = react_suite_data_engineer::PipelineName::parse(sctx.scope().project_id.as_str())
