@@ -454,11 +454,18 @@ pub(crate) async fn wire_providers(
     lance_uri_prefix: &str,
     lance_storage_opts: LanceStorageOptions,
 ) -> Result<(), String> {
-    let cfg = sctx
-        .resolved_config()
-        .as_ref()
-        .expect("resolved_config must be set before wire_providers");
-    let providers = de_cfg::de_config_from_resolved(cfg).unwrap_or_default();
+    let (providers, tenant, workspace, pipeline_id) = {
+        let cfg = sctx
+            .resolved_config()
+            .as_ref()
+            .expect("resolved_config must be set before wire_providers");
+        (
+            de_cfg::de_config_from_resolved(cfg).unwrap_or_default(),
+            cfg.scope.tenant.to_string(),
+            cfg.scope.workspace.to_string(),
+            cfg.scope.project_id.to_string(),
+        )
+    };
     let wh_kind = providers.warehouse.kind;
 
     match wh_kind {
@@ -629,7 +636,6 @@ pub(crate) async fn wire_providers(
     }
 
     if providers.el.enabled {
-        let scope = &cfg.scope;
         let project_root = std::env::var("SKIPPR_CONFIG_FILE")
             .ok()
             .map(PathBuf::from)
@@ -637,11 +643,10 @@ pub(crate) async fn wire_providers(
             .unwrap_or_else(|| PathBuf::from("."));
 
         // Match `prepare_engine_command`: EL metadata lives under `.skippr/{tenant}/{pipeline}`.
-        let tenant = scope.tenant.to_string();
-        let workspace = scope.workspace.to_string();
-        let pipeline = scope.project_id.to_string();
-
-        let data_dir = project_root.join(".skippr").join(&tenant).join(&pipeline);
+        let data_dir = project_root
+            .join(".skippr")
+            .join(&tenant)
+            .join(&pipeline_id);
 
         let storage_mode = getenv_nonempty("SKIPPRD_EL_STORAGE_MODE").or_else(|| Some("local".into()));
         let storage_bucket = storage_mode
@@ -661,7 +666,7 @@ pub(crate) async fn wire_providers(
         sctx.set_capability(Arc::new(SkipprCap(skippr)));
     }
 
-    let pipeline = react_suite_data_engineer::PipelineName::parse(sctx.scope().project_id.as_str())
+    let pipeline = react_suite_data_engineer::PipelineName::parse(&pipeline_id)
         .map_err(|e| format!("invalid data-engineer pipeline scope: {e}"))?;
     sctx.set_capability(Arc::new(PipelineCap(pipeline)));
     sctx.set_capability(Arc::new(ProvidersCfgCap(providers)));
