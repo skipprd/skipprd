@@ -252,6 +252,7 @@ runs:
             Write-Error "::error::Snowflake raw type assertion failed with exit code $LASTEXITCODE"
           }
 
+          $env:SKIPPRD_EL_STORAGE_MODE = "local"
           & $skipprBin --config $configPath --log info model --pipeline $projectName --no-resume 2>&1 | Tee-Object -FilePath $logPath
           $status = $LASTEXITCODE
           if ($status -ne 0) {

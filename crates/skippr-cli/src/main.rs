@@ -5298,6 +5298,7 @@ async fn run_model_body(
     client: api_client::ApiClient,
     internal_file: react::config::ReactConfigFile,
 ) {
+    set_public_cli_el_storage_default();
     let run_id = uuid::Uuid::new_v4().to_string();
     react_suite_data_engineer::metering::set_metering_run_id(&run_id);
     eprintln!("[skippr] run {run_id}");

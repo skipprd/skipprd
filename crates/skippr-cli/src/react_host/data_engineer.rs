@@ -629,15 +629,31 @@ pub(crate) async fn wire_providers(
     }
 
     if providers.el.enabled {
-        let data_dir = std::env::var("DATA_DIR")
+        let scope = &cfg.scope;
+        let project_root = std::env::var("SKIPPR_CONFIG_FILE")
+            .ok()
             .map(PathBuf::from)
-            .unwrap_or_else(|_| PathBuf::from(".skippr"));
-        let storage_mode = getenv_nonempty("SKIPPRD_EL_STORAGE_MODE");
-        let storage_bucket = getenv_nonempty("SKIPPR_S3_BUCKET");
+            .and_then(|path| path.parent().map(|parent| parent.to_path_buf()))
+            .unwrap_or_else(|| PathBuf::from("."));
+
+        // Match `prepare_engine_command`: EL metadata lives under `.skippr/{tenant}/{pipeline}`.
+        let data_dir = project_root
+            .join(".skippr")
+            .join(scope.tenant.as_str())
+            .join(scope.project_id.as_str());
+
+        let storage_mode = getenv_nonempty("SKIPPRD_EL_STORAGE_MODE").or_else(|| Some("local".into()));
+        let storage_bucket = storage_mode
+            .as_deref()
+            .filter(|mode| mode.eq_ignore_ascii_case("s3"))
+            .and_then(|_| getenv_nonempty("SKIPPR_S3_BUCKET"));
+
         let skippr = Arc::new(SkipprCliProvider::new(
             providers.el.clone(),
             providers.warehouse.clone(),
             data_dir,
+            scope.tenant.clone(),
+            scope.workspace.clone(),
             storage_mode,
             storage_bucket,
         ));

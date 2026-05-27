@@ -13,6 +13,8 @@ use react_suite_data_engineer::providers::{
 pub struct SkipprCliProvider {
     pub binary: String,
     pub data_dir: PathBuf,
+    pub tenant: String,
+    pub workspace: String,
     pub el_config: ElToolResolved,
     pub warehouse: WarehouseResolved,
     pub storage_mode: Option<String>,
@@ -24,6 +26,8 @@ impl SkipprCliProvider {
         el_config: ElToolResolved,
         warehouse: WarehouseResolved,
         data_dir: PathBuf,
+        tenant: String,
+        workspace: String,
         storage_mode: Option<String>,
         storage_bucket: Option<String>,
     ) -> Self {
@@ -35,6 +39,8 @@ impl SkipprCliProvider {
         Self {
             binary,
             data_dir,
+            tenant,
+            workspace,
             el_config,
             warehouse,
             storage_mode,
@@ -66,6 +72,12 @@ impl SkipprCliProvider {
             "SKIPPR_CONFIG_FILE".into(),
             self.skippr_yml_path().to_string_lossy().to_string(),
         );
+        if !self.tenant.is_empty() {
+            env.insert("TENANT".into(), self.tenant.clone());
+        }
+        if !self.workspace.is_empty() {
+            env.insert("WORKSPACE_NAME".into(), self.workspace.clone());
+        }
         if let Some(storage_mode) = self.storage_mode.as_deref().filter(|v| !v.is_empty()) {
             env.insert("SKIPPRD_EL_STORAGE_MODE".into(), storage_mode.to_string());
         }
@@ -745,6 +757,12 @@ impl SkipprCliProvider {
         }
 
         let mut skippr_block = serde_json::Map::new();
+        if !self.workspace.is_empty() {
+            skippr_block.insert(
+                "workspace".to_string(),
+                serde_json::Value::String(self.workspace.clone()),
+            );
+        }
         if let Some(storage_mode) = self.storage_mode.as_deref().filter(|v| !v.is_empty()) {
             skippr_block.insert(
                 "skipprd_el_storage_mode".to_string(),
@@ -1399,6 +1417,8 @@ mod tests {
         SkipprCliProvider {
             binary: "skipprd".to_string(),
             data_dir: PathBuf::from("/tmp/skippr-provider-test"),
+            tenant: "tenant".to_string(),
+            workspace: "workspace".to_string(),
             el_config: ElToolResolved::default(),
             warehouse: WarehouseResolved {
                 kind: WarehouseKind::Postgres,
@@ -1415,6 +1435,8 @@ mod tests {
         SkipprCliProvider {
             binary: "skipprd".to_string(),
             data_dir: PathBuf::from("/tmp/skippr-provider-test"),
+            tenant: "tenant".to_string(),
+            workspace: "workspace".to_string(),
             el_config: ElToolResolved::default(),
             warehouse: WarehouseResolved {
                 kind: WarehouseKind::Databricks,
@@ -1435,6 +1457,8 @@ mod tests {
         SkipprCliProvider {
             binary: "skipprd".to_string(),
             data_dir: PathBuf::from("/tmp/skippr-provider-test"),
+            tenant: "tenant".to_string(),
+            workspace: "workspace".to_string(),
             el_config: ElToolResolved::default(),
             warehouse: WarehouseResolved {
                 kind: WarehouseKind::Snowflake,
@@ -1601,6 +1625,8 @@ mod tests {
         SkipprCliProvider {
             binary: "skipprd".to_string(),
             data_dir: PathBuf::from("/tmp/skippr-provider-test"),
+            tenant: "tenant".to_string(),
+            workspace: "workspace".to_string(),
             el_config: ElToolResolved::default(),
             warehouse: WarehouseResolved {
                 kind: WarehouseKind::Athena,
