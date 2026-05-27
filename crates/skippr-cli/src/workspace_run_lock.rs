@@ -22,20 +22,6 @@ pub fn sync_api_command(once: bool) -> &'static str {
     }
 }
 
-/// CI uses API keys against auth.skippr.io; workspace run-lock routes are not yet on API Gateway.
-fn skip_workspace_run_lock() -> bool {
-    if matches!(
-        std::env::var("SKIPPR_SKIP_WORKSPACE_RUN_LOCK").ok().as_deref(),
-        Some("1" | "true" | "TRUE" | "yes" | "YES")
-    ) {
-        return true;
-    }
-    std::env::var("GITHUB_ACTIONS").ok().as_deref() == Some("true")
-        && std::env::var("SKIPPR_API_KEY")
-            .ok()
-            .is_some_and(|value| !value.trim().is_empty())
-}
-
 struct ActiveLock {
     client: ApiClient,
     workspace: String,
@@ -55,9 +41,6 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = T>,
 {
-    if skip_workspace_run_lock() {
-        return f().await;
-    }
     let lock = match acquire_heavy_lock_with_client(&client, workspace, command, pipeline).await {
         Ok(l) => l,
         Err(msg) => {
@@ -95,9 +78,6 @@ where
     F: FnOnce() -> Fut,
     Fut: Future<Output = T>,
 {
-    if skip_workspace_run_lock() {
-        return f().await;
-    }
     let client = crate::authenticated_api_client().await;
     let lock = match acquire_heavy_lock_with_client(&client, workspace, command, pipeline).await {
         Ok(l) => l,

@@ -31,6 +31,15 @@ This repository contains **Skippr** — a Rust-based data ingestion and transfor
 - **Runtime e2e harness:** before release/tag work, run the relevant local unit and harness tests plus the targeted runtime e2e path when credentials/services are available. At minimum, validate harness changes with `python3 .github/scripts/test_runtime_e2e_harness.py`.
 - **GitHub release CI:** the release workflow is tag-triggered. Use the scratch tag `0.0.0` for CI validation reruns, then move the intended release tag only after local tests pass and the relevant `0.0.0` GitHub Actions run is healthy.
 
+## GitHub E2E testing
+
+Release CI on `skipprd-private` is a **full integration test** of user-facing behaviour, not a slim compile check.
+
+- E2E jobs exercise the same paths customers use: `skippr doctor`, `discover`, `sync`, `model`, workspace run locks on `auth.skippr.io`, runtime plugins, and downstream sinks (Iceberg/Glue/Athena, Snowflake, etc.).
+- CI authenticates with `SKIPPR_API_KEY` (API key exchange → JWT) the same way automation customers use; do **not** add CI-only shortcuts that skip auth, run locks, ingest, or other platform steps.
+- If an E2E job fails, fix the product or the test scenario—do not bypass the failing step for GitHub Actions only.
+- Auth API routes (including `/auth/workspaces/.../runs/lock/*`) must be deployed to production before release tags that depend on them; the CLI assumes those endpoints exist when run locks are enabled.
+
 ## Key gotchas
 
 1. **Memory-constrained linking:** test builds can be heavy on memory.
