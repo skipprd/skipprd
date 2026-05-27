@@ -637,10 +637,11 @@ pub(crate) async fn wire_providers(
             .unwrap_or_else(|| PathBuf::from("."));
 
         // Match `prepare_engine_command`: EL metadata lives under `.skippr/{tenant}/{pipeline}`.
-        let data_dir = project_root
-            .join(".skippr")
-            .join(scope.tenant.as_str())
-            .join(scope.project_id.as_str());
+        let tenant = scope.tenant.to_string();
+        let workspace = scope.workspace.to_string();
+        let pipeline = scope.project_id.to_string();
+
+        let data_dir = project_root.join(".skippr").join(&tenant).join(&pipeline);
 
         let storage_mode = getenv_nonempty("SKIPPRD_EL_STORAGE_MODE").or_else(|| Some("local".into()));
         let storage_bucket = storage_mode
@@ -652,8 +653,8 @@ pub(crate) async fn wire_providers(
             providers.el.clone(),
             providers.warehouse.clone(),
             data_dir,
-            scope.tenant.clone(),
-            scope.workspace.clone(),
+            tenant,
+            workspace,
             storage_mode,
             storage_bucket,
         ));
