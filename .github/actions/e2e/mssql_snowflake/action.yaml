@@ -221,7 +221,7 @@ runs:
                 raise SystemExit(f"expected UNIT_PRICE numeric with a decimal scale, got {column!r}")
 
             cur.execute(
-                'SELECT TO_CHAR(PLACED_AT, \'YYYY-MM-DD HH24:MI:SS\'), TOTAL_AMOUNT FROM "'
+                'SELECT TO_CHAR(PLACED_AT, \'YYYY-MM-DD HH24:MI:SS\'), COALESCE(TOTAL_AMOUNT_DECIMAL, TOTAL_AMOUNT) FROM "'
                 + os.environ["SNOWFLAKE_DATABASE"].upper()
                 + '"."'
                 + os.environ["SNOWFLAKE_TARGET_SCHEMA"].upper()
@@ -233,7 +233,7 @@ runs:
                 raise SystemExit(f"unexpected ORDERS o1 values: {order!r}")
 
             cur.execute(
-                'SELECT UNIT_PRICE FROM "'
+                'SELECT COALESCE(UNIT_PRICE_DECIMAL, UNIT_PRICE) FROM "'
                 + os.environ["SNOWFLAKE_DATABASE"].upper()
                 + '"."'
                 + os.environ["SNOWFLAKE_TARGET_SCHEMA"].upper()
