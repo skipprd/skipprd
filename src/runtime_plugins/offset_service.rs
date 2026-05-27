@@ -19,10 +19,17 @@ static OFFSET_SERVICE_RT: Lazy<Runtime> =
 fn validate_entries(offsets: &Offsets, entries: &[RuntimeOffsetValidationEntry]) -> Vec<bool> {
     entries
         .iter()
-        .map(|entry| {
-            offsets
-                .validate(&entry.key, entry.offset_type, entry.offset_value)
-                .unwrap_or(true)
+        .map(|entry| match offsets.validate(
+            &entry.key,
+            entry.offset_type,
+            entry.offset_value,
+        ) {
+            None => true,
+            Some(allow) => match entry.offset_type {
+                // `Offsets::validate` returns true when a Closed partition is already ingested.
+                OffsetTypes::Closed => !allow,
+                OffsetTypes::Filesize | OffsetTypes::Position => allow,
+            },
         })
         .collect()
 }
@@ -133,14 +140,23 @@ mod tests {
     use crate::helpers::offsets::OffsetKey;
 
     #[test]
-    fn validate_entries_defaults_to_process_when_missing() {
+    fn validate_entries_closed_semantics() {
         let offsets = Arc::new(Offsets::init().unwrap());
-        let entries = vec![RuntimeOffsetValidationEntry {
+
+        let missing = vec![RuntimeOffsetValidationEntry {
             key: OffsetKey::new("ns", "missing-key"),
             offset_type: OffsetTypes::Closed,
             offset_value: 1,
         }];
-        let decisions = validate_entries(&offsets, &entries);
-        assert_eq!(decisions, vec![true]);
+        assert_eq!(validate_entries(&offsets, &missing), vec![true]);
+
+        let closed_key = OffsetKey::new("ns", "closed-key");
+        offsets.set(&closed_key, OffsetTypes::Closed, 1);
+        let closed = vec![RuntimeOffsetValidationEntry {
+            key: closed_key,
+            offset_type: OffsetTypes::Closed,
+            offset_value: 1,
+        }];
+        assert_eq!(validate_entries(&offsets, &closed), vec![false]);
     }
 }

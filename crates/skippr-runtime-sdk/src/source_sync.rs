@@ -367,7 +367,17 @@ pub fn submit_payload_batch_groups(
     ctx.submit_payload_tasks(tasks)
 }
 
+/// Returns true when a Closed partition was already ingested and should be skipped.
+pub fn partition_already_closed(
+    ctx: &dyn SourceSyncContext,
+    key: &OffsetKey,
+) -> bool {
+    !validate_offset_key(ctx, key, OffsetTypes::Closed, 1).unwrap_or(true)
+}
+
 /// Validate a single offset key through the batched offset service.
+///
+/// For Closed offsets this returns whether the partition should still be processed.
 pub fn validate_offset_key(
     ctx: &dyn SourceSyncContext,
     key: &OffsetKey,

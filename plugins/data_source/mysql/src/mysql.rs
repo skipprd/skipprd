@@ -20,8 +20,8 @@ use skippr_runtime_sdk::plugins::{
 };
 use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes};
 use skippr_runtime_sdk::source_compat::{
-    load_checkpoint_payload, submit_payload_batch_groups, submit_payload_batches,
-    validate_offset_key, IngestBatch, SourceSyncContext,
+    load_checkpoint_payload, partition_already_closed, submit_payload_batch_groups,
+    submit_payload_batches, IngestBatch, SourceSyncContext,
 };
 
 #[derive(Debug, Deserialize, Clone)]
@@ -289,8 +289,7 @@ impl DataSourceMysqlPlugin {
                 partition: table_fq.clone(),
             };
 
-            if validate_offset_key(ctx.as_ref(), &offset_key, OffsetTypes::Closed, 1) == Some(true)
-            {
+            if partition_already_closed(ctx.as_ref(), &offset_key) {
                 info!("CDC snapshot: skipping already-ingested {}", table_fq);
                 continue;
             }
@@ -575,8 +574,7 @@ impl DataSourceMysqlPlugin {
                 partition: table_fq.clone(),
             };
 
-            if validate_offset_key(ctx.as_ref(), &offset_key, OffsetTypes::Closed, 1) == Some(true)
-            {
+            if partition_already_closed(ctx.as_ref(), &offset_key) {
                 info!("Skipping already-ingested table: {}", table_fq);
                 continue;
             }

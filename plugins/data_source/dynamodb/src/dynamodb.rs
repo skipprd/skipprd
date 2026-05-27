@@ -23,7 +23,7 @@ use skippr_runtime_sdk::plugins::{
 use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes};
 use skippr_runtime_sdk::source_compat::{
     load_checkpoint_payload, submit_payload_batch_groups, submit_payload_batches,
-    validate_offset_key, IngestBatch, SourceSyncContext,
+    partition_already_closed, IngestBatch, SourceSyncContext,
 };
 
 /// CDC scan configuration passed to `sync_scan` when CDC tagging is needed.
@@ -233,9 +233,7 @@ impl DataSourceDynamodbPlugin {
                     }
                 };
 
-                let skip_ingest =
-                    validate_offset_key(ctx.as_ref(), &offset_key, OffsetTypes::Closed, 1)
-                        == Some(true);
+                let skip_ingest = partition_already_closed(ctx.as_ref(), &offset_key);
 
                 if !skip_ingest {
                     let items = out.items();

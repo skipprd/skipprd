@@ -20,7 +20,7 @@ use crate::serdes::input_format::InputFormat;
 use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::progress::{OffsetKey, OffsetTypes};
 use skippr_runtime_sdk::source_compat::{
-    submit_payload_batch_groups, validate_offset_key, IngestBatch, SourceSyncContext,
+    partition_already_closed, submit_payload_batch_groups, IngestBatch, SourceSyncContext,
 };
 
 type BatchSender = UnboundedSender<Vec<Vec<IngestBatch>>>;
@@ -235,9 +235,7 @@ impl DataSourceLocalFilePlugin {
                     partition: path.to_str().unwrap().to_string(),
                 };
 
-                if validate_offset_key(ctx.as_ref(), &offset_key, OffsetTypes::Closed, 1)
-                    == Some(true)
-                {
+                if partition_already_closed(ctx.as_ref(), &offset_key) {
                     continue;
                 }
 
