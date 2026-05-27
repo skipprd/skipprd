@@ -232,17 +232,22 @@ async fn selected_pipeline_raw_tables(
         .show_pipeline(sctx.scope(), pipeline)
         .await
         .map_err(|e| format!("failed to load selected pipeline '{pipeline}' status: {e}"))?;
-    Ok(Some(pipeline_raw_tables_from_status(&status)))
+    Ok(pipeline_raw_tables_from_status(&status))
 }
 
 fn pipeline_raw_tables_from_status(
     status: &crate::providers::SkipprPipelineStatus,
-) -> std::collections::BTreeSet<String> {
-    status
+) -> Option<std::collections::BTreeSet<String>> {
+    let tables: std::collections::BTreeSet<String> = status
         .namespaces
         .iter()
         .map(|ns| crate::phase_el_verify::namespace_to_snowflake_table(&ns.namespace))
-        .collect()
+        .collect();
+    if tables.is_empty() {
+        None
+    } else {
+        Some(tables)
+    }
 }
 
 fn table_leaf_name(table: &str) -> String {
@@ -1456,7 +1461,8 @@ mod tests {
             }],
             metadata_location: None,
         };
-        let raw_tables = super::pipeline_raw_tables_from_status(&status);
+        let raw_tables = super::pipeline_raw_tables_from_status(&status)
+            .expect("bank namespace should produce raw table filter");
 
         let filtered = super::filter_tables_to_pipeline_raw_tables(
             vec![
@@ -1485,7 +1491,8 @@ mod tests {
             }],
             metadata_location: None,
         };
-        let raw_tables = super::pipeline_raw_tables_from_status(&status);
+        let raw_tables = super::pipeline_raw_tables_from_status(&status)
+            .expect("bank namespace should produce raw table filter");
 
         let err = super::filter_tables_to_pipeline_raw_tables(
             vec!["ANALYTICS.RAW.BIKE_HIRE".to_string()],
@@ -1496,6 +1503,29 @@ mod tests {
 
         assert!(err.contains("pipeline 'bank' has no matching raw warehouse tables"));
         assert!(err.contains("skippr sync --pipeline bank --once"));
+    }
+
+    #[test]
+    fn pipeline_raw_table_filter_skipped_when_show_pipeline_has_no_namespaces() {
+        let status = crate::providers::SkipprPipelineStatus {
+            pipeline: "mssql_snowflake_e2e".to_string(),
+            status: "active".to_string(),
+            namespaces: vec![],
+            metadata_location: Some("metadata.json".to_string()),
+        };
+        assert!(super::pipeline_raw_tables_from_status(&status).is_none());
+
+        let filtered = super::filter_tables_to_pipeline_raw_tables(
+            vec![
+                "ANALYTICS.RAW_123.CUSTOMERS".to_string(),
+                "ANALYTICS.RAW_123.ORDERS".to_string(),
+            ],
+            None,
+            "mssql_snowflake_e2e",
+        )
+        .expect("empty SHOW PIPELINE namespaces should not filter warehouse tables");
+
+        assert_eq!(filtered.len(), 2);
     }
 }
 
