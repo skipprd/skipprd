@@ -3,7 +3,9 @@
 use crate::api_client::{ApiClient, ApiError};
 use reqwest::StatusCode;
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 #[allow(dead_code)]
@@ -26,7 +28,8 @@ struct ActiveLock {
     client: ApiClient,
     workspace: String,
     run_id: String,
-    version: i64,
+    /// Shared with the heartbeat task so complete uses the latest server version.
+    version: Arc<Mutex<i64>>,
 }
 
 /// Run `f` while holding the workspace heavy lock using an existing API client.
@@ -52,7 +55,7 @@ where
         lock.client.clone(),
         lock.workspace.clone(),
         lock.run_id.clone(),
-        lock.version,
+        Arc::clone(&lock.version),
     );
     let result = f().await;
     heartbeat.abort();
@@ -90,7 +93,7 @@ where
         lock.client.clone(),
         lock.workspace.clone(),
         lock.run_id.clone(),
-        lock.version,
+        Arc::clone(&lock.version),
     );
     let result = f().await;
     heartbeat.abort();
@@ -135,7 +138,7 @@ async fn acquire_heavy_lock_with_client(
                 client: client.clone(),
                 workspace: workspace.to_string(),
                 run_id: run_id.trim().to_string(),
-                version,
+                version: Arc::new(Mutex::new(version)),
             });
         }
     }
@@ -148,14 +151,15 @@ async fn acquire_heavy_lock_with_client(
         client: client.clone(),
         workspace: workspace.to_string(),
         run_id: resp.run_id,
-        version: resp.version,
+        version: Arc::new(Mutex::new(resp.version)),
     })
 }
 
 impl ActiveLock {
     async fn complete(self, status: &str) -> Result<(), String> {
+        let version = *self.version.lock().await;
         self.client
-            .complete_run_lock(&self.workspace, &self.run_id, self.version, status)
+            .complete_run_lock(&self.workspace, &self.run_id, version, status)
             .await
             .map_err(|e| e.to_string())
     }
@@ -165,18 +169,19 @@ fn spawn_heartbeat(
     client: ApiClient,
     workspace: String,
     run_id: String,
-    mut version: i64,
+    version: Arc<Mutex<i64>>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(30));
         interval.tick().await;
         loop {
             interval.tick().await;
+            let current = *version.lock().await;
             match client
-                .heartbeat_run_lock(&workspace, &run_id, version)
+                .heartbeat_run_lock(&workspace, &run_id, current)
                 .await
             {
-                Ok(resp) => version = resp.version,
+                Ok(resp) => *version.lock().await = resp.version,
                 Err(e) => {
                     eprintln!("[skippr] run lock heartbeat failed: {e}");
                     break;
