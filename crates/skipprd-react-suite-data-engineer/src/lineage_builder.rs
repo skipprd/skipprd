@@ -2,18 +2,23 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use react_core::storage::{retry_get_bytes, retry_list_prefix};
 use react_core::suite::SuiteCtx;
-use serde::Serialize;
 use serde_json::Value;
 
-use crate::ctx_ext::{sctx_catalog, sctx_datasets, sctx_skippr, sctx_warehouse, ProvidersCfgCap};
+use crate::ctx_ext::{
+    sctx_catalog, sctx_datasets, sctx_skippr, sctx_skipprd_metadata, sctx_warehouse,
+    ProvidersCfgCap, SkipprdMetadataLocation,
+};
 use crate::lineage_sql::{analyze_select_sql, SqlSelectedOutput};
-use crate::lineage_store::{merge_lineage_node, slice_graph, strip_query_history_evidence, LineageStore};
+use crate::lineage_store::{
+    matching_field_node_ids, merge_lineage_node, slice_graph, strip_query_history_evidence,
+    LineageStore,
+};
 use crate::lineage_types::{
     canonical_dataset_id, canonical_field_path, dataset_node_id, edge_id, field_node_id,
-    LineageDiagnostic, LineageDiagnosticSeverity, LineageDirection, LineageEdge, LineageEdgeKind,
+    LineageDiagnostic, LineageDiagnosticSeverity, LineageEdge, LineageEdgeKind,
     LineageEvidenceSource, LineageFieldRef, LineageGraphQuery, LineageGraphSnapshot, LineageNode,
-    LineageNodeId, LineageNodeKind, LineageProvenance, LineageRefreshResult,
-    QueryHistoryImportSummary,
+    LineageNodeId, LineageNodeKind, LineageProvenance, LineageRefreshResult, LineageResourceKind,
+    LineageResourceRef, QueryHistoryImportSummary, LINEAGE_META_RESOURCES,
 };
 use crate::providers::{
     DataCatalog, DatasetCatalogProvider, EvidenceStatus, QueryHistoryRecord, QueryHistoryRequest,
@@ -388,19 +393,25 @@ pub async fn load_lineage_graph_for_suite(
 ) -> Result<LineageGraphSnapshot, String> {
     let store = LineageStore::new(sctx.storage().clone(), sctx.keyspace().clone());
     let graph = store.read_graph(sctx.scope()).await?.unwrap_or_default();
-    Ok(slice_graph(&graph, &query))
+    let needs_field_focus = query
+        .field_node_id
+        .as_deref()
+        .map(str::trim)
+        .is_some_and(|value| !value.is_empty());
+    let mut sliced = slice_graph(&graph, &query);
+    if needs_field_focus && matching_field_node_ids(&graph, &query).is_empty() {
+        sliced.diagnostics.push(LineageDiagnostic {
+            severity: LineageDiagnosticSeverity::Warning,
+            message: "No field lineage matched this focus. Run `skippr lineage refresh --pipeline <pipeline>` to rebuild the persisted graph.".into(),
+            source: Some(LineageEvidenceSource::SkipprdMetadata),
+        });
+    }
+    Ok(sliced)
 }
 
 fn refresh_result(graph: LineageGraphSnapshot) -> LineageRefreshResult {
     let query_history = query_history_summary(&graph);
-    let projected_graph = slice_graph(
-        &graph,
-        &LineageGraphQuery {
-            asset: None,
-            field: None,
-            direction: LineageDirection::Both,
-        },
-    );
+    let projected_graph = slice_graph(&graph, &LineageGraphQuery::default());
     LineageRefreshResult {
         ok: true,
         node_count: projected_graph.nodes.len(),
@@ -444,11 +455,7 @@ fn query_history_summary(graph: &LineageGraphSnapshot) -> QueryHistoryImportSumm
     let queries_seen = graph
         .diagnostics
         .iter()
-        .filter(|diagnostic| {
-            diagnostic
-                .message
-                .starts_with("query history:")
-        })
+        .filter(|diagnostic| diagnostic.message.starts_with("query history:"))
         .count()
         + query_ids.len();
     QueryHistoryImportSummary {
@@ -736,237 +743,476 @@ fn warehouse_node_metadata(
     ])
 }
 
-fn schema_fields_for_source_side(fields: &[SkipprFieldSchema]) -> Vec<SkipprFieldSchema> {
-    fields
-        .iter()
-        .map(|field| {
-            let output_field_name = field
-                .out_field_name
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(field.name.as_str());
-            let source_field_name = field
-                .source_field_name
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(output_field_name);
-            SkipprFieldSchema {
-                name: source_field_name.to_string(),
-                field_type: field.field_type.clone(),
-                nullable: field.nullable,
-                source_field_name: field.source_field_name.clone(),
-                out_field_name: field.out_field_name.clone(),
-                field_id: field.field_id,
-                lineage_id: field.lineage_id.clone(),
-            }
-        })
-        .collect()
-}
-
-fn schema_fields_for_pipeline_side(fields: &[SkipprFieldSchema]) -> Vec<SkipprFieldSchema> {
-    fields
-        .iter()
-        .map(|field| {
-            let output_field_name = field
-                .out_field_name
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(field.name.as_str());
-            SkipprFieldSchema {
-                name: output_field_name.to_string(),
-                field_type: field.field_type.clone(),
-                nullable: field.nullable,
-                source_field_name: field.source_field_name.clone(),
-                out_field_name: field.out_field_name.clone(),
-                field_id: field.field_id,
-                lineage_id: field.lineage_id.clone(),
-            }
-        })
-        .collect()
-}
-
-fn encode_schema_fields_metadata(fields: &[SkipprFieldSchema]) -> Option<String> {
-    if fields.is_empty() {
-        return None;
+fn insert_lineage_resources(
+    metadata: &mut BTreeMap<String, String>,
+    resources: Vec<LineageResourceRef>,
+) {
+    if resources.is_empty() {
+        return;
     }
-    serde_json::to_string(fields).ok()
-}
-
-fn parse_schema_fields_metadata(metadata: &BTreeMap<String, String>) -> Vec<SkipprFieldSchema> {
-    metadata
-        .get("schema_fields")
-        .and_then(|raw| serde_json::from_str(raw).ok())
-        .unwrap_or_default()
-}
-
-fn schema_fields_from_graph_field_nodes(
-    graph: &LineageGraphSnapshot,
-    node: &LineageNode,
-) -> Vec<SkipprFieldSchema> {
-    let dataset_id = node.dataset_id.as_deref().unwrap_or("");
-    if dataset_id.is_empty() {
-        return Vec::new();
+    if let Ok(json) = serde_json::to_string(&resources) {
+        metadata.insert(LINEAGE_META_RESOURCES.to_string(), json);
     }
-    let mut fields = graph
-        .nodes
-        .iter()
-        .filter(|candidate| candidate.kind == LineageNodeKind::Field)
-        .filter(|candidate| {
-            candidate
-                .metadata
-                .get("_lineage_schema_only")
-                .map(String::as_str)
-                != Some("true")
-        })
-        .filter(|candidate| {
-            candidate
-                .field
-                .as_ref()
-                .map(|field| field.dataset_id.as_str())
-                == Some(dataset_id)
-        })
-        .map(|candidate| {
-            let field_path = candidate
-                .field
-                .as_ref()
-                .map(|field| field.field_path.as_str())
-                .unwrap_or(candidate.label.as_str());
-            SkipprFieldSchema {
-                name: field_path.to_string(),
-                field_type: candidate.metadata.get("type").cloned().unwrap_or_default(),
-                nullable: candidate
-                    .metadata
-                    .get("nullable")
-                    .map(|value| value == "true")
-                    .unwrap_or(true),
-                source_field_name: candidate.metadata.get("source_field_name").cloned(),
-                out_field_name: candidate.metadata.get("out_field_name").cloned(),
-                field_id: candidate
-                    .metadata
-                    .get("field_id")
-                    .and_then(|value| value.parse().ok()),
-                lineage_id: candidate.metadata.get("lineage_id").cloned(),
-            }
-        })
-        .collect::<Vec<_>>();
-    fields.sort_by(|left, right| left.name.cmp(&right.name));
-    fields
 }
 
-async fn skippr_schema_fields_for_node(
+fn resources_for_raw_source(
+    node_id: &LineageNodeId,
+    dataset_id: &str,
+    metadata_location: Option<&str>,
+) -> Vec<LineageResourceRef> {
+    let mut resources = vec![
+        LineageResourceRef {
+            kind: LineageResourceKind::NodeId,
+            label: "Copy node id".to_string(),
+            target: Some(node_id.as_str().to_string()),
+        },
+        LineageResourceRef {
+            kind: LineageResourceKind::DatasetId,
+            label: "Copy dataset id".to_string(),
+            target: Some(dataset_id.to_string()),
+        },
+    ];
+    if let Some(target) = metadata_location.filter(|value| !value.trim().is_empty()) {
+        resources.insert(
+            0,
+            LineageResourceRef {
+                kind: LineageResourceKind::Metadata,
+                label: "Open metadata".to_string(),
+                target: Some(target.to_string()),
+            },
+        );
+    }
+    resources
+}
+
+fn resources_for_pipeline(
+    node_id: &LineageNodeId,
+    pipeline: &str,
+    metadata_location: Option<&str>,
+) -> Vec<LineageResourceRef> {
+    let mut resources = vec![
+        LineageResourceRef {
+            kind: LineageResourceKind::NodeId,
+            label: "Copy node id".to_string(),
+            target: Some(node_id.as_str().to_string()),
+        },
+        LineageResourceRef {
+            kind: LineageResourceKind::DatasetId,
+            label: "Copy dataset id".to_string(),
+            target: Some(pipeline.to_string()),
+        },
+        LineageResourceRef {
+            kind: LineageResourceKind::Config,
+            label: "Open skippr.yml".to_string(),
+            target: None,
+        },
+    ];
+    if let Some(target) = metadata_location.filter(|value| !value.trim().is_empty()) {
+        resources.insert(
+            0,
+            LineageResourceRef {
+                kind: LineageResourceKind::Metadata,
+                label: "Open pipeline metadata".to_string(),
+                target: Some(target.to_string()),
+            },
+        );
+    }
+    resources
+}
+
+fn resources_for_dataset_node(
+    node_id: &LineageNodeId,
+    dataset_id: &str,
+) -> Vec<LineageResourceRef> {
+    vec![
+        LineageResourceRef {
+            kind: LineageResourceKind::NodeId,
+            label: "Copy node id".to_string(),
+            target: Some(node_id.as_str().to_string()),
+        },
+        LineageResourceRef {
+            kind: LineageResourceKind::DatasetId,
+            label: "Copy dataset id".to_string(),
+            target: Some(dataset_id.to_string()),
+        },
+    ]
+}
+
+struct SkipprdNamespaceGraph {
+    raw_id: LineageNodeId,
+    pipeline_id: LineageNodeId,
+    ingest_id: LineageNodeId,
+    _warehouse_id: LineageNodeId,
+    dataset_id: String,
+}
+
+async fn load_skipprd_pipeline_metadata(
     sctx: &SuiteCtx,
     pipeline: &str,
-    node: &LineageNode,
-) -> Vec<SkipprFieldSchema> {
-    let status = if let Some(skippr) = sctx_skippr(sctx) {
-        skippr.show_pipeline(sctx.scope(), pipeline).await.ok()
+    builder: &mut GraphBuilder,
+) -> (Vec<crate::providers::SkipprNamespaceStatus>, Option<String>) {
+    let uses_configured_metadata = sctx_skipprd_metadata(sctx).is_some();
+    let mut status = if uses_configured_metadata {
+        load_configured_skipprd_metadata_status(sctx, pipeline, builder).await
+    } else if let Some(skippr) = sctx_skippr(sctx) {
+        match skippr.show_pipeline(sctx.scope(), pipeline).await {
+            Ok(status) => Some(status),
+            Err(e) => {
+                builder.warn(
+                    format!("failed to read skipprd metadata for pipeline '{pipeline}': {e}"),
+                    Some(LineageEvidenceSource::SkipprdMetadata),
+                );
+                None
+            }
+        }
     } else {
+        builder.info(
+            "skippr provider is unavailable; using config-derived source lineage only",
+            Some(LineageEvidenceSource::SkipprdMetadata),
+        );
         None
     };
-    let status = if skippr_status_missing_fields(status.as_ref()) {
-        load_persisted_skipprd_metadata_status(sctx, pipeline, status.as_ref()).await
-    } else {
-        status
-    };
-    let Some(status) = status else {
-        return Vec::new();
-    };
-    match node.kind {
-        LineageNodeKind::RawSource => status
-            .namespaces
-            .iter()
-            .flat_map(|namespace| schema_fields_for_source_side(&namespace.fields))
-            .collect(),
-        LineageNodeKind::Pipeline => status
-            .namespaces
-            .iter()
-            .find(|namespace| namespace.namespace == pipeline)
-            .or_else(|| status.namespaces.first())
-            .map(|namespace| schema_fields_for_pipeline_side(&namespace.fields))
-            .unwrap_or_default(),
-        _ => Vec::new(),
+    if !uses_configured_metadata && skippr_status_missing_fields(status.as_ref()) {
+        if let Some(persisted) =
+            load_persisted_skipprd_metadata_status(sctx, pipeline, status.as_ref()).await
+        {
+            status = Some(persisted);
+        }
     }
+    let source_ref = status
+        .as_ref()
+        .and_then(|status| status.metadata_location.clone());
+    let namespaces = status
+        .map(|status| status.namespaces)
+        .filter(|namespaces| !namespaces.is_empty())
+        .unwrap_or_else(|| {
+            vec![crate::providers::SkipprNamespaceStatus {
+                namespace: pipeline.to_string(),
+                ..Default::default()
+            }]
+        });
+    (namespaces, source_ref)
 }
 
-#[derive(Clone, Debug, Serialize)]
-pub struct LineageNodeSchemaResponse {
-    pub ok: bool,
-    pub node_id: String,
-    pub kind: String,
-    pub label: String,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub fields: Vec<SkipprFieldSchema>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-}
-
-pub async fn resolve_lineage_node_schema(
+async fn load_configured_skipprd_metadata_status(
     sctx: &SuiteCtx,
     pipeline: &str,
-    node_id: &str,
-) -> LineageNodeSchemaResponse {
-    let store = LineageStore::new(sctx.storage().clone(), sctx.keyspace().clone());
-    let graph = match store.read_graph(sctx.scope()).await {
-        Ok(graph) => graph.unwrap_or_default(),
-        Err(error) => {
-            return LineageNodeSchemaResponse {
-                ok: false,
-                node_id: node_id.to_string(),
-                kind: String::new(),
-                label: String::new(),
-                fields: Vec::new(),
-                error: Some(error),
-            };
+    builder: &mut GraphBuilder,
+) -> Option<SkipprPipelineStatus> {
+    let Some(cap) = sctx_skipprd_metadata(sctx) else {
+        return None;
+    };
+    let mut inspected = Vec::new();
+    for location in cap.locations {
+        match read_skipprd_metadata_location(sctx, &location).await {
+            Ok(Some(value)) => {
+                let source_ref = skipprd_metadata_location_label(&location);
+                if let Some(status) =
+                    skippr_status_from_metadata_value(pipeline, &source_ref, &value)
+                {
+                    return Some(status);
+                }
+                inspected.push(source_ref);
+            }
+            Ok(None) => inspected.push(skipprd_metadata_location_label(&location)),
+            Err(error) => builder.warn(
+                format!(
+                    "failed to read configured skipprd metadata '{}': {error}",
+                    skipprd_metadata_location_label(&location)
+                ),
+                Some(LineageEvidenceSource::SkipprdMetadata),
+            ),
         }
-    };
-    let Some(node) = graph.nodes.iter().find(|node| node.id.as_str() == node_id) else {
-        return LineageNodeSchemaResponse {
-            ok: false,
-            node_id: node_id.to_string(),
-            kind: String::new(),
-            label: String::new(),
-            fields: Vec::new(),
-            error: Some(format!("lineage node '{node_id}' not found")),
-        };
-    };
-    let mut fields = parse_schema_fields_metadata(&node.metadata);
-    if fields.is_empty() {
-        fields = schema_fields_from_graph_field_nodes(&graph, node);
     }
-    if fields.is_empty()
-        && matches!(
-            node.kind,
-            LineageNodeKind::RawSource | LineageNodeKind::Pipeline
-        )
-    {
-        fields = skippr_schema_fields_for_node(sctx, pipeline, node).await;
+    if !inspected.is_empty() {
+        builder.warn(
+            format!(
+                "no skipprd metadata fields found for pipeline '{pipeline}' in configured metadata locations: {}",
+                inspected.join(", ")
+            ),
+            Some(LineageEvidenceSource::SkipprdMetadata),
+        );
     }
-    LineageNodeSchemaResponse {
-        ok: true,
-        node_id: node.id.as_str().to_string(),
-        kind: lineage_node_kind_name(&node.kind).to_string(),
-        label: node.label.clone(),
-        fields,
-        error: None,
+    None
+}
+
+async fn read_skipprd_metadata_location(
+    sctx: &SuiteCtx,
+    location: &SkipprdMetadataLocation,
+) -> Result<Option<Value>, String> {
+    match location {
+        SkipprdMetadataLocation::LocalPath(path) => {
+            if !path.exists() {
+                return Ok(None);
+            }
+            let bytes = tokio::fs::read(path)
+                .await
+                .map_err(|error| error.to_string())?;
+            serde_json::from_slice::<Value>(&bytes)
+                .map(Some)
+                .map_err(|error| error.to_string())
+        }
+        SkipprdMetadataLocation::StorageKey(key) => {
+            match retry_get_bytes(sctx.storage().as_ref(), key).await {
+                Ok(bytes) => serde_json::from_slice::<Value>(&bytes)
+                    .map(Some)
+                    .map_err(|error| error.to_string()),
+                Err(_) => Ok(None),
+            }
+        }
     }
 }
 
-fn lineage_node_kind_name(kind: &LineageNodeKind) -> &'static str {
-    match kind {
-        LineageNodeKind::RawSource => "raw_source",
-        LineageNodeKind::Pipeline => "pipeline",
-        LineageNodeKind::IngestTable => "ingest_table",
-        LineageNodeKind::DbtSource => "dbt_source",
-        LineageNodeKind::DbtModel => "dbt_model",
-        LineageNodeKind::WarehouseTable => "warehouse_table",
-        LineageNodeKind::Field => "field",
-        LineageNodeKind::Query => "query",
-        LineageNodeKind::Dashboard => "dashboard",
-        LineageNodeKind::Metric => "metric",
-        LineageNodeKind::ExternalSystem => "external_system",
+fn skipprd_metadata_location_label(location: &SkipprdMetadataLocation) -> String {
+    match location {
+        SkipprdMetadataLocation::LocalPath(path) => path.display().to_string(),
+        SkipprdMetadataLocation::StorageKey(key) => key.clone(),
+    }
+}
+
+fn build_skipprd_entity_nodes(
+    builder: &mut GraphBuilder,
+    resolver: &mut RelationResolver,
+    pipeline: &str,
+    source: &SourceDescriptor,
+    source_ref: Option<&str>,
+    namespace: &crate::providers::SkipprNamespaceStatus,
+    default_catalog: &str,
+    default_schema: &str,
+    cfg: Option<&crate::de_config::ProvidersResolved>,
+) -> SkipprdNamespaceGraph {
+    let raw_id = source.node_id.clone();
+    let pipeline_id = LineageNodeId::generated(format!("pipeline:{pipeline}"));
+    let mut source_metadata = source.metadata.clone();
+    source_metadata.insert("pipeline".to_string(), pipeline.to_string());
+    if let Some(location) = source_ref {
+        source_metadata.insert("metadata_location".to_string(), location.to_string());
+    }
+    insert_lineage_resources(
+        &mut source_metadata,
+        resources_for_raw_source(&raw_id, &source.dataset_id, source_ref),
+    );
+    builder.add_node(LineageNode {
+        id: raw_id.clone(),
+        label: source.label.clone(),
+        kind: LineageNodeKind::RawSource,
+        dataset_id: Some(source.dataset_id.clone()),
+        field: None,
+        path: source
+            .path
+            .clone()
+            .or_else(|| source_ref.map(str::to_string)),
+        metadata: source_metadata,
+    });
+    let dataset_id = if default_catalog.is_empty() || default_schema.is_empty() {
+        canonical_dataset_id(&namespace.namespace)
+    } else {
+        canonical_dataset_id(&format!(
+            "{default_catalog}.{default_schema}.{}",
+            namespace.namespace
+        ))
+    };
+    resolver.add_alias(&dataset_id, &dataset_id);
+    resolver.add_alias(&namespace.namespace, &dataset_id);
+    let mut pipeline_metadata = BTreeMap::from([
+        ("provider_brand".to_string(), "skippr".to_string()),
+        ("provider_label".to_string(), "Skippr".to_string()),
+        (
+            "transform_key".to_string(),
+            format!("warehouse:{dataset_id}"),
+        ),
+        (
+            "transform_source".to_string(),
+            "skipprd_metadata".to_string(),
+        ),
+        ("pipeline".to_string(), pipeline.to_string()),
+    ]);
+    if let Some(location) = source_ref {
+        pipeline_metadata.insert("metadata_location".to_string(), location.to_string());
+    }
+    insert_lineage_resources(
+        &mut pipeline_metadata,
+        resources_for_pipeline(&pipeline_id, pipeline, source_ref),
+    );
+    builder.add_node(LineageNode {
+        id: pipeline_id.clone(),
+        label: pipeline.to_string(),
+        kind: LineageNodeKind::Pipeline,
+        dataset_id: Some(pipeline.to_string()),
+        field: None,
+        path: source_ref.map(str::to_string),
+        metadata: pipeline_metadata,
+    });
+    let ingest_id = dataset_node_id(&dataset_id, LineageNodeKind::IngestTable);
+    let mut ingest_metadata = warehouse_node_metadata(cfg);
+    insert_lineage_resources(
+        &mut ingest_metadata,
+        resources_for_dataset_node(&ingest_id, &dataset_id),
+    );
+    builder.add_node(LineageNode {
+        id: ingest_id.clone(),
+        label: dataset_id.clone(),
+        kind: LineageNodeKind::IngestTable,
+        dataset_id: Some(dataset_id.clone()),
+        field: None,
+        path: None,
+        metadata: ingest_metadata,
+    });
+    let warehouse_id = dataset_node_id(&dataset_id, LineageNodeKind::WarehouseTable);
+    let mut warehouse_metadata = warehouse_node_metadata(cfg);
+    insert_lineage_resources(
+        &mut warehouse_metadata,
+        resources_for_dataset_node(&warehouse_id, &dataset_id),
+    );
+    builder.add_node(LineageNode {
+        id: warehouse_id.clone(),
+        label: dataset_id.clone(),
+        kind: LineageNodeKind::WarehouseTable,
+        dataset_id: Some(dataset_id.clone()),
+        field: None,
+        path: None,
+        metadata: warehouse_metadata,
+    });
+    let provenance = || {
+        LineageProvenance::observed(
+            LineageEvidenceSource::SkipprdMetadata,
+            source_ref.map(str::to_string),
+        )
+    };
+    builder.add_edge(LineageEdge {
+        id: edge_id(LineageEdgeKind::Ingests, &raw_id, &pipeline_id),
+        from_node_id: raw_id.clone(),
+        to_node_id: pipeline_id.clone(),
+        kind: LineageEdgeKind::Ingests,
+        provenance: provenance(),
+        metadata: BTreeMap::new(),
+    });
+    builder.add_edge(LineageEdge {
+        id: edge_id(LineageEdgeKind::Ingests, &pipeline_id, &ingest_id),
+        from_node_id: pipeline_id.clone(),
+        to_node_id: ingest_id.clone(),
+        kind: LineageEdgeKind::Ingests,
+        provenance: provenance(),
+        metadata: BTreeMap::new(),
+    });
+    builder.add_edge(LineageEdge {
+        id: edge_id(LineageEdgeKind::Materializes, &ingest_id, &warehouse_id),
+        from_node_id: ingest_id.clone(),
+        to_node_id: warehouse_id.clone(),
+        kind: LineageEdgeKind::Materializes,
+        provenance: provenance(),
+        metadata: BTreeMap::new(),
+    });
+    SkipprdNamespaceGraph {
+        raw_id,
+        pipeline_id,
+        ingest_id,
+        _warehouse_id: warehouse_id,
+        dataset_id,
+    }
+}
+
+fn build_skipprd_field_nodes(
+    builder: &mut GraphBuilder,
+    pipeline: &str,
+    source: &SourceDescriptor,
+    source_ref: Option<&str>,
+    graph: &SkipprdNamespaceGraph,
+    fields: &[crate::providers::SkipprFieldSchema],
+) {
+    let provenance = || {
+        LineageProvenance::observed(
+            LineageEvidenceSource::SkipprdMetadata,
+            source_ref.map(str::to_string),
+        )
+    };
+    for field in fields {
+        let output_field_name = field
+            .out_field_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(field.name.as_str());
+        let source_field_name = field
+            .source_field_name
+            .as_deref()
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or(output_field_name);
+        let mut field_metadata = BTreeMap::from([
+            ("type".to_string(), field.field_type.clone()),
+            ("nullable".to_string(), field.nullable.to_string()),
+            (
+                "source_field_name".to_string(),
+                source_field_name.to_string(),
+            ),
+            ("out_field_name".to_string(), output_field_name.to_string()),
+        ]);
+        field_metadata.insert("pipeline".to_string(), pipeline.to_string());
+        if let Some(field_id) = field.field_id {
+            field_metadata.insert("field_id".to_string(), field_id.to_string());
+        }
+        if let Some(lineage_id) = field.lineage_id.as_deref() {
+            if !lineage_id.trim().is_empty() {
+                field_metadata.insert("lineage_id".to_string(), lineage_id.to_string());
+            }
+        }
+        let source_field_id = add_field_node(
+            builder,
+            &source.dataset_id,
+            source_field_name,
+            source_field_name.to_string(),
+            None,
+            field_metadata.clone(),
+        );
+        let pipeline_field_id = add_field_node(
+            builder,
+            pipeline,
+            output_field_name,
+            output_field_name.to_string(),
+            None,
+            field_metadata,
+        );
+        let output_field_id = add_field_node(
+            builder,
+            &graph.dataset_id,
+            output_field_name,
+            output_field_name.to_string(),
+            None,
+            BTreeMap::from([
+                ("type".to_string(), field.field_type.clone()),
+                ("nullable".to_string(), field.nullable.to_string()),
+                (
+                    "source_field_name".to_string(),
+                    source_field_name.to_string(),
+                ),
+                ("out_field_name".to_string(), output_field_name.to_string()),
+            ]),
+        );
+        add_contains_field_edge(builder, &graph.raw_id, &source_field_id, provenance());
+        add_contains_field_edge(
+            builder,
+            &graph.pipeline_id,
+            &pipeline_field_id,
+            provenance(),
+        );
+        add_contains_field_edge(builder, &graph.ingest_id, &output_field_id, provenance());
+        add_field_lineage_edge(
+            builder,
+            LineageEdgeKind::FieldDerivesFrom,
+            &source_field_id,
+            &pipeline_field_id,
+            provenance(),
+            BTreeMap::new(),
+        );
+        add_field_lineage_edge(
+            builder,
+            LineageEdgeKind::FieldDerivesFrom,
+            &pipeline_field_id,
+            &output_field_id,
+            provenance(),
+            BTreeMap::new(),
+        );
     }
 }
 
@@ -993,272 +1239,29 @@ async fn build_skipprd_metadata_lineage(
         .and_then(source_descriptor_from_providers_cfg)
         .unwrap_or_else(|| SourceDescriptor::namespace(pipeline));
 
-    let mut status = if let Some(skippr) = sctx_skippr(sctx) {
-        match skippr.show_pipeline(sctx.scope(), pipeline).await {
-            Ok(status) => Some(status),
-            Err(e) => {
-                builder.warn(
-                    format!("failed to read skipprd metadata for pipeline '{pipeline}': {e}"),
-                    Some(LineageEvidenceSource::SkipprdMetadata),
-                );
-                None
-            }
-        }
-    } else {
-        builder.info(
-            "skippr provider is unavailable; using config-derived source lineage only",
-            Some(LineageEvidenceSource::SkipprdMetadata),
-        );
-        None
-    };
-    if skippr_status_missing_fields(status.as_ref()) {
-        if let Some(persisted) =
-            load_persisted_skipprd_metadata_status(sctx, pipeline, status.as_ref()).await
-        {
-            status = Some(persisted);
-        }
-    }
-
-    let namespaces = status
-        .as_ref()
-        .map(|status| status.namespaces.clone())
-        .filter(|namespaces| !namespaces.is_empty())
-        .unwrap_or_else(|| {
-            vec![crate::providers::SkipprNamespaceStatus {
-                namespace: pipeline.to_string(),
-                ..Default::default()
-            }]
-        });
-    let source_ref = status
-        .as_ref()
-        .and_then(|status| status.metadata_location.clone());
+    let (namespaces, source_ref) = load_skipprd_pipeline_metadata(sctx, pipeline, builder).await;
+    let source_ref = source_ref.as_deref();
 
     for namespace in namespaces {
-        let raw_id = source.node_id.clone();
-        let pipeline_id = LineageNodeId::generated(format!("pipeline:{pipeline}"));
-        let source_schema_fields = schema_fields_for_source_side(&namespace.fields);
-        let pipeline_schema_fields = schema_fields_for_pipeline_side(&namespace.fields);
-        let mut source_metadata = source.metadata.clone();
-        source_metadata.insert("pipeline".to_string(), pipeline.to_string());
-        if let Some(json) = encode_schema_fields_metadata(&source_schema_fields) {
-            source_metadata.insert("schema_fields".to_string(), json);
-        }
-        if let Some(ref location) = source_ref {
-            source_metadata.insert("metadata_location".to_string(), location.clone());
-        }
-        builder.add_node(LineageNode {
-            id: raw_id.clone(),
-            label: source.label.clone(),
-            kind: LineageNodeKind::RawSource,
-            dataset_id: Some(source.dataset_id.clone()),
-            field: None,
-            path: source.path.clone().or_else(|| source_ref.clone()),
-            metadata: source_metadata,
-        });
-        let dataset_id = if default_catalog.is_empty() || default_schema.is_empty() {
-            canonical_dataset_id(&namespace.namespace)
-        } else {
-            canonical_dataset_id(&format!(
-                "{}.{}.{}",
-                default_catalog, default_schema, namespace.namespace
-            ))
-        };
-        resolver.add_alias(&dataset_id, &dataset_id);
-        resolver.add_alias(&namespace.namespace, &dataset_id);
-        let mut pipeline_metadata = BTreeMap::from([
-            ("provider_brand".to_string(), "skippr".to_string()),
-            ("provider_label".to_string(), "Skippr".to_string()),
-            (
-                "transform_key".to_string(),
-                format!("warehouse:{dataset_id}"),
-            ),
-            (
-                "transform_source".to_string(),
-                "skipprd_metadata".to_string(),
-            ),
-            ("pipeline".to_string(), pipeline.to_string()),
-        ]);
-        if let Some(json) = encode_schema_fields_metadata(&pipeline_schema_fields) {
-            pipeline_metadata.insert("schema_fields".to_string(), json);
-        }
-        if let Some(ref location) = source_ref {
-            pipeline_metadata.insert("metadata_location".to_string(), location.clone());
-        }
-        builder.add_node(LineageNode {
-            id: pipeline_id.clone(),
-            label: pipeline.to_string(),
-            kind: LineageNodeKind::Pipeline,
-            dataset_id: Some(pipeline.to_string()),
-            field: None,
-            path: source_ref.clone(),
-            metadata: pipeline_metadata,
-        });
-        let ingest_id = dataset_node_id(&dataset_id, LineageNodeKind::IngestTable);
-        builder.add_node(LineageNode {
-            id: ingest_id.clone(),
-            label: dataset_id.clone(),
-            kind: LineageNodeKind::IngestTable,
-            dataset_id: Some(dataset_id.clone()),
-            field: None,
-            path: None,
-            metadata: warehouse_node_metadata(cfg.as_ref()),
-        });
-        let warehouse_id = dataset_node_id(&dataset_id, LineageNodeKind::WarehouseTable);
-        builder.add_node(LineageNode {
-            id: warehouse_id.clone(),
-            label: dataset_id.clone(),
-            kind: LineageNodeKind::WarehouseTable,
-            dataset_id: Some(dataset_id.clone()),
-            field: None,
-            path: None,
-            metadata: warehouse_node_metadata(cfg.as_ref()),
-        });
-        builder.add_edge(LineageEdge {
-            id: edge_id(LineageEdgeKind::Ingests, &raw_id, &pipeline_id),
-            from_node_id: raw_id.clone(),
-            to_node_id: pipeline_id.clone(),
-            kind: LineageEdgeKind::Ingests,
-            provenance: LineageProvenance::observed(
-                LineageEvidenceSource::SkipprdMetadata,
-                source_ref.clone(),
-            ),
-            metadata: BTreeMap::new(),
-        });
-        builder.add_edge(LineageEdge {
-            id: edge_id(LineageEdgeKind::Ingests, &pipeline_id, &ingest_id),
-            from_node_id: pipeline_id.clone(),
-            to_node_id: ingest_id.clone(),
-            kind: LineageEdgeKind::Ingests,
-            provenance: LineageProvenance::observed(
-                LineageEvidenceSource::SkipprdMetadata,
-                source_ref.clone(),
-            ),
-            metadata: BTreeMap::new(),
-        });
-        builder.add_edge(LineageEdge {
-            id: edge_id(LineageEdgeKind::Materializes, &ingest_id, &warehouse_id),
-            from_node_id: ingest_id.clone(),
-            to_node_id: warehouse_id,
-            kind: LineageEdgeKind::Materializes,
-            provenance: LineageProvenance::observed(
-                LineageEvidenceSource::SkipprdMetadata,
-                source_ref.clone(),
-            ),
-            metadata: BTreeMap::new(),
-        });
-        for field in namespace.fields {
-            let output_field_name = field
-                .out_field_name
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(field.name.as_str());
-            let source_field_name = field
-                .source_field_name
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-                .unwrap_or(output_field_name);
-            let mut field_metadata = BTreeMap::from([
-                ("type".to_string(), field.field_type.clone()),
-                ("nullable".to_string(), field.nullable.to_string()),
-                (
-                    "source_field_name".to_string(),
-                    source_field_name.to_string(),
-                ),
-                ("out_field_name".to_string(), output_field_name.to_string()),
-            ]);
-            field_metadata.insert("pipeline".to_string(), pipeline.to_string());
-            if let Some(field_id) = field.field_id {
-                field_metadata.insert("field_id".to_string(), field_id.to_string());
-            }
-            if let Some(lineage_id) = field.lineage_id.as_deref() {
-                if !lineage_id.trim().is_empty() {
-                    field_metadata.insert("lineage_id".to_string(), lineage_id.to_string());
-                }
-            }
-            let source_field_id = add_field_node(
-                builder,
-                &source.dataset_id,
-                source_field_name,
-                source_field_name.to_string(),
-                None,
-                field_metadata.clone(),
-            );
-            let pipeline_field_id = add_field_node(
-                builder,
-                pipeline,
-                output_field_name,
-                output_field_name.to_string(),
-                None,
-                field_metadata,
-            );
-            let output_field_id = add_field_node(
-                builder,
-                &dataset_id,
-                output_field_name,
-                output_field_name.to_string(),
-                None,
-                BTreeMap::from([
-                    ("type".to_string(), field.field_type.clone()),
-                    ("nullable".to_string(), field.nullable.to_string()),
-                    (
-                        "source_field_name".to_string(),
-                        source_field_name.to_string(),
-                    ),
-                    ("out_field_name".to_string(), output_field_name.to_string()),
-                ]),
-            );
-            add_contains_field_edge(
-                builder,
-                &raw_id,
-                &source_field_id,
-                LineageProvenance::observed(
-                    LineageEvidenceSource::SkipprdMetadata,
-                    source_ref.clone(),
-                ),
-            );
-            add_contains_field_edge(
-                builder,
-                &pipeline_id,
-                &pipeline_field_id,
-                LineageProvenance::observed(
-                    LineageEvidenceSource::SkipprdMetadata,
-                    source_ref.clone(),
-                ),
-            );
-            add_contains_field_edge(
-                builder,
-                &ingest_id,
-                &output_field_id,
-                LineageProvenance::observed(
-                    LineageEvidenceSource::SkipprdMetadata,
-                    source_ref.clone(),
-                ),
-            );
-            add_field_lineage_edge(
-                builder,
-                LineageEdgeKind::FieldDerivesFrom,
-                &source_field_id,
-                &pipeline_field_id,
-                LineageProvenance::observed(
-                    LineageEvidenceSource::SkipprdMetadata,
-                    source_ref.clone(),
-                ),
-                BTreeMap::new(),
-            );
-            add_field_lineage_edge(
-                builder,
-                LineageEdgeKind::FieldDerivesFrom,
-                &pipeline_field_id,
-                &output_field_id,
-                LineageProvenance::observed(
-                    LineageEvidenceSource::SkipprdMetadata,
-                    source_ref.clone(),
-                ),
-                BTreeMap::new(),
-            );
-        }
+        let graph = build_skipprd_entity_nodes(
+            builder,
+            resolver,
+            pipeline,
+            &source,
+            source_ref,
+            &namespace,
+            default_catalog,
+            default_schema,
+            cfg.as_ref(),
+        );
+        build_skipprd_field_nodes(
+            builder,
+            pipeline,
+            &source,
+            source_ref,
+            &graph,
+            &namespace.fields,
+        );
     }
 }
 
@@ -2146,7 +2149,10 @@ async fn fetch_query_history_records(
     result.records
 }
 
-fn push_query_history_diagnostic(diagnostics: &mut Vec<LineageDiagnostic>, message: impl Into<String>) {
+fn push_query_history_diagnostic(
+    diagnostics: &mut Vec<LineageDiagnostic>,
+    message: impl Into<String>,
+) {
     let diagnostic = LineageDiagnostic {
         severity: LineageDiagnosticSeverity::Warning,
         message: message.into(),
@@ -2179,7 +2185,10 @@ fn dedupe_query_history_records(records: Vec<QueryHistoryRecord>) -> Vec<QueryHi
     grouped.into_values().collect()
 }
 
-fn query_history_record_is_newer(candidate: &QueryHistoryRecord, existing: &QueryHistoryRecord) -> bool {
+fn query_history_record_is_newer(
+    candidate: &QueryHistoryRecord,
+    existing: &QueryHistoryRecord,
+) -> bool {
     match (candidate.ended_at_epoch_ms, existing.ended_at_epoch_ms) {
         (Some(candidate), Some(existing)) => candidate > existing,
         (Some(_), None) => true,
@@ -2235,8 +2244,7 @@ fn apply_query_record_evidence(
         .or_else(|| Some(record.query_id.clone()));
     let warehouse_metadata = query_warehouse_node_metadata(record);
     for table in output_tables {
-        let warehouse_id =
-            ensure_warehouse_node(builder, &table, warehouse_metadata.clone());
+        let warehouse_id = ensure_warehouse_node(builder, &table, warehouse_metadata.clone());
         let transform_id = canonical_transform_for_builder(builder, &table)
             .unwrap_or_else(|| warehouse_id.clone());
         for input in &input_tables {
@@ -2362,15 +2370,9 @@ fn append_query_history_refs(
     ids.dedup();
     ids.truncate(MAX_QUERY_HISTORY_IDS);
     if let Ok(json) = serde_json::to_string(&ids) {
-        node.metadata
-            .insert("query_history_ids".to_string(), json);
+        node.metadata.insert("query_history_ids".to_string(), json);
     }
-    if node
-        .metadata
-        .get("provider")
-        .is_none()
-        && !record.provider.to_string().is_empty()
-    {
+    if node.metadata.get("provider").is_none() && !record.provider.to_string().is_empty() {
         node.metadata
             .insert("provider".to_string(), record.provider.to_string());
     }
@@ -2543,104 +2545,9 @@ fn manifest_dep_node_kind(dep: &str) -> LineageNodeKind {
     }
 }
 
-#[allow(dead_code)]
-fn default_query() -> LineageGraphQuery {
-    LineageGraphQuery {
-        asset: None,
-        field: None,
-        direction: LineageDirection::Both,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn schema_fields_metadata_encodes_source_and_pipeline_side_fields() {
-        let fields = vec![SkipprFieldSchema {
-            name: "bike_id".to_string(),
-            field_type: "Long".to_string(),
-            nullable: false,
-            source_field_name: Some("BIKE_ID".to_string()),
-            out_field_name: Some("bike_id".to_string()),
-            field_id: Some(7),
-            lineage_id: Some("bike_hire:bike_id".to_string()),
-        }];
-        let source_fields = schema_fields_for_source_side(&fields);
-        let pipeline_fields = schema_fields_for_pipeline_side(&fields);
-
-        assert_eq!(source_fields[0].name, "BIKE_ID");
-        assert_eq!(pipeline_fields[0].name, "bike_id");
-
-        let json = encode_schema_fields_metadata(&source_fields).expect("schema json");
-        let parsed =
-            parse_schema_fields_metadata(&BTreeMap::from([("schema_fields".to_string(), json)]));
-        assert_eq!(parsed.len(), 1);
-        assert_eq!(parsed[0].name, "BIKE_ID");
-        assert_eq!(parsed[0].field_type, "Long");
-        assert!(!parsed[0].nullable);
-    }
-
-    #[test]
-    fn schema_fields_metadata_merges_on_duplicate_nodes() {
-        let fields = vec![SkipprFieldSchema {
-            name: "bike_id".to_string(),
-            field_type: "Long".to_string(),
-            nullable: false,
-            source_field_name: Some("BIKE_ID".to_string()),
-            out_field_name: Some("bike_id".to_string()),
-            field_id: None,
-            lineage_id: None,
-        }];
-        let mut builder = GraphBuilder::default();
-        let node_id = LineageNodeId::generated("raw:test");
-        let schema_json = encode_schema_fields_metadata(&schema_fields_for_source_side(&fields))
-            .expect("schema json");
-        builder.add_node(LineageNode {
-            id: node_id.clone(),
-            label: "source".to_string(),
-            kind: LineageNodeKind::RawSource,
-            dataset_id: Some("source".to_string()),
-            field: None,
-            path: None,
-            metadata: BTreeMap::from([("schema_fields".to_string(), schema_json.clone())]),
-        });
-        builder.add_node(LineageNode {
-            id: node_id,
-            label: "source".to_string(),
-            kind: LineageNodeKind::RawSource,
-            dataset_id: Some("source".to_string()),
-            field: None,
-            path: None,
-            metadata: BTreeMap::from([(
-                "schema_fields".to_string(),
-                encode_schema_fields_metadata(&schema_fields_for_source_side(&[
-                    SkipprFieldSchema {
-                        name: "ride_id".to_string(),
-                        field_type: "Long".to_string(),
-                        nullable: true,
-                        source_field_name: Some("RIDE_ID".to_string()),
-                        out_field_name: Some("ride_id".to_string()),
-                        field_id: None,
-                        lineage_id: None,
-                    },
-                ]))
-                .expect("schema json"),
-            )]),
-        });
-
-        let graph = builder.finish();
-        let node = graph
-            .nodes
-            .iter()
-            .find(|node| node.kind == LineageNodeKind::RawSource)
-            .expect("raw source");
-        let parsed = parse_schema_fields_metadata(&node.metadata);
-        assert_eq!(parsed.len(), 2);
-        assert!(parsed.iter().any(|field| field.name == "BIKE_ID"));
-        assert!(parsed.iter().any(|field| field.name == "RIDE_ID"));
-    }
 
     #[test]
     fn manifest_relation_fqn_uses_identifier_for_sources() {
@@ -3043,7 +2950,10 @@ mod tests {
         );
         assert!(!graph.nodes.iter().any(|node| node.id == short_table));
         assert!(graph.nodes.iter().any(|node| node.id == canonical_table));
-        assert!(!graph.nodes.iter().any(|node| node.kind == LineageNodeKind::Query));
+        assert!(!graph
+            .nodes
+            .iter()
+            .any(|node| node.kind == LineageNodeKind::Query));
     }
 
     #[test]
@@ -3075,7 +2985,10 @@ mod tests {
         graph
             .validate()
             .expect("query CTAS field lineage validates");
-        assert!(!graph.nodes.iter().any(|node| node.kind == LineageNodeKind::Query));
+        assert!(!graph
+            .nodes
+            .iter()
+            .any(|node| node.kind == LineageNodeKind::Query));
         let source_field = field_node_id("analytics.raw.bike_hire", "event_date");
         let output_field = field_node_id("bike_hire_gold.bike_hire.events", "ride_date");
         let output_table = dataset_node_id(
@@ -3233,13 +3146,18 @@ mod tests {
         graph.validate().expect("query lineage graph validates");
         let source_field_id =
             field_node_id("bike_hire_gold.bike_hire.fct_bike_hire_events", "bike_id");
-        let output_field_id =
-            field_node_id("bike_hire_gold.bike_hire.fct_bike_hire_events_agg", "bike_id");
+        let output_field_id = field_node_id(
+            "bike_hire_gold.bike_hire.fct_bike_hire_events_agg",
+            "bike_id",
+        );
         let output_table = dataset_node_id(
             "bike_hire_gold.bike_hire.fct_bike_hire_events_agg",
             LineageNodeKind::WarehouseTable,
         );
-        assert!(!graph.nodes.iter().any(|node| node.kind == LineageNodeKind::Query));
+        assert!(!graph
+            .nodes
+            .iter()
+            .any(|node| node.kind == LineageNodeKind::Query));
         assert!(graph.nodes.iter().any(|node| node.id == source_field_id));
         assert!(graph.nodes.iter().any(|node| node.id == output_field_id));
         assert!(graph.edges.iter().any(|edge| {
@@ -3312,7 +3230,10 @@ mod tests {
         let resolver = RelationResolver::default();
         apply_query_record_evidence(&record, &mut builder, &resolver);
         let graph = builder.finish();
-        assert!(!graph.nodes.iter().any(|node| node.kind == LineageNodeKind::Query));
+        assert!(!graph
+            .nodes
+            .iter()
+            .any(|node| node.kind == LineageNodeKind::Query));
         assert!(graph.edges.iter().any(|edge| {
             edge.kind == LineageEdgeKind::SelectsFrom
                 && edge.from_node_id

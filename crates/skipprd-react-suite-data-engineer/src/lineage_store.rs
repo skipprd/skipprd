@@ -6,9 +6,9 @@ use react_core::scope::RequestScope;
 use react_core::storage::StorageAdapter;
 
 use crate::lineage_types::{
-    canonical_dataset_id, canonical_field_path, edge_id, now_epoch_secs, LineageDirection,
-    LineageEdge, LineageEdgeKind, LineageEvidenceSource, LineageGraphQuery, LineageGraphSnapshot,
-    LineageNode, LineageNodeId, LineageNodeKind, LINEAGE_GRAPH_VERSION,
+    edge_id, now_epoch_secs, LineageDirection, LineageEdge, LineageEdgeKind, LineageEvidenceSource,
+    LineageGraphQuery, LineageGraphSnapshot, LineageNode, LineageNodeId, LineageNodeKind,
+    LINEAGE_GRAPH_VERSION,
 };
 
 #[derive(Clone)]
@@ -183,10 +183,6 @@ pub fn merge_lineage_node(existing: &mut LineageNode, incoming: &LineageNode) {
         if value.trim().is_empty() {
             continue;
         }
-        if key == "schema_fields" {
-            merge_schema_fields_metadata(&mut existing.metadata, value);
-            continue;
-        }
         existing
             .metadata
             .entry(key.clone())
@@ -194,99 +190,20 @@ pub fn merge_lineage_node(existing: &mut LineageNode, incoming: &LineageNode) {
     }
 }
 
-fn merge_schema_fields_metadata(metadata: &mut BTreeMap<String, String>, incoming_json: &str) {
-    let incoming_fields = parse_schema_fields_json(incoming_json);
-    if incoming_fields.is_empty() {
-        return;
-    }
-    match metadata.get("schema_fields") {
-        None => {
-            metadata.insert("schema_fields".to_string(), incoming_json.to_string());
-        }
-        Some(existing_json) => {
-            let mut merged = parse_schema_fields_json(existing_json);
-            for field in incoming_fields {
-                if !merged.iter().any(|existing| existing.name == field.name) {
-                    merged.push(field);
-                }
-            }
-            if let Ok(json) = serde_json::to_string(&merged) {
-                metadata.insert("schema_fields".to_string(), json);
-            }
-        }
-    }
-}
-
-fn parse_schema_fields_json(raw: &str) -> Vec<crate::providers::SkipprFieldSchema> {
-    serde_json::from_str(raw).unwrap_or_default()
-}
-
 pub fn slice_graph(
     graph: &LineageGraphSnapshot,
     query: &LineageGraphQuery,
 ) -> LineageGraphSnapshot {
     if query
-        .field
+        .field_node_id
         .as_deref()
         .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .is_some()
+        .is_some_and(|value| !value.is_empty())
     {
-        return field_projection_graph(graph, query);
+        field_projection_graph(graph, query)
+    } else {
+        entity_projection_graph(graph)
     }
-
-    let Some(seed) = seed_node_id(graph, query) else {
-        return entity_projection_graph(graph);
-    };
-
-    let include_upstream = matches!(
-        query.direction,
-        LineageDirection::Upstream | LineageDirection::Both
-    );
-    let include_downstream = matches!(
-        query.direction,
-        LineageDirection::Downstream | LineageDirection::Both
-    );
-    let mut selected = BTreeSet::from([seed.clone()]);
-    let mut queue = VecDeque::from([seed]);
-
-    while let Some(node_id) = queue.pop_front() {
-        for edge in &graph.edges {
-            if include_upstream
-                && edge.to_node_id == node_id
-                && selected.insert(edge.from_node_id.clone())
-            {
-                queue.push_back(edge.from_node_id.clone());
-            }
-            if include_downstream
-                && edge.from_node_id == node_id
-                && selected.insert(edge.to_node_id.clone())
-            {
-                queue.push_back(edge.to_node_id.clone());
-            }
-        }
-    }
-
-    let nodes = graph
-        .nodes
-        .iter()
-        .filter(|node| selected.contains(&node.id))
-        .cloned()
-        .collect::<Vec<_>>();
-    let edges = graph
-        .edges
-        .iter()
-        .filter(|edge| selected.contains(&edge.from_node_id) && selected.contains(&edge.to_node_id))
-        .cloned()
-        .collect::<Vec<_>>();
-
-    entity_projection_graph(&LineageGraphSnapshot {
-        version: graph.version,
-        built_at_epoch_secs: graph.built_at_epoch_secs,
-        nodes,
-        edges,
-        diagnostics: graph.diagnostics.clone(),
-    })
 }
 
 fn entity_projection_graph(graph: &LineageGraphSnapshot) -> LineageGraphSnapshot {
@@ -295,19 +212,24 @@ fn entity_projection_graph(graph: &LineageGraphSnapshot) -> LineageGraphSnapshot
     remove_redundant_direct_edges(&mut projected_edges);
     remove_isolated_query_nodes(graph, &mut entity_ids, &mut projected_edges);
     let mut ranks = topology_ranks(&projected_edges, &entity_ids);
-    let field_ids = field_node_ids(graph);
+    let field_ids = contained_field_node_ids(graph, &entity_ids);
     add_field_ranks(graph, &field_ids, &mut ranks);
-    let mut nodes = graph
+    let nodes = graph
         .nodes
         .iter()
-        .filter(|node| entity_ids.contains(&node.id))
+        .filter(|node| entity_ids.contains(&node.id) || field_ids.contains(&node.id))
         .map(|node| annotate_node_rank(node.clone(), &ranks, "normal"))
         .collect::<Vec<_>>();
-    nodes.extend(schema_field_nodes(graph, &ranks, &BTreeSet::new()));
-    let edges = projected_edges
+    let mut edges = projected_edges
         .into_iter()
         .map(|edge| annotate_edge_state(edge, "normal"))
         .collect::<Vec<_>>();
+    edges.extend(contains_field_edges(
+        graph,
+        &entity_ids,
+        &field_ids,
+        "normal",
+    ));
     LineageGraphSnapshot {
         version: graph.version,
         built_at_epoch_secs: graph.built_at_epoch_secs,
@@ -333,34 +255,37 @@ fn field_projection_graph(
     remove_redundant_direct_edges(&mut projected_edges);
     remove_isolated_query_nodes(graph, &mut entity_ids, &mut projected_edges);
     let mut ranks = topology_ranks(&projected_edges, &entity_ids);
-    let field_ids = field_node_ids(graph);
-    add_field_ranks(graph, &field_ids, &mut ranks);
+    let displayed_field_ids = contained_field_node_ids(graph, &entity_ids);
+    add_field_ranks(graph, &displayed_field_ids, &mut ranks);
 
     let mut selected_ids = entity_ids.clone();
-    selected_ids.extend(lineage_field_ids.iter().cloned());
+    selected_ids.extend(displayed_field_ids.iter().cloned());
 
-    let mut nodes = graph
+    let nodes = graph
         .nodes
         .iter()
         .filter(|node| selected_ids.contains(&node.id))
         .map(|node| {
-            let state = if node.kind == LineageNodeKind::Field
+            let state = if lineage_field_ids.contains(&node.id)
                 || highlighted_entity_ids.contains(&node.id)
             {
                 "highlighted"
-            } else {
+            } else if node.kind != LineageNodeKind::Field {
                 "faded"
+            } else {
+                "normal"
             };
             annotate_node_rank(node.clone(), &ranks, state)
         })
         .collect::<Vec<_>>();
-    nodes.extend(schema_field_nodes(graph, &ranks, &lineage_field_ids));
 
     let mut edges = graph
         .edges
         .iter()
         .filter(|edge| {
-            selected_ids.contains(&edge.from_node_id) && selected_ids.contains(&edge.to_node_id)
+            edge.kind == LineageEdgeKind::FieldDerivesFrom
+                && lineage_field_ids.contains(&edge.from_node_id)
+                && lineage_field_ids.contains(&edge.to_node_id)
         })
         .map(|edge| {
             let highlighted = lineage_field_ids.contains(&edge.from_node_id)
@@ -373,6 +298,12 @@ fn field_projection_graph(
             )
         })
         .collect::<Vec<_>>();
+    edges.extend(contains_field_edges(
+        graph,
+        &entity_ids,
+        &displayed_field_ids,
+        "normal",
+    ));
     edges.extend(projected_edges.into_iter().filter_map(|edge| {
         if !selected_ids.contains(&edge.from_node_id) || !selected_ids.contains(&edge.to_node_id) {
             return None;
@@ -402,43 +333,23 @@ fn field_projection_graph(
     }
 }
 
-fn matching_field_node_ids(
+pub(crate) fn matching_field_node_ids(
     graph: &LineageGraphSnapshot,
     query: &LineageGraphQuery,
 ) -> BTreeSet<LineageNodeId> {
-    let asset = query
-        .asset
+    if let Some(field_node_id) = query
+        .field_node_id
         .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(canonical_dataset_id);
-    let field = query
-        .field
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(canonical_field_path);
-    graph
-        .nodes
-        .iter()
-        .filter(|node| node.kind == LineageNodeKind::Field)
-        .filter_map(|node| {
-            let node_field = node.field.as_ref()?;
-            if asset
-                .as_ref()
-                .is_some_and(|asset| canonical_dataset_id(&node_field.dataset_id) != *asset)
-            {
-                return None;
-            }
-            if field
-                .as_ref()
-                .is_some_and(|field| canonical_field_path(&node_field.field_path) != *field)
-            {
-                return None;
-            }
-            Some(node.id.clone())
-        })
-        .collect()
+        .and_then(|value| LineageNodeId::new(value.trim()))
+    {
+        return graph
+            .nodes
+            .iter()
+            .filter(|node| node.kind == LineageNodeKind::Field && node.id == field_node_id)
+            .map(|node| node.id.clone())
+            .collect();
+    }
+    BTreeSet::new()
 }
 
 fn connected_field_node_ids(
@@ -643,31 +554,35 @@ fn add_field_ranks(
     }
 }
 
-fn field_node_ids(graph: &LineageGraphSnapshot) -> BTreeSet<LineageNodeId> {
+fn contained_field_node_ids(
+    graph: &LineageGraphSnapshot,
+    entity_ids: &BTreeSet<LineageNodeId>,
+) -> BTreeSet<LineageNodeId> {
     graph
-        .nodes
+        .edges
         .iter()
-        .filter(|node| node.kind == LineageNodeKind::Field)
-        .map(|node| node.id.clone())
+        .filter(|edge| {
+            edge.kind == LineageEdgeKind::ContainsField && entity_ids.contains(&edge.from_node_id)
+        })
+        .map(|edge| edge.to_node_id.clone())
         .collect()
 }
 
-fn schema_field_nodes(
+fn contains_field_edges(
     graph: &LineageGraphSnapshot,
-    ranks: &BTreeMap<LineageNodeId, usize>,
-    highlighted_field_ids: &BTreeSet<LineageNodeId>,
-) -> Vec<LineageNode> {
+    entity_ids: &BTreeSet<LineageNodeId>,
+    field_ids: &BTreeSet<LineageNodeId>,
+    state: &str,
+) -> Vec<LineageEdge> {
     graph
-        .nodes
+        .edges
         .iter()
-        .filter(|node| node.kind == LineageNodeKind::Field)
-        .filter(|node| !highlighted_field_ids.contains(&node.id))
-        .map(|node| {
-            let mut node = annotate_node_rank(node.clone(), ranks, "normal");
-            node.metadata
-                .insert("_lineage_schema_only".to_string(), "true".to_string());
-            node
+        .filter(|edge| {
+            edge.kind == LineageEdgeKind::ContainsField
+                && entity_ids.contains(&edge.from_node_id)
+                && field_ids.contains(&edge.to_node_id)
         })
+        .map(|edge| annotate_edge_state(edge.clone(), state))
         .collect()
 }
 
@@ -939,45 +854,6 @@ fn annotate_edge_state(mut edge: LineageEdge, state: &str) -> LineageEdge {
     edge
 }
 
-fn seed_node_id(graph: &LineageGraphSnapshot, query: &LineageGraphQuery) -> Option<LineageNodeId> {
-    let asset = query
-        .asset
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    let field = query
-        .field
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-    match (asset, field) {
-        (None, None) => None,
-        (Some(asset), Some(field)) => graph.nodes.iter().find_map(|node| {
-            let node_field = node.field.as_ref()?;
-            if node_field.dataset_id == asset && node_field.field_path == field {
-                Some(node.id.clone())
-            } else {
-                None
-            }
-        }),
-        (Some(asset), None) => graph.nodes.iter().find_map(|node| {
-            if node.id.as_str() == asset || node.dataset_id.as_deref() == Some(asset) {
-                Some(node.id.clone())
-            } else {
-                None
-            }
-        }),
-        (None, Some(field)) => graph.nodes.iter().find_map(|node| {
-            let node_field = node.field.as_ref()?;
-            if node_field.field_path == field {
-                Some(node.id.clone())
-            } else {
-                None
-            }
-        }),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
@@ -1116,7 +992,7 @@ mod tests {
     }
 
     #[test]
-    fn default_slice_hides_fields_and_adds_topology_ranks() {
+    fn default_slice_projects_fields_from_contains_edges_and_adds_topology_ranks() {
         let a = node("raw.orders");
         let b = node("analytics.orders");
         let field = field_node("raw.orders", "order_id");
@@ -1129,22 +1005,14 @@ mod tests {
             ..Default::default()
         };
 
-        let got = slice_graph(
-            &graph,
-            &LineageGraphQuery {
-                asset: None,
-                field: None,
-                direction: LineageDirection::Both,
-            },
-        );
-        assert_eq!(
-            got.nodes
-                .iter()
-                .find(|node| node.id == field.id)
-                .and_then(|node| node.metadata.get("_lineage_schema_only"))
-                .map(String::as_str),
-            Some("true")
-        );
+        let got = slice_graph(&graph, &LineageGraphQuery::default());
+        assert!(got.nodes.iter().any(|node| node.id == field.id));
+        assert!(got.edges.iter().any(|edge| {
+            edge.kind == LineageEdgeKind::ContainsField
+                && edge.from_node_id == a.id
+                && edge.to_node_id == field.id
+        }));
+        assert!(got.nodes.iter().find(|node| node.id == field.id).is_some());
         assert_eq!(
             got.nodes
                 .iter()
@@ -1193,8 +1061,7 @@ mod tests {
         let got = slice_graph(
             &graph,
             &LineageGraphQuery {
-                asset: Some("analytics.orders".to_string()),
-                field: Some("order_id".to_string()),
+                field_node_id: Some(b_field.id.as_str().to_string()),
                 direction: LineageDirection::Both,
             },
         );
@@ -1202,13 +1069,11 @@ mod tests {
             .nodes
             .iter()
             .any(|node| node.kind == LineageNodeKind::Field));
-        assert_eq!(
-            got.nodes
-                .iter()
-                .find(|node| node.id == b_field.id)
-                .and_then(|node| node.metadata.get("_lineage_schema_only")),
-            None
-        );
+        assert!(got
+            .nodes
+            .iter()
+            .find(|node| node.id == b_field.id)
+            .is_some());
         assert_eq!(
             got.nodes
                 .iter()
@@ -1265,8 +1130,7 @@ mod tests {
         let got = slice_graph(
             &graph,
             &LineageGraphQuery {
-                asset: Some("analytics.orders".to_string()),
-                field: Some("order_id".to_string()),
+                field_node_id: Some(b_field.id.as_str().to_string()),
                 direction: LineageDirection::Both,
             },
         );
@@ -1362,8 +1226,7 @@ mod tests {
         let got = slice_graph(
             &graph,
             &LineageGraphQuery {
-                asset: Some("analytics.raw.bike_hire".to_string()),
-                field: Some("EVENT_DATE".to_string()),
+                field_node_id: Some(raw_field.id.as_str().to_string()),
                 direction: LineageDirection::Both,
             },
         );
@@ -1428,11 +1291,7 @@ mod tests {
 
     #[test]
     fn field_slice_highlights_pipeline_and_source_when_ingest_hidden() {
-        let source = typed_node(
-            "raw:source",
-            LineageNodeKind::RawSource,
-            Some("source:raw"),
-        );
+        let source = typed_node("raw:source", LineageNodeKind::RawSource, Some("source:raw"));
         let pipeline = typed_node(
             "pipeline:bike_hire",
             LineageNodeKind::Pipeline,
@@ -1493,8 +1352,7 @@ mod tests {
         let got = slice_graph(
             &graph,
             &LineageGraphQuery {
-                asset: Some("analytics.raw.bike_hire".to_string()),
-                field: Some("event_date".to_string()),
+                field_node_id: Some(warehouse_field.id.as_str().to_string()),
                 direction: LineageDirection::Both,
             },
         );
@@ -1510,6 +1368,55 @@ mod tests {
             );
         }
         assert!(!got.nodes.iter().any(|node| node.id == ingest.id));
+    }
+
+    #[test]
+    fn field_slice_accepts_field_node_id_focus() {
+        let source = typed_node("raw:source", LineageNodeKind::RawSource, Some("source:raw"));
+        let pipeline = typed_node(
+            "pipeline:bike_hire",
+            LineageNodeKind::Pipeline,
+            Some("bike_hire"),
+        );
+        let pipeline_field = field_node("bike_hire", "event_date");
+        let warehouse_field = field_node("analytics.raw.bike_hire", "event_date");
+        let graph = LineageGraphSnapshot {
+            nodes: vec![
+                source.clone(),
+                pipeline.clone(),
+                pipeline_field.clone(),
+                warehouse_field.clone(),
+            ],
+            edges: vec![
+                edge(
+                    LineageEdgeKind::ContainsField,
+                    &pipeline.id,
+                    &pipeline_field.id,
+                ),
+                edge(
+                    LineageEdgeKind::FieldDerivesFrom,
+                    &pipeline_field.id,
+                    &warehouse_field.id,
+                ),
+            ],
+            ..Default::default()
+        };
+
+        let got = slice_graph(
+            &graph,
+            &LineageGraphQuery {
+                field_node_id: Some(pipeline_field.id.as_str().to_string()),
+                direction: LineageDirection::Both,
+            },
+        );
+        assert_eq!(
+            got.nodes
+                .iter()
+                .find(|node| node.id == pipeline_field.id)
+                .and_then(|node| node.metadata.get("_lineage_state"))
+                .map(String::as_str),
+            Some("highlighted")
+        );
     }
 
     #[test]
@@ -1544,14 +1451,7 @@ mod tests {
             ..Default::default()
         };
 
-        let got = slice_graph(
-            &graph,
-            &LineageGraphQuery {
-                asset: None,
-                field: None,
-                direction: LineageDirection::Both,
-            },
-        );
+        let got = slice_graph(&graph, &LineageGraphQuery::default());
         assert!(got
             .edges
             .iter()
@@ -1616,14 +1516,7 @@ mod tests {
             ..Default::default()
         };
 
-        let got = slice_graph(
-            &graph,
-            &LineageGraphQuery {
-                asset: None,
-                field: None,
-                direction: LineageDirection::Both,
-            },
-        );
+        let got = slice_graph(&graph, &LineageGraphQuery::default());
 
         assert!(got.nodes.iter().all(|node| node.id != dbt_source.id));
         assert!(got
@@ -1673,14 +1566,7 @@ mod tests {
             ..Default::default()
         };
 
-        let got = slice_graph(
-            &graph,
-            &LineageGraphQuery {
-                asset: None,
-                field: None,
-                direction: LineageDirection::Both,
-            },
-        );
+        let got = slice_graph(&graph, &LineageGraphQuery::default());
 
         assert!(got.nodes.iter().any(|node| node.id == query.id));
         assert!(got
@@ -1736,14 +1622,7 @@ mod tests {
             ..Default::default()
         };
 
-        let got = slice_graph(
-            &graph,
-            &LineageGraphQuery {
-                asset: None,
-                field: None,
-                direction: LineageDirection::Both,
-            },
-        );
+        let got = slice_graph(&graph, &LineageGraphQuery::default());
         assert!(got.nodes.iter().any(|node| node.id == linked_query.id));
         assert!(got.nodes.iter().all(|node| node.id != isolated_query.id));
     }

@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use react_core::agent::AgentCtx;
@@ -28,6 +29,15 @@ pub struct QueryCap(pub Arc<dyn QueryProvider>);
 pub struct DatasetsCap(pub Arc<dyn DatasetCatalogProvider>);
 pub struct CatalogCap(pub Arc<dyn CatalogProvider>);
 pub struct SkipprCap(pub Arc<dyn SkipprProvider>);
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SkipprdMetadataLocation {
+    LocalPath(PathBuf),
+    StorageKey(String),
+}
+#[derive(Clone, Debug, Default)]
+pub struct SkipprdMetadataCap {
+    pub locations: Vec<SkipprdMetadataLocation>,
+}
 pub struct ProvidersCfgCap(pub ProvidersResolved);
 pub struct PipelineCap(pub PipelineName);
 
@@ -69,6 +79,11 @@ pub(crate) fn actx_catalog(ctx: &AgentCtx) -> Option<Arc<dyn CatalogProvider>> {
 
 pub(crate) fn sctx_skippr(ctx: &SuiteCtx) -> Option<Arc<dyn SkipprProvider>> {
     ctx.capability::<SkipprCap>().map(|c| c.0.clone())
+}
+
+pub(crate) fn sctx_skipprd_metadata(ctx: &SuiteCtx) -> Option<SkipprdMetadataCap> {
+    ctx.capability::<SkipprdMetadataCap>()
+        .map(|cap| cap.as_ref().clone())
 }
 
 pub(crate) fn actx_providers_cfg(ctx: &AgentCtx) -> Option<ProvidersResolved> {

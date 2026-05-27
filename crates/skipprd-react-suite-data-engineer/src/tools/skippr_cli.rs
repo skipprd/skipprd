@@ -293,23 +293,14 @@ impl Tool for SkipprCliTool {
                     cli_args.push("--pipeline".to_string());
                     cli_args.push(pipeline.to_string());
                 }
-                if let Some(asset) = args
-                    .get("asset")
+                if let Some(field_node_id) = args
+                    .get("field_node_id")
                     .and_then(|v| v.as_str())
                     .map(str::trim)
                     .filter(|s| !s.is_empty())
                 {
-                    cli_args.push("--asset".to_string());
-                    cli_args.push(asset.to_string());
-                }
-                if let Some(field) = args
-                    .get("field")
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    cli_args.push("--field".to_string());
-                    cli_args.push(field.to_string());
+                    cli_args.push("--field-node-id".to_string());
+                    cli_args.push(field_node_id.to_string());
                 }
                 if let Some(direction) = args
                     .get("direction")

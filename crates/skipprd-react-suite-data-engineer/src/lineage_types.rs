@@ -284,12 +284,32 @@ impl LineageGraphSnapshot {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LineageResourceKind {
+    Metadata,
+    Config,
+    SourceFile,
+    StorageLocation,
+    DatasetId,
+    NodeId,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LineageResourceRef {
+    pub kind: LineageResourceKind,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+}
+
+pub const LINEAGE_META_RESOURCES: &str = "lineage_resources";
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct LineageGraphQuery {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub asset: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub field: Option<String>,
+    pub field_node_id: Option<String>,
     #[serde(default)]
     pub direction: LineageDirection,
 }
