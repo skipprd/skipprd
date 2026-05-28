@@ -664,6 +664,17 @@ fn source_descriptor_from_providers_cfg(
             .or_else(|| input.get("property_id").and_then(Value::as_str))
             .map(|property_id| format!("GA4 property {property_id}"))
             .unwrap_or_else(|| "Google Analytics (GA4)".to_string()),
+        Some("apple_search_ads") => input
+            .get("name")
+            .and_then(Value::as_str)
+            .or_else(|| input.get("org_id").and_then(Value::as_str))
+            .map(|org_id| format!("Apple Search Ads org {org_id}"))
+            .unwrap_or_else(|| "Apple Search Ads".to_string()),
+            .get("name")
+            .and_then(Value::as_str)
+            .or_else(|| input.get("ad_account_id").and_then(Value::as_str))
+            .map(|ad_account_id| format!("Meta Instagram Ads account {ad_account_id}"))
+            .unwrap_or_else(|| "Meta Instagram Ads".to_string()),
         _ => input
             .get("name")
             .and_then(Value::as_str)
@@ -697,6 +708,7 @@ fn provider_brand_for_source_kind(kind: &str) -> Option<&'static str> {
         "s3" => Some("s3"),
         "file" | "files" | "csv" | "local" | "local_file" => Some("file"),
         "google_analytics" => Some("google_analytics"),
+        "apple_search_ads" => Some("apple_search_ads"),
         _ => None,
     }
 }
@@ -731,6 +743,7 @@ fn provider_label_for_brand(brand: &str) -> &'static str {
         "clickhouse" => "ClickHouse",
         "motherduck" => "MotherDuck",
         "google_analytics" => "Google Analytics (GA4)",
+        "apple_search_ads" => "Apple Search Ads",
         _ => "Provider",
     }
 }

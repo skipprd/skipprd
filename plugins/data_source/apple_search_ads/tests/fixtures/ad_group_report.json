@@ -1,0 +1,24 @@
+{
+  "data": {
+    "reportingDataResponse": {
+      "row": [
+        {
+          "metadata": {
+            "campaignId": 1001,
+            "campaignName": "Test Campaign",
+            "adGroupId": 2001,
+            "adGroupName": "Test Ad Group"
+          },
+          "granularity": [
+            {
+              "date": "2024-01-01",
+              "impressions": 600,
+              "taps": 20,
+              "localSpend": { "amount": "6.25", "currency": "USD" }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

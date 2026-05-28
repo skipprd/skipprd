@@ -25,6 +25,7 @@ pub enum RetryDecision {
     Success,
 }
 
+#[derive(Clone)]
 pub struct RetryableHttpClient {
     pub client: reqwest::Client,
     pub config: RetryConfig,

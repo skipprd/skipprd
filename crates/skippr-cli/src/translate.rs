@@ -835,6 +835,78 @@ pub fn to_internal(
                     }
                     serde_json::Value::Object(m)
                 }
+                SourceConfig::AppleSearchAds {
+                    org_id,
+                    client_id,
+                    team_id,
+                    key_id,
+                    private_key_path,
+                    private_key_pem,
+                    start_date,
+                    end_date,
+                    lookback_days,
+                    stream_profile,
+                    processing_lag_days,
+                    time_zone,
+                    access_token,
+                    streams,
+                    return_records_with_no_metrics,
+                    max_concurrent_requests,
+                } => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("kind".into(), "apple_search_ads".into());
+                    if let Some(v) = org_id {
+                        m.insert("org_id".into(), v.clone().into());
+                        m.insert("name".into(), format!("Apple Search Ads org {v}").into());
+                    }
+                    if let Some(v) = client_id {
+                        m.insert("client_id".into(), v.clone().into());
+                    }
+                    if let Some(v) = team_id {
+                        m.insert("team_id".into(), v.clone().into());
+                    }
+                    if let Some(v) = key_id {
+                        m.insert("key_id".into(), v.clone().into());
+                    }
+                    if let Some(v) = private_key_path {
+                        m.insert("private_key_path".into(), v.clone().into());
+                    }
+                    if let Some(v) = private_key_pem {
+                        m.insert("private_key_pem".into(), v.clone().into());
+                    }
+                    if let Some(v) = start_date {
+                        m.insert("start_date".into(), v.clone().into());
+                    }
+                    if let Some(v) = end_date {
+                        m.insert("end_date".into(), v.clone().into());
+                    }
+                    if let Some(v) = lookback_days {
+                        m.insert("lookback_days".into(), (*v).into());
+                    }
+                    if let Some(v) = stream_profile {
+                        m.insert("stream_profile".into(), v.clone().into());
+                    }
+                    if let Some(v) = processing_lag_days {
+                        m.insert("processing_lag_days".into(), (*v).into());
+                    }
+                    if let Some(v) = time_zone {
+                        m.insert("time_zone".into(), v.clone().into());
+                    }
+                    if let Some(v) = access_token {
+                        m.insert("access_token".into(), v.clone().into());
+                    }
+                    if let Some(v) = streams {
+                        m.insert("streams".into(), serde_json::to_value(v).unwrap_or_default());
+                    }
+                    if let Some(v) = return_records_with_no_metrics {
+                        m.insert("return_records_with_no_metrics".into(), (*v).into());
+                    }
+                    if let Some(v) = max_concurrent_requests {
+                        m.insert("max_concurrent_requests".into(), (*v).into());
+                    }
+                    serde_json::Value::Object(m)
+                }
+
                 SourceConfig::HttpClient {
                     url,
                     method,
@@ -1740,6 +1812,44 @@ mod tests {
         assert_eq!(input["access_token"], "${GA4_ACCESS_TOKEN}");
         assert_eq!(input["streams"][0], "google_analytics.events_daily");
     }
+
+    #[test]
+    fn translate_apple_search_ads_source() {
+        let cfg = make_cfg(
+            WarehouseConfig::Athena {
+                workgroup: None,
+                region: Some("us-east-1".into()),
+                result_s3: None,
+                schema: Some("marketing".into()),
+            },
+            SourceConfig::AppleSearchAds {
+                org_id: Some("12345".into()),
+                client_id: Some("client".into()),
+                team_id: Some("team".into()),
+                key_id: Some("key".into()),
+                private_key_path: Some("${APPLE_SEARCH_ADS_PRIVATE_KEY_PATH}".into()),
+                private_key_pem: None,
+                start_date: Some("2024-01-01".into()),
+                end_date: None,
+                lookback_days: Some(3),
+                stream_profile: Some("full".into()),
+                processing_lag_days: Some(1),
+                time_zone: Some("UTC".into()),
+                access_token: None,
+                streams: None,
+                return_records_with_no_metrics: Some(true),
+                max_concurrent_requests: Some(8),
+            },
+        );
+        let input = el_input(&cfg);
+        assert_eq!(input["kind"], "apple_search_ads");
+        assert_eq!(input["org_id"], "12345");
+        assert_eq!(input["start_date"], "2024-01-01");
+        assert_eq!(input["stream_profile"], "full");
+        assert_eq!(input["max_concurrent_requests"], 8);
+    }
+
+    #[test]
 
     #[test]
     fn translate_http_client_source() {

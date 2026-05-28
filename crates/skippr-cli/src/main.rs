@@ -918,6 +918,41 @@ enum SourceKind {
         #[arg(long, value_delimiter = ',')]
         streams: Option<Vec<String>>,
     },
+    /// Apple Search Ads source (Campaign Management API v5 daily reports).
+    AppleSearchAds {
+        #[arg(long)]
+        org_id: Option<String>,
+        #[arg(long)]
+        client_id: Option<String>,
+        #[arg(long)]
+        team_id: Option<String>,
+        #[arg(long)]
+        key_id: Option<String>,
+        #[arg(long)]
+        private_key_path: Option<String>,
+        #[arg(long)]
+        private_key_pem: Option<String>,
+        #[arg(long)]
+        start_date: Option<String>,
+        #[arg(long)]
+        end_date: Option<String>,
+        #[arg(long)]
+        lookback_days: Option<u32>,
+        #[arg(long)]
+        stream_profile: Option<String>,
+        #[arg(long)]
+        processing_lag_days: Option<u32>,
+        #[arg(long)]
+        time_zone: Option<String>,
+        #[arg(long)]
+        return_records_with_no_metrics: Option<bool>,
+        #[arg(long)]
+        access_token: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        streams: Option<Vec<String>>,
+        #[arg(long)]
+        max_concurrent_requests: Option<u32>,
+    },
     /// HTTP client source (polling).
     HttpClient {
         #[arg(long)]
@@ -1616,6 +1651,7 @@ fn plugin_mapping_key(map: &serde_yaml::Mapping) -> Option<String> {
 
 /// Prefer known runtime plugin keys (e.g. `GoogleAnalytics`) over incidental mappings like `transform`.
 const DATA_SOURCE_RUNTIME_PLUGIN_KEYS: &[&str] = &[
+    "AppleSearchAds",
     "GoogleAnalytics",
     "S3",
     "File",
@@ -1813,6 +1849,19 @@ fn yaml_u32(map: &serde_yaml::Mapping, key: &str) -> Option<u32> {
     })
 }
 
+fn yaml_u64(map: &serde_yaml::Mapping, key: &str) -> Option<u64> {
+    map.get(yaml_key(key)).and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| {
+                value
+                    .as_i64()
+                    .and_then(|n| u64::try_from(n).ok().filter(|_| n >= 0))
+            })
+            .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
+    })
+}
+
 fn yaml_bool(map: &serde_yaml::Mapping, key: &str) -> Option<bool> {
     map.get(yaml_key(key)).and_then(|value| {
         value.as_bool().or_else(|| {
@@ -1910,6 +1959,25 @@ fn source_config_from_data_source(
             service_account_json_path: yaml_str(plugin_cfg, "service_account_json_path"),
             streams: yaml_string_vec(plugin_cfg, "streams"),
         }),
+        "AppleSearchAds" => Ok(SourceConfig::AppleSearchAds {
+            org_id: yaml_str(plugin_cfg, "org_id"),
+            client_id: yaml_str(plugin_cfg, "client_id"),
+            team_id: yaml_str(plugin_cfg, "team_id"),
+            key_id: yaml_str(plugin_cfg, "key_id"),
+            private_key_path: yaml_str(plugin_cfg, "private_key_path"),
+            private_key_pem: yaml_str(plugin_cfg, "private_key_pem"),
+            start_date: yaml_str(plugin_cfg, "start_date"),
+            end_date: yaml_str(plugin_cfg, "end_date"),
+            lookback_days: yaml_u32(plugin_cfg, "lookback_days"),
+            stream_profile: yaml_str(plugin_cfg, "stream_profile"),
+            processing_lag_days: yaml_u32(plugin_cfg, "processing_lag_days"),
+            access_token: yaml_str(plugin_cfg, "access_token"),
+            streams: yaml_string_vec(plugin_cfg, "streams"),
+            time_zone: yaml_str(plugin_cfg, "time_zone"),
+            return_records_with_no_metrics: yaml_bool(plugin_cfg, "return_records_with_no_metrics"),
+            max_concurrent_requests: yaml_u32(plugin_cfg, "max_concurrent_requests"),
+        }),
+),
         other => Err(format!(
             "data_sources.{data_source_name}.{other} is not supported by lineage config translation"
         )),
@@ -2661,6 +2729,65 @@ fn source_plugin_and_config(kind: SourceKind) -> (&'static str, serde_json::Valu
                     "service_account_json_path",
                     str_json(service_account_json_path),
                 ),
+                ("streams", strings_json(streams)),
+            ]),
+        ),
+        SourceKind::AppleSearchAds {
+            org_id,
+            client_id,
+            team_id,
+            key_id,
+            private_key_path,
+            private_key_pem,
+            start_date,
+            end_date,
+            lookback_days,
+            stream_profile,
+            processing_lag_days,
+            time_zone,
+            return_records_with_no_metrics,
+            access_token,
+            streams,
+            max_concurrent_requests,
+        } => (
+            "AppleSearchAds",
+            json_object(vec![
+                ("org_id", str_json(org_id)),
+                ("client_id", str_json(client_id)),
+                ("team_id", str_json(team_id)),
+                ("key_id", str_json(key_id)),
+                ("private_key_path", str_json(private_key_path)),
+                ("private_key_pem", str_json(private_key_pem)),
+                ("start_date", str_json(start_date)),
+                ("end_date", str_json(end_date)),
+                ("lookback_days", u32_json(lookback_days)),
+                ("stream_profile", str_json(stream_profile)),
+                ("processing_lag_days", u32_json(processing_lag_days)),
+                ("time_zone", str_json(time_zone)),
+                (
+                    "return_records_with_no_metrics",
+                    bool_json(return_records_with_no_metrics),
+                ),
+                ("access_token", str_json(access_token)),
+                ("streams", strings_json(streams)),
+                ("max_concurrent_requests", u32_json(max_concurrent_requests)),
+            ]),
+        ),
+ => (
+                    json_object(vec![
+                ("ad_account_id", str_json(ad_account_id)),
+                ("start_date", str_json(start_date)),
+                ("end_date", str_json(end_date)),
+                ("lookback_days", u32_json(lookback_days)),
+                ("stream_profile", str_json(stream_profile)),
+                ("processing_lag_days", u32_json(processing_lag_days)),
+                ("api_version", str_json(api_version)),
+                ("access_token", str_json(access_token)),
+                ("oauth_token_url", str_json(oauth_token_url)),
+                ("oauth_client_id", str_json(oauth_client_id)),
+                ("oauth_client_secret", str_json(oauth_client_secret)),
+                ("oauth_refresh_token", str_json(oauth_refresh_token)),
+                ("instagram_filter", bool_json(instagram_filter)),
                 ("streams", strings_json(streams)),
             ]),
         ),
@@ -3482,6 +3609,49 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         }
     }
 
+    if let SourceKind::AppleSearchAds {
+        ref mut org_id,
+        ref mut client_id,
+        ref mut team_id,
+        ref mut key_id,
+        ref mut private_key_path,
+        ref mut start_date,
+        ..
+    } = &mut kind
+    {
+        if org_id.is_none() {
+            *org_id = prompt("Apple Search Ads org ID");
+        }
+        if client_id.is_none() {
+            *client_id = Some("${APPLE_SEARCH_ADS_CLIENT_ID}".to_string());
+        }
+        if team_id.is_none() {
+            *team_id = Some("${APPLE_SEARCH_ADS_TEAM_ID}".to_string());
+        }
+        if key_id.is_none() {
+            *key_id = Some("${APPLE_SEARCH_ADS_KEY_ID}".to_string());
+        }
+        if private_key_path.is_none() {
+            *private_key_path = Some("${APPLE_SEARCH_ADS_PRIVATE_KEY_PATH}".to_string());
+        }
+        if start_date.is_none() {
+            *start_date = prompt("Start date for first sync (YYYY-MM-DD)");
+        }
+    }
+
+ = &mut kind
+    {
+        if ad_account_id.is_none() {
+            *ad_account_id = prompt("Meta ad account ID (numeric, without act_ prefix)");
+        }
+        if start_date.is_none() {
+            *start_date = prompt("Start date for first sync (YYYY-MM-DD)");
+        }
+        if access_token.is_none() {
+            *access_token = Some("${META_INSTAGRAM_ADS_ACCESS_TOKEN}".to_string());
+        }
+    }
+
     match load_cli_raw_config_for_save(explicit_config) {
         Ok(mut cfg) => {
             let (plugin, config) = source_plugin_and_config(kind);
@@ -3790,6 +3960,41 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
             service_account_json_path,
             streams,
         },
+        SourceKind::AppleSearchAds {
+            org_id,
+            client_id,
+            team_id,
+            key_id,
+            private_key_path,
+            private_key_pem,
+            start_date,
+            end_date,
+            lookback_days,
+            stream_profile,
+            processing_lag_days,
+            time_zone,
+            return_records_with_no_metrics,
+            access_token,
+            streams,
+            max_concurrent_requests,
+        } => SourceConfig::AppleSearchAds {
+            org_id,
+            client_id,
+            team_id,
+            key_id,
+            private_key_path,
+            private_key_pem,
+            start_date,
+            end_date,
+            lookback_days,
+            stream_profile,
+            processing_lag_days,
+            time_zone,
+            access_token,
+            streams,
+            return_records_with_no_metrics,
+            max_concurrent_requests,
+        },
         SourceKind::HttpClient {
             url,
             method,
@@ -3855,6 +4060,7 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         SourceConfig::Mqtt { .. } => "mqtt",
         SourceConfig::Websocket { .. } => "websocket",
         SourceConfig::GoogleAnalytics { .. } => "google_analytics",
+        SourceConfig::AppleSearchAds { .. } => "apple_search_ads",
         SourceConfig::HttpClient { .. } => "http_client",
         SourceConfig::HttpServer { .. } => "http_server",
         SourceConfig::Socket { .. } => "socket",

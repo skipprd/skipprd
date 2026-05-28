@@ -7,7 +7,10 @@ pub mod json_extract;
 pub mod pagination;
 pub mod retry;
 
-pub use auth::{BearerAuth, OAuth2RefreshTokenAuth, ServiceAccountAuth, StaticBearerAuth};
+pub use auth::{
+    AppleAdsClientCredentialsAuth, BearerAuth, OAuth2RefreshTokenAuth, ServiceAccountAuth,
+    StaticBearerAuth,
+};
 pub use checkpoint::{CheckpointPayload, JsonCheckpoint};
 pub use date_window::{DateWindow, DateWindowPlanner};
 pub use json_extract::json_rows_from_response;

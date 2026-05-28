@@ -1,0 +1,22 @@
+{
+  "data": {
+    "reportingDataResponse": {
+      "row": [
+        {
+          "metadata": {
+            "campaignId": 1001,
+            "searchTerm": "running shoes"
+          },
+          "granularity": [
+            {
+              "date": "2024-01-01",
+              "impressions": 50,
+              "taps": 3,
+              "localSpend": { "amount": "0.75", "currency": "USD" }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

@@ -450,6 +450,41 @@ pub enum SourceConfig {
         #[serde(default)]
         streams: Option<Vec<String>>,
     },
+    #[serde(rename = "apple_search_ads")]
+    AppleSearchAds {
+        #[serde(default)]
+        org_id: Option<String>,
+        #[serde(default)]
+        client_id: Option<String>,
+        #[serde(default)]
+        team_id: Option<String>,
+        #[serde(default)]
+        key_id: Option<String>,
+        #[serde(default)]
+        private_key_path: Option<String>,
+        #[serde(default)]
+        private_key_pem: Option<String>,
+        #[serde(default)]
+        start_date: Option<String>,
+        #[serde(default)]
+        end_date: Option<String>,
+        #[serde(default)]
+        lookback_days: Option<u32>,
+        #[serde(default)]
+        stream_profile: Option<String>,
+        #[serde(default)]
+        processing_lag_days: Option<u32>,
+        #[serde(default)]
+        time_zone: Option<String>,
+        #[serde(default)]
+        access_token: Option<String>,
+        #[serde(default)]
+        streams: Option<Vec<String>>,
+        #[serde(default)]
+        return_records_with_no_metrics: Option<bool>,
+        #[serde(default)]
+        max_concurrent_requests: Option<u32>,
+    },
     HttpClient {
         #[serde(default)]
         url: Option<String>,
@@ -617,6 +652,7 @@ impl SkipprProjectConfig {
             Some(SourceConfig::Mqtt { .. }) => Some("mqtt"),
             Some(SourceConfig::Websocket { .. }) => Some("websocket"),
             Some(SourceConfig::GoogleAnalytics { .. }) => Some("google_analytics"),
+            Some(SourceConfig::AppleSearchAds { .. }) => Some("apple_search_ads"),
             Some(SourceConfig::HttpClient { .. }) => Some("http_client"),
             Some(SourceConfig::HttpServer { .. }) => Some("http_server"),
             Some(SourceConfig::Socket { .. }) => Some("socket"),
