@@ -11,9 +11,9 @@ pub struct RetryConfig {
 impl Default for RetryConfig {
     fn default() -> Self {
         Self {
-            max_attempts: 5,
-            initial_backoff_ms: 500,
-            max_backoff_ms: 30_000,
+            max_attempts: 8,
+            initial_backoff_ms: 1_000,
+            max_backoff_ms: 120_000,
         }
     }
 }
@@ -42,10 +42,17 @@ impl RetryableHttpClient {
         if status.is_success() {
             return RetryDecision::Success;
         }
-        if status == reqwest::StatusCode::TOO_MANY_REQUESTS || status.is_server_error() {
+        if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
+            // Quota-style limits often need tens of seconds without a Retry-After header.
             let delay = retry_after
                 .map(Duration::from_secs)
-                .unwrap_or_else(|| Duration::from_millis(1000));
+                .unwrap_or(Duration::from_secs(30));
+            return RetryDecision::RetryAfter(delay);
+        }
+        if status.is_server_error() {
+            let delay = retry_after
+                .map(Duration::from_secs)
+                .unwrap_or(Duration::from_millis(1_000));
             return RetryDecision::RetryAfter(delay);
         }
         RetryDecision::GiveUp
@@ -55,10 +62,11 @@ impl RetryableHttpClient {
         let exp = self
             .config
             .initial_backoff_ms
-            .saturating_mul(1 << attempt.min(8));
+            .saturating_mul(1 << attempt.min(10));
         let capped = exp.min(self.config.max_backoff_ms);
-        let delay = suggested.max(Duration::from_millis(capped));
-        sleep(delay).await;
+        let base = suggested.max(Duration::from_millis(capped));
+        let jitter_ms = (attempt as u64).saturating_mul(250).min(5_000);
+        sleep(base + Duration::from_millis(jitter_ms)).await;
     }
 }
 
@@ -67,10 +75,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn rate_limit_retries() {
+    fn rate_limit_retries_with_retry_after() {
         assert_eq!(
             RetryableHttpClient::classify_status(reqwest::StatusCode::TOO_MANY_REQUESTS, Some(2)),
             RetryDecision::RetryAfter(Duration::from_secs(2))
+        );
+    }
+
+    #[test]
+    fn rate_limit_default_backoff_without_retry_after() {
+        assert_eq!(
+            RetryableHttpClient::classify_status(reqwest::StatusCode::TOO_MANY_REQUESTS, None),
+            RetryDecision::RetryAfter(Duration::from_secs(30))
         );
     }
 

@@ -6,8 +6,9 @@ use chrono::{Duration, NaiveDate, Utc};
 use serde::Deserialize;
 use serde_derive::Serialize;
 use skippr_plugin_shared_api_source::{
-    DateWindow, DateWindowPlanner, OAuth2RefreshTokenAuth, RetryableHttpClient,
+    DateWindow, DateWindowPlanner, OAuth2RefreshTokenAuth, RetryConfig, RetryableHttpClient,
 };
+use tokio::time::{sleep, Duration};
 use skippr_runtime_sdk::helpers::offsets::OffsetKey;
 use skippr_runtime_sdk::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
 use skippr_runtime_sdk::plugins::source_contract::{
@@ -80,6 +81,12 @@ pub struct DataSourceGoogleAnalyticsPluginConfig {
     pub window_in_days: u32,
     #[serde(default)]
     pub streams: Option<Vec<String>>,
+    /// Pause between successful Data API runReport calls (reduces 429 quota errors).
+    #[serde(default = "default_request_interval_ms")]
+    pub request_interval_ms: u64,
+    /// Per-request retries on HTTP 429 / 5xx (exponential backoff in the plugin HTTP client).
+    #[serde(default = "default_max_api_retries")]
+    pub max_api_retries: u32,
 }
 
 fn default_lookback_days() -> u32 {
@@ -100,6 +107,14 @@ fn default_processing_lag_days() -> u32 {
 
 fn default_window_in_days() -> u32 {
     1
+}
+
+fn default_request_interval_ms() -> u64 {
+    300
+}
+
+fn default_max_api_retries() -> u32 {
+    12
 }
 
 impl DataSourceGoogleAnalyticsPluginConfig {
@@ -124,9 +139,13 @@ impl DataSourceGoogleAnalyticsPlugin {
     pub fn new(config: DataSourceGoogleAnalyticsPluginConfig) -> Result<Self, std::io::Error> {
         config.validate()?;
         let oauth = Self::build_oauth(&config);
+        let http = RetryableHttpClient::new(RetryConfig {
+            max_attempts: config.max_api_retries,
+            ..RetryConfig::default()
+        });
         Ok(Self {
             config,
-            http: RetryableHttpClient::new(Default::default()),
+            http,
             oauth,
         })
     }
@@ -504,15 +523,24 @@ impl DataSource for DataSourceGoogleAnalyticsPlugin {
             let dates = DateWindowPlanner::dates_inclusive(&window);
             let chunks = chunk_dates(&dates, self.config.window_in_days);
 
-            info!(
-                "GA4 sync {}: {} dates ({}..={}), {} API chunk(s), window_in_days={}",
-                stream.namespace,
-                dates.len(),
-                window.start,
-                window.end,
-                chunks.len(),
-                self.config.window_in_days,
-            );
+            match last_completed {
+                Some(cp) => info!(
+                    namespace = stream.namespace,
+                    last_completed = %cp,
+                    effective_start = %window.start,
+                    effective_end = %window.end,
+                    lookback_days = planner.lookback_days,
+                    api_calls = chunks.len(),
+                    "GA4 resuming namespace from stored checkpoint (one runReport per date chunk; no API pagination)"
+                ),
+                None => info!(
+                    namespace = stream.namespace,
+                    effective_start = %window.start,
+                    effective_end = %window.end,
+                    api_calls = chunks.len(),
+                    "GA4 no checkpoint for namespace; syncing full configured window"
+                ),
+            }
 
             for (chunk_start, chunk_end) in chunks {
                 let mut chunk_dates_list = Vec::new();
@@ -531,6 +559,9 @@ impl DataSource for DataSourceGoogleAnalyticsPlugin {
                             let date_key = date.format("%Y-%m-%d").to_string();
                             let rows_for_day = grouped.get(&date_key).cloned().unwrap_or_default();
                             self.submit_rows_for_date(ctx.as_ref(), stream, date, rows_for_day)?;
+                        }
+                        if self.config.request_interval_ms > 0 {
+                            sleep(Duration::from_millis(self.config.request_interval_ms)).await;
                         }
                     }
                     Err(err) if stream.optional && is_invalid_dimension_metric_error(&err) => {
@@ -570,6 +601,8 @@ mod tests {
             processing_lag_days: 1,
             window_in_days: 1,
             streams: None,
+            request_interval_ms: 300,
+            max_api_retries: 12,
         }
     }
 

@@ -1,6 +1,6 @@
 use chrono::NaiveDate;
 use skippr_plugin_shared_api_source::RetryableHttpClient;
-use tracing::debug;
+use tracing::warn;
 
 const GA4_RUN_REPORT_URL: &str = "https://analyticsdata.googleapis.com/v1beta";
 const GA4_SCOPE: &str = "https://www.googleapis.com/auth/analytics.readonly";
@@ -91,12 +91,19 @@ pub async fn run_report_range(
                 attempt += 1;
                 if attempt >= http.config.max_attempts {
                     return Err(std::io::Error::other(format!(
-                        "GA4 runReport failed after {} attempts: HTTP {}",
-                        attempt, status
+                        "GA4 runReport failed after {attempt}/{} attempts: HTTP {status}",
+                        http.config.max_attempts
                     )));
                 }
-                debug!(
-                    "GA4 runReport retry {attempt} for property {property} on {start_str}..={end_str}"
+                warn!(
+                    attempt,
+                    max_attempts = http.config.max_attempts,
+                    delay_secs = delay.as_secs(),
+                    %status,
+                    property,
+                    start = %start_str,
+                    end = %end_str,
+                    "GA4 runReport rate limited or transient error; backing off before retry"
                 );
                 http.backoff(attempt, delay).await;
             }
