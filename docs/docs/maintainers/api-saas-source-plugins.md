@@ -113,9 +113,21 @@ The host also validates that the **pipeline’s configured data sink** supports 
 Prefer `plugins/shared/api_source/` where applicable:
 
 - [ ] OAuth2 refresh, static bearer, optional service-account pattern
-- [ ] Retry with backoff and rate-limit handling
+- [ ] Retry with backoff and rate-limit handling (see [Lessons learned](#lessons-learned-operations--design) — 429 defaults and proactive pacing)
 - [ ] Pagination helpers and date/window planners for report APIs
 - [ ] Document credential env/config in the plugin crate; provide **fixture-based tests** so CI does not need live credentials (env var pointing at fixture directory is a common pattern)
+
+### Discover auto-sampling (required for report APIs)
+
+`skippr discover` must not pull full historical backfills or large bronze catalogs just to infer schemas. Sampling is **automatic** (not a `skippr.yml` knob):
+
+- [ ] Read `SKIPPR_RUNTIME_EXECUTION_MODE` via `SKIPPR_RUNTIME_EXECUTION_MODE_ENV` (`discover` vs normal sync) — set by the host in [`append_source_runtime.rs`](../../../crates/skippr-runtime-sdk/src/append_source_runtime.rs)
+- [ ] In discover mode: narrow **date window** (e.g. last 3 days), **minimal stream profile**, `lookback_days = 0`, **no checkpoint load/advance**
+- [ ] `source_namespace_contracts()` still reflects the **configured** profile so discover knows all namespaces; only `sync()` API traffic is throttled
+- [ ] Unit tests: discover window, minimal streams only, env detection, no checkpoint writes in discover
+- [ ] For fan-out APIs (per-campaign child reports): discover must **not** run fan-out enumeration — only org-wide / minimal grains
+
+Reference: `runtime_is_discover_mode()` and `streams_for_run(discover)` in `plugins/data_source/google_analytics/`.
 
 ### Tests (source)
 
@@ -314,6 +326,96 @@ Reusable building blocks for API/SaaS **sources** (vendor-specific mapping stays
 | `checkpoint.rs` | Versioned checkpoint envelopes |
 | `json_extract.rs` | Row extraction helpers |
 
+**`retry.rs` defaults (shared across connectors):** HTTP 429 uses a **30s** suggested delay when the vendor omits `Retry-After`; exponential backoff caps at **120s**; default **8** attempts. Per-plugin configs may raise `max_api_retries` and add a **pause between successful requests** (`request_interval_ms`) — retries alone are not enough when the catalog issues hundreds of report calls per sync.
+
+---
+
+## Lessons learned (operations & design)
+
+Generic guidance from production-style SaaS connector work (especially mutable daily report APIs). Plugin-specific detail stays in [Reference implementations](#reference-implementations).
+
+### Discover must self-limit API volume
+
+Discover runs the same source plugin as sync. Without an in-plugin sampling knob, a `stream_profile: full` pipeline will issue a full backfill during discover and burn quota before schema inference completes.
+
+| Discover | Normal sync |
+| --- | --- |
+| Short recent date window (e.g. 3 days) | `start_date` … effective end |
+| Minimal bronze profile for HTTP calls | User-selected profile |
+| No checkpoint read/write | Per-namespace checkpoints |
+| No parent/child fan-out (if applicable) | Full enumeration when required |
+
+Log clearly when sampling is active so operators do not confuse discover traffic with scheduled sync volume.
+
+### Rate limits: retry backoff **and** proactive pacing
+
+Most vendors return **HTTP 429** (or 503) under quota pressure.
+
+1. **Use** [`RetryableHttpClient`](../../../plugins/shared/api_source/src/retry.rs) — do not hand-roll two-attempt retries.
+2. **Treat 429 differently from 5xx** — missing `Retry-After` on 429 often needs tens of seconds, not sub-second delays.
+3. **Expose plugin config** for `max_api_retries` and `request_interval_ms` (pause after each **successful** call). Defaults alone may be insufficient for large catalogs.
+4. **Log at WARN** on retry with attempt number, delay, and request scope (namespace, date range) so logs are diagnosable.
+5. **Curated catalogs** — more namespaces × more days × pagination ≈ quota risk; offer `minimal` / `standard` / `full` profiles and document tradeoffs on the public connector page.
+
+**Stale-plugin smell:** an error like `failed after 5 attempts` when the crate default is already higher means the host is running an **old plugin binary** (see below), not that backoff is disabled.
+
+### Local plugin builds vs published runtime binaries
+
+`cargo build -p skippr-cli` rebuilds the **host** only. Each `plugins/data_source/<name>/` crate is a **separate** subprocess loaded at runtime.
+
+For IDE and local dev:
+
+```bash
+cargo build -p skippr-plugin-data-source-<name> -p skippr-cli
+python3 .github/scripts/local_runtime_plugins.py --config <skippr.yml> --pipeline <pipeline>
+# export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR=<printed path>
+```
+
+Skippr IDE can build this manifest when **use local runtime plugins** is enabled (`skippr.dev.useLocalRuntimePlugins`). If sync behavior does not match source changes (retry counts, discover sampling, new config fields), rebuild the **plugin crate** and refresh the manifest before re-running sync.
+
+**Protocol version mismatch** (`host=11 child=10` or similar) usually means the host was rebuilt but the child plugin was not — align both via `local_runtime_plugins.py` or a full plugin build.
+
+### Bounded (`Finite`) sources and `sync --once`
+
+Report-style sources should declare `SourceOnceContract::Finite` and exit when backfill completes. The host must **not** apply streaming idle timeouts that kill long finite backfills (IDE and CLI often use `sync --once`). Verify finite sources complete multi-hour runs without arbitrary 60s cutoffs.
+
+### Tell source success apart from sink uploads
+
+Host metrics can show **ingest/compactor progress** while the data sink reports **`Uploads total: 0`**.
+
+| Signal | Meaning |
+| --- | --- |
+| `Messages Total` / `uploaded_rows` (compactor) rising | Source → WAL → compact path is receiving rows |
+| `Uploads total: 0` | Athena/S3 sink path not committing (credentials, partition layout, tiny batches, or sink errors) |
+| `msgs_total=0` on failed run | Source failed before meaningful ingest (auth, 429 on first call, config error) |
+
+Fix the source first (429, credentials), then the sink (Glue database, S3 prefix, IAM, `replace_partition` scope).
+
+### Pipeline + Athena: partition time field
+
+For daily report bronze with a `date` column and `replace_partition` on `date`, the pipeline should usually set:
+
+```yaml
+transform:
+  batch_time_fields: [date]
+```
+
+so the compactor and object layout align with contract partition keys. Missing `batch_time_fields` can yield very small batches and confusing sink behavior even when the source ingests successfully.
+
+### Mutable metrics: contracts, not append
+
+Ad platforms and analytics APIs **revise** past days (conversions, spend, etc.). Use `write_policy: replace_partition`, `partition_key` on the report date, and `refresh_window` / `lookback_days` on the source. Checkpoints record **extraction progress**, not “downstream is correct forever.”
+
+Pair with Athena or Iceberg sinks that declare `supports_replace_partition` in the manifest; append-only sinks should fail validation at startup.
+
+### Ship CLI, lineage, and plugin name mapping together
+
+A source plugin without `skippr connect`, `public_config`, `translate`, and `skippr_impl` / `lineage_builder` arms forces hand-edited YAML and produces lineage errors (“not supported by config translation”). Add these in the same PR as the plugin when the connector is user-facing.
+
+### Optional-stream pattern for incompatible report grains
+
+When a bronze namespace uses dimension/metric combinations that some accounts reject (400 / `INVALID_ARGUMENT`), mark the stream `optional` and skip **only that namespace** on known errors — do not fail the entire pipeline for one unsupported grain.
+
 ---
 
 ## Maintainer verification
@@ -355,3 +457,4 @@ Use these for end-to-end examples only; new connectors should follow the generic
 - Mutable HTTP report APIs: prefer `replace_partition` + `refresh_window` over append
 - `merge_by_key` only when the API is true entity state **and** the sink manifest supports it
 - Ship **source + data sink + schema sink** contract wiring together; partial integration fails at runtime or leaves catalog paths inconsistent with writes
+- Implement **discover auto-sampling** and **rate-limit pacing** for every new report API connector — see [Lessons learned](#lessons-learned-operations--design)
