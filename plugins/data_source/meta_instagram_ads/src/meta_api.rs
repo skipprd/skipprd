@@ -105,30 +105,35 @@ impl MetaInsightsApiClient {
 
         let mut merged: Vec<serde_json::Value> = Vec::new();
         let mut pagination = TokenPagination::default();
-        let mut last_body: Option<serde_json::Value> = None;
 
-        loop {
+        let url = self
+            .resolve_insights_url(stream, date, pagination.next_token.as_deref())
+            .await?;
+        let mut last_body = self.get_url_with_retry(auth_header, &url).await?;
+        if let Some(page) = last_body.get("data").and_then(|v| v.as_array()) {
+            merged.extend(page.clone());
+        }
+        pagination.next_token = last_body
+            .pointer("/paging/next")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+
+        while pagination.should_continue() {
             let url = self
                 .resolve_insights_url(stream, date, pagination.next_token.as_deref())
                 .await?;
-            let body = self.get_url_with_retry(auth_header, &url).await?;
-            last_body = Some(body.clone());
-            if let Some(page) = body.get("data").and_then(|v| v.as_array()) {
+            last_body = self.get_url_with_retry(auth_header, &url).await?;
+            if let Some(page) = last_body.get("data").and_then(|v| v.as_array()) {
                 merged.extend(page.clone());
             }
-            pagination.next_token = body
+            pagination.next_token = last_body
                 .pointer("/paging/next")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            if !pagination.should_continue() {
-                break;
-            }
         }
 
-        if let Some(mut last_body) = last_body {
-            if let Some(data) = last_body.get_mut("data") {
-                *data = serde_json::Value::Array(merged);
-            }
+        if let Some(data) = last_body.get_mut("data") {
+            *data = serde_json::Value::Array(merged);
             Ok(last_body)
         } else {
             Ok(serde_json::json!({ "data": merged }))

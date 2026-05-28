@@ -1881,19 +1881,6 @@ fn yaml_u32(map: &serde_yaml::Mapping, key: &str) -> Option<u32> {
     })
 }
 
-fn yaml_u64(map: &serde_yaml::Mapping, key: &str) -> Option<u64> {
-    map.get(yaml_key(key)).and_then(|value| {
-        value
-            .as_u64()
-            .or_else(|| {
-                value
-                    .as_i64()
-                    .and_then(|n| u64::try_from(n).ok().filter(|_| n >= 0))
-            })
-            .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
-    })
-}
-
 fn yaml_bool(map: &serde_yaml::Mapping, key: &str) -> Option<bool> {
     map.get(yaml_key(key)).and_then(|value| {
         value.as_bool().or_else(|| {

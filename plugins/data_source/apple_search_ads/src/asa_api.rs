@@ -206,10 +206,23 @@ impl AsaApiClient {
             offset: 0,
             limit: DEFAULT_PAGE_LIMIT,
         };
-        let mut last_body: Option<serde_json::Value> = None;
 
-        loop {
-            let body = self
+        let mut last_body = self
+            .fetch_report_page(
+                stream,
+                date,
+                campaign_id,
+                ad_group_id,
+                pagination.offset,
+                pagination.limit,
+            )
+            .await?;
+        let mut page_rows = rows_from_report_body(&last_body);
+        let mut count = page_rows.len();
+        merged_rows.append(&mut page_rows);
+        while !pagination.should_stop(count) {
+            pagination.advance(count);
+            last_body = self
                 .fetch_report_page(
                     stream,
                     date,
@@ -219,21 +232,14 @@ impl AsaApiClient {
                     pagination.limit,
                 )
                 .await?;
-            last_body = Some(body.clone());
-            let page_rows = rows_from_report_body(&body);
-            let count = page_rows.len();
+            let page_rows = rows_from_report_body(&last_body);
+            count = page_rows.len();
             merged_rows.extend(page_rows);
-            if pagination.should_stop(count) {
-                break;
-            }
-            pagination.advance(count);
         }
 
-        if let Some(mut last_body) = last_body {
-            if let Some(data) = last_body.get_mut("data") {
-                if let Some(resp) = data.get_mut("reportingDataResponse") {
-                    resp["row"] = serde_json::Value::Array(merged_rows);
-                }
+        if let Some(data) = last_body.get_mut("data") {
+            if let Some(resp) = data.get_mut("reportingDataResponse") {
+                resp["row"] = serde_json::Value::Array(merged_rows);
             }
             Ok(last_body)
         } else {
@@ -411,6 +417,7 @@ pub fn report_time_zone<'a>(stream: &'a AsaStreamDef, config_time_zone: &'a str)
 mod tests {
     use super::*;
     use crate::streams::{CURATED_STREAMS, ReportGrain};
+    use skippr_plugin_shared_api_source::RetryConfig;
 
     #[test]
     fn search_term_report_uses_ortz_only() {
