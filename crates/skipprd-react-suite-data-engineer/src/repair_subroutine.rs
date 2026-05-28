@@ -485,8 +485,11 @@ async fn extract_diagnosis_structured(
     ];
 
     let actx = build_tool_ctx(sctx, "repair_diagnosis");
-    actx.llm_chat_json::<GatherDiagnosisV1>(&messages, &options)
+    let raw = actx
+        .llm_chat(&messages, &options)
         .await
+        .map_err(|e| format!("diagnosis extraction failed: {e}"))?;
+    react_core::json_repair::resilient_parse::<GatherDiagnosisV1>(&raw)
         .map_err(|e| format!("diagnosis extraction failed: {e}"))
 }
 
@@ -671,9 +674,11 @@ async fn run_reason(
     };
 
     let actx = build_tool_ctx(sctx, "repair_reason");
-    let plan: RepairFixPlanV1 = actx
-        .llm_chat_json(&messages, &options)
+    let raw = actx
+        .llm_chat(&messages, &options)
         .await
+        .map_err(|e| format!("reason stage LLM call failed: {e}"))?;
+    let plan: RepairFixPlanV1 = react_core::json_repair::resilient_parse(&raw)
         .map_err(|e| format!("reason stage LLM call failed: {e}"))?;
 
     Ok(plan.fixes)
