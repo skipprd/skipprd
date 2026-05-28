@@ -906,7 +906,69 @@ pub fn to_internal(
                     }
                     serde_json::Value::Object(m)
                 }
-
+                SourceConfig::MetaInstagramAds {
+                    ad_account_id,
+                    start_date,
+                    end_date,
+                    lookback_days,
+                    stream_profile,
+                    processing_lag_days,
+                    api_version,
+                    access_token,
+                    oauth_token_url,
+                    oauth_client_id,
+                    oauth_client_secret,
+                    oauth_refresh_token,
+                    instagram_filter,
+                    streams,
+                } => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("kind".into(), "meta_instagram_ads".into());
+                    if let Some(v) = ad_account_id {
+                        m.insert("ad_account_id".into(), v.clone().into());
+                        m.insert("name".into(), format!("Meta ad account {v}").into());
+                    }
+                    if let Some(v) = start_date {
+                        m.insert("start_date".into(), v.clone().into());
+                    }
+                    if let Some(v) = end_date {
+                        m.insert("end_date".into(), v.clone().into());
+                    }
+                    if let Some(v) = lookback_days {
+                        m.insert("lookback_days".into(), (*v).into());
+                    }
+                    if let Some(v) = stream_profile {
+                        m.insert("stream_profile".into(), v.clone().into());
+                    }
+                    if let Some(v) = processing_lag_days {
+                        m.insert("processing_lag_days".into(), (*v).into());
+                    }
+                    if let Some(v) = api_version {
+                        m.insert("api_version".into(), v.clone().into());
+                    }
+                    if let Some(v) = access_token {
+                        m.insert("access_token".into(), v.clone().into());
+                    }
+                    if let Some(v) = oauth_token_url {
+                        m.insert("oauth_token_url".into(), v.clone().into());
+                    }
+                    if let Some(v) = oauth_client_id {
+                        m.insert("oauth_client_id".into(), v.clone().into());
+                    }
+                    if let Some(v) = oauth_client_secret {
+                        m.insert("oauth_client_secret".into(), v.clone().into());
+                    }
+                    if let Some(v) = oauth_refresh_token {
+                        m.insert("oauth_refresh_token".into(), v.clone().into());
+                    }
+                    if let Some(v) = instagram_filter {
+                        m.insert("instagram_filter".into(), (*v).into());
+                    }
+                    if let Some(v) = streams {
+                        m.insert("streams".into(), serde_json::to_value(v).unwrap_or_default());
+                    }
+                    serde_json::Value::Object(m)
+                }
                 SourceConfig::HttpClient {
                     url,
                     method,
@@ -1850,6 +1912,38 @@ mod tests {
     }
 
     #[test]
+    fn translate_meta_instagram_ads_source() {
+        let cfg = make_cfg(
+            WarehouseConfig::Athena {
+                workgroup: None,
+                region: Some("us-east-1".into()),
+                result_s3: None,
+                schema: Some("marketing".into()),
+            },
+            SourceConfig::MetaInstagramAds {
+                ad_account_id: Some("123456789".into()),
+                start_date: Some("2024-01-01".into()),
+                end_date: None,
+                lookback_days: Some(3),
+                stream_profile: Some("full".into()),
+                processing_lag_days: Some(1),
+                api_version: Some("v21.0".into()),
+                access_token: Some("${META_INSTAGRAM_ADS_ACCESS_TOKEN}".into()),
+                oauth_token_url: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                oauth_refresh_token: None,
+                instagram_filter: Some(true),
+                streams: None,
+            },
+        );
+        let input = el_input(&cfg);
+        assert_eq!(input["kind"], "meta_instagram_ads");
+        assert_eq!(input["ad_account_id"], "123456789");
+        assert_eq!(input["start_date"], "2024-01-01");
+        assert_eq!(input["stream_profile"], "full");
+        assert_eq!(input["instagram_filter"], true);
+    }
 
     #[test]
     fn translate_http_client_source() {

@@ -9885,6 +9885,8 @@ dependencies = [
 [[package]]
 name = "react"
 version = "1.4.0"
+source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
+checksum = "32f38fdfdbc3e1d244ec32024a14f9379869aa6a9a43066667e2dbaa6be6031b"
 dependencies = [
  "async-trait",
  "axum",
@@ -9922,6 +9924,8 @@ dependencies = [
 [[package]]
 name = "react-core"
 version = "1.4.0"
+source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
+checksum = "ad8714fe9ea70c80b4c70c08f83e36e375f966ef69e447bc08e53d4ecce831b9"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9942,6 +9946,8 @@ dependencies = [
 [[package]]
 name = "react-http-protocol"
 version = "1.4.0"
+source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
+checksum = "622c396360959fbcef5edc907b5b80e08a26c41cf918d5c273fbe6567011c2bd"
 dependencies = [
  "serde",
  "serde_json",
@@ -10137,6 +10143,8 @@ dependencies = [
 [[package]]
 name = "react-module-provider-vector-lance"
 version = "1.4.0"
+source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
+checksum = "89e539c21587af9c47f797474c92cae1da8c35a055bc8dc02c5fcf85dc387c86"
 dependencies = [
  "arrow 56.2.0",
  "arrow-buffer 56.2.0",
@@ -10151,6 +10159,8 @@ dependencies = [
 [[package]]
 name = "react-module-storage-local"
 version = "1.4.0"
+source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
+checksum = "3aa67b8670b037589e13f17c31237667890c1a0c69cc22a278fc03aeb595bc3f"
 dependencies = [
  "async-trait",
  "react-core",
@@ -10162,6 +10172,8 @@ dependencies = [
 [[package]]
 name = "react-module-storage-memory"
 version = "1.4.0"
+source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
+checksum = "12a44a019679583db97a42e295a21f6de806d2cb843856ee6185d1b753fb746b"
 dependencies = [
  "async-trait",
  "react-core",
@@ -10171,6 +10183,8 @@ dependencies = [
 [[package]]
 name = "react-module-storage-s3"
 version = "1.4.0"
+source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
+checksum = "a1c1a24db96b4db5d007f1f56c35b87be70afbc2d4e622bd49911090e92aa78c"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -10211,6 +10225,8 @@ dependencies = [
 [[package]]
 name = "react-suite-debugger"
 version = "1.4.0"
+source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
+checksum = "577b3ccd4444981b2fe913663f9d5fdbe3f031937f5b47fc5e7f963d5074ee0c"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10223,6 +10239,8 @@ dependencies = [
 [[package]]
 name = "react-transport"
 version = "1.4.0"
+source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
+checksum = "fdd0ef232b2c6ba406ed4427ad0fb3f72ffc3f7a7a49319ef8ed0120a1dec86e"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10244,6 +10262,8 @@ dependencies = [
 [[package]]
 name = "react-view"
 version = "1.4.0"
+source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
+checksum = "b511027bc93e87bb25db34fb1cafc4edb1344292b1732c6ccea01327743ff550"
 dependencies = [
  "chrono",
  "react-core",
@@ -12126,6 +12146,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippr-plugin-data-source-apple-search-ads"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "skippr-plugin-shared-api-source",
+ "skippr-runtime-sdk",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "skippr-plugin-data-source-clickhouse"
 version = "0.1.2"
 dependencies = [
@@ -12292,6 +12328,22 @@ dependencies = [
  "datafusion 50.3.0",
  "serde",
  "serde_derive",
+ "skippr-runtime-sdk",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-meta-instagram-ads"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "skippr-plugin-shared-api-source",
  "skippr-runtime-sdk",
  "tokio",
  "tracing",

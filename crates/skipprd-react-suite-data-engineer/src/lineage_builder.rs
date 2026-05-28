@@ -670,6 +670,7 @@ fn source_descriptor_from_providers_cfg(
             .or_else(|| input.get("org_id").and_then(Value::as_str))
             .map(|org_id| format!("Apple Search Ads org {org_id}"))
             .unwrap_or_else(|| "Apple Search Ads".to_string()),
+        Some("meta_instagram_ads") => input
             .get("name")
             .and_then(Value::as_str)
             .or_else(|| input.get("ad_account_id").and_then(Value::as_str))
@@ -709,6 +710,7 @@ fn provider_brand_for_source_kind(kind: &str) -> Option<&'static str> {
         "file" | "files" | "csv" | "local" | "local_file" => Some("file"),
         "google_analytics" => Some("google_analytics"),
         "apple_search_ads" => Some("apple_search_ads"),
+        "meta_instagram_ads" => Some("meta_instagram_ads"),
         _ => None,
     }
 }
@@ -744,6 +746,7 @@ fn provider_label_for_brand(brand: &str) -> &'static str {
         "motherduck" => "MotherDuck",
         "google_analytics" => "Google Analytics (GA4)",
         "apple_search_ads" => "Apple Search Ads",
+        "meta_instagram_ads" => "Meta Instagram Ads",
         _ => "Provider",
     }
 }

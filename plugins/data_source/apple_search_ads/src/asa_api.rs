@@ -1,6 +1,6 @@
 use chrono::NaiveDate;
 use skippr_plugin_shared_api_source::{
-    AppleAdsClientCredentialsAuth, OffsetPagination, RetryConfig, RetryableHttpClient,
+    AppleAdsClientCredentialsAuth, OffsetPagination, RetryableHttpClient,
 };
 use tracing::warn;
 
@@ -12,13 +12,16 @@ const DEFAULT_PAGE_LIMIT: u64 = 1000;
 #[derive(Clone, Debug)]
 pub struct CampaignRef {
     pub id: i64,
+    #[allow(dead_code)]
     pub name: String,
 }
 
 #[derive(Clone, Debug)]
 pub struct AdGroupRef {
+    #[allow(dead_code)]
     pub campaign_id: i64,
     pub id: i64,
+    #[allow(dead_code)]
     pub name: String,
 }
 
@@ -203,7 +206,7 @@ impl AsaApiClient {
             offset: 0,
             limit: DEFAULT_PAGE_LIMIT,
         };
-        let mut last_body = serde_json::json!({});
+        let mut last_body: Option<serde_json::Value> = None;
 
         loop {
             let body = self
@@ -216,7 +219,7 @@ impl AsaApiClient {
                     pagination.limit,
                 )
                 .await?;
-            last_body = body.clone();
+            last_body = Some(body.clone());
             let page_rows = rows_from_report_body(&body);
             let count = page_rows.len();
             merged_rows.extend(page_rows);
@@ -226,9 +229,11 @@ impl AsaApiClient {
             pagination.advance(count);
         }
 
-        if let Some(data) = last_body.get_mut("data") {
-            if let Some(resp) = data.get_mut("reportingDataResponse") {
-                resp["row"] = serde_json::Value::Array(merged_rows);
+        if let Some(mut last_body) = last_body {
+            if let Some(data) = last_body.get_mut("data") {
+                if let Some(resp) = data.get_mut("reportingDataResponse") {
+                    resp["row"] = serde_json::Value::Array(merged_rows);
+                }
             }
             Ok(last_body)
         } else {

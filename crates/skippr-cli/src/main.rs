@@ -953,6 +953,37 @@ enum SourceKind {
         #[arg(long)]
         max_concurrent_requests: Option<u32>,
     },
+    /// Meta Instagram Ads source (Marketing API daily insights).
+    MetaInstagramAds {
+        #[arg(long)]
+        ad_account_id: Option<String>,
+        #[arg(long)]
+        start_date: Option<String>,
+        #[arg(long)]
+        end_date: Option<String>,
+        #[arg(long)]
+        lookback_days: Option<u32>,
+        #[arg(long)]
+        stream_profile: Option<String>,
+        #[arg(long)]
+        processing_lag_days: Option<u32>,
+        #[arg(long)]
+        api_version: Option<String>,
+        #[arg(long)]
+        access_token: Option<String>,
+        #[arg(long)]
+        oauth_token_url: Option<String>,
+        #[arg(long)]
+        oauth_client_id: Option<String>,
+        #[arg(long)]
+        oauth_client_secret: Option<String>,
+        #[arg(long)]
+        oauth_refresh_token: Option<String>,
+        #[arg(long)]
+        instagram_filter: Option<bool>,
+        #[arg(long, value_delimiter = ',')]
+        streams: Option<Vec<String>>,
+    },
     /// HTTP client source (polling).
     HttpClient {
         #[arg(long)]
@@ -1652,6 +1683,7 @@ fn plugin_mapping_key(map: &serde_yaml::Mapping) -> Option<String> {
 /// Prefer known runtime plugin keys (e.g. `GoogleAnalytics`) over incidental mappings like `transform`.
 const DATA_SOURCE_RUNTIME_PLUGIN_KEYS: &[&str] = &[
     "AppleSearchAds",
+    "MetaInstagramAds",
     "GoogleAnalytics",
     "S3",
     "File",
@@ -1977,7 +2009,22 @@ fn source_config_from_data_source(
             return_records_with_no_metrics: yaml_bool(plugin_cfg, "return_records_with_no_metrics"),
             max_concurrent_requests: yaml_u32(plugin_cfg, "max_concurrent_requests"),
         }),
-),
+        "MetaInstagramAds" => Ok(SourceConfig::MetaInstagramAds {
+            ad_account_id: yaml_str(plugin_cfg, "ad_account_id"),
+            start_date: yaml_str(plugin_cfg, "start_date"),
+            end_date: yaml_str(plugin_cfg, "end_date"),
+            lookback_days: yaml_u32(plugin_cfg, "lookback_days"),
+            stream_profile: yaml_str(plugin_cfg, "stream_profile"),
+            processing_lag_days: yaml_u32(plugin_cfg, "processing_lag_days"),
+            api_version: yaml_str(plugin_cfg, "api_version"),
+            access_token: yaml_str(plugin_cfg, "access_token"),
+            oauth_token_url: yaml_str(plugin_cfg, "oauth_token_url"),
+            oauth_client_id: yaml_str(plugin_cfg, "oauth_client_id"),
+            oauth_client_secret: yaml_str(plugin_cfg, "oauth_client_secret"),
+            oauth_refresh_token: yaml_str(plugin_cfg, "oauth_refresh_token"),
+            instagram_filter: yaml_bool(plugin_cfg, "instagram_filter"),
+            streams: yaml_string_vec(plugin_cfg, "streams"),
+        }),
         other => Err(format!(
             "data_sources.{data_source_name}.{other} is not supported by lineage config translation"
         )),
@@ -2773,8 +2820,24 @@ fn source_plugin_and_config(kind: SourceKind) -> (&'static str, serde_json::Valu
                 ("max_concurrent_requests", u32_json(max_concurrent_requests)),
             ]),
         ),
- => (
-                    json_object(vec![
+        SourceKind::MetaInstagramAds {
+            ad_account_id,
+            start_date,
+            end_date,
+            lookback_days,
+            stream_profile,
+            processing_lag_days,
+            api_version,
+            access_token,
+            oauth_token_url,
+            oauth_client_id,
+            oauth_client_secret,
+            oauth_refresh_token,
+            instagram_filter,
+            streams,
+        } => (
+            "MetaInstagramAds",
+            json_object(vec![
                 ("ad_account_id", str_json(ad_account_id)),
                 ("start_date", str_json(start_date)),
                 ("end_date", str_json(end_date)),
@@ -3639,7 +3702,12 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         }
     }
 
- = &mut kind
+    if let SourceKind::MetaInstagramAds {
+        ref mut ad_account_id,
+        ref mut start_date,
+        ref mut access_token,
+        ..
+    } = &mut kind
     {
         if ad_account_id.is_none() {
             *ad_account_id = prompt("Meta ad account ID (numeric, without act_ prefix)");
@@ -3995,6 +4063,37 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
             return_records_with_no_metrics,
             max_concurrent_requests,
         },
+        SourceKind::MetaInstagramAds {
+            ad_account_id,
+            start_date,
+            end_date,
+            lookback_days,
+            stream_profile,
+            processing_lag_days,
+            api_version,
+            access_token,
+            oauth_token_url,
+            oauth_client_id,
+            oauth_client_secret,
+            oauth_refresh_token,
+            instagram_filter,
+            streams,
+        } => SourceConfig::MetaInstagramAds {
+            ad_account_id,
+            start_date,
+            end_date,
+            lookback_days,
+            stream_profile,
+            processing_lag_days,
+            api_version,
+            access_token,
+            oauth_token_url,
+            oauth_client_id,
+            oauth_client_secret,
+            oauth_refresh_token,
+            instagram_filter,
+            streams,
+        },
         SourceKind::HttpClient {
             url,
             method,
@@ -4061,6 +4160,7 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         SourceConfig::Websocket { .. } => "websocket",
         SourceConfig::GoogleAnalytics { .. } => "google_analytics",
         SourceConfig::AppleSearchAds { .. } => "apple_search_ads",
+        SourceConfig::MetaInstagramAds { .. } => "meta_instagram_ads",
         SourceConfig::HttpClient { .. } => "http_client",
         SourceConfig::HttpServer { .. } => "http_server",
         SourceConfig::Socket { .. } => "socket",

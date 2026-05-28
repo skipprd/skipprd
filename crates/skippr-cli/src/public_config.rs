@@ -485,6 +485,37 @@ pub enum SourceConfig {
         #[serde(default)]
         max_concurrent_requests: Option<u32>,
     },
+    #[serde(rename = "meta_instagram_ads")]
+    MetaInstagramAds {
+        #[serde(default)]
+        ad_account_id: Option<String>,
+        #[serde(default)]
+        start_date: Option<String>,
+        #[serde(default)]
+        end_date: Option<String>,
+        #[serde(default)]
+        lookback_days: Option<u32>,
+        #[serde(default)]
+        stream_profile: Option<String>,
+        #[serde(default)]
+        processing_lag_days: Option<u32>,
+        #[serde(default)]
+        api_version: Option<String>,
+        #[serde(default)]
+        access_token: Option<String>,
+        #[serde(default)]
+        oauth_token_url: Option<String>,
+        #[serde(default)]
+        oauth_client_id: Option<String>,
+        #[serde(default)]
+        oauth_client_secret: Option<String>,
+        #[serde(default)]
+        oauth_refresh_token: Option<String>,
+        #[serde(default)]
+        instagram_filter: Option<bool>,
+        #[serde(default)]
+        streams: Option<Vec<String>>,
+    },
     HttpClient {
         #[serde(default)]
         url: Option<String>,
@@ -653,6 +684,7 @@ impl SkipprProjectConfig {
             Some(SourceConfig::Websocket { .. }) => Some("websocket"),
             Some(SourceConfig::GoogleAnalytics { .. }) => Some("google_analytics"),
             Some(SourceConfig::AppleSearchAds { .. }) => Some("apple_search_ads"),
+            Some(SourceConfig::MetaInstagramAds { .. }) => Some("meta_instagram_ads"),
             Some(SourceConfig::HttpClient { .. }) => Some("http_client"),
             Some(SourceConfig::HttpServer { .. }) => Some("http_server"),
             Some(SourceConfig::Socket { .. }) => Some("socket"),
