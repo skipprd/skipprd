@@ -6,6 +6,7 @@ use std::sync::Arc;
 
 use crate::discover::OutputMetadata;
 use crate::plugins::cdc::{SinkCapability, SourceCapability, SyncContext};
+use crate::plugins::source_contract::SourceNamespaceContract;
 use crate::plugins::source_sync::SourceSyncContext;
 
 #[derive(Clone, Copy, Debug)]
@@ -108,6 +109,20 @@ pub trait DataSource: Send + Sync {
     fn capability(&self) -> Option<&'static SourceCapability> {
         self.execution_contract().cdc.capability()
     }
+
+    /// Per-namespace extraction contracts (write policy, keys, cursors).
+    fn source_namespace_contracts(&self) -> Vec<SourceNamespaceContract> {
+        vec![]
+    }
+}
+
+/// Context passed to sinks for a single compacted batch.
+#[derive(Clone, Debug)]
+pub struct SinkWriteContext<'a> {
+    pub filename: String,
+    pub compaction_id: String,
+    pub cdc_ctx: Option<&'a SyncContext>,
+    pub source_contract: Option<&'a SourceNamespaceContract>,
 }
 
 #[cfg(test)]
@@ -156,6 +171,14 @@ pub trait DataSink: Send + Sync {
         cdc_ctx: Option<&SyncContext>,
     ) -> Result<(), std::io::Error>;
 
+    async fn sync_with_context(
+        &self,
+        stream: SendableRecordBatchStream,
+        ctx: SinkWriteContext<'_>,
+    ) -> Result<(), std::io::Error> {
+        self.sync(stream, ctx.filename, ctx.cdc_ctx).await
+    }
+
     /// Return the compile-time capability descriptor for this sink.
     /// Default returns `None` for backward compatibility with existing
     /// connectors that have not yet declared capabilities.
@@ -181,6 +204,7 @@ pub trait DataSink: Send + Sync {
 pub struct SchemaSyncRequest<'a> {
     pub namespace: &'a str,
     pub compaction_id: &'a str,
+    pub source_contract: Option<&'a SourceNamespaceContract>,
 }
 
 #[async_trait]
@@ -196,6 +220,7 @@ pub trait SchemaSink: Send + Sync {
         request: SchemaSyncRequest<'_>,
         metadata: &OutputMetadata,
     ) -> Result<(), std::io::Error> {
+        let _ = request.source_contract;
         self.sync_schema(request.namespace, metadata).await
     }
 

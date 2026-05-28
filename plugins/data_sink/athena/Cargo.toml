@@ -42,3 +42,6 @@ can_manage_skippr_columns = false
 can_maintain_tombstone_tables = false
 can_compare_order_tokens = false
 supports_transactions = false
+supports_replace_partition = true
+supports_replace_table = true
+supports_primary_key_metadata = true

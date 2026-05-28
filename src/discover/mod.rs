@@ -251,6 +251,8 @@ pub struct PipelineMetadata {
     pub metadata_version: u32,
     #[serde(default)]
     pub schema_id: u64,
+    #[serde(default)]
+    pub source_contracts: HashMap<String, crate::plugins::source_contract::SourceNamespaceContract>,
 }
 
 impl crate::discover::PipelineMetadata {
@@ -273,6 +275,7 @@ impl crate::discover::PipelineMetadata {
             flattened: flatten,
             metadata_version: CURRENT_METADATA_VERSION,
             schema_id: DEFAULT_SCHEMA_ID,
+            source_contracts: HashMap::new(),
         }
     }
 
@@ -293,6 +296,7 @@ impl crate::discover::PipelineMetadata {
             flattened: flatten,
             metadata_version: CURRENT_METADATA_VERSION,
             schema_id: DEFAULT_SCHEMA_ID,
+            source_contracts: HashMap::new(),
         })
     }
 
@@ -327,7 +331,7 @@ impl crate::discover::PipelineMetadata {
     }
 }
 
-const CURRENT_METADATA_VERSION: u32 = 2;
+const CURRENT_METADATA_VERSION: u32 = 3;
 const DEFAULT_SCHEMA_ID: u64 = 1;
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -3621,6 +3625,7 @@ mod tests_roundtrip {
             flattened: false,
             metadata_version: 0,
             schema_id: 0,
+            source_contracts: HashMap::new(),
         };
 
         assert!(pipeline.migrate_persisted_metadata());
@@ -3631,7 +3636,8 @@ mod tests_roundtrip {
             .fields
             .get("customer_id")
             .unwrap();
-        assert_eq!(pipeline.metadata_version, 2);
+        assert_eq!(pipeline.metadata_version, 3);
+        assert!(pipeline.source_contracts.is_empty());
         assert_eq!(pipeline.schema_id, 1);
         assert_ne!(migrated.field_id, 0);
         assert_eq!(migrated.schema_id, 1);

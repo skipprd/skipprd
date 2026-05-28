@@ -417,6 +417,39 @@ pub enum SourceConfig {
         #[serde(default)]
         mode: Option<String>,
     },
+    #[serde(rename = "google_analytics")]
+    GoogleAnalytics {
+        #[serde(default)]
+        property_id: Option<String>,
+        #[serde(default)]
+        start_date: Option<String>,
+        #[serde(default)]
+        end_date: Option<String>,
+        #[serde(default)]
+        lookback_days: Option<u32>,
+        #[serde(default)]
+        stream_profile: Option<String>,
+        #[serde(default)]
+        keep_empty_rows: Option<bool>,
+        #[serde(default)]
+        processing_lag_days: Option<u32>,
+        #[serde(default)]
+        window_in_days: Option<u32>,
+        #[serde(default)]
+        access_token: Option<String>,
+        #[serde(default)]
+        oauth_token_url: Option<String>,
+        #[serde(default)]
+        oauth_client_id: Option<String>,
+        #[serde(default)]
+        oauth_client_secret: Option<String>,
+        #[serde(default)]
+        oauth_refresh_token: Option<String>,
+        #[serde(default)]
+        service_account_json_path: Option<String>,
+        #[serde(default)]
+        streams: Option<Vec<String>>,
+    },
     HttpClient {
         #[serde(default)]
         url: Option<String>,
@@ -583,6 +616,7 @@ impl SkipprProjectConfig {
             Some(SourceConfig::Eventbridge { .. }) => Some("eventbridge"),
             Some(SourceConfig::Mqtt { .. }) => Some("mqtt"),
             Some(SourceConfig::Websocket { .. }) => Some("websocket"),
+            Some(SourceConfig::GoogleAnalytics { .. }) => Some("google_analytics"),
             Some(SourceConfig::HttpClient { .. }) => Some("http_client"),
             Some(SourceConfig::HttpServer { .. }) => Some("http_server"),
             Some(SourceConfig::Socket { .. }) => Some("socket"),

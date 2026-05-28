@@ -39,6 +39,8 @@ nav:
       - How Skippr Works: concepts/how-it-works.md
       - Exactly-Once Delivery: concepts/exactly-once.md
       - Schema Discovery & Evolution: concepts/schema.md
+      - Source Landing Semantics: concepts/source-landing-semantics.md
+      - GA4 Bronze & Modeling: concepts/ga4-bronze-and-modeling.md
       - Deadletters: concepts/deadletters.md
   - Operator Guides:
       - Installation: getting-started/install.md
@@ -86,6 +88,7 @@ nav:
                   - MQTT: connectors/inputs/mqtt.md
                   - WebSocket: connectors/inputs/websocket.md
               - HTTP:
+                  - Google Analytics (GA4): connectors/inputs/google_analytics.md
                   - HTTP Client: connectors/inputs/http_client.md
                   - HTTP Server: connectors/inputs/http_server.md
               - Other:

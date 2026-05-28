@@ -10,6 +10,7 @@ use skippr_core::discover::OutputMetadata as CoreOutputMetadata;
 use skippr_core::helpers::configuration::{Config, PIPELINE_NAME};
 use skippr_core::helpers::logging::init_logging;
 use skippr_core::plugins::source_sync::SourceSyncContext;
+use skippr_core::plugins::traits::SourceOnceContract;
 use skippr_core::plugins::DataSource;
 use skippr_core::{METADATA, PIPELINE_SCHEMA_VERSION};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -22,7 +23,8 @@ use crate::protocol::{
     RuntimePluginConfigEnvelope, RuntimePluginKind,
     RuntimeSchemaState, RuntimeSessionHello, RuntimeSourceCapabilityDescriptor, SourceEvent,
     SourceStartRequest, RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV,
-    SKIPPR_RUNTIME_DATA_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
+    SKIPPR_RUNTIME_DATA_ADDR_ENV, SKIPPR_RUNTIME_EXECUTION_MODE_ENV,
+    SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use crate::source_sync::{run_offset_service_reader_loop, RuntimeSourceSyncContext};
 use crate::wire::{read_frame_or_eof, write_frame};
@@ -65,6 +67,18 @@ fn runtime_once_idle_timeout() -> Duration {
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_ONCE_IDLE_TIMEOUT_SECONDS);
     Duration::from_secs(seconds)
+}
+
+/// Idle supervision applies only to streaming sources; bounded `sync()` sources use `Finite`.
+fn runtime_once_idle_timeout_for_contract(
+    once: bool,
+    suppress_data_relay: bool,
+    once_contract: SourceOnceContract,
+) -> Option<Duration> {
+    if !once || suppress_data_relay || once_contract == SourceOnceContract::Finite {
+        return None;
+    }
+    Some(runtime_once_idle_timeout())
 }
 
 #[derive(Clone, Debug)]
@@ -404,11 +418,18 @@ pub async fn run_append_data_source_main(
 
     configure_runtime_source_data_dir(&start.context.data_dir, plugin_name);
     configure_runtime_input_config(&start.config.0);
+    let execution_mode_label = match start.context.execution_mode {
+        RuntimeExecutionMode::Discover => "discover",
+        RuntimeExecutionMode::Sync => "sync",
+    };
+    std::env::set_var(
+        SKIPPR_RUNTIME_EXECUTION_MODE_ENV,
+        execution_mode_label,
+    );
     Config::reset_envcache();
     Config::build_config();
     Config::init().await;
     let suppress_data_relay = runtime_mode_suppresses_data_relay(start.context.execution_mode);
-    let once_idle_timeout = (start.once && !suppress_data_relay).then(runtime_once_idle_timeout);
 
     let control = RuntimeSourceControl::new();
     let mut shutdown_rx = control.subscribe_shutdown();
@@ -417,7 +438,21 @@ pub async fn run_append_data_source_main(
         let _ = run_runtime_source_host_frame_loop(control_reader, reader_control).await;
     });
 
+    let source_once = start.once;
     let mut source = build(start).await?;
+    let once_idle_timeout = runtime_once_idle_timeout_for_contract(
+        source_once,
+        suppress_data_relay,
+        source.execution_contract().once,
+    );
+    let namespace_contracts = source.source_namespace_contracts();
+    if !namespace_contracts.is_empty() {
+        control_writer
+            .write(&PluginFrame::SourceEvent(SourceEvent::ContractsUpdate(
+                namespace_contracts,
+            )))
+            .await?;
+    }
     let (sync_ctx, offset_reader) = RuntimeSourceSyncContext::new(
         control_writer.clone(),
         data_writer.clone(),
@@ -509,6 +544,28 @@ mod tests {
     fn runtime_source_start_preserves_once_flag() {
         assert!(source_start_request(true).once);
         assert!(!source_start_request(false).once);
+    }
+
+    #[test]
+    fn finite_once_sources_skip_idle_supervision() {
+        assert!(runtime_once_idle_timeout_for_contract(
+            true,
+            false,
+            SourceOnceContract::Finite,
+        )
+        .is_none());
+        assert!(runtime_once_idle_timeout_for_contract(
+            true,
+            false,
+            SourceOnceContract::HostIdleBounded,
+        )
+        .is_some());
+        assert!(runtime_once_idle_timeout_for_contract(
+            true,
+            true,
+            SourceOnceContract::HostIdleBounded,
+        )
+        .is_none());
     }
 
     #[test]

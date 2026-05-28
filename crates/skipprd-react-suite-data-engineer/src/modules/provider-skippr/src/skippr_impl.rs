@@ -1191,6 +1191,7 @@ impl SkipprCliProvider {
 fn skippr_plugin_name(kind: &str) -> String {
     match kind {
         "delta_lake" => "DeltaLake".to_string(),
+        "google_analytics" => "GoogleAnalytics".to_string(),
         "http_client" => "HttpClient".to_string(),
         "http_server" => "HttpServer".to_string(),
         _ => capitalize_first(kind),

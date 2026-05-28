@@ -55,7 +55,11 @@ Tables are created as `EXTERNAL_TABLE` with:
 - SerDe: `ParquetHiveSerDe`
 - Input format: `MapredParquetInputFormat`
 - Compression: Snappy
-- Partition keys derived from time bucketing configuration
+- Partition keys derived from time bucketing configuration, or from [source namespace contracts](../../concepts/source-landing-semantics.md) (for example `date` for [GA4](../inputs/google_analytics.md))
+
+## Partitioned API sources
+
+When the source declares `replace_partition`, Athena deletes the contract partition prefix under the namespace (for example `date=2024-01-15`) before writing new Parquet. See [Source landing semantics](../../concepts/source-landing-semantics.md).
 
 ## AWS permissions required
 

@@ -367,7 +367,28 @@ impl DataSink for OutputRouter {
         filename: String,
         cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
-        let sink_ref = BufferChunker::decode_file_sink_ref(&filename);
+        let namespace = crate::buffer::BufferChunker::decode_file_namespace(&filename);
+        let compaction_id = filename
+            .rsplit_once("-c=")
+            .map(|(_, suffix)| suffix.to_string())
+            .unwrap_or_default();
+        let source_contract =
+            crate::plugins::source_contract::namespace_source_contract(&namespace);
+        let ctx = crate::plugins::SinkWriteContext {
+            filename,
+            compaction_id,
+            cdc_ctx,
+            source_contract: source_contract.as_ref(),
+        };
+        self.sync_with_context(stream, ctx).await
+    }
+
+    async fn sync_with_context(
+        &self,
+        stream: SendableRecordBatchStream,
+        ctx: crate::plugins::SinkWriteContext<'_>,
+    ) -> Result<(), std::io::Error> {
+        let sink_ref = BufferChunker::decode_file_sink_ref(&ctx.filename);
         let target_sink_ref = if sink_ref.is_empty() {
             self.primary_sink_ref.clone()
         } else {
@@ -379,7 +400,7 @@ impl DataSink for OutputRouter {
                 target_sink_ref
             ))
         })?;
-        plugin.sync(stream, filename, cdc_ctx).await
+        plugin.sync_with_context(stream, ctx).await
     }
 
     async fn install_schema_state(
@@ -800,13 +821,18 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
             if let (Some(src), Some(snk)) = (src_cap.as_ref(), sink_cap.as_ref()) {
                 let mut contracts = BTreeMap::new();
                 let default_contract = cdc_cfg.default_contract();
+                let source_contracts = METADATA.load().source_contracts.clone();
                 let mut namespace_configs = vec![(
                     "*".to_string(),
                     default_contract.business_key_columns.clone(),
                 )];
                 namespace_configs.extend(cdc_cfg.namespaces.iter().map(|(namespace, cfg)| {
                     let keys = if cfg.business_key_columns.is_empty() {
-                        default_contract.business_key_columns.clone()
+                        if let Some(source_contract) = source_contracts.get(namespace) {
+                            source_contract.business_key_column_names()
+                        } else {
+                            default_contract.business_key_columns.clone()
+                        }
                     } else {
                         cfg.business_key_columns.clone()
                     };
@@ -852,6 +878,8 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
             set_global_cdc_contract(None);
         }
     }
+
+    validate_pipeline_source_contracts_at_startup(&output_plugin_name).await;
 
     Buffers::start_compactor_service(shared_output.clone(), offsets_db.clone());
 
@@ -1242,6 +1270,29 @@ pub async fn sync_deadletter_plugin(
         .await?,
     ) as Box<dyn DataSink + Send + Sync>;
     Ok(Some((sink_ref, plugin)))
+}
+
+async fn validate_pipeline_source_contracts_at_startup(output_plugin_name: &str) {
+    use crate::plugins::source_contract::{
+        validate_active_sink_supports_contracts, WritePolicy,
+    };
+    use crate::METADATA;
+
+    let contracts: Vec<_> = METADATA.load().source_contracts.values().cloned().collect();
+    if contracts.is_empty() {
+        return;
+    }
+    if let Err(err) = validate_active_sink_supports_contracts(&contracts).await {
+        panic!("Invalid source namespace contracts for sink '{output_plugin_name}': {err}");
+    }
+    for contract in &contracts {
+        if contract.write_policy == WritePolicy::ReplaceTable {
+            warn!(
+                "namespace '{}' uses ReplaceTable — ensure table size is bounded",
+                contract.namespace
+            );
+        }
+    }
 }
 
 fn build_cdc_contract_for_namespace(

@@ -1830,8 +1830,21 @@ impl Buffers {
             schema: schema.clone(),
             rx,
         });
+        let namespace = BufferChunker::decode_file_namespace(&out_key);
+        let compaction_id = out_key
+            .rsplit_once("-c=")
+            .map(|(_, suffix)| suffix.to_string())
+            .unwrap_or_default();
+        let source_contract =
+            crate::plugins::source_contract::namespace_source_contract(&namespace);
+        let sink_ctx = crate::plugins::SinkWriteContext {
+            filename: out_key.clone(),
+            compaction_id,
+            cdc_ctx: cdc_ctx.as_ref(),
+            source_contract: source_contract.as_ref(),
+        };
         if let Err(e) = shared_output
-            .sync(batch_stream, out_key.clone(), cdc_ctx.as_ref())
+            .sync_with_context(batch_stream, sink_ctx)
             .await
         {
             let err_str = e.to_string();
@@ -3233,8 +3246,21 @@ impl WalPartition {
 
         // (No re-upload here; WALs were uploaded earlier in flush prior to offset commit.)
 
+        let wal_namespace = self.namespace.clone();
+        let wal_compaction_id = output_file_name
+            .rsplit_once("-c=")
+            .map(|(_, suffix)| suffix.to_string())
+            .unwrap_or_default();
+        let wal_source_contract =
+            crate::plugins::source_contract::namespace_source_contract(&wal_namespace);
+        let wal_sink_ctx = crate::plugins::SinkWriteContext {
+            filename: output_file_name.clone(),
+            compaction_id: wal_compaction_id,
+            cdc_ctx: None,
+            source_contract: wal_source_contract.as_ref(),
+        };
         match shared_output
-            .sync(batch_stream, output_file_name.clone(), None)
+            .sync_with_context(batch_stream, wal_sink_ctx)
             .await
         {
             Ok(()) => {

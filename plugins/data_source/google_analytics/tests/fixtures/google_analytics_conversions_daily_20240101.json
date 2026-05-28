@@ -1,0 +1,22 @@
+{
+  "rows": [
+    {
+      "dimensionValues": [
+        {
+          "value": "20240101"
+        },
+        {
+          "value": "sample"
+        }
+      ],
+      "metricValues": [
+        {
+          "value": "1"
+        },
+        {
+          "value": "1"
+        }
+      ]
+    }
+  ]
+}

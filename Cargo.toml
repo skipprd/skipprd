@@ -26,6 +26,7 @@ members = [
     "plugins/data_source/*",
     "plugins/data_sink/*",
     "plugins/schema_sink/*",
+    "plugins/shared/api_source",
 ]
 
 [workspace.dependencies]

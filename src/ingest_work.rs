@@ -649,6 +649,7 @@ impl Ingest {
     }
 
     #[cfg(test)]
+    #[allow(dead_code)]
     pub(crate) fn outstanding_payload_bytes_for_tests(&self) -> usize {
         self.outstanding_bytes.load(Ordering::Acquire)
     }

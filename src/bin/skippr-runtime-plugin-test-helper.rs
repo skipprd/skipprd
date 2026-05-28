@@ -392,6 +392,7 @@ async fn run_source_loop(
                         compaction_id: "runtime-helper-output".to_string(),
                         arrow_stream_bytes,
                         cdc_ctx: None,
+                        source_contract: None,
                     }),
                 )
                 .await?;
@@ -410,6 +411,7 @@ async fn run_source_loop(
                         compaction_id: "runtime-helper-output".to_string(),
                         arrow_stream_bytes,
                         cdc_ctx: None,
+                        source_contract: None,
                     }),
                 )
                 .await?;

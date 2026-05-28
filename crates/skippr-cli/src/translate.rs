@@ -768,6 +768,73 @@ pub fn to_internal(
                     }
                     serde_json::Value::Object(m)
                 }
+                SourceConfig::GoogleAnalytics {
+                    property_id,
+                    start_date,
+                    end_date,
+                    lookback_days,
+                    stream_profile,
+                    keep_empty_rows,
+                    processing_lag_days,
+                    window_in_days,
+                    access_token,
+                    oauth_token_url,
+                    oauth_client_id,
+                    oauth_client_secret,
+                    oauth_refresh_token,
+                    service_account_json_path,
+                    streams,
+                } => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("kind".into(), "google_analytics".into());
+                    if let Some(v) = property_id {
+                        m.insert("property_id".into(), v.clone().into());
+                        m.insert("name".into(), format!("GA4 property {v}").into());
+                    }
+                    if let Some(v) = start_date {
+                        m.insert("start_date".into(), v.clone().into());
+                    }
+                    if let Some(v) = end_date {
+                        m.insert("end_date".into(), v.clone().into());
+                    }
+                    if let Some(v) = lookback_days {
+                        m.insert("lookback_days".into(), (*v).into());
+                    }
+                    if let Some(v) = stream_profile {
+                        m.insert("stream_profile".into(), v.clone().into());
+                    }
+                    if let Some(v) = keep_empty_rows {
+                        m.insert("keep_empty_rows".into(), (*v).into());
+                    }
+                    if let Some(v) = processing_lag_days {
+                        m.insert("processing_lag_days".into(), (*v).into());
+                    }
+                    if let Some(v) = window_in_days {
+                        m.insert("window_in_days".into(), (*v).into());
+                    }
+                    if let Some(v) = access_token {
+                        m.insert("access_token".into(), v.clone().into());
+                    }
+                    if let Some(v) = oauth_token_url {
+                        m.insert("oauth_token_url".into(), v.clone().into());
+                    }
+                    if let Some(v) = oauth_client_id {
+                        m.insert("oauth_client_id".into(), v.clone().into());
+                    }
+                    if let Some(v) = oauth_client_secret {
+                        m.insert("oauth_client_secret".into(), v.clone().into());
+                    }
+                    if let Some(v) = oauth_refresh_token {
+                        m.insert("oauth_refresh_token".into(), v.clone().into());
+                    }
+                    if let Some(v) = service_account_json_path {
+                        m.insert("service_account_json_path".into(), v.clone().into());
+                    }
+                    if let Some(v) = streams {
+                        m.insert("streams".into(), serde_json::to_value(v).unwrap_or_default());
+                    }
+                    serde_json::Value::Object(m)
+                }
                 SourceConfig::HttpClient {
                     url,
                     method,
@@ -1635,6 +1702,46 @@ mod tests {
     }
 
     #[test]
+    fn translate_google_analytics_source() {
+        let cfg = make_cfg(
+            WarehouseConfig::Athena {
+                workgroup: None,
+                region: Some("us-east-1".into()),
+                result_s3: None,
+                schema: Some("analytics".into()),
+            },
+            SourceConfig::GoogleAnalytics {
+                property_id: Some("123456789".into()),
+                start_date: Some("2024-01-01".into()),
+                end_date: None,
+                lookback_days: Some(7),
+                stream_profile: Some("minimal".into()),
+                keep_empty_rows: Some(true),
+                processing_lag_days: Some(1),
+                window_in_days: Some(1),
+                access_token: Some("${GA4_ACCESS_TOKEN}".into()),
+                oauth_token_url: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                oauth_refresh_token: None,
+                service_account_json_path: None,
+                streams: Some(vec!["google_analytics.events_daily".into()]),
+            },
+        );
+        let input = el_input(&cfg);
+        assert_eq!(input["kind"], "google_analytics");
+        assert_eq!(input["property_id"], "123456789");
+        assert_eq!(input["start_date"], "2024-01-01");
+        assert_eq!(input["lookback_days"], 7);
+        assert_eq!(input["stream_profile"], "minimal");
+        assert_eq!(input["keep_empty_rows"], true);
+        assert_eq!(input["processing_lag_days"], 1);
+        assert_eq!(input["window_in_days"], 1);
+        assert_eq!(input["access_token"], "${GA4_ACCESS_TOKEN}");
+        assert_eq!(input["streams"][0], "google_analytics.events_daily");
+    }
+
+    #[test]
     fn translate_http_client_source() {
         let cfg = make_cfg(
             WarehouseConfig::Snowflake {
@@ -1676,7 +1783,7 @@ mod tests {
     #[test]
     fn authenticated_overlay_sets_scope_tenant_from_credentials() {
         with_clean_llm_env(|| {
-            let mut internal = to_internal(&mssql_snowflake_config()).unwrap();
+            let mut internal = to_internal(&mssql_snowflake_config(), None).unwrap();
             let creds = credentials_response("server-llm-token");
             apply_authenticated_overlay(&mut internal, &creds, token_provider(), 0.0).unwrap();
 
@@ -1698,7 +1805,7 @@ mod tests {
     #[test]
     fn authenticated_overlay_requires_server_llm_token_without_env_override() {
         with_clean_llm_env(|| {
-            let mut internal = to_internal(&mssql_snowflake_config()).unwrap();
+            let mut internal = to_internal(&mssql_snowflake_config(), None).unwrap();
             let creds = credentials_response("");
 
             let err = apply_authenticated_overlay(&mut internal, &creds, token_provider(), 0.0)

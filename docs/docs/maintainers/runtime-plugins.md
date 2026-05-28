@@ -10,6 +10,10 @@ The runtime boundary is intentionally narrow:
 
 The exact contract is documented in [Runtime Plugin Contract](runtime-plugin-contract.md).
 
+For API/SaaS marketing and analytics connectors, see [API / SaaS source plugins](./api-saas-source-plugins.md).
+
+When adding a **user-facing** runtime source, also wire `skippr connect source <kebab-name>` in `crates/skippr-cli` and map the public `kind` in `skippr_impl.rs` — see the **CLI (`skippr connect source`)** checklist in [API / SaaS source plugins](./api-saas-source-plugins.md#cli-skippr-connect-source).
+
 ## Single source of truth
 
 Each runtime plugin crate declares its metadata in its own `Cargo.toml`:

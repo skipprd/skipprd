@@ -12217,6 +12217,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippr-plugin-data-source-google-analytics"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "skippr-plugin-shared-api-source",
+ "skippr-runtime-sdk",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "skippr-plugin-data-source-http-client"
 version = "0.1.2"
 dependencies = [
@@ -12626,6 +12642,20 @@ dependencies = [
  "skippr-plugin-data-sink-snowflake",
  "skippr-runtime-sdk",
  "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-shared-api-source"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "jsonwebtoken 9.3.1",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

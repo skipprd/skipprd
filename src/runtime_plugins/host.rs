@@ -32,7 +32,7 @@ use crate::helpers::offsets::{
 };
 use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks, INGEST_RT};
 use crate::plugins::cdc;
-use crate::plugins::{DataSink, SchemaSink};
+use crate::plugins::{DataSink, SchemaSink, SchemaSyncRequest};
 use crate::runtime_plugins::artifact::resolve_plugin_executable;
 use crate::runtime_plugins::manifest::RuntimePluginManifest;
 use crate::runtime_plugins::offset_service::OffsetServiceEndpoint;
@@ -861,9 +861,28 @@ pub async fn sync_runtime_input_plugin(
             return Ok(());
         }
 
-        if !control_completed {
+        while !control_completed {
             if let Some(control_frame) = control_reader.take_frame::<PluginFrame>()? {
                 match control_frame {
+                    PluginFrame::SourceEvent(SourceEvent::ContractsUpdate(contracts)) => {
+                        match crate::plugins::source_contract::apply_runtime_source_namespace_contracts(
+                            contracts,
+                        )
+                        .await
+                        {
+                            Ok(changed) => {
+                                if changed {
+                                    info!("Runtime source namespace contracts updated");
+                                }
+                            }
+                            Err(err) => {
+                                pending_source_tasks.abort_all();
+                                return Err(io::Error::other(format!(
+                                    "invalid runtime source namespace contracts: {err}"
+                                )));
+                            }
+                        }
+                    }
                     PluginFrame::SourceEvent(SourceEvent::SchemaStateUpdate(schema_state)) => {
                         let namespace_count = schema_state.namespaces.len();
                         let changed_namespaces = apply_runtime_source_schema_state(schema_state);
@@ -926,6 +945,7 @@ pub async fn sync_runtime_input_plugin(
                     "runtime source closed control channel before sending completion",
                 ));
             }
+            break;
         }
 
         if let Some(payload) = data_reader.take_frame_payload()? {
@@ -1021,14 +1041,23 @@ pub async fn sync_runtime_input_plugin(
                         let stream = decoded.stream;
                         crate::metrics::counters::add_messages(decoded.rows);
                         crate::metrics::counters::add_source_bytes(source_bytes);
-                        if let Some(namespace) =
-                            query_value_from_runtime_filename(&write.filename, "namespace")
-                        {
-                            apply_derived_runtime_schema(namespace, &stream.schema());
+                        let namespace =
+                            query_value_from_runtime_filename(&write.filename, "namespace");
+                        if let Some(ref ns) = namespace {
+                            apply_derived_runtime_schema(ns.clone(), &stream.schema());
                         }
-                        shared_output
-                            .sync(stream, write.filename, write.cdc_ctx.as_ref())
-                            .await?;
+                        let source_contract = write.source_contract.or_else(|| {
+                            namespace.as_deref().and_then(
+                                crate::plugins::source_contract::namespace_source_contract,
+                            )
+                        });
+                        let ctx = crate::plugins::SinkWriteContext {
+                            filename: write.filename,
+                            compaction_id: write.compaction_id,
+                            cdc_ctx: write.cdc_ctx.as_ref(),
+                            source_contract: source_contract.as_ref(),
+                        };
+                        shared_output.sync_with_context(stream, ctx).await?;
                         Ok(())
                     });
                 }
@@ -1079,6 +1108,7 @@ pub async fn sync_runtime_input_plugin(
         }
 
         tokio::select! {
+            biased;
             control_ready = connection.control.readable(), if !control_completed => {
                 match control_ready {
                     Ok(()) => control_reader.fill_from_ready(&connection.control).map_err(|err| {
@@ -1402,20 +1432,48 @@ impl DataSink for RuntimeDataSinkPlugin {
         filename: String,
         cdc_ctx: Option<&cdc::SyncContext>,
     ) -> Result<(), io::Error> {
-        if let Some(namespace) = query_value_from_runtime_filename(&filename, "namespace") {
+        self.sync_with_context(
+            stream,
+            crate::plugins::SinkWriteContext {
+                filename,
+                compaction_id: String::new(),
+                cdc_ctx,
+                source_contract: None,
+            },
+        )
+        .await
+    }
+
+    async fn sync_with_context(
+        &self,
+        stream: datafusion::execution::SendableRecordBatchStream,
+        ctx: crate::plugins::SinkWriteContext<'_>,
+    ) -> Result<(), io::Error> {
+        if let Some(namespace) = query_value_from_runtime_filename(&ctx.filename, "namespace") {
             apply_derived_runtime_schema(namespace, &stream.schema());
         }
         let schema_state = current_runtime_schema_state();
         self.install_schema_state_with_retry(schema_state.version, &schema_state.namespaces)
             .await?;
         let encoded_stream = encode_record_batch_stream_with_stats(stream).await?;
+        let namespace = query_value_from_runtime_filename(&ctx.filename, "namespace");
+        let source_contract = ctx.source_contract.cloned().or_else(|| {
+            namespace
+                .as_deref()
+                .and_then(crate::plugins::source_contract::namespace_source_contract)
+        });
         let request = SinkRunRequest {
             request_id: next_runtime_request_id(),
-            compaction_id: runtime_compaction_id(&filename),
+            compaction_id: if ctx.compaction_id.is_empty() {
+                runtime_compaction_id(&ctx.filename)
+            } else {
+                ctx.compaction_id.clone()
+            },
             binding: self.install_request.binding,
             required_schema_version: schema_state.version,
-            filename,
-            cdc_ctx: cdc_ctx.cloned(),
+            filename: ctx.filename,
+            cdc_ctx: ctx.cdc_ctx.cloned(),
+            source_contract,
         };
         self.send_sink_request(request, encoded_stream.bytes, encoded_stream.rows)
             .await
@@ -1631,18 +1689,41 @@ impl SchemaSink for RuntimeSchemaSinkPlugin {
         namespace: &str,
         metadata: &crate::discover::OutputMetadata,
     ) -> Result<(), io::Error> {
+        self.sync_schema_request(
+            SchemaSyncRequest {
+                namespace,
+                compaction_id: "",
+                source_contract: None,
+            },
+            metadata,
+        )
+        .await
+    }
+
+    async fn sync_schema_request(
+        &self,
+        request_ctx: SchemaSyncRequest<'_>,
+        metadata: &crate::discover::OutputMetadata,
+    ) -> Result<(), io::Error> {
         let schema_version = current_pipeline_schema_version();
         let schema_fingerprint = runtime_schema_compaction_fingerprint(metadata);
         let request = SchemaRunRequest {
             request_id: next_runtime_request_id(),
-            compaction_id: runtime_schema_compaction_id(
-                self.install_request.binding,
-                &schema_fingerprint,
-                namespace,
-            ),
+            compaction_id: if request_ctx.compaction_id.is_empty() {
+                runtime_schema_compaction_id(
+                    self.install_request.binding,
+                    &schema_fingerprint,
+                    request_ctx.namespace,
+                )
+            } else {
+                request_ctx.compaction_id.to_string()
+            },
             binding: self.install_request.binding,
             required_schema_version: schema_version,
-            namespace: namespace.to_string(),
+            namespace: request_ctx.namespace.to_string(),
+            source_contract: request_ctx.source_contract.cloned().or_else(|| {
+                crate::plugins::source_contract::namespace_source_contract(request_ctx.namespace)
+            }),
         };
         self.send_schema_request(request).await
     }

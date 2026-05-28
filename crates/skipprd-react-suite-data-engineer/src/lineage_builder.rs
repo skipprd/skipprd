@@ -658,6 +658,12 @@ fn source_descriptor_from_providers_cfg(
                 format!("s3://{bucket}/{prefix}")
             }
         }
+        Some("google_analytics") => input
+            .get("name")
+            .and_then(Value::as_str)
+            .or_else(|| input.get("property_id").and_then(Value::as_str))
+            .map(|property_id| format!("GA4 property {property_id}"))
+            .unwrap_or_else(|| "Google Analytics (GA4)".to_string()),
         _ => input
             .get("name")
             .and_then(Value::as_str)
@@ -690,6 +696,7 @@ fn provider_brand_for_source_kind(kind: &str) -> Option<&'static str> {
     match kind.trim().to_ascii_lowercase().as_str() {
         "s3" => Some("s3"),
         "file" | "files" | "csv" | "local" | "local_file" => Some("file"),
+        "google_analytics" => Some("google_analytics"),
         _ => None,
     }
 }
@@ -723,6 +730,7 @@ fn provider_label_for_brand(brand: &str) -> &'static str {
         "redshift" => "Amazon Redshift",
         "clickhouse" => "ClickHouse",
         "motherduck" => "MotherDuck",
+        "google_analytics" => "Google Analytics (GA4)",
         _ => "Provider",
     }
 }
@@ -903,9 +911,11 @@ async fn load_configured_skipprd_metadata_status(
         return None;
     };
     let mut inspected = Vec::new();
+    let mut saw_readable_metadata = false;
     for location in cap.locations {
         match read_skipprd_metadata_location(sctx, &location).await {
             Ok(Some(value)) => {
+                saw_readable_metadata = true;
                 let source_ref = skipprd_metadata_location_label(&location);
                 if let Some(status) =
                     skippr_status_from_metadata_value(pipeline, &source_ref, &value)
@@ -925,13 +935,20 @@ async fn load_configured_skipprd_metadata_status(
         }
     }
     if !inspected.is_empty() {
-        builder.warn(
-            format!(
-                "no skipprd metadata fields found for pipeline '{pipeline}' in configured metadata locations: {}",
-                inspected.join(", ")
-            ),
-            Some(LineageEvidenceSource::SkipprdMetadata),
+        let message = format!(
+            "no skipprd metadata fields found for pipeline '{pipeline}' in configured metadata locations: {}",
+            inspected.join(", ")
         );
+        if saw_readable_metadata {
+            builder.warn(message, Some(LineageEvidenceSource::SkipprdMetadata));
+        } else {
+            builder.info(
+                format!(
+                    "{message} (metadata may not exist yet during discover/sync; lineage uses config-derived source only)"
+                ),
+                Some(LineageEvidenceSource::SkipprdMetadata),
+            );
+        }
     }
     None
 }

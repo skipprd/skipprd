@@ -9,17 +9,20 @@ use crate::plugins::cdc::{
     CheckpointEnvelope, EventIdSemantics, SinkCapability, SinkGuaranteeTier, SourceBootstrapStyle,
     SourceCapability, SourceCheckpointStyle, SourceGuaranteeTier, SourceOrderModel, SyncContext,
 };
+use crate::plugins::source_contract::{SinkWritePolicySupport, SourceNamespaceContract};
 use serde::{Deserialize, Serialize};
 
 // This is the in-process runtime plugin IPC contract. It is deliberately
 // separate from the skippr/React adapter's CLI subprocess JSON summaries.
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 10;
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 11;
 pub const SKIPPR_RUNTIME_CONTROL_ADDR_ENV: &str = "SKIPPR_RUNTIME_CONTROL_ADDR";
 pub const SKIPPR_RUNTIME_DATA_ADDR_ENV: &str = "SKIPPR_RUNTIME_DATA_ADDR";
 pub const SKIPPR_RUNTIME_OFFSET_ADDR_ENV: &str = "SKIPPR_RUNTIME_OFFSET_ADDR";
 pub const SKIPPR_RUNTIME_SESSION_TOKEN_ENV: &str = "SKIPPR_RUNTIME_SESSION_TOKEN";
+/// Set on runtime source children by the host (`discover` | `sync`). Not a customer-facing setting.
+pub const SKIPPR_RUNTIME_EXECUTION_MODE_ENV: &str = "SKIPPR_RUNTIME_EXECUTION_MODE";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RuntimeSessionHello {
@@ -49,6 +52,8 @@ pub struct RuntimeSourceCapabilityDescriptor {
     pub order_model: SourceOrderModel,
     pub supports_deletes: bool,
     pub event_id_semantics: EventIdSemantics,
+    #[serde(default)]
+    pub declares_namespace_contracts: bool,
 }
 
 impl From<&'static SourceCapability> for RuntimeSourceCapabilityDescriptor {
@@ -61,6 +66,7 @@ impl From<&'static SourceCapability> for RuntimeSourceCapabilityDescriptor {
             order_model: value.order_model,
             supports_deletes: value.supports_deletes,
             event_id_semantics: value.event_id_semantics,
+            declares_namespace_contracts: false,
         }
     }
 }
@@ -87,10 +93,19 @@ pub struct RuntimeSinkCapabilityDescriptor {
     pub can_maintain_tombstone_tables: bool,
     pub can_compare_order_tokens: bool,
     pub supports_transactions: bool,
+    #[serde(default)]
+    pub supports_merge_by_key: bool,
+    #[serde(default)]
+    pub supports_replace_table: bool,
+    #[serde(default)]
+    pub supports_replace_partition: bool,
+    #[serde(default)]
+    pub supports_primary_key_metadata: bool,
 }
 
 impl From<&'static SinkCapability> for RuntimeSinkCapabilityDescriptor {
     fn from(value: &'static SinkCapability) -> Self {
+        let flags = Self::default_write_policy_flags_for_sink(value.name);
         Self {
             name: value.name.to_string(),
             guarantee_tier: value.guarantee_tier,
@@ -98,7 +113,34 @@ impl From<&'static SinkCapability> for RuntimeSinkCapabilityDescriptor {
             can_maintain_tombstone_tables: value.can_maintain_tombstone_tables,
             can_compare_order_tokens: value.can_compare_order_tokens,
             supports_transactions: value.supports_transactions,
+            supports_merge_by_key: flags.supports_merge_by_key,
+            supports_replace_table: flags.supports_replace_table,
+            supports_replace_partition: flags.supports_replace_partition,
+            supports_primary_key_metadata: Self::supports_primary_key_metadata_for_sink(value.name),
         }
+    }
+}
+
+impl RuntimeSinkCapabilityDescriptor {
+    fn supports_primary_key_metadata_for_sink(name: &str) -> bool {
+        matches!(name, "Athena")
+    }
+
+    fn default_write_policy_flags_for_sink(name: &str) -> SinkWritePolicySupport {
+        let mut support = SinkWritePolicySupport::default();
+        match name {
+            "Athena" => {
+                support.supports_replace_partition = true;
+                support.supports_replace_table = true;
+            }
+            "Iceberg" => {
+                support.supports_merge_by_key = true;
+                support.supports_replace_partition = true;
+                support.supports_replace_table = true;
+            }
+            _ => {}
+        }
+        support
     }
 }
 
@@ -352,6 +394,8 @@ pub struct RuntimeSourceSinkWrite {
     pub compaction_id: String,
     pub arrow_stream_bytes: Vec<u8>,
     pub cdc_ctx: Option<SyncContext>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_contract: Option<SourceNamespaceContract>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -362,6 +406,7 @@ pub struct RuntimeRequestAck {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum SourceEvent {
     SchemaStateUpdate(RuntimeSchemaState),
+    ContractsUpdate(Vec<SourceNamespaceContract>),
     Completed,
 }
 
@@ -373,6 +418,10 @@ pub struct SinkRunRequest {
     pub required_schema_version: u64,
     pub filename: String,
     pub cdc_ctx: Option<SyncContext>,
+    /// Always present on the bincode wire (use `None` when unset). Do not use
+    /// `skip_serializing_if` here — bincode + serde will not apply defaults for omitted fields.
+    #[serde(default)]
+    pub source_contract: Option<SourceNamespaceContract>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -388,6 +437,8 @@ pub struct SchemaRunRequest {
     pub binding: RuntimeBinding,
     pub required_schema_version: u64,
     pub namespace: String,
+    #[serde(default)]
+    pub source_contract: Option<SourceNamespaceContract>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -486,5 +537,144 @@ mod tests {
         };
         assert_eq!(decoded.context.pipeline_name, "pipeline");
         assert_eq!(decoded.context.execution_mode, RuntimeExecutionMode::Sync);
+    }
+
+    #[test]
+    fn source_event_contracts_update_roundtrips() {
+        use crate::plugins::source_contract::{FieldPath, SourceNamespaceContract, WritePolicy};
+
+        let event = SourceEvent::ContractsUpdate(vec![SourceNamespaceContract {
+            namespace: "google_analytics.events_daily".into(),
+            primary_key: vec![FieldPath::single("property_id"), FieldPath::single("date")],
+            cursor: Some(FieldPath::single("date")),
+            partition_key: vec![FieldPath::single("date")],
+            write_policy: WritePolicy::ReplacePartition,
+            refresh_window: Some(3),
+            description: String::new(),
+            semantics: None,
+        }]);
+        let frame = PluginFrame::SourceEvent(event);
+        let bytes = bincode::serialize(&frame).unwrap();
+        let decoded: PluginFrame = bincode::deserialize(&bytes).unwrap();
+        match decoded {
+            PluginFrame::SourceEvent(SourceEvent::ContractsUpdate(contracts)) => {
+                assert_eq!(contracts.len(), 1);
+                assert_eq!(contracts[0].write_policy, WritePolicy::ReplacePartition);
+            }
+            other => panic!("unexpected frame: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn sink_run_request_optional_source_contract_defaults_none() {
+        let bytes = bincode::serialize(&SinkRunRequest {
+            request_id: 1,
+            compaction_id: "c1".into(),
+            binding: RuntimeBinding::Primary,
+            required_schema_version: 0,
+            filename: "f".into(),
+            cdc_ctx: None,
+            source_contract: None,
+        })
+        .unwrap();
+        let decoded: SinkRunRequest = bincode::deserialize(&bytes).unwrap();
+        assert!(decoded.source_contract.is_none());
+    }
+
+    #[test]
+    fn sink_run_request_source_contract_roundtrips() {
+        use crate::plugins::source_contract::{FieldPath, SourceNamespaceContract, WritePolicy};
+
+        let contract = SourceNamespaceContract {
+            namespace: "google_analytics.events_daily".into(),
+            primary_key: vec![FieldPath::single("date")],
+            cursor: Some(FieldPath::single("date")),
+            partition_key: vec![FieldPath::single("date")],
+            write_policy: WritePolicy::ReplacePartition,
+            refresh_window: Some(3),
+            description: String::new(),
+            semantics: None,
+        };
+        let bytes = bincode::serialize(&SinkRunRequest {
+            request_id: 2,
+            compaction_id: "c2".into(),
+            binding: RuntimeBinding::Primary,
+            required_schema_version: 1,
+            filename: "ns/part.parquet".into(),
+            cdc_ctx: None,
+            source_contract: Some(contract.clone()),
+        })
+        .unwrap();
+        let decoded: SinkRunRequest = bincode::deserialize(&bytes).unwrap();
+        let roundtrip = decoded.source_contract.expect("contract");
+        assert_eq!(roundtrip.namespace, contract.namespace);
+        assert_eq!(roundtrip.write_policy, WritePolicy::ReplacePartition);
+    }
+
+    #[test]
+    fn schema_run_request_source_contract_roundtrips() {
+        use crate::plugins::source_contract::{FieldPath, SourceNamespaceContract, WritePolicy};
+
+        let contract = SourceNamespaceContract {
+            namespace: "google_analytics.events_daily".into(),
+            primary_key: vec![FieldPath::single("date")],
+            cursor: None,
+            partition_key: vec![FieldPath::single("date")],
+            write_policy: WritePolicy::ReplacePartition,
+            refresh_window: None,
+            description: String::new(),
+            semantics: None,
+        };
+        let request = SchemaRunRequest {
+            request_id: 3,
+            compaction_id: "schema-c1".into(),
+            binding: RuntimeBinding::Primary,
+            required_schema_version: 2,
+            namespace: "google_analytics.events_daily".into(),
+            source_contract: Some(contract),
+        };
+        let bytes = bincode::serialize(&request).unwrap();
+        let decoded: SchemaRunRequest = bincode::deserialize(&bytes).unwrap();
+        assert_eq!(
+            decoded
+                .source_contract
+                .as_ref()
+                .map(|c| c.partition_key[0].dotted()),
+            Some("date".to_string())
+        );
+    }
+
+    #[test]
+    fn contracts_update_empty_clears_via_roundtrip() {
+        let event = SourceEvent::ContractsUpdate(vec![]);
+        let frame = PluginFrame::SourceEvent(event);
+        let bytes = bincode::serialize(&frame).unwrap();
+        let decoded: PluginFrame = bincode::deserialize(&bytes).unwrap();
+        match decoded {
+            PluginFrame::SourceEvent(SourceEvent::ContractsUpdate(contracts)) => {
+                assert!(contracts.is_empty());
+            }
+            other => panic!("unexpected frame: {:?}", other),
+        }
+    }
+
+    #[test]
+    fn athena_sink_capability_handshake_matches_plugin_manifest_metadata() {
+        use crate::plugins::cdc::{sink_capabilities, SinkGuaranteeTier};
+
+        let handshake = RuntimeSinkCapabilityDescriptor::from(&sink_capabilities::ATHENA);
+        let manifest = RuntimeSinkCapabilityDescriptor {
+            name: "Athena".into(),
+            guarantee_tier: SinkGuaranteeTier::CdcEncodedOnly,
+            can_manage_skippr_columns: false,
+            can_maintain_tombstone_tables: false,
+            can_compare_order_tokens: false,
+            supports_transactions: false,
+            supports_merge_by_key: false,
+            supports_replace_table: true,
+            supports_replace_partition: true,
+            supports_primary_key_metadata: true,
+        };
+        assert_eq!(handshake, manifest);
     }
 }

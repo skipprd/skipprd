@@ -2541,9 +2541,17 @@ impl Config {
                             }
                             if let Some(ref plugin) = primary_plugin {
                                 info!("Schema sync: updating schema for namespace {}", ns);
+                                let source_contract = crate::METADATA
+                                    .load()
+                                    .source_contract_for_namespace(&ns);
+                                let schema_request = crate::plugins::SchemaSyncRequest {
+                                    namespace: &ns,
+                                    compaction_id: "",
+                                    source_contract: source_contract.as_ref(),
+                                };
                                 match tokio::time::timeout(
                                     sync_timeout,
-                                    plugin.sync_schema(&ns, &out_meta),
+                                    plugin.sync_schema_request(schema_request, &out_meta),
                                 )
                                 .await
                                 {

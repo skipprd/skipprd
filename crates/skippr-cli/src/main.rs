@@ -875,6 +875,49 @@ enum SourceKind {
         #[arg(long)]
         mode: Option<String>,
     },
+    /// Google Analytics 4 source (Data API daily reports).
+    GoogleAnalytics {
+        /// GA4 property ID (numeric, without the `properties/` prefix).
+        #[arg(long)]
+        property_id: Option<String>,
+        /// First date to sync (YYYY-MM-DD).
+        #[arg(long)]
+        start_date: Option<String>,
+        /// Last date to sync (YYYY-MM-DD). Omit to sync through today.
+        #[arg(long)]
+        end_date: Option<String>,
+        /// Re-fetch this many days before the checkpoint on each run (plugin default: 3).
+        #[arg(long)]
+        lookback_days: Option<u32>,
+        /// Bronze catalog profile: minimal, standard, or full (default: full).
+        #[arg(long)]
+        stream_profile: Option<String>,
+        /// Include dimension rows with zero metrics in API responses (default: true).
+        #[arg(long)]
+        keep_empty_rows: Option<bool>,
+        /// Do not sync the last N calendar days while GA4 is still processing (default: 1).
+        #[arg(long)]
+        processing_lag_days: Option<u32>,
+        /// Days per runReport dateRanges chunk; use 1 for best accuracy (default: 1).
+        #[arg(long)]
+        window_in_days: Option<u32>,
+        /// OAuth access token, or use ${GA4_ACCESS_TOKEN}.
+        #[arg(long)]
+        access_token: Option<String>,
+        #[arg(long)]
+        oauth_token_url: Option<String>,
+        #[arg(long)]
+        oauth_client_id: Option<String>,
+        #[arg(long)]
+        oauth_client_secret: Option<String>,
+        #[arg(long)]
+        oauth_refresh_token: Option<String>,
+        #[arg(long)]
+        service_account_json_path: Option<String>,
+        /// Curated namespace(s) to sync; overrides stream_profile when set.
+        #[arg(long, value_delimiter = ',')]
+        streams: Option<Vec<String>>,
+    },
     /// HTTP client source (polling).
     HttpClient {
         #[arg(long)]
@@ -1571,6 +1614,50 @@ fn plugin_mapping_key(map: &serde_yaml::Mapping) -> Option<String> {
         .next()
 }
 
+/// Prefer known runtime plugin keys (e.g. `GoogleAnalytics`) over incidental mappings like `transform`.
+const DATA_SOURCE_RUNTIME_PLUGIN_KEYS: &[&str] = &[
+    "GoogleAnalytics",
+    "S3",
+    "File",
+    "Mssql",
+    "Mysql",
+    "Postgres",
+    "Kafka",
+    "HttpClient",
+    "HttpServer",
+    "Websocket",
+    "Kinesis",
+    "Sqs",
+    "Sns",
+    "Amqp",
+    "Mqtt",
+    "Eventbridge",
+    "Socket",
+    "Stdin",
+    "Statsd",
+    "Pcap",
+    "Dynamodb",
+    "Mongodb",
+    "Redshift",
+    "Clickhouse",
+    "Motherduck",
+    "DeltaLake",
+    "Sftp",
+];
+
+fn data_source_plugin_key(map: &serde_yaml::Mapping) -> Option<String> {
+    for name in DATA_SOURCE_RUNTIME_PLUGIN_KEYS {
+        if map
+            .get(yaml_key(name))
+            .and_then(|value| value.as_mapping())
+            .is_some()
+        {
+            return Some(name.to_string());
+        }
+    }
+    plugin_mapping_key(map)
+}
+
 pub(crate) fn validate_pipeline_exists(
     engine_cfg: &serde_yaml::Value,
     pipeline: &str,
@@ -1712,6 +1799,57 @@ fn yaml_str(map: &serde_yaml::Mapping, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
+fn yaml_u32(map: &serde_yaml::Mapping, key: &str) -> Option<u32> {
+    map.get(yaml_key(key)).and_then(|value| {
+        value
+            .as_u64()
+            .and_then(|n| u32::try_from(n).ok())
+            .or_else(|| {
+                value
+                    .as_i64()
+                    .and_then(|n| u32::try_from(n).ok().filter(|_| n >= 0))
+            })
+            .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
+    })
+}
+
+fn yaml_bool(map: &serde_yaml::Mapping, key: &str) -> Option<bool> {
+    map.get(yaml_key(key)).and_then(|value| {
+        value.as_bool().or_else(|| {
+            value.as_str().and_then(|s| match s.trim().to_ascii_lowercase().as_str() {
+                "true" | "yes" | "1" => Some(true),
+                "false" | "no" | "0" => Some(false),
+                _ => None,
+            })
+        })
+    })
+}
+
+fn yaml_string_vec(map: &serde_yaml::Mapping, key: &str) -> Option<Vec<String>> {
+    let value = map.get(yaml_key(key))?;
+    if let Some(seq) = value.as_sequence() {
+        let items: Vec<String> = seq
+            .iter()
+            .filter_map(|entry| {
+                entry
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(str::to_string)
+            })
+            .collect();
+        return (!items.is_empty()).then_some(items);
+    }
+    let single = value.as_str().map(str::trim).filter(|item| !item.is_empty())?;
+    let items: Vec<String> = single
+        .split(',')
+        .map(str::trim)
+        .filter(|item| !item.is_empty())
+        .map(str::to_string)
+        .collect();
+    (!items.is_empty()).then_some(items)
+}
+
 fn result_s3_from_athena_results_bucket(bucket: Option<String>) -> Option<String> {
     bucket.map(|bucket| {
         let bucket = bucket.trim();
@@ -1728,7 +1866,7 @@ fn source_config_from_data_source(
     data_source_name: &str,
 ) -> Result<SourceConfig, String> {
     let source = selected_data_source_mapping(engine_cfg, data_source_name)?;
-    let plugin = plugin_mapping_key(source).ok_or_else(|| {
+    let plugin = data_source_plugin_key(source).ok_or_else(|| {
         format!(
             "data_sources.{} must contain a runtime plugin config such as S3:",
             data_source_name
@@ -1754,6 +1892,23 @@ fn source_config_from_data_source(
         }),
         "Mssql" => Ok(SourceConfig::Mssql {
             connection_string: yaml_str(plugin_cfg, "connection_string"),
+        }),
+        "GoogleAnalytics" => Ok(SourceConfig::GoogleAnalytics {
+            property_id: yaml_str(plugin_cfg, "property_id"),
+            start_date: yaml_str(plugin_cfg, "start_date"),
+            end_date: yaml_str(plugin_cfg, "end_date"),
+            lookback_days: yaml_u32(plugin_cfg, "lookback_days"),
+            stream_profile: yaml_str(plugin_cfg, "stream_profile"),
+            keep_empty_rows: yaml_bool(plugin_cfg, "keep_empty_rows"),
+            processing_lag_days: yaml_u32(plugin_cfg, "processing_lag_days"),
+            window_in_days: yaml_u32(plugin_cfg, "window_in_days"),
+            access_token: yaml_str(plugin_cfg, "access_token"),
+            oauth_token_url: yaml_str(plugin_cfg, "oauth_token_url"),
+            oauth_client_id: yaml_str(plugin_cfg, "oauth_client_id"),
+            oauth_client_secret: yaml_str(plugin_cfg, "oauth_client_secret"),
+            oauth_refresh_token: yaml_str(plugin_cfg, "oauth_refresh_token"),
+            service_account_json_path: yaml_str(plugin_cfg, "service_account_json_path"),
+            streams: yaml_string_vec(plugin_cfg, "streams"),
         }),
         other => Err(format!(
             "data_sources.{data_source_name}.{other} is not supported by lineage config translation"
@@ -2004,6 +2159,10 @@ fn u8_json(value: Option<u8>) -> Option<serde_json::Value> {
 
 fn u32_json(value: Option<u32>) -> Option<serde_json::Value> {
     value.map(|value| serde_json::Value::Number(value.into()))
+}
+
+fn bool_json(value: Option<bool>) -> Option<serde_json::Value> {
+    value.map(serde_json::Value::Bool)
 }
 
 fn u64_json(value: Option<u64>) -> Option<serde_json::Value> {
@@ -2464,6 +2623,45 @@ fn source_plugin_and_config(kind: SourceKind) -> (&'static str, serde_json::Valu
                 ("url", str_json(url)),
                 ("headers", map_json(headers)),
                 ("mode", str_json(mode)),
+            ]),
+        ),
+        SourceKind::GoogleAnalytics {
+            property_id,
+            start_date,
+            end_date,
+            lookback_days,
+            stream_profile,
+            keep_empty_rows,
+            processing_lag_days,
+            window_in_days,
+            access_token,
+            oauth_token_url,
+            oauth_client_id,
+            oauth_client_secret,
+            oauth_refresh_token,
+            service_account_json_path,
+            streams,
+        } => (
+            "GoogleAnalytics",
+            json_object(vec![
+                ("property_id", str_json(property_id)),
+                ("start_date", str_json(start_date)),
+                ("end_date", str_json(end_date)),
+                ("lookback_days", u32_json(lookback_days)),
+                ("stream_profile", str_json(stream_profile)),
+                ("keep_empty_rows", bool_json(keep_empty_rows)),
+                ("processing_lag_days", u32_json(processing_lag_days)),
+                ("window_in_days", u32_json(window_in_days)),
+                ("access_token", str_json(access_token)),
+                ("oauth_token_url", str_json(oauth_token_url)),
+                ("oauth_client_id", str_json(oauth_client_id)),
+                ("oauth_client_secret", str_json(oauth_client_secret)),
+                ("oauth_refresh_token", str_json(oauth_refresh_token)),
+                (
+                    "service_account_json_path",
+                    str_json(service_account_json_path),
+                ),
+                ("streams", strings_json(streams)),
             ]),
         ),
         SourceKind::HttpClient {
@@ -3265,7 +3463,25 @@ fn cmd_connect_warehouse(kind: WarehouseKind, explicit_config: &Option<PathBuf>,
 // connect source
 // ---------------------------------------------------------------------------
 
-fn cmd_connect_source(kind: SourceKind, explicit_config: &Option<PathBuf>, output: &str) {
+fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, output: &str) {
+    if let SourceKind::GoogleAnalytics {
+        ref mut property_id,
+        ref mut start_date,
+        ref mut access_token,
+        ..
+    } = &mut kind
+    {
+        if property_id.is_none() {
+            *property_id = prompt("GA4 property ID (numeric, e.g. 123456789)");
+        }
+        if start_date.is_none() {
+            *start_date = prompt("Start date for first sync (YYYY-MM-DD)");
+        }
+        if access_token.is_none() {
+            *access_token = Some("${GA4_ACCESS_TOKEN}".to_string());
+        }
+    }
+
     match load_cli_raw_config_for_save(explicit_config) {
         Ok(mut cfg) => {
             let (plugin, config) = source_plugin_and_config(kind);
@@ -3541,6 +3757,39 @@ fn cmd_connect_source(kind: SourceKind, explicit_config: &Option<PathBuf>, outpu
             headers: pairs_to_hash_map(headers),
             mode,
         },
+        SourceKind::GoogleAnalytics {
+            property_id,
+            start_date,
+            end_date,
+            lookback_days,
+            stream_profile,
+            keep_empty_rows,
+            processing_lag_days,
+            window_in_days,
+            access_token,
+            oauth_token_url,
+            oauth_client_id,
+            oauth_client_secret,
+            oauth_refresh_token,
+            service_account_json_path,
+            streams,
+        } => SourceConfig::GoogleAnalytics {
+            property_id,
+            start_date,
+            end_date,
+            lookback_days,
+            stream_profile,
+            keep_empty_rows,
+            processing_lag_days,
+            window_in_days,
+            access_token,
+            oauth_token_url,
+            oauth_client_id,
+            oauth_client_secret,
+            oauth_refresh_token,
+            service_account_json_path,
+            streams,
+        },
         SourceKind::HttpClient {
             url,
             method,
@@ -3605,6 +3854,7 @@ fn cmd_connect_source(kind: SourceKind, explicit_config: &Option<PathBuf>, outpu
         SourceConfig::Eventbridge { .. } => "eventbridge",
         SourceConfig::Mqtt { .. } => "mqtt",
         SourceConfig::Websocket { .. } => "websocket",
+        SourceConfig::GoogleAnalytics { .. } => "google_analytics",
         SourceConfig::HttpClient { .. } => "http_client",
         SourceConfig::HttpServer { .. } => "http_server",
         SourceConfig::Socket { .. } => "socket",
@@ -7308,6 +7558,61 @@ data_sinks:
                 .and_then(|naming| naming.get("target_schema"))
                 .and_then(|schema| schema.as_str()),
             Some("cursor_semantic_validation")
+        );
+    }
+
+    #[test]
+    fn react_config_translates_google_analytics_for_lineage() {
+        let cfg: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+skippr:
+  workspace: default
+pipelines:
+  picnic_ga4:
+    data_source: data_sources.picnic_ga4
+    data_sink: data_sinks.picnic
+data_sources:
+  picnic_ga4:
+    GoogleAnalytics:
+      property_id: "123456789"
+      start_date: "2024-01-01"
+      oauth_token_url: https://oauth2.googleapis.com/token
+      oauth_client_id: ${GA4_OAUTH_CLIENT_ID}
+      oauth_client_secret: ${GA4_OAUTH_CLIENT_SECRET}
+      oauth_refresh_token: ${GA4_OAUTH_REFRESH_TOKEN}
+data_sinks:
+  picnic:
+    schema_sink: schema_sinks.glue_picnic
+    Athena:
+      athena_workgroup_name: picnic
+      athena_results_s3_bucket: s3://example-athena-results/
+      s3_bucket: example-datalake
+schema_sinks:
+  glue_picnic:
+    Glue:
+      glue_database_name: picnic
+"#,
+        )
+        .expect("yaml");
+
+        let internal =
+            react_config_from_pipeline_config(&cfg, "picnic_ga4").expect("internal config");
+        let providers = internal.providers.expect("providers");
+        assert_eq!(
+            providers
+                .get("el")
+                .and_then(|el| el.get("skippr_input"))
+                .and_then(|input| input.get("kind"))
+                .and_then(|kind| kind.as_str()),
+            Some("google_analytics")
+        );
+        assert_eq!(
+            providers
+                .get("el")
+                .and_then(|el| el.get("skippr_input"))
+                .and_then(|input| input.get("property_id"))
+                .and_then(|id| id.as_str()),
+            Some("123456789")
         );
     }
 

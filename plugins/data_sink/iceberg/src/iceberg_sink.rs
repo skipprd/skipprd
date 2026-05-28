@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -29,10 +29,21 @@ use serde_derive::Deserialize;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
+const ICEBERG_WRITE_POLICY_SUPPORT: SinkWritePolicySupport = SinkWritePolicySupport {
+    supports_merge_by_key: true,
+    supports_replace_partition: true,
+    supports_replace_table: true,
+};
+
 use crate::helpers::configuration::DataSinkPluginConfig;
 use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
 use skippr_runtime_sdk::plugins::cdc::EffectiveGuarantee;
-use skippr_runtime_sdk::plugins::{DataSink, SchemaSink};
+use skippr_runtime_sdk::plugins::source_contract::{
+    ensure_source_contract_for_policy, namespace_source_contract,
+    validate_write_policy_for_sink, FieldPath, SinkWritePolicySupport, SourceNamespaceContract,
+    WritePolicy,
+};
+use skippr_runtime_sdk::plugins::{DataSink, SchemaSink, SinkWriteContext};
 use skippr_runtime_sdk::protocol::{RuntimeBinding, RuntimeExecutionContext};
 use skippr_runtime_sdk::sink_compat::BufferChunker;
 
@@ -126,11 +137,60 @@ impl DataSink for DataSinkIcebergPlugin {
         filename: String,
         cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> Result<(), io::Error> {
-        let stream = match cdc_ctx {
-            Some(ctx) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &ctx.part_meta),
+        self.sync_with_context(
+            stream,
+            SinkWriteContext {
+                filename,
+                compaction_id: String::new(),
+                cdc_ctx,
+                source_contract: None,
+            },
+        )
+        .await
+    }
+
+    async fn sync_with_context(
+        &self,
+        stream: SendableRecordBatchStream,
+        ctx: SinkWriteContext<'_>,
+    ) -> Result<(), io::Error> {
+        let stream = match ctx.cdc_ctx {
+            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
             None => stream,
         };
-        self.native_append(stream, filename, cdc_ctx).await
+        if ctx.cdc_ctx.is_some() {
+            return self.native_append(stream, ctx.filename, ctx.cdc_ctx).await;
+        }
+        let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
+        let resolved_contract = ctx
+            .source_contract
+            .cloned()
+            .or_else(|| namespace_source_contract(&namespace));
+        let policy = resolved_contract
+            .as_ref()
+            .map(|c| c.write_policy)
+            .unwrap_or(WritePolicy::Append);
+        if let Some(ref contract) = resolved_contract {
+            validate_write_policy_for_sink(contract, "Iceberg", ICEBERG_WRITE_POLICY_SUPPORT)
+                .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err.to_string()))?;
+        }
+        ensure_source_contract_for_policy(&namespace, policy, resolved_contract.as_ref())?;
+        match policy {
+            WritePolicy::Append => self.native_append(stream, ctx.filename, None).await,
+            WritePolicy::MergeByKey | WritePolicy::ReplacePartition | WritePolicy::ReplaceTable => {
+                let contract = resolved_contract.ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Iceberg write policy {:?} requires a source namespace contract",
+                            policy
+                        ),
+                    )
+                })?;
+                self.native_policy_write(stream, ctx.filename, &contract, policy)
+                    .await
+            }
+        }
     }
 
     fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
@@ -267,6 +327,131 @@ impl DataSinkIcebergPlugin {
         }
         info!(
             "Committed Iceberg append namespace={} table={} rows={}",
+            namespace,
+            committed.identifier(),
+            row_count
+        );
+        Ok(())
+    }
+
+    async fn native_policy_write(
+        &self,
+        stream: SendableRecordBatchStream,
+        filename: String,
+        contract: &SourceNamespaceContract,
+        policy: WritePolicy,
+    ) -> Result<(), io::Error> {
+        use iceberg::Catalog;
+
+        let namespace = BufferChunker::decode_file_namespace(&filename);
+        let metadata = self.namespace_metadata(&namespace).await?;
+        let catalog = self.glue_catalog().await?;
+
+        if policy == WritePolicy::ReplaceTable {
+            let table_ident = self.table_ident(&namespace)?;
+            if catalog
+                .table_exists(&table_ident)
+                .await
+                .map_err(|err| io::Error::other(err.to_string()))?
+            {
+                catalog
+                    .drop_table(&table_ident)
+                    .await
+                    .map_err(|err| io::Error::other(err.to_string()))?;
+                info!(
+                    "Iceberg ReplaceTable dropped existing table '{}' before recreate",
+                    table_ident
+                );
+            }
+            self.ensure_table(&catalog, &namespace, &metadata).await?;
+            return self.native_append(stream, filename, None).await;
+        }
+
+        let table = self.ensure_table(&catalog, &namespace, &metadata).await?;
+        let batches = collect_record_batches(stream).await?;
+        if batches.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Iceberg {:?} for namespace '{}' requires at least one row to derive delete scope",
+                    policy, namespace
+                ),
+            ));
+        }
+
+        let schema = batches[0].schema();
+        let data_batch = arrow::compute::concat_batches(&schema, &batches)
+            .map_err(|err| io::Error::other(err.to_string()))?;
+
+        let delete_paths = match policy {
+            WritePolicy::MergeByKey => &contract.primary_key,
+            WritePolicy::ReplacePartition => &contract.partition_key,
+            WritePolicy::Append | WritePolicy::ReplaceTable => {
+                return Err(io::Error::other("unexpected write policy branch"));
+            }
+        };
+        if delete_paths.is_empty() {
+            return Err(io::Error::other(format!(
+                "Iceberg {:?} for namespace '{}' requires non-empty key columns in source contract",
+                policy, namespace
+            )));
+        }
+
+        let delete_columns: Vec<String> = delete_paths.iter().map(FieldPath::dotted).collect();
+        let delete_batch = dedupe_batch_by_columns(&data_batch, &delete_columns)?;
+        let equality_ids = plan_contract_equality_ids(&table, delete_paths)?;
+
+        let mut commit_files = Vec::new();
+        let mut row_count = 0u64;
+
+        if delete_batch.num_rows() > 0 {
+            let delete_stream = batch_stream(vec![delete_batch]);
+            let delete_bytes = crate::parquet_util::serialize_to_parquet(delete_stream).await?;
+            let delete_row_count = delete_bytes.meta_data.num_rows as u64;
+            if delete_row_count > 0 {
+                let delete_file_uri = self
+                    .write_parquet_file(&namespace, "delete", &filename, delete_bytes.bytes)
+                    .await?;
+                commit_files.push(self.build_data_file(
+                    &table,
+                    DataContentType::EqualityDeletes,
+                    delete_file_uri,
+                    delete_row_count,
+                    delete_bytes.size_bytes as u64,
+                    Some(equality_ids.clone()),
+                )?);
+            }
+        }
+
+        if data_batch.num_rows() > 0 {
+            let data_stream = batch_stream(vec![data_batch]);
+            let parquet_bytes = crate::parquet_util::serialize_to_parquet(data_stream).await?;
+            row_count = parquet_bytes.meta_data.num_rows as u64;
+            if row_count > 0 {
+                let data_file_uri = self
+                    .write_parquet_file(&namespace, "data", &filename, parquet_bytes.bytes.clone())
+                    .await?;
+                commit_files.push(self.build_data_file(
+                    &table,
+                    DataContentType::Data,
+                    data_file_uri,
+                    row_count,
+                    parquet_bytes.size_bytes as u64,
+                    None,
+                )?);
+            }
+        }
+
+        if commit_files.is_empty() {
+            return Ok(());
+        }
+
+        let committed = self
+            .commit_append_with_retries(&catalog, table.identifier().clone(), commit_files)
+            .await?;
+        info!(
+            "Committed Iceberg {:?} namespace={} table={} rows={}",
+            policy,
             namespace,
             committed.identifier(),
             row_count
@@ -823,6 +1008,55 @@ fn batch_stream(batches: Vec<RecordBatch>) -> SendableRecordBatchStream {
         schema,
         batches: batches.into_iter(),
     })
+}
+
+async fn collect_record_batches(
+    mut stream: SendableRecordBatchStream,
+) -> Result<Vec<RecordBatch>, io::Error> {
+    let mut batches = Vec::new();
+    while let Some(batch) = stream.next().await {
+        batches.push(batch.map_err(|err| io::Error::other(err.to_string()))?);
+    }
+    Ok(batches)
+}
+
+fn plan_contract_equality_ids(
+    table: &iceberg::table::Table,
+    key_paths: &[FieldPath],
+) -> Result<Vec<i32>, io::Error> {
+    let schema = table.metadata().current_schema();
+    let mut equality_ids = Vec::with_capacity(key_paths.len());
+    for path in key_paths {
+        let column = path.dotted();
+        let field = schema.field_by_name(&column).ok_or_else(|| {
+            io::Error::other(format!(
+                "Iceberg equality key '{}' is not present in table schema",
+                column
+            ))
+        })?;
+        equality_ids.push(field.id);
+    }
+    Ok(equality_ids)
+}
+
+fn dedupe_batch_by_columns(
+    batch: &RecordBatch,
+    columns: &[String],
+) -> Result<RecordBatch, io::Error> {
+    let mut seen = HashSet::new();
+    let mut keep = Vec::with_capacity(batch.num_rows());
+    for row in 0..batch.num_rows() {
+        let key = business_key_for_row(batch, columns, row)?;
+        if seen.insert(key) {
+            keep.push(row);
+        }
+    }
+    let mask = BooleanArray::from(
+        (0..batch.num_rows())
+            .map(|row| keep.contains(&row))
+            .collect::<Vec<_>>(),
+    );
+    filter_record_batch(batch, &mask).map_err(|err| io::Error::other(err.to_string()))
 }
 
 fn business_key_for_row(

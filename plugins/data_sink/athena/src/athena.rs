@@ -14,7 +14,8 @@ use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use aws_sdk_s3::Client as S3Client;
 use skippr_runtime_sdk::converters::skippr_hive::SkipprHive;
-use skippr_runtime_sdk::discover::OutputMetadata;
+use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
+use skippr_runtime_sdk::plugins::{SchemaSink, SchemaSyncRequest};
 use skippr_runtime_sdk::metrics::counters as metrics_counters;
 use skippr_runtime_sdk::sink_compat::BufferChunker;
 
@@ -22,8 +23,14 @@ use async_trait::async_trait;
 use aws_sdk_glue::error::SdkError;
 use aws_sdk_glue::operation::get_table::{GetTableError, GetTableOutput};
 use bytes::Bytes;
+use arrow::array::RecordBatch;
+use arrow::util::display::array_value_to_string;
 use datafusion::physical_plan::SendableRecordBatchStream;
+use datafusion::physical_plan::RecordBatchStream;
 use futures::StreamExt;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll as TaskPoll};
 use parquet::arrow::ArrowWriter;
 use std::collections::{BTreeMap, HashMap};
 use std::io;
@@ -34,16 +41,25 @@ use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use rand::Rng;
 use serde_derive::Deserialize;
-use skippr_runtime_sdk::plugins::DataSink;
+use skippr_runtime_sdk::plugins::source_contract::{
+    ensure_source_contract_for_policy, namespace_source_contract,
+    validate_write_policy_for_sink, SourceNamespaceContract, SinkWritePolicySupport, WritePolicy,
+};
+use skippr_runtime_sdk::plugins::{DataSink, SinkWriteContext};
 use skippr_runtime_sdk::protocol::{RuntimeBinding, RuntimeExecutionContext};
 use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock, Semaphore};
 use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
 use tracing::{debug, info, warn};
 
 const TIME_PARTITION_GRANULARITIES: [&str; 5] = ["year", "month", "day", "hour", "minute"];
+
+const ATHENA_WRITE_POLICY_SUPPORT: SinkWritePolicySupport = SinkWritePolicySupport {
+    supports_merge_by_key: false,
+    supports_replace_partition: true,
+    supports_replace_table: true,
+};
 
 // Global control-plane throttling and serialization
 const DEFAULT_GLUE_CONTROL_PLANE_CONCURRENCY: usize = 2;
@@ -190,11 +206,63 @@ impl DataSink for DataSinkAthenaPlugin {
         filename: String,
         cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
-        let stream = match cdc_ctx {
-            Some(ctx) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &ctx.part_meta),
+        self.sync_with_context(
+            stream,
+            SinkWriteContext {
+                filename,
+                compaction_id: String::new(),
+                cdc_ctx,
+                source_contract: None,
+            },
+        )
+        .await
+    }
+
+    async fn sync_with_context(
+        &self,
+        stream: SendableRecordBatchStream,
+        ctx: SinkWriteContext<'_>,
+    ) -> Result<(), std::io::Error> {
+        let stream = match ctx.cdc_ctx {
+            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
             None => stream,
         };
-        self.inner_sync(stream, filename).await
+        let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
+        let resolved_contract = if ctx.cdc_ctx.is_some() {
+            None
+        } else {
+            ctx.source_contract
+                .cloned()
+                .or_else(|| namespace_source_contract(&namespace))
+        };
+        let write_policy = if ctx.cdc_ctx.is_some() {
+            WritePolicy::Append
+        } else {
+            resolved_contract
+                .as_ref()
+                .map(|c| c.write_policy)
+                .unwrap_or(WritePolicy::Append)
+        };
+        if ctx.cdc_ctx.is_none() {
+            if let Some(ref contract) = resolved_contract {
+                validate_write_policy_for_sink(contract, "Athena", ATHENA_WRITE_POLICY_SUPPORT)
+                    .map_err(|err| {
+                        io::Error::new(io::ErrorKind::Unsupported, err.to_string())
+                    })?;
+            }
+            ensure_source_contract_for_policy(
+                &namespace,
+                write_policy,
+                resolved_contract.as_ref(),
+            )?;
+        }
+        self.inner_sync(
+            stream,
+            ctx.filename,
+            write_policy,
+            resolved_contract.as_ref(),
+        )
+        .await
     }
 
     fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
@@ -213,22 +281,46 @@ impl DataSink for DataSinkAthenaPlugin {
     }
 }
 
-impl DataSinkAthenaPlugin {
-    pub async fn sync_schema(
+#[async_trait]
+impl SchemaSink for DataSinkAthenaPlugin {
+    async fn sync_schema(
         &self,
         namespace: &str,
-        metadata: &skippr_runtime_sdk::discover::OutputMetadata,
-    ) -> Result<(), std::io::Error> {
-        AwsAthena::create_or_update_schema_with_config(
-            namespace,
+        metadata: &OutputMetadata,
+    ) -> Result<(), io::Error> {
+        self.sync_schema_request(
+            SchemaSyncRequest {
+                namespace,
+                compaction_id: "",
+                source_contract: None,
+            },
             metadata,
-            &self.context,
-            self.binding,
-            self.config.clone(),
         )
         .await
     }
 
+    async fn sync_schema_request(
+        &self,
+        request: SchemaSyncRequest<'_>,
+        metadata: &OutputMetadata,
+    ) -> Result<(), io::Error> {
+        let source_contract = request
+            .source_contract
+            .cloned()
+            .or_else(|| namespace_source_contract(request.namespace));
+        AwsAthena::create_or_update_schema_with_config(
+            request.namespace,
+            metadata,
+            &self.context,
+            self.binding,
+            self.config.clone(),
+            source_contract.as_ref(),
+        )
+        .await
+    }
+}
+
+impl DataSinkAthenaPlugin {
     pub async fn new_with_config(
         context: RuntimeExecutionContext,
         binding: RuntimeBinding,
@@ -269,10 +361,60 @@ impl DataSinkAthenaPlugin {
         })
     }
 
+    async fn delete_s3_prefix(&self, bucket: &str, prefix: &str) -> Result<(), io::Error> {
+        let lock = get_namespace_lock(prefix);
+        let _guard = lock.lock().await;
+        let mut next_token = None;
+        loop {
+            let resp = self
+                .s3_client
+                .list_objects_v2()
+                .bucket(bucket)
+                .prefix(prefix)
+                .max_keys(1000)
+                .set_continuation_token(next_token.clone())
+                .send()
+                .await
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            let mut delete_objects = Vec::new();
+            for obj in resp.contents() {
+                if let Some(key) = obj.key() {
+                    delete_objects.push(
+                        ObjectIdentifier::builder()
+                            .key(key)
+                            .build()
+                            .map_err(|e| io::Error::other(e.to_string()))?,
+                    );
+                }
+            }
+            if !delete_objects.is_empty() {
+                self.s3_client
+                    .delete_objects()
+                    .bucket(bucket)
+                    .delete(
+                        Delete::builder()
+                            .set_objects(Some(delete_objects))
+                            .build()
+                            .map_err(|e| io::Error::other(e.to_string()))?,
+                    )
+                    .send()
+                    .await
+                    .map_err(|e| io::Error::other(e.to_string()))?;
+            }
+            next_token = resp.next_continuation_token;
+            if next_token.is_none() {
+                break;
+            }
+        }
+        Ok(())
+    }
+
     pub async fn inner_sync(
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
+        write_policy: WritePolicy,
+        source_contract: Option<&SourceNamespaceContract>,
     ) -> Result<(), std::io::Error> {
         let _bucket = &self.config.s3_bucket;
         let key = &self.config.s3_prefix;
@@ -287,6 +429,7 @@ impl DataSinkAthenaPlugin {
                 &self.context,
                 self.binding,
                 self.config.clone(),
+                None,
             )
             .await?;
             self.deadletter_schema_ready.store(true, Ordering::Release);
@@ -307,8 +450,25 @@ impl DataSinkAthenaPlugin {
             tags.insert("namespace".to_string(), namespace.to_string());
         }
 
-        // Partitioning
+        // Partitioning (contract keys first to match Glue table partition key order).
         let mut partition_values: Vec<String> = vec![];
+
+        let (contract_peek_batch, stream) =
+            if write_policy == WritePolicy::ReplacePartition && source_contract.is_some() {
+                Self::peek_first_batch(stream).await?
+            } else {
+                (None, stream)
+            };
+
+        if let (Some(contract), Some(batch)) = (source_contract, contract_peek_batch.as_ref()) {
+            if !contract.partition_key.is_empty() {
+                for (column, value) in contract_partition_key_values(contract, batch)? {
+                    partition_values.push(value.clone());
+                    tags.insert(column.clone(), value.clone());
+                    full_key = format!("{}/{}={}", full_key, column, value);
+                }
+            }
+        }
 
         let partition_path = BufferChunker::decode_file_partition(&filename);
 
@@ -357,7 +517,25 @@ impl DataSinkAthenaPlugin {
                         });
                 }
                 Err(e) => {
-                    warn!("Failed to derive time partitions from filename '{}': {}. Proceeding without time partitions.", filename, e);
+                    let contract_covers_partition = source_contract
+                        .is_some_and(|contract| !contract.partition_key.is_empty());
+                    if write_policy == WritePolicy::ReplacePartition
+                        && !contract_covers_partition
+                        && partition_path.is_empty()
+                        && partition_values.is_empty()
+                    {
+                        return Err(io::Error::new(
+                            io::ErrorKind::InvalidInput,
+                            format!(
+                                "Athena ReplacePartition for namespace '{}' requires time partitions in filename or source contract partition_key: {}",
+                                namespace, e
+                            ),
+                        ));
+                    }
+                    warn!(
+                        "Failed to derive time partitions from filename '{}': {}. Proceeding without time partitions.",
+                        filename, e
+                    );
                 }
             }
         }
@@ -367,6 +545,77 @@ impl DataSinkAthenaPlugin {
         } else {
             None
         };
+        let has_contract_partition_scope = source_contract
+            .zip(contract_peek_batch.as_ref())
+            .is_some_and(|(contract, _)| !contract.partition_key.is_empty());
+        let has_partition_scope = !partition_path.is_empty()
+            || !time_partition_str.is_empty()
+            || has_contract_partition_scope;
+
+        match write_policy {
+            WritePolicy::ReplacePartition => {
+                if full_key.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Athena ReplacePartition for namespace '{}' requires a non-empty object prefix",
+                            namespace
+                        ),
+                    ));
+                }
+                let delete_prefix = if let (Some(contract), Some(batch)) =
+                    (source_contract, contract_peek_batch.as_ref())
+                {
+                    contract_partition_delete_prefix(&namespace, trimmed_key, contract, batch)?
+                } else if has_partition_scope {
+                    full_key.clone()
+                } else {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        format!(
+                            "Athena ReplacePartition for namespace '{}' requires partition scope \
+                             from source contract or encoded filename partitions",
+                            namespace
+                        ),
+                    ));
+                };
+                info!(
+                    "Athena ReplacePartition: deleting s3://{}/{} before upload",
+                    self.config.s3_bucket, delete_prefix
+                );
+                self.delete_s3_prefix(&self.config.s3_bucket, &delete_prefix)
+                    .await?;
+            }
+            WritePolicy::ReplaceTable => {
+                if namespace.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidInput,
+                        "Athena ReplaceTable requires a non-empty namespace",
+                    ));
+                }
+                let table_prefix = if trimmed_key.is_empty() {
+                    namespace.clone()
+                } else {
+                    format!("{}/{}", trimmed_key, namespace)
+                };
+                info!(
+                    "Athena ReplaceTable: deleting s3://{}/{} before upload",
+                    self.config.s3_bucket, table_prefix
+                );
+                self.delete_s3_prefix(&self.config.s3_bucket, &table_prefix)
+                    .await?;
+            }
+            WritePolicy::MergeByKey => {
+                return Err(io::Error::new(
+                    io::ErrorKind::Unsupported,
+                    format!(
+                        "Athena sink does not support MergeByKey for namespace '{}'",
+                        namespace
+                    ),
+                ));
+            }
+            WritePolicy::Append => {}
+        }
 
         // Use deterministic hashed filename to avoid leaking internal encodings
         let md5_digest = md5::compute(&filename);
@@ -772,6 +1021,7 @@ impl DataSinkAthenaPlugin {
                 partition_values,
                 &full_key,
                 &partition_metadata,
+                source_contract,
             )
             .await
             .map_err(io::Error::other)?;
@@ -855,6 +1105,7 @@ impl AwsAthena {
         context: &RuntimeExecutionContext,
         binding: RuntimeBinding,
         config: DataSinkAthenaPluginConfig,
+        source_contract: Option<&SourceNamespaceContract>,
     ) -> io::Result<()> {
         // Serialize workgroup changes to avoid Athena InvalidRequestException on concurrent updates
         let _wg_guard = ATHENA_WG_LOCK.lock().await;
@@ -932,7 +1183,12 @@ impl AwsAthena {
                     AwsAthena::backoff_retry(
                         || {
                             AwsAthena::glue_create_table(
-                                context, binding, &config, namespace, schema,
+                                context,
+                                binding,
+                                &config,
+                                namespace,
+                                schema,
+                                source_contract,
                             )
                         },
                         "create_table",
@@ -962,7 +1218,16 @@ impl AwsAthena {
                 if matches!(err.err(), GetTableError::EntityNotFoundException(_)) =>
             {
                 AwsAthena::backoff_retry(
-                    || AwsAthena::glue_create_table(context, binding, &config, namespace, schema),
+                    || {
+                        AwsAthena::glue_create_table(
+                            context,
+                            binding,
+                            &config,
+                            namespace,
+                            schema,
+                            source_contract,
+                        )
+                    },
                     "create_table",
                 )
                 .await
@@ -1590,6 +1855,7 @@ impl AwsAthena {
         config: &DataSinkAthenaPluginConfig,
         namespace: &str,
         metadata: &OutputMetadata,
+        source_contract: Option<&SourceNamespaceContract>,
     ) -> Result<bool, String> {
         let database = config.glue_database_name.clone();
         let bucket = config.s3_bucket.clone();
@@ -1615,6 +1881,9 @@ impl AwsAthena {
         let is_deadletter = binding == RuntimeBinding::Deadletter
             && namespace == skippr_runtime_sdk::sink_compat::deadletter::table_name();
         if !is_deadletter {
+            if let Some(contract) = source_contract {
+                append_contract_glue_partition_keys(&mut partitions, contract, metadata);
+            }
             AwsAthena::get_partition_by_fields(&context.output_layout, &mut partitions);
         }
 
@@ -1794,6 +2063,7 @@ impl AwsAthena {
         partition_values: Vec<String>,
         key: &str,
         metadata: &OutputMetadata,
+        source_contract: Option<&SourceNamespaceContract>,
     ) -> Result<bool, String> {
         let database = config.glue_database_name.clone();
         let bucket = config.s3_bucket.clone();
@@ -1890,7 +2160,16 @@ impl AwsAthena {
                     })?;
                 }
                 AwsAthena::backoff_retry(
-                    || AwsAthena::glue_create_table(context, binding, config, namespace, metadata),
+                    || {
+                        AwsAthena::glue_create_table(
+                            context,
+                            binding,
+                            config,
+                            namespace,
+                            metadata,
+                            source_contract,
+                        )
+                    },
                     "create_table",
                 )
                 .await
@@ -1967,5 +2246,329 @@ impl AwsAthena {
         }
 
         Ok(true)
+    }
+}
+
+impl DataSinkAthenaPlugin {
+    async fn peek_first_batch(
+        mut stream: SendableRecordBatchStream,
+    ) -> Result<(Option<RecordBatch>, SendableRecordBatchStream), io::Error> {
+        let schema = stream.schema();
+        match stream.next().await {
+            Some(Ok(batch)) => {
+                let first = batch.clone();
+                let batches = vec![batch];
+                let replay = ChainedRecordBatchStream::new(schema, batches, stream);
+                Ok((Some(first), Box::pin(replay) as SendableRecordBatchStream))
+            }
+            Some(Err(err)) => Err(io::Error::other(err.to_string())),
+            None => Ok((None, Box::pin(EmptyRecordBatchStream::new(schema)) as SendableRecordBatchStream)),
+        }
+    }
+}
+
+struct ChainedRecordBatchStream {
+    schema: Arc<arrow::datatypes::Schema>,
+    prefix: Vec<RecordBatch>,
+    tail: SendableRecordBatchStream,
+}
+
+impl ChainedRecordBatchStream {
+    fn new(
+        schema: Arc<arrow::datatypes::Schema>,
+        prefix: Vec<RecordBatch>,
+        tail: SendableRecordBatchStream,
+    ) -> Self {
+        Self {
+            schema,
+            prefix,
+            tail,
+        }
+    }
+}
+
+impl futures::Stream for ChainedRecordBatchStream {
+    type Item = Result<RecordBatch, datafusion::error::DataFusionError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> TaskPoll<Option<Self::Item>> {
+        if !self.prefix.is_empty() {
+            return TaskPoll::Ready(Some(Ok(self.prefix.remove(0))));
+        }
+        Pin::new(&mut self.tail).poll_next(cx)
+    }
+}
+
+impl RecordBatchStream for ChainedRecordBatchStream {
+    fn schema(&self) -> Arc<arrow::datatypes::Schema> {
+        self.schema.clone()
+    }
+}
+
+struct EmptyRecordBatchStream {
+    schema: Arc<arrow::datatypes::Schema>,
+}
+
+impl EmptyRecordBatchStream {
+    fn new(schema: Arc<arrow::datatypes::Schema>) -> Self {
+        Self { schema }
+    }
+}
+
+impl futures::Stream for EmptyRecordBatchStream {
+    type Item = Result<RecordBatch, datafusion::error::DataFusionError>;
+
+    fn poll_next(self: Pin<&mut Self>, _cx: &mut TaskContext<'_>) -> TaskPoll<Option<Self::Item>> {
+        TaskPoll::Ready(None)
+    }
+}
+
+impl RecordBatchStream for EmptyRecordBatchStream {
+    fn schema(&self) -> Arc<arrow::datatypes::Schema> {
+        self.schema.clone()
+    }
+}
+
+fn hive_type_for_skippr_data_type(dtype: &SkipprDataType) -> &'static str {
+    match dtype {
+        SkipprDataType::Boolean => "boolean",
+        SkipprDataType::Integer => "int",
+        SkipprDataType::Short => "smallint",
+        SkipprDataType::Byte => "tinyint",
+        SkipprDataType::Long => "bigint",
+        SkipprDataType::Float => "float",
+        SkipprDataType::Double => "double",
+        SkipprDataType::Decimal => "decimal(38,9)",
+        SkipprDataType::Date | SkipprDataType::Timestamp | SkipprDataType::TimestampMilli => {
+            "timestamp"
+        }
+        SkipprDataType::Binary | SkipprDataType::Fixed => "binary",
+        _ => "string",
+    }
+}
+
+fn hive_partition_type_for_column(metadata: &OutputMetadata, column: &str) -> String {
+    let segments: Vec<&str> = column.split('.').collect();
+    let mut current = metadata;
+    for (index, segment) in segments.iter().enumerate() {
+        let child = current
+            .child_fields()
+            .find(|(_, field)| field.out_field_name() == *segment)
+            .map(|(_, field)| field);
+        let Some(child) = child else {
+            return "string".to_string();
+        };
+        if index + 1 == segments.len() {
+            return hive_type_for_skippr_data_type(child.determined_type()).to_string();
+        }
+        current = child;
+    }
+    "string".to_string()
+}
+
+fn append_contract_glue_partition_keys(
+    partitions: &mut Vec<Column>,
+    contract: &SourceNamespaceContract,
+    metadata: &OutputMetadata,
+) {
+    if contract.partition_key.is_empty() {
+        return;
+    }
+    let existing: std::collections::HashSet<String> =
+        partitions.iter().map(|column| column.name().to_string()).collect();
+    for path in &contract.partition_key {
+        let name = path.dotted();
+        if existing.contains(&name) {
+            continue;
+        }
+        let hive_type = hive_partition_type_for_column(metadata, &name);
+        partitions.push(
+            Column::builder()
+                .name(name)
+                .r#type(hive_type)
+                .build()
+                .unwrap(),
+        );
+    }
+}
+
+fn contract_partition_key_values(
+    contract: &SourceNamespaceContract,
+    batch: &RecordBatch,
+) -> Result<Vec<(String, String)>, io::Error> {
+    if contract.partition_key.is_empty() {
+        return Ok(Vec::new());
+    }
+    if batch.num_rows() == 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "ReplacePartition requires at least one row to derive contract partition values",
+        ));
+    }
+    let mut values = Vec::with_capacity(contract.partition_key.len());
+    for path in &contract.partition_key {
+        let column = path.dotted();
+        let idx = batch
+            .schema()
+            .index_of(&column)
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        let array = batch.column(idx);
+        if array.is_null(0) {
+            return Err(io::Error::other(format!(
+                "partition key '{}' is null in first batch row",
+                column
+            )));
+        }
+        let value = array_value_to_string(array.as_ref(), 0)
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        values.push((column, value));
+    }
+    Ok(values)
+}
+
+fn contract_partition_delete_prefix(
+    namespace: &str,
+    trimmed_key: &str,
+    contract: &SourceNamespaceContract,
+    batch: &RecordBatch,
+) -> Result<String, io::Error> {
+    if contract.partition_key.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!(
+                "ReplacePartition for namespace '{}' requires partition_key in source contract",
+                namespace
+            ),
+        ));
+    }
+    let segments: Vec<String> = contract_partition_key_values(contract, batch)?
+        .into_iter()
+        .map(|(column, value)| format!("{}={}", column, value))
+        .collect();
+    let partition_path = segments.join("/");
+    let base = if trimmed_key.is_empty() {
+        namespace.to_string()
+    } else {
+        format!("{}/{}", trimmed_key, namespace)
+    };
+    Ok(format!("{}/{}", base, partition_path))
+}
+
+#[cfg(test)]
+mod contract_schema_tests {
+    use super::*;
+    use arrow::array::{Int64Array, StringArray};
+    use arrow::datatypes::{DataType, Field, Schema};
+    use skippr_runtime_sdk::plugins::source_contract::{FieldPath, WritePolicy};
+
+    fn ga4_replace_partition_contract() -> SourceNamespaceContract {
+        SourceNamespaceContract {
+            namespace: "google_analytics.events_daily".to_string(),
+            primary_key: vec![FieldPath::single("property_id"), FieldPath::single("date")],
+            cursor: Some(FieldPath::single("date")),
+            partition_key: vec![FieldPath::single("date")],
+            write_policy: WritePolicy::ReplacePartition,
+            refresh_window: Some(3),
+            description: String::new(),
+            semantics: None,
+        }
+    }
+
+    fn batch_with_date(date: &str) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![Field::new("date", DataType::Utf8, false)]));
+        let dates = StringArray::from(vec![date]);
+        RecordBatch::try_new(schema, vec![Arc::new(dates)]).unwrap()
+    }
+
+    #[test]
+    fn contract_partition_key_becomes_glue_partition_column() {
+        let contract = ga4_replace_partition_contract();
+        let metadata = OutputMetadata::new();
+        let mut partitions = Vec::new();
+        append_contract_glue_partition_keys(&mut partitions, &contract, &metadata);
+        assert_eq!(partitions.len(), 1);
+        assert_eq!(partitions[0].name(), "date");
+        assert_eq!(partitions[0].r#type(), Some("string"));
+    }
+
+    #[test]
+    fn contract_glue_partition_keys_skip_duplicates() {
+        let contract = ga4_replace_partition_contract();
+        let metadata = OutputMetadata::new();
+        let mut partitions = vec![
+            Column::builder()
+                .name("date")
+                .r#type("string")
+                .build()
+                .unwrap(),
+        ];
+        append_contract_glue_partition_keys(&mut partitions, &contract, &metadata);
+        assert_eq!(partitions.len(), 1);
+    }
+
+    #[test]
+    fn contract_partition_key_values_from_batch() {
+        let contract = ga4_replace_partition_contract();
+        let batch = batch_with_date("2024-01-15");
+        let values = contract_partition_key_values(&contract, &batch).unwrap();
+        assert_eq!(values, vec![("date".to_string(), "2024-01-15".to_string())]);
+    }
+
+    #[test]
+    fn contract_partition_delete_prefix_matches_s3_layout() {
+        let contract = ga4_replace_partition_contract();
+        let batch = batch_with_date("2024-01-15");
+        let prefix =
+            contract_partition_delete_prefix("google_analytics.events_daily", "bronze", &contract, &batch)
+                .unwrap();
+        assert_eq!(
+            prefix,
+            "bronze/google_analytics.events_daily/date=2024-01-15"
+        );
+    }
+
+    #[test]
+    fn contract_partition_empty_batch_is_rejected() {
+        let contract = ga4_replace_partition_contract();
+        let schema = Arc::new(Schema::new(vec![Field::new("date", DataType::Utf8, false)]));
+        let batch = RecordBatch::new_empty(schema);
+        let err = contract_partition_key_values(&contract, &batch).unwrap_err();
+        assert!(err.to_string().contains("at least one row"));
+    }
+
+    #[test]
+    fn contract_partition_null_key_is_rejected() {
+        let contract = ga4_replace_partition_contract();
+        let schema = Arc::new(Schema::new(vec![Field::new("date", DataType::Utf8, true)]));
+        let dates = StringArray::from(vec![None as Option<&str>]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(dates)]).unwrap();
+        let err = contract_partition_key_values(&contract, &batch).unwrap_err();
+        assert!(err.to_string().contains("null"));
+    }
+
+    #[test]
+    fn contract_partition_missing_column_is_rejected() {
+        let contract = ga4_replace_partition_contract();
+        let schema = Arc::new(Schema::new(vec![Field::new("other", DataType::Utf8, false)]));
+        let values = StringArray::from(vec!["x"]);
+        let batch = RecordBatch::try_new(schema, vec![Arc::new(values)]).unwrap();
+        assert!(contract_partition_key_values(&contract, &batch).is_err());
+    }
+
+    #[test]
+    fn contract_partition_delete_prefix_requires_partition_key() {
+        let contract = SourceNamespaceContract {
+            namespace: "ns".into(),
+            primary_key: vec![],
+            cursor: None,
+            partition_key: vec![],
+            write_policy: WritePolicy::ReplacePartition,
+            refresh_window: None,
+            description: String::new(),
+            semantics: None,
+        };
+        let batch = batch_with_date("2024-01-01");
+        let err =
+            contract_partition_delete_prefix("ns", "", &contract, &batch).unwrap_err();
+        assert!(err.to_string().contains("partition_key"));
     }
 }

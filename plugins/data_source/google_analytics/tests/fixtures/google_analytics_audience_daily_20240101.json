@@ -1,0 +1,28 @@
+{
+  "rows": [
+    {
+      "dimensionValues": [
+        {
+          "value": "20240101"
+        }
+      ],
+      "metricValues": [
+        {
+          "value": "1"
+        },
+        {
+          "value": "1"
+        },
+        {
+          "value": "1"
+        },
+        {
+          "value": "1"
+        },
+        {
+          "value": "1"
+        }
+      ]
+    }
+  ]
+}

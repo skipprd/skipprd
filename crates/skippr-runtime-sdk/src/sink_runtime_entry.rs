@@ -383,10 +383,20 @@ where
         .as_ref()
         .ok_or_else(|| io::Error::other("runtime sink binding was not installed"))?;
     let stream = decode_record_batch_stream(arrow_stream_bytes)?;
-    let cdc_ctx = request.cdc_ctx.clone();
-    plugin
-        .sync(stream, request.filename, cdc_ctx.as_ref())
-        .await
+    let SinkRunRequest {
+        filename,
+        compaction_id,
+        cdc_ctx,
+        source_contract,
+        ..
+    } = request;
+    let ctx = skippr_core::plugins::SinkWriteContext {
+        filename,
+        compaction_id,
+        cdc_ctx: cdc_ctx.as_ref(),
+        source_contract: source_contract.as_ref(),
+    };
+    plugin.sync_with_context(stream, ctx).await
 }
 
 pub async fn run_runtime_schema_sink_plugin<P, F, Fut>(
@@ -610,6 +620,7 @@ where
             SchemaSyncRequest {
                 namespace: &request.namespace,
                 compaction_id: &request.compaction_id,
+                source_contract: request.source_contract.as_ref(),
             },
             metadata,
         )
