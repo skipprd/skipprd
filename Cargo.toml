@@ -56,12 +56,12 @@ tungstenite = "0.21"
 skippr-core = { path = "crates/skippr-core" }
 skippr-runtime-sdk = { path = "crates/skippr-runtime-sdk" }
 react-core = { version = "1.4.1", registry = "react-cargo" }
-react = { version = "1.4.0", registry = "react-cargo" }
-react-module-storage-s3 = { version = "1.4.0", registry = "react-cargo" }
-react-module-storage-local = { version = "1.4.0", registry = "react-cargo" }
-react-module-storage-memory = { version = "1.4.0", registry = "react-cargo" }
-react-module-provider-vector-lance = { version = "1.4.0", registry = "react-cargo" }
-react-suite-debugger = { version = "1.4.0", registry = "react-cargo" }
+react = { version = "1.4.1", registry = "react-cargo" }
+react-module-storage-s3 = { version = "1.4.1", registry = "react-cargo" }
+react-module-storage-local = { version = "1.4.1", registry = "react-cargo" }
+react-module-storage-memory = { version = "1.4.1", registry = "react-cargo" }
+react-module-provider-vector-lance = { version = "1.4.1", registry = "react-cargo" }
+react-suite-debugger = { version = "1.4.1", registry = "react-cargo" }
 
 [[bin]]
 name = "skipprd"
