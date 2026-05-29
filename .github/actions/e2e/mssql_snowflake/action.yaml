@@ -73,10 +73,16 @@ runs:
           $skipprBin = (Get-Command skippr -ErrorAction Stop).Source
         }
 
+        $skipprdBin = $null
         $skipprdArtifact = ".\skipprd-${{ inputs.architecture_name }}\skipprd.exe"
         if (Test-Path $skipprdArtifact) {
           $skipprdBin = (Resolve-Path $skipprdArtifact).Path
           $env:PATH = "$(Split-Path $skipprdBin);$env:PATH"
+        } elseif (Get-Command skipprd -ErrorAction SilentlyContinue) {
+          $skipprdBin = (Get-Command skipprd).Source
+        }
+        if ($skipprdBin) {
+          $env:SKIPPRD_BINARY = $skipprdBin
         }
 
         $workdir = Join-Path $env:RUNNER_TEMP ("mssql-snowflake-" + [guid]::NewGuid().ToString("N"))

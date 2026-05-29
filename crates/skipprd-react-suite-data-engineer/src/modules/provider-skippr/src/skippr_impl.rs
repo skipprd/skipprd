@@ -1,6 +1,6 @@
 use async_trait::async_trait;
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use react_core::scope::RequestScope;
 use react_suite_data_engineer::de_config::{ElToolResolved, WarehouseKind, WarehouseResolved};
@@ -21,6 +21,94 @@ pub struct SkipprCliProvider {
     pub storage_bucket: Option<String>,
 }
 
+fn skippr_binary_looks_like_path(binary: &str) -> bool {
+    let binary = binary.trim();
+    Path::new(binary).is_absolute()
+        || binary.contains('/')
+        || binary.contains('\\')
+        || binary.ends_with(".exe")
+}
+
+fn find_skippr_binary_on_path(name: &str) -> Option<PathBuf> {
+    let name = name.trim();
+    if name.is_empty() {
+        return None;
+    }
+    let path_var = std::env::var_os("PATH")?;
+    for dir in std::env::split_paths(&path_var) {
+        #[cfg(windows)]
+        let candidates = [
+            dir.join(format!("{}.exe", name.trim_end_matches(".exe"))),
+            dir.join(name),
+        ];
+        #[cfg(not(windows))]
+        let candidates = [dir.join(name)];
+        for candidate in candidates {
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+/// Resolve the skipprd executable to an absolute path when possible.
+///
+/// Windows `CreateProcess` searches the child `current_dir` before `PATH`; model runs
+/// with `cwd` under `.skippr/{tenant}/{pipeline}`, so a bare `skipprd` name can fail
+/// even when the binary is on `PATH`.
+pub fn resolve_skippr_binary(configured: &str) -> String {
+    let configured = configured.trim();
+    let fallback = if configured.is_empty() {
+        "skipprd"
+    } else {
+        configured
+    };
+
+    if skippr_binary_looks_like_path(fallback) {
+        let path = PathBuf::from(fallback);
+        if path.is_file() {
+            return path.to_string_lossy().into_owned();
+        }
+    }
+
+    for key in ["SKIPPRD_BINARY", "SKIPPR_BINARY"] {
+        if let Ok(value) = std::env::var(key) {
+            let value = value.trim();
+            if value.is_empty() {
+                continue;
+            }
+            let path = PathBuf::from(value);
+            if path.is_file() {
+                return path.to_string_lossy().into_owned();
+            }
+        }
+    }
+
+    if let Ok(current_exe) = std::env::current_exe() {
+        if let Some(parent) = current_exe.parent() {
+            #[cfg(windows)]
+            let candidates = [
+                parent.join(format!("{}.exe", fallback.trim_end_matches(".exe"))),
+                parent.join(fallback),
+            ];
+            #[cfg(not(windows))]
+            let candidates = [parent.join(fallback)];
+            for candidate in candidates {
+                if candidate.is_file() {
+                    return candidate.to_string_lossy().into_owned();
+                }
+            }
+        }
+    }
+
+    if let Some(found) = find_skippr_binary_on_path(fallback) {
+        return found.to_string_lossy().into_owned();
+    }
+
+    fallback.to_string()
+}
+
 impl SkipprCliProvider {
     pub fn new(
         el_config: ElToolResolved,
@@ -31,11 +119,14 @@ impl SkipprCliProvider {
         storage_mode: Option<String>,
         storage_bucket: Option<String>,
     ) -> Self {
-        let binary = if el_config.skippr_binary.is_empty() {
-            "skipprd".to_string()
-        } else {
-            el_config.skippr_binary.clone()
-        };
+        let binary = resolve_skippr_binary(&el_config.skippr_binary);
+        if binary != el_config.skippr_binary {
+            tracing::info!(
+                configured = %el_config.skippr_binary,
+                resolved = %binary,
+                "resolved skippr EL binary path"
+            );
+        }
         Self {
             binary,
             data_dir,
@@ -1419,6 +1510,33 @@ mod tests {
                 None => std::env::remove_var(&key),
             }
         }
+    }
+
+    #[test]
+    fn resolve_skippr_binary_uses_skipprd_binary_env() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin = dir.path().join("skipprd-custom");
+        std::fs::write(&bin, b"").expect("write stub binary");
+        with_env(
+            &[("SKIPPRD_BINARY", Some(bin.to_str().expect("utf8 path")))],
+            || {
+                assert_eq!(
+                    resolve_skippr_binary("skipprd"),
+                    bin.to_string_lossy().as_ref()
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn resolve_skippr_binary_keeps_configured_absolute_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let bin = dir.path().join("skipprd-abs");
+        std::fs::write(&bin, b"").expect("write stub binary");
+        assert_eq!(
+            resolve_skippr_binary(bin.to_str().expect("utf8 path")),
+            bin.to_string_lossy().as_ref()
+        );
     }
 
     fn postgres_provider() -> SkipprCliProvider {

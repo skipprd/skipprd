@@ -93,6 +93,10 @@ pub mod env_keys {
     pub const AGENT_MAX_PUBLISH_RETRIES: &str = "AGENT_MAX_PUBLISH_RETRIES";
     pub const AGENT_MAX_SUBJECTIVE_RETRIES: &str = "AGENT_MAX_SUBJECTIVE_RETRIES";
 
+    // EL subprocess (skipprd) invoked by the data-engineer suite
+    pub const SKIPPRD_BINARY: &str = "SKIPPRD_BINARY";
+    pub const SKIPPR_BINARY: &str = "SKIPPR_BINARY";
+
     // Suite runtime
     pub const REACT_HEADLESS: &str = "REACT_HEADLESS";
     pub const DE_CATALOG_BOOTSTRAP_TIMEOUT_SECS: &str = "DE_CATALOG_BOOTSTRAP_TIMEOUT_SECS";

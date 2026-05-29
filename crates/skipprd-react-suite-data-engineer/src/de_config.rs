@@ -397,7 +397,10 @@ pub fn resolve_providers_from_yaml(
         },
         "el": {
             "enabled": el_f.enabled.unwrap_or(false),
-            "skippr_binary": el_f.skippr_binary.unwrap_or_else(|| "skipprd".to_string()),
+            "skippr_binary": getenv_nonempty(env_keys::SKIPPRD_BINARY)
+                .or(getenv_nonempty(env_keys::SKIPPR_BINARY))
+                .or(el_f.skippr_binary)
+                .unwrap_or_else(|| "skipprd".to_string()),
             "skippr_input": el_f.skippr_input.unwrap_or(serde_json::Value::Null),
             "cdc": el_f.cdc,
         },
