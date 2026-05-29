@@ -8,7 +8,7 @@ use serde_derive::Serialize;
 use skippr_plugin_shared_api_source::{
     DateWindow, DateWindowPlanner, OAuth2RefreshTokenAuth, RetryConfig, RetryableHttpClient,
 };
-use tokio::time::{sleep, Duration};
+use tokio::time::{sleep, Duration as TokioDuration};
 use skippr_runtime_sdk::helpers::offsets::OffsetKey;
 use skippr_runtime_sdk::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
 use skippr_runtime_sdk::plugins::source_contract::{
@@ -561,7 +561,7 @@ impl DataSource for DataSourceGoogleAnalyticsPlugin {
                             self.submit_rows_for_date(ctx.as_ref(), stream, date, rows_for_day)?;
                         }
                         if self.config.request_interval_ms > 0 {
-                            sleep(Duration::from_millis(self.config.request_interval_ms)).await;
+                            sleep(TokioDuration::from_millis(self.config.request_interval_ms)).await;
                         }
                     }
                     Err(err) if stream.optional && is_invalid_dimension_metric_error(&err) => {
