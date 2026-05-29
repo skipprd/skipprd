@@ -625,6 +625,10 @@ def run_command(
             f"({completed.returncode}, normalized={normalized_returncode}): "
             f"{' '.join(command)}"
         )
+        if env is not None:
+            skippr_bin = Path(command[0])
+            if skippr_bin.name in {"skippr", "skippr.exe"}:
+                release_workspace_run_lock_best_effort(skippr_bin, env)
     return completed
 
 
@@ -734,6 +738,38 @@ def assert_runtime_plugin_patterns_downloaded(
     print_step("Downloaded runtime plugin artifacts:")
     for path in matches:
         print(path)
+
+
+def cloud_workspace_from_config(config_path: str) -> str | None:
+    with open(config_path, encoding="utf-8") as handle:
+        for line in handle:
+            stripped = line.strip()
+            if stripped.startswith("workspace:"):
+                value = stripped.split(":", 1)[1].strip()
+                return value or None
+    return None
+
+
+def release_workspace_run_lock_best_effort(
+    skippr: Path,
+    env: dict[str, str],
+) -> None:
+    config_path = env.get("SKIPPR_CONFIG_FILE")
+    if not config_path:
+        return
+    workspace = cloud_workspace_from_config(config_path)
+    if not workspace:
+        return
+    command = skippr_engine_command_prefix(skippr, env) + [
+        "runs",
+        "release-lock",
+        "--workspace",
+        workspace,
+    ]
+    print_step(
+        f"Releasing stale workspace run lock for '{workspace}' after abnormal exit"
+    )
+    subprocess.run(command, env=env, check=False)
 
 
 def base_environment(

@@ -502,7 +502,6 @@ impl ApiClient {
         Ok(())
     }
 
-    #[allow(dead_code)]
     pub async fn get_run_lock(&self, workspace: &str) -> Result<RunLockStatusResponse, ApiError> {
         let url = format!("{}/auth/workspaces/{}/runs/lock", self.base_url, workspace);
         let resp = self
@@ -597,7 +596,6 @@ pub struct AcquireLockResponse {
     pub lease_expires_at: String,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunLockStatus {
@@ -610,7 +608,6 @@ pub struct RunLockStatus {
     pub cancel_requested: bool,
 }
 
-#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RunLockStatusResponse {

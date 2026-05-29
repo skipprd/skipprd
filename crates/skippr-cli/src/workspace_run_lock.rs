@@ -3,6 +3,7 @@
 use crate::api_client::{ApiClient, ApiError};
 use reqwest::StatusCode;
 use std::future::Future;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
@@ -32,6 +33,135 @@ struct ActiveLock {
     version: Arc<Mutex<i64>>,
 }
 
+/// Ensures the workspace heavy lock is released exactly once (normal return, panic, or signal).
+struct RunLockGuard {
+    lock: Option<ActiveLock>,
+    heartbeat: Option<JoinHandle<()>>,
+    released: Arc<AtomicBool>,
+    shutdown_listener: Option<JoinHandle<()>>,
+}
+
+impl RunLockGuard {
+    fn new(lock: ActiveLock, heartbeat: JoinHandle<()>) -> Self {
+        let released = Arc::new(AtomicBool::new(false));
+        let shutdown_listener = spawn_shutdown_listener(Arc::clone(&released), lock.clone_for_signal());
+        Self {
+            lock: Some(lock),
+            heartbeat: Some(heartbeat),
+            released,
+            shutdown_listener,
+        }
+    }
+
+    async fn release(&mut self, status: &str) {
+        if self.released.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        if let Some(listener) = self.shutdown_listener.take() {
+            listener.abort();
+        }
+        if let Some(heartbeat) = self.heartbeat.take() {
+            heartbeat.abort();
+        }
+        if let Some(lock) = self.lock.take() {
+            if let Err(e) = lock.complete(status).await {
+                eprintln!("[skippr] warning: failed to release run lock: {e}");
+            }
+        }
+    }
+}
+
+impl Drop for RunLockGuard {
+    fn drop(&mut self) {
+        if self.released.load(Ordering::SeqCst) {
+            return;
+        }
+        if let Some(listener) = self.shutdown_listener.take() {
+            listener.abort();
+        }
+        if let Some(heartbeat) = self.heartbeat.take() {
+            heartbeat.abort();
+        }
+        let Some(lock) = self.lock.take() else {
+            return;
+        };
+        let status = if std::thread::panicking() {
+            "failed"
+        } else {
+            "failed"
+        };
+        if let Err(e) = block_on_complete(lock, status) {
+            eprintln!("[skippr] warning: failed to release run lock on drop: {e}");
+        }
+    }
+}
+
+impl ActiveLock {
+    fn clone_for_signal(&self) -> ActiveLock {
+        ActiveLock {
+            client: self.client.clone(),
+            workspace: self.workspace.clone(),
+            run_id: self.run_id.clone(),
+            version: Arc::clone(&self.version),
+        }
+    }
+
+    async fn complete(self, status: &str) -> Result<(), String> {
+        let version = *self.version.lock().await;
+        self.client
+            .complete_run_lock(&self.workspace, &self.run_id, version, status)
+            .await
+            .map_err(|e| e.to_string())
+    }
+}
+
+fn block_on_complete(lock: ActiveLock, status: &str) -> Result<(), String> {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        return handle.block_on(lock.complete(status));
+    }
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|e| e.to_string())?;
+    rt.block_on(lock.complete(status))
+}
+
+fn spawn_shutdown_listener(
+    released: Arc<AtomicBool>,
+    lock: ActiveLock,
+) -> Option<JoinHandle<()>> {
+    #[cfg(unix)]
+    {
+        Some(tokio::spawn(async move {
+            use tokio::signal::unix::{signal, SignalKind};
+            let mut term = match signal(SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            let mut int = match signal(SignalKind::interrupt()) {
+                Ok(s) => s,
+                Err(_) => return,
+            };
+            tokio::select! {
+                _ = term.recv() => {}
+                _ = int.recv() => {}
+            }
+            if released.swap(true, Ordering::SeqCst) {
+                return;
+            }
+            if let Err(e) = lock.complete("failed").await {
+                eprintln!("[skippr] warning: failed to release run lock on shutdown signal: {e}");
+            }
+            std::process::exit(137);
+        }))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (released, lock);
+        None
+    }
+}
+
 /// Run `f` while holding the workspace heavy lock using an existing API client.
 pub async fn with_heavy_run_lock_client<T, F, Fut>(
     client: ApiClient,
@@ -57,16 +187,14 @@ where
         lock.run_id.clone(),
         Arc::clone(&lock.version),
     );
+    let mut guard = RunLockGuard::new(lock, heartbeat);
     let result = f().await;
-    heartbeat.abort();
     let status = if std::thread::panicking() {
         "failed"
     } else {
         "completed"
     };
-    if let Err(e) = lock.complete(status).await {
-        eprintln!("[skippr] warning: failed to release run lock: {e}");
-    }
+    guard.release(status).await;
     result
 }
 
@@ -82,30 +210,33 @@ where
     Fut: Future<Output = T>,
 {
     let client = crate::authenticated_api_client().await;
-    let lock = match acquire_heavy_lock_with_client(&client, workspace, command, pipeline).await {
-        Ok(l) => l,
-        Err(msg) => {
-            eprintln!("[skippr] ERROR: {msg}");
-            std::process::exit(1);
-        }
+    with_heavy_run_lock_client(client, workspace, command, pipeline, f).await
+}
+
+/// Best-effort release after an abnormal process exit (e.g. chaos SIGKILL before signal handler).
+/// Used by CI harnesses when retrying after an allowed non-zero exit.
+pub async fn release_workspace_heavy_lock_best_effort(workspace: &str) {
+    let client = crate::authenticated_api_client().await;
+    let Ok(resp) = client.get_run_lock(workspace).await else {
+        return;
     };
-    let heartbeat = spawn_heartbeat(
-        lock.client.clone(),
-        lock.workspace.clone(),
-        lock.run_id.clone(),
-        Arc::clone(&lock.version),
-    );
-    let result = f().await;
-    heartbeat.abort();
-    let status = if std::thread::panicking() {
-        "failed"
-    } else {
-        "completed"
+    let Some(lock) = resp.lock else {
+        return;
     };
-    if let Err(e) = lock.complete(status).await {
-        eprintln!("[skippr] warning: failed to release run lock: {e}");
+    if lock.status != "running" {
+        return;
     }
-    result
+    if let Err(e) = client
+        .complete_run_lock(workspace, &lock.run_id, lock.version, "failed")
+        .await
+    {
+        eprintln!("[skippr] warning: could not release stale workspace run lock: {e}");
+        return;
+    }
+    eprintln!(
+        "[skippr] released stale workspace run lock for '{}' (run {})",
+        workspace, lock.run_id
+    );
 }
 
 #[allow(dead_code)]
@@ -153,16 +284,6 @@ async fn acquire_heavy_lock_with_client(
         run_id: resp.run_id,
         version: Arc::new(Mutex::new(resp.version)),
     })
-}
-
-impl ActiveLock {
-    async fn complete(self, status: &str) -> Result<(), String> {
-        let version = *self.version.lock().await;
-        self.client
-            .complete_run_lock(&self.workspace, &self.run_id, version, status)
-            .await
-            .map_err(|e| e.to_string())
-    }
 }
 
 fn spawn_heartbeat(

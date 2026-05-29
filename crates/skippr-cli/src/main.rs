@@ -239,6 +239,22 @@ enum Cmd {
         #[command(subcommand)]
         action: UserAction,
     },
+
+    /// Workspace run registry helpers (CI / recovery).
+    Runs {
+        #[command(subcommand)]
+        action: RunsAction,
+    },
+}
+
+#[derive(Subcommand, Debug)]
+enum RunsAction {
+    /// Release an active workspace heavy lock left behind after crash or SIGKILL.
+    ReleaseLock {
+        /// Cloud workspace name from skippr.yaml (`skippr.workspace`).
+        #[arg(long)]
+        workspace: String,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -5027,18 +5043,24 @@ async fn cmd_discover(
 ) {
     prepare_engine_command(log, explicit_config, &args.pipeline).await;
     let workspace = std::env::var("SKIPPR_CLOUD_WORKSPACE").unwrap_or_else(|_| "default".into());
-    workspace_run_lock::with_heavy_run_lock(
+    let failed = workspace_run_lock::with_heavy_run_lock(
         &workspace,
         "discover",
         Some(&args.pipeline),
         || async {
-            if let Err(err) = skipprd::engine::run_discover(&args.output).await {
-                eprintln!("[skippr] discover failed: {}", err);
-                std::process::exit(1);
-            }
+            skipprd::engine::run_discover(&args.output)
+                .await
+                .err()
+                .map(|err| {
+                    eprintln!("[skippr] discover failed: {}", err);
+                })
+                .is_some()
         },
     )
     .await;
+    if failed {
+        std::process::exit(1);
+    }
 }
 
 async fn cmd_metadata(
@@ -5062,14 +5084,25 @@ async fn cmd_sync(log: Option<String>, explicit_config: &Option<PathBuf>, args: 
     prepare_engine_command(log, explicit_config, &args.pipeline).await;
     let workspace = std::env::var("SKIPPR_CLOUD_WORKSPACE").unwrap_or_else(|_| "default".into());
     let command = workspace_run_lock::sync_api_command(args.once);
-    workspace_run_lock::with_heavy_run_lock(&workspace, command, Some(&args.pipeline), || async {
-        skipprd::metrics::Metrics::init_send_loop();
-        if let Err(err) = skipprd::engine::run_sync(&args.output, args.once).await {
-            eprintln!("[skippr] sync failed: {}", err);
-            std::process::exit(1);
-        }
-    })
+    let failed = workspace_run_lock::with_heavy_run_lock(
+        &workspace,
+        command,
+        Some(&args.pipeline),
+        || async {
+            skipprd::metrics::Metrics::init_send_loop();
+            skipprd::engine::run_sync(&args.output, args.once)
+                .await
+                .err()
+                .map(|err| {
+                    eprintln!("[skippr] sync failed: {}", err);
+                })
+                .is_some()
+        },
+    )
     .await;
+    if failed {
+        std::process::exit(1);
+    }
 }
 
 async fn cmd_ask(log: Option<String>, explicit_config: &Option<PathBuf>, args: AskArgs) {
@@ -7116,6 +7149,11 @@ async fn async_main() {
             UserAction::CreateApiKey { name } => cmd_user_create_api_key(&name, &output).await,
             UserAction::RevokeApiKey { key_id } => cmd_user_revoke_api_key(&key_id, &output).await,
             UserAction::ListApiKeys => cmd_user_list_api_keys(&output).await,
+        },
+        Cmd::Runs { action } => match action {
+            RunsAction::ReleaseLock { workspace } => {
+                workspace_run_lock::release_workspace_heavy_lock_best_effort(&workspace).await;
+            }
         },
     }
 }
