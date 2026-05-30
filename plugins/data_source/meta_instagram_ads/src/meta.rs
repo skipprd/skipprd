@@ -172,14 +172,19 @@ impl DataSourceMetaInstagramAdsPlugin {
     }
 
     async fn auth_header(&self) -> Result<String, std::io::Error> {
+        let token = self.access_token().await?;
+        Ok(format!("Bearer {token}"))
+    }
+
+    async fn access_token(&self) -> Result<String, std::io::Error> {
         if let Some(auth) = &self.static_auth {
             return auth
                 .authorization_header()
+                .map(|h| strip_bearer_token(&h))
                 .map_err(std::io::Error::other);
         }
         if let Some(oauth) = &self.oauth {
-            let token = oauth.refresh().await.map_err(std::io::Error::other)?;
-            return Ok(format!("Bearer {token}"));
+            return oauth.refresh().await.map_err(std::io::Error::other);
         }
         Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
@@ -341,17 +346,27 @@ impl DataSourceMetaInstagramAdsPlugin {
         api: &MetaInsightsApiClient,
         stream: &MetaStreamDef,
         date: NaiveDate,
-        auth_header: &str,
+        access_token: &str,
     ) -> Result<Vec<serde_json::Value>, std::io::Error> {
         let body = api
-            .fetch_insights_all_pages(stream, date, auth_header)
+            .fetch_insights_all_pages(stream, date, access_token)
             .await?;
         Ok(parse_insight_rows(
             &body,
             stream,
             &self.ad_account_id,
+            self.config.instagram_filter,
         ))
     }
+}
+
+fn strip_bearer_token(header: &str) -> String {
+    header
+        .trim()
+        .strip_prefix("Bearer ")
+        .or_else(|| header.trim().strip_prefix("bearer "))
+        .unwrap_or(header.trim())
+        .to_string()
 }
 
 impl DataSourceMetaInstagramAdsPluginConfig {
@@ -370,12 +385,20 @@ pub(crate) fn parse_insight_rows(
     body: &serde_json::Value,
     stream: &MetaStreamDef,
     ad_account_id: &str,
+    instagram_filter: bool,
 ) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
     for row in rows_from_insights_body(body) {
         let Some(obj) = row.as_object() else {
             continue;
         };
+        if instagram_filter {
+            if let Some(platform) = obj.get("publisher_platform").and_then(|v| v.as_str()) {
+                if !platform.eq_ignore_ascii_case("instagram") {
+                    continue;
+                }
+            }
+        }
         let mut record = serde_json::Map::new();
         record.insert(
             "ad_account_id".into(),
@@ -531,7 +554,7 @@ impl DataSource for DataSourceMetaInstagramAdsPlugin {
         }
 
         let api = self.api_client();
-        let auth_header = self.auth_header().await?;
+        let access_token = self.access_token().await?;
         let planner = DateWindowPlanner {
             lookback_days: if discover { 0 } else { self.config.lookback_days },
         };
@@ -548,7 +571,7 @@ impl DataSource for DataSourceMetaInstagramAdsPlugin {
 
             for date in dates {
                 let rows = self
-                    .sync_stream_date(&api, stream, date, &auth_header)
+                    .sync_stream_date(&api, stream, date, &access_token)
                     .await?;
                 if !discover {
                     Self::store_last_completed(ctx.as_ref(), &checkpoint_key, date)?;
@@ -644,7 +667,7 @@ mod tests {
         .unwrap())
         .unwrap();
         let stream = streams_for_profile(StreamProfile::Minimal)[0];
-        let rows = parse_insight_rows(&body, stream, "123456789");
+        let rows = parse_insight_rows(&body, stream, "123456789", true);
         assert!(!rows.is_empty());
         assert_eq!(rows[0]["ad_account_id"], "123456789");
         assert_eq!(rows[0]["date"], "2024-01-01");
@@ -670,7 +693,7 @@ mod tests {
                 .iter()
                 .find(|s| s.namespace == namespace)
                 .unwrap();
-            let rows = parse_insight_rows(&body, stream, "123456789");
+            let rows = parse_insight_rows(&body, stream, "123456789", true);
             assert!(!rows.is_empty(), "expected rows in {file}");
             assert_eq!(rows[0]["ad_account_id"], "123456789");
             assert_eq!(rows[0]["date"], "2024-01-01");
@@ -701,9 +724,9 @@ mod tests {
         let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
         let rows = rt
             .block_on(async {
-                let auth = plugin.auth_header().await.unwrap();
+                let token = plugin.access_token().await.unwrap();
                 plugin
-                    .sync_stream_date(&api, stream, date, &auth)
+                    .sync_stream_date(&api, stream, date, &token)
                     .await
             })
             .expect("fixture sync");
@@ -892,26 +915,26 @@ mod tests {
                 "impressions": "10"
             }]
         });
-        let rows = parse_insight_rows(&body, stream, "123");
+        let rows = parse_insight_rows(&body, stream, "123", true);
         assert_eq!(rows[0]["date"], "2024-01-01");
     }
 
     #[test]
     fn parse_empty_insights_data_returns_no_rows() {
         let stream = streams_for_profile(StreamProfile::Minimal)[0];
-        let rows = parse_insight_rows(&serde_json::json!({"data": []}), stream, "123");
+        let rows = parse_insight_rows(&serde_json::json!({"data": []}), stream, "123", true);
         assert!(rows.is_empty());
     }
 
     #[test]
     fn parse_malformed_insights_body_returns_no_rows() {
         let stream = streams_for_profile(StreamProfile::Minimal)[0];
-        assert!(parse_insight_rows(&serde_json::json!({}), stream, "123").is_empty());
-        assert!(parse_insight_rows(&serde_json::json!({"data": "bad"}), stream, "123").is_empty());
+        assert!(parse_insight_rows(&serde_json::json!({}), stream, "123", true).is_empty());
+        assert!(parse_insight_rows(&serde_json::json!({"data": "bad"}), stream, "123", true).is_empty());
     }
 
     #[test]
-    fn non_instagram_rows_parsed_when_present_in_fixture() {
+    fn instagram_filter_drops_non_instagram_publisher_platform() {
         let stream = CURATED_STREAMS
             .iter()
             .find(|s| s.placement_breakdown)
@@ -926,7 +949,27 @@ mod tests {
                 "impressions": "5"
             }]
         });
-        let rows = parse_insight_rows(&body, stream, "123");
+        assert!(parse_insight_rows(&body, stream, "123", true).is_empty());
+        assert_eq!(parse_insight_rows(&body, stream, "123", false).len(), 1);
+    }
+
+    #[test]
+    fn non_instagram_rows_parsed_when_filter_disabled() {
+        let stream = CURATED_STREAMS
+            .iter()
+            .find(|s| s.placement_breakdown)
+            .unwrap();
+        let body = serde_json::json!({
+            "data": [{
+                "date_start": "2024-01-01",
+                "date_stop": "2024-01-01",
+                "campaign_id": "1",
+                "publisher_platform": "facebook",
+                "platform_position": "feed",
+                "impressions": "5"
+            }]
+        });
+        let rows = parse_insight_rows(&body, stream, "123", false);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["publisher_platform"], "facebook");
     }

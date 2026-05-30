@@ -164,10 +164,11 @@ Ship operator wiring whenever a source is user-facing (not internal-only). Witho
 
 ```bash
 cargo test -p skippr-cli translate_google_analytics
+cargo test -p skippr-cli translate_meta_instagram_ads
 skippr connect source <kebab-name> --help
 ```
 
-Reference: `google-analytics` / `GoogleAnalytics` in `plugins/data_source/google_analytics/`.
+Reference: `google-analytics` / `GoogleAnalytics` in `plugins/data_source/google_analytics/`, `meta-instagram-ads` / `MetaInstagramAds` in `plugins/data_source/meta_instagram_ads/`.
 
 ---
 
@@ -443,6 +444,7 @@ Use these for end-to-end examples only; new connectors should follow the generic
 | Role | Crate | Notes |
 | --- | --- | --- |
 | Source | `plugins/data_source/google_analytics/` | **Bronze grain catalog:** one namespace per daily fact grain (23 in `full` profile); avoid `runPivotReport`/custom reports in the plugin; `replace_partition` on `date`; fixtures via `SKIPPR_GA4_FIXTURE_DIR`. See [GA4 bronze & modeling](../concepts/ga4-bronze-and-modeling.md). |
+| Source | `plugins/data_source/meta_instagram_ads/` | **Five** Instagram-scoped Marketing API insights namespaces; discover auto-samples 3 days × `account_daily`; `replace_partition` on `date`; fixtures via `SKIPPR_META_INSTAGRAM_ADS_FIXTURE_DIR`. See [Meta Instagram Ads plugin](./meta-instagram-ads-plugin.md). |
 | Data sink | `plugins/data_sink/athena/` | S3 + Glue; contract-driven partition delete; rejects `merge_by_key` |
 | Data sink | `plugins/data_sink/iceberg/` | Native merge / replace partition / replace table |
 | Schema sink | `plugins/schema_sink/glue/` | Glue DDL; merges `partition_key` into table on create (shared Athena helpers) |

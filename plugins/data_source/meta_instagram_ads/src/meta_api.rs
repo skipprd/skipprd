@@ -8,7 +8,7 @@ pub const META_GRAPH_API_BASE: &str = "https://graph.facebook.com";
 
 const DEFAULT_API_VERSION: &str = "v21.0";
 
-const BASE_INSIGHT_FIELDS: &str = "impressions,clicks,spend,reach,frequency,cpm,cpc,ctr,\
+const BASE_INSIGHT_FIELDS: &str = "impressions,clicks,inline_link_clicks,spend,reach,frequency,cpm,cpc,ctr,\
 account_id,account_name,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,actions";
 
 const PLACEMENT_EXTRA_FIELDS: &str = "publisher_platform,platform_position";
@@ -73,10 +73,12 @@ impl MetaInsightsApiClient {
         &self,
         stream: &MetaStreamDef,
         date: NaiveDate,
+        access_token: &str,
     ) -> reqwest::RequestBuilder {
         let day = date.format("%Y-%m-%d").to_string();
         let time_range = serde_json::json!({"since": day, "until": day}).to_string();
         let mut req = self.http.client.get(self.insights_base_url()).query(&[
+            ("access_token", access_token),
             ("time_range", time_range.as_str()),
             ("time_increment", "1"),
             ("level", insights_level_param(stream.level)),
@@ -95,7 +97,7 @@ impl MetaInsightsApiClient {
         &self,
         stream: &MetaStreamDef,
         date: NaiveDate,
-        auth_header: &str,
+        access_token: &str,
     ) -> Result<serde_json::Value, std::io::Error> {
         if let Ok(dir) = std::env::var("SKIPPR_META_INSTAGRAM_ADS_FIXTURE_DIR") {
             if let Some(body) = load_fixture_insights(&dir, stream.namespace) {
@@ -107,9 +109,9 @@ impl MetaInsightsApiClient {
         let mut pagination = TokenPagination::default();
 
         let url = self
-            .resolve_insights_url(stream, date, pagination.next_token.as_deref())
+            .resolve_insights_url(stream, date, access_token, pagination.next_token.as_deref())
             .await?;
-        let mut last_body = self.get_url_with_retry(auth_header, &url).await?;
+        let mut last_body = self.get_url_with_retry(access_token, &url).await?;
         if let Some(page) = last_body.get("data").and_then(|v| v.as_array()) {
             merged.extend(page.clone());
         }
@@ -120,9 +122,9 @@ impl MetaInsightsApiClient {
 
         while pagination.should_continue() {
             let url = self
-                .resolve_insights_url(stream, date, pagination.next_token.as_deref())
+                .resolve_insights_url(stream, date, access_token, pagination.next_token.as_deref())
                 .await?;
-            last_body = self.get_url_with_retry(auth_header, &url).await?;
+            last_body = self.get_url_with_retry(access_token, &url).await?;
             if let Some(page) = last_body.get("data").and_then(|v| v.as_array()) {
                 merged.extend(page.clone());
             }
@@ -144,13 +146,14 @@ impl MetaInsightsApiClient {
         &self,
         stream: &MetaStreamDef,
         date: NaiveDate,
+        access_token: &str,
         after_url: Option<&str>,
     ) -> Result<String, std::io::Error> {
         if let Some(url) = after_url.filter(|u| !u.trim().is_empty()) {
             return Ok(url.to_string());
         }
         let request = self
-            .build_insights_request(stream, date)
+            .build_insights_request(stream, date, access_token)
             .build()
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         Ok(request.url().to_string())
@@ -158,16 +161,16 @@ impl MetaInsightsApiClient {
 
     async fn get_url_with_retry(
         &self,
-        auth_header: &str,
+        access_token: &str,
         url: &str,
     ) -> Result<serde_json::Value, std::io::Error> {
         let mut attempt = 0u32;
         loop {
-            let response = self
-                .http
-                .client
-                .get(url)
-                .header("Authorization", auth_header)
+            let mut request = self.http.client.get(url);
+            if !url.contains("access_token=") {
+                request = request.query(&[("access_token", access_token)]);
+            }
+            let response = request
                 .send()
                 .await
                 .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -275,7 +278,7 @@ mod tests {
         let stream = streams_for_profile(StreamProfile::Minimal)[0];
         let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
         let req = client
-            .build_insights_request(stream, date)
+            .build_insights_request(stream, date, "test-token")
             .build()
             .expect("request");
         let query: Vec<(String, String)> = req
@@ -283,12 +286,40 @@ mod tests {
             .query_pairs()
             .map(|(k, v)| (k.into_owned(), v.into_owned()))
             .collect();
+        assert!(
+            query.iter().any(|(k, v)| k == "access_token" && v == "test-token"),
+            "expected access_token query param"
+        );
         let filtering = query
             .iter()
             .find(|(k, _)| k == "filtering")
             .map(|(_, v)| v.as_str())
             .expect("filtering query param");
         assert_eq!(filtering, instagram_filter_json());
+    }
+
+    #[test]
+    fn placement_stream_requests_platform_position_breakdown() {
+        let client = MetaInsightsApiClient::new(
+            RetryableHttpClient::new(RetryConfig::default()),
+            "123".into(),
+            "v21.0".into(),
+            true,
+        );
+        let stream = CURATED_STREAMS
+            .iter()
+            .find(|s| s.placement_breakdown)
+            .unwrap();
+        let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let req = client
+            .build_insights_request(stream, date, "test-token")
+            .build()
+            .expect("request");
+        assert!(req
+            .url()
+            .query()
+            .unwrap_or("")
+            .contains("breakdowns=platform_position"));
     }
 
     #[test]
@@ -302,7 +333,7 @@ mod tests {
         let stream = streams_for_profile(StreamProfile::Minimal)[0];
         let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
         let req = client
-            .build_insights_request(stream, date)
+            .build_insights_request(stream, date, "test-token")
             .build()
             .expect("request");
         assert!(!req.url().query().unwrap_or("").contains("filtering"));
@@ -346,7 +377,7 @@ mod tests {
             .block_on(client.fetch_insights_all_pages(
                 &stream,
                 NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                "Bearer fixture",
+                "fixture",
             ))
             .expect("fixture insights");
         assert!(!rows_from_insights_body(&body).is_empty());
