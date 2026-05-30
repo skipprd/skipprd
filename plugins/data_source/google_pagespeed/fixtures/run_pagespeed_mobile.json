@@ -1,0 +1,98 @@
+{
+  "id": "https://example.com/",
+  "analysisUTCTimestamp": "2024-01-15T12:00:00.000Z",
+  "lighthouseResult": {
+    "finalUrl": "https://example.com/",
+    "categories": {
+      "performance": { "id": "performance", "score": 0.85 },
+      "accessibility": { "id": "accessibility", "score": 0.92 },
+      "best-practices": { "id": "best-practices", "score": 0.88 },
+      "seo": { "id": "seo", "score": 0.95 }
+    },
+    "audits": {
+      "largest-contentful-paint": {
+        "id": "largest-contentful-paint",
+        "title": "Largest Contentful Paint",
+        "score": 0.9,
+        "numericValue": 1200,
+        "displayValue": "1.2 s"
+      },
+      "cumulative-layout-shift": {
+        "id": "cumulative-layout-shift",
+        "title": "Cumulative Layout Shift",
+        "score": 0.95,
+        "numericValue": 0.05,
+        "displayValue": "0.05"
+      },
+      "first-contentful-paint": {
+        "id": "first-contentful-paint",
+        "title": "First Contentful Paint",
+        "score": 0.88,
+        "numericValue": 900,
+        "displayValue": "0.9 s"
+      },
+      "total-blocking-time": {
+        "id": "total-blocking-time",
+        "title": "Total Blocking Time",
+        "score": 0.4,
+        "numericValue": 350,
+        "displayValue": "350 ms"
+      },
+      "speed-index": {
+        "id": "speed-index",
+        "title": "Speed Index",
+        "score": 0.7,
+        "numericValue": 2800,
+        "displayValue": "2.8 s"
+      },
+      "render-blocking-resources": {
+        "id": "render-blocking-resources",
+        "title": "Eliminate render-blocking resources",
+        "score": 0.3,
+        "displayValue": "Est savings of 450 ms"
+      }
+    }
+  },
+  "loadingExperience": {
+    "overall_category": "FAST",
+    "metrics": {
+      "LARGEST_CONTENTFUL_PAINT_MS": {
+        "category": "FAST",
+        "percentile": 2100
+      },
+      "CUMULATIVE_LAYOUT_SHIFT_SCORE": {
+        "category": "FAST",
+        "percentile": 5
+      },
+      "INTERACTION_TO_NEXT_PAINT": {
+        "category": "AVERAGE",
+        "percentile": 180
+      },
+      "FIRST_CONTENTFUL_PAINT_MS": {
+        "category": "FAST",
+        "percentile": 1500
+      },
+      "EXPERIMENTAL_TIME_TO_FIRST_BYTE": {
+        "category": "FAST",
+        "percentile": 400
+      }
+    }
+  },
+  "originLoadingExperience": {
+    "overall_category": "AVERAGE",
+    "metrics": {
+      "LARGEST_CONTENTFUL_PAINT_MS": {
+        "category": "AVERAGE",
+        "percentile": 2800
+      },
+      "CUMULATIVE_LAYOUT_SHIFT_SCORE": {
+        "category": "FAST",
+        "percentile": 8
+      },
+      "FIRST_CONTENTFUL_PAINT_MS": {
+        "category": "FAST",
+        "percentile": 1600
+      }
+    }
+  }
+}

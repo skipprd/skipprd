@@ -1,0 +1,40 @@
+{
+  "id": "https://example.com/",
+  "analysisUTCTimestamp": "2024-01-15T12:05:00.000Z",
+  "lighthouseResult": {
+    "finalUrl": "https://example.com/",
+    "categories": {
+      "performance": { "id": "performance", "score": 0.91 },
+      "accessibility": { "id": "accessibility", "score": 0.94 },
+      "best-practices": { "id": "best-practices", "score": 0.90 },
+      "seo": { "id": "seo", "score": 0.96 }
+    },
+    "audits": {
+      "largest-contentful-paint": {
+        "id": "largest-contentful-paint",
+        "title": "Largest Contentful Paint",
+        "score": 0.95,
+        "numericValue": 900,
+        "displayValue": "0.9 s"
+      },
+      "render-blocking-resources": {
+        "id": "render-blocking-resources",
+        "title": "Eliminate render-blocking resources",
+        "score": 0.5,
+        "displayValue": "Est savings of 200 ms"
+      }
+    }
+  },
+  "loadingExperience": {
+    "overall_category": "FAST",
+    "metrics": {
+      "LARGEST_CONTENTFUL_PAINT_MS": { "category": "FAST", "percentile": 1800 }
+    }
+  },
+  "originLoadingExperience": {
+    "overall_category": "FAST",
+    "metrics": {
+      "LARGEST_CONTENTFUL_PAINT_MS": { "category": "FAST", "percentile": 2000 }
+    }
+  }
+}
