@@ -450,6 +450,76 @@ pub enum SourceConfig {
         #[serde(default)]
         streams: Option<Vec<String>>,
     },
+    #[serde(rename = "google_search_console")]
+    GoogleSearchConsole {
+        #[serde(default)]
+        site_url: Option<String>,
+        #[serde(default)]
+        start_date: Option<String>,
+        #[serde(default)]
+        end_date: Option<String>,
+        #[serde(default)]
+        lookback_days: Option<u32>,
+        #[serde(default)]
+        stream_profile: Option<String>,
+        #[serde(default)]
+        processing_lag_days: Option<u32>,
+        #[serde(default)]
+        window_in_days: Option<u32>,
+        #[serde(default)]
+        access_token: Option<String>,
+        #[serde(default)]
+        oauth_token_url: Option<String>,
+        #[serde(default)]
+        oauth_client_id: Option<String>,
+        #[serde(default)]
+        oauth_client_secret: Option<String>,
+        #[serde(default)]
+        oauth_refresh_token: Option<String>,
+        #[serde(default)]
+        service_account_json_path: Option<String>,
+        #[serde(default)]
+        streams: Option<Vec<String>>,
+        #[serde(default)]
+        search_type: Option<String>,
+        #[serde(default)]
+        data_state: Option<String>,
+        #[serde(default)]
+        row_limit: Option<u32>,
+        #[serde(default)]
+        url_inspection_enabled: Option<bool>,
+        #[serde(default)]
+        url_list: Option<Vec<String>>,
+    },
+    #[serde(rename = "google_pagespeed")]
+    GooglePageSpeed {
+        #[serde(default)]
+        site: Option<String>,
+        #[serde(default)]
+        api_key: Option<String>,
+        #[serde(default)]
+        url_mode: Option<String>,
+        #[serde(default)]
+        url_list: Option<Vec<String>>,
+        #[serde(default)]
+        max_urls: Option<u32>,
+        #[serde(default)]
+        strategies: Option<Vec<String>>,
+        #[serde(default)]
+        categories: Option<Vec<String>>,
+        #[serde(default)]
+        locale: Option<String>,
+        #[serde(default)]
+        max_requests_per_run: Option<u32>,
+        #[serde(default)]
+        requests_per_minute: Option<u32>,
+        #[serde(default)]
+        respect_robots: Option<bool>,
+        #[serde(default)]
+        top_audits_per_page: Option<u32>,
+        #[serde(default)]
+        max_concurrent_requests: Option<u32>,
+    },
     #[serde(rename = "apple_search_ads")]
     AppleSearchAds {
         #[serde(default)]
@@ -683,6 +753,8 @@ impl SkipprProjectConfig {
             Some(SourceConfig::Mqtt { .. }) => Some("mqtt"),
             Some(SourceConfig::Websocket { .. }) => Some("websocket"),
             Some(SourceConfig::GoogleAnalytics { .. }) => Some("google_analytics"),
+            Some(SourceConfig::GoogleSearchConsole { .. }) => Some("google_search_console"),
+            Some(SourceConfig::GooglePageSpeed { .. }) => Some("google_pagespeed"),
             Some(SourceConfig::AppleSearchAds { .. }) => Some("apple_search_ads"),
             Some(SourceConfig::MetaInstagramAds { .. }) => Some("meta_instagram_ads"),
             Some(SourceConfig::HttpClient { .. }) => Some("http_client"),
