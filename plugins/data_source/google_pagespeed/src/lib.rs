@@ -9,4 +9,5 @@ pub mod parse;
 pub mod sampling;
 pub mod streams;
 
+pub use config::*;
 pub use pagespeed::*;

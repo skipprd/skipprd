@@ -227,7 +227,7 @@ fn fetch_sitemap_urls(sitemap_url: &str) -> Result<Vec<String>, std::io::Error> 
 
 fn parse_sitemap_xml(body: &str, out: &mut Vec<String>) -> Result<(), std::io::Error> {
     let mut reader = quick_xml::Reader::from_str(body);
-    reader.config_mut().trim_text(true);
+    reader.trim_text(true);
     let mut buf = Vec::new();
     loop {
         match reader.read_event_into(&mut buf) {

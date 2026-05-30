@@ -14,7 +14,7 @@ Calls the [PageSpeed Insights API v5](https://developers.google.com/speed/docs/i
 | `google_pagespeed.page_daily` | URL × strategy |
 | `google_pagespeed.field_origin_daily` | Origin CrUX (when API returns `originLoadingExperience`) |
 | `google_pagespeed.audit_daily` | Top failing Lighthouse audits |
-| `google_pagespeed.issue` | Threshold issues (e.g. `FIELD_LCP_SLOW`) |
+| `google_pagespeed.check_daily` | Threshold check outcomes (e.g. `FIELD_LCP_SLOW`) |
 
 ## Configuration (`skippr.yml`)
 
