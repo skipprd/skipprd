@@ -24,8 +24,13 @@ pub struct DataSourceSeoCrawlPluginConfig {
     pub openai_analyze_blocks: bool,
     #[serde(default = "default_openai_max_blocks_per_page")]
     pub openai_max_blocks_per_page: u32,
+    #[serde(default = "default_skip_unchanged_content")]
+    pub skip_unchanged_content: bool,
     #[serde(default = "default_user_agent")]
     pub user_agent: String,
+    /// Extra paths or absolute URLs to seed the crawl queue (useful for JS SPAs with no static links).
+    #[serde(default)]
+    pub seed_urls: Vec<String>,
 }
 
 fn default_max_urls() -> u32 {
@@ -66,6 +71,10 @@ fn default_openai_analyze_blocks() -> bool {
 
 fn default_openai_max_blocks_per_page() -> u32 {
     24
+}
+
+fn default_skip_unchanged_content() -> bool {
+    true
 }
 
 fn default_user_agent() -> String {

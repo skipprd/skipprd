@@ -7,9 +7,19 @@ pub struct SitemapEntry {
     pub lastmod: Option<String>,
 }
 
+fn looks_like_sitemap_xml(body: &str) -> bool {
+    let trimmed = body.trim_start();
+    trimmed.starts_with("<?xml")
+        || trimmed.starts_with("<urlset")
+        || trimmed.starts_with("<sitemapindex")
+}
+
 pub fn parse_sitemap_xml(body: &str) -> Result<Vec<SitemapEntry>, std::io::Error> {
+    if !looks_like_sitemap_xml(body) {
+        return Ok(Vec::new());
+    }
     let mut reader = Reader::from_str(body);
-    reader.config_mut().trim_text(true);
+    reader.trim_text(true);
     let mut buf = Vec::new();
     let mut entries = Vec::new();
     let mut in_sitemapindex = false;
@@ -37,7 +47,7 @@ pub fn parse_sitemap_xml(body: &str) -> Result<Vec<SitemapEntry>, std::io::Error
             Ok(Event::Text(e)) => {
                 let text = e.unescape().unwrap_or_default().into_owned();
                 if in_loc {
-                    current_loc = Some(text);
+                    current_loc = Some(text.clone());
                 }
                 if in_lastmod {
                     current_lastmod = Some(text);
@@ -64,10 +74,8 @@ pub fn parse_sitemap_xml(body: &str) -> Result<Vec<SitemapEntry>, std::io::Error
             }
             Ok(Event::Eof) => break,
             Err(e) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("sitemap XML parse error: {e}"),
-                ));
+                tracing::warn!(error = %e, "sitemap XML parse error; treating as empty");
+                break;
             }
             _ => {}
         }
@@ -81,8 +89,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn malformed_xml_returns_error() {
-        assert!(parse_sitemap_xml("<not-xml").is_err());
+    fn non_sitemap_input_returns_empty() {
+        assert!(parse_sitemap_xml("<not-xml").unwrap().is_empty());
     }
 
     #[test]

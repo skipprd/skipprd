@@ -18,6 +18,7 @@ pub async fn crawl_site(
     max_urls: u32,
     max_depth: u32,
     respect_robots: bool,
+    seed_urls: &[String],
 ) -> Result<Vec<CrawlPageResult>, std::io::Error> {
     let cap = max_urls.max(1) as usize;
     let depth_cap = max_depth;
@@ -53,6 +54,27 @@ pub async fn crawl_site(
                         }
                     }
                 }
+            }
+        }
+    }
+    for seed in seed_urls {
+        let trimmed = seed.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let url = if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+            trimmed.to_string()
+        } else {
+            let path = if trimmed.starts_with('/') {
+                trimmed.to_string()
+            } else {
+                format!("/{trimmed}")
+            };
+            format!("{}{}", origin.origin.trim_end_matches('/'), path)
+        };
+        if let Some(url) = crate::origin::normalize_url_for_crawl(&url, origin) {
+            if seen.insert(url.clone()) {
+                queue.push_back((url, 0));
             }
         }
     }
@@ -114,7 +136,7 @@ mod tests {
         std::env::set_var("SKIPPR_SEO_CRAWL_FIXTURE_DIR", dir);
         let origin = seed_origin("https://example.com").unwrap();
         let fetcher = HttpFetcher::new("SkipprSeoCrawl/1.0").with_fixture_dir(dir);
-        let pages = crawl_site(&origin, &fetcher, "SkipprSeoCrawl/1.0", 5, 1, true)
+        let pages = crawl_site(&origin, &fetcher, "SkipprSeoCrawl/1.0", 5, 1, true, &[])
             .await
             .unwrap();
         assert!(!pages.is_empty());

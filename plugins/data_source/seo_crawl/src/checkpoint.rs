@@ -2,6 +2,7 @@ use std::collections::HashMap;
 
 use serde::Deserialize;
 use serde_derive::Serialize;
+use skippr_plugin_shared_api_source::CheckpointPayload;
 use skippr_runtime_sdk::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
 use skippr_runtime_sdk::plugins::SourceSyncContext;
 use skippr_runtime_sdk::source_compat::load_checkpoint_payload;
@@ -27,6 +28,10 @@ pub struct PageContentCheckpoint {
     #[serde(default)]
     pub block_scores: HashMap<String, serde_json::Value>,
     pub openai_model: String,
+}
+
+impl CheckpointPayload for PageContentCheckpoint {
+    const VERSION: u32 = CHECKPOINT_PAYLOAD_VERSION;
 }
 
 pub fn checkpoint_key(canonical_url: &str) -> String {

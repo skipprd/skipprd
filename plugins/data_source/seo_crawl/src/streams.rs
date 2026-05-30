@@ -7,7 +7,7 @@ pub const NAMESPACE_PAGE_DAILY: &str = "seo_crawl.page_daily";
 pub const NAMESPACE_LINK_EDGE: &str = "seo_crawl.link_edge";
 pub const NAMESPACE_ROBOTS_TXT: &str = "seo_crawl.robots_txt";
 pub const NAMESPACE_SITEMAP_URL: &str = "seo_crawl.sitemap_url";
-pub const NAMESPACE_ISSUE: &str = "seo_crawl.issue";
+pub const NAMESPACE_CHECK_DAILY: &str = "seo_crawl.check_daily";
 pub const NAMESPACE_CONTENT_BLOCK: &str = "seo_crawl.content_block";
 
 pub const NAMESPACE_COUNT: usize = 7;
@@ -18,7 +18,7 @@ pub const ALL_NAMESPACES: &[&str] = &[
     NAMESPACE_LINK_EDGE,
     NAMESPACE_ROBOTS_TXT,
     NAMESPACE_SITEMAP_URL,
-    NAMESPACE_ISSUE,
+    NAMESPACE_CHECK_DAILY,
     NAMESPACE_CONTENT_BLOCK,
 ];
 
@@ -51,7 +51,7 @@ pub fn namespace_contract(namespace: &str) -> SourceNamespaceContract {
             ],
             vec![crawl_date.clone()],
         ),
-        NAMESPACE_ISSUE => (
+        NAMESPACE_CHECK_DAILY => (
             vec![
                 site.clone(),
                 FieldPath::single("page_url"),

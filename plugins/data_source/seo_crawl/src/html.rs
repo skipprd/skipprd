@@ -1,12 +1,27 @@
-use std::collections::HashMap;
-
 use regex::Regex;
 use scraper::{Html, Selector};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
+use crate::checkpoint::PageScores;
 use crate::fetch::{resolve_href, FetchResponse};
 use crate::origin::SiteOrigin;
+
+#[derive(Debug, Clone)]
+pub struct ContentBlock {
+    pub block_id: String,
+    pub block_type: String,
+    pub heading_path: Vec<String>,
+    pub text: String,
+    pub text_hash: String,
+    pub char_count: usize,
+    pub word_count: usize,
+    pub ordinal: u32,
+    pub has_list: bool,
+    pub has_table: bool,
+    pub has_citation: bool,
+    pub outbound_link_count: u32,
+}
 
 #[derive(Debug, Clone)]
 pub struct ParsedLink {
@@ -30,11 +45,52 @@ pub struct ParsedPage {
     pub meta_description: Option<String>,
     pub h1: Option<String>,
     pub head: Value,
+    pub http_headers: Value,
     pub links: Vec<ParsedLink>,
+    pub internal_links: Vec<LinkEdge>,
+    pub blocks: Vec<ContentBlock>,
     pub main_text: String,
     pub content_hash: String,
     pub structured_data_count: u32,
+    pub technical_score: f64,
     pub issues: Vec<IssueRow>,
+}
+
+#[derive(Debug, Clone)]
+pub struct LinkEdge {
+    pub target_url: String,
+    pub anchor_text: String,
+    pub rel: Vec<String>,
+    pub is_nofollow: bool,
+    pub link_kind: String,
+}
+
+pub fn parse_fetched_page(
+    page_url: &str,
+    response: &FetchResponse,
+    origin: &SiteOrigin,
+) -> ParsedPage {
+    let mut page = parse_html_page(page_url, response, origin);
+    page.http_headers = json!(response.headers);
+    page.technical_score = technical_score(response, &page);
+    page.internal_links = page
+        .links
+        .iter()
+        .map(|l| LinkEdge {
+            target_url: l.target_url.clone(),
+            anchor_text: l.anchor_text.clone(),
+            rel: l.rel.clone(),
+            is_nofollow: l.is_nofollow,
+            link_kind: if l.target_url.starts_with(&origin.origin) {
+                "internal".into()
+            } else {
+                "external".into()
+            },
+        })
+        .collect();
+    let document = Html::parse_document(&response.body);
+    page.blocks = extract_content_blocks(page_url, &document);
+    page
 }
 
 pub fn normalize_whitespace(text: &str) -> String {
@@ -81,6 +137,25 @@ pub fn parse_html_page(url: &str, response: &FetchResponse, origin: &SiteOrigin)
             severity: "medium".into(),
         });
     }
+    let internal_hrefs = links
+        .iter()
+        .filter(|l| l.target_url.starts_with(&origin.origin))
+        .count();
+    let has_spa_root = document
+        .select(&Selector::parse("#root, #app").unwrap())
+        .next()
+        .is_some();
+    let has_module_script = document
+        .select(&Selector::parse("script[type=\"module\"]").unwrap())
+        .next()
+        .is_some();
+    if has_spa_root && has_module_script && internal_hrefs == 0 {
+        issues.push(IssueRow {
+            issue_code: "SPA_SHELL_NO_STATIC_LINKS".into(),
+            message: "Page looks like a JS SPA shell with no crawlable internal links in static HTML; use seed_urls or site_quality for rendered metrics".into(),
+            severity: "medium".into(),
+        });
+    }
     let canonical_url = head
         .get("canonical")
         .and_then(|v| v.as_str())
@@ -92,16 +167,20 @@ pub fn parse_html_page(url: &str, response: &FetchResponse, origin: &SiteOrigin)
         meta_description,
         h1,
         head,
+        http_headers: json!({}),
         links,
+        internal_links: Vec::new(),
+        blocks: Vec::new(),
         main_text,
         content_hash: hash,
         structured_data_count,
+        technical_score: 0.0,
         issues,
     }
 }
 
 pub fn technical_score(response: &FetchResponse, page: &ParsedPage) -> f64 {
-    let mut score = 1.0;
+    let mut score: f64 = 1.0;
     if response.status >= 400 {
         score -= 0.5;
     }
@@ -237,12 +316,13 @@ fn question_re() -> Regex {
     Regex::new(r"^(how|what|why|when|where|who)\b").expect("regex")
 }
 
-pub fn heading_blocks(page_url: &str, document: &Html) -> Vec<(String, String)> {
+pub fn extract_content_blocks(page_url: &str, document: &Html) -> Vec<ContentBlock> {
     let heading_sel = Selector::parse("h2, h3, h4, h5, h6").ok();
     let Some(heading_sel) = heading_sel else {
         return Vec::new();
     };
     let mut blocks = Vec::new();
+    let mut ordinal = 0u32;
     for heading in document.select(&heading_sel) {
         let text = heading.text().collect::<String>().trim().to_string();
         if text.is_empty() {
@@ -253,10 +333,72 @@ pub fn heading_blocks(page_url: &str, document: &Html) -> Vec<(String, String)> 
         } else {
             "heading_section"
         };
-        blocks.push((block_type.to_string(), text));
+        let heading_path = vec![text.clone()];
+        let text_hash = content_hash(&text);
+        let block_id = block_id_for(page_url, &heading_path, ordinal);
+        blocks.push(ContentBlock {
+            block_id,
+            block_type: block_type.into(),
+            heading_path,
+            text: text.clone(),
+            text_hash,
+            char_count: text.chars().count(),
+            word_count: text.split_whitespace().count(),
+            ordinal,
+            has_list: false,
+            has_table: false,
+            has_citation: false,
+            outbound_link_count: 0,
+        });
+        ordinal += 1;
     }
-    let _ = page_url;
     blocks
+}
+
+pub fn block_id_for(page_url: &str, heading_path: &[String], ordinal: u32) -> String {
+    let seed = format!("{page_url}|{}|{ordinal}", heading_path.join(" > "));
+    content_hash(&seed)
+}
+
+pub fn rollup_page_scores(block_scores: &[Value]) -> PageScores {
+    if block_scores.is_empty() {
+        return PageScores::default();
+    }
+    let n = block_scores.len() as f64;
+    let mut helpfulness = 0.0;
+    let mut trust = 0.0;
+    let mut ai = 0.0;
+    for row in block_scores {
+        helpfulness += row.get("helpfulness_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        trust += row.get("trust_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        ai += row
+            .get("extractability_score")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+    }
+    PageScores {
+        technical_score: 0.0,
+        content_quality_score: helpfulness / n,
+        eeat_proxy_score: trust / n,
+        ai_readiness_score: ai / n,
+        risk_score: (1.0 - helpfulness / n).clamp(0.0, 1.0),
+    }
+}
+
+pub fn mock_block_analysis(block: &ContentBlock) -> Value {
+    json!({
+        "block_id": block.block_id,
+        "extractability_score": 0.75,
+        "answer_clarity_score": 0.7,
+        "citation_worthiness_score": 0.6,
+        "helpfulness_score": 0.72,
+        "trust_score": 0.68,
+        "is_self_contained": block.word_count >= 20,
+        "suggested_query_intents": [],
+        "missing_for_ai_citation": [],
+        "evidence_quotes": [block.text.chars().take(80).collect::<String>()],
+        "confidence": 0.8
+    })
 }
 
 #[cfg(test)]
