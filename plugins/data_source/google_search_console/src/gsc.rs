@@ -655,11 +655,7 @@ impl DataSource for DataSourceGoogleSearchConsolePlugin {
                         .await?;
                     run_stats.rows_synced += count;
                 }
-                GscStreamKind::SiteRunAggregate if !discover => {
-                    self.emit_site_run_daily(Arc::clone(&ctx), run_date, &run_stats)
-                        .await?;
-                }
-                _ => {}
+                GscStreamKind::SiteRunAggregate => {}
             }
         }
 
@@ -682,6 +678,15 @@ impl DataSource for DataSourceGoogleSearchConsolePlugin {
                 run_date,
                 rows,
             )?;
+        }
+
+        if !discover
+            && self
+                .selected_streams()
+                .iter()
+                .any(|s| s.kind == GscStreamKind::SiteRunAggregate)
+        {
+            self.emit_site_run_daily(ctx, run_date, &run_stats).await?;
         }
 
         Ok(())
