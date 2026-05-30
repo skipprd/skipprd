@@ -30,7 +30,9 @@ use crate::helpers::offsets::{OffsetTypes, Offsets};
 use crate::helpers::offsets::{
     RuntimeOffsetOperation, RuntimeOffsetRpcRequest, RuntimeOffsetRpcResponse, RuntimeOffsetValue,
 };
-use crate::ingest_work::{Ingest, IngestBatch, IngestTask, IngestTasks, INGEST_RT};
+use crate::ingest_work::{
+    storage_namespace, storage_partition, Ingest, IngestBatch, IngestTask, IngestTasks, INGEST_RT,
+};
 use crate::plugins::cdc;
 use crate::plugins::{DataSink, SchemaSink, SchemaSyncRequest};
 use crate::runtime_plugins::artifact::resolve_plugin_executable;
@@ -635,12 +637,13 @@ async fn ingest_runtime_batches_into_core(
             .first()
             .map(|batch| batch.schema())
             .unwrap_or_else(|| Arc::new(arrow::datatypes::Schema::empty()));
+        let namespace = storage_namespace(&batch.namespace);
         if !current_runtime_schema_state()
             .namespaces
-            .contains_key(&batch.namespace)
+            .contains_key(&namespace)
         {
             derived_namespaces.insert(
-                batch.namespace.clone(),
+                namespace.clone(),
                 output_metadata_for_arrow_schema(&schema),
             );
         }
@@ -652,8 +655,8 @@ async fn ingest_runtime_batches_into_core(
         buffer_batches.push(IngestBufferBatch {
             offsets: offsets_map,
             sink_ref: batch.sink_ref,
-            _namespace: batch.namespace,
-            _partition: batch.partition,
+            _namespace: namespace,
+            _partition: storage_partition(&batch.partition),
             _time: batch.time,
             _shard: batch.shard,
             schema,

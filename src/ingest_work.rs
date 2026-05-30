@@ -201,6 +201,58 @@ fn slow_ingest_blocking(
 
 use crate::ingest::deadletter::{self, DeadletterRecord};
 
+/// Physical metadata / warehouse table key for a source namespace.
+///
+/// Delegates to [`Helpers::clean_field_name`] (same rules as legacy namespace parsing):
+/// lowercase snake_case, non-alphanumeric characters → `_`, collapsed underscores.
+/// Apply once at ingest; sinks (Athena, Glue, etc.) must use the namespace as-is.
+pub fn storage_namespace(namespace: &str) -> String {
+    Helpers::clean_field_name(namespace.to_string())
+}
+
+/// Sanitize a path token (partition value or simple key) without field-name rules
+/// (no leading-digit strip, no `item_` prefix for numeric-only tokens).
+fn storage_path_token(raw: &str) -> String {
+    let lower = raw.to_lowercase();
+    let re = regex::Regex::new(r"[^a-z0-9_]+").expect("valid regex");
+    let collapsed = regex::Regex::new(r"_+").expect("valid regex");
+    let out = re.replace_all(&lower, "_");
+    collapsed
+        .replace_all(out.as_ref(), "_")
+        .trim_matches('_')
+        .to_string()
+}
+
+/// Sanitize a partition key or offset partition string for storage paths.
+///
+/// Hive-style paths (`col=val/...`) keep `/` and `=`; segment names use [`Helpers::clean_field_name`];
+/// values use [`storage_path_token`] so years and timestamps keep leading digits.
+pub fn storage_partition(partition: &str) -> String {
+    if partition.is_empty() {
+        return String::new();
+    }
+    if partition.contains('/') {
+        partition
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .map(|segment| {
+                if let Some((key, value)) = segment.split_once('=') {
+                    format!(
+                        "{}={}",
+                        Helpers::clean_field_name(key.to_string()),
+                        storage_path_token(value)
+                    )
+                } else {
+                    Helpers::clean_field_name(segment.to_string())
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("/")
+    } else {
+        storage_path_token(partition)
+    }
+}
+
 // Bare metal platforms usually have very small amounts of RAM
 // (in the order of hundreds of KB)
 pub const _WRITE_BUF_SIZE: usize = if cfg!(target_os = "espidf") {
@@ -247,12 +299,15 @@ impl IngestBatch {
         namespace: Option<String>,
         cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
     ) -> Self {
+        let mut offset_key = offset_key;
+        offset_key.namespace = storage_namespace(&offset_key.namespace);
+        offset_key.partition = storage_partition(&offset_key.partition);
         Self {
             offset_key,
             data,
             bytes,
             source_uri,
-            namespace,
+            namespace: namespace.map(|ns| storage_namespace(&ns)),
             cdc_rows,
         }
     }
@@ -297,14 +352,14 @@ impl From<IngestBatch> for RuntimeRawIngestBatch {
 
 impl From<RuntimeRawIngestBatch> for IngestBatch {
     fn from(batch: RuntimeRawIngestBatch) -> Self {
-        Self {
-            offset_key: batch.offset_key,
-            data: batch.data,
-            bytes: batch.bytes,
-            source_uri: batch.source_uri,
-            namespace: batch.namespace,
-            cdc_rows: batch.cdc_rows,
-        }
+        IngestBatch::new(
+            batch.offset_key,
+            batch.data,
+            batch.bytes,
+            batch.source_uri,
+            batch.namespace,
+            batch.cdc_rows,
+        )
     }
 }
 
@@ -1652,23 +1707,26 @@ impl Ingest {
                     i += 1;
 
                     let skpr_namespace = if ingest_batch.namespace.is_some() {
+                        // Already normalized in `IngestBatch::new`.
                         batch_namespace_override.clone()
                     } else {
-                        let mut namesapce_cache =
-                            PARSE_NAMESPACE_CACHE.with(|cache| cache.read().unwrap().clone());
-                        let ns = Helpers::parse_namespace_field(
-                            &record,
-                            batch_namespace_override.clone(),
-                            &mut namesapce_cache,
-                        );
-                        if namesapce_cache
-                            != PARSE_NAMESPACE_CACHE.with(|cache| cache.read().unwrap().clone())
-                        {
-                            PARSE_NAMESPACE_CACHE.with(|cache| cache.write().unwrap().clear());
-                            PARSE_NAMESPACE_CACHE
-                                .with(|cache| cache.write().unwrap().extend(namesapce_cache));
-                        }
-                        ns
+                        storage_namespace(&{
+                            let mut namesapce_cache =
+                                PARSE_NAMESPACE_CACHE.with(|cache| cache.read().unwrap().clone());
+                            let ns = Helpers::parse_namespace_field(
+                                &record,
+                                batch_namespace_override.clone(),
+                                &mut namesapce_cache,
+                            );
+                            if namesapce_cache
+                                != PARSE_NAMESPACE_CACHE.with(|cache| cache.read().unwrap().clone())
+                            {
+                                PARSE_NAMESPACE_CACHE.with(|cache| cache.write().unwrap().clear());
+                                PARSE_NAMESPACE_CACHE
+                                    .with(|cache| cache.write().unwrap().extend(namesapce_cache));
+                            }
+                            ns
+                        })
                     };
 
                     let allowed_values =
@@ -2405,5 +2463,27 @@ mod stats_integration_tests {
         assert!(cx.get("max_numeric").unwrap().is_null());
         assert!(cx.get("min_len").unwrap().is_null());
         assert!(cx.get("max_len").unwrap().is_null());
+    }
+}
+
+#[cfg(test)]
+mod storage_key_tests {
+    use super::*;
+
+    #[test]
+    fn storage_namespace_sanitizes_special_chars() {
+        assert_eq!(
+            storage_namespace("acme.source/stream-name"),
+            "acme_source_stream_name"
+        );
+        assert_eq!(storage_namespace("My-Stream/v2"), "my_stream_v2");
+    }
+
+    #[test]
+    fn storage_partition_preserves_hive_segments() {
+        assert_eq!(
+            storage_partition("crawl_date=2026-05-30T00:00:00/year=2026"),
+            "crawl_date=2026_05_30t00_00_00/year=2026"
+        );
     }
 }

@@ -1305,6 +1305,7 @@ impl AwsAthena {
         namespace: &str,
     ) -> Result<GetTableOutput, SdkError<GetTableError>> {
         let database_name = config.glue_database_name.clone();
+        let table_name = namespace.to_string();
 
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
@@ -1315,7 +1316,7 @@ impl AwsAthena {
         glue_client
             .get_table()
             .database_name(&database_name)
-            .name(namespace)
+            .name(&table_name)
             .send()
             .await
     }
@@ -1830,6 +1831,7 @@ impl AwsAthena {
         namespace: &str,
     ) -> Result<bool, String> {
         let database = config.glue_database_name.clone();
+        let table_name = namespace.to_string();
 
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
@@ -1840,7 +1842,7 @@ impl AwsAthena {
         match glue_client
             .delete_table()
             .database_name(&database)
-            .name(namespace)
+            .name(&table_name)
             .send()
             .await
         {
@@ -1858,6 +1860,7 @@ impl AwsAthena {
         source_contract: Option<&SourceNamespaceContract>,
     ) -> Result<bool, String> {
         let database = config.glue_database_name.clone();
+        let table_name = namespace.to_string();
         let bucket = config.s3_bucket.clone();
         let granularity_target = context
             .output_layout
@@ -1917,7 +1920,8 @@ impl AwsAthena {
             }
         }
 
-        let columns = SkipprHive::convert_skippr_to_hive(metadata).unwrap();
+        let columns =
+            SkipprHive::storage_columns_excluding_partition_keys(metadata, &partitions).unwrap();
 
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
@@ -1926,7 +1930,7 @@ impl AwsAthena {
         let glue_client = GlueClient::new(&aws_config);
 
         let mut table_input = TableInput::builder()
-            .name(namespace)
+            .name(&table_name)
             .retention(0)
             .parameters("parquet.compression", "SNAPPY")
             .storage_descriptor(
@@ -1938,7 +1942,7 @@ impl AwsAthena {
                     .output_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat")
                     .serde_info(
                         SerDeInfo::builder()
-                            .name(format!("{}.{}", &database, namespace))
+                            .name(format!("{}.{}", &database, table_name))
                             .parameters("serialization.format", "1")
                             .serialization_library(
                                 "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
@@ -1982,6 +1986,7 @@ impl AwsAthena {
         existing_table: GetTableOutput,
     ) -> Result<bool, String> {
         let database = config.glue_database_name.clone();
+        let table_name = namespace.to_string();
         let bucket = config.s3_bucket.clone();
 
         let path = config.s3_prefix.clone();
@@ -1993,7 +1998,15 @@ impl AwsAthena {
             .unwrap()
             .to_string();
 
-        let columns = SkipprHive::convert_skippr_to_hive(metadata).unwrap();
+        let existing_partition_keys = existing_table
+            .table()
+            .and_then(|table| table.partition_keys.clone())
+            .unwrap_or_default();
+        let columns = SkipprHive::storage_columns_excluding_partition_keys(
+            metadata,
+            &existing_partition_keys,
+        )
+        .unwrap();
 
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
@@ -2002,7 +2015,7 @@ impl AwsAthena {
         let glue_client = GlueClient::new(&aws_config);
 
         let mut table_input = TableInput::builder()
-            .name(namespace)
+            .name(&table_name)
             .retention(0)
             .parameters("parquet.compression", "SNAPPY")
             .storage_descriptor(
@@ -2014,7 +2027,7 @@ impl AwsAthena {
                     .output_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat")
                     .serde_info(
                         SerDeInfo::builder()
-                            .name(format!("{}.{}", &database, namespace))
+                            .name(format!("{}.{}", &database, table_name))
                             .parameters("serialization.format", "1")
                             .serialization_library(
                                 "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
@@ -2066,6 +2079,7 @@ impl AwsAthena {
         source_contract: Option<&SourceNamespaceContract>,
     ) -> Result<bool, String> {
         let database = config.glue_database_name.clone();
+        let table_name = namespace.to_string();
         let bucket = config.s3_bucket.clone();
 
         let path = std::path::Path::new(&bucket)
@@ -2074,37 +2088,11 @@ impl AwsAthena {
             .unwrap()
             .to_string();
 
-        let columns = SkipprHive::convert_skippr_to_hive(metadata).unwrap();
-
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
             .await;
 
         let glue_client = GlueClient::new(&aws_config);
-
-        let partition_conf = PartitionInput::builder()
-            .set_values(Some(partition_values.clone()))
-            .parameters("parquet.compression", "SNAPPY")
-            .storage_descriptor(
-                StorageDescriptor::builder()
-                    .set_columns(Some(columns)) // @todo
-                    .compressed(true)
-                    .input_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat")
-                    .location(format!("s3://{}", path))
-                    .output_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat")
-                    .serde_info(
-                        SerDeInfo::builder()
-                            .name(format!("{}.{}", &database, namespace))
-                            .parameters("serialization.format", "1")
-                            .serialization_library(
-                                "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
-                            )
-                            .build(),
-                    )
-                    .stored_as_sub_directories(true)
-                    .build(),
-            )
-            .build();
 
         // Gate by global semaphore and per-namespace mutex
         let _cp_permit = GLUE_CP_SEM.acquire().await.unwrap();
@@ -2112,18 +2100,17 @@ impl AwsAthena {
         let _ns_guard = ns_lock.lock().await;
 
         // Ensure table exists; if missing, create DB/table before proceeding.
-        match glue_client
+        let existing_partition_keys = match glue_client
             .get_table()
             .database_name(&database)
-            .name(namespace)
+            .name(&table_name)
             .send()
             .await
         {
             Ok(output) => {
                 let existing_partition_keys = output
                     .table()
-                    .and_then(|table| table.partition_keys.as_ref())
-                    .cloned()
+                    .and_then(|table| table.partition_keys.clone())
                     .unwrap_or_default();
                 if existing_partition_keys.len() != partition_values.len() {
                     let key_names = existing_partition_keys
@@ -2141,6 +2128,7 @@ impl AwsAthena {
                         key
                     ));
                 }
+                existing_partition_keys
             }
             Err(SdkError::ServiceError(err))
                 if matches!(err.err(), GetTableError::EntityNotFoundException(_)) =>
@@ -2179,19 +2167,67 @@ impl AwsAthena {
                         database, namespace, err
                     )
                 })?;
+                match glue_client
+                    .get_table()
+                    .database_name(&database)
+                    .name(&table_name)
+                    .send()
+                    .await
+                {
+                    Ok(output) => output
+                        .table()
+                        .and_then(|table| table.partition_keys.clone())
+                        .unwrap_or_default(),
+                    Err(err) => {
+                        return Err(format!(
+                            "failed to read Glue table '{}.{}' after create: {}",
+                            database, table_name, err
+                        ));
+                    }
+                }
             }
             Err(err) => {
                 return Err(format!(
                     "failed to read Glue table '{}.{}' before partition sync: {}",
-                    database, namespace, err
+                    database, table_name, err
                 ));
             }
-        }
+        };
+
+        let columns = SkipprHive::storage_columns_excluding_partition_keys(
+            metadata,
+            &existing_partition_keys,
+        )
+        .unwrap();
+
+        let partition_conf = PartitionInput::builder()
+            .set_values(Some(partition_values.clone()))
+            .parameters("parquet.compression", "SNAPPY")
+            .storage_descriptor(
+                StorageDescriptor::builder()
+                    .set_columns(Some(columns)) // @todo
+                    .compressed(true)
+                    .input_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat")
+                    .location(format!("s3://{}", path))
+                    .output_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat")
+                    .serde_info(
+                        SerDeInfo::builder()
+                            .name(format!("{}.{}", &database, table_name))
+                            .parameters("serialization.format", "1")
+                            .serialization_library(
+                                "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
+                            )
+                            .build(),
+                    )
+                    .stored_as_sub_directories(true)
+                    .build(),
+            )
+            .build();
 
         match glue_client
             .get_partition()
             .database_name(&database)
-            .table_name(namespace)
+            .table_name(&table_name)
             .set_partition_values(Some(partition_values.clone()))
             .send()
             .await
@@ -2202,7 +2238,7 @@ impl AwsAthena {
                         glue_client
                             .update_partition()
                             .database_name(database.clone())
-                            .table_name(namespace)
+                            .table_name(&table_name)
                             .partition_input(partition_conf.clone())
                             .set_partition_value_list(Some(partition_values.clone()))
                             .send()
@@ -2221,7 +2257,7 @@ impl AwsAthena {
                         match glue_client
                             .create_partition()
                             .database_name(&database)
-                            .table_name(namespace)
+                            .table_name(&table_name)
                             .partition_input(partition_conf.clone())
                             .send()
                             .await
@@ -2456,6 +2492,7 @@ fn contract_partition_delete_prefix(
 #[cfg(test)]
 mod contract_schema_tests {
     use super::*;
+    use aws_sdk_glue::types::Column;
     use arrow::array::{Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use skippr_runtime_sdk::plugins::source_contract::{FieldPath, WritePolicy};

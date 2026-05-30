@@ -244,7 +244,11 @@ pub fn replace_source_contracts_authoritative(
     validate_namespace_contracts(&contracts)?;
     let next: HashMap<String, SourceNamespaceContract> = contracts
         .into_iter()
-        .map(|contract| (contract.namespace.clone(), contract))
+        .map(|mut contract| {
+            contract.namespace =
+                crate::ingest_work::storage_namespace(&contract.namespace);
+            (contract.namespace.clone(), contract)
+        })
         .collect();
     if pipeline.source_contracts == next {
         return Ok(false);

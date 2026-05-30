@@ -7,6 +7,7 @@ use arc_swap::ArcSwap;
 use once_cell::sync::Lazy;
 
 use crate::discover::OutputMetadata;
+use crate::ingest_work::storage_namespace;
 use crate::runtime_plugins::protocol::RuntimeSchemaState;
 use crate::{METADATA, PIPELINE_SCHEMA_VERSION};
 
@@ -78,6 +79,7 @@ pub fn apply_runtime_source_schema_state(schema_state: RuntimeSchemaState) -> Ve
     }
     let mut changed_namespaces = Vec::new();
     for (namespace, output) in schema_state.namespaces {
+        let namespace = storage_namespace(&namespace);
         if effective_namespaces
             .get(&namespace)
             .is_some_and(|current| output_schema_equivalent(current, &output))

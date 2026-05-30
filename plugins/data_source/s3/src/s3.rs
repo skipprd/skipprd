@@ -83,6 +83,8 @@ pub struct DataSourceS3PluginConfig {
 
     pub s3_bucket: String,
     pub s3_prefix: String,
+    /// AWS region for this bucket (required when the default credential region differs, e.g. cross-account picnic sync).
+    pub region: Option<String>,
     #[allow(dead_code)]
     pub s3_prefix_ordered_depth: Option<usize>,
     #[allow(dead_code)]
@@ -113,9 +115,12 @@ pub struct DataSourceS3Plugin {
 
 impl DataSourceS3Plugin {
     async fn from_config(config: DataSourceS3PluginConfig, temp_dir: String) -> DataSourceS3Plugin {
-        let shared_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .load()
-            .await;
+        let mut config_loader =
+            aws_config::defaults(aws_config::BehaviorVersion::latest());
+        if let Some(region) = config.region.as_deref().filter(|r| !r.is_empty()) {
+            config_loader = config_loader.region(aws_config::Region::new(region.to_string()));
+        }
+        let shared_config = config_loader.load().await;
         let mut s3_client_config = aws_sdk_s3::config::Builder::from(&shared_config);
         if let Some(ref endpoint_url) = config.endpoint_url {
             s3_client_config = s3_client_config

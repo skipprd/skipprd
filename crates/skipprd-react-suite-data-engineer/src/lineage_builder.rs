@@ -676,6 +676,18 @@ fn source_descriptor_from_providers_cfg(
             .or_else(|| input.get("site").and_then(Value::as_str))
             .map(|site| format!("PageSpeed site {site}"))
             .unwrap_or_else(|| "Google PageSpeed Insights".to_string()),
+        Some("site_quality") => input
+            .get("name")
+            .and_then(Value::as_str)
+            .or_else(|| input.get("site").and_then(Value::as_str))
+            .map(|site| format!("Site Quality {site}"))
+            .unwrap_or_else(|| "Site Quality".to_string()),
+        Some("seo_crawl") => input
+            .get("name")
+            .and_then(Value::as_str)
+            .or_else(|| input.get("site").and_then(Value::as_str))
+            .map(|site| format!("SEO Crawl {site}"))
+            .unwrap_or_else(|| "SEO Crawl".to_string()),
         Some("apple_search_ads") => input
             .get("name")
             .and_then(Value::as_str)
@@ -688,6 +700,12 @@ fn source_descriptor_from_providers_cfg(
             .or_else(|| input.get("ad_account_id").and_then(Value::as_str))
             .map(|ad_account_id| format!("Meta Instagram Ads account {ad_account_id}"))
             .unwrap_or_else(|| "Meta Instagram Ads".to_string()),
+        Some("dataforseo_backlinks") => input
+            .get("name")
+            .and_then(Value::as_str)
+            .or_else(|| input.get("site").and_then(Value::as_str))
+            .map(|site| format!("DataForSEO Backlinks {site}"))
+            .unwrap_or_else(|| "DataForSEO Backlinks".to_string()),
         _ => input
             .get("name")
             .and_then(Value::as_str)
@@ -723,7 +741,10 @@ fn provider_brand_for_source_kind(kind: &str) -> Option<&'static str> {
         "google_analytics" => Some("google_analytics"),
         "google_search_console" => Some("google_search_console"),
         "google_pagespeed" => Some("google_pagespeed"),
+        "site_quality" => Some("site_quality"),
+        "seo_crawl" => Some("seo_crawl"),
         "apple_search_ads" => Some("apple_search_ads"),
+        "dataforseo_backlinks" => Some("dataforseo_backlinks"),
         "meta_instagram_ads" => Some("meta_instagram_ads"),
         _ => None,
     }
@@ -761,7 +782,10 @@ fn provider_label_for_brand(brand: &str) -> &'static str {
         "google_analytics" => "Google Analytics (GA4)",
         "google_search_console" => "Google Search Console",
         "google_pagespeed" => "Google PageSpeed Insights",
+        "site_quality" => "Site Quality",
+        "seo_crawl" => "SEO Crawl",
         "apple_search_ads" => "Apple Search Ads",
+        "dataforseo_backlinks" => "DataForSEO Backlinks",
         "meta_instagram_ads" => "Meta Instagram Ads",
         _ => "Provider",
     }

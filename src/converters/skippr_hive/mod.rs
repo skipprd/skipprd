@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use aws_sdk_glue::types::Column;
 
 use crate::discover::{OutputMetadata, SkipprDataType};
@@ -42,6 +44,24 @@ impl SkipprHive {
         let field_types: Result<Vec<Column>, bool> =
             SkipprHive::convert_skippr_to_hive_field_types(metadata);
         field_types
+    }
+
+    /// Glue/Hive storage descriptor columns must not repeat partition keys (Athena
+    /// `HIVE_INVALID_METADATA: duplicate columns`). Data files may still contain those
+    /// fields; only the table metadata must omit them from `StorageDescriptor.Columns`.
+    pub fn storage_columns_excluding_partition_keys(
+        metadata: &OutputMetadata,
+        partition_keys: &[Column],
+    ) -> Result<Vec<Column>, bool> {
+        let exclude: HashSet<String> = partition_keys
+            .iter()
+            .map(|column| column.name.clone())
+            .collect();
+        let columns = SkipprHive::convert_skippr_to_hive(metadata)?;
+        Ok(columns
+            .into_iter()
+            .filter(|column| !exclude.contains(&column.name))
+            .collect())
     }
 
     fn convert_skippr_to_hive_field_types(metadata: &OutputMetadata) -> Result<Vec<Column>, bool> {
@@ -243,6 +263,28 @@ mod tests {
             assert_eq!(columns.len(), 1);
             assert_eq!(columns[0].r#type().unwrap(), hive_type);
         }
+    }
+
+    #[test]
+    fn storage_columns_exclude_partition_keys() {
+        let mut metadata = OutputMetadata::new();
+        metadata.determined_type = SkipprDataType::Record;
+        for name in ["date", "metric"] {
+            let mut field = OutputMetadata::new();
+            field.out_field_name = name.to_string();
+            field.determined_type = SkipprDataType::String;
+            metadata.fields.insert(name.to_string(), field);
+        }
+        let partition = Column::builder()
+            .name("date")
+            .r#type("string")
+            .build()
+            .unwrap();
+        let columns =
+            SkipprHive::storage_columns_excluding_partition_keys(&metadata, &[partition])
+                .unwrap();
+        assert_eq!(columns.len(), 1);
+        assert_eq!(columns[0].name(), "metric");
     }
 
     #[test]
