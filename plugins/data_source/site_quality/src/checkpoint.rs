@@ -63,3 +63,25 @@ pub fn should_skip_heavy_audits(
         .map(|cp| cp.render_hash == render_hash)
         .unwrap_or(false)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn skip_heavy_when_render_hash_unchanged() {
+        let cp = PageCheckpoint {
+            render_hash: "sha256:abc".into(),
+            lcp_ms: None,
+            inp_ms: None,
+            cls: None,
+            lh_performance: None,
+            lh_accessibility: None,
+            lh_best_practices: None,
+            lh_seo: None,
+            axe_summary_hash: None,
+        };
+        assert!(should_skip_heavy_audits(true, Some(&cp), "sha256:abc"));
+        assert!(!should_skip_heavy_audits(true, Some(&cp), "sha256:other"));
+    }
+}

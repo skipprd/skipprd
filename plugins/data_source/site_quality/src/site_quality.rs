@@ -424,9 +424,7 @@ mod tests {
     use crate::config::DataSourceSiteQualityPluginConfig;
     use crate::sampling::UrlMode;
     use crate::worker::{build_job_request, WorkerClient, FIXTURE_ENV};
-    use skippr_runtime_sdk::plugins::cdc::{
-        CheckpointAuthority, CheckpointEnvelope, CheckpointKind,
-    };
+    use skippr_runtime_sdk::plugins::cdc::CheckpointEnvelope;
     use skippr_runtime_sdk::protocol::RuntimeOffsetMaterializationHint;
     use skippr_runtime_sdk::source_compat::ThroughputMetrics;
     use skippr_runtime_sdk::plugins::{
@@ -489,7 +487,7 @@ mod tests {
         std::env::set_var(FIXTURE_ENV, fixture_dir);
 
         let cfg = test_config();
-        let worker = WorkerClient::new(cfg).unwrap();
+        let worker = WorkerClient::new(cfg.clone()).unwrap();
         let device = crate::config::default_devices()[0].clone();
         let prior = PageCheckpoint {
             render_hash: "sha256:fixturehash".into(),
@@ -503,7 +501,7 @@ mod tests {
             axe_summary_hash: None,
         };
         let job = build_job_request(
-            &worker.config,
+            &cfg,
             "https://example.com/",
             &device,
             false,

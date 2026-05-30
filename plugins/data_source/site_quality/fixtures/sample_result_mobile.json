@@ -1,0 +1,48 @@
+{
+  "job_id": "fixture-mobile",
+  "ok": true,
+  "final_url": "https://example.com/",
+  "status": 200,
+  "redirect_count": 0,
+  "timings_ms": {
+    "dom_content_loaded": 1200,
+    "load": 2100,
+    "fully_loaded": 3400
+  },
+  "web_vitals": {
+    "lcp": 2400,
+    "inp": 180,
+    "cls": 0.04,
+    "fcp": 900,
+    "ttfb": 320
+  },
+  "render_hash": "sha256:fixturehash",
+  "mobile_heuristics": {
+    "viewport_meta_ok": true,
+    "horizontal_scroll": false,
+    "text_too_small_count": 2,
+    "tap_target_issues": 1
+  },
+  "lighthouse": {
+    "performance": 72,
+    "accessibility": 91,
+    "best_practices": 88,
+    "seo": 95,
+    "top_failing_audits": [
+      {
+        "id": "unused-javascript",
+        "score": 0.4,
+        "display_value": "Reduce unused JavaScript"
+      }
+    ]
+  },
+  "axe_violations": [
+    {
+      "id": "color-contrast",
+      "impact": "serious",
+      "help": "Elements must have sufficient color contrast",
+      "nodes": 3
+    }
+  ],
+  "error": null
+}
