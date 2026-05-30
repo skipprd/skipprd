@@ -975,6 +975,51 @@ mod tests {
     }
 
     #[test]
+    fn sync_mode_stores_checkpoints() {
+        let _lock = env_test_lock();
+        let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
+        std::env::set_var("SKIPPR_META_INSTAGRAM_ADS_FIXTURE_DIR", fixture_dir);
+        std::env::remove_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV);
+
+        let mut cfg = test_config();
+        cfg.stream_profile = StreamProfile::Minimal;
+        cfg.start_date = "2024-01-01".into();
+        cfg.end_date = Some("2024-01-01".into());
+        let mut plugin = DataSourceMetaInstagramAdsPlugin::new(cfg).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let ctx = Arc::new(RecordingSyncContext::default());
+        rt.block_on(plugin.sync(ctx.clone())).expect("sync");
+        assert!(
+            !ctx.checkpoint_stores.lock().unwrap().is_empty(),
+            "sync should persist checkpoints per namespace/day"
+        );
+
+        std::env::remove_var("SKIPPR_META_INSTAGRAM_ADS_FIXTURE_DIR");
+    }
+
+    #[test]
+    fn oauth_partial_empty_fields_rejected() {
+        let cfg = DataSourceMetaInstagramAdsPluginConfig {
+            ad_account_id: "act_123".into(),
+            access_token: None,
+            oauth_token_url: Some("https://graph.facebook.com/v21.0/oauth/access_token".into()),
+            oauth_client_id: Some("client".into()),
+            oauth_client_secret: Some("".into()),
+            oauth_refresh_token: Some("refresh".into()),
+            api_version: None,
+            start_date: "2024-01-01".into(),
+            end_date: None,
+            lookback_days: 3,
+            stream_profile: StreamProfile::Minimal,
+            processing_lag_days: 1,
+            instagram_filter: true,
+            streams: None,
+        };
+        let err = DataSourceMetaInstagramAdsPlugin::new(cfg).unwrap_err();
+        assert!(err.to_string().contains("OAuth"));
+    }
+
+    #[test]
     fn discover_sync_does_not_store_checkpoints() {
         let _lock = env_test_lock();
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");

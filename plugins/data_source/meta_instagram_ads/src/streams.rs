@@ -130,6 +130,16 @@ mod tests {
     }
 
     #[test]
+    fn resolve_streams_explicit_override_filters_catalog() {
+        let selected = resolve_streams(
+            StreamProfile::Full,
+            Some(vec!["meta_instagram_ads.ad_daily".into()]),
+        );
+        assert_eq!(selected.len(), 1);
+        assert_eq!(selected[0].namespace, "meta_instagram_ads.ad_daily");
+    }
+
+    #[test]
     fn placement_stream_uses_campaign_level_with_breakdown() {
         let placement = CURATED_STREAMS
             .iter()

@@ -357,6 +357,10 @@ mod tests {
             RetryableHttpClient::classify_status(reqwest::StatusCode::BAD_REQUEST, None),
             RetryDecision::GiveUp
         );
+        assert_eq!(
+            RetryableHttpClient::classify_status(reqwest::StatusCode::FORBIDDEN, None),
+            RetryDecision::GiveUp
+        );
     }
 
     #[test]
