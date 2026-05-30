@@ -185,3 +185,32 @@ impl DataSourceSiteQualityPluginConfig {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn url_list_requires_urls() {
+        let cfg = DataSourceSiteQualityPluginConfig {
+            site: "https://example.com".into(),
+            url_mode: UrlMode::UrlList,
+            url_list: vec![],
+            max_pages_per_run: 10,
+            devices: default_devices(),
+            wait_until: "load".into(),
+            navigation_timeout_ms: 5000,
+            lighthouse_enabled: false,
+            lighthouse_categories: vec![],
+            axe_enabled: false,
+            axe_tags: vec![],
+            throttle: Default::default(),
+            pages_per_minute: 6,
+            worker_node_path: "node".into(),
+            playwright_executable_path: None,
+            respect_robots: true,
+            skip_heavy_when_unchanged: true,
+        };
+        assert!(cfg.validate().is_err());
+    }
+}
