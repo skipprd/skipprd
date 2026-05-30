@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -422,124 +422,45 @@ impl DataSource for DataSourceGooglePageSpeedPlugin {
             "PageSpeed sync starting"
         );
 
-        let semaphore = Arc::new(Semaphore::new(
-            self.config.max_concurrent_requests.max(1) as usize,
-        ));
-        let acc = Arc::new(Mutex::new(RunAccumulator::default()));
-        let rate_limiter = Arc::new(Mutex::new(Instant::now()));
+        let mut acc = RunAccumulator::default();
+        let mut last_request = Instant::now();
         let top_audits = self.config.top_audits_per_page;
-        let site = self.site_normalized.clone();
-        let run_date_s = run_date.clone();
-        let checkpoint_key_s = checkpoint_key.clone();
-        let ctx_jobs = Arc::clone(&ctx);
 
-        let mut handles = Vec::new();
         for (url, strategy) in pending {
-            let permit = semaphore
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
-            let client = client.clone();
-            let acc = Arc::clone(&acc);
-            let rate_limiter = Arc::clone(&rate_limiter);
-            let site = site.clone();
-            let run_date_s = run_date_s.clone();
-            let ctx_jobs = Arc::clone(&ctx_jobs);
-            let checkpoint_key_s = checkpoint_key_s.clone();
-            let completed_shared = Arc::new(Mutex::new(completed.clone()));
+            self.rate_limit_wait(&mut last_request).await;
 
-            handles.push(tokio::spawn(async move {
-                let _permit = permit;
-                {
-                    let mut last = rate_limiter.lock().await;
-                    let rpm = 30u32;
-                    let min_interval = Duration::from_secs(60) / rpm.max(1);
-                    let elapsed = last.elapsed();
-                    if elapsed < min_interval {
-                        sleep(min_interval - elapsed).await;
-                    }
-                    *last = Instant::now();
-                }
-
-                let parsed = match client.run_pagespeed(&url, &strategy).await {
-                    Ok(body) => parse_pagespeed_response(
-                        &body,
-                        &site,
+            let parsed = match client.run_pagespeed(&url, &strategy).await {
+                Ok(body) => parse_pagespeed_response(
+                    &body,
+                    &self.site_normalized,
+                    &url,
+                    &run_date,
+                    &strategy,
+                    top_audits,
+                ),
+                Err(err) => {
+                    let code = Self::classify_api_error(&err);
+                    warn!(url = %url, strategy = strategy.as_api_str(), %err, "PageSpeed API call failed");
+                    parse_error_page_row(
+                        &self.site_normalized,
                         &url,
-                        &run_date_s,
+                        &run_date,
                         &strategy,
-                        top_audits,
-                    ),
-                    Err(err) => {
-                        let code = DataSourceGooglePageSpeedPlugin::classify_api_error(&err);
-                        warn!(url = %url, strategy = strategy.as_api_str(), %err, "PageSpeed API call failed");
-                        parse_error_page_row(&site, &url, &run_date_s, &strategy, code)
-                    }
-                };
-
-                {
-                    let mut guard = acc.lock().await;
-                    guard.urls_total += 0; // merge_parsed increments
-                    let mut tmp = RunAccumulator::default();
-                    // use merge via site reference - call inline
-                    if let Some(page) = parsed.page_daily.first().and_then(|p| p.as_object()) {
-                        if page.get("field_data_available").and_then(|v| v.as_bool()) == Some(true) {
-                            tmp.urls_with_field += 1;
-                        }
-                    }
-                    // Simpler: extend vectors directly
-                    guard.page_daily.extend(parsed.page_daily);
-                    if guard.field_origin_daily.is_empty() {
-                        guard.field_origin_daily = parsed.field_origin_daily;
-                    }
-                    guard.audit_daily.extend(parsed.audit_daily);
-                    guard.issues.extend(parsed.issues);
-                    guard.urls_total += 1;
-                    if let Some(page) = guard.page_daily.last().and_then(|p| p.as_object()) {
-                        if page.get("field_data_available").and_then(|v| v.as_bool()) == Some(true)
-                        {
-                            guard.urls_with_field += 1;
-                        }
-                        if page.get("strategy").and_then(|v| v.as_str()) == Some("mobile") {
-                            if let Some(score) = page.get("lh_performance").and_then(|v| v.as_f64())
-                            {
-                                guard.mobile_perf_scores.push(score);
-                            }
-                        }
-                    }
+                        code,
+                    )
                 }
+            };
 
-                if !discover {
-                    let job = CompletedJob {
-                        canonical_url: url.clone(),
-                        strategy: strategy.as_api_str().to_string(),
-                    };
-                    let mut done = completed_shared.lock().await;
-                    done.insert(job);
-                    DataSourceGooglePageSpeedPlugin::store_completed_jobs(
-                        ctx_jobs.as_ref(),
-                        &checkpoint_key_s,
-                        &done,
-                    )?;
-                }
-                Ok::<(), std::io::Error>(())
-            }));
+            self.merge_parsed(&mut acc, parsed);
+
+            if !discover {
+                completed.insert(CompletedJob {
+                    canonical_url: url,
+                    strategy: strategy.as_api_str().to_string(),
+                });
+                Self::store_completed_jobs(ctx.as_ref(), &checkpoint_key, &completed)?;
+            }
         }
-
-        for handle in handles {
-            handle
-                .await
-                .map_err(|e| std::io::Error::other(e.to_string()))??;
-        }
-
-        if !discover {
-            completed = Self::load_completed_jobs(ctx.as_ref(), &checkpoint_key);
-        }
-
-        let acc = Arc::try_unwrap(acc)
-            .map_err(|_| std::io::Error::other("accumulator still shared"))?
-            .into_inner();
 
         let site_run = self.site_run_daily_row(&run_date, &acc);
         self.submit_namespace_rows(
