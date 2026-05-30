@@ -89,6 +89,7 @@ nav:
                   - WebSocket: connectors/inputs/websocket.md
               - HTTP:
                   - Google Analytics (GA4): connectors/inputs/google_analytics.md
+                  - Google Search Console: connectors/inputs/google_search_console.md
                   - HTTP Client: connectors/inputs/http_client.md
                   - HTTP Server: connectors/inputs/http_server.md
               - Other:
