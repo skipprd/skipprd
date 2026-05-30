@@ -934,6 +934,48 @@ enum SourceKind {
         #[arg(long, value_delimiter = ',')]
         streams: Option<Vec<String>>,
     },
+    /// Google Search Console source (Search Analytics daily reports).
+    GoogleSearchConsole {
+        /// Site URL (`https://example.com/` or `sc-domain:example.com`).
+        #[arg(long)]
+        site_url: Option<String>,
+        #[arg(long)]
+        start_date: Option<String>,
+        #[arg(long)]
+        end_date: Option<String>,
+        #[arg(long)]
+        lookback_days: Option<u32>,
+        #[arg(long)]
+        stream_profile: Option<String>,
+        #[arg(long)]
+        processing_lag_days: Option<u32>,
+        #[arg(long)]
+        window_in_days: Option<u32>,
+        #[arg(long)]
+        access_token: Option<String>,
+        #[arg(long)]
+        oauth_token_url: Option<String>,
+        #[arg(long)]
+        oauth_client_id: Option<String>,
+        #[arg(long)]
+        oauth_client_secret: Option<String>,
+        #[arg(long)]
+        oauth_refresh_token: Option<String>,
+        #[arg(long)]
+        service_account_json_path: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        streams: Option<Vec<String>>,
+        #[arg(long)]
+        search_type: Option<String>,
+        #[arg(long)]
+        data_state: Option<String>,
+        #[arg(long)]
+        row_limit: Option<u32>,
+        #[arg(long)]
+        url_inspection_enabled: Option<bool>,
+        #[arg(long, value_delimiter = ',')]
+        url_list: Option<Vec<String>>,
+    },
     /// Apple Search Ads source (Campaign Management API v5 daily reports).
     AppleSearchAds {
         #[arg(long)]
@@ -1701,6 +1743,7 @@ const DATA_SOURCE_RUNTIME_PLUGIN_KEYS: &[&str] = &[
     "AppleSearchAds",
     "MetaInstagramAds",
     "GoogleAnalytics",
+    "GoogleSearchConsole",
     "S3",
     "File",
     "Mssql",
@@ -1993,6 +2036,27 @@ fn source_config_from_data_source(
             oauth_refresh_token: yaml_str(plugin_cfg, "oauth_refresh_token"),
             service_account_json_path: yaml_str(plugin_cfg, "service_account_json_path"),
             streams: yaml_string_vec(plugin_cfg, "streams"),
+        }),
+        "GoogleSearchConsole" => Ok(SourceConfig::GoogleSearchConsole {
+            site_url: yaml_str(plugin_cfg, "site_url"),
+            start_date: yaml_str(plugin_cfg, "start_date"),
+            end_date: yaml_str(plugin_cfg, "end_date"),
+            lookback_days: yaml_u32(plugin_cfg, "lookback_days"),
+            stream_profile: yaml_str(plugin_cfg, "stream_profile"),
+            processing_lag_days: yaml_u32(plugin_cfg, "processing_lag_days"),
+            window_in_days: yaml_u32(plugin_cfg, "window_in_days"),
+            access_token: yaml_str(plugin_cfg, "access_token"),
+            oauth_token_url: yaml_str(plugin_cfg, "oauth_token_url"),
+            oauth_client_id: yaml_str(plugin_cfg, "oauth_client_id"),
+            oauth_client_secret: yaml_str(plugin_cfg, "oauth_client_secret"),
+            oauth_refresh_token: yaml_str(plugin_cfg, "oauth_refresh_token"),
+            service_account_json_path: yaml_str(plugin_cfg, "service_account_json_path"),
+            streams: yaml_string_vec(plugin_cfg, "streams"),
+            search_type: yaml_str(plugin_cfg, "search_type"),
+            data_state: yaml_str(plugin_cfg, "data_state"),
+            row_limit: yaml_u32(plugin_cfg, "row_limit"),
+            url_inspection_enabled: yaml_bool(plugin_cfg, "url_inspection_enabled"),
+            url_list: yaml_string_vec(plugin_cfg, "url_list"),
         }),
         "AppleSearchAds" => Ok(SourceConfig::AppleSearchAds {
             org_id: yaml_str(plugin_cfg, "org_id"),
