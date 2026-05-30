@@ -976,6 +976,37 @@ enum SourceKind {
         #[arg(long, value_delimiter = ',')]
         url_list: Option<Vec<String>>,
     },
+    /// Google PageSpeed Insights source (Lighthouse lab + CrUX field via API v5).
+    GooglePageSpeed {
+        /// Site origin to sample (e.g. https://example.com).
+        #[arg(long)]
+        site: Option<String>,
+        #[arg(long)]
+        api_key: Option<String>,
+        /// `tld_sample` (robots + sitemap) or `url_list`.
+        #[arg(long)]
+        url_mode: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        url_list: Option<Vec<String>>,
+        #[arg(long)]
+        max_urls: Option<u32>,
+        #[arg(long, value_delimiter = ',')]
+        strategies: Option<Vec<String>>,
+        #[arg(long, value_delimiter = ',')]
+        categories: Option<Vec<String>>,
+        #[arg(long)]
+        locale: Option<String>,
+        #[arg(long)]
+        max_requests_per_run: Option<u32>,
+        #[arg(long)]
+        requests_per_minute: Option<u32>,
+        #[arg(long)]
+        respect_robots: Option<bool>,
+        #[arg(long)]
+        top_audits_per_page: Option<u32>,
+        #[arg(long)]
+        max_concurrent_requests: Option<u32>,
+    },
     /// Apple Search Ads source (Campaign Management API v5 daily reports).
     AppleSearchAds {
         #[arg(long)]
@@ -1744,6 +1775,7 @@ const DATA_SOURCE_RUNTIME_PLUGIN_KEYS: &[&str] = &[
     "MetaInstagramAds",
     "GoogleAnalytics",
     "GoogleSearchConsole",
+    "GooglePageSpeed",
     "S3",
     "File",
     "Mssql",
@@ -4177,6 +4209,47 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
             service_account_json_path,
             streams,
         },
+        SourceKind::GoogleSearchConsole {
+            site_url,
+            start_date,
+            end_date,
+            lookback_days,
+            stream_profile,
+            processing_lag_days,
+            window_in_days,
+            access_token,
+            oauth_token_url,
+            oauth_client_id,
+            oauth_client_secret,
+            oauth_refresh_token,
+            service_account_json_path,
+            streams,
+            search_type,
+            data_state,
+            row_limit,
+            url_inspection_enabled,
+            url_list,
+        } => SourceConfig::GoogleSearchConsole {
+            site_url,
+            start_date,
+            end_date,
+            lookback_days,
+            stream_profile,
+            processing_lag_days,
+            window_in_days,
+            access_token,
+            oauth_token_url,
+            oauth_client_id,
+            oauth_client_secret,
+            oauth_refresh_token,
+            service_account_json_path,
+            streams,
+            search_type,
+            data_state,
+            row_limit,
+            url_inspection_enabled,
+            url_list,
+        },
         SourceKind::AppleSearchAds {
             org_id,
             client_id,
@@ -4308,6 +4381,7 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         SourceConfig::Mqtt { .. } => "mqtt",
         SourceConfig::Websocket { .. } => "websocket",
         SourceConfig::GoogleAnalytics { .. } => "google_analytics",
+        SourceConfig::GoogleSearchConsole { .. } => "google_search_console",
         SourceConfig::AppleSearchAds { .. } => "apple_search_ads",
         SourceConfig::MetaInstagramAds { .. } => "meta_instagram_ads",
         SourceConfig::HttpClient { .. } => "http_client",
