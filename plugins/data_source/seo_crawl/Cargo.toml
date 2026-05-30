@@ -1,0 +1,42 @@
+[package]
+name = "skippr-plugin-data-source-seo-crawl"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "skippr-plugin-data-source-seo-crawl"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+quick-xml = { version = "0.39", features = [] }
+regex = "1"
+scraper = "0.20"
+serde.workspace = true
+serde_derive = "1.0.105"
+serde_json = "1.0.85"
+sha2 = "0.10"
+skippr-plugin-shared-api-source = { path = "../../shared/api_source" }
+skippr-runtime-sdk.workspace = true
+tokio = { workspace = true, features = ["time", "sync", "fs"] }
+tracing = "0.1"
+url = "2.5"
+reqwest = { version = "0.11", default-features = false, features = ["rustls-tls"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[package.metadata.skippr-plugin]
+kind = "DataSource"
+plugin_name = "SeoCrawl"
+
+[package.metadata.skippr-plugin.source_capability]
+name = "SeoCrawl"
+guarantee_tier = "IncrementalOnly"
+checkpoint_style = "CursorBased"
+bootstrap_style = "FullScan"
+order_model = "UnsupportedForFinalState"
+supports_deletes = false
+event_id_semantics = "None"
+declares_namespace_contracts = true
