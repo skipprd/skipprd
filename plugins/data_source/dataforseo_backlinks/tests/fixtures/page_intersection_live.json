@@ -1,0 +1,23 @@
+{
+  "tasks": [
+    {
+      "id": "task-2",
+      "status_code": 20000,
+      "cost": 0.03,
+      "result": [
+        {
+          "items": [
+            {
+              "url_from": "https://shared-ref.example/",
+              "rank": 80,
+              "page_intersection": {
+                "1": { "rank": 10 },
+                "2": { "rank": 20 }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

@@ -2,6 +2,8 @@ use serde_json::{json, Map, Value};
 
 use crate::config::BacklinkJob;
 use crate::config::MAX_OFFSET;
+use crate::entity::EntityParseContext;
+use crate::parse_util::copy_field;
 use crate::target::normalize_target;
 
 pub fn build_backlink_task(
@@ -59,9 +61,7 @@ pub fn parse_backlinks_items(
 }
 
 pub struct BacklinkParseContext<'a> {
-    pub site: &'a str,
-    pub target: &'a str,
-    pub run_date: &'a str,
+    pub entity: EntityParseContext<'a>,
     pub job_tag: &'a str,
     pub backlinks_status_type: Option<&'a str>,
     pub mode: Option<&'a str>,
@@ -72,9 +72,7 @@ fn parse_backlink_item(item: &Value, ctx: &BacklinkParseContext<'_>) -> Option<V
     let url_from = item.get("url_from").and_then(|v| v.as_str())?;
     let url_to = item.get("url_to").and_then(|v| v.as_str())?;
     let mut row = Map::new();
-    row.insert("site".into(), json!(ctx.site));
-    row.insert("target".into(), json!(ctx.target));
-    row.insert("run_date".into(), json!(ctx.run_date));
+    ctx.entity.apply_envelope(&mut row);
     row.insert("job_tag".into(), json!(ctx.job_tag));
     row.insert("url_from".into(), json!(url_from));
     row.insert("url_to".into(), json!(url_to));
@@ -118,12 +116,6 @@ fn parse_backlink_item(item: &Value, ctx: &BacklinkParseContext<'_>) -> Option<V
     row.insert("api_cost_usd".into(), json!(ctx.api_cost_usd));
 
     Some(Value::Object(row))
-}
-
-fn copy_field(row: &mut Map<String, Value>, item: &Value, key: &str) {
-    if let Some(v) = item.get(key) {
-        row.insert(key.to_string(), v.clone());
-    }
 }
 
 pub fn next_pagination_state(
@@ -187,12 +179,17 @@ mod tests {
             "dofollow": true,
             "rank": 120
         })];
+        let entity = crate::entity::SyncEntity {
+            site: "example".into(),
+            target: "example.com".into(),
+            entity_kind: crate::entity::EntityKind::Primary,
+            competitor_name: None,
+            backlink_jobs: vec![],
+        };
         let rows = parse_backlinks_items(
             &items,
             &BacklinkParseContext {
-                site: "example",
-                target: "example.com",
-                run_date: "2024-06-01",
+                entity: entity.parse_context("2024-06-01"),
                 job_tag: "main",
                 backlinks_status_type: Some("live"),
                 mode: Some("one_per_domain"),
@@ -202,6 +199,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["url_from"], "https://referrer.com/page");
         assert_eq!(rows[0]["target"], "example.com");
+        assert_eq!(rows[0]["entity_kind"], "primary");
         assert_eq!(rows[0]["rank"], 120);
     }
 

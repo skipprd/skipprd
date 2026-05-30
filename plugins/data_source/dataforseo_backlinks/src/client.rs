@@ -5,6 +5,11 @@ use tracing::warn;
 pub const BACKLINKS_LIVE_URL: &str = "https://api.dataforseo.com/v3/backlinks/backlinks/live";
 pub const PAGE_INTERSECTION_LIVE_URL: &str =
     "https://api.dataforseo.com/v3/backlinks/page_intersection/live";
+pub const SUMMARY_LIVE_URL: &str = "https://api.dataforseo.com/v3/backlinks/summary/live";
+pub const REFERRING_DOMAINS_LIVE_URL: &str =
+    "https://api.dataforseo.com/v3/backlinks/referring_domains/live";
+pub const ANCHORS_LIVE_URL: &str = "https://api.dataforseo.com/v3/backlinks/anchors/live";
+pub const HISTORY_LIVE_URL: &str = "https://api.dataforseo.com/v3/backlinks/history/live";
 
 pub const TASK_OK_STATUS: i64 = 20_000;
 
@@ -15,6 +20,7 @@ pub struct ParsedTaskResponse {
     pub items_count: u32,
     pub total_count: Option<u64>,
     pub search_after_token: Option<String>,
+    pub result_body: Option<Value>,
     pub task_status_code: i64,
     pub task_status_message: String,
     pub task_ok: bool,
@@ -75,14 +81,42 @@ impl DataForSeoClient {
             .await
     }
 
+    pub async fn post_summary_live(
+        &self,
+        tasks: Vec<Value>,
+        fixture_name: &str,
+    ) -> Result<LiveApiResponse, std::io::Error> {
+        self.post_live(SUMMARY_LIVE_URL, tasks, fixture_name).await
+    }
+
+    pub async fn post_referring_domains_live(
+        &self,
+        tasks: Vec<Value>,
+        fixture_name: &str,
+    ) -> Result<LiveApiResponse, std::io::Error> {
+        self.post_live(REFERRING_DOMAINS_LIVE_URL, tasks, fixture_name)
+            .await
+    }
+
+    pub async fn post_anchors_live(
+        &self,
+        tasks: Vec<Value>,
+        fixture_name: &str,
+    ) -> Result<LiveApiResponse, std::io::Error> {
+        self.post_live(ANCHORS_LIVE_URL, tasks, fixture_name).await
+    }
+
+    pub async fn post_history_live(
+        &self,
+        tasks: Vec<Value>,
+        fixture_name: &str,
+    ) -> Result<LiveApiResponse, std::io::Error> {
+        self.post_live(HISTORY_LIVE_URL, tasks, fixture_name).await
+    }
+
     /// Minimal credential probe (`limit: 1`) for `skippr doctor`.
     pub async fn probe_credentials(login: &str, password: &str) -> Result<(), String> {
-        let client = DataForSeoClient::new(
-            login.to_string(),
-            password.to_string(),
-            3,
-            0,
-        );
+        let client = DataForSeoClient::new(login.to_string(), password.to_string(), 3, 0);
         if client.fixture_dir.is_some() {
             return Ok(());
         }
@@ -177,10 +211,7 @@ impl DataForSeoClient {
 }
 
 pub fn parse_live_response(body: &Value) -> Result<LiveApiResponse, std::io::Error> {
-    let top_level_cost = body
-        .get("cost")
-        .and_then(json_f64)
-        .unwrap_or(0.0);
+    let top_level_cost = body.get("cost").and_then(json_f64).unwrap_or(0.0);
     let tasks = body
         .get("tasks")
         .and_then(|v| v.as_array())
@@ -197,10 +228,7 @@ pub fn parse_live_response(body: &Value) -> Result<LiveApiResponse, std::io::Err
 }
 
 fn parse_task(task: &Value) -> Result<ParsedTaskResponse, std::io::Error> {
-    let task_status_code = task
-        .get("status_code")
-        .and_then(json_i64)
-        .unwrap_or(0);
+    let task_status_code = task.get("status_code").and_then(json_i64).unwrap_or(0);
     let task_ok = task_status_code == TASK_OK_STATUS;
     let task_status_message = task
         .get("status_message")
@@ -214,25 +242,26 @@ fn parse_task(task: &Value) -> Result<ParsedTaskResponse, std::io::Error> {
         .and_then(|v| v.as_array())
         .and_then(|arr| arr.first());
 
-    let (items, items_count, total_count, search_after_token) = if let Some(result) = result0 {
-        let items = result
-            .get("items")
-            .and_then(|v| v.as_array())
-            .cloned()
-            .unwrap_or_default();
-        let items_count = result
-            .get("items_count")
-            .and_then(json_u32)
-            .unwrap_or(items.len() as u32);
-        let total_count = result.get("total_count").and_then(json_u64);
-        let search_after_token = result
-            .get("search_after_token")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        (items, items_count, total_count, search_after_token)
-    } else {
-        (Vec::new(), 0, None, None)
-    };
+    let (items, items_count, total_count, search_after_token, result_body) =
+        if let Some(result) = result0 {
+            let items = result
+                .get("items")
+                .and_then(|v| v.as_array())
+                .cloned()
+                .unwrap_or_default();
+            let items_count = result
+                .get("items_count")
+                .and_then(json_u32)
+                .unwrap_or(items.len() as u32);
+            let total_count = result.get("total_count").and_then(json_u64);
+            let search_after_token = result
+                .get("search_after_token")
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            (items, items_count, total_count, search_after_token, Some(result.clone()))
+        } else {
+            (Vec::new(), 0, None, None, None)
+        };
 
     Ok(ParsedTaskResponse {
         task_cost,
@@ -240,6 +269,7 @@ fn parse_task(task: &Value) -> Result<ParsedTaskResponse, std::io::Error> {
         items_count,
         total_count,
         search_after_token,
+        result_body,
         task_status_code,
         task_status_message,
         task_ok,
@@ -283,4 +313,25 @@ fn json_u64(value: &Value) -> Option<u64> {
     value
         .as_u64()
         .or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn fixture_backlinks_response() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures");
+        std::env::set_var("SKIPPR_DATAFORSEO_BACKLINKS_FIXTURE_DIR", dir);
+        let client = DataForSeoClient::new("login".into(), "pass".into(), 3, 0);
+        let body = client
+            .post_backlinks_live(
+                vec![json!({"target": "example.com"})],
+                "backlinks_live_0",
+            )
+            .await
+            .expect("fixture");
+        assert!(body.tasks[0].task_ok);
+        std::env::remove_var("SKIPPR_DATAFORSEO_BACKLINKS_FIXTURE_DIR");
+    }
 }

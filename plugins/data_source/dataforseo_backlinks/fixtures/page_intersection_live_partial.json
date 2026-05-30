@@ -1,0 +1,40 @@
+{
+  "version": "0.1.20240228",
+  "status_code": 20000,
+  "status_message": "Ok.",
+  "cost": 0.03,
+  "tasks": [
+    {
+      "status_code": 20000,
+      "status_message": "Ok.",
+      "cost": 0.03,
+      "result": [
+        {
+          "intersections_count": 10,
+          "items_count": 1,
+          "total_count": 10,
+          "items": [
+            {
+              "url_from": "https://shared-ref.com/post",
+              "domain_from": "shared-ref.com",
+              "page_from_rank": 200,
+              "domain_from_rank": 300,
+              "anchor": "Competitors",
+              "dofollow": true,
+              "rank": 150,
+              "backlink_spam_score": 8,
+              "is_lost": false,
+              "page_intersection": {
+                "1": {
+                  "type": "backlink",
+                  "url_to": "https://competitor-a.com/"
+                },
+                "2": {}
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

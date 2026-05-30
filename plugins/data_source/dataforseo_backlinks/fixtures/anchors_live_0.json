@@ -1,0 +1,34 @@
+{
+  "version": "0.1.20240228",
+  "status_code": 20000,
+  "status_message": "Ok.",
+  "cost": 0.02,
+  "tasks": [
+    {
+      "status_code": 20000,
+      "status_message": "Ok.",
+      "cost": 0.02,
+      "result": [
+        {
+          "target": "example.com",
+          "total_count": 30,
+          "items_count": 2,
+          "items": [
+            {
+              "type": "backlinks_anchor",
+              "anchor": "Example Brand",
+              "rank": 100,
+              "backlinks": 42
+            },
+            {
+              "type": "backlinks_anchor",
+              "anchor": "click here",
+              "rank": 40,
+              "backlinks": 12
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

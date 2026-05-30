@@ -1,0 +1,49 @@
+{
+  "version": "0.1.20240228",
+  "status_code": 20000,
+  "status_message": "Ok.",
+  "time": "0.12 sec.",
+  "cost": 0.02,
+  "tasks_count": 1,
+  "tasks_error": 0,
+  "tasks": [
+    {
+      "id": "task-1",
+      "status_code": 20000,
+      "status_message": "Ok.",
+      "time": "0.10 sec.",
+      "cost": 0.02,
+      "result_count": 1,
+      "path": ["v3", "backlinks", "backlinks", "live"],
+      "data": {
+        "target": "example.com",
+        "limit": 5,
+        "offset": 0
+      },
+      "result": [
+        {
+          "target": "example.com",
+          "total_count": 100,
+          "items_count": 2,
+          "search_after_token": "token-page-2",
+          "items": [
+            {
+              "url_from": "https://referrer-a.com/page",
+              "url_to": "https://example.com/",
+              "domain_from": "referrer-a.com",
+              "anchor": "Example",
+              "dofollow": true,
+              "rank": 100
+            },
+            {
+              "url_from": "https://referrer-b.com/x",
+              "url_to": "https://example.com/about",
+              "domain_from": "referrer-b.com",
+              "rank": 50
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

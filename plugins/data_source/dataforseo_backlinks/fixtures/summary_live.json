@@ -1,0 +1,31 @@
+{
+  "version": "0.1.20240228",
+  "status_code": 20000,
+  "status_message": "Ok.",
+  "cost": 0.02,
+  "tasks": [
+    {
+      "status_code": 20000,
+      "status_message": "Ok.",
+      "cost": 0.02,
+      "result": [
+        {
+          "target": "example.com",
+          "rank": 371,
+          "backlinks": 41245,
+          "backlinks_spam_score": 8,
+          "referring_domains": 12372,
+          "referring_main_domains": 11438,
+          "broken_backlinks": 209,
+          "info": {
+            "server": "cloudflare",
+            "country": "US"
+          },
+          "referring_links_tld": {
+            "com": 26012
+          }
+        }
+      ]
+    }
+  ]
+}

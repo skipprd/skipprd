@@ -3,11 +3,8 @@ use std::collections::HashMap;
 use serde_json::{json, Map, Value};
 
 use crate::config::IntersectionJob;
-use crate::parse_backlinks::next_pagination_state;
-use crate::parse_backlinks::PaginationAdvance;
+use crate::entity::EntityParseContext;
 use crate::target::normalize_target;
-
-pub use crate::parse_backlinks::next_pagination_state as intersection_next_page;
 
 pub fn build_intersection_task(
     job: &IntersectionJob,
@@ -82,7 +79,7 @@ pub fn parse_intersection_items(
 }
 
 pub struct IntersectionParseContext<'a> {
-    pub run_date: &'a str,
+    pub entity: EntityParseContext<'a>,
     pub job_name: &'a str,
     pub intersection_mode: Option<&'a str>,
     pub targets_config: &'a Value,
@@ -93,8 +90,8 @@ pub struct IntersectionParseContext<'a> {
 fn parse_intersection_item(item: &Value, ctx: &IntersectionParseContext<'_>) -> Option<Value> {
     let url_from = item.get("url_from").and_then(|v| v.as_str())?;
     let mut row = Map::new();
+    ctx.entity.apply_envelope(&mut row);
     row.insert("job_name".into(), json!(ctx.job_name));
-    row.insert("run_date".into(), json!(ctx.run_date));
     row.insert("url_from".into(), json!(url_from));
 
     for key in [
@@ -117,7 +114,7 @@ fn parse_intersection_item(item: &Value, ctx: &IntersectionParseContext<'_>) -> 
     }
     row.insert("targets_config".into(), ctx.targets_config.clone());
     row.insert(
-        "targets_linked",
+        "targets_linked".to_string(),
         json!(flatten_page_intersection(item.get("page_intersection"))),
     );
     if let Some(count) = ctx.intersections_count {
@@ -159,10 +156,17 @@ mod tests {
             }
         })];
         let targets_config = json!({ "1": "a.com", "2": "b.com" });
+        let entity = crate::entity::SyncEntity {
+            site: "example".into(),
+            target: "example.com".into(),
+            entity_kind: crate::entity::EntityKind::Primary,
+            competitor_name: None,
+            backlink_jobs: vec![],
+        };
         let rows = parse_intersection_items(
             &items,
             &IntersectionParseContext {
-                run_date: "2024-06-01",
+                entity: entity.parse_context("2024-06-01"),
                 job_name: "gap",
                 intersection_mode: Some("partial"),
                 targets_config: &targets_config,

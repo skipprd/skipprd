@@ -5,6 +5,23 @@ pub fn normalize_target(raw: &str) -> Result<String, String> {
         return Err("target must not be empty".into());
     }
     if trimmed.starts_with("http://") || trimmed.starts_with("https://") {
+        let without_scheme = trimmed
+            .split("://")
+            .nth(1)
+            .unwrap_or(trimmed)
+            .trim_end_matches('/');
+        let (authority, path) = match without_scheme.split_once('/') {
+            Some((host, rest)) if !rest.is_empty() => (host, format!("/{rest}")),
+            Some((host, _)) => (host, String::new()),
+            None => (without_scheme, String::new()),
+        };
+        let domain = authority
+            .strip_prefix("www.")
+            .unwrap_or(authority)
+            .to_string();
+        if path.is_empty() || path == "/" {
+            return Ok(domain);
+        }
         return Ok(trimmed.trim_end_matches('/').to_string());
     }
     let mut domain = trimmed.to_string();

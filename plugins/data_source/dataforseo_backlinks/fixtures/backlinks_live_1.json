@@ -1,0 +1,27 @@
+{
+  "version": "0.1.20240228",
+  "status_code": 20000,
+  "status_message": "Ok.",
+  "cost": 0.02,
+  "tasks": [
+    {
+      "status_code": 20000,
+      "status_message": "Ok.",
+      "cost": 0.02,
+      "result": [
+        {
+          "target": "example.com",
+          "items_count": 1,
+          "items": [
+            {
+              "url_from": "https://referrer-c.com/z",
+              "url_to": "https://example.com/contact",
+              "domain_from": "referrer-c.com",
+              "rank": 30
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

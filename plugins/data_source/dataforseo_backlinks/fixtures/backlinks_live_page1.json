@@ -1,0 +1,68 @@
+{
+  "version": "0.1.20240228",
+  "status_code": 20000,
+  "status_message": "Ok.",
+  "time": "0.12 sec.",
+  "cost": 0.02,
+  "tasks_count": 1,
+  "tasks_error": 0,
+  "tasks": [
+    {
+      "id": "task-1",
+      "status_code": 20000,
+      "status_message": "Ok.",
+      "time": "0.10 sec.",
+      "cost": 0.02,
+      "result_count": 1,
+      "path": ["v3", "backlinks", "backlinks", "live"],
+      "data": {
+        "target": "example.com",
+        "limit": 100,
+        "offset": 0
+      },
+      "result": [
+        {
+          "target": "example.com",
+          "total_count": 5000,
+          "items_count": 2,
+          "search_after_token": "eyJ0b2tlbiI6InBhZ2UyIn0=",
+          "items": [
+            {
+              "type": "backlink",
+              "domain_from": "referrer-a.com",
+              "url_from": "https://referrer-a.com/page",
+              "page_from_rank": 120,
+              "domain_from_rank": 450,
+              "domain_from_country": "US",
+              "domain_to": "example.com",
+              "url_to": "https://example.com/",
+              "url_to_status_code": 200,
+              "anchor": "Example site",
+              "dofollow": true,
+              "item_type": "anchor",
+              "is_new": false,
+              "is_lost": false,
+              "is_broken": false,
+              "rank": 210,
+              "backlink_spam_score": 5,
+              "links_count": 1,
+              "first_seen": "2023-01-01",
+              "last_seen": "2024-05-30"
+            },
+            {
+              "type": "backlink",
+              "domain_from": "referrer-b.com",
+              "url_from": "https://referrer-b.com/article",
+              "domain_to": "example.com",
+              "url_to": "https://example.com/pricing",
+              "anchor": "Pricing",
+              "dofollow": false,
+              "rank": 80,
+              "backlink_spam_score": 12
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

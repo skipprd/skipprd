@@ -1,0 +1,29 @@
+{
+  "version": "0.1.20240228",
+  "status_code": 20000,
+  "status_message": "Ok.",
+  "cost": 0.03,
+  "tasks": [
+    {
+      "status_code": 20000,
+      "status_message": "Ok.",
+      "cost": 0.03,
+      "result": [
+        {
+          "intersections_count": 5,
+          "items_count": 1,
+          "items": [
+            {
+              "url_from": "https://shared-ref.com/post",
+              "domain_from": "shared-ref.com",
+              "page_intersection": {
+                "1": { "rank": 10 },
+                "2": {}
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

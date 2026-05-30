@@ -1,0 +1,41 @@
+{
+  "version": "0.1.20240228",
+  "status_code": 20000,
+  "status_message": "Ok.",
+  "cost": 0.03,
+  "tasks": [
+    {
+      "status_code": 20000,
+      "status_message": "Ok.",
+      "cost": 0.03,
+      "result": [
+        {
+          "target": "example.com",
+          "date_from": "2024-01-01",
+          "date_to": "2024-03-01",
+          "items_count": 2,
+          "items": [
+            {
+              "type": "backlinks_history",
+              "date": "2024-01-01 00:00:00 +00:00",
+              "rank": 350,
+              "backlinks": 40000,
+              "new_backlinks": 120,
+              "lost_backlinks": 45,
+              "referring_domains": 12000
+            },
+            {
+              "type": "backlinks_history",
+              "date": "2024-02-01 00:00:00 +00:00",
+              "rank": 360,
+              "backlinks": 40500,
+              "new_backlinks": 200,
+              "lost_backlinks": 60,
+              "referring_domains": 12100
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

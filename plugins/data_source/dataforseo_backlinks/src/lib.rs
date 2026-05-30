@@ -5,8 +5,15 @@ pub mod checkpoint;
 pub mod client;
 pub mod config;
 pub mod dataforseo_backlinks;
+pub mod entity;
+pub mod parse_anchors;
 pub mod parse_backlinks;
+pub mod parse_history;
 pub mod parse_intersection;
+pub mod parse_referring_domains;
+pub mod parse_summary;
+pub mod parse_target;
+pub mod parse_util;
 pub mod streams;
 pub mod target;
 

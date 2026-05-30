@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::Deserialize;
 use serde_derive::Serialize;
 
+use crate::entity::{EntityKind, SyncEntity};
 use crate::target::normalize_target;
 
 pub const MAX_BACKLINK_LIMIT: u32 = 1000;
@@ -44,6 +45,63 @@ pub struct BacklinkJob {
     pub exclude_internal_backlinks: Option<bool>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StreamKind {
+    Backlinks,
+    Summary,
+    ReferringDomains,
+    Anchors,
+    History,
+    PageIntersection,
+}
+
+impl StreamKind {
+    pub fn all() -> &'static [StreamKind] {
+        &[
+            StreamKind::Backlinks,
+            StreamKind::Summary,
+            StreamKind::ReferringDomains,
+            StreamKind::Anchors,
+            StreamKind::History,
+            StreamKind::PageIntersection,
+        ]
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StreamKind::Backlinks => "backlinks",
+            StreamKind::Summary => "summary",
+            StreamKind::ReferringDomains => "referring_domains",
+            StreamKind::Anchors => "anchors",
+            StreamKind::History => "history",
+            StreamKind::PageIntersection => "page_intersection",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CompetitorEntry {
+    pub name: String,
+    pub target: String,
+    #[serde(default)]
+    pub limit: Option<u32>,
+    #[serde(default)]
+    pub max_pages: Option<u32>,
+    #[serde(default)]
+    pub include_subdomains: Option<bool>,
+    #[serde(default)]
+    pub backlinks_status_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct HistoryConfig {
+    #[serde(default)]
+    pub date_from: Option<String>,
+    #[serde(default)]
+    pub date_to: Option<String>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct IntersectionJob {
     pub name: String,
@@ -79,6 +137,12 @@ pub struct DataForSeoBacklinksPluginConfig {
     #[serde(default)]
     pub intersection_jobs: Vec<IntersectionJob>,
     #[serde(default)]
+    pub competitors: Vec<CompetitorEntry>,
+    #[serde(default)]
+    pub streams: Vec<StreamKind>,
+    #[serde(default)]
+    pub history: Option<HistoryConfig>,
+    #[serde(default)]
     pub rank_scale: Option<String>,
     #[serde(default = "default_request_interval_ms")]
     pub request_interval_ms: u64,
@@ -92,6 +156,24 @@ fn default_request_interval_ms() -> u64 {
 
 fn default_max_api_retries() -> u32 {
     8
+}
+
+fn env_nonempty(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|v| v.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// Resolve login/password from environment (used by config and `skippr doctor`).
+///
+/// Preferred: `DATAFORSEO_API_USER` / `DATAFORSEO_API_PASS`.
+/// Legacy: `DATAFORSEO_LOGIN` / `DATAFORSEO_PASSWORD`.
+pub fn credentials_from_env() -> Option<(String, String)> {
+    let login = env_nonempty("DATAFORSEO_API_USER").or_else(|| env_nonempty("DATAFORSEO_LOGIN"))?;
+    let password =
+        env_nonempty("DATAFORSEO_API_PASS").or_else(|| env_nonempty("DATAFORSEO_PASSWORD"))?;
+    Some((login, password))
 }
 
 impl DataForSeoBacklinksPluginConfig {
@@ -190,7 +272,108 @@ impl DataForSeoBacklinksPluginConfig {
             }
         }
 
+        let mut competitor_names = std::collections::HashSet::new();
+        for competitor in &self.competitors {
+            if competitor.name.trim().is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "competitor name is required",
+                ));
+            }
+            if !competitor_names.insert(competitor.name.trim().to_string()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("duplicate competitor name '{}'", competitor.name),
+                ));
+            }
+            normalize_target(&competitor.target).map_err(std::io::Error::other)?;
+            if let Some(limit) = competitor.limit {
+                if limit == 0 || limit > MAX_BACKLINK_LIMIT {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        format!("competitor limit must be 1..={MAX_BACKLINK_LIMIT}"),
+                    ));
+                }
+            }
+        }
+
+        if let Some(history) = &self.history {
+            if let (Some(from), Some(to)) = (&history.date_from, &history.date_to) {
+                if from > to {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidInput,
+                        "history.date_from must be on or before history.date_to",
+                    ));
+                }
+            }
+        }
+
         Ok(())
+    }
+
+    pub fn enabled_streams(&self) -> Vec<StreamKind> {
+        if self.streams.is_empty() {
+            return StreamKind::all().to_vec();
+        }
+        self.streams.clone()
+    }
+
+    pub fn stream_enabled(&self, kind: StreamKind) -> bool {
+        self.enabled_streams().contains(&kind)
+    }
+
+    pub fn sync_entities(&self) -> Result<Vec<SyncEntity>, std::io::Error> {
+        let site = self.site_label();
+        let mut entities = Vec::new();
+
+        let mut by_target: HashMap<String, Vec<BacklinkJob>> = HashMap::new();
+        for job in &self.backlink_jobs {
+            let target = normalize_target(&job.target).map_err(std::io::Error::other)?;
+            by_target.entry(target).or_default().push(job.clone());
+        }
+        for (target, jobs) in by_target {
+            entities.push(SyncEntity {
+                site: site.clone(),
+                target,
+                entity_kind: EntityKind::Primary,
+                competitor_name: None,
+                backlink_jobs: jobs,
+            });
+        }
+
+        let templates: Vec<BacklinkJob> = if self.backlink_jobs.is_empty() {
+            vec![BacklinkJob {
+                target: normalize_target(&site).unwrap_or(site.clone()),
+                job_tag: None,
+                limit: Some(100),
+                mode: None,
+                backlinks_status_type: None,
+                filters: None,
+                order_by: None,
+                max_pages: Some(5),
+                include_subdomains: Some(true),
+                exclude_internal_backlinks: Some(true),
+            }]
+        } else {
+            self.backlink_jobs.clone()
+        };
+
+        for competitor in &self.competitors {
+            let target = normalize_target(&competitor.target).map_err(std::io::Error::other)?;
+            let jobs = templates
+                .iter()
+                .map(|template| template.clone_for_target(&target, competitor))
+                .collect();
+            entities.push(SyncEntity {
+                site: site.clone(),
+                target,
+                entity_kind: EntityKind::Competitor,
+                competitor_name: Some(competitor.name.trim().to_string()),
+                backlink_jobs: jobs,
+            });
+        }
+
+        Ok(entities)
     }
 
     pub fn resolve_credentials(&self) -> Result<(String, String), std::io::Error> {
@@ -200,15 +383,11 @@ impl DataForSeoBacklinksPluginConfig {
             .filter(|s| !s.trim().is_empty())
             .map(str::trim)
             .map(str::to_string)
-            .or_else(|| {
-                std::env::var("DATAFORSEO_LOGIN")
-                    .ok()
-                    .filter(|s| !s.trim().is_empty())
-            })
+            .or_else(|| credentials_from_env().map(|(l, _)| l))
             .ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    "DataForSEO login is required (config.login or DATAFORSEO_LOGIN)",
+                    "DataForSEO login is required (config.login, DATAFORSEO_API_USER, or DATAFORSEO_LOGIN)",
                 )
             })?;
         let password = self
@@ -217,15 +396,11 @@ impl DataForSeoBacklinksPluginConfig {
             .filter(|s| !s.trim().is_empty())
             .map(str::trim)
             .map(str::to_string)
-            .or_else(|| {
-                std::env::var("DATAFORSEO_PASSWORD")
-                    .ok()
-                    .filter(|s| !s.trim().is_empty())
-            })
+            .or_else(|| credentials_from_env().map(|(_, p)| p))
             .ok_or_else(|| {
                 std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    "DataForSEO password is required (config.password or DATAFORSEO_PASSWORD)",
+                    "DataForSEO password is required (config.password, DATAFORSEO_API_PASS, or DATAFORSEO_PASSWORD)",
                 )
             })?;
         Ok((login, password))
@@ -252,6 +427,26 @@ impl DataForSeoBacklinksPluginConfig {
 }
 
 impl BacklinkJob {
+    pub fn clone_for_target(&self, target: &str, competitor: &CompetitorEntry) -> Self {
+        Self {
+            target: target.to_string(),
+            job_tag: self.job_tag.clone(),
+            limit: competitor.limit.or(self.limit),
+            mode: self.mode.clone(),
+            backlinks_status_type: competitor
+                .backlinks_status_type
+                .clone()
+                .or_else(|| self.backlinks_status_type.clone()),
+            filters: self.filters.clone(),
+            order_by: self.order_by.clone(),
+            max_pages: competitor.max_pages.or(self.max_pages),
+            include_subdomains: competitor
+                .include_subdomains
+                .or(self.include_subdomains),
+            exclude_internal_backlinks: self.exclude_internal_backlinks,
+        }
+    }
+
     pub fn job_id(&self) -> String {
         self.job_tag
             .as_deref()

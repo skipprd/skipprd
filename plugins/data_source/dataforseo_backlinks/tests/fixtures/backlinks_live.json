@@ -1,0 +1,25 @@
+{
+  "tasks": [
+    {
+      "id": "task-1",
+      "status_code": 20000,
+      "cost": 0.02,
+      "result": [
+        {
+          "target": "example.com",
+          "items": [
+            {
+              "url_from": "https://ref.example/page",
+              "url_to": "https://example.com/",
+              "domain_from": "ref.example",
+              "domain_to": "example.com",
+              "rank": 120,
+              "is_dofollow": true
+            }
+          ],
+          "search_after_token": null
+        }
+      ]
+    }
+  ]
+}
