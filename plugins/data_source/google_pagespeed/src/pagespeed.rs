@@ -62,7 +62,8 @@ struct RunAccumulator {
     audit_daily: Vec<serde_json::Value>,
     issues: Vec<serde_json::Value>,
     urls_with_field: u32,
-    urls_total: u32,
+    jobs_completed: u32,
+    sampled_urls: HashSet<String>,
     mobile_perf_scores: Vec<f64>,
     errors_invalid_url: u32,
     errors_quota: u32,
@@ -236,8 +237,11 @@ impl DataSourceGooglePageSpeedPlugin {
     }
 
     fn merge_parsed(&self, acc: &mut RunAccumulator, parsed: ParsedRun) {
-        acc.urls_total += 1;
+        acc.jobs_completed += 1;
         if let Some(page) = parsed.page_daily.first().and_then(|p| p.as_object()) {
+            if let Some(url) = page.get("canonical_url").and_then(|v| v.as_str()) {
+                acc.sampled_urls.insert(url.to_string());
+            }
             if page.get("field_data_available").and_then(|v| v.as_bool()) == Some(true) {
                 acc.urls_with_field += 1;
             }
@@ -263,16 +267,18 @@ impl DataSourceGooglePageSpeedPlugin {
     }
 
     fn site_run_daily_row(&self, run_date: &str, acc: &RunAccumulator) -> serde_json::Value {
-        let field_pct = if acc.urls_total == 0 {
+        let urls_sampled = acc.sampled_urls.len() as u32;
+        let field_pct = if acc.jobs_completed == 0 {
             0.0
         } else {
-            (acc.urls_with_field as f64 / acc.urls_total as f64) * 100.0
+            (acc.urls_with_field as f64 / acc.jobs_completed as f64) * 100.0
         };
         let median_mobile_perf = median(&acc.mobile_perf_scores);
         serde_json::json!({
             "site": self.site_normalized,
             "run_date": run_date,
-            "urls_sampled": acc.urls_total,
+            "urls_sampled": urls_sampled,
+            "api_calls_completed": acc.jobs_completed,
             "urls_with_field_data": acc.urls_with_field,
             "pct_with_field_data": field_pct,
             "median_lh_performance_mobile": median_mobile_perf,
@@ -372,12 +378,6 @@ impl DataSource for DataSourceGooglePageSpeedPlugin {
         } else {
             self.config.categories.clone()
         };
-        let client = PageSpeedClient::new(
-            self.config.resolve_api_key()?,
-            categories,
-            self.config.locale.clone(),
-        );
-
         let max_urls = if discover { 1 } else { self.config.max_urls };
         let urls = sample_urls(SamplingInput {
             site: &self.config.site,

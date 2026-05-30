@@ -1,0 +1,22 @@
+{
+  "id": "https://example.com/no-field",
+  "analysisUTCTimestamp": "2024-01-15T12:10:00.000Z",
+  "lighthouseResult": {
+    "finalUrl": "https://example.com/no-field",
+    "categories": {
+      "performance": { "id": "performance", "score": 0.72 },
+      "accessibility": { "id": "accessibility", "score": 0.88 },
+      "best-practices": { "id": "best-practices", "score": 0.82 },
+      "seo": { "id": "seo", "score": 0.90 }
+    },
+    "audits": {
+      "largest-contentful-paint": {
+        "id": "largest-contentful-paint",
+        "title": "Largest Contentful Paint",
+        "score": 0.6,
+        "numericValue": 2400,
+        "displayValue": "2.4 s"
+      }
+    }
+  }
+}
