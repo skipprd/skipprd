@@ -77,4 +77,10 @@ mod tests {
     fn rejects_empty_site() {
         assert!(normalize_site("  ").is_err());
     }
+
+    #[test]
+    fn off_site_url_rejected_for_crawl() {
+        let origin = normalize_site("https://example.com").unwrap();
+        assert!(normalize_url_for_crawl("https://other.com/x", &origin).is_none());
+    }
 }

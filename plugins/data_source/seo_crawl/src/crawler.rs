@@ -1,6 +1,6 @@
 use std::collections::{HashSet, VecDeque};
 
-use crate::fetch::{resolve_href, HttpFetcher};
+use crate::fetch::HttpFetcher;
 use crate::html::parse_html_page;
 use crate::origin::{normalize_site, SiteOrigin};
 use crate::robots::{parse_robots_txt, path_allowed};

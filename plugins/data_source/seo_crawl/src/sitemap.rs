@@ -81,6 +81,11 @@ mod tests {
     use super::*;
 
     #[test]
+    fn malformed_xml_returns_error() {
+        assert!(parse_sitemap_xml("<not-xml").is_err());
+    }
+
+    #[test]
     fn parses_urlset() {
         let xml = r#"<?xml version="1.0"?>
         <urlset>
