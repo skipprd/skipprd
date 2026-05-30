@@ -489,4 +489,13 @@ mod tests {
         let err = std::io::Error::other("GSC request failed: HTTP 403 Forbidden");
         assert!(is_forbidden_site_error(&err));
     }
+
+    #[test]
+    fn optional_stream_skipped_on_400() {
+        let err = std::io::Error::other(
+            "GSC request failed: HTTP 400 dimension searchAppearance not supported",
+        );
+        assert!(is_optional_stream_error(&err));
+        assert!(!is_forbidden_site_error(&err));
+    }
 }
