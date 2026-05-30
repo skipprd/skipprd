@@ -171,11 +171,6 @@ impl DataSourceMetaInstagramAdsPlugin {
         ))
     }
 
-    async fn auth_header(&self) -> Result<String, std::io::Error> {
-        let token = self.access_token().await?;
-        Ok(format!("Bearer {token}"))
-    }
-
     async fn access_token(&self) -> Result<String, std::io::Error> {
         if let Some(auth) = &self.static_auth {
             return auth
@@ -817,8 +812,8 @@ mod tests {
     fn static_bearer_auth_selected_when_access_token_set() {
         let plugin = DataSourceMetaInstagramAdsPlugin::new(test_config()).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let header = rt.block_on(plugin.auth_header()).unwrap();
-        assert_eq!(header, "Bearer token");
+        let token = rt.block_on(plugin.access_token()).unwrap();
+        assert_eq!(token, "token");
     }
 
     #[test]
