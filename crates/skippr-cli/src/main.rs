@@ -4808,10 +4808,10 @@ fn cmd_doctor(explicit_config: &Option<PathBuf>, output: &str) {
         check_postgres_env(&mut ok);
     }
 
-    if !is_json_output(output) && cfg_raw.contains("googlepagespeed") {
-        check_pagespeed_env(&mut checks, &mut ok);
-    } else if !is_json_output(output) && cfg_raw.contains("google_pagespeed") {
-        check_pagespeed_env(&mut checks, &mut ok);
+    if !is_json_output(output)
+        && (cfg_raw.contains("googlepagespeed") || cfg_raw.contains("google_pagespeed"))
+    {
+        check_pagespeed_env(output, &mut checks, &mut ok);
     }
 
     if is_json_output(output) {
@@ -5207,10 +5207,10 @@ fn check_postgres_env(ok: &mut bool) {
     }
 }
 
-fn check_pagespeed_env(checks: &mut Vec<DoctorCheck>, ok: &mut bool) {
+fn check_pagespeed_env(output: &str, checks: &mut Vec<DoctorCheck>, ok: &mut bool) {
     if env_set("PAGESPEED_API_KEY") {
         emit_doctor_check(
-            "text",
+            output,
             checks,
             true,
             "PAGESPEED_API_KEY is set",
@@ -5218,7 +5218,7 @@ fn check_pagespeed_env(checks: &mut Vec<DoctorCheck>, ok: &mut bool) {
         );
     } else {
         emit_doctor_check(
-            "text",
+            output,
             checks,
             false,
             "PAGESPEED_API_KEY not set — required for Google PageSpeed Insights API calls",
