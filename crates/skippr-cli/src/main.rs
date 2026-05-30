@@ -2090,6 +2090,21 @@ fn source_config_from_data_source(
             url_inspection_enabled: yaml_bool(plugin_cfg, "url_inspection_enabled"),
             url_list: yaml_string_vec(plugin_cfg, "url_list"),
         }),
+        "GooglePageSpeed" => Ok(SourceConfig::GooglePageSpeed {
+            site: yaml_str(plugin_cfg, "site"),
+            api_key: yaml_str(plugin_cfg, "api_key"),
+            url_mode: yaml_str(plugin_cfg, "url_mode"),
+            url_list: yaml_string_vec(plugin_cfg, "url_list"),
+            max_urls: yaml_u32(plugin_cfg, "max_urls"),
+            strategies: yaml_string_vec(plugin_cfg, "strategies"),
+            categories: yaml_string_vec(plugin_cfg, "categories"),
+            locale: yaml_str(plugin_cfg, "locale"),
+            max_requests_per_run: yaml_u32(plugin_cfg, "max_requests_per_run"),
+            requests_per_minute: yaml_u32(plugin_cfg, "requests_per_minute"),
+            respect_robots: yaml_bool(plugin_cfg, "respect_robots"),
+            top_audits_per_page: yaml_u32(plugin_cfg, "top_audits_per_page"),
+            max_concurrent_requests: yaml_u32(plugin_cfg, "max_concurrent_requests"),
+        }),
         "AppleSearchAds" => Ok(SourceConfig::AppleSearchAds {
             org_id: yaml_str(plugin_cfg, "org_id"),
             client_id: yaml_str(plugin_cfg, "client_id"),
@@ -2926,6 +2941,38 @@ fn source_plugin_and_config(kind: SourceKind) -> (&'static str, serde_json::Valu
                     bool_json(url_inspection_enabled),
                 ),
                 ("url_list", strings_json(url_list)),
+            ]),
+        ),
+        SourceKind::GooglePageSpeed {
+            site,
+            api_key,
+            url_mode,
+            url_list,
+            max_urls,
+            strategies,
+            categories,
+            locale,
+            max_requests_per_run,
+            requests_per_minute,
+            respect_robots,
+            top_audits_per_page,
+            max_concurrent_requests,
+        } => (
+            "GooglePageSpeed",
+            json_object(vec![
+                ("site", str_json(site)),
+                ("api_key", str_json(api_key)),
+                ("url_mode", str_json(url_mode)),
+                ("url_list", strings_json(url_list)),
+                ("max_urls", u32_json(max_urls)),
+                ("strategies", strings_json(strategies)),
+                ("categories", strings_json(categories)),
+                ("locale", str_json(locale)),
+                ("max_requests_per_run", u32_json(max_requests_per_run)),
+                ("requests_per_minute", u32_json(requests_per_minute)),
+                ("respect_robots", bool_json(respect_robots)),
+                ("top_audits_per_page", u32_json(top_audits_per_page)),
+                ("max_concurrent_requests", u32_json(max_concurrent_requests)),
             ]),
         ),
         SourceKind::AppleSearchAds {
@@ -3853,6 +3900,28 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         }
     }
 
+    if let SourceKind::GooglePageSpeed {
+        ref mut site,
+        ref mut api_key,
+        ref mut url_mode,
+        ref mut strategies,
+        ..
+    } = &mut kind
+    {
+        if site.is_none() {
+            *site = prompt("Site URL to sample (e.g. https://example.com)");
+        }
+        if api_key.is_none() {
+            *api_key = Some("${PAGESPEED_API_KEY}".to_string());
+        }
+        if url_mode.is_none() {
+            *url_mode = Some("tld_sample".to_string());
+        }
+        if strategies.is_none() {
+            *strategies = Some(vec!["mobile".into(), "desktop".into()]);
+        }
+    }
+
     if let SourceKind::AppleSearchAds {
         ref mut org_id,
         ref mut client_id,
@@ -4250,6 +4319,35 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
             url_inspection_enabled,
             url_list,
         },
+        SourceKind::GooglePageSpeed {
+            site,
+            api_key,
+            url_mode,
+            url_list,
+            max_urls,
+            strategies,
+            categories,
+            locale,
+            max_requests_per_run,
+            requests_per_minute,
+            respect_robots,
+            top_audits_per_page,
+            max_concurrent_requests,
+        } => SourceConfig::GooglePageSpeed {
+            site,
+            api_key,
+            url_mode,
+            url_list,
+            max_urls,
+            strategies,
+            categories,
+            locale,
+            max_requests_per_run,
+            requests_per_minute,
+            respect_robots,
+            top_audits_per_page,
+            max_concurrent_requests,
+        },
         SourceKind::AppleSearchAds {
             org_id,
             client_id,
@@ -4382,6 +4480,7 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         SourceConfig::Websocket { .. } => "websocket",
         SourceConfig::GoogleAnalytics { .. } => "google_analytics",
         SourceConfig::GoogleSearchConsole { .. } => "google_search_console",
+        SourceConfig::GooglePageSpeed { .. } => "google_pagespeed",
         SourceConfig::AppleSearchAds { .. } => "apple_search_ads",
         SourceConfig::MetaInstagramAds { .. } => "meta_instagram_ads",
         SourceConfig::HttpClient { .. } => "http_client",
@@ -4707,6 +4806,12 @@ fn cmd_doctor(explicit_config: &Option<PathBuf>, output: &str) {
 
     if !is_json_output(output) && cfg_raw.contains("postgres") {
         check_postgres_env(&mut ok);
+    }
+
+    if !is_json_output(output) && cfg_raw.contains("googlepagespeed") {
+        check_pagespeed_env(&mut checks, &mut ok);
+    } else if !is_json_output(output) && cfg_raw.contains("google_pagespeed") {
+        check_pagespeed_env(&mut checks, &mut ok);
     }
 
     if is_json_output(output) {
@@ -5098,6 +5203,27 @@ fn check_postgres_env(ok: &mut bool) {
         check_pass("POSTGRES_PASSWORD is set");
     } else {
         check_fail("POSTGRES_PASSWORD is not set");
+        *ok = false;
+    }
+}
+
+fn check_pagespeed_env(checks: &mut Vec<DoctorCheck>, ok: &mut bool) {
+    if env_set("PAGESPEED_API_KEY") {
+        emit_doctor_check(
+            "text",
+            checks,
+            true,
+            "PAGESPEED_API_KEY is set",
+            None,
+        );
+    } else {
+        emit_doctor_check(
+            "text",
+            checks,
+            false,
+            "PAGESPEED_API_KEY not set — required for Google PageSpeed Insights API calls",
+            Some("Create a key in Google Cloud Console and export PAGESPEED_API_KEY"),
+        );
         *ok = false;
     }
 }
