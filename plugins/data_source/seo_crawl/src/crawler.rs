@@ -1,154 +1,121 @@
 use std::collections::{HashSet, VecDeque};
 
-use url::Url;
+use crate::fetch::{resolve_href, HttpFetcher};
+use crate::html::parse_html_page;
+use crate::origin::{normalize_site, SiteOrigin};
+use crate::robots::{parse_robots_txt, path_allowed};
 
-use crate::origin::{normalize_url_for_crawl, SiteOrigin};
-use crate::robots::{path_allowed, ParsedRobots};
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum UrlSource {
-    Tld,
-    Sitemap,
-    InternalLink,
-}
-
-#[derive(Clone, Debug)]
-pub struct QueuedUrl {
+pub struct CrawlPageResult {
     pub url: String,
-    pub depth: u32,
-    pub source: UrlSource,
-    pub parent_url: Option<String>,
+    pub parsed: crate::html::ParsedPage,
+    pub status: u16,
 }
 
-pub struct CrawlQueue {
-    queue: VecDeque<QueuedUrl>,
-    seen: HashSet<String>,
-    max_urls: usize,
+pub async fn crawl_site(
+    origin: &SiteOrigin,
+    fetcher: &HttpFetcher,
+    user_agent: &str,
+    max_urls: u32,
     max_depth: u32,
-}
+    respect_robots: bool,
+) -> Result<Vec<CrawlPageResult>, std::io::Error> {
+    let cap = max_urls.max(1) as usize;
+    let depth_cap = max_depth;
+    let robots_url = format!("{}/robots.txt", origin.origin);
+    let robots_body = fetcher.get(&robots_url, origin).await.ok().map(|r| r.body);
+    let parsed_robots = robots_body
+        .as_deref()
+        .map(parse_robots_txt);
 
-impl CrawlQueue {
-    pub fn new(max_urls: usize, max_depth: u32) -> Self {
-        Self {
-            queue: VecDeque::new(),
-            seen: HashSet::new(),
-            max_urls: max_urls.max(1),
-            max_depth,
-        }
-    }
+    let mut queue: VecDeque<(String, u32)> = VecDeque::new();
+    let mut seen = HashSet::new();
+    let home = format!("{}/", origin.origin.trim_end_matches('/'));
+    queue.push_back((home.clone(), 0));
+    seen.insert(home);
 
-    pub fn seed(&mut self, url: impl Into<String>, source: UrlSource) {
-        self.enqueue(url.into(), 0, source, None);
-    }
-
-    pub fn enqueue(
-        &mut self,
-        url: String,
-        depth: u32,
-        source: UrlSource,
-        parent: Option<String>,
-    ) {
-        if depth > self.max_depth || self.seen.len() >= self.max_urls {
-            return;
-        }
-        if !self.seen.insert(url.clone()) {
-            return;
-        }
-        self.queue.push_back(QueuedUrl {
-            url,
-            depth,
-            source,
-            parent_url: parent,
-        });
-    }
-
-    pub fn pop(&mut self) -> Option<QueuedUrl> {
-        self.queue.pop_front()
-    }
-
-    pub fn discovered_count(&self) -> usize {
-        self.seen.len()
-    }
-
-    pub fn enqueue_internal_links(
-        &mut self,
-        links: &[String],
-        depth: u32,
-        parent: &str,
-        robots: Option<&ParsedRobots>,
-        respect_robots: bool,
-        user_agent: &str,
-    ) {
-        for link in links {
-            if self.seen.len() >= self.max_urls {
-                break;
+    if let Some(rules) = parsed_robots.as_ref() {
+        for sm in &rules.sitemap_urls {
+            if let Some(url) = crate::origin::normalize_url_for_crawl(sm, origin) {
+                if seen.insert(url.clone()) {
+                    queue.push_back((url, 0));
+                }
             }
-            if respect_robots {
-                if let Some(parsed) = robots {
-                    let path = Url::parse(link)
-                        .ok()
-                        .map(|u| u.path().to_string())
-                        .unwrap_or_else(|| "/".into());
-                    if !path_allowed(&path, parsed, user_agent) {
-                        continue;
+        }
+    }
+    for path in ["/sitemap.xml", "/sitemap_index.xml"] {
+        let sm_url = format!("{}{}", origin.origin, path);
+        if let Ok(resp) = fetcher.get(&sm_url, origin).await {
+            if let Ok(entries) = crate::sitemap::parse_sitemap_xml(&resp.body) {
+                for entry in entries {
+                    if let Some(url) = crate::origin::normalize_url_for_crawl(&entry.loc, origin) {
+                        if seen.insert(url.clone()) {
+                            queue.push_back((url, 0));
+                        }
                     }
                 }
             }
-            self.enqueue(link.clone(), depth + 1, UrlSource::InternalLink, Some(parent.to_string()));
         }
     }
+
+    let mut results = Vec::new();
+    while let Some((url, depth)) = queue.pop_front() {
+        if results.len() >= cap {
+            break;
+        }
+        if depth > depth_cap {
+            continue;
+        }
+        let path = url::Url::parse(&url)
+            .ok()
+            .map(|u| u.path().to_string())
+            .unwrap_or_else(|| "/".into());
+        if respect_robots {
+            if let Some(rules) = parsed_robots.as_ref() {
+                if !path_allowed(&path, rules, user_agent) {
+                    continue;
+                }
+            }
+        }
+        let response = fetcher.get(&url, origin).await?;
+        if response.status >= 400 {
+            continue;
+        }
+        let parsed = parse_html_page(&url, &response, origin);
+        results.push(CrawlPageResult {
+            url: url.clone(),
+            parsed,
+            status: response.status,
+        });
+        if depth < depth_cap {
+            let page = results.last().unwrap();
+            for link in &page.parsed.links {
+                if seen.insert(link.target_url.clone()) {
+                    queue.push_back((link.target_url.clone(), depth + 1));
+                }
+            }
+        }
+    }
+    Ok(results)
 }
 
-pub fn default_sitemap_probe_paths() -> Vec<String> {
-    vec![
-        "/sitemap.xml".into(),
-        "/sitemap_index.xml".into(),
-        "/sitemap-index.xml".into(),
-    ]
-}
-
-pub fn probe_sitemap_urls(origin: &SiteOrigin, paths: &[String]) -> Vec<String> {
-    paths
-        .iter()
-        .map(|p| {
-            let path = if p.starts_with('/') {
-                p.clone()
-            } else {
-                format!("/{p}")
-            };
-            format!("{}{}", origin.origin, path)
-        })
-        .collect()
-}
-
-pub fn filter_site_urls(urls: impl IntoIterator<Item = String>, origin: &SiteOrigin) -> Vec<String> {
-    urls.into_iter()
-        .filter_map(|u| normalize_url_for_crawl(&u, origin))
-        .collect()
+pub fn seed_origin(site: &str) -> Result<SiteOrigin, std::io::Error> {
+    normalize_site(site)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::origin::normalize_site;
 
-    #[test]
-    fn queue_respects_max_urls() {
-        let origin = normalize_site("https://example.com").unwrap();
-        let mut q = CrawlQueue::new(2, 5);
-        q.seed(format!("{}/", origin.origin), UrlSource::Tld);
-        q.enqueue(
-            format!("{}/a", origin.origin),
-            1,
-            UrlSource::InternalLink,
-            None,
-        );
-        q.enqueue(
-            format!("{}/b", origin.origin),
-            1,
-            UrlSource::InternalLink,
-            None,
-        );
-        assert_eq!(q.discovered_count(), 2);
+    #[tokio::test]
+    async fn fixture_crawl_returns_at_least_homepage() {
+        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
+        std::env::set_var("SKIPPR_SEO_CRAWL_FIXTURE_DIR", dir);
+        let origin = seed_origin("https://example.com").unwrap();
+        let fetcher = HttpFetcher::new("SkipprSeoCrawl/1.0").with_fixture_dir(dir);
+        let pages = crawl_site(&origin, &fetcher, "SkipprSeoCrawl/1.0", 5, 1, true)
+            .await
+            .unwrap();
+        assert!(!pages.is_empty());
+        std::env::remove_var("SKIPPR_SEO_CRAWL_FIXTURE_DIR");
     }
 }

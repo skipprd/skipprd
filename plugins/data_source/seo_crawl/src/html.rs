@@ -1,306 +1,386 @@
 use std::collections::HashMap;
 
+use regex::Regex;
 use scraper::{Html, Selector};
-use serde_json::{json, Value};
-use url::Url;
+use sha2::{Digest, Sha256};
 
-use crate::fetch::{resolve_href, FetchResponse};
-use crate::origin::SiteOrigin;
+use crate::checkpoint::PageScores;
 
-#[derive(Clone, Debug)]
-pub struct ExtractedLink {
+#[derive(Debug, Clone)]
+pub struct ContentBlock {
+    pub block_id: String,
+    pub block_type: String,
+    pub heading_path: Vec<String>,
+    pub text: String,
+    pub text_hash: String,
+    pub char_count: usize,
+    pub word_count: usize,
+    pub ordinal: u32,
+    pub has_list: bool,
+    pub has_table: bool,
+    pub has_citation: bool,
+    pub outbound_link_count: u32,
+}
+
+#[derive(Debug, Clone)]
+pub struct ParsedPage {
+    pub canonical_url: String,
+    pub title: Option<String>,
+    pub meta_description: Option<String>,
+    pub h1: Option<String>,
+    pub head: serde_json::Value,
+    pub http_headers: serde_json::Value,
+    pub content_hash: String,
+    pub blocks: Vec<ContentBlock>,
+    pub internal_links: Vec<LinkEdge>,
+    pub issues: Vec<IssueRow>,
+    pub technical_score: f64,
+}
+
+#[derive(Debug, Clone)]
+pub struct LinkEdge {
     pub target_url: String,
     pub anchor_text: String,
     pub rel: Vec<String>,
     pub is_nofollow: bool,
-    pub is_ugc: bool,
-    pub is_sponsored: bool,
+    pub link_kind: String,
 }
 
-#[derive(Clone, Debug)]
-pub struct ParsedPage {
-    pub canonical_url: String,
-    pub h1: Option<String>,
-    pub head: Value,
-    pub links: Vec<ExtractedLink>,
-    pub main_text: String,
-    pub content_hash: String,
-    pub structured_data_count: usize,
-    pub issues: Vec<PageIssue>,
-}
-
-#[derive(Clone, Debug)]
-pub struct PageIssue {
-    pub code: String,
-    pub severity: String,
+#[derive(Debug, Clone)]
+pub struct IssueRow {
+    pub issue_code: String,
     pub message: String,
-    pub evidence: Value,
+    pub severity: String,
+}
+
+pub fn content_hash(text: &str) -> String {
+    let normalized: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let digest = Sha256::digest(normalized.as_bytes());
+    format!("sha256:{}", hex::encode(digest))
+}
+
+pub fn block_id_for(page_url: &str, heading_path: &[String], ordinal: u32) -> String {
+    let seed = format!("{page_url}|{}|{ordinal}", heading_path.join(" > "));
+    content_hash(&seed)
 }
 
 pub fn parse_html_page(
     page_url: &str,
-    response: &FetchResponse,
-    origin: &SiteOrigin,
+    final_url: &str,
+    html: &str,
+    headers: &[(String, String)],
+    origin: &str,
 ) -> ParsedPage {
-    let document = Html::parse_document(&response.body);
-    let title = meta_content(&document, "title").or_else(|| {
-        document
-            .select(&Selector::parse("title").unwrap())
-            .next()
-            .map(|el| el.text().collect::<String>().trim().to_string())
-    });
-    let description = meta_name(&document, "description");
-    let robots_meta = meta_name(&document, "robots");
-    let canonical = link_rel(&document, "canonical");
-    let html_lang = document
-        .select(&Selector::parse("html").unwrap())
-        .next()
-        .and_then(|el| el.value().attr("lang").map(str::to_string));
-    let html_dir = document
-        .select(&Selector::parse("html").unwrap())
-        .next()
-        .and_then(|el| el.value().attr("dir").map(str::to_string));
-
-    let mut og = serde_json::Map::new();
-    let mut twitter = serde_json::Map::new();
-    for meta in document.select(&Selector::parse("meta[property^=og:], meta[name^=twitter:]").unwrap())
-    {
-        if let Some(prop) = meta.value().attr("property").or(meta.value().attr("name")) {
-            if let Some(content) = meta.value().attr("content") {
-                if prop.starts_with("og:") {
-                    og.insert(prop.to_string(), json!(content));
-                } else if prop.starts_with("twitter:") {
-                    twitter.insert(prop.to_string(), json!(content));
-                }
-            }
-        }
-    }
-
-    let h1 = document
-        .select(&Selector::parse("h1").unwrap())
-        .next()
-        .map(|el| el.text().collect::<String>().trim().to_string());
-
-    let hreflang: Vec<Value> = document
-        .select(&Selector::parse("link[rel=alternate][hreflang]").unwrap())
-        .filter_map(|el| {
-            let href = el.value().attr("href")?;
-            let lang = el.value().attr("hreflang")?;
-            Some(json!({ "hreflang": lang, "href": href }))
-        })
-        .collect();
-
-    let head = json!({
-        "title": title,
-        "title_length": title.as_ref().map(|t| t.chars().count()),
-        "meta_description": description,
-        "meta_description_length": description.as_ref().map(|d| d.chars().count()),
-        "meta_robots": robots_meta,
-        "canonical": canonical,
-        "html_lang": html_lang,
-        "html_dir": html_dir,
-        "viewport_present": meta_name(&document, "viewport").is_some(),
-        "open_graph": og,
-        "twitter": twitter,
-        "hreflang": hreflang,
-        "http": response_headers_summary(response),
-    });
-
+    let document = Html::parse_document(html);
+    let title = select_text(&document, "title");
+    let meta_description = meta_content(&document, "description");
+    let h1 = select_text(&document, "h1");
+    let head = extract_head_json(&document, final_url, &title, &meta_description, &h1);
+    let http_headers = serde_json::json!(headers
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect::<HashMap<_, _>>());
     let main_text = extract_main_text(&document);
-    let content_hash = content_sha256(&main_text);
-
-    let links = extract_links(&document, page_url, origin);
-    let structured_data_count = document
-        .select(&Selector::parse("script[type='application/ld+json']").unwrap())
-        .count();
-
+    let hash = content_hash(&main_text);
+    let blocks = extract_content_blocks(page_url, &document);
+    let internal_links = extract_links(&document, page_url, origin);
     let mut issues = Vec::new();
-    if title.as_ref().is_none_or(|t| t.is_empty()) {
-        issues.push(PageIssue {
-            code: "missing_title".into(),
+    if title.as_ref().map(|t| t.is_empty()).unwrap_or(true) {
+        issues.push(IssueRow {
+            issue_code: "MISSING_TITLE".into(),
+            message: "Page is missing a title element".into(),
             severity: "high".into(),
-            message: "Page is missing a <title>".into(),
-            evidence: json!({ "url": page_url }),
         });
     }
-    if description.as_ref().is_none_or(|d| d.is_empty()) {
-        issues.push(PageIssue {
-            code: "missing_meta_description".into(),
-            severity: "medium".into(),
+    if meta_description.as_ref().map(|d| d.is_empty()).unwrap_or(true) {
+        issues.push(IssueRow {
+            issue_code: "MISSING_META_DESCRIPTION".into(),
             message: "Page is missing meta description".into(),
-            evidence: json!({ "url": page_url }),
+            severity: "medium".into(),
         });
     }
-    if let (Some(canon), final_url) = (&canonical, &response.final_url) {
-        if canon != final_url {
-            issues.push(PageIssue {
-                code: "canonical_mismatch_final_url".into(),
-                severity: "medium".into(),
-                message: "Canonical href does not match final URL after redirects".into(),
-                evidence: json!({ "canonical": canon, "final_url": final_url }),
-            });
-        }
+    if h1.as_ref().map(|h| h.is_empty()).unwrap_or(true) {
+        issues.push(IssueRow {
+            issue_code: "MISSING_H1".into(),
+            message: "Page is missing H1".into(),
+            severity: "medium".into(),
+        });
     }
-
-    let canonical_url = canonical
-        .clone()
-        .filter(|c| !c.is_empty())
-        .unwrap_or_else(|| response.final_url.clone());
-
+    let technical_score = compute_technical_score(&issues);
     ParsedPage {
-        canonical_url,
+        canonical_url: final_url.to_string(),
+        title,
+        meta_description,
         h1,
         head,
-        links,
-        main_text,
-        content_hash,
-        structured_data_count,
+        http_headers,
+        content_hash: hash,
+        blocks,
+        internal_links,
         issues,
+        technical_score,
     }
 }
 
-fn response_headers_summary(response: &FetchResponse) -> Value {
-    json!({
-        "content_type": response.headers.get("content-type"),
-        "cache_control": response.headers.get("cache-control"),
-        "etag": response.headers.get("etag"),
-        "last_modified": response.headers.get("last-modified"),
-        "x_robots_tag": response.headers.get("x-robots-tag"),
-        "strict_transport_security": response.headers.get("strict-transport-security"),
-        "redirect_chain": response.redirect_chain,
-        "ttfb_ms": response.ttfb_ms,
-        "status": response.status,
-    })
+fn compute_technical_score(issues: &[IssueRow]) -> f64 {
+    let penalty: f64 = issues
+        .iter()
+        .map(|i| match i.severity.as_str() {
+            "high" => 0.25,
+            "medium" => 0.1,
+            _ => 0.05,
+        })
+        .sum();
+    (1.0 - penalty).clamp(0.0, 1.0)
 }
 
-fn meta_name(document: &Html, name: &str) -> Option<String> {
-    let selector = Selector::parse(&format!("meta[name='{name}'], meta[name=\"{name}\"]")).ok()?;
+fn select_text(document: &Html, selector: &str) -> Option<String> {
+    let sel = Selector::parse(selector).ok()?;
     document
-        .select(&selector)
+        .select(&sel)
         .next()
-        .and_then(|el| el.value().attr("content").map(str::to_string))
+        .map(|el| el.text().collect::<String>().trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
-fn meta_content(document: &Html, _name: &str) -> Option<String> {
-    None
-}
-
-fn link_rel(document: &Html, rel: &str) -> Option<String> {
+fn meta_content(document: &Html, name: &str) -> Option<String> {
+    let sel = Selector::parse(&format!("meta[name=\"{name}\"]")).ok()?;
     document
-        .select(&Selector::parse(&format!("link[rel='{rel}'], link[rel=\"{rel}\"]")).unwrap())
+        .select(&sel)
         .next()
-        .and_then(|el| el.value().attr("href").map(str::to_string))
+        .and_then(|el| el.value().attr("content"))
+        .map(|c| c.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn extract_head_json(
+    document: &Html,
+    final_url: &str,
+    title: &Option<String>,
+    meta_description: &Option<String>,
+    h1: &Option<String>,
+) -> serde_json::Value {
+    let mut head = serde_json::Map::new();
+    if let Some(t) = title {
+        head.insert("title".into(), serde_json::json!(t));
+    }
+    if let Some(d) = meta_description {
+        head.insert("meta_description".into(), serde_json::json!(d));
+    }
+    if let Some(h) = h1 {
+        head.insert("h1".into(), serde_json::json!(h));
+    }
+    if let Some(canonical) = select_attr(document, "link[rel=\"canonical\"]", "href") {
+        head.insert("canonical".into(), serde_json::json!(canonical));
+        if canonical != final_url {
+            head.insert("canonical_mismatch".into(), serde_json::json!(true));
+        }
+    }
+    for prop in ["og:title", "og:description", "og:url", "og:image", "twitter:card"] {
+        if let Some(val) = meta_property(document, prop) {
+            head.insert(prop.replace(':', "_"), serde_json::json!(val));
+        }
+    }
+    if let Some(lang) = select_attr(document, "html", "lang") {
+        head.insert("html_lang".into(), serde_json::json!(lang));
+    }
+    serde_json::Value::Object(head)
+}
+
+fn select_attr(document: &Html, selector: &str, attr: &str) -> Option<String> {
+    let sel = Selector::parse(selector).ok()?;
+    document
+        .select(&sel)
+        .next()
+        .and_then(|el| el.value().attr(attr))
+        .map(str::to_string)
+}
+
+fn meta_property(document: &Html, property: &str) -> Option<String> {
+    let sel = Selector::parse(&format!("meta[property=\"{property}\"]")).ok()?;
+    document
+        .select(&sel)
+        .next()
+        .and_then(|el| el.value().attr("content"))
+        .map(str::to_string)
 }
 
 fn extract_main_text(document: &Html) -> String {
-    let body_sel = Selector::parse("body").unwrap();
-    let mut parts = Vec::new();
-    if let Some(body) = document.select(&body_sel).next() {
-        for sel in ["main", "article", "[role=main]"] {
-            if let Ok(s) = Selector::parse(sel) {
-                for el in body.select(&s) {
-                    let text = el.text().collect::<Vec<_>>().join(" ");
-                    let normalized = normalize_whitespace(&text);
-                    if !normalized.is_empty() {
-                        parts.push(normalized);
-                    }
-                }
-            }
-        }
-    }
-    if parts.is_empty() {
-        let text = document.root_element().text().collect::<Vec<_>>().join(" ");
-        normalize_whitespace(&text)
-    } else {
-        parts.join("\n\n")
-    }
+    let body_sel = Selector::parse("body").ok();
+    let Some(body_sel) = body_sel else {
+        return String::new();
+    };
+    document
+        .select(&body_sel)
+        .next()
+        .map(|el| el.text().collect::<String>())
+        .unwrap_or_default()
 }
 
-pub fn normalize_whitespace(text: &str) -> String {
-    let mut out = String::new();
-    let mut prev_space = false;
-    for ch in text.chars() {
-        if ch.is_whitespace() {
-            if !prev_space {
-                out.push(' ');
-                prev_space = true;
-            }
+fn extract_content_blocks(page_url: &str, document: &Html) -> Vec<ContentBlock> {
+    let heading_sel = Selector::parse("h2, h3, h4, h5, h6").ok();
+    let Some(heading_sel) = heading_sel else {
+        return Vec::new();
+    };
+    let mut blocks = Vec::new();
+    let mut ordinal = 0u32;
+    for heading in document.select(&heading_sel) {
+        let text = heading.text().collect::<String>().trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        let block_type = if text.contains('?') || question_re().is_match(&text.to_lowercase()) {
+            "direct_answer"
         } else {
-            out.push(ch);
-            prev_space = false;
-        }
+            "heading_section"
+        };
+        let heading_path = vec![text.clone()];
+        let text_hash = content_hash(&text);
+        let block_id = block_id_for(page_url, &heading_path, ordinal);
+        blocks.push(ContentBlock {
+            block_id,
+            block_type: block_type.into(),
+            heading_path,
+            text: text.clone(),
+            text_hash,
+            char_count: text.chars().count(),
+            word_count: text.split_whitespace().count(),
+            ordinal,
+            has_list: false,
+            has_table: false,
+            has_citation: false,
+            outbound_link_count: 0,
+        });
+        ordinal += 1;
     }
-    out.trim().to_string()
+    blocks
 }
 
-pub fn content_sha256(text: &str) -> String {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(text.as_bytes());
-    format!("sha256:{:x}", digest)
+fn question_re() -> Regex {
+    Regex::new(r"^(how|what|why|when|where|who)\b").expect("regex")
 }
 
-fn extract_links(document: &Html, page_url: &str, origin: &SiteOrigin) -> Vec<ExtractedLink> {
+fn extract_links(document: &Html, source_url: &str, origin: &str) -> Vec<LinkEdge> {
+    let sel = Selector::parse("a[href]").ok();
+    let Some(sel) = sel else {
+        return Vec::new();
+    };
     let mut links = Vec::new();
-    let a_sel = Selector::parse("a[href]").unwrap();
-    for el in document.select(&a_sel) {
-        let Some(href) = el.value().attr("href") else {
-            continue;
-        };
-        if href.starts_with('#') || href.starts_with("mailto:") || href.starts_with("tel:") {
+    for anchor in document.select(&sel) {
+        let href = anchor.value().attr("href").unwrap_or_default();
+        if href.is_empty() || href.starts_with('#') || href.starts_with("mailto:") {
             continue;
         }
-        let Some(target) = resolve_href(href, page_url, origin) else {
+        let target = if href.starts_with("http") {
+            href.to_string()
+        } else if href.starts_with('/') {
+            format!("{}{}", origin.trim_end_matches('/'), href)
+        } else {
             continue;
         };
-        let rel_attr = el.value().attr("rel").unwrap_or_default();
-        let rel: Vec<String> = rel_attr
+        let rel: Vec<String> = anchor
+            .value()
+            .attr("rel")
+            .unwrap_or_default()
             .split_whitespace()
-            .map(|s| s.to_ascii_lowercase())
+            .map(str::to_string)
             .collect();
-        let anchor_text = el.text().collect::<String>().trim().to_string();
-        links.push(ExtractedLink {
+        let is_nofollow = rel.iter().any(|r| r.eq_ignore_ascii_case("nofollow"));
+        let link_kind = if crate::crawl::same_site(origin, &target) {
+            "internal"
+        } else {
+            "external"
+        };
+        let anchor_text = anchor.text().collect::<String>().trim().to_string();
+        links.push(LinkEdge {
             target_url: target,
             anchor_text,
-            rel: rel.clone(),
-            is_nofollow: rel.iter().any(|r| r == "nofollow"),
-            is_ugc: rel.iter().any(|r| r == "ugc"),
-            is_sponsored: rel.iter().any(|r| r == "sponsored"),
+            rel,
+            is_nofollow,
+            link_kind: link_kind.into(),
         });
+        let _ = source_url;
     }
     links
 }
 
-pub fn technical_score(response: &FetchResponse, page: &ParsedPage) -> f64 {
-    let mut score = 1.0f64;
-    if response.status >= 400 {
-        score -= 0.5;
+pub fn rollup_page_scores(block_scores: &[serde_json::Value]) -> PageScores {
+    if block_scores.is_empty() {
+        return PageScores::default();
     }
-    if page.h1.is_none() {
-        score -= 0.1;
+    let mut extractability = 0.0;
+    let mut helpfulness = 0.0;
+    let mut trust = 0.0;
+    let mut ai = 0.0;
+    let n = block_scores.len() as f64;
+    for row in block_scores {
+        extractability += row
+            .get("extractability_score")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        helpfulness += row
+            .get("helpfulness_score")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        trust += row
+            .get("trust_score")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        ai += row
+            .get("answer_clarity_score")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
     }
-    if page.head.get("title").and_then(|v| v.as_str()).is_none() {
-        score -= 0.15;
+    PageScores {
+        technical_score: 0.0,
+        content_quality_score: helpfulness / n,
+        eeat_proxy_score: trust / n,
+        ai_readiness_score: ai / n,
     }
-    score.clamp(0.0, 1.0)
+}
+
+pub fn mock_block_analysis(block: &ContentBlock) -> serde_json::Value {
+    serde_json::json!({
+        "block_id": block.block_id,
+        "extractability_score": 0.75,
+        "answer_clarity_score": 0.7,
+        "citation_worthiness_score": 0.6,
+        "helpfulness_score": 0.72,
+        "trust_score": 0.68,
+        "is_self_contained": block.word_count >= 20,
+        "suggested_query_intents": [],
+        "missing_for_ai_citation": [],
+        "evidence_quotes": [block.text.chars().take(80).collect::<String>()],
+        "confidence": 0.8
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::fetch::HttpFetcher;
-    use crate::origin::normalize_site;
 
-    #[tokio::test]
-    async fn parses_fixture_head_fields() {
-        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
-        let origin = normalize_site("https://example.com").unwrap();
-        let fetcher = HttpFetcher::new("test").with_fixture_dir(dir);
-        let resp = fetcher
-            .get("https://example.com/", &origin)
-            .await
-            .unwrap();
-        let page = parse_html_page("https://example.com/", &resp, &origin);
-        assert!(page.head.get("title").is_some());
-        assert!(!page.content_hash.is_empty());
+    #[test]
+    fn content_hash_is_stable() {
+        assert_eq!(content_hash("hello world"), content_hash("hello   world"));
+    }
+
+    #[test]
+    fn parse_html_extracts_title_and_blocks() {
+        let html = r#"<!doctype html><html lang="en"><head>
+            <title>Example</title>
+            <meta name="description" content="Desc">
+            <link rel="canonical" href="https://example.com/">
+        </head><body><h1>Home</h1><h2>What is SEO?</h2><p>Answer here.</p>
+        <a href="/pricing">Pricing</a></body></html>"#;
+        let parsed = parse_html_page(
+            "https://example.com/",
+            "https://example.com/",
+            html,
+            &[],
+            "https://example.com/",
+        );
+        assert_eq!(parsed.title.as_deref(), Some("Example"));
+        assert!(!parsed.blocks.is_empty());
+        assert!(!parsed.internal_links.is_empty());
     }
 }
