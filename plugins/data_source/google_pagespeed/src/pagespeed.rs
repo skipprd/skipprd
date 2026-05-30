@@ -72,23 +72,16 @@ struct RunAccumulator {
 
 pub struct DataSourceGooglePageSpeedPlugin {
     config: DataSourceGooglePageSpeedPluginConfig,
-    client: PageSpeedClient,
     site_normalized: String,
 }
 
 impl DataSourceGooglePageSpeedPlugin {
     pub fn new(config: DataSourceGooglePageSpeedPluginConfig) -> Result<Self, std::io::Error> {
         config.validate()?;
-        let api_key = config.resolve_api_key()?;
+        config.resolve_api_key()?;
         let site_normalized = crate::sampling::normalize_site(&config.site)?;
-        let client = PageSpeedClient::new(
-            api_key,
-            config.categories.clone(),
-            config.locale.clone(),
-        );
         Ok(Self {
             config,
-            client,
             site_normalized,
         })
     }
@@ -425,6 +418,11 @@ impl DataSource for DataSourceGooglePageSpeedPlugin {
         let mut acc = RunAccumulator::default();
         let mut last_request = Instant::now();
         let top_audits = self.config.top_audits_per_page;
+        let client = PageSpeedClient::new(
+            self.config.resolve_api_key()?,
+            categories,
+            self.config.locale.clone(),
+        );
 
         for (url, strategy) in pending {
             self.rate_limit_wait(&mut last_request).await;
