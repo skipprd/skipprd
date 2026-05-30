@@ -22,28 +22,6 @@ pub fn is_invalid_dimension_metric_error(err: &std::io::Error) -> bool {
             || msg.contains("not found"))
 }
 
-pub async fn run_report(
-    http: &RetryableHttpClient,
-    auth_header: &str,
-    property_id: &str,
-    date: NaiveDate,
-    dimensions: &[&str],
-    metrics: &[&str],
-    keep_empty_rows: bool,
-) -> Result<serde_json::Value, std::io::Error> {
-    run_report_range(
-        http,
-        auth_header,
-        property_id,
-        date,
-        date,
-        dimensions,
-        metrics,
-        keep_empty_rows,
-    )
-    .await
-}
-
 pub async fn run_report_range(
     http: &RetryableHttpClient,
     auth_header: &str,

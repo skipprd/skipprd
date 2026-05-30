@@ -6,7 +6,7 @@ use chrono::{Duration, NaiveDate, Utc};
 use serde::Deserialize;
 use serde_derive::Serialize;
 use skippr_plugin_shared_api_source::{
-    DateWindow, DateWindowPlanner, OAuth2RefreshTokenAuth, RetryConfig, RetryableHttpClient,
+    DateWindowPlanner, OAuth2RefreshTokenAuth, RetryConfig, RetryableHttpClient,
 };
 use tokio::time::{sleep, Duration as TokioDuration};
 use skippr_runtime_sdk::helpers::offsets::OffsetKey;
@@ -315,38 +315,40 @@ impl DataSourceGoogleAnalyticsPlugin {
         ))
     }
 
-    fn submit_rows_for_date(
+    /// One host ingest round-trip for all partition days in a chunk (critical when window_in_days > 1).
+    fn submit_rows_grouped(
         &self,
         ctx: &dyn SourceSyncContext,
         stream: &Ga4StreamDef,
-        date: NaiveDate,
-        rows: Vec<serde_json::Value>,
+        grouped: &HashMap<String, Vec<serde_json::Value>>,
     ) -> Result<(), std::io::Error> {
-        if rows.is_empty() {
-            return Ok(());
-        }
-        let payload = rows
-            .into_iter()
-            .map(|row| serde_json::to_string(&row))
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|e| std::io::Error::other(e.to_string()))?
-            .join("\n");
-        let bytes = payload.len();
-        let offset_key = OffsetKey::new(stream.namespace, date.format("%Y-%m-%d").to_string());
-        submit_payload_batches(
-            ctx,
-            vec![IngestBatch {
-                offset_key,
+        let property_id = normalize_property_id(&self.config.property_id);
+        let source_uri = format!("ga4://properties/{property_id}/reports");
+        let mut batches = Vec::with_capacity(grouped.len());
+        for (date_key, rows) in grouped {
+            if rows.is_empty() {
+                continue;
+            }
+            let payload = rows
+                .iter()
+                .map(|row| serde_json::to_string(row))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|e| std::io::Error::other(e.to_string()))?
+                .join("\n");
+            let bytes = payload.len();
+            batches.push(IngestBatch {
+                offset_key: OffsetKey::new(stream.namespace, date_key.clone()),
                 data: payload,
                 bytes,
-                source_uri: format!(
-                    "ga4://properties/{}/reports",
-                    normalize_property_id(&self.config.property_id)
-                ),
+                source_uri: source_uri.clone(),
                 namespace: Some(stream.namespace.to_string()),
                 cdc_rows: None,
-            }],
-        )?;
+            });
+        }
+        if batches.is_empty() {
+            return Ok(());
+        }
+        submit_payload_batches(ctx, batches)?;
         Ok(())
     }
 }
@@ -549,16 +551,29 @@ impl DataSource for DataSourceGoogleAnalyticsPlugin {
                     chunk_dates_list.push(cursor);
                     cursor += Duration::days(1);
                 }
+                info!(
+                    namespace = stream.namespace,
+                    chunk_start = %chunk_start,
+                    chunk_end = %chunk_end,
+                    day_count = chunk_dates_list.len(),
+                    request_interval_ms = self.config.request_interval_ms,
+                    "GA4 runReport: fetching date chunk"
+                );
                 match self.rows_for_range(stream, chunk_start, chunk_end).await {
                     Ok(rows) => {
+                        info!(
+                            namespace = stream.namespace,
+                            chunk_start = %chunk_start,
+                            chunk_end = %chunk_end,
+                            row_count = rows.len(),
+                            "GA4 runReport: chunk succeeded"
+                        );
                         let grouped = group_rows_by_date(rows);
-                        for date in chunk_dates_list {
-                            if !discover {
+                        self.submit_rows_grouped(ctx.as_ref(), stream, &grouped)?;
+                        if !discover {
+                            for date in chunk_dates_list {
                                 Self::store_last_completed(ctx.as_ref(), &checkpoint_key, date)?;
                             }
-                            let date_key = date.format("%Y-%m-%d").to_string();
-                            let rows_for_day = grouped.get(&date_key).cloned().unwrap_or_default();
-                            self.submit_rows_for_date(ctx.as_ref(), stream, date, rows_for_day)?;
                         }
                         if self.config.request_interval_ms > 0 {
                             sleep(TokioDuration::from_millis(self.config.request_interval_ms)).await;
