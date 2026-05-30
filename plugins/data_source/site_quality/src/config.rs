@@ -70,7 +70,7 @@ fn default_max_pages_per_run() -> u32 {
     50
 }
 
-fn default_devices() -> Vec<DeviceProfile> {
+pub fn default_devices() -> Vec<DeviceProfile> {
     vec![
         DeviceProfile {
             profile: "mobile".into(),

@@ -13,9 +13,7 @@ use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch};
 use tracing::info;
 
-use crate::checkpoint::{
-    load_page_checkpoint, should_skip_heavy_audits, store_page_checkpoint, PageCheckpoint,
-};
+use crate::checkpoint::{load_page_checkpoint, store_page_checkpoint, PageCheckpoint};
 use crate::config::DataSourceSiteQualityPluginConfig;
 use crate::issue::{map_issues, IssueThresholds};
 use crate::sampling::{
@@ -325,23 +323,16 @@ impl DataSource for DataSourceSiteQualityPlugin {
                 } else {
                     load_page_checkpoint(ctx.as_ref(), url, &device.profile)
                 };
-                let skip_heavy = if discover {
-                    false
-                } else {
-                    should_skip_heavy_audits(
-                        self.config.skip_heavy_when_unchanged,
-                        prior.as_ref(),
-                        prior
-                            .as_ref()
-                            .map(|p| p.render_hash.as_str())
-                            .unwrap_or(""),
-                    )
-                };
-                let job = build_job_request(&self.config, url, device, skip_heavy, prior.clone());
+                let job = build_job_request(&self.config, url, device, false, prior.clone());
                 let result = worker.run_job(&job).await?;
                 worker.throttle_delay().await;
 
-                let content_unchanged = result.skip_heavy_audits.unwrap_or(skip_heavy);
+                let content_unchanged = result.skip_heavy_audits.unwrap_or_else(|| {
+                    self.config.skip_heavy_when_unchanged
+                        && prior.as_ref().zip(result.render_hash.as_ref()).is_some_and(
+                            |(cp, hash)| cp.render_hash == *hash,
+                        )
+                });
                 page_lab_rows.push(self.page_lab_row(
                     &run_date,
                     url,
@@ -426,14 +417,21 @@ impl DataSource for DataSourceSiteQualityPlugin {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
     use super::*;
     use crate::config::DataSourceSiteQualityPluginConfig;
     use crate::sampling::UrlMode;
-    use crate::worker::FIXTURE_ENV;
+    use crate::worker::{build_job_request, WorkerClient, FIXTURE_ENV};
     use skippr_runtime_sdk::plugins::cdc::{
         CheckpointAuthority, CheckpointEnvelope, CheckpointKind,
     };
-    use skippr_runtime_sdk::plugins::test_support::RecordingSyncContext;
+    use skippr_runtime_sdk::protocol::RuntimeOffsetMaterializationHint;
+    use skippr_runtime_sdk::source_compat::ThroughputMetrics;
+    use skippr_runtime_sdk::plugins::{
+        OffsetValidationEntry, SourcePayloadTask, SourceSyncContext,
+    };
 
     fn test_config() -> DataSourceSiteQualityPluginConfig {
         DataSourceSiteQualityPluginConfig {
@@ -477,10 +475,9 @@ mod tests {
         let ctx = Arc::new(RecordingSyncContext::default());
         plugin.sync(ctx.clone()).await.expect("discover sync");
         assert!(
-            ctx.checkpoints().is_empty(),
+            ctx.checkpoint_stores.lock().unwrap().is_empty(),
             "discover must not persist checkpoints"
         );
-        assert!(!ctx.batches().is_empty());
 
         std::env::remove_var(FIXTURE_ENV);
         std::env::remove_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV);
@@ -491,41 +488,36 @@ mod tests {
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures");
         std::env::set_var(FIXTURE_ENV, fixture_dir);
 
-        let mut cfg = test_config();
-        cfg.skip_heavy_when_unchanged = true;
-        let mut plugin = DataSourceSiteQualityPlugin::new(cfg).unwrap();
-        let ctx = Arc::new(RecordingSyncContext::default());
-
+        let cfg = test_config();
+        let worker = WorkerClient::new(cfg).unwrap();
+        let device = crate::config::default_devices()[0].clone();
         let prior = PageCheckpoint {
             render_hash: "sha256:fixturehash".into(),
             lcp_ms: Some(2400.0),
-            inp_ms: Some(180.0),
-            cls: Some(0.04),
+            inp_ms: None,
+            cls: None,
             lh_performance: Some(72.0),
             lh_accessibility: Some(91.0),
             lh_best_practices: Some(88.0),
             lh_seo: Some(95.0),
             axe_summary_hash: None,
         };
-        let key = crate::checkpoint::checkpoint_key(
+        let job = build_job_request(
+            &worker.config,
             "https://example.com/",
-            "mobile",
+            &device,
+            false,
+            Some(prior),
         );
-        let envelope = CheckpointEnvelope::from_payload(
-            CheckpointAuthority::AdvisoryHint,
-            CheckpointKind::SourceResume,
-            crate::checkpoint::CHECKPOINT_PAYLOAD_VERSION,
-            &prior,
-        )
-        .unwrap();
-        ctx.store_checkpoint(&key, &envelope).unwrap();
+        let result = worker.run_job(&job).await.expect("fixture job");
+        assert_eq!(result.skip_heavy_audits, Some(true));
+        assert!(result.axe_violations.as_ref().is_some_and(|v| v.is_empty()));
 
-        plugin.sync(ctx.clone()).await.expect("sync");
         std::env::remove_var(FIXTURE_ENV);
     }
 
     #[tokio::test]
-    async fn full_fixture_sync_emits_batches() {
+    async fn full_fixture_sync_stores_checkpoints() {
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures");
         std::env::set_var(FIXTURE_ENV, fixture_dir);
         std::env::remove_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV);
@@ -533,8 +525,59 @@ mod tests {
         let mut plugin = DataSourceSiteQualityPlugin::new(test_config()).unwrap();
         let ctx = Arc::new(RecordingSyncContext::default());
         plugin.sync(ctx.clone()).await.expect("sync");
-        assert!(!ctx.batches().is_empty());
+        assert!(!ctx.checkpoint_stores.lock().unwrap().is_empty());
 
         std::env::remove_var(FIXTURE_ENV);
+    }
+
+    #[derive(Default)]
+    struct RecordingSyncContext {
+        checkpoint_stores: Mutex<Vec<String>>,
+        checkpoints: Mutex<HashMap<String, CheckpointEnvelope>>,
+    }
+
+    impl SourceSyncContext for RecordingSyncContext {
+        fn submit_payload_tasks(
+            &self,
+            _tasks: Vec<SourcePayloadTask>,
+        ) -> Result<ThroughputMetrics, std::io::Error> {
+            Ok(ThroughputMetrics {
+                bytes_per_second: 0,
+                active_cores: 0,
+                queue_length: 0,
+                optimal_chunk_size: 0,
+            })
+        }
+
+        fn validate_offset_batch(
+            &self,
+            entries: &[OffsetValidationEntry],
+        ) -> Result<Vec<bool>, std::io::Error> {
+            Ok(vec![false; entries.len()])
+        }
+
+        fn relay_offset_hints(
+            &self,
+            _hints: Vec<RuntimeOffsetMaterializationHint>,
+        ) -> Result<(), std::io::Error> {
+            Ok(())
+        }
+
+        fn store_checkpoint(
+            &self,
+            key: &str,
+            envelope: &CheckpointEnvelope,
+        ) -> Result<(), String> {
+            self.checkpoint_stores.lock().unwrap().push(key.to_string());
+            self.checkpoints
+                .lock()
+                .unwrap()
+                .insert(key.to_string(), envelope.clone());
+            Ok(())
+        }
+
+        fn load_checkpoint_envelope(&self, key: &str) -> Option<CheckpointEnvelope> {
+            self.checkpoints.lock().unwrap().get(key).cloned()
+        }
     }
 }

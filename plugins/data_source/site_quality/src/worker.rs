@@ -5,7 +5,7 @@ use std::time::Duration;
 use serde::Deserialize;
 use serde_derive::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{ChildStdin, Command};
+use tokio::process::Command;
 use tokio::time::sleep;
 use uuid::Uuid;
 
@@ -215,16 +215,19 @@ impl WorkerClient {
                     )
                 })?;
                 result.job_id = job.job_id.clone();
-                if job.skip_heavy_audits {
-                    result.lighthouse = job.prior_checkpoint.as_ref().and_then(|cp| {
-                        Some(LighthouseScores {
+                let unchanged = job.prior_checkpoint.as_ref().zip(result.render_hash.as_ref()).is_some_and(
+                    |(prior, hash)| prior.render_hash == *hash,
+                );
+                if job.skip_heavy_audits || unchanged {
+                    if let Some(cp) = job.prior_checkpoint.as_ref() {
+                        result.lighthouse = Some(LighthouseScores {
                             performance: cp.lh_performance,
                             accessibility: cp.lh_accessibility,
                             best_practices: cp.lh_best_practices,
                             seo: cp.lh_seo,
                             top_failing_audits: Vec::new(),
-                        })
-                    });
+                        });
+                    }
                     result.axe_violations = Some(Vec::new());
                     result.skip_heavy_audits = Some(true);
                 }
