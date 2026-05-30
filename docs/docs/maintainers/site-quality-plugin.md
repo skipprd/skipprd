@@ -1,0 +1,92 @@
+# Site Quality source plugin
+
+Runtime source plugin: `plugins/data_source/site_quality/` (`SiteQuality` / `site_quality`).
+
+Playwright lab sessions per URL × device profile (mobile + desktop), with optional axe-core and Lighthouse (CDP). Bronze namespaces use `replace_partition` on `run_date`.
+
+## Bronze catalog
+
+| Namespace | Grain |
+| --- | --- |
+| `site_quality.site_run_daily` | 1 / run |
+| `site_quality.page_lab_daily` | URL × device / day |
+| `site_quality.a11y_issue` | axe violation / day |
+| `site_quality.check_daily` | Per-check outcomes (pass / warn / fail) / day |
+| `site_quality.lighthouse_audit` | failing audit / day |
+
+## Discover sampling (automatic)
+
+When `SKIPPR_RUNTIME_EXECUTION_MODE=discover`:
+
+- Homepage only, **mobile** device profile
+- No checkpoint load/advance
+- Namespace contracts still reflect full configured options (lighthouse/axe flags)
+
+## Configuration (engine `skippr.yml`)
+
+```yaml
+data_sources:
+  example_site:
+    SiteQuality:
+      site: "https://example.com"
+      url_mode: tld_sample
+      max_pages_per_run: 50
+      lighthouse_enabled: true
+      axe_enabled: true
+      pages_per_minute: 6
+```
+
+`url_mode: url_list` requires `url_list: [...]`.
+
+## Worker sidecar
+
+Bundled Node worker: `plugins/data_source/site_quality/worker/site-quality-worker.mjs`
+
+- JSON-lines job on stdin, one result line on stdout
+- Dependencies: `playwright-core`, `@axe-core/playwright`, `lighthouse`, `chrome-launcher`
+
+Install once per machine:
+
+```bash
+cd plugins/data_source/site_quality/worker && npm install
+npx playwright install chromium
+```
+
+The worker script is resolved automatically (plugin crate `worker/`, skipprd repo layout from cwd or executable, or local runtime manifest dir). Optional override: `SKIPPR_SITE_QUALITY_WORKER_SCRIPT`.
+
+## Local verification
+
+```bash
+cargo build -p skippr-plugin-data-source-site-quality
+cargo test -p skippr-plugin-data-source-site-quality
+cargo test -p skippr-cli translate_site_quality_source
+```
+
+Fixture-only sync (no live browser):
+
+```bash
+export SKIPPR_SITE_QUALITY_FIXTURE_DIR=plugins/data_source/site_quality/fixtures
+export USE_LOCAL_PLUGIN_CODE=1
+manifest_dir="$(python3 .github/scripts/local_runtime_plugins.py \
+  --config path/to/skippr.yml --pipeline my_pipeline)"
+export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="$manifest_dir"
+skippr discover --pipeline my_pipeline
+skippr sync --once --pipeline my_pipeline
+```
+
+## CLI
+
+```bash
+skippr connect source site-quality \
+  --site https://example.com \
+  --url-mode tld_sample \
+  --max-pages-per-run 50
+```
+
+## Checkpointing
+
+Per URL + device key: `site_quality:page:{canonical_url}:{device_profile}`.
+
+When `render_hash` matches the prior run, the worker skips Lighthouse and axe (`skip_heavy_when_unchanged`, default `true`) but still emits `page_lab_daily` for partition completeness.
+
+Public connector: [skippr-web Site Quality](https://github.com/skippr-io/skippr-web/blob/main/docs/connectors/sources/site-quality.md).

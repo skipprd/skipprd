@@ -208,12 +208,22 @@ fn fetch_sitemap_urls(
     parse_sitemap_xml(&body, origin, &disallows, 0)
 }
 
+fn looks_like_sitemap_xml(body: &str) -> bool {
+    let trimmed = body.trim_start();
+    trimmed.starts_with("<?xml")
+        || trimmed.starts_with("<urlset")
+        || trimmed.starts_with("<sitemapindex")
+}
+
 fn parse_sitemap_xml(
     xml: &str,
-    origin: &str,
+    _origin: &str,
     disallows: &[String],
     depth: usize,
 ) -> Result<Vec<CandidateUrl>, std::io::Error> {
+    if !looks_like_sitemap_xml(xml) {
+        return Ok(Vec::new());
+    }
     let mut out = Vec::new();
     let mut reader = quick_xml::Reader::from_str(xml);
     reader.config_mut().trim_text(true);
@@ -271,10 +281,10 @@ fn parse_sitemap_xml(
             }
             Ok(quick_xml::events::Event::Eof) => break,
             Err(e) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    format!("sitemap parse error: {e}"),
-                ));
+                tracing::warn!(
+                    "skipping ill-formed sitemap XML (depth={depth}): {e}"
+                );
+                break;
             }
             _ => {}
         }

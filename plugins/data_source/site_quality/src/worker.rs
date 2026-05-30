@@ -7,6 +7,7 @@ use serde_derive::Serialize;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Command;
 use tokio::time::sleep;
+use tracing::info;
 use uuid::Uuid;
 
 use crate::checkpoint::PageCheckpoint;
@@ -245,29 +246,38 @@ impl WorkerClient {
     }
 
     async fn run_live_worker(&self, job: &WorkerJobRequest) -> Result<WorkerJobResult, std::io::Error> {
-        let mut child = Command::new(&self.config.worker_node_path)
+        let mut command = Command::new(&self.config.worker_node_path);
+        command
             .arg(&self.worker_script)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .env(
-                "PLAYWRIGHT_BROWSERS_PATH",
-                std::env::var("PLAYWRIGHT_BROWSERS_PATH").unwrap_or_default(),
-            )
-            .spawn()
-            .map_err(|e| {
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!(
-                        "failed to spawn site quality worker ({}): {e}",
-                        self.worker_script.display()
-                    ),
-                )
-            })?;
-
-        if let Some(path) = &self.config.playwright_executable_path {
-            child.env("PLAYWRIGHT_EXECUTABLE_PATH", path);
+            // Playwright/Chromium can be verbose on stderr; if we only read stderr after
+            // wait(), a full pipe will block the child and hang sync indefinitely.
+            .stderr(Stdio::null())
+            ;
+        if let Ok(path) = std::env::var("PLAYWRIGHT_BROWSERS_PATH") {
+            if !path.trim().is_empty() {
+                command.env("PLAYWRIGHT_BROWSERS_PATH", path);
+            }
         }
+        if let Some(path) = &self.config.playwright_executable_path {
+            command.env("PLAYWRIGHT_EXECUTABLE_PATH", path);
+        }
+        info!(
+            url = %job.url,
+            device = %job.device_profile,
+            script = %self.worker_script.display(),
+            "Site Quality worker: spawning Node process"
+        );
+        let mut child = command.spawn().map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!(
+                    "failed to spawn site quality worker ({}): {e}",
+                    self.worker_script.display()
+                ),
+            )
+        })?;
 
         let mut stdin = child.stdin.take().ok_or_else(|| {
             std::io::Error::new(std::io::ErrorKind::BrokenPipe, "worker stdin unavailable")
@@ -292,13 +302,10 @@ impl WorkerClient {
                 std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "worker produced no output")
             })?;
 
-        let status = child.wait().await.map_err(std::io::Error::other)?;
-        if !status.success() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("site quality worker exited with {status}"),
-            ));
-        }
+        // One job per process; after the result line we do not need to wait for Playwright
+        // browser teardown (can hang for minutes on some platforms).
+        let _ = child.start_kill();
+        let _ = child.wait().await;
 
         parse_result_line(&response_line)
     }
@@ -310,20 +317,9 @@ impl WorkerClient {
     }
 }
 
-fn resolve_worker_script() -> Result<PathBuf, std::io::Error> {
-    if let Ok(path) = std::env::var("SKIPPR_SITE_QUALITY_WORKER_SCRIPT") {
-        if !path.trim().is_empty() {
-            return Ok(PathBuf::from(path));
-        }
-    }
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let script = manifest.join("worker/site-quality-worker.mjs");
-    if script.exists() {
-        return Ok(script);
-    }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::NotFound,
-        format!("site quality worker script not found at {}", script.display()),
+pub fn resolve_worker_script() -> Result<PathBuf, std::io::Error> {
+    skippr_runtime_sdk::site_quality_worker::resolve_site_quality_worker_script(Some(
+        Path::new(env!("CARGO_MANIFEST_DIR")),
     ))
 }
 

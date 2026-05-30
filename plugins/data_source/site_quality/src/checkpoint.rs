@@ -64,12 +64,13 @@ pub fn should_skip_heavy_audits(
         .unwrap_or(false)
 }
 
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn skip_heavy_when_render_hash_unchanged() {
+    fn checkpoint_skips_when_hash_matches() {
         let cp = PageCheckpoint {
             render_hash: "sha256:abc".into(),
             lcp_ms: None,

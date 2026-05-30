@@ -90,7 +90,8 @@ pub fn default_devices() -> Vec<DeviceProfile> {
 }
 
 fn default_wait_until() -> String {
-    "networkidle".into()
+    // SPAs often never reach networkidle; load is enough for lab metrics and axe.
+    "load".into()
 }
 
 fn default_navigation_timeout_ms() -> u32 {
@@ -189,6 +190,7 @@ impl DataSourceSiteQualityPluginConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::sampling::UrlMode;
 
     #[test]
     fn url_list_requires_urls() {

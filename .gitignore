@@ -58,3 +58,4 @@ crates/skipprd-react-suite-data-engineer/snowflake_key.p8
 crates/skipprd-react-suite-data-engineer/snowflake_key.pub
 .cargo/*
 !.cargo/config.toml
+plugins/data_source/site_quality/worker/node_modules

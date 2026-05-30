@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use chrono::Utc;
@@ -21,7 +22,7 @@ use crate::sampling::{
     StaticSitemapFetcher, UrlMode,
 };
 use crate::streams::{
-    active_namespaces, namespace_contract, NAMESPACE_A11Y_ISSUE, NAMESPACE_ISSUE,
+    active_namespaces, namespace_contract, NAMESPACE_A11Y_ISSUE, NAMESPACE_CHECK_DAILY,
     NAMESPACE_LIGHTHOUSE_AUDIT, NAMESPACE_PAGE_LAB_DAILY, NAMESPACE_SITE_RUN_DAILY,
 };
 use crate::worker::{build_job_request, WorkerClient, WorkerJobResult};
@@ -220,7 +221,7 @@ impl DataSourceSiteQualityPlugin {
             axe_summary_hash: result
                 .axe_violations
                 .as_ref()
-                .map(axe_summary_hash),
+                .map(|violations| axe_summary_hash(violations)),
         })
     }
 
@@ -296,14 +297,28 @@ impl DataSource for DataSourceSiteQualityPlugin {
 
         let discover = runtime_is_discover_mode();
         let run_date = self.run_date();
+        info!(
+            site = %self.origin,
+            discover,
+            url_mode = ?self.config.url_mode,
+            max_pages = self.config.max_pages_per_run,
+            lighthouse = self.config.lighthouse_enabled,
+            axe = self.config.axe_enabled,
+            "Site Quality sync: resolving URL sample"
+        );
         let urls = self.resolve_urls(discover).await?;
         let devices = self.devices_for_run(discover);
+        let job_count = urls.len().saturating_mul(devices.len());
+        info!(
+            url_count = urls.len(),
+            device_count = devices.len(),
+            job_count,
+            sample_urls = ?urls,
+            device_profiles = ?devices.iter().map(|d| d.profile.as_str()).collect::<Vec<_>>(),
+            "Site Quality sync: URL sample ready (each job may take 30s–3min with Lighthouse)"
+        );
         if discover {
-            info!(
-                url_count = urls.len(),
-                device_count = devices.len(),
-                "Site Quality discover: single homepage on mobile only"
-            );
+            info!("Site Quality discover: homepage + mobile only; no checkpoints");
         }
 
         let worker = WorkerClient::new(self.config.clone())?;
@@ -324,7 +339,26 @@ impl DataSource for DataSourceSiteQualityPlugin {
                     load_page_checkpoint(ctx.as_ref(), url, &device.profile)
                 };
                 let job = build_job_request(&self.config, url, device, false, prior.clone());
+                let started = Instant::now();
+                info!(
+                    url = %url,
+                    device = %device.profile,
+                    job_id = %job.job_id,
+                    lighthouse = job.lighthouse_enabled,
+                    axe = job.axe_enabled,
+                    skip_heavy = job.skip_heavy_audits,
+                    "Site Quality: starting Playwright worker job"
+                );
                 let result = worker.run_job(&job).await?;
+                info!(
+                    url = %url,
+                    device = %device.profile,
+                    elapsed_ms = started.elapsed().as_millis(),
+                    ok = result.ok,
+                    status = ?result.status,
+                    final_url = ?result.final_url,
+                    "Site Quality: worker job finished"
+                );
                 worker.throttle_delay().await;
 
                 let content_unchanged = result.skip_heavy_audits.unwrap_or_else(|| {
@@ -359,6 +393,8 @@ impl DataSource for DataSourceSiteQualityPlugin {
                     &device.profile,
                     &result,
                     &thresholds,
+                    self.config.lighthouse_enabled,
+                    self.config.axe_enabled,
                 ));
 
                 if result.ok {
@@ -384,7 +420,7 @@ impl DataSource for DataSourceSiteQualityPlugin {
         if self.config.axe_enabled {
             self.submit_namespace(ctx.as_ref(), NAMESPACE_A11Y_ISSUE, &run_date, a11y_rows)?;
         }
-        self.submit_namespace(ctx.as_ref(), NAMESPACE_ISSUE, &run_date, issue_rows)?;
+        self.submit_namespace(ctx.as_ref(), NAMESPACE_CHECK_DAILY, &run_date, issue_rows)?;
         if self.config.lighthouse_enabled {
             self.submit_namespace(
                 ctx.as_ref(),
@@ -418,7 +454,7 @@ impl DataSource for DataSourceSiteQualityPlugin {
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
-    use std::sync::Mutex;
+    use std::sync::{LazyLock, Mutex};
 
     use super::*;
     use crate::config::DataSourceSiteQualityPluginConfig;
@@ -431,13 +467,19 @@ mod tests {
         OffsetValidationEntry, SourcePayloadTask, SourceSyncContext,
     };
 
+    static ENV_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
     fn test_config() -> DataSourceSiteQualityPluginConfig {
         DataSourceSiteQualityPluginConfig {
             site: "https://example.com".into(),
             url_mode: UrlMode::UrlList,
             url_list: vec!["https://example.com/".into()],
             max_pages_per_run: 5,
-            devices: crate::config::default_devices(),
+            devices: vec![crate::config::default_devices()[0].clone()],
             wait_until: "load".into(),
             navigation_timeout_ms: 5000,
             lighthouse_enabled: true,
@@ -465,6 +507,7 @@ mod tests {
 
     #[tokio::test]
     async fn discover_sync_uses_fixture_without_checkpoints() {
+        let _lock = env_lock();
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures");
         std::env::set_var(FIXTURE_ENV, fixture_dir);
         std::env::set_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV, "discover");
@@ -483,6 +526,7 @@ mod tests {
 
     #[tokio::test]
     async fn checkpoint_skips_heavy_audits() {
+        let _lock = env_lock();
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures");
         std::env::set_var(FIXTURE_ENV, fixture_dir);
 
@@ -516,6 +560,7 @@ mod tests {
 
     #[tokio::test]
     async fn full_fixture_sync_stores_checkpoints() {
+        let _lock = env_lock();
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures");
         std::env::set_var(FIXTURE_ENV, fixture_dir);
         std::env::remove_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV);

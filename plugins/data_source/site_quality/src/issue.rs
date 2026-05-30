@@ -6,6 +6,8 @@ pub const CLS_POOR: &str = "CLS_POOR";
 pub const LCP_SLOW: &str = "LCP_SLOW";
 pub const MISSING_VIEWPORT: &str = "MISSING_VIEWPORT";
 pub const HORIZONTAL_SCROLL: &str = "HORIZONTAL_SCROLL";
+pub const TEXT_TOO_SMALL: &str = "TEXT_TOO_SMALL";
+pub const TAP_TARGETS: &str = "TAP_TARGETS";
 pub const LH_PERFORMANCE_LOW: &str = "LH_PERFORMANCE_LOW";
 pub const AXE_CRITICAL: &str = "AXE_CRITICAL";
 pub const NAVIGATION_TIMEOUT: &str = "NAVIGATION_TIMEOUT";
@@ -32,6 +34,7 @@ impl Default for IssueThresholds {
     }
 }
 
+/// Emits one row per scorecard check (pass, warn, or fail) for traffic-light dashboards.
 pub fn map_issues(
     site: &str,
     canonical_url: &str,
@@ -39,8 +42,10 @@ pub fn map_issues(
     device_profile: &str,
     result: &WorkerJobResult,
     thresholds: &IssueThresholds,
+    lighthouse_enabled: bool,
+    axe_enabled: bool,
 ) -> Vec<Value> {
-    let mut issues = Vec::new();
+    let mut rows = Vec::new();
     let page_url = canonical_url;
 
     if !result.ok {
@@ -50,12 +55,14 @@ pub fn map_issues(
             .and_then(|e| e.get("code"))
             .and_then(|c| c.as_str())
             .unwrap_or(NAVIGATION_TIMEOUT);
-        issues.push(issue_row(
+        rows.push(check_row(
             site,
             page_url,
             run_date,
             device_profile,
             code,
+            "run",
+            "fail",
             "error",
             result
                 .error
@@ -64,124 +71,234 @@ pub fn map_issues(
                 .and_then(|m| m.as_str())
                 .unwrap_or("page lab failed"),
         ));
-        return issues;
+        return rows;
     }
 
-    if let Some(status) = result.status {
-        if status >= 400 {
-            issues.push(issue_row(
-                site,
-                page_url,
-                run_date,
-                device_profile,
-                HTTP_ERROR,
-                "error",
-                &format!("HTTP {status}"),
-            ));
-        }
+    let status = result.status.unwrap_or(0);
+    if status >= 400 {
+        rows.push(check_row(
+            site,
+            page_url,
+            run_date,
+            device_profile,
+            HTTP_ERROR,
+            "http",
+            "fail",
+            "error",
+            &format!("HTTP {status}"),
+        ));
+    } else {
+        rows.push(check_row(
+            site,
+            page_url,
+            run_date,
+            device_profile,
+            HTTP_ERROR,
+            "http",
+            "pass",
+            "info",
+            &format!("HTTP {status}"),
+        ));
     }
 
     if let Some(vitals) = &result.web_vitals {
-        if vitals.cls.unwrap_or(0.0) > thresholds.cls_poor {
-            issues.push(issue_row(
+        let cls = vitals.cls.unwrap_or(0.0);
+        if cls > thresholds.cls_poor {
+            rows.push(check_row(
                 site,
                 page_url,
                 run_date,
                 device_profile,
                 CLS_POOR,
+                "vitals",
+                "fail",
                 "warning",
-                &format!("CLS {:.3} exceeds {}", vitals.cls.unwrap_or(0.0), thresholds.cls_poor),
+                &format!("CLS {cls:.3} exceeds {:.3}", thresholds.cls_poor),
+            ));
+        } else {
+            rows.push(check_row(
+                site,
+                page_url,
+                run_date,
+                device_profile,
+                CLS_POOR,
+                "vitals",
+                "pass",
+                "info",
+                &format!("CLS {cls:.3} within threshold",),
             ));
         }
-        if vitals.lcp.unwrap_or(0.0) > thresholds.lcp_slow_ms {
-            issues.push(issue_row(
+
+        let lcp = vitals.lcp.unwrap_or(0.0);
+        if lcp > thresholds.lcp_slow_ms {
+            rows.push(check_row(
                 site,
                 page_url,
                 run_date,
                 device_profile,
                 LCP_SLOW,
+                "vitals",
+                "fail",
                 "warning",
-                &format!(
-                    "LCP {:.0}ms exceeds {:.0}ms",
-                    vitals.lcp.unwrap_or(0.0),
-                    thresholds.lcp_slow_ms
-                ),
+                &format!("LCP {lcp:.0}ms exceeds {:.0}ms", thresholds.lcp_slow_ms),
             ));
-        }
-    }
-
-    if let Some(heuristics) = &result.mobile_heuristics {
-        if device_profile == "mobile" {
-            if heuristics.viewport_meta_ok == Some(false) {
-                issues.push(issue_row(
-                    site,
-                    page_url,
-                    run_date,
-                    device_profile,
-                    MISSING_VIEWPORT,
-                    "warning",
-                    "viewport meta tag missing or invalid",
-                ));
-            }
-            if heuristics.horizontal_scroll == Some(true) {
-                issues.push(issue_row(
-                    site,
-                    page_url,
-                    run_date,
-                    device_profile,
-                    HORIZONTAL_SCROLL,
-                    "warning",
-                    "horizontal scroll detected on mobile viewport",
-                ));
-            }
-        }
-    }
-
-    if let Some(lh) = &result.lighthouse {
-        if lh.performance.unwrap_or(100.0) < thresholds.lh_performance_low {
-            issues.push(issue_row(
+        } else {
+            rows.push(check_row(
                 site,
                 page_url,
                 run_date,
                 device_profile,
-                LH_PERFORMANCE_LOW,
-                "warning",
-                &format!(
-                    "Lighthouse performance {:.0} below {:.0}",
-                    lh.performance.unwrap_or(0.0),
-                    thresholds.lh_performance_low
-                ),
+                LCP_SLOW,
+                "vitals",
+                "pass",
+                "info",
+                &format!("LCP {lcp:.0}ms within threshold"),
             ));
         }
     }
 
-    if let Some(violations) = &result.axe_violations {
-        for v in violations {
-            if v.impact.as_deref() == Some("critical") {
-                issues.push(issue_row(
+    if device_profile == "mobile" {
+        if let Some(heuristics) = &result.mobile_heuristics {
+            let viewport_ok = heuristics.viewport_meta_ok.unwrap_or(false);
+            rows.push(check_row(
+                site,
+                page_url,
+                run_date,
+                device_profile,
+                MISSING_VIEWPORT,
+                "mobile",
+                if viewport_ok { "pass" } else { "fail" },
+                if viewport_ok { "info" } else { "warning" },
+                if viewport_ok {
+                    "viewport meta tag present"
+                } else {
+                    "viewport meta tag missing or invalid"
+                },
+            ));
+
+            let hscroll = heuristics.horizontal_scroll.unwrap_or(false);
+            rows.push(check_row(
+                site,
+                page_url,
+                run_date,
+                device_profile,
+                HORIZONTAL_SCROLL,
+                "mobile",
+                if hscroll { "fail" } else { "pass" },
+                if hscroll { "warning" } else { "info" },
+                if hscroll {
+                    "horizontal scroll detected on mobile viewport"
+                } else {
+                    "no horizontal scroll on mobile viewport"
+                },
+            ));
+
+            let small = heuristics.text_too_small_count.unwrap_or(0);
+            rows.push(check_row(
+                site,
+                page_url,
+                run_date,
+                device_profile,
+                TEXT_TOO_SMALL,
+                "mobile",
+                if small > 0 { "warn" } else { "pass" },
+                if small > 0 { "warning" } else { "info" },
+                if small > 0 {
+                    format!("{small} elements with font size below 12px")
+                } else {
+                    "no undersized text elements".into()
+                },
+            ));
+
+            let tap = heuristics.tap_target_issues.unwrap_or(0);
+            rows.push(check_row(
+                site,
+                page_url,
+                run_date,
+                device_profile,
+                TAP_TARGETS,
+                "mobile",
+                if tap > 0 { "warn" } else { "pass" },
+                if tap > 0 { "warning" } else { "info" },
+                if tap > 0 {
+                    format!("{tap} tap targets smaller than 48×48px")
+                } else {
+                    "tap targets meet minimum size".into()
+                },
+            ));
+        }
+    }
+
+    if lighthouse_enabled {
+        if let Some(lh) = &result.lighthouse {
+            let perf = lh.performance.unwrap_or(0.0);
+            if perf < thresholds.lh_performance_low {
+                rows.push(check_row(
                     site,
                     page_url,
                     run_date,
                     device_profile,
-                    AXE_CRITICAL,
-                    "error",
-                    v.help.as_deref().unwrap_or(&v.id),
+                    LH_PERFORMANCE_LOW,
+                    "lighthouse",
+                    "fail",
+                    "warning",
+                    &format!(
+                        "Lighthouse performance {perf:.0} below {:.0}",
+                        thresholds.lh_performance_low
+                    ),
+                ));
+            } else {
+                rows.push(check_row(
+                    site,
+                    page_url,
+                    run_date,
+                    device_profile,
+                    LH_PERFORMANCE_LOW,
+                    "lighthouse",
+                    "pass",
+                    "info",
+                    &format!("Lighthouse performance {perf:.0}"),
                 ));
             }
         }
     }
 
-    issues
+    if axe_enabled {
+        let critical = result
+            .axe_violations
+            .as_ref()
+            .map(|v| v.iter().any(|x| x.impact.as_deref() == Some("critical")))
+            .unwrap_or(false);
+        rows.push(check_row(
+            site,
+            page_url,
+            run_date,
+            device_profile,
+            AXE_CRITICAL,
+            "accessibility",
+            if critical { "fail" } else { "pass" },
+            if critical { "error" } else { "info" },
+            if critical {
+                "axe reported critical accessibility violations"
+            } else {
+                "no critical axe violations"
+            },
+        ));
+    }
+
+    rows
 }
 
-fn issue_row(
+fn check_row(
     site: &str,
     page_url: &str,
     run_date: &str,
     device_profile: &str,
     issue_code: &str,
+    section: &str,
+    status: &str,
     severity: &str,
-    message: &str,
+    message: impl AsRef<str>,
 ) -> Value {
     json!({
         "site": site,
@@ -189,8 +306,10 @@ fn issue_row(
         "run_date": run_date,
         "device_profile": device_profile,
         "issue_code": issue_code,
+        "section": section,
+        "status": status,
         "severity": severity,
-        "message": message,
+        "message": message.as_ref(),
     })
 }
 
@@ -200,7 +319,7 @@ mod tests {
     use crate::worker::{MobileHeuristics, WebVitals, WorkerJobResult};
 
     #[test]
-    fn issue_mapping_thresholds() {
+    fn scorecard_includes_pass_and_fail_rows() {
         let result = WorkerJobResult {
             job_id: "j1".into(),
             ok: true,
@@ -227,21 +346,25 @@ mod tests {
             error: None,
             skip_heavy_audits: None,
         };
-        let issues = map_issues(
+        let rows = map_issues(
             "https://example.com",
             "https://example.com/",
             "2024-06-01",
             "mobile",
             &result,
             &IssueThresholds::default(),
+            false,
+            true,
         );
-        let codes: Vec<_> = issues
+        let statuses: Vec<_> = rows
             .iter()
-            .filter_map(|r| r.get("issue_code").and_then(|c| c.as_str()))
+            .filter_map(|r| r.get("status").and_then(|s| s.as_str()))
             .collect();
-        assert!(codes.contains(&CLS_POOR));
-        assert!(codes.contains(&LCP_SLOW));
-        assert!(codes.contains(&MISSING_VIEWPORT));
-        assert!(codes.contains(&HORIZONTAL_SCROLL));
+        assert!(statuses.contains(&"pass"));
+        assert!(statuses.contains(&"fail"));
+        assert!(rows.iter().any(|r| {
+            r.get("issue_code").and_then(|c| c.as_str()) == Some(AXE_CRITICAL)
+                && r.get("status").and_then(|s| s.as_str()) == Some("pass")
+        }));
     }
 }

@@ -67,31 +67,37 @@ async function runJob(job) {
   }
 }
 
-rl.on('line', async (line) => {
-  const trimmed = line.trim();
-  if (!trimmed) {
-    return;
-  }
-  let job;
-  try {
-    job = JSON.parse(trimmed);
-  } catch (err) {
-    process.stdout.write(
-      `${JSON.stringify({
-        job_id: 'unknown',
-        ok: false,
-        error: { code: 'INVALID_JOB', message: String(err) },
-      })}\n`,
-    );
-    return;
-  }
-  const result = await runJob(job);
-  process.stdout.write(`${JSON.stringify(result)}\n`);
+let pending = Promise.resolve();
+
+rl.on('line', (line) => {
+  pending = pending.then(async () => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return;
+    }
+    let job;
+    try {
+      job = JSON.parse(trimmed);
+    } catch (err) {
+      process.stdout.write(
+        `${JSON.stringify({
+          job_id: 'unknown',
+          ok: false,
+          error: { code: 'INVALID_JOB', message: String(err) },
+        })}\n`,
+      );
+      return;
+    }
+    const result = await runJob(job);
+    process.stdout.write(`${JSON.stringify(result)}\n`);
+  });
 });
 
 rl.on('close', async () => {
+  await pending;
   if (browser) {
-    await browser.close();
+    // Do not block process exit on browser teardown; skipprd waits on child.wait().
+    void browser.close().catch(() => {});
   }
   process.exit(0);
 });

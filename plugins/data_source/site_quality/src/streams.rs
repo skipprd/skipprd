@@ -5,7 +5,7 @@ use skippr_runtime_sdk::plugins::source_contract::{
 pub const NAMESPACE_PAGE_LAB_DAILY: &str = "site_quality.page_lab_daily";
 pub const NAMESPACE_SITE_RUN_DAILY: &str = "site_quality.site_run_daily";
 pub const NAMESPACE_A11Y_ISSUE: &str = "site_quality.a11y_issue";
-pub const NAMESPACE_ISSUE: &str = "site_quality.issue";
+pub const NAMESPACE_CHECK_DAILY: &str = "site_quality.check_daily";
 pub const NAMESPACE_LIGHTHOUSE_AUDIT: &str = "site_quality.lighthouse_audit";
 
 pub const FULL_NAMESPACE_COUNT: usize = 5;
@@ -34,7 +34,7 @@ pub const ALL_NAMESPACES: &[SiteQualityNamespace] = &[
         enabled_when_axe: true,
     },
     SiteQualityNamespace {
-        namespace: NAMESPACE_ISSUE,
+        namespace: NAMESPACE_CHECK_DAILY,
         enabled_when_lighthouse: false,
         enabled_when_axe: false,
     },
@@ -107,7 +107,7 @@ pub fn namespace_contract(namespace: &str) -> SourceNamespaceContract {
             description: "Site Quality axe accessibility violations".into(),
             semantics: Some(SourceSemantics::MutableReport),
         },
-        NAMESPACE_ISSUE => SourceNamespaceContract {
+        NAMESPACE_CHECK_DAILY => SourceNamespaceContract {
             namespace: namespace.to_string(),
             primary_key: vec![
                 FieldPath::single("site"),
@@ -120,7 +120,7 @@ pub fn namespace_contract(namespace: &str) -> SourceNamespaceContract {
             partition_key: vec![FieldPath::single("run_date")],
             write_policy: WritePolicy::ReplacePartition,
             refresh_window: None,
-            description: "Site Quality derived issue rows".into(),
+            description: "Site Quality check outcomes per URL and device".into(),
             semantics: Some(SourceSemantics::MutableReport),
         },
         NAMESPACE_LIGHTHOUSE_AUDIT => SourceNamespaceContract {
