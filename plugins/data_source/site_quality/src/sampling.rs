@@ -1,4 +1,5 @@
 use std::collections::{HashSet, VecDeque};
+use std::sync::LazyLock;
 
 use regex::Regex;
 use serde::Deserialize;
