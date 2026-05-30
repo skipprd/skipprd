@@ -1,5 +1,3 @@
-//! Bronze namespace contracts for `seo_crawl.*`.
-
 use skippr_runtime_sdk::plugins::source_contract::{
     FieldPath, SourceNamespaceContract, SourceSemantics, WritePolicy,
 };
@@ -12,6 +10,8 @@ pub const NAMESPACE_SITEMAP_URL: &str = "seo_crawl.sitemap_url";
 pub const NAMESPACE_ISSUE: &str = "seo_crawl.issue";
 pub const NAMESPACE_CONTENT_BLOCK: &str = "seo_crawl.content_block";
 
+pub const NAMESPACE_COUNT: usize = 7;
+
 pub const ALL_NAMESPACES: &[&str] = &[
     NAMESPACE_SITE_RUN_DAILY,
     NAMESPACE_PAGE_DAILY,
@@ -22,32 +22,60 @@ pub const ALL_NAMESPACES: &[&str] = &[
     NAMESPACE_CONTENT_BLOCK,
 ];
 
-pub const NAMESPACE_COUNT: usize = ALL_NAMESPACES.len();
-
-pub fn all_namespace_contracts() -> Vec<SourceNamespaceContract> {
-    let contracts = vec![
-        site_run_daily_contract(),
-        page_daily_contract(),
-        link_edge_contract(),
-        robots_txt_contract(),
-        sitemap_url_contract(),
-        issue_contract(),
-        content_block_contract(),
-    ];
-    for contract in &contracts {
-        contract
-            .validate()
-            .expect("invalid seo_crawl namespace contract");
-    }
-    contracts
-}
-
-fn base_contract(namespace: &str, primary_key: Vec<FieldPath>) -> SourceNamespaceContract {
+pub fn namespace_contract(namespace: &str) -> SourceNamespaceContract {
+    let site = FieldPath::single("site");
+    let crawl_date = FieldPath::single("crawl_date");
+    let (primary_key, partition_key) = match namespace {
+        NAMESPACE_SITE_RUN_DAILY => (vec![site.clone(), crawl_date.clone()], vec![crawl_date.clone()]),
+        NAMESPACE_PAGE_DAILY => (
+            vec![site.clone(), FieldPath::single("canonical_url"), crawl_date.clone()],
+            vec![crawl_date.clone()],
+        ),
+        NAMESPACE_LINK_EDGE => (
+            vec![
+                site.clone(),
+                FieldPath::single("source_url"),
+                FieldPath::single("target_url"),
+                FieldPath::single("link_kind"),
+                crawl_date.clone(),
+            ],
+            vec![crawl_date.clone()],
+        ),
+        NAMESPACE_ROBOTS_TXT => (vec![site.clone(), crawl_date.clone()], vec![crawl_date.clone()]),
+        NAMESPACE_SITEMAP_URL => (
+            vec![
+                site.clone(),
+                FieldPath::single("page_url"),
+                FieldPath::single("sitemap_file"),
+                crawl_date.clone(),
+            ],
+            vec![crawl_date.clone()],
+        ),
+        NAMESPACE_ISSUE => (
+            vec![
+                site.clone(),
+                FieldPath::single("page_url"),
+                FieldPath::single("issue_code"),
+                crawl_date.clone(),
+            ],
+            vec![crawl_date.clone()],
+        ),
+        NAMESPACE_CONTENT_BLOCK => (
+            vec![
+                site.clone(),
+                FieldPath::single("page_url"),
+                FieldPath::single("block_id"),
+                crawl_date.clone(),
+            ],
+            vec![crawl_date.clone()],
+        ),
+        _ => panic!("unknown seo_crawl namespace: {namespace}"),
+    };
     SourceNamespaceContract {
         namespace: namespace.to_string(),
         primary_key,
-        cursor: Some(FieldPath::single("crawl_date")),
-        partition_key: vec![FieldPath::single("crawl_date")],
+        cursor: Some(crawl_date.clone()),
+        partition_key,
         write_policy: WritePolicy::ReplacePartition,
         refresh_window: None,
         description: "SEO crawl daily snapshot".into(),
@@ -55,86 +83,11 @@ fn base_contract(namespace: &str, primary_key: Vec<FieldPath>) -> SourceNamespac
     }
 }
 
-pub fn site_run_daily_contract() -> SourceNamespaceContract {
-    let mut c = base_contract(
-        NAMESPACE_SITE_RUN_DAILY,
-        vec![
-            FieldPath::single("site"),
-            FieldPath::single("crawl_date"),
-        ],
-    );
-    c.description = "Per-run site crawl aggregate".into();
-    c
-}
-
-pub fn page_daily_contract() -> SourceNamespaceContract {
-    base_contract(
-        NAMESPACE_PAGE_DAILY,
-        vec![
-            FieldPath::single("site"),
-            FieldPath::single("canonical_url"),
-            FieldPath::single("crawl_date"),
-        ],
-    )
-}
-
-pub fn link_edge_contract() -> SourceNamespaceContract {
-    base_contract(
-        NAMESPACE_LINK_EDGE,
-        vec![
-            FieldPath::single("site"),
-            FieldPath::single("source_url"),
-            FieldPath::single("target_url"),
-            FieldPath::single("link_kind"),
-            FieldPath::single("crawl_date"),
-        ],
-    )
-}
-
-pub fn robots_txt_contract() -> SourceNamespaceContract {
-    base_contract(
-        NAMESPACE_ROBOTS_TXT,
-        vec![
-            FieldPath::single("site"),
-            FieldPath::single("crawl_date"),
-        ],
-    )
-}
-
-pub fn sitemap_url_contract() -> SourceNamespaceContract {
-    base_contract(
-        NAMESPACE_SITEMAP_URL,
-        vec![
-            FieldPath::single("site"),
-            FieldPath::single("page_url"),
-            FieldPath::single("sitemap_file"),
-            FieldPath::single("crawl_date"),
-        ],
-    )
-}
-
-pub fn issue_contract() -> SourceNamespaceContract {
-    base_contract(
-        NAMESPACE_ISSUE,
-        vec![
-            FieldPath::single("site"),
-            FieldPath::single("page_url"),
-            FieldPath::single("issue_code"),
-            FieldPath::single("crawl_date"),
-        ],
-    )
-}
-
-pub fn content_block_contract() -> SourceNamespaceContract {
-    base_contract(
-        NAMESPACE_CONTENT_BLOCK,
-        vec![
-            FieldPath::single("site"),
-            FieldPath::single("page_url"),
-            FieldPath::single("block_id"),
-            FieldPath::single("crawl_date"),
-        ],
-    )
+pub fn all_namespace_contracts() -> Vec<SourceNamespaceContract> {
+    ALL_NAMESPACES
+        .iter()
+        .map(|ns| namespace_contract(ns))
+        .collect()
 }
 
 #[cfg(test)]
@@ -142,8 +95,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn all_namespaces_have_contracts() {
-        assert_eq!(all_namespace_contracts().len(), NAMESPACE_COUNT);
+    fn all_namespaces_use_replace_partition() {
+        for contract in all_namespace_contracts() {
+            assert_eq!(contract.write_policy, WritePolicy::ReplacePartition);
+            contract.validate().expect("valid contract");
+        }
         assert_eq!(ALL_NAMESPACES.len(), NAMESPACE_COUNT);
     }
 }
