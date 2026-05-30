@@ -41,11 +41,14 @@ Any other cargo invocation can use the same wrapper:
 
 ### CodeArtifact token (CI and release builds)
 
-Before local builds that must resolve published React crate versions from the registry, authenticate Cargo:
+`skipprd` and `react` use the private registry **`react-cargo`** on CodeArtifact (domain `skippr`, owner `132355036174`, `us-east-1`). Cargo expects **`CARGO_REGISTRIES_REACT_CARGO_TOKEN`** — same command as `react/.github/workflows/react-ci.yml` (“Login to CodeArtifact”) and `skipprd/.github/actions/setup-builder`.
+
+Before local builds that must resolve published React crate versions from the registry:
 
 ```bash
+export AWS_PROFILE=skippr-prod   # or any profile with codeartifact:GetAuthorizationToken on domain skippr
 export CARGO_REGISTRIES_REACT_CARGO_TOKEN="$(
-  AWS_PROFILE=skippr-prod aws codeartifact get-authorization-token \
+  aws codeartifact get-authorization-token \
     --domain skippr \
     --domain-owner 132355036174 \
     --region us-east-1 \
@@ -53,6 +56,8 @@ export CARGO_REGISTRIES_REACT_CARGO_TOKEN="$(
     --output text
 )"
 ```
+
+`AWS_PROFILE=circles-prod` is fine for Picnic Athena/S3 work but only works for CodeArtifact if that IAM user/role is allowed on account `132355036174`; otherwise keep using `skippr-prod` for `cargo build` or use `./scripts/cargo-with-local-react.sh` with a sibling `react` checkout (no token).
 
 Use these commands as the default local loop:
 
