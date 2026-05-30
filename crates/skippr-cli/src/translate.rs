@@ -835,6 +835,148 @@ pub fn to_internal(
                     }
                     serde_json::Value::Object(m)
                 }
+                SourceConfig::GoogleSearchConsole {
+                    site_url,
+                    start_date,
+                    end_date,
+                    lookback_days,
+                    stream_profile,
+                    processing_lag_days,
+                    window_in_days,
+                    access_token,
+                    oauth_token_url,
+                    oauth_client_id,
+                    oauth_client_secret,
+                    oauth_refresh_token,
+                    service_account_json_path,
+                    streams,
+                    search_type,
+                    data_state,
+                    row_limit,
+                    url_inspection_enabled,
+                    url_list,
+                } => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("kind".into(), "google_search_console".into());
+                    if let Some(v) = site_url {
+                        m.insert("site_url".into(), v.clone().into());
+                        m.insert("name".into(), format!("GSC property {v}").into());
+                    }
+                    if let Some(v) = start_date {
+                        m.insert("start_date".into(), v.clone().into());
+                    }
+                    if let Some(v) = end_date {
+                        m.insert("end_date".into(), v.clone().into());
+                    }
+                    if let Some(v) = lookback_days {
+                        m.insert("lookback_days".into(), (*v).into());
+                    }
+                    if let Some(v) = stream_profile {
+                        m.insert("stream_profile".into(), v.clone().into());
+                    }
+                    if let Some(v) = processing_lag_days {
+                        m.insert("processing_lag_days".into(), (*v).into());
+                    }
+                    if let Some(v) = window_in_days {
+                        m.insert("window_in_days".into(), (*v).into());
+                    }
+                    if let Some(v) = access_token {
+                        m.insert("access_token".into(), v.clone().into());
+                    }
+                    if let Some(v) = oauth_token_url {
+                        m.insert("oauth_token_url".into(), v.clone().into());
+                    }
+                    if let Some(v) = oauth_client_id {
+                        m.insert("oauth_client_id".into(), v.clone().into());
+                    }
+                    if let Some(v) = oauth_client_secret {
+                        m.insert("oauth_client_secret".into(), v.clone().into());
+                    }
+                    if let Some(v) = oauth_refresh_token {
+                        m.insert("oauth_refresh_token".into(), v.clone().into());
+                    }
+                    if let Some(v) = service_account_json_path {
+                        m.insert("service_account_json_path".into(), v.clone().into());
+                    }
+                    if let Some(v) = streams {
+                        m.insert("streams".into(), serde_json::to_value(v).unwrap_or_default());
+                    }
+                    if let Some(v) = search_type {
+                        m.insert("search_type".into(), v.clone().into());
+                    }
+                    if let Some(v) = data_state {
+                        m.insert("data_state".into(), v.clone().into());
+                    }
+                    if let Some(v) = row_limit {
+                        m.insert("row_limit".into(), (*v).into());
+                    }
+                    if let Some(v) = url_inspection_enabled {
+                        m.insert("url_inspection_enabled".into(), (*v).into());
+                    }
+                    if let Some(v) = url_list {
+                        m.insert("url_list".into(), serde_json::to_value(v).unwrap_or_default());
+                    }
+                    serde_json::Value::Object(m)
+                }
+                SourceConfig::GooglePageSpeed {
+                    site,
+                    api_key,
+                    url_mode,
+                    url_list,
+                    max_urls,
+                    strategies,
+                    categories,
+                    locale,
+                    max_requests_per_run,
+                    requests_per_minute,
+                    respect_robots,
+                    top_audits_per_page,
+                    max_concurrent_requests,
+                } => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("kind".into(), "google_pagespeed".into());
+                    if let Some(v) = site {
+                        m.insert("site".into(), v.clone().into());
+                        m.insert("name".into(), format!("PageSpeed site {v}").into());
+                    }
+                    if let Some(v) = api_key {
+                        m.insert("api_key".into(), v.clone().into());
+                    }
+                    if let Some(v) = url_mode {
+                        m.insert("url_mode".into(), v.clone().into());
+                    }
+                    if let Some(v) = url_list {
+                        m.insert("url_list".into(), serde_json::to_value(v).unwrap_or_default());
+                    }
+                    if let Some(v) = max_urls {
+                        m.insert("max_urls".into(), (*v).into());
+                    }
+                    if let Some(v) = strategies {
+                        m.insert("strategies".into(), serde_json::to_value(v).unwrap_or_default());
+                    }
+                    if let Some(v) = categories {
+                        m.insert("categories".into(), serde_json::to_value(v).unwrap_or_default());
+                    }
+                    if let Some(v) = locale {
+                        m.insert("locale".into(), v.clone().into());
+                    }
+                    if let Some(v) = max_requests_per_run {
+                        m.insert("max_requests_per_run".into(), (*v).into());
+                    }
+                    if let Some(v) = requests_per_minute {
+                        m.insert("requests_per_minute".into(), (*v).into());
+                    }
+                    if let Some(v) = respect_robots {
+                        m.insert("respect_robots".into(), (*v).into());
+                    }
+                    if let Some(v) = top_audits_per_page {
+                        m.insert("top_audits_per_page".into(), (*v).into());
+                    }
+                    if let Some(v) = max_concurrent_requests {
+                        m.insert("max_concurrent_requests".into(), (*v).into());
+                    }
+                    serde_json::Value::Object(m)
+                }
                 SourceConfig::AppleSearchAds {
                     org_id,
                     client_id,
@@ -1836,6 +1978,47 @@ mod tests {
     }
 
     #[test]
+    fn translate_google_search_console_source() {
+        let cfg = make_cfg(
+            WarehouseConfig::Athena {
+                workgroup: None,
+                region: Some("us-east-1".into()),
+                result_s3: None,
+                schema: Some("seo".into()),
+            },
+            SourceConfig::GoogleSearchConsole {
+                site_url: Some("https://example.com/".into()),
+                start_date: Some("2024-01-01".into()),
+                end_date: None,
+                lookback_days: Some(3),
+                stream_profile: Some("standard".into()),
+                processing_lag_days: Some(3),
+                window_in_days: Some(1),
+                access_token: Some("${GSC_ACCESS_TOKEN}".into()),
+                oauth_token_url: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                oauth_refresh_token: None,
+                service_account_json_path: None,
+                streams: Some(vec!["google_search_console.query_daily".into()]),
+                search_type: Some("web".into()),
+                data_state: Some("final".into()),
+                row_limit: Some(25000),
+                url_inspection_enabled: Some(false),
+                url_list: None,
+            },
+        );
+        let input = el_input(&cfg);
+        assert_eq!(input["kind"], "google_search_console");
+        assert_eq!(input["site_url"], "https://example.com/");
+        assert_eq!(input["start_date"], "2024-01-01");
+        assert_eq!(input["stream_profile"], "standard");
+        assert_eq!(input["processing_lag_days"], 3);
+        assert_eq!(input["access_token"], "${GSC_ACCESS_TOKEN}");
+        assert_eq!(input["streams"][0], "google_search_console.query_daily");
+    }
+
+    #[test]
     fn translate_google_analytics_source() {
         let cfg = make_cfg(
             WarehouseConfig::Athena {
@@ -1873,6 +2056,41 @@ mod tests {
         assert_eq!(input["window_in_days"], 1);
         assert_eq!(input["access_token"], "${GA4_ACCESS_TOKEN}");
         assert_eq!(input["streams"][0], "google_analytics.events_daily");
+    }
+
+    #[test]
+    fn translate_google_pagespeed_source() {
+        let cfg = make_cfg(
+            WarehouseConfig::Athena {
+                workgroup: None,
+                region: Some("us-east-1".into()),
+                result_s3: None,
+                schema: Some("web".into()),
+            },
+            SourceConfig::GooglePageSpeed {
+                site: Some("https://example.com".into()),
+                api_key: Some("${PAGESPEED_API_KEY}".into()),
+                url_mode: Some("tld_sample".into()),
+                url_list: None,
+                max_urls: Some(50),
+                strategies: Some(vec!["mobile".into(), "desktop".into()]),
+                categories: Some(vec!["performance".into(), "seo".into()]),
+                locale: Some("en_US".into()),
+                max_requests_per_run: Some(120),
+                requests_per_minute: Some(30),
+                respect_robots: Some(true),
+                top_audits_per_page: Some(15),
+                max_concurrent_requests: Some(2),
+            },
+        );
+        let input = el_input(&cfg);
+        assert_eq!(input["kind"], "google_pagespeed");
+        assert_eq!(input["site"], "https://example.com");
+        assert_eq!(input["api_key"], "${PAGESPEED_API_KEY}");
+        assert_eq!(input["url_mode"], "tld_sample");
+        assert_eq!(input["max_urls"], 50);
+        assert_eq!(input["strategies"][0], "mobile");
+        assert_eq!(input["max_requests_per_run"], 120);
     }
 
     #[test]
