@@ -491,6 +491,64 @@ pub enum SourceConfig {
         #[serde(default)]
         url_list: Option<Vec<String>>,
     },
+    #[serde(rename = "seo_crawl")]
+    SeoCrawl {
+        #[serde(default)]
+        site: Option<String>,
+        #[serde(default)]
+        max_urls: Option<u32>,
+        #[serde(default)]
+        max_depth: Option<u32>,
+        #[serde(default)]
+        crawl_rate_per_second: Option<f64>,
+        #[serde(default)]
+        respect_robots: Option<bool>,
+        #[serde(default)]
+        openai_enabled: Option<bool>,
+        #[serde(default)]
+        openai_model: Option<String>,
+        #[serde(default)]
+        openai_analyze_blocks: Option<bool>,
+        #[serde(default)]
+        openai_max_blocks_per_page: Option<u32>,
+        #[serde(default)]
+        skip_unchanged_content: Option<bool>,
+        #[serde(default)]
+        user_agent: Option<String>,
+    },
+    #[serde(rename = "site_quality")]
+    SiteQuality {
+        #[serde(default)]
+        site: Option<String>,
+        #[serde(default)]
+        url_mode: Option<String>,
+        #[serde(default)]
+        url_list: Option<Vec<String>>,
+        #[serde(default)]
+        max_pages_per_run: Option<u32>,
+        #[serde(default)]
+        wait_until: Option<String>,
+        #[serde(default)]
+        navigation_timeout_ms: Option<u32>,
+        #[serde(default)]
+        lighthouse_enabled: Option<bool>,
+        #[serde(default)]
+        lighthouse_categories: Option<Vec<String>>,
+        #[serde(default)]
+        axe_enabled: Option<bool>,
+        #[serde(default)]
+        axe_tags: Option<Vec<String>>,
+        #[serde(default)]
+        pages_per_minute: Option<u32>,
+        #[serde(default)]
+        worker_node_path: Option<String>,
+        #[serde(default)]
+        playwright_executable_path: Option<String>,
+        #[serde(default)]
+        respect_robots: Option<bool>,
+        #[serde(default)]
+        skip_heavy_when_unchanged: Option<bool>,
+    },
     #[serde(rename = "google_pagespeed")]
     GooglePageSpeed {
         #[serde(default)]
@@ -554,6 +612,25 @@ pub enum SourceConfig {
         return_records_with_no_metrics: Option<bool>,
         #[serde(default)]
         max_concurrent_requests: Option<u32>,
+    },
+    #[serde(rename = "dataforseo_backlinks")]
+    DataForSeoBacklinks {
+        #[serde(default)]
+        login: Option<String>,
+        #[serde(default)]
+        password: Option<String>,
+        #[serde(default)]
+        site: Option<String>,
+        #[serde(default)]
+        run_mode: Option<String>,
+        #[serde(default)]
+        backlink_target: Option<String>,
+        #[serde(default)]
+        limit: Option<u32>,
+        #[serde(default)]
+        max_pages: Option<u32>,
+        #[serde(default)]
+        request_interval_ms: Option<u64>,
     },
     #[serde(rename = "meta_instagram_ads")]
     MetaInstagramAds {
@@ -755,8 +832,11 @@ impl SkipprProjectConfig {
             Some(SourceConfig::GoogleAnalytics { .. }) => Some("google_analytics"),
             Some(SourceConfig::GoogleSearchConsole { .. }) => Some("google_search_console"),
             Some(SourceConfig::GooglePageSpeed { .. }) => Some("google_pagespeed"),
+            Some(SourceConfig::SeoCrawl { .. }) => Some("seo_crawl"),
+            Some(SourceConfig::SiteQuality { .. }) => Some("site_quality"),
             Some(SourceConfig::AppleSearchAds { .. }) => Some("apple_search_ads"),
             Some(SourceConfig::MetaInstagramAds { .. }) => Some("meta_instagram_ads"),
+            Some(SourceConfig::DataForSeoBacklinks { .. }) => Some("dataforseo_backlinks"),
             Some(SourceConfig::HttpClient { .. }) => Some("http_client"),
             Some(SourceConfig::HttpServer { .. }) => Some("http_server"),
             Some(SourceConfig::Socket { .. }) => Some("socket"),

@@ -22,6 +22,8 @@ dirs-next = "2.0"
 flate2 = "1"
 tar = "0.4"
 skipprd = { path = "../.." }
+skippr-runtime-sdk = { path = "../skippr-runtime-sdk" }
+skippr-plugin-data-source-dataforseo-backlinks = { path = "../../plugins/data_source/dataforseo_backlinks" }
 
 react-core.workspace = true
 react.workspace = true

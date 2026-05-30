@@ -1007,6 +1007,64 @@ enum SourceKind {
         #[arg(long)]
         max_concurrent_requests: Option<u32>,
     },
+    /// SEO crawl source (robots, sitemap, static HTML, content blocks, OpenAI AEO scores).
+    SeoCrawl {
+        #[arg(long)]
+        site: Option<String>,
+        #[arg(long)]
+        max_urls: Option<u32>,
+        #[arg(long)]
+        max_depth: Option<u32>,
+        #[arg(long)]
+        crawl_rate_per_second: Option<f64>,
+        #[arg(long)]
+        respect_robots: Option<bool>,
+        #[arg(long)]
+        openai_enabled: Option<bool>,
+        #[arg(long)]
+        openai_model: Option<String>,
+        #[arg(long)]
+        openai_analyze_blocks: Option<bool>,
+        #[arg(long)]
+        openai_max_blocks_per_page: Option<u32>,
+        #[arg(long)]
+        skip_unchanged_content: Option<bool>,
+        #[arg(long)]
+        user_agent: Option<String>,
+    },
+    /// Site Quality source (Playwright lab: vitals, axe, Lighthouse).
+    SiteQuality {
+        #[arg(long)]
+        site: Option<String>,
+        #[arg(long)]
+        url_mode: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        url_list: Option<Vec<String>>,
+        #[arg(long)]
+        max_pages_per_run: Option<u32>,
+        #[arg(long)]
+        wait_until: Option<String>,
+        #[arg(long)]
+        navigation_timeout_ms: Option<u32>,
+        #[arg(long)]
+        lighthouse_enabled: Option<bool>,
+        #[arg(long, value_delimiter = ',')]
+        lighthouse_categories: Option<Vec<String>>,
+        #[arg(long)]
+        axe_enabled: Option<bool>,
+        #[arg(long, value_delimiter = ',')]
+        axe_tags: Option<Vec<String>>,
+        #[arg(long)]
+        pages_per_minute: Option<u32>,
+        #[arg(long)]
+        worker_node_path: Option<String>,
+        #[arg(long)]
+        playwright_executable_path: Option<String>,
+        #[arg(long)]
+        respect_robots: Option<bool>,
+        #[arg(long)]
+        skip_heavy_when_unchanged: Option<bool>,
+    },
     /// Apple Search Ads source (Campaign Management API v5 daily reports).
     AppleSearchAds {
         #[arg(long)]
@@ -1072,6 +1130,25 @@ enum SourceKind {
         instagram_filter: Option<bool>,
         #[arg(long, value_delimiter = ',')]
         streams: Option<Vec<String>>,
+    },
+    /// DataForSEO Backlinks API v3 (backlinks + page intersection live).
+    DataForSeoBacklinks {
+        #[arg(long)]
+        login: Option<String>,
+        #[arg(long)]
+        password: Option<String>,
+        #[arg(long)]
+        site: Option<String>,
+        #[arg(long)]
+        run_mode: Option<String>,
+        #[arg(long)]
+        backlink_target: Option<String>,
+        #[arg(long)]
+        limit: Option<u32>,
+        #[arg(long)]
+        max_pages: Option<u32>,
+        #[arg(long)]
+        request_interval_ms: Option<u64>,
     },
     /// HTTP client source (polling).
     HttpClient {
@@ -1771,11 +1848,14 @@ fn plugin_mapping_key(map: &serde_yaml::Mapping) -> Option<String> {
 
 /// Prefer known runtime plugin keys (e.g. `GoogleAnalytics`) over incidental mappings like `transform`.
 const DATA_SOURCE_RUNTIME_PLUGIN_KEYS: &[&str] = &[
+    "SeoCrawl",
     "AppleSearchAds",
     "MetaInstagramAds",
+    "DataForSeoBacklinks",
     "GoogleAnalytics",
     "GoogleSearchConsole",
     "GooglePageSpeed",
+    "SiteQuality",
     "S3",
     "File",
     "Mssql",
@@ -2104,6 +2184,38 @@ fn source_config_from_data_source(
             respect_robots: yaml_bool(plugin_cfg, "respect_robots"),
             top_audits_per_page: yaml_u32(plugin_cfg, "top_audits_per_page"),
             max_concurrent_requests: yaml_u32(plugin_cfg, "max_concurrent_requests"),
+        }),
+        "SeoCrawl" => Ok(SourceConfig::SeoCrawl {
+            site: yaml_str(plugin_cfg, "site"),
+            max_urls: yaml_u32(plugin_cfg, "max_urls"),
+            max_depth: yaml_u32(plugin_cfg, "max_depth"),
+            crawl_rate_per_second: plugin_cfg
+                .get("crawl_rate_per_second")
+                .and_then(|v| v.as_f64()),
+            respect_robots: yaml_bool(plugin_cfg, "respect_robots"),
+            openai_enabled: yaml_bool(plugin_cfg, "openai_enabled"),
+            openai_model: yaml_str(plugin_cfg, "openai_model"),
+            openai_analyze_blocks: yaml_bool(plugin_cfg, "openai_analyze_blocks"),
+            openai_max_blocks_per_page: yaml_u32(plugin_cfg, "openai_max_blocks_per_page"),
+            skip_unchanged_content: yaml_bool(plugin_cfg, "skip_unchanged_content"),
+            user_agent: yaml_str(plugin_cfg, "user_agent"),
+        }),
+        "SiteQuality" => Ok(SourceConfig::SiteQuality {
+            site: yaml_str(plugin_cfg, "site"),
+            url_mode: yaml_str(plugin_cfg, "url_mode"),
+            url_list: yaml_string_vec(plugin_cfg, "url_list"),
+            max_pages_per_run: yaml_u32(plugin_cfg, "max_pages_per_run"),
+            wait_until: yaml_str(plugin_cfg, "wait_until"),
+            navigation_timeout_ms: yaml_u32(plugin_cfg, "navigation_timeout_ms"),
+            lighthouse_enabled: yaml_bool(plugin_cfg, "lighthouse_enabled"),
+            lighthouse_categories: yaml_string_vec(plugin_cfg, "lighthouse_categories"),
+            axe_enabled: yaml_bool(plugin_cfg, "axe_enabled"),
+            axe_tags: yaml_string_vec(plugin_cfg, "axe_tags"),
+            pages_per_minute: yaml_u32(plugin_cfg, "pages_per_minute"),
+            worker_node_path: yaml_str(plugin_cfg, "worker_node_path"),
+            playwright_executable_path: yaml_str(plugin_cfg, "playwright_executable_path"),
+            respect_robots: yaml_bool(plugin_cfg, "respect_robots"),
+            skip_heavy_when_unchanged: yaml_bool(plugin_cfg, "skip_heavy_when_unchanged"),
         }),
         "AppleSearchAds" => Ok(SourceConfig::AppleSearchAds {
             org_id: yaml_str(plugin_cfg, "org_id"),
@@ -2975,6 +3087,79 @@ fn source_plugin_and_config(kind: SourceKind) -> (&'static str, serde_json::Valu
                 ("max_concurrent_requests", u32_json(max_concurrent_requests)),
             ]),
         ),
+        SourceKind::SeoCrawl {
+            site,
+            max_urls,
+            max_depth,
+            crawl_rate_per_second,
+            respect_robots,
+            openai_enabled,
+            openai_model,
+            openai_analyze_blocks,
+            openai_max_blocks_per_page,
+            skip_unchanged_content,
+            user_agent,
+        } => (
+            "SeoCrawl",
+            json_object(vec![
+                ("site", str_json(site)),
+                ("max_urls", u32_json(max_urls)),
+                ("max_depth", u32_json(max_depth)),
+                (
+                    "crawl_rate_per_second",
+                    crawl_rate_per_second.map(serde_json::Value::from),
+                ),
+                ("respect_robots", bool_json(respect_robots)),
+                ("openai_enabled", bool_json(openai_enabled)),
+                ("openai_model", str_json(openai_model)),
+                ("openai_analyze_blocks", bool_json(openai_analyze_blocks)),
+                ("openai_max_blocks_per_page", u32_json(openai_max_blocks_per_page)),
+                ("skip_unchanged_content", bool_json(skip_unchanged_content)),
+                ("user_agent", str_json(user_agent)),
+            ]),
+        ),
+        SourceKind::SiteQuality {
+            site,
+            url_mode,
+            url_list,
+            max_pages_per_run,
+            wait_until,
+            navigation_timeout_ms,
+            lighthouse_enabled,
+            lighthouse_categories,
+            axe_enabled,
+            axe_tags,
+            pages_per_minute,
+            worker_node_path,
+            playwright_executable_path,
+            respect_robots,
+            skip_heavy_when_unchanged,
+        } => (
+            "SiteQuality",
+            json_object(vec![
+                ("site", str_json(site)),
+                ("url_mode", str_json(url_mode)),
+                ("url_list", strings_json(url_list)),
+                ("max_pages_per_run", u32_json(max_pages_per_run)),
+                ("wait_until", str_json(wait_until)),
+                ("navigation_timeout_ms", u32_json(navigation_timeout_ms)),
+                ("lighthouse_enabled", bool_json(lighthouse_enabled)),
+                ("lighthouse_categories", strings_json(lighthouse_categories)),
+                ("axe_enabled", bool_json(axe_enabled)),
+                ("axe_tags", strings_json(axe_tags)),
+                ("pages_per_minute", u32_json(pages_per_minute)),
+                ("worker_node_path", str_json(worker_node_path)),
+                (
+                    "playwright_executable_path",
+                    str_json(playwright_executable_path),
+                ),
+                ("respect_robots", bool_json(respect_robots)),
+                (
+                    "skip_heavy_when_unchanged",
+                    bool_json(skip_heavy_when_unchanged),
+                ),
+            ]),
+        ),
         SourceKind::AppleSearchAds {
             org_id,
             client_id,
@@ -3050,6 +3235,46 @@ fn source_plugin_and_config(kind: SourceKind) -> (&'static str, serde_json::Valu
                 ("streams", strings_json(streams)),
             ]),
         ),
+        SourceKind::DataForSeoBacklinks {
+            login,
+            password,
+            site,
+            run_mode,
+            backlink_target,
+            limit,
+            max_pages,
+            request_interval_ms,
+        } => {
+            let mut backlink_jobs = Vec::new();
+            if let Some(target) = backlink_target.filter(|t| !t.trim().is_empty()) {
+                backlink_jobs.push(serde_json::json!({
+                    "target": target,
+                    "limit": limit.unwrap_or(1000),
+                    "max_pages": max_pages.unwrap_or(5),
+                }));
+            }
+            (
+                "DataForSeoBacklinks",
+                json_object(vec![
+                    ("login", str_json(login)),
+                    ("password", str_json(password)),
+                    ("site", str_json(site)),
+                    (
+                        "run_mode",
+                        str_json(run_mode.or_else(|| Some("both".to_string()))),
+                    ),
+                    (
+                        "backlink_jobs",
+                        Some(serde_json::Value::Array(backlink_jobs)),
+                    ),
+                    (
+                        "intersection_jobs",
+                        Some(serde_json::json!([])),
+                    ),
+                    ("request_interval_ms", u64_json(request_interval_ms)),
+                ]),
+            )
+        }
         SourceKind::HttpClient {
             url,
             method,
@@ -3922,6 +4147,20 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         }
     }
 
+    if let SourceKind::SiteQuality {
+        ref mut site,
+        ref mut url_mode,
+        ..
+    } = &mut kind
+    {
+        if site.is_none() {
+            *site = prompt("Site URL to measure (e.g. https://example.com)");
+        }
+        if url_mode.is_none() {
+            *url_mode = Some("tld_sample".to_string());
+        }
+    }
+
     if let SourceKind::AppleSearchAds {
         ref mut org_id,
         ref mut client_id,
@@ -3967,6 +4206,36 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         }
         if access_token.is_none() {
             *access_token = Some("${META_INSTAGRAM_ADS_ACCESS_TOKEN}".to_string());
+        }
+    }
+
+    if let SourceKind::DataForSeoBacklinks {
+        ref mut login,
+        ref mut password,
+        ref mut site,
+        ref mut run_mode,
+        ref mut backlink_target,
+        ..
+    } = &mut kind
+    {
+        if login.is_none() {
+            *login = Some("${DATAFORSEO_API_USER}".to_string());
+        }
+        if password.is_none() {
+            *password = Some("${DATAFORSEO_API_PASS}".to_string());
+        }
+        if site.is_none() {
+            if let Some(target) = backlink_target.as_deref().filter(|t| !t.trim().is_empty()) {
+                *site = Some(target.to_string());
+            } else {
+                *site = prompt("Site label for bronze rows (e.g. example.com)");
+            }
+        }
+        if run_mode.is_none() {
+            *run_mode = Some("both".to_string());
+        }
+        if backlink_target.is_none() {
+            *backlink_target = prompt("Primary backlink target domain (e.g. example.com)");
         }
     }
 
@@ -4348,6 +4617,64 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
             top_audits_per_page,
             max_concurrent_requests,
         },
+        SourceKind::SeoCrawl {
+            site,
+            max_urls,
+            max_depth,
+            crawl_rate_per_second,
+            respect_robots,
+            openai_enabled,
+            openai_model,
+            openai_analyze_blocks,
+            openai_max_blocks_per_page,
+            skip_unchanged_content,
+            user_agent,
+        } => SourceConfig::SeoCrawl {
+            site,
+            max_urls,
+            max_depth,
+            crawl_rate_per_second,
+            respect_robots,
+            openai_enabled,
+            openai_model,
+            openai_analyze_blocks,
+            openai_max_blocks_per_page,
+            skip_unchanged_content,
+            user_agent,
+        },
+        SourceKind::SiteQuality {
+            site,
+            url_mode,
+            url_list,
+            max_pages_per_run,
+            wait_until,
+            navigation_timeout_ms,
+            lighthouse_enabled,
+            lighthouse_categories,
+            axe_enabled,
+            axe_tags,
+            pages_per_minute,
+            worker_node_path,
+            playwright_executable_path,
+            respect_robots,
+            skip_heavy_when_unchanged,
+        } => SourceConfig::SiteQuality {
+            site,
+            url_mode,
+            url_list,
+            max_pages_per_run,
+            wait_until,
+            navigation_timeout_ms,
+            lighthouse_enabled,
+            lighthouse_categories,
+            axe_enabled,
+            axe_tags,
+            pages_per_minute,
+            worker_node_path,
+            playwright_executable_path,
+            respect_robots,
+            skip_heavy_when_unchanged,
+        },
         SourceKind::AppleSearchAds {
             org_id,
             client_id,
@@ -4413,6 +4740,25 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
             oauth_refresh_token,
             instagram_filter,
             streams,
+        },
+        SourceKind::DataForSeoBacklinks {
+            login,
+            password,
+            site,
+            run_mode,
+            backlink_target,
+            limit,
+            max_pages,
+            request_interval_ms,
+        } => SourceConfig::DataForSeoBacklinks {
+            login,
+            password,
+            site,
+            run_mode,
+            backlink_target,
+            limit,
+            max_pages,
+            request_interval_ms,
         },
         SourceKind::HttpClient {
             url,
@@ -4481,8 +4827,11 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         SourceConfig::GoogleAnalytics { .. } => "google_analytics",
         SourceConfig::GoogleSearchConsole { .. } => "google_search_console",
         SourceConfig::GooglePageSpeed { .. } => "google_pagespeed",
+        SourceConfig::SiteQuality { .. } => "site_quality",
+        SourceConfig::SeoCrawl { .. } => "seo_crawl",
         SourceConfig::AppleSearchAds { .. } => "apple_search_ads",
         SourceConfig::MetaInstagramAds { .. } => "meta_instagram_ads",
+        SourceConfig::DataForSeoBacklinks { .. } => "dataforseo_backlinks",
         SourceConfig::HttpClient { .. } => "http_client",
         SourceConfig::HttpServer { .. } => "http_server",
         SourceConfig::Socket { .. } => "socket",
@@ -4812,6 +5161,16 @@ fn cmd_doctor(explicit_config: &Option<PathBuf>, output: &str) {
         && (cfg_raw.contains("googlepagespeed") || cfg_raw.contains("google_pagespeed"))
     {
         check_pagespeed_env(output, &mut checks, &mut ok);
+    }
+
+    if !is_json_output(output)
+        && (cfg_raw.contains("sitequality") || cfg_raw.contains("site_quality"))
+    {
+        check_site_quality_env(output, &mut checks, &mut ok);
+    }
+
+    if cfg_raw.contains("dataforseo") {
+        check_dataforseo_backlinks_credentials(output, &mut checks, &mut ok);
     }
 
     if is_json_output(output) {
@@ -5223,6 +5582,166 @@ fn check_pagespeed_env(output: &str, checks: &mut Vec<DoctorCheck>, ok: &mut boo
             false,
             "PAGESPEED_API_KEY not set — required for Google PageSpeed Insights API calls",
             Some("Create a key in Google Cloud Console and export PAGESPEED_API_KEY"),
+        );
+        *ok = false;
+    }
+}
+
+fn check_dataforseo_backlinks_credentials(
+    output: &str,
+    checks: &mut Vec<DoctorCheck>,
+    ok: &mut bool,
+) {
+    if env_set("SKIPPR_DATAFORSEO_BACKLINKS_FIXTURE_DIR") {
+        emit_doctor_check(
+            output,
+            checks,
+            true,
+            "SKIPPR_DATAFORSEO_BACKLINKS_FIXTURE_DIR set (offline fixtures)",
+            None,
+        );
+        return;
+    }
+
+    let Some((login, password)) =
+        skippr_plugin_data_source_dataforseo_backlinks::config::credentials_from_env()
+    else {
+        emit_doctor_check(
+            output,
+            checks,
+            false,
+            "DATAFORSEO_API_USER and DATAFORSEO_API_PASS (or DATAFORSEO_LOGIN / DATAFORSEO_PASSWORD) must be set for DataForSEO Backlinks",
+            Some("Export credentials from https://app.dataforseo.com/api-access"),
+        );
+        *ok = false;
+        return;
+    };
+    let rt = match tokio::runtime::Runtime::new() {
+        Ok(rt) => rt,
+        Err(e) => {
+            emit_doctor_check(
+                output,
+                checks,
+                false,
+                format!("DataForSEO credential probe failed to start runtime: {e}"),
+                None,
+            );
+            *ok = false;
+            return;
+        }
+    };
+    match rt.block_on(
+        skippr_plugin_data_source_dataforseo_backlinks::client::DataForSeoClient::probe_credentials(
+            &login,
+            &password,
+        ),
+    ) {
+        Ok(()) => emit_doctor_check(
+            output,
+            checks,
+            true,
+            "DataForSEO API credentials verified (backlinks/live probe)",
+            None,
+        ),
+        Err(e) => {
+            emit_doctor_check(
+                output,
+                checks,
+                false,
+                format!("DataForSEO API credential probe failed: {e}"),
+                Some("Check DATAFORSEO_API_USER / DATAFORSEO_API_PASS at https://app.dataforseo.com/api-access"),
+            );
+            *ok = false;
+        }
+    }
+}
+
+fn check_site_quality_env(output: &str, checks: &mut Vec<DoctorCheck>, ok: &mut bool) {
+    if which("node") {
+        emit_doctor_check(output, checks, true, "node found on PATH", None);
+    } else {
+        emit_doctor_check(
+            output,
+            checks,
+            false,
+            "node not found on PATH — required for Site Quality Playwright worker",
+            Some("Install Node.js 20+ and ensure `node` is on PATH"),
+        );
+        *ok = false;
+    }
+
+    let fixture_mode = std::env::var("SKIPPR_SITE_QUALITY_FIXTURE_DIR")
+        .ok()
+        .filter(|d| !d.trim().is_empty())
+        .is_some();
+
+    if fixture_mode {
+        emit_doctor_check(
+            output,
+            checks,
+            true,
+            "SKIPPR_SITE_QUALITY_FIXTURE_DIR set (offline fixture mode)",
+            None,
+        );
+    }
+
+    if fixture_mode {
+        emit_doctor_check(
+            output,
+            checks,
+            true,
+            "worker script check skipped (fixture mode)",
+            None,
+        );
+    } else {
+        match skippr_runtime_sdk::site_quality_worker::resolve_site_quality_worker_script(None) {
+            Ok(path) => {
+                emit_doctor_check(
+                    output,
+                    checks,
+                    true,
+                    &format!("site-quality-worker.mjs found at {}", path.display()),
+                    None,
+                );
+            }
+            Err(err) => {
+                emit_doctor_check(
+                    output,
+                    checks,
+                    false,
+                    &format!(
+                        "site-quality-worker.mjs not found ({err}); run from a skipprd checkout or set SKIPPR_SITE_QUALITY_WORKER_SCRIPT"
+                    ),
+                    None,
+                );
+                *ok = false;
+            }
+        }
+    }
+
+    if fixture_mode {
+        emit_doctor_check(
+            output,
+            checks,
+            true,
+            "Chromium check skipped (fixture mode)",
+            None,
+        );
+    } else if which("npx") {
+        emit_doctor_check(
+            output,
+            checks,
+            true,
+            "npx found — run `npx playwright install chromium` if Chromium is not cached",
+            None,
+        );
+    } else {
+        emit_doctor_check(
+            output,
+            checks,
+            false,
+            "Chromium for Playwright may be missing — install Node/npx and run `npx playwright install chromium`",
+            None,
         );
         *ok = false;
     }

@@ -977,6 +977,127 @@ pub fn to_internal(
                     }
                     serde_json::Value::Object(m)
                 }
+                SourceConfig::SeoCrawl {
+                    site,
+                    max_urls,
+                    max_depth,
+                    crawl_rate_per_second,
+                    respect_robots,
+                    openai_enabled,
+                    openai_model,
+                    openai_analyze_blocks,
+                    openai_max_blocks_per_page,
+                    skip_unchanged_content,
+                    user_agent,
+                } => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("kind".into(), "seo_crawl".into());
+                    if let Some(v) = site {
+                        m.insert("site".into(), v.clone().into());
+                        m.insert("name".into(), format!("SEO Crawl {v}").into());
+                    }
+                    if let Some(v) = max_urls {
+                        m.insert("max_urls".into(), (*v).into());
+                    }
+                    if let Some(v) = max_depth {
+                        m.insert("max_depth".into(), (*v).into());
+                    }
+                    if let Some(v) = crawl_rate_per_second {
+                        m.insert("crawl_rate_per_second".into(), (*v).into());
+                    }
+                    if let Some(v) = respect_robots {
+                        m.insert("respect_robots".into(), (*v).into());
+                    }
+                    if let Some(v) = openai_enabled {
+                        m.insert("openai_enabled".into(), (*v).into());
+                    }
+                    if let Some(v) = openai_model {
+                        m.insert("openai_model".into(), v.clone().into());
+                    }
+                    if let Some(v) = openai_analyze_blocks {
+                        m.insert("openai_analyze_blocks".into(), (*v).into());
+                    }
+                    if let Some(v) = openai_max_blocks_per_page {
+                        m.insert("openai_max_blocks_per_page".into(), (*v).into());
+                    }
+                    if let Some(v) = skip_unchanged_content {
+                        m.insert("skip_unchanged_content".into(), (*v).into());
+                    }
+                    if let Some(v) = user_agent {
+                        m.insert("user_agent".into(), v.clone().into());
+                    }
+                    serde_json::Value::Object(m)
+                }
+                SourceConfig::SiteQuality {
+                    site,
+                    url_mode,
+                    url_list,
+                    max_pages_per_run,
+                    wait_until,
+                    navigation_timeout_ms,
+                    lighthouse_enabled,
+                    lighthouse_categories,
+                    axe_enabled,
+                    axe_tags,
+                    pages_per_minute,
+                    worker_node_path,
+                    playwright_executable_path,
+                    respect_robots,
+                    skip_heavy_when_unchanged,
+                } => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("kind".into(), "site_quality".into());
+                    if let Some(v) = site {
+                        m.insert("site".into(), v.clone().into());
+                        m.insert("name".into(), format!("Site Quality {v}").into());
+                    }
+                    if let Some(v) = url_mode {
+                        m.insert("url_mode".into(), v.clone().into());
+                    }
+                    if let Some(v) = url_list {
+                        m.insert("url_list".into(), serde_json::to_value(v).unwrap_or_default());
+                    }
+                    if let Some(v) = max_pages_per_run {
+                        m.insert("max_pages_per_run".into(), (*v).into());
+                    }
+                    if let Some(v) = wait_until {
+                        m.insert("wait_until".into(), v.clone().into());
+                    }
+                    if let Some(v) = navigation_timeout_ms {
+                        m.insert("navigation_timeout_ms".into(), (*v).into());
+                    }
+                    if let Some(v) = lighthouse_enabled {
+                        m.insert("lighthouse_enabled".into(), (*v).into());
+                    }
+                    if let Some(v) = lighthouse_categories {
+                        m.insert(
+                            "lighthouse_categories".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
+                    }
+                    if let Some(v) = axe_enabled {
+                        m.insert("axe_enabled".into(), (*v).into());
+                    }
+                    if let Some(v) = axe_tags {
+                        m.insert("axe_tags".into(), serde_json::to_value(v).unwrap_or_default());
+                    }
+                    if let Some(v) = pages_per_minute {
+                        m.insert("pages_per_minute".into(), (*v).into());
+                    }
+                    if let Some(v) = worker_node_path {
+                        m.insert("worker_node_path".into(), v.clone().into());
+                    }
+                    if let Some(v) = playwright_executable_path {
+                        m.insert("playwright_executable_path".into(), v.clone().into());
+                    }
+                    if let Some(v) = respect_robots {
+                        m.insert("respect_robots".into(), (*v).into());
+                    }
+                    if let Some(v) = skip_heavy_when_unchanged {
+                        m.insert("skip_heavy_when_unchanged".into(), (*v).into());
+                    }
+                    serde_json::Value::Object(m)
+                }
                 SourceConfig::AppleSearchAds {
                     org_id,
                     client_id,
@@ -1045,6 +1166,45 @@ pub fn to_internal(
                     }
                     if let Some(v) = max_concurrent_requests {
                         m.insert("max_concurrent_requests".into(), (*v).into());
+                    }
+                    serde_json::Value::Object(m)
+                }
+                SourceConfig::DataForSeoBacklinks {
+                    login,
+                    password,
+                    site,
+                    run_mode,
+                    backlink_target,
+                    limit,
+                    max_pages,
+                    request_interval_ms,
+                } => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("kind".into(), "dataforseo_backlinks".into());
+                    if let Some(v) = login {
+                        m.insert("login".into(), v.clone().into());
+                    }
+                    if let Some(v) = password {
+                        m.insert("password".into(), v.clone().into());
+                    }
+                    if let Some(v) = site {
+                        m.insert("site".into(), v.clone().into());
+                        m.insert("name".into(), format!("DataForSEO Backlinks {v}").into());
+                    }
+                    if let Some(v) = run_mode {
+                        m.insert("run_mode".into(), v.clone().into());
+                    }
+                    if let Some(v) = backlink_target {
+                        m.insert("backlink_target".into(), v.clone().into());
+                    }
+                    if let Some(v) = limit {
+                        m.insert("limit".into(), (*v).into());
+                    }
+                    if let Some(v) = max_pages {
+                        m.insert("max_pages".into(), (*v).into());
+                    }
+                    if let Some(v) = request_interval_ms {
+                        m.insert("request_interval_ms".into(), (*v).into());
                     }
                     serde_json::Value::Object(m)
                 }
@@ -2094,6 +2254,41 @@ mod tests {
     }
 
     #[test]
+    fn translate_site_quality_source() {
+        let cfg = make_cfg(
+            WarehouseConfig::Athena {
+                workgroup: None,
+                region: Some("us-east-1".into()),
+                result_s3: None,
+                schema: Some("web".into()),
+            },
+            SourceConfig::SiteQuality {
+                site: Some("https://example.com".into()),
+                url_mode: Some("tld_sample".into()),
+                url_list: None,
+                max_pages_per_run: Some(50),
+                wait_until: Some("networkidle".into()),
+                navigation_timeout_ms: Some(45000),
+                lighthouse_enabled: Some(true),
+                lighthouse_categories: Some(vec!["performance".into()]),
+                axe_enabled: Some(true),
+                axe_tags: Some(vec!["wcag2aa".into()]),
+                pages_per_minute: Some(6),
+                worker_node_path: Some("node".into()),
+                playwright_executable_path: None,
+                respect_robots: Some(true),
+                skip_heavy_when_unchanged: Some(true),
+            },
+        );
+        let input = el_input(&cfg);
+        assert_eq!(input["kind"], "site_quality");
+        assert_eq!(input["site"], "https://example.com");
+        assert_eq!(input["url_mode"], "tld_sample");
+        assert_eq!(input["max_pages_per_run"], 50);
+        assert_eq!(input["lighthouse_enabled"], true);
+    }
+
+    #[test]
     fn translate_apple_search_ads_source() {
         let cfg = make_cfg(
             WarehouseConfig::Athena {
@@ -2127,6 +2322,33 @@ mod tests {
         assert_eq!(input["start_date"], "2024-01-01");
         assert_eq!(input["stream_profile"], "full");
         assert_eq!(input["max_concurrent_requests"], 8);
+    }
+
+    #[test]
+    fn translate_dataforseo_backlinks_source() {
+        let cfg = make_cfg(
+            WarehouseConfig::Athena {
+                workgroup: None,
+                region: Some("us-east-1".into()),
+                result_s3: None,
+                schema: Some("marketing".into()),
+            },
+            SourceConfig::DataForSeoBacklinks {
+                login: Some("${DATAFORSEO_LOGIN}".into()),
+                password: Some("${DATAFORSEO_PASSWORD}".into()),
+                site: Some("example.com".into()),
+                run_mode: Some("both".into()),
+                backlink_target: Some("example.com".into()),
+                limit: Some(1000),
+                max_pages: Some(5),
+                request_interval_ms: Some(200),
+            },
+        );
+        let input = el_input(&cfg);
+        assert_eq!(input["kind"], "dataforseo_backlinks");
+        assert_eq!(input["site"], "example.com");
+        assert_eq!(input["backlink_target"], "example.com");
+        assert_eq!(input["max_pages"], 5);
     }
 
     #[test]
