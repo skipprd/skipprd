@@ -11,6 +11,35 @@ pub trait BearerAuth: Send + Sync {
     fn authorization_header(&self) -> Result<String, String>;
 }
 
+/// HTTP Basic authentication (`Authorization: Basic …`).
+#[derive(Clone)]
+pub struct BasicAuth {
+    login: String,
+    password: String,
+}
+
+impl BasicAuth {
+    pub fn new(login: impl Into<String>, password: impl Into<String>) -> Self {
+        Self {
+            login: login.into(),
+            password: password.into(),
+        }
+    }
+
+    pub fn authorization_header_value(&self) -> String {
+        use base64::Engine;
+        let token = base64::engine::general_purpose::STANDARD
+            .encode(format!("{}:{}", self.login, self.password));
+        format!("Basic {token}")
+    }
+}
+
+impl BearerAuth for BasicAuth {
+    fn authorization_header(&self) -> Result<String, String> {
+        Ok(self.authorization_header_value())
+    }
+}
+
 #[derive(Clone)]
 pub struct StaticBearerAuth {
     token: String,
@@ -491,6 +520,15 @@ mod tests {
     fn static_bearer_formats_header() {
         let auth = StaticBearerAuth::new("secret");
         assert_eq!(auth.authorization_header().unwrap(), "Bearer secret");
+    }
+
+    #[test]
+    fn basic_auth_formats_header() {
+        let auth = BasicAuth::new("login", "pass");
+        assert_eq!(
+            auth.authorization_header().unwrap(),
+            "Basic bG9naW46cGFzcw=="
+        );
     }
 
     #[test]
