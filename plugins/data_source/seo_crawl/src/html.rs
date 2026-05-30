@@ -2,48 +2,18 @@ use std::collections::HashMap;
 
 use regex::Regex;
 use scraper::{Html, Selector};
+use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::checkpoint::PageScores;
+use crate::fetch::{resolve_href, FetchResponse};
+use crate::origin::SiteOrigin;
 
 #[derive(Debug, Clone)]
-pub struct ContentBlock {
-    pub block_id: String,
-    pub block_type: String,
-    pub heading_path: Vec<String>,
-    pub text: String,
-    pub text_hash: String,
-    pub char_count: usize,
-    pub word_count: usize,
-    pub ordinal: u32,
-    pub has_list: bool,
-    pub has_table: bool,
-    pub has_citation: bool,
-    pub outbound_link_count: u32,
-}
-
-#[derive(Debug, Clone)]
-pub struct ParsedPage {
-    pub canonical_url: String,
-    pub title: Option<String>,
-    pub meta_description: Option<String>,
-    pub h1: Option<String>,
-    pub head: serde_json::Value,
-    pub http_headers: serde_json::Value,
-    pub content_hash: String,
-    pub blocks: Vec<ContentBlock>,
-    pub internal_links: Vec<LinkEdge>,
-    pub issues: Vec<IssueRow>,
-    pub technical_score: f64,
-}
-
-#[derive(Debug, Clone)]
-pub struct LinkEdge {
+pub struct ParsedLink {
     pub target_url: String,
     pub anchor_text: String,
     pub rel: Vec<String>,
     pub is_nofollow: bool,
-    pub link_kind: String,
 }
 
 #[derive(Debug, Clone)]
@@ -53,37 +23,42 @@ pub struct IssueRow {
     pub severity: String,
 }
 
+#[derive(Debug, Clone)]
+pub struct ParsedPage {
+    pub canonical_url: String,
+    pub title: Option<String>,
+    pub meta_description: Option<String>,
+    pub h1: Option<String>,
+    pub head: Value,
+    pub links: Vec<ParsedLink>,
+    pub main_text: String,
+    pub content_hash: String,
+    pub structured_data_count: u32,
+    pub issues: Vec<IssueRow>,
+}
+
+pub fn normalize_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
 pub fn content_hash(text: &str) -> String {
-    let normalized: String = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let normalized = normalize_whitespace(text);
     let digest = Sha256::digest(normalized.as_bytes());
-    format!("sha256:{}", hex::encode(digest))
+    format!("sha256:{:x}", digest)
 }
 
-pub fn block_id_for(page_url: &str, heading_path: &[String], ordinal: u32) -> String {
-    let seed = format!("{page_url}|{}|{ordinal}", heading_path.join(" > "));
-    content_hash(&seed)
-}
-
-pub fn parse_html_page(
-    page_url: &str,
-    final_url: &str,
-    html: &str,
-    headers: &[(String, String)],
-    origin: &str,
-) -> ParsedPage {
-    let document = Html::parse_document(html);
+pub fn parse_html_page(url: &str, response: &FetchResponse, origin: &SiteOrigin) -> ParsedPage {
+    let document = Html::parse_document(&response.body);
     let title = select_text(&document, "title");
     let meta_description = meta_content(&document, "description");
     let h1 = select_text(&document, "h1");
-    let head = extract_head_json(&document, final_url, &title, &meta_description, &h1);
-    let http_headers = serde_json::json!(headers
-        .iter()
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect::<HashMap<_, _>>());
+    let head = extract_head_json(&document, &response.final_url, &title, &meta_description, &h1);
     let main_text = extract_main_text(&document);
     let hash = content_hash(&main_text);
-    let blocks = extract_content_blocks(page_url, &document);
-    let internal_links = extract_links(&document, page_url, origin);
+    let links = extract_links(&document, url, origin);
+    let structured_data_count = document
+        .select(&Selector::parse("script[type=\"application/ld+json\"]").unwrap())
+        .count() as u32;
     let mut issues = Vec::new();
     if title.as_ref().map(|t| t.is_empty()).unwrap_or(true) {
         issues.push(IssueRow {
@@ -106,32 +81,41 @@ pub fn parse_html_page(
             severity: "medium".into(),
         });
     }
-    let technical_score = compute_technical_score(&issues);
+    let canonical_url = head
+        .get("canonical")
+        .and_then(|v| v.as_str())
+        .unwrap_or(&response.final_url)
+        .to_string();
     ParsedPage {
-        canonical_url: final_url.to_string(),
+        canonical_url,
         title,
         meta_description,
         h1,
         head,
-        http_headers,
+        links,
+        main_text,
         content_hash: hash,
-        blocks,
-        internal_links,
+        structured_data_count,
         issues,
-        technical_score,
     }
 }
 
-fn compute_technical_score(issues: &[IssueRow]) -> f64 {
-    let penalty: f64 = issues
-        .iter()
-        .map(|i| match i.severity.as_str() {
+pub fn technical_score(response: &FetchResponse, page: &ParsedPage) -> f64 {
+    let mut score = 1.0;
+    if response.status >= 400 {
+        score -= 0.5;
+    }
+    for issue in &page.issues {
+        score -= match issue.severity.as_str() {
             "high" => 0.25,
             "medium" => 0.1,
             _ => 0.05,
-        })
-        .sum();
-    (1.0 - penalty).clamp(0.0, 1.0)
+        };
+    }
+    if page.structured_data_count == 0 {
+        score -= 0.05;
+    }
+    score.clamp(0.0, 1.0)
 }
 
 fn select_text(document: &Html, selector: &str) -> Option<String> {
@@ -159,32 +143,32 @@ fn extract_head_json(
     title: &Option<String>,
     meta_description: &Option<String>,
     h1: &Option<String>,
-) -> serde_json::Value {
+) -> Value {
     let mut head = serde_json::Map::new();
     if let Some(t) = title {
-        head.insert("title".into(), serde_json::json!(t));
+        head.insert("title".into(), json!(t));
     }
     if let Some(d) = meta_description {
-        head.insert("meta_description".into(), serde_json::json!(d));
+        head.insert("meta_description".into(), json!(d));
     }
     if let Some(h) = h1 {
-        head.insert("h1".into(), serde_json::json!(h));
+        head.insert("h1".into(), json!(h));
     }
     if let Some(canonical) = select_attr(document, "link[rel=\"canonical\"]", "href") {
-        head.insert("canonical".into(), serde_json::json!(canonical));
+        head.insert("canonical".into(), json!(canonical));
         if canonical != final_url {
-            head.insert("canonical_mismatch".into(), serde_json::json!(true));
+            head.insert("canonical_mismatch".into(), json!(true));
         }
     }
     for prop in ["og:title", "og:description", "og:url", "og:image", "twitter:card"] {
         if let Some(val) = meta_property(document, prop) {
-            head.insert(prop.replace(':', "_"), serde_json::json!(val));
+            head.insert(prop.replace(':', "_"), json!(val));
         }
     }
     if let Some(lang) = select_attr(document, "html", "lang") {
-        head.insert("html_lang".into(), serde_json::json!(lang));
+        head.insert("html_lang".into(), json!(lang));
     }
-    serde_json::Value::Object(head)
+    Value::Object(head)
 }
 
 fn select_attr(document: &Html, selector: &str, attr: &str) -> Option<String> {
@@ -217,50 +201,7 @@ fn extract_main_text(document: &Html) -> String {
         .unwrap_or_default()
 }
 
-fn extract_content_blocks(page_url: &str, document: &Html) -> Vec<ContentBlock> {
-    let heading_sel = Selector::parse("h2, h3, h4, h5, h6").ok();
-    let Some(heading_sel) = heading_sel else {
-        return Vec::new();
-    };
-    let mut blocks = Vec::new();
-    let mut ordinal = 0u32;
-    for heading in document.select(&heading_sel) {
-        let text = heading.text().collect::<String>().trim().to_string();
-        if text.is_empty() {
-            continue;
-        }
-        let block_type = if text.contains('?') || question_re().is_match(&text.to_lowercase()) {
-            "direct_answer"
-        } else {
-            "heading_section"
-        };
-        let heading_path = vec![text.clone()];
-        let text_hash = content_hash(&text);
-        let block_id = block_id_for(page_url, &heading_path, ordinal);
-        blocks.push(ContentBlock {
-            block_id,
-            block_type: block_type.into(),
-            heading_path,
-            text: text.clone(),
-            text_hash,
-            char_count: text.chars().count(),
-            word_count: text.split_whitespace().count(),
-            ordinal,
-            has_list: false,
-            has_table: false,
-            has_citation: false,
-            outbound_link_count: 0,
-        });
-        ordinal += 1;
-    }
-    blocks
-}
-
-fn question_re() -> Regex {
-    Regex::new(r"^(how|what|why|when|where|who)\b").expect("regex")
-}
-
-fn extract_links(document: &Html, source_url: &str, origin: &str) -> Vec<LinkEdge> {
+fn extract_links(document: &Html, page_url: &str, origin: &SiteOrigin) -> Vec<ParsedLink> {
     let sel = Selector::parse("a[href]").ok();
     let Some(sel) = sel else {
         return Vec::new();
@@ -271,11 +212,7 @@ fn extract_links(document: &Html, source_url: &str, origin: &str) -> Vec<LinkEdg
         if href.is_empty() || href.starts_with('#') || href.starts_with("mailto:") {
             continue;
         }
-        let target = if href.starts_with("http") {
-            href.to_string()
-        } else if href.starts_with('/') {
-            format!("{}{}", origin.trim_end_matches('/'), href)
-        } else {
+        let Some(target_url) = resolve_href(href, page_url, origin) else {
             continue;
         };
         let rel: Vec<String> = anchor
@@ -286,78 +223,46 @@ fn extract_links(document: &Html, source_url: &str, origin: &str) -> Vec<LinkEdg
             .map(str::to_string)
             .collect();
         let is_nofollow = rel.iter().any(|r| r.eq_ignore_ascii_case("nofollow"));
-        let link_kind = if crate::crawl::same_site(origin, &target) {
-            "internal"
-        } else {
-            "external"
-        };
-        let anchor_text = anchor.text().collect::<String>().trim().to_string();
-        links.push(LinkEdge {
-            target_url: target,
-            anchor_text,
+        links.push(ParsedLink {
+            target_url,
+            anchor_text: anchor.text().collect::<String>().trim().to_string(),
             rel,
             is_nofollow,
-            link_kind: link_kind.into(),
         });
-        let _ = source_url;
     }
     links
 }
 
-pub fn rollup_page_scores(block_scores: &[serde_json::Value]) -> PageScores {
-    if block_scores.is_empty() {
-        return PageScores::default();
-    }
-    let mut extractability = 0.0;
-    let mut helpfulness = 0.0;
-    let mut trust = 0.0;
-    let mut ai = 0.0;
-    let n = block_scores.len() as f64;
-    for row in block_scores {
-        extractability += row
-            .get("extractability_score")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        helpfulness += row
-            .get("helpfulness_score")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        trust += row
-            .get("trust_score")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-        ai += row
-            .get("answer_clarity_score")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-    }
-    PageScores {
-        technical_score: 0.0,
-        content_quality_score: helpfulness / n,
-        eeat_proxy_score: trust / n,
-        ai_readiness_score: ai / n,
-    }
+fn question_re() -> Regex {
+    Regex::new(r"^(how|what|why|when|where|who)\b").expect("regex")
 }
 
-pub fn mock_block_analysis(block: &ContentBlock) -> serde_json::Value {
-    serde_json::json!({
-        "block_id": block.block_id,
-        "extractability_score": 0.75,
-        "answer_clarity_score": 0.7,
-        "citation_worthiness_score": 0.6,
-        "helpfulness_score": 0.72,
-        "trust_score": 0.68,
-        "is_self_contained": block.word_count >= 20,
-        "suggested_query_intents": [],
-        "missing_for_ai_citation": [],
-        "evidence_quotes": [block.text.chars().take(80).collect::<String>()],
-        "confidence": 0.8
-    })
+pub fn heading_blocks(page_url: &str, document: &Html) -> Vec<(String, String)> {
+    let heading_sel = Selector::parse("h2, h3, h4, h5, h6").ok();
+    let Some(heading_sel) = heading_sel else {
+        return Vec::new();
+    };
+    let mut blocks = Vec::new();
+    for heading in document.select(&heading_sel) {
+        let text = heading.text().collect::<String>().trim().to_string();
+        if text.is_empty() {
+            continue;
+        }
+        let block_type = if text.contains('?') || question_re().is_match(&text.to_lowercase()) {
+            "direct_answer"
+        } else {
+            "heading_section"
+        };
+        blocks.push((block_type.to_string(), text));
+    }
+    let _ = page_url;
+    blocks
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn content_hash_is_stable() {
@@ -365,22 +270,24 @@ mod tests {
     }
 
     #[test]
-    fn parse_html_extracts_title_and_blocks() {
+    fn parse_html_extracts_title_and_links() {
         let html = r#"<!doctype html><html lang="en"><head>
             <title>Example</title>
             <meta name="description" content="Desc">
             <link rel="canonical" href="https://example.com/">
         </head><body><h1>Home</h1><h2>What is SEO?</h2><p>Answer here.</p>
-        <a href="/pricing">Pricing</a></body></html>"#;
-        let parsed = parse_html_page(
-            "https://example.com/",
-            "https://example.com/",
-            html,
-            &[],
-            "https://example.com/",
-        );
+        <a href="/about">About</a></body></html>"#;
+        let origin = crate::origin::normalize_site("https://example.com").unwrap();
+        let response = FetchResponse {
+            final_url: "https://example.com/".into(),
+            status: 200,
+            headers: HashMap::new(),
+            body: html.into(),
+            redirect_chain: vec![200],
+            ttfb_ms: 10,
+        };
+        let parsed = parse_html_page("https://example.com/", &response, &origin);
         assert_eq!(parsed.title.as_deref(), Some("Example"));
-        assert!(!parsed.blocks.is_empty());
-        assert!(!parsed.internal_links.is_empty());
+        assert!(!parsed.links.is_empty());
     }
 }

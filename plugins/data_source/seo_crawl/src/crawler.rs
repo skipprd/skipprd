@@ -1,7 +1,7 @@
 use std::collections::{HashSet, VecDeque};
 
 use crate::fetch::HttpFetcher;
-use crate::html::parse_html_page;
+use crate::html::parse_fetched_page;
 use crate::origin::{normalize_site, SiteOrigin};
 use crate::robots::{parse_robots_txt, path_allowed};
 
@@ -80,7 +80,7 @@ pub async fn crawl_site(
         if response.status >= 400 {
             continue;
         }
-        let parsed = parse_html_page(&url, &response, origin);
+        let parsed = parse_fetched_page(&url, &response, origin);
         results.push(CrawlPageResult {
             url: url.clone(),
             parsed,
@@ -88,9 +88,11 @@ pub async fn crawl_site(
         });
         if depth < depth_cap {
             let page = results.last().unwrap();
-            for link in &page.parsed.links {
-                if seen.insert(link.target_url.clone()) {
-                    queue.push_back((link.target_url.clone(), depth + 1));
+            for link in &page.parsed.internal_links {
+                if link.link_kind == "internal" && !link.is_nofollow {
+                    if seen.insert(link.target_url.clone()) {
+                        queue.push_back((link.target_url.clone(), depth + 1));
+                    }
                 }
             }
         }
