@@ -2846,6 +2846,56 @@ fn source_plugin_and_config(kind: SourceKind) -> (&'static str, serde_json::Valu
                 ("streams", strings_json(streams)),
             ]),
         ),
+        SourceKind::GoogleSearchConsole {
+            site_url,
+            start_date,
+            end_date,
+            lookback_days,
+            stream_profile,
+            processing_lag_days,
+            window_in_days,
+            access_token,
+            oauth_token_url,
+            oauth_client_id,
+            oauth_client_secret,
+            oauth_refresh_token,
+            service_account_json_path,
+            streams,
+            search_type,
+            data_state,
+            row_limit,
+            url_inspection_enabled,
+            url_list,
+        } => (
+            "GoogleSearchConsole",
+            json_object(vec![
+                ("site_url", str_json(site_url)),
+                ("start_date", str_json(start_date)),
+                ("end_date", str_json(end_date)),
+                ("lookback_days", u32_json(lookback_days)),
+                ("stream_profile", str_json(stream_profile)),
+                ("processing_lag_days", u32_json(processing_lag_days)),
+                ("window_in_days", u32_json(window_in_days)),
+                ("access_token", str_json(access_token)),
+                ("oauth_token_url", str_json(oauth_token_url)),
+                ("oauth_client_id", str_json(oauth_client_id)),
+                ("oauth_client_secret", str_json(oauth_client_secret)),
+                ("oauth_refresh_token", str_json(oauth_refresh_token)),
+                (
+                    "service_account_json_path",
+                    str_json(service_account_json_path),
+                ),
+                ("streams", strings_json(streams)),
+                ("search_type", str_json(search_type)),
+                ("data_state", str_json(data_state)),
+                ("row_limit", u32_json(row_limit)),
+                (
+                    "url_inspection_enabled",
+                    bool_json(url_inspection_enabled),
+                ),
+                ("url_list", strings_json(url_list)),
+            ]),
+        ),
         SourceKind::AppleSearchAds {
             org_id,
             client_id,
@@ -3736,6 +3786,38 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         }
         if access_token.is_none() {
             *access_token = Some("${GA4_ACCESS_TOKEN}".to_string());
+        }
+    }
+
+    if let SourceKind::GoogleSearchConsole {
+        ref mut site_url,
+        ref mut start_date,
+        ref mut access_token,
+        ref mut oauth_client_id,
+        ref mut oauth_client_secret,
+        ref mut oauth_refresh_token,
+        ..
+    } = &mut kind
+    {
+        if site_url.is_none() {
+            *site_url = prompt(
+                "Search Console site URL (https://example.com/ or sc-domain:example.com)",
+            );
+        }
+        if start_date.is_none() {
+            *start_date = prompt("Start date for first sync (YYYY-MM-DD)");
+        }
+        if access_token.is_none() {
+            *access_token = Some("${GSC_ACCESS_TOKEN}".to_string());
+        }
+        if oauth_client_id.is_none() {
+            *oauth_client_id = Some("${GSC_OAUTH_CLIENT_ID}".to_string());
+        }
+        if oauth_client_secret.is_none() {
+            *oauth_client_secret = Some("${GSC_OAUTH_CLIENT_SECRET}".to_string());
+        }
+        if oauth_refresh_token.is_none() {
+            *oauth_refresh_token = Some("${GSC_OAUTH_REFRESH_TOKEN}".to_string());
         }
     }
 
