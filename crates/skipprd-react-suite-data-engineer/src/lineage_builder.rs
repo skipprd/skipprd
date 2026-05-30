@@ -664,6 +664,18 @@ fn source_descriptor_from_providers_cfg(
             .or_else(|| input.get("property_id").and_then(Value::as_str))
             .map(|property_id| format!("GA4 property {property_id}"))
             .unwrap_or_else(|| "Google Analytics (GA4)".to_string()),
+        Some("google_search_console") => input
+            .get("name")
+            .and_then(Value::as_str)
+            .or_else(|| input.get("site_url").and_then(Value::as_str))
+            .map(|site_url| format!("Search Console {site_url}"))
+            .unwrap_or_else(|| "Google Search Console".to_string()),
+        Some("google_pagespeed") => input
+            .get("name")
+            .and_then(Value::as_str)
+            .or_else(|| input.get("site").and_then(Value::as_str))
+            .map(|site| format!("PageSpeed site {site}"))
+            .unwrap_or_else(|| "Google PageSpeed Insights".to_string()),
         Some("apple_search_ads") => input
             .get("name")
             .and_then(Value::as_str)
@@ -709,6 +721,8 @@ fn provider_brand_for_source_kind(kind: &str) -> Option<&'static str> {
         "s3" => Some("s3"),
         "file" | "files" | "csv" | "local" | "local_file" => Some("file"),
         "google_analytics" => Some("google_analytics"),
+        "google_search_console" => Some("google_search_console"),
+        "google_pagespeed" => Some("google_pagespeed"),
         "apple_search_ads" => Some("apple_search_ads"),
         "meta_instagram_ads" => Some("meta_instagram_ads"),
         _ => None,
@@ -745,6 +759,8 @@ fn provider_label_for_brand(brand: &str) -> &'static str {
         "clickhouse" => "ClickHouse",
         "motherduck" => "MotherDuck",
         "google_analytics" => "Google Analytics (GA4)",
+        "google_search_console" => "Google Search Console",
+        "google_pagespeed" => "Google PageSpeed Insights",
         "apple_search_ads" => "Apple Search Ads",
         "meta_instagram_ads" => "Meta Instagram Ads",
         _ => "Provider",

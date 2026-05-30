@@ -1283,6 +1283,8 @@ fn skippr_plugin_name(kind: &str) -> String {
     match kind {
         "delta_lake" => "DeltaLake".to_string(),
         "google_analytics" => "GoogleAnalytics".to_string(),
+        "google_search_console" => "GoogleSearchConsole".to_string(),
+        "google_pagespeed" => "GooglePageSpeed".to_string(),
         "apple_search_ads" => "AppleSearchAds".to_string(),
         "meta_instagram_ads" => "MetaInstagramAds".to_string(),
         "http_client" => "HttpClient".to_string(),
