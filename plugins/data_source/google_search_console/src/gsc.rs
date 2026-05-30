@@ -6,7 +6,7 @@ use chrono::{Duration, NaiveDate, Utc};
 use serde::Deserialize;
 use serde_derive::Serialize;
 use skippr_plugin_shared_api_source::{
-    DateWindow, DateWindowPlanner, OAuth2RefreshTokenAuth, RetryConfig, RetryableHttpClient,
+    DateWindowPlanner, OAuth2RefreshTokenAuth, RetryConfig, RetryableHttpClient,
 };
 use skippr_runtime_sdk::helpers::offsets::OffsetKey;
 use skippr_runtime_sdk::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
@@ -30,7 +30,6 @@ use crate::gsc_api::{
 use crate::sitemaps::sitemap_rows_for_date;
 use crate::streams::{
     resolve_streams, GscStreamDef, GscStreamKind, StreamProfile, URL_INSPECTION_NAMESPACE,
-    FULL_STREAM_COUNT,
 };
 use crate::url_inspection::inspection_rows_for_date;
 
@@ -649,11 +648,13 @@ impl DataSource for DataSourceGoogleSearchConsolePlugin {
                     run_stats.rows_synced += stats.rows_synced;
                     run_stats.api_errors += stats.api_errors;
                 }
-                GscStreamKind::SitemapSnapshot if !discover => {
-                    let count = self
-                        .sync_sitemap_snapshot(Arc::clone(&ctx), &auth_header, run_date)
-                        .await?;
-                    run_stats.rows_synced += count;
+                GscStreamKind::SitemapSnapshot => {
+                    if !discover {
+                        let count = self
+                            .sync_sitemap_snapshot(Arc::clone(&ctx), &auth_header, run_date)
+                            .await?;
+                        run_stats.rows_synced += count;
+                    }
                 }
                 GscStreamKind::SiteRunAggregate => {}
             }
@@ -695,8 +696,17 @@ impl DataSource for DataSourceGoogleSearchConsolePlugin {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{LazyLock, Mutex};
+
     use super::*;
-    use crate::streams::{streams_for_profile, StreamProfile};
+    use crate::streams::{streams_for_profile, StreamProfile, FULL_STREAM_COUNT};
+    use skippr_plugin_shared_api_source::DateWindow;
+
+    static ENV_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    }
 
     fn test_config() -> DataSourceGoogleSearchConsolePluginConfig {
         DataSourceGoogleSearchConsolePluginConfig {
@@ -707,7 +717,7 @@ mod tests {
             oauth_client_secret: None,
             oauth_refresh_token: None,
             service_account_json_path: None,
-            start_date: "2024-01-01".into(),
+            start_date: "2025-06-01".into(),
             end_date: None,
             lookback_days: 3,
             stream_profile: StreamProfile::Full,
@@ -729,7 +739,7 @@ mod tests {
         let cfg: DataSourceGoogleSearchConsolePluginConfig =
             serde_json::from_value(serde_json::json!({
                 "site_url": "https://example.com/",
-                "start_date": "2024-01-01"
+                "start_date": "2025-06-01"
             }))
             .expect("deserialize");
         assert_eq!(cfg.stream_profile, StreamProfile::Full);
@@ -788,6 +798,7 @@ mod tests {
 
     #[test]
     fn loads_fixture_dir_for_search_analytics() {
+        let _lock = env_lock();
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
         std::env::set_var("SKIPPR_GOOGLE_SEARCH_CONSOLE_FIXTURE_DIR", fixture_dir);
         let rt = tokio::runtime::Runtime::new().unwrap();
@@ -810,5 +821,119 @@ mod tests {
             .expect("fixture rows");
         assert!(!rows.is_empty());
         std::env::remove_var("SKIPPR_GOOGLE_SEARCH_CONSOLE_FIXTURE_DIR");
+    }
+
+    #[test]
+    fn missing_credentials_returns_clear_error() {
+        let _lock = env_lock();
+        let saved_gac = std::env::var("GOOGLE_APPLICATION_CREDENTIALS").ok();
+        let cfg = DataSourceGoogleSearchConsolePluginConfig {
+            site_url: "https://example.com/".into(),
+            access_token: None,
+            oauth_token_url: None,
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            oauth_refresh_token: None,
+            service_account_json_path: None,
+            start_date: "2025-06-01".into(),
+            end_date: None,
+            lookback_days: 3,
+            stream_profile: StreamProfile::Minimal,
+            processing_lag_days: 3,
+            window_in_days: 1,
+            streams: None,
+            search_type: "web".into(),
+            data_state: "final".into(),
+            row_limit: 100,
+            request_interval_ms: 0,
+            max_api_retries: 3,
+            url_inspection_enabled: false,
+            url_list: vec![],
+        };
+        std::env::remove_var("SKIPPR_GOOGLE_SEARCH_CONSOLE_FIXTURE_DIR");
+        std::env::remove_var("GOOGLE_SEARCH_CONSOLE_ACCESS_TOKEN");
+        std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS");
+        let plugin = DataSourceGoogleSearchConsolePlugin::new(cfg).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let err = rt.block_on(plugin.auth_header()).expect_err("auth should fail");
+        assert!(
+            err.to_string().contains("access_token")
+                || err.to_string().contains("credentials")
+        );
+        if let Some(path) = saved_gac {
+            std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", path);
+        }
+    }
+
+    #[test]
+    fn discover_sync_does_not_store_checkpoints() {
+        let _lock = env_lock();
+        let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
+        std::env::set_var("SKIPPR_GOOGLE_SEARCH_CONSOLE_FIXTURE_DIR", fixture_dir);
+        std::env::set_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV, "discover");
+
+        let mut cfg = test_config();
+        cfg.end_date = Some("2025-06-01".into());
+        cfg.stream_profile = StreamProfile::Minimal;
+        let mut plugin = DataSourceGoogleSearchConsolePlugin::new(cfg).unwrap();
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let ctx = Arc::new(RecordingSyncContext::default());
+        rt.block_on(plugin.sync(ctx.clone())).expect("discover sync");
+        assert!(ctx.checkpoint_stores.lock().unwrap().is_empty());
+
+        std::env::remove_var("SKIPPR_GOOGLE_SEARCH_CONSOLE_FIXTURE_DIR");
+        std::env::remove_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV);
+    }
+
+    use skippr_runtime_sdk::plugins::{
+        OffsetValidationEntry, SourcePayloadTask, SourceSyncContext,
+    };
+    use skippr_runtime_sdk::protocol::RuntimeOffsetMaterializationHint;
+    use skippr_runtime_sdk::source_compat::ThroughputMetrics;
+
+    #[derive(Default)]
+    struct RecordingSyncContext {
+        checkpoint_stores: Mutex<Vec<String>>,
+    }
+
+    impl SourceSyncContext for RecordingSyncContext {
+        fn submit_payload_tasks(
+            &self,
+            _tasks: Vec<SourcePayloadTask>,
+        ) -> Result<ThroughputMetrics, std::io::Error> {
+            Ok(ThroughputMetrics {
+                bytes_per_second: 0,
+                active_cores: 0,
+                queue_length: 0,
+                optimal_chunk_size: 0,
+            })
+        }
+
+        fn validate_offset_batch(
+            &self,
+            entries: &[OffsetValidationEntry],
+        ) -> Result<Vec<bool>, std::io::Error> {
+            Ok(vec![false; entries.len()])
+        }
+
+        fn relay_offset_hints(
+            &self,
+            _hints: Vec<RuntimeOffsetMaterializationHint>,
+        ) -> Result<(), std::io::Error> {
+            Ok(())
+        }
+
+        fn store_checkpoint(
+            &self,
+            key: &str,
+            _envelope: &CheckpointEnvelope,
+        ) -> Result<(), String> {
+            self.checkpoint_stores.lock().unwrap().push(key.to_string());
+            Ok(())
+        }
+
+        fn load_checkpoint_envelope(&self, _key: &str) -> Option<CheckpointEnvelope> {
+            None
+        }
     }
 }

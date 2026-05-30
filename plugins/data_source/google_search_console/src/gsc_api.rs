@@ -440,7 +440,7 @@ mod tests {
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0]["date"], "2024-06-01");
         assert_eq!(parsed[0]["query"], "example query");
-        assert_eq!(parsed[0]["clicks"], 10);
+        assert_eq!(parsed[0]["clicks"], serde_json::json!(10.0));
     }
 
     #[test]
