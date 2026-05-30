@@ -300,32 +300,93 @@ impl HttpSitemapFetcher {
             .map_err(std::io::Error::other)?;
         Ok(Self { client })
     }
+
+    pub async fn fetch_text_async(&self, url: &str) -> Result<String, std::io::Error> {
+        let resp = self
+            .client
+            .get(url)
+            .send()
+            .await
+            .map_err(std::io::Error::other)?;
+        if !resp.status().is_success() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                format!("HTTP {} for {url}", resp.status()),
+            ));
+        }
+        resp.text().await.map_err(std::io::Error::other)
+    }
 }
 
-impl SitemapFetcher for HttpSitemapFetcher {
-    fn fetch_text(&self, url: &str) -> Result<String, std::io::Error> {
-        let rt = tokio::runtime::Handle::try_current().map_err(|_| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "HttpSitemapFetcher requires a Tokio runtime",
-            )
-        })?;
-        rt.block_on(async {
-            let resp = self
-                .client
-                .get(url)
-                .send()
-                .await
-                .map_err(std::io::Error::other)?;
-            if !resp.status().is_success() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    format!("HTTP {} for {url}", resp.status()),
-                ));
+pub async fn resolve_url_list_async(
+    origin: &str,
+    url_mode: UrlMode,
+    url_list: &[String],
+    max_pages: u32,
+    fetcher: &HttpSitemapFetcher,
+    respect_robots: bool,
+) -> Result<Vec<String>, std::io::Error> {
+    let cap = max_pages.max(1) as usize;
+    match url_mode {
+        UrlMode::UrlList => {
+            let mut out: Vec<String> = url_list
+                .iter()
+                .map(|u| canonicalize_page_url(origin, u))
+                .collect::<Result<Vec<_>, _>>()?;
+            out.sort();
+            out.dedup();
+            out.truncate(cap);
+            Ok(out)
+        }
+        UrlMode::TldSample => {
+            let home = homepage_url(origin);
+            let mut candidates = vec![CandidateUrl {
+                url: home.clone(),
+                priority: 1.0,
+                lastmod: None,
+                depth: 0,
+            }];
+            if let Ok(robots) = fetcher.fetch_text_async(&format!("{origin}/robots.txt")).await {
+                for sitemap in parse_robots_sitemaps(&robots) {
+                    candidates.extend(
+                        fetch_sitemap_urls_async(fetcher, &sitemap, origin, respect_robots).await?,
+                    );
+                }
             }
-            resp.text().await.map_err(std::io::Error::other)
-        })
+            for fallback in ["/sitemap.xml", "/sitemap_index.xml"] {
+                let loc = format!("{origin}{fallback}");
+                if candidates.len() >= cap * 4 {
+                    break;
+                }
+                candidates.extend(
+                    fetch_sitemap_urls_async(fetcher, &loc, origin, respect_robots).await?,
+                );
+            }
+            Ok(rank_and_cap_candidates(origin, &home, candidates, cap))
+        }
     }
+}
+
+async fn fetch_sitemap_urls_async(
+    fetcher: &HttpSitemapFetcher,
+    sitemap_url: &str,
+    origin: &str,
+    respect_robots: bool,
+) -> Result<Vec<CandidateUrl>, std::io::Error> {
+    let body = match fetcher.fetch_text_async(sitemap_url).await {
+        Ok(b) => b,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let disallows = if respect_robots {
+        fetcher
+            .fetch_text_async(&format!("{origin}/robots.txt"))
+            .await
+            .map(|txt| parse_robots_disallow(&txt))
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    parse_sitemap_xml(&body, origin, &disallows, 0)
 }
 
 pub struct StaticSitemapFetcher {
@@ -348,8 +409,8 @@ impl SitemapFetcher for StaticSitemapFetcher {
     }
 }
 
-static SITEMAP_LOC_RE: once_cell::sync::Lazy<Regex> =
-    once_cell::sync::Lazy::new(|| Regex::new(r"<loc>\s*([^<]+)\s*</loc>").unwrap());
+static SITEMAP_LOC_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"<loc>\s*([^<]+)\s*</loc>").unwrap());
 
 /// Lightweight XML loc extraction for tests without full parser setup.
 pub fn extract_sitemap_locs(xml: &str) -> Vec<String> {
