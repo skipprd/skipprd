@@ -1,4 +1,4 @@
-use std::collections::{HashSet, VecDeque};
+use std::collections::HashSet;
 
 use serde::Deserialize;
 use serde_derive::Serialize;
