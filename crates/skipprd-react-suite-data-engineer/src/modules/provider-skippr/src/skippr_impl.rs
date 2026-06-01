@@ -100,7 +100,7 @@ pub fn resolve_skippr_binary(configured: &str) -> String {
                 }
             }
 
-            let fallback_stem = PathBuf::from(fallback)
+            let fallback_stem = Path::new(fallback)
                 .file_stem()
                 .and_then(|stem| stem.to_str())
                 .unwrap_or(fallback);
