@@ -184,11 +184,46 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
         self.assertEqual(status, 0)
         run_scenario.assert_called_once()
 
+    def test_iceberg_glue_table_name_follows_storage_namespace_sanitization(self) -> None:
+        self.assertEqual(
+            runtime_e2e_harness.iceberg_glue_table_name(
+                runtime_e2e_harness.POSTGRES_TYPE_MATRIX_NAMESPACE
+            ),
+            "skippr_postgres_type_matrix_orders",
+        )
+        self.assertEqual(
+            runtime_e2e_harness.iceberg_glue_table_name(
+                runtime_e2e_harness.MYSQL_TYPE_MATRIX_NAMESPACE
+            ),
+            "skippr_type_matrix_orders",
+        )
+        self.assertEqual(
+            runtime_e2e_harness.iceberg_glue_table_name(
+                runtime_e2e_harness.DYNAMODB_TYPE_MATRIX_NAMESPACE
+            ),
+            "skippr_dynamodb_skippr_iceberg_dynamodb_types_cdc",
+        )
+        self.assertEqual(
+            runtime_e2e_harness.iceberg_glue_table_name(
+                runtime_e2e_harness.MSSQL_DEBUG_TABLE_NAMESPACES[0]
+            ),
+            "skippr_mssql_testdb_dbo_customers",
+        )
+
     def test_mssql_debug_expected_counts_match_seed_fixture(self) -> None:
+        customers = runtime_e2e_harness.iceberg_glue_table_name(
+            runtime_e2e_harness.MSSQL_DEBUG_TABLE_NAMESPACES[0]
+        )
+        orders = runtime_e2e_harness.iceberg_glue_table_name(
+            runtime_e2e_harness.MSSQL_DEBUG_TABLE_NAMESPACES[1]
+        )
+        order_items = runtime_e2e_harness.iceberg_glue_table_name(
+            runtime_e2e_harness.MSSQL_DEBUG_TABLE_NAMESPACES[2]
+        )
         expected_queries = {
-            'SELECT COUNT(*) FROM "skippr_customers"': "6",
-            'SELECT COUNT(*) FROM "skippr_orders"': "8",
-            'SELECT COUNT(*) FROM "skippr_order_items"': "11",
+            f'SELECT COUNT(*) FROM "{customers}"': "6",
+            f'SELECT COUNT(*) FROM "{orders}"': "8",
+            f'SELECT COUNT(*) FROM "{order_items}"': "11",
         }
         observed: list[tuple[str, str]] = []
 
@@ -215,23 +250,23 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
         self.assertEqual(
             observed,
             [
-                ("iceberg_e2e_mssql_debug_linux", 'SELECT COUNT(*) FROM "skippr_customers"'),
-                ("iceberg_e2e_mssql_debug_linux", 'SELECT COUNT(*) FROM "skippr_orders"'),
+                ("iceberg_e2e_mssql_debug_linux", f'SELECT COUNT(*) FROM "{customers}"'),
+                ("iceberg_e2e_mssql_debug_linux", f'SELECT COUNT(*) FROM "{orders}"'),
                 (
                     "iceberg_e2e_mssql_debug_linux",
-                    'SELECT COUNT(*) FROM "skippr_order_items"',
+                    f'SELECT COUNT(*) FROM "{order_items}"',
                 ),
             ],
         )
 
     def test_mysql_final_state_verifier_uses_numeric_update_predicate(self) -> None:
+        table = runtime_e2e_harness.iceberg_glue_table_name(
+            runtime_e2e_harness.MYSQL_TYPE_MATRIX_NAMESPACE
+        )
         expected_queries = {
-            'SELECT COUNT(*) FROM "skippr_type_matrix_orders"': "3",
-            'SELECT COUNT(*) FROM "skippr_type_matrix_orders" WHERE id = 2': "0",
-            (
-                'SELECT COUNT(*) FROM "skippr_type_matrix_orders" '
-                "WHERE id = 1 AND int_col = 11"
-            ): "1",
+            f'SELECT COUNT(*) FROM "{table}"': "3",
+            f'SELECT COUNT(*) FROM "{table}" WHERE id = 2': "0",
+            (f'SELECT COUNT(*) FROM "{table}" WHERE id = 1 AND int_col = 11'): "1",
         }
         observed: list[str] = []
 
@@ -259,13 +294,13 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
         self.assertEqual(list(expected_queries), observed)
 
     def test_postgres_final_state_verifier_uses_numeric_update_predicate(self) -> None:
+        table = runtime_e2e_harness.iceberg_glue_table_name(
+            runtime_e2e_harness.POSTGRES_TYPE_MATRIX_NAMESPACE
+        )
         expected_queries = {
-            'SELECT COUNT(*) FROM "skippr_type_matrix_orders"': "3",
-            'SELECT COUNT(*) FROM "skippr_type_matrix_orders" WHERE id = 2': "0",
-            (
-                'SELECT COUNT(*) FROM "skippr_type_matrix_orders" '
-                "WHERE id = 1 AND int_col = 11"
-            ): "1",
+            f'SELECT COUNT(*) FROM "{table}"': "3",
+            f'SELECT COUNT(*) FROM "{table}" WHERE id = 2': "0",
+            (f'SELECT COUNT(*) FROM "{table}" WHERE id = 1 AND int_col = 11'): "1",
         }
         observed: list[str] = []
 
@@ -654,7 +689,7 @@ schema_sinks:
                 return subprocess.CompletedProcess(
                     args=command,
                     returncode=0,
-                    stdout='["skippr_orders", "skippr_order_items"]',
+                    stdout='["skippr_mssql_testdb_dbo_orders", "skippr_mssql_testdb_dbo_order_items"]',
                     stderr="",
                 )
             return subprocess.CompletedProcess(
@@ -686,7 +721,7 @@ schema_sinks:
         self.assertIn("--database-name", calls[1])
         self.assertIn("iceberg_e2e_mssql_debug_windows", calls[1])
         self.assertIn("--name", calls[1])
-        self.assertIn("skippr_orders", calls[1])
+        self.assertIn("skippr_mssql_testdb_dbo_orders", calls[1])
 
     def test_ensure_soda_installed_uses_virtualenv(self) -> None:
         original_installed = runtime_e2e_harness.SODA_INSTALLED

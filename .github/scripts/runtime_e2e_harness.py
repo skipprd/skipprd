@@ -7,6 +7,7 @@ import fnmatch
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -183,6 +184,46 @@ RUNTIME_ACCEPTANCE_WORKSPACE = "runtime-plugin-acceptance"
 RUNTIME_ACCEPTANCE_POSTGRES_SERVICES = ("postgres", "postgres-target")
 DYNAMODB_TABLE = "Test-MetadataService-Stack-MetadataTable8CB34826-1OBKKG0QKVLJC"
 DYNAMODB_ICEBERG_CDC_TABLE = "skippr_iceberg_dynamodb_types_cdc"
+POSTGRES_TYPE_MATRIX_NAMESPACE = "postgres.type_matrix_orders"
+MYSQL_TYPE_MATRIX_NAMESPACE = "type_matrix_orders"
+DYNAMODB_TYPE_MATRIX_NAMESPACE = f"dynamodb.{DYNAMODB_ICEBERG_CDC_TABLE}"
+MSSQL_DEBUG_TABLE_NAMESPACES = (
+    "mssql.testdb.dbo.customers",
+    "mssql.testdb.dbo.orders",
+    "mssql.testdb.dbo.order_items",
+)
+
+
+def storage_namespace_key(namespace: str) -> str:
+    """Mirror skipprd `storage_namespace` / `Helpers::clean_field_name` for e2e assertions."""
+    lowered = namespace.lower()
+    out = re.sub(r"[^a-z0-9_]+", "_", lowered)
+    out = re.sub(r"_+", "_", out).strip("_")
+    return out or "table"
+
+
+def iceberg_table_suffix(namespace: str) -> str:
+    """Mirror `iceberg_table_suffix` in the Iceberg data sink plugin."""
+    raw = namespace.rsplit(".", 1)[-1]
+    out: list[str] = []
+    for ch in raw:
+        if ch.isascii() and (ch.isalnum() or ch == "_"):
+            out.append(ch.lower())
+        else:
+            out.append("_")
+    trimmed = "".join(out).strip("_")
+    return trimmed or "table"
+
+
+def iceberg_glue_table_name(source_namespace: str, *, table_prefix: str = "skippr") -> str:
+    """Glue/Athena table name after ingest namespace sanitization and Iceberg naming."""
+    storage_ns = storage_namespace_key(source_namespace)
+    suffix = iceberg_table_suffix(storage_ns)
+    if table_prefix:
+        return f"{table_prefix}_{suffix}"
+    return suffix
+
+
 ICEBERG_CDC_SCENARIO_AWS_STATE = {
     "postgres_iceberg_types_cdc": {
         "database": "iceberg_e2e_postgres",
@@ -2127,7 +2168,7 @@ def verify_postgres_iceberg_types_cdc_final_state(context: ScenarioContext) -> N
     verify_iceberg_type_matrix_final_state(
         context,
         database="iceberg_e2e_postgres",
-        table="skippr_type_matrix_orders",
+        table=iceberg_glue_table_name(POSTGRES_TYPE_MATRIX_NAMESPACE),
         updated_row_predicate="id = 1 AND int_col = 11",
     )
 
@@ -2136,7 +2177,7 @@ def verify_mysql_iceberg_types_cdc_final_state(context: ScenarioContext) -> None
     verify_iceberg_type_matrix_final_state(
         context,
         database="iceberg_e2e_mysql",
-        table="skippr_type_matrix_orders",
+        table=iceberg_glue_table_name(MYSQL_TYPE_MATRIX_NAMESPACE),
         updated_row_predicate="id = 1 AND int_col = 11",
     )
 
@@ -2145,7 +2186,7 @@ def verify_dynamodb_iceberg_types_cdc_encoded(context: ScenarioContext) -> None:
     verify_iceberg_type_matrix_cdc_encoded(
         context,
         database="iceberg_e2e_dynamodb",
-        table=f"skippr_{DYNAMODB_ICEBERG_CDC_TABLE}",
+        table=iceberg_glue_table_name(DYNAMODB_TYPE_MATRIX_NAMESPACE),
     )
 
 
@@ -2169,9 +2210,9 @@ def verify_mssql_iceberg_debug_rows(
     database: str,
 ) -> None:
     expected_counts = {
-        "skippr_customers": 6,
-        "skippr_orders": 8,
-        "skippr_order_items": 11,
+        iceberg_glue_table_name(MSSQL_DEBUG_TABLE_NAMESPACES[0]): 6,
+        iceberg_glue_table_name(MSSQL_DEBUG_TABLE_NAMESPACES[1]): 8,
+        iceberg_glue_table_name(MSSQL_DEBUG_TABLE_NAMESPACES[2]): 11,
     }
     for table, expected_count in expected_counts.items():
         actual_count = int(
