@@ -1271,28 +1271,42 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - name: Start MySQL with row binlog
+      - name: Install MySQL client
         shell: bash
         run: |
           set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install -y default-mysql-client
+
+      - name: Start MySQL and seed exhaustive type and CDC source data
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker rm -f skippr-mysql-iceberg-e2e >/dev/null 2>&1 || true
           docker run --name skippr-mysql-iceberg-e2e \
+            --restart unless-stopped \
             -e MYSQL_ROOT_PASSWORD=mysql \
             -e MYSQL_DATABASE=skippr_iceberg_e2e \
             -p 3306:3306 \
-            -d mysql:8 \
+            -d mysql:8.0 \
+            --mysql-native-password=ON \
             --server-id=1 \
             --log-bin=mysql-bin \
             --binlog-format=ROW \
-            --binlog-row-image=FULL
-          until docker exec skippr-mysql-iceberg-e2e mysql -uroot -pmysql -e 'SELECT 1' >/dev/null 2>&1; do
+            --binlog-row-image=FULL \
+            --gtid-mode=ON \
+            --enforce-gtid-consistency=ON
+          attempts=0
+          until mysqladmin ping -h127.0.0.1 -P3306 -uroot -pmysql --silent >/dev/null 2>&1; do
+            attempts=$((attempts + 1))
+            if [ "$attempts" -ge 60 ]; then
+              echo "MySQL did not become ready in time" >&2
+              docker logs skippr-mysql-iceberg-e2e || true
+              exit 1
+            fi
             sleep 2
           done
-
-      - name: Seed exhaustive type and CDC source data
-        shell: bash
-        run: |
-          set -euo pipefail
-          docker exec -i skippr-mysql-iceberg-e2e mysql -uroot -pmysql skippr_iceberg_e2e <<'SQL'
+          mysql -h127.0.0.1 -P3306 -uroot -pmysql skippr_iceberg_e2e <<'SQL'
           DROP TABLE IF EXISTS type_matrix_orders;
           CREATE TABLE type_matrix_orders (
             id BIGINT PRIMARY KEY,
@@ -1368,6 +1382,8 @@ jobs:
           USE_LOCAL_PLUGIN_CODE: "1"
           SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR: ${{ steps.local_runtime.outputs.manifest_dir }}
         run: |
+          set -euo pipefail
+          mysqladmin ping -h127.0.0.1 -P3306 -uroot -pmysql --silent
           python3 .github/scripts/runtime_e2e_harness.py run mysql_iceberg_types_cdc \
             --mode full \
             --skipprd target/debug/skipprd \
@@ -1509,7 +1525,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          docker rm -f skippr-mssql-iceberg-debug >/dev/null 2>&1 || true
           docker run --name skippr-mssql-iceberg-debug \
+            --restart unless-stopped \
             -e ACCEPT_EULA=Y \
             -e MSSQL_SA_PASSWORD='Skippr!Test123' \
             -p 1433:1433 \

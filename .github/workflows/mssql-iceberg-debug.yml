@@ -146,7 +146,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          docker rm -f skippr-mssql-iceberg-debug >/dev/null 2>&1 || true
           docker run --name skippr-mssql-iceberg-debug \
+            --restart unless-stopped \
             -e ACCEPT_EULA=Y \
             -e MSSQL_SA_PASSWORD='Skippr!Test123' \
             -p 1433:1433 \
