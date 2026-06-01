@@ -159,13 +159,26 @@ impl DataSourceMysqlPlugin {
     async fn get_binlog_position(
         conn: &mut mysql_async::Conn,
     ) -> Result<(String, u64), std::io::Error> {
-        let row: Option<Row> = conn
-            .query_first("SHOW BINARY LOG STATUS")
-            .await
-            .map_err(|e| std::io::Error::other(format!("SHOW BINARY LOG STATUS: {}", e)))?;
+        let row: Option<Row> = match conn.query_first("SHOW BINARY LOG STATUS").await {
+            Ok(row) => row,
+            Err(primary_err) => {
+                warn!(
+                    "SHOW BINARY LOG STATUS failed, falling back to SHOW MASTER STATUS: {}",
+                    primary_err
+                );
+                conn.query_first("SHOW MASTER STATUS")
+                    .await
+                    .map_err(|fallback_err| {
+                        std::io::Error::other(format!(
+                            "SHOW BINARY LOG STATUS: {}; SHOW MASTER STATUS: {}",
+                            primary_err, fallback_err
+                        ))
+                    })?
+            }
+        };
         let row = row.ok_or_else(|| {
             std::io::Error::other(
-                "SHOW BINARY LOG STATUS returned no rows; is binary logging enabled?",
+                "SHOW BINARY LOG STATUS/SHOW MASTER STATUS returned no rows; is binary logging enabled?",
             )
         })?;
         let file: String = row.get(0).unwrap_or_default();
