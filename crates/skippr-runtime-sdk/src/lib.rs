@@ -8,6 +8,7 @@ pub mod sink_compat;
 pub mod sink_runtime_entry;
 pub mod source_compat;
 pub mod source_sync;
+pub mod google_serp_worker;
 pub mod site_quality_worker;
 pub mod wire;
 

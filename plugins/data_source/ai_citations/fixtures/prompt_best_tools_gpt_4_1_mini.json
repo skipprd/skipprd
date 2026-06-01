@@ -1,0 +1,16 @@
+{
+  "answer": "Example is a strong project management tool. See https://example.com/features and https://competitor.io/compare.",
+  "citations": [
+    {
+      "url": "https://example.com/features",
+      "title": "Example Features",
+      "snippet": "Collaboration and tasks"
+    }
+  ],
+  "links": [
+    {
+      "url": "https://competitor.io/compare",
+      "anchor_text": "competitor comparison"
+    }
+  ]
+}

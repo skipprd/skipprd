@@ -1,0 +1,12 @@
+{
+  "job_id": "fixture-blocked",
+  "ok": true,
+  "status": "blocked",
+  "blocked_reason": "captcha",
+  "organic_results": [],
+  "target_matches": [],
+  "results_inspected": 0,
+  "pages_fetched": 1,
+  "search_url_hash": "sha256:fixture-blocked",
+  "error": null
+}

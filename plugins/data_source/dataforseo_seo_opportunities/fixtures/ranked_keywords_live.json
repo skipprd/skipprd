@@ -1,0 +1,60 @@
+{
+  "version": "0.1.20240228",
+  "status_code": 20000,
+  "status_message": "Ok.",
+  "cost": 0.003,
+  "tasks": [
+    {
+      "status_code": 20000,
+      "status_message": "Ok.",
+      "cost": 0.003,
+      "result": [
+        {
+          "target": "rival.com",
+          "location_code": 2840,
+          "language_code": "en",
+          "total_count": 2,
+          "items_count": 2,
+          "items": [
+            {
+              "keyword_data": {
+                "keyword": "family calendar app",
+                "keyword_info": {
+                  "search_volume": 5400,
+                  "keyword_difficulty": 38
+                }
+              },
+              "ranked_serp_element": {
+                "serp_item": {
+                  "type": "organic",
+                  "rank_group": 3,
+                  "rank_absolute": 5,
+                  "url": "https://rival.com/family-calendar",
+                  "title": "Family Calendar App - Rival"
+                }
+              }
+            },
+            {
+              "keyword_data": {
+                "keyword": "shared grocery list app",
+                "keyword_info": {
+                  "search_volume": 1200,
+                  "keyword_difficulty": 22
+                }
+              },
+              "ranked_serp_element": {
+                "serp_item": {
+                  "type": "organic",
+                  "rank_group": 7,
+                  "rank_absolute": 9,
+                  "url": "https://rival.com/grocery-list",
+                  "title": "Shared Grocery List App"
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

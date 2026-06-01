@@ -1,0 +1,21 @@
+{
+  "version": "0.1.20250203",
+  "status_code": 20000,
+  "status_message": "Ok.",
+  "cost": 0.01,
+  "tasks": [
+    {
+      "id": "empty-task",
+      "status_code": 20000,
+      "status_message": "Ok.",
+      "cost": 0.01,
+      "result": [
+        {
+          "items": [],
+          "items_count": 0,
+          "total_count": 0
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,15 @@
+{
+  "version": "0.1.20250203",
+  "status_code": 20000,
+  "status_message": "Ok.",
+  "cost": 0,
+  "tasks": [
+    {
+      "id": "error-task",
+      "status_code": 40101,
+      "status_message": "Invalid credentials.",
+      "cost": 0,
+      "result": null
+    }
+  ]
+}

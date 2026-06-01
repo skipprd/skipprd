@@ -11921,6 +11921,7 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "skippr-plugin-data-source-dataforseo-backlinks",
+ "skippr-plugin-data-source-dataforseo-seo-opportunities",
  "skippr-runtime-sdk",
  "skipprd",
  "tar",
@@ -12338,6 +12339,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippr-plugin-data-source-ai-citations"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "regex",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "sha2",
+ "skippr-plugin-shared-api-source",
+ "skippr-runtime-sdk",
+ "tokio",
+ "tracing",
+ "url",
+]
+
+[[package]]
 name = "skippr-plugin-data-source-amqp"
 version = "0.1.2"
 dependencies = [
@@ -12371,6 +12390,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippr-plugin-data-source-bing-webmaster-tools"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "skippr-plugin-shared-api-source",
+ "skippr-runtime-sdk",
+ "tokio",
+ "tracing",
+ "urlencoding",
+]
+
+[[package]]
 name = "skippr-plugin-data-source-clickhouse"
 version = "0.1.2"
 dependencies = [
@@ -12387,6 +12423,22 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-dataforseo-backlinks"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "skippr-plugin-shared-api-source",
+ "skippr-runtime-sdk",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-dataforseo-seo-opportunities"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -12526,6 +12578,24 @@ dependencies = [
  "tokio",
  "tracing",
  "urlencoding",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-google-serp-ranks"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "sha2",
+ "skippr-runtime-sdk",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid 1.18.1",
 ]
 
 [[package]]

@@ -1,0 +1,15 @@
+{
+  "job_id": "fixture-error",
+  "ok": false,
+  "status": "error",
+  "blocked_reason": null,
+  "organic_results": [],
+  "target_matches": [],
+  "results_inspected": 0,
+  "pages_fetched": 0,
+  "search_url_hash": null,
+  "error": {
+    "code": "NAVIGATION_ERROR",
+    "message": "Timeout 45000ms exceeded"
+  }
+}

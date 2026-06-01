@@ -1,0 +1,30 @@
+{
+  "job_id": "fixture-ok",
+  "ok": true,
+  "status": "ok",
+  "blocked_reason": null,
+  "organic_results": [
+    {
+      "position": 3,
+      "title": "Example Domain",
+      "url": "https://www.example.com/",
+      "domain": "example.com",
+      "snippet": "Example site",
+      "page_start": 0
+    }
+  ],
+  "target_matches": [
+    {
+      "target_site": "example.com",
+      "matched_url": "https://www.example.com/",
+      "matched_domain": "example.com",
+      "position": 3,
+      "page_start": 0,
+      "found": true
+    }
+  ],
+  "results_inspected": 10,
+  "pages_fetched": 1,
+  "search_url_hash": "sha256:fixture",
+  "error": null
+}

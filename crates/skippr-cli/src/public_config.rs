@@ -6,6 +6,16 @@ use std::path::Path;
 ///
 /// This is the only config surface exposed to product users.
 /// It maps to the internal runtime config shape silently.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TrackedPromptEntry {
+    pub id: String,
+    pub text: String,
+    #[serde(default)]
+    pub category: Option<String>,
+    #[serde(default)]
+    pub intent: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SkipprProjectConfig {
     pub project: String,
@@ -188,6 +198,13 @@ pub enum WarehouseConfig {
         #[serde(default)]
         schema: Option<String>,
     },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct GoogleSerpTargetConfig {
+    pub site: String,
+    #[serde(default)]
+    pub aliases: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -491,6 +508,37 @@ pub enum SourceConfig {
         #[serde(default)]
         url_list: Option<Vec<String>>,
     },
+    #[serde(rename = "bing_webmaster_tools")]
+    BingWebmasterTools {
+        #[serde(default)]
+        site_url: Option<String>,
+        #[serde(default)]
+        api_key: Option<String>,
+        #[serde(default)]
+        start_date: Option<String>,
+        #[serde(default)]
+        end_date: Option<String>,
+        #[serde(default)]
+        lookback_days: Option<u32>,
+        #[serde(default)]
+        stream_profile: Option<String>,
+        #[serde(default)]
+        processing_lag_days: Option<u32>,
+        #[serde(default)]
+        window_in_days: Option<u32>,
+        #[serde(default)]
+        access_token: Option<String>,
+        #[serde(default)]
+        oauth_token_url: Option<String>,
+        #[serde(default)]
+        oauth_client_id: Option<String>,
+        #[serde(default)]
+        oauth_client_secret: Option<String>,
+        #[serde(default)]
+        oauth_refresh_token: Option<String>,
+        #[serde(default)]
+        streams: Option<Vec<String>>,
+    },
     #[serde(rename = "seo_crawl")]
     SeoCrawl {
         #[serde(default)]
@@ -515,6 +563,58 @@ pub enum SourceConfig {
         skip_unchanged_content: Option<bool>,
         #[serde(default)]
         user_agent: Option<String>,
+    },
+    #[serde(rename = "google_serp_ranks")]
+    GoogleSerpRanks {
+        #[serde(default)]
+        targets: Option<Vec<GoogleSerpTargetConfig>>,
+        #[serde(default)]
+        keywords: Option<Vec<String>>,
+        #[serde(default)]
+        country: Option<String>,
+        #[serde(default)]
+        language: Option<String>,
+        #[serde(default)]
+        device: Option<String>,
+        #[serde(default)]
+        max_depth: Option<u32>,
+        #[serde(default)]
+        min_query_interval_ms: Option<u64>,
+        #[serde(default)]
+        max_queries_per_run: Option<u32>,
+        #[serde(default)]
+        stop_after_first_target_match: Option<bool>,
+        #[serde(default)]
+        capture_results: Option<bool>,
+        #[serde(default)]
+        force_refresh_today: Option<bool>,
+        #[serde(default)]
+        navigation_timeout_ms: Option<u32>,
+        #[serde(default)]
+        worker_node_path: Option<String>,
+        #[serde(default)]
+        playwright_executable_path: Option<String>,
+        #[serde(default)]
+        user_agent: Option<String>,
+    },
+    #[serde(rename = "ai_citations")]
+    AiCitations {
+        #[serde(default)]
+        site: Option<String>,
+        #[serde(default)]
+        brand_names: Option<Vec<String>>,
+        #[serde(default)]
+        prompt_list: Option<Vec<TrackedPromptEntry>>,
+        #[serde(default)]
+        models: Option<Vec<String>>,
+        #[serde(default)]
+        requests_per_minute: Option<u32>,
+        #[serde(default)]
+        max_prompts_per_run: Option<u32>,
+        #[serde(default)]
+        skip_unchanged_responses: Option<bool>,
+        #[serde(default)]
+        openai_base_url: Option<String>,
     },
     #[serde(rename = "site_quality")]
     SiteQuality {
@@ -629,6 +729,27 @@ pub enum SourceConfig {
         limit: Option<u32>,
         #[serde(default)]
         max_pages: Option<u32>,
+        #[serde(default)]
+        request_interval_ms: Option<u64>,
+    },
+    #[serde(rename = "dataforseo_seo_opportunities")]
+    DataForSeoSeoOpportunities {
+        #[serde(default)]
+        login: Option<String>,
+        #[serde(default)]
+        password: Option<String>,
+        #[serde(default)]
+        site: Option<String>,
+        #[serde(default)]
+        location_code: Option<u32>,
+        #[serde(default)]
+        language_code: Option<String>,
+        #[serde(default)]
+        device: Option<String>,
+        #[serde(default)]
+        run_mode: Option<String>,
+        #[serde(default)]
+        seed_keywords: Option<Vec<String>>,
         #[serde(default)]
         request_interval_ms: Option<u64>,
     },
@@ -831,12 +952,18 @@ impl SkipprProjectConfig {
             Some(SourceConfig::Websocket { .. }) => Some("websocket"),
             Some(SourceConfig::GoogleAnalytics { .. }) => Some("google_analytics"),
             Some(SourceConfig::GoogleSearchConsole { .. }) => Some("google_search_console"),
+            Some(SourceConfig::BingWebmasterTools { .. }) => Some("bing_webmaster_tools"),
             Some(SourceConfig::GooglePageSpeed { .. }) => Some("google_pagespeed"),
             Some(SourceConfig::SeoCrawl { .. }) => Some("seo_crawl"),
+            Some(SourceConfig::GoogleSerpRanks { .. }) => Some("google_serp_ranks"),
+            Some(SourceConfig::AiCitations { .. }) => Some("ai_citations"),
             Some(SourceConfig::SiteQuality { .. }) => Some("site_quality"),
             Some(SourceConfig::AppleSearchAds { .. }) => Some("apple_search_ads"),
             Some(SourceConfig::MetaInstagramAds { .. }) => Some("meta_instagram_ads"),
             Some(SourceConfig::DataForSeoBacklinks { .. }) => Some("dataforseo_backlinks"),
+            Some(SourceConfig::DataForSeoSeoOpportunities { .. }) => {
+                Some("dataforseo_seo_opportunities")
+            }
             Some(SourceConfig::HttpClient { .. }) => Some("http_client"),
             Some(SourceConfig::HttpServer { .. }) => Some("http_server"),
             Some(SourceConfig::Socket { .. }) => Some("socket"),

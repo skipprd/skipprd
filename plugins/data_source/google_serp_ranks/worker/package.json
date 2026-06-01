@@ -1,0 +1,11 @@
+{
+  "name": "google-serp-worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node --test lib/serp.test.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "^1.50.1"
+  }
+}

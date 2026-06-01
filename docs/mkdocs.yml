@@ -90,6 +90,7 @@ nav:
               - HTTP:
                   - Google Analytics (GA4): connectors/inputs/google_analytics.md
                   - Google Search Console: connectors/inputs/google_search_console.md
+                  - Google SERP Ranks: connectors/inputs/google_serp_ranks.md
                   - HTTP Client: connectors/inputs/http_client.md
                   - HTTP Server: connectors/inputs/http_server.md
               - Other:

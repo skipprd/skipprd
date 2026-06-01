@@ -1,0 +1,18 @@
+{
+  "d": [
+    {
+      "__type": "UrlTrafficInfo:#Microsoft.Bing.Webmaster.Api",
+      "Clicks": 5,
+      "Impressions": 42,
+      "IsPage": true,
+      "Url": "https://example.com/page-a"
+    },
+    {
+      "__type": "UrlTrafficInfo:#Microsoft.Bing.Webmaster.Api",
+      "Clicks": 1,
+      "Impressions": 8,
+      "IsPage": true,
+      "Url": "https://example.com/page-b"
+    }
+  ]
+}

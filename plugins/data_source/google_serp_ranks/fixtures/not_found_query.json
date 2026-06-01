@@ -1,0 +1,30 @@
+{
+  "job_id": "fixture-not-found",
+  "ok": true,
+  "status": "ok",
+  "blocked_reason": null,
+  "organic_results": [
+    {
+      "position": 1,
+      "title": "Competitor",
+      "url": "https://www.competitor.com/",
+      "domain": "competitor.com",
+      "snippet": "Other site",
+      "page_start": 0
+    }
+  ],
+  "target_matches": [
+    {
+      "target_site": "example.com",
+      "matched_url": null,
+      "matched_domain": null,
+      "position": null,
+      "page_start": null,
+      "found": false
+    }
+  ],
+  "results_inspected": 10,
+  "pages_fetched": 1,
+  "search_url_hash": "sha256:fixture-not-found",
+  "error": null
+}

@@ -24,6 +24,7 @@ tar = "0.4"
 skipprd = { path = "../.." }
 skippr-runtime-sdk = { path = "../skippr-runtime-sdk" }
 skippr-plugin-data-source-dataforseo-backlinks = { path = "../../plugins/data_source/dataforseo_backlinks" }
+skippr-plugin-data-source-dataforseo-seo-opportunities = { path = "../../plugins/data_source/dataforseo_seo_opportunities" }
 
 react-core.workspace = true
 react.workspace = true

@@ -1,0 +1,22 @@
+{
+  "d": [
+    {
+      "__type": "QueryStats:#Microsoft.Bing.Webmaster.Api",
+      "AvgClickPosition": 18,
+      "AvgImpressionPosition": 17,
+      "Clicks": 15,
+      "Date": "/Date(1772323200000)/",
+      "Impressions": 100,
+      "Query": "example query"
+    },
+    {
+      "__type": "QueryStats:#Microsoft.Bing.Webmaster.Api",
+      "AvgClickPosition": 0,
+      "AvgImpressionPosition": 27,
+      "Clicks": 0,
+      "Date": "/Date(1772409600000)/",
+      "Impressions": 1,
+      "Query": "second query"
+    }
+  ]
+}

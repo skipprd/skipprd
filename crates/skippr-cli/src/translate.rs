@@ -918,6 +918,69 @@ pub fn to_internal(
                     }
                     serde_json::Value::Object(m)
                 }
+                SourceConfig::BingWebmasterTools {
+                    site_url,
+                    api_key,
+                    start_date,
+                    end_date,
+                    lookback_days,
+                    stream_profile,
+                    processing_lag_days,
+                    window_in_days,
+                    access_token,
+                    oauth_token_url,
+                    oauth_client_id,
+                    oauth_client_secret,
+                    oauth_refresh_token,
+                    streams,
+                } => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("kind".into(), "bing_webmaster_tools".into());
+                    if let Some(v) = site_url {
+                        m.insert("site_url".into(), v.clone().into());
+                        m.insert("name".into(), format!("Bing Webmaster {v}").into());
+                    }
+                    if let Some(v) = api_key {
+                        m.insert("api_key".into(), v.clone().into());
+                    }
+                    if let Some(v) = start_date {
+                        m.insert("start_date".into(), v.clone().into());
+                    }
+                    if let Some(v) = end_date {
+                        m.insert("end_date".into(), v.clone().into());
+                    }
+                    if let Some(v) = lookback_days {
+                        m.insert("lookback_days".into(), (*v).into());
+                    }
+                    if let Some(v) = stream_profile {
+                        m.insert("stream_profile".into(), v.clone().into());
+                    }
+                    if let Some(v) = processing_lag_days {
+                        m.insert("processing_lag_days".into(), (*v).into());
+                    }
+                    if let Some(v) = window_in_days {
+                        m.insert("window_in_days".into(), (*v).into());
+                    }
+                    if let Some(v) = access_token {
+                        m.insert("access_token".into(), v.clone().into());
+                    }
+                    if let Some(v) = oauth_token_url {
+                        m.insert("oauth_token_url".into(), v.clone().into());
+                    }
+                    if let Some(v) = oauth_client_id {
+                        m.insert("oauth_client_id".into(), v.clone().into());
+                    }
+                    if let Some(v) = oauth_client_secret {
+                        m.insert("oauth_client_secret".into(), v.clone().into());
+                    }
+                    if let Some(v) = oauth_refresh_token {
+                        m.insert("oauth_refresh_token".into(), v.clone().into());
+                    }
+                    if let Some(v) = streams {
+                        m.insert("streams".into(), serde_json::to_value(v).unwrap_or_default());
+                    }
+                    serde_json::Value::Object(m)
+                }
                 SourceConfig::GooglePageSpeed {
                     site,
                     api_key,
@@ -1025,6 +1088,119 @@ pub fn to_internal(
                     }
                     if let Some(v) = user_agent {
                         m.insert("user_agent".into(), v.clone().into());
+                    }
+                    serde_json::Value::Object(m)
+                }
+                SourceConfig::GoogleSerpRanks {
+                    targets,
+                    keywords,
+                    country,
+                    language,
+                    device,
+                    max_depth,
+                    min_query_interval_ms,
+                    max_queries_per_run,
+                    stop_after_first_target_match,
+                    capture_results,
+                    force_refresh_today,
+                    navigation_timeout_ms,
+                    worker_node_path,
+                    playwright_executable_path,
+                    user_agent,
+                } => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("kind".into(), "google_serp_ranks".into());
+                    if let Some(v) = targets {
+                        m.insert(
+                            "targets".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
+                        if let Some(first) = m.get("targets").and_then(|t| t.as_array()).and_then(|a| a.first()) {
+                            if let Some(site) = first.get("site").and_then(|s| s.as_str()) {
+                                m.insert("name".into(), format!("Google SERP {site}").into());
+                            }
+                        }
+                    }
+                    if let Some(v) = keywords {
+                        m.insert("keywords".into(), serde_json::to_value(v).unwrap_or_default());
+                    }
+                    if let Some(v) = country {
+                        m.insert("country".into(), v.clone().into());
+                    }
+                    if let Some(v) = language {
+                        m.insert("language".into(), v.clone().into());
+                    }
+                    if let Some(v) = device {
+                        m.insert("device".into(), v.clone().into());
+                    }
+                    if let Some(v) = max_depth {
+                        m.insert("max_depth".into(), (*v).into());
+                    }
+                    if let Some(v) = min_query_interval_ms {
+                        m.insert("min_query_interval_ms".into(), (*v).into());
+                    }
+                    if let Some(v) = max_queries_per_run {
+                        m.insert("max_queries_per_run".into(), (*v).into());
+                    }
+                    if let Some(v) = stop_after_first_target_match {
+                        m.insert("stop_after_first_target_match".into(), (*v).into());
+                    }
+                    if let Some(v) = capture_results {
+                        m.insert("capture_results".into(), (*v).into());
+                    }
+                    if let Some(v) = force_refresh_today {
+                        m.insert("force_refresh_today".into(), (*v).into());
+                    }
+                    if let Some(v) = navigation_timeout_ms {
+                        m.insert("navigation_timeout_ms".into(), (*v).into());
+                    }
+                    if let Some(v) = worker_node_path {
+                        m.insert("worker_node_path".into(), v.clone().into());
+                    }
+                    if let Some(v) = playwright_executable_path {
+                        m.insert("playwright_executable_path".into(), v.clone().into());
+                    }
+                    if let Some(v) = user_agent {
+                        m.insert("user_agent".into(), v.clone().into());
+                    }
+                    serde_json::Value::Object(m)
+                }
+                SourceConfig::AiCitations {
+                    site,
+                    brand_names,
+                    prompt_list,
+                    models,
+                    requests_per_minute,
+                    max_prompts_per_run,
+                    skip_unchanged_responses,
+                    openai_base_url,
+                } => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("kind".into(), "ai_citations".into());
+                    if let Some(v) = site {
+                        m.insert("site".into(), v.clone().into());
+                        m.insert("name".into(), format!("AI Citations {v}").into());
+                    }
+                    if let Some(v) = brand_names {
+                        m.insert("brand_names".into(), serde_json::to_value(v).unwrap_or_default());
+                    }
+                    if let Some(v) = prompt_list {
+                        m.insert("prompt_list".into(), serde_json::to_value(v).unwrap_or_default());
+                    }
+                    if let Some(v) = models {
+                        m.insert("models".into(), serde_json::to_value(v).unwrap_or_default());
+                    }
+                    if let Some(v) = requests_per_minute {
+                        m.insert("requests_per_minute".into(), (*v).into());
+                    }
+                    if let Some(v) = max_prompts_per_run {
+                        m.insert("max_prompts_per_run".into(), (*v).into());
+                    }
+                    if let Some(v) = skip_unchanged_responses {
+                        m.insert("skip_unchanged_responses".into(), (*v).into());
+                    }
+                    if let Some(v) = openai_base_url {
+                        m.insert("openai_base_url".into(), v.clone().into());
                     }
                     serde_json::Value::Object(m)
                 }
@@ -1202,6 +1378,57 @@ pub fn to_internal(
                     }
                     if let Some(v) = max_pages {
                         m.insert("max_pages".into(), (*v).into());
+                    }
+                    if let Some(v) = request_interval_ms {
+                        m.insert("request_interval_ms".into(), (*v).into());
+                    }
+                    serde_json::Value::Object(m)
+                }
+                SourceConfig::DataForSeoSeoOpportunities {
+                    login,
+                    password,
+                    site,
+                    location_code,
+                    language_code,
+                    device,
+                    run_mode,
+                    seed_keywords,
+                    request_interval_ms,
+                } => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("kind".into(), "dataforseo_seo_opportunities".into());
+                    if let Some(v) = login {
+                        m.insert("login".into(), v.clone().into());
+                    }
+                    if let Some(v) = password {
+                        m.insert("password".into(), v.clone().into());
+                    }
+                    if let Some(v) = site {
+                        m.insert("site".into(), v.clone().into());
+                        m.insert(
+                            "name".into(),
+                            format!("DataForSEO SEO Opportunities {v}").into(),
+                        );
+                    }
+                    if let Some(v) = location_code {
+                        m.insert("location_code".into(), (*v).into());
+                    }
+                    if let Some(v) = language_code {
+                        m.insert("language_code".into(), v.clone().into());
+                    }
+                    if let Some(v) = device {
+                        m.insert("device".into(), v.clone().into());
+                    }
+                    if let Some(v) = run_mode {
+                        m.insert("run_mode".into(), v.clone().into());
+                    }
+                    if let Some(v) = seed_keywords {
+                        m.insert(
+                            "seed_keywords".into(),
+                            serde_json::Value::Array(
+                                v.iter().map(|s| serde_json::Value::String(s.clone())).collect(),
+                            ),
+                        );
                     }
                     if let Some(v) = request_interval_ms {
                         m.insert("request_interval_ms".into(), (*v).into());
@@ -2179,6 +2406,40 @@ mod tests {
     }
 
     #[test]
+    fn translate_bing_webmaster_tools_source() {
+        let cfg = make_cfg(
+            WarehouseConfig::Athena {
+                workgroup: None,
+                region: Some("us-east-1".into()),
+                result_s3: None,
+                schema: Some("seo".into()),
+            },
+            SourceConfig::BingWebmasterTools {
+                site_url: Some("https://example.com/".into()),
+                api_key: Some("${BING_WEBMASTER_TOOLS_API_KEY}".into()),
+                start_date: Some("2026-03-01".into()),
+                end_date: None,
+                lookback_days: Some(3),
+                stream_profile: Some("standard".into()),
+                processing_lag_days: Some(3),
+                window_in_days: Some(1),
+                access_token: None,
+                oauth_token_url: None,
+                oauth_client_id: None,
+                oauth_client_secret: None,
+                oauth_refresh_token: None,
+                streams: Some(vec!["bing_webmaster_tools.query_daily".into()]),
+            },
+        );
+        let input = el_input(&cfg);
+        assert_eq!(input["kind"], "bing_webmaster_tools");
+        assert_eq!(input["site_url"], "https://example.com/");
+        assert_eq!(input["api_key"], "${BING_WEBMASTER_TOOLS_API_KEY}");
+        assert_eq!(input["stream_profile"], "standard");
+        assert_eq!(input["streams"][0], "bing_webmaster_tools.query_daily");
+    }
+
+    #[test]
     fn translate_google_analytics_source() {
         let cfg = make_cfg(
             WarehouseConfig::Athena {
@@ -2251,6 +2512,75 @@ mod tests {
         assert_eq!(input["max_urls"], 50);
         assert_eq!(input["strategies"][0], "mobile");
         assert_eq!(input["max_requests_per_run"], 120);
+    }
+
+    #[test]
+    fn translate_google_serp_ranks_source() {
+        let cfg = make_cfg(
+            WarehouseConfig::Athena {
+                workgroup: None,
+                region: Some("us-east-1".into()),
+                result_s3: None,
+                schema: Some("seo".into()),
+            },
+            SourceConfig::GoogleSerpRanks {
+                targets: Some(vec![crate::public_config::GoogleSerpTargetConfig {
+                    site: "example.com".into(),
+                    aliases: vec!["www.example.com".into()],
+                }]),
+                keywords: Some(vec!["best widgets".into()]),
+                country: Some("uk".into()),
+                language: Some("en".into()),
+                device: Some("desktop".into()),
+                max_depth: Some(30),
+                min_query_interval_ms: Some(30_000),
+                max_queries_per_run: Some(10),
+                stop_after_first_target_match: Some(true),
+                capture_results: Some(false),
+                force_refresh_today: Some(false),
+                navigation_timeout_ms: Some(45_000),
+                worker_node_path: Some("node".into()),
+                playwright_executable_path: None,
+                user_agent: None,
+            },
+        );
+        let input = el_input(&cfg);
+        assert_eq!(input["kind"], "google_serp_ranks");
+        assert_eq!(input["country"], "uk");
+        assert_eq!(input["max_depth"], 30);
+        assert_eq!(input["keywords"][0], "best widgets");
+    }
+
+    #[test]
+    fn translate_ai_citations_source() {
+        let cfg = make_cfg(
+            WarehouseConfig::Athena {
+                workgroup: None,
+                region: Some("us-east-1".into()),
+                result_s3: None,
+                schema: Some("marketing".into()),
+            },
+            SourceConfig::AiCitations {
+                site: Some("https://example.com".into()),
+                brand_names: Some(vec!["Example".into()]),
+                prompt_list: Some(vec![TrackedPromptEntry {
+                    id: "best_tools".into(),
+                    text: "What are the best tools?".into(),
+                    category: Some("discovery".into()),
+                    intent: None,
+                }]),
+                models: Some(vec!["gpt-4.1-mini".into()]),
+                requests_per_minute: Some(10),
+                max_prompts_per_run: Some(50),
+                skip_unchanged_responses: Some(true),
+                openai_base_url: None,
+            },
+        );
+        let input = el_input(&cfg);
+        assert_eq!(input["kind"], "ai_citations");
+        assert_eq!(input["site"], "https://example.com");
+        assert_eq!(input["models"][0], "gpt-4.1-mini");
+        assert_eq!(input["prompt_list"][0]["id"], "best_tools");
     }
 
     #[test]
@@ -2349,6 +2679,33 @@ mod tests {
         assert_eq!(input["site"], "example.com");
         assert_eq!(input["backlink_target"], "example.com");
         assert_eq!(input["max_pages"], 5);
+    }
+
+    #[test]
+    fn translate_dataforseo_seo_opportunities_source() {
+        let cfg = make_cfg(
+            WarehouseConfig::Athena {
+                workgroup: None,
+                region: Some("us-east-1".into()),
+                result_s3: None,
+                schema: Some("marketing".into()),
+            },
+            SourceConfig::DataForSeoSeoOpportunities {
+                login: Some("${DATAFORSEO_API_USER}".into()),
+                password: Some("${DATAFORSEO_API_PASS}".into()),
+                site: Some("example.com".into()),
+                location_code: Some(2840),
+                language_code: Some("en".into()),
+                device: Some("desktop".into()),
+                run_mode: Some("mvp".into()),
+                seed_keywords: Some(vec!["meal planning app".into()]),
+                request_interval_ms: Some(200),
+            },
+        );
+        let input = el_input(&cfg);
+        assert_eq!(input["kind"], "dataforseo_seo_opportunities");
+        assert_eq!(input["site"], "example.com");
+        assert_eq!(input["seed_keywords"][0], "meal planning app");
     }
 
     #[test]

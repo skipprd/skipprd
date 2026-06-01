@@ -445,6 +445,8 @@ Use these for end-to-end examples only; new connectors should follow the generic
 | --- | --- | --- |
 | Source | `plugins/data_source/google_analytics/` | **Bronze grain catalog:** one namespace per daily fact grain (23 in `full` profile); avoid `runPivotReport`/custom reports in the plugin; `replace_partition` on `date`; fixtures via `SKIPPR_GA4_FIXTURE_DIR`. See [GA4 bronze & modeling](../concepts/ga4-bronze-and-modeling.md). |
 | Source | `plugins/data_source/meta_instagram_ads/` | **Five** Instagram-scoped Marketing API insights namespaces; discover auto-samples 3 days × `account_daily`; `replace_partition` on `date`; fixtures via `SKIPPR_META_INSTAGRAM_ADS_FIXTURE_DIR`. See [Meta Instagram Ads plugin](./meta-instagram-ads-plugin.md). |
+| Source | `plugins/data_source/bing_webmaster_tools/` | Bing Webmaster read APIs (`GetQueryStats`, `GetRankAndTrafficStats`, `GetPageStats`, `GetCrawlStats`); client-side date filtering; `replace_partition` on `date`; fixtures via `SKIPPR_BING_WEBMASTER_TOOLS_FIXTURE_DIR`. See [Bing Webmaster Tools plugin](./bing-webmaster-tools-plugin.md). |
+| Source | `plugins/data_source/google_search_console/` | GSC Search Analytics daily grains; same mutable-report pattern as Bing. See [Google Search Console plugin](./google-search-console-plugin.md). |
 | Data sink | `plugins/data_sink/athena/` | S3 + Glue; contract-driven partition delete; rejects `merge_by_key` |
 | Data sink | `plugins/data_sink/iceberg/` | Native merge / replace partition / replace table |
 | Schema sink | `plugins/schema_sink/glue/` | Glue DDL; merges `partition_key` into table on create (shared Athena helpers) |

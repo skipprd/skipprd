@@ -1,0 +1,98 @@
+{
+  "version": "0.1.20240228",
+  "status_code": 20000,
+  "status_message": "Ok.",
+  "cost": 0.004,
+  "tasks": [
+    {
+      "status_code": 20000,
+      "status_message": "Ok.",
+      "cost": 0.004,
+      "result": [
+        {
+          "keyword": "meal planning app free",
+          "type": "organic",
+          "se_domain": "google.com",
+          "location_code": 2840,
+          "language_code": "en",
+          "check_url": "https://www.google.com/search?q=meal+planning+app+free",
+          "datetime": "2026-05-30 12:00:00 +00:00",
+          "items_count": 12,
+          "items": [
+            {
+              "type": "featured_snippet",
+              "rank_group": 1,
+              "rank_absolute": 1,
+              "domain": "reddit.com",
+              "title": "Best free meal planning apps? : r/MealPrepSunday",
+              "description": "Discussion thread about free meal planning apps.",
+              "url": "https://www.reddit.com/r/MealPrepSunday/comments/example/"
+            },
+            {
+              "type": "people_also_ask",
+              "rank_group": 2,
+              "rank_absolute": 2,
+              "items": [
+                {
+                  "type": "people_also_ask_element",
+                  "title": "What is the best free meal planning app?",
+                  "expanded_element": [
+                    {
+                      "type": "people_also_ask_expanded_element",
+                      "title": "What is the best free meal planning app?",
+                      "description": "Several apps offer free tiers for meal planning.",
+                      "url": "https://example.com/best-free-meal-planning-apps"
+                    }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "organic",
+              "rank_group": 1,
+              "rank_absolute": 3,
+              "domain": "smallblog.example.org",
+              "title": "Meal Planning App Free - Complete Guide 2026",
+              "description": "A guide to free meal planning apps for families.",
+              "url": "https://smallblog.example.org/meal-planning-app-free",
+              "breadcrumb": "smallblog.example.org › meal-planning",
+              "website_name": "Small Blog",
+              "is_image": false,
+              "is_video": false,
+              "rank_info": {
+                "page_rank": 12,
+                "main_domain_rank": 18
+              }
+            },
+            {
+              "type": "organic",
+              "rank_group": 2,
+              "rank_absolute": 4,
+              "domain": "forum.example.net",
+              "title": "Free meal planning app recommendations",
+              "description": "Forum thread with user recommendations.",
+              "url": "https://forum.example.net/t/free-meal-planning-app",
+              "rank_info": {
+                "page_rank": 8,
+                "main_domain_rank": 22
+              }
+            },
+            {
+              "type": "organic",
+              "rank_group": 3,
+              "rank_absolute": 5,
+              "domain": "picnic.com",
+              "title": "Picnic - Family Meal Planning",
+              "description": "Plan meals for your family with Picnic.",
+              "url": "https://www.picnic.com/meal-planning",
+              "rank_info": {
+                "page_rank": 45,
+                "main_domain_rank": 52
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

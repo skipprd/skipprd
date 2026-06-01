@@ -1,0 +1,32 @@
+{
+  "version": "0.1.20240228",
+  "status_code": 20000,
+  "status_message": "Ok.",
+  "cost": 0.002,
+  "tasks": [
+    {
+      "status_code": 20000,
+      "status_message": "Ok.",
+      "cost": 0.002,
+      "result": [
+        {
+          "items": [
+            {
+              "keyword": "meal planning app free",
+              "location_code": 2840,
+              "language_code": "en",
+              "search_volume": 2400,
+              "cpc": 1.25,
+              "competition": 0.42,
+              "monthly_searches": [
+                {"year": 2025, "month": 12, "search_volume": 2400},
+                {"year": 2026, "month": 1, "search_volume": 2600}
+              ]
+            }
+          ],
+          "items_count": 1
+        }
+      ]
+    }
+  ]
+}

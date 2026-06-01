@@ -976,6 +976,39 @@ enum SourceKind {
         #[arg(long, value_delimiter = ',')]
         url_list: Option<Vec<String>>,
     },
+    /// Bing Webmaster Tools source (search performance and crawl reports).
+    BingWebmasterTools {
+        /// Verified site URL (e.g. https://example.com/).
+        #[arg(long)]
+        site_url: Option<String>,
+        #[arg(long)]
+        start_date: Option<String>,
+        #[arg(long)]
+        end_date: Option<String>,
+        #[arg(long)]
+        lookback_days: Option<u32>,
+        #[arg(long)]
+        stream_profile: Option<String>,
+        #[arg(long)]
+        processing_lag_days: Option<u32>,
+        #[arg(long)]
+        window_in_days: Option<u32>,
+        /// API key from Bing Webmaster Tools Settings → API Access.
+        #[arg(long)]
+        api_key: Option<String>,
+        #[arg(long)]
+        access_token: Option<String>,
+        #[arg(long)]
+        oauth_token_url: Option<String>,
+        #[arg(long)]
+        oauth_client_id: Option<String>,
+        #[arg(long)]
+        oauth_client_secret: Option<String>,
+        #[arg(long)]
+        oauth_refresh_token: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        streams: Option<Vec<String>>,
+    },
     /// Google PageSpeed Insights source (Lighthouse lab + CrUX field via API v5).
     GooglePageSpeed {
         /// Site origin to sample (e.g. https://example.com).
@@ -1065,6 +1098,58 @@ enum SourceKind {
         #[arg(long)]
         skip_heavy_when_unchanged: Option<bool>,
     },
+    /// AI citations source (tracked prompts × OpenAI-compatible models).
+    AiCitations {
+        #[arg(long)]
+        site: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        brand_names: Option<Vec<String>>,
+        #[arg(long, value_delimiter = ',')]
+        models: Option<Vec<String>>,
+        #[arg(long)]
+        requests_per_minute: Option<u32>,
+        #[arg(long)]
+        max_prompts_per_run: Option<u32>,
+        #[arg(long)]
+        skip_unchanged_responses: Option<bool>,
+        #[arg(long)]
+        openai_base_url: Option<String>,
+    },
+    /// Google organic rank tracking for configured target domains (low-volume Playwright).
+    GoogleSerpRanks {
+        #[arg(long)]
+        target_site: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        target_aliases: Option<Vec<String>>,
+        #[arg(long, value_delimiter = ',')]
+        keywords: Option<Vec<String>>,
+        #[arg(long)]
+        country: Option<String>,
+        #[arg(long)]
+        language: Option<String>,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        max_depth: Option<u32>,
+        #[arg(long)]
+        min_query_interval_ms: Option<u64>,
+        #[arg(long)]
+        max_queries_per_run: Option<u32>,
+        #[arg(long)]
+        stop_after_first_target_match: Option<bool>,
+        #[arg(long)]
+        capture_results: Option<bool>,
+        #[arg(long)]
+        force_refresh_today: Option<bool>,
+        #[arg(long)]
+        navigation_timeout_ms: Option<u32>,
+        #[arg(long)]
+        worker_node_path: Option<String>,
+        #[arg(long)]
+        playwright_executable_path: Option<String>,
+        #[arg(long)]
+        user_agent: Option<String>,
+    },
     /// Apple Search Ads source (Campaign Management API v5 daily reports).
     AppleSearchAds {
         #[arg(long)]
@@ -1147,6 +1232,27 @@ enum SourceKind {
         limit: Option<u32>,
         #[arg(long)]
         max_pages: Option<u32>,
+        #[arg(long)]
+        request_interval_ms: Option<u64>,
+    },
+    /// DataForSEO SEO opportunities (keyword research, SERP weakness, AI citation).
+    DataForSeoSeoOpportunities {
+        #[arg(long)]
+        login: Option<String>,
+        #[arg(long)]
+        password: Option<String>,
+        #[arg(long)]
+        site: Option<String>,
+        #[arg(long)]
+        location_code: Option<u32>,
+        #[arg(long)]
+        language_code: Option<String>,
+        #[arg(long)]
+        device: Option<String>,
+        #[arg(long)]
+        run_mode: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        seed_keywords: Option<Vec<String>>,
         #[arg(long)]
         request_interval_ms: Option<u64>,
     },
@@ -1852,10 +1958,14 @@ const DATA_SOURCE_RUNTIME_PLUGIN_KEYS: &[&str] = &[
     "AppleSearchAds",
     "MetaInstagramAds",
     "DataForSeoBacklinks",
+    "DataForSeoSeoOpportunities",
     "GoogleAnalytics",
     "GoogleSearchConsole",
+    "BingWebmasterTools",
     "GooglePageSpeed",
     "SiteQuality",
+    "AiCitations",
+    "GoogleSerpRanks",
     "S3",
     "File",
     "Mssql",
@@ -2052,6 +2162,54 @@ fn yaml_u32(map: &serde_yaml::Mapping, key: &str) -> Option<u32> {
     })
 }
 
+fn yaml_u64(map: &serde_yaml::Mapping, key: &str) -> Option<u64> {
+    map.get(yaml_key(key)).and_then(|value| {
+        value
+            .as_u64()
+            .or_else(|| {
+                value
+                    .as_i64()
+                    .and_then(|n| u64::try_from(n).ok().filter(|_| n >= 0))
+            })
+            .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
+    })
+}
+
+fn yaml_google_serp_targets(
+    map: &serde_yaml::Mapping,
+    key: &str,
+) -> Option<Vec<crate::public_config::GoogleSerpTargetConfig>> {
+    let value = map.get(yaml_key(key))?;
+    let seq = value.as_sequence()?;
+    let mut targets = Vec::new();
+    for entry in seq {
+        let mapping = entry.as_mapping()?;
+        let site = mapping
+            .get(yaml_key("site"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?
+            .to_string();
+        let aliases = mapping
+            .get(yaml_key("aliases"))
+            .and_then(|v| v.as_sequence())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        item.as_str()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        targets.push(crate::public_config::GoogleSerpTargetConfig { site, aliases });
+    }
+    (!targets.is_empty()).then_some(targets)
+}
+
 fn yaml_bool(map: &serde_yaml::Mapping, key: &str) -> Option<bool> {
     map.get(yaml_key(key)).and_then(|value| {
         value.as_bool().or_else(|| {
@@ -2062,6 +2220,14 @@ fn yaml_bool(map: &serde_yaml::Mapping, key: &str) -> Option<bool> {
             })
         })
     })
+}
+
+fn yaml_tracked_prompt_list(
+    map: &serde_yaml::Mapping,
+    key: &str,
+) -> Option<Vec<public_config::TrackedPromptEntry>> {
+    map.get(&yaml_key(key))
+        .and_then(|v| serde_yaml::from_value(v.clone()).ok())
 }
 
 fn yaml_string_vec(map: &serde_yaml::Mapping, key: &str) -> Option<Vec<String>> {
@@ -2170,6 +2336,22 @@ fn source_config_from_data_source(
             url_inspection_enabled: yaml_bool(plugin_cfg, "url_inspection_enabled"),
             url_list: yaml_string_vec(plugin_cfg, "url_list"),
         }),
+        "BingWebmasterTools" => Ok(SourceConfig::BingWebmasterTools {
+            site_url: yaml_str(plugin_cfg, "site_url"),
+            api_key: yaml_str(plugin_cfg, "api_key"),
+            start_date: yaml_str(plugin_cfg, "start_date"),
+            end_date: yaml_str(plugin_cfg, "end_date"),
+            lookback_days: yaml_u32(plugin_cfg, "lookback_days"),
+            stream_profile: yaml_str(plugin_cfg, "stream_profile"),
+            processing_lag_days: yaml_u32(plugin_cfg, "processing_lag_days"),
+            window_in_days: yaml_u32(plugin_cfg, "window_in_days"),
+            access_token: yaml_str(plugin_cfg, "access_token"),
+            oauth_token_url: yaml_str(plugin_cfg, "oauth_token_url"),
+            oauth_client_id: yaml_str(plugin_cfg, "oauth_client_id"),
+            oauth_client_secret: yaml_str(plugin_cfg, "oauth_client_secret"),
+            oauth_refresh_token: yaml_str(plugin_cfg, "oauth_refresh_token"),
+            streams: yaml_string_vec(plugin_cfg, "streams"),
+        }),
         "GooglePageSpeed" => Ok(SourceConfig::GooglePageSpeed {
             site: yaml_str(plugin_cfg, "site"),
             api_key: yaml_str(plugin_cfg, "api_key"),
@@ -2216,6 +2398,33 @@ fn source_config_from_data_source(
             playwright_executable_path: yaml_str(plugin_cfg, "playwright_executable_path"),
             respect_robots: yaml_bool(plugin_cfg, "respect_robots"),
             skip_heavy_when_unchanged: yaml_bool(plugin_cfg, "skip_heavy_when_unchanged"),
+        }),
+        "AiCitations" => Ok(SourceConfig::AiCitations {
+            site: yaml_str(plugin_cfg, "site"),
+            brand_names: yaml_string_vec(plugin_cfg, "brand_names"),
+            prompt_list: yaml_tracked_prompt_list(plugin_cfg, "prompt_list"),
+            models: yaml_string_vec(plugin_cfg, "models"),
+            requests_per_minute: yaml_u32(plugin_cfg, "requests_per_minute"),
+            max_prompts_per_run: yaml_u32(plugin_cfg, "max_prompts_per_run"),
+            skip_unchanged_responses: yaml_bool(plugin_cfg, "skip_unchanged_responses"),
+            openai_base_url: yaml_str(plugin_cfg, "openai_base_url"),
+        }),
+        "GoogleSerpRanks" => Ok(SourceConfig::GoogleSerpRanks {
+            targets: yaml_google_serp_targets(plugin_cfg, "targets"),
+            keywords: yaml_string_vec(plugin_cfg, "keywords"),
+            country: yaml_str(plugin_cfg, "country"),
+            language: yaml_str(plugin_cfg, "language"),
+            device: yaml_str(plugin_cfg, "device"),
+            max_depth: yaml_u32(plugin_cfg, "max_depth"),
+            min_query_interval_ms: yaml_u64(plugin_cfg, "min_query_interval_ms"),
+            max_queries_per_run: yaml_u32(plugin_cfg, "max_queries_per_run"),
+            stop_after_first_target_match: yaml_bool(plugin_cfg, "stop_after_first_target_match"),
+            capture_results: yaml_bool(plugin_cfg, "capture_results"),
+            force_refresh_today: yaml_bool(plugin_cfg, "force_refresh_today"),
+            navigation_timeout_ms: yaml_u32(plugin_cfg, "navigation_timeout_ms"),
+            worker_node_path: yaml_str(plugin_cfg, "worker_node_path"),
+            playwright_executable_path: yaml_str(plugin_cfg, "playwright_executable_path"),
+            user_agent: yaml_str(plugin_cfg, "user_agent"),
         }),
         "AppleSearchAds" => Ok(SourceConfig::AppleSearchAds {
             org_id: yaml_str(plugin_cfg, "org_id"),
@@ -2516,6 +2725,17 @@ fn i64_json(value: Option<i64>) -> Option<serde_json::Value> {
 
 fn strings_json(value: Option<Vec<String>>) -> Option<serde_json::Value> {
     value.map(|values| serde_json::json!(values))
+}
+
+fn google_serp_targets_json(
+    target_site: Option<String>,
+    target_aliases: Option<Vec<String>>,
+) -> Option<serde_json::Value> {
+    let site = target_site?;
+    Some(serde_json::json!([{
+        "site": site,
+        "aliases": target_aliases.unwrap_or_default(),
+    }]))
 }
 
 fn map_json(value: Option<Vec<(String, String)>>) -> Option<serde_json::Value> {
@@ -3055,6 +3275,40 @@ fn source_plugin_and_config(kind: SourceKind) -> (&'static str, serde_json::Valu
                 ("url_list", strings_json(url_list)),
             ]),
         ),
+        SourceKind::BingWebmasterTools {
+            site_url,
+            start_date,
+            end_date,
+            lookback_days,
+            stream_profile,
+            processing_lag_days,
+            window_in_days,
+            api_key,
+            access_token,
+            oauth_token_url,
+            oauth_client_id,
+            oauth_client_secret,
+            oauth_refresh_token,
+            streams,
+        } => (
+            "BingWebmasterTools",
+            json_object(vec![
+                ("site_url", str_json(site_url)),
+                ("start_date", str_json(start_date)),
+                ("end_date", str_json(end_date)),
+                ("lookback_days", u32_json(lookback_days)),
+                ("stream_profile", str_json(stream_profile)),
+                ("processing_lag_days", u32_json(processing_lag_days)),
+                ("window_in_days", u32_json(window_in_days)),
+                ("api_key", str_json(api_key)),
+                ("access_token", str_json(access_token)),
+                ("oauth_token_url", str_json(oauth_token_url)),
+                ("oauth_client_id", str_json(oauth_client_id)),
+                ("oauth_client_secret", str_json(oauth_client_secret)),
+                ("oauth_refresh_token", str_json(oauth_refresh_token)),
+                ("streams", strings_json(streams)),
+            ]),
+        ),
         SourceKind::GooglePageSpeed {
             site,
             api_key,
@@ -3158,6 +3412,75 @@ fn source_plugin_and_config(kind: SourceKind) -> (&'static str, serde_json::Valu
                     "skip_heavy_when_unchanged",
                     bool_json(skip_heavy_when_unchanged),
                 ),
+            ]),
+        ),
+        SourceKind::AiCitations {
+            site,
+            brand_names,
+            models,
+            requests_per_minute,
+            max_prompts_per_run,
+            skip_unchanged_responses,
+            openai_base_url,
+        } => (
+            "AiCitations",
+            json_object(vec![
+                ("site", str_json(site)),
+                ("brand_names", strings_json(brand_names)),
+                ("models", strings_json(models)),
+                ("requests_per_minute", u32_json(requests_per_minute)),
+                ("max_prompts_per_run", u32_json(max_prompts_per_run)),
+                (
+                    "skip_unchanged_responses",
+                    bool_json(skip_unchanged_responses),
+                ),
+                ("openai_base_url", str_json(openai_base_url)),
+            ]),
+        ),
+        SourceKind::GoogleSerpRanks {
+            target_site,
+            target_aliases,
+            keywords,
+            country,
+            language,
+            device,
+            max_depth,
+            min_query_interval_ms,
+            max_queries_per_run,
+            stop_after_first_target_match,
+            capture_results,
+            force_refresh_today,
+            navigation_timeout_ms,
+            worker_node_path,
+            playwright_executable_path,
+            user_agent,
+        } => (
+            "GoogleSerpRanks",
+            json_object(vec![
+                (
+                    "targets",
+                    google_serp_targets_json(target_site, target_aliases),
+                ),
+                ("keywords", strings_json(keywords)),
+                ("country", str_json(country)),
+                ("language", str_json(language)),
+                ("device", str_json(device)),
+                ("max_depth", u32_json(max_depth)),
+                ("min_query_interval_ms", u64_json(min_query_interval_ms)),
+                ("max_queries_per_run", u32_json(max_queries_per_run)),
+                (
+                    "stop_after_first_target_match",
+                    bool_json(stop_after_first_target_match),
+                ),
+                ("capture_results", bool_json(capture_results)),
+                ("force_refresh_today", bool_json(force_refresh_today)),
+                ("navigation_timeout_ms", u32_json(navigation_timeout_ms)),
+                ("worker_node_path", str_json(worker_node_path)),
+                (
+                    "playwright_executable_path",
+                    str_json(playwright_executable_path),
+                ),
+                ("user_agent", str_json(user_agent)),
             ]),
         ),
         SourceKind::AppleSearchAds {
@@ -3275,6 +3598,30 @@ fn source_plugin_and_config(kind: SourceKind) -> (&'static str, serde_json::Valu
                 ]),
             )
         }
+        SourceKind::DataForSeoSeoOpportunities {
+            login,
+            password,
+            site,
+            location_code,
+            language_code,
+            device,
+            run_mode,
+            seed_keywords,
+            request_interval_ms,
+        } => (
+            "DataForSeoSeoOpportunities",
+            json_object(vec![
+                ("login", str_json(login)),
+                ("password", str_json(password)),
+                ("site", str_json(site)),
+                ("location_code", u32_json(location_code.or(Some(2840)))),
+                ("language_code", str_json(language_code.or_else(|| Some("en".to_string())))),
+                ("device", str_json(device.or_else(|| Some("desktop".to_string())))),
+                ("run_mode", str_json(run_mode.or_else(|| Some("mvp".to_string())))),
+                ("seed_keywords", strings_json(seed_keywords)),
+                ("request_interval_ms", u64_json(request_interval_ms)),
+            ]),
+        ),
         SourceKind::HttpClient {
             url,
             method,
@@ -4125,6 +4472,36 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         }
     }
 
+    if let SourceKind::BingWebmasterTools {
+        ref mut site_url,
+        ref mut start_date,
+        ref mut api_key,
+        ref mut oauth_client_id,
+        ref mut oauth_client_secret,
+        ref mut oauth_refresh_token,
+        ..
+    } = &mut kind
+    {
+        if site_url.is_none() {
+            *site_url = prompt("Bing Webmaster site URL (https://example.com/)");
+        }
+        if start_date.is_none() {
+            *start_date = prompt("Start date for first sync (YYYY-MM-DD)");
+        }
+        if api_key.is_none() {
+            *api_key = Some("${BING_WEBMASTER_TOOLS_API_KEY}".to_string());
+        }
+        if oauth_client_id.is_none() {
+            *oauth_client_id = Some("${BING_WEBMASTER_OAUTH_CLIENT_ID}".to_string());
+        }
+        if oauth_client_secret.is_none() {
+            *oauth_client_secret = Some("${BING_WEBMASTER_OAUTH_CLIENT_SECRET}".to_string());
+        }
+        if oauth_refresh_token.is_none() {
+            *oauth_refresh_token = Some("${BING_WEBMASTER_OAUTH_REFRESH_TOKEN}".to_string());
+        }
+    }
+
     if let SourceKind::GooglePageSpeed {
         ref mut site,
         ref mut api_key,
@@ -4158,6 +4535,50 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         }
         if url_mode.is_none() {
             *url_mode = Some("tld_sample".to_string());
+        }
+    }
+
+    if let SourceKind::GoogleSerpRanks {
+        ref mut target_site,
+        ref mut keywords,
+        ref mut country,
+        ref mut language,
+        ..
+    } = &mut kind
+    {
+        if target_site.is_none() {
+            *target_site = prompt("Target site domain to track (e.g. example.com)");
+        }
+        if keywords.as_ref().is_none_or(|k| k.is_empty()) {
+            let raw = prompt("Keywords to track (comma-separated)");
+            *keywords = raw.map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            });
+        }
+        if country.is_none() {
+            *country = Some("uk".to_string());
+        }
+        if language.is_none() {
+            *language = Some("en".to_string());
+        }
+    }
+
+    if let SourceKind::AiCitations {
+        ref mut site,
+        ref mut models,
+        ..
+    } = &mut kind
+    {
+        if site.is_none() {
+            *site = prompt("Target site URL (e.g. https://example.com)");
+        }
+        if models.is_none() {
+            *models = Some(vec!["gpt-4.1-mini".to_string()]);
         }
     }
 
@@ -4236,6 +4657,32 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         }
         if backlink_target.is_none() {
             *backlink_target = prompt("Primary backlink target domain (e.g. example.com)");
+        }
+    }
+
+    if let SourceKind::DataForSeoSeoOpportunities {
+        ref mut login,
+        ref mut password,
+        ref mut site,
+        ref mut seed_keywords,
+        ..
+    } = &mut kind
+    {
+        if login.is_none() {
+            *login = Some("${DATAFORSEO_API_USER}".to_string());
+        }
+        if password.is_none() {
+            *password = Some("${DATAFORSEO_API_PASS}".to_string());
+        }
+        if site.is_none() {
+            *site = prompt("Site domain for bronze rows (e.g. example.com)");
+        }
+        if seed_keywords.is_none() {
+            if let Some(seed) = prompt(
+                "Seed keyword for opportunity analysis (e.g. meal planning app)",
+            ) {
+                *seed_keywords = Some(vec![seed]);
+            }
         }
     }
 
@@ -4588,6 +5035,37 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
             url_inspection_enabled,
             url_list,
         },
+        SourceKind::BingWebmasterTools {
+            site_url,
+            start_date,
+            end_date,
+            lookback_days,
+            stream_profile,
+            processing_lag_days,
+            window_in_days,
+            api_key,
+            access_token,
+            oauth_token_url,
+            oauth_client_id,
+            oauth_client_secret,
+            oauth_refresh_token,
+            streams,
+        } => SourceConfig::BingWebmasterTools {
+            site_url,
+            api_key,
+            start_date,
+            end_date,
+            lookback_days,
+            stream_profile,
+            processing_lag_days,
+            window_in_days,
+            access_token,
+            oauth_token_url,
+            oauth_client_id,
+            oauth_client_secret,
+            oauth_refresh_token,
+            streams,
+        },
         SourceKind::GooglePageSpeed {
             site,
             api_key,
@@ -4675,6 +5153,63 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
             respect_robots,
             skip_heavy_when_unchanged,
         },
+        SourceKind::AiCitations {
+            site,
+            brand_names,
+            models,
+            requests_per_minute,
+            max_prompts_per_run,
+            skip_unchanged_responses,
+            openai_base_url,
+        } => SourceConfig::AiCitations {
+            site,
+            brand_names,
+            prompt_list: None,
+            models,
+            requests_per_minute,
+            max_prompts_per_run,
+            skip_unchanged_responses,
+            openai_base_url,
+        },
+        SourceKind::GoogleSerpRanks {
+            target_site,
+            target_aliases,
+            keywords,
+            country,
+            language,
+            device,
+            max_depth,
+            min_query_interval_ms,
+            max_queries_per_run,
+            stop_after_first_target_match,
+            capture_results,
+            force_refresh_today,
+            navigation_timeout_ms,
+            worker_node_path,
+            playwright_executable_path,
+            user_agent,
+        } => SourceConfig::GoogleSerpRanks {
+            targets: target_site.map(|site| {
+                vec![crate::public_config::GoogleSerpTargetConfig {
+                    site,
+                    aliases: target_aliases.unwrap_or_default(),
+                }]
+            }),
+            keywords,
+            country,
+            language,
+            device,
+            max_depth,
+            min_query_interval_ms,
+            max_queries_per_run,
+            stop_after_first_target_match,
+            capture_results,
+            force_refresh_today,
+            navigation_timeout_ms,
+            worker_node_path,
+            playwright_executable_path,
+            user_agent,
+        },
         SourceKind::AppleSearchAds {
             org_id,
             client_id,
@@ -4760,6 +5295,27 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
             max_pages,
             request_interval_ms,
         },
+        SourceKind::DataForSeoSeoOpportunities {
+            login,
+            password,
+            site,
+            location_code,
+            language_code,
+            device,
+            run_mode,
+            seed_keywords,
+            request_interval_ms,
+        } => SourceConfig::DataForSeoSeoOpportunities {
+            login,
+            password,
+            site,
+            location_code,
+            language_code,
+            device,
+            run_mode,
+            seed_keywords,
+            request_interval_ms,
+        },
         SourceKind::HttpClient {
             url,
             method,
@@ -4826,12 +5382,16 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         SourceConfig::Websocket { .. } => "websocket",
         SourceConfig::GoogleAnalytics { .. } => "google_analytics",
         SourceConfig::GoogleSearchConsole { .. } => "google_search_console",
+        SourceConfig::BingWebmasterTools { .. } => "bing_webmaster_tools",
         SourceConfig::GooglePageSpeed { .. } => "google_pagespeed",
+        SourceConfig::AiCitations { .. } => "ai_citations",
+        SourceConfig::GoogleSerpRanks { .. } => "google_serp_ranks",
         SourceConfig::SiteQuality { .. } => "site_quality",
         SourceConfig::SeoCrawl { .. } => "seo_crawl",
         SourceConfig::AppleSearchAds { .. } => "apple_search_ads",
         SourceConfig::MetaInstagramAds { .. } => "meta_instagram_ads",
         SourceConfig::DataForSeoBacklinks { .. } => "dataforseo_backlinks",
+        SourceConfig::DataForSeoSeoOpportunities { .. } => "dataforseo_seo_opportunities",
         SourceConfig::HttpClient { .. } => "http_client",
         SourceConfig::HttpServer { .. } => "http_server",
         SourceConfig::Socket { .. } => "socket",
@@ -5167,6 +5727,12 @@ fn cmd_doctor(explicit_config: &Option<PathBuf>, output: &str) {
         && (cfg_raw.contains("sitequality") || cfg_raw.contains("site_quality"))
     {
         check_site_quality_env(output, &mut checks, &mut ok);
+    }
+
+    if !is_json_output(output)
+        && (cfg_raw.contains("aicitations") || cfg_raw.contains("ai_citations"))
+    {
+        check_ai_citations_env(output, &mut checks, &mut ok);
     }
 
     if cfg_raw.contains("dataforseo") {
@@ -5653,6 +6219,51 @@ fn check_dataforseo_backlinks_credentials(
             );
             *ok = false;
         }
+    }
+}
+
+fn check_ai_citations_env(output: &str, checks: &mut Vec<DoctorCheck>, ok: &mut bool) {
+    let fixture_mode = std::env::var("SKIPPR_AI_CITATIONS_FIXTURE_DIR")
+        .ok()
+        .filter(|d| !d.trim().is_empty())
+        .is_some()
+        || std::env::var("SKIPPR_OPENAI_FIXTURE_DIR")
+            .ok()
+            .filter(|d| !d.trim().is_empty())
+            .is_some();
+
+    if fixture_mode {
+        emit_doctor_check(
+            output,
+            checks,
+            true,
+            "AI Citations fixture mode enabled (offline)",
+            None,
+        );
+        return;
+    }
+
+    if std::env::var("OPENAI_API_KEY")
+        .ok()
+        .filter(|k| !k.trim().is_empty())
+        .is_some()
+    {
+        emit_doctor_check(
+            output,
+            checks,
+            true,
+            "OPENAI_API_KEY is set for AI Citations",
+            None,
+        );
+    } else {
+        emit_doctor_check(
+            output,
+            checks,
+            false,
+            "OPENAI_API_KEY is not set — required for AI Citations sync",
+            Some("Export OPENAI_API_KEY or set SKIPPR_AI_CITATIONS_FIXTURE_DIR for offline runs"),
+        );
+        *ok = false;
     }
 }
 
