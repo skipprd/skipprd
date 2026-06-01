@@ -72,6 +72,7 @@ runs:
         } else {
           $skipprBin = (Get-Command skippr -ErrorAction Stop).Source
         }
+        $env:SKIPPR_BINARY = $skipprBin
 
         $skipprdBin = $null
         $skipprdArtifact = ".\skipprd-${{ inputs.architecture_name }}\skipprd.exe"

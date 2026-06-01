@@ -99,6 +99,18 @@ pub fn resolve_skippr_binary(configured: &str) -> String {
                     return candidate.to_string_lossy().into_owned();
                 }
             }
+
+            let fallback_stem = PathBuf::from(fallback)
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or(fallback);
+            let current_stem = current_exe
+                .file_stem()
+                .and_then(|stem| stem.to_str())
+                .unwrap_or_default();
+            if fallback_stem == "skipprd" && current_stem == "skippr" && current_exe.is_file() {
+                return current_exe.to_string_lossy().into_owned();
+            }
         }
     }
 
