@@ -207,7 +207,7 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
             runtime_e2e_harness.iceberg_glue_table_name(
                 runtime_e2e_harness.MSSQL_DEBUG_TABLE_NAMESPACES[0]
             ),
-            "skippr_mssql_testdb_dbo_customers",
+            "skippr_customers",
         )
 
     def test_mssql_debug_expected_counts_match_seed_fixture(self) -> None:
@@ -689,7 +689,7 @@ schema_sinks:
                 return subprocess.CompletedProcess(
                     args=command,
                     returncode=0,
-                    stdout='["skippr_mssql_testdb_dbo_orders", "skippr_mssql_testdb_dbo_order_items"]',
+                    stdout='["skippr_orders", "skippr_order_items"]',
                     stderr="",
                 )
             return subprocess.CompletedProcess(
@@ -721,7 +721,7 @@ schema_sinks:
         self.assertIn("--database-name", calls[1])
         self.assertIn("iceberg_e2e_mssql_debug_windows", calls[1])
         self.assertIn("--name", calls[1])
-        self.assertIn("skippr_mssql_testdb_dbo_orders", calls[1])
+        self.assertIn("skippr_orders", calls[1])
 
     def test_ensure_soda_installed_uses_virtualenv(self) -> None:
         original_installed = runtime_e2e_harness.SODA_INSTALLED

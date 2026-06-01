@@ -187,10 +187,11 @@ DYNAMODB_ICEBERG_CDC_TABLE = "skippr_iceberg_dynamodb_types_cdc"
 POSTGRES_TYPE_MATRIX_NAMESPACE = "postgres.type_matrix_orders"
 MYSQL_TYPE_MATRIX_NAMESPACE = "type_matrix_orders"
 DYNAMODB_TYPE_MATRIX_NAMESPACE = f"dynamodb.{DYNAMODB_ICEBERG_CDC_TABLE}"
+# MSSQL source sets IngestBatch.namespace to the bare table name (see mssql.rs), not mssql.db.schema.table.
 MSSQL_DEBUG_TABLE_NAMESPACES = (
-    "mssql.testdb.dbo.customers",
-    "mssql.testdb.dbo.orders",
-    "mssql.testdb.dbo.order_items",
+    "customers",
+    "orders",
+    "order_items",
 )
 
 
