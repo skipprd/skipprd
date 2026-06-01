@@ -1284,18 +1284,14 @@ jobs:
           set -euo pipefail
           docker rm -f skippr-mysql-iceberg-e2e >/dev/null 2>&1 || true
           docker run --name skippr-mysql-iceberg-e2e \
-            --restart unless-stopped \
             -e MYSQL_ROOT_PASSWORD=mysql \
             -e MYSQL_DATABASE=skippr_iceberg_e2e \
             -p 3306:3306 \
             -d mysql:8.0 \
-            --mysql-native-password=ON \
             --server-id=1 \
             --log-bin=mysql-bin \
             --binlog-format=ROW \
-            --binlog-row-image=FULL \
-            --gtid-mode=ON \
-            --enforce-gtid-consistency=ON
+            --binlog-row-image=FULL
           attempts=0
           until mysqladmin ping -h127.0.0.1 -P3306 -uroot -pmysql --silent >/dev/null 2>&1; do
             attempts=$((attempts + 1))
