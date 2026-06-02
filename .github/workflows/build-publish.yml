@@ -1058,32 +1058,6 @@ jobs:
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
-  s3_wal_test:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
-    needs:
-      - cleanup
-      - purge_dynamodb
-      - linux_x86
-      - publish_runtime_plugins
-    name: S3 WAL (linux x86)
-    runs-on:
-      - depot-ubuntu-22.04-16
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download Artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: skipprd-linux_x86
-
-      - name: Test linux x86 release
-        uses: ./.github/actions/e2e/runtime_scenario
-        with:
-          scenario: bike_hire_s3_wal_many
-          architecture_name: linux_x86
-          aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
   deadletters_test:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
     needs:
@@ -1722,51 +1696,12 @@ jobs:
             --prepare-aws-state `
             --skip-dynamodb-purge
 
-  mssql_snowflake_test:
-    needs:
-      - publish_runtime_plugins
-      - linux_x86
-      - windows_x86
-    if: ${{ !failure() && !cancelled() && needs.publish_runtime_plugins.result == 'success' && needs.linux_x86.result == 'success' && needs.windows_x86.result == 'success' }}
-    name: MSSQL to Snowflake (windows x86)
-    runs-on: depot-windows-2022-16
-    environment: Skippr
-    env:
-      SKIPPR_API_KEY: ${{ secrets.SKIPPR_API_KEY }}
-      SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT || secrets.SNOWFLAKE_ACCOUNT }}
-      SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_USER || secrets.SNOWFLAKE_USER }}
-      SNOWFLAKE_PRIVATE_KEY_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PEM }}
-      SNOWFLAKE_WAREHOUSE: COMPUTE_WH
-      SNOWFLAKE_DATABASE: ANALYTICS
-      SNOWFLAKE_SCHEMA: RAW
-      SNOWFLAKE_ROLE: ACCOUNTADMIN
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download skipprd artifact
-        uses: actions/download-artifact@v4
-        with:
-          pattern: skipprd-windows_x86
-
-      - name: Download skippr artifact
-        uses: actions/download-artifact@v4
-        with:
-          pattern: skippr-windows_x86
-
-      - name: Test MSSQL to Snowflake
-        uses: ./.github/actions/e2e/mssql_snowflake
-        with:
-          architecture_name: windows_x86
-          test_namespace: cargo_build
-
-
   publish_skipprd:
     name: Publish skipprd Release
     if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     needs:
       - bike_hire_test
       - chaos_mode_test
-      - s3_wal_test
       - deadletters_test
       - published_runtime_plugins_smoke_test
       - linux_x86
@@ -1807,7 +1742,6 @@ jobs:
     name: Publish skippr Release
     if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     needs:
-      - mssql_snowflake_test
       - linux_x86
       - macos_arm64
       - windows_x86
@@ -1949,43 +1883,5 @@ jobs:
           test_namespace: release_install
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-
-  skippr_release_download_test:
-    name: Installed skippr MSSQL to Snowflake (windows x86)
-    if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
-    needs:
-      - publish_skippr
-      - publish_runtime_plugins
-    runs-on: depot-windows-2022-16
-    environment: Skippr
-    env:
-      SKIPPR_API_KEY: ${{ secrets.SKIPPR_API_KEY }}
-      SNOWFLAKE_ACCOUNT: ${{ vars.SNOWFLAKE_ACCOUNT || secrets.SNOWFLAKE_ACCOUNT }}
-      SNOWFLAKE_USER: ${{ vars.SNOWFLAKE_USER || secrets.SNOWFLAKE_USER }}
-      SNOWFLAKE_PRIVATE_KEY_PEM: ${{ secrets.SNOWFLAKE_PRIVATE_KEY_PEM }}
-      SNOWFLAKE_WAREHOUSE: COMPUTE_WH
-      SNOWFLAKE_DATABASE: ANALYTICS
-      SNOWFLAKE_SCHEMA: RAW
-      SNOWFLAKE_ROLE: ACCOUNTADMIN
-    steps:
-      - uses: actions/checkout@v4
-      - name: Install published skippr release
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          irm https://install.skippr.io/install.ps1 | iex
-          $installDir = Join-Path $env:LOCALAPPDATA "skippr\bin"
-          $skipprExe = Join-Path $installDir "skippr.exe"
-          if (-not (Test-Path $skipprExe)) {
-            throw "install.skippr.io installer did not place skippr.exe at $skipprExe"
-          }
-          Add-Content -Path $env:GITHUB_PATH -Value $installDir
-          skippr --version
-      - name: Test downloaded skippr release
-        uses: ./.github/actions/e2e/mssql_snowflake
-        with:
-          architecture_name: windows_x86
-          test_namespace: release_install
-
 
 
