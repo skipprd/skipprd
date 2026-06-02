@@ -213,6 +213,8 @@ pub enum SourceConfig {
     Mssql {
         #[serde(default)]
         connection_string: Option<String>,
+        #[serde(default)]
+        tables: Option<Vec<String>>,
     },
     S3 {
         #[serde(default)]

@@ -284,11 +284,17 @@ pub fn to_internal(
     let el_json = match &cfg.source {
         Some(source) => {
             let skippr_input = match source {
-                SourceConfig::Mssql { connection_string } => {
+                SourceConfig::Mssql {
+                    connection_string,
+                    tables,
+                } => {
                     let mut m = serde_json::Map::new();
                     m.insert("kind".into(), "mssql".into());
                     if let Some(cs) = connection_string {
                         m.insert("connection_string".into(), cs.clone().into());
+                    }
+                    if let Some(v) = tables {
+                        m.insert("tables".into(), serde_json::to_value(v).unwrap_or_default());
                     }
                     serde_json::Value::Object(m)
                 }
@@ -831,7 +837,10 @@ pub fn to_internal(
                         m.insert("service_account_json_path".into(), v.clone().into());
                     }
                     if let Some(v) = streams {
-                        m.insert("streams".into(), serde_json::to_value(v).unwrap_or_default());
+                        m.insert(
+                            "streams".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
                     }
                     serde_json::Value::Object(m)
                 }
@@ -899,7 +908,10 @@ pub fn to_internal(
                         m.insert("service_account_json_path".into(), v.clone().into());
                     }
                     if let Some(v) = streams {
-                        m.insert("streams".into(), serde_json::to_value(v).unwrap_or_default());
+                        m.insert(
+                            "streams".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
                     }
                     if let Some(v) = search_type {
                         m.insert("search_type".into(), v.clone().into());
@@ -914,7 +926,10 @@ pub fn to_internal(
                         m.insert("url_inspection_enabled".into(), (*v).into());
                     }
                     if let Some(v) = url_list {
-                        m.insert("url_list".into(), serde_json::to_value(v).unwrap_or_default());
+                        m.insert(
+                            "url_list".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
                     }
                     serde_json::Value::Object(m)
                 }
@@ -977,7 +992,10 @@ pub fn to_internal(
                         m.insert("oauth_refresh_token".into(), v.clone().into());
                     }
                     if let Some(v) = streams {
-                        m.insert("streams".into(), serde_json::to_value(v).unwrap_or_default());
+                        m.insert(
+                            "streams".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
                     }
                     serde_json::Value::Object(m)
                 }
@@ -1009,16 +1027,25 @@ pub fn to_internal(
                         m.insert("url_mode".into(), v.clone().into());
                     }
                     if let Some(v) = url_list {
-                        m.insert("url_list".into(), serde_json::to_value(v).unwrap_or_default());
+                        m.insert(
+                            "url_list".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
                     }
                     if let Some(v) = max_urls {
                         m.insert("max_urls".into(), (*v).into());
                     }
                     if let Some(v) = strategies {
-                        m.insert("strategies".into(), serde_json::to_value(v).unwrap_or_default());
+                        m.insert(
+                            "strategies".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
                     }
                     if let Some(v) = categories {
-                        m.insert("categories".into(), serde_json::to_value(v).unwrap_or_default());
+                        m.insert(
+                            "categories".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
                     }
                     if let Some(v) = locale {
                         m.insert("locale".into(), v.clone().into());
@@ -1115,14 +1142,21 @@ pub fn to_internal(
                             "targets".into(),
                             serde_json::to_value(v).unwrap_or_default(),
                         );
-                        if let Some(first) = m.get("targets").and_then(|t| t.as_array()).and_then(|a| a.first()) {
+                        if let Some(first) = m
+                            .get("targets")
+                            .and_then(|t| t.as_array())
+                            .and_then(|a| a.first())
+                        {
                             if let Some(site) = first.get("site").and_then(|s| s.as_str()) {
                                 m.insert("name".into(), format!("Google SERP {site}").into());
                             }
                         }
                     }
                     if let Some(v) = keywords {
-                        m.insert("keywords".into(), serde_json::to_value(v).unwrap_or_default());
+                        m.insert(
+                            "keywords".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
                     }
                     if let Some(v) = country {
                         m.insert("country".into(), v.clone().into());
@@ -1182,10 +1216,16 @@ pub fn to_internal(
                         m.insert("name".into(), format!("AI Citations {v}").into());
                     }
                     if let Some(v) = brand_names {
-                        m.insert("brand_names".into(), serde_json::to_value(v).unwrap_or_default());
+                        m.insert(
+                            "brand_names".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
                     }
                     if let Some(v) = prompt_list {
-                        m.insert("prompt_list".into(), serde_json::to_value(v).unwrap_or_default());
+                        m.insert(
+                            "prompt_list".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
                     }
                     if let Some(v) = models {
                         m.insert("models".into(), serde_json::to_value(v).unwrap_or_default());
@@ -1231,7 +1271,10 @@ pub fn to_internal(
                         m.insert("url_mode".into(), v.clone().into());
                     }
                     if let Some(v) = url_list {
-                        m.insert("url_list".into(), serde_json::to_value(v).unwrap_or_default());
+                        m.insert(
+                            "url_list".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
                     }
                     if let Some(v) = max_pages_per_run {
                         m.insert("max_pages_per_run".into(), (*v).into());
@@ -1255,7 +1298,10 @@ pub fn to_internal(
                         m.insert("axe_enabled".into(), (*v).into());
                     }
                     if let Some(v) = axe_tags {
-                        m.insert("axe_tags".into(), serde_json::to_value(v).unwrap_or_default());
+                        m.insert(
+                            "axe_tags".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
                     }
                     if let Some(v) = pages_per_minute {
                         m.insert("pages_per_minute".into(), (*v).into());
@@ -1335,7 +1381,10 @@ pub fn to_internal(
                         m.insert("access_token".into(), v.clone().into());
                     }
                     if let Some(v) = streams {
-                        m.insert("streams".into(), serde_json::to_value(v).unwrap_or_default());
+                        m.insert(
+                            "streams".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
                     }
                     if let Some(v) = return_records_with_no_metrics {
                         m.insert("return_records_with_no_metrics".into(), (*v).into());
@@ -1426,7 +1475,9 @@ pub fn to_internal(
                         m.insert(
                             "seed_keywords".into(),
                             serde_json::Value::Array(
-                                v.iter().map(|s| serde_json::Value::String(s.clone())).collect(),
+                                v.iter()
+                                    .map(|s| serde_json::Value::String(s.clone()))
+                                    .collect(),
                             ),
                         );
                     }
@@ -1494,7 +1545,10 @@ pub fn to_internal(
                         m.insert("instagram_filter".into(), (*v).into());
                     }
                     if let Some(v) = streams {
-                        m.insert("streams".into(), serde_json::to_value(v).unwrap_or_default());
+                        m.insert(
+                            "streams".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
                     }
                     serde_json::Value::Object(m)
                 }
@@ -1890,6 +1944,7 @@ mod tests {
             }),
             source: Some(SourceConfig::Mssql {
                 connection_string: Some("${MSSQL_CONNECTION_STRING}".into()),
+                tables: None,
             }),
             dbt: None,
             schema_sink: None,
@@ -1944,6 +1999,7 @@ mod tests {
             }),
             source: Some(SourceConfig::Mssql {
                 connection_string: Some("${MSSQL_CONNECTION_STRING}".into()),
+                tables: None,
             }),
             dbt: None,
             schema_sink: None,
@@ -1987,6 +2043,7 @@ mod tests {
             }),
             source: Some(SourceConfig::Mssql {
                 connection_string: Some("${MSSQL_CONNECTION_STRING}".into()),
+                tables: None,
             }),
             dbt: None,
             schema_sink: None,
@@ -2206,6 +2263,7 @@ mod tests {
             },
             SourceConfig::Mssql {
                 connection_string: None,
+                tables: None,
             },
         );
         let wh = wh_json(&cfg);
@@ -2230,6 +2288,7 @@ mod tests {
             },
             SourceConfig::Mssql {
                 connection_string: None,
+                tables: None,
             },
         );
         let wh = wh_json(&cfg);
@@ -2249,6 +2308,7 @@ mod tests {
             },
             SourceConfig::Mssql {
                 connection_string: None,
+                tables: None,
             },
         );
         let wh = wh_json(&cfg);
@@ -2266,6 +2326,7 @@ mod tests {
             },
             SourceConfig::Mssql {
                 connection_string: None,
+                tables: None,
             },
         );
         let wh = wh_json(&cfg);
@@ -2283,6 +2344,7 @@ mod tests {
             },
             SourceConfig::Mssql {
                 connection_string: None,
+                tables: None,
             },
         );
         let wh = wh_json(&cfg);
@@ -2314,6 +2376,7 @@ mod tests {
             },
             SourceConfig::Mssql {
                 connection_string: None,
+                tables: None,
             },
         );
         let wh = wh_json(&cfg);

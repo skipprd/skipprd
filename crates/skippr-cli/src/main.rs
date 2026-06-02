@@ -654,6 +654,8 @@ enum SourceKind {
         /// ADO.NET connection string, or use ${ENV_VAR} notation.
         #[arg(long)]
         connection_string: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        tables: Option<Vec<String>>,
     },
     /// S3 bucket source.
     S3 {
@@ -2213,11 +2215,13 @@ fn yaml_google_serp_targets(
 fn yaml_bool(map: &serde_yaml::Mapping, key: &str) -> Option<bool> {
     map.get(yaml_key(key)).and_then(|value| {
         value.as_bool().or_else(|| {
-            value.as_str().and_then(|s| match s.trim().to_ascii_lowercase().as_str() {
-                "true" | "yes" | "1" => Some(true),
-                "false" | "no" | "0" => Some(false),
-                _ => None,
-            })
+            value
+                .as_str()
+                .and_then(|s| match s.trim().to_ascii_lowercase().as_str() {
+                    "true" | "yes" | "1" => Some(true),
+                    "false" | "no" | "0" => Some(false),
+                    _ => None,
+                })
         })
     })
 }
@@ -2245,7 +2249,10 @@ fn yaml_string_vec(map: &serde_yaml::Mapping, key: &str) -> Option<Vec<String>> 
             .collect();
         return (!items.is_empty()).then_some(items);
     }
-    let single = value.as_str().map(str::trim).filter(|item| !item.is_empty())?;
+    let single = value
+        .as_str()
+        .map(str::trim)
+        .filter(|item| !item.is_empty())?;
     let items: Vec<String> = single
         .split(',')
         .map(str::trim)
@@ -2297,6 +2304,7 @@ fn source_config_from_data_source(
         }),
         "Mssql" => Ok(SourceConfig::Mssql {
             connection_string: yaml_str(plugin_cfg, "connection_string"),
+            tables: yaml_string_vec(plugin_cfg, "tables"),
         }),
         "GoogleAnalytics" => Ok(SourceConfig::GoogleAnalytics {
             property_id: yaml_str(plugin_cfg, "property_id"),
@@ -2901,9 +2909,15 @@ fn warehouse_plugin_and_config(kind: WarehouseKind) -> (&'static str, serde_json
 
 fn source_plugin_and_config(kind: SourceKind) -> (&'static str, serde_json::Value) {
     match kind {
-        SourceKind::Mssql { connection_string } => (
+        SourceKind::Mssql {
+            connection_string,
+            tables,
+        } => (
             "Mssql",
-            json_object(vec![("connection_string", str_json(connection_string))]),
+            json_object(vec![
+                ("connection_string", str_json(connection_string)),
+                ("tables", strings_json(tables)),
+            ]),
         ),
         SourceKind::S3 {
             bucket,
@@ -3268,10 +3282,7 @@ fn source_plugin_and_config(kind: SourceKind) -> (&'static str, serde_json::Valu
                 ("search_type", str_json(search_type)),
                 ("data_state", str_json(data_state)),
                 ("row_limit", u32_json(row_limit)),
-                (
-                    "url_inspection_enabled",
-                    bool_json(url_inspection_enabled),
-                ),
+                ("url_inspection_enabled", bool_json(url_inspection_enabled)),
                 ("url_list", strings_json(url_list)),
             ]),
         ),
@@ -3367,7 +3378,10 @@ fn source_plugin_and_config(kind: SourceKind) -> (&'static str, serde_json::Valu
                 ("openai_enabled", bool_json(openai_enabled)),
                 ("openai_model", str_json(openai_model)),
                 ("openai_analyze_blocks", bool_json(openai_analyze_blocks)),
-                ("openai_max_blocks_per_page", u32_json(openai_max_blocks_per_page)),
+                (
+                    "openai_max_blocks_per_page",
+                    u32_json(openai_max_blocks_per_page),
+                ),
                 ("skip_unchanged_content", bool_json(skip_unchanged_content)),
                 ("user_agent", str_json(user_agent)),
             ]),
@@ -3590,10 +3604,7 @@ fn source_plugin_and_config(kind: SourceKind) -> (&'static str, serde_json::Valu
                         "backlink_jobs",
                         Some(serde_json::Value::Array(backlink_jobs)),
                     ),
-                    (
-                        "intersection_jobs",
-                        Some(serde_json::json!([])),
-                    ),
+                    ("intersection_jobs", Some(serde_json::json!([]))),
                     ("request_interval_ms", u64_json(request_interval_ms)),
                 ]),
             )
@@ -3615,9 +3626,18 @@ fn source_plugin_and_config(kind: SourceKind) -> (&'static str, serde_json::Valu
                 ("password", str_json(password)),
                 ("site", str_json(site)),
                 ("location_code", u32_json(location_code.or(Some(2840)))),
-                ("language_code", str_json(language_code.or_else(|| Some("en".to_string())))),
-                ("device", str_json(device.or_else(|| Some("desktop".to_string())))),
-                ("run_mode", str_json(run_mode.or_else(|| Some("mvp".to_string())))),
+                (
+                    "language_code",
+                    str_json(language_code.or_else(|| Some("en".to_string()))),
+                ),
+                (
+                    "device",
+                    str_json(device.or_else(|| Some("desktop".to_string()))),
+                ),
+                (
+                    "run_mode",
+                    str_json(run_mode.or_else(|| Some("mvp".to_string()))),
+                ),
                 ("seed_keywords", strings_json(seed_keywords)),
                 ("request_interval_ms", u64_json(request_interval_ms)),
             ]),
@@ -4451,9 +4471,8 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
     } = &mut kind
     {
         if site_url.is_none() {
-            *site_url = prompt(
-                "Search Console site URL (https://example.com/ or sc-domain:example.com)",
-            );
+            *site_url =
+                prompt("Search Console site URL (https://example.com/ or sc-domain:example.com)");
         }
         if start_date.is_none() {
             *start_date = prompt("Start date for first sync (YYYY-MM-DD)");
@@ -4678,9 +4697,9 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
             *site = prompt("Site domain for bronze rows (e.g. example.com)");
         }
         if seed_keywords.is_none() {
-            if let Some(seed) = prompt(
-                "Seed keyword for opportunity analysis (e.g. meal planning app)",
-            ) {
+            if let Some(seed) =
+                prompt("Seed keyword for opportunity analysis (e.g. meal planning app)")
+            {
                 *seed_keywords = Some(vec![seed]);
             }
         }
@@ -4719,11 +4738,17 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
     };
 
     let src = match kind {
-        SourceKind::Mssql { connection_string } => {
+        SourceKind::Mssql {
+            connection_string,
+            tables,
+        } => {
             let connection_string = connection_string.or_else(|| {
                 prompt("MSSQL connection string (or ${MSSQL_CONNECTION_STRING} to read from env)")
             });
-            SourceConfig::Mssql { connection_string }
+            SourceConfig::Mssql {
+                connection_string,
+                tables,
+            }
         }
         SourceKind::S3 {
             bucket,
@@ -6134,13 +6159,7 @@ fn check_postgres_env(ok: &mut bool) {
 
 fn check_pagespeed_env(output: &str, checks: &mut Vec<DoctorCheck>, ok: &mut bool) {
     if env_set("PAGESPEED_API_KEY") {
-        emit_doctor_check(
-            output,
-            checks,
-            true,
-            "PAGESPEED_API_KEY is set",
-            None,
-        );
+        emit_doctor_check(output, checks, true, "PAGESPEED_API_KEY is set", None);
     } else {
         emit_doctor_check(
             output,
@@ -6198,8 +6217,7 @@ fn check_dataforseo_backlinks_credentials(
     };
     match rt.block_on(
         skippr_plugin_data_source_dataforseo_backlinks::client::DataForSeoClient::probe_credentials(
-            &login,
-            &password,
+            &login, &password,
         ),
     ) {
         Ok(()) => emit_doctor_check(
@@ -9357,6 +9375,20 @@ data_sinks:
                 .and_then(|input| input.get("connection_string"))
                 .and_then(|connection_string| connection_string.as_str()),
             Some("server=tcp:127.0.0.1,1433;database=testdb")
+        );
+        assert_eq!(
+            providers
+                .get("el")
+                .and_then(|el| el.get("skippr_input"))
+                .and_then(|input| input.get("tables"))
+                .and_then(|tables| tables.as_array())
+                .map(|tables| {
+                    tables
+                        .iter()
+                        .filter_map(|table| table.as_str())
+                        .collect::<Vec<_>>()
+                }),
+            Some(vec!["dbo.customers"])
         );
         assert_eq!(
             providers
