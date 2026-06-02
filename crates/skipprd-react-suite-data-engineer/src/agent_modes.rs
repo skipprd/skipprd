@@ -148,12 +148,6 @@ async fn persist_terminal_failure_result(
 #[async_trait::async_trait]
 impl<'a> react_core::workflow::PhaseExecutor for DataEngineerExecutor<'a> {
     async fn execute_turn(&self, out_frames: &mut Vec<FlowFrame>) -> PhaseOutcome {
-        let metering = crate::metering::global_metering();
-        if let Err(e) = metering.budget.check_and_refresh().await {
-            tracing::error!(error = %e, "credit budget exhausted at phase boundary");
-            return PhaseOutcome::Failed { reason: e };
-        }
-
         let execution_state = match crate::progress_controller::ExecutionState::load_strict(
             &self.thread_store.control_store(),
             self.thread_id,
@@ -166,6 +160,20 @@ impl<'a> react_core::workflow::PhaseExecutor for DataEngineerExecutor<'a> {
         };
 
         let phase = execution_state.phase.current_phase;
+        let publish_after_validate = matches!(
+            phase,
+            control_flow::Phase::PublishAwaitApproval
+                | control_flow::Phase::Publish
+                | control_flow::Phase::Done
+        ) && !execution_state.last_validate_failed();
+        if !publish_after_validate {
+            let metering = crate::metering::global_metering();
+            if let Err(e) = metering.budget.check_and_refresh().await {
+                tracing::error!(error = %e, "credit budget exhausted at phase boundary");
+                return PhaseOutcome::Failed { reason: e };
+            }
+        }
+
         let thread_log = self.thread_store.get(self.thread_id).await.ok();
         let thread_state_step_count = thread_log.as_ref().map(|log| log.steps.len()).unwrap_or(0);
 
