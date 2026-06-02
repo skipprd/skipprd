@@ -64,15 +64,33 @@ pub enum StreamKind {
 }
 
 impl StreamKind {
-    pub fn mvp_streams() -> &'static [StreamKind] {
+    /// Labs keyword expansion, MSV/KD, KGR — not SERP rank tracking (use `GoogleSerpRanks` / Bright Data).
+    pub fn keyword_research_streams() -> &'static [StreamKind] {
         &[
             StreamKind::KeywordSuggestions,
             StreamKind::KeywordMetrics,
+            StreamKind::Allintitle,
+            StreamKind::OpportunityScores,
+        ]
+    }
+
+    /// Live SERP snapshots and rank-style outputs from DataForSEO (opt-in only).
+    pub fn serp_tracking_streams() -> &'static [StreamKind] {
+        &[
             StreamKind::SerpResults,
             StreamKind::SerpFeatures,
             StreamKind::WeakSpots,
-            StreamKind::OpportunityScores,
+            StreamKind::RankTracking,
+            StreamKind::KeywordClusters,
         ]
+    }
+
+    pub fn is_serp_tracking(self) -> bool {
+        Self::serp_tracking_streams().contains(&self)
+    }
+
+    pub fn mvp_streams() -> &'static [StreamKind] {
+        Self::keyword_research_streams()
     }
 
     pub fn all() -> &'static [StreamKind] {
@@ -482,7 +500,9 @@ mod tests {
             ..Default::default()
         };
         let streams = cfg.enabled_streams();
-        assert!(streams.contains(&StreamKind::WeakSpots));
+        assert!(streams.contains(&StreamKind::KeywordMetrics));
+        assert!(!streams.contains(&StreamKind::SerpResults));
+        assert!(!streams.contains(&StreamKind::RankTracking));
         assert!(!streams.contains(&StreamKind::CompetitorSitemaps));
     }
 

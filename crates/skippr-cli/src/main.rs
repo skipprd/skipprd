@@ -1237,7 +1237,7 @@ enum SourceKind {
         #[arg(long)]
         request_interval_ms: Option<u64>,
     },
-    /// DataForSEO SEO opportunities (keyword research, SERP weakness, AI citation).
+    /// DataForSEO keyword research (MSV, KD, KGR). SERP rank tracking uses GoogleSerpRanks (Bright Data).
     DataForSeoSeoOpportunities {
         #[arg(long)]
         login: Option<String>,

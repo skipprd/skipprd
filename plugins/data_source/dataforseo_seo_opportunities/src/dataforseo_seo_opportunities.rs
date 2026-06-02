@@ -604,7 +604,7 @@ impl DataSource for DataForSeoSeoOpportunitiesPlugin {
         if discover {
             info!(
                 run_date = %run_date,
-                "DataForSEO SEO opportunities discover: one seed, shallow SERP"
+                "DataForSEO keyword research discover: one seed, suggestion preview"
             );
         }
 
@@ -689,25 +689,24 @@ impl DataSource for DataForSeoSeoOpportunitiesPlugin {
             metric_rows.extend(metrics);
         }
 
-        let keywords_for_serp: Vec<String> = if discover {
+        let keywords_for_analysis: Vec<String> = if discover {
             keyword_states.keys().take(1).cloned().collect()
         } else {
             keyword_states.keys().cloned().collect()
         };
 
-        for keyword in keywords_for_serp {
-            if self.config.stream_enabled(StreamKind::SerpResults)
-                || self.config.stream_enabled(StreamKind::SerpFeatures)
-                || self.config.stream_enabled(StreamKind::WeakSpots)
-            {
+        let serp_tracking_enabled = self.config.enabled_streams().iter().any(|s| s.is_serp_tracking());
+
+        for keyword in &keywords_for_analysis {
+            if serp_tracking_enabled {
                 let (items, _result_body) = self
-                    .fetch_serp(&keyword, serp_depth, &mut stats, "serp_organic_live")
+                    .fetch_serp(keyword, serp_depth, &mut stats, "serp_organic_live")
                     .await?;
                 stats.serp_count += 1;
                 let serp_ctx = SerpParseContext {
                     site: &self.site,
                     run_date: &run_date,
-                    keyword: &keyword,
+                    keyword,
                     own_domain: &self.own_domain,
                     competitor_domains: &self.competitor_domains,
                     location_code: self.config.location_code,
@@ -723,7 +722,7 @@ impl DataSource for DataForSeoSeoOpportunitiesPlugin {
                 }
                 if self.config.stream_enabled(StreamKind::WeakSpots) {
                     weak_spot_rows.extend(compute_weak_spots(
-                        &keyword,
+                        keyword,
                         &parsed.results,
                         &self.site,
                         &run_date,
@@ -734,7 +733,7 @@ impl DataSource for DataForSeoSeoOpportunitiesPlugin {
                     ));
                 }
 
-                let state = keyword_states.entry(keyword.clone()).or_default();
+                let state = keyword_states.entry(keyword.to_string()).or_default();
                 if let Some(weak) = weak_spot_rows.iter().find(|r| {
                     r.get("keyword").and_then(|v| v.as_str()) == Some(keyword.as_str())
                 }) {
@@ -774,35 +773,57 @@ impl DataSource for DataForSeoSeoOpportunitiesPlugin {
                     .filter_map(|r| r.get("domain").and_then(|v| v.as_str()))
                     .map(str::to_string)
                     .collect();
-                keyword_domains.insert(keyword.clone(), domains);
+                keyword_domains.insert(keyword.to_string(), domains);
 
                 if self.config.stream_enabled(StreamKind::RankTracking)
-                    || self.config.rank_track_keywords.iter().any(|k| k == &keyword)
+                    || self.config.rank_track_keywords.iter().any(|k| k == keyword)
                 {
                     rank_tracking_rows
-                        .extend(self.build_rank_tracking_rows(&run_date, &keyword, &parsed.results));
+                        .extend(self.build_rank_tracking_rows(&run_date, keyword, &parsed.results));
+                }
+
+                if self.config.stream_enabled(StreamKind::AiCitationOpportunities) {
+                    let features = keyword_states
+                        .get(keyword)
+                        .map(|s| s.serp_features.clone())
+                        .unwrap_or_default();
+                    let results = keyword_states
+                        .get(keyword)
+                        .map(|s| s.serp_results.clone())
+                        .unwrap_or_default();
+                    ai_citation_rows.extend(detect_ai_citation_opportunities(
+                        &self.site,
+                        &run_date,
+                        &self.own_domain,
+                        keyword,
+                        &features,
+                        &results,
+                        self.config.location_code,
+                        &self.config.language_code,
+                        self.device_str(),
+                    ));
                 }
             }
 
             if self.config.stream_enabled(StreamKind::Allintitle)
                 && self.config.scoring.include_allintitle
             {
-                if let Some(result_body) = self.fetch_allintitle(&keyword, &mut stats).await? {
+                if let Some(result_body) = self.fetch_allintitle(keyword, &mut stats).await? {
                     let volume = keyword_states
-                        .get(&keyword)
+                        .get(keyword)
                         .map(|s| s.search_volume)
                         .unwrap_or(0);
                     let row = parse_allintitle_result(
                         &result_body,
                         &self.site,
                         &run_date,
-                        &keyword,
+                        keyword,
                         volume,
                         self.config.location_code,
                         &self.config.language_code,
                         self.device_str(),
                     );
-                    if let Some(state) = keyword_states.get_mut(&keyword) {
+                    if let Some(state) = keyword_states.get_mut(keyword) {
                         state.kgr = row.get("kgr").and_then(|v| v.as_f64());
                         state.allintitle_count = row
                             .get("allintitle_count")
@@ -812,37 +833,15 @@ impl DataSource for DataForSeoSeoOpportunitiesPlugin {
                 }
             }
 
-            if self.config.stream_enabled(StreamKind::AiCitationOpportunities) {
-                let features = keyword_states
-                    .get(&keyword)
-                    .map(|s| s.serp_features.clone())
-                    .unwrap_or_default();
-                let results = keyword_states
-                    .get(&keyword)
-                    .map(|s| s.serp_results.clone())
-                    .unwrap_or_default();
-                ai_citation_rows.extend(detect_ai_citation_opportunities(
-                    &self.site,
-                    &run_date,
-                    &self.own_domain,
-                    &keyword,
-                    &features,
-                    &results,
-                    self.config.location_code,
-                    &self.config.language_code,
-                    self.device_str(),
-                ));
-            }
-
             if self.config.stream_enabled(StreamKind::OpportunityScores) {
-                if let Some(state) = keyword_states.get(&keyword) {
+                if let Some(state) = keyword_states.get(keyword) {
                     let ai_score = ai_citation_score_from_features(
-                        &keyword,
+                        keyword,
                         &state.serp_features,
                         &self.own_domain,
                     );
                     let inputs = OpportunityInputs {
-                        keyword: keyword.clone(),
+                        keyword: keyword.to_string(),
                         search_volume: state.search_volume,
                         keyword_difficulty: state.keyword_difficulty,
                         cpc: state.cpc,
@@ -1213,10 +1212,12 @@ mod tests {
             .into_iter()
             .map(|c| c.namespace)
             .collect();
-        assert!(namespaces.contains(&NAMESPACE_WEAK_SPOT_DAILY.to_string()));
+        assert!(namespaces.contains(&NAMESPACE_ALLINTITLE_DAILY.to_string()));
         assert!(namespaces.contains(&NAMESPACE_OPPORTUNITY_SCORE_DAILY.to_string()));
+        assert!(!namespaces.contains(&NAMESPACE_SERP_RESULT_DAILY.to_string()));
+        assert!(!namespaces.contains(&NAMESPACE_WEAK_SPOT_DAILY.to_string()));
         assert!(!namespaces.contains(&NAMESPACE_COMPETITOR_SITEMAP_URL_DAILY.to_string()));
-        assert_eq!(namespaces.len(), 8);
+        assert_eq!(namespaces.len(), 6);
         clear_fixture_env();
     }
 
@@ -1280,9 +1281,7 @@ mod tests {
             NAMESPACE_SEED_KEYWORD_DAILY,
             NAMESPACE_KEYWORD_SUGGESTION_DAILY,
             NAMESPACE_KEYWORD_METRIC_DAILY,
-            NAMESPACE_SERP_RESULT_DAILY,
-            NAMESPACE_SERP_FEATURE_DAILY,
-            NAMESPACE_WEAK_SPOT_DAILY,
+            NAMESPACE_ALLINTITLE_DAILY,
             NAMESPACE_OPPORTUNITY_SCORE_DAILY,
             NAMESPACE_SITE_RUN_DAILY,
         ] {

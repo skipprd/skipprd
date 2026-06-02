@@ -1456,7 +1456,7 @@ pub fn to_internal(
                         m.insert("site".into(), v.clone().into());
                         m.insert(
                             "name".into(),
-                            format!("DataForSEO SEO Opportunities {v}").into(),
+                            format!("DataForSEO Keyword Research {v}").into(),
                         );
                     }
                     if let Some(v) = location_code {
