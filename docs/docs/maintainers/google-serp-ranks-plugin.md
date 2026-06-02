@@ -2,7 +2,9 @@
 
 Runtime source plugin: `plugins/data_source/google_serp_ranks/` (`GoogleSerpRanks` / `google_serp_ranks`).
 
-Low-volume Google organic rank tracking for configured target domains via a Playwright worker. This is **not** a general SERP harvester: keep query counts small, respect rate limits, and stop on CAPTCHA or consent walls (recorded as `blocked` runs).
+Low-volume Google organic rank tracking for configured target domains via the **Bright Data SERP API** (`POST https://api.brightdata.com/request`). Set `BRIGHTDATA_API_KEY` in the runtime environment (Up Foundry: Secrets Manager `upfoundry/brightdata`). Optional config: `brightdata_zone` (default `serp_api1`). `fetch_backend` in bronze is `brightdata`.
+
+This is **not** a general SERP harvester: keep query counts small and respect `min_query_interval_ms`. CAPTCHA or consent walls are recorded as `blocked` runs when the API returns them.
 
 ## Bronze catalog
 
@@ -33,11 +35,16 @@ data_sources:
       max_queries_per_run: 10
       stop_after_first_target_match: true
       capture_results: false
+      brightdata_zone: serp_api1
 ```
 
 Hard caps: `max_depth` ≤ 100, `max_queries_per_run` ≤ 100, `min_query_interval_ms` ≥ 5000.
 
-## Worker sidecar
+## Bright Data API
+
+The plugin calls Bright Data with `format: raw` and `data_format: parsed_light`, parsing the `organic[]` array (`link`, `title`, `description`, `global_rank`). See [Bright Data SERP API](https://docs.brightdata.com/scraping-automation/serp-api/send-your-first-request).
+
+## Worker sidecar (legacy)
 
 Bundled Node worker: `plugins/data_source/google_serp_ranks/worker/google-serp-worker.mjs`
 

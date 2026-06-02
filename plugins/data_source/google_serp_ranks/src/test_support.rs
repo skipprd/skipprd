@@ -32,6 +32,8 @@ pub fn sample_config() -> DataSourceGoogleSerpRanksPluginConfig {
         worker_node_path: "node".into(),
         playwright_executable_path: None,
         user_agent: None,
+        brightdata_zone: Some("serp_api1".into()),
+        brightdata_api_base: None,
     }
 }
 

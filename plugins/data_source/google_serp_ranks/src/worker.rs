@@ -1,15 +1,9 @@
-use std::path::{Path, PathBuf};
-use std::process::Stdio;
-use std::time::Duration;
-
 use serde::Deserialize;
 use serde_derive::Serialize;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::Command;
-use tokio::time::sleep;
-use tracing::info;
+use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
+use crate::brightdata::BrightDataClient;
 use crate::config::DataSourceGoogleSerpRanksPluginConfig;
 
 pub const FIXTURE_ENV: &str = "SKIPPR_GOOGLE_SERP_RANKS_FIXTURE_DIR";
@@ -111,7 +105,7 @@ pub fn parse_result_line(line: &str) -> Result<WorkerJobResult, std::io::Error> 
 pub struct WorkerClient {
     config: DataSourceGoogleSerpRanksPluginConfig,
     fixture_dir: Option<PathBuf>,
-    worker_script: PathBuf,
+    brightdata: Option<BrightDataClient>,
 }
 
 impl WorkerClient {
@@ -120,11 +114,15 @@ impl WorkerClient {
             .ok()
             .filter(|d| !d.trim().is_empty())
             .map(PathBuf::from);
-        let worker_script = resolve_worker_script()?;
+        let brightdata = if fixture_dir.is_none() {
+            Some(BrightDataClient::new(config.clone())?)
+        } else {
+            None
+        };
         Ok(Self {
             config,
             fixture_dir,
-            worker_script,
+            brightdata,
         })
     }
 
@@ -132,7 +130,13 @@ impl WorkerClient {
         if let Some(dir) = &self.fixture_dir {
             return self.run_fixture_job(dir, job).await;
         }
-        self.run_live_worker(job).await
+        let client = self.brightdata.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Bright Data client not initialized",
+            )
+        })?;
+        client.run_job(job).await
     }
 
     async fn run_fixture_job(
@@ -171,75 +175,16 @@ impl WorkerClient {
         ))
     }
 
-    async fn run_live_worker(&self, job: &WorkerJobRequest) -> Result<WorkerJobResult, std::io::Error> {
-        let mut command = Command::new(&self.config.worker_node_path);
-        command
-            .arg(&self.worker_script)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        if let Ok(path) = std::env::var("PLAYWRIGHT_BROWSERS_PATH") {
-            if !path.trim().is_empty() {
-                command.env("PLAYWRIGHT_BROWSERS_PATH", path);
-            }
-        }
-        if let Some(path) = &self.config.playwright_executable_path {
-            command.env("PLAYWRIGHT_EXECUTABLE_PATH", path);
-        }
-        info!(
-            keyword = %job.keyword,
-            device = %job.device,
-            script = %self.worker_script.display(),
-            "Google SERP worker: spawning Node process"
-        );
-        let mut child = command.spawn().map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!(
-                    "failed to spawn google serp worker ({}): {e}",
-                    self.worker_script.display()
-                ),
-            )
-        })?;
-
-        let mut stdin = child.stdin.take().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "worker stdin unavailable")
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::BrokenPipe, "worker stdout unavailable")
-        })?;
-
-        let request_line = serde_json::to_string(job).map_err(std::io::Error::other)?;
-        stdin
-            .write_all(format!("{request_line}\n").as_bytes())
-            .await
-            .map_err(std::io::Error::other)?;
-        stdin.shutdown().await.map_err(std::io::Error::other)?;
-
-        let mut lines = BufReader::new(stdout).lines();
-        let response_line = lines
-            .next_line()
-            .await
-            .map_err(std::io::Error::other)?
-            .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "worker produced no output")
-            })?;
-
-        let _ = child.start_kill();
-        let _ = child.wait().await;
-
-        parse_result_line(&response_line)
-    }
-
     pub async fn throttle_delay(&self) {
-        sleep(Duration::from_millis(self.config.min_query_interval_ms)).await;
+        if let Some(client) = &self.brightdata {
+            client.throttle_delay().await;
+        } else {
+            tokio::time::sleep(std::time::Duration::from_millis(
+                self.config.min_query_interval_ms,
+            ))
+            .await;
+        }
     }
-}
-
-pub fn resolve_worker_script() -> Result<PathBuf, std::io::Error> {
-    skippr_runtime_sdk::google_serp_worker::resolve_google_serp_worker_script(Some(
-        Path::new(env!("CARGO_MANIFEST_DIR")),
-    ))
 }
 
 fn fixture_slug(keyword: &str) -> String {
@@ -308,6 +253,8 @@ mod tests {
             worker_node_path: "node".into(),
             playwright_executable_path: None,
             user_agent: None,
+            brightdata_zone: Some("serp_api1".into()),
+            brightdata_api_base: None,
         };
         let client = WorkerClient::new(cfg).unwrap();
         let job = build_job_request(
@@ -330,6 +277,8 @@ mod tests {
                 worker_node_path: "node".into(),
                 playwright_executable_path: None,
                 user_agent: None,
+                brightdata_zone: Some("serp_api1".into()),
+                brightdata_api_base: None,
             },
             "no-such-fixture-keyword-xyz",
             10,
@@ -361,6 +310,8 @@ mod tests {
             worker_node_path: "node".into(),
             playwright_executable_path: None,
             user_agent: None,
+            brightdata_zone: None,
+            brightdata_api_base: None,
         };
         cfg.device = SerpDevice::Mobile;
         let job = build_job_request(&cfg, "kw", 10, vec!["example.com".into()]);

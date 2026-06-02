@@ -110,7 +110,7 @@ impl DataSourceGoogleSerpRanksPlugin {
             "results_inspected": result.results_inspected,
             "pages_fetched": result.pages_fetched,
             "search_url_hash": result.search_url_hash,
-            "fetch_backend": "playwright",
+            "fetch_backend": "brightdata",
             "elapsed_ms": elapsed_ms,
             "skipped_same_day": skipped,
             "worker_ok": result.ok,

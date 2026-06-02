@@ -67,6 +67,12 @@ pub struct DataSourceGoogleSerpRanksPluginConfig {
     pub playwright_executable_path: Option<String>,
     #[serde(default)]
     pub user_agent: Option<String>,
+    /// Bright Data SERP API zone (default `serp_api1`; override with `BRIGHTDATA_ZONE`).
+    #[serde(default)]
+    pub brightdata_zone: Option<String>,
+    /// Bright Data API base URL (default `https://api.brightdata.com`).
+    #[serde(default)]
+    pub brightdata_api_base: Option<String>,
 }
 
 fn default_country() -> String {
@@ -224,6 +230,8 @@ mod tests {
             worker_node_path: "node".into(),
             playwright_executable_path: None,
             user_agent: None,
+            brightdata_zone: Some("serp_api1".into()),
+            brightdata_api_base: None,
         }
     }
 
