@@ -12,6 +12,7 @@ mod run_results_parse;
 mod test_cmd;
 mod translate;
 mod vector_ingest_docs;
+mod vector_search;
 mod workspace_run_lock;
 
 use std::{
@@ -270,6 +271,24 @@ enum ThreadAction {
 
 #[derive(Subcommand, Debug, Clone)]
 enum VectorAction {
+    /// Semantic search over a tenant Lance collection (embed query, nearest neighbors).
+    Search {
+        /// Natural-language query (embedded with the configured LLM).
+        #[arg(long)]
+        query: String,
+        /// Pipeline entry under `pipelines:` with `vector_source` (default: `dataforseo_seo_opportunities`).
+        #[arg(long, default_value = "dataforseo_seo_opportunities")]
+        pipeline: PipelineName,
+        /// Lance collection / namespace (default `keyword_research`).
+        #[arg(long)]
+        namespace: Option<String>,
+        /// Maximum hits to return (1–50).
+        #[arg(long, default_value_t = 10)]
+        limit: usize,
+        /// Output mode: text or json.
+        #[arg(long, default_value = "json")]
+        output: String,
+    },
     /// Chunk, embed, and upsert declarative doc trees into tenant Lance storage (DE path).
     IngestDocs {
         /// Pipeline entry under `pipelines:` with `vector_source` (default: `vector_ingest`).
@@ -8613,6 +8632,23 @@ async fn async_main() {
             no_diagnostics,
         } => cmd_feedback(pipeline, good, bad, comment, !no_diagnostics, &cli.config).await,
         Cmd::Vector { action } => match action {
+            VectorAction::Search {
+                query,
+                pipeline,
+                namespace,
+                limit,
+                output,
+            } => {
+                vector_search::run_vector_search(vector_search::VectorSearchArgs {
+                    config: cli.config.clone(),
+                    pipeline,
+                    namespace,
+                    query,
+                    limit,
+                    output,
+                })
+                .await;
+            }
             VectorAction::IngestDocs {
                 pipeline,
                 vector_source,
