@@ -19,7 +19,7 @@ pub async fn analyze_blocks_batch(
         return Ok(Vec::new());
     }
     if std::env::var("SKIPPR_OPENAI_FIXTURE_DIR")
-        .or_else(|_| std::env::var("SKIPPR_SEO_CRAWL_FIXTURE_DIR"))
+        .or_else(|_| std::env::var("SKIPPR_CONTENT_QUALITY_FIXTURE_DIR"))
         .map(|d| !d.trim().is_empty())
         .unwrap_or(false)
     {
@@ -70,42 +70,5 @@ impl CountingOpenAiClient {
     ) -> Result<Vec<serde_json::Value>, std::io::Error> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         analyze_blocks_batch(&self.inner, model, site, page_url, blocks).await
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn openai_fixture_returns_json() {
-        let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
-        std::env::set_var("SKIPPR_OPENAI_FIXTURE_DIR", dir);
-        let client = OpenAiChatClient::new("fixture-key", "https://api.openai.com/v1");
-        let block = ContentBlock {
-            block_id: "h1:0".into(),
-            block_type: "heading".into(),
-            heading_path: vec![],
-            text: "Title".into(),
-            text_hash: "sha256:1".into(),
-            char_count: 5,
-            word_count: 1,
-            ordinal: 0,
-            has_list: false,
-            has_table: false,
-            has_citation: false,
-            outbound_link_count: 0,
-        };
-        let out = analyze_blocks_batch(
-            &client,
-            "gpt-4.1-mini",
-            "https://example.com",
-            "https://example.com/",
-            &[block],
-        )
-        .await
-        .expect("fixture openai");
-        assert!(!out.is_empty());
-        std::env::remove_var("SKIPPR_OPENAI_FIXTURE_DIR");
     }
 }

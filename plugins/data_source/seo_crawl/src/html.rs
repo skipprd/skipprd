@@ -3,24 +3,13 @@ use scraper::{Html, Selector};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
-use crate::checkpoint::PageScores;
 use crate::fetch::{resolve_href, FetchResponse};
 use crate::origin::SiteOrigin;
 
 #[derive(Debug, Clone)]
-pub struct ContentBlock {
-    pub block_id: String,
-    pub block_type: String,
-    pub heading_path: Vec<String>,
+pub struct HeadingEntry {
+    pub level: u8,
     pub text: String,
-    pub text_hash: String,
-    pub char_count: usize,
-    pub word_count: usize,
-    pub ordinal: u32,
-    pub has_list: bool,
-    pub has_table: bool,
-    pub has_citation: bool,
-    pub outbound_link_count: u32,
 }
 
 #[derive(Debug, Clone)]
@@ -44,14 +33,18 @@ pub struct ParsedPage {
     pub title: Option<String>,
     pub meta_description: Option<String>,
     pub h1: Option<String>,
+    pub h1_count: u32,
+    pub heading_outline: Vec<HeadingEntry>,
+    pub img_count: u32,
+    pub img_missing_alt: u32,
     pub head: Value,
     pub http_headers: Value,
     pub links: Vec<ParsedLink>,
     pub internal_links: Vec<LinkEdge>,
-    pub blocks: Vec<ContentBlock>,
     pub main_text: String,
     pub content_hash: String,
     pub structured_data_count: u32,
+    pub has_faq_schema: bool,
     pub technical_score: f64,
     pub issues: Vec<IssueRow>,
 }
@@ -88,8 +81,6 @@ pub fn parse_fetched_page(
             },
         })
         .collect();
-    let document = Html::parse_document(&response.body);
-    page.blocks = extract_content_blocks(page_url, &document);
     page
 }
 
@@ -103,11 +94,53 @@ pub fn content_hash(text: &str) -> String {
     format!("sha256:{:x}", digest)
 }
 
+/// Heuristic: flag when any token appears more than `max_ratio` of word count.
+pub fn repetitive_token_ratio(text: &str) -> f64 {
+    let words: Vec<String> = text
+        .to_lowercase()
+        .split_whitespace()
+        .filter(|w| w.len() >= 4)
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()).to_string())
+        .filter(|w| w.len() >= 4)
+        .collect();
+    if words.len() < 20 {
+        return 0.0;
+    }
+    let mut counts = std::collections::HashMap::<&str, usize>::new();
+    for w in &words {
+        *counts.entry(w.as_str()).or_default() += 1;
+    }
+    counts
+        .values()
+        .copied()
+        .max()
+        .unwrap_or(0) as f64
+        / words.len() as f64
+}
+
+pub fn heading_hierarchy_ok(outline: &[HeadingEntry]) -> bool {
+    if outline.is_empty() {
+        return true;
+    }
+    let mut prev = outline[0].level;
+    for h in outline.iter().skip(1) {
+        if h.level > prev + 1 {
+            return false;
+        }
+        prev = h.level;
+    }
+    true
+}
+
 pub fn parse_html_page(url: &str, response: &FetchResponse, origin: &SiteOrigin) -> ParsedPage {
     let document = Html::parse_document(&response.body);
     let title = select_text(&document, "title");
     let meta_description = meta_content(&document, "description");
-    let h1 = select_text(&document, "h1");
+    let h1_texts = select_all_text(&document, "h1");
+    let h1 = h1_texts.first().cloned();
+    let h1_count = h1_texts.len() as u32;
+    let heading_outline = extract_heading_outline(&document);
+    let (img_count, img_missing_alt) = extract_image_alt_stats(&document);
     let head = extract_head_json(&document, &response.final_url, &title, &meta_description, &h1);
     let main_text = extract_main_text(&document);
     let hash = content_hash(&main_text);
@@ -115,6 +148,14 @@ pub fn parse_html_page(url: &str, response: &FetchResponse, origin: &SiteOrigin)
     let structured_data_count = document
         .select(&Selector::parse("script[type=\"application/ld+json\"]").unwrap())
         .count() as u32;
+    let has_faq_schema = document
+        .select(&Selector::parse("script[type=\"application/ld+json\"]").unwrap())
+        .any(|el| {
+            el.text()
+                .collect::<String>()
+                .to_lowercase()
+                .contains("faqpage")
+        });
     let mut issues = Vec::new();
     if title.as_ref().map(|t| t.is_empty()).unwrap_or(true) {
         issues.push(IssueRow {
@@ -130,7 +171,7 @@ pub fn parse_html_page(url: &str, response: &FetchResponse, origin: &SiteOrigin)
             severity: "medium".into(),
         });
     }
-    if h1.as_ref().map(|h| h.is_empty()).unwrap_or(true) {
+    if h1_count == 0 {
         issues.push(IssueRow {
             issue_code: "MISSING_H1".into(),
             message: "Page is missing H1".into(),
@@ -166,14 +207,18 @@ pub fn parse_html_page(url: &str, response: &FetchResponse, origin: &SiteOrigin)
         title,
         meta_description,
         h1,
+        h1_count,
+        heading_outline,
+        img_count,
+        img_missing_alt,
         head,
         http_headers: json!({}),
         links,
         internal_links: Vec::new(),
-        blocks: Vec::new(),
         main_text,
         content_hash: hash,
         structured_data_count,
+        has_faq_schema,
         technical_score: 0.0,
         issues,
     }
@@ -194,6 +239,9 @@ pub fn technical_score(response: &FetchResponse, page: &ParsedPage) -> f64 {
     if page.structured_data_count == 0 {
         score -= 0.05;
     }
+    if page.img_count > 0 && page.img_missing_alt > 0 {
+        score -= 0.05 * (page.img_missing_alt as f64 / page.img_count as f64);
+    }
     score.clamp(0.0, 1.0)
 }
 
@@ -206,6 +254,18 @@ fn select_text(document: &Html, selector: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+fn select_all_text(document: &Html, selector: &str) -> Vec<String> {
+    let sel = match Selector::parse(selector) {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    document
+        .select(&sel)
+        .map(|el| el.text().collect::<String>().trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
+}
+
 fn meta_content(document: &Html, name: &str) -> Option<String> {
     let sel = Selector::parse(&format!("meta[name=\"{name}\"]")).ok()?;
     document
@@ -214,6 +274,45 @@ fn meta_content(document: &Html, name: &str) -> Option<String> {
         .and_then(|el| el.value().attr("content"))
         .map(|c| c.trim().to_string())
         .filter(|s| !s.is_empty())
+}
+
+fn extract_heading_outline(document: &Html) -> Vec<HeadingEntry> {
+    let sel = match Selector::parse("h1, h2, h3, h4, h5, h6") {
+        Ok(s) => s,
+        Err(_) => return Vec::new(),
+    };
+    let level_re = Regex::new(r"^h([1-6])$").expect("regex");
+    let mut out = Vec::new();
+    for el in document.select(&sel) {
+        let tag = el.value().name();
+        let level = level_re
+            .captures(tag)
+            .and_then(|c| c.get(1))
+            .and_then(|m| m.as_str().parse().ok())
+            .unwrap_or(2);
+        let text = el.text().collect::<String>().trim().to_string();
+        if !text.is_empty() {
+            out.push(HeadingEntry { level, text });
+        }
+    }
+    out
+}
+
+fn extract_image_alt_stats(document: &Html) -> (u32, u32) {
+    let sel = match Selector::parse("img") {
+        Ok(s) => s,
+        Err(_) => return (0, 0),
+    };
+    let mut total = 0u32;
+    let mut missing = 0u32;
+    for img in document.select(&sel) {
+        total += 1;
+        let alt = img.value().attr("alt").unwrap_or("").trim();
+        if alt.is_empty() {
+            missing += 1;
+        }
+    }
+    (total, missing)
 }
 
 fn extract_head_json(
@@ -226,9 +325,11 @@ fn extract_head_json(
     let mut head = serde_json::Map::new();
     if let Some(t) = title {
         head.insert("title".into(), json!(t));
+        head.insert("title_length".into(), json!(t.chars().count()));
     }
     if let Some(d) = meta_description {
         head.insert("meta_description".into(), json!(d));
+        head.insert("meta_description_length".into(), json!(d.chars().count()));
     }
     if let Some(h) = h1 {
         head.insert("h1".into(), json!(h));
@@ -269,6 +370,13 @@ fn meta_property(document: &Html, property: &str) -> Option<String> {
 }
 
 fn extract_main_text(document: &Html) -> String {
+    for sel_str in ["main", "article", "[role=main]"] {
+        if let Ok(sel) = Selector::parse(sel_str) {
+            if let Some(el) = document.select(&sel).next() {
+                return normalize_whitespace(&el.text().collect::<String>());
+            }
+        }
+    }
     let body_sel = Selector::parse("body").ok();
     let Some(body_sel) = body_sel else {
         return String::new();
@@ -276,7 +384,7 @@ fn extract_main_text(document: &Html) -> String {
     document
         .select(&body_sel)
         .next()
-        .map(|el| el.text().collect::<String>())
+        .map(|el| normalize_whitespace(&el.text().collect::<String>()))
         .unwrap_or_default()
 }
 
@@ -312,95 +420,6 @@ fn extract_links(document: &Html, page_url: &str, origin: &SiteOrigin) -> Vec<Pa
     links
 }
 
-fn question_re() -> Regex {
-    Regex::new(r"^(how|what|why|when|where|who)\b").expect("regex")
-}
-
-pub fn extract_content_blocks(page_url: &str, document: &Html) -> Vec<ContentBlock> {
-    let heading_sel = Selector::parse("h2, h3, h4, h5, h6").ok();
-    let Some(heading_sel) = heading_sel else {
-        return Vec::new();
-    };
-    let mut blocks = Vec::new();
-    let mut ordinal = 0u32;
-    for heading in document.select(&heading_sel) {
-        let text = heading.text().collect::<String>().trim().to_string();
-        if text.is_empty() {
-            continue;
-        }
-        let block_type = if text.contains('?') || question_re().is_match(&text.to_lowercase()) {
-            "direct_answer"
-        } else {
-            "heading_section"
-        };
-        let heading_path = vec![text.clone()];
-        let text_hash = content_hash(&text);
-        let block_id = block_id_for(page_url, &heading_path, ordinal);
-        blocks.push(ContentBlock {
-            block_id,
-            block_type: block_type.into(),
-            heading_path,
-            text: text.clone(),
-            text_hash,
-            char_count: text.chars().count(),
-            word_count: text.split_whitespace().count(),
-            ordinal,
-            has_list: false,
-            has_table: false,
-            has_citation: false,
-            outbound_link_count: 0,
-        });
-        ordinal += 1;
-    }
-    blocks
-}
-
-pub fn block_id_for(page_url: &str, heading_path: &[String], ordinal: u32) -> String {
-    let seed = format!("{page_url}|{}|{ordinal}", heading_path.join(" > "));
-    content_hash(&seed)
-}
-
-pub fn rollup_page_scores(block_scores: &[Value]) -> PageScores {
-    if block_scores.is_empty() {
-        return PageScores::default();
-    }
-    let n = block_scores.len() as f64;
-    let mut helpfulness = 0.0;
-    let mut trust = 0.0;
-    let mut ai = 0.0;
-    for row in block_scores {
-        helpfulness += row.get("helpfulness_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        trust += row.get("trust_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        ai += row
-            .get("extractability_score")
-            .and_then(|v| v.as_f64())
-            .unwrap_or(0.0);
-    }
-    PageScores {
-        technical_score: 0.0,
-        content_quality_score: helpfulness / n,
-        eeat_proxy_score: trust / n,
-        ai_readiness_score: ai / n,
-        risk_score: (1.0 - helpfulness / n).clamp(0.0, 1.0),
-    }
-}
-
-pub fn mock_block_analysis(block: &ContentBlock) -> Value {
-    json!({
-        "block_id": block.block_id,
-        "extractability_score": 0.75,
-        "answer_clarity_score": 0.7,
-        "citation_worthiness_score": 0.6,
-        "helpfulness_score": 0.72,
-        "trust_score": 0.68,
-        "is_self_contained": block.word_count >= 20,
-        "suggested_query_intents": [],
-        "missing_for_ai_citation": [],
-        "evidence_quotes": [block.text.chars().take(80).collect::<String>()],
-        "confidence": 0.8
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -418,7 +437,7 @@ mod tests {
             <meta name="description" content="Desc">
             <link rel="canonical" href="https://example.com/">
         </head><body><h1>Home</h1><h2>What is SEO?</h2><p>Answer here.</p>
-        <a href="/about">About</a></body></html>"#;
+        <a href="/about">About</a><img src="/x.png" alt="logo"></body></html>"#;
         let origin = crate::origin::normalize_site("https://example.com").unwrap();
         let response = FetchResponse {
             final_url: "https://example.com/".into(),
@@ -431,5 +450,22 @@ mod tests {
         let parsed = parse_html_page("https://example.com/", &response, &origin);
         assert_eq!(parsed.title.as_deref(), Some("Example"));
         assert!(!parsed.links.is_empty());
+        assert_eq!(parsed.img_count, 1);
+        assert_eq!(parsed.img_missing_alt, 0);
+    }
+
+    #[test]
+    fn heading_hierarchy_detects_skip() {
+        let outline = vec![
+            HeadingEntry {
+                level: 1,
+                text: "A".into(),
+            },
+            HeadingEntry {
+                level: 4,
+                text: "B".into(),
+            },
+        ];
+        assert!(!heading_hierarchy_ok(&outline));
     }
 }

@@ -8,9 +8,8 @@ pub const NAMESPACE_LINK_EDGE: &str = "seo_crawl.link_edge";
 pub const NAMESPACE_ROBOTS_TXT: &str = "seo_crawl.robots_txt";
 pub const NAMESPACE_SITEMAP_URL: &str = "seo_crawl.sitemap_url";
 pub const NAMESPACE_CHECK_DAILY: &str = "seo_crawl.check_daily";
-pub const NAMESPACE_CONTENT_BLOCK: &str = "seo_crawl.content_block";
 
-pub const NAMESPACE_COUNT: usize = 7;
+pub const NAMESPACE_COUNT: usize = 6;
 
 pub const ALL_NAMESPACES: &[&str] = &[
     NAMESPACE_SITE_RUN_DAILY,
@@ -19,7 +18,6 @@ pub const ALL_NAMESPACES: &[&str] = &[
     NAMESPACE_ROBOTS_TXT,
     NAMESPACE_SITEMAP_URL,
     NAMESPACE_CHECK_DAILY,
-    NAMESPACE_CONTENT_BLOCK,
 ];
 
 pub fn namespace_contract(namespace: &str) -> SourceNamespaceContract {
@@ -60,15 +58,6 @@ pub fn namespace_contract(namespace: &str) -> SourceNamespaceContract {
             ],
             vec![crawl_date.clone()],
         ),
-        NAMESPACE_CONTENT_BLOCK => (
-            vec![
-                site.clone(),
-                FieldPath::single("page_url"),
-                FieldPath::single("block_id"),
-                crawl_date.clone(),
-            ],
-            vec![crawl_date.clone()],
-        ),
         _ => panic!("unknown seo_crawl namespace: {namespace}"),
     };
     SourceNamespaceContract {
@@ -78,7 +67,7 @@ pub fn namespace_contract(namespace: &str) -> SourceNamespaceContract {
         partition_key,
         write_policy: WritePolicy::ReplacePartition,
         refresh_window: None,
-        description: "SEO crawl daily snapshot".into(),
+        description: "SEO technical crawl daily snapshot".into(),
         semantics: Some(SourceSemantics::MutableReport),
     }
 }

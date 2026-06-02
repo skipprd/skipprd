@@ -2,7 +2,7 @@ use serde::Deserialize;
 use serde_derive::Serialize;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct DataSourceSeoCrawlPluginConfig {
+pub struct DataSourceContentQualityPluginConfig {
     pub site: String,
     #[serde(default = "default_max_urls")]
     pub max_urls: u32,
@@ -14,24 +14,22 @@ pub struct DataSourceSeoCrawlPluginConfig {
     pub crawl_rate_per_second: f64,
     #[serde(default = "default_respect_robots")]
     pub respect_robots: bool,
-    #[serde(default = "default_sitemap_probe_paths")]
-    pub sitemap_probe_paths: Vec<String>,
     #[serde(default = "default_openai_model")]
     pub openai_model: String,
-    /// When true, optional LLM pass for structural / AIO convention signals (not content prose).
-    #[serde(default)]
-    pub openai_structure_enabled: bool,
+    #[serde(default = "default_openai_enabled")]
+    pub openai_enabled: bool,
+    #[serde(default = "default_openai_max_blocks_per_page")]
+    pub openai_max_blocks_per_page: u32,
     #[serde(default = "default_skip_unchanged_content")]
     pub skip_unchanged_content: bool,
     #[serde(default = "default_user_agent")]
     pub user_agent: String,
-    /// Extra paths or absolute URLs to seed the crawl queue (useful for JS SPAs with no static links).
     #[serde(default)]
     pub seed_urls: Vec<String>,
 }
 
 fn default_max_urls() -> u32 {
-    5000
+    500
 }
 
 fn default_max_depth() -> u32 {
@@ -39,23 +37,23 @@ fn default_max_depth() -> u32 {
 }
 
 fn default_crawl_rate_per_second() -> f64 {
-    2.0
+    1.5
 }
 
 fn default_respect_robots() -> bool {
     true
 }
 
-fn default_sitemap_probe_paths() -> Vec<String> {
-    vec![
-        "/sitemap.xml".into(),
-        "/sitemap_index.xml".into(),
-        "/sitemap-index.xml".into(),
-    ]
-}
-
 fn default_openai_model() -> String {
     "gpt-4.1-mini".into()
+}
+
+fn default_openai_enabled() -> bool {
+    true
+}
+
+fn default_openai_max_blocks_per_page() -> u32 {
+    24
 }
 
 fn default_skip_unchanged_content() -> bool {
@@ -63,10 +61,10 @@ fn default_skip_unchanged_content() -> bool {
 }
 
 fn default_user_agent() -> String {
-    "SkipprSeoCrawl/1.0".into()
+    "SkipprContentQuality/1.0".into()
 }
 
-impl DataSourceSeoCrawlPluginConfig {
+impl DataSourceContentQualityPluginConfig {
     pub fn validate(&self) -> Result<(), std::io::Error> {
         if self.site.trim().is_empty() {
             return Err(std::io::Error::new(
@@ -83,12 +81,12 @@ impl DataSourceSeoCrawlPluginConfig {
         Ok(())
     }
 
-    pub fn openai_structure_active(&self) -> bool {
-        self.openai_structure_enabled
+    pub fn openai_active(&self) -> bool {
+        self.openai_enabled
             && (std::env::var("OPENAI_API_KEY")
                 .map(|k| !k.trim().is_empty())
                 .unwrap_or(false)
-                || std::env::var("SKIPPR_SEO_CRAWL_FIXTURE_DIR")
+                || std::env::var("SKIPPR_CONTENT_QUALITY_FIXTURE_DIR")
                     .map(|d| !d.trim().is_empty())
                     .unwrap_or(false)
                 || std::env::var("SKIPPR_OPENAI_FIXTURE_DIR")
