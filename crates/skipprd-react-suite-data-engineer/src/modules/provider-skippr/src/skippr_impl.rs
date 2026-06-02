@@ -165,6 +165,48 @@ impl SkipprCliProvider {
         self.data_dir_path().join("skippr.yml")
     }
 
+    fn uses_public_skippr_binary(&self) -> bool {
+        Path::new(&self.binary)
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .is_some_and(|stem| stem.eq_ignore_ascii_case("skippr"))
+    }
+
+    fn local_pipeline_status(&self, pipeline: &str) -> Option<SkipprPipelineStatus> {
+        let input = &self.el_config.skippr_input;
+        let kind = input
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or_default();
+        let namespaces: Vec<SkipprNamespaceStatus> = input
+            .get("tables")
+            .and_then(|v| v.as_array())
+            .into_iter()
+            .flatten()
+            .filter_map(|table| table.as_str())
+            .map(|table| {
+                let namespace = if kind.eq_ignore_ascii_case("mssql") {
+                    table.rsplit('.').next().unwrap_or(table).to_string()
+                } else if kind.eq_ignore_ascii_case("postgres") {
+                    format!("postgres.{}", table)
+                } else {
+                    table.to_string()
+                };
+                SkipprNamespaceStatus {
+                    namespace,
+                    ..Default::default()
+                }
+            })
+            .collect();
+
+        (!namespaces.is_empty()).then(|| SkipprPipelineStatus {
+            pipeline: pipeline.to_string(),
+            status: "synced".to_string(),
+            namespaces,
+            metadata_location: None,
+        })
+    }
+
     fn env_vars(&self) -> HashMap<String, String> {
         let mut env = HashMap::new();
         env.insert(
@@ -1560,6 +1602,26 @@ mod tests {
         );
     }
 
+    #[test]
+    fn local_pipeline_status_uses_mssql_table_namespaces() {
+        let mut provider = postgres_provider();
+        provider.el_config.skippr_input = serde_json::json!({
+            "kind": "Mssql",
+            "tables": ["dbo.customers", "dbo.orders", "dbo.order_items"]
+        });
+
+        let status = provider
+            .local_pipeline_status("mssql_snowflake")
+            .expect("local status");
+        let namespaces: Vec<_> = status
+            .namespaces
+            .into_iter()
+            .map(|namespace| namespace.namespace)
+            .collect();
+
+        assert_eq!(namespaces, ["customers", "orders", "order_items"]);
+    }
+
     fn postgres_provider() -> SkipprCliProvider {
         SkipprCliProvider {
             binary: "skipprd".to_string(),
@@ -1973,6 +2035,12 @@ impl SkipprProvider for SkipprCliProvider {
         _scope: &RequestScope,
         pipeline: &str,
     ) -> Result<SkipprPipelineStatus, String> {
+        if self.uses_public_skippr_binary() {
+            if let Some(status) = self.local_pipeline_status(pipeline) {
+                return Ok(status);
+            }
+        }
+
         let sql = format!("SHOW PIPELINE \"{}\"", pipeline);
         let output = self
             .run_skippr(&["query", "--plain", "--sql", &sql])
