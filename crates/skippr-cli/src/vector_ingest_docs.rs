@@ -1,5 +1,6 @@
 //! `skippr vector ingest-docs` — declarative file walk, chunk, embed, Lance upsert (tenant bucket).
 
+use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -11,7 +12,7 @@ use react_suite_data_engineer::PipelineName;
 use walkdir::WalkDir;
 
 use crate::api_client;
-use crate::public_config::SkipprProjectConfig;
+use crate::public_config::{SkipprProjectConfig, VectorSourceMode};
 use crate::react_host::vector::LanceVectorStore;
 use crate::translate;
 
@@ -136,22 +137,13 @@ pub async fn run_vector_ingest_docs(args: VectorIngestDocsArgs) {
         .unwrap_or("default")
         .to_string();
 
-    let cfg_dir = cfg_path.parent().unwrap_or(Path::new("."));
-    let declared_root = cfg_dir.join(entry.root.trim());
-    let scan_root = args
-        .src_path
-        .as_ref()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| declared_root.clone());
-    let scan_root = scan_root.canonicalize().unwrap_or(scan_root);
-
-    if !scan_root.is_dir() {
-        eprintln!(
-            "[skippr] ERROR: ingest scan root is not a directory: {}",
-            scan_root.display()
-        );
-        std::process::exit(1);
-    }
+    let collection = entry
+        .collection
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("docs")
+        .to_string();
 
     let chunk_chars = args
         .chunk_chars
@@ -164,98 +156,135 @@ pub async fn run_vector_ingest_docs(args: VectorIngestDocsArgs) {
         .or(entry.chunk_overlap)
         .unwrap_or(DEFAULT_CHUNK_OVERLAP);
 
-    let mut include = entry.include.clone();
-    include.extend(
-        args.include_glob
-            .iter()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
-    );
-    if include.is_empty() {
-        eprintln!(
-            "[skippr] ERROR: vector_sources.{source_key}.include must list at least one glob (declarative discovery)."
-        );
-        std::process::exit(1);
-    }
+    let (files, scan_root, work_items) = if entry.mode == VectorSourceMode::Stdin {
+        let stdin_items = match read_stdin_ndjson_records() {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("[skippr] ERROR: {e}");
+                std::process::exit(1);
+            }
+        };
+        let mut work_items: Vec<(PathBuf, String, usize)> = Vec::new();
+        for (id, text, _extra) in &stdin_items {
+            let chunks = chunk_text(text, chunk_chars, chunk_overlap);
+            let key = PathBuf::from(id);
+            for (ci, chunk) in chunks.into_iter().enumerate() {
+                work_items.push((key.clone(), chunk, ci));
+            }
+        }
+        (stdin_items.len(), PathBuf::from("<stdin>"), work_items)
+    } else {
+        let cfg_dir = cfg_path.parent().unwrap_or(Path::new("."));
+        let declared_root = cfg_dir.join(entry.root.trim());
+        let scan_root = args
+            .src_path
+            .as_ref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| declared_root.clone());
+        let scan_root = scan_root.canonicalize().unwrap_or(scan_root);
 
-    let mut exclude = entry.exclude.clone();
-    exclude.extend(
-        args.exclude_glob
-            .iter()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty()),
-    );
-
-    let include_set = match build_glob_set(&include, "include") {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("[skippr] ERROR: {e}");
+        if !scan_root.is_dir() {
+            eprintln!(
+                "[skippr] ERROR: ingest scan root is not a directory: {}",
+                scan_root.display()
+            );
             std::process::exit(1);
         }
-    };
-    let exclude_set = if exclude.is_empty() {
-        GlobSetBuilder::new().build().unwrap_or_else(|e| {
-            eprintln!("[skippr] ERROR: internal GlobSet: {e}");
+
+        let mut include = entry.include.clone();
+        include.extend(
+            args.include_glob
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        );
+        if include.is_empty() {
+            eprintln!(
+                "[skippr] ERROR: vector_sources.{source_key}.include must list at least one glob (declarative discovery)."
+            );
             std::process::exit(1);
-        })
-    } else {
-        match build_glob_set(&exclude, "exclude") {
+        }
+
+        let mut exclude = entry.exclude.clone();
+        exclude.extend(
+            args.exclude_glob
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty()),
+        );
+
+        let include_set = match build_glob_set(&include, "include") {
             Ok(s) => s,
             Err(e) => {
                 eprintln!("[skippr] ERROR: {e}");
                 std::process::exit(1);
             }
-        }
-    };
-
-    let ext_filter: Option<Vec<String>> = entry.extensions.clone().map(|v| {
-        v.into_iter()
-            .map(|e| e.trim().trim_start_matches('.').to_ascii_lowercase())
-            .filter(|e| !e.is_empty())
-            .collect()
-    });
-
-    let mut files: Vec<PathBuf> = Vec::new();
-    for w in WalkDir::new(&scan_root).into_iter().filter_map(Result::ok) {
-        if !w.file_type().is_file() {
-            continue;
-        }
-        let path = w.path().to_path_buf();
-        let rel = posix_rel(&path, &scan_root);
-        if !include_set.is_match(rel.as_str()) {
-            continue;
-        }
-        if exclude_set.is_match(rel.as_str()) {
-            continue;
-        }
-        if let Some(ref exts) = ext_filter {
-            let ext = path
-                .extension()
-                .and_then(|e| e.to_str())
-                .unwrap_or("")
-                .to_ascii_lowercase();
-            if !exts.iter().any(|allowed| allowed == &ext) {
-                continue;
-            }
-        }
-        files.push(path);
-    }
-    files.sort();
-
-    let mut work_items: Vec<(PathBuf, String, usize)> = Vec::new();
-    for path in &files {
-        let text = match std::fs::read_to_string(path) {
-            Ok(t) => t,
-            Err(e) => {
-                eprintln!("[skippr] WARNING: skip {}: {}", path.display(), e);
-                continue;
+        };
+        let exclude_set = if exclude.is_empty() {
+            GlobSetBuilder::new().build().unwrap_or_else(|e| {
+                eprintln!("[skippr] ERROR: internal GlobSet: {e}");
+                std::process::exit(1);
+            })
+        } else {
+            match build_glob_set(&exclude, "exclude") {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("[skippr] ERROR: {e}");
+                    std::process::exit(1);
+                }
             }
         };
-        let chunks = chunk_text(&text, chunk_chars, chunk_overlap);
-        for (ci, chunk) in chunks.into_iter().enumerate() {
-            work_items.push((path.clone(), chunk, ci));
+
+        let ext_filter: Option<Vec<String>> = entry.extensions.clone().map(|v| {
+            v.into_iter()
+                .map(|e| e.trim().trim_start_matches('.').to_ascii_lowercase())
+                .filter(|e| !e.is_empty())
+                .collect()
+        });
+
+        let mut files: Vec<PathBuf> = Vec::new();
+        for w in WalkDir::new(&scan_root).into_iter().filter_map(Result::ok) {
+            if !w.file_type().is_file() {
+                continue;
+            }
+            let path = w.path().to_path_buf();
+            let rel = posix_rel(&path, &scan_root);
+            if !include_set.is_match(rel.as_str()) {
+                continue;
+            }
+            if exclude_set.is_match(rel.as_str()) {
+                continue;
+            }
+            if let Some(ref exts) = ext_filter {
+                let ext = path
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("")
+                    .to_ascii_lowercase();
+                if !exts.iter().any(|allowed| allowed == &ext) {
+                    continue;
+                }
+            }
+            files.push(path);
         }
-    }
+        files.sort();
+
+        let mut work_items: Vec<(PathBuf, String, usize)> = Vec::new();
+        for path in &files {
+            let text = match std::fs::read_to_string(path) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("[skippr] WARNING: skip {}: {}", path.display(), e);
+                    continue;
+                }
+            };
+            let chunks = chunk_text(&text, chunk_chars, chunk_overlap);
+            for (ci, chunk) in chunks.into_iter().enumerate() {
+                work_items.push((path.clone(), chunk, ci));
+            }
+        }
+        (files.len(), scan_root, work_items)
+    };
 
     if crate::is_json_output(&args.output) {
         println!(
@@ -265,16 +294,18 @@ pub async fn run_vector_ingest_docs(args: VectorIngestDocsArgs) {
                 "dry_run": args.dry_run,
                 "pipeline": args.pipeline.trim(),
                 "vector_source": source_key,
-                "files": files.len(),
+                "collection": collection,
+                "mode": if entry.mode == VectorSourceMode::Stdin { "stdin" } else { "files" },
+                "files": files,
                 "chunks": work_items.len(),
                 "scan_root": scan_root.to_string_lossy(),
             })
         );
     } else {
         eprintln!(
-            "[skippr] vector ingest-docs: pipeline={} source={source_key} files={} chunks={} root={}",
+            "[skippr] vector ingest-docs: pipeline={} source={source_key} collection={collection} files={} chunks={} root={}",
             args.pipeline.trim(),
-            files.len(),
+            files,
             work_items.len(),
             scan_root.display()
         );
@@ -305,7 +336,7 @@ pub async fn run_vector_ingest_docs(args: VectorIngestDocsArgs) {
                 tokens
             }
             Err(e) => {
-                eprintln!("[skippr] ERROR: API key authentication failed: {}", e);
+                eprintln!("[skippr] ERROR: API key authentication failed: {e}");
                 std::process::exit(1);
             }
         }
@@ -327,7 +358,7 @@ pub async fn run_vector_ingest_docs(args: VectorIngestDocsArgs) {
     let client = api_client::ApiClient::authenticated(&base_url, std::sync::Arc::clone(&tokens));
 
     if let Err(e) = crate::ensure_eula_accepted(&client, !authenticated_with_api_key).await {
-        eprintln!("[skippr] ERROR: {}", e);
+        eprintln!("[skippr] ERROR: {e}");
         std::process::exit(1);
     }
 
@@ -341,7 +372,7 @@ pub async fn run_vector_ingest_docs(args: VectorIngestDocsArgs) {
             bal
         }
         Err(e) => {
-            eprintln!("[skippr] ERROR: Could not verify account balance ({}).", e);
+            eprintln!("[skippr] ERROR: Could not verify account balance ({e}).");
             std::process::exit(1);
         }
     };
@@ -349,7 +380,7 @@ pub async fn run_vector_ingest_docs(args: VectorIngestDocsArgs) {
     let srv_creds = match client.get_credentials().await {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("[skippr] ERROR: Failed to fetch server credentials: {}", e);
+            eprintln!("[skippr] ERROR: Failed to fetch server credentials: {e}");
             std::process::exit(1);
         }
     };
@@ -411,13 +442,19 @@ pub async fn run_vector_ingest_docs(args: VectorIngestDocsArgs) {
     });
 
     let epoch = chrono::Utc::now().timestamp() as u64;
+    let stdin_mode = entry.mode == VectorSourceMode::Stdin;
     let mut total = 0usize;
     for batch in work_items.chunks(EMBED_BATCH) {
         let texts: Vec<String> = batch
             .iter()
             .map(|(path, text, _)| {
-                let rel = posix_rel(path, &scan_root);
-                format!("file: {rel}\n\n{text}")
+                if stdin_mode {
+                    let id = path.to_string_lossy();
+                    format!("id: {id}\n\n{text}")
+                } else {
+                    let rel = posix_rel(path, &scan_root);
+                    format!("file: {rel}\n\n{text}")
+                }
             })
             .collect();
         let embeddings = match sctx.llm_embed(&texts) {
@@ -429,13 +466,18 @@ pub async fn run_vector_ingest_docs(args: VectorIngestDocsArgs) {
         };
         let mut docs: Vec<ManualVectorDocument> = Vec::with_capacity(batch.len());
         for (i, (path, text, chunk_idx)) in batch.iter().enumerate() {
-            let rel = posix_rel(path, &scan_root);
-            let id = format!("docs:{source_key}:{rel}:{chunk_idx}");
+            let rel = if stdin_mode {
+                path.to_string_lossy().to_string()
+            } else {
+                posix_rel(path, &scan_root)
+            };
+            let id = format!("{collection}:{source_key}:{rel}:{chunk_idx}");
             let doc_text = texts.get(i).cloned().unwrap_or_else(|| text.clone());
             let vec = embeddings.get(i).cloned().unwrap_or_default();
             let meta = serde_json::json!({
                 "path": rel,
                 "vector_source": source_key,
+                "collection": collection,
                 "chunk_index": chunk_idx,
             });
             docs.push(ManualVectorDocument::new(
@@ -444,7 +486,7 @@ pub async fn run_vector_ingest_docs(args: VectorIngestDocsArgs) {
                 vec,
                 epoch,
                 react_suite_data_engineer::vector_docs::ManualVectorMetadata {
-                    kind: "docs".into(),
+                    kind: collection.clone(),
                     dataset_id: Some(source_key.clone()),
                     field: None,
                     extra: meta,
@@ -492,5 +534,55 @@ pub async fn run_vector_ingest_docs(args: VectorIngestDocsArgs) {
             resolved.scope.workspace,
             resolved.scope.project_id
         );
+    }
+}
+
+/// One NDJSON record from stdin: `{ "id", "text", ...optional fields }`.
+fn read_stdin_ndjson_records() -> Result<Vec<(String, String, serde_json::Value)>, String> {
+    let reader = BufReader::new(std::io::stdin());
+    let mut out = Vec::new();
+    for (line_no, line) in reader.lines().enumerate() {
+        let line = line.map_err(|e| format!("stdin read failed at line {}: {e}", line_no + 1))?;
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        let v: serde_json::Value = serde_json::from_str(trimmed)
+            .map_err(|e| format!("stdin line {}: invalid JSON: {e}", line_no + 1))?;
+        let id = v
+            .get("id")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("stdin line {}: missing non-empty \"id\"", line_no + 1))?
+            .to_string();
+        let text = v
+            .get("text")
+            .and_then(|x| x.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| format!("stdin line {}: missing non-empty \"text\"", line_no + 1))?
+            .to_string();
+        let mut extra = v;
+        if let Some(obj) = extra.as_object_mut() {
+            obj.remove("id");
+            obj.remove("text");
+        }
+        out.push((id, text, extra));
+    }
+    if out.is_empty() {
+        return Err("stdin mode: no NDJSON records on standard input".to_string());
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn chunk_text_splits_overlap() {
+        let chunks = chunk_text("abcdefghij", 4, 1);
+        assert!(chunks.len() >= 2);
     }
 }

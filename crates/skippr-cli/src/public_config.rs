@@ -64,11 +64,29 @@ fn yaml_mapping_get_usize(m: &serde_yaml::Mapping, key: &str) -> Option<usize> {
         .and_then(|(_, v)| v.as_u64().map(|n| n as usize))
 }
 
+/// How a `vector_sources` entry resolves input for `skippr vector ingest-docs`.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum VectorSourceMode {
+    /// Walk `root` with `include` / `exclude` globs (default).
+    #[default]
+    Files,
+    /// Read NDJSON from stdin: each line is `{ "id", "text", ...metadata }`.
+    Stdin,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct VectorSourceEntry {
+    /// `files` (default) or `stdin` for NDJSON on standard input.
+    #[serde(default)]
+    pub mode: VectorSourceMode,
+    /// Lance namespace / vector metadata kind (default `docs`).
+    #[serde(default)]
+    pub collection: Option<String>,
     /// Directory root for discovery (relative paths resolve against the `skippr.yml` directory).
+    #[serde(default)]
     pub root: String,
-    /// Glob patterns relative to `root` (e.g. `**/*.md`).
+    /// Glob patterns relative to `root` (e.g. `**/*.md`). Required for `files` mode.
     #[serde(default)]
     pub include: Vec<String>,
     /// Glob patterns relative to `root` excluded after include.
@@ -910,9 +928,9 @@ impl SkipprProjectConfig {
 
     pub fn save_to(&self, path: &Path) -> Result<(), String> {
         let yaml = serde_yaml::to_string(self)
-            .map_err(|e| format!("failed to serialize config: {}", e))?;
+            .map_err(|e| format!("failed to serialize config: {e}"))?;
         std::fs::write(path, yaml.as_bytes())
-            .map_err(|e| format!("failed to write {}: {}", path.display(), e))
+            .map_err(|e| format!("failed to write {}: {e}", path.display()))
     }
 
     pub fn warehouse_kind_str(&self) -> Option<&'static str> {

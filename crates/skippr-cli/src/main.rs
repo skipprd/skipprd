@@ -173,7 +173,7 @@ enum Cmd {
         action: test_cmd::TestSubcommand,
     },
 
-    /// dbt helpers (compile model SQL for IDE query runs).
+    /// dbt helpers (compile SQL, run models).
     Dbt {
         #[command(subcommand)]
         action: dbt_cmd::DbtSubcommand,
@@ -8584,6 +8584,12 @@ async fn async_main() {
         Cmd::Dbt { action } => match action {
             dbt_cmd::DbtSubcommand::CompileSql(args) => {
                 if let Err(e) = dbt_cmd::cmd_dbt_compile_sql(cli.log, &cli.config, args).await {
+                    eprintln!("[skippr] ERROR: {e}");
+                    std::process::exit(1);
+                }
+            }
+            dbt_cmd::DbtSubcommand::Run(args) => {
+                if let Err(e) = dbt_cmd::cmd_dbt_run(cli.log, &cli.config, args).await {
                     eprintln!("[skippr] ERROR: {e}");
                     std::process::exit(1);
                 }

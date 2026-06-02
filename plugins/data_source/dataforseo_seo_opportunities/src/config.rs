@@ -75,6 +75,9 @@ impl StreamKind {
     }
 
     /// Live SERP snapshots and rank-style outputs from DataForSEO (opt-in only).
+    ///
+    /// **Deprecated for Up Foundry keyword hub:** use Bright Data `google_serp_ranks` and dbt
+    /// `keyword_cluster_daily` instead of `serp_result_daily`, `weak_spot_daily`, and DFS clusters.
     pub fn serp_tracking_streams() -> &'static [StreamKind] {
         &[
             StreamKind::SerpResults,

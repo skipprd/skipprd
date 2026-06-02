@@ -1,4 +1,4 @@
-//! `skippr dbt compile-sql` — compile a dbt model SQL file and return warehouse-ready SQL.
+//! `skippr dbt compile-sql` / `skippr dbt run` — compile SQL or run models for a pipeline.
 
 use std::path::{Path, PathBuf};
 
@@ -6,13 +6,34 @@ use react_module_provider_dbt::DbtProjectProvider;
 use react_suite_data_engineer::PipelineName;
 use serde::Serialize;
 
-use crate::test_cmd;
+use crate::run_results_parse::{parse_run_results_json, ParsedDbtRunResult};
+use crate::test_cmd::{self, OpenDbtProject};
 use crate::{config_path, project_root_from_config_path};
 
 #[derive(Debug, Clone, clap::Subcommand)]
 pub enum DbtSubcommand {
     /// Compile a dbt SQL resource and return compiled SQL (plus model/test metadata).
     CompileSql(CompileSqlArgs),
+    /// Run `dbt run` for a pipeline (materialize from cloud storage or use `--project-dir`).
+    Run(DbtRunArgs),
+}
+
+#[derive(Debug, Clone, clap::Args)]
+pub struct DbtRunArgs {
+    #[arg(long)]
+    pub pipeline: PipelineName,
+    /// dbt `--select` expression (repeatable).
+    #[arg(long = "select")]
+    pub select: Vec<String>,
+    /// dbt profile target (defaults to generated profiles target).
+    #[arg(long)]
+    pub target: Option<String>,
+    /// Use a local dbt project directory instead of materializing from cloud storage.
+    #[arg(long)]
+    pub project_dir: Option<PathBuf>,
+    /// Output: jsonl, json, or text.
+    #[arg(long, default_value = "jsonl")]
+    pub output: String,
 }
 
 #[derive(Debug, Clone, clap::Args)]
@@ -51,6 +72,16 @@ struct CompileSqlResponse<'a> {
 
 fn is_json_output(output: &str) -> bool {
     output.trim().eq_ignore_ascii_case("json")
+}
+
+fn is_jsonl_output(output: &str) -> bool {
+    output.trim().eq_ignore_ascii_case("jsonl")
+}
+
+fn emit_jsonl(output: &str, line: &serde_json::Value) {
+    if is_jsonl_output(output) {
+        println!("{line}");
+    }
 }
 
 fn print_json(value: &serde_json::Value) {
@@ -110,10 +141,13 @@ fn read_dbt_project_name(project_dir: &Path) -> Result<String, String> {
     Err("dbt_project.yml: missing name:".to_string())
 }
 
+type ModelManifestInfo = (Option<String>, Option<String>, Option<String>, bool);
+
+#[allow(clippy::type_complexity)]
 fn model_and_tests_from_manifest(
     manifest_path: &Path,
     rel_path: &str,
-) -> Result<(Option<String>, Option<String>, Option<String>, bool), String> {
+) -> Result<ModelManifestInfo, String> {
     let raw = std::fs::read_to_string(manifest_path).map_err(|e| e.to_string())?;
     let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| e.to_string())?;
     let nodes = v
@@ -452,6 +486,190 @@ pub async fn cmd_dbt_compile_sql(
     }
     if !ok {
         return Err(err_message.unwrap_or_else(|| "dbt compile-sql failed".to_string()));
+    }
+    Ok(())
+}
+
+fn map_dbt_run_status(s: &str) -> &'static str {
+    match s {
+        "success" => "success",
+        "pass" => "success",
+        "fail" | "failed" | "error" | "runtime error" => "error",
+        "skipped" | "skip" => "skipped",
+        _ => "error",
+    }
+}
+
+fn summarize_model_run(rows: &[ParsedDbtRunResult]) -> (bool, usize, usize) {
+    let mut err = 0usize;
+    let mut skip = 0usize;
+    for r in rows {
+        match map_dbt_run_status(r.status.as_str()) {
+            "error" => err += 1,
+            "skipped" => skip += 1,
+            _ => {}
+        }
+    }
+    let ok = err == 0;
+    (ok, err, skip)
+}
+
+/// Open a dbt project for `skippr dbt run`: local `--project-dir` or cloud materialization.
+pub async fn open_dbt_project_for_run(
+    explicit_config: &Option<PathBuf>,
+    pipeline: &str,
+    project_dir_override: Option<&Path>,
+    clear_target: bool,
+) -> Result<OpenDbtProject, String> {
+    if let Some(dir) = project_dir_override {
+        let dir = dir
+            .canonicalize()
+            .map_err(|e| format!("project-dir not found: {e}"))?;
+        if !dir.join("dbt_project.yml").is_file() {
+            return Err(format!(
+                "project-dir missing dbt_project.yml: {}",
+                dir.display()
+            ));
+        }
+        let mut session =
+            test_cmd::open_materialized_dbt_project(explicit_config, pipeline, false).await?;
+        if clear_target {
+            let _ = std::fs::remove_dir_all(dir.join("target"));
+        }
+        test_cmd::run_dbt_deps_parse_on_project(
+            &session.dbt,
+            &dir,
+            &session.profiles_dir,
+            session.target.as_str(),
+            &session.tier_env,
+        )?;
+        session.project_dir = dir;
+        return Ok(session);
+    }
+    test_cmd::open_materialized_dbt_project(explicit_config, pipeline, clear_target).await
+}
+
+pub async fn cmd_dbt_run(
+    _log: Option<String>,
+    explicit_config: &Option<PathBuf>,
+    args: DbtRunArgs,
+) -> Result<(), String> {
+    let project_override = args.project_dir.as_deref();
+    let session = open_dbt_project_for_run(
+        explicit_config,
+        &args.pipeline,
+        project_override,
+        true,
+    )
+    .await?;
+    let project_dir = &session.project_dir;
+    let target = args
+        .target
+        .as_deref()
+        .unwrap_or(session.target.as_str())
+        .to_string();
+    let tier_env = session.tier_env.as_slice();
+    let profiles_pd = session.profiles_dir.as_path();
+    let mut base_env: Vec<(&str, String)> = vec![(
+        "DBT_PROFILES_DIR",
+        profiles_pd.to_string_lossy().to_string(),
+    )];
+    base_env.extend(tier_env.iter().cloned());
+
+    let mut argv: Vec<String> = vec!["run".into(), "--target".into(), target.clone()];
+    for s in &args.select {
+        if !s.trim().is_empty() {
+            argv.push("--select".into());
+            argv.push(s.trim().to_string());
+        }
+    }
+    let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
+    let run_out = session.dbt.invoke_dbt_cli(
+        project_dir,
+        Some(profiles_pd),
+        &argv_refs,
+        &base_env,
+        "run",
+    );
+
+    let run_results_path = project_dir.join("target").join("run_results.json");
+    let rr_path_abs = run_results_path
+        .canonicalize()
+        .unwrap_or(run_results_path.clone());
+
+    let parsed: Vec<ParsedDbtRunResult> = if run_results_path.is_file() {
+        let txt = std::fs::read_to_string(&run_results_path).unwrap_or_default();
+        parse_run_results_json(&txt).unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+
+    if is_jsonl_output(&args.output) {
+        if !run_out.status_ok {
+            emit_jsonl(
+                &args.output,
+                &serde_json::json!({
+                    "event": "run_error",
+                    "message": format!("dbt run exited with code {}", run_out.code),
+                    "stdout": run_out.stdout,
+                    "stderr": run_out.stderr,
+                }),
+            );
+        }
+        for row in &parsed {
+            emit_jsonl(
+                &args.output,
+                &serde_json::json!({
+                    "event": "model_result",
+                    "unique_id": row.unique_id,
+                    "status": map_dbt_run_status(row.status.as_str()),
+                    "message": row.message,
+                    "compiled_path": row.compiled_path,
+                    "path": row.path,
+                }),
+            );
+        }
+        emit_jsonl(
+            &args.output,
+            &serde_json::json!({
+                "event": "run_complete",
+                "run_results": rr_path_abs.to_string_lossy(),
+                "dbt_exit_code": run_out.code,
+            }),
+        );
+    } else if is_json_output(&args.output) {
+        let (summary_ok, errs, skipped) = summarize_model_run(&parsed);
+        let doc = serde_json::json!({
+            "pipeline": args.pipeline,
+            "dbt_ok": run_out.status_ok,
+            "dbt_code": run_out.code,
+            "run_results": rr_path_abs.to_string_lossy(),
+            "summary_ok": summary_ok && run_out.status_ok,
+            "error_count": errs,
+            "skipped_count": skipped,
+            "results": parsed,
+            "stdout": run_out.stdout,
+            "stderr": run_out.stderr,
+        });
+        print_json(&doc);
+    } else {
+        if !run_out.stdout.trim().is_empty() {
+            print!("{}", run_out.stdout);
+        }
+        if !run_out.stderr.trim().is_empty() {
+            eprint!("{}", run_out.stderr);
+        }
+        eprintln!(
+            "[skippr] run_results: {} (dbt exit {})",
+            rr_path_abs.display(),
+            run_out.code
+        );
+    }
+
+    let (summary_ok, errs, _skipped) = summarize_model_run(&parsed);
+    let exit_bad = !run_out.status_ok || !summary_ok || errs > 0;
+    if exit_bad {
+        return Err("one or more dbt models failed or dbt exited with an error".to_string());
     }
     Ok(())
 }
