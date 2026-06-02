@@ -17,6 +17,7 @@ serde.workspace = true
 serde_derive = "1.0.105"
 serde_json = "1.0.85"
 sha2 = "0.10"
+skippr-plugin-data-source-seo-crawl = { path = "../seo_crawl" }
 skippr-runtime-sdk.workspace = true
 tokio = { workspace = true, features = ["process", "io-util", "time"] }
 tracing = "0.1"

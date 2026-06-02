@@ -34,6 +34,10 @@ pub struct DataSourceSiteQualityPluginConfig {
     pub url_list: Vec<String>,
     #[serde(default = "default_max_pages_per_run")]
     pub max_pages_per_run: u32,
+    #[serde(default = "default_max_crawl_depth")]
+    pub max_crawl_depth: u32,
+    #[serde(default)]
+    pub crawl_seed_urls: Vec<String>,
     #[serde(default = "default_devices")]
     pub devices: Vec<DeviceProfile>,
     #[serde(default = "default_wait_until")]
@@ -68,6 +72,10 @@ fn default_url_mode() -> UrlMode {
 
 fn default_max_pages_per_run() -> u32 {
     50
+}
+
+fn default_max_crawl_depth() -> u32 {
+    8
 }
 
 pub fn default_devices() -> Vec<DeviceProfile> {
@@ -199,6 +207,8 @@ mod tests {
             url_mode: UrlMode::UrlList,
             url_list: vec![],
             max_pages_per_run: 10,
+            max_crawl_depth: 8,
+            crawl_seed_urls: vec![],
             devices: default_devices(),
             wait_until: "load".into(),
             navigation_timeout_ms: 5000,

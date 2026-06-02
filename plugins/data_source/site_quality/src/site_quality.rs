@@ -85,6 +85,16 @@ impl DataSourceSiteQualityPlugin {
                 self.config.respect_robots,
             );
         }
+        if self.config.url_mode == UrlMode::SiteCrawl {
+            return crate::sampling::resolve_site_crawl_urls(
+                &self.config.site,
+                self.config.max_pages_per_run,
+                self.config.max_crawl_depth,
+                &self.config.crawl_seed_urls,
+                self.config.respect_robots,
+            )
+            .await;
+        }
         let fetcher = HttpSitemapFetcher::new()?;
         resolve_url_list_async(
             &self.origin,
@@ -479,6 +489,8 @@ mod tests {
             url_mode: UrlMode::UrlList,
             url_list: vec!["https://example.com/".into()],
             max_pages_per_run: 5,
+            max_crawl_depth: 8,
+            crawl_seed_urls: vec![],
             devices: vec![crate::config::default_devices()[0].clone()],
             wait_until: "load".into(),
             navigation_timeout_ms: 5000,

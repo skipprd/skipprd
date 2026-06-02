@@ -10062,8 +10062,6 @@ dependencies = [
 [[package]]
 name = "react"
 version = "1.4.1"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "fd3170c5df831e1a8659a00d301cc071b233aa703983c6b73689cff2c5f798a0"
 dependencies = [
  "async-trait",
  "axum",
@@ -10101,8 +10099,6 @@ dependencies = [
 [[package]]
 name = "react-core"
 version = "1.4.1"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "47a611545f34d5dd7eb2fa9011115d28a4b531f971665b339cfdb25bd711b137"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10123,8 +10119,6 @@ dependencies = [
 [[package]]
 name = "react-http-protocol"
 version = "1.4.1"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "6611a533c3c5ab9159724a66d22544f8335e1b53197354f041852a1ada6549bd"
 dependencies = [
  "serde",
  "serde_json",
@@ -10320,8 +10314,6 @@ dependencies = [
 [[package]]
 name = "react-module-provider-vector-lance"
 version = "1.4.1"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "2002a9b2ddce82bfd44ac0155298e9cedc1868ba23be17cf2b857dc620e007b0"
 dependencies = [
  "arrow 56.2.0",
  "arrow-buffer 56.2.0",
@@ -10336,8 +10328,6 @@ dependencies = [
 [[package]]
 name = "react-module-storage-local"
 version = "1.4.1"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "f443323539b338f2f2868b1e4cf20d6e65c435caa22b39c03ef94943057e5519"
 dependencies = [
  "async-trait",
  "react-core",
@@ -10349,8 +10339,6 @@ dependencies = [
 [[package]]
 name = "react-module-storage-memory"
 version = "1.4.1"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "a498b7a6d46870bbb4fd1b103919d1b583436020a8d2aee21477c03187300cda"
 dependencies = [
  "async-trait",
  "react-core",
@@ -10360,8 +10348,6 @@ dependencies = [
 [[package]]
 name = "react-module-storage-s3"
 version = "1.4.1"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "ce33d1d348ad085b97b3e76476e7055f27251bdd967f41a6c2c35d8af563a96e"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -10402,8 +10388,6 @@ dependencies = [
 [[package]]
 name = "react-suite-debugger"
 version = "1.4.1"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "c74865d157662b481e4ffb67c3bc3855b9740868d5b700f44f1268d3671a1714"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10416,8 +10400,6 @@ dependencies = [
 [[package]]
 name = "react-transport"
 version = "1.4.1"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "0a7f902e6b096b075a95eff070742f4d9c7e3422077ba072164dbc187cd917b8"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10439,8 +10421,6 @@ dependencies = [
 [[package]]
 name = "react-view"
 version = "1.4.1"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "0d6b254f4db507cbfcdd7f5be95dc182abace1cae87bce55f78ba0aba26f9639"
 dependencies = [
  "chrono",
  "react-core",
@@ -12904,6 +12884,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "sha2",
+ "skippr-plugin-data-source-seo-crawl",
  "skippr-runtime-sdk",
  "tokio",
  "tracing",

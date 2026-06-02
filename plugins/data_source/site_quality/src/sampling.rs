@@ -11,6 +11,8 @@ use url::Url;
 pub enum UrlMode {
     TldSample,
     UrlList,
+    /// Discover URLs by following same-origin links (BFS), then sitemap fallbacks.
+    SiteCrawl,
 }
 
 #[derive(Debug, Clone)]
@@ -89,7 +91,45 @@ pub fn resolve_url_list(
             }
             Ok(rank_and_cap_candidates(origin, &home, candidates, cap))
         }
+        UrlMode::SiteCrawl => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "site_crawl url_mode requires async resolution",
+        )),
     }
+}
+
+/// Same-origin link crawl (shared with SeoCrawl plugin).
+pub async fn resolve_site_crawl_urls(
+    site: &str,
+    max_pages: u32,
+    max_depth: u32,
+    seed_urls: &[String],
+    respect_robots: bool,
+) -> Result<Vec<String>, std::io::Error> {
+    use skippr_plugin_data_source_seo_crawl::crawler::{crawl_site, seed_origin};
+    use skippr_plugin_data_source_seo_crawl::fetch::HttpFetcher;
+
+    let origin = seed_origin(site)?;
+    let user_agent = "SkipprSiteQuality/1.0";
+    let mut fetcher = HttpFetcher::new(user_agent);
+    if let Ok(dir) = std::env::var("SKIPPR_SITE_QUALITY_FIXTURE_DIR")
+        .or_else(|_| std::env::var("SKIPPR_SEO_CRAWL_FIXTURE_DIR"))
+    {
+        if !dir.trim().is_empty() {
+            fetcher = fetcher.with_fixture_dir(dir.trim());
+        }
+    }
+    let pages = crawl_site(
+        &origin,
+        &fetcher,
+        user_agent,
+        max_pages,
+        max_depth,
+        respect_robots,
+        seed_urls,
+    )
+    .await?;
+    Ok(pages.into_iter().map(|p| p.url).collect())
 }
 
 pub fn rank_and_cap_candidates(
@@ -374,6 +414,10 @@ pub async fn resolve_url_list_async(
             }
             Ok(rank_and_cap_candidates(origin, &home, candidates, cap))
         }
+        UrlMode::SiteCrawl => Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "site_crawl url_mode requires resolve_site_crawl_urls",
+        )),
     }
 }
 

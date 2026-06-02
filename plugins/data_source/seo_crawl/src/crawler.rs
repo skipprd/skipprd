@@ -11,6 +11,35 @@ pub struct CrawlPageResult {
     pub status: u16,
 }
 
+async fn collect_sitemap_urls(
+    origin: &SiteOrigin,
+    fetcher: &HttpFetcher,
+    parsed_robots: Option<&crate::robots::ParsedRobots>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    if let Some(rules) = parsed_robots {
+        for sm in &rules.sitemap_urls {
+            if let Some(url) = crate::origin::normalize_url_for_crawl(sm, origin) {
+                out.push(url);
+            }
+        }
+    }
+    for path in ["/sitemap.xml", "/sitemap_index.xml"] {
+        let sm_url = format!("{}{}", origin.origin, path);
+        if let Ok(resp) = fetcher.get(&sm_url, origin).await {
+            if let Ok(entries) = crate::sitemap::parse_sitemap_xml(&resp.body) {
+                for entry in entries {
+                    if let Some(url) = crate::origin::normalize_url_for_crawl(&entry.loc, origin) {
+                        out.push(url);
+                    }
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Crawl same-origin pages: BFS via discovered internal links first, then unfetched sitemap URLs.
 pub async fn crawl_site(
     origin: &SiteOrigin,
     fetcher: &HttpFetcher,
@@ -24,9 +53,7 @@ pub async fn crawl_site(
     let depth_cap = max_depth;
     let robots_url = format!("{}/robots.txt", origin.origin);
     let robots_body = fetcher.get(&robots_url, origin).await.ok().map(|r| r.body);
-    let parsed_robots = robots_body
-        .as_deref()
-        .map(parse_robots_txt);
+    let parsed_robots = robots_body.as_deref().map(parse_robots_txt);
 
     let mut queue: VecDeque<(String, u32)> = VecDeque::new();
     let mut seen = HashSet::new();
@@ -34,29 +61,6 @@ pub async fn crawl_site(
     queue.push_back((home.clone(), 0));
     seen.insert(home);
 
-    if let Some(rules) = parsed_robots.as_ref() {
-        for sm in &rules.sitemap_urls {
-            if let Some(url) = crate::origin::normalize_url_for_crawl(sm, origin) {
-                if seen.insert(url.clone()) {
-                    queue.push_back((url, 0));
-                }
-            }
-        }
-    }
-    for path in ["/sitemap.xml", "/sitemap_index.xml"] {
-        let sm_url = format!("{}{}", origin.origin, path);
-        if let Ok(resp) = fetcher.get(&sm_url, origin).await {
-            if let Ok(entries) = crate::sitemap::parse_sitemap_xml(&resp.body) {
-                for entry in entries {
-                    if let Some(url) = crate::origin::normalize_url_for_crawl(&entry.loc, origin) {
-                        if seen.insert(url.clone()) {
-                            queue.push_back((url, 0));
-                        }
-                    }
-                }
-            }
-        }
-    }
     for seed in seed_urls {
         let trimmed = seed.trim();
         if trimmed.is_empty() {
@@ -79,11 +83,29 @@ pub async fn crawl_site(
         }
     }
 
+    let mut sitemap_deferred: VecDeque<String> = collect_sitemap_urls(
+        origin,
+        fetcher,
+        parsed_robots.as_ref(),
+    )
+    .await
+    .into_iter()
+    .filter(|u| !seen.contains(u))
+    .collect();
+
     let mut results = Vec::new();
-    while let Some((url, depth)) = queue.pop_front() {
-        if results.len() >= cap {
+    while results.len() < cap {
+        let (url, depth) = if let Some(next) = queue.pop_front() {
+            next
+        } else if let Some(sm) = sitemap_deferred.pop_front() {
+            if !seen.insert(sm.clone()) {
+                continue;
+            }
+            (sm, 0)
+        } else {
             break;
-        }
+        };
+
         if depth > depth_cap {
             continue;
         }
@@ -98,7 +120,10 @@ pub async fn crawl_site(
                 }
             }
         }
-        let response = fetcher.get(&url, origin).await?;
+        let response = match fetcher.get(&url, origin).await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
         if response.status >= 400 {
             continue;
         }
