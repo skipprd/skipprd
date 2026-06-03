@@ -18,17 +18,26 @@ use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch};
 use tracing::info;
 
 use crate::config::DataSourceSiteSecurityPluginConfig;
-use crate::issue::map_issues;
+use crate::issue::{map_issues, origin_checks};
+use crate::lighthouse::{checks_from_lighthouse, load_lighthouse_audits};
 use crate::streams::{
-    namespace_contract, ALL_NAMESPACES, NAMESPACE_CHECK_DAILY, NAMESPACE_PAGE_SCAN_DAILY,
-    NAMESPACE_SITE_RUN_DAILY, NAMESPACE_STORAGE_ENTRY, NAMESPACE_THIRD_PARTY_SCRIPT,
+    namespace_contract, ALL_NAMESPACES, NAMESPACE_CHECK_DAILY, NAMESPACE_COOKIE_ENTRY,
+    NAMESPACE_PAGE_SCAN_DAILY, NAMESPACE_SITE_RUN_DAILY, NAMESPACE_STORAGE_ENTRY,
+    NAMESPACE_THIRD_PARTY_SCRIPT, NAMESPACE_TLS_DAILY,
 };
+use crate::tls::{probe_origin, site_origin_for_probe, tls_row};
 use crate::worker::{build_job_request, WorkerClient, WorkerJobResult};
 
 fn runtime_is_discover_mode() -> bool {
     std::env::var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV)
         .map(|mode| mode.eq_ignore_ascii_case("discover"))
         .unwrap_or(false)
+}
+
+fn data_dir() -> std::path::PathBuf {
+    std::env::var("DATA_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| std::path::PathBuf::from("./data"))
 }
 
 pub struct DataSourceSiteSecurityPlugin {
@@ -112,6 +121,7 @@ impl DataSourceSiteSecurityPlugin {
         result: &WorkerJobResult,
     ) -> Value {
         let headers = result.headers.as_ref();
+        let dom = result.dom.as_ref();
         json!({
             "site": self.origin,
             "page_url": page_url,
@@ -126,15 +136,17 @@ impl DataSourceSiteSecurityPlugin {
             "has_hsts": headers.map(|h| h.has_hsts),
             "has_x_frame_options": headers.map(|h| h.has_x_frame_options),
             "has_x_content_type_options": headers.map(|h| h.has_x_content_type_options),
+            "inline_script_count": dom.map(|d| d.inline_script_count),
+            "scripts_without_sri": dom.map(|d| d.scripts_without_sri),
+            "mixed_content_count": result.mixed_content_urls.len() as u32,
         })
     }
 
     fn storage_rows(&self, run_date: &str, page_url: &str, result: &WorkerJobResult) -> Vec<Value> {
         let mut rows = Vec::new();
         for entry in result
-            .cookies
+            .local_storage
             .iter()
-            .chain(result.local_storage.iter())
             .chain(result.session_storage.iter())
         {
             rows.push(json!({
@@ -148,6 +160,28 @@ impl DataSourceSiteSecurityPlugin {
             }));
         }
         rows
+    }
+
+    fn cookie_rows(&self, run_date: &str, page_url: &str, result: &WorkerJobResult) -> Vec<Value> {
+        result
+            .jar_cookies
+            .iter()
+            .map(|c| {
+                json!({
+                    "site": self.origin,
+                    "page_url": page_url,
+                    "run_date": run_date,
+                    "entry_name": c.entry_name,
+                    "domain": c.domain,
+                    "path": c.path,
+                    "secure": c.secure,
+                    "http_only": c.http_only,
+                    "same_site": c.same_site,
+                    "value_length": c.value_length,
+                    "pii_hints": c.pii_hints.join(","),
+                })
+            })
+            .collect()
     }
 
     fn script_rows(&self, run_date: &str, page_url: &str, result: &WorkerJobResult) -> Vec<Value> {
@@ -164,6 +198,7 @@ impl DataSourceSiteSecurityPlugin {
                     "is_third_party": s.is_third_party,
                     "async": s.async_attr,
                     "defer": s.defer,
+                    "has_integrity": s.has_integrity,
                 })
             })
             .collect()
@@ -243,14 +278,38 @@ impl DataSource for DataSourceSiteSecurityPlugin {
             self.config.devices.clone()
         };
 
+        let lh_audits = if self.config.import_lighthouse_from_site_quality && !discover {
+            load_lighthouse_audits(&data_dir(), &self.origin, &run_date)
+        } else {
+            Vec::new()
+        };
+        if !lh_audits.is_empty() {
+            info!(
+                count = lh_audits.len(),
+                "Site Security: reusing site-quality Lighthouse audits"
+            );
+        }
+
+        let probe_origin_url = site_origin_for_probe(&self.origin);
+        let tls_probe = if discover {
+            crate::tls::TlsProbeResult::default()
+        } else {
+            probe_origin(&probe_origin_url).await
+        };
+
         let worker = WorkerClient::new(&self.config)?;
 
         let mut page_scan_rows = Vec::new();
         let mut storage_rows = Vec::new();
+        let mut cookie_rows = Vec::new();
         let mut script_rows = Vec::new();
         let mut check_rows = Vec::new();
         let mut pages_ok = 0u32;
         let mut pages_failed = 0u32;
+
+        if !discover {
+            check_rows.extend(origin_checks(&self.origin, &run_date, &tls_probe));
+        }
 
         for url in &urls {
             for device in &devices {
@@ -267,6 +326,7 @@ impl DataSource for DataSourceSiteSecurityPlugin {
                 page_scan_rows.push(self.page_scan_row(&run_date, url, &result));
                 if result.ok {
                     storage_rows.extend(self.storage_rows(&run_date, url, &result));
+                    cookie_rows.extend(self.cookie_rows(&run_date, url, &result));
                     script_rows.extend(self.script_rows(&run_date, url, &result));
                 }
                 check_rows.extend(map_issues(
@@ -276,6 +336,14 @@ impl DataSource for DataSourceSiteSecurityPlugin {
                     &result,
                     &self.config,
                 ));
+                if !lh_audits.is_empty() {
+                    check_rows.extend(checks_from_lighthouse(
+                        &self.origin,
+                        url,
+                        &run_date,
+                        &lh_audits,
+                    ));
+                }
             }
         }
 
@@ -287,9 +355,18 @@ impl DataSource for DataSourceSiteSecurityPlugin {
             "pages_failed": pages_failed,
             "storage_entries": storage_rows.len(),
             "script_entries": script_rows.len(),
+            "cookie_entries": cookie_rows.len(),
         });
 
         self.submit_namespace(ctx.as_ref(), NAMESPACE_SITE_RUN_DAILY, &run_date, vec![site_run])?;
+        if !discover {
+            self.submit_namespace(
+                ctx.as_ref(),
+                NAMESPACE_TLS_DAILY,
+                &run_date,
+                vec![tls_row(&self.origin, &run_date, &tls_probe)],
+            )?;
+        }
         self.submit_namespace(
             ctx.as_ref(),
             NAMESPACE_PAGE_SCAN_DAILY,
@@ -302,6 +379,7 @@ impl DataSource for DataSourceSiteSecurityPlugin {
             &run_date,
             storage_rows,
         )?;
+        self.submit_namespace(ctx.as_ref(), NAMESPACE_COOKIE_ENTRY, &run_date, cookie_rows)?;
         self.submit_namespace(
             ctx.as_ref(),
             NAMESPACE_THIRD_PARTY_SCRIPT,

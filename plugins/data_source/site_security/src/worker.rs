@@ -26,18 +26,52 @@ pub struct WorkerJobRequest {
     pub navigation_timeout_ms: u32,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct SecurityHeaders {
     pub has_csp: bool,
     pub has_hsts: bool,
     pub has_x_frame_options: bool,
     pub has_x_content_type_options: bool,
+    #[serde(default)]
+    pub csp: Option<String>,
+    #[serde(default)]
+    pub hsts: Option<String>,
+    #[serde(default)]
+    pub x_frame_options: Option<String>,
+    #[serde(default)]
+    pub referrer_policy: Option<String>,
+    #[serde(default)]
+    pub permissions_policy: Option<String>,
+    #[serde(default)]
+    pub cross_origin_opener_policy: Option<String>,
+    #[serde(default)]
+    pub cross_origin_embedder_policy: Option<String>,
+    #[serde(default)]
+    pub cross_origin_resource_policy: Option<String>,
+    #[serde(default)]
+    pub x_xss_protection: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct StorageEntryWire {
     pub storage_kind: String,
     pub entry_name: String,
+    pub value_length: u32,
+    #[serde(default)]
+    pub pii_hints: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct JarCookieWire {
+    pub entry_name: String,
+    #[serde(default)]
+    pub domain: String,
+    #[serde(default)]
+    pub path: String,
+    pub secure: bool,
+    pub http_only: bool,
+    #[serde(default)]
+    pub same_site: String,
     pub value_length: u32,
     #[serde(default)]
     pub pii_hints: Vec<String>,
@@ -51,6 +85,24 @@ pub struct ScriptEntryWire {
     #[serde(rename = "async")]
     pub async_attr: bool,
     pub defer: bool,
+    #[serde(default)]
+    pub has_integrity: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct DomMetricsWire {
+    #[serde(default)]
+    pub inline_script_count: u32,
+    #[serde(default)]
+    pub external_script_count: u32,
+    #[serde(default)]
+    pub scripts_with_sri: u32,
+    #[serde(default)]
+    pub scripts_without_sri: u32,
+    #[serde(default)]
+    pub insecure_form_count: u32,
+    #[serde(default)]
+    pub insecure_form_actions: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -64,6 +116,8 @@ pub struct WorkerJobResult {
     #[serde(default)]
     pub headers: Option<SecurityHeaders>,
     #[serde(default)]
+    pub jar_cookies: Vec<JarCookieWire>,
+    #[serde(default)]
     pub cookies: Vec<StorageEntryWire>,
     #[serde(default)]
     pub local_storage: Vec<StorageEntryWire>,
@@ -71,6 +125,12 @@ pub struct WorkerJobResult {
     pub session_storage: Vec<StorageEntryWire>,
     #[serde(default)]
     pub scripts: Vec<ScriptEntryWire>,
+    #[serde(default)]
+    pub dom: Option<DomMetricsWire>,
+    #[serde(default)]
+    pub mixed_content_urls: Vec<String>,
+    #[serde(default)]
+    pub body_snippet: Option<String>,
     #[serde(default)]
     pub cookie_count: Option<u32>,
     #[serde(default)]

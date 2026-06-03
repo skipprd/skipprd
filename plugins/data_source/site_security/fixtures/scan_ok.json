@@ -7,8 +7,25 @@
     "has_csp": true,
     "has_hsts": true,
     "has_x_frame_options": true,
-    "has_x_content_type_options": true
+    "has_x_content_type_options": true,
+    "csp": "default-src 'self'",
+    "hsts": "max-age=31536000; includeSubDomains",
+    "referrer_policy": "strict-origin-when-cross-origin",
+    "permissions_policy": "geolocation=()",
+    "cross_origin_opener_policy": "same-origin"
   },
+  "jar_cookies": [
+    {
+      "entry_name": "session",
+      "domain": "example.com",
+      "path": "/",
+      "secure": true,
+      "http_only": true,
+      "same_site": "Lax",
+      "value_length": 12,
+      "pii_hints": ["sensitive_name"]
+    }
+  ],
   "cookies": [
     {
       "storage_kind": "cookie",
@@ -25,9 +42,20 @@
       "script_host": "cdn.example.net",
       "is_third_party": true,
       "async": true,
-      "defer": false
+      "defer": false,
+      "has_integrity": false
     }
   ],
+  "dom": {
+    "inline_script_count": 1,
+    "external_script_count": 1,
+    "scripts_with_sri": 0,
+    "scripts_without_sri": 1,
+    "insecure_form_count": 0,
+    "insecure_form_actions": []
+  },
+  "mixed_content_urls": [],
+  "body_snippet": "<html></html>",
   "cookie_count": 1,
   "local_storage_key_count": 0,
   "session_storage_key_count": 0,

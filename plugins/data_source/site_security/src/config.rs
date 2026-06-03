@@ -33,6 +33,8 @@ pub struct DataSourceSiteSecurityPluginConfig {
     pub respect_robots: bool,
     #[serde(default = "default_max_third_party_scripts")]
     pub max_third_party_scripts: u32,
+    #[serde(default = "default_import_lighthouse")]
+    pub import_lighthouse_from_site_quality: bool,
 }
 
 fn default_url_mode() -> UrlMode {
@@ -80,6 +82,10 @@ fn default_respect_robots() -> bool {
 
 fn default_max_third_party_scripts() -> u32 {
     25
+}
+
+fn default_import_lighthouse() -> bool {
+    true
 }
 
 impl DataSourceSiteSecurityPluginConfig {

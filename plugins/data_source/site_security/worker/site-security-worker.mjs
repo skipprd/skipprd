@@ -16,6 +16,9 @@ const CHROMIUM_ARGS = [
   '--single-process',
 ];
 
+const BODY_SNIPPET_MAX = 32_000;
+const MIXED_CONTENT_CAP = 30;
+
 const PII_PATTERNS = [
   { id: 'email', re: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/ },
   { id: 'phone', re: /\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/ },
@@ -59,6 +62,40 @@ function headerPresent(headers, name) {
   return Object.keys(headers || {}).some((k) => k.toLowerCase() === target);
 }
 
+function headerValue(headers, name) {
+  const target = name.toLowerCase();
+  for (const [k, v] of Object.entries(headers || {})) {
+    if (k.toLowerCase() === target) {
+      return v;
+    }
+  }
+  return undefined;
+}
+
+function buildResponseHeaders(headers) {
+  const csp = headerValue(headers, 'content-security-policy');
+  const xfo = headerValue(headers, 'x-frame-options');
+  const hasFrameAncestors =
+    typeof csp === 'string' && /frame-ancestors/i.test(csp);
+  return {
+    has_csp: headerPresent(headers, 'content-security-policy'),
+    has_hsts: headerPresent(headers, 'strict-transport-security'),
+    has_x_frame_options: headerPresent(headers, 'x-frame-options') || hasFrameAncestors,
+    has_x_content_type_options: headerPresent(headers, 'x-content-type-options'),
+    csp,
+    hsts: headerValue(headers, 'strict-transport-security'),
+    x_frame_options: xfo,
+    referrer_policy: headerValue(headers, 'referrer-policy'),
+    permissions_policy:
+      headerValue(headers, 'permissions-policy') ||
+      headerValue(headers, 'feature-policy'),
+    cross_origin_opener_policy: headerValue(headers, 'cross-origin-opener-policy'),
+    cross_origin_embedder_policy: headerValue(headers, 'cross-origin-embedder-policy'),
+    cross_origin_resource_policy: headerValue(headers, 'cross-origin-resource-policy'),
+    x_xss_protection: headerValue(headers, 'x-xss-protection'),
+  };
+}
+
 async function ensureBrowser() {
   if (browser?.isConnected?.() === false) {
     browser = undefined;
@@ -73,29 +110,41 @@ async function ensureBrowser() {
   return browser;
 }
 
-async function collectFromPage(page, job) {
+async function collectFromPage(page, context, job) {
+  const mixedHttpUrls = [];
+  const onRequest = (req) => {
+    const u = req.url();
+    if (u.startsWith('http://') && mixedHttpUrls.length < MIXED_CONTENT_CAP) {
+      mixedHttpUrls.push(u);
+    }
+  };
+  page.on('request', onRequest);
+
   const response = await page.goto(job.url, {
     waitUntil: job.wait_until || 'load',
     timeout: job.navigation_timeout_ms || 60000,
   });
+  page.off('request', onRequest);
+
   const finalUrl = page.url();
   const status = response?.status() ?? 0;
-  const headers = response?.headers() || {};
-
+  const rawHeaders = response?.headers() || {};
   const pageHost = hostOf(finalUrl);
+  const isHttps = finalUrl.startsWith('https://');
+
+  const jarCookies = await context.cookies(finalUrl);
+  const jarCookieRows = jarCookies.map((c) => ({
+    entry_name: c.name,
+    domain: c.domain || '',
+    path: c.path || '/',
+    secure: Boolean(c.secure),
+    http_only: Boolean(c.httpOnly),
+    same_site: c.sameSite || 'None',
+    value_length: (c.value || '').length,
+    pii_hints: piiHints(c.name, c.value),
+  }));
 
   const storagePayload = await page.evaluate(() => {
-    const cookies = document.cookie
-      .split(';')
-      .map((part) => part.trim())
-      .filter(Boolean)
-      .map((part) => {
-        const eq = part.indexOf('=');
-        const name = eq >= 0 ? part.slice(0, eq).trim() : part;
-        const value = eq >= 0 ? part.slice(eq + 1) : '';
-        return { name, value_length: value.length, value };
-      });
-
     const readStore = (store) => {
       const out = [];
       for (let i = 0; i < store.length; i += 1) {
@@ -107,26 +156,41 @@ async function collectFromPage(page, job) {
       return out;
     };
 
-    const scripts = [...document.querySelectorAll('script[src]')].map((el) => ({
+    const scriptEls = [...document.querySelectorAll('script')];
+    const withSrc = scriptEls.filter((el) => el.getAttribute('src'));
+    const inlineScripts = scriptEls.filter((el) => !el.getAttribute('src'));
+    const withSri = withSrc.filter((el) => el.getAttribute('integrity'));
+    const withoutSri = withSrc.filter((el) => !el.getAttribute('integrity'));
+
+    const scripts = withSrc.map((el) => ({
       src: el.getAttribute('src') || '',
       async: el.hasAttribute('async'),
       defer: el.hasAttribute('defer'),
+      has_integrity: Boolean(el.getAttribute('integrity')),
     }));
 
+    const insecureForms = [];
+    for (const form of document.querySelectorAll('form[action]')) {
+      const action = form.getAttribute('action') || '';
+      if (action.startsWith('http://')) {
+        insecureForms.push(action);
+      }
+    }
+
     return {
-      cookies,
       local_storage: readStore(localStorage),
       session_storage: readStore(sessionStorage),
       scripts,
+      dom: {
+        inline_script_count: inlineScripts.length,
+        external_script_count: withSrc.length,
+        scripts_with_sri: withSri.length,
+        scripts_without_sri: withoutSri.length,
+        insecure_form_count: insecureForms.length,
+        insecure_form_actions: insecureForms.slice(0, 10),
+      },
     };
   });
-
-  const cookies = storagePayload.cookies.map((c) => ({
-    storage_kind: 'cookie',
-    entry_name: c.name,
-    value_length: c.value_length,
-    pii_hints: piiHints(c.name, c.value),
-  }));
 
   const localStorage = storagePayload.local_storage.map((e) => ({
     storage_kind: 'localStorage',
@@ -157,23 +221,34 @@ async function collectFromPage(page, job) {
         is_third_party: isThirdParty(pageHost, absolute),
         async: s.async,
         defer: s.defer,
+        has_integrity: s.has_integrity,
       };
     });
+
+  const bodyHtml = await page.content();
+  const body_snippet = bodyHtml.slice(0, BODY_SNIPPET_MAX);
+
+  const dom = storagePayload.dom;
+  const mixed_content_urls = isHttps ? mixedHttpUrls : [];
 
   return {
     final_url: finalUrl,
     status,
-    headers: {
-      has_csp: headerPresent(headers, 'content-security-policy'),
-      has_hsts: headerPresent(headers, 'strict-transport-security'),
-      has_x_frame_options: headerPresent(headers, 'x-frame-options'),
-      has_x_content_type_options: headerPresent(headers, 'x-content-type-options'),
-    },
-    cookies,
+    headers: buildResponseHeaders(rawHeaders),
+    jar_cookies: jarCookieRows,
+    cookies: jarCookieRows.map((c) => ({
+      storage_kind: 'cookie',
+      entry_name: c.entry_name,
+      value_length: c.value_length,
+      pii_hints: c.pii_hints,
+    })),
     local_storage: localStorage,
     session_storage: sessionStorage,
     scripts,
-    cookie_count: cookies.length,
+    dom,
+    mixed_content_urls,
+    body_snippet,
+    cookie_count: jarCookieRows.length,
     local_storage_key_count: localStorage.length,
     session_storage_key_count: sessionStorage.length,
     third_party_script_count: scripts.filter((s) => s.is_third_party).length,
@@ -192,7 +267,7 @@ async function runJob(job) {
       userAgent: job.user_agent || undefined,
     });
     const page = await context.newPage();
-    const scan = await collectFromPage(page, job);
+    const scan = await collectFromPage(page, context, job);
     return {
       job_id: job.job_id,
       ok: true,
