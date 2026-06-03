@@ -1,5 +1,7 @@
 use serde::Deserialize;
-use skippr_plugin_data_source_site_quality::config::{DeviceProfile, Viewport};
+use skippr_plugin_data_source_site_quality::config::{
+    default_user_agent_for_profile, DeviceProfile, Viewport,
+};
 use skippr_plugin_data_source_site_quality::sampling::UrlMode;
 
 #[derive(Debug, Clone, Deserialize)]
@@ -52,6 +54,7 @@ pub fn default_devices() -> Vec<DeviceProfile> {
             width: 1350,
             height: 940,
         },
+        user_agent: default_user_agent_for_profile("desktop"),
     }]
 }
 

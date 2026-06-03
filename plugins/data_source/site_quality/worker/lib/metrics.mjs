@@ -11,6 +11,42 @@ const WEB_VITALS_IIFE = join(__dirname, '../node_modules/web-vitals/dist/web-vit
 const DEFAULT_LIGHTHOUSE_CATEGORIES = ['performance', 'accessibility', 'best-practices', 'seo'];
 const DEFAULT_VITALS_SETTLE_MS = 2500;
 
+function resolveLighthouseFormFactor(job) {
+  const fromJob = job.lighthouse_form_factor || job.device_profile;
+  return fromJob === 'mobile' ? 'mobile' : 'desktop';
+}
+
+function shouldCollectMobileHeuristics(job) {
+  return job.device_profile === 'mobile';
+}
+
+async function collectMobileHeuristics(page) {
+  return page.evaluate(() => {
+    const viewport = document.querySelector('meta[name="viewport"]');
+    const viewport_meta_ok = Boolean(
+      viewport && /width\s*=/i.test(viewport.getAttribute('content') || ''),
+    );
+    const horizontal_scroll = document.documentElement.scrollWidth > window.innerWidth;
+    const text_too_small_count = [...document.querySelectorAll('body *')]
+      .filter((el) => {
+        const style = window.getComputedStyle(el);
+        const size = parseFloat(style.fontSize || '0');
+        return size > 0 && size < 12;
+      }).length;
+    const tap_target_issues = [...document.querySelectorAll('a, button')]
+      .filter((el) => {
+        const rect = el.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && (rect.width < 48 || rect.height < 48);
+      }).length;
+    return {
+      viewport_meta_ok,
+      horizontal_scroll,
+      text_too_small_count,
+      tap_target_issues,
+    };
+  });
+}
+
 async function installWebVitalsCollection(page) {
   await page.addInitScript({ path: WEB_VITALS_IIFE });
   await page.addInitScript(() => {
@@ -94,30 +130,9 @@ export async function collectPageMetrics(page, job) {
 
   const web_vitals = await collectWebVitals(page, job);
 
-  const mobile_heuristics = await page.evaluate(() => {
-    const viewport = document.querySelector('meta[name="viewport"]');
-    const viewport_meta_ok = Boolean(
-      viewport && /width\s*=/i.test(viewport.getAttribute('content') || ''),
-    );
-    const horizontal_scroll = document.documentElement.scrollWidth > window.innerWidth;
-    const text_too_small_count = [...document.querySelectorAll('body *')]
-      .filter((el) => {
-        const style = window.getComputedStyle(el);
-        const size = parseFloat(style.fontSize || '0');
-        return size > 0 && size < 12;
-      }).length;
-    const tap_target_issues = [...document.querySelectorAll('a, button')]
-      .filter((el) => {
-        const rect = el.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0 && (rect.width < 48 || rect.height < 48);
-      }).length;
-    return {
-      viewport_meta_ok,
-      horizontal_scroll,
-      text_too_small_count,
-      tap_target_issues,
-    };
-  });
+  const mobile_heuristics = shouldCollectMobileHeuristics(job)
+    ? await collectMobileHeuristics(page)
+    : null;
 
   const render_hash = await page
     .evaluate(() => {
@@ -163,6 +178,9 @@ export async function collectPageMetrics(page, job) {
 async function runLighthouse(url, job) {
   const chrome = await launchChrome({ chromeFlags: ['--headless'] });
   try {
+    const formFactor = resolveLighthouseFormFactor(job);
+    const width = job.viewport?.width ?? (formFactor === 'mobile' ? 390 : 1350);
+    const height = job.viewport?.height ?? (formFactor === 'mobile' ? 844 : 940);
     const options = {
       logLevel: 'error',
       output: 'json',
@@ -171,6 +189,16 @@ async function runLighthouse(url, job) {
           ? job.lighthouse_categories
           : DEFAULT_LIGHTHOUSE_CATEGORIES,
       port: chrome.port,
+      settings: {
+        formFactor,
+        screenEmulation: {
+          mobile: formFactor === 'mobile',
+          width,
+          height,
+          deviceScaleFactor: formFactor === 'mobile' ? 2 : 1,
+          disabled: false,
+        },
+      },
     };
     const runnerResult = await lighthouse(url, options);
     const cats = runnerResult.lhr.categories;

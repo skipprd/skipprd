@@ -7,27 +7,39 @@ const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 
 let browser;
 
+const CHROMIUM_ARGS = [
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--disable-dev-shm-usage',
+  '--disable-gpu',
+  '--disable-gpu-compositing',
+  '--disable-software-rasterizer',
+  '--single-process',
+];
+
 async function ensureBrowser() {
   if (!browser) {
     browser = await chromium.launch({
       headless: true,
       executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH || undefined,
+      args: CHROMIUM_ARGS,
     });
   }
   return browser;
 }
 
 async function runJob(job) {
-  const browserInstance = await ensureBrowser();
-  const context = await browserInstance.newContext({
-    viewport: {
-      width: job.viewport.width,
-      height: job.viewport.height,
-    },
-    userAgent: job.user_agent || undefined,
-  });
-  const page = await context.newPage();
+  let context;
   try {
+    const browserInstance = await ensureBrowser();
+    context = await browserInstance.newContext({
+      viewport: {
+        width: job.viewport.width,
+        height: job.viewport.height,
+      },
+      userAgent: job.user_agent || undefined,
+    });
+    const page = await context.newPage();
     const metrics = await collectPageMetrics(page, job);
     const prior = job.prior_checkpoint;
     const unchanged =
@@ -58,12 +70,14 @@ async function runJob(job) {
       job_id: job.job_id,
       ok: false,
       error: {
-        code: 'NAVIGATION_TIMEOUT',
+        code: 'WORKER_ERROR',
         message: String(err?.message || err),
       },
     };
   } finally {
-    await context.close();
+    if (context) {
+      await context.close().catch(() => {});
+    }
   }
 }
 
@@ -90,6 +104,14 @@ rl.on('line', (line) => {
     }
     const result = await runJob(job);
     process.stdout.write(`${JSON.stringify(result)}\n`);
+  }).catch((err) => {
+    process.stdout.write(
+      `${JSON.stringify({
+        job_id: 'unknown',
+        ok: false,
+        error: { code: 'WORKER_ERROR', message: String(err?.message || err) },
+      })}\n`,
+    );
   });
 });
 
