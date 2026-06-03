@@ -1171,6 +1171,35 @@ enum SourceKind {
         #[arg(long)]
         user_agent: Option<String>,
     },
+    /// App Store search rank tracking via the public iTunes Search API.
+    AppleAppStoreSerp {
+        #[arg(long)]
+        app_id: Option<String>,
+        #[arg(long)]
+        bundle_id: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        target_aliases: Option<Vec<String>>,
+        #[arg(long, value_delimiter = ',')]
+        keywords: Option<Vec<String>>,
+        #[arg(long, value_delimiter = ',')]
+        storefronts: Option<Vec<String>>,
+        #[arg(long)]
+        entity: Option<String>,
+        #[arg(long)]
+        max_depth: Option<u32>,
+        #[arg(long)]
+        min_query_interval_ms: Option<u64>,
+        #[arg(long)]
+        max_queries_per_run: Option<u32>,
+        #[arg(long)]
+        stop_after_first_target_match: Option<bool>,
+        #[arg(long)]
+        capture_results: Option<bool>,
+        #[arg(long)]
+        force_refresh_today: Option<bool>,
+        #[arg(long)]
+        user_agent: Option<String>,
+    },
     /// Apple Search Ads source (Campaign Management API v5 daily reports).
     AppleSearchAds {
         #[arg(long)]
@@ -1987,6 +2016,7 @@ const DATA_SOURCE_RUNTIME_PLUGIN_KEYS: &[&str] = &[
     "SiteQuality",
     "AiCitations",
     "GoogleSerpRanks",
+    "AppleAppStoreSerp",
     "S3",
     "File",
     "Mssql",
@@ -2231,6 +2261,51 @@ fn yaml_google_serp_targets(
     (!targets.is_empty()).then_some(targets)
 }
 
+fn yaml_apple_app_store_targets(
+    map: &serde_yaml::Mapping,
+    key: &str,
+) -> Option<Vec<crate::public_config::AppleAppStoreTargetConfig>> {
+    let value = map.get(yaml_key(key))?;
+    let seq = value.as_sequence()?;
+    let mut targets = Vec::new();
+    for entry in seq {
+        let mapping = entry.as_mapping()?;
+        let app_id = mapping
+            .get(yaml_key("app_id"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?
+            .to_string();
+        let bundle_id = mapping
+            .get(yaml_key("bundle_id"))
+            .and_then(|v| v.as_str())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        let aliases = mapping
+            .get(yaml_key("aliases"))
+            .and_then(|v| v.as_sequence())
+            .map(|items| {
+                items
+                    .iter()
+                    .filter_map(|item| {
+                        item.as_str()
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                            .map(str::to_string)
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        targets.push(crate::public_config::AppleAppStoreTargetConfig {
+            app_id,
+            bundle_id,
+            aliases,
+        });
+    }
+    (!targets.is_empty()).then_some(targets)
+}
+
 fn yaml_bool(map: &serde_yaml::Mapping, key: &str) -> Option<bool> {
     map.get(yaml_key(key)).and_then(|value| {
         value.as_bool().or_else(|| {
@@ -2451,6 +2526,19 @@ fn source_config_from_data_source(
             navigation_timeout_ms: yaml_u32(plugin_cfg, "navigation_timeout_ms"),
             worker_node_path: yaml_str(plugin_cfg, "worker_node_path"),
             playwright_executable_path: yaml_str(plugin_cfg, "playwright_executable_path"),
+            user_agent: yaml_str(plugin_cfg, "user_agent"),
+        }),
+        "AppleAppStoreSerp" => Ok(SourceConfig::AppleAppStoreSerp {
+            targets: yaml_apple_app_store_targets(plugin_cfg, "targets"),
+            keywords: yaml_string_vec(plugin_cfg, "keywords"),
+            storefronts: yaml_string_vec(plugin_cfg, "storefronts"),
+            entity: yaml_str(plugin_cfg, "entity"),
+            max_depth: yaml_u32(plugin_cfg, "max_depth"),
+            min_query_interval_ms: yaml_u64(plugin_cfg, "min_query_interval_ms"),
+            max_queries_per_run: yaml_u32(plugin_cfg, "max_queries_per_run"),
+            stop_after_first_target_match: yaml_bool(plugin_cfg, "stop_after_first_target_match"),
+            capture_results: yaml_bool(plugin_cfg, "capture_results"),
+            force_refresh_today: yaml_bool(plugin_cfg, "force_refresh_today"),
             user_agent: yaml_str(plugin_cfg, "user_agent"),
         }),
         "AppleSearchAds" => Ok(SourceConfig::AppleSearchAds {
@@ -2761,6 +2849,19 @@ fn google_serp_targets_json(
     let site = target_site?;
     Some(serde_json::json!([{
         "site": site,
+        "aliases": target_aliases.unwrap_or_default(),
+    }]))
+}
+
+fn apple_app_store_targets_json(
+    app_id: Option<String>,
+    bundle_id: Option<String>,
+    target_aliases: Option<Vec<String>>,
+) -> Option<serde_json::Value> {
+    let app_id = app_id?;
+    Some(serde_json::json!([{
+        "app_id": app_id,
+        "bundle_id": bundle_id,
         "aliases": target_aliases.unwrap_or_default(),
     }]))
 }
@@ -3513,6 +3614,42 @@ fn source_plugin_and_config(kind: SourceKind) -> (&'static str, serde_json::Valu
                     "playwright_executable_path",
                     str_json(playwright_executable_path),
                 ),
+                ("user_agent", str_json(user_agent)),
+            ]),
+        ),
+        SourceKind::AppleAppStoreSerp {
+            app_id,
+            bundle_id,
+            target_aliases,
+            keywords,
+            storefronts,
+            entity,
+            max_depth,
+            min_query_interval_ms,
+            max_queries_per_run,
+            stop_after_first_target_match,
+            capture_results,
+            force_refresh_today,
+            user_agent,
+        } => (
+            "AppleAppStoreSerp",
+            json_object(vec![
+                (
+                    "targets",
+                    apple_app_store_targets_json(app_id, bundle_id, target_aliases),
+                ),
+                ("keywords", strings_json(keywords)),
+                ("storefronts", strings_json(storefronts)),
+                ("entity", str_json(entity)),
+                ("max_depth", u32_json(max_depth)),
+                ("min_query_interval_ms", u64_json(min_query_interval_ms)),
+                ("max_queries_per_run", u32_json(max_queries_per_run)),
+                (
+                    "stop_after_first_target_match",
+                    bool_json(stop_after_first_target_match),
+                ),
+                ("capture_results", bool_json(capture_results)),
+                ("force_refresh_today", bool_json(force_refresh_today)),
                 ("user_agent", str_json(user_agent)),
             ]),
         ),
@@ -4606,6 +4743,36 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         }
     }
 
+    if let SourceKind::AppleAppStoreSerp {
+        ref mut app_id,
+        ref mut keywords,
+        ref mut storefronts,
+        ref mut entity,
+        ..
+    } = &mut kind
+    {
+        if app_id.is_none() {
+            *app_id = prompt("iTunes trackId (app_id) to track");
+        }
+        if keywords.as_ref().is_none_or(|k| k.is_empty()) {
+            let raw = prompt("Keywords to track (comma-separated)");
+            *keywords = raw.map(|value| {
+                value
+                    .split(',')
+                    .map(str::trim)
+                    .filter(|item| !item.is_empty())
+                    .map(str::to_string)
+                    .collect()
+            });
+        }
+        if storefronts.as_ref().is_none_or(|s| s.is_empty()) {
+            *storefronts = Some(vec!["us".to_string()]);
+        }
+        if entity.is_none() {
+            *entity = Some("software".to_string());
+        }
+    }
+
     if let SourceKind::AiCitations {
         ref mut site,
         ref mut models,
@@ -5254,6 +5421,39 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
             playwright_executable_path,
             user_agent,
         },
+        SourceKind::AppleAppStoreSerp {
+            app_id,
+            bundle_id,
+            target_aliases,
+            keywords,
+            storefronts,
+            entity,
+            max_depth,
+            min_query_interval_ms,
+            max_queries_per_run,
+            stop_after_first_target_match,
+            capture_results,
+            force_refresh_today,
+            user_agent,
+        } => SourceConfig::AppleAppStoreSerp {
+            targets: app_id.map(|id| {
+                vec![crate::public_config::AppleAppStoreTargetConfig {
+                    app_id: id,
+                    bundle_id,
+                    aliases: target_aliases.unwrap_or_default(),
+                }]
+            }),
+            keywords,
+            storefronts,
+            entity,
+            max_depth,
+            min_query_interval_ms,
+            max_queries_per_run,
+            stop_after_first_target_match,
+            capture_results,
+            force_refresh_today,
+            user_agent,
+        },
         SourceKind::AppleSearchAds {
             org_id,
             client_id,
@@ -5430,6 +5630,7 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         SourceConfig::GooglePageSpeed { .. } => "google_pagespeed",
         SourceConfig::AiCitations { .. } => "ai_citations",
         SourceConfig::GoogleSerpRanks { .. } => "google_serp_ranks",
+        SourceConfig::AppleAppStoreSerp { .. } => "apple_app_store_serp",
         SourceConfig::SiteQuality { .. } => "site_quality",
         SourceConfig::SeoCrawl { .. } => "seo_crawl",
         SourceConfig::AppleSearchAds { .. } => "apple_search_ads",

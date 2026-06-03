@@ -1,0 +1,27 @@
+{
+  "job_id": "fixture-ok",
+  "ok": true,
+  "status": "ok",
+  "results": [
+    {
+      "position": 3,
+      "app_id": "123456789",
+      "bundle_id": "com.example.app",
+      "track_name": "Example App",
+      "artist_name": "Example Inc"
+    }
+  ],
+  "target_matches": [
+    {
+      "target_app_id": "123456789",
+      "matched_app_id": "123456789",
+      "matched_bundle_id": "com.example.app",
+      "matched_track_name": "Example App",
+      "position": 3,
+      "found": true
+    }
+  ],
+  "results_inspected": 10,
+  "search_url_hash": "sha256:fixture",
+  "error": null
+}

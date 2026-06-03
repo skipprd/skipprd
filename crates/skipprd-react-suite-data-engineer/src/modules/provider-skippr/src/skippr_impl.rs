@@ -1343,6 +1343,7 @@ fn skippr_plugin_name(kind: &str) -> String {
         "site_quality" => "SiteQuality".to_string(),
         "ai_citations" => "AiCitations".to_string(),
         "google_serp_ranks" => "GoogleSerpRanks".to_string(),
+        "apple_app_store_serp" => "AppleAppStoreSerp".to_string(),
         "seo_crawl" => "SeoCrawl".to_string(),
         "apple_search_ads" => "AppleSearchAds".to_string(),
         "dataforseo_backlinks" => "DataForSeoBacklinks".to_string(),

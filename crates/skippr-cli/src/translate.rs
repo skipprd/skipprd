@@ -1199,6 +1199,74 @@ pub fn to_internal(
                     }
                     serde_json::Value::Object(m)
                 }
+                SourceConfig::AppleAppStoreSerp {
+                    targets,
+                    keywords,
+                    storefronts,
+                    entity,
+                    max_depth,
+                    min_query_interval_ms,
+                    max_queries_per_run,
+                    stop_after_first_target_match,
+                    capture_results,
+                    force_refresh_today,
+                    user_agent,
+                } => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("kind".into(), "apple_app_store_serp".into());
+                    if let Some(v) = targets {
+                        m.insert(
+                            "targets".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
+                        if let Some(first) = m
+                            .get("targets")
+                            .and_then(|t| t.as_array())
+                            .and_then(|a| a.first())
+                        {
+                            if let Some(app_id) = first.get("app_id").and_then(|s| s.as_str()) {
+                                m.insert("name".into(), format!("App Store SERP {app_id}").into());
+                            }
+                        }
+                    }
+                    if let Some(v) = keywords {
+                        m.insert(
+                            "keywords".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
+                    }
+                    if let Some(v) = storefronts {
+                        m.insert(
+                            "storefronts".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
+                    }
+                    if let Some(v) = entity {
+                        m.insert("entity".into(), v.clone().into());
+                    }
+                    if let Some(v) = max_depth {
+                        m.insert("max_depth".into(), (*v).into());
+                    }
+                    if let Some(v) = min_query_interval_ms {
+                        m.insert("min_query_interval_ms".into(), (*v).into());
+                    }
+                    if let Some(v) = max_queries_per_run {
+                        m.insert("max_queries_per_run".into(), (*v).into());
+                    }
+                    if let Some(v) = stop_after_first_target_match {
+                        m.insert("stop_after_first_target_match".into(), (*v).into());
+                    }
+                    if let Some(v) = capture_results {
+                        m.insert("capture_results".into(), (*v).into());
+                    }
+                    if let Some(v) = force_refresh_today {
+                        m.insert("force_refresh_today".into(), (*v).into());
+                    }
+                    if let Some(v) = user_agent {
+                        m.insert("user_agent".into(), v.clone().into());
+                    }
+                    serde_json::Value::Object(m)
+                }
                 SourceConfig::AiCitations {
                     site,
                     brand_names,
@@ -2612,6 +2680,40 @@ mod tests {
         assert_eq!(input["country"], "uk");
         assert_eq!(input["max_depth"], 30);
         assert_eq!(input["keywords"][0], "best widgets");
+    }
+
+    #[test]
+    fn translate_apple_app_store_serp_source() {
+        let cfg = make_cfg(
+            WarehouseConfig::Athena {
+                workgroup: None,
+                region: Some("us-east-1".into()),
+                result_s3: None,
+                schema: Some("seo".into()),
+            },
+            SourceConfig::AppleAppStoreSerp {
+                targets: Some(vec![crate::public_config::AppleAppStoreTargetConfig {
+                    app_id: "123456789".into(),
+                    bundle_id: Some("com.example.app".into()),
+                    aliases: vec![],
+                }]),
+                keywords: Some(vec!["photo editor".into()]),
+                storefronts: Some(vec!["us".into(), "gb".into()]),
+                entity: Some("software".into()),
+                max_depth: Some(50),
+                min_query_interval_ms: Some(3_000),
+                max_queries_per_run: Some(20),
+                stop_after_first_target_match: Some(true),
+                capture_results: Some(false),
+                force_refresh_today: Some(false),
+                user_agent: None,
+            },
+        );
+        let input = el_input(&cfg);
+        assert_eq!(input["kind"], "apple_app_store_serp");
+        assert_eq!(input["storefronts"][0], "us");
+        assert_eq!(input["max_depth"], 50);
+        assert_eq!(input["keywords"][0], "photo editor");
     }
 
     #[test]

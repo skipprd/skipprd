@@ -91,6 +91,7 @@ nav:
                   - Google Analytics (GA4): connectors/inputs/google_analytics.md
                   - Google Search Console: connectors/inputs/google_search_console.md
                   - Google SERP Ranks: connectors/inputs/google_serp_ranks.md
+                  - Apple App Store SERP: connectors/inputs/apple_app_store_serp.md
                   - HTTP Client: connectors/inputs/http_client.md
                   - HTTP Server: connectors/inputs/http_server.md
               - Other:

@@ -1,0 +1,27 @@
+{
+  "job_id": "fixture-not-found",
+  "ok": true,
+  "status": "ok",
+  "results": [
+    {
+      "position": 1,
+      "app_id": "111111111",
+      "bundle_id": "com.competitor.app",
+      "track_name": "Competitor",
+      "artist_name": "Other Dev"
+    }
+  ],
+  "target_matches": [
+    {
+      "target_app_id": "123456789",
+      "matched_app_id": null,
+      "matched_bundle_id": null,
+      "matched_track_name": null,
+      "position": null,
+      "found": false
+    }
+  ],
+  "results_inspected": 1,
+  "search_url_hash": "sha256:fixture-not-found",
+  "error": null
+}

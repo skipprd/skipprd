@@ -226,6 +226,15 @@ pub struct GoogleSerpTargetConfig {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AppleAppStoreTargetConfig {
+    pub app_id: String,
+    #[serde(default)]
+    pub bundle_id: Option<String>,
+    #[serde(default)]
+    pub aliases: Vec<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SourceConfig {
     Mssql {
@@ -617,6 +626,31 @@ pub enum SourceConfig {
         #[serde(default)]
         user_agent: Option<String>,
     },
+    #[serde(rename = "apple_app_store_serp")]
+    AppleAppStoreSerp {
+        #[serde(default)]
+        targets: Option<Vec<AppleAppStoreTargetConfig>>,
+        #[serde(default)]
+        keywords: Option<Vec<String>>,
+        #[serde(default)]
+        storefronts: Option<Vec<String>>,
+        #[serde(default)]
+        entity: Option<String>,
+        #[serde(default)]
+        max_depth: Option<u32>,
+        #[serde(default)]
+        min_query_interval_ms: Option<u64>,
+        #[serde(default)]
+        max_queries_per_run: Option<u32>,
+        #[serde(default)]
+        stop_after_first_target_match: Option<bool>,
+        #[serde(default)]
+        capture_results: Option<bool>,
+        #[serde(default)]
+        force_refresh_today: Option<bool>,
+        #[serde(default)]
+        user_agent: Option<String>,
+    },
     #[serde(rename = "ai_citations")]
     AiCitations {
         #[serde(default)]
@@ -976,6 +1010,7 @@ impl SkipprProjectConfig {
             Some(SourceConfig::GooglePageSpeed { .. }) => Some("google_pagespeed"),
             Some(SourceConfig::SeoCrawl { .. }) => Some("seo_crawl"),
             Some(SourceConfig::GoogleSerpRanks { .. }) => Some("google_serp_ranks"),
+            Some(SourceConfig::AppleAppStoreSerp { .. }) => Some("apple_app_store_serp"),
             Some(SourceConfig::AiCitations { .. }) => Some("ai_citations"),
             Some(SourceConfig::SiteQuality { .. }) => Some("site_quality"),
             Some(SourceConfig::AppleSearchAds { .. }) => Some("apple_search_ads"),

@@ -1,0 +1,10 @@
+{
+  "job_id": "fixture-error",
+  "ok": false,
+  "status": "error",
+  "results": [],
+  "target_matches": [],
+  "results_inspected": 0,
+  "search_url_hash": "sha256:fixture-error",
+  "error": { "code": "HTTP_ERROR", "status": 503 }
+}

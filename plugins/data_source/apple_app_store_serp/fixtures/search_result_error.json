@@ -1,0 +1,23 @@
+{
+  "job_id": "fixture-error",
+  "ok": false,
+  "status": "error",
+  "blocked_reason": null,
+  "app_results": [],
+  "target_matches": [
+    {
+      "target_app_id": "123456789",
+      "matched_app_id": null,
+      "matched_bundle_id": null,
+      "matched_track_name": null,
+      "position": null,
+      "found": false
+    }
+  ],
+  "results_inspected": 0,
+  "search_url_hash": "sha256:fixture",
+  "error": {
+    "code": "ITUNES_HTTP_ERROR",
+    "message": "simulated error"
+  }
+}

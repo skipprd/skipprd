@@ -1,0 +1,20 @@
+{
+  "job_id": "fixture-not-found",
+  "ok": true,
+  "status": "ok",
+  "blocked_reason": null,
+  "app_results": [],
+  "target_matches": [
+    {
+      "target_app_id": "123456789",
+      "matched_app_id": null,
+      "matched_bundle_id": null,
+      "matched_track_name": null,
+      "position": null,
+      "found": false
+    }
+  ],
+  "results_inspected": 10,
+  "search_url_hash": "sha256:fixture",
+  "error": null
+}
