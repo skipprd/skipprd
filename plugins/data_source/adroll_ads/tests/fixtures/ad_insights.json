@@ -1,0 +1,17 @@
+{
+  "data": [
+    {
+      "date_start": "2024-01-01",
+      "date_stop": "2024-01-01",
+      "account_id": "123456789",
+      "campaign_id": "120330000000001",
+      "adset_id": "120330000000002",
+      "ad_id": "120330000000003",
+      "ad_name": "Carousel - Spring",
+      "impressions": "900",
+      "clicks": "25",
+      "spend": "8.75"
+    }
+  ],
+  "paging": {}
+}

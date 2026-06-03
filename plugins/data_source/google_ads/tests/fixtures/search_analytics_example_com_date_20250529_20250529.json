@@ -1,0 +1,11 @@
+{
+  "rows": [
+    {
+      "keys": ["2025-05-29"],
+      "clicks": 42,
+      "impressions": 1000,
+      "ctr": 0.042,
+      "position": 8.5
+    }
+  ]
+}

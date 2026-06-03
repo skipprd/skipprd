@@ -12359,6 +12359,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippr-plugin-data-source-adroll-ads"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "skippr-plugin-shared-api-source",
+ "skippr-runtime-sdk",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "skippr-plugin-data-source-ai-citations"
 version = "0.1.0"
 dependencies = [
@@ -12589,6 +12605,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippr-plugin-data-source-google-ads"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "skippr-plugin-shared-api-source",
+ "skippr-runtime-sdk",
+ "tokio",
+ "tracing",
+ "urlencoding",
+]
+
+[[package]]
 name = "skippr-plugin-data-source-google-analytics"
 version = "0.1.0"
 dependencies = [
@@ -12718,6 +12751,38 @@ dependencies = [
  "datafusion 50.3.0",
  "serde",
  "serde_derive",
+ "skippr-runtime-sdk",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-linkedin-ads"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "skippr-plugin-shared-api-source",
+ "skippr-runtime-sdk",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-meta-ads"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "skippr-plugin-shared-api-source",
  "skippr-runtime-sdk",
  "tokio",
  "tracing",
@@ -12953,7 +13018,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-site-security"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "arrow 56.2.0",
  "async-trait",
@@ -13065,6 +13130,22 @@ dependencies = [
  "tracing",
  "tungstenite",
  "url",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-x-ads"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "reqwest 0.11.27",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "skippr-plugin-shared-api-source",
+ "skippr-runtime-sdk",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

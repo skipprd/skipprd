@@ -52,7 +52,7 @@ struct MetaNamespaceCheckpoint {
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct DataSourceMetaInstagramAdsPluginConfig {
+pub struct DataSourceLinkedInAdsPluginConfig {
     pub ad_account_id: String,
     #[serde(default)]
     pub access_token: Option<String>,
@@ -94,19 +94,19 @@ fn default_processing_lag_days() -> u32 {
 }
 
 fn default_instagram_filter() -> bool {
-    true
+    false
 }
 
-pub struct DataSourceMetaInstagramAdsPlugin {
-    config: DataSourceMetaInstagramAdsPluginConfig,
+pub struct DataSourceLinkedInAdsPlugin {
+    config: DataSourceLinkedInAdsPluginConfig,
     http: RetryableHttpClient,
     static_auth: Option<StaticBearerAuth>,
     oauth: Option<OAuth2RefreshTokenAuth>,
     ad_account_id: String,
 }
 
-impl DataSourceMetaInstagramAdsPlugin {
-    pub fn new(config: DataSourceMetaInstagramAdsPluginConfig) -> Result<Self, std::io::Error> {
+impl DataSourceLinkedInAdsPlugin {
+    pub fn new(config: DataSourceLinkedInAdsPluginConfig) -> Result<Self, std::io::Error> {
         config.validate()?;
         let ad_account_id = normalize_ad_account_id(&config.ad_account_id);
         let (static_auth, oauth) = Self::build_auth(&config)?;
@@ -121,18 +121,18 @@ impl DataSourceMetaInstagramAdsPlugin {
     }
 
     fn build_auth(
-        config: &DataSourceMetaInstagramAdsPluginConfig,
+        config: &DataSourceLinkedInAdsPluginConfig,
     ) -> Result<(Option<StaticBearerAuth>, Option<OAuth2RefreshTokenAuth>), std::io::Error> {
         if let Some(token) = config.access_token.as_deref().filter(|t| !t.trim().is_empty()) {
             return Ok((Some(StaticBearerAuth::new(token.trim())), None));
         }
-        if std::env::var("SKIPPR_META_INSTAGRAM_ADS_FIXTURE_DIR")
+        if std::env::var("SKIPPR_LINKEDIN_ADS_FIXTURE_DIR")
             .map(|d| !d.trim().is_empty())
             .unwrap_or(false)
         {
             return Ok((Some(StaticBearerAuth::new("fixture")), None));
         }
-        if let Ok(token) = std::env::var("META_INSTAGRAM_ADS_ACCESS_TOKEN") {
+        if let Ok(token) = std::env::var("LINKEDIN_ADS_ACCESS_TOKEN") {
             if !token.trim().is_empty() {
                 return Ok((Some(StaticBearerAuth::new(token.trim())), None));
             }
@@ -166,7 +166,7 @@ impl DataSourceMetaInstagramAdsPlugin {
         }
         Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "Meta Instagram Ads requires access_token, META_INSTAGRAM_ADS_ACCESS_TOKEN, or \
+            "Meta Instagram Ads requires access_token, LINKEDIN_ADS_ACCESS_TOKEN, or \
              oauth_token_url + oauth_client_id + oauth_client_secret + oauth_refresh_token",
         ))
     }
@@ -326,7 +326,7 @@ impl DataSourceMetaInstagramAdsPlugin {
                 data: payload,
                 bytes,
                 source_uri: format!(
-                    "meta-instagram-ads://act_{}/insights",
+                    "linkedin-ads://act_{}/insights",
                     self.ad_account_id
                 ),
                 namespace: Some(stream.namespace.to_string()),
@@ -364,7 +364,7 @@ fn strip_bearer_token(header: &str) -> String {
         .to_string()
 }
 
-impl DataSourceMetaInstagramAdsPluginConfig {
+impl DataSourceLinkedInAdsPluginConfig {
     pub fn validate(&self) -> Result<(), std::io::Error> {
         if normalize_ad_account_id(&self.ad_account_id).is_empty() {
             return Err(std::io::Error::new(
@@ -482,7 +482,7 @@ fn group_rows_by_date(rows: Vec<serde_json::Value>) -> HashMap<String, Vec<serde
 }
 
 #[async_trait]
-impl DataSource for DataSourceMetaInstagramAdsPlugin {
+impl DataSource for DataSourceLinkedInAdsPlugin {
     fn execution_contract(&self) -> SourceExecutionContract {
         SourceExecutionContract::stream(SourceOnceContract::Finite)
     }
@@ -597,8 +597,8 @@ mod tests {
         ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn test_config() -> DataSourceMetaInstagramAdsPluginConfig {
-        DataSourceMetaInstagramAdsPluginConfig {
+    fn test_config() -> DataSourceLinkedInAdsPluginConfig {
+        DataSourceLinkedInAdsPluginConfig {
             ad_account_id: "act_123456789".into(),
             access_token: Some("token".into()),
             oauth_token_url: None,
@@ -611,7 +611,7 @@ mod tests {
             lookback_days: 3,
             stream_profile: StreamProfile::Full,
             processing_lag_days: 1,
-            instagram_filter: true,
+            instagram_filter: false,
             streams: None,
         }
     }
@@ -630,7 +630,7 @@ mod tests {
 
     #[test]
     fn discover_mode_uses_minimal_streams_only() {
-        let plugin = DataSourceMetaInstagramAdsPlugin::new(test_config()).unwrap();
+        let plugin = DataSourceLinkedInAdsPlugin::new(test_config()).unwrap();
         let discover_streams = plugin.streams_for_run(true);
         assert_eq!(discover_streams.len(), 1);
         assert_eq!(plugin.streams_for_run(false).len(), FULL_STREAM_COUNT);
@@ -638,7 +638,7 @@ mod tests {
 
     #[test]
     fn namespace_contracts_use_replace_partition() {
-        let plugin = DataSourceMetaInstagramAdsPlugin::new(test_config()).unwrap();
+        let plugin = DataSourceLinkedInAdsPlugin::new(test_config()).unwrap();
         let contracts = plugin.source_namespace_contracts();
         assert_eq!(contracts.len(), FULL_STREAM_COUNT);
         assert!(contracts
@@ -672,12 +672,12 @@ mod tests {
     fn parses_campaign_adset_ad_and_placement_fixtures() {
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
         for (file, namespace) in [
-            ("campaign_insights.json", "meta_instagram_ads.campaign_daily"),
-            ("adset_insights.json", "meta_instagram_ads.adset_daily"),
-            ("ad_insights.json", "meta_instagram_ads.ad_daily"),
+            ("campaign_insights.json", "linkedin_ads.campaign_daily"),
+            ("adset_insights.json", "linkedin_ads.adset_daily"),
+            ("ad_insights.json", "linkedin_ads.ad_daily"),
             (
                 "campaign_placement_insights.json",
-                "meta_instagram_ads.campaign_placement_daily",
+                "linkedin_ads.campaign_placement_daily",
             ),
         ] {
             let body: serde_json::Value = serde_json::from_str(
@@ -701,7 +701,7 @@ mod tests {
             .into_iter()
             .find(|s| s.placement_breakdown)
             .unwrap();
-        let contract = DataSourceMetaInstagramAdsPlugin::namespace_contract(stream);
+        let contract = DataSourceLinkedInAdsPlugin::namespace_contract(stream);
         let pk: Vec<String> = contract.primary_key.iter().map(|f| f.dotted()).collect();
         assert!(pk.contains(&"publisher_platform".to_string()));
         assert!(pk.contains(&"platform_position".to_string()));
@@ -711,8 +711,10 @@ mod tests {
     fn loads_fixture_dir_for_account_rows() {
         let _lock = env_test_lock();
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
-        std::env::set_var("SKIPPR_META_INSTAGRAM_ADS_FIXTURE_DIR", fixture_dir);
-        let plugin = DataSourceMetaInstagramAdsPlugin::new(test_config()).unwrap();
+        std::env::set_var("SKIPPR_LINKEDIN_ADS_FIXTURE_DIR", fixture_dir);
+        let mut cfg = test_config();
+        cfg.access_token = None;
+        let plugin = DataSourceLinkedInAdsPlugin::new(cfg).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let api = plugin.api_client();
         let stream = streams_for_profile(StreamProfile::Minimal)[0];
@@ -726,7 +728,7 @@ mod tests {
             })
             .expect("fixture sync");
         assert!(!rows.is_empty());
-        std::env::remove_var("SKIPPR_META_INSTAGRAM_ADS_FIXTURE_DIR");
+        std::env::remove_var("SKIPPR_LINKEDIN_ADS_FIXTURE_DIR");
     }
 
     #[test]
@@ -763,7 +765,7 @@ mod tests {
 
     #[test]
     fn config_defaults_and_validation_succeed() {
-        let cfg: DataSourceMetaInstagramAdsPluginConfig =
+        let cfg: DataSourceLinkedInAdsPluginConfig =
             serde_json::from_value(serde_json::json!({
                 "ad_account_id": "act_123",
                 "access_token": "token",
@@ -771,14 +773,14 @@ mod tests {
             }))
             .expect("deserialize");
         assert_eq!(cfg.stream_profile, StreamProfile::Full);
-        assert!(cfg.instagram_filter);
+        assert!(!cfg.instagram_filter);
         cfg.validate().expect("valid ad_account_id");
-        DataSourceMetaInstagramAdsPlugin::new(cfg).expect("plugin init");
+        DataSourceLinkedInAdsPlugin::new(cfg).expect("plugin init");
     }
 
     #[test]
     fn namespace_contracts_use_mutable_report_semantics() {
-        let plugin = DataSourceMetaInstagramAdsPlugin::new(test_config()).unwrap();
+        let plugin = DataSourceLinkedInAdsPlugin::new(test_config()).unwrap();
         let contracts = plugin.source_namespace_contracts();
         assert!(contracts.iter().all(|c| {
             c.semantics == Some(SourceSemantics::MutableReport)
@@ -789,7 +791,7 @@ mod tests {
     #[test]
     fn contract_primary_key_includes_level_dimensions() {
         for stream in CURATED_STREAMS {
-            let contract = DataSourceMetaInstagramAdsPlugin::namespace_contract(stream);
+            let contract = DataSourceLinkedInAdsPlugin::namespace_contract(stream);
             let pk: Vec<String> = contract.primary_key.iter().map(|f| f.dotted()).collect();
             assert!(pk.contains(&"ad_account_id".to_string()));
             assert!(pk.contains(&"date".to_string()));
@@ -810,7 +812,7 @@ mod tests {
 
     #[test]
     fn static_bearer_auth_selected_when_access_token_set() {
-        let plugin = DataSourceMetaInstagramAdsPlugin::new(test_config()).unwrap();
+        let plugin = DataSourceLinkedInAdsPlugin::new(test_config()).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let token = rt.block_on(plugin.access_token()).unwrap();
         assert_eq!(token, "token");
@@ -818,7 +820,7 @@ mod tests {
 
     #[test]
     fn oauth_refresh_auth_accepted_when_fully_configured() {
-        let cfg = DataSourceMetaInstagramAdsPluginConfig {
+        let cfg = DataSourceLinkedInAdsPluginConfig {
             ad_account_id: "act_123".into(),
             access_token: None,
             oauth_token_url: Some("https://graph.facebook.com/v21.0/oauth/access_token".into()),
@@ -831,16 +833,16 @@ mod tests {
             lookback_days: 3,
             stream_profile: StreamProfile::Minimal,
             processing_lag_days: 1,
-            instagram_filter: true,
+            instagram_filter: false,
             streams: None,
         };
-        DataSourceMetaInstagramAdsPlugin::new(cfg).expect("oauth config accepted");
+        DataSourceLinkedInAdsPlugin::new(cfg).expect("oauth config accepted");
     }
 
     #[test]
     fn missing_credentials_returns_clear_error() {
         let _lock = env_test_lock();
-        let cfg = DataSourceMetaInstagramAdsPluginConfig {
+        let cfg = DataSourceLinkedInAdsPluginConfig {
             ad_account_id: "act_123".into(),
             access_token: None,
             oauth_token_url: None,
@@ -853,12 +855,12 @@ mod tests {
             lookback_days: 3,
             stream_profile: StreamProfile::Minimal,
             processing_lag_days: 1,
-            instagram_filter: true,
+            instagram_filter: false,
             streams: None,
         };
-        std::env::remove_var("SKIPPR_META_INSTAGRAM_ADS_FIXTURE_DIR");
-        std::env::remove_var("META_INSTAGRAM_ADS_ACCESS_TOKEN");
-        let err = match DataSourceMetaInstagramAdsPlugin::new(cfg) {
+        std::env::remove_var("SKIPPR_LINKEDIN_ADS_FIXTURE_DIR");
+        std::env::remove_var("LINKEDIN_ADS_ACCESS_TOKEN");
+        let err = match DataSourceLinkedInAdsPlugin::new(cfg) {
             Err(err) => err,
             Ok(_) => panic!("expected missing credentials error"),
         };
@@ -875,7 +877,7 @@ mod tests {
 
     #[test]
     fn invalid_start_date_rejected() {
-        let err = DataSourceMetaInstagramAdsPlugin::parse_date("not-a-date").unwrap_err();
+        let err = DataSourceLinkedInAdsPlugin::parse_date("not-a-date").unwrap_err();
         assert!(err.to_string().contains("invalid date"));
     }
 
@@ -883,13 +885,13 @@ mod tests {
     fn end_date_before_start_date_rejected_on_sync() {
         let _lock = env_test_lock();
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
-        std::env::set_var("SKIPPR_META_INSTAGRAM_ADS_FIXTURE_DIR", fixture_dir);
+        std::env::set_var("SKIPPR_LINKEDIN_ADS_FIXTURE_DIR", fixture_dir);
         std::env::remove_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV);
 
         let mut cfg = test_config();
         cfg.start_date = "2024-12-01".into();
         cfg.end_date = Some("2024-01-01".into());
-        let mut plugin = DataSourceMetaInstagramAdsPlugin::new(cfg).unwrap();
+        let mut plugin = DataSourceLinkedInAdsPlugin::new(cfg).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = Arc::new(RecordingSyncContext::default());
         let err = rt
@@ -897,7 +899,7 @@ mod tests {
             .expect_err("end before start");
         assert!(err.to_string().contains("before start date"));
 
-        std::env::remove_var("SKIPPR_META_INSTAGRAM_ADS_FIXTURE_DIR");
+        std::env::remove_var("SKIPPR_LINKEDIN_ADS_FIXTURE_DIR");
     }
 
     #[test]
@@ -973,7 +975,7 @@ mod tests {
     fn sync_mode_stores_checkpoints() {
         let _lock = env_test_lock();
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
-        std::env::set_var("SKIPPR_META_INSTAGRAM_ADS_FIXTURE_DIR", fixture_dir);
+        std::env::set_var("SKIPPR_LINKEDIN_ADS_FIXTURE_DIR", fixture_dir);
         std::env::remove_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV);
 
         let mut cfg = test_config();
@@ -981,7 +983,7 @@ mod tests {
         cfg.access_token = None;
         cfg.start_date = "2024-01-01".into();
         cfg.end_date = Some("2024-01-01".into());
-        let mut plugin = DataSourceMetaInstagramAdsPlugin::new(cfg).unwrap();
+        let mut plugin = DataSourceLinkedInAdsPlugin::new(cfg).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = Arc::new(RecordingSyncContext::default());
         rt.block_on(plugin.sync(ctx.clone())).expect("sync");
@@ -990,13 +992,13 @@ mod tests {
             "sync should persist checkpoints per namespace/day"
         );
 
-        std::env::remove_var("SKIPPR_META_INSTAGRAM_ADS_FIXTURE_DIR");
+        std::env::remove_var("SKIPPR_LINKEDIN_ADS_FIXTURE_DIR");
     }
 
     #[test]
     fn oauth_partial_empty_fields_rejected() {
         let _lock = env_test_lock();
-        std::env::remove_var("SKIPPR_META_INSTAGRAM_ADS_FIXTURE_DIR");
+        std::env::remove_var("SKIPPR_LINKEDIN_ADS_FIXTURE_DIR");
         for key in [
             "META_ADS_ACCESS_TOKEN",
             "META_INSTAGRAM_ADS_ACCESS_TOKEN",
@@ -1006,7 +1008,7 @@ mod tests {
         ] {
             std::env::remove_var(key);
         }
-        let cfg = DataSourceMetaInstagramAdsPluginConfig {
+        let cfg = DataSourceLinkedInAdsPluginConfig {
             ad_account_id: "act_123".into(),
             access_token: None,
             oauth_token_url: Some("https://graph.facebook.com/v21.0/oauth/access_token".into()),
@@ -1019,10 +1021,10 @@ mod tests {
             lookback_days: 3,
             stream_profile: StreamProfile::Minimal,
             processing_lag_days: 1,
-            instagram_filter: true,
+            instagram_filter: false,
             streams: None,
         };
-        let err = match DataSourceMetaInstagramAdsPlugin::new(cfg) {
+        let err = match DataSourceLinkedInAdsPlugin::new(cfg) {
             Ok(_) => panic!("expected OAuth config error"),
             Err(e) => e,
         };
@@ -1033,14 +1035,15 @@ mod tests {
     fn discover_sync_does_not_store_checkpoints() {
         let _lock = env_test_lock();
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
-        std::env::set_var("SKIPPR_META_INSTAGRAM_ADS_FIXTURE_DIR", fixture_dir);
+        std::env::set_var("SKIPPR_LINKEDIN_ADS_FIXTURE_DIR", fixture_dir);
         std::env::set_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV, "discover");
 
         let mut cfg = test_config();
+        cfg.access_token = None;
         cfg.stream_profile = StreamProfile::Minimal;
         cfg.start_date = "2024-01-01".into();
         cfg.end_date = Some("2024-01-01".into());
-        let mut plugin = DataSourceMetaInstagramAdsPlugin::new(cfg).unwrap();
+        let mut plugin = DataSourceLinkedInAdsPlugin::new(cfg).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = Arc::new(RecordingSyncContext::default());
         rt.block_on(plugin.sync(ctx.clone())).expect("discover sync");
@@ -1049,7 +1052,7 @@ mod tests {
             "discover must not persist checkpoints"
         );
 
-        std::env::remove_var("SKIPPR_META_INSTAGRAM_ADS_FIXTURE_DIR");
+        std::env::remove_var("SKIPPR_LINKEDIN_ADS_FIXTURE_DIR");
         std::env::remove_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV);
     }
 
