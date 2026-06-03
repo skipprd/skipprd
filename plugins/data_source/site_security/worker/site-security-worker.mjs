@@ -75,12 +75,10 @@ function headerValue(headers, name) {
 function buildResponseHeaders(headers) {
   const csp = headerValue(headers, 'content-security-policy');
   const xfo = headerValue(headers, 'x-frame-options');
-  const hasFrameAncestors =
-    typeof csp === 'string' && /frame-ancestors/i.test(csp);
   return {
     has_csp: headerPresent(headers, 'content-security-policy'),
     has_hsts: headerPresent(headers, 'strict-transport-security'),
-    has_x_frame_options: headerPresent(headers, 'x-frame-options') || hasFrameAncestors,
+    has_x_frame_options: headerPresent(headers, 'x-frame-options'),
     has_x_content_type_options: headerPresent(headers, 'x-content-type-options'),
     csp,
     hsts: headerValue(headers, 'strict-transport-security'),
@@ -124,6 +122,13 @@ async function collectFromPage(page, context, job) {
     waitUntil: job.wait_until || 'load',
     timeout: job.navigation_timeout_ms || 60000,
   });
+  try {
+    await page.waitForLoadState('networkidle', {
+      timeout: Math.min(job.navigation_timeout_ms || 60000, 3000),
+    });
+  } catch {
+    // Keep the scan bounded; this wait only gives late subresource requests a chance to surface.
+  }
   page.off('request', onRequest);
 
   const finalUrl = page.url();
@@ -139,7 +144,7 @@ async function collectFromPage(page, context, job) {
     path: c.path || '/',
     secure: Boolean(c.secure),
     http_only: Boolean(c.httpOnly),
-    same_site: c.sameSite || 'None',
+    same_site: c.sameSite || 'Unspecified',
     value_length: (c.value || '').length,
     pii_hints: piiHints(c.name, c.value),
   }));

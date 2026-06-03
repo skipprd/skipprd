@@ -33,6 +33,22 @@ fn find_lighthouse_table_root(data_dir: &Path) -> Option<std::path::PathBuf> {
     None
 }
 
+fn path_matches_run_date(path: &Path, run_date: &str) -> bool {
+    let raw = path.to_string_lossy();
+    if raw.contains(run_date) {
+        return true;
+    }
+    let mut parts = run_date.split('-');
+    let (Some(year), Some(month), Some(day)) = (parts.next(), parts.next(), parts.next()) else {
+        return false;
+    };
+    let month_num = month.trim_start_matches('0');
+    let day_num = day.trim_start_matches('0');
+    raw.contains(&format!("year={year}"))
+        && (raw.contains(&format!("month={month}")) || raw.contains(&format!("month={month_num}")))
+        && (raw.contains(&format!("day={day}")) || raw.contains(&format!("day={day_num}")))
+}
+
 fn collect_parquet_files(dir: &Path, run_date: &str, out: &mut Vec<std::path::PathBuf>) {
     let Ok(read) = std::fs::read_dir(dir) else {
         return;
@@ -40,13 +56,10 @@ fn collect_parquet_files(dir: &Path, run_date: &str, out: &mut Vec<std::path::Pa
     for entry in read.flatten() {
         let path = entry.path();
         if path.is_dir() {
-            let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-            if name.contains(run_date) {
-                collect_parquet_files(&path, run_date, out);
-            } else {
-                collect_parquet_files(&path, run_date, out);
-            }
-        } else if path.extension().is_some_and(|e| e == "parquet") {
+            collect_parquet_files(&path, run_date, out);
+        } else if path.extension().is_some_and(|e| e == "parquet")
+            && path_matches_run_date(&path, run_date)
+        {
             out.push(path);
         }
     }
@@ -97,6 +110,28 @@ fn parquet_rows(path: &Path, site: &str) -> Vec<Value> {
     rows
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::PathBuf;
+
+    #[test]
+    fn matches_run_date_partition_path() {
+        let path = PathBuf::from(
+            "/tmp/datalake/site/site_quality_lighthouse_audit/year=2026/month=6/day=3/a.parquet",
+        );
+        assert!(path_matches_run_date(&path, "2026-06-03"));
+    }
+
+    #[test]
+    fn rejects_other_run_date_partition_path() {
+        let path = PathBuf::from(
+            "/tmp/datalake/site/site_quality_lighthouse_audit/year=2026/month=6/day=2/a.parquet",
+        );
+        assert!(!path_matches_run_date(&path, "2026-06-03"));
+    }
+}
+
 /// Load site_quality lighthouse_audit rows from local datalake parquet (prior site-quality run).
 pub fn load_lighthouse_audits(data_dir: &Path, site: &str, run_date: &str) -> Vec<Value> {
     let Some(table_root) = find_lighthouse_table_root(data_dir) else {
@@ -126,10 +161,7 @@ pub fn checks_from_lighthouse(
         let Some(id) = row.get("audit_id").and_then(|a| a.as_str()) else {
             continue;
         };
-        let score = row
-            .get("score")
-            .and_then(|s| s.as_f64())
-            .unwrap_or(1.0);
+        let score = row.get("score").and_then(|s| s.as_f64()).unwrap_or(1.0);
         by_id.insert(id.to_string(), score);
     }
 
@@ -142,7 +174,11 @@ pub fn checks_from_lighthouse(
                 "info",
                 format!("Lighthouse audit {audit_id} not failing (reused from site-quality)"),
             ),
-            Some(s) if s >= 0.9 => ("pass", "info", format!("Lighthouse {audit_id} score {s:.2}")),
+            Some(s) if s >= 0.9 => (
+                "pass",
+                "info",
+                format!("Lighthouse {audit_id} score {s:.2}"),
+            ),
             Some(s) if s >= 0.5 => (
                 "warn",
                 "warning",

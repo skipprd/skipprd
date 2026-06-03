@@ -44,8 +44,10 @@ pub async fn probe_origin(site_origin: &str) -> TlsProbeResult {
 
     match client.get(&https_url).send().await {
         Ok(resp) => {
-            out.https_reachable = resp.status().is_success() || resp.status().is_redirection();
-            out.cert_valid = resp.error_for_status_ref().is_ok() || resp.status().as_u16() < 500;
+            // reqwest/rustls only returns Ok after validating certificate expiry and hostname.
+            out.https_reachable = true;
+            out.cert_valid = true;
+            out.message = format!("https status {}", resp.status().as_u16());
         }
         Err(e) => {
             out.message = format!("https probe failed: {e}");

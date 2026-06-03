@@ -3,7 +3,9 @@ use serde_json::{json, Value};
 use crate::config::DataSourceSiteSecurityPluginConfig;
 use crate::csp::analyze_csp;
 use crate::secrets::scan_body;
-use crate::worker::{DomMetricsWire, JarCookieWire, SecurityHeaders, StorageEntryWire, WorkerJobResult};
+use crate::worker::{
+    DomMetricsWire, JarCookieWire, SecurityHeaders, StorageEntryWire, WorkerJobResult,
+};
 
 pub const NAVIGATION_TIMEOUT: &str = "NAVIGATION_TIMEOUT";
 pub const HTTP_ERROR: &str = "HTTP_ERROR";
@@ -19,6 +21,7 @@ pub const CSP_UNSAFE_EVAL: &str = "CSP_UNSAFE_EVAL";
 pub const CSP_WILDCARD_DEFAULT: &str = "CSP_WILDCARD_DEFAULT";
 pub const MISSING_HSTS: &str = "MISSING_HSTS";
 pub const HSTS_SHORT_MAX_AGE: &str = "HSTS_SHORT_MAX_AGE";
+pub const HSTS_INCLUDE_SUBDOMAINS_MISSING: &str = "HSTS_INCLUDE_SUBDOMAINS_MISSING";
 pub const HSTS_PRELOAD_MISSING: &str = "HSTS_PRELOAD_MISSING";
 pub const MISSING_X_FRAME_OPTIONS: &str = "MISSING_X_FRAME_OPTIONS";
 pub const MISSING_X_CONTENT_TYPE_OPTIONS: &str = "MISSING_X_CONTENT_TYPE_OPTIONS";
@@ -31,6 +34,7 @@ pub const LEGACY_XSS_PROTECTION: &str = "LEGACY_XSS_PROTECTION";
 pub const COOKIE_MISSING_SECURE: &str = "COOKIE_MISSING_SECURE";
 pub const COOKIE_MISSING_HTTPONLY: &str = "COOKIE_MISSING_HTTPONLY";
 pub const COOKIE_SAMESITE_NONE: &str = "COOKIE_SAMESITE_NONE";
+pub const COOKIE_SAMESITE_WEAK: &str = "COOKIE_SAMESITE_WEAK";
 pub const COOKIE_HOST_PREFIX_INVALID: &str = "COOKIE_HOST_PREFIX_INVALID";
 pub const COOKIE_BROAD_DOMAIN: &str = "COOKIE_BROAD_DOMAIN";
 pub const THIRD_PARTY_SCRIPTS_HIGH: &str = "THIRD_PARTY_SCRIPTS_HIGH";
@@ -86,6 +90,19 @@ fn hsts_max_age(hsts: Option<&str>) -> Option<u64> {
         }
     }
     None
+}
+
+fn hsts_has_directive(hsts: Option<&str>, directive: &str) -> bool {
+    let Some(raw) = hsts else {
+        return false;
+    };
+    raw.split(';')
+        .map(|part| part.trim().to_ascii_lowercase())
+        .any(|part| part == directive.to_ascii_lowercase())
+}
+
+fn samesite_is_strict_or_lax(same_site: &str) -> bool {
+    same_site.eq_ignore_ascii_case("strict") || same_site.eq_ignore_ascii_case("lax")
 }
 
 fn apply_header_checks(
@@ -188,16 +205,18 @@ fn apply_header_checks(
         ));
         if headers.has_hsts {
             let max_age = hsts_max_age(headers.hsts.as_deref());
+            let has_include_subdomains =
+                hsts_has_directive(headers.hsts.as_deref(), "includesubdomains");
             rows.push(check_row(
                 site,
                 page_url,
                 run_date,
                 HSTS_SHORT_MAX_AGE,
                 section,
-                if max_age.is_some_and(|a| a < 15_552_000) {
-                    "warn"
-                } else {
+                if max_age.is_some_and(|a| a >= 15_552_000) {
                     "pass"
+                } else {
+                    "warn"
                 },
                 "warning",
                 &format!(
@@ -207,28 +226,45 @@ fn apply_header_checks(
                         .unwrap_or_else(|| "unknown".into())
                 ),
             ));
-            let has_preload = headers
-                .hsts
-                .as_deref()
-                .is_some_and(|h| h.to_ascii_lowercase().contains("preload"));
+            rows.push(check_row(
+                site,
+                page_url,
+                run_date,
+                HSTS_INCLUDE_SUBDOMAINS_MISSING,
+                section,
+                if has_include_subdomains {
+                    "pass"
+                } else {
+                    "warn"
+                },
+                "info",
+                if has_include_subdomains {
+                    "HSTS includeSubDomains directive present"
+                } else {
+                    "HSTS missing includeSubDomains"
+                },
+            ));
+            let has_preload = hsts_has_directive(headers.hsts.as_deref(), "preload");
+            let preload_eligible =
+                max_age.is_some_and(|a| a >= 31_536_000) && has_include_subdomains && has_preload;
             rows.push(check_row(
                 site,
                 page_url,
                 run_date,
                 HSTS_PRELOAD_MISSING,
                 section,
-                if has_preload { "pass" } else { "warn" },
+                if preload_eligible { "pass" } else { "warn" },
                 "info",
-                if has_preload {
-                    "HSTS preload directive present"
+                if preload_eligible {
+                    "HSTS satisfies preload directives"
                 } else {
-                    "HSTS without preload (optional hardening)"
+                    "HSTS does not satisfy preload directives (max-age >= 31536000, includeSubDomains, preload)"
                 },
             ));
         }
     }
 
-    let frame_ok = headers.has_x_frame_options || csp_analysis.has_frame_ancestors;
+    let frame_ok = headers.has_x_frame_options || csp_analysis.frame_ancestors_restricted;
     rows.push(check_row(
         site,
         page_url,
@@ -437,6 +473,22 @@ fn apply_cookie_checks(
         },
     ));
 
+    let weak_samesite = jar.iter().any(|c| !samesite_is_strict_or_lax(&c.same_site));
+    rows.push(check_row(
+        site,
+        page_url,
+        run_date,
+        COOKIE_SAMESITE_WEAK,
+        section,
+        if weak_samesite { "warn" } else { "pass" },
+        if weak_samesite { "warning" } else { "info" },
+        if weak_samesite {
+            "Cookie(s) without SameSite Strict or Lax"
+        } else {
+            "All cookies use SameSite Strict or Lax"
+        },
+    ));
+
     let bad_host_prefix = jar.iter().any(|c| {
         (c.entry_name.starts_with("__Host-") && (!c.secure || c.path != "/"))
             || (c.entry_name.starts_with("__Secure-") && !c.secure)
@@ -473,6 +525,32 @@ fn apply_cookie_checks(
             "No overly broad cookie Domain attribute"
         },
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_hsts_directives_case_insensitively() {
+        let hsts = Some("max-age=31536000; includeSubDomains; preload");
+        assert_eq!(hsts_max_age(hsts), Some(31_536_000));
+        assert!(hsts_has_directive(hsts, "includesubdomains"));
+        assert!(hsts_has_directive(hsts, "preload"));
+    }
+
+    #[test]
+    fn hsts_unknown_max_age_is_not_accepted() {
+        assert_eq!(hsts_max_age(Some("max-age=abc; includeSubDomains")), None);
+    }
+
+    #[test]
+    fn samesite_requires_strict_or_lax() {
+        assert!(samesite_is_strict_or_lax("Strict"));
+        assert!(samesite_is_strict_or_lax("Lax"));
+        assert!(!samesite_is_strict_or_lax("None"));
+        assert!(!samesite_is_strict_or_lax(""));
+    }
 }
 
 fn apply_dom_checks(
@@ -856,7 +934,9 @@ pub fn map_issues(
     }
 
     if !jar.is_empty() {
-        apply_cookie_checks(site, page_url, run_date, jar, is_https, page_host, &mut rows);
+        apply_cookie_checks(
+            site, page_url, run_date, jar, is_https, page_host, &mut rows,
+        );
     }
 
     if let Some(dom) = &result.dom {
