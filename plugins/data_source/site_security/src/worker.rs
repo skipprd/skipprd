@@ -187,26 +187,26 @@ impl WorkerClient {
             }
         }
 
-        let mut child = Command::new(&self.node_path)
+        let playwright_executable =
+            std::env::var("PLAYWRIGHT_EXECUTABLE_PATH").unwrap_or_default();
+        let mut command = Command::new(&self.node_path);
+        command
             .arg(&self.script_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
-            .env(
-                "PLAYWRIGHT_EXECUTABLE_PATH",
-                std::env::var("PLAYWRIGHT_EXECUTABLE_PATH").unwrap_or_default(),
-            );
+            .env("PLAYWRIGHT_EXECUTABLE_PATH", &playwright_executable);
         if let Ok(path) = std::env::var("PLAYWRIGHT_BROWSERS_PATH") {
             if !path.trim().is_empty() {
-                child.env("PLAYWRIGHT_BROWSERS_PATH", path);
+                command.env("PLAYWRIGHT_BROWSERS_PATH", path);
             }
         }
         if let Ok(path) = std::env::var("LD_PRELOAD") {
             if !path.trim().is_empty() {
-                child.env("LD_PRELOAD", path);
+                command.env("LD_PRELOAD", path);
             }
         }
-        let mut child = child.spawn()?;
+        let mut child = command.spawn()?;
 
         let mut stdin = child.stdin.take().expect("stdin");
         let line = serde_json::to_string(job).map_err(std::io::Error::other)?;
