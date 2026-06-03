@@ -2515,6 +2515,7 @@ fn source_config_from_data_source(
             user_agent: yaml_str(plugin_cfg, "user_agent"),
         }),
         "SiteQuality" => Ok(SourceConfig::SiteQuality {
+            devices: None,
             site: yaml_str(plugin_cfg, "site"),
             url_mode: yaml_str(plugin_cfg, "url_mode"),
             url_list: yaml_string_vec(plugin_cfg, "url_list"),
@@ -5445,6 +5446,7 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
             respect_robots,
             skip_heavy_when_unchanged,
         } => SourceConfig::SiteQuality {
+            devices: None,
             site,
             url_mode,
             url_list,

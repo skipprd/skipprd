@@ -4,6 +4,8 @@ use crate::worker::WorkerJobResult;
 
 pub const CLS_POOR: &str = "CLS_POOR";
 pub const LCP_SLOW: &str = "LCP_SLOW";
+pub const TTFB_SLOW: &str = "TTFB_SLOW";
+pub const INP_SLOW: &str = "INP_SLOW";
 pub const MISSING_VIEWPORT: &str = "MISSING_VIEWPORT";
 pub const HORIZONTAL_SCROLL: &str = "HORIZONTAL_SCROLL";
 pub const TEXT_TOO_SMALL: &str = "TEXT_TOO_SMALL";
@@ -13,14 +15,19 @@ pub const AXE_CRITICAL: &str = "AXE_CRITICAL";
 pub const NAVIGATION_TIMEOUT: &str = "NAVIGATION_TIMEOUT";
 pub const HTTP_ERROR: &str = "HTTP_ERROR";
 
+/// Google Core Web Vitals "good" boundaries (lab).
 const CLS_THRESHOLD: f64 = 0.1;
 const LCP_SLOW_MS: f64 = 2500.0;
+const TTFB_SLOW_MS: f64 = 800.0;
+const INP_SLOW_MS: f64 = 200.0;
 const LH_PERF_LOW: f64 = 50.0;
 
 #[derive(Debug, Clone, Copy)]
 pub struct IssueThresholds {
     pub cls_poor: f64,
     pub lcp_slow_ms: f64,
+    pub ttfb_slow_ms: f64,
+    pub inp_slow_ms: f64,
     pub lh_performance_low: f64,
 }
 
@@ -29,6 +36,8 @@ impl Default for IssueThresholds {
         Self {
             cls_poor: CLS_THRESHOLD,
             lcp_slow_ms: LCP_SLOW_MS,
+            ttfb_slow_ms: TTFB_SLOW_MS,
+            inp_slow_ms: INP_SLOW_MS,
             lh_performance_low: LH_PERF_LOW,
         }
     }
@@ -153,6 +162,77 @@ pub fn map_issues(
                 "pass",
                 "info",
                 &format!("LCP {lcp:.0}ms within threshold"),
+            ));
+        }
+
+        if let Some(ttfb) = vitals.ttfb {
+            if ttfb > thresholds.ttfb_slow_ms {
+                rows.push(check_row(
+                    site,
+                    page_url,
+                    run_date,
+                    device_profile,
+                    TTFB_SLOW,
+                    "vitals",
+                    "fail",
+                    "warning",
+                    &format!(
+                        "TTFB {ttfb:.0}ms exceeds {:.0}ms",
+                        thresholds.ttfb_slow_ms
+                    ),
+                ));
+            } else {
+                rows.push(check_row(
+                    site,
+                    page_url,
+                    run_date,
+                    device_profile,
+                    TTFB_SLOW,
+                    "vitals",
+                    "pass",
+                    "info",
+                    &format!("TTFB {ttfb:.0}ms within threshold"),
+                ));
+            }
+        }
+
+        if let Some(inp) = vitals.inp {
+            if inp > thresholds.inp_slow_ms {
+                rows.push(check_row(
+                    site,
+                    page_url,
+                    run_date,
+                    device_profile,
+                    INP_SLOW,
+                    "vitals",
+                    "fail",
+                    "warning",
+                    &format!("INP {inp:.0}ms exceeds {:.0}ms", thresholds.inp_slow_ms),
+                ));
+            } else {
+                rows.push(check_row(
+                    site,
+                    page_url,
+                    run_date,
+                    device_profile,
+                    INP_SLOW,
+                    "vitals",
+                    "pass",
+                    "info",
+                    &format!("INP {inp:.0}ms within threshold"),
+                ));
+            }
+        } else {
+            rows.push(check_row(
+                site,
+                page_url,
+                run_date,
+                device_profile,
+                INP_SLOW,
+                "vitals",
+                "pass",
+                "info",
+                "INP not measured in lab run (no interaction timing)",
             ));
         }
     }
@@ -365,6 +445,53 @@ mod tests {
         assert!(rows.iter().any(|r| {
             r.get("issue_code").and_then(|c| c.as_str()) == Some(AXE_CRITICAL)
                 && r.get("status").and_then(|s| s.as_str()) == Some("pass")
+        }));
+        assert!(rows.iter().any(|r| {
+            r.get("issue_code").and_then(|c| c.as_str()) == Some(TTFB_SLOW)
+                && r.get("status").and_then(|s| s.as_str()) == Some("pass")
+        }));
+    }
+
+    #[test]
+    fn ttfb_and_inp_fail_above_threshold() {
+        let result = WorkerJobResult {
+            job_id: "j1".into(),
+            ok: true,
+            final_url: Some("https://example.com/".into()),
+            status: Some(200),
+            redirect_count: Some(0),
+            timings_ms: None,
+            web_vitals: Some(WebVitals {
+                lcp: Some(1000.0),
+                inp: Some(350.0),
+                cls: Some(0.05),
+                fcp: Some(500.0),
+                ttfb: Some(1200.0),
+            }),
+            render_hash: None,
+            mobile_heuristics: None,
+            lighthouse: None,
+            axe_violations: None,
+            error: None,
+            skip_heavy_audits: None,
+        };
+        let rows = map_issues(
+            "https://example.com",
+            "https://example.com/",
+            "2024-06-01",
+            "desktop",
+            &result,
+            &IssueThresholds::default(),
+            false,
+            false,
+        );
+        assert!(rows.iter().any(|r| {
+            r.get("issue_code").and_then(|c| c.as_str()) == Some(TTFB_SLOW)
+                && r.get("status").and_then(|s| s.as_str()) == Some("fail")
+        }));
+        assert!(rows.iter().any(|r| {
+            r.get("issue_code").and_then(|c| c.as_str()) == Some(INP_SLOW)
+                && r.get("status").and_then(|s| s.as_str()) == Some("fail")
         }));
     }
 }

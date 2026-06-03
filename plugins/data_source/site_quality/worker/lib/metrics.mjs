@@ -2,8 +2,77 @@ import AxeBuilder from '@axe-core/playwright';
 import { launch as launchChrome } from 'chrome-launcher';
 import lighthouse from 'lighthouse';
 import { createHash } from 'node:crypto';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const WEB_VITALS_IIFE = join(__dirname, '../node_modules/web-vitals/dist/web-vitals.iife.js');
+
+const DEFAULT_LIGHTHOUSE_CATEGORIES = ['performance', 'accessibility', 'best-practices', 'seo'];
+const DEFAULT_VITALS_SETTLE_MS = 2500;
+
+async function installWebVitalsCollection(page) {
+  await page.addInitScript({ path: WEB_VITALS_IIFE });
+  await page.addInitScript(() => {
+    window.__sqVitals = {
+      lcp: undefined,
+      cls: undefined,
+      inp: undefined,
+      fcp: undefined,
+      ttfb: undefined,
+    };
+    webVitals.onTTFB((m) => {
+      window.__sqVitals.ttfb = m.value;
+    });
+    webVitals.onFCP((m) => {
+      window.__sqVitals.fcp = m.value;
+    });
+    webVitals.onLCP((m) => {
+      window.__sqVitals.lcp = m.value;
+    });
+    webVitals.onCLS(
+      (m) => {
+        window.__sqVitals.cls = m.value;
+      },
+      { reportAllChanges: true },
+    );
+    webVitals.onINP((m) => {
+      window.__sqVitals.inp = m.value;
+    });
+  });
+}
+
+async function collectWebVitals(page, job) {
+  const settleMs = job.web_vitals_settle_ms ?? DEFAULT_VITALS_SETTLE_MS;
+  await page.waitForTimeout(settleMs);
+
+  if (job.collect_inp !== false) {
+    const viewport = page.viewportSize();
+    if (viewport) {
+      await page.mouse
+        .click(Math.floor(viewport.width / 2), Math.floor(viewport.height / 2))
+        .catch(() => {});
+      await page.waitForTimeout(400);
+    }
+  }
+
+  return page.evaluate(() => {
+    const v = window.__sqVitals || {};
+    const round = (n) =>
+      typeof n === 'number' && Number.isFinite(n) ? Math.round(n * 1000) / 1000 : undefined;
+    return {
+      lcp: round(v.lcp),
+      cls: round(v.cls ?? 0),
+      inp: round(v.inp),
+      fcp: round(v.fcp),
+      ttfb: round(v.ttfb),
+    };
+  });
+}
 
 export async function collectPageMetrics(page, job) {
+  await installWebVitalsCollection(page);
+
   const response = await page.goto(job.url, {
     waitUntil: job.wait_until || 'load',
     timeout: job.navigation_timeout_ms || 45000,
@@ -23,20 +92,7 @@ export async function collectPageMetrics(page, job) {
     };
   });
 
-  const web_vitals = await page.evaluate(() => {
-    const nav = performance.getEntriesByType('navigation')[0];
-    const lcpEntries = performance.getEntriesByType('largest-contentful-paint');
-    const lcp = lcpEntries.length ? lcpEntries[lcpEntries.length - 1].startTime : undefined;
-    const paint = performance.getEntriesByType('paint');
-    const fcp = paint.find((e) => e.name === 'first-contentful-paint')?.startTime;
-    return {
-      lcp,
-      inp: undefined,
-      cls: 0,
-      fcp,
-      ttfb: nav?.responseStart,
-    };
-  });
+  const web_vitals = await collectWebVitals(page, job);
 
   const mobile_heuristics = await page.evaluate(() => {
     const viewport = document.querySelector('meta[name="viewport"]');
@@ -110,7 +166,10 @@ async function runLighthouse(url, job) {
     const options = {
       logLevel: 'error',
       output: 'json',
-      onlyCategories: job.lighthouse_categories || ['performance'],
+      onlyCategories:
+        job.lighthouse_categories?.length > 0
+          ? job.lighthouse_categories
+          : DEFAULT_LIGHTHOUSE_CATEGORIES,
       port: chrome.port,
     };
     const runnerResult = await lighthouse(url, options);

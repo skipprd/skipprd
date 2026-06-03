@@ -38,12 +38,34 @@ data_sources:
 
 `url_mode: url_list` requires `url_list: [...]`.
 
+### Device profiles (mobile-first lab)
+
+Default `devices` (when omitted):
+
+| `profile` | Viewport | Lighthouse `form_factor` |
+| --- | --- | --- |
+| `mobile` | 390×844 | `mobile` |
+| `desktop` | 1350×940 | `desktop` |
+
+Override in engine `skippr.yml` or public `skippr.yaml` (`devices` on `site_quality` source):
+
+```yaml
+devices:
+  - profile: mobile
+    viewport: { width: 390, height: 844 }
+  - profile: desktop
+    viewport: { width: 1350, height: 940 }
+```
+
+Full sync runs **one lab job per URL per device** (`max_pages_per_run × len(devices)` jobs). Mobile-only scorecard checks (`MISSING_VIEWPORT`, `HORIZONTAL_SCROLL`, `TEXT_TOO_SMALL`, `TAP_TARGETS`) emit only when `device_profile == mobile`. Web Vitals scorecard checks (`CLS_POOR`, `LCP_SLOW`, `TTFB_SLOW`, `INP_SLOW`) emit per device.
+
 ## Worker sidecar
 
 Bundled Node worker: `plugins/data_source/site_quality/worker/site-quality-worker.mjs`
 
 - JSON-lines job on stdin, one result line on stdout
-- Dependencies: `playwright-core`, `@axe-core/playwright`, `lighthouse`, `chrome-launcher`
+- Job fields include `device_profile`, `viewport`, `user_agent`, `lighthouse_form_factor` (`mobile` \| `desktop`), `web_vitals_settle_ms`, `collect_inp`
+- Dependencies: `playwright-core`, `@axe-core/playwright`, `lighthouse`, `chrome-launcher`, `web-vitals` (production worker override)
 
 Install once per machine:
 

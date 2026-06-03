@@ -13,6 +13,29 @@ pub struct Viewport {
 pub struct DeviceProfile {
     pub profile: String,
     pub viewport: Viewport,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub user_agent: Option<String>,
+}
+
+/// Chromium-style UA for lab runs (mobile vs desktop layout).
+pub fn default_user_agent_for_profile(profile: &str) -> Option<String> {
+    match profile {
+        "mobile" => Some(
+            "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36".into(),
+        ),
+        "desktop" => Some(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36".into(),
+        ),
+        _ => None,
+    }
+}
+
+pub fn lighthouse_form_factor_for_profile(profile: &str) -> String {
+    if profile == "mobile" {
+        "mobile".into()
+    } else {
+        "desktop".into()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -86,6 +109,7 @@ pub fn default_devices() -> Vec<DeviceProfile> {
                 width: 390,
                 height: 844,
             },
+            user_agent: default_user_agent_for_profile("mobile"),
         },
         DeviceProfile {
             profile: "desktop".into(),
@@ -93,6 +117,7 @@ pub fn default_devices() -> Vec<DeviceProfile> {
                 width: 1350,
                 height: 940,
             },
+            user_agent: default_user_agent_for_profile("desktop"),
         },
     ]
 }

@@ -11,7 +11,10 @@ use tracing::info;
 use uuid::Uuid;
 
 use crate::checkpoint::PageCheckpoint;
-use crate::config::{DataSourceSiteQualityPluginConfig, DeviceProfile, ThrottleConfig, Viewport};
+use crate::config::{
+    default_user_agent_for_profile, lighthouse_form_factor_for_profile,
+    DataSourceSiteQualityPluginConfig, DeviceProfile, ThrottleConfig, Viewport,
+};
 
 pub const FIXTURE_ENV: &str = "SKIPPR_SITE_QUALITY_FIXTURE_DIR";
 
@@ -34,6 +37,20 @@ pub struct WorkerJobRequest {
     pub skip_heavy_audits: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub prior_checkpoint: Option<PageCheckpoint>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub lighthouse_form_factor: Option<String>,
+    #[serde(default = "default_web_vitals_settle_ms")]
+    pub web_vitals_settle_ms: u32,
+    #[serde(default = "default_collect_inp")]
+    pub collect_inp: bool,
+}
+
+fn default_web_vitals_settle_ms() -> u32 {
+    2500
+}
+
+fn default_collect_inp() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -126,7 +143,10 @@ pub fn build_job_request(
         url: url.to_string(),
         device_profile: device.profile.clone(),
         viewport: device.viewport.clone(),
-        user_agent: None,
+        user_agent: device
+            .user_agent
+            .clone()
+            .or_else(|| default_user_agent_for_profile(&device.profile)),
         wait_until: config.wait_until.clone(),
         navigation_timeout_ms: config.navigation_timeout_ms,
         throttle: config.throttle.clone(),
@@ -136,6 +156,9 @@ pub fn build_job_request(
         axe_tags: config.axe_tags.clone(),
         skip_heavy_audits: skip_heavy,
         prior_checkpoint: prior,
+        lighthouse_form_factor: Some(lighthouse_form_factor_for_profile(&device.profile)),
+        web_vitals_settle_ms: default_web_vitals_settle_ms(),
+        collect_inp: default_collect_inp(),
     }
 }
 

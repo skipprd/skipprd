@@ -1378,6 +1378,7 @@ pub fn to_internal(
                     serde_json::Value::Object(m)
                 }
                 SourceConfig::SiteQuality {
+                    devices,
                     site,
                     url_mode,
                     url_list,
@@ -1396,6 +1397,27 @@ pub fn to_internal(
                 } => {
                     let mut m = serde_json::Map::new();
                     m.insert("kind".into(), "site_quality".into());
+                    if let Some(v) = devices {
+                        let mapped: Vec<serde_json::Value> = v
+                            .iter()
+                            .map(|d| {
+                                let mut dm = serde_json::Map::new();
+                                dm.insert("profile".into(), d.profile.clone().into());
+                                dm.insert(
+                                    "viewport".into(),
+                                    serde_json::json!({
+                                        "width": d.viewport.width,
+                                        "height": d.viewport.height,
+                                    }),
+                                );
+                                if let Some(ua) = &d.user_agent {
+                                    dm.insert("user_agent".into(), ua.clone().into());
+                                }
+                                serde_json::Value::Object(dm)
+                            })
+                            .collect();
+                        m.insert("devices".into(), serde_json::Value::Array(mapped));
+                    }
                     if let Some(v) = site {
                         m.insert("site".into(), v.clone().into());
                         m.insert("name".into(), format!("Site Quality {v}").into());
@@ -2823,6 +2845,16 @@ mod tests {
                 schema: Some("web".into()),
             },
             SourceConfig::SiteQuality {
+                devices: Some(vec![
+                    SiteQualityDeviceConfig {
+                        profile: "mobile".into(),
+                        viewport: SiteQualityViewportConfig {
+                            width: 390,
+                            height: 844,
+                        },
+                        user_agent: None,
+                    },
+                ]),
                 site: Some("https://example.com".into()),
                 url_mode: Some("tld_sample".into()),
                 url_list: None,
@@ -2846,6 +2878,8 @@ mod tests {
         assert_eq!(input["url_mode"], "tld_sample");
         assert_eq!(input["max_pages_per_run"], 50);
         assert_eq!(input["lighthouse_enabled"], true);
+        assert_eq!(input["devices"][0]["profile"], "mobile");
+        assert_eq!(input["devices"][0]["viewport"]["width"], 390);
     }
 
     #[test]

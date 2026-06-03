@@ -235,6 +235,20 @@ pub struct AppleAppStoreTargetConfig {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SiteQualityViewportConfig {
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SiteQualityDeviceConfig {
+    pub profile: String,
+    pub viewport: SiteQualityViewportConfig,
+    #[serde(default)]
+    pub user_agent: Option<String>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SourceConfig {
     Mssql {
@@ -672,6 +686,9 @@ pub enum SourceConfig {
     },
     #[serde(rename = "site_quality")]
     SiteQuality {
+        /// Lab device profiles (mobile + desktop by default when omitted).
+        #[serde(default)]
+        devices: Option<Vec<SiteQualityDeviceConfig>>,
         #[serde(default)]
         site: Option<String>,
         #[serde(default)]
