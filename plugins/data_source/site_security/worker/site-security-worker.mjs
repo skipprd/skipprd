@@ -1,11 +1,13 @@
 #!/usr/bin/env node
 import { createInterface } from 'node:readline';
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { chromium } from 'playwright-core';
 
 const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 
-let browser;
-
+// Avoid --single-process: Chromium often crashes on Lambda before first navigation.
 const CHROMIUM_ARGS = [
   '--no-sandbox',
   '--disable-setuid-sandbox',
@@ -13,7 +15,6 @@ const CHROMIUM_ARGS = [
   '--disable-gpu',
   '--disable-gpu-compositing',
   '--disable-software-rasterizer',
-  '--single-process',
 ];
 
 const BODY_SNIPPET_MAX = 32_000;
@@ -75,10 +76,12 @@ function headerValue(headers, name) {
 function buildResponseHeaders(headers) {
   const csp = headerValue(headers, 'content-security-policy');
   const xfo = headerValue(headers, 'x-frame-options');
+  const hasFrameAncestors =
+    typeof csp === 'string' && /frame-ancestors/i.test(csp);
   return {
     has_csp: headerPresent(headers, 'content-security-policy'),
     has_hsts: headerPresent(headers, 'strict-transport-security'),
-    has_x_frame_options: headerPresent(headers, 'x-frame-options'),
+    has_x_frame_options: headerPresent(headers, 'x-frame-options') || hasFrameAncestors,
     has_x_content_type_options: headerPresent(headers, 'x-content-type-options'),
     csp,
     hsts: headerValue(headers, 'strict-transport-security'),
@@ -94,19 +97,59 @@ function buildResponseHeaders(headers) {
   };
 }
 
-async function ensureBrowser() {
-  if (browser?.isConnected?.() === false) {
-    browser = undefined;
-  }
-  if (!browser) {
-    browser = await chromium.launch({
-      headless: true,
-      executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH || undefined,
-      args: CHROMIUM_ARGS,
-    });
-  }
-  return browser;
+async function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
+
+async function openContext(job) {
+  const executablePath = process.env.PLAYWRIGHT_EXECUTABLE_PATH || undefined;
+  const profileDir = await mkdtemp(join(tmpdir(), 'site-sec-'));
+  const viewport = {
+    width: job.viewport?.width ?? 1350,
+    height: job.viewport?.height ?? 940,
+  };
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const context = await chromium.launchPersistentContext(profileDir, {
+        headless: true,
+        executablePath,
+        args: CHROMIUM_ARGS,
+        viewport,
+        userAgent: job.user_agent || undefined,
+        timeout: 120_000,
+        handleSIGINT: false,
+        handleSIGTERM: false,
+      });
+      return { context, profileDir };
+    } catch (err) {
+      lastError = err;
+      await rm(profileDir, { recursive: true, force: true }).catch(() => {});
+      await sleep(400 * attempt);
+    }
+  }
+  throw lastError;
+}
+
+function emitFatal(jobId, err) {
+  process.stdout.write(
+    `${JSON.stringify({
+      job_id: jobId,
+      ok: false,
+      error: { code: 'WORKER_ERROR', message: String(err?.message || err) },
+    })}\n`,
+  );
+}
+
+process.on('unhandledRejection', (err) => {
+  emitFatal('unknown', err);
+  process.exit(1);
+});
+
+process.on('uncaughtException', (err) => {
+  emitFatal('unknown', err);
+  process.exit(1);
+});
 
 async function collectFromPage(page, context, job) {
   const mixedHttpUrls = [];
@@ -122,13 +165,6 @@ async function collectFromPage(page, context, job) {
     waitUntil: job.wait_until || 'load',
     timeout: job.navigation_timeout_ms || 60000,
   });
-  try {
-    await page.waitForLoadState('networkidle', {
-      timeout: Math.min(job.navigation_timeout_ms || 60000, 3000),
-    });
-  } catch {
-    // Keep the scan bounded; this wait only gives late subresource requests a chance to surface.
-  }
   page.off('request', onRequest);
 
   const finalUrl = page.url();
@@ -144,7 +180,7 @@ async function collectFromPage(page, context, job) {
     path: c.path || '/',
     secure: Boolean(c.secure),
     http_only: Boolean(c.httpOnly),
-    same_site: c.sameSite || 'Unspecified',
+    same_site: c.sameSite || 'None',
     value_length: (c.value || '').length,
     pii_hints: piiHints(c.name, c.value),
   }));
@@ -262,16 +298,10 @@ async function collectFromPage(page, context, job) {
 
 async function runJob(job) {
   let context;
+  let profileDir;
   try {
-    const browserInstance = await ensureBrowser();
-    context = await browserInstance.newContext({
-      viewport: {
-        width: job.viewport?.width ?? 1350,
-        height: job.viewport?.height ?? 940,
-      },
-      userAgent: job.user_agent || undefined,
-    });
-    const page = await context.newPage();
+    ({ context, profileDir } = await openContext(job));
+    const page = context.pages()[0] ?? (await context.newPage());
     const scan = await collectFromPage(page, context, job);
     return {
       job_id: job.job_id,
@@ -280,10 +310,6 @@ async function runJob(job) {
       error: null,
     };
   } catch (err) {
-    if (browser) {
-      await browser.close().catch(() => {});
-      browser = undefined;
-    }
     return {
       job_id: job.job_id,
       ok: false,
@@ -295,6 +321,9 @@ async function runJob(job) {
   } finally {
     if (context) {
       await context.close().catch(() => {});
+    }
+    if (profileDir) {
+      await rm(profileDir, { recursive: true, force: true }).catch(() => {});
     }
   }
 }
@@ -337,8 +366,5 @@ rl.on('line', (line) => {
 
 rl.on('close', async () => {
   await pending;
-  if (browser) {
-    await browser.close().catch(() => {});
-  }
   process.exit(0);
 });

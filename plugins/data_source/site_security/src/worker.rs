@@ -191,12 +191,22 @@ impl WorkerClient {
             .arg(&self.script_path)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::null())
             .env(
                 "PLAYWRIGHT_EXECUTABLE_PATH",
                 std::env::var("PLAYWRIGHT_EXECUTABLE_PATH").unwrap_or_default(),
-            )
-            .spawn()?;
+            );
+        if let Ok(path) = std::env::var("PLAYWRIGHT_BROWSERS_PATH") {
+            if !path.trim().is_empty() {
+                child.env("PLAYWRIGHT_BROWSERS_PATH", path);
+            }
+        }
+        if let Ok(path) = std::env::var("LD_PRELOAD") {
+            if !path.trim().is_empty() {
+                child.env("LD_PRELOAD", path);
+            }
+        }
+        let mut child = child.spawn()?;
 
         let mut stdin = child.stdin.take().expect("stdin");
         let line = serde_json::to_string(job).map_err(std::io::Error::other)?;
