@@ -6,6 +6,16 @@ const rl = createInterface({ input: process.stdin, crlfDelay: Infinity });
 
 let browser;
 
+const CHROMIUM_ARGS = [
+  '--no-sandbox',
+  '--disable-setuid-sandbox',
+  '--disable-dev-shm-usage',
+  '--disable-gpu',
+  '--disable-gpu-compositing',
+  '--disable-software-rasterizer',
+  '--single-process',
+];
+
 const PII_PATTERNS = [
   { id: 'email', re: /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/ },
   { id: 'phone', re: /\b(?:\+?1[-.\s]?)?\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b/ },
@@ -50,10 +60,14 @@ function headerPresent(headers, name) {
 }
 
 async function ensureBrowser() {
+  if (browser?.isConnected?.() === false) {
+    browser = undefined;
+  }
   if (!browser) {
     browser = await chromium.launch({
       headless: true,
       executablePath: process.env.PLAYWRIGHT_EXECUTABLE_PATH || undefined,
+      args: CHROMIUM_ARGS,
     });
   }
   return browser;
@@ -167,16 +181,17 @@ async function collectFromPage(page, job) {
 }
 
 async function runJob(job) {
-  const browserInstance = await ensureBrowser();
-  const context = await browserInstance.newContext({
-    viewport: {
-      width: job.viewport?.width ?? 1350,
-      height: job.viewport?.height ?? 940,
-    },
-    userAgent: job.user_agent || undefined,
-  });
-  const page = await context.newPage();
+  let context;
   try {
+    const browserInstance = await ensureBrowser();
+    context = await browserInstance.newContext({
+      viewport: {
+        width: job.viewport?.width ?? 1350,
+        height: job.viewport?.height ?? 940,
+      },
+      userAgent: job.user_agent || undefined,
+    });
+    const page = await context.newPage();
     const scan = await collectFromPage(page, job);
     return {
       job_id: job.job_id,
@@ -185,49 +200,65 @@ async function runJob(job) {
       error: null,
     };
   } catch (err) {
+    if (browser) {
+      await browser.close().catch(() => {});
+      browser = undefined;
+    }
     return {
       job_id: job.job_id,
       ok: false,
       error: {
-        code: 'NAVIGATION_TIMEOUT',
+        code: 'WORKER_ERROR',
         message: String(err?.message || err),
       },
     };
   } finally {
-    await context.close();
+    if (context) {
+      await context.close().catch(() => {});
+    }
   }
 }
 
 let pending = Promise.resolve();
 
 rl.on('line', (line) => {
-  pending = pending.then(async () => {
-    const trimmed = line.trim();
-    if (!trimmed) {
-      return;
-    }
-    let job;
-    try {
-      job = JSON.parse(trimmed);
-    } catch (err) {
+  pending = pending
+    .then(async () => {
+      const trimmed = line.trim();
+      if (!trimmed) {
+        return;
+      }
+      let job;
+      try {
+        job = JSON.parse(trimmed);
+      } catch (err) {
+        process.stdout.write(
+          `${JSON.stringify({
+            job_id: 'unknown',
+            ok: false,
+            error: { code: 'INVALID_JOB', message: String(err) },
+          })}\n`,
+        );
+        return;
+      }
+      const result = await runJob(job);
+      process.stdout.write(`${JSON.stringify(result)}\n`);
+    })
+    .catch((err) => {
       process.stdout.write(
         `${JSON.stringify({
           job_id: 'unknown',
           ok: false,
-          error: { code: 'INVALID_JOB', message: String(err) },
+          error: { code: 'WORKER_ERROR', message: String(err?.message || err) },
         })}\n`,
       );
-      return;
-    }
-    const result = await runJob(job);
-    process.stdout.write(`${JSON.stringify(result)}\n`);
-  });
+    });
 });
 
 rl.on('close', async () => {
   await pending;
   if (browser) {
-    void browser.close().catch(() => {});
+    await browser.close().catch(() => {});
   }
   process.exit(0);
 });
