@@ -1341,6 +1341,7 @@ fn skippr_plugin_name(kind: &str) -> String {
         "bing_webmaster_tools" => "BingWebmasterTools".to_string(),
         "google_pagespeed" => "GooglePageSpeed".to_string(),
         "site_quality" => "SiteQuality".to_string(),
+        "site_security" => "SiteSecurity".to_string(),
         "ai_citations" => "AiCitations".to_string(),
         "google_serp_ranks" => "GoogleSerpRanks".to_string(),
         "apple_app_store_serp" => "AppleAppStoreSerp".to_string(),

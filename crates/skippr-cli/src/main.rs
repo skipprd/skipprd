@@ -1119,6 +1119,35 @@ enum SourceKind {
         #[arg(long)]
         skip_heavy_when_unchanged: Option<bool>,
     },
+    /// Site Security source (Playwright: cookies, storage, headers, scripts).
+    SiteSecurity {
+        #[arg(long)]
+        site: Option<String>,
+        #[arg(long)]
+        url_mode: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        url_list: Option<Vec<String>>,
+        #[arg(long)]
+        max_pages_per_run: Option<u32>,
+        #[arg(long)]
+        max_crawl_depth: Option<u32>,
+        #[arg(long, value_delimiter = ',')]
+        crawl_seed_urls: Option<Vec<String>>,
+        #[arg(long)]
+        wait_until: Option<String>,
+        #[arg(long)]
+        navigation_timeout_ms: Option<u32>,
+        #[arg(long)]
+        pages_per_minute: Option<u32>,
+        #[arg(long)]
+        worker_node_path: Option<String>,
+        #[arg(long)]
+        playwright_executable_path: Option<String>,
+        #[arg(long)]
+        respect_robots: Option<bool>,
+        #[arg(long)]
+        max_third_party_scripts: Option<u32>,
+    },
     /// AI citations source (tracked prompts × OpenAI-compatible models).
     AiCitations {
         #[arg(long)]
@@ -2014,6 +2043,7 @@ const DATA_SOURCE_RUNTIME_PLUGIN_KEYS: &[&str] = &[
     "BingWebmasterTools",
     "GooglePageSpeed",
     "SiteQuality",
+    "SiteSecurity",
     "AiCitations",
     "GoogleSerpRanks",
     "AppleAppStoreSerp",
@@ -2500,6 +2530,21 @@ fn source_config_from_data_source(
             playwright_executable_path: yaml_str(plugin_cfg, "playwright_executable_path"),
             respect_robots: yaml_bool(plugin_cfg, "respect_robots"),
             skip_heavy_when_unchanged: yaml_bool(plugin_cfg, "skip_heavy_when_unchanged"),
+        }),
+        "SiteSecurity" => Ok(SourceConfig::SiteSecurity {
+            site: yaml_str(plugin_cfg, "site"),
+            url_mode: yaml_str(plugin_cfg, "url_mode"),
+            url_list: yaml_string_vec(plugin_cfg, "url_list"),
+            max_pages_per_run: yaml_u32(plugin_cfg, "max_pages_per_run"),
+            max_crawl_depth: yaml_u32(plugin_cfg, "max_crawl_depth"),
+            crawl_seed_urls: yaml_string_vec(plugin_cfg, "crawl_seed_urls"),
+            wait_until: yaml_str(plugin_cfg, "wait_until"),
+            navigation_timeout_ms: yaml_u32(plugin_cfg, "navigation_timeout_ms"),
+            pages_per_minute: yaml_u32(plugin_cfg, "pages_per_minute"),
+            worker_node_path: yaml_str(plugin_cfg, "worker_node_path"),
+            playwright_executable_path: yaml_str(plugin_cfg, "playwright_executable_path"),
+            respect_robots: yaml_bool(plugin_cfg, "respect_robots"),
+            max_third_party_scripts: yaml_u32(plugin_cfg, "max_third_party_scripts"),
         }),
         "AiCitations" => Ok(SourceConfig::AiCitations {
             site: yaml_str(plugin_cfg, "site"),
@@ -3545,6 +3590,44 @@ fn source_plugin_and_config(kind: SourceKind) -> (&'static str, serde_json::Valu
                 (
                     "skip_heavy_when_unchanged",
                     bool_json(skip_heavy_when_unchanged),
+                ),
+            ]),
+        ),
+        SourceKind::SiteSecurity {
+            site,
+            url_mode,
+            url_list,
+            max_pages_per_run,
+            max_crawl_depth,
+            crawl_seed_urls,
+            wait_until,
+            navigation_timeout_ms,
+            pages_per_minute,
+            worker_node_path,
+            playwright_executable_path,
+            respect_robots,
+            max_third_party_scripts,
+        } => (
+            "SiteSecurity",
+            json_object(vec![
+                ("site", str_json(site)),
+                ("url_mode", str_json(url_mode)),
+                ("url_list", strings_json(url_list)),
+                ("max_pages_per_run", u32_json(max_pages_per_run)),
+                ("max_crawl_depth", u32_json(max_crawl_depth)),
+                ("crawl_seed_urls", strings_json(crawl_seed_urls)),
+                ("wait_until", str_json(wait_until)),
+                ("navigation_timeout_ms", u32_json(navigation_timeout_ms)),
+                ("pages_per_minute", u32_json(pages_per_minute)),
+                ("worker_node_path", str_json(worker_node_path)),
+                (
+                    "playwright_executable_path",
+                    str_json(playwright_executable_path),
+                ),
+                ("respect_robots", bool_json(respect_robots)),
+                (
+                    "max_third_party_scripts",
+                    u32_json(max_third_party_scripts),
                 ),
             ]),
         ),
@@ -4713,6 +4796,20 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         }
     }
 
+    if let SourceKind::SiteSecurity {
+        ref mut site,
+        ref mut url_mode,
+        ..
+    } = &mut kind
+    {
+        if site.is_none() {
+            *site = prompt("Site URL to scan for client storage and headers (e.g. https://example.com)");
+        }
+        if url_mode.is_none() {
+            *url_mode = Some("site_crawl".to_string());
+        }
+    }
+
     if let SourceKind::GoogleSerpRanks {
         ref mut target_site,
         ref mut keywords,
@@ -5364,6 +5461,35 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
             respect_robots,
             skip_heavy_when_unchanged,
         },
+        SourceKind::SiteSecurity {
+            site,
+            url_mode,
+            url_list,
+            max_pages_per_run,
+            max_crawl_depth,
+            crawl_seed_urls,
+            wait_until,
+            navigation_timeout_ms,
+            pages_per_minute,
+            worker_node_path,
+            playwright_executable_path,
+            respect_robots,
+            max_third_party_scripts,
+        } => SourceConfig::SiteSecurity {
+            site,
+            url_mode,
+            url_list,
+            max_pages_per_run,
+            max_crawl_depth,
+            crawl_seed_urls,
+            wait_until,
+            navigation_timeout_ms,
+            pages_per_minute,
+            worker_node_path,
+            playwright_executable_path,
+            respect_robots,
+            max_third_party_scripts,
+        },
         SourceKind::AiCitations {
             site,
             brand_names,
@@ -5632,6 +5758,7 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         SourceConfig::GoogleSerpRanks { .. } => "google_serp_ranks",
         SourceConfig::AppleAppStoreSerp { .. } => "apple_app_store_serp",
         SourceConfig::SiteQuality { .. } => "site_quality",
+        SourceConfig::SiteSecurity { .. } => "site_security",
         SourceConfig::SeoCrawl { .. } => "seo_crawl",
         SourceConfig::AppleSearchAds { .. } => "apple_search_ads",
         SourceConfig::MetaInstagramAds { .. } => "meta_instagram_ads",
@@ -5972,6 +6099,12 @@ fn cmd_doctor(explicit_config: &Option<PathBuf>, output: &str) {
         && (cfg_raw.contains("sitequality") || cfg_raw.contains("site_quality"))
     {
         check_site_quality_env(output, &mut checks, &mut ok);
+    }
+
+    if !is_json_output(output)
+        && (cfg_raw.contains("sitesecurity") || cfg_raw.contains("site_security"))
+    {
+        check_site_security_env(output, &mut checks, &mut ok);
     }
 
     if !is_json_output(output)
@@ -6593,6 +6726,45 @@ fn check_site_quality_env(output: &str, checks: &mut Vec<DoctorCheck>, ok: &mut 
             None,
         );
         *ok = false;
+    }
+}
+
+fn check_site_security_env(output: &str, checks: &mut Vec<DoctorCheck>, ok: &mut bool) {
+    check_site_quality_env(output, checks, ok);
+    let fixture_mode = std::env::var("SKIPPR_SITE_SECURITY_FIXTURE_DIR")
+        .ok()
+        .filter(|d| !d.trim().is_empty())
+        .is_some();
+    if fixture_mode {
+        emit_doctor_check(
+            output,
+            checks,
+            true,
+            "SKIPPR_SITE_SECURITY_FIXTURE_DIR set (offline fixture mode)",
+            None,
+        );
+        return;
+    }
+    match skippr_runtime_sdk::site_security_worker::resolve_site_security_worker_script(None) {
+        Ok(path) => emit_doctor_check(
+            output,
+            checks,
+            true,
+            &format!("site-security-worker.mjs found at {}", path.display()),
+            None,
+        ),
+        Err(err) => {
+            emit_doctor_check(
+                output,
+                checks,
+                false,
+                &format!(
+                    "site-security-worker.mjs not found ({err}); run from a skipprd checkout or set SKIPPR_SITE_SECURITY_WORKER_SCRIPT"
+                ),
+                None,
+            );
+            *ok = false;
+        }
     }
 }
 

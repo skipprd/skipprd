@@ -1,0 +1,36 @@
+[package]
+name = "skippr-plugin-data-source-site-security"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "skippr-plugin-data-source-site-security"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+regex = "1.10"
+serde.workspace = true
+serde_derive = "1.0.105"
+serde_json = "1.0.85"
+skippr-plugin-data-source-site-quality = { path = "../site_quality" }
+skippr-runtime-sdk.workspace = true
+tokio = { workspace = true, features = ["process", "io-util", "time"] }
+tracing = "0.1"
+url = "2.5"
+uuid = { version = "1", features = ["v4"] }
+
+[package.metadata.skippr-plugin]
+kind = "DataSource"
+plugin_name = "SiteSecurity"
+
+[package.metadata.skippr-plugin.source_capability]
+name = "SiteSecurity"
+guarantee_tier = "IncrementalOnly"
+checkpoint_style = "CursorBased"
+bootstrap_style = "FullScan"
+order_model = "UnsupportedForFinalState"
+supports_deletes = false
+event_id_semantics = "None"
+declares_namespace_contracts = true

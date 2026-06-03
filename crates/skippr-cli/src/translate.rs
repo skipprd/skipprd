@@ -1312,6 +1312,71 @@ pub fn to_internal(
                     }
                     serde_json::Value::Object(m)
                 }
+                SourceConfig::SiteSecurity {
+                    site,
+                    url_mode,
+                    url_list,
+                    max_pages_per_run,
+                    max_crawl_depth,
+                    crawl_seed_urls,
+                    wait_until,
+                    navigation_timeout_ms,
+                    pages_per_minute,
+                    worker_node_path,
+                    playwright_executable_path,
+                    respect_robots,
+                    max_third_party_scripts,
+                } => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("kind".into(), "site_security".into());
+                    if let Some(v) = site {
+                        m.insert("site".into(), v.clone().into());
+                        m.insert("name".into(), format!("Site Security {v}").into());
+                    }
+                    if let Some(v) = url_mode {
+                        m.insert("url_mode".into(), v.clone().into());
+                    }
+                    if let Some(v) = url_list {
+                        m.insert(
+                            "url_list".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
+                    }
+                    if let Some(v) = max_pages_per_run {
+                        m.insert("max_pages_per_run".into(), (*v).into());
+                    }
+                    if let Some(v) = max_crawl_depth {
+                        m.insert("max_crawl_depth".into(), (*v).into());
+                    }
+                    if let Some(v) = crawl_seed_urls {
+                        m.insert(
+                            "crawl_seed_urls".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
+                    }
+                    if let Some(v) = wait_until {
+                        m.insert("wait_until".into(), v.clone().into());
+                    }
+                    if let Some(v) = navigation_timeout_ms {
+                        m.insert("navigation_timeout_ms".into(), (*v).into());
+                    }
+                    if let Some(v) = pages_per_minute {
+                        m.insert("pages_per_minute".into(), (*v).into());
+                    }
+                    if let Some(v) = worker_node_path {
+                        m.insert("worker_node_path".into(), v.clone().into());
+                    }
+                    if let Some(v) = playwright_executable_path {
+                        m.insert("playwright_executable_path".into(), v.clone().into());
+                    }
+                    if let Some(v) = respect_robots {
+                        m.insert("respect_robots".into(), (*v).into());
+                    }
+                    if let Some(v) = max_third_party_scripts {
+                        m.insert("max_third_party_scripts".into(), (*v).into());
+                    }
+                    serde_json::Value::Object(m)
+                }
                 SourceConfig::SiteQuality {
                     site,
                     url_mode,

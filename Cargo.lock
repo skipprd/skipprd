@@ -12952,6 +12952,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippr-plugin-data-source-site-security"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "regex",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "skippr-plugin-data-source-site-quality",
+ "skippr-runtime-sdk",
+ "tokio",
+ "tracing",
+ "url",
+ "uuid 1.18.1",
+]
+
+[[package]]
 name = "skippr-plugin-data-source-sns"
 version = "0.1.2"
 dependencies = [

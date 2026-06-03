@@ -703,6 +703,35 @@ pub enum SourceConfig {
         #[serde(default)]
         skip_heavy_when_unchanged: Option<bool>,
     },
+    #[serde(rename = "site_security")]
+    SiteSecurity {
+        #[serde(default)]
+        site: Option<String>,
+        #[serde(default)]
+        url_mode: Option<String>,
+        #[serde(default)]
+        url_list: Option<Vec<String>>,
+        #[serde(default)]
+        max_pages_per_run: Option<u32>,
+        #[serde(default)]
+        max_crawl_depth: Option<u32>,
+        #[serde(default)]
+        crawl_seed_urls: Option<Vec<String>>,
+        #[serde(default)]
+        wait_until: Option<String>,
+        #[serde(default)]
+        navigation_timeout_ms: Option<u32>,
+        #[serde(default)]
+        pages_per_minute: Option<u32>,
+        #[serde(default)]
+        worker_node_path: Option<String>,
+        #[serde(default)]
+        playwright_executable_path: Option<String>,
+        #[serde(default)]
+        respect_robots: Option<bool>,
+        #[serde(default)]
+        max_third_party_scripts: Option<u32>,
+    },
     #[serde(rename = "google_pagespeed")]
     GooglePageSpeed {
         #[serde(default)]
@@ -1013,6 +1042,7 @@ impl SkipprProjectConfig {
             Some(SourceConfig::AppleAppStoreSerp { .. }) => Some("apple_app_store_serp"),
             Some(SourceConfig::AiCitations { .. }) => Some("ai_citations"),
             Some(SourceConfig::SiteQuality { .. }) => Some("site_quality"),
+            Some(SourceConfig::SiteSecurity { .. }) => Some("site_security"),
             Some(SourceConfig::AppleSearchAds { .. }) => Some("apple_search_ads"),
             Some(SourceConfig::MetaInstagramAds { .. }) => Some("meta_instagram_ads"),
             Some(SourceConfig::DataForSeoBacklinks { .. }) => Some("dataforseo_backlinks"),
