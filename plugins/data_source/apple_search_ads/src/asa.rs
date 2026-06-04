@@ -484,6 +484,7 @@ pub(crate) fn parse_report_rows(
             inject_grain_ids(&mut record, grain, &metadata);
             flatten_metrics_into(&mut record, &slice);
             flatten_metrics_into(&mut record, &metadata);
+            normalize_spend_field(&mut record);
             out.push(serde_json::Value::Object(record));
         }
     }
@@ -553,6 +554,20 @@ fn json_to_i64(value: &serde_json::Value) -> Option<i64> {
         .as_i64()
         .or_else(|| value.as_u64().map(|n| n as i64))
         .or_else(|| value.as_str().and_then(|s| s.parse().ok()))
+}
+
+fn normalize_spend_field(record: &mut serde_json::Map<String, serde_json::Value>) {
+    if record.contains_key("spend") {
+        return;
+    }
+    let amount = record
+        .get("localSpend")
+        .and_then(|v| v.get("amount"))
+        .and_then(|v| v.as_str())
+        .and_then(|s| s.parse::<f64>().ok());
+    if let Some(spend) = amount {
+        record.insert("spend".into(), serde_json::json!(spend));
+    }
 }
 
 fn flatten_metrics_into(
