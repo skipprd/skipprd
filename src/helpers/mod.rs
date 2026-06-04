@@ -21,7 +21,6 @@ pub mod dotenv;
 pub mod logger;
 pub mod logging;
 pub mod manifest;
-pub mod offset_store_dynamodb;
 pub mod offsets;
 pub mod plugin_config;
 pub mod progress;

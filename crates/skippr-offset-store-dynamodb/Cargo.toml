@@ -1,0 +1,15 @@
+[package]
+name = "skippr-offset-store-dynamodb"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "DynamoDB offset/checkpoint materialization for skipprd (optional host feature)"
+
+[dependencies]
+aws-config = "1.5.1"
+aws-sdk-dynamodb = "1.32.0"
+base64 = "0.22.1"
+chrono = "=0.4.42"
+once_cell = "1.17.0"
+tokio = { version = "1", features = ["rt"] }
+tracing = "0.1"

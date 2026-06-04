@@ -11,6 +11,12 @@ Optional durable offset and checkpoint index for short-lived runtimes (for examp
 
 DynamoDB rows are a **materialized index**. If a row is missing after a committed WAL write, the next run rebuilds from S3 WAL via `wal_recover_s3`.
 
+## Build
+
+Published `skipprd` release binaries are built with `--features offset-store-dynamodb`. Local
+`cargo build -p skipprd` without that feature rejects `SKIPPR_OFFSET_STORE=dynamodb` at runtime
+(host/plugin dependency boundary: `aws-sdk-dynamodb` must not link into default host builds).
+
 ## Configuration
 
 Environment variables (also available as `skippr.yml` under `skippr:` and as CLI flags):

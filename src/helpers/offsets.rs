@@ -5,7 +5,8 @@ use std::time::Duration;
 use Result;
 
 use crate::helpers::configuration::Config;
-use crate::helpers::offset_store_dynamodb::DynamoDbOffsetStore;
+#[cfg(feature = "offset-store-dynamodb")]
+use skippr_offset_store_dynamodb::DynamoDbOffsetStore;
 use crate::helpers::offsets::OffsetsError::VacuumError;
 use crate::helpers::Helpers;
 use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
@@ -126,6 +127,7 @@ struct LocalOffsets {
 #[derive(Clone)]
 pub struct Offsets {
     local: Option<LocalOffsets>,
+    #[cfg(feature = "offset-store-dynamodb")]
     dynamo: Option<Arc<DynamoDbOffsetStore>>,
     transport: Option<Arc<dyn OffsetTransport>>,
     checkpoint_transport: Option<Arc<dyn CheckpointTransport>>,
@@ -187,6 +189,7 @@ impl Offsets {
     ) -> Self {
         Self {
             local: None,
+            #[cfg(feature = "offset-store-dynamodb")]
             dynamo: None,
             transport: Some(transport),
             checkpoint_transport,
@@ -197,12 +200,24 @@ impl Offsets {
         self.local.as_ref().map(|local| &local.tree)
     }
 
+    #[cfg(feature = "offset-store-dynamodb")]
     fn dynamo_store(&self) -> Option<&DynamoDbOffsetStore> {
         self.dynamo.as_deref()
     }
 
+    fn uses_dynamo_store(&self) -> bool {
+        #[cfg(feature = "offset-store-dynamodb")]
+        {
+            return self.dynamo.is_some();
+        }
+        #[cfg(not(feature = "offset-store-dynamodb"))]
+        {
+            false
+        }
+    }
+
     fn has_materialized_store(&self) -> bool {
-        self.local_tree().is_some() || self.dynamo_store().is_some()
+        self.local_tree().is_some() || self.uses_dynamo_store()
     }
 
     fn transport(&self) -> Option<&Arc<dyn OffsetTransport>> {
@@ -233,13 +248,29 @@ impl Offsets {
 
     pub fn init() -> Result<Offsets, OffsetsError> {
         if Config::get_offset_store().eq_ignore_ascii_case("dynamodb") {
-            let store = DynamoDbOffsetStore::open()?;
-            return Ok(Offsets {
-                local: None,
-                dynamo: Some(Arc::new(store)),
-                transport: None,
-                checkpoint_transport: None,
-            });
+            #[cfg(feature = "offset-store-dynamodb")]
+            {
+                let warn_without_s3_wal =
+                    !Config::get_wal_storage().eq_ignore_ascii_case("s3");
+                let store = DynamoDbOffsetStore::open(
+                    Config::get_offset_dynamodb_table(),
+                    Config::offset_store_partition_key(),
+                    warn_without_s3_wal,
+                )
+                .map_err(OffsetsError::AlreadyOpenError)?;
+                return Ok(Offsets {
+                    local: None,
+                    dynamo: Some(Arc::new(store)),
+                    transport: None,
+                    checkpoint_transport: None,
+                });
+            }
+            #[cfg(not(feature = "offset-store-dynamodb"))]
+            {
+                return Err(OffsetsError::AlreadyOpenError(
+                    "SKIPPR_OFFSET_STORE=dynamodb requires skipprd built with --features offset-store-dynamodb".into(),
+                ));
+            }
         }
 
         // match Self::vacuum() { // requires a full scan of table which is expensive on EFS since we're opting to keep all offsets to support replays
@@ -321,6 +352,7 @@ impl Offsets {
 
         let store = Offsets {
             local: Some(LocalOffsets { db, tree }),
+            #[cfg(feature = "offset-store-dynamodb")]
             dynamo: None,
             transport: None,
             checkpoint_transport: None,
@@ -580,14 +612,14 @@ impl Offsets {
                     None
                 }
             }
-        } else if self.dynamo_store().is_some() {
+        } else if self.uses_dynamo_store() {
             None
         } else {
             None
         }
     }
     pub fn set(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Option<IVec> {
-        if self.local_tree().is_none() && self.dynamo_store().is_none() {
+        if self.local_tree().is_none() && !self.uses_dynamo_store() {
             panic!(
                 "remote/source offset handles are read-only; attempted set for {}:{} type={:?} offset={}",
                 key.namespace, key.partition, offset_type, offset
@@ -611,6 +643,7 @@ impl Offsets {
     }
 
     pub fn insert(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Option<IVec> {
+        #[cfg(feature = "offset-store-dynamodb")]
         if let Some(dynamo) = self.dynamo_store() {
             return self.insert_dynamo(dynamo, key, offset_type, offset);
         }
@@ -657,6 +690,7 @@ impl Offsets {
         old_val
     }
 
+    #[cfg(feature = "offset-store-dynamodb")]
     fn insert_dynamo(
         &self,
         dynamo: &DynamoDbOffsetStore,
@@ -696,6 +730,7 @@ impl Offsets {
     }
 
     pub fn get(&self, key: &OffsetKey) -> Option<IVec> {
+        #[cfg(feature = "offset-store-dynamodb")]
         if let Some(dynamo) = self.dynamo_store() {
             return dynamo
                 .get_offset(&key.namespace, &key.partition)
@@ -797,7 +832,7 @@ impl Offsets {
         offset_type: OffsetTypes,
         offset_value: u64,
     ) -> Option<bool> {
-        if self.local_tree().is_none() && self.dynamo_store().is_none() {
+        if self.local_tree().is_none() && !self.uses_dynamo_store() {
             return match self.remote_value(RuntimeOffsetOperation::Validate {
                 key: key.clone(),
                 offset_type,
@@ -874,6 +909,7 @@ impl Offsets {
         offset_type: OffsetTypes,
         offset: u64,
     ) -> Result<Option<IVec>, sled::Error> {
+        #[cfg(feature = "offset-store-dynamodb")]
         if let Some(dynamo) = self.dynamo_store().cloned() {
             let key_clone = key.clone();
             let offset_type = offset_type;
@@ -967,6 +1003,7 @@ impl Offsets {
         key: &str,
         envelope: &CheckpointEnvelope,
     ) -> Result<(), String> {
+        #[cfg(feature = "offset-store-dynamodb")]
         if let Some(dynamo) = self.dynamo_store() {
             let value = bincode::serialize(envelope).map_err(|err| err.to_string())?;
             return dynamo.put_checkpoint(key, &value);
@@ -1001,6 +1038,7 @@ impl Offsets {
     }
 
     pub fn load_checkpoint_envelope(&self, key: &str) -> Option<CheckpointEnvelope> {
+        #[cfg(feature = "offset-store-dynamodb")]
         if let Some(dynamo) = self.dynamo_store() {
             let value = dynamo.get_checkpoint(key).ok().flatten()?;
             return match bincode::deserialize::<CheckpointEnvelope>(&value) {

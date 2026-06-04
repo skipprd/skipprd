@@ -48,11 +48,16 @@ FORBIDDEN_PACKAGES = {
 
 EDGE_KINDS = "normal,build,dev"
 
+# Widest routine host build for CI (not `cargo tree --all-features`). Release-only
+# features such as `offset-store-dynamodb` intentionally pull connector SDKs and
+# are enabled only in published skipprd binaries.
+HOST_WIDEST_FEATURES = ["stats_integration"]
 
-def collect_leaked_host_packages(*, all_features: bool) -> set[str]:
+
+def collect_leaked_host_packages(*, widest_features: bool) -> set[str]:
     command = ["cargo", "tree", "-p", "skipprd", "-e", EDGE_KINDS, "--prefix", "none"]
-    if all_features:
-        command.append("--all-features")
+    if widest_features and HOST_WIDEST_FEATURES:
+        command.extend(["--features", ",".join(HOST_WIDEST_FEATURES)])
     result = subprocess.run(
         command,
         cwd=REPO_ROOT,
@@ -115,12 +120,12 @@ def collect_plugin_source_violations() -> list[str]:
 
 
 def main() -> int:
-    leaked_default = collect_leaked_host_packages(all_features=False)
-    leaked_all_features = collect_leaked_host_packages(all_features=True)
+    leaked_default = collect_leaked_host_packages(widest_features=False)
+    leaked_widest = collect_leaked_host_packages(widest_features=True)
     manifest_violations = collect_plugin_manifest_violations()
     source_violations = collect_plugin_source_violations()
 
-    if leaked_default or leaked_all_features or manifest_violations or source_violations:
+    if leaked_default or leaked_widest or manifest_violations or source_violations:
         print(
             "host/plugin dependency boundary violated:",
             file=sys.stderr,
@@ -132,12 +137,12 @@ def main() -> int:
             )
             for name in sorted(leaked_default):
                 print(f"    - {name}", file=sys.stderr)
-        if leaked_all_features:
+        if leaked_widest:
             print(
-                f"  root `skipprd` leaked forbidden packages under --all-features (edges: {EDGE_KINDS}):",
+                f"  root `skipprd` leaked forbidden packages under widest host features {HOST_WIDEST_FEATURES} (edges: {EDGE_KINDS}):",
                 file=sys.stderr,
             )
-            for name in sorted(leaked_all_features):
+            for name in sorted(leaked_widest):
                 print(f"    - {name}", file=sys.stderr)
         if manifest_violations:
             print(
@@ -157,7 +162,7 @@ def main() -> int:
 
     print(
         "host/plugin dependency boundary check passed "
-        f"(edges: {EDGE_KINDS}, plus plugin manifest scan and --all-features)"
+        f"(edges: {EDGE_KINDS}, plus plugin manifest scan and widest host features)"
     )
     return 0
 

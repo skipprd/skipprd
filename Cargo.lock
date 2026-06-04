@@ -11960,6 +11960,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippr-offset-store-dynamodb"
+version = "0.1.0"
+dependencies = [
+ "aws-config",
+ "aws-sdk-dynamodb",
+ "base64 0.22.1",
+ "chrono",
+ "once_cell",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "skippr-plugin-data-sink-amqp"
 version = "0.1.2"
 dependencies = [
@@ -13321,7 +13334,6 @@ dependencies = [
  "avro-rs",
  "aws-config",
  "aws-credential-types",
- "aws-sdk-dynamodb",
  "aws-sdk-glue",
  "aws-sdk-s3",
  "aws-smithy-http 0.60.12",
@@ -13384,6 +13396,7 @@ dependencies = [
  "sha2",
  "shellexpand",
  "signal-hook",
+ "skippr-offset-store-dynamodb",
  "sled",
  "sqlparser 0.43.1",
  "tar",

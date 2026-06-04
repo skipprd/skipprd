@@ -7,6 +7,7 @@ edition = "2021"
 resolver = "2"
 members = [
     "crates/skippr-core",
+    "crates/skippr-offset-store-dynamodb",
     "crates/skippr-runtime-sdk",
     "crates/skippr-cli",
     "crates/skippr-admin",
@@ -88,8 +89,8 @@ array-init = "2.1.0"
 envy = "0.4.2"
 aws-config = "1.5.1"
 aws-sdk-s3 = "1.32.0"
-aws-sdk-dynamodb = "1.32.0"
 aws-types = "1.3.1"
+skippr-offset-store-dynamodb = { path = "crates/skippr-offset-store-dynamodb", optional = true }
 tokio = { version = "1", features = ["full"] }
 flate2 = "1.0.25"
 csv = "1.1.6"
@@ -164,6 +165,9 @@ quick-xml = { version = "0.39.2", features = ["serialize"] }
 
 [features]
 stats_integration = []
+# Release tarballs enable this so Lambda can use SKIPPR_OFFSET_STORE=dynamodb without
+# pulling aws-sdk-dynamodb into the default host dependency closure (CI boundary check).
+offset-store-dynamodb = ["dep:skippr-offset-store-dynamodb"]
 
 [dev-dependencies]
 serial_test = "1.0.0"
