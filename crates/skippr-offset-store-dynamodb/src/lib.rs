@@ -3,7 +3,9 @@
 //! does not pull `aws-sdk-dynamodb` in default builds.
 
 use std::collections::HashMap;
+use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
+use std::thread;
 
 use aws_sdk_dynamodb::types::AttributeValue;
 use aws_sdk_dynamodb::Client;
@@ -12,40 +14,64 @@ use chrono::Utc;
 use once_cell::sync::OnceCell;
 use tracing::{info, warn};
 
-static DYNAMO_RUNTIME: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
-static DYNAMO_CLIENT: OnceCell<Arc<Client>> = OnceCell::new();
+type Job = Box<dyn FnOnce(&tokio::runtime::Runtime, Arc<Client>) + Send>;
 
-/// Dedicated runtime for sync offset I/O. Never call `Handle::current().block_on` here:
-/// skipprd/plugins may already run on Tokio, and nested block_on panics.
-fn dynamo_runtime() -> &'static tokio::runtime::Runtime {
-    DYNAMO_RUNTIME.get_or_init(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .expect("failed to build DynamoDB offset store runtime")
+struct DynamoIoWorker {
+    jobs: SyncSender<Job>,
+}
+
+static DYNAMO_WORKER: OnceCell<DynamoIoWorker> = OnceCell::new();
+
+/// Dedicated OS thread owns the Tokio runtime + AWS client (skipprd may already use Tokio).
+fn dynamo_worker() -> &'static DynamoIoWorker {
+    DYNAMO_WORKER.get_or_init(|| {
+        let (job_tx, job_rx) = sync_channel::<Job>(256);
+        let (ready_tx, ready_rx) = sync_channel::<()>(1);
+        thread::Builder::new()
+            .name("skippr-dynamo-offset-io".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("failed to build DynamoDB offset store runtime");
+                let client = rt.block_on(async {
+                    let shared = aws_config::defaults(aws_config::BehaviorVersion::latest())
+                        .load()
+                        .await;
+                    Arc::new(Client::new(&shared))
+                });
+                let _ = ready_tx.send(());
+                while let Ok(job) = job_rx.recv() {
+                    job(&rt, client.clone());
+                }
+            })
+            .expect("failed to spawn DynamoDB offset store worker thread");
+        ready_rx
+            .recv()
+            .expect("DynamoDB offset worker failed to start");
+        DynamoIoWorker { jobs: job_tx }
     })
 }
 
-fn block_on<F: std::future::Future>(future: F) -> F::Output {
-    dynamo_runtime().block_on(future)
-}
-
-fn dynamo_client() -> Arc<Client> {
-    DYNAMO_CLIENT
-        .get_or_init(|| {
-            block_on(async {
-                let shared = aws_config::defaults(aws_config::BehaviorVersion::latest())
-                    .load()
-                    .await;
-                Arc::new(Client::new(&shared))
-            })
-        })
-        .clone()
+fn run_on_worker<T, F>(f: F) -> T
+where
+    T: Send + 'static,
+    F: FnOnce(&tokio::runtime::Runtime, Arc<Client>) -> T + Send + 'static,
+{
+    let (reply_tx, reply_rx): (SyncSender<T>, Receiver<T>) = sync_channel(1);
+    dynamo_worker()
+        .jobs
+        .send(Box::new(move |rt, client| {
+            let _ = reply_tx.send(f(rt, client));
+        }))
+        .expect("DynamoDB offset worker channel closed");
+    reply_rx
+        .recv()
+        .expect("DynamoDB offset worker dropped reply")
 }
 
 #[derive(Clone)]
 pub struct DynamoDbOffsetStore {
-    client: Arc<Client>,
     table: String,
     pk: String,
 }
@@ -71,8 +97,8 @@ impl DynamoDbOffsetStore {
             "Opening DynamoDB offset store table={} pk={}",
             table, partition_key
         );
+        let _ = dynamo_worker();
         Ok(Self {
-            client: dynamo_client(),
             table,
             pk: partition_key,
         })
@@ -87,59 +113,66 @@ impl DynamoDbOffsetStore {
     }
 
     pub fn get_bytes(&self, sk: &str) -> Result<Option<Vec<u8>>, String> {
-        let resp = block_on(async {
-            self.client
-                .get_item()
-                .table_name(&self.table)
-                .key("PK", AttributeValue::S(self.pk.clone()))
-                .key("SK", AttributeValue::S(sk.to_string()))
-                .send()
-                .await
-        });
-        match resp {
-            Ok(out) => {
-                let item = match out.item {
-                    Some(i) => i,
-                    None => return Ok(None),
-                };
-                let payload = item
-                    .get("payload_b64")
-                    .and_then(|v| v.as_s().ok())
-                    .ok_or_else(|| {
-                        format!("DynamoDB offset item missing payload_b64 for SK={sk}")
-                    })?;
-                B64.decode(payload)
-                    .map(Some)
-                    .map_err(|e| format!("Invalid payload_b64 for SK={sk}: {e}"))
-            }
-            Err(e) => Err(format!("DynamoDB get_item failed: {e}")),
-        }
+        let table = self.table.clone();
+        let pk = self.pk.clone();
+        let sk = sk.to_string();
+        run_on_worker(move |rt, client| {
+            rt.block_on(async move {
+                let resp = client
+                    .get_item()
+                    .table_name(&table)
+                    .key("PK", AttributeValue::S(pk))
+                    .key("SK", AttributeValue::S(sk.clone()))
+                    .send()
+                    .await;
+                match resp {
+                    Ok(out) => {
+                        let item = match out.item {
+                            Some(i) => i,
+                            None => return Ok(None),
+                        };
+                        let payload = item
+                            .get("payload_b64")
+                            .and_then(|v| v.as_s().ok())
+                            .ok_or_else(|| {
+                                format!("DynamoDB offset item missing payload_b64 for SK={sk}")
+                            })?;
+                        B64.decode(payload)
+                            .map(Some)
+                            .map_err(|e| format!("Invalid payload_b64 for SK={sk}: {e}"))
+                    }
+                    Err(e) => Err(format!("DynamoDB get_item failed: {e}")),
+                }
+            })
+        })
     }
 
     pub fn put_bytes(&self, sk: &str, bytes: &[u8]) -> Result<(), String> {
-        let now = Utc::now().to_rfc3339();
+        let table = self.table.clone();
+        let pk = self.pk.clone();
+        let sk = sk.to_string();
         let payload_b64 = B64.encode(bytes);
-        let mut item = HashMap::new();
-        item.insert(
-            "PK".to_string(),
-            AttributeValue::S(self.pk.clone()),
-        );
-        item.insert("SK".to_string(), AttributeValue::S(sk.to_string()));
-        item.insert(
-            "payload_b64".to_string(),
-            AttributeValue::S(payload_b64),
-        );
-        item.insert("updated_at".to_string(), AttributeValue::S(now));
-        block_on(async {
-            self.client
-                .put_item()
-                .table_name(&self.table)
-                .set_item(Some(item))
-                .send()
-                .await
+        run_on_worker(move |rt, client| {
+            rt.block_on(async move {
+                let now = Utc::now().to_rfc3339();
+                let mut item = HashMap::new();
+                item.insert("PK".to_string(), AttributeValue::S(pk));
+                item.insert("SK".to_string(), AttributeValue::S(sk));
+                item.insert(
+                    "payload_b64".to_string(),
+                    AttributeValue::S(payload_b64),
+                );
+                item.insert("updated_at".to_string(), AttributeValue::S(now));
+                client
+                    .put_item()
+                    .table_name(&table)
+                    .set_item(Some(item))
+                    .send()
+                    .await
+                    .map(|_| ())
+                    .map_err(|e| format!("DynamoDB put_item failed: {e}"))
+            })
         })
-        .map_err(|e| format!("DynamoDB put_item failed: {e}"))?;
-        Ok(())
     }
 
     pub fn fetch_and_update_bytes<F>(&self, sk: &str, update: F) -> Result<Option<Vec<u8>>, String>
