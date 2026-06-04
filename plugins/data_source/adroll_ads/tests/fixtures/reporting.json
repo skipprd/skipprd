@@ -1,0 +1,22 @@
+{
+  "data": {
+    "advertisable": {
+      "reports": [
+        {
+          "date": "2024-01-01",
+          "campaignEid": "camp_001",
+          "campaignName": "Retargeting — Site visitors",
+          "adGroupEid": "ag_001",
+          "adGroupName": "US — Display",
+          "adEid": "ad_001",
+          "adName": "Hero banner",
+          "impressions": 12000,
+          "clicks": 180,
+          "spend": 245.5,
+          "conversions": 12,
+          "revenue": 890.0
+        }
+      ]
+    }
+  }
+}

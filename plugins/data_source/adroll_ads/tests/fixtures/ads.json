@@ -1,0 +1,11 @@
+{
+  "results": [
+    {
+      "eid": "ad_001",
+      "name": "Hero banner",
+      "ad_group_eid": "ag_001",
+      "destination_url": "https://example.com/landing",
+      "status": "running"
+    }
+  ]
+}
