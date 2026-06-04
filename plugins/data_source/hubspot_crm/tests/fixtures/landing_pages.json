@@ -1,0 +1,13 @@
+{
+  "results": [
+    {
+      "id": "lp-100",
+      "slug": "demo",
+      "url": "https://www.example.com/demo",
+      "currentState": "PUBLISHED",
+      "campaign": "camp-1",
+      "createdAt": "2024-01-01T00:00:00.000Z",
+      "updatedAt": "2024-02-01T00:00:00.000Z"
+    }
+  ]
+}

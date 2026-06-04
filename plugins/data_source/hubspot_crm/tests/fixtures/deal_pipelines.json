@@ -1,0 +1,12 @@
+{
+  "results": [
+    {
+      "id": "default",
+      "label": "Sales Pipeline",
+      "stages": [
+        { "id": "appointmentscheduled", "label": "Appointment Scheduled", "displayOrder": 0, "metadata": { "probability": "0.2" } },
+        { "id": "closedwon", "label": "Closed Won", "displayOrder": 1, "metadata": { "probability": "1.0" } }
+      ]
+    }
+  ]
+}

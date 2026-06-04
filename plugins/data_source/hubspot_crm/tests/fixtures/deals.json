@@ -1,0 +1,19 @@
+{
+  "results": [
+    {
+      "id": "9001",
+      "properties": {
+        "dealname": "Enterprise Plan",
+        "amount": "50000",
+        "dealstage": "closedwon",
+        "pipeline": "default",
+        "createdate": "2024-01-15T10:00:00.000Z",
+        "closedate": "2024-02-01T12:00:00.000Z",
+        "hs_is_closed_won": "true",
+        "hs_analytics_source": "ORGANIC_SEARCH",
+        "hs_analytics_source_data_1": "google",
+        "utm_campaign": "brand-q1"
+      }
+    }
+  ]
+}

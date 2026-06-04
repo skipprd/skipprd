@@ -1,0 +1,20 @@
+{
+  "results": [
+    {
+      "id": "8001",
+      "properties": {
+        "hs_pipeline": "0",
+        "hs_pipeline_stage": "1",
+        "hs_ticket_priority": "HIGH",
+        "source_type": "EMAIL",
+        "createdate": "2024-03-01T09:00:00.000Z",
+        "closed_date": "2024-03-02T15:00:00.000Z",
+        "hs_time_to_close": "86400000"
+      },
+      "associations": {
+        "companies": { "results": [{ "id": "701" }] },
+        "contacts": { "results": [{ "id": "501" }] }
+      }
+    }
+  ]
+}

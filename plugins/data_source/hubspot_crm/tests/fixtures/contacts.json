@@ -1,0 +1,16 @@
+{
+  "results": [
+    {
+      "id": "501",
+      "properties": {
+        "lifecyclestage": "customer",
+        "createdate": "2024-01-10T08:00:00.000Z",
+        "hs_analytics_source": "PAID_SEARCH",
+        "utm_source": "google",
+        "utm_medium": "cpc",
+        "utm_campaign": "demo-request",
+        "associatedcompanyid": "701"
+      }
+    }
+  ]
+}

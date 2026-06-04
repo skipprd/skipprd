@@ -1,0 +1,15 @@
+{
+  "results": [
+    {
+      "id": "701",
+      "properties": {
+        "domain": "acme.example",
+        "industry": "SOFTWARE",
+        "numberofemployees": "50",
+        "country": "US",
+        "lifecyclestage": "customer",
+        "createdate": "2024-01-05T00:00:00.000Z"
+      }
+    }
+  ]
+}
