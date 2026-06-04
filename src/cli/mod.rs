@@ -6,6 +6,18 @@ pub struct Cli {
     /// Enable logging. Optional level: debug|info|warn|error. Using --log defaults to 'info'.
     #[arg(long, global = true, num_args=0..=1, default_missing_value="info", value_name="LEVEL")]
     pub log: Option<String>,
+    /// WAL backend: disk or s3 (also WAL_STORAGE env)
+    #[arg(long, global = true)]
+    pub wal_storage: Option<String>,
+    /// Dedicated S3 bucket for WAL segments (also SKIPPR_WAL_S3_BUCKET env)
+    #[arg(long, global = true)]
+    pub wal_s3_bucket: Option<String>,
+    /// Offset store: sled (default) or dynamodb (also SKIPPR_OFFSET_STORE env)
+    #[arg(long, global = true)]
+    pub offset_store: Option<String>,
+    /// DynamoDB table for offsets when offset_store=dynamodb
+    #[arg(long, global = true)]
+    pub offset_dynamodb_table: Option<String>,
     #[command(subcommand)]
     pub mode: Mode,
 }

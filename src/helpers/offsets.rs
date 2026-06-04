@@ -5,6 +5,7 @@ use std::time::Duration;
 use Result;
 
 use crate::helpers::configuration::Config;
+use crate::helpers::offset_store_dynamodb::DynamoDbOffsetStore;
 use crate::helpers::offsets::OffsetsError::VacuumError;
 use crate::helpers::Helpers;
 use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
@@ -125,6 +126,7 @@ struct LocalOffsets {
 #[derive(Clone)]
 pub struct Offsets {
     local: Option<LocalOffsets>,
+    dynamo: Option<Arc<DynamoDbOffsetStore>>,
     transport: Option<Arc<dyn OffsetTransport>>,
     checkpoint_transport: Option<Arc<dyn CheckpointTransport>>,
 }
@@ -185,6 +187,7 @@ impl Offsets {
     ) -> Self {
         Self {
             local: None,
+            dynamo: None,
             transport: Some(transport),
             checkpoint_transport,
         }
@@ -192,6 +195,14 @@ impl Offsets {
 
     fn local_tree(&self) -> Option<&sled::Tree> {
         self.local.as_ref().map(|local| &local.tree)
+    }
+
+    fn dynamo_store(&self) -> Option<&DynamoDbOffsetStore> {
+        self.dynamo.as_deref()
+    }
+
+    fn has_materialized_store(&self) -> bool {
+        self.local_tree().is_some() || self.dynamo_store().is_some()
     }
 
     fn transport(&self) -> Option<&Arc<dyn OffsetTransport>> {
@@ -203,7 +214,7 @@ impl Offsets {
     }
 
     pub fn is_remote(&self) -> bool {
-        self.local_tree().is_none()
+        !self.has_materialized_store() && self.transport().is_some()
     }
 
     #[cfg(test)]
@@ -221,6 +232,16 @@ impl Offsets {
     }
 
     pub fn init() -> Result<Offsets, OffsetsError> {
+        if Config::get_offset_store().eq_ignore_ascii_case("dynamodb") {
+            let store = DynamoDbOffsetStore::open()?;
+            return Ok(Offsets {
+                local: None,
+                dynamo: Some(Arc::new(store)),
+                transport: None,
+                checkpoint_transport: None,
+            });
+        }
+
         // match Self::vacuum() { // requires a full scan of table which is expensive on EFS since we're opting to keep all offsets to support replays
         //     Ok(size) => {}
         //     Err(err) => {
@@ -300,6 +321,7 @@ impl Offsets {
 
         let store = Offsets {
             local: Some(LocalOffsets { db, tree }),
+            dynamo: None,
             transport: None,
             checkpoint_transport: None,
         };
@@ -558,12 +580,14 @@ impl Offsets {
                     None
                 }
             }
+        } else if self.dynamo_store().is_some() {
+            None
         } else {
             None
         }
     }
     pub fn set(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Option<IVec> {
-        if self.local_tree().is_none() {
+        if self.local_tree().is_none() && self.dynamo_store().is_none() {
             panic!(
                 "remote/source offset handles are read-only; attempted set for {}:{} type={:?} offset={}",
                 key.namespace, key.partition, offset_type, offset
@@ -587,6 +611,9 @@ impl Offsets {
     }
 
     pub fn insert(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Option<IVec> {
+        if let Some(dynamo) = self.dynamo_store() {
+            return self.insert_dynamo(dynamo, key, offset_type, offset);
+        }
         let Some(tree) = self.local_tree() else {
             error!(
                 "Remote offsets are read-only; ignoring insert for {}:{} type={:?} offset={}",
@@ -630,7 +657,52 @@ impl Offsets {
         old_val
     }
 
+    fn insert_dynamo(
+        &self,
+        dynamo: &DynamoDbOffsetStore,
+        key: &OffsetKey,
+        offset_type: OffsetTypes,
+        offset: u64,
+    ) -> Option<IVec> {
+        let old = dynamo
+            .get_offset(&key.namespace, &key.partition)
+            .ok()
+            .flatten();
+        let new_val = match offset_type {
+            OffsetTypes::Filesize => Self::offset_value_bytes(offset_type, offset),
+            OffsetTypes::Position => {
+                if let Some(existing) = old.as_ref() {
+                    let mut backing_bytes = existing.clone();
+                    let layout: LayoutVerified<&mut [u8], OffsetValue> =
+                        LayoutVerified::new_unaligned(&mut *backing_bytes)
+                            .expect("bytes do not fit schema");
+                    let old_value: &mut OffsetValue = layout.into_mut();
+                    let new_value = self.increment(old_value.line, offset.into());
+                    Self::offset_value_bytes(OffsetTypes::Position, new_value.get())
+                } else {
+                    Self::offset_value_bytes(offset_type, offset)
+                }
+            }
+            OffsetTypes::Closed => Self::offset_value_bytes(offset_type, offset),
+        };
+        let old_ivec = old.map(IVec::from);
+        if dynamo
+            .put_offset(&key.namespace, &key.partition, &new_val)
+            .is_err()
+        {
+            return None;
+        }
+        old_ivec
+    }
+
     pub fn get(&self, key: &OffsetKey) -> Option<IVec> {
+        if let Some(dynamo) = self.dynamo_store() {
+            return dynamo
+                .get_offset(&key.namespace, &key.partition)
+                .ok()
+                .flatten()
+                .map(IVec::from);
+        }
         let Some(tree) = self.local_tree() else {
             return None;
         };
@@ -725,7 +797,7 @@ impl Offsets {
         offset_type: OffsetTypes,
         offset_value: u64,
     ) -> Option<bool> {
-        if self.local_tree().is_none() {
+        if self.local_tree().is_none() && self.dynamo_store().is_none() {
             return match self.remote_value(RuntimeOffsetOperation::Validate {
                 key: key.clone(),
                 offset_type,
@@ -802,6 +874,36 @@ impl Offsets {
         offset_type: OffsetTypes,
         offset: u64,
     ) -> Result<Option<IVec>, sled::Error> {
+        if let Some(dynamo) = self.dynamo_store().cloned() {
+            let key_clone = key.clone();
+            let offset_type = offset_type;
+            let offset = offset;
+            let result = dynamo.fetch_and_update_offset(
+                &key_clone.namespace,
+                &key_clone.partition,
+                |value_opt| {
+                    if let Some(existing) = value_opt {
+                        let mut backing_bytes = existing;
+                        let layout: LayoutVerified<&mut [u8], OffsetValue> =
+                            LayoutVerified::new_unaligned(&mut *backing_bytes)
+                                .expect("bytes do not fit schema");
+                        let value: &mut OffsetValue = layout.into_mut();
+                        match offset_type {
+                            OffsetTypes::Filesize => value.filesize.set(offset),
+                            OffsetTypes::Position => value.line.set(offset),
+                            OffsetTypes::Closed => value.closed.set(offset),
+                        }
+                        Some(backing_bytes)
+                    } else {
+                        Some(Self::offset_value_bytes(offset_type, offset).to_vec())
+                    }
+                },
+            );
+            return match result {
+                Ok(val) => Ok(val.map(IVec::from)),
+                Err(e) => Err(sled::Error::ReportableBug(e.to_string())),
+            };
+        }
         let Some(tree) = self.local_tree() else {
             return Err(sled::Error::ReportableBug(format!(
                 "Remote offsets are read-only; refusing upsert for {}:{} type={:?} offset={}",
@@ -865,6 +967,10 @@ impl Offsets {
         key: &str,
         envelope: &CheckpointEnvelope,
     ) -> Result<(), String> {
+        if let Some(dynamo) = self.dynamo_store() {
+            let value = bincode::serialize(envelope).map_err(|err| err.to_string())?;
+            return dynamo.put_checkpoint(key, &value);
+        }
         if self.local_tree().is_none() {
             let transport = self.checkpoint_transport().ok_or_else(|| {
                 format!("remote offsets have no checkpoint transport for '{}'", key)
@@ -895,6 +1001,19 @@ impl Offsets {
     }
 
     pub fn load_checkpoint_envelope(&self, key: &str) -> Option<CheckpointEnvelope> {
+        if let Some(dynamo) = self.dynamo_store() {
+            let value = dynamo.get_checkpoint(key).ok().flatten()?;
+            return match bincode::deserialize::<CheckpointEnvelope>(&value) {
+                Ok(envelope) => Some(envelope),
+                Err(err) => {
+                    error!(
+                        "Failed to deserialize checkpoint envelope '{}': {}",
+                        key, err
+                    );
+                    None
+                }
+            };
+        }
         if self.local_tree().is_none() {
             return match self.remote_value(RuntimeOffsetOperation::LoadCheckpointEnvelope {
                 key: key.to_string(),

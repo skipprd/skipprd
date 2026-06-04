@@ -61,6 +61,7 @@ nav:
           - Output Destination: configuration/output.md
           - Transforms: configuration/transforms.md
           - Buffering & WAL: configuration/buffering.md
+          - DynamoDB offset store: configuration/offset-store-dynamodb.md
           - Advanced: configuration/advanced.md
       - Connectors:
           - Inputs:

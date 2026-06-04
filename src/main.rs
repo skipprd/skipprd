@@ -127,6 +127,19 @@ async fn async_main() {
 
     let cli: Cli = Cli::parse();
 
+    if let Some(wal_storage) = &cli.wal_storage {
+        Config::set_wal_storage(wal_storage);
+    }
+    if let Some(bucket) = &cli.wal_s3_bucket {
+        Config::set_wal_s3_bucket(bucket);
+    }
+    if let Some(store) = &cli.offset_store {
+        Config::set_offset_store(store);
+    }
+    if let Some(table) = &cli.offset_dynamodb_table {
+        Config::set_offset_dynamodb_table(table);
+    }
+
     // Initialize logging if --log is provided; default level is 'info', '--log debug' enables debug
     init_logging(cli.log.clone());
 

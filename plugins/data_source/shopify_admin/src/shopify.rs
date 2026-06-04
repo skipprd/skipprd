@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -7,6 +8,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use skippr_plugin_shared_api_source::{DateWindowPlanner, RetryConfig, RetryableHttpClient};
 use skippr_runtime_sdk::helpers::offsets::OffsetKey;
+use skippr_runtime_sdk::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
 use skippr_runtime_sdk::plugins::source_contract::{
     FieldPath, SourceNamespaceContract, SourceSemantics, WritePolicy,
 };
@@ -14,7 +16,11 @@ use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceOnceContract, SourceSyncContext,
 };
 use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
-use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch};
+use skippr_runtime_sdk::source_compat::{
+    load_checkpoint_payload, submit_payload_batches, IngestBatch,
+};
+
+const CHECKPOINT_PAYLOAD_VERSION: u32 = 1;
 use tracing::{info, warn};
 
 use crate::shopify_api::{
@@ -27,7 +33,20 @@ use crate::streams::{
     NAMESPACE_SYNC_RUN_DAILY,
 };
 
+pub const NAMESPACE_REFUND_FACT: &str = "shopify_refund_fact";
+pub const NAMESPACE_VARIANT_SNAPSHOT: &str = "shopify_variant_snapshot";
+pub const NAMESPACE_COLLECTION_SNAPSHOT: &str = "shopify_collection_snapshot";
+pub const NAMESPACE_CONTENT_PAGE_SNAPSHOT: &str = "shopify_content_page_snapshot";
+pub const NAMESPACE_REDIRECT_SNAPSHOT: &str = "shopify_redirect_snapshot";
+pub const NAMESPACE_DISCOUNT_SNAPSHOT: &str = "shopify_discount_snapshot";
+pub const NAMESPACE_MARKETING_EVENT_FACT: &str = "shopify_marketing_event_fact";
+
 const DISCOVER_SAMPLE_DAYS: u32 = 3;
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct ShopifyOrderCheckpoint {
+    last_completed_date: String,
+}
 
 fn runtime_is_discover_mode() -> bool {
     std::env::var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV)
@@ -62,7 +81,7 @@ pub struct DataSourceShopifyAdminPluginConfig {
 }
 
 fn default_lookback_days() -> u32 {
-    30
+    7
 }
 
 fn default_min_query_interval_ms() -> u64 {
@@ -180,8 +199,8 @@ impl DataSourceShopifyAdminPlugin {
             NAMESPACE_ORDER_FACT => SourceNamespaceContract {
                 namespace: namespace.to_string(),
                 primary_key: vec![FieldPath::single("order_id")],
-                cursor: Some(FieldPath::single("run_date")),
-                partition_key: vec![FieldPath::single("run_date")],
+                cursor: Some(FieldPath::single("order_date")),
+                partition_key: vec![FieldPath::single("order_date")],
                 write_policy: WritePolicy::ReplacePartition,
                 refresh_window: Some(lookback_days),
                 description: "Shopify orders without PII".into(),
@@ -193,11 +212,48 @@ impl DataSourceShopifyAdminPlugin {
                     FieldPath::single("order_id"),
                     FieldPath::single("line_id"),
                 ],
-                cursor: Some(FieldPath::single("run_date")),
-                partition_key: vec![FieldPath::single("run_date")],
+                cursor: Some(FieldPath::single("order_date")),
+                partition_key: vec![FieldPath::single("order_date")],
                 write_policy: WritePolicy::ReplacePartition,
                 refresh_window: Some(lookback_days),
                 description: "Shopify order line items".into(),
+                semantics: Some(SourceSemantics::EventStream),
+            },
+            NAMESPACE_REFUND_FACT => SourceNamespaceContract {
+                namespace: namespace.to_string(),
+                primary_key: vec![
+                    FieldPath::single("order_id"),
+                    FieldPath::single("refund_id"),
+                ],
+                cursor: Some(FieldPath::single("order_date")),
+                partition_key: vec![FieldPath::single("order_date")],
+                write_policy: WritePolicy::ReplacePartition,
+                refresh_window: Some(lookback_days),
+                description: "Shopify refunds without PII".into(),
+                semantics: Some(SourceSemantics::EventStream),
+            },
+            NAMESPACE_VARIANT_SNAPSHOT
+            | NAMESPACE_COLLECTION_SNAPSHOT
+            | NAMESPACE_CONTENT_PAGE_SNAPSHOT
+            | NAMESPACE_REDIRECT_SNAPSHOT
+            | NAMESPACE_DISCOUNT_SNAPSHOT => SourceNamespaceContract {
+                namespace: namespace.to_string(),
+                primary_key: vec![FieldPath::single("id"), FieldPath::single("run_date")],
+                cursor: Some(FieldPath::single("run_date")),
+                partition_key: vec![FieldPath::single("run_date")],
+                write_policy: WritePolicy::ReplacePartition,
+                refresh_window: None,
+                description: format!("Shopify snapshot: {namespace}"),
+                semantics: Some(SourceSemantics::MutableReport),
+            },
+            NAMESPACE_MARKETING_EVENT_FACT => SourceNamespaceContract {
+                namespace: namespace.to_string(),
+                primary_key: vec![FieldPath::single("event_id")],
+                cursor: Some(FieldPath::single("occurred_at")),
+                partition_key: vec![FieldPath::single("occurred_at")],
+                write_policy: WritePolicy::ReplacePartition,
+                refresh_window: Some(lookback_days),
+                description: "Shopify marketing events".into(),
                 semantics: Some(SourceSemantics::EventStream),
             },
             NAMESPACE_SYNC_RUN_DAILY => SourceNamespaceContract {
@@ -249,7 +305,86 @@ impl DataSourceShopifyAdminPlugin {
         Ok(())
     }
 
-    fn order_search_window(&self, discover: bool) -> Result<(NaiveDate, NaiveDate), std::io::Error> {
+    fn order_checkpoint_key(&self) -> String {
+        format!("shopify:{}:{}", self.shop_domain, NAMESPACE_ORDER_FACT)
+    }
+
+    fn load_last_completed_order_date(
+        ctx: &dyn SourceSyncContext,
+        key: &str,
+    ) -> Option<NaiveDate> {
+        load_checkpoint_payload::<ShopifyOrderCheckpoint>(ctx, key)
+            .and_then(|cp| NaiveDate::parse_from_str(&cp.last_completed_date, "%Y-%m-%d").ok())
+    }
+
+    fn store_last_completed_order_date(
+        ctx: &dyn SourceSyncContext,
+        key: &str,
+        date: NaiveDate,
+    ) -> Result<(), std::io::Error> {
+        let envelope = CheckpointEnvelope::from_payload(
+            CheckpointAuthority::AdvisoryHint,
+            CheckpointKind::SourceResume,
+            CHECKPOINT_PAYLOAD_VERSION,
+            &ShopifyOrderCheckpoint {
+                last_completed_date: date.format("%Y-%m-%d").to_string(),
+            },
+        )
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        ctx.store_checkpoint(key, &envelope)
+            .map_err(std::io::Error::other)
+    }
+
+    fn order_date_from_created_at(created_at: Option<&str>, fallback: &str) -> String {
+        created_at
+            .and_then(|s| s.get(0..10))
+            .unwrap_or(fallback)
+            .to_string()
+    }
+
+    fn submit_rows_by_partition_field(
+        &self,
+        ctx: &dyn SourceSyncContext,
+        namespace: &str,
+        field: &str,
+        rows: Vec<Value>,
+    ) -> Result<(), std::io::Error> {
+        if rows.is_empty() {
+            return Ok(());
+        }
+        let mut by_date: HashMap<String, Vec<Value>> = HashMap::new();
+        for row in rows {
+            let date = row
+                .get(field)
+                .and_then(|v| v.as_str())
+                .and_then(|s| s.get(0..10))
+                .unwrap_or("")
+                .to_string();
+            if date.is_empty() {
+                continue;
+            }
+            by_date.entry(date).or_default().push(row);
+        }
+        for (date, batch) in by_date {
+            self.submit_namespace(ctx, namespace, &date, batch)?;
+        }
+        Ok(())
+    }
+
+    fn submit_rows_by_order_date(
+        &self,
+        ctx: &dyn SourceSyncContext,
+        namespace: &str,
+        rows: Vec<Value>,
+    ) -> Result<(), std::io::Error> {
+        self.submit_rows_by_partition_field(ctx, namespace, "order_date", rows)
+    }
+
+    fn order_date_window(
+        &self,
+        discover: bool,
+        last_completed: Option<NaiveDate>,
+    ) -> Result<(NaiveDate, NaiveDate), std::io::Error> {
         let end = Utc::now().date_naive() - Duration::days(1);
         let configured_start = NaiveDate::parse_from_str(&self.config.start_date, "%Y-%m-%d")
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e.to_string()))?;
@@ -259,7 +394,7 @@ impl DataSourceShopifyAdminPlugin {
             let planner = DateWindowPlanner {
                 lookback_days: self.config.lookback_days,
             };
-            let window = planner.plan(configured_start, None, end);
+            let window = planner.plan(configured_start, last_completed, end);
             window.start
         };
         if end < start {
@@ -345,20 +480,101 @@ impl DataSourceShopifyAdminPlugin {
         Ok(rows)
     }
 
-    async fn sync_orders(
+    fn parse_order_nodes(
         &self,
-        client: &ShopifyGraphqlClient,
-        run_date: &str,
-        discover: bool,
-    ) -> Result<(Vec<Value>, Vec<Value>), std::io::Error> {
-        let (start, end) = self.order_search_window(discover)?;
-        let search_query = format!(
-            "created_at:>={} created_at:<={}",
-            start.format("%Y-%m-%d"),
-            end.format("%Y-%m-%d")
-        );
+        nodes: &[Value],
+        ingest_run_date: &str,
+    ) -> (Vec<Value>, Vec<Value>, Vec<Value>) {
         let mut order_rows = Vec::new();
         let mut line_rows = Vec::new();
+        let mut refund_rows = Vec::new();
+        for node in nodes {
+            let order_id = node
+                .get("id")
+                .and_then(|v| v.as_str())
+                .map(gid_tail)
+                .unwrap_or_default();
+            let created_at = node.get("createdAt").and_then(|v| v.as_str());
+            let order_date =
+                Self::order_date_from_created_at(created_at, ingest_run_date);
+            let journey = node.get("customerJourneySummary");
+            let first_visit = journey.and_then(|j| j.get("firstVisit"));
+            let utm = first_visit.and_then(|v| v.get("utmParameters"));
+            let discount_codes = node
+                .get("discountCodes")
+                .and_then(|v| v.as_array())
+                .map(|codes| {
+                    codes
+                        .iter()
+                        .filter_map(|c| c.as_str())
+                        .collect::<Vec<_>>()
+                        .join(",")
+                })
+                .filter(|s| !s.is_empty());
+            order_rows.push(json!({
+                "ingest_run_date": ingest_run_date,
+                "order_date": order_date,
+                "order_id": order_id,
+                "created_at": created_at,
+                "financial_status": node.get("displayFinancialStatus").and_then(|v| v.as_str()),
+                "fulfillment_status": node.get("displayFulfillmentStatus").and_then(|v| v.as_str()),
+                "currency_code": node.get("currencyCode").and_then(|v| v.as_str()),
+                "total_price": money_amount(node.get("totalPriceSet")),
+                "subtotal_price": money_amount(node.get("subtotalPriceSet")),
+                "total_tax": money_amount(node.get("totalTaxSet")),
+                "total_shipping": money_amount(node.get("totalShippingPriceSet")),
+                "total_discounts": money_amount(node.get("totalDiscountsSet")),
+                "landing_page_url": first_visit.and_then(|v| v.get("landingPage")).and_then(|v| v.as_str()),
+                "referring_site": first_visit.and_then(|v| v.get("referrerUrl")).and_then(|v| v.as_str()),
+                "utm_source": utm.and_then(|u| u.get("source")).and_then(|v| v.as_str()),
+                "utm_medium": utm.and_then(|u| u.get("medium")).and_then(|v| v.as_str()),
+                "utm_campaign": utm.and_then(|u| u.get("campaign")).and_then(|v| v.as_str()),
+                "sales_channel": node.pointer("/channelInformation/channelDefinition/channelName").and_then(|v| v.as_str()),
+                "discount_codes": discount_codes,
+            }));
+            if let Some(lines) = node.pointer("/lineItems/nodes").and_then(|v| v.as_array()) {
+                for line in lines {
+                    line_rows.push(json!({
+                        "ingest_run_date": ingest_run_date,
+                        "order_date": order_date,
+                        "order_id": order_id,
+                        "line_id": line.get("id").and_then(|v| v.as_str()).map(gid_tail),
+                        "product_id": line.pointer("/product/id").and_then(|v| v.as_str()).map(gid_tail),
+                        "variant_id": line.pointer("/variant/id").and_then(|v| v.as_str()).map(gid_tail),
+                        "sku": line.get("sku").and_then(|v| v.as_str()),
+                        "title": line.get("title").and_then(|v| v.as_str()),
+                        "quantity": line.get("quantity").and_then(|v| v.as_i64()),
+                        "line_total": money_amount(line.get("originalTotalSet")),
+                    }));
+                }
+            }
+            if let Some(refunds) = node.pointer("/refunds").and_then(|v| v.as_array()) {
+                for refund in refunds {
+                    let refund_id = refund.get("id").and_then(|v| v.as_str()).map(gid_tail);
+                    refund_rows.push(json!({
+                        "ingest_run_date": ingest_run_date,
+                        "order_date": order_date,
+                        "order_id": order_id,
+                        "refund_id": refund_id,
+                        "created_at": refund.get("createdAt").and_then(|v| v.as_str()),
+                    }));
+                }
+            }
+        }
+        (order_rows, line_rows, refund_rows)
+    }
+
+    async fn fetch_orders_for_day(
+        &self,
+        client: &ShopifyGraphqlClient,
+        day: NaiveDate,
+    ) -> Result<(Vec<Value>, Vec<Value>, Vec<Value>), std::io::Error> {
+        let day_str = day.format("%Y-%m-%d").to_string();
+        let next_day = (day + Duration::days(1)).format("%Y-%m-%d").to_string();
+        let search_query = format!("created_at:>={day_str} created_at:<{next_day}");
+        let mut order_rows = Vec::new();
+        let mut line_rows = Vec::new();
+        let mut refund_rows = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
             let mut body = client
@@ -369,62 +585,10 @@ impl DataSourceShopifyAdminPlugin {
                 .pointer("/data/orders")
                 .ok_or_else(|| std::io::Error::other("missing data.orders"))?;
             if let Some(nodes) = orders.get("nodes").and_then(|v| v.as_array()) {
-                for node in nodes {
-                    let order_id = node
-                        .get("id")
-                        .and_then(|v| v.as_str())
-                        .map(gid_tail)
-                        .unwrap_or_default();
-                    let journey = node.get("customerJourneySummary");
-                    let first_visit = journey.and_then(|j| j.get("firstVisit"));
-                    let utm = first_visit.and_then(|v| v.get("utmParameters"));
-                    let discount_codes = node
-                        .get("discountCodes")
-                        .and_then(|v| v.as_array())
-                        .map(|codes| {
-                            codes
-                                .iter()
-                                .filter_map(|c| c.as_str())
-                                .collect::<Vec<_>>()
-                                .join(",")
-                        })
-                        .filter(|s| !s.is_empty());
-                    order_rows.push(json!({
-                        "run_date": run_date,
-                        "order_id": order_id,
-                        "created_at": node.get("createdAt").and_then(|v| v.as_str()),
-                        "financial_status": node.get("displayFinancialStatus").and_then(|v| v.as_str()),
-                        "fulfillment_status": node.get("displayFulfillmentStatus").and_then(|v| v.as_str()),
-                        "currency_code": node.get("currencyCode").and_then(|v| v.as_str()),
-                        "total_price": money_amount(node.get("totalPriceSet")),
-                        "subtotal_price": money_amount(node.get("subtotalPriceSet")),
-                        "total_tax": money_amount(node.get("totalTaxSet")),
-                        "total_shipping": money_amount(node.get("totalShippingPriceSet")),
-                        "total_discounts": money_amount(node.get("totalDiscountsSet")),
-                        "landing_page_url": first_visit.and_then(|v| v.get("landingPage")).and_then(|v| v.as_str()),
-                        "referring_site": first_visit.and_then(|v| v.get("referrerUrl")).and_then(|v| v.as_str()),
-                        "utm_source": utm.and_then(|u| u.get("source")).and_then(|v| v.as_str()),
-                        "utm_medium": utm.and_then(|u| u.get("medium")).and_then(|v| v.as_str()),
-                        "utm_campaign": utm.and_then(|u| u.get("campaign")).and_then(|v| v.as_str()),
-                        "sales_channel": node.pointer("/channelInformation/channelDefinition/channelName").and_then(|v| v.as_str()),
-                        "discount_codes": discount_codes,
-                    }));
-                    if let Some(lines) = node.pointer("/lineItems/nodes").and_then(|v| v.as_array()) {
-                        for line in lines {
-                            line_rows.push(json!({
-                                "run_date": run_date,
-                                "order_id": order_id,
-                                "line_id": line.get("id").and_then(|v| v.as_str()).map(gid_tail),
-                                "product_id": line.pointer("/product/id").and_then(|v| v.as_str()).map(gid_tail),
-                                "variant_id": line.pointer("/variant/id").and_then(|v| v.as_str()).map(gid_tail),
-                                "sku": line.get("sku").and_then(|v| v.as_str()),
-                                "title": line.get("title").and_then(|v| v.as_str()),
-                                "quantity": line.get("quantity").and_then(|v| v.as_i64()),
-                                "line_total": money_amount(line.get("originalTotalSet")),
-                            }));
-                        }
-                    }
-                }
+                let (o, l, r) = self.parse_order_nodes(nodes, &day_str);
+                order_rows.extend(o);
+                line_rows.extend(l);
+                refund_rows.extend(r);
             }
             let page_info = orders.get("pageInfo");
             let has_next = page_info
@@ -442,7 +606,252 @@ impl DataSourceShopifyAdminPlugin {
                 break;
             }
         }
-        Ok((order_rows, line_rows))
+        Ok((order_rows, line_rows, refund_rows))
+    }
+
+    async fn sync_orders(
+        &self,
+        ctx: &dyn SourceSyncContext,
+        client: &ShopifyGraphqlClient,
+        _ingest_run_date: &str,
+        discover: bool,
+    ) -> Result<(), std::io::Error> {
+        let checkpoint_key = self.order_checkpoint_key();
+        let last_completed = if discover {
+            None
+        } else {
+            Self::load_last_completed_order_date(ctx, &checkpoint_key)
+        };
+        let (start, end) = self.order_date_window(discover, last_completed)?;
+        let mut cursor_day = start;
+        while cursor_day <= end {
+            let (orders, lines, refunds) = self.fetch_orders_for_day(client, cursor_day).await?;
+            self.submit_rows_by_order_date(ctx, NAMESPACE_ORDER_FACT, orders)?;
+            self.submit_rows_by_order_date(ctx, NAMESPACE_ORDER_LINE_FACT, lines)?;
+            self.submit_rows_by_order_date(ctx, NAMESPACE_REFUND_FACT, refunds)?;
+            if !discover {
+                Self::store_last_completed_order_date(ctx, &checkpoint_key, cursor_day)?;
+            }
+            cursor_day += Duration::days(1);
+        }
+        Ok(())
+    }
+
+    async fn sync_content(
+        &self,
+        client: &ShopifyGraphqlClient,
+        run_date: &str,
+    ) -> Result<(Vec<Value>, Vec<Value>), std::io::Error> {
+        let mut pages = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut body = client.fetch_pages_page(cursor.as_deref()).await?;
+            strip_pii_value(&mut body);
+            let nodes = body
+                .pointer("/data/pages/nodes")
+                .and_then(|v| v.as_array());
+            if let Some(nodes) = nodes {
+                for node in nodes {
+                    pages.push(json!({
+                        "run_date": run_date,
+                        "id": node.get("id").and_then(|v| v.as_str()).map(gid_tail),
+                        "title": node.get("title").and_then(|v| v.as_str()),
+                        "handle": node.get("handle").and_then(|v| v.as_str()),
+                        "is_published": node.get("isPublished").and_then(|v| v.as_bool()),
+                        "updated_at": node.get("updatedAt").and_then(|v| v.as_str()),
+                    }));
+                }
+            }
+            let page_info = body.pointer("/data/pages/pageInfo");
+            if !page_info
+                .and_then(|p| p.get("hasNextPage"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                break;
+            }
+            cursor = page_info
+                .and_then(|p| p.get("endCursor"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
+        }
+
+        let mut redirects = Vec::new();
+        cursor = None;
+        loop {
+            let mut body = client.fetch_redirects_page(cursor.as_deref()).await?;
+            strip_pii_value(&mut body);
+            if let Some(nodes) = body
+                .pointer("/data/urlRedirects/nodes")
+                .and_then(|v| v.as_array())
+            {
+                for node in nodes {
+                    redirects.push(json!({
+                        "run_date": run_date,
+                        "id": node.get("id").and_then(|v| v.as_str()).map(gid_tail),
+                        "path": node.get("path").and_then(|v| v.as_str()),
+                        "target": node.get("target").and_then(|v| v.as_str()),
+                    }));
+                }
+            }
+            let page_info = body.pointer("/data/urlRedirects/pageInfo");
+            if !page_info
+                .and_then(|p| p.get("hasNextPage"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                break;
+            }
+            cursor = page_info
+                .and_then(|p| p.get("endCursor"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok((pages, redirects))
+    }
+
+    async fn sync_collections(
+        &self,
+        client: &ShopifyGraphqlClient,
+        run_date: &str,
+    ) -> Result<Vec<Value>, std::io::Error> {
+        let mut rows = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut body = client.fetch_collections_page(cursor.as_deref()).await?;
+            strip_pii_value(&mut body);
+            if let Some(nodes) = body
+                .pointer("/data/collections/nodes")
+                .and_then(|v| v.as_array())
+            {
+                for node in nodes {
+                    rows.push(json!({
+                        "run_date": run_date,
+                        "id": node.get("id").and_then(|v| v.as_str()).map(gid_tail),
+                        "title": node.get("title").and_then(|v| v.as_str()),
+                        "handle": node.get("handle").and_then(|v| v.as_str()),
+                        "updated_at": node.get("updatedAt").and_then(|v| v.as_str()),
+                    }));
+                }
+            }
+            let page_info = body.pointer("/data/collections/pageInfo");
+            if !page_info
+                .and_then(|p| p.get("hasNextPage"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                break;
+            }
+            cursor = page_info
+                .and_then(|p| p.get("endCursor"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(rows)
+    }
+
+    async fn sync_discounts(
+        &self,
+        client: &ShopifyGraphqlClient,
+        run_date: &str,
+    ) -> Result<Vec<Value>, std::io::Error> {
+        let mut rows = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut body = client.fetch_discounts_page(cursor.as_deref()).await?;
+            strip_pii_value(&mut body);
+            if let Some(nodes) = body
+                .pointer("/data/codeDiscountNodes/nodes")
+                .and_then(|v| v.as_array())
+            {
+                for node in nodes {
+                    let discount = node.get("codeDiscount");
+                    rows.push(json!({
+                        "run_date": run_date,
+                        "id": node.get("id").and_then(|v| v.as_str()).map(gid_tail),
+                        "title": discount.and_then(|d| d.get("title")).and_then(|v| v.as_str()),
+                        "status": discount.and_then(|d| d.get("status")).and_then(|v| v.as_str()),
+                        "starts_at": discount.and_then(|d| d.get("startsAt")).and_then(|v| v.as_str()),
+                        "ends_at": discount.and_then(|d| d.get("endsAt")).and_then(|v| v.as_str()),
+                    }));
+                }
+            }
+            let page_info = body.pointer("/data/codeDiscountNodes/pageInfo");
+            if !page_info
+                .and_then(|p| p.get("hasNextPage"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                break;
+            }
+            cursor = page_info
+                .and_then(|p| p.get("endCursor"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(rows)
+    }
+
+    async fn sync_marketing(
+        &self,
+        client: &ShopifyGraphqlClient,
+        run_date: &str,
+    ) -> Result<Vec<Value>, std::io::Error> {
+        let mut rows = Vec::new();
+        let mut cursor: Option<String> = None;
+        loop {
+            let mut body = client.fetch_marketing_events_page(cursor.as_deref()).await?;
+            strip_pii_value(&mut body);
+            if let Some(nodes) = body
+                .pointer("/data/marketingEvents/nodes")
+                .and_then(|v| v.as_array())
+            {
+                for node in nodes {
+                    let occurred = node
+                        .get("startedAt")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.get(0..10).unwrap_or(run_date).to_string())
+                        .unwrap_or_else(|| run_date.to_string());
+                    rows.push(json!({
+                        "event_id": node.get("id").and_then(|v| v.as_str()).map(gid_tail),
+                        "occurred_at": occurred,
+                        "event_type": node.get("type").and_then(|v| v.as_str()),
+                        "utm_campaign": node.get("utmCampaign").and_then(|v| v.as_str()),
+                        "utm_source": node.get("utmSource").and_then(|v| v.as_str()),
+                        "utm_medium": node.get("utmMedium").and_then(|v| v.as_str()),
+                        "ended_at": node.get("endedAt").and_then(|v| v.as_str()),
+                    }));
+                }
+            }
+            let page_info = body.pointer("/data/marketingEvents/pageInfo");
+            if !page_info
+                .and_then(|p| p.get("hasNextPage"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false)
+            {
+                break;
+            }
+            cursor = page_info
+                .and_then(|p| p.get("endCursor"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string);
+            if cursor.is_none() {
+                break;
+            }
+        }
+        Ok(rows)
     }
 }
 
@@ -456,8 +865,15 @@ impl DataSource for DataSourceShopifyAdminPlugin {
         let namespaces = [
             NAMESPACE_STORE_SNAPSHOT,
             NAMESPACE_PRODUCT_SNAPSHOT,
+            NAMESPACE_VARIANT_SNAPSHOT,
             NAMESPACE_ORDER_FACT,
             NAMESPACE_ORDER_LINE_FACT,
+            NAMESPACE_REFUND_FACT,
+            NAMESPACE_COLLECTION_SNAPSHOT,
+            NAMESPACE_CONTENT_PAGE_SNAPSHOT,
+            NAMESPACE_REDIRECT_SNAPSHOT,
+            NAMESPACE_DISCOUNT_SNAPSHOT,
+            NAMESPACE_MARKETING_EVENT_FACT,
             NAMESPACE_SYNC_RUN_DAILY,
         ];
         namespaces
@@ -487,10 +903,6 @@ impl DataSource for DataSourceShopifyAdminPlugin {
         }
 
         for stream in &streams {
-            if !stream.is_implemented() {
-                info!(stream = stream.name(), "Shopify Admin: stream not implemented in minimal plugin; skipping");
-                continue;
-            }
             let result: Result<(), std::io::Error> = match stream {
                 ShopifyStream::Store => {
                     let rows = self.sync_store(&client, &run_date).await?;
@@ -503,12 +915,36 @@ impl DataSource for DataSourceShopifyAdminPlugin {
                     Ok(())
                 }
                 ShopifyStream::Orders => {
-                    let (orders, lines) = self.sync_orders(&client, &run_date, discover).await?;
-                    self.submit_namespace(ctx.as_ref(), NAMESPACE_ORDER_FACT, &run_date, orders)?;
-                    self.submit_namespace(ctx.as_ref(), NAMESPACE_ORDER_LINE_FACT, &run_date, lines)?;
+                    self.sync_orders(ctx.as_ref(), &client, &run_date, discover)
+                        .await?;
                     Ok(())
                 }
-                _ => Ok(()),
+                ShopifyStream::Content => {
+                    let (pages, redirects) = self.sync_content(&client, &run_date).await?;
+                    self.submit_namespace(ctx.as_ref(), NAMESPACE_CONTENT_PAGE_SNAPSHOT, &run_date, pages)?;
+                    self.submit_namespace(ctx.as_ref(), NAMESPACE_REDIRECT_SNAPSHOT, &run_date, redirects)?;
+                    Ok(())
+                }
+                ShopifyStream::Collections => {
+                    let rows = self.sync_collections(&client, &run_date).await?;
+                    self.submit_namespace(ctx.as_ref(), NAMESPACE_COLLECTION_SNAPSHOT, &run_date, rows)?;
+                    Ok(())
+                }
+                ShopifyStream::Discounts => {
+                    let rows = self.sync_discounts(&client, &run_date).await?;
+                    self.submit_namespace(ctx.as_ref(), NAMESPACE_DISCOUNT_SNAPSHOT, &run_date, rows)?;
+                    Ok(())
+                }
+                ShopifyStream::Marketing => {
+                    let rows = self.sync_marketing(&client, &run_date).await?;
+                    self.submit_rows_by_partition_field(
+                        ctx.as_ref(),
+                        NAMESPACE_MARKETING_EVENT_FACT,
+                        "occurred_at",
+                        rows,
+                    )?;
+                    Ok(())
+                }
             };
             match result {
                 Ok(()) => synced_streams.push(stream.name()),
@@ -615,13 +1051,26 @@ mod tests {
         assert_eq!(products[0]["handle"], "fixture-product");
 
         let orders = ctx.rows_for_namespace(NAMESPACE_ORDER_FACT);
-        assert_eq!(orders.len(), 1);
-        assert_eq!(orders[0]["order_id"], "5001");
+        assert!(!orders.is_empty());
+        assert!(
+            orders
+                .iter()
+                .any(|o| o.get("order_id").and_then(|v| v.as_str()) == Some("5001"))
+        );
+        assert!(
+            orders
+                .iter()
+                .all(|o| o.get("order_date").and_then(|v| v.as_str()).is_some())
+        );
         assert!(orders[0].get("email").is_none());
 
         let lines = ctx.rows_for_namespace(NAMESPACE_ORDER_LINE_FACT);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0]["sku"], "FIX-SKU-1");
+        assert!(!lines.is_empty());
+        assert!(
+            lines
+                .iter()
+                .any(|l| l.get("sku").and_then(|v| v.as_str()) == Some("FIX-SKU-1"))
+        );
 
         let runs = ctx.rows_for_namespace(NAMESPACE_SYNC_RUN_DAILY);
         assert_eq!(runs.len(), 1);

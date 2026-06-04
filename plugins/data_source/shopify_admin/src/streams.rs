@@ -46,9 +46,8 @@ impl ShopifyStream {
         }
     }
 
-    /// Streams that perform API work in this minimal plugin.
     pub fn is_implemented(self) -> bool {
-        matches!(self, Self::Store | Self::Catalog | Self::Orders)
+        true
     }
 }
 
@@ -124,14 +123,9 @@ mod tests {
     }
 
     #[test]
-    fn only_store_catalog_orders_are_implemented() {
+    fn full_profile_streams_are_implemented() {
         for stream in streams_for_profile(StreamProfile::Full) {
-            if stream.is_implemented() {
-                assert!(matches!(
-                    stream,
-                    ShopifyStream::Store | ShopifyStream::Catalog | ShopifyStream::Orders
-                ));
-            }
+            assert!(stream.is_implemented());
         }
     }
 }

@@ -35,7 +35,16 @@ The Write-Ahead Log provides durability and crash recovery. Every record passes 
 | **Values** | `disk`, `s3` |
 
 - `disk` — WAL segments are stored in `DATA_DIR`. Fast, but requires the same disk on restart.
-- `s3` — WAL segments are stored in `SKIPPR_S3_BUCKET`. No local disk dependency. Enables fully stateless compute.
+- `s3` — WAL segments are stored in `SKIPPR_WAL_S3_BUCKET` when set, otherwise `SKIPPR_S3_BUCKET`. No local disk dependency. Enables fully stateless compute. See [DynamoDB offset store](offset-store-dynamodb.md) for Lambda resume with `SKIPPR_OFFSET_STORE=dynamodb`.
+
+### SKIPPR_WAL_S3_BUCKET
+
+| | |
+|---|---|
+| **Environment variable** | `SKIPPR_WAL_S3_BUCKET` |
+| **Default** | `SKIPPR_S3_BUCKET` |
+
+Dedicated bucket for WAL segments only (recommended for Upfoundry). Keeps internal pipeline state separate from customer datalake objects.
 
 ### WAL_BYTES_PER_FILE
 

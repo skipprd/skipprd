@@ -54,6 +54,12 @@ pub struct Skippr {
     pub tenant: Option<String>,
     pub skippr_s3_bucket: Option<String>,
     pub skipprd_el_storage_mode: Option<String>,
+    /// Dedicated S3 bucket for WAL segments (falls back to skippr_s3_bucket).
+    pub wal_s3_bucket: Option<String>,
+    /// Offset store backend: `sled` (default) or `dynamodb`.
+    pub offset_store: Option<String>,
+    /// DynamoDB table for offset/checkpoint rows when offset_store=dynamodb.
+    pub offset_dynamodb_table: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -315,6 +321,9 @@ impl Config {
                 tenant: None,
                 skippr_s3_bucket: None,
                 skipprd_el_storage_mode: None,
+                wal_s3_bucket: None,
+                offset_store: None,
+                offset_dynamodb_table: None,
             }),
             pipelines: HashMap::new(),
             data_sources: None,
@@ -989,10 +998,97 @@ impl Config {
         Config::setenv("WAL_STORAGE", value);
     }
 
-    // WAL S3 bucket (always use SKIPPR_S3_BUCKET; no separate WAL_S3_BUCKET)
+    /// S3 bucket for WAL segments. Prefer `SKIPPR_WAL_S3_BUCKET` / skippr.wal_s3_bucket, then datalake bucket.
     pub fn get_wal_s3_bucket() -> String {
-        // Intentionally ignore any WAL_S3_BUCKET environment variables; standardize on SKIPPR_S3_BUCKET
-        Config::get_skippr_s3_bucket()
+        if Config::get_envcache("SKIPPR_WAL_S3_BUCKET") != "" {
+            return Config::get_envcache("SKIPPR_WAL_S3_BUCKET");
+        }
+        let from_env = Config::getenv("SKIPPR_WAL_S3_BUCKET", "");
+        if !from_env.is_empty() {
+            Config::set_evncache("SKIPPR_WAL_S3_BUCKET", &from_env);
+            return from_env;
+        }
+        let config = Config::get();
+        if let Some(skippr) = config.skippr.as_ref() {
+            if let Some(bucket) = skippr.wal_s3_bucket.as_ref() {
+                if !bucket.is_empty() {
+                    Config::set_evncache("SKIPPR_WAL_S3_BUCKET", bucket);
+                    return bucket.clone();
+                }
+            }
+        }
+        let fallback = Config::get_skippr_s3_bucket();
+        Config::set_evncache("SKIPPR_WAL_S3_BUCKET", &fallback);
+        fallback
+    }
+
+    pub fn set_wal_s3_bucket(value: &str) {
+        Config::setenv("SKIPPR_WAL_S3_BUCKET", value);
+        Config::set_evncache("SKIPPR_WAL_S3_BUCKET", value);
+    }
+
+    /// `sled` (default) or `dynamodb`.
+    pub fn get_offset_store() -> String {
+        if Config::get_envcache("SKIPPR_OFFSET_STORE") != "" {
+            return Config::get_envcache("SKIPPR_OFFSET_STORE");
+        }
+        let from_env = Config::getenv("SKIPPR_OFFSET_STORE", "");
+        if !from_env.is_empty() {
+            Config::set_evncache("SKIPPR_OFFSET_STORE", &from_env);
+            return from_env;
+        }
+        let config = Config::get();
+        if let Some(skippr) = config.skippr.as_ref() {
+            if let Some(store) = skippr.offset_store.as_ref() {
+                if !store.is_empty() {
+                    Config::set_evncache("SKIPPR_OFFSET_STORE", store);
+                    return store.clone();
+                }
+            }
+        }
+        Config::set_evncache("SKIPPR_OFFSET_STORE", "sled");
+        "sled".to_string()
+    }
+
+    pub fn set_offset_store(value: &str) {
+        Config::setenv("SKIPPR_OFFSET_STORE", value);
+        Config::set_evncache("SKIPPR_OFFSET_STORE", value);
+    }
+
+    pub fn get_offset_dynamodb_table() -> String {
+        if Config::get_envcache("SKIPPR_OFFSET_DYNAMODB_TABLE") != "" {
+            return Config::get_envcache("SKIPPR_OFFSET_DYNAMODB_TABLE");
+        }
+        let from_env = Config::getenv("SKIPPR_OFFSET_DYNAMODB_TABLE", "");
+        if !from_env.is_empty() {
+            Config::set_evncache("SKIPPR_OFFSET_DYNAMODB_TABLE", &from_env);
+            return from_env;
+        }
+        let config = Config::get();
+        if let Some(skippr) = config.skippr.as_ref() {
+            if let Some(table) = skippr.offset_dynamodb_table.as_ref() {
+                if !table.is_empty() {
+                    Config::set_evncache("SKIPPR_OFFSET_DYNAMODB_TABLE", table);
+                    return table.clone();
+                }
+            }
+        }
+        String::new()
+    }
+
+    pub fn set_offset_dynamodb_table(value: &str) {
+        Config::setenv("SKIPPR_OFFSET_DYNAMODB_TABLE", value);
+        Config::set_evncache("SKIPPR_OFFSET_DYNAMODB_TABLE", value);
+    }
+
+    /// Derived identity for DynamoDB offset rows: tenant#workspace#pipeline.
+    pub fn offset_store_partition_key() -> String {
+        format!(
+            "{}#{}#{}",
+            Config::get_tenant(),
+            Config::get_workspace_name(),
+            Config::get_pipeline_name()
+        )
     }
 
     // WAL prefix (default derived: {tenant}/{workspace}/{pipeline}/segments)
@@ -3146,6 +3242,19 @@ data_sinks:
 
     #[test]
     #[serial]
+    fn offset_store_partition_key_is_derived() {
+        Config::setenv("TENANT", "tenant-a");
+        Config::setenv("WORKSPACE_NAME", "workspace-b");
+        PIPELINE_NAME.write().clear();
+        PIPELINE_NAME.write().push_str("google_analytics");
+        ENV_CACHE.write().clear();
+        assert_eq!(
+            Config::offset_store_partition_key(),
+            "tenant-a#workspace-b#google_analytics"
+        );
+    }
+
+    #[test]
     fn skipprd_el_storage_mode_uses_explicit_name() {
         let original_config = APP_CONFIG.read().clone();
         let original_env = std::env::var("SKIPPRD_EL_STORAGE_MODE").ok();
@@ -3158,6 +3267,9 @@ data_sinks:
             tenant: None,
             skippr_s3_bucket: None,
             skipprd_el_storage_mode: Some("local".to_string()),
+            wal_s3_bucket: None,
+            offset_store: None,
+            offset_dynamodb_table: None,
         });
         *APP_CONFIG.write() = Some(config);
 
@@ -3199,6 +3311,9 @@ data_sinks:
                 tenant: None,
                 skippr_s3_bucket: None,
                 skipprd_el_storage_mode: None,
+                wal_s3_bucket: None,
+                offset_store: None,
+                offset_dynamodb_table: None,
             }),
             pipelines: HashMap::new(),
             data_sources: None,
@@ -3242,6 +3357,9 @@ data_sinks:
                 tenant: None,
                 skippr_s3_bucket: None,
                 skipprd_el_storage_mode: None,
+                wal_s3_bucket: None,
+                offset_store: None,
+                offset_dynamodb_table: None,
             }),
             pipelines: HashMap::new(),
             data_sources: None,

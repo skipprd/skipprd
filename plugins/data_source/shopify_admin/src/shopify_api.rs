@@ -66,6 +66,78 @@ const ORDERS_QUERY: &str = r#"query OrdersInRange($cursor: String, $query: Strin
           variant { id }
         }
       }
+      refunds {
+        id
+        createdAt
+      }
+    }
+  }
+}"#;
+
+const PAGES_QUERY: &str = r#"query Pages($cursor: String) {
+  pages(first: 50, after: $cursor) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id
+      title
+      handle
+      isPublished
+      updatedAt
+    }
+  }
+}"#;
+
+const REDIRECTS_QUERY: &str = r#"query Redirects($cursor: String) {
+  urlRedirects(first: 50, after: $cursor) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id
+      path
+      target
+    }
+  }
+}"#;
+
+const COLLECTIONS_QUERY: &str = r#"query Collections($cursor: String) {
+  collections(first: 50, after: $cursor) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id
+      title
+      handle
+      updatedAt
+    }
+  }
+}"#;
+
+const DISCOUNTS_QUERY: &str = r#"query Discounts($cursor: String) {
+  codeDiscountNodes(first: 50, after: $cursor) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id
+      codeDiscount {
+        ... on DiscountCodeBasic {
+          title
+          status
+          startsAt
+          endsAt
+        }
+      }
+    }
+  }
+}"#;
+
+const MARKETING_EVENTS_QUERY: &str = r#"query MarketingEvents($cursor: String) {
+  marketingEvents(first: 50, after: $cursor) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      id
+      type
+      startedAt
+      endedAt
+      utmCampaign
+      utmSource
+      utmMedium
     }
   }
 }"#;
@@ -128,6 +200,52 @@ impl ShopifyGraphqlClient {
             "query": search_query,
         });
         self.execute("orders", ORDERS_QUERY, variables).await
+    }
+
+    pub async fn fetch_pages_page(&self, cursor: Option<&str>) -> Result<Value, std::io::Error> {
+        let variables = match cursor {
+            Some(c) => json!({ "cursor": c }),
+            None => json!({ "cursor": null }),
+        };
+        self.execute("pages", PAGES_QUERY, variables).await
+    }
+
+    pub async fn fetch_redirects_page(&self, cursor: Option<&str>) -> Result<Value, std::io::Error> {
+        let variables = match cursor {
+            Some(c) => json!({ "cursor": c }),
+            None => json!({ "cursor": null }),
+        };
+        self.execute("redirects", REDIRECTS_QUERY, variables).await
+    }
+
+    pub async fn fetch_collections_page(
+        &self,
+        cursor: Option<&str>,
+    ) -> Result<Value, std::io::Error> {
+        let variables = match cursor {
+            Some(c) => json!({ "cursor": c }),
+            None => json!({ "cursor": null }),
+        };
+        self.execute("collections", COLLECTIONS_QUERY, variables).await
+    }
+
+    pub async fn fetch_discounts_page(&self, cursor: Option<&str>) -> Result<Value, std::io::Error> {
+        let variables = match cursor {
+            Some(c) => json!({ "cursor": c }),
+            None => json!({ "cursor": null }),
+        };
+        self.execute("discounts", DISCOUNTS_QUERY, variables).await
+    }
+
+    pub async fn fetch_marketing_events_page(
+        &self,
+        cursor: Option<&str>,
+    ) -> Result<Value, std::io::Error> {
+        let variables = match cursor {
+            Some(c) => json!({ "cursor": c }),
+            None => json!({ "cursor": null }),
+        };
+        self.execute("marketing_events", MARKETING_EVENTS_QUERY, variables).await
     }
 
     async fn execute(
@@ -225,6 +343,11 @@ fn load_fixture_response(dir: &str, operation: &str) -> Option<Value> {
         "shop" => "shop.json",
         "products" => "products.json",
         "orders" => "orders.json",
+        "pages" => "pages.json",
+        "redirects" => "redirects.json",
+        "collections" => "collections.json",
+        "discounts" => "discounts.json",
+        "marketing_events" => "marketing_events.json",
         _ => return None,
     };
     let path = format!("{}/{}", dir.trim_end_matches('/'), file);

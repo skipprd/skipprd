@@ -1,0 +1,21 @@
+{
+  "id": "8001",
+  "propertiesWithHistory": {
+    "createdate": [
+      {
+        "value": "2024-01-10T08:00:00.000Z",
+        "timestamp": "2024-01-10T08:00:00.000Z"
+      }
+    ],
+    "lifecyclestage": [
+      {
+        "value": "lead",
+        "timestamp": "2024-01-10T08:00:00.000Z"
+      },
+      {
+        "value": "customer",
+        "timestamp": "2024-03-01T09:00:00.000Z"
+      }
+    ]
+  }
+}

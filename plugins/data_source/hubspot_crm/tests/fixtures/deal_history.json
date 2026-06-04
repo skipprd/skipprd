@@ -1,0 +1,21 @@
+{
+  "id": "9001",
+  "propertiesWithHistory": {
+    "createdate": [
+      {
+        "value": "2024-01-15T10:00:00.000Z",
+        "timestamp": "2024-01-15T10:00:00.000Z"
+      }
+    ],
+    "dealstage": [
+      {
+        "value": "appointmentscheduled",
+        "timestamp": "2024-01-15T10:00:00.000Z"
+      },
+      {
+        "value": "closedwon",
+        "timestamp": "2024-02-01T12:00:00.000Z"
+      }
+    ]
+  }
+}

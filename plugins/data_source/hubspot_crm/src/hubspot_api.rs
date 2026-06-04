@@ -184,6 +184,31 @@ impl HubspotApiClient {
         self.get_json("/cms/v3/pages/landing-pages?limit=50", "landing_pages.json")
             .await
     }
+
+    pub async fn deal_with_property_history(
+        &self,
+        deal_id: &str,
+        properties: &[&str],
+    ) -> Result<Value, std::io::Error> {
+        let props = properties.join(",");
+        let path = format!("/crm/v3/objects/deals/{deal_id}?propertiesWithHistory={props}");
+        self.get_json(&path, "deal_history.json").await
+    }
+
+    pub async fn contact_with_property_history(
+        &self,
+        contact_id: &str,
+        properties: &[&str],
+    ) -> Result<Value, std::io::Error> {
+        let props = properties.join(",");
+        let path = format!("/crm/v3/objects/contacts/{contact_id}?propertiesWithHistory={props}");
+        self.get_json(&path, "contact_history.json").await
+    }
+
+    pub async fn list_marketing_emails(&self) -> Result<Value, std::io::Error> {
+        self.get_json("/marketing/v3/emails?limit=50", "marketing_emails.json")
+            .await
+    }
 }
 
 pub fn prop_str(props: &Value, key: &str) -> Option<String> {

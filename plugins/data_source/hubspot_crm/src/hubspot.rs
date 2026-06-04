@@ -7,6 +7,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use skippr_plugin_shared_api_source::{RetryConfig, RetryableHttpClient};
 use skippr_runtime_sdk::helpers::offsets::OffsetKey;
+use skippr_runtime_sdk::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
 use skippr_runtime_sdk::plugins::source_contract::{
     FieldPath, SourceNamespaceContract, SourceSemantics, WritePolicy,
 };
@@ -14,7 +15,11 @@ use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceOnceContract, SourceSyncContext,
 };
 use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
-use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch};
+use skippr_runtime_sdk::source_compat::{
+    load_checkpoint_payload, submit_payload_batches, IngestBatch,
+};
+
+const CHECKPOINT_PAYLOAD_VERSION: u32 = 1;
 use tracing::{info, warn};
 
 use crate::hubspot_api::{prop_str, HubspotApiClient, FIXTURE_ENV};
@@ -53,7 +58,12 @@ pub struct DataSourceHubspotCrmPluginConfig {
 }
 
 fn default_lookback_days() -> u32 {
-    30
+    7
+}
+
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+struct HubspotIngestCheckpoint {
+    last_occurred_at: String,
 }
 
 fn default_min_query_interval_ms() -> u64 {
@@ -173,13 +183,141 @@ impl DataSourceHubspotCrmPlugin {
         row
     }
 
+    fn events_from_deal_history(
+        &self,
+        ingest_run_date: &str,
+        deal_id: &str,
+        history: &Value,
+        attribution: Value,
+    ) -> Vec<Value> {
+        let mut events = Vec::new();
+        if let Some(created) = history
+            .pointer("/propertiesWithHistory/createdate")
+            .and_then(|v| v.as_array())
+            .and_then(|entries| entries.first())
+        {
+            let occurred = created
+                .get("timestamp")
+                .or_else(|| created.get("value"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !occurred.is_empty() {
+                events.push(self.event_row(
+                    ingest_run_date,
+                    "deal.created",
+                    occurred,
+                    json!({ "deal_id": deal_id }),
+                    attribution.clone(),
+                ));
+            }
+        }
+        if let Some(stages) = history
+            .pointer("/propertiesWithHistory/dealstage")
+            .and_then(|v| v.as_array())
+        {
+            for entry in stages {
+                let occurred = entry.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+                if occurred.is_empty() {
+                    continue;
+                }
+                let value = entry.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                events.push(self.event_row(
+                    ingest_run_date,
+                    "deal.stage_changed",
+                    occurred,
+                    json!({ "deal_id": deal_id }),
+                    json!({
+                        "property_name": "dealstage",
+                        "value_string": value,
+                    }),
+                ));
+            }
+        }
+        events
+    }
+
+    fn events_from_contact_history(
+        &self,
+        ingest_run_date: &str,
+        contact_id: &str,
+        company_id: Option<String>,
+        history: &Value,
+        attribution: Value,
+    ) -> Vec<Value> {
+        let mut events = Vec::new();
+        if let Some(created) = history
+            .pointer("/propertiesWithHistory/createdate")
+            .and_then(|v| v.as_array())
+            .and_then(|entries| entries.first())
+        {
+            let occurred = created
+                .get("timestamp")
+                .or_else(|| created.get("value"))
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if !occurred.is_empty() {
+                events.push(self.event_row(
+                    ingest_run_date,
+                    "contact.created",
+                    occurred,
+                    json!({
+                        "contact_id": contact_id,
+                        "company_id": company_id,
+                    }),
+                    attribution.clone(),
+                ));
+            }
+        }
+        if let Some(stages) = history
+            .pointer("/propertiesWithHistory/lifecyclestage")
+            .and_then(|v| v.as_array())
+        {
+            for entry in stages {
+                let occurred = entry.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+                if occurred.is_empty() {
+                    continue;
+                }
+                let value = entry.get("value").and_then(|v| v.as_str()).unwrap_or("");
+                events.push(self.event_row(
+                    ingest_run_date,
+                    "contact.lifecycle_changed",
+                    occurred,
+                    json!({
+                        "contact_id": contact_id,
+                        "company_id": company_id,
+                    }),
+                    json!({
+                        "property_name": "lifecyclestage",
+                        "value_string": value,
+                    }),
+                ));
+            }
+        }
+        events
+    }
+
+    fn filter_events_after_watermark(events: Vec<Value>, watermark: Option<&str>) -> Vec<Value> {
+        let Some(wm) = watermark else {
+            return events;
+        };
+        events
+            .into_iter()
+            .filter(|e| {
+                e.get("occurred_at")
+                    .and_then(|v| v.as_str())
+                    .map(|o| o > wm)
+                    .unwrap_or(true)
+            })
+            .collect()
+    }
+
     fn namespace_contract(namespace: &str) -> SourceNamespaceContract {
         match namespace {
             NAMESPACE_EVENT_FACT => SourceNamespaceContract {
                 namespace: namespace.to_string(),
                 primary_key: vec![FieldPath::single("event_id")],
                 cursor: Some(FieldPath::single("occurred_at")),
-                partition_key: vec![FieldPath::single("ingest_run_date")],
+                partition_key: vec![FieldPath::single("occurred_at")],
                 write_policy: WritePolicy::Append,
                 refresh_window: None,
                 description: "HubSpot touchpoint events".into(),
@@ -272,6 +410,65 @@ impl DataSourceHubspotCrmPlugin {
             },
             other => panic!("unknown hubspot namespace: {other}"),
         }
+    }
+
+    fn ingest_checkpoint_key(&self) -> String {
+        format!("hubspot:{}:{}", self.hub_id, NAMESPACE_EVENT_FACT)
+    }
+
+    fn load_last_occurred_at(ctx: &dyn SourceSyncContext, key: &str) -> Option<String> {
+        load_checkpoint_payload::<HubspotIngestCheckpoint>(ctx, key)
+            .map(|cp| cp.last_occurred_at)
+    }
+
+    fn store_last_occurred_at(
+        ctx: &dyn SourceSyncContext,
+        key: &str,
+        occurred_at: &str,
+    ) -> Result<(), std::io::Error> {
+        let envelope = CheckpointEnvelope::from_payload(
+            CheckpointAuthority::AdvisoryHint,
+            CheckpointKind::SourceResume,
+            CHECKPOINT_PAYLOAD_VERSION,
+            &HubspotIngestCheckpoint {
+                last_occurred_at: occurred_at.to_string(),
+            },
+        )
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+        ctx.store_checkpoint(key, &envelope)
+            .map_err(std::io::Error::other)
+    }
+
+    fn submit_events(
+        &self,
+        ctx: &dyn SourceSyncContext,
+        events: Vec<Value>,
+    ) -> Result<Option<String>, std::io::Error> {
+        if events.is_empty() {
+            return Ok(None);
+        }
+        let mut max_occurred: Option<String> = None;
+        let mut by_day: std::collections::HashMap<String, Vec<Value>> =
+            std::collections::HashMap::new();
+        for row in events {
+            let occurred = row
+                .get("occurred_at")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            if occurred.is_empty() {
+                continue;
+            }
+            let day = occurred.get(0..10).unwrap_or(&occurred).to_string();
+            if max_occurred.as_ref().map(|m| occurred.as_str() > m.as_str()).unwrap_or(true) {
+                max_occurred = Some(occurred.clone());
+            }
+            by_day.entry(day).or_default().push(row);
+        }
+        for (day, batch) in by_day {
+            self.submit_namespace(ctx, NAMESPACE_EVENT_FACT, &day, batch)?;
+        }
+        Ok(max_occurred)
     }
 
     fn submit_namespace(
@@ -371,24 +568,16 @@ impl DataSourceHubspotCrmPlugin {
             for deal in results {
                 let deal_id = deal.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let props = deal.get("properties").cloned().unwrap_or(json!({}));
-                let created = prop_str(&props, "createdate").unwrap_or_else(|| run_date.to_string());
-                events.push(self.event_row(
-                    run_date,
-                    "deal.created",
-                    &created,
-                    json!({ "deal_id": deal_id }),
-                    attribution_from_props(&props),
-                ));
-                if let Some(stage) = prop_str(&props, "dealstage") {
-                    events.push(self.event_row(
+                let attribution = attribution_from_props(&props);
+                if !deal_id.is_empty() {
+                    let history = client
+                        .deal_with_property_history(deal_id, &["dealstage", "createdate"])
+                        .await?;
+                    events.extend(self.events_from_deal_history(
                         run_date,
-                        "deal.stage_changed",
-                        &created,
-                        json!({ "deal_id": deal_id }),
-                        json!({
-                            "property_name": "dealstage",
-                            "value_string": stage,
-                        }),
+                        deal_id,
+                        &history,
+                        attribution.clone(),
                     ));
                 }
                 let mut snap = json!({
@@ -419,25 +608,20 @@ impl DataSourceHubspotCrmPlugin {
             for contact in results {
                 let contact_id = contact.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let props = contact.get("properties").cloned().unwrap_or(json!({}));
-                let created = prop_str(&props, "createdate").unwrap_or_else(|| run_date.to_string());
                 let company_id = prop_str(&props, "associatedcompanyid");
-                events.push(self.event_row(
-                    run_date,
-                    "contact.created",
-                    &created,
-                    json!({
-                        "contact_id": contact_id,
-                        "company_id": company_id,
-                    }),
-                    attribution_from_props(&props),
-                ));
-                if let Some(stage) = prop_str(&props, "lifecyclestage") {
-                    events.push(self.event_row(
+                if !contact_id.is_empty() {
+                    let history = client
+                        .contact_with_property_history(
+                            contact_id,
+                            &["lifecyclestage", "createdate"],
+                        )
+                        .await?;
+                    events.extend(self.events_from_contact_history(
                         run_date,
-                        "contact.lifecycle_changed",
-                        &created,
-                        json!({ "contact_id": contact_id, "company_id": company_id }),
-                        json!({ "property_name": "lifecyclestage", "value_string": stage }),
+                        contact_id,
+                        company_id,
+                        &history,
+                        attribution_from_props(&props),
                     ));
                 }
             }
@@ -493,15 +677,22 @@ impl DataSourceHubspotCrmPlugin {
                 });
                 self.redact(&mut dim);
                 forms.push(dim);
-                let created = form
-                    .get("createdAt")
+            }
+        }
+        let emails_body = client.list_marketing_emails().await?;
+        if let Some(results) = emails_body.get("results").and_then(|v| v.as_array()) {
+            for email in results {
+                let email_id = email.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let occurred = email
+                    .get("publishedAt")
+                    .or_else(|| email.get("createdAt"))
                     .and_then(|v| v.as_str())
                     .unwrap_or(run_date);
                 events.push(self.event_row(
                     run_date,
-                    "form.submitted",
-                    created,
-                    json!({ "form_id": form_id }),
+                    "email.published",
+                    occurred,
+                    json!({ "email_id": email_id }),
                     json!({}),
                 ));
             }
@@ -574,7 +765,7 @@ impl DataSourceHubspotCrmPlugin {
         client: &HubspotApiClient,
         run_date: &str,
     ) -> Result<(Vec<Value>, Vec<Value>), std::io::Error> {
-        let mut events = Vec::new();
+        let events = Vec::new();
         let mut pages = Vec::new();
         let body = client.list_landing_pages().await?;
         if let Some(results) = body.get("results").and_then(|v| v.as_array()) {
@@ -592,17 +783,6 @@ impl DataSourceHubspotCrmPlugin {
                 });
                 self.redact(&mut dim);
                 pages.push(dim);
-                let updated = page
-                    .get("updatedAt")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or(run_date);
-                events.push(self.event_row(
-                    run_date,
-                    "page.viewed",
-                    updated,
-                    json!({ "page_id": page_id }),
-                    json!({ "page_url_path": path_without_query(url) }),
-                ));
             }
         }
         Ok((events, pages))
@@ -663,6 +843,12 @@ impl DataSource for DataSourceHubspotCrmPlugin {
         let started = Instant::now();
         let client = self.api_client().await?;
         let streams = self.streams_for_run(discover);
+        let checkpoint_key = self.ingest_checkpoint_key();
+        let watermark = if discover {
+            None
+        } else {
+            Self::load_last_occurred_at(ctx.as_ref(), &checkpoint_key)
+        };
         let mut all_events: Vec<Value> = Vec::new();
         let mut synced: Vec<&str> = Vec::new();
         let mut properties_redacted: u64 = 0;
@@ -707,7 +893,12 @@ impl DataSource for DataSourceHubspotCrmPlugin {
             }
         }
 
-        self.submit_namespace(ctx.as_ref(), NAMESPACE_EVENT_FACT, &run_date, all_events)?;
+        let all_events = Self::filter_events_after_watermark(all_events, watermark.as_deref());
+        if let Some(max_occurred) = self.submit_events(ctx.as_ref(), all_events)? {
+            if !discover {
+                Self::store_last_occurred_at(ctx.as_ref(), &checkpoint_key, &max_occurred)?;
+            }
+        }
 
         let sync_row = json!({
             "run_date": run_date,
