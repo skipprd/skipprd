@@ -12,14 +12,28 @@ use chrono::Utc;
 use once_cell::sync::OnceCell;
 use tracing::{info, warn};
 
+static DYNAMO_RUNTIME: OnceCell<tokio::runtime::Runtime> = OnceCell::new();
 static DYNAMO_CLIENT: OnceCell<Arc<Client>> = OnceCell::new();
+
+/// Dedicated runtime for sync offset I/O. Never call `Handle::current().block_on` here:
+/// skipprd/plugins may already run on Tokio, and nested block_on panics.
+fn dynamo_runtime() -> &'static tokio::runtime::Runtime {
+    DYNAMO_RUNTIME.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("failed to build DynamoDB offset store runtime")
+    })
+}
+
+fn block_on<F: std::future::Future>(future: F) -> F::Output {
+    dynamo_runtime().block_on(future)
+}
 
 fn dynamo_client() -> Arc<Client> {
     DYNAMO_CLIENT
         .get_or_init(|| {
-            let rt = tokio::runtime::Handle::try_current()
-                .expect("DynamoDB offset store requires a Tokio runtime");
-            rt.block_on(async {
+            block_on(async {
                 let shared = aws_config::defaults(aws_config::BehaviorVersion::latest())
                     .load()
                     .await;
@@ -73,7 +87,7 @@ impl DynamoDbOffsetStore {
     }
 
     pub fn get_bytes(&self, sk: &str) -> Result<Option<Vec<u8>>, String> {
-        let resp = tokio::runtime::Handle::current().block_on(async {
+        let resp = block_on(async {
             self.client
                 .get_item()
                 .table_name(&self.table)
@@ -116,16 +130,15 @@ impl DynamoDbOffsetStore {
             AttributeValue::S(payload_b64),
         );
         item.insert("updated_at".to_string(), AttributeValue::S(now));
-        tokio::runtime::Handle::current()
-            .block_on(async {
-                self.client
-                    .put_item()
-                    .table_name(&self.table)
-                    .set_item(Some(item))
-                    .send()
-                    .await
-            })
-            .map_err(|e| format!("DynamoDB put_item failed: {e}"))?;
+        block_on(async {
+            self.client
+                .put_item()
+                .table_name(&self.table)
+                .set_item(Some(item))
+                .send()
+                .await
+        })
+        .map_err(|e| format!("DynamoDB put_item failed: {e}"))?;
         Ok(())
     }
 
