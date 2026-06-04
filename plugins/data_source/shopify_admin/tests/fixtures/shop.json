@@ -1,0 +1,23 @@
+{
+  "data": {
+    "shop": {
+      "name": "Fixture Shop",
+      "currencyCode": "USD",
+      "primaryDomain": {
+        "url": "https://fixture.example.com"
+      },
+      "plan": {
+        "displayName": "Basic"
+      }
+    }
+  },
+  "extensions": {
+    "cost": {
+      "throttleStatus": {
+        "maximumAvailable": 2000.0,
+        "currentlyAvailable": 1990.0,
+        "restoreRate": 100.0
+      }
+    }
+  }
+}

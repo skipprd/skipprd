@@ -1,0 +1,31 @@
+{
+  "data": {
+    "products": {
+      "pageInfo": {
+        "hasNextPage": false,
+        "endCursor": null
+      },
+      "nodes": [
+        {
+          "id": "gid://shopify/Product/1001",
+          "handle": "fixture-product",
+          "title": "Fixture Product",
+          "status": "ACTIVE",
+          "productType": "Apparel",
+          "vendor": "Fixture Vendor",
+          "onlineStoreUrl": "https://fixture.example.com/products/fixture-product",
+          "seo": {
+            "title": "Fixture SEO Title",
+            "description": "Fixture SEO description"
+          },
+          "publishedAt": "2024-01-15T10:00:00Z",
+          "updatedAt": "2024-06-01T12:00:00Z",
+          "totalInventory": 42,
+          "variantsCount": {
+            "count": 2
+          }
+        }
+      ]
+    }
+  }
+}

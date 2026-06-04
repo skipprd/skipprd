@@ -1,0 +1,88 @@
+{
+  "data": {
+    "orders": {
+      "pageInfo": {
+        "hasNextPage": false,
+        "endCursor": null
+      },
+      "nodes": [
+        {
+          "id": "gid://shopify/Order/5001",
+          "createdAt": "2024-01-20T14:30:00Z",
+          "displayFinancialStatus": "PAID",
+          "displayFulfillmentStatus": "FULFILLED",
+          "currencyCode": "USD",
+          "totalPriceSet": {
+            "shopMoney": {
+              "amount": "99.00"
+            }
+          },
+          "subtotalPriceSet": {
+            "shopMoney": {
+              "amount": "89.00"
+            }
+          },
+          "totalTaxSet": {
+            "shopMoney": {
+              "amount": "5.00"
+            }
+          },
+          "totalShippingPriceSet": {
+            "shopMoney": {
+              "amount": "5.00"
+            }
+          },
+          "totalDiscountsSet": {
+            "shopMoney": {
+              "amount": "0.00"
+            }
+          },
+          "customerJourneySummary": {
+            "firstVisit": {
+              "landingPage": "/collections/all",
+              "referrerUrl": "https://search.example.com",
+              "utmParameters": {
+                "source": "google",
+                "medium": "cpc",
+                "campaign": "spring"
+              }
+            }
+          },
+          "channelInformation": {
+            "channelDefinition": {
+              "channelName": "Online Store"
+            }
+          },
+          "discountCodes": ["WELCOME10"],
+          "lineItems": {
+            "nodes": [
+              {
+                "id": "gid://shopify/LineItem/9001",
+                "sku": "FIX-SKU-1",
+                "title": "Fixture Product Variant",
+                "quantity": 1,
+                "originalTotalSet": {
+                  "shopMoney": {
+                    "amount": "89.00"
+                  }
+                },
+                "product": {
+                  "id": "gid://shopify/Product/1001"
+                },
+                "variant": {
+                  "id": "gid://shopify/ProductVariant/2001"
+                }
+              }
+            ]
+          },
+          "customer": {
+            "email": "must-not-emit@example.com",
+            "firstName": "Jane",
+            "lastName": "Doe",
+            "phone": "+15551234567"
+          }
+        }
+      ]
+    }
+  }
+}
