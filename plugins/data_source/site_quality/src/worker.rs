@@ -78,6 +78,31 @@ pub struct MobileHeuristics {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct SocialPreview {
+    pub title: Option<String>,
+    pub description: Option<String>,
+    pub image: Option<String>,
+    pub url: Option<String>,
+    pub card: Option<String>,
+    pub card_title: Option<String>,
+    pub card_description: Option<String>,
+    pub card_image: Option<String>,
+    pub title_present: Option<bool>,
+    pub description_present: Option<bool>,
+    pub image_present: Option<bool>,
+    pub url_present: Option<bool>,
+    pub card_present: Option<bool>,
+    pub card_title_present: Option<bool>,
+    pub card_description_present: Option<bool>,
+    pub card_image_present: Option<bool>,
+    #[serde(default)]
+    pub missing_fields: Vec<String>,
+    #[serde(default)]
+    pub card_missing_fields: Vec<String>,
+    pub complete: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct LighthouseScores {
     pub performance: Option<f64>,
     pub accessibility: Option<f64>,
@@ -121,6 +146,8 @@ pub struct WorkerJobResult {
     pub render_hash: Option<String>,
     #[serde(default)]
     pub mobile_heuristics: Option<MobileHeuristics>,
+    #[serde(default)]
+    pub social_preview: Option<SocialPreview>,
     #[serde(default)]
     pub lighthouse: Option<LighthouseScores>,
     #[serde(default)]

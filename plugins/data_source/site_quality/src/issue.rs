@@ -14,6 +14,7 @@ pub const LH_PERFORMANCE_LOW: &str = "LH_PERFORMANCE_LOW";
 pub const AXE_CRITICAL: &str = "AXE_CRITICAL";
 pub const NAVIGATION_TIMEOUT: &str = "NAVIGATION_TIMEOUT";
 pub const HTTP_ERROR: &str = "HTTP_ERROR";
+pub const SOCIAL_PREVIEW_METADATA: &str = "SOCIAL_PREVIEW_METADATA";
 
 /// Google Core Web Vitals "good" boundaries (lab).
 const CLS_THRESHOLD: f64 = 0.1;
@@ -110,6 +111,64 @@ pub fn map_issues(
         ));
     }
 
+    if let Some(social) = &result.social_preview {
+        if !social.missing_fields.is_empty() {
+            rows.push(check_row(
+                site,
+                page_url,
+                run_date,
+                device_profile,
+                SOCIAL_PREVIEW_METADATA,
+                "metadata",
+                "fail",
+                "warning",
+                format!(
+                    "missing social preview metadata: {}",
+                    social.missing_fields.join(", ")
+                ),
+            ));
+        } else if !social.card_missing_fields.is_empty() {
+            rows.push(check_row(
+                site,
+                page_url,
+                run_date,
+                device_profile,
+                SOCIAL_PREVIEW_METADATA,
+                "metadata",
+                "warn",
+                "warning",
+                format!(
+                    "social preview card metadata incomplete: {}",
+                    social.card_missing_fields.join(", ")
+                ),
+            ));
+        } else {
+            rows.push(check_row(
+                site,
+                page_url,
+                run_date,
+                device_profile,
+                SOCIAL_PREVIEW_METADATA,
+                "metadata",
+                "pass",
+                "info",
+                "social preview metadata complete",
+            ));
+        }
+    } else {
+        rows.push(check_row(
+            site,
+            page_url,
+            run_date,
+            device_profile,
+            SOCIAL_PREVIEW_METADATA,
+            "metadata",
+            "fail",
+            "warning",
+            "social preview metadata unavailable",
+        ));
+    }
+
     if let Some(vitals) = &result.web_vitals {
         let cls = vitals.cls.unwrap_or(0.0);
         if cls > thresholds.cls_poor {
@@ -176,10 +235,7 @@ pub fn map_issues(
                     "vitals",
                     "fail",
                     "warning",
-                    &format!(
-                        "TTFB {ttfb:.0}ms exceeds {:.0}ms",
-                        thresholds.ttfb_slow_ms
-                    ),
+                    &format!("TTFB {ttfb:.0}ms exceeds {:.0}ms", thresholds.ttfb_slow_ms),
                 ));
             } else {
                 rows.push(check_row(
@@ -396,7 +452,31 @@ fn check_row(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::worker::{MobileHeuristics, WebVitals, WorkerJobResult};
+    use crate::worker::{MobileHeuristics, SocialPreview, WebVitals, WorkerJobResult};
+
+    fn complete_social_preview() -> SocialPreview {
+        SocialPreview {
+            title: Some("Example page".into()),
+            description: Some("Useful summary".into()),
+            image: Some("https://example.com/social.png".into()),
+            url: Some("https://example.com/".into()),
+            card: Some("summary_large_image".into()),
+            card_title: None,
+            card_description: None,
+            card_image: None,
+            title_present: Some(true),
+            description_present: Some(true),
+            image_present: Some(true),
+            url_present: Some(true),
+            card_present: Some(true),
+            card_title_present: Some(true),
+            card_description_present: Some(true),
+            card_image_present: Some(true),
+            missing_fields: Vec::new(),
+            card_missing_fields: Vec::new(),
+            complete: Some(true),
+        }
+    }
 
     #[test]
     fn scorecard_includes_pass_and_fail_rows() {
@@ -421,6 +501,7 @@ mod tests {
                 text_too_small_count: Some(0),
                 tap_target_issues: Some(0),
             }),
+            social_preview: Some(complete_social_preview()),
             lighthouse: None,
             axe_violations: None,
             error: None,
@@ -470,6 +551,11 @@ mod tests {
             }),
             render_hash: None,
             mobile_heuristics: None,
+            social_preview: Some(SocialPreview {
+                missing_fields: vec!["image".into()],
+                complete: Some(false),
+                ..complete_social_preview()
+            }),
             lighthouse: None,
             axe_violations: None,
             error: None,
@@ -491,6 +577,10 @@ mod tests {
         }));
         assert!(rows.iter().any(|r| {
             r.get("issue_code").and_then(|c| c.as_str()) == Some(INP_SLOW)
+                && r.get("status").and_then(|s| s.as_str()) == Some("fail")
+        }));
+        assert!(rows.iter().any(|r| {
+            r.get("issue_code").and_then(|c| c.as_str()) == Some(SOCIAL_PREVIEW_METADATA)
                 && r.get("status").and_then(|s| s.as_str()) == Some("fail")
         }));
     }

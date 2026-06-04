@@ -23,6 +23,27 @@
     "text_too_small_count": 2,
     "tap_target_issues": 1
   },
+  "social_preview": {
+    "title": "Example page",
+    "description": "Useful summary for social previews.",
+    "image": "https://example.com/social.png",
+    "url": "https://example.com/",
+    "card": "summary_large_image",
+    "card_title": null,
+    "card_description": null,
+    "card_image": null,
+    "title_present": true,
+    "description_present": true,
+    "image_present": true,
+    "url_present": true,
+    "card_present": true,
+    "card_title_present": true,
+    "card_description_present": true,
+    "card_image_present": true,
+    "missing_fields": [],
+    "card_missing_fields": [],
+    "complete": true
+  },
   "lighthouse": {
     "performance": 72,
     "accessibility": 91,

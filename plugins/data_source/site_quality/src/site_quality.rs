@@ -131,6 +131,7 @@ impl DataSourceSiteQualityPlugin {
         let vitals = result.web_vitals.as_ref();
         let lh = result.lighthouse.as_ref();
         let heuristics = result.mobile_heuristics.as_ref();
+        let social = result.social_preview.as_ref();
         let timings = result.timings_ms.as_ref();
         json!({
             "site": self.origin,
@@ -156,6 +157,17 @@ impl DataSourceSiteQualityPlugin {
             "horizontal_scroll": heuristics.and_then(|h| h.horizontal_scroll),
             "text_too_small_count": heuristics.and_then(|h| h.text_too_small_count),
             "tap_target_issues": heuristics.and_then(|h| h.tap_target_issues),
+            "social_preview_title_present": social.and_then(|s| s.title_present),
+            "social_preview_description_present": social.and_then(|s| s.description_present),
+            "social_preview_image_present": social.and_then(|s| s.image_present),
+            "social_preview_url_present": social.and_then(|s| s.url_present),
+            "social_preview_card_present": social.and_then(|s| s.card_present),
+            "social_preview_card_title_present": social.and_then(|s| s.card_title_present),
+            "social_preview_card_description_present": social.and_then(|s| s.card_description_present),
+            "social_preview_card_image_present": social.and_then(|s| s.card_image_present),
+            "social_preview_missing_fields": social.map(|s| s.missing_fields.join(",")),
+            "social_preview_card_missing_fields": social.map(|s| s.card_missing_fields.join(",")),
+            "social_preview_complete": social.and_then(|s| s.complete),
             "render_hash": result.render_hash,
             "content_unchanged": content_unchanged,
             "error_code": result.error.as_ref().and_then(|e| e.get("code")).and_then(|c| c.as_str()),

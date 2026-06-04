@@ -20,6 +20,110 @@ function shouldCollectMobileHeuristics(job) {
   return job.device_profile === 'mobile';
 }
 
+function cleanMetaValue(value) {
+  if (typeof value !== 'string') {
+    return null;
+  }
+  const cleaned = value.replace(/\s+/g, ' ').trim();
+  return cleaned.length > 0 ? cleaned : null;
+}
+
+function absoluteUrl(value, baseUrl) {
+  const cleaned = cleanMetaValue(value);
+  if (!cleaned) {
+    return null;
+  }
+  try {
+    return new URL(cleaned, baseUrl).toString();
+  } catch {
+    return cleaned;
+  }
+}
+
+function missingFields(fields) {
+  return Object.entries(fields)
+    .filter(([, value]) => !value)
+    .map(([field]) => field);
+}
+
+export function normalizeSocialPreview(raw, pageUrl) {
+  const title = cleanMetaValue(raw?.title);
+  const description = cleanMetaValue(raw?.description);
+  const image = absoluteUrl(raw?.image, pageUrl);
+  const url = absoluteUrl(raw?.url, pageUrl);
+  const card = cleanMetaValue(raw?.card);
+  const cardTitle = cleanMetaValue(raw?.card_title);
+  const cardDescription = cleanMetaValue(raw?.card_description);
+  const cardImage = absoluteUrl(raw?.card_image, pageUrl);
+
+  const openGraphMissing = missingFields({
+    title,
+    description,
+    image,
+    url,
+  });
+  const cardMissing = missingFields({
+    card,
+    title: cardTitle || title,
+    description: cardDescription || description,
+    image: cardImage || image,
+  });
+
+  return {
+    title,
+    description,
+    image,
+    url,
+    card,
+    card_title: cardTitle,
+    card_description: cardDescription,
+    card_image: cardImage,
+    title_present: Boolean(title),
+    description_present: Boolean(description),
+    image_present: Boolean(image),
+    url_present: Boolean(url),
+    card_present: Boolean(card),
+    card_title_present: Boolean(cardTitle || title),
+    card_description_present: Boolean(cardDescription || description),
+    card_image_present: Boolean(cardImage || image),
+    missing_fields: openGraphMissing,
+    card_missing_fields: cardMissing,
+    complete: openGraphMissing.length === 0 && cardMissing.length === 0,
+  };
+}
+
+async function collectSocialPreview(page, pageUrl) {
+  const raw = await page.evaluate(() => {
+    const firstMeta = (names) => {
+      const wanted = new Set(names.map((name) => name.toLowerCase()));
+      for (const meta of document.querySelectorAll('meta')) {
+        const property = meta.getAttribute('property')?.toLowerCase();
+        const name = meta.getAttribute('name')?.toLowerCase();
+        if (wanted.has(property) || wanted.has(name)) {
+          const content = meta.getAttribute('content')?.replace(/\s+/g, ' ').trim();
+          if (content) {
+            return content;
+          }
+        }
+      }
+      return null;
+    };
+
+    return {
+      title: firstMeta(['og:title']),
+      description: firstMeta(['og:description']),
+      image: firstMeta(['og:image', 'og:image:url', 'og:image:secure_url']),
+      url: firstMeta(['og:url']),
+      card: firstMeta(['twitter:card']),
+      card_title: firstMeta(['twitter:title']),
+      card_description: firstMeta(['twitter:description']),
+      card_image: firstMeta(['twitter:image', 'twitter:image:src']),
+    };
+  });
+
+  return normalizeSocialPreview(raw, pageUrl);
+}
+
 async function collectMobileHeuristics(page) {
   return page.evaluate(() => {
     const viewport = document.querySelector('meta[name="viewport"]');
@@ -133,6 +237,7 @@ export async function collectPageMetrics(page, job) {
   const mobile_heuristics = shouldCollectMobileHeuristics(job)
     ? await collectMobileHeuristics(page)
     : null;
+  const social_preview = await collectSocialPreview(page, finalUrl);
 
   const render_hash = await page
     .evaluate(() => {
@@ -170,6 +275,7 @@ export async function collectPageMetrics(page, job) {
     web_vitals,
     render_hash,
     mobile_heuristics,
+    social_preview,
     lighthouse: lighthouseScores,
     axe_violations,
   };

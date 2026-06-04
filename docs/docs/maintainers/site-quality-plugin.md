@@ -2,7 +2,7 @@
 
 Runtime source plugin: `plugins/data_source/site_quality/` (`SiteQuality` / `site_quality`).
 
-Playwright lab sessions per URL × device profile (mobile + desktop), with optional axe-core and Lighthouse (CDP). Bronze namespaces use `replace_partition` on `run_date`.
+Playwright lab sessions per URL × device profile (mobile + desktop), with social preview metadata extraction plus optional axe-core and Lighthouse (CDP). Bronze namespaces use `replace_partition` on `run_date`.
 
 ## Bronze catalog
 
@@ -57,7 +57,7 @@ devices:
     viewport: { width: 1350, height: 940 }
 ```
 
-Full sync runs **one lab job per URL per device** (`max_pages_per_run × len(devices)` jobs). Mobile-only scorecard checks (`MISSING_VIEWPORT`, `HORIZONTAL_SCROLL`, `TEXT_TOO_SMALL`, `TAP_TARGETS`) emit only when `device_profile == mobile`. Web Vitals scorecard checks (`CLS_POOR`, `LCP_SLOW`, `TTFB_SLOW`, `INP_SLOW`) emit per device.
+Full sync runs **one lab job per URL per device** (`max_pages_per_run × len(devices)` jobs). Mobile-only scorecard checks (`MISSING_VIEWPORT`, `HORIZONTAL_SCROLL`, `TEXT_TOO_SMALL`, `TAP_TARGETS`) emit only when `device_profile == mobile`. Web Vitals scorecard checks (`CLS_POOR`, `LCP_SLOW`, `TTFB_SLOW`, `INP_SLOW`) emit per device. `SOCIAL_PREVIEW_METADATA` emits per device from rendered social preview tags.
 
 ## Worker sidecar
 
@@ -65,6 +65,7 @@ Bundled Node worker: `plugins/data_source/site_quality/worker/site-quality-worke
 
 - JSON-lines job on stdin, one result line on stdout
 - Job fields include `device_profile`, `viewport`, `user_agent`, `lighthouse_form_factor` (`mobile` \| `desktop`), `web_vitals_settle_ms`, `collect_inp`
+- Result fields include `social_preview`, with normalized title, description, image, URL, generic card fields, and missing-field lists used by `SOCIAL_PREVIEW_METADATA`.
 - Dependencies: `playwright-core`, `@axe-core/playwright`, `lighthouse`, `chrome-launcher`, `web-vitals` (production worker override)
 
 Install once per machine:
