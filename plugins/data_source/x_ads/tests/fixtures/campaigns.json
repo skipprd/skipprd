@@ -1,0 +1,17 @@
+{
+  "data": [
+    {
+      "id": "camp001",
+      "name": "Brand awareness",
+      "entity_status": "ACTIVE",
+      "currency": "USD",
+      "daily_budget_amount_local_micro": 50000000
+    },
+    {
+      "id": "camp002",
+      "name": "Site traffic",
+      "entity_status": "PAUSED",
+      "currency": "USD"
+    }
+  ]
+}

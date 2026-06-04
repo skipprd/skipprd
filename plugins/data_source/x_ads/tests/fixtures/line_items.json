@@ -1,0 +1,18 @@
+{
+  "data": [
+    {
+      "id": "li001",
+      "name": "Promoted tweets — US",
+      "campaign_id": "camp001",
+      "entity_status": "ACTIVE",
+      "objective": "ENGAGEMENTS"
+    },
+    {
+      "id": "li002",
+      "name": "Website clicks",
+      "campaign_id": "camp002",
+      "entity_status": "PAUSED",
+      "objective": "WEBSITE_CLICKS"
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "data": [
+    {
+      "id": "li001",
+      "id_data": [
+        {
+          "metrics": {
+            "impressions": [1200],
+            "clicks": [48],
+            "billed_charge_local_micro": [125000000],
+            "engagements": [72]
+          }
+        }
+      ]
+    }
+  ]
+}
