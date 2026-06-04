@@ -187,12 +187,27 @@ impl DataSourceMetaAdsPlugin {
         ))
     }
 
+    fn app_secret_for_requests(&self) -> Option<String> {
+        if let Some(secret) = self
+            .config
+            .oauth_client_secret
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+        {
+            return Some(secret.trim().to_string());
+        }
+        std::env::var("META_ADS_APP_SECRET")
+            .ok()
+            .filter(|s| !s.trim().is_empty())
+    }
+
     fn api_client(&self) -> MetaInsightsApiClient {
         MetaInsightsApiClient::new(
             self.http.clone(),
             self.ad_account_id.clone(),
             api_version_or_default(self.config.api_version.as_deref()),
             self.config.instagram_filter,
+            self.app_secret_for_requests(),
         )
     }
 
@@ -712,6 +727,8 @@ mod tests {
         let _lock = env_test_lock();
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
         std::env::set_var("SKIPPR_META_ADS_FIXTURE_DIR", fixture_dir);
+        std::env::remove_var("META_ADS_ACCESS_TOKEN");
+        std::env::remove_var("META_ADS_APP_SECRET");
         let mut cfg = test_config();
         cfg.access_token = None;
         let plugin = DataSourceMetaAdsPlugin::new(cfg).unwrap();

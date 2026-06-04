@@ -1,4 +1,6 @@
 use chrono::NaiveDate;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use skippr_plugin_shared_api_source::{RetryableHttpClient, TokenPagination};
 use tracing::warn;
 
@@ -39,12 +41,21 @@ pub fn instagram_filter_json() -> &'static str {
     r#"[{"field":"publisher_platform","operator":"IN","value":["instagram"]}]"#
 }
 
+/// SHA-256 HMAC of the access token using the app secret (Meta `appsecret_proof`).
+pub fn meta_appsecret_proof(access_token: &str, app_secret: &str) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(app_secret.as_bytes())
+        .expect("HMAC accepts arbitrary key length");
+    mac.update(access_token.as_bytes());
+    hex::encode(mac.finalize().into_bytes())
+}
+
 #[derive(Clone)]
 pub struct MetaInsightsApiClient {
     pub http: RetryableHttpClient,
     pub ad_account_id: String,
     pub api_version: String,
     pub instagram_filter: bool,
+    pub app_secret: Option<String>,
 }
 
 impl MetaInsightsApiClient {
@@ -53,13 +64,30 @@ impl MetaInsightsApiClient {
         ad_account_id: String,
         api_version: String,
         instagram_filter: bool,
+        app_secret: Option<String>,
     ) -> Self {
         Self {
             http,
             ad_account_id: normalize_ad_account_id(&ad_account_id),
             api_version,
             instagram_filter,
+            app_secret,
         }
+    }
+
+    fn with_auth_query(
+        &self,
+        req: reqwest::RequestBuilder,
+        access_token: &str,
+    ) -> reqwest::RequestBuilder {
+        let mut next = req.query(&[("access_token", access_token)]);
+        if let Some(secret) = self.app_secret.as_deref().filter(|s| !s.is_empty()) {
+            next = next.query(&[(
+                "appsecret_proof",
+                meta_appsecret_proof(access_token, secret).as_str(),
+            )]);
+        }
+        next
     }
 
     fn insights_base_url(&self) -> String {
@@ -77,8 +105,11 @@ impl MetaInsightsApiClient {
     ) -> reqwest::RequestBuilder {
         let day = date.format("%Y-%m-%d").to_string();
         let time_range = serde_json::json!({"since": day, "until": day}).to_string();
-        let mut req = self.http.client.get(self.insights_base_url()).query(&[
-            ("access_token", access_token),
+        let mut req = self.with_auth_query(
+            self.http.client.get(self.insights_base_url()),
+            access_token,
+        )
+        .query(&[
             ("time_range", time_range.as_str()),
             ("time_increment", "1"),
             ("level", insights_level_param(stream.level)),
@@ -100,8 +131,17 @@ impl MetaInsightsApiClient {
         access_token: &str,
     ) -> Result<serde_json::Value, std::io::Error> {
         if let Ok(dir) = std::env::var("SKIPPR_META_ADS_FIXTURE_DIR") {
-            if let Some(body) = load_fixture_insights(&dir, stream.namespace) {
-                return Ok(body);
+            if !dir.trim().is_empty() {
+                if let Some(body) = load_fixture_insights(&dir, stream.namespace) {
+                    return Ok(body);
+                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::NotFound,
+                    format!(
+                        "Meta Ads fixture missing for namespace {} under {}",
+                        stream.namespace, dir
+                    ),
+                ));
             }
         }
 
@@ -168,7 +208,7 @@ impl MetaInsightsApiClient {
         loop {
             let mut request = self.http.client.get(url);
             if !url.contains("access_token=") {
-                request = request.query(&[("access_token", access_token)]);
+                request = self.with_auth_query(request, access_token);
             }
             let response = request
                 .send()
@@ -249,6 +289,7 @@ mod tests {
             "123".into(),
             "v21.0".into(),
             true,
+            None,
         );
         assert!(client.insights_base_url().contains("/act_123/insights"));
         let prefixed = MetaInsightsApiClient::new(
@@ -256,6 +297,7 @@ mod tests {
             "act_456".into(),
             "v21.0".into(),
             true,
+            None,
         );
         assert!(prefixed.insights_base_url().contains("/act_456/insights"));
     }
@@ -274,6 +316,7 @@ mod tests {
             "123".into(),
             "v21.0".into(),
             true,
+            None,
         );
         let stream = streams_for_profile(StreamProfile::Minimal)[0];
         let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
@@ -305,6 +348,7 @@ mod tests {
             "123".into(),
             "v21.0".into(),
             true,
+            None,
         );
         let stream = CURATED_STREAMS
             .iter()
@@ -329,6 +373,7 @@ mod tests {
             "123".into(),
             "v21.0".into(),
             false,
+            None,
         );
         let stream = streams_for_profile(StreamProfile::Minimal)[0];
         let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
@@ -337,6 +382,44 @@ mod tests {
             .build()
             .expect("request");
         assert!(!req.url().query().unwrap_or("").contains("filtering"));
+    }
+
+    #[test]
+    fn appsecret_proof_is_deterministic_hex() {
+        let proof = meta_appsecret_proof("user-token", "app-secret");
+        assert_eq!(proof.len(), 64);
+        assert_eq!(
+            proof,
+            meta_appsecret_proof("user-token", "app-secret")
+        );
+    }
+
+    #[test]
+    fn insights_request_includes_appsecret_proof_when_secret_configured() {
+        let client = MetaInsightsApiClient::new(
+            RetryableHttpClient::new(RetryConfig::default()),
+            "123".into(),
+            "v21.0".into(),
+            false,
+            Some("super-secret".into()),
+        );
+        let stream = streams_for_profile(StreamProfile::Minimal)[0];
+        let date = NaiveDate::from_ymd_opt(2024, 1, 1).unwrap();
+        let req = client
+            .build_insights_request(stream, date, "test-token")
+            .build()
+            .expect("request");
+        let query: Vec<(String, String)> = req
+            .url()
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        let proof = query
+            .iter()
+            .find(|(k, _)| k == "appsecret_proof")
+            .map(|(_, v)| v.as_str())
+            .expect("appsecret_proof");
+        assert_eq!(proof, meta_appsecret_proof("test-token", "super-secret"));
     }
 
     #[test]
@@ -374,6 +457,7 @@ mod tests {
             "123".into(),
             "v21.0".into(),
             true,
+            None,
         );
         let stream = CURATED_STREAMS[0];
         let rt = tokio::runtime::Runtime::new().unwrap();
