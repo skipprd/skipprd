@@ -1,0 +1,16 @@
+[
+  {
+    "results": [
+      {
+        "segments": { "date": "2024-01-01" },
+        "customer": { "id": "1234567890", "descriptiveName": "Example Ads Account" },
+        "metrics": {
+          "impressions": "5000",
+          "clicks": "200",
+          "costMicros": "10000000",
+          "conversions": "12"
+        }
+      }
+    ]
+  }
+]

@@ -1,0 +1,17 @@
+[
+  {
+    "results": [
+      {
+        "segments": { "date": "2024-01-01" },
+        "customer": { "id": "1234567890" },
+        "campaign": { "id": "1001", "name": "Brand Search", "status": "ENABLED" },
+        "metrics": {
+          "impressions": "1200",
+          "clicks": "48",
+          "costMicros": "2500000",
+          "conversions": "3"
+        }
+      }
+    ]
+  }
+]

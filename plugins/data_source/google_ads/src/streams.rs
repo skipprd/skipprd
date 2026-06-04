@@ -2,124 +2,96 @@ use std::collections::HashSet;
 
 use serde::Deserialize;
 
-/// Bronze namespaces in the full profile (excludes config-gated `url_inspection_daily`).
-pub const FULL_STREAM_COUNT: usize = 9;
+pub const FULL_STREAM_COUNT: usize = 6;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StreamProfile {
-    /// `site_daily` only (discover / dev).
     Minimal,
-    /// Core Search Analytics breakdowns.
     Standard,
-    /// Full catalog including high-cardinality and sitemap snapshots.
     #[default]
     Full,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum GscStreamKind {
-    SearchAnalytics,
-    SitemapSnapshot,
-    SiteRunAggregate,
+pub enum GoogleAdsStreamKind {
+    Customer,
+    Campaign,
+    AdGroup,
+    Keyword,
+    SearchTerm,
+    LandingPage,
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct GscStreamDef {
+pub struct GoogleAdsStreamDef {
     pub namespace: &'static str,
-    pub dimensions: &'static [&'static str],
-    pub kind: GscStreamKind,
-    /// When true, API errors for unsupported dimensions skip this stream only.
-    pub optional: bool,
+    pub kind: GoogleAdsStreamKind,
+    pub gaql: &'static str,
+    pub primary_key: &'static [&'static str],
 }
 
-pub const CURATED_STREAMS: &[GscStreamDef] = &[
-    GscStreamDef {
-        namespace: "google_ads.site_daily",
-        dimensions: &["date"],
-        kind: GscStreamKind::SearchAnalytics,
-        optional: false,
+pub const CURATED_STREAMS: &[GoogleAdsStreamDef] = &[
+    GoogleAdsStreamDef {
+        namespace: "google_ads.account_daily",
+        kind: GoogleAdsStreamKind::Customer,
+        gaql: "SELECT segments.date, customer.id, customer.descriptive_name, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM customer WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'",
+        primary_key: &["customer_id", "date"],
     },
-    GscStreamDef {
-        namespace: "google_ads.query_daily",
-        dimensions: &["date", "query"],
-        kind: GscStreamKind::SearchAnalytics,
-        optional: false,
+    GoogleAdsStreamDef {
+        namespace: "google_ads.campaign_daily",
+        kind: GoogleAdsStreamKind::Campaign,
+        gaql: "SELECT segments.date, customer.id, campaign.id, campaign.name, campaign.status, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM campaign WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'",
+        primary_key: &["customer_id", "campaign_id", "date"],
     },
-    GscStreamDef {
-        namespace: "google_ads.page_daily",
-        dimensions: &["date", "page"],
-        kind: GscStreamKind::SearchAnalytics,
-        optional: false,
+    GoogleAdsStreamDef {
+        namespace: "google_ads.ad_group_daily",
+        kind: GoogleAdsStreamKind::AdGroup,
+        gaql: "SELECT segments.date, customer.id, campaign.id, ad_group.id, ad_group.name, ad_group.status, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM ad_group WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'",
+        primary_key: &["customer_id", "campaign_id", "ad_group_id", "date"],
     },
-    GscStreamDef {
-        namespace: "google_ads.device_daily",
-        dimensions: &["date", "device"],
-        kind: GscStreamKind::SearchAnalytics,
-        optional: false,
+    GoogleAdsStreamDef {
+        namespace: "google_ads.keyword_daily",
+        kind: GoogleAdsStreamKind::Keyword,
+        gaql: "SELECT segments.date, customer.id, campaign.id, ad_group.id, ad_group_criterion.criterion_id, ad_group_criterion.keyword.text, ad_group_criterion.keyword.match_type, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM keyword_view WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'",
+        primary_key: &["customer_id", "campaign_id", "ad_group_id", "criterion_id", "date"],
     },
-    GscStreamDef {
-        namespace: "google_ads.country_daily",
-        dimensions: &["date", "country"],
-        kind: GscStreamKind::SearchAnalytics,
-        optional: false,
+    GoogleAdsStreamDef {
+        namespace: "google_ads.search_term_daily",
+        kind: GoogleAdsStreamKind::SearchTerm,
+        gaql: "SELECT segments.date, customer.id, campaign.id, ad_group.id, search_term_view.search_term, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM search_term_view WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'",
+        primary_key: &["customer_id", "campaign_id", "ad_group_id", "search_term", "date"],
     },
-    GscStreamDef {
-        namespace: "google_ads.page_query_daily",
-        dimensions: &["date", "page", "query"],
-        kind: GscStreamKind::SearchAnalytics,
-        optional: false,
-    },
-    GscStreamDef {
-        namespace: "google_ads.search_appearance_daily",
-        dimensions: &["date", "searchAppearance"],
-        kind: GscStreamKind::SearchAnalytics,
-        optional: true,
-    },
-    GscStreamDef {
-        namespace: "google_ads.sitemap_daily",
-        dimensions: &["date", "path"],
-        kind: GscStreamKind::SitemapSnapshot,
-        optional: false,
-    },
-    GscStreamDef {
-        namespace: "google_ads.site_run_daily",
-        dimensions: &["date"],
-        kind: GscStreamKind::SiteRunAggregate,
-        optional: false,
+    GoogleAdsStreamDef {
+        namespace: "google_ads.landing_page_daily",
+        kind: GoogleAdsStreamKind::LandingPage,
+        gaql: "SELECT segments.date, customer.id, landing_page_view.unexpanded_final_url, metrics.impressions, metrics.clicks, metrics.cost_micros, metrics.conversions FROM landing_page_view WHERE segments.date BETWEEN '{start_date}' AND '{end_date}'",
+        primary_key: &["customer_id", "landing_page_url", "date"],
     },
 ];
 
-pub const URL_INSPECTION_NAMESPACE: &str = "google_ads.url_inspection_daily";
-
-const MINIMAL_NAMESPACES: &[&str] = &["google_ads.site_daily"];
-
-const STANDARD_EXCLUDED: &[&str] = &[
-    "google_ads.page_query_daily",
-    "google_ads.search_appearance_daily",
-    "google_ads.sitemap_daily",
-    "google_ads.site_run_daily",
+const MINIMAL_NAMESPACES: &[&str] = &["google_ads.account_daily"];
+const STANDARD_NAMESPACES: &[&str] = &[
+    "google_ads.account_daily",
+    "google_ads.campaign_daily",
+    "google_ads.ad_group_daily",
 ];
 
-pub fn streams_for_profile(profile: StreamProfile) -> Vec<&'static GscStreamDef> {
+pub fn streams_for_profile(profile: StreamProfile) -> Vec<&'static GoogleAdsStreamDef> {
     CURATED_STREAMS
         .iter()
-        .filter(|stream| stream_in_profile(stream, profile))
+        .filter(|stream| match profile {
+            StreamProfile::Full => true,
+            StreamProfile::Standard => STANDARD_NAMESPACES.contains(&stream.namespace),
+            StreamProfile::Minimal => MINIMAL_NAMESPACES.contains(&stream.namespace),
+        })
         .collect()
-}
-
-fn stream_in_profile(stream: &GscStreamDef, profile: StreamProfile) -> bool {
-    match profile {
-        StreamProfile::Full => true,
-        StreamProfile::Standard => !STANDARD_EXCLUDED.contains(&stream.namespace),
-        StreamProfile::Minimal => MINIMAL_NAMESPACES.contains(&stream.namespace),
-    }
 }
 
 pub fn resolve_streams(
     profile: StreamProfile,
     explicit: Option<Vec<String>>,
-) -> Vec<&'static GscStreamDef> {
+) -> Vec<&'static GoogleAdsStreamDef> {
     let selected: HashSet<String> = explicit.unwrap_or_default().into_iter().collect();
     if selected.is_empty() {
         return streams_for_profile(profile);
@@ -130,39 +102,28 @@ pub fn resolve_streams(
         .collect()
 }
 
+pub fn render_gaql(template: &str, start_date: &str, end_date: &str) -> String {
+    template
+        .replace("{start_date}", start_date)
+        .replace("{end_date}", end_date)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn full_profile_has_expected_count() {
-        assert_eq!(streams_for_profile(StreamProfile::Full).len(), FULL_STREAM_COUNT);
+    fn profile_counts_are_provider_specific() {
         assert_eq!(CURATED_STREAMS.len(), FULL_STREAM_COUNT);
-    }
-
-    #[test]
-    fn standard_profile_is_five_streams() {
-        let streams = streams_for_profile(StreamProfile::Standard);
-        assert_eq!(streams.len(), 5);
-        for name in STANDARD_EXCLUDED {
-            assert!(!streams.iter().any(|s| s.namespace == *name));
-        }
-    }
-
-    #[test]
-    fn minimal_profile_is_site_daily_only() {
-        let streams = streams_for_profile(StreamProfile::Minimal);
-        assert_eq!(streams.len(), 1);
-        assert_eq!(streams[0].namespace, "google_ads.site_daily");
-    }
-
-    #[test]
-    fn explicit_streams_filter_overrides_profile() {
-        let streams = resolve_streams(
-            StreamProfile::Full,
-            Some(vec!["google_ads.query_daily".into()]),
+        assert_eq!(
+            streams_for_profile(StreamProfile::Minimal)[0].namespace,
+            "google_ads.account_daily"
         );
-        assert_eq!(streams.len(), 1);
-        assert_eq!(streams[0].namespace, "google_ads.query_daily");
+        assert_eq!(streams_for_profile(StreamProfile::Standard).len(), 3);
+    }
+    #[test]
+    fn gaql_templates_are_google_ads_not_search_console() {
+        let q = render_gaql(CURATED_STREAMS[1].gaql, "2024-01-01", "2024-01-02");
+        assert!(q.contains("FROM campaign"));
+        assert!(q.contains("segments.date BETWEEN '2024-01-01' AND '2024-01-02'"));
     }
 }
