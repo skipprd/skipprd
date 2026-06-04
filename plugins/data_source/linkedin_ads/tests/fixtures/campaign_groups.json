@@ -1,0 +1,10 @@
+{
+  "elements": [
+    {
+      "id": 9001,
+      "name": "Q1 Demand Gen",
+      "status": "ACTIVE",
+      "account": "urn:li:sponsoredAccount:123"
+    }
+  ]
+}

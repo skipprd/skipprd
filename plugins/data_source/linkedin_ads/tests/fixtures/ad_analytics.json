@@ -1,0 +1,11 @@
+{
+  "elements": [
+    {
+      "pivotValue": "urn:li:sponsoredCampaign:2001",
+      "costInUsd": "125.40",
+      "clicks": 84,
+      "impressions": 12400,
+      "landingPageClicks": 62
+    }
+  ]
+}

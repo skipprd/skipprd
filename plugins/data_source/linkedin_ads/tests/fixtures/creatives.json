@@ -1,0 +1,10 @@
+{
+  "elements": [
+    {
+      "id": 3001,
+      "name": "Single image — product",
+      "status": "ACTIVE",
+      "campaign": "urn:li:sponsoredCampaign:2001"
+    }
+  ]
+}

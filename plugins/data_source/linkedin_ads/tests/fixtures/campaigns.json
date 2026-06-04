@@ -1,0 +1,16 @@
+{
+  "elements": [
+    {
+      "id": 2001,
+      "name": "Thought leadership",
+      "status": "ACTIVE",
+      "campaignGroup": "urn:li:sponsoredCampaignGroup:9001"
+    },
+    {
+      "id": 2002,
+      "name": "Website visits",
+      "status": "PAUSED",
+      "campaignGroup": "urn:li:sponsoredCampaignGroup:9001"
+    }
+  ]
+}

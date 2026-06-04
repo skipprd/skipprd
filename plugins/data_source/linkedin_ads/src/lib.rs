@@ -1,8 +1,8 @@
 pub use skippr_runtime_sdk::RUNNING;
 pub use skippr_runtime_sdk::{converters, discover, helpers, ingest, metrics, plugins, serdes};
 
-pub mod meta;
-mod meta_api;
+pub mod linkedin_ads;
+mod linkedin_ads_api;
 pub mod streams;
 
-pub use meta::*;
+pub use linkedin_ads::*;

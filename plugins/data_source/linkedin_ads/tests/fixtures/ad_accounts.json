@@ -1,0 +1,10 @@
+{
+  "elements": [
+    {
+      "id": 123,
+      "name": "Demo B2B Ad Account",
+      "currency": "USD",
+      "status": "ACTIVE"
+    }
+  ]
+}
