@@ -1,0 +1,16 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "cus_fixture1",
+      "object": "customer",
+      "email": "user@example.com",
+      "name": "Fixture User",
+      "currency": "usd",
+      "balance": 0,
+      "delinquent": false,
+      "created": 1704067200
+    }
+  ],
+  "has_more": false
+}

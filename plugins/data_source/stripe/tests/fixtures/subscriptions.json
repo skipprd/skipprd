@@ -1,0 +1,30 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "sub_fixture1",
+      "object": "subscription",
+      "customer": "cus_fixture1",
+      "status": "active",
+      "currency": "usd",
+      "cancel_at_period_end": false,
+      "current_period_start": 1704067200,
+      "current_period_end": 1706745600,
+      "created": 1704067200,
+      "items": {
+        "data": [
+          {
+            "id": "si_fixture1",
+            "quantity": 1,
+            "price": {
+              "id": "price_fixture1",
+              "unit_amount": 2900,
+              "recurring": { "interval": "month", "interval_count": 1 }
+            }
+          }
+        ]
+      }
+    }
+  ],
+  "has_more": false
+}

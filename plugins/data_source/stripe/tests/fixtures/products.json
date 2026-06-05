@@ -1,0 +1,14 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "prod_fixture1",
+      "object": "product",
+      "name": "Pro Plan",
+      "active": true,
+      "created": 1704067200,
+      "updated": 1704153600
+    }
+  ],
+  "has_more": false
+}

@@ -1,0 +1,17 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "pi_fixture1",
+      "object": "payment_intent",
+      "customer": "cus_fixture1",
+      "invoice": "in_fixture1",
+      "status": "succeeded",
+      "amount": 2900,
+      "amount_received": 2900,
+      "currency": "usd",
+      "created": 1704067200
+    }
+  ],
+  "has_more": false
+}

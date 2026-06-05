@@ -1,0 +1,34 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "in_fixture1",
+      "object": "invoice",
+      "customer": "cus_fixture1",
+      "subscription": "sub_fixture1",
+      "status": "paid",
+      "currency": "usd",
+      "amount_due": 2900,
+      "amount_paid": 2900,
+      "amount_remaining": 0,
+      "total": 2900,
+      "subtotal": 2900,
+      "period_start": 1704067200,
+      "period_end": 1706745600,
+      "created": 1704067200,
+      "lines": {
+        "data": [
+          {
+            "id": "il_fixture1",
+            "amount": 2900,
+            "currency": "usd",
+            "quantity": 1,
+            "description": "Pro Plan",
+            "price": { "id": "price_fixture1", "product": "prod_fixture1" }
+          }
+        ]
+      }
+    }
+  ],
+  "has_more": false
+}

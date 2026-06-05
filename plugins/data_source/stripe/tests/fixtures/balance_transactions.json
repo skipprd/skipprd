@@ -1,0 +1,18 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "txn_fixture1",
+      "object": "balance_transaction",
+      "type": "charge",
+      "status": "available",
+      "amount": 2900,
+      "fee": 100,
+      "net": 2800,
+      "currency": "usd",
+      "source": "ch_fixture1",
+      "created": 1704067200
+    }
+  ],
+  "has_more": false
+}

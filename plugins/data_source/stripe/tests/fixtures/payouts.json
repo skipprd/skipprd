@@ -1,0 +1,15 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "po_fixture1",
+      "object": "payout",
+      "status": "paid",
+      "amount": 2800,
+      "currency": "usd",
+      "arrival_date": 1704153600,
+      "created": 1704067200
+    }
+  ],
+  "has_more": false
+}

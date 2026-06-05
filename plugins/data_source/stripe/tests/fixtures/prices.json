@@ -1,0 +1,17 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "price_fixture1",
+      "object": "price",
+      "product": "prod_fixture1",
+      "currency": "usd",
+      "unit_amount": 2900,
+      "billing_scheme": "per_unit",
+      "recurring": { "interval": "month", "interval_count": 1 },
+      "active": true,
+      "created": 1704067200
+    }
+  ],
+  "has_more": false
+}

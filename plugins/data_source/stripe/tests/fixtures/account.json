@@ -1,0 +1,10 @@
+{
+  "id": "acct_fixture",
+  "object": "account",
+  "business_type": "company",
+  "country": "US",
+  "default_currency": "usd",
+  "charges_enabled": true,
+  "payouts_enabled": true,
+  "created": 1704067200
+}

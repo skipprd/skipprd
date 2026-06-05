@@ -1,0 +1,20 @@
+{
+  "object": "list",
+  "data": [
+    {
+      "id": "ch_fixture1",
+      "object": "charge",
+      "customer": "cus_fixture1",
+      "invoice": "in_fixture1",
+      "payment_intent": "pi_fixture1",
+      "status": "succeeded",
+      "paid": true,
+      "refunded": false,
+      "amount": 2900,
+      "amount_refunded": 0,
+      "currency": "usd",
+      "created": 1704067200
+    }
+  ],
+  "has_more": false
+}
