@@ -75,6 +75,8 @@ pub struct Transform {
     pub enable_single_quote_parsing: Option<String>,
     pub enable_unicode_parsing: Option<String>,
     pub batch_order_fields: Option<String>,
+    /// Static field names and JSON values merged onto each source record before ingest.
+    pub inject_fields: Option<HashMap<String, Value>>,
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -1198,8 +1200,15 @@ impl Config {
                 enable_single_quote_parsing: None,
                 enable_unicode_parsing: None,
                 batch_order_fields: None,
+                inject_fields: None,
             },
         }
+    }
+
+    pub fn get_transform_inject_fields() -> HashMap<String, Value> {
+        Config::get_transform_config()
+            .inject_fields
+            .unwrap_or_default()
     }
 
     pub fn get_pipeline_type() -> String {

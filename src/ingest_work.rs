@@ -26,6 +26,8 @@ static DISCOVERY_COMPLETE: once_cell::sync::Lazy<AtomicBool> =
     once_cell::sync::Lazy::new(|| AtomicBool::new(false));
 static DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS: once_cell::sync::Lazy<AtomicU64> =
     once_cell::sync::Lazy::new(|| AtomicU64::new(0));
+static TRANSFORM_INJECT_FIELDS: Lazy<HashMap<String, Value>> =
+    Lazy::new(Config::get_transform_inject_fields);
 use crate::metrics::counters as metrics_hot;
 // Bounded concurrency for background metadata writes and Glue schema syncs
 static METADATA_WRITE_SEM: once_cell::sync::Lazy<Arc<tokio::sync::Semaphore>> =
@@ -171,6 +173,21 @@ fn ensure_slow_ingest_worker() {
     let handle = runtime::Handle::try_current()
         .expect("slow_ingest_worker must be started inside a tokio runtime");
     handle.spawn(worker);
+}
+
+fn merge_inject_fields(record: &mut Value, fields: &HashMap<String, Value>) {
+    if fields.is_empty() {
+        return;
+    }
+    if let Some(obj) = record.as_object_mut() {
+        for (key, value) in fields {
+            obj.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+fn apply_transform_inject_fields(record: &mut Value) {
+    merge_inject_fields(record, &*TRANSFORM_INJECT_FIELDS);
 }
 
 fn slow_ingest_blocking(
@@ -1664,7 +1681,7 @@ impl Ingest {
                 };
             }
 
-            for record in unwrapped_records {
+            for mut record in unwrapped_records {
                 batch_line += 1;
                 cdc_row_idx += 1;
 
@@ -1749,6 +1766,7 @@ impl Ingest {
                     // to avoid a read-then-write race where a second thread's
                     // stale snapshot regresses already-evolved metadata.
 
+                    apply_transform_inject_fields(&mut record);
                     let source = SourceRecord::new(record);
 
                     let msg = match METADATA.load().metadata.get(&skpr_namespace) {
@@ -2262,6 +2280,33 @@ mod empty_ingest_tasks_tests {
         let output = Arc::new(noop);
 
         ingest.ingest_file(&empty_tasks, &offsets, output);
+    }
+}
+
+#[cfg(test)]
+mod transform_inject_fields_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn merge_inject_fields_adds_configured_values() {
+        let fields = HashMap::from([
+            ("workspace_id".to_string(), json!("ws-1")),
+            ("domain_id".to_string(), json!("dom-1")),
+        ]);
+        let mut record = json!({"event": "click"});
+        merge_inject_fields(&mut record, &fields);
+        assert_eq!(record["workspace_id"], "ws-1");
+        assert_eq!(record["domain_id"], "dom-1");
+        assert_eq!(record["event"], "click");
+    }
+
+    #[test]
+    fn merge_inject_fields_overwrites_existing_keys() {
+        let fields = HashMap::from([("workspace_id".to_string(), json!("new"))]);
+        let mut record = json!({"workspace_id": "old", "event": "click"});
+        merge_inject_fields(&mut record, &fields);
+        assert_eq!(record["workspace_id"], "new");
     }
 }
 
