@@ -132,6 +132,7 @@ impl StripeApiClient {
                 if let Some(body) = Self::fixture_path(&dir, fixture) {
                     return Ok(body);
                 }
+                return Ok(json!({ "id": self.stripe_account_id }));
             }
         }
         self.throttle().await;
@@ -640,6 +641,30 @@ mod tests {
         let rows = client.list_refunds(None).await.unwrap();
 
         assert!(rows.is_empty());
+        std::env::remove_var(FIXTURE_ENV);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[tokio::test]
+    async fn fixture_mode_missing_singleton_file_returns_account_stub() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "skippr_stripe_fixture_singleton_missing_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var(FIXTURE_ENV, &dir);
+
+        let client = StripeApiClient::new(
+            RetryableHttpClient::new(skippr_plugin_shared_api_source::RetryConfig::default()),
+            "acct_fixture".to_string(),
+            "fixture".to_string(),
+            0,
+        );
+
+        let account = client.account().await.unwrap();
+
+        assert_eq!(account["id"], "acct_fixture");
         std::env::remove_var(FIXTURE_ENV);
         let _ = std::fs::remove_dir_all(dir);
     }
