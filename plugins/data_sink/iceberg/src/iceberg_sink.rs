@@ -887,17 +887,11 @@ impl DataSinkIcebergPlugin {
             .await?;
 
         let iceberg_schema = iceberg_schema_from_output_metadata(namespace, metadata)?;
-        let mut properties: HashMap<String, String> = self
-            .config
-            .properties
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
-        properties.insert(
-            "skippr.pipeline".to_string(),
-            self.context.pipeline_name.clone(),
+        let properties = iceberg_table_properties(
+            &self.config.properties,
+            &self.context.pipeline_name,
+            format!("{:?}", self.binding),
         );
-        properties.insert("skippr.binding".to_string(), format!("{:?}", self.binding));
 
         let creation = TableCreation::builder()
             .name(table_ident.name().to_string())
@@ -1273,6 +1267,23 @@ fn iceberg_date_field_names(metadata: &OutputMetadata) -> HashSet<String> {
         .collect()
 }
 
+fn iceberg_table_properties(
+    configured: &BTreeMap<String, String>,
+    pipeline_name: &str,
+    binding: String,
+) -> HashMap<String, String> {
+    let mut properties: HashMap<String, String> = configured
+        .iter()
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect();
+    properties
+        .entry("format-version".to_string())
+        .or_insert_with(|| "2".to_string());
+    properties.insert("skippr.pipeline".to_string(), pipeline_name.to_string());
+    properties.insert("skippr.binding".to_string(), binding);
+    properties
+}
+
 fn primitive_type_for_skippr(value: &SkipprDataType) -> Type {
     let primitive = match value {
         SkipprDataType::Boolean => PrimitiveType::Boolean,
@@ -1384,6 +1395,28 @@ mod tests {
             "type_matrix_orders"
         );
         assert_eq!(iceberg_table_suffix("S3.Raw-Orders"), "raw_orders");
+    }
+
+    #[test]
+    fn iceberg_table_properties_default_to_format_version_2() {
+        let properties = iceberg_table_properties(
+            &BTreeMap::new(),
+            "postgres_iceberg_cdc_late_delete",
+            "Pipeline".to_string(),
+        );
+        assert_eq!(properties.get("format-version"), Some(&"2".to_string()));
+        assert_eq!(
+            properties.get("skippr.pipeline"),
+            Some(&"postgres_iceberg_cdc_late_delete".to_string())
+        );
+    }
+
+    #[test]
+    fn iceberg_table_properties_preserve_explicit_format_version() {
+        let mut configured = BTreeMap::new();
+        configured.insert("format-version".to_string(), "3".to_string());
+        let properties = iceberg_table_properties(&configured, "pipeline", "Binding".to_string());
+        assert_eq!(properties.get("format-version"), Some(&"3".to_string()));
     }
 
     #[test]
