@@ -34,11 +34,11 @@ plugin_name = "Iceberg"
 
 [package.metadata.skippr-plugin.sink_capability]
 name = "Iceberg"
-guarantee_tier = "CdcEncodedOnly"
+guarantee_tier = "ExactOnceCdcEligible"
 can_manage_skippr_columns = true
-can_maintain_tombstone_tables = false
-can_compare_order_tokens = false
-supports_transactions = false
+can_maintain_tombstone_tables = true
+can_compare_order_tokens = true
+supports_transactions = true
 supports_merge_by_key = true
 supports_replace_partition = true
 supports_replace_table = true
