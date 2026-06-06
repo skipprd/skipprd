@@ -281,8 +281,7 @@ mod tests {
             .build()
             .unwrap();
         let columns =
-            SkipprHive::storage_columns_excluding_partition_keys(&metadata, &[partition])
-                .unwrap();
+            SkipprHive::storage_columns_excluding_partition_keys(&metadata, &[partition]).unwrap();
         assert_eq!(columns.len(), 1);
         assert_eq!(columns[0].name(), "metric");
     }

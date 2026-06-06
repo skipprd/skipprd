@@ -5,13 +5,13 @@ use std::time::Duration;
 use Result;
 
 use crate::helpers::configuration::Config;
-#[cfg(feature = "offset-store-dynamodb")]
-use skippr_offset_store_dynamodb::DynamoDbOffsetStore;
 use crate::helpers::offsets::OffsetsError::VacuumError;
 use crate::helpers::Helpers;
 use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
 use crate::METRICS;
 use serde_derive::{Deserialize, Serialize};
+#[cfg(feature = "offset-store-dynamodb")]
+use skippr_offset_store_dynamodb::DynamoDbOffsetStore;
 use sled::{IVec, Mode};
 use thiserror::Error;
 use tracing::{error, info};
@@ -250,8 +250,7 @@ impl Offsets {
         if Config::get_offset_store().eq_ignore_ascii_case("dynamodb") {
             #[cfg(feature = "offset-store-dynamodb")]
             {
-                let warn_without_s3_wal =
-                    !Config::get_wal_storage().eq_ignore_ascii_case("s3");
+                let warn_without_s3_wal = !Config::get_wal_storage().eq_ignore_ascii_case("s3");
                 let store = DynamoDbOffsetStore::open(
                     Config::get_offset_dynamodb_table(),
                     Config::offset_store_partition_key(),

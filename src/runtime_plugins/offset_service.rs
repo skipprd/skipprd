@@ -19,18 +19,16 @@ static OFFSET_SERVICE_RT: Lazy<Runtime> =
 fn validate_entries(offsets: &Offsets, entries: &[RuntimeOffsetValidationEntry]) -> Vec<bool> {
     entries
         .iter()
-        .map(|entry| match offsets.validate(
-            &entry.key,
-            entry.offset_type,
-            entry.offset_value,
-        ) {
-            None => true,
-            Some(allow) => match entry.offset_type {
-                // `Offsets::validate` returns true when a Closed partition is already ingested.
-                OffsetTypes::Closed => !allow,
-                OffsetTypes::Filesize | OffsetTypes::Position => allow,
+        .map(
+            |entry| match offsets.validate(&entry.key, entry.offset_type, entry.offset_value) {
+                None => true,
+                Some(allow) => match entry.offset_type {
+                    // `Offsets::validate` returns true when a Closed partition is already ingested.
+                    OffsetTypes::Closed => !allow,
+                    OffsetTypes::Filesize | OffsetTypes::Position => allow,
+                },
             },
-        })
+        )
         .collect()
 }
 

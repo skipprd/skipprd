@@ -57,7 +57,10 @@ fn worker_script_candidates(plugin_crate_root: Option<&Path>) -> Vec<PathBuf> {
 
     if let Ok(manifest_dir) = std::env::var("SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR") {
         let manifests = PathBuf::from(manifest_dir);
-        if let Some(repo_root) = manifests.parent().and_then(|p| p.parent()).and_then(|p| p.parent())
+        if let Some(repo_root) = manifests
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
         {
             push(repo_root.join(REPO_WORKER_REL_PATH));
         }

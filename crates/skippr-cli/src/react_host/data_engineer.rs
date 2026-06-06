@@ -648,7 +648,8 @@ pub(crate) async fn wire_providers(
             .join(&tenant)
             .join(&pipeline_id);
 
-        let storage_mode = getenv_nonempty("SKIPPRD_EL_STORAGE_MODE").or_else(|| Some("local".into()));
+        let storage_mode =
+            getenv_nonempty("SKIPPRD_EL_STORAGE_MODE").or_else(|| Some("local".into()));
         let storage_bucket = storage_mode
             .as_deref()
             .filter(|mode| mode.eq_ignore_ascii_case("s3"))

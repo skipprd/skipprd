@@ -43,8 +43,7 @@ pub static PIPELINE_SCHEMA_VERSION: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::ne
 
 /// Serializes tests that mutate [`METADATA`] or other process-wide pipeline globals.
 #[cfg(test)]
-pub static METADATA_TEST_LOCK: Lazy<std::sync::Mutex<()>> =
-    Lazy::new(|| std::sync::Mutex::new(()));
+pub static METADATA_TEST_LOCK: Lazy<std::sync::Mutex<()>> = Lazy::new(|| std::sync::Mutex::new(()));
 
 #[cfg(test)]
 pub fn metadata_test_lock() -> std::sync::MutexGuard<'static, ()> {

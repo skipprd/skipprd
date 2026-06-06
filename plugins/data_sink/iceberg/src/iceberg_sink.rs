@@ -294,26 +294,47 @@ impl DataSinkIcebergPlugin {
         }
 
         if let Some(delete_stream) = delete_stream {
-            if let Some(equality_ids) = self.plan_cdc_commit(&table, &namespace, cdc_ctx).await? {
-                let delete_bytes = crate::parquet_util::serialize_to_parquet_for_iceberg(
-                    delete_stream,
-                    &date_fields,
-                )
-                .await?;
-                let delete_row_count = delete_bytes.meta_data.num_rows as u64;
-                if delete_row_count > 0 {
-                    let delete_file_uri = self
-                        .write_parquet_file(&namespace, "delete", &filename, delete_bytes.bytes)
-                        .await?;
-                    commit_files.push(self.build_data_file(
-                        &table,
-                        DataContentType::EqualityDeletes,
-                        delete_file_uri,
-                        delete_row_count,
-                        delete_bytes.size_bytes as u64,
-                        Some(equality_ids),
-                    )?);
-                }
+            let ctx = cdc_ctx
+                .ok_or_else(|| io::Error::other("Iceberg CDC delete stream requires context"))?;
+            let contract = ctx.contract.as_ref().ok_or_else(|| {
+                io::Error::other(format!(
+                    "Iceberg CDC delete stream for namespace '{}' requires a namespace contract",
+                    namespace
+                ))
+            })?;
+            let equality_ids = self
+                .plan_cdc_commit(&table, &namespace, Some(ctx))
+                .await?
+                .ok_or_else(|| {
+                    io::Error::other(format!(
+                        "Iceberg CDC namespace '{}' could not plan equality-delete keys",
+                        namespace
+                    ))
+                })?;
+            let delete_batches = collect_record_batches(delete_stream).await?;
+            let delete_columns = &contract.business_key_columns;
+            let projected_delete_batches = delete_batches
+                .iter()
+                .map(|batch| project_batch_columns(batch, delete_columns))
+                .collect::<Result<Vec<_>, _>>()?;
+            let delete_bytes = crate::parquet_util::serialize_to_parquet_for_iceberg(
+                batch_stream(projected_delete_batches),
+                &date_fields,
+            )
+            .await?;
+            let delete_row_count = delete_bytes.meta_data.num_rows as u64;
+            if delete_row_count > 0 {
+                let delete_file_uri = self
+                    .write_parquet_file(&namespace, "delete", &filename, delete_bytes.bytes)
+                    .await?;
+                commit_files.push(self.build_data_file(
+                    &table,
+                    DataContentType::EqualityDeletes,
+                    delete_file_uri,
+                    delete_row_count,
+                    delete_bytes.size_bytes as u64,
+                    Some(equality_ids),
+                )?);
             }
         }
 

@@ -62,7 +62,10 @@ fn worker_script_candidates(plugin_crate_root: Option<&Path>) -> Vec<PathBuf> {
     if let Ok(manifest_dir) = std::env::var("SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR") {
         let manifests = PathBuf::from(manifest_dir);
         // <repo>/.skippr/local-runtime-plugins/manifests
-        if let Some(repo_root) = manifests.parent().and_then(|p| p.parent()).and_then(|p| p.parent())
+        if let Some(repo_root) = manifests
+            .parent()
+            .and_then(|p| p.parent())
+            .and_then(|p| p.parent())
         {
             push(repo_root.join(REPO_WORKER_REL_PATH));
         }
@@ -122,7 +125,10 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let script = temp.path().join("custom.mjs");
         fs::write(&script, "// custom").unwrap();
-        std::env::set_var("SKIPPR_SITE_QUALITY_WORKER_SCRIPT", script.to_str().unwrap());
+        std::env::set_var(
+            "SKIPPR_SITE_QUALITY_WORKER_SCRIPT",
+            script.to_str().unwrap(),
+        );
         let resolved = resolve_site_quality_worker_script(None).expect("resolve worker");
         assert_eq!(resolved, script);
         std::env::remove_var("SKIPPR_SITE_QUALITY_WORKER_SCRIPT");

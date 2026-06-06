@@ -20,11 +20,10 @@ use tokio::sync::{watch, Mutex};
 
 use crate::protocol::{
     HandshakeResponse, HostFrame, PluginDataFrame, PluginFrame, RuntimeExecutionMode,
-    RuntimePluginConfigEnvelope, RuntimePluginKind,
-    RuntimeSchemaState, RuntimeSessionHello, RuntimeSourceCapabilityDescriptor, SourceEvent,
-    SourceStartRequest, RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV,
-    SKIPPR_RUNTIME_DATA_ADDR_ENV, SKIPPR_RUNTIME_EXECUTION_MODE_ENV,
-    SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
+    RuntimePluginConfigEnvelope, RuntimePluginKind, RuntimeSchemaState, RuntimeSessionHello,
+    RuntimeSourceCapabilityDescriptor, SourceEvent, SourceStartRequest, RUNTIME_PROTOCOL_VERSION,
+    SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
+    SKIPPR_RUNTIME_EXECUTION_MODE_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use crate::source_sync::{run_offset_service_reader_loop, RuntimeSourceSyncContext};
 use crate::wire::{read_frame_or_eof, write_frame};
@@ -422,10 +421,7 @@ pub async fn run_append_data_source_main(
         RuntimeExecutionMode::Discover => "discover",
         RuntimeExecutionMode::Sync => "sync",
     };
-    std::env::set_var(
-        SKIPPR_RUNTIME_EXECUTION_MODE_ENV,
-        execution_mode_label,
-    );
+    std::env::set_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV, execution_mode_label);
     Config::reset_envcache();
     Config::build_config();
     Config::init().await;
@@ -548,12 +544,10 @@ mod tests {
 
     #[test]
     fn finite_once_sources_skip_idle_supervision() {
-        assert!(runtime_once_idle_timeout_for_contract(
-            true,
-            false,
-            SourceOnceContract::Finite,
-        )
-        .is_none());
+        assert!(
+            runtime_once_idle_timeout_for_contract(true, false, SourceOnceContract::Finite,)
+                .is_none()
+        );
         assert!(runtime_once_idle_timeout_for_contract(
             true,
             false,

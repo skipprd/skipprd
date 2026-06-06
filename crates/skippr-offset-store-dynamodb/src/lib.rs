@@ -84,8 +84,7 @@ impl DynamoDbOffsetStore {
     ) -> Result<Self, String> {
         if table.is_empty() {
             return Err(
-                "SKIPPR_OFFSET_DYNAMODB_TABLE is required when SKIPPR_OFFSET_STORE=dynamodb"
-                    .into(),
+                "SKIPPR_OFFSET_DYNAMODB_TABLE is required when SKIPPR_OFFSET_STORE=dynamodb".into(),
             );
         }
         if warn_without_s3_wal {
@@ -158,10 +157,7 @@ impl DynamoDbOffsetStore {
                 let mut item = HashMap::new();
                 item.insert("PK".to_string(), AttributeValue::S(pk));
                 item.insert("SK".to_string(), AttributeValue::S(sk));
-                item.insert(
-                    "payload_b64".to_string(),
-                    AttributeValue::S(payload_b64),
-                );
+                item.insert("payload_b64".to_string(), AttributeValue::S(payload_b64));
                 item.insert("updated_at".to_string(), AttributeValue::S(now));
                 client
                     .put_item()
@@ -192,12 +188,7 @@ impl DynamoDbOffsetStore {
         self.get_bytes(&Self::offset_sk(namespace, partition))
     }
 
-    pub fn put_offset(
-        &self,
-        namespace: &str,
-        partition: &str,
-        bytes: &[u8],
-    ) -> Result<(), String> {
+    pub fn put_offset(&self, namespace: &str, partition: &str, bytes: &[u8]) -> Result<(), String> {
         self.put_bytes(&Self::offset_sk(namespace, partition), bytes)
     }
 

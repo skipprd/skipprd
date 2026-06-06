@@ -311,7 +311,10 @@ impl ServiceAccountAuth {
             .await
             .map_err(|e| e.to_string())?;
         if !response.status().is_success() {
-            return Err(format!("service account token exchange failed: {}", response.status()));
+            return Err(format!(
+                "service account token exchange failed: {}",
+                response.status()
+            ));
         }
         let body: serde_json::Value = response.json().await.map_err(|e| e.to_string())?;
         body.get("access_token")
@@ -411,7 +414,8 @@ impl AppleAdsClientCredentialsAuth {
         encode(
             &header,
             &claims,
-            &EncodingKey::from_ec_pem(self.private_key_pem.as_bytes()).map_err(|e| e.to_string())?,
+            &EncodingKey::from_ec_pem(self.private_key_pem.as_bytes())
+                .map_err(|e| e.to_string())?,
         )
         .map_err(|e| e.to_string())
     }
@@ -540,7 +544,10 @@ mod tests {
     #[test]
     fn parse_oauth_expires_in_defaults_when_missing() {
         let body = serde_json::json!({ "access_token": "x" });
-        assert_eq!(parse_oauth_expires_in_secs(&body), DEFAULT_OAUTH_EXPIRES_IN_SECS);
+        assert_eq!(
+            parse_oauth_expires_in_secs(&body),
+            DEFAULT_OAUTH_EXPIRES_IN_SECS
+        );
     }
 
     const TEST_EC_PRIVATE_KEY_PEM: &str =
@@ -555,7 +562,9 @@ mod tests {
             TEST_EC_PRIVATE_KEY_PEM,
         );
         assert_eq!(auth.searchads_subject(), "SEARCHADS.TEAM123");
-        let jwt = auth.build_client_secret_jwt(1_700_000_000).expect("sign jwt");
+        let jwt = auth
+            .build_client_secret_jwt(1_700_000_000)
+            .expect("sign jwt");
         assert_eq!(jwt.split('.').count(), 3);
     }
 

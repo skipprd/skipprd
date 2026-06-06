@@ -555,13 +555,8 @@ pub async fn cmd_dbt_run(
     args: DbtRunArgs,
 ) -> Result<(), String> {
     let project_override = args.project_dir.as_deref();
-    let session = open_dbt_project_for_run(
-        explicit_config,
-        &args.pipeline,
-        project_override,
-        true,
-    )
-    .await?;
+    let session =
+        open_dbt_project_for_run(explicit_config, &args.pipeline, project_override, true).await?;
     let project_dir = &session.project_dir;
     let target = args
         .target
@@ -584,13 +579,10 @@ pub async fn cmd_dbt_run(
         }
     }
     let argv_refs: Vec<&str> = argv.iter().map(|s| s.as_str()).collect();
-    let run_out = session.dbt.invoke_dbt_cli(
-        project_dir,
-        Some(profiles_pd),
-        &argv_refs,
-        &base_env,
-        "run",
-    );
+    let run_out =
+        session
+            .dbt
+            .invoke_dbt_cli(project_dir, Some(profiles_pd), &argv_refs, &base_env, "run");
 
     let run_results_path = project_dir.join("target").join("run_results.json");
     let rr_path_abs = run_results_path

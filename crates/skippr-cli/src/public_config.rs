@@ -1007,8 +1007,8 @@ impl SkipprProjectConfig {
     }
 
     pub fn save_to(&self, path: &Path) -> Result<(), String> {
-        let yaml = serde_yaml::to_string(self)
-            .map_err(|e| format!("failed to serialize config: {e}"))?;
+        let yaml =
+            serde_yaml::to_string(self).map_err(|e| format!("failed to serialize config: {e}"))?;
         std::fs::write(path, yaml.as_bytes())
             .map_err(|e| format!("failed to write {}: {e}", path.display()))
     }

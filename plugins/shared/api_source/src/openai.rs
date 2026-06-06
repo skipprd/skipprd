@@ -106,7 +106,9 @@ impl OpenAiChatClient {
     }
 }
 
-fn parse_chat_json_content(envelope: &serde_json::Value) -> Result<serde_json::Value, std::io::Error> {
+fn parse_chat_json_content(
+    envelope: &serde_json::Value,
+) -> Result<serde_json::Value, std::io::Error> {
     let content = envelope
         .pointer("/choices/0/message/content")
         .and_then(|v| v.as_str())

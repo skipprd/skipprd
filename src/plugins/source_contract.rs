@@ -245,8 +245,7 @@ pub fn replace_source_contracts_authoritative(
     let next: HashMap<String, SourceNamespaceContract> = contracts
         .into_iter()
         .map(|mut contract| {
-            contract.namespace =
-                crate::ingest_work::storage_namespace(&contract.namespace);
+            contract.namespace = crate::ingest_work::storage_namespace(&contract.namespace);
             (contract.namespace.clone(), contract)
         })
         .collect();
@@ -291,9 +290,7 @@ pub async fn validate_active_sink_supports_contracts(
     }
     validate_namespace_contracts(contracts)?;
     let output_plugin_name = Config::get_pipeline_output_plugin_name();
-    let runtime_output_version = Config::get_pipeline_output_plugin_version()
-        .ok()
-        .flatten();
+    let runtime_output_version = Config::get_pipeline_output_plugin_version().ok().flatten();
     let sink_manifest = resolve_runtime_plugin(
         RuntimePluginKind::DataSink,
         &output_plugin_name,
@@ -313,9 +310,8 @@ pub async fn validate_active_sink_supports_contracts(
     })?;
     let support = SinkWritePolicySupport::from(sink_cap);
     for contract in contracts {
-        validate_write_policy_for_sink(contract, &sink_cap.name, support).map_err(|err| {
-            SourceContractError::SinkPolicyUnsupported(err.to_string())
-        })?;
+        validate_write_policy_for_sink(contract, &sink_cap.name, support)
+            .map_err(|err| SourceContractError::SinkPolicyUnsupported(err.to_string()))?;
     }
     Ok(())
 }
@@ -478,8 +474,7 @@ mod tests {
                 semantics: None,
             },
         );
-        let changed =
-            replace_source_contracts_authoritative(&mut pipeline, Vec::new()).unwrap();
+        let changed = replace_source_contracts_authoritative(&mut pipeline, Vec::new()).unwrap();
         assert!(changed);
         assert!(pipeline.source_contracts.is_empty());
     }
@@ -644,8 +639,7 @@ mod tests {
     #[test]
     fn resolve_write_policy_prefers_context_contract() {
         let ctx = sample_contract("ctx", WritePolicy::ReplacePartition);
-        let (policy, resolved) =
-            resolved_write_policy_for_namespace("other", Some(&ctx));
+        let (policy, resolved) = resolved_write_policy_for_namespace("other", Some(&ctx));
         assert_eq!(policy, WritePolicy::ReplacePartition);
         assert_eq!(resolved.unwrap().namespace, "ctx");
     }
@@ -663,7 +657,9 @@ mod tests {
             None,
         )
         .unwrap_err();
-        assert!(err.to_string().contains("requires a source namespace contract"));
+        assert!(err
+            .to_string()
+            .contains("requires a source namespace contract"));
     }
 
     #[test]

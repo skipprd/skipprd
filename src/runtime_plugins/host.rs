@@ -642,10 +642,7 @@ async fn ingest_runtime_batches_into_core(
             .namespaces
             .contains_key(&namespace)
         {
-            derived_namespaces.insert(
-                namespace.clone(),
-                output_metadata_for_arrow_schema(&schema),
-            );
+            derived_namespaces.insert(namespace.clone(), output_metadata_for_arrow_schema(&schema));
         }
         let offsets_map = batch
             .offsets

@@ -383,7 +383,9 @@ pub struct RuntimeRawIngestBatch {
     pub offset_key: OffsetKey,
     pub data: String,
     pub bytes: usize,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Always present on the bincode wire (use `None` when unset). Do not use
+    /// `skip_serializing_if` here — bincode + serde will not apply defaults for omitted fields.
+    #[serde(default)]
     pub offset_pos: Option<u64>,
     pub source_uri: String,
     pub namespace: Option<String>,
@@ -396,7 +398,9 @@ pub struct RuntimeSourceSinkWrite {
     pub compaction_id: String,
     pub arrow_stream_bytes: Vec<u8>,
     pub cdc_ctx: Option<SyncContext>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Always present on the bincode wire (use `None` when unset). Do not use
+    /// `skip_serializing_if` here — bincode + serde will not apply defaults for omitted fields.
+    #[serde(default)]
     pub source_contract: Option<SourceNamespaceContract>,
 }
 
@@ -581,6 +585,52 @@ mod tests {
         .unwrap();
         let decoded: SinkRunRequest = bincode::deserialize(&bytes).unwrap();
         assert!(decoded.source_contract.is_none());
+    }
+
+    #[test]
+    fn source_payload_batch_none_offset_pos_roundtrips() {
+        use crate::helpers::offsets::OffsetKey;
+
+        let frame = PluginDataFrame::SourcePayloadBatches {
+            tasks: vec![vec![RuntimeRawIngestBatch {
+                offset_key: OffsetKey::new("orders", "partition-1"),
+                data: "{}\n".into(),
+                bytes: 3,
+                offset_pos: None,
+                source_uri: "mysql://localhost/orders".into(),
+                namespace: Some("mysql.orders".into()),
+                cdc_rows: None,
+            }]],
+        };
+
+        let bytes = bincode::serialize(&frame).unwrap();
+        let decoded: PluginDataFrame = bincode::deserialize(&bytes).unwrap();
+
+        let PluginDataFrame::SourcePayloadBatches { tasks } = decoded else {
+            panic!("expected SourcePayloadBatches frame");
+        };
+        assert_eq!(tasks[0][0].offset_pos, None);
+        assert_eq!(tasks[0][0].source_uri, "mysql://localhost/orders");
+    }
+
+    #[test]
+    fn sink_write_none_source_contract_roundtrips() {
+        let frame = PluginDataFrame::SinkWrite(RuntimeSourceSinkWrite {
+            filename: "orders/part-0001.arrow".into(),
+            compaction_id: "c1".into(),
+            arrow_stream_bytes: vec![1, 2, 3],
+            cdc_ctx: None,
+            source_contract: None,
+        });
+
+        let bytes = bincode::serialize(&frame).unwrap();
+        let decoded: PluginDataFrame = bincode::deserialize(&bytes).unwrap();
+
+        let PluginDataFrame::SinkWrite(decoded) = decoded else {
+            panic!("expected SinkWrite frame");
+        };
+        assert!(decoded.source_contract.is_none());
+        assert_eq!(decoded.filename, "orders/part-0001.arrow");
     }
 
     #[test]

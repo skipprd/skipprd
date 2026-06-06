@@ -44,7 +44,8 @@ struct RunLockGuard {
 impl RunLockGuard {
     fn new(lock: ActiveLock, heartbeat: JoinHandle<()>) -> Self {
         let released = Arc::new(AtomicBool::new(false));
-        let shutdown_listener = spawn_shutdown_listener(Arc::clone(&released), lock.clone_for_signal());
+        let shutdown_listener =
+            spawn_shutdown_listener(Arc::clone(&released), lock.clone_for_signal());
         Self {
             lock: Some(lock),
             heartbeat: Some(heartbeat),
@@ -126,10 +127,7 @@ fn block_on_complete(lock: ActiveLock, status: &str) -> Result<(), String> {
     rt.block_on(lock.complete(status))
 }
 
-fn spawn_shutdown_listener(
-    released: Arc<AtomicBool>,
-    lock: ActiveLock,
-) -> Option<JoinHandle<()>> {
+fn spawn_shutdown_listener(released: Arc<AtomicBool>, lock: ActiveLock) -> Option<JoinHandle<()>> {
     #[cfg(unix)]
     {
         Some(tokio::spawn(async move {

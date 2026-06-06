@@ -15,25 +15,25 @@ use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use aws_sdk_s3::Client as S3Client;
 use skippr_runtime_sdk::converters::skippr_hive::SkipprHive;
 use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
-use skippr_runtime_sdk::plugins::{SchemaSink, SchemaSyncRequest};
 use skippr_runtime_sdk::metrics::counters as metrics_counters;
+use skippr_runtime_sdk::plugins::{SchemaSink, SchemaSyncRequest};
 use skippr_runtime_sdk::sink_compat::BufferChunker;
 
+use arrow::array::RecordBatch;
+use arrow::util::display::array_value_to_string;
 use async_trait::async_trait;
 use aws_sdk_glue::error::SdkError;
 use aws_sdk_glue::operation::get_table::{GetTableError, GetTableOutput};
 use bytes::Bytes;
-use arrow::array::RecordBatch;
-use arrow::util::display::array_value_to_string;
-use datafusion::physical_plan::SendableRecordBatchStream;
 use datafusion::physical_plan::RecordBatchStream;
+use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::StreamExt;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::task::{Context as TaskContext, Poll as TaskPoll};
 use parquet::arrow::ArrowWriter;
 use std::collections::{BTreeMap, HashMap};
 use std::io;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::task::{Context as TaskContext, Poll as TaskPoll};
 use tokio::task::block_in_place;
 
 use super::parquet_util::serialize_to_parquet;
@@ -42,8 +42,8 @@ use once_cell::sync::Lazy;
 use rand::Rng;
 use serde_derive::Deserialize;
 use skippr_runtime_sdk::plugins::source_contract::{
-    ensure_source_contract_for_policy, namespace_source_contract,
-    validate_write_policy_for_sink, SourceNamespaceContract, SinkWritePolicySupport, WritePolicy,
+    ensure_source_contract_for_policy, namespace_source_contract, validate_write_policy_for_sink,
+    SinkWritePolicySupport, SourceNamespaceContract, WritePolicy,
 };
 use skippr_runtime_sdk::plugins::{DataSink, SinkWriteContext};
 use skippr_runtime_sdk::protocol::{RuntimeBinding, RuntimeExecutionContext};
@@ -246,9 +246,7 @@ impl DataSink for DataSinkAthenaPlugin {
         if ctx.cdc_ctx.is_none() {
             if let Some(ref contract) = resolved_contract {
                 validate_write_policy_for_sink(contract, "Athena", ATHENA_WRITE_POLICY_SUPPORT)
-                    .map_err(|err| {
-                        io::Error::new(io::ErrorKind::Unsupported, err.to_string())
-                    })?;
+                    .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err.to_string()))?;
             }
             ensure_source_contract_for_policy(
                 &namespace,
@@ -517,8 +515,8 @@ impl DataSinkAthenaPlugin {
                         });
                 }
                 Err(e) => {
-                    let contract_covers_partition = source_contract
-                        .is_some_and(|contract| !contract.partition_key.is_empty());
+                    let contract_covers_partition =
+                        source_contract.is_some_and(|contract| !contract.partition_key.is_empty());
                     if write_policy == WritePolicy::ReplacePartition
                         && !contract_covers_partition
                         && partition_path.is_empty()
@@ -2298,7 +2296,10 @@ impl DataSinkAthenaPlugin {
                 Ok((Some(first), Box::pin(replay) as SendableRecordBatchStream))
             }
             Some(Err(err)) => Err(io::Error::other(err.to_string())),
-            None => Ok((None, Box::pin(EmptyRecordBatchStream::new(schema)) as SendableRecordBatchStream)),
+            None => Ok((
+                None,
+                Box::pin(EmptyRecordBatchStream::new(schema)) as SendableRecordBatchStream,
+            )),
         }
     }
 }
@@ -2326,7 +2327,10 @@ impl ChainedRecordBatchStream {
 impl futures::Stream for ChainedRecordBatchStream {
     type Item = Result<RecordBatch, datafusion::error::DataFusionError>;
 
-    fn poll_next(mut self: Pin<&mut Self>, cx: &mut TaskContext<'_>) -> TaskPoll<Option<Self::Item>> {
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        cx: &mut TaskContext<'_>,
+    ) -> TaskPoll<Option<Self::Item>> {
         if !self.prefix.is_empty() {
             return TaskPoll::Ready(Some(Ok(self.prefix.remove(0))));
         }
@@ -2409,8 +2413,10 @@ fn append_contract_glue_partition_keys(
     if contract.partition_key.is_empty() {
         return;
     }
-    let existing: std::collections::HashSet<String> =
-        partitions.iter().map(|column| column.name().to_string()).collect();
+    let existing: std::collections::HashSet<String> = partitions
+        .iter()
+        .map(|column| column.name().to_string())
+        .collect();
     for path in &contract.partition_key {
         let name = path.dotted();
         if existing.contains(&name) {
@@ -2492,9 +2498,9 @@ fn contract_partition_delete_prefix(
 #[cfg(test)]
 mod contract_schema_tests {
     use super::*;
-    use aws_sdk_glue::types::Column;
     use arrow::array::{Int64Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
+    use aws_sdk_glue::types::Column;
     use skippr_runtime_sdk::plugins::source_contract::{FieldPath, WritePolicy};
 
     fn ga4_replace_partition_contract() -> SourceNamespaceContract {
@@ -2531,13 +2537,11 @@ mod contract_schema_tests {
     fn contract_glue_partition_keys_skip_duplicates() {
         let contract = ga4_replace_partition_contract();
         let metadata = OutputMetadata::new();
-        let mut partitions = vec![
-            Column::builder()
-                .name("date")
-                .r#type("string")
-                .build()
-                .unwrap(),
-        ];
+        let mut partitions = vec![Column::builder()
+            .name("date")
+            .r#type("string")
+            .build()
+            .unwrap()];
         append_contract_glue_partition_keys(&mut partitions, &contract, &metadata);
         assert_eq!(partitions.len(), 1);
     }
@@ -2554,9 +2558,13 @@ mod contract_schema_tests {
     fn contract_partition_delete_prefix_matches_s3_layout() {
         let contract = ga4_replace_partition_contract();
         let batch = batch_with_date("2024-01-15");
-        let prefix =
-            contract_partition_delete_prefix("google_analytics.events_daily", "bronze", &contract, &batch)
-                .unwrap();
+        let prefix = contract_partition_delete_prefix(
+            "google_analytics.events_daily",
+            "bronze",
+            &contract,
+            &batch,
+        )
+        .unwrap();
         assert_eq!(
             prefix,
             "bronze/google_analytics.events_daily/date=2024-01-15"
@@ -2585,7 +2593,11 @@ mod contract_schema_tests {
     #[test]
     fn contract_partition_missing_column_is_rejected() {
         let contract = ga4_replace_partition_contract();
-        let schema = Arc::new(Schema::new(vec![Field::new("other", DataType::Utf8, false)]));
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "other",
+            DataType::Utf8,
+            false,
+        )]));
         let values = StringArray::from(vec!["x"]);
         let batch = RecordBatch::try_new(schema, vec![Arc::new(values)]).unwrap();
         assert!(contract_partition_key_values(&contract, &batch).is_err());
@@ -2604,8 +2616,7 @@ mod contract_schema_tests {
             semantics: None,
         };
         let batch = batch_with_date("2024-01-01");
-        let err =
-            contract_partition_delete_prefix("ns", "", &contract, &batch).unwrap_err();
+        let err = contract_partition_delete_prefix("ns", "", &contract, &batch).unwrap_err();
         assert!(err.to_string().contains("partition_key"));
     }
 }

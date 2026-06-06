@@ -3626,10 +3626,7 @@ fn source_plugin_and_config(kind: SourceKind) -> (&'static str, serde_json::Valu
                     str_json(playwright_executable_path),
                 ),
                 ("respect_robots", bool_json(respect_robots)),
-                (
-                    "max_third_party_scripts",
-                    u32_json(max_third_party_scripts),
-                ),
+                ("max_third_party_scripts", u32_json(max_third_party_scripts)),
             ]),
         ),
         SourceKind::AiCitations {
@@ -4804,7 +4801,9 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
     } = &mut kind
     {
         if site.is_none() {
-            *site = prompt("Site URL to scan for client storage and headers (e.g. https://example.com)");
+            *site = prompt(
+                "Site URL to scan for client storage and headers (e.g. https://example.com)",
+            );
         }
         if url_mode.is_none() {
             *url_mode = Some("site_crawl".to_string());

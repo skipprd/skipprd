@@ -2845,16 +2845,14 @@ mod tests {
                 schema: Some("web".into()),
             },
             SourceConfig::SiteQuality {
-                devices: Some(vec![
-                    SiteQualityDeviceConfig {
-                        profile: "mobile".into(),
-                        viewport: SiteQualityViewportConfig {
-                            width: 390,
-                            height: 844,
-                        },
-                        user_agent: None,
+                devices: Some(vec![SiteQualityDeviceConfig {
+                    profile: "mobile".into(),
+                    viewport: SiteQualityViewportConfig {
+                        width: 390,
+                        height: 844,
                     },
-                ]),
+                    user_agent: None,
+                }]),
                 site: Some("https://example.com".into()),
                 url_mode: Some("tld_sample".into()),
                 url_list: None,

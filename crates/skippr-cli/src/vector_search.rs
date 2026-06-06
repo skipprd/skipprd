@@ -82,7 +82,11 @@ pub async fn run_vector_search(args: VectorSearchArgs) {
                 let score = hit.get("score").and_then(|v| v.as_f64()).unwrap_or(0.0);
                 let text = hit.get("text").and_then(|v| v.as_str()).unwrap_or("");
                 let id = hit.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                eprintln!("  {}. score={score:.4} id={id} {}", i + 1, text.chars().take(120).collect::<String>());
+                eprintln!(
+                    "  {}. score={score:.4} id={id} {}",
+                    i + 1,
+                    text.chars().take(120).collect::<String>()
+                );
             }
         }
     }

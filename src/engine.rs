@@ -1273,9 +1273,7 @@ pub async fn sync_deadletter_plugin(
 }
 
 async fn validate_pipeline_source_contracts_at_startup(output_plugin_name: &str) {
-    use crate::plugins::source_contract::{
-        validate_active_sink_supports_contracts, WritePolicy,
-    };
+    use crate::plugins::source_contract::{validate_active_sink_supports_contracts, WritePolicy};
     use crate::METADATA;
 
     let contracts: Vec<_> = METADATA.load().source_contracts.values().cloned().collect();

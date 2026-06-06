@@ -156,10 +156,7 @@ mod tests {
         let mut names = HashSet::new();
         names.insert("date".to_string());
         let coerced = coerce_timestamp_dates_to_date32(batch, &names).unwrap();
-        assert_eq!(
-            coerced.schema().field(0).data_type(),
-            &DataType::Date32
-        );
+        assert_eq!(coerced.schema().field(0).data_type(), &DataType::Date32);
         let dates = coerced
             .column(0)
             .as_any()
@@ -175,9 +172,8 @@ mod tests {
             DataType::Int64,
             false,
         )]));
-        let batch =
-            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1]))])
-                .unwrap();
+        let batch = RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1]))])
+            .unwrap();
         let names = HashSet::new();
         let coerced = coerce_timestamp_dates_to_date32(batch.clone(), &names).unwrap();
         assert_eq!(coerced.schema(), batch.schema());
