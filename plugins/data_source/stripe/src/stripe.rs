@@ -205,14 +205,21 @@ impl DataSourceStripePlugin {
             NAMESPACE_SYNC_RUN_DAILY => "run_date",
             _ => "id",
         };
+        let date_key = if namespace == NAMESPACE_SYNC_RUN_DAILY {
+            "run_date"
+        } else {
+            "ingest_run_date"
+        };
+        let primary_key = if namespace == NAMESPACE_SYNC_RUN_DAILY {
+            vec![FieldPath::single(pk_id)]
+        } else {
+            vec![FieldPath::single(pk_id), FieldPath::single(date_key)]
+        };
         SourceNamespaceContract {
             namespace: namespace.to_string(),
-            primary_key: vec![
-                FieldPath::single(pk_id),
-                FieldPath::single("ingest_run_date"),
-            ],
-            cursor: Some(FieldPath::single("ingest_run_date")),
-            partition_key: vec![FieldPath::single("ingest_run_date")],
+            primary_key,
+            cursor: Some(FieldPath::single(date_key)),
+            partition_key: vec![FieldPath::single(date_key)],
             write_policy: Self::write_policy_from_env(WritePolicy::ReplacePartition),
             refresh_window: None,
             description: format!("Stripe {namespace}"),
@@ -629,6 +636,18 @@ mod tests {
         for contract in plugin.source_namespace_contracts() {
             contract.validate().expect("valid contract");
         }
+    }
+
+    #[test]
+    fn sync_run_contract_uses_emitted_run_date_key() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        std::env::remove_var(WRITE_POLICY_ENV);
+        let contract = DataSourceStripePlugin::namespace_contract(NAMESPACE_SYNC_RUN_DAILY);
+
+        assert_eq!(contract.primary_key.len(), 1);
+        assert_eq!(contract.primary_key[0].dotted(), "run_date");
+        assert_eq!(contract.cursor.as_ref().unwrap().dotted(), "run_date");
+        assert_eq!(contract.partition_key[0].dotted(), "run_date");
     }
 
     #[tokio::test]

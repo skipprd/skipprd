@@ -499,11 +499,7 @@ impl DataSourceDynamodbPlugin {
                 .shard_iterator_type(ShardIteratorType::AfterSequenceNumber)
                 .sequence_number(seq_str);
         } else {
-            iter_builder = iter_builder.shard_iterator_type(if mode == SourceCdcMode::CdcOnly {
-                ShardIteratorType::Latest
-            } else {
-                ShardIteratorType::TrimHorizon
-            });
+            iter_builder = iter_builder.shard_iterator_type(initial_shard_iterator_type(mode));
         }
 
         let iter_resp = iter_builder.send().await.map_err(|e| {
@@ -692,6 +688,12 @@ impl DataSourceDynamodbPlugin {
     }
 }
 
+fn initial_shard_iterator_type(_mode: SourceCdcMode) -> ShardIteratorType {
+    // SnapshotThenCdc already lands the current table state. Replaying stream
+    // history from TrimHorizon would apply pre-snapshot mutations again.
+    ShardIteratorType::Latest
+}
+
 #[async_trait]
 impl DataSource for DataSourceDynamodbPlugin {
     async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
@@ -788,6 +790,18 @@ mod tests {
         let t3 = DataSourceDynamodbPlugin::sequence_number_to_order_token("999999999999");
         assert!(t1 < t2, "smaller sequence must produce smaller token");
         assert!(t2 < t3, "larger sequence must produce larger token");
+    }
+
+    #[test]
+    fn snapshot_then_cdc_starts_stream_at_latest_without_checkpoint() {
+        assert_eq!(
+            initial_shard_iterator_type(SourceCdcMode::SnapshotThenCdc),
+            ShardIteratorType::Latest
+        );
+        assert_eq!(
+            initial_shard_iterator_type(SourceCdcMode::CdcOnly),
+            ShardIteratorType::Latest
+        );
     }
 
     #[test]
