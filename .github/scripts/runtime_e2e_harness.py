@@ -609,8 +609,8 @@ SCENARIOS = {
         ),
         smoke_runs=(SyncRun(pipeline="dynamodb_iceberg_types_cdc"),),
         full_runs=(SyncRun(pipeline="dynamodb_iceberg_types_cdc"),),
-        smoke_verifiers=("dynamodb_iceberg_types_cdc_encoded",),
-        full_verifiers=("dynamodb_iceberg_types_cdc_encoded",),
+        smoke_verifiers=("dynamodb_iceberg_types_cdc_final_state",),
+        full_verifiers=("dynamodb_iceberg_types_cdc_final_state",),
     ),
     "postgres_iceberg_cdc_late_delete": Scenario(
         name="postgres_iceberg_cdc_late_delete",
@@ -2413,8 +2413,8 @@ def verify_mysql_iceberg_types_cdc_final_state(context: ScenarioContext) -> None
     )
 
 
-def verify_dynamodb_iceberg_types_cdc_encoded(context: ScenarioContext) -> None:
-    verify_iceberg_type_matrix_cdc_encoded(
+def verify_dynamodb_iceberg_types_cdc_final_state(context: ScenarioContext) -> None:
+    verify_iceberg_type_matrix_final_state(
         context,
         database="iceberg_e2e_dynamodb",
         table=iceberg_glue_table_name(DYNAMODB_TYPE_MATRIX_NAMESPACE),
@@ -2559,7 +2559,7 @@ VERIFIERS: dict[str, Callable[[ScenarioContext], None]] = {
     "stripe_iceberg_replace_partition_rows": verify_stripe_iceberg_replace_partition_rows,
     "stripe_iceberg_merge_by_key_rows": verify_stripe_iceberg_merge_by_key_rows,
     "mysql_iceberg_types_cdc_final_state": verify_mysql_iceberg_types_cdc_final_state,
-    "dynamodb_iceberg_types_cdc_encoded": verify_dynamodb_iceberg_types_cdc_encoded,
+    "dynamodb_iceberg_types_cdc_final_state": verify_dynamodb_iceberg_types_cdc_final_state,
     "mssql_iceberg_debug_linux_rows": verify_mssql_iceberg_debug_linux_rows,
     "mssql_iceberg_debug_windows_rows": verify_mssql_iceberg_debug_windows_rows,
 }
