@@ -20,6 +20,7 @@ pub fn sample_config() -> DataSourceStripePluginConfig {
         stream_profile: StreamProfile::ConsoleDefault,
         streams: None,
         min_query_interval_ms: 0,
+        write_policy: None,
         oauth_token_url: None,
         oauth_client_id: None,
         oauth_client_secret: None,

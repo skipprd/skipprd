@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::io;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -585,11 +586,13 @@ impl DataSourceDynamodbPlugin {
                     let json_str = Self::streams_item_to_json(image);
                     let bytes = json_str.len();
 
-                    let seq_number = stream_record.sequence_number().unwrap_or("0");
+                    let seq_number = stream_record.sequence_number().ok_or_else(|| {
+                        io::Error::other("DynamoDB stream record is missing sequence_number")
+                    })?;
                     last_seq = Some(seq_number.to_string());
                     let event_id = seq_number.as_bytes().to_vec();
 
-                    let order_token = Self::sequence_number_to_order_token(seq_number);
+                    let order_token = Self::sequence_number_to_order_token(seq_number)?;
 
                     let cdc_rows = Some(vec![WalRowMeta {
                         mutation,
@@ -682,9 +685,14 @@ impl DataSourceDynamodbPlugin {
         }
     }
 
-    fn sequence_number_to_order_token(seq: &str) -> Vec<u8> {
-        let numeric: u128 = seq.parse().unwrap_or(0);
-        numeric.to_be_bytes().to_vec()
+    fn sequence_number_to_order_token(seq: &str) -> Result<Vec<u8>, io::Error> {
+        let numeric: u128 = seq.parse().map_err(|err| {
+            io::Error::other(format!(
+                "DynamoDB stream sequence_number '{}' is not a numeric u128: {}",
+                seq, err
+            ))
+        })?;
+        Ok(numeric.to_be_bytes().to_vec())
     }
 }
 
@@ -777,7 +785,7 @@ mod tests {
 
     #[test]
     fn test_sequence_number_to_order_token_big_endian() {
-        let token = DataSourceDynamodbPlugin::sequence_number_to_order_token("12345");
+        let token = DataSourceDynamodbPlugin::sequence_number_to_order_token("12345").unwrap();
         assert_eq!(token.len(), 16, "u128 big-endian should be 16 bytes");
         let restored = u128::from_be_bytes(token.try_into().unwrap());
         assert_eq!(restored, 12345);
@@ -785,9 +793,9 @@ mod tests {
 
     #[test]
     fn test_sequence_number_ordering_preserved() {
-        let t1 = DataSourceDynamodbPlugin::sequence_number_to_order_token("100");
-        let t2 = DataSourceDynamodbPlugin::sequence_number_to_order_token("200");
-        let t3 = DataSourceDynamodbPlugin::sequence_number_to_order_token("999999999999");
+        let t1 = DataSourceDynamodbPlugin::sequence_number_to_order_token("100").unwrap();
+        let t2 = DataSourceDynamodbPlugin::sequence_number_to_order_token("200").unwrap();
+        let t3 = DataSourceDynamodbPlugin::sequence_number_to_order_token("999999999999").unwrap();
         assert!(t1 < t2, "smaller sequence must produce smaller token");
         assert!(t2 < t3, "larger sequence must produce larger token");
     }
@@ -805,10 +813,8 @@ mod tests {
     }
 
     #[test]
-    fn test_sequence_number_zero_fallback() {
-        let token = DataSourceDynamodbPlugin::sequence_number_to_order_token("not_a_number");
-        let restored = u128::from_be_bytes(token.try_into().unwrap());
-        assert_eq!(restored, 0, "non-numeric should fall back to 0");
+    fn test_sequence_number_rejects_malformed_value() {
+        assert!(DataSourceDynamodbPlugin::sequence_number_to_order_token("not_a_number").is_err());
     }
 
     #[test]

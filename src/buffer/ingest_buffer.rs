@@ -364,21 +364,28 @@ impl GlobalSegment {
 
 fn serialize_cdc_meta_to_blobs(
     cdc_meta: &HashMap<PartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
+    batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
 ) -> HashMap<PartitionKey, Vec<u8>> {
-    use crate::plugins::cdc::{WalPartKind, WalPartMeta};
+    use crate::plugins::cdc::WalPartMeta;
     let mut blobs: HashMap<PartitionKey, Vec<u8>> = HashMap::new();
     for (key, rows) in cdc_meta.iter() {
         if rows.is_empty() {
             continue;
         }
-        let meta = WalPartMeta {
-            kind: WalPartKind::Cdc,
-            row_count: rows.len() as u64,
-            rows: rows.clone(),
-        };
-        if let Ok(bytes) = bincode::serialize(&meta) {
-            blobs.insert(key.clone(), bytes);
-        }
+        let arrow_row_count = batches
+            .get(key)
+            .map(|partition_batches| {
+                partition_batches
+                    .iter()
+                    .map(|batch| batch.num_rows() as u64)
+                    .sum()
+            })
+            .unwrap_or(0);
+        let meta = WalPartMeta::cdc(rows.clone(), arrow_row_count)
+            .expect("CDC WAL metadata must align with Arrow rows before WAL serialization");
+        let bytes = bincode::serialize(&meta)
+            .expect("CDC WAL metadata must serialize before WAL segment write");
+        blobs.insert(key.clone(), bytes);
     }
     blobs
 }
@@ -476,7 +483,7 @@ impl Buffers {
                         },
                     );
                 }
-                let blobs = serialize_cdc_meta_to_blobs(&cdc_meta);
+                let blobs = serialize_cdc_meta_to_blobs(&cdc_meta, &batches);
                 let snapshot = SegmentSnapshot::new(
                     Helpers::random_str(16),
                     offsets,
@@ -711,13 +718,14 @@ impl Buffers {
             );
         }
 
+        let part_meta_blobs = serialize_cdc_meta_to_blobs(&to_flush_cdc, &to_flush_batches);
         let mut snapshot = SegmentSnapshot::new(
             Helpers::random_str(16),
             to_flush_offsets,
             to_flush_batches,
             meta,
             total_bytes,
-            serialize_cdc_meta_to_blobs(&to_flush_cdc),
+            part_meta_blobs,
         );
 
         match Self::persist_snapshot_to_wal(&mut snapshot, offsets_db, "live flush").await? {
@@ -1762,6 +1770,9 @@ impl Buffers {
         struct SegRecordBatchStream {
             schema: SchemaRef,
             rx: mpsc::Receiver<Result<RecordBatch, DataFusionError>>,
+            expected_cdc_rows: Option<u64>,
+            seen_rows: u64,
+            emitted_cdc_count_error: bool,
         }
         impl futures::Stream for SegRecordBatchStream {
             type Item = Result<RecordBatch, DataFusionError>;
@@ -1771,8 +1782,25 @@ impl Buffers {
             ) -> TaskPoll<Option<Self::Item>> {
                 let inner = unsafe { self.get_unchecked_mut() };
                 match inner.rx.poll_recv(cx) {
-                    TaskPoll::Ready(Some(item)) => TaskPoll::Ready(Some(item)),
-                    TaskPoll::Ready(None) => TaskPoll::Ready(None),
+                    TaskPoll::Ready(Some(Ok(batch))) => {
+                        inner.seen_rows = inner.seen_rows.saturating_add(batch.num_rows() as u64);
+                        TaskPoll::Ready(Some(Ok(batch)))
+                    }
+                    TaskPoll::Ready(Some(Err(err))) => TaskPoll::Ready(Some(Err(err))),
+                    TaskPoll::Ready(None) => {
+                        if let Some(expected) = inner.expected_cdc_rows {
+                            if !inner.emitted_cdc_count_error && inner.seen_rows != expected {
+                                inner.emitted_cdc_count_error = true;
+                                return TaskPoll::Ready(Some(Err(DataFusionError::Internal(
+                                    format!(
+                                        "CDC WAL metadata expected {} rows but Arrow stream produced {} rows",
+                                        expected, inner.seen_rows
+                                    ),
+                                ))));
+                            }
+                        }
+                        TaskPoll::Ready(None)
+                    }
                     TaskPoll::Pending => TaskPoll::Pending,
                 }
             }
@@ -1802,33 +1830,43 @@ impl Buffers {
                     )),
                 };
             match blobs_result {
-                Ok(blobs) => blobs.get(&idx.key).and_then(|blob| {
-                    if blob.is_empty() {
-                        return None;
+                Ok(blobs) => match blobs.get(&idx.key) {
+                    Some(blob) if !blob.is_empty() => {
+                        let pm = bincode::deserialize::<WalPartMeta>(blob).map_err(|err| {
+                            io::Error::other(format!(
+                                "failed to deserialize CDC WAL metadata for {:?}: {}",
+                                idx.key, err
+                            ))
+                        })?;
+                        pm.validate().map_err(|err| {
+                            io::Error::other(format!(
+                                "invalid CDC WAL metadata for {:?}: {}",
+                                idx.key, err
+                            ))
+                        })?;
+                        if pm.kind == WalPartKind::Cdc {
+                            let contract =
+                                crate::plugins::cdc::get_namespace_cdc_contract(&idx.key.namespace);
+                            Some(SyncContext {
+                                part_meta: pm,
+                                contract,
+                            })
+                        } else {
+                            None
+                        }
                     }
-                    bincode::deserialize::<WalPartMeta>(blob)
-                        .ok()
-                        .and_then(|pm| {
-                            if pm.kind == WalPartKind::Cdc && !pm.rows.is_empty() {
-                                let contract = crate::plugins::cdc::get_namespace_cdc_contract(
-                                    &idx.key.namespace,
-                                );
-                                Some(SyncContext {
-                                    part_meta: pm,
-                                    contract,
-                                })
-                            } else {
-                                None
-                            }
-                        })
-                }),
-                Err(_) => None,
+                    _ => None,
+                },
+                Err(err) => return Err(err),
             }
         };
 
         let batch_stream: SendableRecordBatchStream = Box::pin(SegRecordBatchStream {
             schema: schema.clone(),
             rx,
+            expected_cdc_rows: cdc_ctx.as_ref().map(|ctx| ctx.part_meta.row_count),
+            seen_rows: 0,
+            emitted_cdc_count_error: false,
         });
         let namespace = BufferChunker::decode_file_namespace(&out_key);
         let compaction_id = out_key

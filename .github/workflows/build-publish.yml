@@ -214,6 +214,10 @@ jobs:
         shell: bash
         run: |
           python3 .github/scripts/check_host_dependency_boundaries.py
+      - name: Verify runtime E2E harness registry
+        shell: bash
+        run: |
+          python3 .github/scripts/test_runtime_e2e_harness.py
       - name: Run root host test suite
         shell: bash
         run: |
@@ -222,6 +226,12 @@ jobs:
         shell: bash
         run: |
           cargo test -p skippr-plugin-data-sink-postgres -- --nocapture
+      - name: Run CDC Iceberg and source plugin tests
+        shell: bash
+        run: |
+          cargo test -p skippr-plugin-data-sink-iceberg --lib -- --nocapture
+          cargo test -p skippr-plugin-data-source-stripe --lib -- --nocapture
+          cargo test -p skippr-plugin-data-source-dynamodb --lib -- --nocapture
 
   data_engineer_test_suite:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}

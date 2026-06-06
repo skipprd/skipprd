@@ -228,20 +228,18 @@ async fn run_runtime_source_host_frame_loop(
     mut reader: OwnedReadHalf,
     control: Arc<RuntimeSourceControl>,
 ) -> io::Result<()> {
-    loop {
-        match read_frame_or_eof::<_, HostFrame>(&mut reader).await? {
-            Some(HostFrame::Shutdown) | None => {
-                control.shutdown(None);
-                return Ok(());
-            }
-            Some(other) => {
-                let err = io::Error::other(format!(
-                    "unexpected host control frame after source start: {:?}",
-                    other
-                ));
-                control.shutdown(Some(err.to_string()));
-                return Err(err);
-            }
+    match read_frame_or_eof::<_, HostFrame>(&mut reader).await? {
+        Some(HostFrame::Shutdown) | None => {
+            control.shutdown(None);
+            Ok(())
+        }
+        Some(other) => {
+            let err = io::Error::other(format!(
+                "unexpected host control frame after source start: {:?}",
+                other
+            ));
+            control.shutdown(Some(err.to_string()));
+            Err(err)
         }
     }
 }

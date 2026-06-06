@@ -18,6 +18,7 @@ data_sources:
       streams: ["payments"]
       start_date: "2024-01-01"
       lookback_days: 1
+      write_policy: merge_by_key
 
 data_sinks:
   iceberg_stripe:

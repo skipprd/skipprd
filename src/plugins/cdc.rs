@@ -1,5 +1,6 @@
 use serde_derive::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::fmt;
 use std::sync::RwLock;
 
 const DEFAULT_CONTRACT_NAMESPACE: &str = "*";
@@ -149,6 +150,43 @@ impl CheckpointEnvelope {
         })
     }
 
+    pub fn wal_owned_source_resume<T: serde::Serialize>(
+        payload_version: u32,
+        payload: &T,
+    ) -> Result<Self, bincode::Error> {
+        Self::from_payload(
+            CheckpointAuthority::WalOwnership,
+            CheckpointKind::SourceResume,
+            payload_version,
+            payload,
+        )
+    }
+
+    pub fn bootstrap_anchor<T: serde::Serialize>(
+        payload_version: u32,
+        payload: &T,
+    ) -> Result<Self, bincode::Error> {
+        Self::from_payload(
+            CheckpointAuthority::AdvisoryHint,
+            CheckpointKind::BootstrapAnchor,
+            payload_version,
+            payload,
+        )
+    }
+
+    pub fn advisory_hint<T: serde::Serialize>(
+        kind: CheckpointKind,
+        payload_version: u32,
+        payload: &T,
+    ) -> Result<Self, bincode::Error> {
+        Self::from_payload(
+            CheckpointAuthority::AdvisoryHint,
+            kind,
+            payload_version,
+            payload,
+        )
+    }
+
     /// Deserialize the payload into the expected type.
     pub fn into_payload<T: serde::de::DeserializeOwned>(&self) -> Result<T, bincode::Error> {
         bincode::deserialize(&self.payload_bytes)
@@ -217,6 +255,87 @@ pub struct WalPartMeta {
     pub kind: WalPartKind,
     pub row_count: u64,
     pub rows: Vec<WalRowMeta>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WalPartMetaError {
+    EmptyCdcRows,
+    RowCountMismatch { expected: u64, actual: u64 },
+    CdcRowsOnAppend,
+}
+
+impl fmt::Display for WalPartMetaError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::EmptyCdcRows => write!(f, "CDC WAL partition requires at least one row"),
+            Self::RowCountMismatch { expected, actual } => write!(
+                f,
+                "CDC WAL metadata row count mismatch: expected {expected}, got {actual}"
+            ),
+            Self::CdcRowsOnAppend => write!(f, "append WAL partition must not carry CDC rows"),
+        }
+    }
+}
+
+impl std::error::Error for WalPartMetaError {}
+
+impl WalPartMeta {
+    pub fn cdc(rows: Vec<WalRowMeta>, arrow_row_count: u64) -> Result<Self, WalPartMetaError> {
+        if rows.is_empty() {
+            return Err(WalPartMetaError::EmptyCdcRows);
+        }
+        let actual = rows.len() as u64;
+        if actual != arrow_row_count {
+            return Err(WalPartMetaError::RowCountMismatch {
+                expected: arrow_row_count,
+                actual,
+            });
+        }
+        Ok(Self {
+            kind: WalPartKind::Cdc,
+            row_count: arrow_row_count,
+            rows,
+        })
+    }
+
+    pub fn append(row_count: u64) -> Self {
+        Self {
+            kind: WalPartKind::Append,
+            row_count,
+            rows: Vec::new(),
+        }
+    }
+
+    pub fn validate(&self) -> Result<(), WalPartMetaError> {
+        match self.kind {
+            WalPartKind::Append if self.rows.is_empty() => Ok(()),
+            WalPartKind::Append => Err(WalPartMetaError::CdcRowsOnAppend),
+            WalPartKind::Cdc => {
+                if self.rows.is_empty() {
+                    return Err(WalPartMetaError::EmptyCdcRows);
+                }
+                let actual = self.rows.len() as u64;
+                if self.row_count != actual {
+                    return Err(WalPartMetaError::RowCountMismatch {
+                        expected: self.row_count,
+                        actual,
+                    });
+                }
+                Ok(())
+            }
+        }
+    }
+
+    pub fn validate_arrow_row_count(&self, arrow_row_count: u64) -> Result<(), WalPartMetaError> {
+        self.validate()?;
+        if self.row_count != arrow_row_count {
+            return Err(WalPartMetaError::RowCountMismatch {
+                expected: self.row_count,
+                actual: arrow_row_count,
+            });
+        }
+        Ok(())
+    }
 }
 
 /// Distinguishes legacy append-mode partitions from CDC-aware partitions.
@@ -542,12 +661,12 @@ pub mod source_capabilities {
 
     pub const MSSQL: SourceCapability = SourceCapability {
         name: "Mssql",
-        guarantee_tier: SourceGuaranteeTier::SnapshotThenLogExactOnce,
-        checkpoint_style: SourceCheckpointStyle::LogNative,
-        bootstrap_style: SourceBootstrapStyle::AnchoredSnapshot,
-        order_model: SourceOrderModel::GlobalTotalOrder,
-        supports_deletes: true,
-        event_id_semantics: EventIdSemantics::LogPosition,
+        guarantee_tier: SourceGuaranteeTier::IncrementalOnly,
+        checkpoint_style: SourceCheckpointStyle::None,
+        bootstrap_style: SourceBootstrapStyle::FullScan,
+        order_model: SourceOrderModel::UnsupportedForFinalState,
+        supports_deletes: false,
+        event_id_semantics: EventIdSemantics::None,
     };
 
     pub const MONGODB: SourceCapability = SourceCapability {
@@ -1003,6 +1122,62 @@ pub mod sink_capabilities {
 mod tests {
     use super::*;
 
+    fn row_meta(order: u8) -> WalRowMeta {
+        WalRowMeta {
+            mutation: MutationKind::Update,
+            event_id: vec![order],
+            order_token: vec![order],
+        }
+    }
+
+    #[test]
+    fn wal_part_meta_cdc_rejects_empty_rows() {
+        assert_eq!(
+            WalPartMeta::cdc(Vec::new(), 0).unwrap_err(),
+            WalPartMetaError::EmptyCdcRows
+        );
+    }
+
+    #[test]
+    fn wal_part_meta_cdc_rejects_row_count_mismatch() {
+        assert_eq!(
+            WalPartMeta::cdc(vec![row_meta(1)], 2).unwrap_err(),
+            WalPartMetaError::RowCountMismatch {
+                expected: 2,
+                actual: 1
+            }
+        );
+    }
+
+    #[test]
+    fn wal_part_meta_validate_rejects_cdc_rows_on_append() {
+        let meta = WalPartMeta {
+            kind: WalPartKind::Append,
+            row_count: 1,
+            rows: vec![row_meta(1)],
+        };
+        assert_eq!(
+            meta.validate().unwrap_err(),
+            WalPartMetaError::CdcRowsOnAppend
+        );
+    }
+
+    #[test]
+    fn checkpoint_constructors_enforce_authority_and_kind() {
+        let payload = PostgresCheckpoint {
+            lsn: 42,
+            slot_name: "slot".to_string(),
+        };
+
+        let wal = CheckpointEnvelope::wal_owned_source_resume(1, &payload).unwrap();
+        assert_eq!(wal.authority, CheckpointAuthority::WalOwnership);
+        assert_eq!(wal.kind, CheckpointKind::SourceResume);
+
+        let anchor = CheckpointEnvelope::bootstrap_anchor(1, &payload).unwrap();
+        assert_eq!(anchor.authority, CheckpointAuthority::AdvisoryHint);
+        assert_eq!(anchor.kind, CheckpointKind::BootstrapAnchor);
+    }
+
     #[test]
     fn test_source_capability_lookup_exhaustive() {
         let names = [
@@ -1108,6 +1283,23 @@ mod tests {
             }
             CompatibilityResult::Incompatible(reasons) => {
                 assert!(!reasons.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn test_mssql_to_iceberg_rejects_exact_once_cdc_until_cdc_exists() {
+        let source = source_capabilities::MSSQL;
+        let sink = sink_capabilities::ICEBERG;
+        let keys = vec!["id".to_string()];
+        match derive_and_validate(&source, &sink, "dbo.orders", &keys) {
+            CompatibilityResult::Compatible(_) => {
+                panic!("expected incompatible for finite MSSQL snapshot source");
+            }
+            CompatibilityResult::Incompatible(reasons) => {
+                assert!(reasons
+                    .iter()
+                    .any(|reason| reason.contains("cannot produce CDC metadata")));
             }
         }
     }

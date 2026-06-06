@@ -43,6 +43,22 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
             ),
         )
 
+    def test_all_scenario_verifiers_are_registered(self) -> None:
+        configured = {
+            verifier
+            for scenario in runtime_e2e_harness.SCENARIOS.values()
+            for verifier in (*scenario.smoke_verifiers, *scenario.full_verifiers)
+        }
+        self.assertLessEqual(configured, set(runtime_e2e_harness.VERIFIERS))
+
+    def test_stripe_merge_by_key_uses_declared_config_not_env_override(self) -> None:
+        scenario = runtime_e2e_harness.SCENARIOS["stripe_iceberg_merge_by_key"]
+        for run in (*scenario.smoke_runs, *scenario.full_runs):
+            self.assertNotIn("SKIPPR_STRIPE_WRITE_POLICY", dict(run.extra_env))
+
+        config_text = scenario.config_path.read_text(encoding="utf-8")
+        self.assertIn("write_policy: merge_by_key", config_text)
+
     def test_github_action_configs_use_refined_skippr_shape(self) -> None:
         github_dir = runtime_e2e_harness.REPO_ROOT / ".github"
         config_paths = sorted(github_dir.glob("actions/**/skippr.yml"))

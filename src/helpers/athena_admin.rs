@@ -25,40 +25,37 @@ pub fn output_athena_admin_config() -> Result<AthenaAdminConfig, String> {
 }
 
 pub async fn delete_glue_database(database_name: &str) -> Result<bool, String> {
-    loop {
+    println!(
+        "Are you sure you want to drop the database? To confirm, please type the database name ('{}'). Type 'exit' or ctrl+c to cancel:",
+        database_name
+    );
+
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).unwrap_or_default();
+
+    if input.trim() == database_name {
+        println!("Dropping database '{}'", database_name);
+
+        let mut timeout = 10;
         println!(
-            "Are you sure you want to drop the database? To confirm, please type the database name ('{}'). Type 'exit' or ctrl+c to cancel:",
-            database_name
+            "Waiting {} seconds before dropping database '{}', ctrl+c to cancel",
+            timeout, database_name
         );
 
-        let mut input = String::new();
-        io::stdin().read_line(&mut input).unwrap_or_default();
-
-        if input.trim() == database_name {
-            println!("Dropping database '{}'", database_name);
-
-            let mut timeout = 10;
-            println!(
-                "Waiting {} seconds before dropping database '{}', ctrl+c to cancel",
-                timeout, database_name
-            );
-
-            while timeout > 0 {
-                tokio::time::sleep(tokio::time::Duration::from_secs(timeout)).await;
-                timeout -= 1;
-            }
-            break;
-        } else if input.trim().eq_ignore_ascii_case("exit") {
-            return Err(format!(
-                "Drop canceled. Exiting without dropping database '{}'.",
-                database_name
-            ));
-        } else {
-            return Err(format!(
-                "Incorrect database name entered: '{}'.",
-                input.trim()
-            ));
+        while timeout > 0 {
+            tokio::time::sleep(tokio::time::Duration::from_secs(timeout)).await;
+            timeout -= 1;
         }
+    } else if input.trim().eq_ignore_ascii_case("exit") {
+        return Err(format!(
+            "Drop canceled. Exiting without dropping database '{}'.",
+            database_name
+        ));
+    } else {
+        return Err(format!(
+            "Incorrect database name entered: '{}'.",
+            input.trim()
+        ));
     }
 
     let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())

@@ -32,9 +32,6 @@ use crate::stripe_api::{
     map_promotion_code, map_refund, map_subscription, StripeApiClient, FIXTURE_ENV,
 };
 
-/// Test-only override for Iceberg equality-commit e2e (`merge_by_key`, `replace_partition`).
-pub const WRITE_POLICY_ENV: &str = "SKIPPR_STRIPE_WRITE_POLICY";
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct DataSourceStripePluginConfig {
     pub stripe_account_id: String,
@@ -47,6 +44,8 @@ pub struct DataSourceStripePluginConfig {
     pub streams: Option<Vec<String>>,
     #[serde(default = "default_min_query_interval_ms")]
     pub min_query_interval_ms: u64,
+    #[serde(default)]
+    pub write_policy: Option<WritePolicy>,
     #[serde(default)]
     pub access_token: Option<String>,
     #[serde(default)]
@@ -173,19 +172,7 @@ impl DataSourceStripePlugin {
         total
     }
 
-    fn write_policy_from_env(default: WritePolicy) -> WritePolicy {
-        match std::env::var(WRITE_POLICY_ENV)
-            .ok()
-            .as_deref()
-            .map(str::trim)
-        {
-            Some("merge_by_key") => WritePolicy::MergeByKey,
-            Some("replace_partition") => WritePolicy::ReplacePartition,
-            _ => default,
-        }
-    }
-
-    fn namespace_contract(namespace: &str) -> SourceNamespaceContract {
+    fn namespace_contract(namespace: &str, write_policy: WritePolicy) -> SourceNamespaceContract {
         let pk_id = match namespace {
             NAMESPACE_ACCOUNT_SNAPSHOT => "account_id",
             NAMESPACE_PRODUCT_SNAPSHOT => "product_id",
@@ -220,7 +207,7 @@ impl DataSourceStripePlugin {
             primary_key,
             cursor: Some(FieldPath::single(date_key)),
             partition_key: vec![FieldPath::single(date_key)],
-            write_policy: Self::write_policy_from_env(WritePolicy::ReplacePartition),
+            write_policy,
             refresh_window: None,
             description: format!("Stripe {namespace}"),
             semantics: Some(SourceSemantics::MutableReport),
@@ -433,6 +420,10 @@ impl DataSource for DataSourceStripePlugin {
     }
 
     fn source_namespace_contracts(&self) -> Vec<SourceNamespaceContract> {
+        let write_policy = self
+            .config
+            .write_policy
+            .unwrap_or(WritePolicy::ReplacePartition);
         [
             NAMESPACE_ACCOUNT_SNAPSHOT,
             NAMESPACE_PRODUCT_SNAPSHOT,
@@ -452,7 +443,7 @@ impl DataSource for DataSourceStripePlugin {
             NAMESPACE_SYNC_RUN_DAILY,
         ]
         .iter()
-        .map(|ns| Self::namespace_contract(ns))
+        .map(|ns| Self::namespace_contract(ns, write_policy))
         .collect()
     }
 
@@ -618,18 +609,22 @@ mod tests {
     static ENV_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
-    fn write_policy_env_override_applies_merge_by_key() {
+    fn write_policy_config_applies_merge_by_key() {
         let _guard = ENV_TEST_LOCK.lock().unwrap();
-        std::env::set_var(WRITE_POLICY_ENV, "merge_by_key");
-        let contract = DataSourceStripePlugin::namespace_contract(NAMESPACE_CHARGE_FACT);
+        let mut cfg = sample_config();
+        cfg.write_policy = Some(WritePolicy::MergeByKey);
+        let plugin = DataSourceStripePlugin::new(cfg).unwrap();
+        let contract = plugin
+            .source_namespace_contracts()
+            .into_iter()
+            .find(|contract| contract.namespace == NAMESPACE_CHARGE_FACT)
+            .unwrap();
         assert_eq!(contract.write_policy, WritePolicy::MergeByKey);
-        std::env::remove_var(WRITE_POLICY_ENV);
     }
 
     #[test]
     fn namespace_contracts_validate() {
         let _guard = ENV_TEST_LOCK.lock().unwrap();
-        std::env::remove_var(WRITE_POLICY_ENV);
         let mut cfg = sample_config();
         cfg.access_token = Some("sk_test".into());
         let plugin = DataSourceStripePlugin::new(cfg).unwrap();
@@ -641,8 +636,10 @@ mod tests {
     #[test]
     fn sync_run_contract_uses_emitted_run_date_key() {
         let _guard = ENV_TEST_LOCK.lock().unwrap();
-        std::env::remove_var(WRITE_POLICY_ENV);
-        let contract = DataSourceStripePlugin::namespace_contract(NAMESPACE_SYNC_RUN_DAILY);
+        let contract = DataSourceStripePlugin::namespace_contract(
+            NAMESPACE_SYNC_RUN_DAILY,
+            WritePolicy::ReplacePartition,
+        );
 
         assert_eq!(contract.primary_key.len(), 1);
         assert_eq!(contract.primary_key[0].dotted(), "run_date");

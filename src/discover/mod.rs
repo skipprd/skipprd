@@ -1717,43 +1717,11 @@ impl AnalyseSchema {
     }
 
     fn is_32_bit_signed_int(&self, value: &mut String) -> bool {
-        // let value = value as i32;
-        const MIN: i32 = -2147483648;
-        const MAX: i32 = 2147483647;
-
-        let mut result = false;
-        let val = match value.parse::<i32>() {
-            Ok(val) => val,
-            Err(_) => {
-                return false;
-            }
-        };
-
-        if val >= MIN && val <= MAX {
-            result = true;
-        }
-
-        result
+        value.parse::<i32>().is_ok()
     }
 
     fn is_64_bit_signed_int(&self, value: &mut String) -> bool {
-        let value = match value.parse::<i64>() {
-            Ok(val) => val,
-            Err(_) => {
-                return false;
-            }
-        };
-
-        const MIN: i64 = -9223372036854775808;
-        const MAX: i64 = 9223372036854775807;
-
-        let mut result = false;
-
-        if value >= MIN && value <= MAX {
-            result = true;
-        }
-
-        result
+        value.parse::<i64>().is_ok()
     }
 
     pub fn is_valid_timestamp_milli(&self, timestamp: &mut String) -> bool {

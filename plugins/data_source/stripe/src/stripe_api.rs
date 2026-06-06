@@ -12,6 +12,7 @@ pub struct StripeApiClient {
     pub stripe_account_id: String,
     access_token: String,
     pub min_interval_ms: u64,
+    fixture_dir: Option<String>,
 }
 
 impl StripeApiClient {
@@ -21,11 +22,34 @@ impl StripeApiClient {
         access_token: String,
         min_interval_ms: u64,
     ) -> Self {
+        let fixture_dir = std::env::var(FIXTURE_ENV)
+            .ok()
+            .map(|dir| dir.trim().to_string())
+            .filter(|dir| !dir.is_empty());
+        Self::with_fixture_dir(
+            http,
+            stripe_account_id,
+            access_token,
+            min_interval_ms,
+            fixture_dir,
+        )
+    }
+
+    pub fn with_fixture_dir(
+        http: RetryableHttpClient,
+        stripe_account_id: String,
+        access_token: String,
+        min_interval_ms: u64,
+        fixture_dir: Option<String>,
+    ) -> Self {
         Self {
             http,
             stripe_account_id,
             access_token,
             min_interval_ms,
+            fixture_dir: fixture_dir
+                .map(|dir| dir.trim().to_string())
+                .filter(|dir| !dir.is_empty()),
         }
     }
 
@@ -71,13 +95,11 @@ impl StripeApiClient {
         created_gte: Option<i64>,
         expand: Option<&str>,
     ) -> Result<Vec<Value>, std::io::Error> {
-        if let Ok(dir) = std::env::var(FIXTURE_ENV) {
-            if !dir.trim().is_empty() {
-                if let Some(body) = Self::fixture_path(&dir, fixture) {
-                    return Ok(Self::extract_list_data(&body));
-                }
-                return Ok(Vec::new());
+        if let Some(dir) = self.fixture_dir.as_deref() {
+            if let Some(body) = Self::fixture_path(dir, fixture) {
+                return Ok(Self::extract_list_data(&body));
             }
+            return Ok(Vec::new());
         }
 
         let mut all_rows = Vec::new();
@@ -127,13 +149,11 @@ impl StripeApiClient {
     }
 
     async fn get_singleton(&self, path: &str, fixture: &str) -> Result<Value, std::io::Error> {
-        if let Ok(dir) = std::env::var(FIXTURE_ENV) {
-            if !dir.trim().is_empty() {
-                if let Some(body) = Self::fixture_path(&dir, fixture) {
-                    return Ok(body);
-                }
-                return Ok(json!({ "id": self.stripe_account_id }));
+        if let Some(dir) = self.fixture_dir.as_deref() {
+            if let Some(body) = Self::fixture_path(dir, fixture) {
+                return Ok(body);
             }
+            return Ok(json!({ "id": self.stripe_account_id }));
         }
         self.throttle().await;
         let url = format!("{API_BASE}{path}");
@@ -629,19 +649,18 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var(FIXTURE_ENV, &dir);
 
-        let client = StripeApiClient::new(
+        let client = StripeApiClient::with_fixture_dir(
             RetryableHttpClient::new(skippr_plugin_shared_api_source::RetryConfig::default()),
             "acct_fixture".to_string(),
             "fixture".to_string(),
             0,
+            Some(dir.to_string_lossy().to_string()),
         );
 
         let rows = client.list_refunds(None).await.unwrap();
 
         assert!(rows.is_empty());
-        std::env::remove_var(FIXTURE_ENV);
         let _ = std::fs::remove_dir_all(dir);
     }
 
@@ -653,19 +672,18 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
-        std::env::set_var(FIXTURE_ENV, &dir);
 
-        let client = StripeApiClient::new(
+        let client = StripeApiClient::with_fixture_dir(
             RetryableHttpClient::new(skippr_plugin_shared_api_source::RetryConfig::default()),
             "acct_fixture".to_string(),
             "fixture".to_string(),
             0,
+            Some(dir.to_string_lossy().to_string()),
         );
 
         let account = client.account().await.unwrap();
 
         assert_eq!(account["id"], "acct_fixture");
-        std::env::remove_var(FIXTURE_ENV);
         let _ = std::fs::remove_dir_all(dir);
     }
 }

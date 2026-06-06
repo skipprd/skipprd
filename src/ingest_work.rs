@@ -309,6 +309,12 @@ pub struct IngestBatch {
 }
 
 impl IngestBatch {
+    fn normalize_cdc_rows(
+        rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
+    ) -> Option<Vec<crate::plugins::cdc::WalRowMeta>> {
+        rows.filter(|rows| !rows.is_empty())
+    }
+
     pub fn new(
         offset_key: OffsetKey,
         data: String,
@@ -327,7 +333,7 @@ impl IngestBatch {
             offset_pos: None,
             source_uri,
             namespace: namespace.map(|ns| storage_namespace(&ns)),
-            cdc_rows,
+            cdc_rows: Self::normalize_cdc_rows(cdc_rows),
         }
     }
 
@@ -1741,6 +1747,18 @@ impl Ingest {
                 };
             }
 
+            if let Some(cdc_rows) = ingest_batch.cdc_rows() {
+                if cdc_rows.len() != unwrapped_records.len() {
+                    panic!(
+                        "CDC row metadata for {}:{} has {} entries but decoded {} logical records",
+                        ingest_batch.offset_key.namespace,
+                        ingest_batch.offset_key.partition,
+                        cdc_rows.len(),
+                        unwrapped_records.len()
+                    );
+                }
+            }
+
             for mut record in unwrapped_records {
                 batch_line += 1;
                 cdc_row_idx += 1;
@@ -1773,7 +1791,7 @@ impl Ingest {
 
                 let offset_pos = ingest_batch.offset_pos_for_line(batch_line);
 
-                let is_cdc_batch = ingest_batch.cdc_rows.is_some();
+                let is_cdc_batch = ingest_batch.cdc_rows().is_some();
 
                 if is_cdc_batch
                     || has_offsets.is_none()

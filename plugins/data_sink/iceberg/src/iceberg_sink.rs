@@ -10,6 +10,8 @@ use arrow::compute::filter_record_batch;
 use arrow::datatypes::{Schema as ArrowSchema, SchemaRef};
 use arrow::util::display::array_value_to_string;
 use async_trait::async_trait;
+use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
+use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
 use datafusion::error::DataFusionError;
@@ -435,9 +437,16 @@ impl DataSinkIcebergPlugin {
                 policy, namespace
             )));
         }
+        validate_flat_field_paths(delete_paths)?;
 
         let delete_columns: Vec<String> = delete_paths.iter().map(FieldPath::dotted).collect();
-        let delete_batch = dedupe_batch_by_columns(&data_batch, &delete_columns)?;
+        if matches!(policy, WritePolicy::MergeByKey) {
+            validate_no_duplicate_batch_keys(&data_batch, &delete_columns)?;
+        }
+        let delete_batch = project_batch_columns(
+            &dedupe_batch_by_columns(&data_batch, &delete_columns)?,
+            &delete_columns,
+        )?;
         let equality_ids = plan_contract_equality_ids(&table, delete_paths)?;
 
         let date_fields = iceberg_date_field_names(&metadata);
@@ -674,10 +683,11 @@ impl DataSinkIcebergPlugin {
 
             for row in 0..batch.num_rows() {
                 let key = business_key_for_row(&batch, &contract.business_key_columns, row)?;
-                let order_token = orders.value(row).to_string();
+                let order_token = validate_cdc_order_token(orders.value(row))?.to_string();
                 let is_stale = state
                     .get(&key)
-                    .map(|seen| seen.as_str() >= order_token.as_str())
+                    .map(|seen| compare_cdc_order_tokens(seen, &order_token))
+                    .transpose()?
                     .unwrap_or(false);
                 if is_stale {
                     upsert_mask.push(false);
@@ -757,7 +767,17 @@ impl DataSinkIcebergPlugin {
                     .into_bytes();
                 serde_json::from_slice(&bytes).map_err(|err| io::Error::other(err.to_string()))
             }
-            Err(_) => Ok(HashMap::new()),
+            Err(err) => {
+                if is_s3_get_object_not_found_error(&err) {
+                    Ok(HashMap::new())
+                } else {
+                    let err_text = err.to_string();
+                    Err(io::Error::other(format!(
+                        "failed to load Iceberg CDC state from {}: {}",
+                        state_uri, err_text
+                    )))
+                }
+            }
         }
     }
 
@@ -770,7 +790,10 @@ impl DataSinkIcebergPlugin {
         for (key, token) in updates {
             let should_update = state
                 .get(&key)
-                .map(|seen| seen.as_str() < token.as_str())
+                .map(|seen| {
+                    compare_cdc_order_tokens(seen, &token).map(|is_seen_newer| !is_seen_newer)
+                })
+                .transpose()?
                 .unwrap_or(true);
             if should_update {
                 state.insert(key, token);
@@ -1135,6 +1158,7 @@ fn plan_contract_equality_ids(
     table: &iceberg::table::Table,
     key_paths: &[FieldPath],
 ) -> Result<Vec<i32>, io::Error> {
+    validate_flat_field_paths(key_paths)?;
     let schema = table.metadata().current_schema();
     let mut equality_ids = Vec::with_capacity(key_paths.len());
     for path in key_paths {
@@ -1150,6 +1174,41 @@ fn plan_contract_equality_ids(
     Ok(equality_ids)
 }
 
+fn validate_flat_field_paths(key_paths: &[FieldPath]) -> Result<(), io::Error> {
+    for path in key_paths {
+        let column = path.dotted();
+        validate_flat_column_name(&column)?;
+    }
+    Ok(())
+}
+
+fn validate_flat_column_name(column: &str) -> Result<(), io::Error> {
+    if column.contains('.') {
+        return Err(io::Error::other(format!(
+            "Iceberg equality key '{}' is nested/dotted; nested equality keys need a real nested resolver before they are supported",
+            column
+        )));
+    }
+    Ok(())
+}
+
+fn validate_no_duplicate_batch_keys(
+    batch: &RecordBatch,
+    columns: &[String],
+) -> Result<(), io::Error> {
+    let mut seen = HashSet::new();
+    for row in 0..batch.num_rows() {
+        let key = business_key_for_row(batch, columns, row)?;
+        if !seen.insert(key) {
+            return Err(io::Error::other(format!(
+                "Iceberg MergeByKey batch contains duplicate key at row {}; provide a deterministic source order or deduplicate upstream",
+                row
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn dedupe_batch_by_columns(
     batch: &RecordBatch,
     columns: &[String],
@@ -1162,11 +1221,11 @@ fn dedupe_batch_by_columns(
             keep.push(row);
         }
     }
-    let mask = BooleanArray::from(
-        (0..batch.num_rows())
-            .map(|row| keep.contains(&row))
-            .collect::<Vec<_>>(),
-    );
+    let mut keep_mask = vec![false; batch.num_rows()];
+    for row in keep {
+        keep_mask[row] = true;
+    }
+    let mask = BooleanArray::from(keep_mask);
     filter_record_batch(batch, &mask).map_err(|err| io::Error::other(err.to_string()))
 }
 
@@ -1178,6 +1237,7 @@ fn project_batch_columns(
     let mut fields = Vec::with_capacity(columns.len());
     let mut projected: Vec<ArrayRef> = Vec::with_capacity(columns.len());
     for column in columns {
+        validate_flat_column_name(column)?;
         let idx = schema
             .index_of(column)
             .map_err(|err| io::Error::other(err.to_string()))?;
@@ -1203,22 +1263,24 @@ fn apply_iceberg_field_ids(
     iceberg_schema: &Schema,
 ) -> Result<RecordBatch, io::Error> {
     let schema = batch.schema();
-    let fields = schema
-        .fields()
-        .iter()
-        .map(|field| {
-            let mut annotated = field.as_ref().clone();
-            if let Some(iceberg_field) = iceberg_schema.field_by_name(field.name()) {
-                let mut metadata = annotated.metadata().clone();
-                metadata.insert(
-                    PARQUET_FIELD_ID_META_KEY.to_string(),
-                    iceberg_field.id.to_string(),
-                );
-                annotated = annotated.with_metadata(metadata);
-            }
-            Arc::new(annotated)
-        })
-        .collect::<Vec<_>>();
+    let mut fields = Vec::with_capacity(schema.fields().len());
+    for field in schema.fields().iter() {
+        let mut annotated = field.as_ref().clone();
+        validate_flat_column_name(field.name())?;
+        let iceberg_field = iceberg_schema.field_by_name(field.name()).ok_or_else(|| {
+            io::Error::other(format!(
+                "Iceberg field '{}' is not present in table schema; schema must be evolved before writing",
+                field.name()
+            ))
+        })?;
+        let mut metadata = annotated.metadata().clone();
+        metadata.insert(
+            PARQUET_FIELD_ID_META_KEY.to_string(),
+            iceberg_field.id.to_string(),
+        );
+        annotated = annotated.with_metadata(metadata);
+        fields.push(Arc::new(annotated));
+    }
     let annotated_schema = Arc::new(ArrowSchema::new_with_metadata(
         fields,
         schema.metadata().clone(),
@@ -1234,6 +1296,7 @@ fn business_key_for_row(
 ) -> Result<String, io::Error> {
     let mut values = Vec::with_capacity(business_key_columns.len());
     for column in business_key_columns {
+        validate_flat_column_name(column)?;
         let idx = batch
             .schema()
             .index_of(column)
@@ -1247,9 +1310,71 @@ fn business_key_for_row(
         }
         let value = array_value_to_string(array.as_ref(), row)
             .map_err(|err| io::Error::other(err.to_string()))?;
-        values.push(format!("{}={}", column, value));
+        values.push(length_prefixed_key_part(column, &value));
     }
-    Ok(values.join("|"))
+    Ok(values.concat())
+}
+
+fn length_prefixed_key_part(column: &str, value: &str) -> String {
+    format!("{}:{}{}:{}", column.len(), column, value.len(), value)
+}
+
+fn validate_cdc_order_token(token: &str) -> Result<&str, io::Error> {
+    if token.is_empty() || token.len() % 2 != 0 || !token.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err(io::Error::other(format!(
+            "CDC order token '{}' is not fixed-width hex",
+            token
+        )));
+    }
+    Ok(token)
+}
+
+fn compare_cdc_order_tokens(seen: &str, incoming: &str) -> Result<bool, io::Error> {
+    validate_cdc_order_token(seen)?;
+    validate_cdc_order_token(incoming)?;
+    if seen.len() != incoming.len() {
+        return Err(io::Error::other(format!(
+            "CDC order token width changed from {} to {}; source order encoding must be fixed-width",
+            seen.len(),
+            incoming.len()
+        )));
+    }
+    Ok(seen >= incoming)
+}
+
+fn is_s3_get_object_not_found_error(err: &SdkError<GetObjectError>) -> bool {
+    if err
+        .raw_response()
+        .is_some_and(|response| response.status().as_u16() == 404)
+    {
+        return true;
+    }
+    if let Some(service_error) = err.as_service_error() {
+        if is_s3_not_found_code(service_error.code()) {
+            return true;
+        }
+        if service_error
+            .message()
+            .is_some_and(is_s3_not_found_error_text)
+        {
+            return true;
+        }
+    }
+    is_s3_not_found_error_text(&err.to_string())
+}
+
+fn is_s3_not_found_code(code: Option<&str>) -> bool {
+    matches!(
+        code,
+        Some("NoSuchKey" | "NotFound" | "NotFoundException" | "404")
+    )
+}
+
+fn is_s3_not_found_error_text(err: &str) -> bool {
+    err.contains("NoSuchKey")
+        || err.contains("NotFound")
+        || err.contains("status code: 404")
+        || err.contains("404 Not Found")
 }
 
 fn iceberg_schema_from_output_metadata(
@@ -1592,6 +1717,56 @@ mod tests {
                 .get(PARQUET_FIELD_ID_META_KEY),
             Some(&"7".to_string())
         );
+    }
+
+    #[test]
+    fn project_batch_columns_rejects_nested_equality_key() {
+        let batch = RecordBatch::try_from_iter(vec![(
+            "id",
+            Arc::new(arrow::array::Int32Array::from(vec![2])) as ArrayRef,
+        )])
+        .unwrap();
+
+        let err = project_batch_columns(&batch, &[String::from("customer.id")]).unwrap_err();
+        assert!(err.to_string().contains("nested/dotted"));
+    }
+
+    #[test]
+    fn merge_by_key_duplicate_batch_keys_fail_before_write() {
+        let batch = RecordBatch::try_from_iter(vec![(
+            "id",
+            Arc::new(arrow::array::Int32Array::from(vec![2, 2])) as ArrayRef,
+        )])
+        .unwrap();
+
+        let err = validate_no_duplicate_batch_keys(&batch, &[String::from("id")]).unwrap_err();
+        assert!(err.to_string().contains("duplicate key"));
+    }
+
+    #[test]
+    fn structured_business_key_encoding_avoids_delimiter_collision() {
+        assert_ne!(
+            length_prefixed_key_part("a", "1|b=2"),
+            length_prefixed_key_part("a=1|b", "2")
+        );
+    }
+
+    #[test]
+    fn cdc_order_token_comparison_requires_fixed_width_hex() {
+        assert!(compare_cdc_order_tokens("0002", "0001").unwrap());
+        assert!(!compare_cdc_order_tokens("0001", "0002").unwrap());
+        assert!(compare_cdc_order_tokens("02", "0001").is_err());
+        assert!(validate_cdc_order_token("not_hex").is_err());
+    }
+
+    #[test]
+    fn cdc_state_load_only_treats_not_found_as_empty() {
+        assert!(is_s3_not_found_code(Some("NoSuchKey")));
+        assert!(is_s3_not_found_code(Some("NotFound")));
+        assert!(is_s3_not_found_error_text("service error NoSuchKey"));
+        assert!(is_s3_not_found_error_text("status code: 404"));
+        assert!(!is_s3_not_found_code(Some("AccessDenied")));
+        assert!(!is_s3_not_found_error_text("AccessDenied"));
     }
 }
 
