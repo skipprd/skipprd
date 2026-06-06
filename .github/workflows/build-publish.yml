@@ -1305,22 +1305,44 @@ jobs:
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-        run: ./.github/scripts/configure-codeartifact-cargo.sh
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          token="$(aws codeartifact get-authorization-token \
+            --domain skippr \
+            --domain-owner 132355036174 \
+            --region us-east-1 \
+            --query authorizationToken \
+            --output text)"
+          echo "::add-mask::$token"
+          echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
+
       - name: Build skipprd and runtime plugins
-        uses: ./.github/actions/rust-build-debug
-        with:
-          runtime_plugin_packages: >-
-            -p skippr-plugin-data-source-postgres
-            -p skippr-plugin-data-sink-iceberg
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: "2"
+          CARGO_INCREMENTAL: "0"
+          RUSTFLAGS: "-C debuginfo=0"
+        run: |
+          cargo build \
+            -p skipprd \
+            -p skippr-plugin-data-source-postgres \
+            -p skippr-plugin-data-sink-iceberg \
             -p skippr-plugin-schema-sink-iceberg
-      - name: Stage local runtime plugin manifests
+
+      - name: Stage local runtime manifests
         id: local_runtime
         shell: bash
+        env:
+          CARGO_BUILD_JOBS: "2"
+          CARGO_INCREMENTAL: "0"
+          CARGO_TARGET_DIR: target
+          RUSTFLAGS: "-C debuginfo=0"
         run: |
           manifest_dir="$(python3 .github/scripts/local_runtime_plugins.py \
             --config .github/actions/e2e/postgres_iceberg_cdc_late_delete/skippr.yml \
             --pipeline postgres_iceberg_cdc_late_delete)"
           echo "manifest_dir=${manifest_dir}" >> "$GITHUB_OUTPUT"
+
       - name: Run Postgres Iceberg CDC late-delete e2e
         shell: bash
         env:
@@ -1357,22 +1379,44 @@ jobs:
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-        run: ./.github/scripts/configure-codeartifact-cargo.sh
+          AWS_DEFAULT_REGION: us-east-1
+        run: |
+          token="$(aws codeartifact get-authorization-token \
+            --domain skippr \
+            --domain-owner 132355036174 \
+            --region us-east-1 \
+            --query authorizationToken \
+            --output text)"
+          echo "::add-mask::$token"
+          echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
+
       - name: Build skipprd and runtime plugins
-        uses: ./.github/actions/rust-build-debug
-        with:
-          runtime_plugin_packages: >-
-            -p skippr-plugin-data-source-stripe
-            -p skippr-plugin-data-sink-iceberg
+        shell: bash
+        env:
+          CARGO_BUILD_JOBS: "2"
+          CARGO_INCREMENTAL: "0"
+          RUSTFLAGS: "-C debuginfo=0"
+        run: |
+          cargo build \
+            -p skipprd \
+            -p skippr-plugin-data-source-stripe \
+            -p skippr-plugin-data-sink-iceberg \
             -p skippr-plugin-schema-sink-iceberg
-      - name: Stage local runtime plugin manifests
+
+      - name: Stage local runtime manifests
         id: local_runtime
         shell: bash
+        env:
+          CARGO_BUILD_JOBS: "2"
+          CARGO_INCREMENTAL: "0"
+          CARGO_TARGET_DIR: target
+          RUSTFLAGS: "-C debuginfo=0"
         run: |
           manifest_dir="$(python3 .github/scripts/local_runtime_plugins.py \
             --config .github/actions/e2e/stripe_iceberg_replace_partition/skippr.yml \
             --pipeline stripe_iceberg_replace_partition)"
           echo "manifest_dir=${manifest_dir}" >> "$GITHUB_OUTPUT"
+
       - name: Run Stripe ReplacePartition Iceberg e2e
         shell: bash
         env:
