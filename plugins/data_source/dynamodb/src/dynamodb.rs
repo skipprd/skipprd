@@ -22,8 +22,8 @@ use skippr_runtime_sdk::plugins::{
 };
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{
-    load_checkpoint_payload, submit_payload_batch_groups, submit_payload_batches,
-    partition_already_closed, IngestBatch, SourceSyncContext,
+    load_checkpoint_payload, store_checkpoint_payload, submit_payload_batch_groups,
+    submit_payload_batches, partition_already_closed, IngestBatch, SourceSyncContext,
 };
 
 /// CDC scan configuration passed to `sync_scan` when CDC tagging is needed.
@@ -363,7 +363,13 @@ impl DataSourceDynamodbPlugin {
                 anchor_bytes,
             };
             self.sync_scan(ctx.clone(), Some(&cfg)).await?;
-            let _ = (&snapshot_checkpoint_key, &stream_arn);
+            store_checkpoint_payload(
+                ctx.as_ref(),
+                &snapshot_checkpoint_key,
+                &DynamodbSnapshotCheckpoint {
+                    stream_arn: stream_arn.clone(),
+                },
+            )?;
         } else if snapshot_done {
             info!("DynamoDB CDC: skipping snapshot (bootstrap checkpoint exists)");
         } else if mode == SourceCdcMode::CdcOnly {
@@ -610,13 +616,16 @@ impl DataSourceDynamodbPlugin {
                     submit_payload_batches(ctx.as_ref(), batch)?;
 
                     if let Some(ref seq) = last_seq {
-                        let checkpoint = DynamodbCheckpoint {
-                            table_name: table_name.to_string(),
-                            stream_arn: stream_arn.to_string(),
-                            shard_id: shard_id.to_string(),
-                            sequence_number: seq.clone(),
-                        };
-                        let _ = (&shard_ckpt_key, &checkpoint);
+                        store_checkpoint_payload(
+                            ctx.as_ref(),
+                            &shard_ckpt_key,
+                            &DynamodbCheckpoint {
+                                table_name: table_name.to_string(),
+                                stream_arn: stream_arn.to_string(),
+                                shard_id: shard_id.to_string(),
+                                sequence_number: seq.clone(),
+                            },
+                        )?;
                     }
                 }
             }

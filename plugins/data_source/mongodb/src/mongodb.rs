@@ -19,8 +19,8 @@ use skippr_runtime_sdk::plugins::{
 };
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{
-    load_checkpoint_payload, submit_payload_batches,
-    IngestBatch, SourceSyncContext,
+    load_checkpoint_payload, store_checkpoint_payload, submit_payload_batches, IngestBatch,
+    SourceSyncContext,
 };
 
 #[derive(Debug, Deserialize, Clone)]
@@ -365,10 +365,13 @@ impl DataSourceMongodbPlugin {
 
             if let Some(ref token) = stream.resume_token() {
                 if let Ok(token_bytes) = serde_json::to_vec(token) {
-                    let checkpoint = MongodbCheckpoint {
-                        resume_token: token_bytes,
-                    };
-                    let _ = (&checkpoint_key, &checkpoint);
+                    store_checkpoint_payload(
+                        ctx.as_ref(),
+                        &checkpoint_key,
+                        &MongodbCheckpoint {
+                            resume_token: token_bytes,
+                        },
+                    )?;
                 }
             }
         }

@@ -6,7 +6,9 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use skippr_core::helpers::offsets::{OffsetKey, OffsetTypes};
 use skippr_core::ingest_work::{IngestBatch, ThroughputMetrics};
-use skippr_core::plugins::cdc::CheckpointEnvelope;
+use skippr_core::plugins::cdc::{
+    CheckpointAuthority, CheckpointEnvelope, CheckpointKind,
+};
 use skippr_core::plugins::source_sync::{
     OffsetValidationEntry, SourcePayloadTask, SourceSyncContext,
 };
@@ -390,6 +392,8 @@ pub fn validate_offset_key(
         .and_then(|mut results| results.pop())
 }
 
+pub const CHECKPOINT_PAYLOAD_VERSION: u32 = 1;
+
 /// Load a typed checkpoint payload from the host offset store.
 pub fn load_checkpoint_payload<T: serde::de::DeserializeOwned>(
     ctx: &dyn SourceSyncContext,
@@ -397,6 +401,23 @@ pub fn load_checkpoint_payload<T: serde::de::DeserializeOwned>(
 ) -> Option<T> {
     ctx.load_checkpoint_envelope(key)
         .and_then(|envelope| envelope.into_payload().ok())
+}
+
+/// Persist a typed checkpoint payload to the host offset store.
+pub fn store_checkpoint_payload<T: serde::Serialize>(
+    ctx: &dyn SourceSyncContext,
+    key: &str,
+    payload: &T,
+) -> io::Result<()> {
+    let envelope = CheckpointEnvelope::from_payload(
+        CheckpointAuthority::AdvisoryHint,
+        CheckpointKind::SourceResume,
+        CHECKPOINT_PAYLOAD_VERSION,
+        payload,
+    )
+    .map_err(|e| io::Error::other(e.to_string()))?;
+    ctx.store_checkpoint(key, &envelope)
+        .map_err(io::Error::other)
 }
 
 pub fn offset_validation_entry(

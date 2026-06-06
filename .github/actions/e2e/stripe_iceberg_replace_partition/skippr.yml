@@ -16,6 +16,7 @@ data_sources:
     Stripe:
       stripe_account_id: acct_fixture
       streams: ["payments"]
+      start_date: "2024-01-01"
       lookback_days: 1
 
 data_sinks:

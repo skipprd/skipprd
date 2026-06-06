@@ -17,7 +17,8 @@ use skippr_runtime_sdk::plugins::{
 };
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{
-    load_checkpoint_payload, submit_payload_batches, IngestBatch, SourceSyncContext,
+    load_checkpoint_payload, store_checkpoint_payload, submit_payload_batches, IngestBatch,
+    SourceSyncContext,
 };
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -140,8 +141,14 @@ impl DataSourcePostgresPlugin {
         slot_name: &str,
         lsn: u64,
     ) -> io::Result<()> {
-        let _ = (ctx, slot_name, lsn);
-        Ok(())
+        store_checkpoint_payload(
+            ctx,
+            &Self::checkpoint_key(slot_name),
+            &PostgresCheckpoint {
+                lsn,
+                slot_name: slot_name.to_string(),
+            },
+        )
     }
 
     fn ingest_batches(

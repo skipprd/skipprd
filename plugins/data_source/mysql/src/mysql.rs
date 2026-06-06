@@ -20,8 +20,8 @@ use skippr_runtime_sdk::plugins::{
 };
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{
-    load_checkpoint_payload, partition_already_closed, submit_payload_batch_groups,
-    submit_payload_batches, IngestBatch, SourceSyncContext,
+    load_checkpoint_payload, partition_already_closed, store_checkpoint_payload,
+    submit_payload_batch_groups, submit_payload_batches, IngestBatch, SourceSyncContext,
 };
 
 #[derive(Debug, Deserialize, Clone)]
@@ -358,11 +358,14 @@ impl DataSourceMysqlPlugin {
         }
 
         if should_run_snapshot {
-            let checkpoint = MysqlCheckpoint {
-                binlog_file: binlog_file.clone(),
-                binlog_position: binlog_pos,
-            };
-            let _ = (&checkpoint_key, &checkpoint);
+            store_checkpoint_payload(
+                ctx.as_ref(),
+                &checkpoint_key,
+                &MysqlCheckpoint {
+                    binlog_file: binlog_file.clone(),
+                    binlog_position: binlog_pos,
+                },
+            )?;
         }
 
         info!("MySQL CDC: bootstrap complete, switching to binlog stream");
@@ -524,11 +527,14 @@ impl DataSourceMysqlPlugin {
                 submit_payload_batches(ctx.as_ref(), vec![batch])?;
             }
 
-            let checkpoint = MysqlCheckpoint {
-                binlog_file: binlog_file.clone(),
-                binlog_position: log_pos as u64,
-            };
-            let _ = (&checkpoint_key, &checkpoint);
+            store_checkpoint_payload(
+                ctx.as_ref(),
+                &checkpoint_key,
+                &MysqlCheckpoint {
+                    binlog_file: binlog_file.clone(),
+                    binlog_position: log_pos as u64,
+                },
+            )?;
         }
 
         info!("MySQL CDC: binlog stream ended");
