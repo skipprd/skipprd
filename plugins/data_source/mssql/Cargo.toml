@@ -31,9 +31,9 @@ plugin_name = "Mssql"
 
 [package.metadata.skippr-plugin.source_capability]
 name = "Mssql"
-guarantee_tier = "SnapshotThenLogExactOnce"
-checkpoint_style = "LogNative"
-bootstrap_style = "AnchoredSnapshot"
-order_model = "GlobalTotalOrder"
-supports_deletes = true
-event_id_semantics = "LogPosition"
+guarantee_tier = "IncrementalOnly"
+checkpoint_style = "None"
+bootstrap_style = "FullScan"
+order_model = "UnsupportedForFinalState"
+supports_deletes = false
+event_id_semantics = "None"
