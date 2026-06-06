@@ -37,11 +37,10 @@ pub fn coerce_timestamp_dates_to_date32(
             let casted = cast(new_columns[idx].as_ref(), &DataType::Date32)
                 .map_err(|err| io::Error::other(err.to_string()))?;
             new_columns[idx] = casted;
-            new_fields[idx] = Arc::new(Field::new(
-                field.name(),
-                DataType::Date32,
-                field.is_nullable(),
-            ));
+            new_fields[idx] = Arc::new(
+                Field::new(field.name(), DataType::Date32, field.is_nullable())
+                    .with_metadata(field.metadata().clone()),
+            );
             changed = true;
         }
     }
@@ -138,6 +137,8 @@ pub async fn serialize_to_parquet_for_iceberg(
 mod tests {
     use super::*;
     use arrow::array::{Date32Array, Int64Array, TimestampMillisecondArray};
+    use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
+    use std::collections::HashMap;
     #[test]
     fn coerce_timestamp_date_column_to_date32() {
         let days = 19_872i32; // 2024-06-15
@@ -177,5 +178,36 @@ mod tests {
         let names = HashSet::new();
         let coerced = coerce_timestamp_dates_to_date32(batch.clone(), &names).unwrap();
         assert_eq!(coerced.schema(), batch.schema());
+    }
+
+    #[test]
+    fn coerce_timestamp_date_preserves_field_metadata() {
+        let schema = Arc::new(Schema::new(vec![Field::new(
+            "date",
+            DataType::Timestamp(TimeUnit::Millisecond, None),
+            false,
+        )
+        .with_metadata(HashMap::from([(
+            PARQUET_FIELD_ID_META_KEY.to_string(),
+            "10".to_string(),
+        )]))]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(TimestampMillisecondArray::from(vec![0]))],
+        )
+        .unwrap();
+        let mut names = HashSet::new();
+        names.insert("date".to_string());
+
+        let coerced = coerce_timestamp_dates_to_date32(batch, &names).unwrap();
+
+        assert_eq!(
+            coerced
+                .schema()
+                .field(0)
+                .metadata()
+                .get(PARQUET_FIELD_ID_META_KEY),
+            Some(&"10".to_string())
+        );
     }
 }

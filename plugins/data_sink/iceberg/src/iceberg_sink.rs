@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use arrow::array::{Array, ArrayRef, BooleanArray, RecordBatch, StringArray};
 use arrow::compute::filter_record_batch;
-use arrow::datatypes::SchemaRef;
+use arrow::datatypes::{Schema as ArrowSchema, SchemaRef};
 use arrow::util::display::array_value_to_string;
 use async_trait::async_trait;
 use aws_sdk_s3::primitives::ByteStream;
@@ -25,6 +25,7 @@ use iceberg::transaction::{ApplyTransactionAction, Transaction};
 use iceberg::{Catalog, CatalogBuilder, NamespaceIdent, TableCreation, TableIdent};
 use iceberg_catalog_glue::{GlueCatalog, GlueCatalogBuilder, GLUE_CATALOG_PROP_CATALOG_ID};
 use iceberg_catalog_glue::{AWS_REGION_NAME, GLUE_CATALOG_PROP_WAREHOUSE};
+use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 use serde_derive::Deserialize;
 use tokio::sync::RwLock;
 use tracing::{info, warn};
@@ -274,9 +275,16 @@ impl DataSinkIcebergPlugin {
         let mut commit_files = Vec::new();
         let mut row_count = 0;
         if upsert_rows != Some(0) {
-            let parquet_bytes =
-                crate::parquet_util::serialize_to_parquet_for_iceberg(data_stream, &date_fields)
-                    .await?;
+            let data_batches = collect_record_batches(data_stream).await?;
+            let data_batches = apply_iceberg_field_ids_to_batches(
+                data_batches,
+                table.metadata().current_schema(),
+            )?;
+            let parquet_bytes = crate::parquet_util::serialize_to_parquet_for_iceberg(
+                batch_stream(data_batches),
+                &date_fields,
+            )
+            .await?;
             row_count = parquet_bytes.meta_data.num_rows as u64;
             if row_count > 0 {
                 let data_file_uri = self
@@ -317,6 +325,10 @@ impl DataSinkIcebergPlugin {
                 .iter()
                 .map(|batch| project_batch_columns(batch, delete_columns))
                 .collect::<Result<Vec<_>, _>>()?;
+            let projected_delete_batches = apply_iceberg_field_ids_to_batches(
+                projected_delete_batches,
+                table.metadata().current_schema(),
+            )?;
             let delete_bytes = crate::parquet_util::serialize_to_parquet_for_iceberg(
                 batch_stream(projected_delete_batches),
                 &date_fields,
@@ -433,6 +445,8 @@ impl DataSinkIcebergPlugin {
         let mut row_count = 0u64;
 
         if delete_batch.num_rows() > 0 {
+            let delete_batch =
+                apply_iceberg_field_ids(delete_batch, table.metadata().current_schema())?;
             let delete_stream = batch_stream(vec![delete_batch]);
             let delete_bytes =
                 crate::parquet_util::serialize_to_parquet_for_iceberg(delete_stream, &date_fields)
@@ -454,6 +468,8 @@ impl DataSinkIcebergPlugin {
         }
 
         if data_batch.num_rows() > 0 {
+            let data_batch =
+                apply_iceberg_field_ids(data_batch, table.metadata().current_schema())?;
             let data_stream = batch_stream(vec![data_batch]);
             let parquet_bytes =
                 crate::parquet_util::serialize_to_parquet_for_iceberg(data_stream, &date_fields)
@@ -1172,6 +1188,45 @@ fn project_batch_columns(
         .map_err(|err| io::Error::other(err.to_string()))
 }
 
+fn apply_iceberg_field_ids_to_batches(
+    batches: Vec<RecordBatch>,
+    iceberg_schema: &Schema,
+) -> Result<Vec<RecordBatch>, io::Error> {
+    batches
+        .into_iter()
+        .map(|batch| apply_iceberg_field_ids(batch, iceberg_schema))
+        .collect()
+}
+
+fn apply_iceberg_field_ids(
+    batch: RecordBatch,
+    iceberg_schema: &Schema,
+) -> Result<RecordBatch, io::Error> {
+    let schema = batch.schema();
+    let fields = schema
+        .fields()
+        .iter()
+        .map(|field| {
+            let mut annotated = field.as_ref().clone();
+            if let Some(iceberg_field) = iceberg_schema.field_by_name(field.name()) {
+                let mut metadata = annotated.metadata().clone();
+                metadata.insert(
+                    PARQUET_FIELD_ID_META_KEY.to_string(),
+                    iceberg_field.id.to_string(),
+                );
+                annotated = annotated.with_metadata(metadata);
+            }
+            Arc::new(annotated)
+        })
+        .collect::<Vec<_>>();
+    let annotated_schema = Arc::new(ArrowSchema::new_with_metadata(
+        fields,
+        schema.metadata().clone(),
+    ));
+    RecordBatch::try_new(annotated_schema, batch.columns().to_vec())
+        .map_err(|err| io::Error::other(err.to_string()))
+}
+
 fn business_key_for_row(
     batch: &RecordBatch,
     business_key_columns: &[String],
@@ -1502,6 +1557,41 @@ mod tests {
         assert_eq!(projected.num_columns(), 1);
         assert_eq!(projected.schema().field(0).name(), "id");
         assert_eq!(projected.num_rows(), 1);
+    }
+
+    #[test]
+    fn apply_iceberg_field_ids_annotates_delete_key_schema() {
+        let iceberg_schema = Schema::builder()
+            .with_schema_id(1)
+            .with_fields(vec![
+                NestedField::required(7, "id", Type::Primitive(PrimitiveType::Int)).into(),
+                NestedField::optional(8, "name", Type::Primitive(PrimitiveType::String)).into(),
+            ])
+            .build()
+            .unwrap();
+        let batch = RecordBatch::try_from_iter(vec![
+            (
+                "id",
+                Arc::new(arrow::array::Int32Array::from(vec![2])) as ArrayRef,
+            ),
+            (
+                "_skippr_mutation",
+                Arc::new(StringArray::from(vec!["delete"])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+        let projected = project_batch_columns(&batch, &[String::from("id")]).unwrap();
+
+        let annotated = apply_iceberg_field_ids(projected, &iceberg_schema).unwrap();
+
+        assert_eq!(
+            annotated
+                .schema()
+                .field(0)
+                .metadata()
+                .get(PARQUET_FIELD_ID_META_KEY),
+            Some(&"7".to_string())
+        );
     }
 }
 
