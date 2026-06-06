@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll as TaskPoll};
 use std::time::Duration;
 
-use arrow::array::{Array, BooleanArray, RecordBatch, StringArray};
+use arrow::array::{Array, ArrayRef, BooleanArray, RecordBatch, StringArray};
 use arrow::compute::filter_record_batch;
 use arrow::datatypes::SchemaRef;
 use arrow::util::display::array_value_to_string;
@@ -679,7 +679,10 @@ impl DataSinkIcebergPlugin {
                 upsert_batches.push(upsert);
             }
             if delete.num_rows() > 0 {
-                delete_batches.push(delete);
+                delete_batches.push(project_batch_columns(
+                    &delete,
+                    &contract.business_key_columns,
+                )?);
             }
         }
 
@@ -1130,6 +1133,24 @@ fn dedupe_batch_by_columns(
     filter_record_batch(batch, &mask).map_err(|err| io::Error::other(err.to_string()))
 }
 
+fn project_batch_columns(
+    batch: &RecordBatch,
+    columns: &[String],
+) -> Result<RecordBatch, io::Error> {
+    let schema = batch.schema();
+    let mut fields = Vec::with_capacity(columns.len());
+    let mut projected: Vec<ArrayRef> = Vec::with_capacity(columns.len());
+    for column in columns {
+        let idx = schema
+            .index_of(column)
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        fields.push(schema.field(idx).clone());
+        projected.push(batch.column(idx).clone());
+    }
+    RecordBatch::try_new(Arc::new(arrow::datatypes::Schema::new(fields)), projected)
+        .map_err(|err| io::Error::other(err.to_string()))
+}
+
 fn business_key_for_row(
     batch: &RecordBatch,
     business_key_columns: &[String],
@@ -1435,6 +1456,31 @@ mod tests {
             partition_commit_files(vec![data_file.clone(), delete_file.clone()]);
         assert_eq!(data_files, vec![data_file]);
         assert_eq!(delete_files, vec![delete_file]);
+    }
+
+    #[test]
+    fn project_batch_columns_keeps_only_equality_keys() {
+        let batch = RecordBatch::try_from_iter(vec![
+            (
+                "id",
+                Arc::new(arrow::array::Int32Array::from(vec![2])) as ArrayRef,
+            ),
+            (
+                "_skippr_mutation",
+                Arc::new(StringArray::from(vec!["delete"])) as ArrayRef,
+            ),
+            (
+                "_skippr_order_token",
+                Arc::new(StringArray::from(vec!["00000001"])) as ArrayRef,
+            ),
+        ])
+        .unwrap();
+
+        let projected = project_batch_columns(&batch, &[String::from("id")]).unwrap();
+
+        assert_eq!(projected.num_columns(), 1);
+        assert_eq!(projected.schema().field(0).name(), "id");
+        assert_eq!(projected.num_rows(), 1);
     }
 }
 

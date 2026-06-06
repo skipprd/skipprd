@@ -12558,7 +12558,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-dynamodb"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -12837,7 +12837,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-mongodb"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -12888,7 +12888,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-mssql"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -12906,7 +12906,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-mysql"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "clap",
