@@ -271,10 +271,13 @@ impl DataSinkIcebergPlugin {
             (stream, None, HashMap::new(), None)
         };
 
+        let date_fields = iceberg_date_field_names(&metadata);
         let mut commit_files = Vec::new();
         let mut row_count = 0;
         if upsert_rows != Some(0) {
-            let parquet_bytes = crate::parquet_util::serialize_to_parquet(data_stream).await?;
+            let parquet_bytes =
+                crate::parquet_util::serialize_to_parquet_for_iceberg(data_stream, &date_fields)
+                    .await?;
             row_count = parquet_bytes.meta_data.num_rows as u64;
             if row_count > 0 {
                 let data_file_uri = self
@@ -293,7 +296,9 @@ impl DataSinkIcebergPlugin {
 
         if let Some(delete_stream) = delete_stream {
             if let Some(equality_ids) = self.plan_cdc_commit(&table, &namespace, cdc_ctx).await? {
-                let delete_bytes = crate::parquet_util::serialize_to_parquet(delete_stream).await?;
+                let delete_bytes =
+                    crate::parquet_util::serialize_to_parquet_for_iceberg(delete_stream, &date_fields)
+                        .await?;
                 let delete_row_count = delete_bytes.meta_data.num_rows as u64;
                 if delete_row_count > 0 {
                     let delete_file_uri = self
@@ -401,12 +406,15 @@ impl DataSinkIcebergPlugin {
         let delete_batch = dedupe_batch_by_columns(&data_batch, &delete_columns)?;
         let equality_ids = plan_contract_equality_ids(&table, delete_paths)?;
 
+        let date_fields = iceberg_date_field_names(&metadata);
         let mut commit_files = Vec::new();
         let mut row_count = 0u64;
 
         if delete_batch.num_rows() > 0 {
             let delete_stream = batch_stream(vec![delete_batch]);
-            let delete_bytes = crate::parquet_util::serialize_to_parquet(delete_stream).await?;
+            let delete_bytes =
+                crate::parquet_util::serialize_to_parquet_for_iceberg(delete_stream, &date_fields)
+                    .await?;
             let delete_row_count = delete_bytes.meta_data.num_rows as u64;
             if delete_row_count > 0 {
                 let delete_file_uri = self
@@ -425,7 +433,9 @@ impl DataSinkIcebergPlugin {
 
         if data_batch.num_rows() > 0 {
             let data_stream = batch_stream(vec![data_batch]);
-            let parquet_bytes = crate::parquet_util::serialize_to_parquet(data_stream).await?;
+            let parquet_bytes =
+                crate::parquet_util::serialize_to_parquet_for_iceberg(data_stream, &date_fields)
+                    .await?;
             row_count = parquet_bytes.meta_data.num_rows as u64;
             if row_count > 0 {
                 let data_file_uri = self
@@ -1253,6 +1263,14 @@ fn field_to_nested_field(
         field_type,
         !metadata.nullable(),
     ))
+}
+
+fn iceberg_date_field_names(metadata: &OutputMetadata) -> HashSet<String> {
+    metadata
+        .child_fields()
+        .filter(|(_, child)| *child.determined_type() == SkipprDataType::Date)
+        .map(|(_, child)| child.out_field_name().to_string())
+        .collect()
 }
 
 fn primitive_type_for_skippr(value: &SkipprDataType) -> Type {
