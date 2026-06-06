@@ -145,11 +145,7 @@ pub fn parse_itunes_response(
         });
     }
 
-    let target_matches = match_targets(
-        &job.targets,
-        &results,
-        job.stop_after_first_target_match,
-    );
+    let target_matches = match_targets(&job.targets, &results, job.stop_after_first_target_match);
 
     Ok(ItunesSearchResult {
         job_id: job.job_id.clone(),
@@ -178,12 +174,7 @@ impl ItunesClient {
         let http = if fixture_dir.is_none() {
             Some(
                 reqwest::Client::builder()
-                    .user_agent(
-                        config
-                            .user_agent
-                            .as_deref()
-                            .unwrap_or(DEFAULT_USER_AGENT),
-                    )
+                    .user_agent(config.user_agent.as_deref().unwrap_or(DEFAULT_USER_AGENT))
                     .build()
                     .map_err(std::io::Error::other)?,
             )
@@ -197,17 +188,26 @@ impl ItunesClient {
         })
     }
 
-    pub async fn run_search(&self, job: &ItunesSearchJob) -> Result<ItunesSearchResult, std::io::Error> {
+    pub async fn run_search(
+        &self,
+        job: &ItunesSearchJob,
+    ) -> Result<ItunesSearchResult, std::io::Error> {
         if let Some(dir) = &self.fixture_dir {
             return self.run_fixture_search(dir, job).await;
         }
         self.run_live_search(job).await
     }
 
-    async fn run_live_search(&self, job: &ItunesSearchJob) -> Result<ItunesSearchResult, std::io::Error> {
+    async fn run_live_search(
+        &self,
+        job: &ItunesSearchJob,
+    ) -> Result<ItunesSearchResult, std::io::Error> {
         let search_url = build_search_url(job)?;
         let client = self.http.as_ref().ok_or_else(|| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "HTTP client not initialized")
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "HTTP client not initialized",
+            )
         })?;
 
         let response = client.get(&search_url).send().await.map_err(|e| {
@@ -291,13 +291,7 @@ impl ItunesClient {
 fn fixture_slug(keyword: &str) -> String {
     keyword
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c
-            } else {
-                '_'
-            }
-        })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect()
 }
 

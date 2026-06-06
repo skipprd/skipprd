@@ -12,7 +12,7 @@ use async_trait::async_trait;
 use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{
-    submit_payload_batch_groups, partition_already_closed, IngestBatch, SourceSyncContext,
+    partition_already_closed, submit_payload_batch_groups, IngestBatch, SourceSyncContext,
 };
 
 #[derive(Debug, Deserialize, Clone)]
@@ -414,6 +414,7 @@ impl DataSourceMssqlPlugin {
                     offset_key: offset_key.clone(),
                     data: json_str,
                     bytes,
+                    offset_pos: None,
                     source_uri: format!("mssql://{}/{}", db_name, table_fq),
                     namespace: Some(table.to_string()),
                     cdc_rows: None,

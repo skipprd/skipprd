@@ -110,12 +110,7 @@ pub fn repetitive_token_ratio(text: &str) -> f64 {
     for w in &words {
         *counts.entry(w.as_str()).or_default() += 1;
     }
-    counts
-        .values()
-        .copied()
-        .max()
-        .unwrap_or(0) as f64
-        / words.len() as f64
+    counts.values().copied().max().unwrap_or(0) as f64 / words.len() as f64
 }
 
 pub fn heading_hierarchy_ok(outline: &[HeadingEntry]) -> bool {
@@ -141,7 +136,13 @@ pub fn parse_html_page(url: &str, response: &FetchResponse, origin: &SiteOrigin)
     let h1_count = h1_texts.len() as u32;
     let heading_outline = extract_heading_outline(&document);
     let (img_count, img_missing_alt) = extract_image_alt_stats(&document);
-    let head = extract_head_json(&document, &response.final_url, &title, &meta_description, &h1);
+    let head = extract_head_json(
+        &document,
+        &response.final_url,
+        &title,
+        &meta_description,
+        &h1,
+    );
     let main_text = extract_main_text(&document);
     let hash = content_hash(&main_text);
     let links = extract_links(&document, url, origin);
@@ -164,7 +165,11 @@ pub fn parse_html_page(url: &str, response: &FetchResponse, origin: &SiteOrigin)
             severity: "high".into(),
         });
     }
-    if meta_description.as_ref().map(|d| d.is_empty()).unwrap_or(true) {
+    if meta_description
+        .as_ref()
+        .map(|d| d.is_empty())
+        .unwrap_or(true)
+    {
         issues.push(IssueRow {
             issue_code: "MISSING_META_DESCRIPTION".into(),
             message: "Page is missing meta description".into(),
@@ -340,7 +345,13 @@ fn extract_head_json(
             head.insert("canonical_mismatch".into(), json!(true));
         }
     }
-    for prop in ["og:title", "og:description", "og:url", "og:image", "twitter:card"] {
+    for prop in [
+        "og:title",
+        "og:description",
+        "og:url",
+        "og:image",
+        "twitter:card",
+    ] {
         if let Some(val) = meta_property(document, prop) {
             head.insert(prop.replace(':', "_"), json!(val));
         }

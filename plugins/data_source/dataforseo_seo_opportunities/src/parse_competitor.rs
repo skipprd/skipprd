@@ -23,7 +23,10 @@ pub fn parse_ranked_keyword_items(
             if keyword.is_empty() {
                 return None;
             }
-            let info = keyword_data.get("keyword_info").cloned().unwrap_or(Value::Null);
+            let info = keyword_data
+                .get("keyword_info")
+                .cloned()
+                .unwrap_or(Value::Null);
             let serp = item.get("ranked_serp_element")?;
             let serp_item = serp.get("serp_item")?;
             let rank = serp_item
@@ -33,11 +36,12 @@ pub fn parse_ranked_keyword_items(
             let url = serp_item.get("url").and_then(|v| v.as_str());
             let title = serp_item.get("title").and_then(|v| v.as_str());
             let search_volume = info.get("search_volume").and_then(json_u64).unwrap_or(0);
-            let difficulty = info
-                .get("keyword_difficulty")
-                .and_then(json_u32);
+            let difficulty = info.get("keyword_difficulty").and_then(json_u32);
             let traffic_estimate = search_volume
-                .checked_mul(rank.map(|r| if r <= 10 { 11 - r as u64 } else { 1 }).unwrap_or(1))
+                .checked_mul(
+                    rank.map(|r| if r <= 10 { 11 - r as u64 } else { 1 })
+                        .unwrap_or(1),
+                )
                 .unwrap_or(0);
             Some(json!({
                 "site": ctx.site,

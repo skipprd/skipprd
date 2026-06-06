@@ -3,8 +3,8 @@ use serde_json::{json, Map, Value};
 use crate::config::Strategy;
 use crate::issue;
 use crate::streams::{
-    NAMESPACE_AUDIT_DAILY, NAMESPACE_CHECK_DAILY, NAMESPACE_FIELD_ORIGIN_DAILY, NAMESPACE_PAGE_DAILY,
-    NAMESPACE_SITE_RUN_DAILY,
+    NAMESPACE_AUDIT_DAILY, NAMESPACE_CHECK_DAILY, NAMESPACE_FIELD_ORIGIN_DAILY,
+    NAMESPACE_PAGE_DAILY, NAMESPACE_SITE_RUN_DAILY,
 };
 
 pub struct ParsedPageSpeed {
@@ -64,10 +64,19 @@ pub fn parse_pagespeed_response(
     page.insert("lh_accessibility".into(), json!(score("accessibility")));
     page.insert("lh_best_practices".into(), json!(score("best-practices")));
     page.insert("lh_seo".into(), json!(score("seo")));
-    page.insert("lcp_ms".into(), json!(audit_metric("largest-contentful-paint")));
+    page.insert(
+        "lcp_ms".into(),
+        json!(audit_metric("largest-contentful-paint")),
+    );
     page.insert("cls".into(), json!(audit_metric("cumulative-layout-shift")));
-    page.insert("inp_ms".into(), json!(audit_metric("interaction-to-next-paint")));
-    page.insert("fcp_ms".into(), json!(audit_metric("first-contentful-paint")));
+    page.insert(
+        "inp_ms".into(),
+        json!(audit_metric("interaction-to-next-paint")),
+    );
+    page.insert(
+        "fcp_ms".into(),
+        json!(audit_metric("first-contentful-paint")),
+    );
     page.insert("tbt_ms".into(), json!(audit_metric("total-blocking-time")));
     page.insert("speed_index_ms".into(), json!(audit_metric("speed-index")));
     page.insert(
@@ -105,7 +114,8 @@ pub fn parse_pagespeed_response(
         json!(field_category("EXPERIMENTAL_TIME_TO_FIRST_BYTE")),
     );
     let page_row = Value::Object(page.clone());
-    let issue_rows = issue::issues_for_page(site, requested_url, run_date, strategy.as_api_str(), &page);
+    let issue_rows =
+        issue::issues_for_page(site, requested_url, run_date, strategy.as_api_str(), &page);
     let audit_rows = top_failing_audits(lh, site, requested_url, run_date, strategy, top_audits);
     let field_origin_row = parse_origin_field(body, site, run_date);
     ParsedPageSpeed {
@@ -192,8 +202,9 @@ mod tests {
 
     #[test]
     fn parses_mobile_fixture_categories() {
-        let body: Value = serde_json::from_str(include_str!("../fixtures/run_pagespeed_mobile.json"))
-            .expect("fixture");
+        let body: Value =
+            serde_json::from_str(include_str!("../fixtures/run_pagespeed_mobile.json"))
+                .expect("fixture");
         let parsed = parse_pagespeed_response(
             &body,
             "https://example.com/",

@@ -212,6 +212,7 @@ impl DataSourceLinkedInAdsPlugin {
                 offset_key: OffsetKey::new(stream.namespace, offset),
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: format!("linkedin-ads://{}", self.account_id),
                 namespace: Some(stream.namespace.to_string()),
                 cdc_rows: None,

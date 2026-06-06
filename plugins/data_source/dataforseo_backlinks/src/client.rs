@@ -69,7 +69,8 @@ impl DataForSeoClient {
         tasks: Vec<Value>,
         fixture_name: &str,
     ) -> Result<LiveApiResponse, std::io::Error> {
-        self.post_live(BACKLINKS_LIVE_URL, tasks, fixture_name).await
+        self.post_live(BACKLINKS_LIVE_URL, tasks, fixture_name)
+            .await
     }
 
     pub async fn post_page_intersection_live(
@@ -258,7 +259,13 @@ fn parse_task(task: &Value) -> Result<ParsedTaskResponse, std::io::Error> {
                 .get("search_after_token")
                 .and_then(|v| v.as_str())
                 .map(str::to_string);
-            (items, items_count, total_count, search_after_token, Some(result.clone()))
+            (
+                items,
+                items_count,
+                total_count,
+                search_after_token,
+                Some(result.clone()),
+            )
         } else {
             (Vec::new(), 0, None, None, None)
         };
@@ -280,10 +287,7 @@ fn load_fixture(dir: &str, name: &str) -> Result<LiveApiResponse, std::io::Error
     let base = dir.trim_end_matches('/');
     let path = format!("{base}/{name}.json");
     let bytes = std::fs::read(&path).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("fixture {path}: {e}"),
-        )
+        std::io::Error::new(std::io::ErrorKind::NotFound, format!("fixture {path}: {e}"))
     })?;
     let json: Value = serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
     parse_live_response(&json)
@@ -325,10 +329,7 @@ mod tests {
         std::env::set_var("SKIPPR_DATAFORSEO_BACKLINKS_FIXTURE_DIR", dir);
         let client = DataForSeoClient::new("login".into(), "pass".into(), 3, 0);
         let body = client
-            .post_backlinks_live(
-                vec![json!({"target": "example.com"})],
-                "backlinks_live_0",
-            )
+            .post_backlinks_live(vec![json!({"target": "example.com"})], "backlinks_live_0")
             .await
             .expect("fixture");
         assert!(body.tasks[0].task_ok);

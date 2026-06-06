@@ -20,10 +20,7 @@ pub fn cluster_keywords_by_serp_overlap(
         if assigned.contains(primary) {
             continue;
         }
-        let primary_domains = keyword_domains
-            .get(primary)
-            .cloned()
-            .unwrap_or_default();
+        let primary_domains = keyword_domains.get(primary).cloned().unwrap_or_default();
         if primary_domains.is_empty() {
             continue;
         }
@@ -37,10 +34,7 @@ pub fn cluster_keywords_by_serp_overlap(
             if assigned.contains(other) || other == primary {
                 continue;
             }
-            let other_domains = keyword_domains
-                .get(other)
-                .cloned()
-                .unwrap_or_default();
+            let other_domains = keyword_domains.get(other).cloned().unwrap_or_default();
             let overlap = jaccard(&primary_domains, &other_domains);
             if overlap >= 0.35 {
                 members.push(other.clone());
@@ -48,10 +42,7 @@ pub fn cluster_keywords_by_serp_overlap(
             }
         }
 
-        let aggregate_volume: u64 = members
-            .iter()
-            .filter_map(|k| keyword_volumes.get(k))
-            .sum();
+        let aggregate_volume: u64 = members.iter().filter_map(|k| keyword_volumes.get(k)).sum();
 
         for keyword in members {
             let overlap_score = keyword_domains

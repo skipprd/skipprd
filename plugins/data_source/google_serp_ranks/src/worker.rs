@@ -190,13 +190,7 @@ impl WorkerClient {
 fn fixture_slug(keyword: &str) -> String {
     keyword
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c
-            } else {
-                '_'
-            }
-        })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect()
 }
 

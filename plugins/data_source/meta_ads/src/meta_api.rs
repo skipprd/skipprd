@@ -10,16 +10,14 @@ pub const META_GRAPH_API_BASE: &str = "https://graph.facebook.com";
 
 const DEFAULT_API_VERSION: &str = "v21.0";
 
-const BASE_INSIGHT_FIELDS: &str = "impressions,clicks,inline_link_clicks,spend,reach,frequency,cpm,cpc,ctr,\
+const BASE_INSIGHT_FIELDS: &str =
+    "impressions,clicks,inline_link_clicks,spend,reach,frequency,cpm,cpc,ctr,\
 account_id,account_name,campaign_id,campaign_name,adset_id,adset_name,ad_id,ad_name,actions";
 
 const PLACEMENT_EXTRA_FIELDS: &str = "publisher_platform,platform_position";
 
 pub fn normalize_ad_account_id(ad_account_id: &str) -> String {
-    ad_account_id
-        .trim()
-        .trim_start_matches("act_")
-        .to_string()
+    ad_account_id.trim().trim_start_matches("act_").to_string()
 }
 
 pub fn api_version_or_default(api_version: Option<&str>) -> String {
@@ -105,16 +103,14 @@ impl MetaInsightsApiClient {
     ) -> reqwest::RequestBuilder {
         let day = date.format("%Y-%m-%d").to_string();
         let time_range = serde_json::json!({"since": day, "until": day}).to_string();
-        let mut req = self.with_auth_query(
-            self.http.client.get(self.insights_base_url()),
-            access_token,
-        )
-        .query(&[
-            ("time_range", time_range.as_str()),
-            ("time_increment", "1"),
-            ("level", insights_level_param(stream.level)),
-            ("fields", insights_fields(stream).as_str()),
-        ]);
+        let mut req = self
+            .with_auth_query(self.http.client.get(self.insights_base_url()), access_token)
+            .query(&[
+                ("time_range", time_range.as_str()),
+                ("time_increment", "1"),
+                ("level", insights_level_param(stream.level)),
+                ("fields", insights_fields(stream).as_str()),
+            ]);
         if self.instagram_filter {
             req = req.query(&[("filtering", instagram_filter_json())]);
         }
@@ -330,7 +326,9 @@ mod tests {
             .map(|(k, v)| (k.into_owned(), v.into_owned()))
             .collect();
         assert!(
-            query.iter().any(|(k, v)| k == "access_token" && v == "test-token"),
+            query
+                .iter()
+                .any(|(k, v)| k == "access_token" && v == "test-token"),
             "expected access_token query param"
         );
         let filtering = query
@@ -388,10 +386,7 @@ mod tests {
     fn appsecret_proof_is_deterministic_hex() {
         let proof = meta_appsecret_proof("user-token", "app-secret");
         assert_eq!(proof.len(), 64);
-        assert_eq!(
-            proof,
-            meta_appsecret_proof("user-token", "app-secret")
-        );
+        assert_eq!(proof, meta_appsecret_proof("user-token", "app-secret"));
     }
 
     #[test]

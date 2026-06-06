@@ -187,8 +187,7 @@ impl WorkerClient {
             }
         }
 
-        let playwright_executable =
-            std::env::var("PLAYWRIGHT_EXECUTABLE_PATH").unwrap_or_default();
+        let playwright_executable = std::env::var("PLAYWRIGHT_EXECUTABLE_PATH").unwrap_or_default();
         let mut command = Command::new(&self.node_path);
         command
             .arg(&self.script_path)
@@ -216,10 +215,9 @@ impl WorkerClient {
 
         let stdout = child.stdout.take().expect("stdout");
         let mut reader = BufReader::new(stdout).lines();
-        let response_line = reader
-            .next_line()
-            .await?
-            .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "no worker output"))?;
+        let response_line = reader.next_line().await?.ok_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "no worker output")
+        })?;
         let _ = child.wait().await;
 
         serde_json::from_str(&response_line).map_err(std::io::Error::other)

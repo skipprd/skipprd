@@ -18,8 +18,8 @@ use crate::checkpoint::{load_page_checkpoint, store_page_checkpoint, PageCheckpo
 use crate::config::DataSourceSiteQualityPluginConfig;
 use crate::issue::{map_issues, IssueThresholds};
 use crate::sampling::{
-    homepage_url, normalize_site_origin, resolve_url_list, resolve_url_list_async, HttpSitemapFetcher,
-    StaticSitemapFetcher, UrlMode,
+    homepage_url, normalize_site_origin, resolve_url_list, resolve_url_list_async,
+    HttpSitemapFetcher, StaticSitemapFetcher, UrlMode,
 };
 use crate::streams::{
     active_namespaces, namespace_contract, NAMESPACE_A11Y_ISSUE, NAMESPACE_CHECK_DAILY,
@@ -271,6 +271,7 @@ impl DataSourceSiteQualityPlugin {
                 offset_key,
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: format!("site-quality://{}/lab", self.origin),
                 namespace: Some(namespace.to_string()),
                 cdc_rows: None,
@@ -385,9 +386,10 @@ impl DataSource for DataSourceSiteQualityPlugin {
 
                 let content_unchanged = result.skip_heavy_audits.unwrap_or_else(|| {
                     self.config.skip_heavy_when_unchanged
-                        && prior.as_ref().zip(result.render_hash.as_ref()).is_some_and(
-                            |(cp, hash)| cp.render_hash == *hash,
-                        )
+                        && prior
+                            .as_ref()
+                            .zip(result.render_hash.as_ref())
+                            .is_some_and(|(cp, hash)| cp.render_hash == *hash)
                 });
                 page_lab_rows.push(self.page_lab_row(
                     &run_date,
@@ -483,11 +485,11 @@ mod tests {
     use crate::sampling::UrlMode;
     use crate::worker::{build_job_request, WorkerClient, FIXTURE_ENV};
     use skippr_runtime_sdk::plugins::cdc::CheckpointEnvelope;
-    use skippr_runtime_sdk::protocol::RuntimeOffsetMaterializationHint;
-    use skippr_runtime_sdk::source_compat::ThroughputMetrics;
     use skippr_runtime_sdk::plugins::{
         OffsetValidationEntry, SourcePayloadTask, SourceSyncContext,
     };
+    use skippr_runtime_sdk::protocol::RuntimeOffsetMaterializationHint;
+    use skippr_runtime_sdk::source_compat::ThroughputMetrics;
 
     static ENV_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
@@ -568,13 +570,7 @@ mod tests {
             lh_seo: Some(95.0),
             axe_summary_hash: None,
         };
-        let job = build_job_request(
-            &cfg,
-            "https://example.com/",
-            &device,
-            false,
-            Some(prior),
-        );
+        let job = build_job_request(&cfg, "https://example.com/", &device, false, Some(prior));
         let result = worker.run_job(&job).await.expect("fixture job");
         assert_eq!(result.skip_heavy_audits, Some(true));
         assert!(result.axe_violations.as_ref().is_some_and(|v| v.is_empty()));
@@ -630,11 +626,7 @@ mod tests {
             Ok(())
         }
 
-        fn store_checkpoint(
-            &self,
-            key: &str,
-            envelope: &CheckpointEnvelope,
-        ) -> Result<(), String> {
+        fn store_checkpoint(&self, key: &str, envelope: &CheckpointEnvelope) -> Result<(), String> {
             self.checkpoint_stores.lock().unwrap().push(key.to_string());
             self.checkpoints
                 .lock()

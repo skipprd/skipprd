@@ -8,7 +8,6 @@ use serde_derive::Serialize;
 use skippr_plugin_shared_api_source::{
     DateWindowPlanner, OAuth2RefreshTokenAuth, RetryConfig, RetryableHttpClient,
 };
-use tokio::time::{sleep, Duration as TokioDuration};
 use skippr_runtime_sdk::helpers::offsets::OffsetKey;
 use skippr_runtime_sdk::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
 use skippr_runtime_sdk::plugins::source_contract::{
@@ -21,6 +20,7 @@ use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 use skippr_runtime_sdk::source_compat::{
     load_checkpoint_payload, submit_payload_batches, IngestBatch,
 };
+use tokio::time::{sleep, Duration as TokioDuration};
 use tracing::{info, warn};
 
 use crate::ga4_api::{
@@ -150,7 +150,9 @@ impl DataSourceGoogleAnalyticsPlugin {
         })
     }
 
-    fn build_oauth(config: &DataSourceGoogleAnalyticsPluginConfig) -> Option<OAuth2RefreshTokenAuth> {
+    fn build_oauth(
+        config: &DataSourceGoogleAnalyticsPluginConfig,
+    ) -> Option<OAuth2RefreshTokenAuth> {
         let token_url = config.oauth_token_url.as_deref()?;
         let client_id = config.oauth_client_id.as_deref()?;
         let client_secret = config.oauth_client_secret.as_deref()?;
@@ -340,6 +342,7 @@ impl DataSourceGoogleAnalyticsPlugin {
                 offset_key: OffsetKey::new(stream.namespace, date_key.clone()),
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: source_uri.clone(),
                 namespace: Some(stream.namespace.to_string()),
                 cdc_rows: None,
@@ -511,7 +514,11 @@ impl DataSource for DataSourceGoogleAnalyticsPlugin {
         }
 
         let planner = DateWindowPlanner {
-            lookback_days: if discover { 0 } else { self.config.lookback_days },
+            lookback_days: if discover {
+                0
+            } else {
+                self.config.lookback_days
+            },
         };
 
         for stream in streams {
@@ -576,14 +583,12 @@ impl DataSource for DataSourceGoogleAnalyticsPlugin {
                             }
                         }
                         if self.config.request_interval_ms > 0 {
-                            sleep(TokioDuration::from_millis(self.config.request_interval_ms)).await;
+                            sleep(TokioDuration::from_millis(self.config.request_interval_ms))
+                                .await;
                         }
                     }
                     Err(err) if stream.optional && is_invalid_dimension_metric_error(&err) => {
-                        warn!(
-                            "GA4 skipping optional stream {}: {err}",
-                            stream.namespace
-                        );
+                        warn!("GA4 skipping optional stream {}: {err}", stream.namespace);
                         break;
                     }
                     Err(err) => return Err(err),
@@ -643,7 +648,11 @@ mod tests {
         assert_eq!(end_out, end);
         assert_eq!(start, NaiveDate::from_ymd_opt(2026, 5, 23).unwrap());
         assert_eq!(
-            DateWindowPlanner::dates_inclusive(&DateWindow { start, end: end_out }).len(),
+            DateWindowPlanner::dates_inclusive(&DateWindow {
+                start,
+                end: end_out
+            })
+            .len(),
             DISCOVER_SAMPLE_DAYS as usize
         );
     }
@@ -777,7 +786,11 @@ mod tests {
             assert_eq!(rows[0]["date"], "2024-01-01");
             assert_eq!(rows[0]["property_id"], "123");
             for dim in stream.dimensions {
-                assert!(rows[0].get(*dim).is_some(), "{} missing {dim}", stream.namespace);
+                assert!(
+                    rows[0].get(*dim).is_some(),
+                    "{} missing {dim}",
+                    stream.namespace
+                );
             }
         }
     }

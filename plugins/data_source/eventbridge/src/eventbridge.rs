@@ -134,6 +134,7 @@ impl DataSource for DataSourceEventbridgePlugin {
                     offset_key,
                     data: detail,
                     bytes,
+                    offset_pos: None,
                     source_uri: format!("eventbridge://{}", self.config.event_bus_name),
                     namespace: Some(namespace.clone()),
                     cdc_rows: None,

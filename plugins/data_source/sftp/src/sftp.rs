@@ -153,6 +153,7 @@ impl DataSource for DataSourceSftpPlugin {
                     offset_key,
                     data: contents,
                     bytes,
+                    offset_pos: None,
                     source_uri: format!("sftp://{}{}", self.config.host, file_path),
                     namespace: Some(namespace),
                     cdc_rows: None,

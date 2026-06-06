@@ -41,7 +41,10 @@ impl CitationClient {
             .ok()
             .filter(|d| !d.trim().is_empty());
         let inner = if fixture_dir.is_some() {
-            OpenAiChatClient::new("fixture-key", openai_base_url.unwrap_or("https://api.openai.com/v1"))
+            OpenAiChatClient::new(
+                "fixture-key",
+                openai_base_url.unwrap_or("https://api.openai.com/v1"),
+            )
         } else {
             let mut client = OpenAiChatClient::from_env()?;
             if let Some(base) = openai_base_url.filter(|b| !b.trim().is_empty()) {
@@ -52,10 +55,7 @@ impl CitationClient {
             }
             client
         };
-        Ok(Self {
-            inner,
-            fixture_dir,
-        })
+        Ok(Self { inner, fixture_dir })
     }
 
     pub async fn query_prompt(
@@ -144,11 +144,7 @@ fn load_fixture(dir: &str, prompt_id: &str, model: &str) -> Option<serde_json::V
 }
 
 fn fixture_slug(prompt_id: &str, model: &str) -> String {
-    format!(
-        "{}_{}",
-        slugify(prompt_id),
-        slugify(model)
-    )
+    format!("{}_{}", slugify(prompt_id), slugify(model))
 }
 
 fn slugify(input: &str) -> String {

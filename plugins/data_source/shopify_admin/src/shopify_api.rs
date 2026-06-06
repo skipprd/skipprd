@@ -210,7 +210,10 @@ impl ShopifyGraphqlClient {
         self.execute("pages", PAGES_QUERY, variables).await
     }
 
-    pub async fn fetch_redirects_page(&self, cursor: Option<&str>) -> Result<Value, std::io::Error> {
+    pub async fn fetch_redirects_page(
+        &self,
+        cursor: Option<&str>,
+    ) -> Result<Value, std::io::Error> {
         let variables = match cursor {
             Some(c) => json!({ "cursor": c }),
             None => json!({ "cursor": null }),
@@ -226,10 +229,14 @@ impl ShopifyGraphqlClient {
             Some(c) => json!({ "cursor": c }),
             None => json!({ "cursor": null }),
         };
-        self.execute("collections", COLLECTIONS_QUERY, variables).await
+        self.execute("collections", COLLECTIONS_QUERY, variables)
+            .await
     }
 
-    pub async fn fetch_discounts_page(&self, cursor: Option<&str>) -> Result<Value, std::io::Error> {
+    pub async fn fetch_discounts_page(
+        &self,
+        cursor: Option<&str>,
+    ) -> Result<Value, std::io::Error> {
         let variables = match cursor {
             Some(c) => json!({ "cursor": c }),
             None => json!({ "cursor": null }),
@@ -245,7 +252,8 @@ impl ShopifyGraphqlClient {
             Some(c) => json!({ "cursor": c }),
             None => json!({ "cursor": null }),
         };
-        self.execute("marketing_events", MARKETING_EVENTS_QUERY, variables).await
+        self.execute("marketing_events", MARKETING_EVENTS_QUERY, variables)
+            .await
     }
 
     async fn execute(
@@ -260,7 +268,9 @@ impl ShopifyGraphqlClient {
             }
         }
 
-        let used = self.query_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let used = self
+            .query_count
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         if used >= self.max_queries_per_run {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -403,10 +413,7 @@ mod tests {
 
     #[test]
     fn gid_tail_extracts_numeric_id() {
-        assert_eq!(
-            gid_tail("gid://shopify/Product/12345"),
-            "12345"
-        );
+        assert_eq!(gid_tail("gid://shopify/Product/12345"), "12345");
     }
 
     #[test]

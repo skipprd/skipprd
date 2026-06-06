@@ -142,6 +142,7 @@ impl DataSource for DataSourceStatsdPlugin {
                                     offset_key,
                                     data: json_str,
                                     bytes,
+                                    offset_pos: None,
                                     source_uri: format!("statsd://{}", addr),
                                     namespace: Some("statsd".to_string()),
                                     cdc_rows: None,

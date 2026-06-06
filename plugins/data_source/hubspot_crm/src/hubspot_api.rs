@@ -212,10 +212,7 @@ impl HubspotApiClient {
 }
 
 pub fn prop_str(props: &Value, key: &str) -> Option<String> {
-    props
-        .get(key)
-        .and_then(|v| v.as_str())
-        .map(str::to_string)
+    props.get(key).and_then(|v| v.as_str()).map(str::to_string)
 }
 
 #[cfg(test)]

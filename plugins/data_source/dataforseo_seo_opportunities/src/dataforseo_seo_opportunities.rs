@@ -21,18 +21,19 @@ use crate::cluster::cluster_keywords_by_serp_overlap;
 use crate::config::{DataForSeoSeoOpportunitiesPluginConfig, StreamKind};
 use crate::content_brief::build_content_brief;
 use crate::parse_allintitle::parse_allintitle_result;
-use crate::parse_competitor::{parse_ranked_keyword_items, parse_sitemap_urls, CompetitorKeywordContext};
+use crate::parse_competitor::{
+    parse_ranked_keyword_items, parse_sitemap_urls, CompetitorKeywordContext,
+};
 use crate::parse_keyword::{parse_keyword_suggestion_items, parse_seed_rows, KeywordParseContext};
 use crate::parse_serp::{compute_weak_spots, parse_serp_items, SerpParseContext};
 use crate::scoring::{compute_opportunity_score, OpportunityInputs};
 use crate::streams::{
     NAMESPACE_AI_CITATION_OPPORTUNITY_DAILY, NAMESPACE_ALLINTITLE_DAILY,
     NAMESPACE_COMPETITOR_KEYWORD_DAILY, NAMESPACE_COMPETITOR_SITEMAP_URL_DAILY,
-    NAMESPACE_CONTENT_BRIEF_DAILY, NAMESPACE_KEYWORD_CLUSTER_DAILY,
-    NAMESPACE_KEYWORD_METRIC_DAILY, NAMESPACE_KEYWORD_SUGGESTION_DAILY,
-    NAMESPACE_OPPORTUNITY_SCORE_DAILY, NAMESPACE_RANK_TRACKING_DAILY,
-    NAMESPACE_SEED_KEYWORD_DAILY, NAMESPACE_SERP_FEATURE_DAILY, NAMESPACE_SERP_RESULT_DAILY,
-    NAMESPACE_SITE_RUN_DAILY, NAMESPACE_WEAK_SPOT_DAILY,
+    NAMESPACE_CONTENT_BRIEF_DAILY, NAMESPACE_KEYWORD_CLUSTER_DAILY, NAMESPACE_KEYWORD_METRIC_DAILY,
+    NAMESPACE_KEYWORD_SUGGESTION_DAILY, NAMESPACE_OPPORTUNITY_SCORE_DAILY,
+    NAMESPACE_RANK_TRACKING_DAILY, NAMESPACE_SEED_KEYWORD_DAILY, NAMESPACE_SERP_FEATURE_DAILY,
+    NAMESPACE_SERP_RESULT_DAILY, NAMESPACE_SITE_RUN_DAILY, NAMESPACE_WEAK_SPOT_DAILY,
 };
 use crate::target::normalize_site;
 
@@ -138,11 +139,20 @@ impl DataForSeoSeoOpportunitiesPlugin {
                 "DataForSEO SEO opportunities daily run rollup",
             ),
             NAMESPACE_SEED_KEYWORD_DAILY => (
-                vec![site.clone(), FieldPath::single("seed_keyword"), run_date.clone()],
+                vec![
+                    site.clone(),
+                    FieldPath::single("seed_keyword"),
+                    run_date.clone(),
+                ],
                 "Seed keywords for SEO opportunity analysis",
             ),
             NAMESPACE_KEYWORD_SUGGESTION_DAILY => (
-                vec![site.clone(), keyword.clone(), FieldPath::single("seed_keyword"), run_date.clone()],
+                vec![
+                    site.clone(),
+                    keyword.clone(),
+                    FieldPath::single("seed_keyword"),
+                    run_date.clone(),
+                ],
                 "Generated keyword suggestions",
             ),
             NAMESPACE_KEYWORD_METRIC_DAILY => (
@@ -170,11 +180,21 @@ impl DataForSeoSeoOpportunitiesPlugin {
                 "SERP feature snapshot",
             ),
             NAMESPACE_WEAK_SPOT_DAILY => (
-                vec![site.clone(), keyword.clone(), FieldPath::single("weakness_type"), run_date.clone()],
+                vec![
+                    site.clone(),
+                    keyword.clone(),
+                    FieldPath::single("weakness_type"),
+                    run_date.clone(),
+                ],
                 "SERP weakness analysis",
             ),
             NAMESPACE_KEYWORD_CLUSTER_DAILY => (
-                vec![site.clone(), FieldPath::single("cluster_id"), keyword.clone(), run_date.clone()],
+                vec![
+                    site.clone(),
+                    FieldPath::single("cluster_id"),
+                    keyword.clone(),
+                    run_date.clone(),
+                ],
                 "Keyword clusters by SERP overlap",
             ),
             NAMESPACE_COMPETITOR_KEYWORD_DAILY => (
@@ -213,7 +233,11 @@ impl DataForSeoSeoOpportunitiesPlugin {
                 "AI citation opportunities",
             ),
             NAMESPACE_CONTENT_BRIEF_DAILY => (
-                vec![site.clone(), FieldPath::single("brief_id"), run_date.clone()],
+                vec![
+                    site.clone(),
+                    FieldPath::single("brief_id"),
+                    run_date.clone(),
+                ],
                 "Generated content briefs",
             ),
             NAMESPACE_OPPORTUNITY_SCORE_DAILY => (
@@ -261,6 +285,7 @@ impl DataForSeoSeoOpportunitiesPlugin {
                 offset_key: OffsetKey::new(namespace, run_date.to_string()),
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: format!("dataforseo-seo-opportunities://{}", self.site),
                 namespace: Some(namespace.to_string()),
                 cdc_rows: None,
@@ -458,11 +483,11 @@ impl DataForSeoSeoOpportunitiesPlugin {
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false)
             {
-                rank = row.get("rank_absolute").and_then(|v| v.as_u64()).map(|n| n as u32);
-                ranking_url = row
-                    .get("url")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string);
+                rank = row
+                    .get("rank_absolute")
+                    .and_then(|v| v.as_u64())
+                    .map(|n| n as u32);
+                ranking_url = row.get("url").and_then(|v| v.as_str()).map(str::to_string);
                 break;
             }
         }
@@ -570,7 +595,8 @@ impl DataSource for DataForSeoSeoOpportunitiesPlugin {
         add(
             &mut namespaces,
             NAMESPACE_AI_CITATION_OPPORTUNITY_DAILY,
-            self.config.stream_enabled(StreamKind::AiCitationOpportunities),
+            self.config
+                .stream_enabled(StreamKind::AiCitationOpportunities),
         );
         add(
             &mut namespaces,
@@ -648,9 +674,10 @@ impl DataSource for DataForSeoSeoOpportunitiesPlugin {
                 continue;
             }
 
-            let items = self.fetch_keyword_suggestions(seed, discover, &mut stats).await?;
-            let (mut suggestions, mut metrics) =
-                parse_keyword_suggestion_items(&items, &parse_ctx);
+            let items = self
+                .fetch_keyword_suggestions(seed, discover, &mut stats)
+                .await?;
+            let (mut suggestions, mut metrics) = parse_keyword_suggestion_items(&items, &parse_ctx);
 
             let max_generated = if discover {
                 crate::config::DISCOVER_SUGGESTION_LIMIT as usize
@@ -695,7 +722,11 @@ impl DataSource for DataForSeoSeoOpportunitiesPlugin {
             keyword_states.keys().cloned().collect()
         };
 
-        let serp_tracking_enabled = self.config.enabled_streams().iter().any(|s| s.is_serp_tracking());
+        let serp_tracking_enabled = self
+            .config
+            .enabled_streams()
+            .iter()
+            .any(|s| s.is_serp_tracking());
 
         for keyword in &keywords_for_analysis {
             if serp_tracking_enabled {
@@ -734,9 +765,10 @@ impl DataSource for DataForSeoSeoOpportunitiesPlugin {
                 }
 
                 let state = keyword_states.entry(keyword.to_string()).or_default();
-                if let Some(weak) = weak_spot_rows.iter().find(|r| {
-                    r.get("keyword").and_then(|v| v.as_str()) == Some(keyword.as_str())
-                }) {
+                if let Some(weak) = weak_spot_rows
+                    .iter()
+                    .find(|r| r.get("keyword").and_then(|v| v.as_str()) == Some(keyword.as_str()))
+                {
                     state.weakness_score = weak
                         .get("weakness_score")
                         .and_then(|v| v.as_f64())
@@ -745,10 +777,8 @@ impl DataSource for DataForSeoSeoOpportunitiesPlugin {
                         .get("forum_count")
                         .and_then(|v| v.as_u64())
                         .unwrap_or(0) as u32;
-                    state.ugc_count = weak
-                        .get("ugc_count")
-                        .and_then(|v| v.as_u64())
-                        .unwrap_or(0) as u32;
+                    state.ugc_count =
+                        weak.get("ugc_count").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
                     state.low_authority_count = weak
                         .get("low_authority_count")
                         .and_then(|v| v.as_u64())
@@ -778,11 +808,17 @@ impl DataSource for DataForSeoSeoOpportunitiesPlugin {
                 if self.config.stream_enabled(StreamKind::RankTracking)
                     || self.config.rank_track_keywords.iter().any(|k| k == keyword)
                 {
-                    rank_tracking_rows
-                        .extend(self.build_rank_tracking_rows(&run_date, keyword, &parsed.results));
+                    rank_tracking_rows.extend(self.build_rank_tracking_rows(
+                        &run_date,
+                        keyword,
+                        &parsed.results,
+                    ));
                 }
 
-                if self.config.stream_enabled(StreamKind::AiCitationOpportunities) {
+                if self
+                    .config
+                    .stream_enabled(StreamKind::AiCitationOpportunities)
+                {
                     let features = keyword_states
                         .get(keyword)
                         .map(|s| s.serp_features.clone())
@@ -825,9 +861,8 @@ impl DataSource for DataForSeoSeoOpportunitiesPlugin {
                     );
                     if let Some(state) = keyword_states.get_mut(keyword) {
                         state.kgr = row.get("kgr").and_then(|v| v.as_f64());
-                        state.allintitle_count = row
-                            .get("allintitle_count")
-                            .and_then(|v| v.as_u64());
+                        state.allintitle_count =
+                            row.get("allintitle_count").and_then(|v| v.as_u64());
                     }
                     allintitle_rows.push(row);
                 }
@@ -950,7 +985,12 @@ impl DataSource for DataForSeoSeoOpportunitiesPlugin {
             self.submit_rows(ctx.as_ref(), ns, &run_date, rows)
         };
 
-        submit("seed_keywords", NAMESPACE_SEED_KEYWORD_DAILY, seed_rows, &mut stats)?;
+        submit(
+            "seed_keywords",
+            NAMESPACE_SEED_KEYWORD_DAILY,
+            seed_rows,
+            &mut stats,
+        )?;
         submit(
             StreamKind::KeywordSuggestions.as_str(),
             NAMESPACE_KEYWORD_SUGGESTION_DAILY,
@@ -1184,11 +1224,7 @@ mod tests {
             Ok(())
         }
 
-        fn store_checkpoint(
-            &self,
-            key: &str,
-            envelope: &CheckpointEnvelope,
-        ) -> Result<(), String> {
+        fn store_checkpoint(&self, key: &str, envelope: &CheckpointEnvelope) -> Result<(), String> {
             self.checkpoint_stores.lock().unwrap().push(key.to_string());
             self.checkpoints
                 .lock()
@@ -1345,7 +1381,9 @@ mod tests {
             ctx.payload_line_count(NAMESPACE_KEYWORD_SUGGESTION_DAILY)
                 <= DISCOVER_SUGGESTION_LIMIT as usize
         );
-        assert!(!ctx.namespace_set().contains(NAMESPACE_COMPETITOR_SITEMAP_URL_DAILY));
+        assert!(!ctx
+            .namespace_set()
+            .contains(NAMESPACE_COMPETITOR_SITEMAP_URL_DAILY));
 
         clear_fixture_env();
     }
@@ -1358,13 +1396,19 @@ mod tests {
 
         let mut plugin = DataForSeoSeoOpportunitiesPlugin::new(test_mvp_config()).unwrap();
         let ctx = Arc::new(RecordingSyncContext::default());
-        plugin.sync(ctx.clone()).await.expect("sync after task error");
+        plugin
+            .sync(ctx.clone())
+            .await
+            .expect("sync after task error");
 
         let site_run = ctx
             .first_payload_line(NAMESPACE_SITE_RUN_DAILY)
             .expect("site_run row");
         assert!(site_run["error_count"].as_u64().unwrap_or(0) >= 1);
-        assert_eq!(ctx.payload_line_count(NAMESPACE_KEYWORD_SUGGESTION_DAILY), 0);
+        assert_eq!(
+            ctx.payload_line_count(NAMESPACE_KEYWORD_SUGGESTION_DAILY),
+            0
+        );
         assert_eq!(ctx.payload_line_count(NAMESPACE_SEED_KEYWORD_DAILY), 1);
 
         clear_fixture_env();
@@ -1378,9 +1422,15 @@ mod tests {
 
         let mut plugin = DataForSeoSeoOpportunitiesPlugin::new(test_mvp_config()).unwrap();
         let ctx = Arc::new(RecordingSyncContext::default());
-        plugin.sync(ctx.clone()).await.expect("sync with empty items");
+        plugin
+            .sync(ctx.clone())
+            .await
+            .expect("sync with empty items");
 
-        assert_eq!(ctx.payload_line_count(NAMESPACE_KEYWORD_SUGGESTION_DAILY), 0);
+        assert_eq!(
+            ctx.payload_line_count(NAMESPACE_KEYWORD_SUGGESTION_DAILY),
+            0
+        );
         let site_run = ctx
             .first_payload_line(NAMESPACE_SITE_RUN_DAILY)
             .expect("site_run row");

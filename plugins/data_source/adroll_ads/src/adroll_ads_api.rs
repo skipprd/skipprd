@@ -116,7 +116,11 @@ impl AdRollAdsApiClient {
                                 .join("; ");
                             return Err(std::io::Error::other(format!(
                                 "AdRoll GraphQL errors: {}",
-                                if msg.is_empty() { "unknown" } else { msg.as_str() }
+                                if msg.is_empty() {
+                                    "unknown"
+                                } else {
+                                    msg.as_str()
+                                }
                             )));
                         }
                     }

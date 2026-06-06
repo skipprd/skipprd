@@ -79,7 +79,12 @@ pub fn resolve_url_list(
             }];
             if let Ok(robots) = fetcher.fetch_text(&format!("{origin}/robots.txt")) {
                 for sitemap in parse_robots_sitemaps(&robots) {
-                    candidates.extend(fetch_sitemap_urls(fetcher, &sitemap, origin, respect_robots)?);
+                    candidates.extend(fetch_sitemap_urls(
+                        fetcher,
+                        &sitemap,
+                        origin,
+                        respect_robots,
+                    )?);
                 }
             }
             for fallback in ["/sitemap.xml", "/sitemap_index.xml"] {
@@ -321,9 +326,7 @@ fn parse_sitemap_xml(
             }
             Ok(quick_xml::events::Event::Eof) => break,
             Err(e) => {
-                tracing::warn!(
-                    "skipping ill-formed sitemap XML (depth={depth}): {e}"
-                );
+                tracing::warn!("skipping ill-formed sitemap XML (depth={depth}): {e}");
                 break;
             }
             _ => {}
@@ -396,7 +399,10 @@ pub async fn resolve_url_list_async(
                 lastmod: None,
                 depth: 0,
             }];
-            if let Ok(robots) = fetcher.fetch_text_async(&format!("{origin}/robots.txt")).await {
+            if let Ok(robots) = fetcher
+                .fetch_text_async(&format!("{origin}/robots.txt"))
+                .await
+            {
                 for sitemap in parse_robots_sitemaps(&robots) {
                     candidates.extend(
                         fetch_sitemap_urls_async(fetcher, &sitemap, origin, respect_robots).await?,
@@ -408,9 +414,8 @@ pub async fn resolve_url_list_async(
                 if candidates.len() >= cap * 4 {
                     break;
                 }
-                candidates.extend(
-                    fetch_sitemap_urls_async(fetcher, &loc, origin, respect_robots).await?,
-                );
+                candidates
+                    .extend(fetch_sitemap_urls_async(fetcher, &loc, origin, respect_robots).await?);
             }
             Ok(rank_and_cap_candidates(origin, &home, candidates, cap))
         }
@@ -518,15 +523,7 @@ mod tests {
         let urls = (1..=10)
             .map(|i| format!("{origin}/page-{i}"))
             .collect::<Vec<_>>();
-        let out = resolve_url_list(
-            origin,
-            UrlMode::UrlList,
-            &urls,
-            3,
-            &fetcher,
-            true,
-        )
-        .unwrap();
+        let out = resolve_url_list(origin, UrlMode::UrlList, &urls, 3, &fetcher, true).unwrap();
         assert_eq!(out.len(), 3);
     }
 

@@ -77,9 +77,7 @@ mod tests {
     #[test]
     fn contracts_validate() {
         for ns in active_namespaces(true) {
-            namespace_contract(ns)
-                .validate()
-                .expect("valid contract");
+            namespace_contract(ns).validate().expect("valid contract");
         }
     }
 

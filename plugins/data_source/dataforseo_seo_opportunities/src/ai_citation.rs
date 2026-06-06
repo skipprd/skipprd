@@ -21,12 +21,8 @@ pub fn detect_ai_citation_opportunities(
         return rows;
     }
 
-    let citation_gap_score = compute_citation_gap_score(
-        &answer_surfaces,
-        &cited_domains,
-        own_domain,
-        keyword,
-    );
+    let citation_gap_score =
+        compute_citation_gap_score(&answer_surfaces, &cited_domains, own_domain, keyword);
 
     if citation_gap_score < 15.0 {
         return rows;

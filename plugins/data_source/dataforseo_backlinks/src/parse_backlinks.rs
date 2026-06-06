@@ -50,10 +50,7 @@ pub fn build_backlink_task(
     Value::Object(task)
 }
 
-pub fn parse_backlinks_items(
-    items: &[Value],
-    ctx: &BacklinkParseContext,
-) -> Vec<Value> {
+pub fn parse_backlinks_items(items: &[Value], ctx: &BacklinkParseContext) -> Vec<Value> {
     items
         .iter()
         .filter_map(|item| parse_backlink_item(item, ctx))
@@ -211,14 +208,7 @@ mod tests {
 
     #[test]
     fn search_after_token_roundtrip() {
-        let adv = next_pagination_state(
-            100,
-            20_000,
-            100,
-            Some("token-abc".into()),
-            1,
-            10,
-        );
+        let adv = next_pagination_state(100, 20_000, 100, Some("token-abc".into()), 1, 10);
         assert_eq!(
             adv,
             PaginationAdvance::ContinueWithToken {

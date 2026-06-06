@@ -13,10 +13,7 @@ pub struct KeywordParseContext<'a> {
     pub suggestion_source: &'a str,
 }
 
-pub fn parse_seed_rows(
-    ctx: &KeywordParseContext<'_>,
-    priority: u32,
-) -> Vec<Value> {
+pub fn parse_seed_rows(ctx: &KeywordParseContext<'_>, priority: u32) -> Vec<Value> {
     vec![json!({
         "site": ctx.site,
         "run_date": ctx.run_date,
@@ -51,10 +48,7 @@ pub fn parse_keyword_suggestion_items(
         }
         let info = item.get("keyword_info").cloned().unwrap_or(Value::Null);
         let serp_info = item.get("serp_info").cloned().unwrap_or(Value::Null);
-        let search_volume = info
-            .get("search_volume")
-            .and_then(json_u64)
-            .unwrap_or(0);
+        let search_volume = info.get("search_volume").and_then(json_u64).unwrap_or(0);
         let cpc = info.get("cpc").and_then(json_f64);
         let competition = info.get("competition").and_then(json_f64);
         let keyword_difficulty = info
@@ -198,8 +192,7 @@ mod tests {
             device: "desktop",
             suggestion_source: "labs_keyword_suggestions",
         };
-        let (suggestions, metrics) =
-            parse_keyword_suggestion_items(&parsed.tasks[0].items, &ctx);
+        let (suggestions, metrics) = parse_keyword_suggestion_items(&parsed.tasks[0].items, &ctx);
         assert_eq!(suggestions.len(), 3);
         assert_eq!(metrics.len(), 3);
         assert_eq!(suggestions[0]["keyword"], "meal planning app free");

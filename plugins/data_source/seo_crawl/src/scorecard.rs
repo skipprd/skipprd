@@ -77,11 +77,7 @@ pub fn page_check_rows(
         page_url,
         "META_LENGTH",
         "metadata",
-        if meta_len_ok {
-            "pass"
-        } else {
-            "warn"
-        },
+        if meta_len_ok { "pass" } else { "warn" },
         "info",
         &format!("meta description length is {meta_len} characters (target ~70–160)"),
     ));
@@ -165,7 +161,10 @@ pub fn page_check_rows(
         ));
     }
 
-    let static_links_ok = !page.issues.iter().any(|i| i.issue_code == "SPA_SHELL_NO_STATIC_LINKS");
+    let static_links_ok = !page
+        .issues
+        .iter()
+        .any(|i| i.issue_code == "SPA_SHELL_NO_STATIC_LINKS");
     rows.push(check_row(
         site,
         crawl_date,
@@ -295,8 +294,16 @@ pub fn site_check_rows(
             site_url,
             "SITEMAP_URLS",
             "site",
-            if sitemap_url_count > 0 { "pass" } else { "warn" },
-            if sitemap_url_count > 0 { "info" } else { "medium" },
+            if sitemap_url_count > 0 {
+                "pass"
+            } else {
+                "warn"
+            },
+            if sitemap_url_count > 0 {
+                "info"
+            } else {
+                "medium"
+            },
             if sitemap_url_count > 0 {
                 format!("{sitemap_url_count} sitemap URL entries discovered")
             } else {

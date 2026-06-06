@@ -99,10 +99,7 @@ impl XAdsApiClient {
                 return load_fixture(&dir, stream.namespace).ok_or_else(|| {
                     std::io::Error::new(
                         std::io::ErrorKind::NotFound,
-                        format!(
-                            "fixture missing for {} in {}",
-                            stream.namespace, dir
-                        ),
+                        format!("fixture missing for {} in {}", stream.namespace, dir),
                     )
                 });
             }
@@ -314,7 +311,10 @@ pub fn parse_rows(
         .collect()
 }
 
-fn flatten_analytics_metrics(obj: &mut serde_json::Map<String, serde_json::Value>, row: &serde_json::Value) {
+fn flatten_analytics_metrics(
+    obj: &mut serde_json::Map<String, serde_json::Value>,
+    row: &serde_json::Value,
+) {
     let metrics = row
         .get("id_data")
         .and_then(|v| v.as_array())
@@ -332,11 +332,11 @@ fn flatten_analytics_metrics(obj: &mut serde_json::Map<String, serde_json::Value
             .unwrap_or_else(|| value.clone());
         obj.entry(key.clone()).or_insert(scalar);
     }
-    if let Some(micro) = obj.get("billed_charge_local_micro").and_then(|v| v.as_f64()) {
-        obj.insert(
-            "spend".into(),
-            serde_json::Value::from(micro / 1_000_000.0),
-        );
+    if let Some(micro) = obj
+        .get("billed_charge_local_micro")
+        .and_then(|v| v.as_f64())
+    {
+        obj.insert("spend".into(), serde_json::Value::from(micro / 1_000_000.0));
     }
 }
 
@@ -366,13 +366,21 @@ mod tests {
         let campaigns = rt.block_on(client.fetch(campaign_stream, None)).unwrap();
         let rows = parse_rows(&campaigns, campaign_stream, "18ce54d4x5t", None);
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].get("campaign_id").and_then(|v| v.as_str()), Some("camp001"));
+        assert_eq!(
+            rows[0].get("campaign_id").and_then(|v| v.as_str()),
+            Some("camp001")
+        );
         let analytics_stream = &crate::streams::CURATED_STREAMS[4];
         let sample_date = chrono::NaiveDate::from_ymd_opt(2024, 1, 15).unwrap();
         let analytics = rt
             .block_on(client.fetch(analytics_stream, Some(sample_date)))
             .unwrap();
-        let arows = parse_rows(&analytics, analytics_stream, "18ce54d4x5t", Some(sample_date));
+        let arows = parse_rows(
+            &analytics,
+            analytics_stream,
+            "18ce54d4x5t",
+            Some(sample_date),
+        );
         assert_eq!(arows.len(), 1);
         assert!(arows[0].get("spend").and_then(|v| v.as_f64()).unwrap() > 0.0);
         std::env::remove_var("SKIPPR_X_ADS_FIXTURE_DIR");

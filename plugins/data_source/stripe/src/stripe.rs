@@ -97,7 +97,12 @@ impl DataSourceStripePlugin {
 
     async fn api_client(&self) -> Result<StripeApiClient, std::io::Error> {
         let http = RetryableHttpClient::new(RetryConfig::default());
-        if let Some(token) = self.config.access_token.as_deref().filter(|t| !t.trim().is_empty()) {
+        if let Some(token) = self
+            .config
+            .access_token
+            .as_deref()
+            .filter(|t| !t.trim().is_empty())
+        {
             return Ok(StripeApiClient::new(
                 http,
                 self.stripe_account_id.clone(),
@@ -240,6 +245,7 @@ impl DataSourceStripePlugin {
                 offset_key,
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: format!("stripe://{}/{}", self.stripe_account_id, namespace),
                 namespace: Some(namespace.to_string()),
                 cdc_rows: None,
@@ -255,11 +261,7 @@ impl DataSourceStripePlugin {
         run_date: &str,
     ) -> Result<Vec<Value>, std::io::Error> {
         let body = client.account().await?;
-        Ok(vec![map_account(
-            run_date,
-            &self.stripe_account_id,
-            &body,
-        )])
+        Ok(vec![map_account(run_date, &self.stripe_account_id, &body)])
     }
 
     async fn sync_catalog(
@@ -541,9 +543,15 @@ impl DataSource for DataSourceStripePlugin {
                     self.submit_namespace(ctx.as_ref(), NAMESPACE_PAYOUT_FACT, &run_date, payouts)
                 }
                 StripeStream::Promotions => {
-                    let (coupons, codes) =
-                        self.sync_promotions(&client, &run_date, created_gte).await?;
-                    self.submit_namespace(ctx.as_ref(), NAMESPACE_COUPON_SNAPSHOT, &run_date, coupons)?;
+                    let (coupons, codes) = self
+                        .sync_promotions(&client, &run_date, created_gte)
+                        .await?;
+                    self.submit_namespace(
+                        ctx.as_ref(),
+                        NAMESPACE_COUPON_SNAPSHOT,
+                        &run_date,
+                        coupons,
+                    )?;
                     self.submit_namespace(
                         ctx.as_ref(),
                         NAMESPACE_PROMOTION_CODE_SNAPSHOT,

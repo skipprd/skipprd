@@ -13,9 +13,7 @@ use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch};
 use tracing::info;
 
-use crate::checkpoint::{
-    load_prompt_checkpoint, store_prompt_checkpoint, PromptCheckpoint,
-};
+use crate::checkpoint::{load_prompt_checkpoint, store_prompt_checkpoint, PromptCheckpoint};
 use crate::checks::map_checks;
 use crate::client::{response_hash, CitationClient};
 use crate::config::{DataSourceAiCitationsPluginConfig, TrackedPrompt};
@@ -113,6 +111,7 @@ impl DataSourceAiCitationsPlugin {
                 offset_key,
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: format!("ai-citations://{}/{}", self.origin, namespace),
                 namespace: Some(namespace.to_string()),
                 cdc_rows: None,
@@ -268,9 +267,7 @@ impl DataSource for DataSourceAiCitationsPlugin {
                     load_prompt_checkpoint(ctx.as_ref(), &prompt.id, model)
                 };
 
-                let skip_api = !discover
-                    && self.config.skip_unchanged_responses
-                    && prior.is_some();
+                let skip_api = !discover && self.config.skip_unchanged_responses && prior.is_some();
 
                 if skip_api {
                     prompts_skipped += 1;
@@ -419,12 +416,7 @@ impl DataSource for DataSourceAiCitationsPlugin {
             "prompts_skipped_unchanged": prompts_skipped,
             "brand_names": self.brand_names,
         });
-        self.submit_namespace(
-            ctx.as_ref(),
-            NAMESPACE_RUN_DAILY,
-            &run_date,
-            vec![run_row],
-        )?;
+        self.submit_namespace(ctx.as_ref(), NAMESPACE_RUN_DAILY, &run_date, vec![run_row])?;
 
         Ok(())
     }
@@ -457,5 +449,4 @@ mod tests {
         let plugin = DataSourceAiCitationsPlugin::new(minimal_config()).unwrap();
         assert_eq!(plugin.source_namespace_contracts().len(), 6);
     }
-
 }

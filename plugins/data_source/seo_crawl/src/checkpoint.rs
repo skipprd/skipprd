@@ -81,8 +81,9 @@ mod tests {
             last_crawl_date: "2026-05-29".into(),
             technical_score: 0.88,
         };
-        let bytes =
-            skippr_plugin_shared_api_source::JsonCheckpoint::new(cp.clone()).to_bytes().unwrap();
+        let bytes = skippr_plugin_shared_api_source::JsonCheckpoint::new(cp.clone())
+            .to_bytes()
+            .unwrap();
         let decoded: skippr_plugin_shared_api_source::JsonCheckpoint<PageTechnicalCheckpoint> =
             skippr_plugin_shared_api_source::JsonCheckpoint::from_bytes(&bytes).unwrap();
         assert_eq!(decoded.payload, cp);

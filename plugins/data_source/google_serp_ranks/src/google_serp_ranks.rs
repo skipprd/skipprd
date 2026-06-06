@@ -73,6 +73,7 @@ impl DataSourceGoogleSerpRanksPlugin {
                 offset_key,
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: format!("google-serp://{namespace}"),
                 namespace: Some(namespace.to_string()),
                 cdc_rows: None,
@@ -118,7 +119,12 @@ impl DataSourceGoogleSerpRanksPlugin {
         })
     }
 
-    fn target_rank_rows(&self, run_date: &str, keyword: &str, result: &WorkerJobResult) -> Vec<Value> {
+    fn target_rank_rows(
+        &self,
+        run_date: &str,
+        keyword: &str,
+        result: &WorkerJobResult,
+    ) -> Vec<Value> {
         result
             .target_matches
             .iter()
@@ -141,7 +147,12 @@ impl DataSourceGoogleSerpRanksPlugin {
             .collect()
     }
 
-    fn result_daily_rows(&self, run_date: &str, keyword: &str, result: &WorkerJobResult) -> Vec<Value> {
+    fn result_daily_rows(
+        &self,
+        run_date: &str,
+        keyword: &str,
+        result: &WorkerJobResult,
+    ) -> Vec<Value> {
         result
             .organic_results
             .iter()
@@ -316,12 +327,7 @@ impl DataSource for DataSourceGoogleSerpRanksPlugin {
             target_rows,
         )?;
         if self.config.capture_results {
-            self.submit_namespace(
-                ctx.as_ref(),
-                NAMESPACE_RESULT_DAILY,
-                &run_date,
-                result_rows,
-            )?;
+            self.submit_namespace(ctx.as_ref(), NAMESPACE_RESULT_DAILY, &run_date, result_rows)?;
         }
 
         info!(
@@ -358,13 +364,17 @@ mod tests {
 
     use std::sync::{Arc, LazyLock, Mutex};
 
-    use chrono::Utc;
     use super::*;
     use crate::checkpoint::{
         load_query_checkpoint, store_query_checkpoint, QueryCheckpoint, QueryTerminalStatus,
     };
-    use crate::streams::{NAMESPACE_RESULT_DAILY, NAMESPACE_RUN_DAILY, NAMESPACE_TARGET_RANK_DAILY};
-    use crate::test_support::{clear_fixture_dir, sample_config, set_fixture_dir, RecordingSyncContext};
+    use crate::streams::{
+        NAMESPACE_RESULT_DAILY, NAMESPACE_RUN_DAILY, NAMESPACE_TARGET_RANK_DAILY,
+    };
+    use crate::test_support::{
+        clear_fixture_dir, sample_config, set_fixture_dir, RecordingSyncContext,
+    };
+    use chrono::Utc;
     use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 
     static ENV_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -606,7 +616,9 @@ mod tests {
         let runs = ctx.rows_for_namespace(NAMESPACE_RUN_DAILY);
         assert_eq!(runs[0]["status"], "blocked");
         assert_eq!(runs[0]["blocked_reason"], "captcha");
-        assert!(ctx.rows_for_namespace(NAMESPACE_TARGET_RANK_DAILY).is_empty());
+        assert!(ctx
+            .rows_for_namespace(NAMESPACE_TARGET_RANK_DAILY)
+            .is_empty());
 
         let cp = load_query_checkpoint(
             ctx.as_ref(),

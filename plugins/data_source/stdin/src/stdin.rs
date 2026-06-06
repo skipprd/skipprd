@@ -77,6 +77,7 @@ impl DataSourceStdinPlugin {
             },
             data: data.clone(),
             bytes: data.len(),
+            offset_pos: None,
             source_uri: String::new(),
             namespace: None,
             cdc_rows: None,

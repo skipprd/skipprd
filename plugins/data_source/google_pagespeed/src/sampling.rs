@@ -161,7 +161,11 @@ pub fn canonicalize_url(raw: &str, base: &str) -> Result<String, std::io::Error>
             .map(|u| u.to_string())
             .map_err(|e| std::io::Error::other(e.to_string()))?
     } else {
-        format!("{}/{}", base.trim_end_matches('/'), trimmed.trim_start_matches('/'))
+        format!(
+            "{}/{}",
+            base.trim_end_matches('/'),
+            trimmed.trim_start_matches('/')
+        )
     };
     let parsed = Url::parse(&absolute).map_err(|e| std::io::Error::other(e.to_string()))?;
     let mut out = format!(
@@ -234,8 +238,7 @@ fn parse_sitemap_xml(body: &str, out: &mut Vec<String>) -> Result<(), std::io::E
             Ok(quick_xml::events::Event::Start(e)) | Ok(quick_xml::events::Event::Empty(e)) => {
                 let name = String::from_utf8_lossy(e.name().as_ref()).to_string();
                 if name == "loc" {
-                    if let Ok(quick_xml::events::Event::Text(t)) =
-                        reader.read_event_into(&mut buf)
+                    if let Ok(quick_xml::events::Event::Text(t)) = reader.read_event_into(&mut buf)
                     {
                         let text = t.unescape().unwrap_or_default().to_string();
                         if text.starts_with("http://") || text.starts_with("https://") {
@@ -246,7 +249,9 @@ fn parse_sitemap_xml(body: &str, out: &mut Vec<String>) -> Result<(), std::io::E
             }
             Ok(quick_xml::events::Event::Eof) => break,
             Err(e) => {
-                return Err(std::io::Error::other(format!("sitemap XML parse error: {e}")));
+                return Err(std::io::Error::other(format!(
+                    "sitemap XML parse error: {e}"
+                )));
             }
             _ => {}
         }
@@ -335,7 +340,10 @@ mod tests {
         let strategies = vec![Strategy::Mobile, Strategy::Desktop];
         let jobs = apply_request_budget(urls, &strategies, 6);
         assert_eq!(jobs.len(), 6);
-        assert_eq!(jobs.iter().filter(|(_, s)| *s == Strategy::Mobile).count(), 3);
+        assert_eq!(
+            jobs.iter().filter(|(_, s)| *s == Strategy::Mobile).count(),
+            3
+        );
     }
 
     #[test]

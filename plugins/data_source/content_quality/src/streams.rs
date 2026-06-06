@@ -24,7 +24,11 @@ pub fn namespace_contract(namespace: &str) -> SourceNamespaceContract {
     let (primary_key, partition_key) = match namespace {
         NAMESPACE_SITE_RUN_DAILY => (vec![site.clone(), run_date.clone()], vec![run_date.clone()]),
         NAMESPACE_PAGE_DAILY => (
-            vec![site.clone(), FieldPath::single("canonical_url"), run_date.clone()],
+            vec![
+                site.clone(),
+                FieldPath::single("canonical_url"),
+                run_date.clone(),
+            ],
             vec![run_date.clone()],
         ),
         NAMESPACE_CONTENT_BLOCK | NAMESPACE_VECTOR_CHUNK => (

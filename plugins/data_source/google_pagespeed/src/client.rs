@@ -16,11 +16,7 @@ pub struct PageSpeedClient {
 }
 
 impl PageSpeedClient {
-    pub fn new(
-        api_key: String,
-        categories: Vec<String>,
-        locale: String,
-    ) -> Self {
+    pub fn new(api_key: String, categories: Vec<String>, locale: String) -> Self {
         let fixture_dir = std::env::var("SKIPPR_GOOGLE_PAGESPEED_FIXTURE_DIR")
             .ok()
             .filter(|d| !d.trim().is_empty());
@@ -120,10 +116,7 @@ fn load_fixture(
         }
     };
     let bytes = std::fs::read(&path).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("fixture {path}: {e}"),
-        )
+        std::io::Error::new(std::io::ErrorKind::NotFound, format!("fixture {path}: {e}"))
     })?;
     serde_json::from_slice(&bytes).map_err(|e| std::io::Error::other(e.to_string()))
 }

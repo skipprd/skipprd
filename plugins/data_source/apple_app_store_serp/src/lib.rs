@@ -11,5 +11,5 @@ pub mod streams;
 #[cfg(test)]
 mod test_support;
 
-pub use config::*;
 pub use apple_app_store_serp::*;
+pub use config::*;

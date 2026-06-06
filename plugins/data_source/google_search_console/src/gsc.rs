@@ -289,11 +289,7 @@ impl DataSourceGoogleSearchConsolePlugin {
     }
 
     fn checkpoint_key(&self, namespace: &str) -> String {
-        format!(
-            "gsc:{}:{}",
-            self.config.normalized_site_url(),
-            namespace
-        )
+        format!("gsc:{}:{}", self.config.normalized_site_url(), namespace)
     }
 
     fn load_last_completed(ctx: &dyn SourceSyncContext, key: &str) -> Option<NaiveDate> {
@@ -367,6 +363,7 @@ impl DataSourceGoogleSearchConsolePlugin {
                 offset_key,
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: format!(
                     "gsc://{}/searchAnalytics",
                     self.config.normalized_site_url()
@@ -395,7 +392,11 @@ impl DataSourceGoogleSearchConsolePlugin {
             Self::load_last_completed(ctx.as_ref(), &checkpoint_key)
         };
         let planner = DateWindowPlanner {
-            lookback_days: if discover { 0 } else { self.config.lookback_days },
+            lookback_days: if discover {
+                0
+            } else {
+                self.config.lookback_days
+            },
         };
         let window = planner.plan(start_date, last_completed, end_date);
         let dates = DateWindowPlanner::dates_inclusive(&window);
@@ -445,10 +446,7 @@ impl DataSourceGoogleSearchConsolePlugin {
                     }
                 }
                 Err(err) if stream.optional && is_optional_stream_error(&err) => {
-                    warn!(
-                        "GSC skipping optional stream {}: {err}",
-                        stream.namespace
-                    );
+                    warn!("GSC skipping optional stream {}: {err}", stream.namespace);
                     stats.api_errors += 1;
                     break;
                 }
@@ -660,10 +658,7 @@ impl DataSource for DataSourceGoogleSearchConsolePlugin {
             }
         }
 
-        if !discover
-            && self.config.url_inspection_enabled
-            && !self.config.url_list.is_empty()
-        {
+        if !discover && self.config.url_inspection_enabled && !self.config.url_list.is_empty() {
             let rows = inspection_rows_for_date(
                 &self.http,
                 &auth_header,
@@ -673,12 +668,7 @@ impl DataSource for DataSourceGoogleSearchConsolePlugin {
             )
             .await?;
             run_stats.rows_synced += rows.len() as u64;
-            self.submit_rows_for_date(
-                ctx.as_ref(),
-                URL_INSPECTION_NAMESPACE,
-                run_date,
-                rows,
-            )?;
+            self.submit_rows_for_date(ctx.as_ref(), URL_INSPECTION_NAMESPACE, run_date, rows)?;
         }
 
         if !discover
@@ -756,7 +746,11 @@ mod tests {
         assert_eq!(end_out, end);
         assert_eq!(start, NaiveDate::from_ymd_opt(2026, 5, 23).unwrap());
         assert_eq!(
-            DateWindowPlanner::dates_inclusive(&DateWindow { start, end: end_out }).len(),
+            DateWindowPlanner::dates_inclusive(&DateWindow {
+                start,
+                end: end_out
+            })
+            .len(),
             DISCOVER_SAMPLE_DAYS as usize
         );
     }
@@ -855,10 +849,11 @@ mod tests {
         std::env::remove_var("GOOGLE_APPLICATION_CREDENTIALS");
         let plugin = DataSourceGoogleSearchConsolePlugin::new(cfg).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let err = rt.block_on(plugin.auth_header()).expect_err("auth should fail");
+        let err = rt
+            .block_on(plugin.auth_header())
+            .expect_err("auth should fail");
         assert!(
-            err.to_string().contains("access_token")
-                || err.to_string().contains("credentials")
+            err.to_string().contains("access_token") || err.to_string().contains("credentials")
         );
         if let Some(path) = saved_gac {
             std::env::set_var("GOOGLE_APPLICATION_CREDENTIALS", path);
@@ -878,7 +873,8 @@ mod tests {
         let mut plugin = DataSourceGoogleSearchConsolePlugin::new(cfg).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = Arc::new(RecordingSyncContext::default());
-        rt.block_on(plugin.sync(ctx.clone())).expect("discover sync");
+        rt.block_on(plugin.sync(ctx.clone()))
+            .expect("discover sync");
         assert!(ctx.checkpoint_stores.lock().unwrap().is_empty());
 
         std::env::remove_var("SKIPPR_GOOGLE_SEARCH_CONSOLE_FIXTURE_DIR");

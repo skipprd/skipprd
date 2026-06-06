@@ -19,11 +19,7 @@ pub struct QueryCheckpoint {
     pub status: QueryTerminalStatus,
 }
 
-pub fn query_checkpoint_key(
-    keyword: &str,
-    storefront: &str,
-    entity: &str,
-) -> String {
+pub fn query_checkpoint_key(keyword: &str, storefront: &str, entity: &str) -> String {
     format!("{KEY_PREFIX}:{keyword}:{storefront}:{entity}")
 }
 

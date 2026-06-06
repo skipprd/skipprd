@@ -334,6 +334,7 @@ impl DataSourceMysqlPlugin {
                     offset_key: offset_key.clone(),
                     data: json_str,
                     bytes,
+                    offset_pos: None,
                     source_uri: format!("mysql://{}/{}", db_name, table_fq),
                     namespace: Some(table.to_string()),
                     cdc_rows: Some(vec![WalRowMeta {
@@ -515,6 +516,7 @@ impl DataSourceMysqlPlugin {
                     offset_key: offset_key.clone(),
                     data: json_str,
                     bytes,
+                    offset_pos: None,
                     source_uri: format!("mysql://{}/{}", db_name, fq_table),
                     namespace: Some(tme_table.clone()),
                     cdc_rows: Some(vec![WalRowMeta {
@@ -636,6 +638,7 @@ impl DataSourceMysqlPlugin {
                     offset_key: offset_key.clone(),
                     data: json_str,
                     bytes,
+                    offset_pos: None,
                     source_uri: format!("mysql://{}/{}", db_name, table_fq),
                     namespace: Some(table.to_string()),
                     cdc_rows,

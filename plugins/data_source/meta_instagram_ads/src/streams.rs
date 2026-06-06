@@ -113,7 +113,10 @@ mod tests {
 
     #[test]
     fn full_profile_has_five_streams() {
-        assert_eq!(streams_for_profile(StreamProfile::Full).len(), FULL_STREAM_COUNT);
+        assert_eq!(
+            streams_for_profile(StreamProfile::Full).len(),
+            FULL_STREAM_COUNT
+        );
         assert_eq!(CURATED_STREAMS.len(), FULL_STREAM_COUNT);
     }
 

@@ -173,6 +173,7 @@ impl DataSourceMongodbPlugin {
                 offset_key: offset_key.clone(),
                 data: json_str,
                 bytes,
+                offset_pos: None,
                 source_uri: source_uri.clone(),
                 namespace: Some(namespace.clone()),
                 cdc_rows,
@@ -352,6 +353,7 @@ impl DataSourceMongodbPlugin {
                 offset_key: offset_key.clone(),
                 data: doc_json,
                 bytes,
+                offset_pos: None,
                 source_uri: source_uri.clone(),
                 namespace: Some(namespace.clone()),
                 cdc_rows: Some(vec![WalRowMeta {

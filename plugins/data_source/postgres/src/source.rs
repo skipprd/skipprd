@@ -168,22 +168,24 @@ impl DataSourcePostgresPlugin {
         columns: &[PgColumn],
         tuple: &[Option<String>],
         mutation: MutationKind,
-        lsn_id: &[u8],
+        lsn: u64,
     ) -> IngestBatch {
         let namespace = format!("postgres.{}", table);
         let offset_key = OffsetKey::new(namespace.clone(), table.to_string());
         let json_str = Self::tuple_to_json(columns, tuple);
         let bytes = json_str.len();
-        IngestBatch::new(
+        let lsn_id = lsn.to_be_bytes().to_vec();
+        IngestBatch::new_with_offset_pos(
             offset_key,
             json_str,
             bytes,
+            lsn,
             format!("postgres://{}", table),
             Some(namespace),
             Some(vec![WalRowMeta {
                 mutation,
-                event_id: lsn_id.to_vec(),
-                order_token: lsn_id.to_vec(),
+                event_id: lsn_id.clone(),
+                order_token: lsn_id,
             }]),
         )
     }
@@ -387,10 +389,11 @@ impl DataSourcePostgresPlugin {
             for row in &rows {
                 let json_str = Self::row_to_json(row);
                 let bytes = json_str.len();
-                current_batch.push(IngestBatch::new(
+                current_batch.push(IngestBatch::new_with_offset_pos(
                     offset_key.clone(),
                     json_str,
                     bytes,
+                    snapshot_lsn,
                     format!("postgres://{}", table_name),
                     Some(namespace.clone()),
                     Some(vec![WalRowMeta {
@@ -502,37 +505,34 @@ impl DataSourcePostgresPlugin {
                         }
                         PgOutputMessage::Insert { oid, new_row } => {
                             if let Some((table, cols)) = relation_map.get(&oid) {
-                                let lsn_id = Self::lsn_bytes(wal_end);
                                 pending_batches.push(self.cdc_batch(
                                     table,
                                     cols,
                                     &new_row,
                                     MutationKind::Insert,
-                                    &lsn_id,
+                                    wal_end.as_u64(),
                                 ));
                             }
                         }
                         PgOutputMessage::Update { oid, new_row, .. } => {
                             if let Some((table, cols)) = relation_map.get(&oid) {
-                                let lsn_id = Self::lsn_bytes(wal_end);
                                 pending_batches.push(self.cdc_batch(
                                     table,
                                     cols,
                                     &new_row,
                                     MutationKind::Update,
-                                    &lsn_id,
+                                    wal_end.as_u64(),
                                 ));
                             }
                         }
                         PgOutputMessage::Delete { oid, old_row } => {
                             if let Some((table, cols)) = relation_map.get(&oid) {
-                                let lsn_id = Self::lsn_bytes(wal_end);
                                 pending_batches.push(self.cdc_batch(
                                     table,
                                     cols,
                                     &old_row,
                                     MutationKind::Delete,
-                                    &lsn_id,
+                                    wal_end.as_u64(),
                                 ));
                             }
                         }

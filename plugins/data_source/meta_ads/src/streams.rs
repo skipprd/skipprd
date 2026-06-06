@@ -113,7 +113,10 @@ mod tests {
 
     #[test]
     fn full_profile_has_five_streams() {
-        assert_eq!(streams_for_profile(StreamProfile::Full).len(), FULL_STREAM_COUNT);
+        assert_eq!(
+            streams_for_profile(StreamProfile::Full).len(),
+            FULL_STREAM_COUNT
+        );
         assert_eq!(CURATED_STREAMS.len(), FULL_STREAM_COUNT);
     }
 
@@ -131,10 +134,7 @@ mod tests {
 
     #[test]
     fn resolve_streams_explicit_override_filters_catalog() {
-        let selected = resolve_streams(
-            StreamProfile::Full,
-            Some(vec!["meta_ads.ad_daily".into()]),
-        );
+        let selected = resolve_streams(StreamProfile::Full, Some(vec!["meta_ads.ad_daily".into()]));
         assert_eq!(selected.len(), 1);
         assert_eq!(selected[0].namespace, "meta_ads.ad_daily");
     }

@@ -126,6 +126,7 @@ impl DataSource for DataSourceMqttPlugin {
                             offset_key,
                             data,
                             bytes,
+                            offset_pos: None,
                             source_uri: format!(
                                 "mqtt://{}/{}",
                                 self.config.broker_url, self.config.topic

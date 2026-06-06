@@ -266,9 +266,11 @@ impl WorkerClient {
                     )
                 })?;
                 result.job_id = job.job_id.clone();
-                let unchanged = job.prior_checkpoint.as_ref().zip(result.render_hash.as_ref()).is_some_and(
-                    |(prior, hash)| prior.render_hash == *hash,
-                );
+                let unchanged = job
+                    .prior_checkpoint
+                    .as_ref()
+                    .zip(result.render_hash.as_ref())
+                    .is_some_and(|(prior, hash)| prior.render_hash == *hash);
                 if job.skip_heavy_audits || unchanged {
                     if let Some(cp) = job.prior_checkpoint.as_ref() {
                         result.lighthouse = Some(LighthouseScores {
@@ -287,15 +289,14 @@ impl WorkerClient {
         }
         Err(std::io::Error::new(
             std::io::ErrorKind::NotFound,
-            format!(
-                "no fixture for {} in {}",
-                job.url,
-                dir.display()
-            ),
+            format!("no fixture for {} in {}", job.url, dir.display()),
         ))
     }
 
-    async fn run_live_worker(&self, job: &WorkerJobRequest) -> Result<WorkerJobResult, std::io::Error> {
+    async fn run_live_worker(
+        &self,
+        job: &WorkerJobRequest,
+    ) -> Result<WorkerJobResult, std::io::Error> {
         let mut command = Command::new(&self.config.worker_node_path);
         command
             .arg(&self.worker_script)
@@ -303,8 +304,7 @@ impl WorkerClient {
             .stdout(Stdio::piped())
             // Playwright/Chromium can be verbose on stderr; if we only read stderr after
             // wait(), a full pipe will block the child and hang sync indefinitely.
-            .stderr(Stdio::null())
-            ;
+            .stderr(Stdio::null());
         if let Ok(path) = std::env::var("PLAYWRIGHT_BROWSERS_PATH") {
             if !path.trim().is_empty() {
                 command.env("PLAYWRIGHT_BROWSERS_PATH", path);
@@ -349,7 +349,10 @@ impl WorkerClient {
             .await
             .map_err(std::io::Error::other)?
             .ok_or_else(|| {
-                std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "worker produced no output")
+                std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "worker produced no output",
+                )
             })?;
 
         // One job per process; after the result line we do not need to wait for Playwright
@@ -368,21 +371,15 @@ impl WorkerClient {
 }
 
 pub fn resolve_worker_script() -> Result<PathBuf, std::io::Error> {
-    skippr_runtime_sdk::site_quality_worker::resolve_site_quality_worker_script(Some(
-        Path::new(env!("CARGO_MANIFEST_DIR")),
-    ))
+    skippr_runtime_sdk::site_quality_worker::resolve_site_quality_worker_script(Some(Path::new(
+        env!("CARGO_MANIFEST_DIR"),
+    )))
 }
 
 fn fixture_slug(url: &str, device: &str) -> String {
     let sanitized: String = url
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c
-            } else {
-                '_'
-            }
-        })
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
         .collect();
     format!("{sanitized}_{device}")
 }

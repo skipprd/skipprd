@@ -239,13 +239,7 @@ impl DataForSeoBacklinksPluginConfig {
                     ),
                 ));
             }
-            if job
-                .exclude_targets
-                .as_ref()
-                .map(|v| v.len())
-                .unwrap_or(0)
-                > MAX_EXCLUDE_TARGETS
-            {
+            if job.exclude_targets.as_ref().map(|v| v.len()).unwrap_or(0) > MAX_EXCLUDE_TARGETS {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
                     format!(
@@ -440,9 +434,7 @@ impl BacklinkJob {
             filters: self.filters.clone(),
             order_by: self.order_by.clone(),
             max_pages: competitor.max_pages.or(self.max_pages),
-            include_subdomains: competitor
-                .include_subdomains
-                .or(self.include_subdomains),
+            include_subdomains: competitor.include_subdomains.or(self.include_subdomains),
             exclude_internal_backlinks: self.exclude_internal_backlinks,
         }
     }

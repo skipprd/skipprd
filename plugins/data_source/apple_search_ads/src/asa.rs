@@ -120,11 +120,7 @@ impl DataSourceAppleSearchAdsPlugin {
         config.validate()?;
         let auth = Self::build_auth(&config)?;
         let http = RetryableHttpClient::new(RetryConfig::default());
-        Ok(Self {
-            config,
-            http,
-            auth,
-        })
+        Ok(Self { config, http, auth })
     }
 
     fn build_auth(
@@ -144,7 +140,11 @@ impl DataSourceAppleSearchAdsPlugin {
         {
             return Ok(None);
         }
-        if let Some(pem) = config.private_key_pem.as_deref().filter(|p| !p.trim().is_empty()) {
+        if let Some(pem) = config
+            .private_key_pem
+            .as_deref()
+            .filter(|p| !p.trim().is_empty())
+        {
             return AppleAdsClientCredentialsAuth::from_private_key_pem(
                 &config.client_id,
                 &config.team_id,
@@ -356,6 +356,7 @@ impl DataSourceAppleSearchAdsPlugin {
                 offset_key,
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: format!(
                     "apple-search-ads://org/{}/reports",
                     self.config.org_id.trim()
@@ -437,11 +438,7 @@ impl DataSourceAppleSearchAdsPlugin {
                                     Some(ad_group_id),
                                 )
                                 .await?;
-                            Ok::<_, std::io::Error>(parse_report_rows(
-                                &body,
-                                stream.grain,
-                                &org_id,
-                            ))
+                            Ok::<_, std::io::Error>(parse_report_rows(&body, stream.grain, &org_id))
                         }));
                     }
                 }
@@ -473,11 +470,17 @@ pub(crate) fn parse_report_rows(
 ) -> Vec<serde_json::Value> {
     let mut out = Vec::new();
     for row in rows_from_report_body(body) {
-        let metadata = row.get("metadata").cloned().unwrap_or(serde_json::json!({}));
+        let metadata = row
+            .get("metadata")
+            .cloned()
+            .unwrap_or(serde_json::json!({}));
         let daily_slices = daily_metric_slices(&row);
         for slice in daily_slices {
             let mut record = serde_json::Map::new();
-            record.insert("org_id".into(), serde_json::Value::String(org_id.to_string()));
+            record.insert(
+                "org_id".into(),
+                serde_json::Value::String(org_id.to_string()),
+            );
             if let Some(date) = slice.get("date").and_then(|v| v.as_str()) {
                 record.insert("date".into(), serde_json::Value::String(date.to_string()));
             }
@@ -510,7 +513,10 @@ fn inject_grain_ids(
         record.insert("campaign_id".into(), serde_json::json!(id));
     }
     if let Some(name) = metadata.get("campaignName").and_then(|v| v.as_str()) {
-        record.insert("campaign_name".into(), serde_json::Value::String(name.into()));
+        record.insert(
+            "campaign_name".into(),
+            serde_json::Value::String(name.into()),
+        );
     }
     if matches!(
         grain,
@@ -581,7 +587,16 @@ fn flatten_metrics_into(
         if key == "date" {
             continue;
         }
-        if matches!(key.as_str(), "campaignId" | "campaignName" | "adGroupId" | "adGroupName" | "keywordId" | "keyword" | "searchTermText") {
+        if matches!(
+            key.as_str(),
+            "campaignId"
+                | "campaignName"
+                | "adGroupId"
+                | "adGroupName"
+                | "keywordId"
+                | "keyword"
+                | "searchTermText"
+        ) {
             continue;
         }
         record.insert(key.clone(), value.clone());
@@ -691,10 +706,14 @@ impl DataSource for DataSourceAppleSearchAdsPlugin {
         };
 
         let semaphore = Arc::new(Semaphore::new(
-            self.config.max_concurrent_requests.max(1) as usize,
+            self.config.max_concurrent_requests.max(1) as usize
         ));
         let planner = DateWindowPlanner {
-            lookback_days: if discover { 0 } else { self.config.lookback_days },
+            lookback_days: if discover {
+                0
+            } else {
+                self.config.lookback_days
+            },
         };
 
         for stream in streams {
@@ -768,7 +787,11 @@ mod tests {
         assert_eq!(end_out, end);
         assert_eq!(start, NaiveDate::from_ymd_opt(2026, 5, 23).unwrap());
         assert_eq!(
-            DateWindowPlanner::dates_inclusive(&DateWindow { start, end: end_out }).len(),
+            DateWindowPlanner::dates_inclusive(&DateWindow {
+                start,
+                end: end_out
+            })
+            .len(),
             DISCOVER_SAMPLE_DAYS as usize
         );
     }
@@ -780,9 +803,7 @@ mod tests {
         assert_eq!(discover_streams.len(), 1);
         assert_eq!(plugin.streams_for_run(false).len(), FULL_STREAM_COUNT);
         assert!(
-            discover_streams
-                .iter()
-                .all(|s| s.fan_out == FanOut::None),
+            discover_streams.iter().all(|s| s.fan_out == FanOut::None),
             "discover must not select fan-out streams"
         );
     }
@@ -817,10 +838,9 @@ mod tests {
     #[test]
     fn parses_search_term_report_fixture() {
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
-        let body: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!(
-            "{fixture_dir}/search_term_report.json"
-        ))
-        .unwrap())
+        let body: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(format!("{fixture_dir}/search_term_report.json")).unwrap(),
+        )
         .unwrap();
         let rows = parse_report_rows(&body, ReportGrain::SearchTerm, "999");
         assert_eq!(rows[0]["search_term"], "running shoes");
@@ -829,10 +849,9 @@ mod tests {
     #[test]
     fn parses_campaign_report_fixture() {
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
-        let body: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!(
-            "{fixture_dir}/campaign_report.json"
-        ))
-        .unwrap())
+        let body: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(format!("{fixture_dir}/campaign_report.json")).unwrap(),
+        )
         .unwrap();
         let rows = parse_report_rows(&body, ReportGrain::Campaign, "999");
         assert!(!rows.is_empty());
@@ -911,16 +930,15 @@ mod tests {
 
     #[test]
     fn config_defaults_and_validation_succeed() {
-        let cfg: DataSourceAppleSearchAdsPluginConfig =
-            serde_json::from_value(serde_json::json!({
-                "org_id": "12345",
-                "client_id": "client",
-                "team_id": "team",
-                "key_id": "key",
-                "access_token": "token",
-                "start_date": "2024-01-01"
-            }))
-            .expect("deserialize");
+        let cfg: DataSourceAppleSearchAdsPluginConfig = serde_json::from_value(serde_json::json!({
+            "org_id": "12345",
+            "client_id": "client",
+            "team_id": "team",
+            "key_id": "key",
+            "access_token": "token",
+            "start_date": "2024-01-01"
+        }))
+        .expect("deserialize");
         assert_eq!(cfg.stream_profile, StreamProfile::Full);
         assert_eq!(cfg.lookback_days, 3);
         cfg.validate().expect("valid org_id");
@@ -950,7 +968,11 @@ mod tests {
             match stream.grain {
                 ReportGrain::Campaign => {}
                 ReportGrain::AdGroup | ReportGrain::Keyword | ReportGrain::SearchTerm => {
-                    assert!(pk.contains(&"ad_group_id".to_string()), "{}", stream.namespace);
+                    assert!(
+                        pk.contains(&"ad_group_id".to_string()),
+                        "{}",
+                        stream.namespace
+                    );
                 }
             }
             if stream.grain == ReportGrain::Keyword {
@@ -981,9 +1003,7 @@ mod tests {
         let mut plugin = DataSourceAppleSearchAdsPlugin::new(cfg).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = Arc::new(RecordingSyncContext::default());
-        let err = rt
-            .block_on(plugin.sync(ctx))
-            .expect_err("end before start");
+        let err = rt.block_on(plugin.sync(ctx)).expect_err("end before start");
         assert!(err.to_string().contains("before start date"));
 
         std::env::remove_var("SKIPPR_APPLE_SEARCH_ADS_FIXTURE_DIR");
@@ -1086,7 +1106,8 @@ mod tests {
         let mut plugin = DataSourceAppleSearchAdsPlugin::new(cfg).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = Arc::new(RecordingSyncContext::default());
-        rt.block_on(plugin.sync(ctx.clone())).expect("discover sync");
+        rt.block_on(plugin.sync(ctx.clone()))
+            .expect("discover sync");
         assert!(
             ctx.checkpoint_stores.lock().unwrap().is_empty(),
             "discover must not persist checkpoints"
@@ -1119,11 +1140,11 @@ mod tests {
         std::env::remove_var("SKIPPR_APPLE_SEARCH_ADS_FIXTURE_DIR");
     }
 
-    use skippr_runtime_sdk::protocol::RuntimeOffsetMaterializationHint;
-    use skippr_runtime_sdk::source_compat::ThroughputMetrics;
     use skippr_runtime_sdk::plugins::{
         OffsetValidationEntry, SourcePayloadTask, SourceSyncContext,
     };
+    use skippr_runtime_sdk::protocol::RuntimeOffsetMaterializationHint;
+    use skippr_runtime_sdk::source_compat::ThroughputMetrics;
 
     #[derive(Default)]
     struct RecordingSyncContext {
@@ -1162,10 +1183,7 @@ mod tests {
             key: &str,
             _envelope: &CheckpointEnvelope,
         ) -> Result<(), String> {
-            self.checkpoint_stores
-                .lock()
-                .unwrap()
-                .push(key.to_string());
+            self.checkpoint_stores.lock().unwrap().push(key.to_string());
             Ok(())
         }
 

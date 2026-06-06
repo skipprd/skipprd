@@ -114,8 +114,14 @@ pub fn rollup_page_scores(block_scores: &[Value]) -> PageScores {
     let mut trust = 0.0;
     let mut ai = 0.0;
     for row in block_scores {
-        helpfulness += row.get("helpfulness_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        trust += row.get("trust_score").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        helpfulness += row
+            .get("helpfulness_score")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
+        trust += row
+            .get("trust_score")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
         ai += row
             .get("extractability_score")
             .and_then(|v| v.as_f64())

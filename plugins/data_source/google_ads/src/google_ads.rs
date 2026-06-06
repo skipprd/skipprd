@@ -206,6 +206,7 @@ impl DataSourceGoogleAdsPlugin {
                 offset_key: OffsetKey::new(stream.namespace, date.format("%Y-%m-%d").to_string()),
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: format!(
                     "google-ads://customers/{}/{}",
                     self.customer_id, stream.namespace

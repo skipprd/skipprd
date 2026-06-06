@@ -65,10 +65,7 @@ pub fn namespace_contract(namespace: &str) -> SourceNamespaceContract {
     match namespace {
         NAMESPACE_SITE_RUN_DAILY => SourceNamespaceContract {
             namespace: namespace.to_string(),
-            primary_key: vec![
-                FieldPath::single("site"),
-                FieldPath::single("run_date"),
-            ],
+            primary_key: vec![FieldPath::single("site"), FieldPath::single("run_date")],
             cursor: Some(FieldPath::single("run_date")),
             partition_key: vec![FieldPath::single("run_date")],
             write_policy: WritePolicy::ReplacePartition,

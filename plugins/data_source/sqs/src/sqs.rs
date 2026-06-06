@@ -192,6 +192,7 @@ impl DataSourceSqsPlugin {
                     offset_key,
                     data: body,
                     bytes,
+                    offset_pos: None,
                     source_uri: queue_url.clone(),
                     namespace: Some(ns_display.clone()),
                     cdc_rows: None,

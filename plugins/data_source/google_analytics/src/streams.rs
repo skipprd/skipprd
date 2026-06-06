@@ -26,8 +26,12 @@ pub struct Ga4StreamDef {
     pub optional: bool,
 }
 
-const CONTENT_PAGE_METRICS: &[&str] =
-    &["screenPageViews", "sessions", "totalUsers", "engagementRate"];
+const CONTENT_PAGE_METRICS: &[&str] = &[
+    "screenPageViews",
+    "sessions",
+    "totalUsers",
+    "engagementRate",
+];
 const DEMOGRAPHIC_METRICS: &[&str] = &["sessions", "totalUsers", "newUsers"];
 const SESSION_METRICS: &[&str] = &["sessions", "totalUsers", "conversions"];
 
@@ -262,7 +266,10 @@ mod tests {
 
     #[test]
     fn full_profile_has_expected_count() {
-        assert_eq!(streams_for_profile(StreamProfile::Full).len(), FULL_STREAM_COUNT);
+        assert_eq!(
+            streams_for_profile(StreamProfile::Full).len(),
+            FULL_STREAM_COUNT
+        );
         assert_eq!(CURATED_STREAMS.len(), FULL_STREAM_COUNT);
     }
 

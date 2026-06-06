@@ -62,6 +62,7 @@ fn read_whole_payload<R: Read>(mut reader: R, offset_key: &OffsetKey, tx: &Batch
         IngestBatch {
             offset_key: offset_key.clone(),
             bytes: ingest_data.len(),
+            offset_pos: None,
             data: ingest_data,
             source_uri: String::new(),
             namespace: None,
@@ -96,6 +97,7 @@ fn read_line_chunks<R: Read>(reader: R, offset_key: &OffsetKey, tx: &BatchSender
                     offset_key: offset_key.clone(),
                     data: std::mem::take(&mut ingest_data),
                     bytes: batch_bytes as usize,
+                    offset_pos: None,
                     source_uri: String::new(),
                     namespace: None,
                     cdc_rows: None,
@@ -112,6 +114,7 @@ fn read_line_chunks<R: Read>(reader: R, offset_key: &OffsetKey, tx: &BatchSender
                 offset_key: offset_key.clone(),
                 data: ingest_data,
                 bytes: batch_bytes as usize,
+                offset_pos: None,
                 source_uri: String::new(),
                 namespace: None,
                 cdc_rows: None,

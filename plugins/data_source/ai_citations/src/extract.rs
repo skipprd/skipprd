@@ -6,9 +6,8 @@ use url::Url;
 
 use crate::origin::host_label;
 
-static URL_RE: std::sync::LazyLock<Regex> = std::sync::LazyLock::new(|| {
-    Regex::new(r#"https?://[^\s\)\]\"'<>]+"#).expect("url regex")
-});
+static URL_RE: std::sync::LazyLock<Regex> =
+    std::sync::LazyLock::new(|| Regex::new(r#"https?://[^\s\)\]\"'<>]+"#).expect("url regex"));
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MentionSpan {
@@ -33,7 +32,10 @@ pub fn extract_urls_from_text(text: &str) -> Vec<String> {
     let mut seen = HashSet::new();
     let mut urls = Vec::new();
     for cap in URL_RE.find_iter(text) {
-        let url = cap.as_str().trim_end_matches(&['.', ',', ';', ')', ']'][..]).to_string();
+        let url = cap
+            .as_str()
+            .trim_end_matches(&['.', ',', ';', ')', ']'][..])
+            .to_string();
         if url.is_empty() {
             continue;
         }
@@ -88,7 +90,10 @@ pub fn citations_from_json(raw: &Value) -> Vec<UrlRef> {
             out.push(UrlRef {
                 ref_id: format!("citation:json:{idx}"),
                 url: url.to_string(),
-                title: item.get("title").and_then(|v| v.as_str()).map(str::to_string),
+                title: item
+                    .get("title")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string),
                 snippet: item
                     .get("snippet")
                     .and_then(|v| v.as_str())
@@ -183,7 +188,10 @@ mod tests {
             "https://www.example.com/page",
             "https://example.com"
         ));
-        assert!(!url_matches_target_site("https://other.com", "https://example.com"));
+        assert!(!url_matches_target_site(
+            "https://other.com",
+            "https://example.com"
+        ));
     }
 
     #[test]

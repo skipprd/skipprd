@@ -110,7 +110,11 @@ impl StripeApiClient {
                 .get("has_more")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            if let Some(last) = page.last().and_then(|o| o.get("id")).and_then(|v| v.as_str()) {
+            if let Some(last) = page
+                .last()
+                .and_then(|o| o.get("id"))
+                .and_then(|v| v.as_str())
+            {
                 starting_after = Some(last.to_string());
             }
             all_rows.extend(page);
@@ -121,11 +125,7 @@ impl StripeApiClient {
         Ok(all_rows)
     }
 
-    async fn get_singleton(
-        &self,
-        path: &str,
-        fixture: &str,
-    ) -> Result<Value, std::io::Error> {
+    async fn get_singleton(&self, path: &str, fixture: &str) -> Result<Value, std::io::Error> {
         if let Ok(dir) = std::env::var(FIXTURE_ENV) {
             if !dir.trim().is_empty() {
                 if let Some(body) = Self::fixture_path(&dir, fixture) {
@@ -180,17 +180,26 @@ impl StripeApiClient {
         self.get_singleton("/account", "account.json").await
     }
 
-    pub async fn list_products(&self, created_gte: Option<i64>) -> Result<Vec<Value>, std::io::Error> {
+    pub async fn list_products(
+        &self,
+        created_gte: Option<i64>,
+    ) -> Result<Vec<Value>, std::io::Error> {
         self.get_list("/products", "products.json", created_gte, None)
             .await
     }
 
-    pub async fn list_prices(&self, created_gte: Option<i64>) -> Result<Vec<Value>, std::io::Error> {
+    pub async fn list_prices(
+        &self,
+        created_gte: Option<i64>,
+    ) -> Result<Vec<Value>, std::io::Error> {
         self.get_list("/prices", "prices.json", created_gte, None)
             .await
     }
 
-    pub async fn list_customers(&self, created_gte: Option<i64>) -> Result<Vec<Value>, std::io::Error> {
+    pub async fn list_customers(
+        &self,
+        created_gte: Option<i64>,
+    ) -> Result<Vec<Value>, std::io::Error> {
         self.get_list("/customers", "customers.json", created_gte, None)
             .await
     }
@@ -208,7 +217,10 @@ impl StripeApiClient {
         .await
     }
 
-    pub async fn list_invoices(&self, created_gte: Option<i64>) -> Result<Vec<Value>, std::io::Error> {
+    pub async fn list_invoices(
+        &self,
+        created_gte: Option<i64>,
+    ) -> Result<Vec<Value>, std::io::Error> {
         self.get_list(
             "/invoices",
             "invoices.json",
@@ -218,7 +230,10 @@ impl StripeApiClient {
         .await
     }
 
-    pub async fn list_charges(&self, created_gte: Option<i64>) -> Result<Vec<Value>, std::io::Error> {
+    pub async fn list_charges(
+        &self,
+        created_gte: Option<i64>,
+    ) -> Result<Vec<Value>, std::io::Error> {
         self.get_list("/charges", "charges.json", created_gte, None)
             .await
     }
@@ -227,16 +242,27 @@ impl StripeApiClient {
         &self,
         created_gte: Option<i64>,
     ) -> Result<Vec<Value>, std::io::Error> {
-        self.get_list("/payment_intents", "payment_intents.json", created_gte, None)
-            .await
+        self.get_list(
+            "/payment_intents",
+            "payment_intents.json",
+            created_gte,
+            None,
+        )
+        .await
     }
 
-    pub async fn list_refunds(&self, created_gte: Option<i64>) -> Result<Vec<Value>, std::io::Error> {
+    pub async fn list_refunds(
+        &self,
+        created_gte: Option<i64>,
+    ) -> Result<Vec<Value>, std::io::Error> {
         self.get_list("/refunds", "refunds.json", created_gte, None)
             .await
     }
 
-    pub async fn list_disputes(&self, created_gte: Option<i64>) -> Result<Vec<Value>, std::io::Error> {
+    pub async fn list_disputes(
+        &self,
+        created_gte: Option<i64>,
+    ) -> Result<Vec<Value>, std::io::Error> {
         self.get_list("/disputes", "disputes.json", created_gte, None)
             .await
     }
@@ -254,12 +280,18 @@ impl StripeApiClient {
         .await
     }
 
-    pub async fn list_payouts(&self, created_gte: Option<i64>) -> Result<Vec<Value>, std::io::Error> {
+    pub async fn list_payouts(
+        &self,
+        created_gte: Option<i64>,
+    ) -> Result<Vec<Value>, std::io::Error> {
         self.get_list("/payouts", "payouts.json", created_gte, None)
             .await
     }
 
-    pub async fn list_coupons(&self, created_gte: Option<i64>) -> Result<Vec<Value>, std::io::Error> {
+    pub async fn list_coupons(
+        &self,
+        created_gte: Option<i64>,
+    ) -> Result<Vec<Value>, std::io::Error> {
         self.get_list("/coupons", "coupons.json", created_gte, None)
             .await
     }
@@ -268,8 +300,13 @@ impl StripeApiClient {
         &self,
         created_gte: Option<i64>,
     ) -> Result<Vec<Value>, std::io::Error> {
-        self.get_list("/promotion_codes", "promotion_codes.json", created_gte, None)
-            .await
+        self.get_list(
+            "/promotion_codes",
+            "promotion_codes.json",
+            created_gte,
+            None,
+        )
+        .await
     }
 }
 
@@ -291,8 +328,7 @@ pub fn stripe_bool(obj: &Value, key: &str) -> Option<bool> {
 
 pub fn unix_to_iso(ts: Option<i64>) -> Option<String> {
     ts.and_then(|t| {
-        chrono::DateTime::from_timestamp(t, 0)
-            .map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
+        chrono::DateTime::from_timestamp(t, 0).map(|dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string())
     })
 }
 
@@ -330,11 +366,7 @@ pub fn subscription_mrr_cents(sub: &Value) -> i64 {
     total
 }
 
-pub fn map_account(
-    ingest_run_date: &str,
-    stripe_account_id: &str,
-    obj: &Value,
-) -> Value {
+pub fn map_account(ingest_run_date: &str, stripe_account_id: &str, obj: &Value) -> Value {
     json!({
         "ingest_run_date": ingest_run_date,
         "stripe_account_id": stripe_account_id,

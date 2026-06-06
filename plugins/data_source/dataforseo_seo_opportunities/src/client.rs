@@ -262,12 +262,7 @@ fn parse_task(task: &Value) -> Result<ParsedTaskResponse, std::io::Error> {
             .and_then(json_u32)
             .unwrap_or(items.len() as u32);
         let total_count = result.get("total_count").and_then(json_u64);
-        (
-            items,
-            items_count,
-            total_count,
-            Some(result.clone()),
-        )
+        (items, items_count, total_count, Some(result.clone()))
     } else {
         (Vec::new(), 0, None, None)
     };
@@ -288,10 +283,7 @@ fn load_fixture(dir: &str, name: &str) -> Result<LiveApiResponse, std::io::Error
     let base = dir.trim_end_matches('/');
     let path = format!("{base}/{name}.json");
     let bytes = std::fs::read(&path).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            format!("fixture {path}: {e}"),
-        )
+        std::io::Error::new(std::io::ErrorKind::NotFound, format!("fixture {path}: {e}"))
     })?;
     let json: Value = serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
     parse_live_response(&json)

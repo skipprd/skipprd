@@ -199,9 +199,7 @@ impl DataSourceBingWebmasterToolsPlugin {
             primary_key.push(FieldPath::single(*dim));
         }
         let description = match stream.kind {
-            BingStreamKind::DatedReport => {
-                "Bing Webmaster Tools mutable daily report".into()
-            }
+            BingStreamKind::DatedReport => "Bing Webmaster Tools mutable daily report".into(),
             BingStreamKind::PageSnapshot => {
                 "Bing Webmaster Tools page traffic snapshot by sync date".into()
             }
@@ -316,6 +314,7 @@ impl DataSourceBingWebmasterToolsPlugin {
                 offset_key,
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: format!(
                     "bing-webmaster://{}/{}",
                     self.config.normalized_site_url(),
@@ -359,7 +358,11 @@ impl DataSourceBingWebmasterToolsPlugin {
             Self::load_last_completed(ctx.as_ref(), &checkpoint_key)
         };
         let planner = DateWindowPlanner {
-            lookback_days: if discover { 0 } else { self.config.lookback_days },
+            lookback_days: if discover {
+                0
+            } else {
+                self.config.lookback_days
+            },
         };
         let window = planner.plan(start_date, last_completed, end_date);
         let dates = DateWindowPlanner::dates_inclusive(&window);
@@ -698,7 +701,9 @@ mod tests {
         };
         let plugin = DataSourceBingWebmasterToolsPlugin::new(cfg).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
-        let err = rt.block_on(plugin.auth_mode()).expect_err("auth should fail");
+        let err = rt
+            .block_on(plugin.auth_mode())
+            .expect_err("auth should fail");
         assert!(
             err.to_string().contains("api_key")
                 || err.to_string().contains("access_token")
@@ -721,7 +726,8 @@ mod tests {
         let mut plugin = DataSourceBingWebmasterToolsPlugin::new(cfg).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = Arc::new(RecordingSyncContext::default());
-        rt.block_on(plugin.sync(ctx.clone())).expect("discover sync");
+        rt.block_on(plugin.sync(ctx.clone()))
+            .expect("discover sync");
         assert!(ctx.checkpoint_stores.lock().unwrap().is_empty());
 
         test_env::clear_fixture_dir();
@@ -816,10 +822,7 @@ mod tests {
             .into_iter()
             .find(|c| c.namespace == "bing_webmaster_tools.query_daily")
             .expect("query_daily contract");
-        assert!(contract
-            .primary_key
-            .iter()
-            .any(|p| p.0 == ["Query"]));
+        assert!(contract.primary_key.iter().any(|p| p.0 == ["Query"]));
     }
 
     #[test]
@@ -834,10 +837,7 @@ mod tests {
     #[test]
     fn execution_contract_is_finite_once() {
         let plugin = DataSourceBingWebmasterToolsPlugin::new(test_config()).unwrap();
-        assert_eq!(
-            plugin.execution_contract().once,
-            SourceOnceContract::Finite
-        );
+        assert_eq!(plugin.execution_contract().once, SourceOnceContract::Finite);
     }
 
     #[test]
@@ -936,7 +936,8 @@ mod tests {
         let mut plugin = DataSourceBingWebmasterToolsPlugin::new(cfg).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = Arc::new(RecordingSyncContext::default());
-        rt.block_on(plugin.sync(ctx.clone())).expect("discover sync");
+        rt.block_on(plugin.sync(ctx.clone()))
+            .expect("discover sync");
         let namespaces = ctx.submitted_namespaces();
         assert!(!namespaces.is_empty());
         assert!(namespaces
@@ -1001,7 +1002,9 @@ mod tests {
                 .unwrap()
                 .iter()
                 .flat_map(|task| {
-                    task.batches.iter().filter_map(|batch| batch.namespace.clone())
+                    task.batches
+                        .iter()
+                        .filter_map(|batch| batch.namespace.clone())
                 })
                 .collect()
         }

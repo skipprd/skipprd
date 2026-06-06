@@ -189,6 +189,8 @@ mod tests {
         assert!(row["opportunity_score"].as_f64().unwrap_or(0.0) > 0.0);
         let positives = row["top_positive_factors"].as_array().unwrap();
         assert!(positives.iter().any(|v| v.as_str() == Some("golden_kgr")));
-        assert!(positives.iter().any(|v| v.as_str() == Some("low_authority_domains_ranking")));
+        assert!(positives
+            .iter()
+            .any(|v| v.as_str() == Some("low_authority_domains_ranking")));
     }
 }

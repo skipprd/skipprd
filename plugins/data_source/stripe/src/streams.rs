@@ -107,10 +107,7 @@ pub fn streams_for_profile(profile: StreamProfile) -> Vec<StripeStream> {
         .collect()
 }
 
-pub fn resolve_streams(
-    profile: StreamProfile,
-    explicit: Option<Vec<String>>,
-) -> Vec<StripeStream> {
+pub fn resolve_streams(profile: StreamProfile, explicit: Option<Vec<String>>) -> Vec<StripeStream> {
     let selected: HashSet<String> = explicit.unwrap_or_default().into_iter().collect();
     if selected.is_empty() {
         return streams_for_profile(profile);

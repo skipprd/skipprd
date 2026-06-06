@@ -69,7 +69,8 @@ pub fn namespace_contract(namespace: &str) -> SourceNamespaceContract {
             partition_key: vec![FieldPath::single("run_date")],
             write_policy: WritePolicy::ReplacePartition,
             refresh_window: None,
-            description: "Cookie and web storage keys with PII heuristics (values not stored)".into(),
+            description: "Cookie and web storage keys with PII heuristics (values not stored)"
+                .into(),
             semantics: Some(SourceSemantics::MutableReport),
         },
         NAMESPACE_COOKIE_ENTRY => SourceNamespaceContract {

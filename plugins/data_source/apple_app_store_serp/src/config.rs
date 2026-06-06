@@ -146,17 +146,13 @@ impl DataSourceAppleAppStoreSerpPluginConfig {
         if self.max_queries_per_run == 0 || self.max_queries_per_run > MAX_QUERIES_PER_RUN_CAP {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!(
-                    "max_queries_per_run must be between 1 and {MAX_QUERIES_PER_RUN_CAP}"
-                ),
+                format!("max_queries_per_run must be between 1 and {MAX_QUERIES_PER_RUN_CAP}"),
             ));
         }
         if self.min_query_interval_ms < MIN_QUERY_INTERVAL_MS_FLOOR {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!(
-                    "min_query_interval_ms must be >= {MIN_QUERY_INTERVAL_MS_FLOOR}"
-                ),
+                format!("min_query_interval_ms must be >= {MIN_QUERY_INTERVAL_MS_FLOOR}"),
             ));
         }
         Ok(())

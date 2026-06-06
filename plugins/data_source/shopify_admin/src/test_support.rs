@@ -97,11 +97,7 @@ impl SourceSyncContext for RecordingSyncContext {
         Ok(())
     }
 
-    fn store_checkpoint(
-        &self,
-        key: &str,
-        envelope: &CheckpointEnvelope,
-    ) -> Result<(), String> {
+    fn store_checkpoint(&self, key: &str, envelope: &CheckpointEnvelope) -> Result<(), String> {
         self.checkpoint_stores.lock().unwrap().push(key.to_string());
         self.checkpoints
             .lock()

@@ -3,7 +3,8 @@ use skippr_plugin_shared_api_source::RetryableHttpClient;
 use tracing::warn;
 
 const WEBMASTERS_API_BASE: &str = "https://www.googleapis.com/webmasters/v3";
-const URL_INSPECTION_API: &str = "https://searchconsole.googleapis.com/v1/urlInspection/index:inspect";
+const URL_INSPECTION_API: &str =
+    "https://searchconsole.googleapis.com/v1/urlInspection/index:inspect";
 const GSC_SCOPE: &str = "https://www.googleapis.com/auth/webmasters.readonly";
 
 pub fn normalize_site_url(site_url: &str) -> String {
@@ -113,7 +114,12 @@ pub async fn list_sites(
         .unwrap_or_default();
     Ok(entries
         .iter()
-        .filter_map(|entry| entry.get("siteUrl").and_then(|v| v.as_str()).map(str::to_string))
+        .filter_map(|entry| {
+            entry
+                .get("siteUrl")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        })
         .collect())
 }
 
@@ -210,16 +216,10 @@ pub async fn search_analytics_query_page(
         "dataState": data_state,
         "type": search_type,
     });
-    let response = send_json_request(
-        http,
-        auth_header,
-        reqwest::Method::POST,
-        &url,
-        Some(body),
-    )
-    .await?;
-    let parsed: SearchAnalyticsResponse = serde_json::from_value(response)
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let response =
+        send_json_request(http, auth_header, reqwest::Method::POST, &url, Some(body)).await?;
+    let parsed: SearchAnalyticsResponse =
+        serde_json::from_value(response).map_err(|e| std::io::Error::other(e.to_string()))?;
     Ok(parsed.rows)
 }
 
@@ -247,10 +247,12 @@ fn load_search_analytics_fixture(
             format!("fixture not found at {path}: {e}"),
         )
     })?;
-    let body: SearchAnalyticsResponse = serde_json::from_slice(&bytes)
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let body: SearchAnalyticsResponse =
+        serde_json::from_slice(&bytes).map_err(|e| std::io::Error::other(e.to_string()))?;
     let start = start_row as usize;
-    let end = start.saturating_add(row_limit as usize).min(body.rows.len());
+    let end = start
+        .saturating_add(row_limit as usize)
+        .min(body.rows.len());
     Ok(body.rows[start..end].to_vec())
 }
 
@@ -336,8 +338,7 @@ async fn send_json_request(
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<u64>().ok());
-        match RetryableHttpClient::classify_status(status, retry_after)
-        {
+        match RetryableHttpClient::classify_status(status, retry_after) {
             skippr_plugin_shared_api_source::RetryDecision::Success => {
                 return response
                     .json()
@@ -381,14 +382,20 @@ pub fn parse_query_response_rows(
     let mut out = Vec::with_capacity(api_rows.len());
     for row in api_rows {
         let mut record = serde_json::Map::new();
-        record.insert("site_url".into(), serde_json::Value::String(site_url.to_string()));
+        record.insert(
+            "site_url".into(),
+            serde_json::Value::String(site_url.to_string()),
+        );
         record.insert(
             "search_type".into(),
             serde_json::Value::String(search_type.to_string()),
         );
         for (idx, dim_name) in stream_dimensions.iter().enumerate() {
             let value = row.keys.get(idx).map(String::as_str).unwrap_or_default();
-            record.insert((*dim_name).into(), serde_json::Value::String(value.to_string()));
+            record.insert(
+                (*dim_name).into(),
+                serde_json::Value::String(value.to_string()),
+            );
         }
         record.insert("clicks".into(), serde_json::json!(row.clicks));
         record.insert("impressions".into(), serde_json::json!(row.impressions));
@@ -431,12 +438,8 @@ mod tests {
             ctr: 0.1,
             position: 5.2,
         }];
-        let parsed = parse_query_response_rows(
-            &rows,
-            &["date", "query"],
-            "https://example.com/",
-            "web",
-        );
+        let parsed =
+            parse_query_response_rows(&rows, &["date", "query"], "https://example.com/", "web");
         assert_eq!(parsed.len(), 1);
         assert_eq!(parsed[0]["date"], "2024-06-01");
         assert_eq!(parsed[0]["query"], "example query");

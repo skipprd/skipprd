@@ -326,6 +326,7 @@ impl DataSourceKinesisPlugin {
                         offset_key,
                         data,
                         bytes,
+                        offset_pos: None,
                         source_uri: format!("kinesis://{stream_name}/{sid}"),
                         namespace: Some(ns_display.clone()),
                         cdc_rows: None,

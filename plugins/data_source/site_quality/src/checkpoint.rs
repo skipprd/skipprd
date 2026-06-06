@@ -64,7 +64,6 @@ pub fn should_skip_heavy_audits(
         .unwrap_or(false)
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

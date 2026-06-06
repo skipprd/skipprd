@@ -7,9 +7,7 @@ use skippr_runtime_sdk::plugins::{OffsetValidationEntry, SourcePayloadTask, Sour
 use skippr_runtime_sdk::protocol::RuntimeOffsetMaterializationHint;
 use skippr_runtime_sdk::source_compat::ThroughputMetrics;
 
-use crate::config::{
-    AppStoreEntity, DataSourceAppleAppStoreSerpPluginConfig, TargetEntry,
-};
+use crate::config::{AppStoreEntity, DataSourceAppleAppStoreSerpPluginConfig, TargetEntry};
 use crate::itunes::FIXTURE_ENV;
 
 pub fn sample_config() -> DataSourceAppleAppStoreSerpPluginConfig {
@@ -33,7 +31,10 @@ pub fn sample_config() -> DataSourceAppleAppStoreSerpPluginConfig {
 }
 
 pub fn set_fixture_dir() {
-    std::env::set_var(FIXTURE_ENV, concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures"));
+    std::env::set_var(
+        FIXTURE_ENV,
+        concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures"),
+    );
 }
 
 pub fn clear_fixture_dir() {
@@ -111,11 +112,7 @@ impl SourceSyncContext for RecordingSyncContext {
         Ok(())
     }
 
-    fn store_checkpoint(
-        &self,
-        key: &str,
-        envelope: &CheckpointEnvelope,
-    ) -> Result<(), String> {
+    fn store_checkpoint(&self, key: &str, envelope: &CheckpointEnvelope) -> Result<(), String> {
         self.checkpoint_stores.lock().unwrap().push(key.to_string());
         self.checkpoints
             .lock()

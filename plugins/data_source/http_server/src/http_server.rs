@@ -140,6 +140,7 @@ impl DataSource for DataSourceHttpServerPlugin {
                             offset_key,
                             data,
                             bytes,
+                            offset_pos: None,
                             source_uri: format!("http_server://{}{}", addr, path),
                             namespace: Some("http_server".to_string()),
                             cdc_rows: None,

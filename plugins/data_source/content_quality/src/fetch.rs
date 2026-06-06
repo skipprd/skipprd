@@ -39,7 +39,11 @@ impl HttpFetcher {
         self
     }
 
-    pub async fn get(&self, url: &str, origin: &SiteOrigin) -> Result<FetchResponse, std::io::Error> {
+    pub async fn get(
+        &self,
+        url: &str,
+        origin: &SiteOrigin,
+    ) -> Result<FetchResponse, std::io::Error> {
         if let Some(dir) = &self.fixture_dir {
             if let Some(resp) = self.read_fixture(dir, url, origin)? {
                 return Ok(resp);
@@ -170,10 +174,7 @@ mod tests {
         let dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
         let origin = normalize_site("https://example.com").unwrap();
         let fetcher = HttpFetcher::new("test").with_fixture_dir(dir);
-        let resp = fetcher
-            .get("https://example.com/", &origin)
-            .await
-            .unwrap();
+        let resp = fetcher.get("https://example.com/", &origin).await.unwrap();
         assert!(resp.body.contains("<html"));
     }
 }

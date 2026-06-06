@@ -80,6 +80,7 @@ impl DataSourceSocketPlugin {
                 offset_key,
                 data,
                 bytes,
+                offset_pos: None,
                 source_uri: format!("socket://{}:{}", self.config.mode, self.config.address),
                 namespace: Some(namespace),
                 cdc_rows: None,

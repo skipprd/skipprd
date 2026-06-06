@@ -24,12 +24,9 @@ use skippr_runtime_sdk::source_compat::{
 use tracing::info;
 
 use crate::meta_api::{
-    api_version_or_default, normalize_ad_account_id, rows_from_insights_body,
-    MetaInsightsApiClient,
+    api_version_or_default, normalize_ad_account_id, rows_from_insights_body, MetaInsightsApiClient,
 };
-use crate::streams::{
-    resolve_streams, InsightsLevel, MetaStreamDef, StreamProfile,
-};
+use crate::streams::{resolve_streams, InsightsLevel, MetaStreamDef, StreamProfile};
 
 const CHECKPOINT_PAYLOAD_VERSION: u32 = 1;
 const DISCOVER_SAMPLE_DAYS: u32 = 3;
@@ -123,7 +120,11 @@ impl DataSourceMetaAdsPlugin {
     fn build_auth(
         config: &DataSourceMetaAdsPluginConfig,
     ) -> Result<(Option<StaticBearerAuth>, Option<OAuth2RefreshTokenAuth>), std::io::Error> {
-        if let Some(token) = config.access_token.as_deref().filter(|t| !t.trim().is_empty()) {
+        if let Some(token) = config
+            .access_token
+            .as_deref()
+            .filter(|t| !t.trim().is_empty())
+        {
             return Ok((Some(StaticBearerAuth::new(token.trim())), None));
         }
         if std::env::var("SKIPPR_META_ADS_FIXTURE_DIR")
@@ -340,10 +341,8 @@ impl DataSourceMetaAdsPlugin {
                 offset_key,
                 data: payload,
                 bytes,
-                source_uri: format!(
-                    "meta-ads://act_{}/insights",
-                    self.ad_account_id
-                ),
+                offset_pos: None,
+                source_uri: format!("meta-ads://act_{}/insights", self.ad_account_id),
                 namespace: Some(stream.namespace.to_string()),
                 cdc_rows: None,
             }],
@@ -548,9 +547,7 @@ impl DataSource for DataSourceMetaAdsPlugin {
         if end_date < start_date {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!(
-                    "Meta Instagram Ads end date {end_date} is before start date {start_date}"
-                ),
+                format!("Meta Instagram Ads end date {end_date} is before start date {start_date}"),
             ));
         }
 
@@ -566,7 +563,11 @@ impl DataSource for DataSourceMetaAdsPlugin {
         let api = self.api_client();
         let access_token = self.access_token().await?;
         let planner = DateWindowPlanner {
-            lookback_days: if discover { 0 } else { self.config.lookback_days },
+            lookback_days: if discover {
+                0
+            } else {
+                self.config.lookback_days
+            },
         };
 
         for stream in streams {
@@ -638,7 +639,11 @@ mod tests {
         assert_eq!(end_out, end);
         assert_eq!(start, NaiveDate::from_ymd_opt(2026, 5, 23).unwrap());
         assert_eq!(
-            DateWindowPlanner::dates_inclusive(&DateWindow { start, end: end_out }).len(),
+            DateWindowPlanner::dates_inclusive(&DateWindow {
+                start,
+                end: end_out
+            })
+            .len(),
             DISCOVER_SAMPLE_DAYS as usize
         );
     }
@@ -671,10 +676,9 @@ mod tests {
     #[test]
     fn parses_account_insights_fixture() {
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
-        let body: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(format!(
-            "{fixture_dir}/account_insights.json"
-        ))
-        .unwrap())
+        let body: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(format!("{fixture_dir}/account_insights.json")).unwrap(),
+        )
         .unwrap();
         let stream = streams_for_profile(StreamProfile::Minimal)[0];
         let rows = parse_insight_rows(&body, stream, "123456789", true);
@@ -739,9 +743,7 @@ mod tests {
         let rows = rt
             .block_on(async {
                 let token = plugin.access_token().await.unwrap();
-                plugin
-                    .sync_stream_date(&api, stream, date, &token)
-                    .await
+                plugin.sync_stream_date(&api, stream, date, &token).await
             })
             .expect("fixture sync");
         assert!(!rows.is_empty());
@@ -782,13 +784,12 @@ mod tests {
 
     #[test]
     fn config_defaults_and_validation_succeed() {
-        let cfg: DataSourceMetaAdsPluginConfig =
-            serde_json::from_value(serde_json::json!({
-                "ad_account_id": "act_123",
-                "access_token": "token",
-                "start_date": "2024-01-01"
-            }))
-            .expect("deserialize");
+        let cfg: DataSourceMetaAdsPluginConfig = serde_json::from_value(serde_json::json!({
+            "ad_account_id": "act_123",
+            "access_token": "token",
+            "start_date": "2024-01-01"
+        }))
+        .expect("deserialize");
         assert_eq!(cfg.stream_profile, StreamProfile::Full);
         assert!(!cfg.instagram_filter);
         cfg.validate().expect("valid ad_account_id");
@@ -815,7 +816,11 @@ mod tests {
             match stream.level {
                 InsightsLevel::Account => {}
                 InsightsLevel::Campaign => {
-                    assert!(pk.contains(&"campaign_id".to_string()), "{}", stream.namespace);
+                    assert!(
+                        pk.contains(&"campaign_id".to_string()),
+                        "{}",
+                        stream.namespace
+                    );
                 }
                 InsightsLevel::Adset => {
                     assert!(pk.contains(&"adset_id".to_string()), "{}", stream.namespace);
@@ -911,9 +916,7 @@ mod tests {
         let mut plugin = DataSourceMetaAdsPlugin::new(cfg).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = Arc::new(RecordingSyncContext::default());
-        let err = rt
-            .block_on(plugin.sync(ctx))
-            .expect_err("end before start");
+        let err = rt.block_on(plugin.sync(ctx)).expect_err("end before start");
         assert!(err.to_string().contains("before start date"));
 
         std::env::remove_var("SKIPPR_META_ADS_FIXTURE_DIR");
@@ -944,7 +947,9 @@ mod tests {
     fn parse_malformed_insights_body_returns_no_rows() {
         let stream = streams_for_profile(StreamProfile::Minimal)[0];
         assert!(parse_insight_rows(&serde_json::json!({}), stream, "123", true).is_empty());
-        assert!(parse_insight_rows(&serde_json::json!({"data": "bad"}), stream, "123", true).is_empty());
+        assert!(
+            parse_insight_rows(&serde_json::json!({"data": "bad"}), stream, "123", true).is_empty()
+        );
     }
 
     #[test]
@@ -1063,7 +1068,8 @@ mod tests {
         let mut plugin = DataSourceMetaAdsPlugin::new(cfg).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = Arc::new(RecordingSyncContext::default());
-        rt.block_on(plugin.sync(ctx.clone())).expect("discover sync");
+        rt.block_on(plugin.sync(ctx.clone()))
+            .expect("discover sync");
         assert!(
             ctx.checkpoint_stores.lock().unwrap().is_empty(),
             "discover must not persist checkpoints"
@@ -1073,11 +1079,11 @@ mod tests {
         std::env::remove_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV);
     }
 
-    use skippr_runtime_sdk::protocol::RuntimeOffsetMaterializationHint;
-    use skippr_runtime_sdk::source_compat::ThroughputMetrics;
     use skippr_runtime_sdk::plugins::{
         OffsetValidationEntry, SourcePayloadTask, SourceSyncContext,
     };
+    use skippr_runtime_sdk::protocol::RuntimeOffsetMaterializationHint;
+    use skippr_runtime_sdk::source_compat::ThroughputMetrics;
 
     #[derive(Default)]
     struct RecordingSyncContext {
@@ -1116,10 +1122,7 @@ mod tests {
             key: &str,
             _envelope: &CheckpointEnvelope,
         ) -> Result<(), String> {
-            self.checkpoint_stores
-                .lock()
-                .unwrap()
-                .push(key.to_string());
+            self.checkpoint_stores.lock().unwrap().push(key.to_string());
             Ok(())
         }
 
@@ -1128,4 +1131,3 @@ mod tests {
         }
     }
 }
-

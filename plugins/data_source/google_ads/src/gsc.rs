@@ -367,6 +367,7 @@ impl DataSourceGoogleAdsPlugin {
                 offset_key,
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: format!(
                     "gaads://{}/searchAnalytics",
                     self.config.normalized_site_url()

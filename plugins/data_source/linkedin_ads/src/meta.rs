@@ -325,6 +325,7 @@ impl DataSourceLinkedInAdsPlugin {
                 offset_key,
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: format!(
                     "linkedin-ads://act_{}/insights",
                     self.ad_account_id

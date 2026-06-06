@@ -146,6 +146,7 @@ impl DataSource for DataSourceDeltaLakePlugin {
                     offset_key: offset_key.clone(),
                     data: json_str,
                     bytes,
+                    offset_pos: None,
                     source_uri: format!("delta://{}", self.config.table_uri),
                     namespace: Some(namespace.clone()),
                     cdc_rows: None,

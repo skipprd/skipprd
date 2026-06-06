@@ -132,6 +132,7 @@ impl DataSource for DataSourceSnsPlugin {
                     offset_key,
                     data: inner,
                     bytes,
+                    offset_pos: None,
                     source_uri: format!("sns://{}", topic_name),
                     namespace: Some(namespace.clone()),
                     cdc_rows: None,

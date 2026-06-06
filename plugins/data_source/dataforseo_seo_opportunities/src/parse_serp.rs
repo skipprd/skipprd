@@ -36,7 +36,9 @@ pub fn parse_serp_items(items: &[Value], ctx: &SerpParseContext<'_>) -> ParsedSe
             }
             "featured_snippet" | "people_also_ask" | "local_pack" | "video" | "images"
             | "shopping" | "knowledge_graph" | "answer_box" | "ai_overview" => {
-                parsed.features.extend(parse_feature_item(item, ctx, item_type));
+                parsed
+                    .features
+                    .extend(parse_feature_item(item, ctx, item_type));
             }
             _ => {
                 if item.get("url").is_some() {
@@ -44,7 +46,9 @@ pub fn parse_serp_items(items: &[Value], ctx: &SerpParseContext<'_>) -> ParsedSe
                         parsed.results.push(row);
                     }
                 } else if item.get("items").is_some() {
-                    parsed.features.extend(parse_feature_item(item, ctx, item_type));
+                    parsed
+                        .features
+                        .extend(parse_feature_item(item, ctx, item_type));
                 }
             }
         }
@@ -52,7 +56,11 @@ pub fn parse_serp_items(items: &[Value], ctx: &SerpParseContext<'_>) -> ParsedSe
     parsed
 }
 
-fn parse_organic_item(item: &Value, ctx: &SerpParseContext<'_>, keyword_lower: &str) -> Option<Value> {
+fn parse_organic_item(
+    item: &Value,
+    ctx: &SerpParseContext<'_>,
+    keyword_lower: &str,
+) -> Option<Value> {
     let url = item.get("url").and_then(|v| v.as_str())?;
     let domain = item
         .get("domain")
@@ -60,15 +68,15 @@ fn parse_organic_item(item: &Value, ctx: &SerpParseContext<'_>, keyword_lower: &
         .map(str::to_lowercase)
         .or_else(|| domain_from_url(url))
         .unwrap_or_default();
-    let title = item.get("title").and_then(|v| v.as_str()).unwrap_or_default();
+    let title = item
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
     let description = item
         .get("description")
         .and_then(|v| v.as_str())
         .unwrap_or_default();
-    let rank_absolute = item
-        .get("rank_absolute")
-        .and_then(json_u32)
-        .unwrap_or(0);
+    let rank_absolute = item.get("rank_absolute").and_then(json_u32).unwrap_or(0);
     let rank_group = item.get("rank_group").and_then(json_u32).unwrap_or(0);
     let estimated_domain_rank = item
         .get("rank_info")
@@ -108,11 +116,7 @@ fn parse_organic_item(item: &Value, ctx: &SerpParseContext<'_>, keyword_lower: &
     }))
 }
 
-fn parse_feature_item(
-    item: &Value,
-    ctx: &SerpParseContext<'_>,
-    feature_type: &str,
-) -> Vec<Value> {
+fn parse_feature_item(item: &Value, ctx: &SerpParseContext<'_>, feature_type: &str) -> Vec<Value> {
     let mut rows = Vec::new();
     let position = item.get("rank_absolute").and_then(json_u32);
     if feature_type == "people_also_ask" {
@@ -138,9 +142,7 @@ fn parse_feature_item(
                         .get("url")
                         .and_then(|v| v.as_str())
                         .map(str::to_string);
-                    owned_by_domain = source_url
-                        .as_deref()
-                        .and_then(domain_from_url);
+                    owned_by_domain = source_url.as_deref().and_then(domain_from_url);
                 }
                 rows.push(json!({
                     "site": ctx.site,
@@ -201,10 +203,7 @@ fn title_match(keyword_lower: &str, title: &str) -> f64 {
     if tokens.is_empty() {
         return 0.0;
     }
-    let matched = tokens
-        .iter()
-        .filter(|t| title_lower.contains(**t))
-        .count();
+    let matched = tokens.iter().filter(|t| title_lower.contains(**t)).count();
     matched as f64 / tokens.len() as f64
 }
 

@@ -211,6 +211,7 @@ impl DataSource for DataSourceRedshiftPlugin {
                         offset_key: offset_key.clone(),
                         data: json_str,
                         bytes,
+                        offset_pos: None,
                         source_uri: format!("redshift://{}/{}", self.config.database, table_name),
                         namespace: Some(namespace.clone()),
                         cdc_rows: None,

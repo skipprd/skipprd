@@ -295,6 +295,7 @@ pub struct IngestBatch {
     pub offset_key: OffsetKey,
     pub data: String,
     pub bytes: usize,
+    pub offset_pos: Option<u64>,
     #[allow(dead_code)]
     pub source_uri: String,
     /// Explicit namespace override from the input plugin (e.g. table name for
@@ -323,10 +324,25 @@ impl IngestBatch {
             offset_key,
             data,
             bytes,
+            offset_pos: None,
             source_uri,
             namespace: namespace.map(|ns| storage_namespace(&ns)),
             cdc_rows,
         }
+    }
+
+    pub fn new_with_offset_pos(
+        offset_key: OffsetKey,
+        data: String,
+        bytes: usize,
+        offset_pos: u64,
+        source_uri: String,
+        namespace: Option<String>,
+        cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
+    ) -> Self {
+        let mut batch = Self::new(offset_key, data, bytes, source_uri, namespace, cdc_rows);
+        batch.offset_pos = Some(offset_pos);
+        batch
     }
 
     pub fn offset_key(&self) -> &OffsetKey {
@@ -339,6 +355,12 @@ impl IngestBatch {
 
     pub fn bytes(&self) -> usize {
         self.bytes
+    }
+
+    pub fn offset_pos_for_line(&self, line: u64) -> u64 {
+        self.offset_pos
+            .map(|base| base.saturating_add(line.saturating_sub(1)))
+            .unwrap_or(line)
     }
 
     pub fn source_uri(&self) -> &str {
@@ -354,12 +376,48 @@ impl IngestBatch {
     }
 }
 
+#[cfg(test)]
+mod ingest_batch_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_offset_pos_overrides_line_number() {
+        let batch = IngestBatch::new_with_offset_pos(
+            OffsetKey::new("postgres.orders", "orders"),
+            "{}".to_string(),
+            2,
+            42,
+            "postgres://orders".to_string(),
+            Some("postgres.orders".to_string()),
+            None,
+        );
+
+        assert_eq!(batch.offset_pos_for_line(1), 42);
+        assert_eq!(batch.offset_pos_for_line(3), 44);
+    }
+
+    #[test]
+    fn default_offset_pos_uses_line_number() {
+        let batch = IngestBatch::new(
+            OffsetKey::new("file.orders", "orders"),
+            "{}".to_string(),
+            2,
+            "file://orders".to_string(),
+            Some("file.orders".to_string()),
+            None,
+        );
+
+        assert_eq!(batch.offset_pos_for_line(3), 3);
+    }
+}
+
 impl From<IngestBatch> for RuntimeRawIngestBatch {
     fn from(batch: IngestBatch) -> Self {
         Self {
             offset_key: batch.offset_key,
             data: batch.data,
             bytes: batch.bytes,
+            offset_pos: batch.offset_pos,
             source_uri: batch.source_uri,
             namespace: batch.namespace,
             cdc_rows: batch.cdc_rows,
@@ -369,14 +427,16 @@ impl From<IngestBatch> for RuntimeRawIngestBatch {
 
 impl From<RuntimeRawIngestBatch> for IngestBatch {
     fn from(batch: RuntimeRawIngestBatch) -> Self {
-        IngestBatch::new(
+        let mut ingest_batch = IngestBatch::new(
             batch.offset_key,
             batch.data,
             batch.bytes,
             batch.source_uri,
             batch.namespace,
             batch.cdc_rows,
-        )
+        );
+        ingest_batch.offset_pos = batch.offset_pos;
+        ingest_batch
     }
 }
 
@@ -1711,6 +1771,8 @@ impl Ingest {
                     continue;
                 }
 
+                let offset_pos = ingest_batch.offset_pos_for_line(batch_line);
+
                 if has_offsets.is_none()
                     || current_line_offset.is_none()
                     || (Some(true) == has_offsets
@@ -1718,7 +1780,7 @@ impl Ingest {
                             == offset_db_clone.validate(
                                 &ingest_batch.offset_key,
                                 OffsetTypes::Position,
-                                batch_line,
+                                offset_pos,
                             ))
                 {
                     i += 1;
@@ -1839,7 +1901,7 @@ impl Ingest {
                         source,
                         normalized,
                         &ingest_batch.offset_key,
-                        batch_line,
+                        offset_pos,
                         row_cdc_meta,
                     );
 

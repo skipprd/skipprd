@@ -111,11 +111,9 @@ pub fn page_check_rows(
         ));
     }
 
-    let missing_answer = block_scores.iter().any(|s| {
-        s.get("is_self_contained")
-            .and_then(|v| v.as_bool())
-            == Some(false)
-    });
+    let missing_answer = block_scores
+        .iter()
+        .any(|s| s.get("is_self_contained").and_then(|v| v.as_bool()) == Some(false));
     if !block_scores.is_empty() {
         rows.push(check_row(
             site,

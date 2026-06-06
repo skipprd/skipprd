@@ -24,9 +24,16 @@ pub fn namespace_contract(namespace: &str) -> SourceNamespaceContract {
     let site = FieldPath::single("site");
     let crawl_date = FieldPath::single("crawl_date");
     let (primary_key, partition_key) = match namespace {
-        NAMESPACE_SITE_RUN_DAILY => (vec![site.clone(), crawl_date.clone()], vec![crawl_date.clone()]),
+        NAMESPACE_SITE_RUN_DAILY => (
+            vec![site.clone(), crawl_date.clone()],
+            vec![crawl_date.clone()],
+        ),
         NAMESPACE_PAGE_DAILY => (
-            vec![site.clone(), FieldPath::single("canonical_url"), crawl_date.clone()],
+            vec![
+                site.clone(),
+                FieldPath::single("canonical_url"),
+                crawl_date.clone(),
+            ],
             vec![crawl_date.clone()],
         ),
         NAMESPACE_LINK_EDGE => (
@@ -39,7 +46,10 @@ pub fn namespace_contract(namespace: &str) -> SourceNamespaceContract {
             ],
             vec![crawl_date.clone()],
         ),
-        NAMESPACE_ROBOTS_TXT => (vec![site.clone(), crawl_date.clone()], vec![crawl_date.clone()]),
+        NAMESPACE_ROBOTS_TXT => (
+            vec![site.clone(), crawl_date.clone()],
+            vec![crawl_date.clone()],
+        ),
         NAMESPACE_SITEMAP_URL => (
             vec![
                 site.clone(),

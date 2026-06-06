@@ -259,6 +259,7 @@ impl DataSource for DataSourceKafkaPlugin {
                             offset_key,
                             data,
                             bytes,
+                            offset_pos: None,
                             source_uri: format!(
                                 "kafka://{}/{}",
                                 self.config.brokers, self.config.topic

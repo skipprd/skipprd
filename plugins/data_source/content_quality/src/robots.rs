@@ -115,7 +115,11 @@ mod tests {
         let body = "User-agent: *\nDisallow: /private\nSitemap: https://example.com/sitemap.xml\n";
         let parsed = parse_robots_txt(body);
         assert_eq!(parsed.sitemap_urls.len(), 1);
-        assert!(!path_allowed("/private/page", &parsed, "SkipprSeoCrawl/1.0"));
+        assert!(!path_allowed(
+            "/private/page",
+            &parsed,
+            "SkipprSeoCrawl/1.0"
+        ));
         assert!(path_allowed("/public", &parsed, "SkipprSeoCrawl/1.0"));
     }
 }

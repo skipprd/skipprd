@@ -1,10 +1,10 @@
 use skippr_plugin_data_source_site_quality::*;
 use skippr_runtime_sdk::append_source_runtime::run_append_data_source_main;
-use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::plugins::cdc::{
-    SourceBootstrapStyle, SourceCheckpointStyle, SourceGuaranteeTier, SourceOrderModel,
-    EventIdSemantics,
+    EventIdSemantics, SourceBootstrapStyle, SourceCheckpointStyle, SourceGuaranteeTier,
+    SourceOrderModel,
 };
+use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::protocol::RuntimeSourceCapabilityDescriptor;
 
 #[tokio::main]

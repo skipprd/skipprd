@@ -10,9 +10,7 @@ use url::Url;
 
 use crate::config::{DataSourceGoogleSerpRanksPluginConfig, SerpDevice};
 use crate::domain::{domain_matches_target, normalize_domain};
-use crate::worker::{
-    OrganicResultRow, TargetMatchRow, WorkerJobRequest, WorkerJobResult,
-};
+use crate::worker::{OrganicResultRow, TargetMatchRow, WorkerJobRequest, WorkerJobResult};
 
 pub const API_KEY_ENV: &str = "BRIGHTDATA_API_KEY";
 pub const ZONE_ENV: &str = "BRIGHTDATA_ZONE";
@@ -91,10 +89,7 @@ impl BrightDataClient {
             "data_format": "parsed_light"
         });
 
-        let endpoint = format!(
-            "{}/request",
-            self.api_base.trim_end_matches('/')
-        );
+        let endpoint = format!("{}/request", self.api_base.trim_end_matches('/'));
         let response = self
             .http
             .post(&endpoint)
@@ -163,9 +158,7 @@ pub fn build_search_url(
         q.append_pair("brd_json", "1");
     }
     if device == SerpDevice::Mobile {
-        url
-            .query_pairs_mut()
-            .append_pair("brd_mobile", "1");
+        url.query_pairs_mut().append_pair("brd_mobile", "1");
     }
     url.to_string()
 }
@@ -253,9 +246,9 @@ fn organic_entries(parsed: &Value) -> Vec<BrightOrganicRow> {
         if !out.is_empty() {
             return out;
         }
-        if let Ok(rows) = serde_json::from_value::<Vec<BrightOrganicRow>>(Value::Array(
-            items.clone(),
-        )) {
+        if let Ok(rows) =
+            serde_json::from_value::<Vec<BrightOrganicRow>>(Value::Array(items.clone()))
+        {
             let filtered: Vec<_> = rows
                 .into_iter()
                 .filter(|r| r.link.is_some() || r.url.is_some())
@@ -340,9 +333,7 @@ fn build_success_result(
             }
         }
 
-        if config.stop_after_first_target_match
-            && target_matches.iter().any(|m| m.found)
-        {
+        if config.stop_after_first_target_match && target_matches.iter().any(|m| m.found) {
             break;
         }
     }

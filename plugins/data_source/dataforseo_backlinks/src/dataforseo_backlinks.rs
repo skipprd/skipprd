@@ -158,10 +158,7 @@ impl DataForSeoBacklinksPlugin {
                 pk.extend([FieldPath::single("history_date"), run_date.clone()]);
                 (pk, "DataForSEO backlinks history daily snapshot")
             }
-            _ => (
-                vec![run_date.clone()],
-                "DataForSEO backlinks namespace",
-            ),
+            _ => (vec![run_date.clone()], "DataForSEO backlinks namespace"),
         };
 
         SourceNamespaceContract {
@@ -176,10 +173,7 @@ impl DataForSeoBacklinksPlugin {
         }
     }
 
-    fn load_job_checkpoint(
-        ctx: &dyn SourceSyncContext,
-        key: &str,
-    ) -> JobPaginationCheckpoint {
+    fn load_job_checkpoint(ctx: &dyn SourceSyncContext, key: &str) -> JobPaginationCheckpoint {
         load_checkpoint_payload::<JobPaginationCheckpoint>(ctx, key).unwrap_or(
             JobPaginationCheckpoint {
                 offset: 0,
@@ -212,6 +206,7 @@ impl DataForSeoBacklinksPlugin {
                 offset_key: OffsetKey::new(namespace, run_date.to_string()),
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: format!("dataforseo-backlinks://{}", self.site),
                 namespace: Some(namespace.to_string()),
                 cdc_rows: None,
@@ -242,7 +237,10 @@ impl DataForSeoBacklinksPlugin {
 
     fn paginated_limit_max_pages(&self, discover: bool) -> (u32, u32) {
         if discover {
-            return (crate::config::DISCOVER_LIMIT, crate::config::DISCOVER_MAX_PAGES);
+            return (
+                crate::config::DISCOVER_LIMIT,
+                crate::config::DISCOVER_MAX_PAGES,
+            );
         }
         (PAGINATED_DEFAULT_LIMIT, PAGINATED_DEFAULT_MAX_PAGES)
     }
@@ -357,20 +355,11 @@ impl DataForSeoBacklinksPlugin {
         if !all_rows.is_empty() {
             let count = all_rows.len() as u32;
             stats.add_rows(StreamKind::Backlinks.as_str(), count);
-            self.submit_rows(
-                ctx.as_ref(),
-                NAMESPACE_BACKLINK_DAILY,
-                run_date,
-                all_rows,
-            )?;
+            self.submit_rows(ctx.as_ref(), NAMESPACE_BACKLINK_DAILY, run_date, all_rows)?;
         }
 
         if !discover {
-            Self::store_job_checkpoint(
-                ctx.as_ref(),
-                &cp_key,
-                &JobPaginationCheckpoint::default(),
-            )?;
+            Self::store_job_checkpoint(ctx.as_ref(), &cp_key, &JobPaginationCheckpoint::default())?;
         }
 
         Ok(())
@@ -410,8 +399,11 @@ impl DataForSeoBacklinksPlugin {
         let Some(result) = task_result.result_body else {
             return Ok(());
         };
-        if let Some(row) = parse_summary_row(&result, &entity.parse_context(run_date), task_result.task_cost)
-        {
+        if let Some(row) = parse_summary_row(
+            &result,
+            &entity.parse_context(run_date),
+            task_result.task_cost,
+        ) {
             stats.add_rows(StreamKind::Summary.as_str(), 1);
             self.submit_rows(ctx.as_ref(), NAMESPACE_SUMMARY_DAILY, run_date, vec![row])?;
         }
@@ -426,7 +418,9 @@ impl DataForSeoBacklinksPlugin {
     ) -> Result<crate::client::LiveApiResponse, std::io::Error> {
         match stream {
             StreamKind::ReferringDomains => {
-                self.client.post_referring_domains_live(tasks, fixture).await
+                self.client
+                    .post_referring_domains_live(tasks, fixture)
+                    .await
             }
             StreamKind::Anchors => self.client.post_anchors_live(tasks, fixture).await,
             _ => Err(std::io::Error::new(
@@ -448,12 +442,7 @@ impl DataForSeoBacklinksPlugin {
         stats: &mut RunStats,
     ) -> Result<(), std::io::Error> {
         let job_id = stream.as_str();
-        let cp_key = checkpoint_key(
-            stream.as_str(),
-            &entity.checkpoint_key(),
-            job_id,
-            run_date,
-        );
+        let cp_key = checkpoint_key(stream.as_str(), &entity.checkpoint_key(), job_id, run_date);
         let mut checkpoint = if discover {
             JobPaginationCheckpoint::default()
         } else {
@@ -476,7 +465,9 @@ impl DataForSeoBacklinksPlugin {
                 &query,
                 Map::new(),
             );
-            let response = self.post_paginated_stream(stream, vec![task], &fixture).await?;
+            let response = self
+                .post_paginated_stream(stream, vec![task], &fixture)
+                .await?;
             stats.total_api_cost_usd += response.top_level_cost;
 
             let Some(task_result) = response.tasks.into_iter().next() else {
@@ -491,9 +482,11 @@ impl DataForSeoBacklinksPlugin {
 
             let entity_ctx = entity.parse_context(run_date);
             let page_rows = match stream {
-                StreamKind::ReferringDomains => {
-                    parse_referring_domain_items(&task_result.items, &entity_ctx, task_result.task_cost)
-                }
+                StreamKind::ReferringDomains => parse_referring_domain_items(
+                    &task_result.items,
+                    &entity_ctx,
+                    task_result.task_cost,
+                ),
                 StreamKind::Anchors => {
                     parse_anchor_items(&task_result.items, &entity_ctx, task_result.task_cost)
                 }
@@ -545,11 +538,7 @@ impl DataForSeoBacklinksPlugin {
         }
 
         if !discover {
-            Self::store_job_checkpoint(
-                ctx.as_ref(),
-                &cp_key,
-                &JobPaginationCheckpoint::default(),
-            )?;
+            Self::store_job_checkpoint(ctx.as_ref(), &cp_key, &JobPaginationCheckpoint::default())?;
         }
 
         Ok(())
@@ -776,11 +765,7 @@ impl DataForSeoBacklinksPlugin {
         }
 
         if !discover {
-            Self::store_job_checkpoint(
-                ctx.as_ref(),
-                &cp_key,
-                &JobPaginationCheckpoint::default(),
-            )?;
+            Self::store_job_checkpoint(ctx.as_ref(), &cp_key, &JobPaginationCheckpoint::default())?;
         }
 
         Ok(())
@@ -1074,7 +1059,8 @@ mod tests {
 
     #[test]
     fn parse_summary_from_fixture() {
-        let body: serde_json::Value = serde_json::from_slice(&fixture_bytes("summary_live")).unwrap();
+        let body: serde_json::Value =
+            serde_json::from_slice(&fixture_bytes("summary_live")).unwrap();
         let parsed = parse_live_response(&body).unwrap();
         let task = &parsed.tasks[0];
         let entity = SyncEntity {
@@ -1130,7 +1116,9 @@ mod tests {
         };
         let entities = cfg.sync_entities().unwrap();
         assert_eq!(entities.len(), 2);
-        assert!(entities.iter().any(|e| e.entity_kind == EntityKind::Competitor));
+        assert!(entities
+            .iter()
+            .any(|e| e.entity_kind == EntityKind::Competitor));
         let rival = entities
             .iter()
             .find(|e| e.competitor_name.as_deref() == Some("Rival"))

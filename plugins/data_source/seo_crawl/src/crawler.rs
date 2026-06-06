@@ -83,15 +83,12 @@ pub async fn crawl_site(
         }
     }
 
-    let mut sitemap_deferred: VecDeque<String> = collect_sitemap_urls(
-        origin,
-        fetcher,
-        parsed_robots.as_ref(),
-    )
-    .await
-    .into_iter()
-    .filter(|u| !seen.contains(u))
-    .collect();
+    let mut sitemap_deferred: VecDeque<String> =
+        collect_sitemap_urls(origin, fetcher, parsed_robots.as_ref())
+            .await
+            .into_iter()
+            .filter(|u| !seen.contains(u))
+            .collect();
 
     let mut results = Vec::new();
     while results.len() < cap {

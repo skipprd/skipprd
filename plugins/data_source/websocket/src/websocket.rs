@@ -112,6 +112,7 @@ impl DataSource for DataSourceWebsocketPlugin {
                             offset_key,
                             data,
                             bytes,
+                            offset_pos: None,
                             source_uri: self.config.url.clone(),
                             namespace: Some(namespace.clone()),
                             cdc_rows: None,

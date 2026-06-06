@@ -115,8 +115,7 @@ pub struct DataSourceS3Plugin {
 
 impl DataSourceS3Plugin {
     async fn from_config(config: DataSourceS3PluginConfig, temp_dir: String) -> DataSourceS3Plugin {
-        let mut config_loader =
-            aws_config::defaults(aws_config::BehaviorVersion::latest());
+        let mut config_loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
         if let Some(region) = config.region.as_deref().filter(|r| !r.is_empty()) {
             config_loader = config_loader.region(aws_config::Region::new(region.to_string()));
         }
@@ -519,6 +518,7 @@ impl DataSourceS3Plugin {
                     },
                     data: str_data,
                     bytes,
+                    offset_pos: None,
                     source_uri,
                     namespace: None,
                     cdc_rows: None,

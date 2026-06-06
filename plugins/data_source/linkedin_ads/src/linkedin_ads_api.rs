@@ -84,10 +84,7 @@ impl LinkedInAdsApiClient {
                 return load_fixture(&dir, stream.namespace).ok_or_else(|| {
                     std::io::Error::new(
                         std::io::ErrorKind::NotFound,
-                        format!(
-                            "fixture missing for {} in {}",
-                            stream.namespace, dir
-                        ),
+                        format!("fixture missing for {} in {}", stream.namespace, dir),
                     )
                 });
             }

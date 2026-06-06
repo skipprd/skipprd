@@ -23,7 +23,7 @@ use crate::robots::parse_robots_txt;
 use crate::scorecard::{page_check_rows, site_check_rows};
 use crate::streams::{
     all_namespace_contracts, NAMESPACE_CHECK_DAILY, NAMESPACE_LINK_EDGE, NAMESPACE_PAGE_DAILY,
-    NAMESPACE_ROBOTS_TXT, NAMESPACE_SITE_RUN_DAILY, NAMESPACE_SITEMAP_URL,
+    NAMESPACE_ROBOTS_TXT, NAMESPACE_SITEMAP_URL, NAMESPACE_SITE_RUN_DAILY,
 };
 
 const DISCOVER_MAX_PAGES: u32 = 10;
@@ -85,6 +85,7 @@ impl DataSourceSeoCrawlPlugin {
                 offset_key: OffsetKey::new(namespace, crawl_date.to_string()),
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: format!("seo-crawl://{}", self.origin.origin),
                 namespace: Some(namespace.to_string()),
                 cdc_rows: None,
@@ -354,7 +355,9 @@ mod tests {
     use std::sync::Mutex;
 
     use skippr_runtime_sdk::plugins::cdc::CheckpointEnvelope;
-    use skippr_runtime_sdk::plugins::{OffsetValidationEntry, SourcePayloadTask, SourceSyncContext};
+    use skippr_runtime_sdk::plugins::{
+        OffsetValidationEntry, SourcePayloadTask, SourceSyncContext,
+    };
     use skippr_runtime_sdk::protocol::RuntimeOffsetMaterializationHint;
     use skippr_runtime_sdk::source_compat::ThroughputMetrics;
 
@@ -416,11 +419,7 @@ mod tests {
             Ok(())
         }
 
-        fn store_checkpoint(
-            &self,
-            key: &str,
-            envelope: &CheckpointEnvelope,
-        ) -> Result<(), String> {
+        fn store_checkpoint(&self, key: &str, envelope: &CheckpointEnvelope) -> Result<(), String> {
             self.writes.lock().unwrap().push(key.to_string());
             self.checkpoints
                 .lock()
@@ -463,7 +462,8 @@ mod tests {
         let mut plugin = DataSourceSeoCrawlPlugin::new(test_config()).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let ctx = Arc::new(MemorySyncContext::default());
-        rt.block_on(plugin.sync(ctx.clone())).expect("discover sync");
+        rt.block_on(plugin.sync(ctx.clone()))
+            .expect("discover sync");
         assert!(ctx.writes.lock().unwrap().is_empty());
 
         std::env::remove_var("SKIPPR_SEO_CRAWL_FIXTURE_DIR");

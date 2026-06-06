@@ -24,8 +24,8 @@ use crate::openai_blocks::analyze_blocks_batch;
 use crate::origin::SiteOrigin;
 use crate::scorecard::page_check_rows;
 use crate::streams::{
-    all_namespace_contracts, NAMESPACE_CHECK_DAILY, NAMESPACE_CONTENT_BLOCK,
-    NAMESPACE_PAGE_DAILY, NAMESPACE_SITE_RUN_DAILY, NAMESPACE_VECTOR_CHUNK,
+    all_namespace_contracts, NAMESPACE_CHECK_DAILY, NAMESPACE_CONTENT_BLOCK, NAMESPACE_PAGE_DAILY,
+    NAMESPACE_SITE_RUN_DAILY, NAMESPACE_VECTOR_CHUNK,
 };
 
 pub struct DataSourceContentQualityPlugin {
@@ -51,7 +51,10 @@ impl DataSourceContentQualityPlugin {
                 .map(|d| !d.trim().is_empty())
                 .unwrap_or(false)
             {
-                Some(OpenAiChatClient::new("fixture", "https://api.openai.com/v1"))
+                Some(OpenAiChatClient::new(
+                    "fixture",
+                    "https://api.openai.com/v1",
+                ))
             } else {
                 OpenAiChatClient::from_env().ok()
             }
@@ -94,6 +97,7 @@ impl DataSourceContentQualityPlugin {
                 offset_key: OffsetKey::new(namespace, run_date.to_string()),
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: format!("content-quality://{}", self.origin.origin),
                 namespace: Some(namespace.to_string()),
                 cdc_rows: None,
@@ -182,12 +186,7 @@ impl DataSource for DataSourceContentQualityPlugin {
             };
 
             if !unchanged && block_scores_json.is_empty() && !page.parsed.blocks.is_empty() {
-                block_scores_json = page
-                    .parsed
-                    .blocks
-                    .iter()
-                    .map(mock_block_analysis)
-                    .collect();
+                block_scores_json = page.parsed.blocks.iter().map(mock_block_analysis).collect();
             }
 
             let rollup = rollup_page_scores(&block_scores_json);
@@ -223,11 +222,7 @@ impl DataSource for DataSourceContentQualityPlugin {
             }));
 
             for (block, score) in page.parsed.blocks.iter().zip(block_scores_json.iter()) {
-                let chunk_text = format!(
-                    "{}\n\n{}",
-                    block.heading_path.join(" > "),
-                    block.text
-                );
+                let chunk_text = format!("{}\n\n{}", block.heading_path.join(" > "), block.text);
                 block_rows.push(json!({
                     "site": site,
                     "run_date": run_date,

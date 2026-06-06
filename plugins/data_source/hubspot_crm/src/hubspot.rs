@@ -26,9 +26,8 @@ use crate::hubspot_api::{prop_str, HubspotApiClient, FIXTURE_ENV};
 use crate::privacy::{path_without_query, PrivacyConfig, PrivacyStats};
 use crate::streams::{
     resolve_streams, HubspotStream, StreamProfile, NAMESPACE_COMPANY_SNAPSHOT,
-    NAMESPACE_DEAL_SNAPSHOT, NAMESPACE_EVENT_FACT, NAMESPACE_FORM_DIM,
-    NAMESPACE_LANDING_PAGE_DIM, NAMESPACE_PIPELINE_STAGE_DIM, NAMESPACE_PORTAL_SNAPSHOT,
-    NAMESPACE_SYNC_RUN_DAILY,
+    NAMESPACE_DEAL_SNAPSHOT, NAMESPACE_EVENT_FACT, NAMESPACE_FORM_DIM, NAMESPACE_LANDING_PAGE_DIM,
+    NAMESPACE_PIPELINE_STAGE_DIM, NAMESPACE_PORTAL_SNAPSHOT, NAMESPACE_SYNC_RUN_DAILY,
 };
 
 #[derive(Debug, Clone, Deserialize)]
@@ -98,7 +97,12 @@ impl DataSourceHubspotCrmPlugin {
 
     async fn api_client(&self) -> Result<HubspotApiClient, std::io::Error> {
         let http = RetryableHttpClient::new(RetryConfig::default());
-        if let Some(token) = self.config.access_token.as_deref().filter(|t| !t.trim().is_empty()) {
+        if let Some(token) = self
+            .config
+            .access_token
+            .as_deref()
+            .filter(|t| !t.trim().is_empty())
+        {
             return Ok(HubspotApiClient::new(
                 http,
                 self.hub_id.clone(),
@@ -216,7 +220,10 @@ impl DataSourceHubspotCrmPlugin {
             .and_then(|v| v.as_array())
         {
             for entry in stages {
-                let occurred = entry.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+                let occurred = entry
+                    .get("timestamp")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if occurred.is_empty() {
                     continue;
                 }
@@ -273,7 +280,10 @@ impl DataSourceHubspotCrmPlugin {
             .and_then(|v| v.as_array())
         {
             for entry in stages {
-                let occurred = entry.get("timestamp").and_then(|v| v.as_str()).unwrap_or("");
+                let occurred = entry
+                    .get("timestamp")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 if occurred.is_empty() {
                     continue;
                 }
@@ -325,10 +335,7 @@ impl DataSourceHubspotCrmPlugin {
             },
             NAMESPACE_PORTAL_SNAPSHOT => SourceNamespaceContract {
                 namespace: namespace.to_string(),
-                primary_key: vec![
-                    FieldPath::single("hub_id"),
-                    FieldPath::single("run_date"),
-                ],
+                primary_key: vec![FieldPath::single("hub_id"), FieldPath::single("run_date")],
                 cursor: Some(FieldPath::single("run_date")),
                 partition_key: vec![FieldPath::single("run_date")],
                 write_policy: WritePolicy::ReplacePartition,
@@ -338,10 +345,7 @@ impl DataSourceHubspotCrmPlugin {
             },
             NAMESPACE_DEAL_SNAPSHOT => SourceNamespaceContract {
                 namespace: namespace.to_string(),
-                primary_key: vec![
-                    FieldPath::single("deal_id"),
-                    FieldPath::single("run_date"),
-                ],
+                primary_key: vec![FieldPath::single("deal_id"), FieldPath::single("run_date")],
                 cursor: Some(FieldPath::single("run_date")),
                 partition_key: vec![FieldPath::single("run_date")],
                 write_policy: WritePolicy::ReplacePartition,
@@ -397,10 +401,7 @@ impl DataSourceHubspotCrmPlugin {
             },
             NAMESPACE_SYNC_RUN_DAILY => SourceNamespaceContract {
                 namespace: namespace.to_string(),
-                primary_key: vec![
-                    FieldPath::single("hub_id"),
-                    FieldPath::single("run_date"),
-                ],
+                primary_key: vec![FieldPath::single("hub_id"), FieldPath::single("run_date")],
                 cursor: Some(FieldPath::single("run_date")),
                 partition_key: vec![FieldPath::single("run_date")],
                 write_policy: WritePolicy::ReplacePartition,
@@ -417,8 +418,7 @@ impl DataSourceHubspotCrmPlugin {
     }
 
     fn load_last_occurred_at(ctx: &dyn SourceSyncContext, key: &str) -> Option<String> {
-        load_checkpoint_payload::<HubspotIngestCheckpoint>(ctx, key)
-            .map(|cp| cp.last_occurred_at)
+        load_checkpoint_payload::<HubspotIngestCheckpoint>(ctx, key).map(|cp| cp.last_occurred_at)
     }
 
     fn store_last_occurred_at(
@@ -460,7 +460,11 @@ impl DataSourceHubspotCrmPlugin {
                 continue;
             }
             let day = occurred.get(0..10).unwrap_or(&occurred).to_string();
-            if max_occurred.as_ref().map(|m| occurred.as_str() > m.as_str()).unwrap_or(true) {
+            if max_occurred
+                .as_ref()
+                .map(|m| occurred.as_str() > m.as_str())
+                .unwrap_or(true)
+            {
                 max_occurred = Some(occurred.clone());
             }
             by_day.entry(day).or_default().push(row);
@@ -494,6 +498,7 @@ impl DataSourceHubspotCrmPlugin {
                 offset_key: OffsetKey::new(namespace, partition.to_string()),
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: format!("hubspot://{}/{}", self.hub_id, namespace),
                 namespace: Some(namespace.to_string()),
                 cdc_rows: None,
@@ -506,15 +511,21 @@ impl DataSourceHubspotCrmPlugin {
         &self,
         client: &HubspotApiClient,
         run_date: &str,
-    ) -> Result<(Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>), std::io::Error>
-    {
+    ) -> Result<(Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>), std::io::Error> {
         let deal_props: Vec<&str> = self
             .config
             .privacy
             .deal_property_allowlist()
             .map(|list| list.to_vec())
             .unwrap_or_else(|| {
-                vec!["dealname", "amount", "dealstage", "pipeline", "createdate", "closedate"]
+                vec![
+                    "dealname",
+                    "amount",
+                    "dealstage",
+                    "pipeline",
+                    "createdate",
+                    "closedate",
+                ]
             });
         let contact_props: Vec<&str> = self
             .config
@@ -594,7 +605,10 @@ impl DataSourceHubspotCrmPlugin {
                     "owner_id": prop_str(&props, "hubspot_owner_id"),
                 });
                 if let Some(obj) = snap.as_object_mut() {
-                    for (k, v) in attribution_from_props(&props).as_object().unwrap_or(&serde_json::Map::new()) {
+                    for (k, v) in attribution_from_props(&props)
+                        .as_object()
+                        .unwrap_or(&serde_json::Map::new())
+                    {
                         obj.insert(k.clone(), v.clone());
                     }
                 }
@@ -627,12 +641,22 @@ impl DataSourceHubspotCrmPlugin {
             }
         }
 
-        let companies_body = client.search_companies(&["domain", "industry", "numberofemployees", "country", "lifecyclestage", "createdate"]).await?;
+        let companies_body = client
+            .search_companies(&[
+                "domain",
+                "industry",
+                "numberofemployees",
+                "country",
+                "lifecyclestage",
+                "createdate",
+            ])
+            .await?;
         if let Some(results) = companies_body.get("results").and_then(|v| v.as_array()) {
             for company in results {
                 let company_id = company.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let props = company.get("properties").cloned().unwrap_or(json!({}));
-                let created = prop_str(&props, "createdate").unwrap_or_else(|| run_date.to_string());
+                let created =
+                    prop_str(&props, "createdate").unwrap_or_else(|| run_date.to_string());
                 events.push(self.event_row(
                     run_date,
                     "company.created",
@@ -720,7 +744,8 @@ impl DataSourceHubspotCrmPlugin {
             for ticket in results {
                 let ticket_id = ticket.get("id").and_then(|v| v.as_str()).unwrap_or("");
                 let props = ticket.get("properties").cloned().unwrap_or(json!({}));
-                let created = prop_str(&props, "createdate").unwrap_or_else(|| run_date.to_string());
+                let created =
+                    prop_str(&props, "createdate").unwrap_or_else(|| run_date.to_string());
                 let company_id = ticket
                     .pointer("/associations/companies/results/0/id")
                     .and_then(|v| v.as_str())
@@ -860,10 +885,25 @@ impl DataSource for DataSourceHubspotCrmPlugin {
                         self.sync_crm(&client, &run_date).await?;
                     properties_redacted += events.len() as u64;
                     all_events.extend(events);
-                    self.submit_namespace(ctx.as_ref(), NAMESPACE_PORTAL_SNAPSHOT, &run_date, portal)?;
-                    self.submit_namespace(ctx.as_ref(), NAMESPACE_PIPELINE_STAGE_DIM, &run_date, stages)?;
+                    self.submit_namespace(
+                        ctx.as_ref(),
+                        NAMESPACE_PORTAL_SNAPSHOT,
+                        &run_date,
+                        portal,
+                    )?;
+                    self.submit_namespace(
+                        ctx.as_ref(),
+                        NAMESPACE_PIPELINE_STAGE_DIM,
+                        &run_date,
+                        stages,
+                    )?;
                     self.submit_namespace(ctx.as_ref(), NAMESPACE_DEAL_SNAPSHOT, &run_date, deals)?;
-                    self.submit_namespace(ctx.as_ref(), NAMESPACE_COMPANY_SNAPSHOT, &run_date, companies)?;
+                    self.submit_namespace(
+                        ctx.as_ref(),
+                        NAMESPACE_COMPANY_SNAPSHOT,
+                        &run_date,
+                        companies,
+                    )?;
                     Ok(())
                 }
                 HubspotStream::Marketing => {
@@ -880,7 +920,12 @@ impl DataSource for DataSourceHubspotCrmPlugin {
                 HubspotStream::Onsite => {
                     let (events, pages) = self.sync_onsite(&client, &run_date).await?;
                     all_events.extend(events);
-                    self.submit_namespace(ctx.as_ref(), NAMESPACE_LANDING_PAGE_DIM, &run_date, pages)?;
+                    self.submit_namespace(
+                        ctx.as_ref(),
+                        NAMESPACE_LANDING_PAGE_DIM,
+                        &run_date,
+                        pages,
+                    )?;
                     Ok(())
                 }
             };
@@ -931,7 +976,9 @@ mod tests {
 
     use super::*;
     use crate::streams::NAMESPACE_EVENT_FACT;
-    use crate::test_support::{clear_fixture_dir, sample_config, set_fixture_dir, RecordingSyncContext};
+    use crate::test_support::{
+        clear_fixture_dir, sample_config, set_fixture_dir, RecordingSyncContext,
+    };
     use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 
     static ENV_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
@@ -951,11 +998,9 @@ mod tests {
         let events = ctx.rows_for_namespace(NAMESPACE_EVENT_FACT);
         assert!(!events.is_empty());
         assert!(events.iter().all(|e| e.get("email").is_none()));
-        assert!(
-            events
-                .iter()
-                .any(|e| e.get("event_type").and_then(|v| v.as_str()) == Some("deal.created"))
-        );
+        assert!(events
+            .iter()
+            .any(|e| e.get("event_type").and_then(|v| v.as_str()) == Some("deal.created")));
 
         clear_fixture_dir();
     }

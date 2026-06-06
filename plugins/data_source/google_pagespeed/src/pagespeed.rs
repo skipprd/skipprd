@@ -41,11 +41,8 @@ impl DataSourceGooglePageSpeedPlugin {
     pub fn new(config: DataSourceGooglePageSpeedPluginConfig) -> Result<Self, std::io::Error> {
         config.validate()?;
         let api_key = config.resolve_api_key()?;
-        let client = PageSpeedClient::new(
-            api_key,
-            config.categories.clone(),
-            config.locale.clone(),
-        );
+        let client =
+            PageSpeedClient::new(api_key, config.categories.clone(), config.locale.clone());
         Ok(Self { config, client })
     }
 
@@ -122,6 +119,7 @@ impl DataSourceGooglePageSpeedPlugin {
                 offset_key: OffsetKey::new(namespace, run_date.to_string()),
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: format!("google-pagespeed://{}", self.config.site),
                 namespace: Some(namespace.to_string()),
                 cdc_rows: None,
@@ -227,7 +225,12 @@ impl DataSource for DataSourceGooglePageSpeedPlugin {
         self.submit_rows(ctx.as_ref(), NAMESPACE_AUDIT_DAILY, &run_date, audit_rows)?;
         self.submit_rows(ctx.as_ref(), NAMESPACE_CHECK_DAILY, &run_date, issue_rows)?;
         if let Some(row) = field_origin_row {
-            self.submit_rows(ctx.as_ref(), NAMESPACE_FIELD_ORIGIN_DAILY, &run_date, vec![row])?;
+            self.submit_rows(
+                ctx.as_ref(),
+                NAMESPACE_FIELD_ORIGIN_DAILY,
+                &run_date,
+                vec![row],
+            )?;
         }
         self.submit_rows(
             ctx.as_ref(),
@@ -254,23 +257,21 @@ mod tests {
 
     #[test]
     fn namespace_contract_count_matches_catalog() {
-        let plugin = DataSourceGooglePageSpeedPlugin::new(
-            DataSourceGooglePageSpeedPluginConfig {
-                site: "https://example.com".into(),
-                api_key: Some("fixture".into()),
-                url_mode: UrlMode::TldSample,
-                url_list: vec![],
-                max_urls: 1,
-                strategies: vec![Strategy::Mobile],
-                categories: vec!["performance".into()],
-                locale: "en_US".into(),
-                max_requests_per_run: 2,
-                requests_per_minute: 60,
-                respect_robots: true,
-                top_audits_per_page: 5,
-                max_concurrent_requests: 1,
-            },
-        )
+        let plugin = DataSourceGooglePageSpeedPlugin::new(DataSourceGooglePageSpeedPluginConfig {
+            site: "https://example.com".into(),
+            api_key: Some("fixture".into()),
+            url_mode: UrlMode::TldSample,
+            url_list: vec![],
+            max_urls: 1,
+            strategies: vec![Strategy::Mobile],
+            categories: vec!["performance".into()],
+            locale: "en_US".into(),
+            max_requests_per_run: 2,
+            requests_per_minute: 60,
+            respect_robots: true,
+            top_audits_per_page: 5,
+            max_concurrent_requests: 1,
+        })
         .unwrap();
         assert_eq!(plugin.source_namespace_contracts().len(), NAMESPACE_COUNT);
     }

@@ -114,12 +114,7 @@ impl DataSourceSiteSecurityPlugin {
         .await
     }
 
-    fn page_scan_row(
-        &self,
-        run_date: &str,
-        page_url: &str,
-        result: &WorkerJobResult,
-    ) -> Value {
+    fn page_scan_row(&self, run_date: &str, page_url: &str, result: &WorkerJobResult) -> Value {
         let headers = result.headers.as_ref();
         let dom = result.dom.as_ref();
         json!({
@@ -228,6 +223,7 @@ impl DataSourceSiteSecurityPlugin {
                 offset_key,
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: format!("site-security://{namespace}"),
                 namespace: Some(namespace.to_string()),
                 cdc_rows: None,
@@ -358,7 +354,12 @@ impl DataSource for DataSourceSiteSecurityPlugin {
             "cookie_entries": cookie_rows.len(),
         });
 
-        self.submit_namespace(ctx.as_ref(), NAMESPACE_SITE_RUN_DAILY, &run_date, vec![site_run])?;
+        self.submit_namespace(
+            ctx.as_ref(),
+            NAMESPACE_SITE_RUN_DAILY,
+            &run_date,
+            vec![site_run],
+        )?;
         if !discover {
             self.submit_namespace(
                 ctx.as_ref(),

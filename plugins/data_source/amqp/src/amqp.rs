@@ -160,6 +160,7 @@ impl DataSource for DataSourceAmqpPlugin {
                             offset_key,
                             data,
                             bytes,
+                            offset_pos: None,
                             source_uri: format!("amqp://{}", self.config.queue),
                             namespace: Some(namespace.clone()),
                             cdc_rows: None,

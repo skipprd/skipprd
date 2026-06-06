@@ -72,6 +72,7 @@ impl DataSourceAppleAppStoreSerpPlugin {
                 offset_key,
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: format!("apple-app-store://{namespace}"),
                 namespace: Some(namespace.to_string()),
                 cdc_rows: None,
@@ -216,12 +217,8 @@ impl DataSource for DataSourceAppleAppStoreSerpPlugin {
 
         for pair in &pairs {
             if !discover {
-                let prior = load_query_checkpoint(
-                    ctx.as_ref(),
-                    &pair.keyword,
-                    &pair.storefront,
-                    &entity,
-                );
+                let prior =
+                    load_query_checkpoint(ctx.as_ref(), &pair.keyword, &pair.storefront, &entity);
                 if should_skip_query_today(
                     prior.as_ref(),
                     &run_date,
@@ -332,12 +329,7 @@ impl DataSource for DataSourceAppleAppStoreSerpPlugin {
             target_rows,
         )?;
         if self.config.capture_results {
-            self.submit_namespace(
-                ctx.as_ref(),
-                NAMESPACE_RESULT_DAILY,
-                &run_date,
-                result_rows,
-            )?;
+            self.submit_namespace(ctx.as_ref(), NAMESPACE_RESULT_DAILY, &run_date, result_rows)?;
         }
 
         info!(
@@ -354,14 +346,18 @@ impl DataSource for DataSourceAppleAppStoreSerpPlugin {
 mod tests {
     use std::sync::{Arc, LazyLock, Mutex};
 
-    use chrono::Utc;
     use super::*;
     use crate::checkpoint::{
         load_query_checkpoint, store_query_checkpoint, QueryCheckpoint, QueryTerminalStatus,
     };
-    use crate::streams::{NAMESPACE_RESULT_DAILY, NAMESPACE_RUN_DAILY, NAMESPACE_TARGET_RANK_DAILY};
     use crate::config::AppStoreEntity;
-    use crate::test_support::{clear_fixture_dir, sample_config, set_fixture_dir, RecordingSyncContext};
+    use crate::streams::{
+        NAMESPACE_RESULT_DAILY, NAMESPACE_RUN_DAILY, NAMESPACE_TARGET_RANK_DAILY,
+    };
+    use crate::test_support::{
+        clear_fixture_dir, sample_config, set_fixture_dir, RecordingSyncContext,
+    };
+    use chrono::Utc;
     use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 
     static ENV_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));

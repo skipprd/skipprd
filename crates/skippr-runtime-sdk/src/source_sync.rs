@@ -6,9 +6,7 @@ use std::sync::{Arc, Mutex as StdMutex};
 
 use skippr_core::helpers::offsets::{OffsetKey, OffsetTypes};
 use skippr_core::ingest_work::{IngestBatch, ThroughputMetrics};
-use skippr_core::plugins::cdc::{
-    CheckpointAuthority, CheckpointEnvelope, CheckpointKind,
-};
+use skippr_core::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
 use skippr_core::plugins::source_sync::{
     OffsetValidationEntry, SourcePayloadTask, SourceSyncContext,
 };
@@ -44,7 +42,9 @@ fn chunk_source_payload_tasks(
         .map(|bytes| bytes.len())
         .unwrap_or(limit.saturating_add(1));
         if encoded_len > limit {
-            let overflow = current.pop().expect("chunk probe always has at least one task");
+            let overflow = current
+                .pop()
+                .expect("chunk probe always has at least one task");
             if !current.is_empty() {
                 chunks.push(std::mem::take(&mut current));
             }
@@ -247,6 +247,7 @@ impl SourceSyncContext for RuntimeSourceSyncContext {
                         offset_key: batch.offset_key,
                         data: batch.data,
                         bytes: batch.bytes,
+                        offset_pos: batch.offset_pos,
                         source_uri: batch.source_uri,
                         namespace: batch.namespace,
                         cdc_rows: batch.cdc_rows,
@@ -365,10 +366,7 @@ pub fn submit_payload_batch_groups(
 }
 
 /// Returns true when a Closed partition was already ingested and should be skipped.
-pub fn partition_already_closed(
-    ctx: &dyn SourceSyncContext,
-    key: &OffsetKey,
-) -> bool {
+pub fn partition_already_closed(ctx: &dyn SourceSyncContext, key: &OffsetKey) -> bool {
     !validate_offset_key(ctx, key, OffsetTypes::Closed, 1).unwrap_or(true)
 }
 

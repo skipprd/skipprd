@@ -49,11 +49,7 @@ pub fn map_checks(
         model,
         run_date,
         CHECK_TARGET_DOMAIN_LINKED,
-        if target_domain_linked {
-            "pass"
-        } else {
-            "fail"
-        },
+        if target_domain_linked { "pass" } else { "fail" },
         if target_domain_linked {
             "info"
         } else {

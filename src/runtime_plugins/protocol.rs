@@ -383,6 +383,8 @@ pub struct RuntimeRawIngestBatch {
     pub offset_key: OffsetKey,
     pub data: String,
     pub bytes: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub offset_pos: Option<u64>,
     pub source_uri: String,
     pub namespace: Option<String>,
     pub cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,

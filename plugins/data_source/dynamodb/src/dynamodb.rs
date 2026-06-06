@@ -22,8 +22,8 @@ use skippr_runtime_sdk::plugins::{
 };
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{
-    load_checkpoint_payload, store_checkpoint_payload, submit_payload_batch_groups,
-    submit_payload_batches, partition_already_closed, IngestBatch, SourceSyncContext,
+    load_checkpoint_payload, partition_already_closed, store_checkpoint_payload,
+    submit_payload_batch_groups, submit_payload_batches, IngestBatch, SourceSyncContext,
 };
 
 /// CDC scan configuration passed to `sync_scan` when CDC tagging is needed.
@@ -272,6 +272,7 @@ impl DataSourceDynamodbPlugin {
                             offset_key: offset_key.clone(),
                             data: json_str,
                             bytes,
+                            offset_pos: None,
                             source_uri: format!("dynamodb://{}", table_name),
                             namespace: Some(format!("dynamodb.{}", table_name)),
                             cdc_rows,
@@ -604,6 +605,7 @@ impl DataSourceDynamodbPlugin {
                         offset_key: shard_offset_key.clone(),
                         data: json_str,
                         bytes,
+                        offset_pos: None,
                         source_uri: format!("dynamodb-stream://{}/{}", table_name, shard_id),
                         namespace: Some(namespace.clone()),
                         cdc_rows,

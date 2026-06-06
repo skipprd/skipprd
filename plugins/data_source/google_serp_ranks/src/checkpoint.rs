@@ -20,12 +20,7 @@ pub struct QueryCheckpoint {
     pub status: QueryTerminalStatus,
 }
 
-pub fn query_checkpoint_key(
-    keyword: &str,
-    country: &str,
-    language: &str,
-    device: &str,
-) -> String {
+pub fn query_checkpoint_key(keyword: &str, country: &str, language: &str, device: &str) -> String {
     format!("{KEY_PREFIX}:{keyword}:{country}:{language}:{device}")
 }
 

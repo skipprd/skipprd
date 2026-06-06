@@ -21,14 +21,12 @@ impl TargetQueryOptions {
     }
 
     pub fn from_jobs(jobs: &[BacklinkJob]) -> Self {
-        jobs.first()
-            .map(Self::from_job)
-            .unwrap_or(Self {
-                include_subdomains: Some(true),
-                exclude_internal_backlinks: Some(true),
-                backlinks_status_type: Some("live".into()),
-                internal_list_limit: Some(10),
-            })
+        jobs.first().map(Self::from_job).unwrap_or(Self {
+            include_subdomains: Some(true),
+            exclude_internal_backlinks: Some(true),
+            backlinks_status_type: Some("live".into()),
+            internal_list_limit: Some(10),
+        })
     }
 }
 

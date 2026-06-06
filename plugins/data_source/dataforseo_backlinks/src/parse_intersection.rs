@@ -26,11 +26,7 @@ pub fn build_intersection_task(
     } else {
         task.insert("offset".into(), json!(offset));
     }
-    if let Some(mode) = job
-        .intersection_mode
-        .as_deref()
-        .filter(|s| !s.is_empty())
-    {
+    if let Some(mode) = job.intersection_mode.as_deref().filter(|s| !s.is_empty()) {
         task.insert("intersection_mode".into(), json!(mode));
     }
     if let Some(filters) = &job.filters {
@@ -53,7 +49,10 @@ pub fn normalize_intersection_job(
 ) -> Result<(HashMap<String, String>, Vec<String>), std::io::Error> {
     let mut targets = HashMap::new();
     for (key, value) in &job.targets {
-        targets.insert(key.clone(), normalize_target(value).map_err(std::io::Error::other)?);
+        targets.insert(
+            key.clone(),
+            normalize_target(value).map_err(std::io::Error::other)?,
+        );
     }
     let excludes = job
         .exclude_targets
@@ -68,10 +67,7 @@ pub fn normalize_intersection_job(
     Ok((targets, excludes))
 }
 
-pub fn parse_intersection_items(
-    items: &[Value],
-    ctx: &IntersectionParseContext,
-) -> Vec<Value> {
+pub fn parse_intersection_items(items: &[Value], ctx: &IntersectionParseContext) -> Vec<Value> {
     items
         .iter()
         .filter_map(|item| parse_intersection_item(item, ctx))

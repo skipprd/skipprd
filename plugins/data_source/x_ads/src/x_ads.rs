@@ -215,6 +215,7 @@ impl DataSourceXAdsPlugin {
                 offset_key: OffsetKey::new(s.namespace, offset),
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: format!("x-ads://{}", self.account_id),
                 namespace: Some(s.namespace.to_string()),
                 cdc_rows: None,

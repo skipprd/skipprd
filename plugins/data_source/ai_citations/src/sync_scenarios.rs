@@ -166,8 +166,14 @@ async fn happy_brand_and_domain_checks_pass() {
     clear_fixture_env();
 
     let checks = ctx.rows(NAMESPACE_CHECK_DAILY);
-    assert_eq!(checks_with_code(&checks, "RESPONSE_SUCCESS")[0]["status"], "pass");
-    assert_eq!(checks_with_code(&checks, "BRAND_MENTIONED")[0]["status"], "pass");
+    assert_eq!(
+        checks_with_code(&checks, "RESPONSE_SUCCESS")[0]["status"],
+        "pass"
+    );
+    assert_eq!(
+        checks_with_code(&checks, "BRAND_MENTIONED")[0]["status"],
+        "pass"
+    );
     assert_eq!(
         checks_with_code(&checks, "TARGET_DOMAIN_LINKED")[0]["status"],
         "pass"

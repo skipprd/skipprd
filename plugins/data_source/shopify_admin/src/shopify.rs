@@ -28,9 +28,8 @@ use crate::shopify_api::{
     ShopifyGraphqlClient, FIXTURE_ENV,
 };
 use crate::streams::{
-    resolve_streams, ShopifyStream, StreamProfile, NAMESPACE_ORDER_FACT,
-    NAMESPACE_ORDER_LINE_FACT, NAMESPACE_PRODUCT_SNAPSHOT, NAMESPACE_STORE_SNAPSHOT,
-    NAMESPACE_SYNC_RUN_DAILY,
+    resolve_streams, ShopifyStream, StreamProfile, NAMESPACE_ORDER_FACT, NAMESPACE_ORDER_LINE_FACT,
+    NAMESPACE_PRODUCT_SNAPSHOT, NAMESPACE_STORE_SNAPSHOT, NAMESPACE_SYNC_RUN_DAILY,
 };
 
 pub const NAMESPACE_REFUND_FACT: &str = "shopify_refund_fact";
@@ -127,8 +126,13 @@ impl DataSourceShopifyAdminPlugin {
         })
     }
 
-    fn resolve_access_token(config: &DataSourceShopifyAdminPluginConfig) -> Result<String, std::io::Error> {
-        if let Some(token) = config.oauth_access_token.as_deref().filter(|t| !t.trim().is_empty())
+    fn resolve_access_token(
+        config: &DataSourceShopifyAdminPluginConfig,
+    ) -> Result<String, std::io::Error> {
+        if let Some(token) = config
+            .oauth_access_token
+            .as_deref()
+            .filter(|t| !t.trim().is_empty())
         {
             return Ok(token.trim().to_string());
         }
@@ -208,10 +212,7 @@ impl DataSourceShopifyAdminPlugin {
             },
             NAMESPACE_ORDER_LINE_FACT => SourceNamespaceContract {
                 namespace: namespace.to_string(),
-                primary_key: vec![
-                    FieldPath::single("order_id"),
-                    FieldPath::single("line_id"),
-                ],
+                primary_key: vec![FieldPath::single("order_id"), FieldPath::single("line_id")],
                 cursor: Some(FieldPath::single("order_date")),
                 partition_key: vec![FieldPath::single("order_date")],
                 write_policy: WritePolicy::ReplacePartition,
@@ -297,6 +298,7 @@ impl DataSourceShopifyAdminPlugin {
                 offset_key,
                 data: payload,
                 bytes,
+                offset_pos: None,
                 source_uri: format!("shopify://{}/{}", self.shop_domain, namespace),
                 namespace: Some(namespace.to_string()),
                 cdc_rows: None,
@@ -309,10 +311,7 @@ impl DataSourceShopifyAdminPlugin {
         format!("shopify:{}:{}", self.shop_domain, NAMESPACE_ORDER_FACT)
     }
 
-    fn load_last_completed_order_date(
-        ctx: &dyn SourceSyncContext,
-        key: &str,
-    ) -> Option<NaiveDate> {
+    fn load_last_completed_order_date(ctx: &dyn SourceSyncContext, key: &str) -> Option<NaiveDate> {
         load_checkpoint_payload::<ShopifyOrderCheckpoint>(ctx, key)
             .and_then(|cp| NaiveDate::parse_from_str(&cp.last_completed_date, "%Y-%m-%d").ok())
     }
@@ -434,9 +433,7 @@ impl DataSourceShopifyAdminPlugin {
         let mut rows = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
-            let mut body = client
-                .fetch_products_page(cursor.as_deref())
-                .await?;
+            let mut body = client.fetch_products_page(cursor.as_deref()).await?;
             strip_pii_value(&mut body);
             let products = body
                 .pointer("/data/products")
@@ -495,8 +492,7 @@ impl DataSourceShopifyAdminPlugin {
                 .map(gid_tail)
                 .unwrap_or_default();
             let created_at = node.get("createdAt").and_then(|v| v.as_str());
-            let order_date =
-                Self::order_date_from_created_at(created_at, ingest_run_date);
+            let order_date = Self::order_date_from_created_at(created_at, ingest_run_date);
             let journey = node.get("customerJourneySummary");
             let first_visit = journey.and_then(|j| j.get("firstVisit"));
             let utm = first_visit.and_then(|v| v.get("utmParameters"));
@@ -647,9 +643,7 @@ impl DataSourceShopifyAdminPlugin {
         loop {
             let mut body = client.fetch_pages_page(cursor.as_deref()).await?;
             strip_pii_value(&mut body);
-            let nodes = body
-                .pointer("/data/pages/nodes")
-                .and_then(|v| v.as_array());
+            let nodes = body.pointer("/data/pages/nodes").and_then(|v| v.as_array());
             if let Some(nodes) = nodes {
                 for node in nodes {
                     pages.push(json!({
@@ -812,7 +806,9 @@ impl DataSourceShopifyAdminPlugin {
         let mut rows = Vec::new();
         let mut cursor: Option<String> = None;
         loop {
-            let mut body = client.fetch_marketing_events_page(cursor.as_deref()).await?;
+            let mut body = client
+                .fetch_marketing_events_page(cursor.as_deref())
+                .await?;
             strip_pii_value(&mut body);
             if let Some(nodes) = body
                 .pointer("/data/marketingEvents/nodes")
@@ -911,7 +907,12 @@ impl DataSource for DataSourceShopifyAdminPlugin {
                 }
                 ShopifyStream::Catalog => {
                     let rows = self.sync_catalog(&client, &run_date).await?;
-                    self.submit_namespace(ctx.as_ref(), NAMESPACE_PRODUCT_SNAPSHOT, &run_date, rows)?;
+                    self.submit_namespace(
+                        ctx.as_ref(),
+                        NAMESPACE_PRODUCT_SNAPSHOT,
+                        &run_date,
+                        rows,
+                    )?;
                     Ok(())
                 }
                 ShopifyStream::Orders => {
@@ -921,18 +922,38 @@ impl DataSource for DataSourceShopifyAdminPlugin {
                 }
                 ShopifyStream::Content => {
                     let (pages, redirects) = self.sync_content(&client, &run_date).await?;
-                    self.submit_namespace(ctx.as_ref(), NAMESPACE_CONTENT_PAGE_SNAPSHOT, &run_date, pages)?;
-                    self.submit_namespace(ctx.as_ref(), NAMESPACE_REDIRECT_SNAPSHOT, &run_date, redirects)?;
+                    self.submit_namespace(
+                        ctx.as_ref(),
+                        NAMESPACE_CONTENT_PAGE_SNAPSHOT,
+                        &run_date,
+                        pages,
+                    )?;
+                    self.submit_namespace(
+                        ctx.as_ref(),
+                        NAMESPACE_REDIRECT_SNAPSHOT,
+                        &run_date,
+                        redirects,
+                    )?;
                     Ok(())
                 }
                 ShopifyStream::Collections => {
                     let rows = self.sync_collections(&client, &run_date).await?;
-                    self.submit_namespace(ctx.as_ref(), NAMESPACE_COLLECTION_SNAPSHOT, &run_date, rows)?;
+                    self.submit_namespace(
+                        ctx.as_ref(),
+                        NAMESPACE_COLLECTION_SNAPSHOT,
+                        &run_date,
+                        rows,
+                    )?;
                     Ok(())
                 }
                 ShopifyStream::Discounts => {
                     let rows = self.sync_discounts(&client, &run_date).await?;
-                    self.submit_namespace(ctx.as_ref(), NAMESPACE_DISCOUNT_SNAPSHOT, &run_date, rows)?;
+                    self.submit_namespace(
+                        ctx.as_ref(),
+                        NAMESPACE_DISCOUNT_SNAPSHOT,
+                        &run_date,
+                        rows,
+                    )?;
                     Ok(())
                 }
                 ShopifyStream::Marketing => {
@@ -1052,25 +1073,19 @@ mod tests {
 
         let orders = ctx.rows_for_namespace(NAMESPACE_ORDER_FACT);
         assert!(!orders.is_empty());
-        assert!(
-            orders
-                .iter()
-                .any(|o| o.get("order_id").and_then(|v| v.as_str()) == Some("5001"))
-        );
-        assert!(
-            orders
-                .iter()
-                .all(|o| o.get("order_date").and_then(|v| v.as_str()).is_some())
-        );
+        assert!(orders
+            .iter()
+            .any(|o| o.get("order_id").and_then(|v| v.as_str()) == Some("5001")));
+        assert!(orders
+            .iter()
+            .all(|o| o.get("order_date").and_then(|v| v.as_str()).is_some()));
         assert!(orders[0].get("email").is_none());
 
         let lines = ctx.rows_for_namespace(NAMESPACE_ORDER_LINE_FACT);
         assert!(!lines.is_empty());
-        assert!(
-            lines
-                .iter()
-                .any(|l| l.get("sku").and_then(|v| v.as_str()) == Some("FIX-SKU-1"))
-        );
+        assert!(lines
+            .iter()
+            .any(|l| l.get("sku").and_then(|v| v.as_str()) == Some("FIX-SKU-1")));
 
         let runs = ctx.rows_for_namespace(NAMESPACE_SYNC_RUN_DAILY);
         assert_eq!(runs.len(), 1);

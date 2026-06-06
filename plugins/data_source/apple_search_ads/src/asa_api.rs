@@ -408,15 +408,13 @@ fn json_to_i64(value: &serde_json::Value) -> Option<i64> {
 }
 
 pub fn report_time_zone<'a>(stream: &'a AsaStreamDef, config_time_zone: &'a str) -> &'a str {
-    stream
-        .time_zone_override
-        .unwrap_or(config_time_zone)
+    stream.time_zone_override.unwrap_or(config_time_zone)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::streams::{CURATED_STREAMS, ReportGrain};
+    use crate::streams::{ReportGrain, CURATED_STREAMS};
     use skippr_plugin_shared_api_source::RetryConfig;
 
     #[test]

@@ -128,7 +128,10 @@ pub async fn fetch_api_rows(
     extract_d_array(body)
 }
 
-fn load_fixture_rows(site_url: &str, method: BingApiMethod) -> Result<Vec<serde_json::Value>, std::io::Error> {
+fn load_fixture_rows(
+    site_url: &str,
+    method: BingApiMethod,
+) -> Result<Vec<serde_json::Value>, std::io::Error> {
     let fixture_dir = std::env::var("SKIPPR_BING_WEBMASTER_TOOLS_FIXTURE_DIR").map_err(|_| {
         std::io::Error::new(
             std::io::ErrorKind::NotFound,
@@ -178,7 +181,10 @@ pub fn bronze_rows_for_stream(
             continue;
         }
         let mut record = serde_json::Map::new();
-        record.insert("site_url".into(), serde_json::Value::String(site_url.to_string()));
+        record.insert(
+            "site_url".into(),
+            serde_json::Value::String(site_url.to_string()),
+        );
         record.insert(
             "date".into(),
             serde_json::Value::String(date.format("%Y-%m-%d").to_string()),
@@ -222,8 +228,10 @@ async fn send_json_request(
             .get(reqwest::header::RETRY_AFTER)
             .and_then(|v| v.to_str().ok())
             .and_then(|v| v.parse::<u64>().ok());
-        match skippr_plugin_shared_api_source::RetryableHttpClient::classify_status(status, retry_after)
-        {
+        match skippr_plugin_shared_api_source::RetryableHttpClient::classify_status(
+            status,
+            retry_after,
+        ) {
             skippr_plugin_shared_api_source::RetryDecision::Success => {
                 return response
                     .json()
@@ -306,17 +314,15 @@ mod tests {
     #[test]
     fn row_date_parses_iso_string() {
         let row = serde_json::json!({ "Date": "2014-05-03" });
-        assert_eq!(
-            row_date(&row),
-            NaiveDate::from_ymd_opt(2014, 5, 3)
-        );
+        assert_eq!(row_date(&row), NaiveDate::from_ymd_opt(2014, 5, 3));
     }
 
     #[test]
     fn bronze_rows_skip_rows_without_date_when_no_partition() {
         let api_rows = vec![serde_json::json!({ "Clicks": 1, "Impressions": 2 })];
         let start = NaiveDate::from_ymd_opt(2014, 5, 3).unwrap();
-        let rows = bronze_rows_for_stream(&api_rows, "https://example.com/", &[], None, start, start);
+        let rows =
+            bronze_rows_for_stream(&api_rows, "https://example.com/", &[], None, start, start);
         assert!(rows.is_empty());
     }
 
@@ -401,14 +407,8 @@ mod tests {
             "Date": "/Date(1399100400000)/"
         })];
         let start = NaiveDate::from_ymd_opt(2014, 5, 3).unwrap();
-        let rows = bronze_rows_for_stream(
-            &api_rows,
-            "https://example.com/",
-            &[],
-            None,
-            start,
-            start,
-        );
+        let rows =
+            bronze_rows_for_stream(&api_rows, "https://example.com/", &[], None, start, start);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["date"], "2014-05-03");
         assert_eq!(rows[0]["site_url"], "https://example.com/");
