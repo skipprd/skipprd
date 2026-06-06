@@ -1773,7 +1773,10 @@ impl Ingest {
 
                 let offset_pos = ingest_batch.offset_pos_for_line(batch_line);
 
-                if has_offsets.is_none()
+                let is_cdc_batch = ingest_batch.cdc_rows.is_some();
+
+                if is_cdc_batch
+                    || has_offsets.is_none()
                     || current_line_offset.is_none()
                     || (Some(true) == has_offsets
                         && Some(true)
