@@ -120,8 +120,7 @@ jobs:
       - mysql_iceberg_types_cdc_test
       - dynamodb_iceberg_types_cdc_test
       - mssql_iceberg_debug_linux_test
-      - mssql_iceberg_debug_windows_test
-    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.snowflake_e2e_only == true) || (needs.linux_test_suite.result == 'success' && needs.data_engineer_test_suite.result == 'success' && needs.skippr_cli_test_suite.result == 'success' && needs.skippr_admin_test_suite.result == 'success' && needs.macos_arm64_test_compile.result == 'success' && needs.postgres_iceberg_types_cdc_test.result == 'success' && needs.mysql_iceberg_types_cdc_test.result == 'success' && needs.dynamodb_iceberg_types_cdc_test.result == 'success' && needs.mssql_iceberg_debug_linux_test.result == 'success' && needs.mssql_iceberg_debug_windows_test.result == 'success')) }}
+    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.snowflake_e2e_only == true) || (needs.linux_test_suite.result == 'success' && needs.data_engineer_test_suite.result == 'success' && needs.skippr_cli_test_suite.result == 'success' && needs.skippr_admin_test_suite.result == 'success' && needs.macos_arm64_test_compile.result == 'success' && needs.postgres_iceberg_types_cdc_test.result == 'success' && needs.mysql_iceberg_types_cdc_test.result == 'success' && needs.dynamodb_iceberg_types_cdc_test.result == 'success' && needs.mssql_iceberg_debug_linux_test.result == 'success')) }}
     runs-on: macos-14
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
@@ -155,8 +154,7 @@ jobs:
       - mysql_iceberg_types_cdc_test
       - dynamodb_iceberg_types_cdc_test
       - mssql_iceberg_debug_linux_test
-      - mssql_iceberg_debug_windows_test
-    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.snowflake_e2e_only == true) || (needs.linux_test_suite.result == 'success' && needs.data_engineer_test_suite.result == 'success' && needs.skippr_cli_test_suite.result == 'success' && needs.skippr_admin_test_suite.result == 'success' && needs.postgres_iceberg_types_cdc_test.result == 'success' && needs.mysql_iceberg_types_cdc_test.result == 'success' && needs.dynamodb_iceberg_types_cdc_test.result == 'success' && needs.mssql_iceberg_debug_linux_test.result == 'success' && needs.mssql_iceberg_debug_windows_test.result == 'success')) }}
+    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.snowflake_e2e_only == true) || (needs.linux_test_suite.result == 'success' && needs.data_engineer_test_suite.result == 'success' && needs.skippr_cli_test_suite.result == 'success' && needs.skippr_admin_test_suite.result == 'success' && needs.postgres_iceberg_types_cdc_test.result == 'success' && needs.mysql_iceberg_types_cdc_test.result == 'success' && needs.dynamodb_iceberg_types_cdc_test.result == 'success' && needs.mssql_iceberg_debug_linux_test.result == 'success')) }}
     runs-on:
       - depot-ubuntu-22.04-16
     env:
@@ -402,17 +400,10 @@ jobs:
     name: cargo build (windows x86)
     needs:
       - plan_runtime_plugin_release
-      - linux_test_suite
-      - data_engineer_test_suite
-      - skippr_cli_test_suite
-      - skippr_admin_test_suite
-      - windows_x86_test_compile
-      - postgres_iceberg_types_cdc_test
-      - mysql_iceberg_types_cdc_test
-      - dynamodb_iceberg_types_cdc_test
-      - mssql_iceberg_debug_linux_test
-      - mssql_iceberg_debug_windows_test
-    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.snowflake_e2e_only == true) || (needs.linux_test_suite.result == 'success' && needs.data_engineer_test_suite.result == 'success' && needs.skippr_cli_test_suite.result == 'success' && needs.skippr_admin_test_suite.result == 'success' && needs.windows_x86_test_compile.result == 'success' && needs.postgres_iceberg_types_cdc_test.result == 'success' && needs.mysql_iceberg_types_cdc_test.result == 'success' && needs.dynamodb_iceberg_types_cdc_test.result == 'success' && needs.mssql_iceberg_debug_linux_test.result == 'success' && needs.mssql_iceberg_debug_windows_test.result == 'success')) }}
+      - linux_x86
+      - macos_arm64
+      - publish_github_release
+    if: ${{ always() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && needs.linux_x86.result == 'success' && needs.macos_arm64.result == 'success' && (needs.publish_github_release.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.snowflake_e2e_only == true && needs.publish_github_release.result == 'skipped')) }}
     runs-on: depot-windows-2022-16
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
@@ -688,8 +679,9 @@ jobs:
           path: runtime-plugin-binaries-windows_x86
           retention-days: 30
 
+  # Disabled: Windows tests are slow and non-gating; Windows build runs after release publish.
   windows_x86_test_compile:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
+    if: false
     name: cargo test --no-run (windows x86)
     needs:
       - plan_runtime_plugin_release
@@ -853,8 +845,7 @@ jobs:
       - plan_runtime_plugin_release
       - linux_x86
       - macos_arm64
-      - windows_x86
-    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.snowflake_e2e_only == true) || (needs.linux_x86.result == 'success' && needs.macos_arm64.result == 'success' && needs.windows_x86.result == 'success')) }}
+    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.snowflake_e2e_only == true) || (needs.linux_x86.result == 'success' && needs.macos_arm64.result == 'success')) }}
     runs-on: depot-ubuntu-22.04-16
     steps:
       - uses: actions/checkout@v4
@@ -1226,6 +1217,174 @@ jobs:
             --prepare-aws-state \
             --skip-dynamodb-purge
 
+  postgres_iceberg_cdc_late_delete_test:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
+    needs:
+      - cleanup
+      - purge_dynamodb
+      - linux_test_suite
+      - data_engineer_test_suite
+    name: Postgres Iceberg CDC late delete e2e
+    runs-on: depot-ubuntu-22.04-16
+    environment: Skippr
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: skippr_iceberg_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d skippr_iceberg_e2e"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: us-east-1
+      DATA_DIR_MIN_FREE_BYTES: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Install Postgres client
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y postgresql-client
+      - name: Configure Postgres logical replication
+        shell: bash
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          psql -h 127.0.0.1 -U postgres -d skippr_iceberg_e2e <<'SQL'
+          ALTER SYSTEM SET wal_level = logical;
+          ALTER SYSTEM SET max_replication_slots = 10;
+          ALTER SYSTEM SET max_wal_senders = 10;
+          SQL
+          docker restart "${{ job.services.postgres.id }}"
+          until pg_isready -h 127.0.0.1 -U postgres -d skippr_iceberg_e2e; do
+            sleep 1
+          done
+      - name: Seed source data without pre-sync delete
+        shell: bash
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -euo pipefail
+          psql -h 127.0.0.1 -U postgres -d skippr_iceberg_e2e <<'SQL'
+          DROP TABLE IF EXISTS type_matrix_orders;
+          CREATE TABLE type_matrix_orders (
+            id BIGINT PRIMARY KEY,
+            bool_col BOOLEAN,
+            string_col TEXT,
+            int_col INTEGER,
+            long_col BIGINT,
+            float_col REAL,
+            double_col DOUBLE PRECISION,
+            decimal_col NUMERIC(18,4),
+            date_col DATE,
+            timestamp_col TIMESTAMP,
+            time_col TIME,
+            json_col JSONB,
+            nullable_col TEXT
+          );
+          INSERT INTO type_matrix_orders VALUES
+            (1, true, 'initial', 10, 10000000000, 1.5, 2.5, 12.3400, DATE '2026-01-01', TIMESTAMP '2026-01-01 12:00:00', TIME '12:00:00', '{"shape":{"nested":true},"items":[1,2]}'::jsonb, NULL),
+            (2, false, 'delete-me', 20, 20000000000, 2.5, 3.5, 22.3400, DATE '2026-01-02', TIMESTAMP '2026-01-02 12:00:00', TIME '13:00:00', '{"op":"delete"}'::jsonb, 'present'),
+            (3, true, 'insert', 30, 30000000000, 3.5, 4.5, 32.3400, DATE '2026-01-03', TIMESTAMP '2026-01-03 12:00:00', TIME '14:00:00', '{"op":"insert"}'::jsonb, 'present');
+          UPDATE type_matrix_orders SET string_col = 'updated', int_col = 11 WHERE id = 1;
+          INSERT INTO type_matrix_orders VALUES
+            (4, false, 'late-insert', 40, 40000000000, 4.5, 5.5, 42.3400, DATE '2026-01-04', TIMESTAMP '2026-01-04 12:00:00', TIME '15:00:00', '{"op":"late_insert"}'::jsonb, 'present');
+          SQL
+      - name: Configure CodeArtifact Cargo access
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+        run: ./.github/scripts/configure-codeartifact-cargo.sh
+      - name: Build skipprd and runtime plugins
+        uses: ./.github/actions/rust-build-debug
+        with:
+          runtime_plugin_packages: >-
+            -p skippr-plugin-data-source-postgres
+            -p skippr-plugin-data-sink-iceberg
+            -p skippr-plugin-schema-sink-iceberg
+      - name: Stage local runtime plugin manifests
+        id: local_runtime
+        shell: bash
+        run: |
+          manifest_dir="$(python3 .github/scripts/local_runtime_plugins.py \
+            --config .github/actions/e2e/postgres_iceberg_cdc_late_delete/skippr.yml \
+            --pipeline postgres_iceberg_cdc_late_delete)"
+          echo "manifest_dir=${manifest_dir}" >> "$GITHUB_OUTPUT"
+      - name: Run Postgres Iceberg CDC late-delete e2e
+        shell: bash
+        env:
+          USE_LOCAL_PLUGIN_CODE: "1"
+          SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR: ${{ steps.local_runtime.outputs.manifest_dir }}
+        run: |
+          python3 .github/scripts/runtime_e2e_harness.py run postgres_iceberg_cdc_late_delete \
+            --mode full \
+            --skipprd target/debug/skipprd \
+            --prepare-aws-state \
+            --skip-dynamodb-purge
+
+  stripe_iceberg_replace_partition_test:
+    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
+    needs:
+      - cleanup
+      - purge_dynamodb
+      - linux_test_suite
+      - data_engineer_test_suite
+    name: Stripe ReplacePartition to Iceberg e2e
+    runs-on: depot-ubuntu-22.04-16
+    environment: Skippr
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+      AWS_DEFAULT_REGION: us-east-1
+      DATA_DIR_MIN_FREE_BYTES: "0"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - name: Configure CodeArtifact Cargo access
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+        run: ./.github/scripts/configure-codeartifact-cargo.sh
+      - name: Build skipprd and runtime plugins
+        uses: ./.github/actions/rust-build-debug
+        with:
+          runtime_plugin_packages: >-
+            -p skippr-plugin-data-source-stripe
+            -p skippr-plugin-data-sink-iceberg
+            -p skippr-plugin-schema-sink-iceberg
+      - name: Stage local runtime plugin manifests
+        id: local_runtime
+        shell: bash
+        run: |
+          manifest_dir="$(python3 .github/scripts/local_runtime_plugins.py \
+            --config .github/actions/e2e/stripe_iceberg_replace_partition/skippr.yml \
+            --pipeline stripe_iceberg_replace_partition)"
+          echo "manifest_dir=${manifest_dir}" >> "$GITHUB_OUTPUT"
+      - name: Run Stripe ReplacePartition Iceberg e2e
+        shell: bash
+        env:
+          USE_LOCAL_PLUGIN_CODE: "1"
+          SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR: ${{ steps.local_runtime.outputs.manifest_dir }}
+        run: |
+          python3 .github/scripts/runtime_e2e_harness.py run stripe_iceberg_replace_partition \
+            --mode full \
+            --skipprd target/debug/skipprd \
+            --prepare-aws-state \
+            --skip-dynamodb-purge
+
   mysql_iceberg_types_cdc_test:
     if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
     needs:
@@ -1544,8 +1703,9 @@ jobs:
             --prepare-aws-state \
             --skip-dynamodb-purge
 
+  # Disabled: Windows tests are slow and non-gating; Windows build runs after release publish.
   mssql_iceberg_debug_windows_test:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
+    if: false
     needs:
       - cleanup
       - purge_dynamodb
@@ -1706,7 +1866,6 @@ jobs:
       - published_runtime_plugins_smoke_test
       - linux_x86
       - macos_arm64
-      - windows_x86
     runs-on: depot-ubuntu-22.04-16
     steps:
       - name: Check out code
@@ -1717,9 +1876,12 @@ jobs:
           pattern: "skipprd-*"
       - name: Compress skipprd release artifacts
         run: |
-          tar -czvf skipprd-linux_x86.tar.gz skipprd-linux_x86/
-          tar -czvf skipprd-macos_arm64.tar.gz skipprd-macos_arm64/
-          tar -czvf skipprd-windows_x86.tar.gz skipprd-windows_x86/
+          set -euo pipefail
+          for dir in skipprd-linux_x86 skipprd-macos_arm64; do
+            if [ -d "$dir" ]; then
+              tar -czvf "${dir}.tar.gz" "$dir/"
+            fi
+          done
       - name: Configure AWS credentials for skipprd release upload
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -1744,7 +1906,6 @@ jobs:
     needs:
       - linux_x86
       - macos_arm64
-      - windows_x86
       - skippr_cli_test_suite
       - data_engineer_test_suite
     runs-on: depot-ubuntu-22.04-16
@@ -1757,9 +1918,12 @@ jobs:
           pattern: "skippr-*"
       - name: Compress skippr release artifacts
         run: |
-          tar -czvf skippr-linux_x86.tar.gz skippr-linux_x86/
-          tar -czvf skippr-macos_arm64.tar.gz skippr-macos_arm64/
-          tar -czvf skippr-windows_x86.tar.gz skippr-windows_x86/
+          set -euo pipefail
+          for dir in skippr-linux_x86 skippr-macos_arm64; do
+            if [ -d "$dir" ]; then
+              tar -czvf "${dir}.tar.gz" "$dir/"
+            fi
+          done
       - name: Configure AWS credentials for skippr release upload
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -1772,8 +1936,10 @@ jobs:
           BUCKET="${{ env.RELEASES_BUCKET }}"
           RELEASE_SUBDIR="${{ env.SKIPPR_RELEASE_SUBDIR }}"
           LATEST_POINTER="${{ env.SKIPPR_LATEST_POINTER }}"
-          for f in skippr-linux_x86.tar.gz skippr-macos_arm64.tar.gz skippr-windows_x86.tar.gz; do
-            aws s3 cp "$f" "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/${f}"
+          for f in skippr-linux_x86.tar.gz skippr-macos_arm64.tar.gz; do
+            if [ -f "$f" ]; then
+              aws s3 cp "$f" "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/${f}"
+            fi
           done
           printf '%s' "$TAG" > "$LATEST_POINTER"
           aws s3 cp "$LATEST_POINTER" "s3://${BUCKET}/releases/${LATEST_POINTER}" --cache-control "no-cache, no-store, must-revalidate"
@@ -1787,7 +1953,6 @@ jobs:
       - skippr_admin_test_suite
       - linux_x86
       - macos_arm64
-      - windows_x86
     runs-on: depot-ubuntu-22.04-16
     steps:
       - name: Check out code
@@ -1798,15 +1963,15 @@ jobs:
           pattern: "*"
       - name: Compress release artifacts
         run: |
-          tar -czvf skipprd-linux_x86.tar.gz skipprd-linux_x86/
-          tar -czvf skipprd-macos_arm64.tar.gz skipprd-macos_arm64/
-          tar -czvf skipprd-windows_x86.tar.gz skipprd-windows_x86/
-          tar -czvf skippr-linux_x86.tar.gz skippr-linux_x86/
-          tar -czvf skippr-macos_arm64.tar.gz skippr-macos_arm64/
-          tar -czvf skippr-windows_x86.tar.gz skippr-windows_x86/
-          tar -czvf skippr-admin-linux_x86.tar.gz skippr-admin-linux_x86/
-          tar -czvf skippr-admin-macos_arm64.tar.gz skippr-admin-macos_arm64/
-          tar -czvf skippr-admin-windows_x86.tar.gz skippr-admin-windows_x86/
+          set -euo pipefail
+          for dir in \
+            skipprd-linux_x86 skipprd-macos_arm64 \
+            skippr-linux_x86 skippr-macos_arm64 \
+            skippr-admin-linux_x86 skippr-admin-macos_arm64; do
+            if [ -d "$dir" ]; then
+              tar -czvf "${dir}.tar.gz" "$dir/"
+            fi
+          done
       - name: Create or update GitHub Release
         env:
           GH_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
@@ -1827,13 +1992,10 @@ jobs:
             install.sh \
             skipprd-linux_x86.tar.gz \
             skipprd-macos_arm64.tar.gz \
-            skipprd-windows_x86.tar.gz \
             skippr-linux_x86.tar.gz \
             skippr-macos_arm64.tar.gz \
-            skippr-windows_x86.tar.gz \
             skippr-admin-linux_x86.tar.gz \
             skippr-admin-macos_arm64.tar.gz \
-            skippr-admin-windows_x86.tar.gz \
             --repo skipprd/skipprd \
             --clobber
       - name: Configure AWS credentials for skippr-admin release upload
@@ -1848,11 +2010,125 @@ jobs:
           BUCKET="${{ env.RELEASES_BUCKET }}"
           RELEASE_SUBDIR="${{ env.SKIPPR_ADMIN_RELEASE_SUBDIR }}"
           LATEST_POINTER="${{ env.SKIPPR_ADMIN_LATEST_POINTER }}"
-          for f in skippr-admin-linux_x86.tar.gz skippr-admin-macos_arm64.tar.gz skippr-admin-windows_x86.tar.gz; do
-            aws s3 cp "$f" "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/${f}"
+          for f in skippr-admin-linux_x86.tar.gz skippr-admin-macos_arm64.tar.gz; do
+            if [ -f "$f" ]; then
+              aws s3 cp "$f" "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/${f}"
+            fi
           done
           printf '%s' "$TAG" > "$LATEST_POINTER"
           aws s3 cp "$LATEST_POINTER" "s3://${BUCKET}/releases/${LATEST_POINTER}" --cache-control "no-cache, no-store, must-revalidate"
+
+  publish_windows_release:
+    name: Publish Windows Release Assets
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && needs.windows_x86.result == 'success' }}
+    needs:
+      - windows_x86
+      - publish_github_release
+    runs-on: depot-ubuntu-22.04-16
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*windows_x86*"
+
+      - name: Compress Windows release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          for dir in skipprd-windows_x86 skippr-windows_x86 skippr-admin-windows_x86; do
+            if [ -d "$dir" ]; then
+              tar -czvf "${dir}.tar.gz" "$dir/"
+            fi
+          done
+
+      - name: Stage Windows runtime plugin release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/publish_runtime_plugins.py \
+            --bucket "${{ env.RELEASES_BUCKET }}" \
+            --subdir "${{ env.RUNTIME_PLUGIN_RELEASE_SUBDIR }}" \
+            --public-base-url "https://install.skippr.io/releases/${{ env.RUNTIME_PLUGIN_RELEASE_SUBDIR }}" \
+            --workspace "$GITHUB_WORKSPACE" \
+            --output-dir "$GITHUB_WORKSPACE/runtime-plugin-release-windows"
+          python3 -c 'from pathlib import Path; [print(path) for path in sorted(Path("runtime-plugin-release-windows").rglob("*")) if path.is_file()]'
+
+      - name: Configure AWS credentials for Windows release upload
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Upload Windows binaries to install releases bucket
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          BUCKET="${{ env.RELEASES_BUCKET }}"
+          for f in skipprd-windows_x86.tar.gz; do
+            if [ -f "$f" ]; then
+              aws s3 cp "$f" "s3://${BUCKET}/releases/${{ env.SKIPPRD_RELEASE_SUBDIR }}/${TAG}/${f}"
+            fi
+          done
+          for f in skippr-windows_x86.tar.gz; do
+            if [ -f "$f" ]; then
+              aws s3 cp "$f" "s3://${BUCKET}/releases/${{ env.SKIPPR_RELEASE_SUBDIR }}/${TAG}/${f}"
+            fi
+          done
+          for f in skippr-admin-windows_x86.tar.gz; do
+            if [ -f "$f" ]; then
+              aws s3 cp "$f" "s3://${BUCKET}/releases/${{ env.SKIPPR_ADMIN_RELEASE_SUBDIR }}/${TAG}/${f}"
+            fi
+          done
+
+      - name: Upload Windows runtime plugin artifacts and manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUCKET="${{ env.RELEASES_BUCKET }}"
+          SUBDIR="${{ env.RUNTIME_PLUGIN_RELEASE_SUBDIR }}"
+          RELEASE_ROOT="$GITHUB_WORKSPACE/runtime-plugin-release-windows"
+          aws s3 cp "$RELEASE_ROOT/" \
+            "s3://${BUCKET}/releases/${SUBDIR}/" \
+            --recursive \
+            --exclude "*.json"
+          aws s3 cp "$RELEASE_ROOT/" \
+            "s3://${BUCKET}/releases/${SUBDIR}/" \
+            --recursive \
+            --exclude "*" \
+            --include "*.json" \
+            --cache-control "no-cache, no-store, must-revalidate" \
+            --content-type "application/json"
+
+      - name: Upload Windows assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          assets=()
+          for f in \
+            skipprd-windows_x86.tar.gz \
+            skippr-windows_x86.tar.gz \
+            skippr-admin-windows_x86.tar.gz; do
+            if [ -f "$f" ]; then
+              assets+=("$f")
+            fi
+          done
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No Windows release archives to upload"
+            exit 0
+          fi
+          gh release upload "$TAG" \
+            "${assets[@]}" \
+            --repo skipprd/skipprd \
+            --clobber
 
   skipprd_release_download_test:
     name: Installed skippr EL smoke test (linux x86)

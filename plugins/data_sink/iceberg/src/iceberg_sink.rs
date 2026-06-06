@@ -489,6 +489,24 @@ impl DataSinkIcebergPlugin {
         &self,
         catalog: &GlueCatalog,
         table_ident: TableIdent,
+        commit_files: Vec<iceberg::spec::DataFile>,
+    ) -> Result<iceberg::table::Table, io::Error> {
+        let (data_files, delete_files) = partition_commit_files(commit_files);
+
+        if delete_files.is_empty() {
+            return self
+                .commit_data_append_with_retries(catalog, table_ident, data_files)
+                .await;
+        }
+
+        self.commit_equality_delta_with_retries(catalog, table_ident, data_files, delete_files)
+            .await
+    }
+
+    async fn commit_data_append_with_retries(
+        &self,
+        catalog: &GlueCatalog,
+        table_ident: TableIdent,
         data_files: Vec<iceberg::spec::DataFile>,
     ) -> Result<iceberg::table::Table, io::Error> {
         let mut last_err: Option<String> = None;
@@ -517,6 +535,46 @@ impl DataSinkIcebergPlugin {
         }
         Err(io::Error::other(format!(
             "Iceberg append commit failed after retries for {}: {}",
+            table_ident,
+            last_err.unwrap_or_else(|| "unknown error".to_string())
+        )))
+    }
+
+    async fn commit_equality_delta_with_retries(
+        &self,
+        catalog: &GlueCatalog,
+        table_ident: TableIdent,
+        data_files: Vec<iceberg::spec::DataFile>,
+        delete_files: Vec<iceberg::spec::DataFile>,
+    ) -> Result<iceberg::table::Table, io::Error> {
+        let mut last_err: Option<String> = None;
+        for attempt in 1..=3 {
+            let table = catalog
+                .load_table(&table_ident)
+                .await
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            let tx = Transaction::new(&table);
+            let mut action = tx.equality_delta_append().add_delete_files(delete_files.clone());
+            if !data_files.is_empty() {
+                action = action.add_data_files(data_files.clone());
+            }
+            let tx = action
+                .apply(tx)
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            match tx.commit(catalog).await {
+                Ok(table) => return Ok(table),
+                Err(err) => {
+                    let err = err.to_string();
+                    warn!(
+                        "Iceberg equality-delta commit attempt {} failed for {}: {}",
+                        attempt, table_ident, err
+                    );
+                    last_err = Some(err);
+                }
+            }
+        }
+        Err(io::Error::other(format!(
+            "Iceberg equality-delta commit failed after retries for {}: {}",
             table_ident,
             last_err.unwrap_or_else(|| "unknown error".to_string())
         )))
@@ -1239,6 +1297,7 @@ fn parse_s3_uri(uri: &str) -> Result<(String, String), io::Error> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use iceberg::spec::{DataFileBuilder, DataFileFormat, Struct};
     use serde_json::json;
 
     fn output_metadata(value: serde_json::Value) -> OutputMetadata {
@@ -1308,4 +1367,83 @@ mod tests {
         );
         assert_eq!(iceberg_table_suffix("S3.Raw-Orders"), "raw_orders");
     }
+
+    #[test]
+    fn commit_files_partition_routes_data_only_to_fast_append_path() {
+        let table = make_v2_minimal_table_for_tests();
+        let data_file = DataFileBuilder::default()
+            .content(DataContentType::Data)
+            .file_path("s3://bucket/data.parquet".to_string())
+            .file_format(DataFileFormat::Parquet)
+            .file_size_in_bytes(100)
+            .record_count(1)
+            .partition_spec_id(table.metadata().default_partition_spec_id())
+            .partition(Struct::empty())
+            .build()
+            .unwrap();
+        let (data_files, delete_files) = partition_commit_files(vec![data_file]);
+        assert_eq!(data_files.len(), 1);
+        assert!(delete_files.is_empty());
+    }
+
+    #[test]
+    fn commit_files_partition_routes_mixed_files_to_equality_delta_path() {
+        let table = make_v2_minimal_table_for_tests();
+        let data_file = DataFileBuilder::default()
+            .content(DataContentType::Data)
+            .file_path("s3://bucket/data.parquet".to_string())
+            .file_format(DataFileFormat::Parquet)
+            .file_size_in_bytes(100)
+            .record_count(1)
+            .partition_spec_id(table.metadata().default_partition_spec_id())
+            .partition(Struct::empty())
+            .build()
+            .unwrap();
+        let delete_file = DataFileBuilder::default()
+            .content(DataContentType::EqualityDeletes)
+            .file_path("s3://bucket/delete.parquet".to_string())
+            .file_format(DataFileFormat::Parquet)
+            .file_size_in_bytes(50)
+            .record_count(1)
+            .partition_spec_id(table.metadata().default_partition_spec_id())
+            .partition(Struct::empty())
+            .equality_ids(Some(vec![1]))
+            .build()
+            .unwrap();
+        let (data_files, delete_files) =
+            partition_commit_files(vec![data_file.clone(), delete_file.clone()]);
+        assert_eq!(data_files, vec![data_file]);
+        assert_eq!(delete_files, vec![delete_file]);
+    }
+}
+
+fn partition_commit_files(
+    commit_files: Vec<iceberg::spec::DataFile>,
+) -> (Vec<iceberg::spec::DataFile>, Vec<iceberg::spec::DataFile>) {
+    commit_files
+        .into_iter()
+        .partition(|file| file.content_type() == DataContentType::Data)
+}
+
+#[cfg(test)]
+fn make_v2_minimal_table_for_tests() -> iceberg::table::Table {
+    use std::fs::File;
+    use std::io::BufReader;
+
+    use iceberg::io::FileIOBuilder;
+    use iceberg::spec::TableMetadata;
+    use iceberg::TableIdent;
+
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../../third_party/iceberg/testdata/table_metadata");
+    let file = File::open(manifest_dir.join("TableMetadataV2ValidMinimal.json")).unwrap();
+    let reader = BufReader::new(file);
+    let metadata = serde_json::from_reader::<_, TableMetadata>(reader).unwrap();
+    iceberg::table::Table::builder()
+        .metadata(metadata)
+        .metadata_location("s3://bucket/test/location/metadata/v1.json".to_string())
+        .identifier(TableIdent::from_strs(["ns1", "test1"]).unwrap())
+        .file_io(FileIOBuilder::new("memory").build().unwrap())
+        .build()
+        .unwrap()
 }

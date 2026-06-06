@@ -79,6 +79,16 @@ LOCAL_SCENARIO_RUNTIME_MANIFESTS_BY_SCENARIO = {
         ("runtime_iceberg_sink", "iceberg-sink.json"),
         ("runtime_iceberg_schema", "iceberg-schema.json"),
     ),
+    "postgres_iceberg_cdc_late_delete": (
+        ("runtime_postgres_source", "postgres-source.json"),
+        ("runtime_iceberg_sink", "iceberg-sink.json"),
+        ("runtime_iceberg_schema", "iceberg-schema.json"),
+    ),
+    "stripe_iceberg_replace_partition": (
+        ("runtime_stripe_source", "stripe-source.json"),
+        ("runtime_iceberg_sink", "iceberg-sink.json"),
+        ("runtime_iceberg_schema", "iceberg-schema.json"),
+    ),
     "mssql_iceberg_debug_linux": (
         ("runtime_mssql_source", "mssql-source.json"),
         ("runtime_iceberg_sink", "iceberg-sink.json"),
@@ -103,6 +113,8 @@ LOCAL_SCENARIO_RUNTIME_PIPELINE_ANCHORS = {
     "postgres_iceberg_types_cdc": "    data_sink: data_sinks.iceberg_types_cdc\n",
     "mysql_iceberg_types_cdc": "    data_sink: data_sinks.iceberg_types_cdc\n",
     "dynamodb_iceberg_types_cdc": "    data_sink: data_sinks.iceberg_types_cdc\n",
+    "postgres_iceberg_cdc_late_delete": "    data_sink: data_sinks.iceberg_types_cdc\n",
+    "stripe_iceberg_replace_partition": "    data_sink: data_sinks.iceberg_stripe\n",
     "mssql_iceberg_debug_linux": "    data_sink: data_sinks.iceberg_debug\n",
     "mssql_iceberg_debug_windows": "    data_sink: data_sinks.iceberg_debug\n",
 }
@@ -136,6 +148,16 @@ SCENARIO_RUNTIME_VERSION_ANCHORS = {
     "dynamodb_iceberg_types_cdc": (
         ("  dynamodb_types_cdc:\n    Dynamodb:\n", "Dynamodb"),
         ("  iceberg_types_cdc:\n    Iceberg:\n", "Iceberg"),
+        ("  iceberg_glue:\n    Iceberg:\n", "Iceberg"),
+    ),
+    "postgres_iceberg_cdc_late_delete": (
+        ("  postgres_types_cdc:\n    Postgres:\n", "Postgres"),
+        ("  iceberg_types_cdc:\n    Iceberg:\n", "Iceberg"),
+        ("  iceberg_glue:\n    Iceberg:\n", "Iceberg"),
+    ),
+    "stripe_iceberg_replace_partition": (
+        ("  stripe_fixture:\n    Stripe:\n", "Stripe"),
+        ("  iceberg_stripe:\n    Iceberg:\n", "Iceberg"),
         ("  iceberg_glue:\n    Iceberg:\n", "Iceberg"),
     ),
     "mssql_iceberg_debug_linux": (
@@ -247,6 +269,20 @@ ICEBERG_CDC_SCENARIO_AWS_STATE = {
             "skippr/iceberg-types-cdc-dynamodb/dynamodb_iceberg_types_cdc",
         ),
     },
+    "postgres_iceberg_cdc_late_delete": {
+        "database": "iceberg_e2e_postgres_late_delete",
+        "s3_prefixes": (
+            "iceberg-e2e-postgres-late-delete",
+            "skippr/iceberg-cdc-late-delete/postgres_iceberg_cdc_late_delete",
+        ),
+    },
+    "stripe_iceberg_replace_partition": {
+        "database": "iceberg_e2e_stripe",
+        "s3_prefixes": (
+            "iceberg-e2e-stripe",
+            "skippr/iceberg-stripe-replace-partition/stripe_iceberg_replace_partition",
+        ),
+    },
     "mssql_iceberg_debug_linux": {
         "database": "iceberg_e2e_mssql_debug_linux",
         "s3_prefixes": (
@@ -279,6 +315,7 @@ class SyncRun:
     extra_env: tuple[tuple[str, str], ...] = ()
     allow_exit_codes: tuple[int, ...] = ()
     timeout_seconds: int | None = None
+    pre_run_shell: str | None = None
 
 
 @dataclass(frozen=True)
@@ -547,6 +584,65 @@ SCENARIOS = {
         full_runs=(SyncRun(pipeline="dynamodb_iceberg_types_cdc"),),
         smoke_verifiers=("dynamodb_iceberg_types_cdc_encoded",),
         full_verifiers=("dynamodb_iceberg_types_cdc_encoded",),
+    ),
+    "postgres_iceberg_cdc_late_delete": Scenario(
+        name="postgres_iceberg_cdc_late_delete",
+        config_path=scenario_config(
+            ".github/actions/e2e/postgres_iceberg_cdc_late_delete/skippr.yml"
+        ),
+        smoke_runs=(SyncRun(pipeline="postgres_iceberg_cdc_late_delete"),),
+        full_runs=(
+            SyncRun(pipeline="postgres_iceberg_cdc_late_delete"),
+            SyncRun(
+                pipeline="postgres_iceberg_cdc_late_delete",
+                pre_run_shell=(
+                    "PGPASSWORD=postgres psql -h 127.0.0.1 -U postgres "
+                    "-d skippr_iceberg_e2e -c "
+                    "\"DELETE FROM type_matrix_orders WHERE id = 2;\""
+                ),
+            ),
+        ),
+        smoke_verifiers=("postgres_iceberg_cdc_late_delete_final_state",),
+        full_verifiers=("postgres_iceberg_cdc_late_delete_final_state",),
+    ),
+    "stripe_iceberg_replace_partition": Scenario(
+        name="stripe_iceberg_replace_partition",
+        config_path=scenario_config(
+            ".github/actions/e2e/stripe_iceberg_replace_partition/skippr.yml"
+        ),
+        smoke_runs=(
+            SyncRun(
+                pipeline="stripe_iceberg_replace_partition",
+                extra_env=(
+                    (
+                        "SKIPPR_STRIPE_FIXTURE_DIR",
+                        str(REPO_ROOT / "plugins/data_source/stripe/tests/fixtures"),
+                    ),
+                ),
+            ),
+        ),
+        full_runs=(
+            SyncRun(
+                pipeline="stripe_iceberg_replace_partition",
+                extra_env=(
+                    (
+                        "SKIPPR_STRIPE_FIXTURE_DIR",
+                        str(REPO_ROOT / "plugins/data_source/stripe/tests/fixtures"),
+                    ),
+                ),
+            ),
+            SyncRun(
+                pipeline="stripe_iceberg_replace_partition",
+                extra_env=(
+                    (
+                        "SKIPPR_STRIPE_FIXTURE_DIR",
+                        str(REPO_ROOT / "plugins/data_source/stripe/tests/fixtures"),
+                    ),
+                ),
+            ),
+        ),
+        smoke_verifiers=("stripe_iceberg_replace_partition_rows",),
+        full_verifiers=("stripe_iceberg_replace_partition_rows",),
     ),
     "mssql_iceberg_debug_linux": Scenario(
         name="mssql_iceberg_debug_linux",
@@ -2174,6 +2270,41 @@ def verify_postgres_iceberg_types_cdc_final_state(context: ScenarioContext) -> N
     )
 
 
+def verify_postgres_iceberg_cdc_late_delete_final_state(context: ScenarioContext) -> None:
+    verify_iceberg_type_matrix_final_state(
+        context,
+        database="iceberg_e2e_postgres_late_delete",
+        table=iceberg_glue_table_name(POSTGRES_TYPE_MATRIX_NAMESPACE),
+        updated_row_predicate="id = 1 AND int_col = 11",
+    )
+
+
+def verify_stripe_iceberg_replace_partition_rows(context: ScenarioContext) -> None:
+    table = iceberg_glue_table_name("stripe_charge_fact")
+    database = "iceberg_e2e_stripe"
+    row_count = int(
+        athena_scalar(
+            f'SELECT COUNT(*) FROM "{table}"',
+            database=database,
+            env=context.base_env,
+            output_location=context.assertion_output,
+        )
+    )
+    distinct_ids = int(
+        athena_scalar(
+            f'SELECT COUNT(DISTINCT charge_id) FROM "{table}"',
+            database=database,
+            env=context.base_env,
+            output_location=context.assertion_output,
+        )
+    )
+    if row_count != 1 or distinct_ids != 1:
+        raise HarnessError(
+            "expected ReplacePartition idempotency for stripe_charge_fact: "
+            f"row_count=1 distinct_charge_id=1, got row_count={row_count} distinct={distinct_ids}"
+        )
+
+
 def verify_mysql_iceberg_types_cdc_final_state(context: ScenarioContext) -> None:
     verify_iceberg_type_matrix_final_state(
         context,
@@ -2325,6 +2456,8 @@ VERIFIERS: dict[str, Callable[[ScenarioContext], None]] = {
     "soda_bike_hire_s3_wal_many": verify_soda_bike_hire_s3_wal_many,
     "soda_deadletters": verify_soda_deadletters,
     "postgres_iceberg_types_cdc_final_state": verify_postgres_iceberg_types_cdc_final_state,
+    "postgres_iceberg_cdc_late_delete_final_state": verify_postgres_iceberg_cdc_late_delete_final_state,
+    "stripe_iceberg_replace_partition_rows": verify_stripe_iceberg_replace_partition_rows,
     "mysql_iceberg_types_cdc_final_state": verify_mysql_iceberg_types_cdc_final_state,
     "dynamodb_iceberg_types_cdc_encoded": verify_dynamodb_iceberg_types_cdc_encoded,
     "mssql_iceberg_debug_linux_rows": verify_mssql_iceberg_debug_linux_rows,
@@ -2655,6 +2788,12 @@ def run_scenario(
         sync_runs = scenario.smoke_runs if mode == "smoke" else scenario.full_runs
         print_step(f"Running scenario {scenario.name} in {mode} mode")
         for sync_run in sync_runs:
+            if sync_run.pre_run_shell:
+                print_step(f"Running pre-sync shell for {sync_run.pipeline}")
+                run_command(
+                    ["bash", "-lc", sync_run.pre_run_shell],
+                    env=base_env,
+                )
             run_sync(skipprd, sync_run, base_env)
 
         if base_env.get("USE_LOCAL_PLUGIN_CODE", "").lower() in {"1", "true", "yes", "on"}:

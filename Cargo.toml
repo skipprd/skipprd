@@ -181,3 +181,6 @@ nix = "0.26.2"
 [profile.profiling]
 inherits = "release"
 debug = true
+
+[patch.crates-io]
+iceberg = { path = "third_party/iceberg" }
