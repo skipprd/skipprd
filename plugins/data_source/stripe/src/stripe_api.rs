@@ -76,6 +76,7 @@ impl StripeApiClient {
                 if let Some(body) = Self::fixture_path(&dir, fixture) {
                     return Ok(Self::extract_list_data(&body));
                 }
+                return Ok(Vec::new());
             }
         }
 
@@ -609,4 +610,37 @@ pub fn map_promotion_code(ingest_run_date: &str, stripe_account_id: &str, obj: &
         "active": stripe_bool(obj, "active"),
         "created_at": unix_to_iso(stripe_i64(obj, "created")),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use skippr_plugin_shared_api_source::RetryableHttpClient;
+    use std::sync::{LazyLock, Mutex};
+
+    static ENV_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
+
+    #[tokio::test]
+    async fn fixture_mode_missing_list_file_returns_empty_rows() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!(
+            "skippr_stripe_fixture_missing_{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::env::set_var(FIXTURE_ENV, &dir);
+
+        let client = StripeApiClient::new(
+            RetryableHttpClient::new(skippr_plugin_shared_api_source::RetryConfig::default()),
+            "acct_fixture".to_string(),
+            "fixture".to_string(),
+            0,
+        );
+
+        let rows = client.list_refunds(None).await.unwrap();
+
+        assert!(rows.is_empty());
+        std::env::remove_var(FIXTURE_ENV);
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }
