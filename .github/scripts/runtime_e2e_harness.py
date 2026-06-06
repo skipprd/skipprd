@@ -31,6 +31,15 @@ from runtime_plugin_targets import published_runtime_plugin_targets, resolve_tar
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_AWS_REGION = "us-east-1"
+STRIPE_FIXTURE_DIR = REPO_ROOT / "plugins/data_source/stripe/tests/fixtures"
+STRIPE_FIXTURE_TWO_CHARGES_DIR = (
+    REPO_ROOT / "plugins/data_source/stripe/tests/fixtures_merge_by_key_two_charges"
+)
+ICEBERG_EQUALITY_COMMIT_SCENARIOS = (
+    "postgres_iceberg_cdc_late_delete",
+    "stripe_iceberg_replace_partition",
+    "stripe_iceberg_merge_by_key",
+)
 DEFAULT_ASSERTION_OUTPUT = (
     "s3://skippr-e2e-sample-data-output/runtime-e2e-assertions"
 )
@@ -89,6 +98,11 @@ LOCAL_SCENARIO_RUNTIME_MANIFESTS_BY_SCENARIO = {
         ("runtime_iceberg_sink", "iceberg-sink.json"),
         ("runtime_iceberg_schema", "iceberg-schema.json"),
     ),
+    "stripe_iceberg_merge_by_key": (
+        ("runtime_stripe_source", "stripe-source.json"),
+        ("runtime_iceberg_sink", "iceberg-sink.json"),
+        ("runtime_iceberg_schema", "iceberg-schema.json"),
+    ),
     "mssql_iceberg_debug_linux": (
         ("runtime_mssql_source", "mssql-source.json"),
         ("runtime_iceberg_sink", "iceberg-sink.json"),
@@ -115,6 +129,7 @@ LOCAL_SCENARIO_RUNTIME_PIPELINE_ANCHORS = {
     "dynamodb_iceberg_types_cdc": "    data_sink: data_sinks.iceberg_types_cdc\n",
     "postgres_iceberg_cdc_late_delete": "    data_sink: data_sinks.iceberg_types_cdc\n",
     "stripe_iceberg_replace_partition": "    data_sink: data_sinks.iceberg_stripe\n",
+    "stripe_iceberg_merge_by_key": "    data_sink: data_sinks.iceberg_stripe\n",
     "mssql_iceberg_debug_linux": "    data_sink: data_sinks.iceberg_debug\n",
     "mssql_iceberg_debug_windows": "    data_sink: data_sinks.iceberg_debug\n",
 }
@@ -156,6 +171,11 @@ SCENARIO_RUNTIME_VERSION_ANCHORS = {
         ("  iceberg_glue:\n    Iceberg:\n", "Iceberg"),
     ),
     "stripe_iceberg_replace_partition": (
+        ("  stripe_fixture:\n    Stripe:\n", "Stripe"),
+        ("  iceberg_stripe:\n    Iceberg:\n", "Iceberg"),
+        ("  iceberg_glue:\n    Iceberg:\n", "Iceberg"),
+    ),
+    "stripe_iceberg_merge_by_key": (
         ("  stripe_fixture:\n    Stripe:\n", "Stripe"),
         ("  iceberg_stripe:\n    Iceberg:\n", "Iceberg"),
         ("  iceberg_glue:\n    Iceberg:\n", "Iceberg"),
@@ -281,6 +301,13 @@ ICEBERG_CDC_SCENARIO_AWS_STATE = {
         "s3_prefixes": (
             "iceberg-e2e-stripe",
             "skippr/iceberg-stripe-replace-partition/stripe_iceberg_replace_partition",
+        ),
+    },
+    "stripe_iceberg_merge_by_key": {
+        "database": "iceberg_e2e_stripe_merge_by_key",
+        "s3_prefixes": (
+            "iceberg-e2e-stripe-merge-by-key",
+            "skippr/iceberg-stripe-merge-by-key/stripe_iceberg_merge_by_key",
         ),
     },
     "mssql_iceberg_debug_linux": {
@@ -643,6 +670,39 @@ SCENARIOS = {
         ),
         smoke_verifiers=("stripe_iceberg_replace_partition_rows",),
         full_verifiers=("stripe_iceberg_replace_partition_rows",),
+    ),
+    "stripe_iceberg_merge_by_key": Scenario(
+        name="stripe_iceberg_merge_by_key",
+        config_path=scenario_config(
+            ".github/actions/e2e/stripe_iceberg_merge_by_key/skippr.yml"
+        ),
+        smoke_runs=(
+            SyncRun(
+                pipeline="stripe_iceberg_merge_by_key",
+                extra_env=(
+                    ("SKIPPR_STRIPE_FIXTURE_DIR", str(STRIPE_FIXTURE_TWO_CHARGES_DIR)),
+                    ("SKIPPR_STRIPE_WRITE_POLICY", "merge_by_key"),
+                ),
+            ),
+        ),
+        full_runs=(
+            SyncRun(
+                pipeline="stripe_iceberg_merge_by_key",
+                extra_env=(
+                    ("SKIPPR_STRIPE_FIXTURE_DIR", str(STRIPE_FIXTURE_TWO_CHARGES_DIR)),
+                    ("SKIPPR_STRIPE_WRITE_POLICY", "merge_by_key"),
+                ),
+            ),
+            SyncRun(
+                pipeline="stripe_iceberg_merge_by_key",
+                extra_env=(
+                    ("SKIPPR_STRIPE_FIXTURE_DIR", str(STRIPE_FIXTURE_DIR)),
+                    ("SKIPPR_STRIPE_WRITE_POLICY", "merge_by_key"),
+                ),
+            ),
+        ),
+        smoke_verifiers=("stripe_iceberg_merge_by_key_rows",),
+        full_verifiers=("stripe_iceberg_merge_by_key_rows",),
     ),
     "mssql_iceberg_debug_linux": Scenario(
         name="mssql_iceberg_debug_linux",
@@ -2279,6 +2339,45 @@ def verify_postgres_iceberg_cdc_late_delete_final_state(context: ScenarioContext
     )
 
 
+def verify_stripe_iceberg_merge_by_key_rows(context: ScenarioContext) -> None:
+    table = iceberg_glue_table_name("stripe_charge_fact")
+    database = "iceberg_e2e_stripe_merge_by_key"
+    row_count = int(
+        athena_scalar(
+            f'SELECT COUNT(*) FROM "{table}"',
+            database=database,
+            env=context.base_env,
+            output_location=context.assertion_output,
+        )
+    )
+    distinct_ids = int(
+        athena_scalar(
+            f'SELECT COUNT(DISTINCT charge_id) FROM "{table}"',
+            database=database,
+            env=context.base_env,
+            output_location=context.assertion_output,
+        )
+    )
+    if row_count != 2 or distinct_ids != 2:
+        raise HarnessError(
+            "expected MergeByKey to retain both charge rows after shrinking fixture: "
+            f"row_count=2 distinct_charge_id=2, got row_count={row_count} distinct={distinct_ids}"
+        )
+    for charge_id in ("ch_fixture1", "ch_fixture2"):
+        present = int(
+            athena_scalar(
+                f"SELECT COUNT(*) FROM \"{table}\" WHERE charge_id = '{charge_id}'",
+                database=database,
+                env=context.base_env,
+                output_location=context.assertion_output,
+            )
+        )
+        if present != 1:
+            raise HarnessError(
+                f"expected MergeByKey table {table} to retain charge_id={charge_id}, got {present}"
+            )
+
+
 def verify_stripe_iceberg_replace_partition_rows(context: ScenarioContext) -> None:
     table = iceberg_glue_table_name("stripe_charge_fact")
     database = "iceberg_e2e_stripe"
@@ -2458,6 +2557,7 @@ VERIFIERS: dict[str, Callable[[ScenarioContext], None]] = {
     "postgres_iceberg_types_cdc_final_state": verify_postgres_iceberg_types_cdc_final_state,
     "postgres_iceberg_cdc_late_delete_final_state": verify_postgres_iceberg_cdc_late_delete_final_state,
     "stripe_iceberg_replace_partition_rows": verify_stripe_iceberg_replace_partition_rows,
+    "stripe_iceberg_merge_by_key_rows": verify_stripe_iceberg_merge_by_key_rows,
     "mysql_iceberg_types_cdc_final_state": verify_mysql_iceberg_types_cdc_final_state,
     "dynamodb_iceberg_types_cdc_encoded": verify_dynamodb_iceberg_types_cdc_encoded,
     "mssql_iceberg_debug_linux_rows": verify_mssql_iceberg_debug_linux_rows,

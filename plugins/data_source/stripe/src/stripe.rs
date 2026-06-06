@@ -32,6 +32,9 @@ use crate::stripe_api::{
     map_promotion_code, map_refund, map_subscription, StripeApiClient, FIXTURE_ENV,
 };
 
+/// Test-only override for Iceberg equality-commit e2e (`merge_by_key`, `replace_partition`).
+pub const WRITE_POLICY_ENV: &str = "SKIPPR_STRIPE_WRITE_POLICY";
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct DataSourceStripePluginConfig {
     pub stripe_account_id: String,
@@ -165,6 +168,18 @@ impl DataSourceStripePlugin {
         total
     }
 
+    fn write_policy_from_env(default: WritePolicy) -> WritePolicy {
+        match std::env::var(WRITE_POLICY_ENV)
+            .ok()
+            .as_deref()
+            .map(str::trim)
+        {
+            Some("merge_by_key") => WritePolicy::MergeByKey,
+            Some("replace_partition") => WritePolicy::ReplacePartition,
+            _ => default,
+        }
+    }
+
     fn namespace_contract(namespace: &str) -> SourceNamespaceContract {
         let pk_id = match namespace {
             NAMESPACE_ACCOUNT_SNAPSHOT => "account_id",
@@ -193,7 +208,7 @@ impl DataSourceStripePlugin {
             ],
             cursor: Some(FieldPath::single("ingest_run_date")),
             partition_key: vec![FieldPath::single("ingest_run_date")],
-            write_policy: WritePolicy::ReplacePartition,
+            write_policy: Self::write_policy_from_env(WritePolicy::ReplacePartition),
             refresh_window: None,
             description: format!("Stripe {namespace}"),
             semantics: Some(SourceSemantics::MutableReport),
@@ -588,7 +603,18 @@ mod tests {
     static ENV_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));
 
     #[test]
+    fn write_policy_env_override_applies_merge_by_key() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        std::env::set_var(WRITE_POLICY_ENV, "merge_by_key");
+        let contract = DataSourceStripePlugin::namespace_contract(NAMESPACE_CHARGE_FACT);
+        assert_eq!(contract.write_policy, WritePolicy::MergeByKey);
+        std::env::remove_var(WRITE_POLICY_ENV);
+    }
+
+    #[test]
     fn namespace_contracts_validate() {
+        let _guard = ENV_TEST_LOCK.lock().unwrap();
+        std::env::remove_var(WRITE_POLICY_ENV);
         let mut cfg = sample_config();
         cfg.access_token = Some("sk_test".into());
         let plugin = DataSourceStripePlugin::new(cfg).unwrap();

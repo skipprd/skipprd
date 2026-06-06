@@ -1,0 +1,47 @@
+skippr:
+  skippr_s3_bucket: skippr-e2e-sample-data-output
+  workspace: iceberg-stripe-merge-by-key
+
+pipelines:
+  stripe_iceberg_merge_by_key:
+    auto_approve: yes
+    env: test
+    buffer_threshold_bytes: 20000000
+    buffer_threshold_seconds: 60
+    data_source: data_sources.stripe_fixture
+    data_sink: data_sinks.iceberg_stripe
+
+data_sources:
+  stripe_fixture:
+    Stripe:
+      stripe_account_id: acct_fixture
+      streams: ["payments"]
+      start_date: "2024-01-01"
+      lookback_days: 1
+
+data_sinks:
+  iceberg_stripe:
+    Iceberg:
+      table_namespace: iceberg_e2e_stripe_merge_by_key
+      table_prefix: skippr
+      table_location_prefix: s3://skippr-e2e-sample-data-output/iceberg-e2e-stripe-merge-by-key
+      catalog:
+        type: glue
+        warehouse: s3://skippr-e2e-sample-data-output/iceberg-e2e-stripe-merge-by-key
+        database: iceberg_e2e_stripe_merge_by_key
+        catalog_id: "353855562591"
+        region: us-east-1
+    schema_sink: schema_sinks.iceberg_glue
+
+schema_sinks:
+  iceberg_glue:
+    Iceberg:
+      table_namespace: iceberg_e2e_stripe_merge_by_key
+      table_prefix: skippr
+      table_location_prefix: s3://skippr-e2e-sample-data-output/iceberg-e2e-stripe-merge-by-key
+      catalog:
+        type: glue
+        warehouse: s3://skippr-e2e-sample-data-output/iceberg-e2e-stripe-merge-by-key
+        database: iceberg_e2e_stripe_merge_by_key
+        catalog_id: "353855562591"
+        region: us-east-1

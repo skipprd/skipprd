@@ -25,17 +25,22 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
     def test_scenarios_cover_expected_names(self) -> None:
         self.assertEqual(
             sorted(runtime_e2e_harness.SCENARIOS.keys()),
-            [
-                "bike_hire",
-                "bike_hire_many",
-                "bike_hire_s3_wal_many",
-                "deadletters_test",
-                "dynamodb_iceberg_types_cdc",
-                "mssql_iceberg_debug_linux",
-                "mssql_iceberg_debug_windows",
-                "mysql_iceberg_types_cdc",
-                "postgres_iceberg_types_cdc",
-            ],
+            sorted(
+                [
+                    "bike_hire",
+                    "bike_hire_many",
+                    "bike_hire_s3_wal_many",
+                    "deadletters_test",
+                    "dynamodb_iceberg_types_cdc",
+                    "mssql_iceberg_debug_linux",
+                    "mssql_iceberg_debug_windows",
+                    "mysql_iceberg_types_cdc",
+                    "postgres_iceberg_cdc_late_delete",
+                    "postgres_iceberg_types_cdc",
+                    "stripe_iceberg_merge_by_key",
+                    "stripe_iceberg_replace_partition",
+                ]
+            ),
         )
 
     def test_github_action_configs_use_refined_skippr_shape(self) -> None:
@@ -324,6 +329,39 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
             side_effect=fake_athena_scalar,
         ):
             runtime_e2e_harness.verify_postgres_iceberg_types_cdc_final_state(context)
+
+        self.assertEqual(list(expected_queries), observed)
+
+    def test_verify_stripe_iceberg_merge_by_key_rows_requires_both_charges(self) -> None:
+        table = runtime_e2e_harness.iceberg_glue_table_name("stripe_charge_fact")
+        expected_queries = {
+            f'SELECT COUNT(*) FROM "{table}"': "2",
+            f'SELECT COUNT(DISTINCT charge_id) FROM "{table}"': "2",
+            f"SELECT COUNT(*) FROM \"{table}\" WHERE charge_id = 'ch_fixture1'": "1",
+            f"SELECT COUNT(*) FROM \"{table}\" WHERE charge_id = 'ch_fixture2'": "1",
+        }
+        observed: list[str] = []
+
+        def fake_athena_scalar(sql, *, database, env, output_location):
+            self.assertEqual(database, "iceberg_e2e_stripe_merge_by_key")
+            observed.append(sql)
+            return expected_queries[sql]
+
+        context = runtime_e2e_harness.ScenarioContext(
+            scenario=runtime_e2e_harness.SCENARIOS["stripe_iceberg_merge_by_key"],
+            skipprd=Path("/tmp/skipprd"),
+            runtime_plugin_dir=Path("/tmp/runtime-plugins"),
+            base_env={},
+            assertion_output="s3://example/assertions",
+            namespace=None,
+        )
+
+        with mock.patch.object(
+            runtime_e2e_harness,
+            "athena_scalar",
+            side_effect=fake_athena_scalar,
+        ):
+            runtime_e2e_harness.verify_stripe_iceberg_merge_by_key_rows(context)
 
         self.assertEqual(list(expected_queries), observed)
 

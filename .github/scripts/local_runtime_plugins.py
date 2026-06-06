@@ -275,8 +275,10 @@ def build_local_runtime_plugins(
     pipeline: str | None,
     output_dir: Path,
     release: bool,
+    skip_cargo_build: bool = False,
 ) -> Path:
-    ensure_tool("cargo")
+    if not skip_cargo_build:
+        ensure_tool("cargo")
     selected = configured_runtime_plugins(config_path, pipeline)
     catalog = catalog_by_plugin(REPO_ROOT)
     missing = sorted(ref for ref in selected if ref not in catalog)
@@ -288,15 +290,15 @@ def build_local_runtime_plugins(
 
     entries = [catalog[ref] for ref in sorted(selected)]
     packages = sorted({entry["package_name"] for entry in entries})
-    build_command = [ensure_tool("cargo"), "build", *react_cargo_config_args()]
-    if release:
-        build_command.append("--release")
-    for package in packages:
-        build_command.extend(["-p", package])
-
     build_env = os.environ.copy()
     build_env.setdefault("CARGO_INCREMENTAL", "0")
-    run_command(build_command, env=build_env)
+    if not skip_cargo_build:
+        build_command = [ensure_tool("cargo"), "build", *react_cargo_config_args()]
+        if release:
+            build_command.append("--release")
+        for package in packages:
+            build_command.extend(["-p", package])
+        run_command(build_command, env=build_env)
 
     target_dir = Path(build_env.get("CARGO_TARGET_DIR", REPO_ROOT / "target"))
     if not target_dir.is_absolute():
@@ -350,6 +352,11 @@ def main(argv: list[str] | None = None) -> int:
         help="Local manifest directory; defaults to .skippr/local-runtime-plugins/manifests",
     )
     parser.add_argument("--release", action="store_true", help="Build release plugin binaries")
+    parser.add_argument(
+        "--skip-cargo-build",
+        action="store_true",
+        help="Only write manifests for binaries already built in CARGO_TARGET_DIR",
+    )
     args = parser.parse_args(argv)
 
     try:
@@ -358,6 +365,7 @@ def main(argv: list[str] | None = None) -> int:
             pipeline=args.pipeline,
             output_dir=Path(args.output_dir),
             release=args.release,
+            skip_cargo_build=args.skip_cargo_build,
         )
     except (LocalRuntimePluginError, subprocess.CalledProcessError) as err:
         print(f"local runtime plugin setup failed: {err}", file=sys.stderr)

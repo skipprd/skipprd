@@ -1,0 +1,84 @@
+name: Iceberg equality-commit e2e
+description: Build skipprd and Iceberg runtime plugins once, then run equality-delete commit scenarios.
+inputs:
+  scenarios:
+    description: Space-separated runtime e2e harness scenario names
+    required: false
+    default: postgres_iceberg_cdc_late_delete stripe_iceberg_replace_partition stripe_iceberg_merge_by_key
+  mode:
+    description: Harness mode (smoke or full)
+    required: false
+    default: full
+  release_aws_access_key_id:
+    description: AWS access key for CodeArtifact Cargo registry
+    required: true
+  release_aws_secret_access_key:
+    description: AWS secret key for CodeArtifact Cargo registry
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Configure CodeArtifact Cargo access
+      shell: bash
+      env:
+        AWS_ACCESS_KEY_ID: ${{ inputs.release_aws_access_key_id }}
+        AWS_SECRET_ACCESS_KEY: ${{ inputs.release_aws_secret_access_key }}
+        AWS_DEFAULT_REGION: us-east-1
+      run: |
+        token="$(aws codeartifact get-authorization-token \
+          --domain skippr \
+          --domain-owner 132355036174 \
+          --region us-east-1 \
+          --query authorizationToken \
+          --output text)"
+        echo "::add-mask::$token"
+        echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
+
+    - name: Build skipprd and equality-commit runtime plugins
+      shell: bash
+      env:
+        CARGO_BUILD_JOBS: "2"
+        CARGO_INCREMENTAL: "0"
+        RUSTFLAGS: "-C debuginfo=0"
+      run: |
+        cargo build \
+          -p skipprd \
+          -p skippr-plugin-data-source-postgres \
+          -p skippr-plugin-data-source-stripe \
+          -p skippr-plugin-data-sink-iceberg \
+          -p skippr-plugin-schema-sink-iceberg
+
+    - name: Stage local runtime manifests
+      id: local_runtime
+      shell: bash
+      env:
+        CARGO_TARGET_DIR: target
+      run: |
+        set -euo pipefail
+        manifest_dir="${RUNNER_TEMP:-/tmp}/skippr-iceberg-equality-commit-manifests"
+        mkdir -p "${manifest_dir}"
+        stage_manifest() {
+          python3 .github/scripts/local_runtime_plugins.py \
+            --config "$1" \
+            --pipeline "$2" \
+            --output-dir "${manifest_dir}" \
+            --skip-cargo-build
+        }
+        stage_manifest .github/actions/e2e/postgres_iceberg_cdc_late_delete/skippr.yml postgres_iceberg_cdc_late_delete
+        stage_manifest .github/actions/e2e/stripe_iceberg_replace_partition/skippr.yml stripe_iceberg_replace_partition
+        stage_manifest .github/actions/e2e/stripe_iceberg_merge_by_key/skippr.yml stripe_iceberg_merge_by_key
+        echo "manifest_dir=${manifest_dir}" >> "$GITHUB_OUTPUT"
+
+    - name: Run Iceberg equality-commit e2e scenarios
+      shell: bash
+      env:
+        USE_LOCAL_PLUGIN_CODE: "1"
+        SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR: ${{ steps.local_runtime.outputs.manifest_dir }}
+      run: |
+        set -euo pipefail
+        # shellcheck disable=SC2086
+        python3 .github/scripts/runtime_e2e_harness.py run ${{ inputs.scenarios }} \
+          --mode "${{ inputs.mode }}" \
+          --skipprd target/debug/skipprd \
+          --prepare-aws-state \
+          --skip-dynamodb-purge
