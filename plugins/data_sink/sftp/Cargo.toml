@@ -17,7 +17,7 @@ futures.workspace = true
 parquet.workspace = true
 
 async-trait = "0.1.77"
-datafusion = "50.3.0"
+datafusion.workspace = true
 hex = "0.4.3"
 md5 = "0.7.0"
 serde.workspace = true

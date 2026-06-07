@@ -14,13 +14,13 @@ skippr-runtime-sdk.workspace = true
 bytes.workspace = true
 parquet.workspace = true
 
-arrow = { version = "56.2.0", features = ["ipc_compression"] }
+arrow = { version = "58.3.0", features = ["ipc_compression"] }
 async-trait = "0.1.77"
 aws-config = "1.5.1"
 aws-sdk-redshiftdata = { version = "1" }
 aws-sdk-s3 = "1.32.0"
 dashmap = "5.5.3"
-datafusion = "50.3.0"
+datafusion.workspace = true
 futures = "0.3.25"
 hex = "0.4.3"
 md5 = "0.7.0"

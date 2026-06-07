@@ -174,6 +174,7 @@ pub(crate) mod transient_retry;
 pub(crate) mod transition_dispatcher;
 pub(crate) mod truth_snapshot;
 pub mod vector_docs;
+pub mod test_env;
 pub(crate) mod ws_plans;
 use agent_modes::{AgentMode, AgentToolCapability};
 pub use ctx_ext::copy_capabilities_to_actx;

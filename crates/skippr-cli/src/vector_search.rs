@@ -3,7 +3,6 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use react_core::provider_traits::VectorStore;
 use react_core::scope::RequestScope;
 use react_suite_data_engineer::PipelineName;
 

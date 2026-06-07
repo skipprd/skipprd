@@ -17,7 +17,7 @@ skippr-plugin-shared-api-source = { path = "../../shared/api_source" }
 skippr-runtime-sdk.workspace = true
 tokio.workspace = true
 tracing = "0.1"
-reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { workspace = true }
 urlencoding = "2.1.3"
 base64.workspace = true
 sha1 = "0.10"

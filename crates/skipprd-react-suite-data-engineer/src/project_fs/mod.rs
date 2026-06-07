@@ -922,33 +922,13 @@ mod tests {
     use react_core::error::CoreError;
     use react_core::storage::{cached, ConditionalWriteStatus, StorageAdapter};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_local_dbt_root(root: &Path, test: impl FnOnce()) {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let saved_local = std::env::var("SKIPPR_LOCAL_DBT_PROJECT_ROOT").ok();
-        std::env::set_var("SKIPPR_LOCAL_DBT_PROJECT_ROOT", root);
-
-        test();
-
-        match saved_local {
-            Some(value) => std::env::set_var("SKIPPR_LOCAL_DBT_PROJECT_ROOT", value),
-            None => std::env::remove_var("SKIPPR_LOCAL_DBT_PROJECT_ROOT"),
-        }
+        crate::test_env::with_local_dbt_root(root, test);
     }
 
     fn with_no_local_dbt_root(test: impl FnOnce()) {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let saved_local = std::env::var("SKIPPR_LOCAL_DBT_PROJECT_ROOT").ok();
-        std::env::remove_var("SKIPPR_LOCAL_DBT_PROJECT_ROOT");
-
-        test();
-
-        if let Some(value) = saved_local {
-            std::env::set_var("SKIPPR_LOCAL_DBT_PROJECT_ROOT", value);
-        }
+        crate::test_env::with_no_local_dbt_root(test);
     }
 
     #[derive(Default)]

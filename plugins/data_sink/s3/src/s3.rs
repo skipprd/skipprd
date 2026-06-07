@@ -108,7 +108,7 @@ impl DataSinkS3Plugin {
             counters::dec_uploads_in_flight();
             e
         })?;
-        let row_count = parquet_bytes.meta_data.num_rows as u64;
+        let row_count = parquet_bytes.num_rows as u64;
         let byte_count = parquet_bytes.size_bytes;
 
         self.s3_client

@@ -4,8 +4,8 @@ use arrow::datatypes::SchemaRef;
 use dashmap::DashSet;
 use once_cell::sync::Lazy;
 use parquet::basic::Compression;
+use parquet::file::metadata::SortingColumn;
 use parquet::file::properties::WriterProperties;
-use parquet::format::SortingColumn;
 use std::collections::HashSet;
 use tracing::warn;
 
@@ -217,7 +217,7 @@ pub fn build_writer_properties(
         .set_dictionary_enabled(false)
         .set_encoding(parquet::basic::Encoding::PLAIN)
         .set_compression(Compression::SNAPPY)
-        .set_max_row_group_size(row_group_size);
+        .set_max_row_group_row_count(Some(row_group_size));
 
     if !order_fields.is_empty() {
         let sorting_cols: Vec<SortingColumn> = order_fields

@@ -88,12 +88,15 @@ impl DataSource for DataSourceDeltaLakePlugin {
     async fn sync(&mut self, sync_ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         let storage_options = self.config.storage_options.clone().unwrap_or_default();
 
+        let table_url = deltalake::ensure_table_uri(&self.config.table_uri)
+            .map_err(|e| std::io::Error::other(format!("Delta Lake URI: {}", e)))?;
+
         let table = if let Some(version) = self.config.version {
-            deltalake::open_table_with_version(&self.config.table_uri, version)
+            deltalake::open_table_with_version(table_url, version as u64)
                 .await
                 .map_err(|e| std::io::Error::other(format!("Delta Lake open: {}", e)))?
         } else {
-            deltalake::open_table_with_storage_options(&self.config.table_uri, storage_options)
+            deltalake::open_table_with_storage_options(table_url, storage_options)
                 .await
                 .map_err(|e| std::io::Error::other(format!("Delta Lake open: {}", e)))?
         };
@@ -105,8 +108,12 @@ impl DataSource for DataSourceDeltaLakePlugin {
         );
 
         let df_ctx = deltalake::datafusion::prelude::SessionContext::new();
+        let provider = table
+            .table_provider()
+            .await
+            .map_err(|e| std::io::Error::other(format!("Delta table provider: {}", e)))?;
         df_ctx
-            .register_table("delta_source", Arc::new(table))
+            .register_table("delta_source", provider)
             .map_err(|e| std::io::Error::other(format!("Delta register: {}", e)))?;
 
         let sql = if let Some(ref filter) = self.config.filter {

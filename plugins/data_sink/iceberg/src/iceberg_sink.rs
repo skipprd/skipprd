@@ -287,7 +287,7 @@ impl DataSinkIcebergPlugin {
                 &date_fields,
             )
             .await?;
-            row_count = parquet_bytes.meta_data.num_rows as u64;
+            row_count = parquet_bytes.num_rows as u64;
             if row_count > 0 {
                 let data_file_uri = self
                     .write_parquet_file(&namespace, "data", &filename, parquet_bytes.bytes.clone())
@@ -336,7 +336,7 @@ impl DataSinkIcebergPlugin {
                 &date_fields,
             )
             .await?;
-            let delete_row_count = delete_bytes.meta_data.num_rows as u64;
+            let delete_row_count = delete_bytes.num_rows as u64;
             if delete_row_count > 0 {
                 let delete_file_uri = self
                     .write_parquet_file(&namespace, "delete", &filename, delete_bytes.bytes)
@@ -460,7 +460,7 @@ impl DataSinkIcebergPlugin {
             let delete_bytes =
                 crate::parquet_util::serialize_to_parquet_for_iceberg(delete_stream, &date_fields)
                     .await?;
-            let delete_row_count = delete_bytes.meta_data.num_rows as u64;
+            let delete_row_count = delete_bytes.num_rows as u64;
             if delete_row_count > 0 {
                 let delete_file_uri = self
                     .write_parquet_file(&namespace, "delete", &filename, delete_bytes.bytes)
@@ -483,7 +483,7 @@ impl DataSinkIcebergPlugin {
             let parquet_bytes =
                 crate::parquet_util::serialize_to_parquet_for_iceberg(data_stream, &date_fields)
                     .await?;
-            row_count = parquet_bytes.meta_data.num_rows as u64;
+            row_count = parquet_bytes.num_rows as u64;
             if row_count > 0 {
                 let data_file_uri = self
                     .write_parquet_file(&namespace, "data", &filename, parquet_bytes.bytes.clone())
@@ -1783,7 +1783,9 @@ fn make_v2_minimal_table_for_tests() -> iceberg::table::Table {
     use std::fs::File;
     use std::io::BufReader;
 
-    use iceberg::io::FileIOBuilder;
+    use std::sync::Arc;
+
+    use iceberg::io::{FileIOBuilder, MemoryStorageFactory};
     use iceberg::spec::TableMetadata;
     use iceberg::TableIdent;
 
@@ -1796,7 +1798,7 @@ fn make_v2_minimal_table_for_tests() -> iceberg::table::Table {
         .metadata(metadata)
         .metadata_location("s3://bucket/test/location/metadata/v1.json".to_string())
         .identifier(TableIdent::from_strs(["ns1", "test1"]).unwrap())
-        .file_io(FileIOBuilder::new("memory").build().unwrap())
+        .file_io(FileIOBuilder::new(Arc::new(MemoryStorageFactory)).build())
         .build()
         .unwrap()
 }

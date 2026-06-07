@@ -11,7 +11,9 @@ use object_store::aws::AmazonS3Builder;
 use object_store::azure::MicrosoftAzureBuilder;
 use object_store::gcp::{GcpCredential, GcpCredentialProvider, GoogleCloudStorageBuilder};
 use object_store::path::Path as ObjectPath;
-use object_store::{Attribute, Attributes, ObjectStore, PutOptions, StaticCredentialProvider};
+use object_store::{
+    Attribute, Attributes, ObjectStore, ObjectStoreExt, PutOptions, StaticCredentialProvider,
+};
 use once_cell::sync::Lazy;
 use serde_derive::Deserialize;
 use std::borrow::Cow;
@@ -1963,7 +1965,7 @@ impl DataSinkSnowflakePlugin {
                 return Err(e);
             }
         };
-        let row_count = parquet.meta_data.num_rows;
+        let row_count = parquet.num_rows;
         let byte_count = parquet.size_bytes;
 
         let stage = self.config.stage.as_deref().unwrap_or("@~");
@@ -2068,7 +2070,7 @@ impl DataSinkSnowflakePlugin {
                 return Err(e);
             }
         };
-        let row_count = parquet.meta_data.num_rows;
+        let row_count = parquet.num_rows;
         let byte_count = parquet.size_bytes;
         let staging_uri = self.config.staging_uri.as_deref().unwrap();
         let location = Self::parse_external_stage_uri(staging_uri)

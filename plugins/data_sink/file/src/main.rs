@@ -161,7 +161,7 @@ async fn sync_file_sink(
         err
     })?;
 
-    counters::add_parquet_rows(parquet_bytes.meta_data.num_rows as u64);
+    counters::add_parquet_rows(parquet_bytes.num_rows as u64);
     counters::add_parquet_bytes(parquet_bytes.size_bytes);
     counters::add_upload(1);
     counters::dec_uploads_in_flight();

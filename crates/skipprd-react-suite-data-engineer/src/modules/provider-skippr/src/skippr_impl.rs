@@ -1549,32 +1549,9 @@ impl SyncSummaryAccumulator {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex;
-
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn with_env(vars: &[(&str, Option<&str>)], test: impl FnOnce()) {
-        let _guard = ENV_LOCK.lock().unwrap();
-        let saved: Vec<(String, Option<String>)> = vars
-            .iter()
-            .map(|(key, _)| ((*key).to_string(), std::env::var(key).ok()))
-            .collect();
-
-        for (key, value) in vars {
-            match value {
-                Some(value) => std::env::set_var(key, value),
-                None => std::env::remove_var(key),
-            }
-        }
-
-        test();
-
-        for (key, value) in saved {
-            match value {
-                Some(value) => std::env::set_var(&key, value),
-                None => std::env::remove_var(&key),
-            }
-        }
+        react_suite_data_engineer::test_env::with_env(vars, test);
     }
 
     #[test]

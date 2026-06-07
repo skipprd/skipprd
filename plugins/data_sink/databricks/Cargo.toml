@@ -15,14 +15,14 @@ bytes.workspace = true
 hex.workspace = true
 parquet.workspace = true
 
-arrow = { version = "56.2.0", features = ["ipc_compression"] }
+arrow = { version = "58.3.0", features = ["ipc_compression"] }
 async-trait = "0.1.77"
 dashmap = "5.5.3"
-datafusion = "50.3.0"
-deltalake = { version = "0.27", features = ["datafusion"] }
+datafusion.workspace = true
+deltalake = { version = "0.32.3", features = ["datafusion"] }
 futures = "0.3.25"
 once_cell = "1.17.0"
-reqwest = { version = "0.11.16", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { workspace = true }
 serde.workspace = true
 serde_derive = "1.0.105"
 serde_json = "1.0.85"

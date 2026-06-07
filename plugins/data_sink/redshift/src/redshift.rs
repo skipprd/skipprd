@@ -259,7 +259,7 @@ impl DataSinkRedshiftPlugin {
             .unwrap_or("skippr-staging");
 
         let parquet_bytes = serialize_to_parquet(stream).await?;
-        let row_count = parquet_bytes.meta_data.num_rows as u64;
+        let row_count = parquet_bytes.num_rows as u64;
 
         let md5_digest = md5::compute(filename.as_bytes());
         let s3_key = format!(

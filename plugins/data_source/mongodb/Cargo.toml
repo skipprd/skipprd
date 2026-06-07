@@ -14,7 +14,7 @@ clap.workspace = true
 tokio.workspace = true
 skippr-runtime-sdk.workspace = true
 
-chrono = "=0.4.42"
+chrono = "0.4.44"
 futures = "0.3.25"
 md5 = "0.7.0"
 mongodb = { version = "3" }

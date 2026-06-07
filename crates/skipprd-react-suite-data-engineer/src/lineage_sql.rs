@@ -1,12 +1,13 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use serde::{Deserialize, Serialize};
-use sqlparser::ast::{
-    Expr, FunctionArg, FunctionArgExpr, Join, JoinConstraint, JoinOperator, ObjectName, Query,
-    Select, SelectItem, SetExpr, Statement, TableFactor, TableWithJoins,
+use datafusion::sql::sqlparser::ast::{
+    CreateTable, CreateView, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, Join,
+    JoinConstraint, JoinOperator, ObjectName, Query, Select, SelectItem,
+    SelectItemQualifiedWildcardKind, SetExpr, Statement, TableFactor, TableWithJoins,
 };
-use sqlparser::dialect::{BigQueryDialect, GenericDialect, MsSqlDialect, SnowflakeDialect};
-use sqlparser::parser::Parser;
+use datafusion::sql::sqlparser::dialect::{BigQueryDialect, GenericDialect, MsSqlDialect, SnowflakeDialect};
+use datafusion::sql::sqlparser::parser::Parser;
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -51,13 +52,13 @@ pub fn analyze_select_sql(sql: &str) -> SqlLineageAnalysis {
     for statement in statements {
         match statement {
             Statement::Query(query) => visit_query(&query, &mut analysis),
-            Statement::CreateTable { name, query, .. } => {
+            Statement::CreateTable(CreateTable { name, query, .. }) => {
                 analysis.output_tables.push(name_to_string(&name));
-                if let Some(query) = query {
-                    visit_query(&query, &mut analysis);
+                if let Some(query) = query.as_deref() {
+                    visit_query(query, &mut analysis);
                 }
             }
-            Statement::CreateView { name, query, .. } => {
+            Statement::CreateView(CreateView { name, query, .. }) => {
                 analysis.output_tables.push(name_to_string(&name));
                 visit_query(&query, &mut analysis);
             }
@@ -174,8 +175,16 @@ fn visit_select(select: &Select, out: &mut SqlLineageAnalysis) {
                     &out.table_aliases,
                 ));
             }
-            SelectItem::QualifiedWildcard(name, _) => {
-                let relation = resolve_relation_or_alias(&name_to_string(name), &out.table_aliases);
+            SelectItem::QualifiedWildcard(kind, _) => {
+                let relation = match kind {
+                    SelectItemQualifiedWildcardKind::ObjectName(name) => {
+                        resolve_relation_or_alias(&name_to_string(name), &out.table_aliases)
+                    }
+                    SelectItemQualifiedWildcardKind::Expr(expr) => {
+                        collect_expr_fields(expr, &out.table_aliases, &mut out.selected_fields);
+                        "*".to_string()
+                    }
+                };
                 out.selected_fields.push(relation.clone());
                 out.selected_outputs.push(SqlSelectedOutput {
                     output_field: None,
@@ -228,9 +237,7 @@ fn inferred_output_field(expr: &Expr) -> Option<String> {
             .last()
             .map(|ident| normalize_field_path(&ident.value))
             .filter(|field| !field.is_empty()),
-        Expr::Nested(expr) | Expr::Cast { expr, .. } | Expr::TryCast { expr, .. } => {
-            inferred_output_field(expr)
-        }
+        Expr::Nested(expr) | Expr::Cast { expr, .. } => inferred_output_field(expr),
         _ => None,
     }
 }
@@ -281,9 +288,9 @@ fn collect_join_operator_fields(operator: &JoinOperator, out: &mut SqlLineageAna
         JoinConstraint::On(expr) => {
             collect_expr_fields(&expr, &out.table_aliases, &mut out.join_fields)
         }
-        JoinConstraint::Using(idents) => {
+        JoinConstraint::Using(object_names) => {
             out.join_fields
-                .extend(idents.iter().map(|ident| ident.value.clone()));
+                .extend(object_names.iter().map(|name| name_to_string(name)));
         }
         _ => {}
     }
@@ -297,11 +304,11 @@ fn collect_aggregate_fields(
     match expr {
         Expr::Function(func) => {
             if is_aggregate_function(&func.name.to_string()) {
-                for arg in &func.args {
+                for arg in function_args(&func.args) {
                     collect_function_arg_fields(arg, aliases, out);
                 }
             } else {
-                for arg in &func.args {
+                for arg in function_args(&func.args) {
                     if let Some(expr) = function_arg_expr(arg) {
                         collect_aggregate_fields(expr, aliases, out);
                     }
@@ -312,9 +319,7 @@ fn collect_aggregate_fields(
             collect_aggregate_fields(left, aliases, out);
             collect_aggregate_fields(right, aliases, out);
         }
-        Expr::Nested(expr) | Expr::Cast { expr, .. } | Expr::TryCast { expr, .. } => {
-            collect_aggregate_fields(expr, aliases, out)
-        }
+        Expr::Nested(expr) | Expr::Cast { expr, .. } => collect_aggregate_fields(expr, aliases, out),
         _ => {}
     }
 }
@@ -347,7 +352,7 @@ fn collect_expr_fields(expr: &Expr, aliases: &BTreeMap<String, String>, out: &mu
             out.push(resolve_compound_identifier(idents, aliases));
         }
         Expr::Function(func) => {
-            for arg in &func.args {
+            for arg in function_args(&func.args) {
                 collect_function_arg_fields(arg, aliases, out);
             }
         }
@@ -358,7 +363,6 @@ fn collect_expr_fields(expr: &Expr, aliases: &BTreeMap<String, String>, out: &mu
         Expr::UnaryOp { expr, .. }
         | Expr::Nested(expr)
         | Expr::Cast { expr, .. }
-        | Expr::TryCast { expr, .. }
         | Expr::IsNull(expr)
         | Expr::IsNotNull(expr)
         | Expr::IsTrue(expr)
@@ -385,17 +389,15 @@ fn collect_expr_fields(expr: &Expr, aliases: &BTreeMap<String, String>, out: &mu
         Expr::Case {
             operand,
             conditions,
-            results,
             else_result,
+            ..
         } => {
             if let Some(operand) = operand {
                 collect_expr_fields(operand, aliases, out);
             }
-            for condition in conditions {
-                collect_expr_fields(condition, aliases, out);
-            }
-            for result in results {
-                collect_expr_fields(result, aliases, out);
+            for case_when in conditions {
+                collect_expr_fields(&case_when.condition, aliases, out);
+                collect_expr_fields(&case_when.result, aliases, out);
             }
             if let Some(result) = else_result {
                 collect_expr_fields(result, aliases, out);
@@ -423,19 +425,26 @@ fn is_aggregate_function(name: &str) -> bool {
     )
 }
 
+fn function_args(args: &FunctionArguments) -> &[FunctionArg] {
+    match args {
+        FunctionArguments::List(list) => &list.args,
+        _ => &[],
+    }
+}
+
 fn name_to_string(name: &ObjectName) -> String {
     normalize_relation_name(
         &name
             .0
             .iter()
-            .map(|ident| ident.value.as_str())
+            .filter_map(|part| part.as_ident().map(|ident| ident.value.as_str()))
             .collect::<Vec<_>>()
             .join("."),
     )
 }
 
 fn resolve_compound_identifier(
-    idents: &[sqlparser::ast::Ident],
+    idents: &[Ident],
     aliases: &BTreeMap<String, String>,
 ) -> String {
     let parts = idents

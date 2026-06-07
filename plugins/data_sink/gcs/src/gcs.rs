@@ -5,6 +5,7 @@ use datafusion::execution::SendableRecordBatchStream;
 use object_store::gcp::GoogleCloudStorageBuilder;
 use object_store::path::Path as ObjectPath;
 use object_store::ObjectStore;
+use object_store::ObjectStoreExt;
 use serde_derive::Deserialize;
 use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;

@@ -37,13 +37,14 @@ use crate::sqlrt::tui::{QueryEditorConfig, QueryEditorView};
 use crate::ARROW_SCHEMA;
 use arc_swap::ArcSwap;
 use arrow::ipc::reader::StreamReader;
-use sqlparser::ast::{
-    Expr as StdExpr, Function, FunctionArg, FunctionArgExpr, GroupByExpr, Ident,
-    ObjectName as SqlObjectName, Query as StdQuery, Select as StdSelect,
-    SelectItem as StdSelectItem, SetExpr, Statement as StdStatement, TableFactor,
+use datafusion::sql::sqlparser::ast::{
+    Expr as StdExpr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
+    FunctionArguments, GroupByExpr, Ident, ObjectName as SqlObjectName, OrderByKind,
+    Query as StdQuery, Select as StdSelect, SelectItem as StdSelectItem, SetExpr,
+    Statement as StdStatement, TableFactor,
 };
-use sqlparser::dialect::GenericDialect;
-use sqlparser::parser::Parser as StdSqlParser;
+use datafusion::sql::sqlparser::dialect::GenericDialect;
+use datafusion::sql::sqlparser::parser::Parser as StdSqlParser;
 use std::io::{Read, Seek};
 use std::sync::mpsc;
 // removed unused HashSet
@@ -1125,10 +1126,14 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                 namespace: String,
             }
             fn split_pipeline_ns(
-                name: &sqlparser::ast::ObjectName,
+                name: &SqlObjectName,
                 _default_pipeline: &str,
             ) -> TableRef {
-                let parts: Vec<String> = name.0.iter().map(|id| id.value.clone()).collect();
+                let parts: Vec<String> = name
+                    .0
+                    .iter()
+                    .filter_map(|part| part.as_ident().map(|id| id.value.clone()))
+                    .collect();
                 match parts.as_slice() {
                     // Fully-qualified: pipeline.namespace
                     [p, n] => TableRef {
@@ -1302,18 +1307,22 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                         if needs_cast_path(idents, whitelist) {
                             let arg = StdExpr::CompoundIdentifier(idents.clone());
                             *expr = StdExpr::Function(Function {
-                                name: SqlObjectName(vec![Ident::new("to_timestamp_millis")]),
-                                args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(arg))],
-                                over: None,
-                                distinct: false,
-                                special: false,
-                                order_by: vec![],
-                                null_treatment: None,
+                                name: SqlObjectName::from(Ident::new("to_timestamp_millis")),
+                                uses_odbc_syntax: false,
+                                parameters: FunctionArguments::None,
+                                args: FunctionArguments::List(FunctionArgumentList {
+                                    duplicate_treatment: None,
+                                    args: vec![FunctionArg::Unnamed(FunctionArgExpr::Expr(arg))],
+                                    clauses: vec![],
+                                }),
                                 filter: None,
+                                null_treatment: None,
+                                over: None,
+                                within_group: vec![],
                             });
                         }
                     }
-                    StdExpr::Identifier(_) | StdExpr::Value(_) | StdExpr::Wildcard => {}
+                    StdExpr::Identifier(_) | StdExpr::Value(_) | StdExpr::Wildcard(_) => {}
                     StdExpr::BinaryOp { left, right, .. } => {
                         rewrite_expr(left, whitelist);
                         rewrite_expr(right, whitelist);
@@ -1325,9 +1334,11 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                         rewrite_expr(inner, whitelist);
                     }
                     StdExpr::Function(f) => {
-                        for a in f.args.iter_mut() {
-                            if let FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) = a {
-                                rewrite_expr(e, whitelist);
+                        if let FunctionArguments::List(list) = &mut f.args {
+                            for a in list.args.iter_mut() {
+                                if let FunctionArg::Unnamed(FunctionArgExpr::Expr(e)) = a {
+                                    rewrite_expr(e, whitelist);
+                                }
                             }
                         }
                     }
@@ -1379,7 +1390,7 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                                 }
                                 // group by
                                 match group_by {
-                                    GroupByExpr::Expressions(exprs) => {
+                                    GroupByExpr::Expressions(exprs, _) => {
                                         for e in exprs.iter_mut() {
                                             rewrite_expr(e, whitelist);
                                         }
@@ -1392,8 +1403,12 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                             }
                             _ => {}
                         }
-                        for ob in order_by.iter_mut() {
-                            rewrite_expr(&mut ob.expr, whitelist);
+                        if let Some(order_by) = order_by.as_mut() {
+                            if let OrderByKind::Expressions(exprs) = &mut order_by.kind {
+                                for ob in exprs.iter_mut() {
+                                    rewrite_expr(&mut ob.expr, whitelist);
+                                }
+                            }
                         }
                         // limit is an Expr in this parser version; nothing to rewrite here
                     }

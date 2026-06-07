@@ -15,7 +15,7 @@ tokio.workspace = true
 skippr-runtime-sdk.workspace = true
 
 flate2 = "1.0.25"
-reqwest = { version = "0.11.16", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+reqwest = { workspace = true }
 serde.workspace = true
 serde_derive = "1.0.105"
 tracing = "0.1"

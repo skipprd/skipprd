@@ -217,7 +217,7 @@ mod tests {
     struct SelectiveFailStorage {
         inner: Arc<InMemoryStorageAdapter>,
         fail_key: String,
-        remaining_failures: Arc<Mutex<usize>>,
+        remaining_failures: Arc<Mutex<Option<usize>>>,
         attempts: Arc<Mutex<usize>>,
     }
 
@@ -226,7 +226,16 @@ mod tests {
             Self {
                 inner: Arc::new(InMemoryStorageAdapter::default()),
                 fail_key,
-                remaining_failures: Arc::new(Mutex::new(remaining_failures)),
+                remaining_failures: Arc::new(Mutex::new(Some(remaining_failures))),
+                attempts: Arc::new(Mutex::new(0)),
+            }
+        }
+
+        fn fail_forever(fail_key: String) -> Self {
+            Self {
+                inner: Arc::new(InMemoryStorageAdapter::default()),
+                fail_key,
+                remaining_failures: Arc::new(Mutex::new(None)),
                 attempts: Arc::new(Mutex::new(0)),
             }
         }
@@ -258,11 +267,19 @@ mod tests {
                     .remaining_failures
                     .lock()
                     .expect("remaining_failures mutex poisoned");
-                if *remaining > 0 {
-                    *remaining -= 1;
-                    return Err(CoreError::Storage(format!(
-                        "synthetic conditional write failure for '{key}'"
-                    )));
+                match *remaining {
+                    None => {
+                        return Err(CoreError::Storage(format!(
+                            "synthetic conditional write failure for '{key}'"
+                        )));
+                    }
+                    Some(0) => {}
+                    Some(count) => {
+                        *remaining = Some(count - 1);
+                        return Err(CoreError::Storage(format!(
+                            "synthetic conditional write failure for '{key}'"
+                        )));
+                    }
                 }
             }
             self.inner
@@ -639,9 +656,8 @@ mod tests {
         let fail_key = keyspace
             .thread_key(&scope, tid)
             .expect("thread key should build");
-        let storage = Arc::new(SelectiveFailStorage::new(
+        let storage = Arc::new(SelectiveFailStorage::fail_forever(
             fail_key,
-            PHASE_STEP_APPEND_RETRY_DELAYS_MS.len() + 10,
         ));
         let store = ThreadStore::new(storage.clone(), scope, keyspace);
 

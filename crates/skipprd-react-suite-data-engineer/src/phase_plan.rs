@@ -86,6 +86,14 @@ async fn handle_plan_semantic_failure(
         "Plan failed semantic validation (design-first). Errors:\n- {}",
         sem_errors.join("\n- ")
     );
+    DataEngineerSuite::annotate_plan_semantic_invalid(
+        thread_store,
+        thread_id,
+        phase,
+        "plan",
+        &sem_errors,
+    )
+    .await?;
     apply_guard_block(
         thread_store,
         thread_id,

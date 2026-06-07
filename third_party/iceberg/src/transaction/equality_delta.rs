@@ -107,13 +107,15 @@ impl TransactionAction for EqualityDeltaAppendAction {
             self.added_delete_files.clone(),
         );
 
-        snapshot_producer.validate_added_data_files(&self.added_data_files)?;
-        snapshot_producer.validate_added_delete_files(&self.added_delete_files)?;
+        if !self.added_data_files.is_empty() {
+            snapshot_producer.validate_added_data_files()?;
+        }
+        if !self.added_delete_files.is_empty() {
+            snapshot_producer.validate_added_delete_files()?;
+        }
 
         if self.check_duplicate && !self.added_data_files.is_empty() {
-            snapshot_producer
-                .validate_duplicate_files(&self.added_data_files)
-                .await?;
+            snapshot_producer.validate_duplicate_files().await?;
         }
 
         snapshot_producer

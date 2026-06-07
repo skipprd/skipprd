@@ -1,6 +1,6 @@
-# Skippr patch on iceberg 0.7.0
+# Skippr patch on iceberg 0.9.1
 
-Upstream `iceberg` 0.7.0 exposes `Transaction::fast_append()` only. MoR equality-delete commits
+Upstream `iceberg` 0.9.1 exposes `Transaction::fast_append()` only. MoR equality-delete commits
 (ReplacePartition, MergeByKey, CDC final-state deletes) require data plus delete manifests in one
 snapshot.
 

@@ -15,11 +15,25 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use opendal::Operator;
-use opendal::services::MemoryConfig;
+//! This module contains Iceberg value types
 
-use crate::Result;
+pub(crate) mod datum;
+pub(crate) mod decimal_utils;
+mod literal;
+mod map;
+mod primitive;
+pub(crate) mod serde;
+mod struct_value;
+mod temporal;
 
-pub(crate) fn memory_config_build() -> Result<Operator> {
-    Ok(Operator::from_config(MemoryConfig::default())?.finish())
-}
+#[cfg(test)]
+mod tests;
+
+// Re-export all public types
+pub use datum::Datum;
+pub use decimal_utils::Decimal;
+pub use literal::Literal;
+pub use map::Map;
+pub use primitive::PrimitiveLiteral;
+pub(crate) use serde::_serde::RawLiteral;
+pub use struct_value::Struct;

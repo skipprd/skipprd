@@ -25,8 +25,8 @@ serde_json.workspace = true
 tracing.workspace = true
 aws-config = "1.5.1"
 aws-sdk-s3 = "1.32.0"
-iceberg = "0.7.0"
-iceberg-catalog-glue = "0.7.0"
+iceberg = "0.9.1"
+iceberg-catalog-glue = "0.9.1"
 
 [package.metadata.skippr-plugin]
 kind = "DataSink"

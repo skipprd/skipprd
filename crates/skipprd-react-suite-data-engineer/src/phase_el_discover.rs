@@ -199,6 +199,9 @@ mod tests {
     async fn discover_phase_transitions_to_sync_without_show_pipeline_tables() {
         let mut sctx = test_suite_ctx();
         sctx.set_resolved_config(Some(resolved_config(sctx.scope().clone())));
+        sctx.set_capability(Arc::new(crate::ctx_ext::PipelineCap(
+            crate::pipeline_identity::PipelineName::parse("test4").expect("valid pipeline"),
+        )));
         sctx.set_capability(Arc::new(crate::ctx_ext::SkipprCap(Arc::new(
             MockSkipprProvider {
                 discover_result: crate::providers::SkipprDiscoverResult {

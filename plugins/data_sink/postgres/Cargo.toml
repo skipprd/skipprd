@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait.workspace = true
-chrono = "=0.4.42"
+chrono = "0.4.44"
 clap.workspace = true
 dashmap.workspace = true
 datafusion.workspace = true

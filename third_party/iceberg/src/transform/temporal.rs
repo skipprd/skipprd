@@ -81,7 +81,15 @@ impl TransformFunction for Year {
     fn transform_literal(&self, input: &crate::spec::Datum) -> Result<Option<crate::spec::Datum>> {
         let val = match (input.data_type(), input.literal()) {
             (PrimitiveType::Date, PrimitiveLiteral::Int(v)) => {
-                Date32Type::to_naive_date(*v).year() - UNIX_EPOCH_YEAR
+                Date32Type::to_naive_date_opt(*v)
+                    .ok_or_else(|| {
+                        crate::Error::new(
+                            crate::ErrorKind::DataInvalid,
+                            format!("Invalid date value for year transform: {v}"),
+                        )
+                    })?
+                    .year()
+                    - UNIX_EPOCH_YEAR
             }
             (PrimitiveType::Timestamp, PrimitiveLiteral::Long(v)) => {
                 Self::timestamp_to_year_micros(*v)?
@@ -178,8 +186,13 @@ impl TransformFunction for Month {
     fn transform_literal(&self, input: &crate::spec::Datum) -> Result<Option<crate::spec::Datum>> {
         let val = match (input.data_type(), input.literal()) {
             (PrimitiveType::Date, PrimitiveLiteral::Int(v)) => {
-                (Date32Type::to_naive_date(*v).year() - UNIX_EPOCH_YEAR) * 12
-                    + Date32Type::to_naive_date(*v).month0() as i32
+                let date = Date32Type::to_naive_date_opt(*v).ok_or_else(|| {
+                    crate::Error::new(
+                        crate::ErrorKind::DataInvalid,
+                        format!("Invalid date value for month transform: {v}"),
+                    )
+                })?;
+                (date.year() - UNIX_EPOCH_YEAR) * 12 + date.month0() as i32
             }
             (PrimitiveType::Timestamp, PrimitiveLiteral::Long(v)) => {
                 Self::timestamp_to_month_micros(*v)?
@@ -230,10 +243,7 @@ impl Day {
         let delta = Duration::new(secs, nanos).ok_or_else(|| {
             Error::new(
                 ErrorKind::DataInvalid,
-                format!(
-                    "Failed to create 'TimeDelta' from seconds {} and nanos {}",
-                    secs, nanos
-                ),
+                format!("Failed to create 'TimeDelta' from seconds {secs} and nanos {nanos}"),
             )
         })?;
 
@@ -259,10 +269,7 @@ impl Day {
         let delta = Duration::new(secs, nanos).ok_or_else(|| {
             Error::new(
                 ErrorKind::DataInvalid,
-                format!(
-                    "Failed to create 'TimeDelta' from seconds {} and nanos {}",
-                    secs, nanos
-                ),
+                format!("Failed to create 'TimeDelta' from seconds {secs} and nanos {nanos}"),
             )
         })?;
 

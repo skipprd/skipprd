@@ -169,12 +169,14 @@ impl DataSinkDatabricksPlugin {
 
         let delta_uri = self.config.delta_table_uri.as_deref().unwrap();
         let storage_opts = self.config.storage_options.clone().unwrap_or_default();
+        let table_url = deltalake::ensure_table_uri(delta_uri)
+            .map_err(|e| std::io::Error::other(format!("Delta URI: {}", e)))?;
 
         let parquet_bytes = serialize_to_parquet(stream).await.map_err(|e| {
             counters::dec_uploads_in_flight();
             e
         })?;
-        let total_rows = parquet_bytes.meta_data.num_rows as u64;
+        let total_rows = parquet_bytes.num_rows as u64;
 
         if total_rows == 0 {
             counters::dec_uploads_in_flight();
@@ -209,7 +211,8 @@ impl DataSinkDatabricksPlugin {
             })?;
 
         let table_result =
-            deltalake::open_table_with_storage_options(delta_uri, storage_opts.clone()).await;
+            deltalake::open_table_with_storage_options(table_url.clone(), storage_opts.clone())
+                .await;
 
         match table_result {
             Ok(table) => {
@@ -221,7 +224,7 @@ impl DataSinkDatabricksPlugin {
             }
             Err(_) => {
                 let ops =
-                    deltalake::DeltaOps::try_from_uri_with_storage_options(delta_uri, storage_opts)
+                    deltalake::DeltaOps::try_from_url_with_storage_options(table_url, storage_opts)
                         .await
                         .map_err(|e| std::io::Error::other(format!("Delta init: {}", e)))?;
 

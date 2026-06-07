@@ -957,6 +957,10 @@ mod tests {
 
     #[tokio::test]
     async fn normalize_schema_artifacts_merges_duplicate_model_entries() {
+        let _guard = crate::test_env::lock();
+        let saved_local = std::env::var("SKIPPR_LOCAL_DBT_PROJECT_ROOT").ok();
+        std::env::remove_var("SKIPPR_LOCAL_DBT_PROJECT_ROOT");
+
         let storage: Arc<dyn StorageAdapter> = Arc::new(InMemoryStorageAdapter::default());
         let ctx = make_ctx(storage.clone());
         let schema_key = project_fs::join_storage_key(&ctx, project_fs::MODELS_SCHEMA_YML);
@@ -976,9 +980,13 @@ mod tests {
 
         let got = String::from_utf8_lossy(&ctx.storage().get_bytes(&schema_key).await.unwrap())
             .to_string();
-        // Only one model stanza remains.
         assert_eq!(got.matches("name: dim_orders").count(), 1);
         assert!(got.contains("customer_id"));
+
+        match saved_local {
+            Some(value) => std::env::set_var("SKIPPR_LOCAL_DBT_PROJECT_ROOT", value),
+            None => std::env::remove_var("SKIPPR_LOCAL_DBT_PROJECT_ROOT"),
+        }
     }
 
     #[tokio::test]

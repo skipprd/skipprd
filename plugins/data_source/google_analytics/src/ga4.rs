@@ -603,6 +603,7 @@ impl DataSource for DataSourceGoogleAnalyticsPlugin {
 mod tests {
     use super::*;
     use crate::streams::{streams_for_profile, StreamProfile, FULL_STREAM_COUNT};
+    use skippr_plugin_shared_api_source::DateWindow;
 
     fn test_config() -> DataSourceGoogleAnalyticsPluginConfig {
         DataSourceGoogleAnalyticsPluginConfig {

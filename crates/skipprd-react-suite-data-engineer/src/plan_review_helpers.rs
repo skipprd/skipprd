@@ -140,6 +140,30 @@ impl DataEngineerSuite {
         Ok(true)
     }
 
+    pub(super) async fn annotate_plan_semantic_invalid(
+        thread_store: &ThreadStore,
+        thread_id: &str,
+        phase: control_flow::Phase,
+        plan_key: &str,
+        errors: &[String],
+    ) -> Result<(), String> {
+        commit_phase_decision(
+            thread_store,
+            thread_id,
+            Some(phase),
+            PhaseDecision::annotation(
+                phase,
+                Some(
+                    crate::progress_controller::PhaseTransition::PlanSemanticInvalid {
+                        plan_key: plan_key.to_string(),
+                        errors: errors.to_vec(),
+                    },
+                ),
+            ),
+        )
+        .await
+    }
+
     pub(super) async fn authoring_complete_reason_detail(
         thread_store: &ThreadStore,
         thread_id: &str,

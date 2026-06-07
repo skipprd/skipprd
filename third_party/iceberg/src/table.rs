@@ -24,7 +24,7 @@ use crate::inspect::MetadataTable;
 use crate::io::FileIO;
 use crate::io::object_cache::ObjectCache;
 use crate::scan::TableScanBuilder;
-use crate::spec::{TableMetadata, TableMetadataRef};
+use crate::spec::{SchemaRef, TableMetadata, TableMetadataRef};
 use crate::{Error, ErrorKind, Result, TableIdent};
 
 /// Builder to create table scan.
@@ -235,6 +235,11 @@ impl Table {
         self.readonly
     }
 
+    /// Returns the current schema as a shared reference.
+    pub fn current_schema_ref(&self) -> SchemaRef {
+        self.metadata.current_schema().clone()
+    }
+
     /// Create a reader for the table.
     pub fn reader_builder(&self) -> ArrowReaderBuilder {
         ArrowReaderBuilder::new(self.file_io.clone())
@@ -251,10 +256,7 @@ impl Table {
 /// # use iceberg::TableIdent;
 /// # async fn example() {
 /// let metadata_file_location = "s3://bucket_name/path/to/metadata.json";
-/// let file_io = FileIO::from_path(&metadata_file_location)
-///     .unwrap()
-///     .build()
-///     .unwrap();
+/// let file_io = FileIO::new_with_fs();
 /// let static_identifier = TableIdent::from_strs(["static_ns", "static_table"]).unwrap();
 /// let static_table =
 ///     StaticTable::from_metadata_file(&metadata_file_location, static_identifier, file_io)
@@ -292,9 +294,7 @@ impl StaticTable {
         table_ident: TableIdent,
         file_io: FileIO,
     ) -> Result<Self> {
-        let metadata_file = file_io.new_input(metadata_location)?;
-        let metadata_file_content = metadata_file.read().await?;
-        let metadata = serde_json::from_slice::<TableMetadata>(&metadata_file_content)?;
+        let metadata = TableMetadata::read_from(&file_io, metadata_location).await?;
 
         let table = Table::builder()
             .metadata(metadata)
@@ -342,10 +342,7 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             metadata_file_name
         );
-        let file_io = FileIO::from_path(&metadata_file_path)
-            .unwrap()
-            .build()
-            .unwrap();
+        let file_io = FileIO::new_with_fs();
         let static_identifier = TableIdent::from_strs(["static_ns", "static_table"]).unwrap();
         let static_table =
             StaticTable::from_metadata_file(&metadata_file_path, static_identifier, file_io)
@@ -370,10 +367,7 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             metadata_file_name
         );
-        let file_io = FileIO::from_path(&metadata_file_path)
-            .unwrap()
-            .build()
-            .unwrap();
+        let file_io = FileIO::new_with_fs();
         let static_identifier = TableIdent::from_strs(["static_ns", "static_table"]).unwrap();
         let static_table =
             StaticTable::from_metadata_file(&metadata_file_path, static_identifier, file_io)
@@ -396,10 +390,7 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             metadata_file_name
         );
-        let file_io = FileIO::from_path(&metadata_file_path)
-            .unwrap()
-            .build()
-            .unwrap();
+        let file_io = FileIO::new_with_fs();
         let metadata_file = file_io.new_input(metadata_file_path).unwrap();
         let metadata_file_content = metadata_file.read().await.unwrap();
         let table_metadata =
