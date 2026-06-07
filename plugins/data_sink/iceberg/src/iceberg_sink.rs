@@ -851,7 +851,7 @@ impl DataSinkIcebergPlugin {
             .map_err(|err| {
                 io::Error::other(format!("Failed to upload Iceberg data file: {err}"))
             })?;
-        Ok(format!("s3://{}/{}", bucket, key))
+        Ok(to_iceberg_s3_uri(&format!("s3://{}/{}", bucket, key)))
     }
 
     async fn plan_cdc_commit(
@@ -914,8 +914,10 @@ impl DataSinkIcebergPlugin {
             )));
         };
 
-        let mut props =
-            HashMap::from([(GLUE_CATALOG_PROP_WAREHOUSE.to_string(), warehouse.clone())]);
+        let mut props = HashMap::from([(
+            GLUE_CATALOG_PROP_WAREHOUSE.to_string(),
+            to_iceberg_s3_uri(warehouse),
+        )]);
         if let Some(catalog_id) = catalog_id {
             props.insert(GLUE_CATALOG_PROP_CATALOG_ID.to_string(), catalog_id.clone());
         }
@@ -1068,11 +1070,11 @@ impl DataSinkIcebergPlugin {
 
     fn table_location(&self, namespace: &str) -> Option<String> {
         self.config.table_location_prefix.as_ref().map(|prefix| {
-            format!(
+            to_iceberg_s3_uri(&format!(
                 "{}/{}",
                 prefix.trim_end_matches('/'),
                 self.table_name(namespace)
-            )
+            ))
         })
     }
 }
@@ -1527,13 +1529,30 @@ fn primitive_type_for_skippr(value: &SkipprDataType) -> Type {
     Type::Primitive(primitive)
 }
 
+fn to_iceberg_s3_uri(uri: &str) -> String {
+    if let Some(rest) = uri.strip_prefix("s3://") {
+        format!("s3a://{rest}")
+    } else {
+        uri.to_string()
+    }
+}
+
 fn parse_s3_uri(uri: &str) -> Result<(String, String), io::Error> {
     let without_scheme = uri
         .strip_prefix("s3://")
-        .ok_or_else(|| io::Error::other(format!("expected s3:// URI, got '{}'", uri)))?;
-    let (bucket, key) = without_scheme
-        .split_once('/')
-        .ok_or_else(|| io::Error::other(format!("expected s3://bucket/key URI, got '{}'", uri)))?;
+        .or_else(|| uri.strip_prefix("s3a://"))
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "expected s3:// or s3a:// URI, got '{}'",
+                uri
+            ))
+        })?;
+    let (bucket, key) = without_scheme.split_once('/').ok_or_else(|| {
+        io::Error::other(format!(
+            "expected s3://bucket/key URI, got '{}'",
+            uri
+        ))
+    })?;
     Ok((bucket.to_string(), key.to_string()))
 }
 
