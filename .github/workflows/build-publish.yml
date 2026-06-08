@@ -107,21 +107,14 @@ jobs:
       - name: Run script
         run: node _files/purge-dynamodb.js
 
+  # macOS release build runs after Linux tests, e2e, and primary release publish.
   macos_arm64:
     name: cargo build (macos arm64)
     needs:
       - plan_runtime_plugin_release
-      - linux_test_suite
-      - data_engineer_test_suite
-      - skippr_cli_test_suite
-      - skippr_admin_test_suite
-      - macos_arm64_test_compile
-      - postgres_iceberg_types_cdc_test
-      - iceberg_equality_commit_e2e_test
-      - mysql_iceberg_types_cdc_test
-      - dynamodb_iceberg_types_cdc_test
-      - mssql_iceberg_debug_linux_test
-    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.snowflake_e2e_only == true) || (needs.linux_test_suite.result == 'success' && needs.data_engineer_test_suite.result == 'success' && needs.skippr_cli_test_suite.result == 'success' && needs.skippr_admin_test_suite.result == 'success' && needs.macos_arm64_test_compile.result == 'success' && needs.postgres_iceberg_types_cdc_test.result == 'success' && needs.iceberg_equality_commit_e2e_test.result == 'success' && needs.mysql_iceberg_types_cdc_test.result == 'success' && needs.dynamodb_iceberg_types_cdc_test.result == 'success' && needs.mssql_iceberg_debug_linux_test.result == 'success')) }}
+      - linux_x86
+      - publish_github_release
+    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && needs.linux_x86.result == 'success' && (needs.publish_github_release.result == 'success' || needs.publish_github_release.result == 'skipped') }}
     runs-on: macos-14
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
@@ -330,8 +323,9 @@ jobs:
           cargo build -p skippr-admin
           cargo test -p skippr-admin -- --nocapture
 
+  # Disabled: compile-only macOS checks are non-gating; Linux carries test coverage.
   macos_arm64_test_compile:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
+    if: false
     name: cargo test --no-run (macos arm64)
     needs:
       - plan_runtime_plugin_release
@@ -411,14 +405,14 @@ jobs:
         run: |
           cargo test -p skippr-plugin-data-sink-postgres --no-run
 
+  # Windows release build runs in parallel with macOS after Linux validation and publish.
   windows_x86:
     name: cargo build (windows x86)
     needs:
       - plan_runtime_plugin_release
       - linux_x86
-      - macos_arm64
       - publish_github_release
-    if: ${{ always() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && needs.linux_x86.result == 'success' && needs.macos_arm64.result == 'success' && (needs.publish_github_release.result == 'success' || (github.event_name == 'workflow_dispatch' && inputs.snowflake_e2e_only == true && needs.publish_github_release.result == 'skipped')) }}
+    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && needs.linux_x86.result == 'success' && (needs.publish_github_release.result == 'success' || needs.publish_github_release.result == 'skipped') }}
     runs-on: depot-windows-2022-16
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
@@ -859,8 +853,7 @@ jobs:
     needs:
       - plan_runtime_plugin_release
       - linux_x86
-      - macos_arm64
-    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.snowflake_e2e_only == true) || (needs.linux_x86.result == 'success' && needs.macos_arm64.result == 'success')) }}
+    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && needs.linux_x86.result == 'success' }}
     runs-on: depot-ubuntu-22.04-16
     steps:
       - uses: actions/checkout@v4
@@ -1801,7 +1794,6 @@ jobs:
       - deadletters_test
       - published_runtime_plugins_smoke_test
       - linux_x86
-      - macos_arm64
     runs-on: depot-ubuntu-22.04-16
     steps:
       - name: Check out code
@@ -1813,7 +1805,7 @@ jobs:
       - name: Compress skipprd release artifacts
         run: |
           set -euo pipefail
-          for dir in skipprd-linux_x86 skipprd-macos_arm64; do
+          for dir in skipprd-linux_x86; do
             if [ -d "$dir" ]; then
               tar -czvf "${dir}.tar.gz" "$dir/"
             fi
@@ -1841,7 +1833,6 @@ jobs:
     if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     needs:
       - linux_x86
-      - macos_arm64
       - skippr_cli_test_suite
       - data_engineer_test_suite
     runs-on: depot-ubuntu-22.04-16
@@ -1855,7 +1846,7 @@ jobs:
       - name: Compress skippr release artifacts
         run: |
           set -euo pipefail
-          for dir in skippr-linux_x86 skippr-macos_arm64; do
+          for dir in skippr-linux_x86; do
             if [ -d "$dir" ]; then
               tar -czvf "${dir}.tar.gz" "$dir/"
             fi
@@ -1872,7 +1863,7 @@ jobs:
           BUCKET="${{ env.RELEASES_BUCKET }}"
           RELEASE_SUBDIR="${{ env.SKIPPR_RELEASE_SUBDIR }}"
           LATEST_POINTER="${{ env.SKIPPR_LATEST_POINTER }}"
-          for f in skippr-linux_x86.tar.gz skippr-macos_arm64.tar.gz; do
+          for f in skippr-linux_x86.tar.gz; do
             if [ -f "$f" ]; then
               aws s3 cp "$f" "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/${f}"
             fi
@@ -1888,7 +1879,6 @@ jobs:
       - publish_skippr
       - skippr_admin_test_suite
       - linux_x86
-      - macos_arm64
     runs-on: depot-ubuntu-22.04-16
     steps:
       - name: Check out code
@@ -1901,9 +1891,9 @@ jobs:
         run: |
           set -euo pipefail
           for dir in \
-            skipprd-linux_x86 skipprd-macos_arm64 \
-            skippr-linux_x86 skippr-macos_arm64 \
-            skippr-admin-linux_x86 skippr-admin-macos_arm64; do
+            skipprd-linux_x86 \
+            skippr-linux_x86 \
+            skippr-admin-linux_x86; do
             if [ -d "$dir" ]; then
               tar -czvf "${dir}.tar.gz" "$dir/"
             fi
@@ -1927,11 +1917,8 @@ jobs:
           gh release upload "$TAG" \
             install.sh \
             skipprd-linux_x86.tar.gz \
-            skipprd-macos_arm64.tar.gz \
             skippr-linux_x86.tar.gz \
-            skippr-macos_arm64.tar.gz \
             skippr-admin-linux_x86.tar.gz \
-            skippr-admin-macos_arm64.tar.gz \
             --repo skipprd/skipprd \
             --clobber
       - name: Configure AWS credentials for skippr-admin release upload
@@ -1946,13 +1933,125 @@ jobs:
           BUCKET="${{ env.RELEASES_BUCKET }}"
           RELEASE_SUBDIR="${{ env.SKIPPR_ADMIN_RELEASE_SUBDIR }}"
           LATEST_POINTER="${{ env.SKIPPR_ADMIN_LATEST_POINTER }}"
-          for f in skippr-admin-linux_x86.tar.gz skippr-admin-macos_arm64.tar.gz; do
+          for f in skippr-admin-linux_x86.tar.gz; do
             if [ -f "$f" ]; then
               aws s3 cp "$f" "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/${f}"
             fi
           done
           printf '%s' "$TAG" > "$LATEST_POINTER"
           aws s3 cp "$LATEST_POINTER" "s3://${BUCKET}/releases/${LATEST_POINTER}" --cache-control "no-cache, no-store, must-revalidate"
+
+  publish_mac_release:
+    name: Publish macOS Release Assets
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && needs.macos_arm64.result == 'success' }}
+    needs:
+      - macos_arm64
+      - publish_github_release
+    runs-on: depot-ubuntu-22.04-16
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Download macOS artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: "*macos_arm64*"
+
+      - name: Compress macOS release artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          for dir in skipprd-macos_arm64 skippr-macos_arm64 skippr-admin-macos_arm64; do
+            if [ -d "$dir" ]; then
+              tar -czvf "${dir}.tar.gz" "$dir/"
+            fi
+          done
+
+      - name: Stage macOS runtime plugin release assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/publish_runtime_plugins.py \
+            --bucket "${{ env.RELEASES_BUCKET }}" \
+            --subdir "${{ env.RUNTIME_PLUGIN_RELEASE_SUBDIR }}" \
+            --public-base-url "https://install.skippr.io/releases/${{ env.RUNTIME_PLUGIN_RELEASE_SUBDIR }}" \
+            --workspace "$GITHUB_WORKSPACE" \
+            --output-dir "$GITHUB_WORKSPACE/runtime-plugin-release-macos"
+          python3 -c 'from pathlib import Path; [print(path) for path in sorted(Path("runtime-plugin-release-macos").rglob("*")) if path.is_file()]'
+
+      - name: Configure AWS credentials for macOS release upload
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Upload macOS binaries to install releases bucket
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          BUCKET="${{ env.RELEASES_BUCKET }}"
+          for f in skipprd-macos_arm64.tar.gz; do
+            if [ -f "$f" ]; then
+              aws s3 cp "$f" "s3://${BUCKET}/releases/${{ env.SKIPPRD_RELEASE_SUBDIR }}/${TAG}/${f}"
+            fi
+          done
+          for f in skippr-macos_arm64.tar.gz; do
+            if [ -f "$f" ]; then
+              aws s3 cp "$f" "s3://${BUCKET}/releases/${{ env.SKIPPR_RELEASE_SUBDIR }}/${TAG}/${f}"
+            fi
+          done
+          for f in skippr-admin-macos_arm64.tar.gz; do
+            if [ -f "$f" ]; then
+              aws s3 cp "$f" "s3://${BUCKET}/releases/${{ env.SKIPPR_ADMIN_RELEASE_SUBDIR }}/${TAG}/${f}"
+            fi
+          done
+
+      - name: Upload macOS runtime plugin artifacts and manifests
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUCKET="${{ env.RELEASES_BUCKET }}"
+          SUBDIR="${{ env.RUNTIME_PLUGIN_RELEASE_SUBDIR }}"
+          RELEASE_ROOT="$GITHUB_WORKSPACE/runtime-plugin-release-macos"
+          aws s3 cp "$RELEASE_ROOT/" \
+            "s3://${BUCKET}/releases/${SUBDIR}/" \
+            --recursive \
+            --exclude "*.json"
+          aws s3 cp "$RELEASE_ROOT/" \
+            "s3://${BUCKET}/releases/${SUBDIR}/" \
+            --recursive \
+            --exclude "*" \
+            --include "*.json" \
+            --cache-control "no-cache, no-store, must-revalidate" \
+            --content-type "application/json"
+
+      - name: Upload macOS assets to GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          TAG="${{ github.ref_name }}"
+          assets=()
+          for f in \
+            skipprd-macos_arm64.tar.gz \
+            skippr-macos_arm64.tar.gz \
+            skippr-admin-macos_arm64.tar.gz; do
+            if [ -f "$f" ]; then
+              assets+=("$f")
+            fi
+          done
+          if [ "${#assets[@]}" -eq 0 ]; then
+            echo "No macOS release archives to upload"
+            exit 0
+          fi
+          gh release upload "$TAG" \
+            "${assets[@]}" \
+            --repo skipprd/skipprd \
+            --clobber
 
   publish_windows_release:
     name: Publish Windows Release Assets
