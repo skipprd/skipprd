@@ -7,7 +7,7 @@ use tracing::warn;
 use crate::streams::{render_gaql, GoogleAdsStreamDef, GoogleAdsStreamKind};
 
 pub const GOOGLE_ADS_API_BASE: &str = "https://googleads.googleapis.com";
-const DEFAULT_API_VERSION: &str = "v17";
+const DEFAULT_API_VERSION: &str = "v20";
 
 pub fn normalize_customer_id(customer_id: &str) -> String {
     customer_id.trim().replace('-', "")
@@ -77,7 +77,7 @@ impl GoogleAdsApiClient {
 
     pub fn search_url(&self) -> String {
         format!(
-            "{GOOGLE_ADS_API_BASE}/{}/customers/{}:searchStream",
+            "{GOOGLE_ADS_API_BASE}/{}/customers/{}/googleAds:searchStream",
             self.api_version, self.customer_id
         )
     }
@@ -365,7 +365,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             req.url().as_str(),
-            "https://googleads.googleapis.com/v17/customers/123456:searchStream"
+            "https://googleads.googleapis.com/v17/customers/123456/googleAds:searchStream"
         );
         assert_eq!(req.headers().get("developer-token").unwrap(), "dev");
         assert_eq!(req.headers().get("login-customer-id").unwrap(), "999888");
@@ -388,7 +388,7 @@ mod tests {
             .iter()
             .find(|s| s.namespace == "google_ads.campaign_daily")
             .unwrap();
-        let client = GoogleAdsApiClient::new(
+        let _client = GoogleAdsApiClient::new(
             RetryableHttpClient::new(RetryConfig::default()),
             "1234567890".into(),
             None,
