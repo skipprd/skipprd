@@ -35,6 +35,7 @@ nav:
       - Runtime Plugin Contract: maintainers/runtime-plugin-contract.md
       - Runtime E2E Harness: maintainers/runtime-e2e-harness.md
       - Release Workflow: maintainers/release-workflow.md
+      - Apple Search Ads Plugin: maintainers/apple-search-ads-plugin.md
   - Architecture:
       - How Skippr Works: concepts/how-it-works.md
       - Exactly-Once Delivery: concepts/exactly-once.md
@@ -93,6 +94,7 @@ nav:
                   - Google Search Console: connectors/inputs/google_search_console.md
                   - Google SERP Ranks: connectors/inputs/google_serp_ranks.md
                   - Apple App Store SERP: connectors/inputs/apple_app_store_serp.md
+                  - Apple Search Ads: connectors/inputs/apple_search_ads.md
                   - HTTP Client: connectors/inputs/http_client.md
                   - HTTP Server: connectors/inputs/http_server.md
               - Other:

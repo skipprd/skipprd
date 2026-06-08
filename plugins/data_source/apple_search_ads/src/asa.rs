@@ -459,6 +459,51 @@ impl DataSourceAppleSearchAdsPluginConfig {
                 "org_id is required",
             ));
         }
+        if self.start_date.trim().is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "start_date is required",
+            ));
+        }
+        if self
+            .access_token
+            .as_deref()
+            .filter(|token| !token.trim().is_empty())
+            .is_some()
+            || std::env::var("SKIPPR_APPLE_SEARCH_ADS_FIXTURE_DIR")
+                .map(|dir| !dir.trim().is_empty())
+                .unwrap_or(false)
+        {
+            return Ok(());
+        }
+        if self.client_id.trim().is_empty()
+            || self.team_id.trim().is_empty()
+            || self.key_id.trim().is_empty()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Apple Search Ads client_id, team_id, and key_id are required for live OAuth",
+            ));
+        }
+        let has_private_key = self
+            .private_key_path
+            .as_deref()
+            .filter(|path| !path.trim().is_empty())
+            .is_some()
+            || self
+                .private_key_pem
+                .as_deref()
+                .filter(|pem| !pem.trim().is_empty())
+                .is_some()
+            || std::env::var("APPLE_SEARCH_ADS_PRIVATE_KEY_PATH")
+                .map(|path| !path.trim().is_empty())
+                .unwrap_or(false);
+        if !has_private_key {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Apple Search Ads requires private_key_path, private_key_pem, APPLE_SEARCH_ADS_PRIVATE_KEY_PATH, or access_token",
+            ));
+        }
         Ok(())
     }
 }
@@ -1046,6 +1091,40 @@ mod tests {
         cfg.org_id = "  ".into();
         let err = cfg.validate().unwrap_err();
         assert!(err.to_string().contains("org_id is required"));
+    }
+
+    #[test]
+    fn live_oauth_validation_requires_client_identifiers() {
+        let _lock = env_test_lock();
+        std::env::remove_var("SKIPPR_APPLE_SEARCH_ADS_FIXTURE_DIR");
+        std::env::remove_var("APPLE_SEARCH_ADS_PRIVATE_KEY_PATH");
+
+        let mut cfg = test_config();
+        cfg.access_token = None;
+        cfg.private_key_pem =
+            Some("-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----".into());
+        cfg.client_id = " ".into();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("client_id"));
+    }
+
+    #[test]
+    fn fixture_mode_allows_missing_live_credentials() {
+        let _lock = env_test_lock();
+        let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
+        std::env::set_var("SKIPPR_APPLE_SEARCH_ADS_FIXTURE_DIR", fixture_dir);
+
+        let mut cfg = test_config();
+        cfg.access_token = None;
+        cfg.client_id = " ".into();
+        cfg.team_id = " ".into();
+        cfg.key_id = " ".into();
+        cfg.private_key_pem = None;
+        cfg.private_key_path = None;
+        cfg.validate()
+            .expect("fixture mode skips live auth validation");
+
+        std::env::remove_var("SKIPPR_APPLE_SEARCH_ADS_FIXTURE_DIR");
     }
 
     #[test]
