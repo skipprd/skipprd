@@ -230,6 +230,7 @@ jobs:
           cargo test -p skippr-plugin-data-source-apple-search-ads --lib -- --nocapture
           cargo test -p skippr-plugin-data-source-adroll-ads --lib -- --nocapture
           cargo test -p skippr-plugin-data-source-linkedin-ads --lib -- --nocapture
+          cargo test -p skippr-plugin-data-source-meta-ads --lib -- --nocapture
           cargo test -p skippr-plugin-data-source-dynamodb --lib -- --nocapture
 
   data_engineer_test_suite:

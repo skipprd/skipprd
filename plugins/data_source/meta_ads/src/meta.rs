@@ -152,7 +152,7 @@ impl DataSourceMetaAdsPlugin {
             {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
-                    "Meta Instagram Ads OAuth fields must all be non-empty when configured",
+                    "Meta Ads OAuth fields must all be non-empty when configured",
                 ));
             }
             return Ok((
@@ -167,7 +167,7 @@ impl DataSourceMetaAdsPlugin {
         }
         Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "Meta Instagram Ads requires access_token, META_ADS_ACCESS_TOKEN, or \
+            "Meta Ads requires access_token, META_ADS_ACCESS_TOKEN, or \
              oauth_token_url + oauth_client_id + oauth_client_secret + oauth_refresh_token",
         ))
     }
@@ -184,7 +184,7 @@ impl DataSourceMetaAdsPlugin {
         }
         Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
-            "Meta Instagram Ads auth is not configured",
+            "Meta Ads auth is not configured",
         ))
     }
 
@@ -255,7 +255,7 @@ impl DataSourceMetaAdsPlugin {
             partition_key: vec![FieldPath::single("date")],
             write_policy: WritePolicy::ReplacePartition,
             refresh_window: None,
-            description: "Meta Instagram Ads mutable daily insights".into(),
+            description: "Meta Ads mutable daily insights".into(),
             semantics: Some(SourceSemantics::MutableReport),
         }
     }
@@ -283,7 +283,7 @@ impl DataSourceMetaAdsPlugin {
     }
 
     fn checkpoint_key(&self, namespace: &str) -> String {
-        format!("meta_ig_ads:{}:{}", self.ad_account_id, namespace)
+        format!("meta_ads:{}:{}", self.ad_account_id, namespace)
     }
 
     fn load_last_completed(ctx: &dyn SourceSyncContext, key: &str) -> Option<NaiveDate> {
@@ -293,7 +293,7 @@ impl DataSourceMetaAdsPlugin {
         match Self::parse_date(&cp.last_completed_date) {
             Ok(date) => Some(date),
             Err(err) => {
-                tracing::warn!("Meta Instagram Ads ignoring corrupt checkpoint for {key}: {err}");
+                tracing::warn!("Meta Ads ignoring corrupt checkpoint for {key}: {err}");
                 None
             }
         }
@@ -384,6 +384,25 @@ impl DataSourceMetaAdsPluginConfig {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "ad_account_id is required",
+            ));
+        }
+        DataSourceMetaAdsPlugin::parse_date(&self.start_date)?;
+        let oauth_fields = [
+            self.oauth_token_url.as_deref(),
+            self.oauth_client_id.as_deref(),
+            self.oauth_client_secret.as_deref(),
+            self.oauth_refresh_token.as_deref(),
+        ];
+        let oauth_present = oauth_fields
+            .iter()
+            .any(|v| v.unwrap_or("").trim().len() > 0);
+        let oauth_complete = oauth_fields
+            .iter()
+            .all(|v| v.unwrap_or("").trim().len() > 0);
+        if oauth_present && !oauth_complete {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Meta Ads OAuth refresh requires oauth_token_url, oauth_client_id, oauth_client_secret, and oauth_refresh_token",
             ));
         }
         Ok(())
@@ -514,7 +533,7 @@ impl DataSource for DataSourceMetaAdsPlugin {
         for contract in &contracts {
             contract
                 .validate()
-                .expect("invalid Meta Instagram Ads namespace contract configuration");
+                .expect("invalid Meta Ads namespace contract configuration");
         }
         contracts
     }
@@ -538,7 +557,7 @@ impl DataSource for DataSourceMetaAdsPlugin {
                 sample_start = %sample_start,
                 sample_end = %end_date,
                 configured_start = %configured_start,
-                "Meta Instagram Ads discover: sampling recent days only; full historical sync runs on skippr sync"
+                "Meta Ads discover: sampling recent days only; full historical sync runs on skippr sync"
             );
             sample_start
         } else {
@@ -547,7 +566,7 @@ impl DataSource for DataSourceMetaAdsPlugin {
         if end_date < start_date {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("Meta Instagram Ads end date {end_date} is before start date {start_date}"),
+                format!("Meta Ads end date {end_date} is before start date {start_date}"),
             ));
         }
 
@@ -556,7 +575,7 @@ impl DataSource for DataSourceMetaAdsPlugin {
             info!(
                 stream_count = streams.len(),
                 stream_profile = "minimal",
-                "Meta Instagram Ads discover: sampling minimal streams and recent days; contracts reflect configured profile"
+                "Meta Ads discover: sampling minimal streams and recent days; contracts reflect configured profile"
             );
         }
 
@@ -754,6 +773,28 @@ mod tests {
     fn normalize_ad_account_id_strips_act_prefix() {
         assert_eq!(normalize_ad_account_id("act_999"), "999");
         assert_eq!(normalize_ad_account_id("888"), "888");
+    }
+
+    #[test]
+    fn checkpoint_key_uses_meta_ads_prefix() {
+        let plugin = DataSourceMetaAdsPlugin::new(test_config()).unwrap();
+        assert_eq!(
+            plugin.checkpoint_key("meta_ads.campaign_daily"),
+            "meta_ads:123456789:meta_ads.campaign_daily"
+        );
+    }
+
+    #[test]
+    fn partial_oauth_refresh_config_is_rejected() {
+        let mut cfg = test_config();
+        cfg.access_token = None;
+        cfg.oauth_token_url = Some("https://graph.facebook.com/oauth/access_token".into());
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("OAuth refresh requires"));
+        cfg.oauth_client_id = Some("client".into());
+        cfg.oauth_client_secret = Some("secret".into());
+        cfg.oauth_refresh_token = Some("refresh".into());
+        cfg.validate().expect("complete oauth quartet");
     }
 
     #[test]

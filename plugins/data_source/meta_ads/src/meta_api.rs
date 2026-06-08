@@ -443,27 +443,9 @@ mod tests {
 
     #[test]
     fn load_fixture_insights_reads_account_file() {
-        static FIXTURE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _lock = FIXTURE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
-        std::env::set_var("SKIPPR_META_ADS_FIXTURE_DIR", fixture_dir);
-        let client = MetaInsightsApiClient::new(
-            RetryableHttpClient::new(RetryConfig::default()),
-            "123".into(),
-            "v21.0".into(),
-            true,
-            None,
-        );
-        let stream = CURATED_STREAMS[0];
-        let rt = tokio::runtime::Runtime::new().unwrap();
-        let body = rt
-            .block_on(client.fetch_insights_all_pages(
-                &stream,
-                NaiveDate::from_ymd_opt(2024, 1, 1).unwrap(),
-                "fixture",
-            ))
+        let body = load_fixture_insights(fixture_dir, CURATED_STREAMS[0].namespace)
             .expect("fixture insights");
         assert!(!rows_from_insights_body(&body).is_empty());
-        std::env::remove_var("SKIPPR_META_ADS_FIXTURE_DIR");
     }
 }
