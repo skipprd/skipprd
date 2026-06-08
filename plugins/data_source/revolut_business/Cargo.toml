@@ -1,0 +1,37 @@
+[package]
+name = "skippr-plugin-data-source-revolut-business"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "skippr-plugin-data-source-revolut-business"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+jsonwebtoken = "9"
+serde.workspace = true
+serde_derive = "1.0.105"
+serde_json = "1.0.85"
+sha2 = "0.10"
+skippr-plugin-shared-api-source = { path = "../../shared/api_source" }
+skippr-runtime-sdk.workspace = true
+tokio.workspace = true
+tracing = "0.1"
+reqwest = { workspace = true }
+uuid = { version = "1", features = ["v4"] }
+
+[package.metadata.skippr-plugin]
+kind = "DataSource"
+plugin_name = "RevolutBusiness"
+
+[package.metadata.skippr-plugin.source_capability]
+name = "RevolutBusiness"
+guarantee_tier = "IncrementalOnly"
+checkpoint_style = "CursorBased"
+bootstrap_style = "FullScan"
+order_model = "UnsupportedForFinalState"
+supports_deletes = true
+event_id_semantics = "None"
+declares_namespace_contracts = true

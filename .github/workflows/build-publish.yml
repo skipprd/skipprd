@@ -231,6 +231,9 @@ jobs:
         run: |
           cargo test -p skippr-plugin-data-sink-iceberg --lib -- --nocapture
           cargo test -p skippr-plugin-data-source-stripe --lib -- --nocapture
+          cargo test -p skippr-plugin-data-source-sumup --lib -- --nocapture
+          cargo test -p skippr-plugin-data-source-xero-accounting --lib -- --nocapture
+          cargo test -p skippr-plugin-data-source-revolut-business --lib -- --nocapture
           cargo test -p skippr-plugin-data-source-dynamodb --lib -- --nocapture
 
   data_engineer_test_suite:

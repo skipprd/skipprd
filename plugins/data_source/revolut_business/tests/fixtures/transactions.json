@@ -1,0 +1,62 @@
+[
+  {
+    "id": "c2b97a7a-1a2b-4c3d-8e9f-0a1b2c3d4e5f",
+    "type": "card_payment",
+    "state": "completed",
+    "reference": "REVP:8988a9a0-aaaa-1234-aaaa-5bcc66d938bf",
+    "description": "Office supplies",
+    "created_at": "2024-06-01T10:56:56.876Z",
+    "updated_at": "2024-06-01T10:57:00.000Z",
+    "completed_at": "2024-06-01T10:57:00.000Z",
+    "merchant": {
+      "name": "Acme Corp.",
+      "city": "London",
+      "category_code": "7311",
+      "country": "GBR"
+    },
+    "card": {
+      "id": "2b1a31bc-4795-4f9a-b9cf-911dc6e",
+      "card_number": "516760******1234",
+      "first_name": "Jane",
+      "last_name": "Smith"
+    },
+    "legs": [
+      {
+        "leg_id": "640c2b97-aaaa-1234-aaaa-c47a165c2e7e",
+        "account_id": "f52c6c84-26b9-4e95-bbcf-99ed6523fb51",
+        "amount": -47.8,
+        "currency": "GBP",
+        "balance": 12452.95
+      }
+    ]
+  },
+  {
+    "id": "d3c88b8b-2b3c-5d4e-9f0a-1b2c3d4e5f6a",
+    "type": "transfer",
+    "state": "completed",
+    "reference": "Invoice 1001",
+    "created_at": "2024-06-02T14:20:00.000Z",
+    "updated_at": "2024-06-02T14:21:00.000Z",
+    "completed_at": "2024-06-02T14:21:00.000Z",
+    "beneficiary": {
+      "name": "Supplier Ltd",
+      "iban": "GB00TEST1234567890"
+    },
+    "legs": [
+      {
+        "leg_id": "750d3c08-bbbb-2345-bbbb-d58b276d3f8f",
+        "account_id": "f52c6c84-26b9-4e95-bbcf-99ed6523fb51",
+        "amount": -500.0,
+        "currency": "GBP",
+        "balance": 11952.95
+      },
+      {
+        "leg_id": "861e4d19-cccc-3456-cccc-e69c387e4g9g",
+        "account_id": "74d4d6cb-aaaa-1234-aaaa-9604b94e4019",
+        "amount": 580.0,
+        "currency": "EUR",
+        "balance": 3780.0
+      }
+    ]
+  }
+]
