@@ -1,0 +1,53 @@
+{
+  "BankTransactions": [
+    {
+      "BankTransactionID": "bank-0000-0000-0000-000000000001",
+      "Type": "RECEIVE",
+      "Status": "AUTHORISED",
+      "Date": "2024-06-15T00:00:00",
+      "CurrencyCode": "GBP",
+      "Total": 1200.0,
+      "SubTotal": 1000.0,
+      "TotalTax": 200.0,
+      "IsReconciled": true,
+      "Payee": "Acme Customer Ltd",
+      "Reference": "INV-001",
+      "UpdatedDateUTC": "/Date(1718409600000+0000)/",
+      "Contact": {
+        "ContactID": "con-0000-0000-0000-000000000001",
+        "Name": "Acme Customer Ltd"
+      },
+      "LineItems": [
+        {
+          "LineItemID": "bank-line-001",
+          "Description": "Customer payment",
+          "LineAmount": 1200.0
+        }
+      ]
+    },
+    {
+      "BankTransactionID": "bank-0000-0000-0000-000000000002",
+      "Type": "SPEND",
+      "Status": "AUTHORISED",
+      "Date": "2024-06-16T00:00:00",
+      "CurrencyCode": "GBP",
+      "Total": 600.0,
+      "SubTotal": 500.0,
+      "TotalTax": 100.0,
+      "IsReconciled": false,
+      "Payee": "Office Supplies Co",
+      "Reference": "BILL-002",
+      "UpdatedDateUTC": "/Date(1718496000000+0000)/",
+      "Contact": {
+        "ContactID": "con-0000-0000-0000-000000000002",
+        "Name": "Office Supplies Co"
+      }
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "pageSize": 100,
+    "pageCount": 1,
+    "itemCount": 2
+  }
+}

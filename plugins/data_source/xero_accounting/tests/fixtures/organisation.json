@@ -1,0 +1,29 @@
+{
+  "Organisations": [
+    {
+      "OrganisationID": "org-0000-0000-0000-000000000001",
+      "Name": "Demo Company Ltd",
+      "LegalName": "Demo Company Limited",
+      "OrganisationType": "COMPANY",
+      "CountryCode": "GB",
+      "BaseCurrency": "GBP",
+      "Timezone": "UTC",
+      "Version": "UK",
+      "FinancialYearEndDay": 31,
+      "FinancialYearEndMonth": 3,
+      "Addresses": [
+        {
+          "AddressType": "POBOX",
+          "City": "London",
+          "PostalCode": "EC1A 1BB"
+        }
+      ],
+      "Phones": [
+        {
+          "PhoneType": "DEFAULT",
+          "PhoneNumber": "+441234567890"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,76 @@
+{
+  "Invoices": [
+    {
+      "InvoiceID": "a1b2c3d4-e5f6-7890-abcd-ef1234567890",
+      "Type": "ACCREC",
+      "Status": "AUTHORISED",
+      "Reference": "PO-12345",
+      "CurrencyCode": "GBP",
+      "Date": "2024-06-01T00:00:00",
+      "DueDate": "2024-06-30T00:00:00",
+      "UpdatedDateUTC": "/Date(1717200000000+0000)/",
+      "SubTotal": 1000.0,
+      "TotalTax": 200.0,
+      "Total": 1200.0,
+      "AmountDue": 1200.0,
+      "AmountPaid": 0.0,
+      "AmountCredited": 0.0,
+      "LineAmountTypes": "Exclusive",
+      "Contact": {
+        "ContactID": "con-0000-0000-0000-000000000001",
+        "Name": "Acme Customer Ltd"
+      },
+      "LineItems": [
+        {
+          "LineItemID": "line-0000-0000-0000-000000000001",
+          "Description": "Consulting services - confidential memo",
+          "AccountCode": "200",
+          "TaxType": "OUTPUT2",
+          "Quantity": 10.0,
+          "UnitAmount": 100.0,
+          "LineAmount": 1000.0,
+          "DiscountRate": 0.0
+        }
+      ]
+    },
+    {
+      "InvoiceID": "b2c3d4e5-f6a7-8901-bcde-f12345678901",
+      "Type": "ACCPAY",
+      "Status": "AUTHORISED",
+      "Reference": "SUP-9876",
+      "CurrencyCode": "GBP",
+      "Date": "2024-06-02T00:00:00",
+      "DueDate": "2024-07-02T00:00:00",
+      "UpdatedDateUTC": "/Date(1717286400000+0000)/",
+      "SubTotal": 500.0,
+      "TotalTax": 100.0,
+      "Total": 600.0,
+      "AmountDue": 600.0,
+      "AmountPaid": 0.0,
+      "AmountCredited": 0.0,
+      "LineAmountTypes": "Exclusive",
+      "Contact": {
+        "ContactID": "con-0000-0000-0000-000000000002",
+        "Name": "Office Supplies Co"
+      },
+      "LineItems": [
+        {
+          "LineItemID": "line-0000-0000-0000-000000000002",
+          "Description": "Office supplies",
+          "AccountCode": "400",
+          "TaxType": "INPUT2",
+          "Quantity": 1.0,
+          "UnitAmount": 500.0,
+          "LineAmount": 500.0,
+          "DiscountRate": 0.0
+        }
+      ]
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "pageSize": 100,
+    "pageCount": 1,
+    "itemCount": 2
+  }
+}

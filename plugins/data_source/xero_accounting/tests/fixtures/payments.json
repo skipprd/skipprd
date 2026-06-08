@@ -1,0 +1,25 @@
+{
+  "Payments": [
+    {
+      "PaymentID": "pay-0000-0000-0000-000000000001",
+      "Date": "2024-06-15T00:00:00",
+      "Status": "AUTHORISED",
+      "Amount": 1200.0,
+      "CurrencyRate": 1.0,
+      "PaymentType": "ACCRECPAYMENT",
+      "UpdatedDateUTC": "/Date(1718409600000+0000)/",
+      "Invoice": {
+        "InvoiceID": "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+      },
+      "Account": {
+        "AccountID": "acc-0000-0000-0000-000000000002"
+      }
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "pageSize": 100,
+    "pageCount": 1,
+    "itemCount": 1
+  }
+}

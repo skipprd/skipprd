@@ -1,0 +1,28 @@
+{
+  "Accounts": [
+    {
+      "AccountID": "acc-0000-0000-0000-000000000001",
+      "Code": "200",
+      "Name": "Sales Revenue",
+      "Type": "REVENUE",
+      "Status": "ACTIVE",
+      "Class": "REVENUE",
+      "CurrencyCode": "GBP",
+      "ReportingCode": "REV",
+      "TaxType": "OUTPUT2",
+      "EnablePaymentsToAccount": false
+    },
+    {
+      "AccountID": "acc-0000-0000-0000-000000000002",
+      "Code": "610",
+      "Name": "Accounts Receivable",
+      "Type": "CURRENT",
+      "Status": "ACTIVE",
+      "Class": "ASSET",
+      "CurrencyCode": "GBP",
+      "ReportingCode": "ASS.CUR",
+      "TaxType": "NONE",
+      "EnablePaymentsToAccount": false
+    }
+  ]
+}

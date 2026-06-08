@@ -1,0 +1,28 @@
+{
+  "Contacts": [
+    {
+      "ContactID": "con-0000-0000-0000-000000000001",
+      "Name": "Acme Customer Ltd",
+      "EmailAddress": "billing@acme.example",
+      "ContactStatus": "ACTIVE",
+      "IsCustomer": true,
+      "IsSupplier": false,
+      "UpdatedDateUTC": "/Date(1717200000000+0000)/"
+    },
+    {
+      "ContactID": "con-0000-0000-0000-000000000002",
+      "Name": "Office Supplies Co",
+      "EmailAddress": "ap@supplies.example",
+      "ContactStatus": "ACTIVE",
+      "IsCustomer": false,
+      "IsSupplier": true,
+      "UpdatedDateUTC": "/Date(1717286400000+0000)/"
+    }
+  ],
+  "pagination": {
+    "page": 1,
+    "pageSize": 100,
+    "pageCount": 1,
+    "itemCount": 2
+  }
+}
