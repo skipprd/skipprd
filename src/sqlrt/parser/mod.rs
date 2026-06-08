@@ -1,5 +1,7 @@
 use core::fmt;
-use datafusion::sql::sqlparser::ast::{ArrayElemTypeDef, DataType, Ident, ObjectName, ObjectNamePart};
+use datafusion::sql::sqlparser::ast::{
+    ArrayElemTypeDef, DataType, Ident, ObjectName, ObjectNamePart,
+};
 use datafusion::sql::sqlparser::dialect::{Dialect, GenericDialect};
 use datafusion::sql::sqlparser::keywords::Keyword;
 use datafusion::sql::sqlparser::parser::{Parser, ParserError};
@@ -499,11 +501,9 @@ impl<'a> SParser<'a> {
             "." => {
                 self.parser.next_token(); // .
                 let schema = self.parser.next_token().token.to_string();
-                Some(ObjectName(vec![
-                    ObjectNamePart::Identifier(
-                        Ident::new(schema),
-                    ),
-                ]))
+                Some(ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
+                    schema,
+                ))]))
             }
             _ => None,
         };
@@ -518,10 +518,12 @@ impl<'a> SParser<'a> {
                         self.parser.expect_keyword(Keyword::COLUMN)?;
                         let column_name = self.parser.parse_object_name(false)?;
                         Ok(Statement::AlterSchemaDropColumn(AlterSchemaDropColumn {
-                        pipeline: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(pipeline))]),
-                        schema,
-                        column_name,
-                    }))
+                            pipeline: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
+                                pipeline,
+                            ))]),
+                            schema,
+                            column_name,
+                        }))
                     }
                     Keyword::ALTER => {
                         self.parser.expect_keyword(Keyword::COLUMN)?;
@@ -532,35 +534,45 @@ impl<'a> SParser<'a> {
 
                         let column_new_type = self.parser.parse_data_type()?;
 
-                        match column_new_type  {
-                        DataType::Array(value_type) => {
-                            match value_type {
-                                ArrayElemTypeDef::AngleBracket(value) => {
-
-                                        Ok(Statement::AlterSchemaAlterColumnType(AlterSchemaAlterColumnType {
-                                        pipeline: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(pipeline))]),
-                                        schema,
-                                        column_name,
-                                        // strip the <value type> from ARRAY<value type> to support matching against `SkipprDataType`
-                                        new_type: DataType::Array(ArrayElemTypeDef::None),
-                                        values_new_type: Some(*value)
-                                     }))
-                                }
-                                _ => {
-                                    return Err(ParserError::ParserError("Expected values type for array, e.g. ARRAY<INT>".to_string()));
+                        match column_new_type {
+                            DataType::Array(value_type) => {
+                                match value_type {
+                                    ArrayElemTypeDef::AngleBracket(value) => {
+                                        Ok(Statement::AlterSchemaAlterColumnType(
+                                            AlterSchemaAlterColumnType {
+                                                pipeline: ObjectName(vec![
+                                                    ObjectNamePart::Identifier(Ident::new(
+                                                        pipeline,
+                                                    )),
+                                                ]),
+                                                schema,
+                                                column_name,
+                                                // strip the <value type> from ARRAY<value type> to support matching against `SkipprDataType`
+                                                new_type: DataType::Array(ArrayElemTypeDef::None),
+                                                values_new_type: Some(*value),
+                                            },
+                                        ))
+                                    }
+                                    _ => {
+                                        return Err(ParserError::ParserError(
+                                            "Expected values type for array, e.g. ARRAY<INT>"
+                                                .to_string(),
+                                        ));
+                                    }
                                 }
                             }
-                        },
-                        _ => {
-                            Ok(Statement::AlterSchemaAlterColumnType(AlterSchemaAlterColumnType {
-                                pipeline: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(pipeline))]),
-                                schema,
-                                column_name,
-                                new_type: column_new_type,
-                                values_new_type: None
-                            }))
+                            _ => Ok(Statement::AlterSchemaAlterColumnType(
+                                AlterSchemaAlterColumnType {
+                                    pipeline: ObjectName(vec![ObjectNamePart::Identifier(
+                                        Ident::new(pipeline),
+                                    )]),
+                                    schema,
+                                    column_name,
+                                    new_type: column_new_type,
+                                    values_new_type: None,
+                                },
+                            )),
                         }
-                    }
                     }
                     _ => Err(ParserError::ParserError("Unexpected keyword".to_string())),
                 }
@@ -665,9 +677,13 @@ impl<'a> SParser<'a> {
 
                         Ok(Statement::SchemaDump(SchemaDumpStatement {
                             // pipeline: SchemaDumpSource::Relation(pipeline),
-                            pipeline: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(pipeline))]),
-                            schema: schema.map(|s| ObjectName(vec![ObjectNamePart::Identifier(Ident::new(s))])),
-                            target
+                            pipeline: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
+                                pipeline,
+                            ))]),
+                            schema: schema.map(|s| {
+                                ObjectName(vec![ObjectNamePart::Identifier(Ident::new(s))])
+                            }),
+                            target,
                         }))
                     }
                     Some(SkipprKeyword::SCHEMA) => Err(ParserError::ParserError(
@@ -720,8 +736,12 @@ impl<'a> SParser<'a> {
                         };
 
                         Ok(Statement::TableDrop(TableDropStatement {
-                            schema: schema.map(|s| ObjectName(vec![ObjectNamePart::Identifier(Ident::new(s))])),
-                            table: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(pipeline))])
+                            schema: schema.map(|s| {
+                                ObjectName(vec![ObjectNamePart::Identifier(Ident::new(s))])
+                            }),
+                            table: ObjectName(vec![ObjectNamePart::Identifier(Ident::new(
+                                pipeline,
+                            ))]),
                         }))
                         // }
                     }

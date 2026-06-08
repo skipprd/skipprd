@@ -1125,10 +1125,7 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                 pipeline: String,
                 namespace: String,
             }
-            fn split_pipeline_ns(
-                name: &SqlObjectName,
-                _default_pipeline: &str,
-            ) -> TableRef {
+            fn split_pipeline_ns(name: &SqlObjectName, _default_pipeline: &str) -> TableRef {
                 let parts: Vec<String> = name
                     .0
                     .iter()

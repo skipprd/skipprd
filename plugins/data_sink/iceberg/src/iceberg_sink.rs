@@ -1541,18 +1541,10 @@ fn parse_s3_uri(uri: &str) -> Result<(String, String), io::Error> {
     let without_scheme = uri
         .strip_prefix("s3://")
         .or_else(|| uri.strip_prefix("s3a://"))
-        .ok_or_else(|| {
-            io::Error::other(format!(
-                "expected s3:// or s3a:// URI, got '{}'",
-                uri
-            ))
-        })?;
-    let (bucket, key) = without_scheme.split_once('/').ok_or_else(|| {
-        io::Error::other(format!(
-            "expected s3://bucket/key URI, got '{}'",
-            uri
-        ))
-    })?;
+        .ok_or_else(|| io::Error::other(format!("expected s3:// or s3a:// URI, got '{}'", uri)))?;
+    let (bucket, key) = without_scheme
+        .split_once('/')
+        .ok_or_else(|| io::Error::other(format!("expected s3://bucket/key URI, got '{}'", uri)))?;
     Ok((bucket.to_string(), key.to_string()))
 }
 

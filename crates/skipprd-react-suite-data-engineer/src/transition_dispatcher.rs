@@ -656,9 +656,7 @@ mod tests {
         let fail_key = keyspace
             .thread_key(&scope, tid)
             .expect("thread key should build");
-        let storage = Arc::new(SelectiveFailStorage::fail_forever(
-            fail_key,
-        ));
+        let storage = Arc::new(SelectiveFailStorage::fail_forever(fail_key));
         let store = ThreadStore::new(storage.clone(), scope, keyspace);
 
         dispatch_phase_transition(

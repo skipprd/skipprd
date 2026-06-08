@@ -1,13 +1,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use serde::{Deserialize, Serialize};
 use datafusion::sql::sqlparser::ast::{
     CreateTable, CreateView, Expr, FunctionArg, FunctionArgExpr, FunctionArguments, Ident, Join,
     JoinConstraint, JoinOperator, ObjectName, Query, Select, SelectItem,
     SelectItemQualifiedWildcardKind, SetExpr, Statement, TableFactor, TableWithJoins,
 };
-use datafusion::sql::sqlparser::dialect::{BigQueryDialect, GenericDialect, MsSqlDialect, SnowflakeDialect};
+use datafusion::sql::sqlparser::dialect::{
+    BigQueryDialect, GenericDialect, MsSqlDialect, SnowflakeDialect,
+};
 use datafusion::sql::sqlparser::parser::Parser;
+use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -319,7 +321,9 @@ fn collect_aggregate_fields(
             collect_aggregate_fields(left, aliases, out);
             collect_aggregate_fields(right, aliases, out);
         }
-        Expr::Nested(expr) | Expr::Cast { expr, .. } => collect_aggregate_fields(expr, aliases, out),
+        Expr::Nested(expr) | Expr::Cast { expr, .. } => {
+            collect_aggregate_fields(expr, aliases, out)
+        }
         _ => {}
     }
 }
@@ -443,10 +447,7 @@ fn name_to_string(name: &ObjectName) -> String {
     )
 }
 
-fn resolve_compound_identifier(
-    idents: &[Ident],
-    aliases: &BTreeMap<String, String>,
-) -> String {
+fn resolve_compound_identifier(idents: &[Ident], aliases: &BTreeMap<String, String>) -> String {
     let parts = idents
         .iter()
         .map(|ident| normalize_ident_part(&ident.value))
