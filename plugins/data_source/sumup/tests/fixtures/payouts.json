@@ -1,0 +1,27 @@
+[
+  {
+    "amount": 132.45,
+    "currency": "GBP",
+    "date": "2024-06-03",
+    "fee": 3.12,
+    "id": 123456789,
+    "reference": "payout-2024-06-03",
+    "status": "SUCCESSFUL",
+    "transaction_code": "TEENSK4W2K",
+    "type": "PAYOUT",
+    "metadata": {
+      "bank_name": "should-be-redacted"
+    }
+  },
+  {
+    "amount": -5.0,
+    "currency": "GBP",
+    "date": "2024-06-04",
+    "fee": 0.0,
+    "id": 123456790,
+    "reference": "refund-deduction",
+    "status": "SUCCESSFUL",
+    "transaction_code": "TEENSK4W2L",
+    "type": "DEDUCTION"
+  }
+]

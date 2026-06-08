@@ -1,0 +1,29 @@
+[
+  {
+    "checkout_reference": "f00a8f74-b05d-4605-bd73-2a901bae5802",
+    "amount": 45.99,
+    "currency": "GBP",
+    "merchant_code": "MH4H92C7",
+    "description": "Online order #1001",
+    "id": "4e425463-3e1b-431d-83fa-1e51c2925e99",
+    "status": "PAID",
+    "date": "2024-06-01T11:00:00+00:00",
+    "transaction_code": "TEENSK4W2K",
+    "transaction_id": "410fc44a-5956-44e1-b5cc-19c6f8d727a4",
+    "customer_id": "831ff8d4cd5958ab5670",
+    "redirect_url": "https://shop.example.com/thanks",
+    "metadata": {
+      "customer_email": "buyer@example.com"
+    }
+  },
+  {
+    "checkout_reference": "a11b9f85-c16e-5716-ce84-3b012cbf6913",
+    "amount": 18.5,
+    "currency": "GBP",
+    "merchant_code": "MH4H92C7",
+    "description": "Counter sale",
+    "id": "5f536574-4f2c-542e-94gb-2f62d3036f00",
+    "status": "PENDING",
+    "date": "2024-06-02T09:30:00+00:00"
+  }
+]

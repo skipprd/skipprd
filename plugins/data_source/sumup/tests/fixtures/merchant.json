@@ -1,0 +1,22 @@
+{
+  "merchant_code": "MH4H92C7",
+  "merchant_profile_id": "831ff8d4cd5958ab5670",
+  "business_name": "Acme Cafe Ltd",
+  "business_type": "company",
+  "country": "GB",
+  "currency": "GBP",
+  "activation_status": "ACTIVATED",
+  "locale": "en-GB",
+  "timezone": "Europe/London",
+  "email": "owner@acmecafe.example",
+  "phone": "+441234567890",
+  "address": {
+    "line1": "10 High Street",
+    "city": "London",
+    "postal_code": "SW1A 1AA",
+    "country": "GB"
+  },
+  "metadata": {
+    "internal_ref": "should-be-redacted"
+  }
+}

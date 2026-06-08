@@ -12398,6 +12398,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippr-plugin-data-source-revolut-business"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "jsonwebtoken 9.3.1",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "sha2 0.10.9",
+ "skippr-plugin-shared-api-source",
+ "skippr-runtime-sdk",
+ "tokio",
+ "tracing",
+ "uuid 1.23.2",
+]
+
+[[package]]
 name = "skippr-plugin-data-source-s3"
 version = "0.1.3"
 dependencies = [
@@ -12607,6 +12626,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippr-plugin-data-source-sumup"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "sha2 0.10.9",
+ "skippr-plugin-shared-api-source",
+ "skippr-runtime-sdk",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "skippr-plugin-data-source-websocket"
 version = "0.1.2"
 dependencies = [
@@ -12637,6 +12673,24 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "sha1 0.10.6",
+ "skippr-plugin-shared-api-source",
+ "skippr-runtime-sdk",
+ "tokio",
+ "tracing",
+ "urlencoding",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-xero-accounting"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "sha2 0.10.9",
  "skippr-plugin-shared-api-source",
  "skippr-runtime-sdk",
  "tokio",

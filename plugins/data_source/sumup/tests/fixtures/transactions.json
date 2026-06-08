@@ -1,0 +1,44 @@
+{
+  "items": [
+    {
+      "transaction_code": "TEENSK4W2K",
+      "amount": 29.5,
+      "currency": "GBP",
+      "timestamp": "2024-06-01T10:56:56.876Z",
+      "status": "SUCCESSFUL",
+      "payment_type": "POS",
+      "installments_count": 1,
+      "merchant_code": "MH4H92C7",
+      "transaction_id": "410fc44a-5956-44e1-b5cc-19c6f8d727a4",
+      "user": "customer@example.com",
+      "type": "PAYMENT",
+      "payout_date": "2024-06-03",
+      "payout_type": "BANK_ACCOUNT",
+      "refunded_amount": 0,
+      "cardholder_name": "Jane Customer",
+      "receipt": {
+        "email": "customer@example.com",
+        "phone": "+449876543210"
+      },
+      "metadata": {
+        "order_ref": "ORD-1001"
+      }
+    },
+    {
+      "transaction_code": "TEENSK4W2L",
+      "amount": 12.0,
+      "currency": "GBP",
+      "timestamp": "2024-06-02T14:20:00.000Z",
+      "status": "SUCCESSFUL",
+      "payment_type": "ECOM",
+      "installments_count": 1,
+      "merchant_code": "MH4H92C7",
+      "transaction_id": "520fc44a-5956-44e1-b5cc-19c6f8d727b5",
+      "user": "payer@example.com",
+      "type": "PAYMENT",
+      "payout_date": "2024-06-04",
+      "payout_type": "BANK_ACCOUNT",
+      "refunded_amount": 0
+    }
+  ]
+}
