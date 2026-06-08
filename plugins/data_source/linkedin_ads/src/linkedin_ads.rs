@@ -243,12 +243,19 @@ fn build_auth(
             return Ok((Some(StaticBearerAuth::new(token.trim())), None));
         }
     }
-    if let (Some(url), Some(id), Some(secret), Some(refresh)) = (
-        config.oauth_token_url.as_deref(),
-        config.oauth_client_id.as_deref(),
-        config.oauth_client_secret.as_deref(),
-        config.oauth_refresh_token.as_deref(),
-    ) {
+    let token_url = config.oauth_token_url.as_deref().map(str::trim);
+    let client_id = config.oauth_client_id.as_deref().map(str::trim);
+    let client_secret = config.oauth_client_secret.as_deref().map(str::trim);
+    let refresh_token = config.oauth_refresh_token.as_deref().map(str::trim);
+    if let (Some(url), Some(id), Some(secret), Some(refresh)) =
+        (token_url, client_id, client_secret, refresh_token)
+    {
+        if url.is_empty() || id.is_empty() || secret.is_empty() || refresh.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "LinkedIn Ads OAuth refresh requires oauth_token_url, oauth_client_id, oauth_client_secret, and oauth_refresh_token",
+            ));
+        }
         return Ok((
             None,
             Some(OAuth2RefreshTokenAuth::new(url, id, secret, refresh)),
@@ -305,6 +312,24 @@ impl DataSourceLinkedInAdsPluginConfig {
             ));
         }
         DataSourceLinkedInAdsPlugin::parse_date(&self.start_date)?;
+        let oauth_fields = [
+            self.oauth_token_url.as_deref(),
+            self.oauth_client_id.as_deref(),
+            self.oauth_client_secret.as_deref(),
+            self.oauth_refresh_token.as_deref(),
+        ];
+        let oauth_present = oauth_fields
+            .iter()
+            .any(|v| v.unwrap_or("").trim().len() > 0);
+        let oauth_complete = oauth_fields
+            .iter()
+            .all(|v| v.unwrap_or("").trim().len() > 0);
+        if oauth_present && !oauth_complete {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "LinkedIn Ads OAuth refresh requires oauth_token_url, oauth_client_id, oauth_client_secret, and oauth_refresh_token",
+            ));
+        }
         Ok(())
     }
 }
@@ -410,5 +435,31 @@ mod tests {
             .collect();
         assert!(namespaces.contains(&"linkedin_ads.creatives".to_string()));
         assert!(!namespaces.iter().any(|n| n.contains("adset")));
+    }
+
+    #[test]
+    fn partial_oauth_refresh_config_is_rejected() {
+        let mut cfg = DataSourceLinkedInAdsPluginConfig {
+            ad_account_id: "urn:li:sponsoredAccount:123".into(),
+            access_token: None,
+            oauth_token_url: Some("https://www.linkedin.com/oauth/v2/accessToken".into()),
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            oauth_refresh_token: None,
+            rest_version: None,
+            api_version: None,
+            start_date: "2024-01-01".into(),
+            end_date: None,
+            lookback_days: 3,
+            stream_profile: StreamProfile::Full,
+            processing_lag_days: 1,
+            streams: None,
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("OAuth refresh requires"));
+        cfg.oauth_client_id = Some("client".into());
+        cfg.oauth_client_secret = Some("secret".into());
+        cfg.oauth_refresh_token = Some("refresh".into());
+        cfg.validate().expect("complete oauth quartet");
     }
 }
