@@ -10,6 +10,7 @@ pub struct AdRollAdsApiClient {
     pub http: RetryableHttpClient,
     pub advertiser_id: String,
     pub access_token: String,
+    pub api_base_url: String,
     pub reporting_url: String,
 }
 impl AdRollAdsApiClient {
@@ -17,12 +18,17 @@ impl AdRollAdsApiClient {
         http: RetryableHttpClient,
         advertiser_id: String,
         access_token: String,
+        api_base_url: Option<String>,
         reporting_url: Option<String>,
     ) -> Self {
         Self {
             http,
             advertiser_id: advertiser_id.trim().to_string(),
             access_token,
+            api_base_url: api_base_url
+                .filter(|u| !u.trim().is_empty())
+                .map(|u| u.trim_end_matches('/').to_string())
+                .unwrap_or_else(|| ADROLL_REST_API_BASE.to_string()),
             reporting_url: reporting_url
                 .filter(|u| !u.trim().is_empty())
                 .unwrap_or_else(|| ADROLL_REPORTING_API.to_string()),
@@ -30,18 +36,18 @@ impl AdRollAdsApiClient {
     }
     pub fn url_for(&self, stream: &AdRollStreamDef) -> String {
         match stream.kind {
-            AdRollStreamKind::Advertisers => format!("{ADROLL_REST_API_BASE}/advertisables"),
+            AdRollStreamKind::Advertisers => format!("{}/advertisables", self.api_base_url),
             AdRollStreamKind::Campaigns => format!(
-                "{ADROLL_REST_API_BASE}/advertisable/{}/campaigns",
-                self.advertiser_id
+                "{}/advertisable/{}/campaigns",
+                self.api_base_url, self.advertiser_id
             ),
             AdRollStreamKind::AdGroups => format!(
-                "{ADROLL_REST_API_BASE}/advertisable/{}/adgroups",
-                self.advertiser_id
+                "{}/advertisable/{}/adgroups",
+                self.api_base_url, self.advertiser_id
             ),
             AdRollStreamKind::Ads => format!(
-                "{ADROLL_REST_API_BASE}/advertisable/{}/ads",
-                self.advertiser_id
+                "{}/advertisable/{}/ads",
+                self.api_base_url, self.advertiser_id
             ),
             AdRollStreamKind::Reporting => self.reporting_url.clone(),
         }
@@ -232,6 +238,7 @@ mod tests {
             "adv".into(),
             "token".into(),
             None,
+            None,
         );
         let req = client
             .build_request(
@@ -252,6 +259,7 @@ mod tests {
             RetryableHttpClient::new(RetryConfig::default()),
             "adv_test_001".into(),
             "fixture".into(),
+            None,
             None,
         );
         let stream = &CURATED_STREAMS[4];

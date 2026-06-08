@@ -41,6 +41,10 @@ pub struct DataSourceAdRollAdsPluginConfig {
     pub oauth_client_secret: Option<String>,
     #[serde(default)]
     pub oauth_refresh_token: Option<String>,
+    #[serde(default)]
+    pub api_base_url: Option<String>,
+    #[serde(default)]
+    pub reporting_base_url: Option<String>,
     pub start_date: String,
     #[serde(default)]
     pub end_date: Option<String>,
@@ -140,11 +144,21 @@ impl DataSourceAdRollAdsPlugin {
         }
     }
     fn api_client(&self, token: String) -> AdRollAdsApiClient {
-        let reporting_url = std::env::var("ADROLL_ADS_REPORTING_URL").ok();
+        let api_base_url = self
+            .config
+            .api_base_url
+            .clone()
+            .or_else(|| std::env::var("ADROLL_ADS_API_BASE").ok());
+        let reporting_url = self
+            .config
+            .reporting_base_url
+            .clone()
+            .or_else(|| std::env::var("ADROLL_ADS_REPORTING_URL").ok());
         AdRollAdsApiClient::new(
             self.http.clone(),
             self.advertiser_id.clone(),
             token,
+            api_base_url,
             reporting_url,
         )
     }
@@ -250,11 +264,22 @@ impl DataSourceAdRollAdsPlugin {
     }
 }
 fn build_oauth(c: &DataSourceAdRollAdsPluginConfig) -> Option<OAuth2RefreshTokenAuth> {
+    let token_url = c.oauth_token_url.as_deref()?.trim();
+    let client_id = c.oauth_client_id.as_deref()?.trim();
+    let client_secret = c.oauth_client_secret.as_deref()?.trim();
+    let refresh_token = c.oauth_refresh_token.as_deref()?.trim();
+    if token_url.is_empty()
+        || client_id.is_empty()
+        || client_secret.is_empty()
+        || refresh_token.is_empty()
+    {
+        return None;
+    }
     Some(OAuth2RefreshTokenAuth::new(
-        c.oauth_token_url.as_deref()?,
-        c.oauth_client_id.as_deref()?,
-        c.oauth_client_secret.as_deref()?,
-        c.oauth_refresh_token.as_deref()?,
+        token_url,
+        client_id,
+        client_secret,
+        refresh_token,
     ))
 }
 impl DataSourceAdRollAdsPluginConfig {
@@ -266,6 +291,24 @@ impl DataSourceAdRollAdsPluginConfig {
             ));
         }
         DataSourceAdRollAdsPlugin::parse_date(&self.start_date)?;
+        let oauth_fields = [
+            self.oauth_token_url.as_deref(),
+            self.oauth_client_id.as_deref(),
+            self.oauth_client_secret.as_deref(),
+            self.oauth_refresh_token.as_deref(),
+        ];
+        let oauth_present = oauth_fields
+            .iter()
+            .any(|v| v.unwrap_or("").trim().len() > 0);
+        let oauth_complete = oauth_fields
+            .iter()
+            .all(|v| v.unwrap_or("").trim().len() > 0);
+        if oauth_present && !oauth_complete {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "AdRoll Ads OAuth refresh requires oauth_token_url, oauth_client_id, oauth_client_secret, and oauth_refresh_token",
+            ));
+        }
         Ok(())
     }
 }
@@ -362,6 +405,8 @@ mod tests {
             oauth_client_id: None,
             oauth_client_secret: None,
             oauth_refresh_token: None,
+            api_base_url: None,
+            reporting_base_url: None,
             start_date: "2024-01-01".into(),
             end_date: None,
             lookback_days: 3,
@@ -374,5 +419,32 @@ mod tests {
             .source_namespace_contracts()
             .iter()
             .any(|c| c.namespace == "adroll_ads.reporting_daily"));
+    }
+
+    #[test]
+    fn partial_oauth_refresh_config_is_rejected() {
+        let mut cfg = DataSourceAdRollAdsPluginConfig {
+            advertiser_id: "adv".into(),
+            access_token: None,
+            personal_access_token: Some("pat".into()),
+            oauth_token_url: Some("https://oauth.example/token".into()),
+            oauth_client_id: None,
+            oauth_client_secret: None,
+            oauth_refresh_token: None,
+            api_base_url: None,
+            reporting_base_url: None,
+            start_date: "2024-01-01".into(),
+            end_date: None,
+            lookback_days: 3,
+            stream_profile: StreamProfile::Full,
+            processing_lag_days: 1,
+            streams: None,
+        };
+        let err = cfg.validate().unwrap_err();
+        assert!(err.to_string().contains("OAuth refresh requires"));
+        cfg.oauth_client_id = Some("client".into());
+        cfg.oauth_client_secret = Some("secret".into());
+        cfg.oauth_refresh_token = Some("refresh".into());
+        cfg.validate().expect("complete oauth quartet");
     }
 }
