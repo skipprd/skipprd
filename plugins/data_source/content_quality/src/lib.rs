@@ -13,6 +13,7 @@ pub mod robots;
 pub mod scorecard;
 pub mod sitemap;
 pub mod streams;
+pub mod worker;
 
 pub use config::*;
 pub use content_quality::*;

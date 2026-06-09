@@ -1,4 +1,5 @@
 pub mod append_source_runtime;
+pub mod content_quality_worker;
 pub mod google_serp_worker;
 pub mod progress;
 pub mod protocol;

@@ -27,6 +27,7 @@ use crate::streams::{
     all_namespace_contracts, NAMESPACE_CHECK_DAILY, NAMESPACE_CONTENT_BLOCK, NAMESPACE_PAGE_DAILY,
     NAMESPACE_SITE_RUN_DAILY, NAMESPACE_VECTOR_CHUNK,
 };
+use crate::worker::WorkerClient;
 
 pub struct DataSourceContentQualityPlugin {
     config: DataSourceContentQualityPluginConfig,
@@ -38,12 +39,6 @@ pub struct DataSourceContentQualityPlugin {
 impl DataSourceContentQualityPlugin {
     pub fn new(config: DataSourceContentQualityPluginConfig) -> Result<Self, std::io::Error> {
         config.validate()?;
-        if config.render_js {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "render_js is not supported in content_quality",
-            ));
-        }
         let origin = seed_origin(&config.site)?;
         let openai = if config.openai_active() {
             if std::env::var("SKIPPR_CONTENT_QUALITY_FIXTURE_DIR")
@@ -125,9 +120,16 @@ impl DataSource for DataSourceContentQualityPlugin {
         let run_id = Utc::now().to_rfc3339();
         let site = self.origin.origin.clone();
 
+        let renderer = if self.config.render_js {
+            Some(WorkerClient::new(self.config.clone())?)
+        } else {
+            None
+        };
+
         let pages = crawl_site(
             &self.origin,
             &self.fetcher,
+            renderer.as_ref(),
             &self.config.user_agent,
             self.config.max_urls,
             self.config.max_depth,
@@ -167,14 +169,24 @@ impl DataSource for DataSourceContentQualityPlugin {
                 let to_analyze: Vec<ContentBlock> = to_analyze.into_iter().take(cap).collect();
                 if self.config.openai_active() && !to_analyze.is_empty() {
                     if let Some(client) = &self.openai {
-                        analyze_blocks_batch(
+                        let mut scores = analyze_blocks_batch(
                             client,
                             &self.config.openai_model,
                             &site,
                             &url,
                             &to_analyze,
                         )
-                        .await?
+                        .await?;
+                        for score in &mut scores {
+                            enrich_analysis_provenance(
+                                score,
+                                "llm",
+                                &self.config.openai_model,
+                                "scored",
+                                None,
+                            );
+                        }
+                        scores
                     } else {
                         to_analyze.iter().map(mock_block_analysis).collect()
                     }
@@ -215,6 +227,14 @@ impl DataSource for DataSourceContentQualityPlugin {
                 "content_hash": page.parsed.content_hash,
                 "content_unchanged": unchanged,
                 "word_count": page.parsed.word_count,
+                "extraction_method": page.parsed.extraction_method,
+                "extraction_failure_reason": page.parsed.extraction_failure_reason,
+                "analysis_source": page_analysis_source(&block_scores_json, &page.parsed.blocks),
+                "analysis_status": page_analysis_status(&block_scores_json, &page.parsed.blocks),
+                "has_author_signal": page.parsed.has_author_signal,
+                "has_publish_date": page.parsed.has_publish_date,
+                "has_about_or_contact_link": page.parsed.has_about_or_contact_link,
+                "outbound_citation_count": page.parsed.outbound_citation_count,
                 "has_faq_schema": page.parsed.has_faq_schema,
                 "question_heading_count": page.parsed.question_heading_count,
                 "seo_content_score": page_scores.seo_content_score,
@@ -237,11 +257,24 @@ impl DataSource for DataSourceContentQualityPlugin {
                     "word_count": block.word_count,
                     "text_hash": block.text_hash,
                     "content_unchanged": unchanged,
+                    "analysis_source": score.get("analysis_source"),
+                    "analysis_model": score.get("analysis_model"),
+                    "prompt_version": score.get("prompt_version"),
+                    "analysis_status": score.get("analysis_status"),
+                    "analysis_error": score.get("analysis_error"),
                     "extractability_score": score.get("extractability_score"),
                     "answer_clarity_score": score.get("answer_clarity_score"),
                     "citation_worthiness_score": score.get("citation_worthiness_score"),
                     "helpfulness_score": score.get("helpfulness_score"),
                     "trust_score": score.get("trust_score"),
+                    "search_helpfulness": score.get("search_helpfulness"),
+                    "ai_citation_likelihood": score.get("ai_citation_likelihood"),
+                    "topical_depth": score.get("topical_depth"),
+                    "expertise_signals_present": score.get("expertise_signals_present"),
+                    "source_citations_present": score.get("source_citations_present"),
+                    "suggested_query_intents": score.get("suggested_query_intents"),
+                    "missing_for_ai_citation": score.get("missing_for_ai_citation"),
+                    "evidence_quotes": score.get("evidence_quotes"),
                     "is_self_contained": score.get("is_self_contained"),
                     "confidence": score.get("confidence"),
                 }));
@@ -332,5 +365,54 @@ impl DataSource for DataSourceContentQualityPlugin {
             "ContentQuality sync complete"
         );
         Ok(())
+    }
+}
+
+fn enrich_analysis_provenance(
+    score: &mut Value,
+    source: &str,
+    model: &str,
+    status: &str,
+    error: Option<&str>,
+) {
+    let Some(obj) = score.as_object_mut() else {
+        return;
+    };
+    obj.entry("analysis_source")
+        .or_insert_with(|| json!(source));
+    obj.entry("analysis_model").or_insert_with(|| json!(model));
+    obj.entry("prompt_version")
+        .or_insert_with(|| json!("content-quality-discoverability-v1"));
+    obj.entry("analysis_status")
+        .or_insert_with(|| json!(status));
+    obj.entry("analysis_error")
+        .or_insert_with(|| error.map_or(Value::Null, |e| json!(e)));
+}
+
+fn page_analysis_source(scores: &[Value], blocks: &[ContentBlock]) -> String {
+    if blocks.is_empty() {
+        "not_scored".into()
+    } else {
+        scores
+            .first()
+            .and_then(|s| s.get("analysis_source"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown")
+            .into()
+    }
+}
+
+fn page_analysis_status(scores: &[Value], blocks: &[ContentBlock]) -> String {
+    if blocks.is_empty() {
+        "not_scored".into()
+    } else if scores.is_empty() {
+        "missing".into()
+    } else {
+        scores
+            .first()
+            .and_then(|s| s.get("analysis_status"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("scored")
+            .into()
     }
 }

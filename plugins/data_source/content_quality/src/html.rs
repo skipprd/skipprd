@@ -1,5 +1,5 @@
 use regex::Regex;
-use scraper::{Html, Selector};
+use scraper::{ElementRef, Html, Selector};
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 
@@ -49,6 +49,12 @@ pub struct ParsedPage {
     pub main_text: String,
     pub content_hash: String,
     pub word_count: u32,
+    pub extraction_method: String,
+    pub extraction_failure_reason: Option<String>,
+    pub has_author_signal: bool,
+    pub has_publish_date: bool,
+    pub has_about_or_contact_link: bool,
+    pub outbound_citation_count: u32,
     pub has_faq_schema: bool,
     pub question_heading_count: u32,
     pub links: Vec<ParsedLink>,
@@ -62,9 +68,11 @@ pub fn parse_fetched_page(
 ) -> ParsedPage {
     let document = Html::parse_document(&response.body);
     let title = select_text(&document, "title");
-    let main_text = extract_main_text(&document);
-    let hash = content_hash(&main_text);
     let blocks = extract_content_blocks(page_url, &document);
+    let extraction_method = extraction_method(&response.body, &blocks);
+    let extraction_failure_reason = extraction_failure_reason(&response.body, &blocks);
+    let main_text = extract_main_text(&document, &blocks);
+    let hash = content_hash(&main_text);
     let has_faq_schema = has_faq_schema(&document);
     let question_heading_count = blocks
         .iter()
@@ -75,6 +83,10 @@ pub fn parse_fetched_page(
     let canonical = select_attr(&document, "link[rel=\"canonical\"]", "href")
         .unwrap_or_else(|| response.final_url.clone());
     let links = extract_links(&document, page_url, origin);
+    let outbound_citation_count = links
+        .iter()
+        .filter(|l| !l.target_url.starts_with(&origin.origin))
+        .count() as u32;
     let internal_links = links
         .iter()
         .map(|l| LinkEdge {
@@ -97,6 +109,15 @@ pub fn parse_fetched_page(
         main_text,
         content_hash: hash,
         word_count,
+        extraction_method,
+        extraction_failure_reason,
+        has_author_signal: has_author_signal(&document),
+        has_publish_date: has_publish_date(&document),
+        has_about_or_contact_link: links.iter().any(|l| {
+            let text = l.anchor_text.to_lowercase();
+            text.contains("about") || text.contains("contact")
+        }),
+        outbound_citation_count,
         has_faq_schema,
         question_heading_count,
         links,
@@ -124,7 +145,8 @@ pub fn rollup_page_scores(block_scores: &[Value]) -> PageScores {
     let mut ai = 0.0;
     for row in block_scores {
         helpfulness += row
-            .get("helpfulness_score")
+            .get("search_helpfulness")
+            .or_else(|| row.get("helpfulness_score"))
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
         trust += row
@@ -132,7 +154,8 @@ pub fn rollup_page_scores(block_scores: &[Value]) -> PageScores {
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
         ai += row
-            .get("extractability_score")
+            .get("ai_citation_likelihood")
+            .or_else(|| row.get("extractability_score"))
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
     }
@@ -146,11 +169,21 @@ pub fn rollup_page_scores(block_scores: &[Value]) -> PageScores {
 pub fn mock_block_analysis(block: &ContentBlock) -> Value {
     json!({
         "block_id": block.block_id,
+        "analysis_source": "heuristic_mock",
+        "analysis_model": "mock",
+        "prompt_version": "content-quality-discoverability-v1",
+        "analysis_status": "mock",
+        "analysis_error": null,
         "extractability_score": 0.75,
         "answer_clarity_score": 0.7,
         "citation_worthiness_score": 0.6,
         "helpfulness_score": 0.72,
         "trust_score": 0.68,
+        "search_helpfulness": 0.72,
+        "ai_citation_likelihood": 0.6,
+        "topical_depth": if block.word_count >= 80 { "moderate" } else { "shallow" },
+        "expertise_signals_present": block.has_citation,
+        "source_citations_present": block.has_citation,
         "is_self_contained": block.word_count >= 20,
         "suggested_query_intents": [],
         "missing_for_ai_citation": [],
@@ -205,68 +238,93 @@ fn has_faq_schema(document: &Html) -> bool {
 pub fn extract_content_blocks(page_url: &str, document: &Html) -> Vec<ContentBlock> {
     let mut blocks = Vec::new();
     let mut ordinal = 0u32;
+    let mut heading_path: Vec<String> = Vec::new();
 
-    if let Ok(p_sel) = Selector::parse("main p, article p, [role=main] p, body p") {
-        for p in document.select(&p_sel).take(3) {
-            let text = p.text().collect::<String>().trim().to_string();
-            if text.split_whitespace().count() < 15 {
+    if let Ok(flow_sel) = Selector::parse("h1, h2, h3, h4, h5, h6, p, li, td, blockquote") {
+        for el in document.select(&flow_sel) {
+            if is_chrome_element(&el) {
                 continue;
             }
-            let text_hash = content_hash(&text);
-            blocks.push(ContentBlock {
-                block_id: block_id_for(page_url, &["intro".into()], ordinal),
-                block_type: "intro".into(),
-                heading_path: vec!["Introduction".into()],
-                text: text.clone(),
-                text_hash,
-                char_count: text.chars().count(),
-                word_count: text.split_whitespace().count(),
-                ordinal,
-                has_list: false,
-                has_table: false,
-                has_citation: false,
-                outbound_link_count: 0,
-            });
+            let tag = el.value().name();
+            let text = normalize_whitespace(&el.text().collect::<String>());
+            if text.is_empty() {
+                continue;
+            }
+            if tag.starts_with('h') && tag.len() == 2 {
+                heading_path = vec![text.clone()];
+                if is_question_text(&text) {
+                    blocks.push(build_block(
+                        page_url,
+                        "direct_answer",
+                        heading_path.clone(),
+                        text,
+                        ordinal,
+                        &el,
+                    ));
+                    ordinal += 1;
+                }
+                continue;
+            }
+            if text.split_whitespace().count() < 12 {
+                continue;
+            }
+            let block_type = if heading_path.last().is_some_and(|h| is_question_text(h))
+                || is_question_text(&text)
+            {
+                "direct_answer"
+            } else if heading_path
+                .last()
+                .is_some_and(|h| h.to_lowercase().contains("faq"))
+            {
+                "faq"
+            } else if tag == "blockquote" {
+                "citation"
+            } else {
+                "heading_section"
+            };
+            let path = if heading_path.is_empty() {
+                vec!["Primary content".into()]
+            } else {
+                heading_path.clone()
+            };
+            blocks.push(build_block(page_url, block_type, path, text, ordinal, &el));
             ordinal += 1;
+        }
+    }
+
+    if !blocks.is_empty() {
+        return dedupe_blocks(blocks);
+    }
+
+    let Ok(region_sel) = Selector::parse("article, main, section, div") else {
+        return blocks;
+    };
+    for el in document.select(&region_sel) {
+        if is_chrome_element(&el) {
+            continue;
+        }
+        let text = normalize_whitespace(&el.text().collect::<String>());
+        let words = text.split_whitespace().count();
+        if words < 40 || link_ratio(&el) > 0.35 {
+            continue;
+        }
+        let heading_path = first_heading_text(&el)
+            .map(|h| vec![h])
+            .unwrap_or_else(|| vec!["Primary content".into()]);
+        blocks.push(build_block(
+            page_url,
+            "primary_region",
+            heading_path,
+            text,
+            ordinal,
+            &el,
+        ));
+        ordinal += 1;
+        if ordinal >= 5 {
             break;
         }
     }
-
-    let heading_sel = Selector::parse("h1, h2, h3, h4, h5, h6").ok();
-    let Some(heading_sel) = heading_sel else {
-        return blocks;
-    };
-    for heading in document.select(&heading_sel) {
-        let text = heading.text().collect::<String>().trim().to_string();
-        if text.is_empty() {
-            continue;
-        }
-        let block_type = if text.contains('?') || question_re().is_match(&text.to_lowercase()) {
-            "direct_answer"
-        } else if text.to_lowercase().contains("faq") {
-            "faq"
-        } else {
-            "heading_section"
-        };
-        let heading_path = vec![text.clone()];
-        let text_hash = content_hash(&text);
-        blocks.push(ContentBlock {
-            block_id: block_id_for(page_url, &heading_path, ordinal),
-            block_type: block_type.into(),
-            heading_path,
-            text: text.clone(),
-            text_hash,
-            char_count: text.chars().count(),
-            word_count: text.split_whitespace().count(),
-            ordinal,
-            has_list: false,
-            has_table: false,
-            has_citation: false,
-            outbound_link_count: 0,
-        });
-        ordinal += 1;
-    }
-    blocks
+    dedupe_blocks(blocks)
 }
 
 pub fn block_id_for(page_url: &str, heading_path: &[String], ordinal: u32) -> String {
@@ -276,6 +334,159 @@ pub fn block_id_for(page_url: &str, heading_path: &[String], ordinal: u32) -> St
 
 fn question_re() -> Regex {
     Regex::new(r"^(how|what|why|when|where|who)\b").expect("regex")
+}
+
+fn is_question_text(text: &str) -> bool {
+    text.contains('?') || question_re().is_match(&text.to_lowercase())
+}
+
+fn build_block(
+    page_url: &str,
+    block_type: &str,
+    heading_path: Vec<String>,
+    text: String,
+    ordinal: u32,
+    el: &ElementRef<'_>,
+) -> ContentBlock {
+    let outbound_link_count = count_links(el);
+    ContentBlock {
+        block_id: block_id_for(page_url, &heading_path, ordinal),
+        block_type: block_type.into(),
+        heading_path,
+        text_hash: content_hash(&text),
+        char_count: text.chars().count(),
+        word_count: text.split_whitespace().count(),
+        text,
+        ordinal,
+        has_list: has_descendant(el, "ul, ol, li"),
+        has_table: has_descendant(el, "table, tr, td, th"),
+        has_citation: outbound_link_count > 0 || has_descendant(el, "cite, blockquote"),
+        outbound_link_count,
+    }
+}
+
+fn dedupe_blocks(blocks: Vec<ContentBlock>) -> Vec<ContentBlock> {
+    let mut seen = std::collections::HashSet::new();
+    blocks
+        .into_iter()
+        .filter(|b| seen.insert(b.text_hash.clone()))
+        .take(24)
+        .collect()
+}
+
+fn has_descendant(el: &ElementRef<'_>, selector: &str) -> bool {
+    Selector::parse(selector)
+        .ok()
+        .is_some_and(|sel| el.select(&sel).next().is_some())
+}
+
+fn count_links(el: &ElementRef<'_>) -> u32 {
+    Selector::parse("a[href]")
+        .ok()
+        .map(|sel| el.select(&sel).count() as u32)
+        .unwrap_or(0)
+}
+
+fn link_ratio(el: &ElementRef<'_>) -> f64 {
+    let total = normalize_whitespace(&el.text().collect::<String>())
+        .split_whitespace()
+        .count();
+    if total == 0 {
+        return 1.0;
+    }
+    let link_words = Selector::parse("a[href]")
+        .ok()
+        .map(|sel| {
+            el.select(&sel)
+                .map(|a| {
+                    normalize_whitespace(&a.text().collect::<String>())
+                        .split_whitespace()
+                        .count()
+                })
+                .sum::<usize>()
+        })
+        .unwrap_or(0);
+    link_words as f64 / total as f64
+}
+
+fn first_heading_text(el: &ElementRef<'_>) -> Option<String> {
+    let sel = Selector::parse("h1, h2, h3, h4, h5, h6").ok()?;
+    el.select(&sel)
+        .next()
+        .map(|h| normalize_whitespace(&h.text().collect::<String>()))
+        .filter(|s| !s.is_empty())
+}
+
+fn is_chrome_element(el: &ElementRef<'_>) -> bool {
+    let tag = el.value().name();
+    if matches!(
+        tag,
+        "script" | "style" | "noscript" | "nav" | "header" | "footer" | "aside"
+    ) {
+        return true;
+    }
+    let attrs = ["id", "class", "role", "aria-label"]
+        .iter()
+        .filter_map(|name| el.value().attr(name))
+        .collect::<Vec<_>>()
+        .join(" ")
+        .to_lowercase();
+    Regex::new(r"(nav|menu|footer|header|cookie|consent|banner|modal|sidebar|breadcrumb)")
+        .expect("regex")
+        .is_match(&attrs)
+}
+
+fn extraction_method(html: &str, blocks: &[ContentBlock]) -> String {
+    if !blocks.is_empty() {
+        "static_ok".into()
+    } else if looks_like_js_shell(html) {
+        "js_shell".into()
+    } else {
+        "empty".into()
+    }
+}
+
+fn extraction_failure_reason(html: &str, blocks: &[ContentBlock]) -> Option<String> {
+    if !blocks.is_empty() {
+        None
+    } else if looks_like_js_shell(html) {
+        Some("js_shell".into())
+    } else {
+        Some("empty".into())
+    }
+}
+
+fn looks_like_js_shell(html: &str) -> bool {
+    let lower = html.to_lowercase();
+    let script_count = lower.matches("<script").count();
+    let document = Html::parse_document(html);
+    let body_words = cleaned_body_text(&document).split_whitespace().count();
+    script_count >= 2 && body_words < 40
+}
+
+fn has_author_signal(document: &Html) -> bool {
+    select_attr(document, "a[rel=\"author\"]", "href").is_some()
+        || select_text(
+            document,
+            "[class*=\"author\"], [id*=\"author\"], [itemprop=\"author\"]",
+        )
+        .is_some()
+}
+
+fn has_publish_date(document: &Html) -> bool {
+    select_attr(
+        document,
+        "time[datetime], meta[property=\"article:published_time\"], meta[name=\"date\"]",
+        "datetime",
+    )
+    .or_else(|| {
+        select_attr(
+            document,
+            "meta[property=\"article:published_time\"], meta[name=\"date\"]",
+            "content",
+        )
+    })
+    .is_some()
 }
 
 fn select_text(document: &Html, selector: &str) -> Option<String> {
@@ -328,23 +539,40 @@ fn extract_links(document: &Html, page_url: &str, origin: &SiteOrigin) -> Vec<Pa
     links
 }
 
-fn extract_main_text(document: &Html) -> String {
-    for sel_str in ["main", "article", "[role=main]"] {
-        if let Ok(sel) = Selector::parse(sel_str) {
-            if let Some(el) = document.select(&sel).next() {
-                return normalize_whitespace(&el.text().collect::<String>());
-            }
-        }
+fn extract_main_text(document: &Html, blocks: &[ContentBlock]) -> String {
+    if !blocks.is_empty() {
+        return normalize_whitespace(
+            &blocks
+                .iter()
+                .map(|b| b.text.as_str())
+                .collect::<Vec<_>>()
+                .join("\n\n"),
+        );
     }
+    cleaned_body_text(document)
+}
+
+fn cleaned_body_text(document: &Html) -> String {
     let body_sel = Selector::parse("body").ok();
     let Some(body_sel) = body_sel else {
         return String::new();
     };
-    document
-        .select(&body_sel)
-        .next()
-        .map(|el| normalize_whitespace(&el.text().collect::<String>()))
-        .unwrap_or_default()
+    let Some(body) = document.select(&body_sel).next() else {
+        return String::new();
+    };
+    let mut parts = Vec::new();
+    if let Ok(sel) = Selector::parse("p, li, td, blockquote, h1, h2, h3, h4, h5, h6") {
+        for el in body.select(&sel) {
+            if is_chrome_element(&el) {
+                continue;
+            }
+            let text = normalize_whitespace(&el.text().collect::<String>());
+            if !text.is_empty() {
+                parts.push(text);
+            }
+        }
+    }
+    normalize_whitespace(&parts.join(" "))
 }
 
 #[cfg(test)]
@@ -382,5 +610,53 @@ mod tests {
         assert!(page.has_faq_schema);
         assert_eq!(page.question_heading_count, 1);
         assert_eq!(page.page_type, "faq");
+    }
+
+    #[test]
+    fn parse_page_ignores_static_js_shell_text() {
+        let origin = seed_origin("https://example.com").expect("origin");
+        let response = FetchResponse {
+            final_url: "https://example.com/blog".into(),
+            status: 200,
+            headers: HashMap::new(),
+            body: r#"
+              <html>
+                <head><title>Shell</title><script src="/app.js"></script><script>window.__app={}</script></head>
+                <body><div id="app"></div><noscript>Please enable JavaScript to continue.</noscript></body>
+              </html>
+            "#.into(),
+            redirect_chain: vec![200],
+            ttfb_ms: 1,
+        };
+        let page = parse_fetched_page("https://example.com/blog", &response, &origin);
+        assert!(page.blocks.is_empty());
+        assert_eq!(page.word_count, 0);
+        assert_eq!(page.extraction_method, "js_shell");
+    }
+
+    #[test]
+    fn parse_page_extracts_div_heavy_content() {
+        let origin = seed_origin("https://example.com").expect("origin");
+        let response = FetchResponse {
+            final_url: "https://example.com/guide".into(),
+            status: 200,
+            headers: HashMap::new(),
+            body: r#"
+              <html><body>
+                <div class="top-nav">Home Pricing Login</div>
+                <div class="cms">
+                  <h1>How does content quality work?</h1>
+                  <div>This guide explains content quality signals with enough detail to help search engines and AI systems understand the answer, trust the evidence, and cite the page confidently.</div>
+                  <p>Author: Upfoundry research team. Updated June 2026 with references to current indexing and answer extraction behaviour.</p>
+                </div>
+              </body></html>
+            "#.into(),
+            redirect_chain: vec![200],
+            ttfb_ms: 1,
+        };
+        let page = parse_fetched_page("https://example.com/guide", &response, &origin);
+        assert!(!page.blocks.is_empty());
+        assert!(page.word_count > 20);
+        assert_eq!(page.extraction_method, "static_ok");
     }
 }

@@ -24,6 +24,14 @@ pub struct DataSourceContentQualityPluginConfig {
     pub skip_unchanged_content: bool,
     #[serde(default = "default_user_agent")]
     pub user_agent: String,
+    #[serde(default = "default_worker_node_path")]
+    pub worker_node_path: String,
+    #[serde(default = "default_render_wait_until")]
+    pub render_wait_until: String,
+    #[serde(default = "default_render_timeout_ms")]
+    pub render_timeout_ms: u32,
+    #[serde(default)]
+    pub playwright_executable_path: Option<String>,
     #[serde(default)]
     pub seed_urls: Vec<String>,
 }
@@ -62,6 +70,18 @@ fn default_skip_unchanged_content() -> bool {
 
 fn default_user_agent() -> String {
     "SkipprContentQuality/1.0".into()
+}
+
+fn default_worker_node_path() -> String {
+    "node".into()
+}
+
+fn default_render_wait_until() -> String {
+    "load".into()
+}
+
+fn default_render_timeout_ms() -> u32 {
+    60_000
 }
 
 impl DataSourceContentQualityPluginConfig {

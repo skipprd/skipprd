@@ -18,48 +18,85 @@ pub fn page_check_rows(
     block_scores: &[Value],
 ) -> Vec<Value> {
     let mut rows = Vec::new();
-
-    rows.push(score_check(
-        site,
-        run_date,
-        page_url,
-        "LOW_CONTENT_QUALITY",
-        "content_seo",
-        scores.seo_content_score,
-        SEO_WARN,
-        SEO_FAIL,
-        "SEO content quality score from block helpfulness rollup",
-    ));
-
-    rows.push(score_check(
-        site,
-        run_date,
-        page_url,
-        "LOW_AIO_READINESS",
-        "content_aio",
-        scores.aio_score,
-        AIO_WARN,
-        AIO_FAIL,
-        "AIO readiness score from block extractability rollup",
-    ));
-
-    rows.push(score_check(
-        site,
-        run_date,
-        page_url,
-        "LOW_EEAT_PROXY",
-        "content_seo",
-        scores.eeat_proxy_score,
-        SEO_WARN,
-        SEO_FAIL,
-        "E-E-A-T proxy score from block trust signals",
-    ));
-
     let no_blocks = page.blocks.is_empty();
-    let block_msg = if no_blocks {
-        "no extractable content blocks found".to_string()
+
+    if no_blocks {
+        rows.push(not_scored_check(
+            site,
+            run_date,
+            page_url,
+            "LOW_CONTENT_QUALITY",
+            "content_seo",
+            "Content quality was not scored because no primary content blocks were extracted",
+        ));
+        rows.push(not_scored_check(
+            site,
+            run_date,
+            page_url,
+            "LOW_AIO_READINESS",
+            "content_aio",
+            "AI citation readiness was not scored because no primary content blocks were extracted",
+        ));
+        rows.push(not_scored_check(
+            site,
+            run_date,
+            page_url,
+            "LOW_EEAT_PROXY",
+            "content_seo",
+            "Trust signal proxy was not scored because no primary content blocks were extracted",
+        ));
     } else {
-        format!("{} content blocks extracted", page.blocks.len())
+        rows.push(score_check(
+            site,
+            run_date,
+            page_url,
+            "LOW_CONTENT_QUALITY",
+            "content_seo",
+            scores.seo_content_score,
+            SEO_WARN,
+            SEO_FAIL,
+            "Search helpfulness score from block-level discoverability rollup",
+        ));
+
+        rows.push(score_check(
+            site,
+            run_date,
+            page_url,
+            "LOW_AIO_READINESS",
+            "content_aio",
+            scores.aio_score,
+            AIO_WARN,
+            AIO_FAIL,
+            "AI citation readiness score from block extractability rollup",
+        ));
+
+        rows.push(score_check(
+            site,
+            run_date,
+            page_url,
+            "LOW_EEAT_PROXY",
+            "content_seo",
+            scores.eeat_proxy_score,
+            SEO_WARN,
+            SEO_FAIL,
+            "Trust signal proxy score from block evidence",
+        ));
+    }
+
+    let block_msg = if no_blocks {
+        format!(
+            "no extractable content blocks found (method {}, reason {})",
+            page.extraction_method,
+            page.extraction_failure_reason
+                .as_deref()
+                .unwrap_or("unknown")
+        )
+    } else {
+        format!(
+            "{} content blocks extracted via {}",
+            page.blocks.len(),
+            page.extraction_method
+        )
     };
     rows.push(check_row(
         site,
@@ -73,20 +110,41 @@ pub fn page_check_rows(
     ));
 
     let thin = page.blocks.iter().any(|b| b.word_count < MIN_BLOCK_WORDS);
-    rows.push(check_row(
-        site,
-        run_date,
-        page_url,
-        "THIN_CONTENT_BLOCK",
-        "content_seo",
-        if thin { "warn" } else { "pass" },
-        if thin { "medium" } else { "info" },
-        if thin {
-            "one or more blocks have very low word count"
-        } else {
-            "all blocks meet minimum word count threshold"
-        },
-    ));
+    if !no_blocks {
+        rows.push(check_row(
+            site,
+            run_date,
+            page_url,
+            "THIN_CONTENT_BLOCK",
+            "content_seo",
+            if thin { "warn" } else { "pass" },
+            if thin { "medium" } else { "info" },
+            if thin {
+                "one or more blocks have very low word count"
+            } else {
+                "all blocks meet minimum word count threshold"
+            },
+        ));
+    }
+
+    if !no_blocks {
+        let weak_trust =
+            !page.has_author_signal || !page.has_publish_date || page.outbound_citation_count == 0;
+        rows.push(check_row(
+            site,
+            run_date,
+            page_url,
+            "WEAK_TRUST_SIGNALS",
+            "content_seo",
+            if weak_trust { "warn" } else { "pass" },
+            if weak_trust { "medium" } else { "info" },
+            if weak_trust {
+                "page is missing one or more trust signals: author, publish date, or outbound citations"
+            } else {
+                "page includes author, freshness, and citation signals"
+            },
+        ));
+    }
 
     let low_citation = block_scores.iter().any(|s| {
         s.get("citation_worthiness_score")
@@ -132,6 +190,26 @@ pub fn page_check_rows(
     }
 
     rows
+}
+
+fn not_scored_check(
+    site: &str,
+    run_date: &str,
+    page_url: &str,
+    issue_code: &str,
+    section: &str,
+    message: &str,
+) -> Value {
+    check_row(
+        site,
+        run_date,
+        page_url,
+        issue_code,
+        section,
+        "not_scored",
+        "info",
+        message,
+    )
 }
 
 fn score_check(

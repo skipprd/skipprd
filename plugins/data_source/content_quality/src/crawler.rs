@@ -4,6 +4,7 @@ use crate::fetch::HttpFetcher;
 use crate::html::parse_fetched_page;
 use crate::origin::{normalize_site, SiteOrigin};
 use crate::robots::{parse_robots_txt, path_allowed};
+use crate::worker::WorkerClient;
 
 pub struct CrawlPageResult {
     pub url: String,
@@ -43,6 +44,7 @@ async fn collect_sitemap_urls(
 pub async fn crawl_site(
     origin: &SiteOrigin,
     fetcher: &HttpFetcher,
+    renderer: Option<&WorkerClient>,
     user_agent: &str,
     max_urls: u32,
     max_depth: u32,
@@ -124,7 +126,19 @@ pub async fn crawl_site(
         if response.status >= 400 {
             continue;
         }
-        let parsed = parse_fetched_page(&url, &response, origin);
+        let mut parsed = parse_fetched_page(&url, &response, origin);
+        if parsed.blocks.is_empty() {
+            if let Some(renderer) = renderer {
+                if let Ok(rendered) = renderer.render(&url).await {
+                    let mut rendered_parsed = parse_fetched_page(&url, &rendered, origin);
+                    if !rendered_parsed.blocks.is_empty() {
+                        rendered_parsed.extraction_method = "rendered_ok".into();
+                        rendered_parsed.extraction_failure_reason = None;
+                        parsed = rendered_parsed;
+                    }
+                }
+            }
+        }
         results.push(CrawlPageResult {
             url: url.clone(),
             parsed,
@@ -158,9 +172,18 @@ mod tests {
         std::env::set_var("SKIPPR_SEO_CRAWL_FIXTURE_DIR", dir);
         let origin = seed_origin("https://example.com").unwrap();
         let fetcher = HttpFetcher::new("SkipprSeoCrawl/1.0").with_fixture_dir(dir);
-        let pages = crawl_site(&origin, &fetcher, "SkipprSeoCrawl/1.0", 5, 1, true, &[])
-            .await
-            .unwrap();
+        let pages = crawl_site(
+            &origin,
+            &fetcher,
+            None,
+            "SkipprSeoCrawl/1.0",
+            5,
+            1,
+            true,
+            &[],
+        )
+        .await
+        .unwrap();
         assert!(!pages.is_empty());
         std::env::remove_var("SKIPPR_SEO_CRAWL_FIXTURE_DIR");
     }
