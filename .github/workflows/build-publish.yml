@@ -1847,7 +1847,7 @@ jobs:
 
   publish_skipprd:
     name: Publish skipprd Release
-    if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && needs.linux_x86.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) && (needs.resolve_pipeline_mode.outputs.fast_release == 'true' || (needs.bike_hire_test.result == 'success' && needs.chaos_mode_test.result == 'success' && needs.deadletters_test.result == 'success' && needs.published_runtime_plugins_smoke_test.result == 'success')) }}
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && needs.linux_x86.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) && (needs.resolve_pipeline_mode.outputs.fast_release == 'true' || (needs.bike_hire_test.result == 'success' && needs.chaos_mode_test.result == 'success' && needs.deadletters_test.result == 'success' && needs.published_runtime_plugins_smoke_test.result == 'success')) }}
     needs:
       - resolve_pipeline_mode
       - bike_hire_test
@@ -1891,7 +1891,7 @@ jobs:
 
   publish_skippr:
     name: Publish skippr Release
-    if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && needs.linux_x86.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) && (needs.resolve_pipeline_mode.outputs.fast_release == 'true' || (needs.skippr_cli_test_suite.result == 'success' && needs.data_engineer_test_suite.result == 'success')) }}
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && needs.linux_x86.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) && (needs.resolve_pipeline_mode.outputs.fast_release == 'true' || (needs.skippr_cli_test_suite.result == 'success' && needs.data_engineer_test_suite.result == 'success')) }}
     needs:
       - resolve_pipeline_mode
       - linux_x86
@@ -1935,7 +1935,7 @@ jobs:
 
   publish_github_release:
     name: Publish GitHub Release
-    if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && needs.linux_x86.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) && (needs.resolve_pipeline_mode.outputs.fast_release == 'true' || needs.skippr_admin_test_suite.result == 'success') }}
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && needs.linux_x86.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) && (needs.resolve_pipeline_mode.outputs.fast_release == 'true' || needs.skippr_admin_test_suite.result == 'success') }}
     needs:
       - resolve_pipeline_mode
       - publish_skipprd
