@@ -3,6 +3,11 @@ name: Rust CI/CD Pipeline
 on:
   workflow_dispatch:
     inputs:
+      fast_release:
+        description: 'Fast path — Linux x86 build + publish only (skip tests, e2e, cleanup, macOS/Windows)'
+        required: false
+        default: true
+        type: boolean
       snowflake_e2e_only:
         description: 'Only build release artifacts and run MSSQL→Snowflake e2e (skip tests and other e2es)'
         required: false
@@ -31,10 +36,40 @@ env:
   RUST_BUILD_CACHE_REGION: us-east-1
 
 jobs:
+  resolve_pipeline_mode:
+    name: resolve pipeline mode
+    runs-on: depot-ubuntu-22.04-16
+    outputs:
+      fast_release: ${{ steps.mode.outputs.fast_release }}
+    steps:
+      - id: mode
+        shell: bash
+        run: |
+          set -euo pipefail
+          fast=false
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            if [[ "${{ inputs.fast_release }}" == "true" ]]; then
+              fast=true
+            fi
+          elif [[ "${{ startsWith(github.ref, 'refs/tags/') }}" == "true" ]]; then
+            tag="${{ github.ref_name }}"
+            if [[ "$tag" != test* ]] && [[ "$tag" != *-full ]]; then
+              fast=true
+            fi
+          fi
+          echo "fast_release=$fast" >> "$GITHUB_OUTPUT"
+          if [[ "$fast" == "true" ]]; then
+            echo "Fast release: skipping tests, e2e, cleanup, and non-Linux builds"
+          else
+            echo "Full CI pipeline"
+          fi
+
   plan_runtime_plugin_release:
     name: plan runtime plugin release
     needs:
+      - resolve_pipeline_mode
       - cleanup
+    if: ${{ always() && needs.resolve_pipeline_mode.result == 'success' && (needs.cleanup.result == 'success' || needs.cleanup.result == 'skipped') }}
     runs-on: depot-ubuntu-22.04-16
     outputs:
       runtime_plugin_packages_json: ${{ steps.plan.outputs.runtime_plugin_packages_json }}
@@ -68,6 +103,9 @@ jobs:
           PY
 
   cleanup:
+    needs:
+      - resolve_pipeline_mode
+    if: ${{ needs.resolve_pipeline_mode.outputs.fast_release != 'true' }}
     runs-on: depot-ubuntu-22.04-16
     container:
       image: python:3.8-alpine
@@ -90,7 +128,9 @@ jobs:
 
   purge_dynamodb:
     needs:
+      - resolve_pipeline_mode
       - cleanup
+    if: ${{ needs.resolve_pipeline_mode.outputs.fast_release != 'true' }}
     runs-on: depot-ubuntu-22.04-16
     container:
       image: node:14
@@ -111,10 +151,11 @@ jobs:
   macos_arm64:
     name: cargo build (macos arm64)
     needs:
+      - resolve_pipeline_mode
       - plan_runtime_plugin_release
       - linux_x86
       - publish_github_release
-    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && needs.linux_x86.result == 'success' && (needs.publish_github_release.result == 'success' || needs.publish_github_release.result == 'skipped') }}
+    if: ${{ !failure() && !cancelled() && needs.resolve_pipeline_mode.outputs.fast_release != 'true' && needs.plan_runtime_plugin_release.result == 'success' && needs.linux_x86.result == 'success' && (needs.publish_github_release.result == 'success' || needs.publish_github_release.result == 'skipped') }}
     runs-on: macos-14
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
@@ -139,6 +180,7 @@ jobs:
   linux_x86:
     name: cargo build (linux x86)
     needs:
+      - resolve_pipeline_mode
       - plan_runtime_plugin_release
       - linux_test_suite
       - data_engineer_test_suite
@@ -149,7 +191,7 @@ jobs:
       - mysql_iceberg_types_cdc_test
       - dynamodb_iceberg_types_cdc_test
       - mssql_iceberg_debug_linux_test
-    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && ((github.event_name == 'workflow_dispatch' && inputs.snowflake_e2e_only == true) || (needs.linux_test_suite.result == 'success' && needs.data_engineer_test_suite.result == 'success' && needs.skippr_cli_test_suite.result == 'success' && needs.skippr_admin_test_suite.result == 'success' && needs.postgres_iceberg_types_cdc_test.result == 'success' && needs.iceberg_equality_commit_e2e_test.result == 'success' && needs.mysql_iceberg_types_cdc_test.result == 'success' && needs.dynamodb_iceberg_types_cdc_test.result == 'success' && needs.mssql_iceberg_debug_linux_test.result == 'success')) }}
+    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && (needs.resolve_pipeline_mode.outputs.fast_release == 'true' || (github.event_name == 'workflow_dispatch' && inputs.snowflake_e2e_only == true) || (needs.linux_test_suite.result == 'success' && needs.data_engineer_test_suite.result == 'success' && needs.skippr_cli_test_suite.result == 'success' && needs.skippr_admin_test_suite.result == 'success' && needs.postgres_iceberg_types_cdc_test.result == 'success' && needs.iceberg_equality_commit_e2e_test.result == 'success' && needs.mysql_iceberg_types_cdc_test.result == 'success' && needs.dynamodb_iceberg_types_cdc_test.result == 'success' && needs.mssql_iceberg_debug_linux_test.result == 'success')) }}
     runs-on:
       - depot-ubuntu-22.04-16
     env:
@@ -173,9 +215,10 @@ jobs:
           runtime_plugin_packages_json: ${{ needs.plan_runtime_plugin_release.outputs.runtime_plugin_packages_json }}
 
   linux_test_suite:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
+    if: ${{ needs.resolve_pipeline_mode.outputs.fast_release != 'true' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     name: cargo test (linux host/packages)
     needs:
+      - resolve_pipeline_mode
       - plan_runtime_plugin_release
     runs-on:
       - depot-ubuntu-22.04-16
@@ -234,9 +277,10 @@ jobs:
           cargo test -p skippr-plugin-data-source-dynamodb --lib -- --nocapture
 
   data_engineer_test_suite:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
+    if: ${{ needs.resolve_pipeline_mode.outputs.fast_release != 'true' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     name: cargo test (data-engineer suite/providers)
     needs:
+      - resolve_pipeline_mode
       - plan_runtime_plugin_release
     runs-on:
       - depot-ubuntu-22.04-16
@@ -268,9 +312,10 @@ jobs:
           cargo test -p react-module-provider-catalog --test catalog_provider_parity -- --nocapture
 
   skippr_cli_test_suite:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
+    if: ${{ needs.resolve_pipeline_mode.outputs.fast_release != 'true' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     name: cargo test (skippr cli)
     needs:
+      - resolve_pipeline_mode
       - data_engineer_test_suite
     runs-on:
       - depot-ubuntu-22.04-16
@@ -298,9 +343,10 @@ jobs:
           cargo test -p skippr-cli -- --nocapture
 
   skippr_admin_test_suite:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
+    if: ${{ needs.resolve_pipeline_mode.outputs.fast_release != 'true' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     name: cargo test (skippr-admin)
     needs:
+      - resolve_pipeline_mode
       - data_engineer_test_suite
     runs-on:
       - depot-ubuntu-22.04-16
@@ -413,10 +459,11 @@ jobs:
   windows_x86:
     name: cargo build (windows x86)
     needs:
+      - resolve_pipeline_mode
       - plan_runtime_plugin_release
       - linux_x86
       - publish_github_release
-    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && needs.linux_x86.result == 'success' && (needs.publish_github_release.result == 'success' || needs.publish_github_release.result == 'skipped') }}
+    if: ${{ !failure() && !cancelled() && needs.resolve_pipeline_mode.outputs.fast_release != 'true' && needs.plan_runtime_plugin_release.result == 'success' && needs.linux_x86.result == 'success' && (needs.publish_github_release.result == 'success' || needs.publish_github_release.result == 'skipped') }}
     runs-on: depot-windows-2022-16
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
@@ -973,8 +1020,9 @@ jobs:
             --content-type "application/json"
 
   published_runtime_plugins_smoke_test:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
+    if: ${{ needs.resolve_pipeline_mode.outputs.fast_release != 'true' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     needs:
+      - resolve_pipeline_mode
       - linux_x86
       - publish_runtime_plugins
     name: smoke test published runtime plugins (linux x86)
@@ -1010,8 +1058,9 @@ jobs:
           runtime_plugin_release_subdir: ${{ env.RUNTIME_PLUGIN_RELEASE_SUBDIR }}
 
   bike_hire_test:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
+    if: ${{ needs.resolve_pipeline_mode.outputs.fast_release != 'true' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     needs:
+      - resolve_pipeline_mode
       - cleanup
       - purge_dynamodb
       - linux_x86
@@ -1036,8 +1085,9 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
   chaos_mode_test:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
+    if: ${{ needs.resolve_pipeline_mode.outputs.fast_release != 'true' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     needs:
+      - resolve_pipeline_mode
       - cleanup
       - purge_dynamodb
       - linux_x86
@@ -1062,8 +1112,9 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
   deadletters_test:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
+    if: ${{ needs.resolve_pipeline_mode.outputs.fast_release != 'true' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     needs:
+      - resolve_pipeline_mode
       - cleanup
       - purge_dynamodb
       - linux_x86
@@ -1088,8 +1139,9 @@ jobs:
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
 
   postgres_iceberg_types_cdc_test:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
+    if: ${{ needs.resolve_pipeline_mode.outputs.fast_release != 'true' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     needs:
+      - resolve_pipeline_mode
       - cleanup
       - purge_dynamodb
       - linux_test_suite
@@ -1230,8 +1282,9 @@ jobs:
             --skip-dynamodb-purge
 
   iceberg_equality_commit_e2e_test:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
+    if: ${{ needs.resolve_pipeline_mode.outputs.fast_release != 'true' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     needs:
+      - resolve_pipeline_mode
       - cleanup
       - purge_dynamodb
       - linux_test_suite
@@ -1319,8 +1372,9 @@ jobs:
           release_aws_secret_access_key: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
 
   mysql_iceberg_types_cdc_test:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
+    if: ${{ needs.resolve_pipeline_mode.outputs.fast_release != 'true' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     needs:
+      - resolve_pipeline_mode
       - cleanup
       - purge_dynamodb
       - linux_test_suite
@@ -1453,8 +1507,9 @@ jobs:
             --skip-dynamodb-purge
 
   dynamodb_iceberg_types_cdc_test:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
+    if: ${{ needs.resolve_pipeline_mode.outputs.fast_release != 'true' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     needs:
+      - resolve_pipeline_mode
       - cleanup
       - purge_dynamodb
       - linux_test_suite
@@ -1546,8 +1601,9 @@ jobs:
             --skipprd target/debug/skipprd
 
   mssql_iceberg_debug_linux_test:
-    if: ${{ github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true }}
+    if: ${{ needs.resolve_pipeline_mode.outputs.fast_release != 'true' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     needs:
+      - resolve_pipeline_mode
       - cleanup
       - purge_dynamodb
       - linux_test_suite
@@ -1791,8 +1847,9 @@ jobs:
 
   publish_skipprd:
     name: Publish skipprd Release
-    if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && needs.linux_x86.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) && (needs.resolve_pipeline_mode.outputs.fast_release == 'true' || (needs.bike_hire_test.result == 'success' && needs.chaos_mode_test.result == 'success' && needs.deadletters_test.result == 'success' && needs.published_runtime_plugins_smoke_test.result == 'success')) }}
     needs:
+      - resolve_pipeline_mode
       - bike_hire_test
       - chaos_mode_test
       - deadletters_test
@@ -1834,8 +1891,9 @@ jobs:
 
   publish_skippr:
     name: Publish skippr Release
-    if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && needs.linux_x86.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) && (needs.resolve_pipeline_mode.outputs.fast_release == 'true' || (needs.skippr_cli_test_suite.result == 'success' && needs.data_engineer_test_suite.result == 'success')) }}
     needs:
+      - resolve_pipeline_mode
       - linux_x86
       - skippr_cli_test_suite
       - data_engineer_test_suite
@@ -1877,8 +1935,9 @@ jobs:
 
   publish_github_release:
     name: Publish GitHub Release
-    if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && needs.linux_x86.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) && (needs.resolve_pipeline_mode.outputs.fast_release == 'true' || needs.skippr_admin_test_suite.result == 'success') }}
     needs:
+      - resolve_pipeline_mode
       - publish_skipprd
       - publish_skippr
       - skippr_admin_test_suite
@@ -2171,8 +2230,9 @@ jobs:
 
   skipprd_release_download_test:
     name: Installed skippr EL smoke test (linux x86)
-    if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
+    if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && needs.resolve_pipeline_mode.outputs.fast_release != 'true' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     needs:
+      - resolve_pipeline_mode
       - publish_skippr
       - publish_runtime_plugins
     runs-on:
