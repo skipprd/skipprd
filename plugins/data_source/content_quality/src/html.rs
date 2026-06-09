@@ -49,6 +49,8 @@ pub struct ParsedPage {
     pub main_text: String,
     pub content_hash: String,
     pub word_count: u32,
+    pub has_faq_schema: bool,
+    pub question_heading_count: u32,
     pub links: Vec<ParsedLink>,
     pub internal_links: Vec<LinkEdge>,
 }
@@ -63,7 +65,12 @@ pub fn parse_fetched_page(
     let main_text = extract_main_text(&document);
     let hash = content_hash(&main_text);
     let blocks = extract_content_blocks(page_url, &document);
-    let page_type = infer_page_type(&document, &blocks);
+    let has_faq_schema = has_faq_schema(&document);
+    let question_heading_count = blocks
+        .iter()
+        .filter(|b| b.block_type == "direct_answer")
+        .count() as u32;
+    let page_type = infer_page_type(page_url, &document, &blocks, has_faq_schema);
     let word_count = main_text.split_whitespace().count() as u32;
     let canonical = select_attr(&document, "link[rel=\"canonical\"]", "href")
         .unwrap_or_else(|| response.final_url.clone());
@@ -90,6 +97,8 @@ pub fn parse_fetched_page(
         main_text,
         content_hash: hash,
         word_count,
+        has_faq_schema,
+        question_heading_count,
         links,
         internal_links,
     }
@@ -150,17 +159,47 @@ pub fn mock_block_analysis(block: &ContentBlock) -> Value {
     })
 }
 
-fn infer_page_type(document: &Html, blocks: &[ContentBlock]) -> String {
+fn infer_page_type(
+    page_url: &str,
+    document: &Html,
+    blocks: &[ContentBlock],
+    has_faq_schema: bool,
+) -> String {
     let body = document.root_element();
     let html = body.html();
     let lower = html.to_lowercase();
-    if lower.contains("faq") || blocks.iter().any(|b| b.block_type == "faq") {
+    let lower_url = page_url.to_lowercase();
+    if has_faq_schema
+        || lower_url.contains("/faq")
+        || lower.contains("faq")
+        || blocks.iter().any(|b| b.block_type == "faq")
+    {
         return "faq".into();
     }
-    if lower.contains("documentation") || lower.contains("docs/") {
+    if lower_url.contains("/docs")
+        || lower_url.contains("/documentation")
+        || lower.contains("documentation")
+        || lower.contains("docs/")
+    {
         return "doc".into();
     }
+    if lower_url.contains("/pricing") || lower_url.contains("/product") {
+        return "commercial".into();
+    }
     "article".into()
+}
+
+fn has_faq_schema(document: &Html) -> bool {
+    let sel = match Selector::parse("script[type=\"application/ld+json\"]") {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+    document.select(&sel).any(|el| {
+        el.text()
+            .collect::<String>()
+            .to_lowercase()
+            .contains("faqpage")
+    })
 }
 
 pub fn extract_content_blocks(page_url: &str, document: &Html) -> Vec<ContentBlock> {
@@ -306,4 +345,42 @@ fn extract_main_text(document: &Html) -> String {
         .next()
         .map(|el| normalize_whitespace(&el.text().collect::<String>()))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::crawler::seed_origin;
+    use crate::fetch::FetchResponse;
+    use std::collections::HashMap;
+
+    #[test]
+    fn parse_page_extracts_aio_evidence() {
+        let origin = seed_origin("https://example.com").expect("origin");
+        let response = FetchResponse {
+            final_url: "https://example.com/faq".into(),
+            status: 200,
+            headers: HashMap::new(),
+            body: r#"
+              <html>
+                <head>
+                  <title>FAQ</title>
+                  <script type="application/ld+json">{"@type":"FAQPage"}</script>
+                </head>
+                <body>
+                  <main>
+                    <p>This introductory paragraph has enough words to be extracted as content for the page.</p>
+                    <h1>What is Skippr?</h1>
+                  </main>
+                </body>
+              </html>
+            "#.into(),
+            redirect_chain: vec![200],
+            ttfb_ms: 1,
+        };
+        let page = parse_fetched_page("https://example.com/faq", &response, &origin);
+        assert!(page.has_faq_schema);
+        assert_eq!(page.question_heading_count, 1);
+        assert_eq!(page.page_type, "faq");
+    }
 }

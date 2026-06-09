@@ -34,6 +34,7 @@ pub struct ParsedPage {
     pub meta_description: Option<String>,
     pub h1: Option<String>,
     pub h1_count: u32,
+    pub h1_structured_count: u32,
     pub heading_outline: Vec<HeadingEntry>,
     pub img_count: u32,
     pub img_missing_alt: u32,
@@ -134,6 +135,7 @@ pub fn parse_html_page(url: &str, response: &FetchResponse, origin: &SiteOrigin)
     let h1_texts = select_all_text(&document, "h1");
     let h1 = h1_texts.first().cloned();
     let h1_count = h1_texts.len() as u32;
+    let h1_structured_count = structured_h1_count(&document);
     let heading_outline = extract_heading_outline(&document);
     let (img_count, img_missing_alt) = extract_image_alt_stats(&document);
     let head = extract_head_json(
@@ -213,6 +215,7 @@ pub fn parse_html_page(url: &str, response: &FetchResponse, origin: &SiteOrigin)
         meta_description,
         h1,
         h1_count,
+        h1_structured_count,
         heading_outline,
         img_count,
         img_missing_alt,
@@ -227,6 +230,16 @@ pub fn parse_html_page(url: &str, response: &FetchResponse, origin: &SiteOrigin)
         technical_score: 0.0,
         issues,
     }
+}
+
+fn structured_h1_count(document: &Html) -> u32 {
+    let sel = match Selector::parse(
+        "main h1, article h1, section[aria-label] h1, section[aria-labelledby] h1, [role=\"main\"] h1, [role=\"region\"] h1",
+    ) {
+        Ok(s) => s,
+        Err(_) => return 0,
+    };
+    document.select(&sel).count() as u32
 }
 
 pub fn technical_score(response: &FetchResponse, page: &ParsedPage) -> f64 {

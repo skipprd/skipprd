@@ -28,23 +28,19 @@ pub fn page_check_rows(
     ));
 
     let title_len = page.title.as_ref().map(|t| t.chars().count()).unwrap_or(0);
-    let title_len_ok = (30..=65).contains(&title_len) || title_len == 0;
-    rows.push(check_row(
-        site,
-        crawl_date,
-        page_url,
-        "TITLE_LENGTH",
-        "metadata",
-        if title_len_ok || !title_ok {
-            "pass"
-        } else if title_len < 30 {
-            "warn"
-        } else {
-            "warn"
-        },
-        "info",
-        &format!("title length is {title_len} characters (target ~30–65)"),
-    ));
+    let title_len_ok = (30..=65).contains(&title_len);
+    if title_ok && !title_len_ok {
+        rows.push(check_row(
+            site,
+            crawl_date,
+            page_url,
+            "TITLE_LENGTH",
+            "metadata",
+            "warn",
+            "info",
+            &format!("title length is {title_len} characters (target ~30–65)"),
+        ));
+    }
 
     let meta_ok = page
         .meta_description
@@ -70,17 +66,19 @@ pub fn page_check_rows(
         .as_ref()
         .map(|d| d.chars().count())
         .unwrap_or(0);
-    let meta_len_ok = (70..=160).contains(&meta_len) || !meta_ok;
-    rows.push(check_row(
-        site,
-        crawl_date,
-        page_url,
-        "META_LENGTH",
-        "metadata",
-        if meta_len_ok { "pass" } else { "warn" },
-        "info",
-        &format!("meta description length is {meta_len} characters (target ~70–160)"),
-    ));
+    let meta_len_ok = (70..=160).contains(&meta_len);
+    if meta_ok && !meta_len_ok {
+        rows.push(check_row(
+            site,
+            crawl_date,
+            page_url,
+            "META_LENGTH",
+            "metadata",
+            "warn",
+            "info",
+            &format!("meta description length is {meta_len} characters (target ~70–160)"),
+        ));
+    }
 
     let h1_ok = page.h1_count == 1;
     rows.push(check_row(
@@ -100,15 +98,28 @@ pub fn page_check_rows(
         },
     ));
 
+    let multiple_h1_ok = multiple_h1_structure_ok(page);
     rows.push(check_row(
         site,
         crawl_date,
         page_url,
         "MULTIPLE_H1",
         "structure",
-        if page.h1_count <= 1 { "pass" } else { "fail" },
-        if page.h1_count <= 1 { "info" } else { "medium" },
-        &format!("{} H1 element(s) on page", page.h1_count),
+        if multiple_h1_ok { "pass" } else { "warn" },
+        if multiple_h1_ok { "info" } else { "medium" },
+        if page.h1_count <= 1 {
+            format!("{} H1 element(s) on page", page.h1_count)
+        } else if page.h1_structured_count == page.h1_count {
+            format!(
+                "{} H1 elements found within crawlable structural landmarks",
+                page.h1_count
+            )
+        } else {
+            format!(
+                "{} H1 elements found; {} are inside clear structural landmarks",
+                page.h1_count, page.h1_structured_count
+            )
+        },
     ));
 
     let hierarchy_ok = heading_hierarchy_ok(&page.heading_outline);
@@ -145,22 +156,6 @@ pub fn page_check_rows(
         },
     ));
 
-    if page.img_missing_alt > 0 {
-        rows.push(check_row(
-            site,
-            crawl_date,
-            page_url,
-            "IMG_ALT_EMPTY",
-            "technical",
-            "fail",
-            "medium",
-            &format!(
-                "{} of {} images missing alt text",
-                page.img_missing_alt, page.img_count
-            ),
-        ));
-    }
-
     let static_links_ok = !page
         .issues
         .iter()
@@ -181,35 +176,22 @@ pub fn page_check_rows(
     ));
 
     let structured_ok = page.structured_data_count > 0;
-    rows.push(check_row(
-        site,
-        crawl_date,
-        page_url,
-        "STRUCTURED_DATA",
-        "metadata",
-        if structured_ok { "pass" } else { "warn" },
-        if structured_ok { "info" } else { "low" },
-        if structured_ok {
-            format!("{} JSON-LD script(s) found", page.structured_data_count)
-        } else {
-            "no JSON-LD structured data found".into()
-        },
-    ));
-
-    rows.push(check_row(
-        site,
-        crawl_date,
-        page_url,
-        "FAQ_SCHEMA",
-        "aio_structure",
-        if page.has_faq_schema { "pass" } else { "warn" },
-        "low",
-        if page.has_faq_schema {
-            "FAQPage or similar schema detected"
-        } else {
-            "no FAQ structured data detected"
-        },
-    ));
+    if structured_ok || structured_data_recommended(page_url) {
+        rows.push(check_row(
+            site,
+            crawl_date,
+            page_url,
+            "STRUCTURED_DATA",
+            "metadata",
+            if structured_ok { "pass" } else { "warn" },
+            if structured_ok { "info" } else { "low" },
+            if structured_ok {
+                format!("{} JSON-LD script(s) found", page.structured_data_count)
+            } else {
+                "no JSON-LD structured data found on a content or landing URL".into()
+            },
+        ));
+    }
 
     let rep_ratio = repetitive_token_ratio(&page.main_text);
     let stuffing = rep_ratio > 0.08;
@@ -225,30 +207,6 @@ pub fn page_check_rows(
             "top token repetition ratio {:.1}% on main text",
             rep_ratio * 100.0
         ),
-    ));
-
-    let question_headings = page
-        .heading_outline
-        .iter()
-        .filter(|h| h.text.contains('?'))
-        .count();
-    rows.push(check_row(
-        site,
-        crawl_date,
-        page_url,
-        "AIO_ANSWER_HEADINGS",
-        "aio_structure",
-        if question_headings > 0 || page.has_faq_schema {
-            "pass"
-        } else {
-            "warn"
-        },
-        "low",
-        if question_headings > 0 {
-            format!("{question_headings} question-style heading(s) for direct answers")
-        } else {
-            "no question-style headings detected for AIO answer blocks".into()
-        },
     ));
 
     let http_ok = http_status < 400;
@@ -313,6 +271,28 @@ pub fn site_check_rows(
     ]
 }
 
+fn multiple_h1_structure_ok(page: &ParsedPage) -> bool {
+    if page.h1_count <= 1 {
+        return true;
+    }
+    page.h1_structured_count == page.h1_count && heading_hierarchy_ok(&page.heading_outline)
+}
+
+fn structured_data_recommended(page_url: &str) -> bool {
+    let path = page_url
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split_once('/').map(|(_, path)| format!("/{path}")))
+        .unwrap_or_else(|| "/".to_string())
+        .to_lowercase();
+    path == "/"
+        || path.starts_with("/blog")
+        || path.starts_with("/docs")
+        || path.starts_with("/guide")
+        || path.starts_with("/product")
+        || path.starts_with("/pricing")
+        || path.starts_with("/features")
+}
+
 fn check_row(
     site: &str,
     crawl_date: &str,
@@ -333,4 +313,100 @@ fn check_row(
         "severity": severity,
         "message": message.as_ref(),
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::html::{HeadingEntry, IssueRow, LinkEdge, ParsedLink};
+    use serde_json::json;
+
+    fn page_with_h1s(h1_count: u32, h1_structured_count: u32) -> ParsedPage {
+        ParsedPage {
+            canonical_url: "https://example.com/blog/post".into(),
+            title: Some("A useful article title for testing".into()),
+            meta_description: Some(
+                "A useful meta description that is long enough for the scorecard test.".into(),
+            ),
+            h1: Some("Primary topic".into()),
+            h1_count,
+            h1_structured_count,
+            heading_outline: vec![
+                HeadingEntry {
+                    level: 1,
+                    text: "Primary topic".into(),
+                },
+                HeadingEntry {
+                    level: 2,
+                    text: "Supporting section".into(),
+                },
+            ],
+            img_count: 0,
+            img_missing_alt: 0,
+            head: json!({}),
+            http_headers: json!({}),
+            links: Vec::<ParsedLink>::new(),
+            internal_links: Vec::<LinkEdge>::new(),
+            main_text: "This is test body copy with enough words to avoid repetition checks."
+                .into(),
+            content_hash: "sha256:test".into(),
+            structured_data_count: 0,
+            has_faq_schema: false,
+            technical_score: 1.0,
+            issues: Vec::<IssueRow>::new(),
+        }
+    }
+
+    #[test]
+    fn seo_crawl_does_not_emit_aio_structure_checks() {
+        let rows = page_check_rows(
+            "https://example.com",
+            "2026-06-09",
+            "https://example.com/blog/post",
+            &page_with_h1s(1, 1),
+            200,
+        );
+        let codes: Vec<String> = rows
+            .iter()
+            .filter_map(|r| {
+                r.get("issue_code")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            })
+            .collect();
+        assert!(!codes.iter().any(|c| c == "FAQ_SCHEMA"));
+        assert!(!codes.iter().any(|c| c == "AIO_ANSWER_HEADINGS"));
+    }
+
+    #[test]
+    fn multiple_h1_passes_when_all_h1s_have_clear_structure() {
+        let rows = page_check_rows(
+            "https://example.com",
+            "2026-06-09",
+            "https://example.com/blog/post",
+            &page_with_h1s(2, 2),
+            200,
+        );
+        let row = rows
+            .iter()
+            .find(|r| r.get("issue_code").and_then(|v| v.as_str()) == Some("MULTIPLE_H1"))
+            .expect("multiple h1 row");
+        assert_eq!(row.get("status").and_then(|v| v.as_str()), Some("pass"));
+    }
+
+    #[test]
+    fn multiple_h1_warns_when_structure_is_ambiguous() {
+        let rows = page_check_rows(
+            "https://example.com",
+            "2026-06-09",
+            "https://example.com/blog/post",
+            &page_with_h1s(2, 1),
+            200,
+        );
+        let row = rows
+            .iter()
+            .find(|r| r.get("issue_code").and_then(|v| v.as_str()) == Some("MULTIPLE_H1"))
+            .expect("multiple h1 row");
+        assert_eq!(row.get("status").and_then(|v| v.as_str()), Some("warn"));
+    }
 }

@@ -215,6 +215,8 @@ impl DataSource for DataSourceContentQualityPlugin {
                 "content_hash": page.parsed.content_hash,
                 "content_unchanged": unchanged,
                 "word_count": page.parsed.word_count,
+                "has_faq_schema": page.parsed.has_faq_schema,
+                "question_heading_count": page.parsed.question_heading_count,
                 "seo_content_score": page_scores.seo_content_score,
                 "aio_score": page_scores.aio_score,
                 "eeat_proxy_score": page_scores.eeat_proxy_score,
@@ -251,6 +253,8 @@ impl DataSource for DataSourceContentQualityPlugin {
                     "block_id": block.block_id,
                     "chunk_id": block.block_id,
                     "page_type": page.parsed.page_type,
+                    "has_faq_schema": page.parsed.has_faq_schema,
+                    "question_heading_count": page.parsed.question_heading_count,
                     "text": chunk_text,
                 }));
             }
