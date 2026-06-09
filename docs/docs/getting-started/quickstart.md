@@ -8,30 +8,60 @@ This guide walks through ingesting JSON data from S3 into Athena-queryable Parqu
 curl -sL "https://raw.githubusercontent.com/skipprd/skipprd/main/install.sh" | sudo bash
 ```
 
-The install script places `skipprd` on your machine. Runtime source, sink, and schema plugins are downloaded automatically the first time the pipeline needs them.
+The install script places `skippr` on your machine. Runtime source, sink, and schema plugins are downloaded automatically the first time the pipeline needs them.
 
-## 2. Set your environment
+## 2. Create `skippr.yml`
+
+Create a project file in your working directory:
+
+```yaml
+skippr:
+  workspace: quickstart
+  skippr_s3_bucket: your-state-bucket
+  default_warehouse: primary
+
+pipelines:
+  bikehire:
+    data_source: data_sources.sample
+    data_sink: data_sinks.athena
+    schema_sink: schema_sinks.glue
+    model:
+      warehouse: primary
+
+data_sources:
+  sample:
+    S3:
+      s3_bucket: skippr-public-sample-data
+      s3_prefix: bike-hire
+
+data_sinks:
+  athena:
+    Athena:
+      s3_bucket: your-output-bucket
+      s3_prefix: data/bikehire
+      glue_database_name: skippr_quickstart
+      athena_workgroup_name: primary
+      athena_results_s3_bucket: your-athena-results
+
+schema_sinks:
+  glue:
+    Glue:
+      glue_database_name: skippr_quickstart
+
+warehouses:
+  primary:
+    kind: athena
+    workgroup: primary
+    schema: skippr_quickstart
+    result_s3: s3://your-athena-results/
+```
+
+Set AWS credentials through the normal AWS environment or instance role:
 
 ```bash
 export AWS_ACCESS_KEY_ID="your-key"
 export AWS_SECRET_ACCESS_KEY="your-secret"
 export AWS_DEFAULT_REGION="us-east-1"
-
-# Pipeline identity
-export PIPELINE_NAME=bikehire
-
-# Source: public sample data on S3
-export DATA_SOURCE_PLUGIN_NAME=s3
-export DATA_SOURCE_S3_BUCKET=skippr-public-sample-data
-export DATA_SOURCE_S3_PREFIX=bike-hire
-
-# Destination: your S3 bucket + Glue catalog
-export DATA_OUTPUT_S3_BUCKET=your-output-bucket
-export DATA_OUTPUT_S3_PREFIX=data/bikehire
-export SCHEMA_OUTPUT_GLUE_DATABASE_NAME=skippr_quickstart
-
-# Skippr state bucket (metadata, offsets, WAL when using S3 WAL)
-export SKIPPR_S3_BUCKET=your-state-bucket
 ```
 
 ## 3. Discover the schema
@@ -39,7 +69,7 @@ export SKIPPR_S3_BUCKET=your-state-bucket
 Skippr connects to the source, samples records, and infers the full nested schema:
 
 ```bash
-skipprd discover --pipeline bikehire --log
+skippr discover --pipeline bikehire --log
 ```
 
 You'll see output showing discovered namespaces and fields. The schema is persisted to S3 as pipeline metadata.
@@ -49,8 +79,8 @@ You'll see output showing discovered namespaces and fields. The schema is persis
 Enable the pipeline, then run sync to ingest data:
 
 ```bash
-skipprd query --sql "ENABLE PIPELINE bikehire"
-skipprd sync --pipeline bikehire --log
+skippr query --sql "ENABLE PIPELINE bikehire"
+skippr sync --pipeline bikehire --log
 ```
 
 Sync reads from the source, buffers through the WAL, compacts into Parquet, uploads to S3, and registers Glue partitions. Watch the logs for:
@@ -62,10 +92,19 @@ Sync reads from the source, buffers through the WAL, compacts into Parquet, uplo
 ## 5. Query the data
 
 ```bash
-skipprd query --sql "SELECT COUNT(*) FROM bikehire"
+skippr query --sql "SELECT COUNT(*) FROM bikehire"
 ```
 
 Your data is now in Athena. You can also query directly from the AWS Athena console.
+
+## Engine-only equivalent
+
+The lightweight `skipprd` binary can run the same engine commands against the same `skippr.yml`:
+
+```bash
+skipprd --config skippr.yml discover --pipeline bikehire --log
+skipprd --config skippr.yml sync --pipeline bikehire --log
+```
 
 ## What just happened?
 
@@ -76,6 +115,6 @@ Your data is now in Athena. You can also query directly from the AWS Athena cons
 ## Next steps
 
 - [How Skippr Works](../concepts/how-it-works.md) — pipeline lifecycle, WAL, compaction
-- [Configuration Reference](../configuration/overview.md) — all environment variables
-- [CLI Reference](../cli/discover.md) — command flags and options
+- [skippr.yml Reference](../configuration/skippr-yml.md) — canonical project config
+- [CLI Reference](../cli/overview.md) — command flags and binary choices
 - [SQL Reference](../sql/reference.md) — all supported SQL statements

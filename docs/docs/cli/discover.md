@@ -1,11 +1,12 @@
-# skipprd discover
+# discover
 
 Connect to the data source, sample records, and infer the pipeline schema. Unlike `sync`, discover never writes to the output destination -- it only discovers schemas and persists metadata.
 
 ## Usage
 
 ```bash
-skipprd discover --pipeline <name> [--output <mode>] [--log [LEVEL]]
+skippr discover --pipeline <name> [--output <mode>] [--log [LEVEL]]
+skipprd --config skippr.yml discover --pipeline <name> [--output <mode>] [--log [LEVEL]]
 ```
 
 ## Flags
@@ -20,7 +21,7 @@ skipprd discover --pipeline <name> [--output <mode>] [--log [LEVEL]]
 
 1. Loads or creates pipeline metadata (from S3 or local disk, depending on `SKIPPRD_EL_STORAGE_MODE`)
 2. Initializes the offset database
-3. Connects to the data source configured by `DATA_SOURCE_PLUGIN_NAME`
+3. Connects to the data source configured in `skippr.yml`
 4. Samples records and infers the complete nested schema via type inference
 5. Persists the updated pipeline metadata
 6. Exits
@@ -30,17 +31,13 @@ Discover does **not** initialize or sync to any output plugin. It is purely a sc
 ## Example
 
 ```bash
-DATA_SOURCE_PLUGIN_NAME=s3 \
-DATA_SOURCE_S3_BUCKET=my-source-bucket \
-DATA_SOURCE_S3_PREFIX=events/ \
-SKIPPR_S3_BUCKET=my-state-bucket \
-skipprd discover --pipeline events --log
+skippr --config skippr.yml discover --pipeline events --log
 ```
 
 ### Structured output for programmatic use
 
 ```bash
-skipprd discover --pipeline el_mssql --output json
+skippr discover --pipeline el_mssql --output json
 ```
 
 This emits JSON events to stdout:
@@ -56,10 +53,10 @@ The `fields` array uses `SkipprDataType` names (`String`, `Long`, `Double`, `Boo
 
 ## Reading discovered schemas
 
-After `skipprd discover` completes, use [`SHOW PIPELINE`](../sql/reference.md#show-pipeline) to retrieve the full discovered schema including field names and inferred types:
+After `discover` completes, use [`SHOW PIPELINE`](../sql/reference.md#show-pipeline) to retrieve the full discovered schema including field names and inferred types:
 
 ```bash
-skipprd query --sql "SHOW PIPELINE el_mssql" --plain
+skippr query --sql "SHOW PIPELINE el_mssql" --plain
 ```
 
 ## Key log events

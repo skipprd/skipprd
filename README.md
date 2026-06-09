@@ -1,6 +1,13 @@
 # Skippr
 
-Skippr is a Rust CLI for data ingestion. It reads from sources (S3, local files), discovers schemas, buffers through a write-ahead log (WAL), compacts into Parquet, and writes to S3 with Glue/Athena catalog integration. Exactly-once delivery is guaranteed through WAL + offset tracking, surviving SIGKILL.
+Skippr is a Rust CLI and runtime for data ingestion, warehouse modeling, and data-engineering workflows configured from one `skippr.yml`.
+
+The repository ships two useful binaries:
+
+- `skippr` — the product CLI for project setup, connector configuration, shared engine commands, modeling, dbt helpers, vector ingestion, chat, and diagnostics.
+- `skipprd` — the lightweight engine/runtime binary for discovery, sync, engine query/schema operations, Lambda images, and runtime plugin testing.
+
+Both binaries read the same `skippr.yml` for shared engine commands such as `discover` and `sync`.
 
 Public docs: [docs/](docs/) | SQL reference: [sql-docs.md](sql-docs.md) | Performance notes: [PERFORMANCE.md](PERFORMANCE.md) | AI agent guidance: [AGENTS.md](AGENTS.md)
 
@@ -45,20 +52,27 @@ cargo clippy
 
 ## CLI commands
 
-Run via cargo during development:
+Run the product CLI during development:
+
+```bash
+cargo run -p skippr-cli --bin skippr -- <command> [flags]
+```
+
+Run the lightweight engine binary when you only need engine/runtime behavior:
 
 ```bash
 cargo run --bin skipprd -- <command> [flags]
 ```
 
-Global flag: `--log [LEVEL]` enables logging (default `info`; override with `debug`, `warn`, `error`).
+Both support `--config path/to/skippr.yml` for shared engine commands.
 
 ### discover
 
 Connect to a source, sample data, infer schemas. Persists metadata to S3.
 
 ```bash
-cargo run --bin skipprd -- discover --pipeline bikehire --log
+cargo run -p skippr-cli --bin skippr -- discover --pipeline bikehire --log
+cargo run --bin skipprd -- --config skippr.yml discover --pipeline bikehire --log
 ```
 
 Flags: `--pipeline/-p <name>`, `--verbose`
@@ -68,7 +82,8 @@ Flags: `--pipeline/-p <name>`, `--verbose`
 Run the ingestion loop: read source → WAL → compact → Parquet → S3 + Glue.
 
 ```bash
-cargo run --bin skipprd -- sync --pipeline bikehire --log
+cargo run -p skippr-cli --bin skippr -- sync --pipeline bikehire --log
+cargo run --bin skipprd -- --config skippr.yml sync --pipeline bikehire --log
 ```
 
 Flags: `--pipeline/-p <name>`
@@ -112,7 +127,54 @@ cargo run --bin skipprd -- benchmark -f 100 -r 50000 -s 800 --name baseline
 
 ## Configuration
 
-Skippr is configured via environment variables. Key groups:
+Skippr is configured primarily via `skippr.yml`. Environment variables remain useful for secrets and deployment overrides.
+
+```yaml
+skippr:
+  workspace: dev
+  default_warehouse: primary
+
+pipelines:
+  bikehire:
+    data_source: data_sources.source
+    data_sink: data_sinks.landing
+    schema_sink: schema_sinks.glue
+    model:
+      warehouse: primary
+
+data_sources:
+  source:
+    S3:
+      s3_bucket: skippr-public-sample-data
+      s3_prefix: bike-hire
+
+data_sinks:
+  landing:
+    Athena:
+      s3_bucket: your-output-bucket
+      s3_prefix: data/bikehire
+      glue_database_name: skippr_quickstart
+      athena_workgroup_name: primary
+      athena_results_s3_bucket: your-athena-results
+
+schema_sinks:
+  glue:
+    Glue:
+      glue_database_name: skippr_quickstart
+
+warehouses:
+  primary:
+    kind: athena
+    workgroup: primary
+    schema: skippr_quickstart
+    result_s3: s3://your-athena-results/
+```
+
+`data_sinks` are ingest/write targets. `warehouses` are query/model/catalog providers used by the product CLI.
+
+See [the docs](docs/docs/configuration/skippr-yml.md) for the full config reference.
+
+Legacy and deployment environment variables include:
 
 ### Pipeline identity
 

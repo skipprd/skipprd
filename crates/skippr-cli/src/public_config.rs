@@ -2,10 +2,10 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
 
-/// Public `skippr` config schema.
+/// Internal product CLI projection used while compiling canonical `skippr.yml`.
 ///
-/// This is the only config surface exposed to product users.
-/// It maps to the internal runtime config shape silently.
+/// Product users author `skippr.yml`; this type is a compatibility bridge for
+/// command helpers that have not yet been moved fully onto the engine-shaped YAML.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TrackedPromptEntry {
     pub id: String,
@@ -48,20 +48,6 @@ pub struct VectorIngestPipelineSpec {
     pub vector_source: String,
     pub chunk_chars: Option<usize>,
     pub chunk_overlap: Option<usize>,
-}
-
-fn yaml_mapping_get_str<'a>(m: &'a serde_yaml::Mapping, key: &str) -> Option<&'a str> {
-    m.iter()
-        .find(|(k, _)| k.as_str() == Some(key))
-        .and_then(|(_, v)| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-}
-
-fn yaml_mapping_get_usize(m: &serde_yaml::Mapping, key: &str) -> Option<usize> {
-    m.iter()
-        .find(|(k, _)| k.as_str() == Some(key))
-        .and_then(|(_, v)| v.as_u64().map(|n| n as usize))
 }
 
 /// How a `vector_sources` entry resolves input for `skippr vector ingest-docs`.
@@ -958,52 +944,6 @@ impl SkipprProjectConfig {
             std::fs::read(path).map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
         serde_yaml::from_slice::<Self>(&bytes)
             .map_err(|e| format!("failed to parse {}: {}", path.display(), e))
-    }
-
-    /// Like [`load_from`], but resolves `${VAR}` placeholders in the YAML (same as engine config).
-    pub fn load_resolved_from(path: &Path) -> Result<Self, String> {
-        let raw = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
-        let value: serde_yaml::Value = serde_yaml::from_str(&raw)
-            .map_err(|e| format!("failed to parse {}: {}", path.display(), e))?;
-        let mut json_value = serde_json::to_value(&value)
-            .map_err(|e| format!("failed to normalize {}: {}", path.display(), e))?;
-        skipprd::helpers::configuration::Config::resolve_env_refs_in_json_value(&mut json_value)?;
-        let yaml_back = serde_yaml::to_value(&json_value)
-            .map_err(|e| format!("failed to convert resolved {}: {}", path.display(), e))?;
-        serde_yaml::from_value(yaml_back)
-            .map_err(|e| format!("failed to parse resolved {}: {}", path.display(), e))
-    }
-
-    /// Read `pipelines.<pipeline_name>.vector_source` (and optional chunk fields) for `vector ingest-docs`.
-    pub fn vector_ingest_pipeline_spec(
-        &self,
-        pipeline_name: &str,
-    ) -> Result<VectorIngestPipelineSpec, String> {
-        let name = pipeline_name.trim();
-        if name.is_empty() {
-            return Err("pipeline name must not be empty".to_string());
-        }
-        let raw = self.pipelines.get(name).ok_or_else(|| {
-            format!(
-                "skippr.yml has no pipelines.{name} entry; add a mapping with vector_source: <vector_sources key>, or pass --pipeline <name>"
-            )
-        })?;
-        let m = raw
-            .as_mapping()
-            .ok_or_else(|| format!("pipelines.{name} must be a mapping (got non-object YAML)"))?;
-        let vector_source = yaml_mapping_get_str(m, "vector_source")
-            .ok_or_else(|| {
-                format!(
-                    "pipelines.{name} must set vector_source: <key> matching an entry under vector_sources"
-                )
-            })?
-            .to_string();
-        Ok(VectorIngestPipelineSpec {
-            vector_source,
-            chunk_chars: yaml_mapping_get_usize(m, "chunk_chars"),
-            chunk_overlap: yaml_mapping_get_usize(m, "chunk_overlap"),
-        })
     }
 
     pub fn save_to(&self, path: &Path) -> Result<(), String> {

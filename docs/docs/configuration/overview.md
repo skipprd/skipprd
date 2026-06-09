@@ -1,8 +1,17 @@
 # Configuration Overview
 
-Skippr is configured entirely via environment variables (or an optional config file set via `SKIPPR_CONFIG_FILE`).
+Skippr is configured primarily with `skippr.yml`. Environment variables are still supported for secrets, deployment overrides, and backwards-compatible engine configuration.
 
-## Quick reference
+Start with:
+
+- [skippr.yml](skippr-yml.md) for the canonical project shape
+- [Warehouses](warehouses.md) for query/model/catalog providers
+- [Input Source](input.md) for `data_sources`
+- [Output Destination](output.md) for ingest `data_sinks` and `schema_sinks`
+
+Both `skippr` and `skipprd` read the same engine sections. `skippr` also reads product sections such as `warehouses`, `dbt`, `vector_sources`, and `llm`.
+
+## Environment overrides
 
 | Variable | Default | Section | Description |
 |---|---|---|---|

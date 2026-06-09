@@ -121,7 +121,7 @@ Prefer `plugins/shared/api_source/` where applicable:
 
 `skippr discover` must not pull full historical backfills or large bronze catalogs just to infer schemas. Sampling is **automatic** (not a `skippr.yml` knob):
 
-- [ ] Read `SKIPPR_RUNTIME_EXECUTION_MODE` via `SKIPPR_RUNTIME_EXECUTION_MODE_ENV` (`discover` vs normal sync) — set by the host in [`append_source_runtime.rs`](../../../crates/skippr-runtime-sdk/src/append_source_runtime.rs)
+- [ ] Read `SKIPPR_RUNTIME_EXECUTION_MODE` via `SKIPPR_RUNTIME_EXECUTION_MODE_ENV` (`discover` vs normal sync) — set by the host in [`append_source_runtime.rs`](https://github.com/skipprd/skipprd/blob/main/crates/skippr-runtime-sdk/src/append_source_runtime.rs)
 - [ ] In discover mode: narrow **date window** (e.g. last 3 days), **minimal stream profile**, `lookback_days = 0`, **no checkpoint load/advance**
 - [ ] `source_namespace_contracts()` still reflects the **configured** profile so discover knows all namespaces; only `sync()` API traffic is throttled
 - [ ] Unit tests: discover window, minimal streams only, env detection, no checkpoint writes in discover
@@ -352,7 +352,7 @@ Log clearly when sampling is active so operators do not confuse discover traffic
 
 Most vendors return **HTTP 429** (or 503) under quota pressure.
 
-1. **Use** [`RetryableHttpClient`](../../../plugins/shared/api_source/src/retry.rs) — do not hand-roll two-attempt retries.
+1. **Use** [`RetryableHttpClient`](https://github.com/skipprd/skipprd/blob/main/plugins/shared/api_source/src/retry.rs) — do not hand-roll two-attempt retries.
 2. **Treat 429 differently from 5xx** — missing `Retry-After` on 429 often needs tens of seconds, not sub-second delays.
 3. **Expose plugin config** for `max_api_retries` and `request_interval_ms` (pause after each **successful** call). Defaults alone may be insufficient for large catalogs.
 4. **Log at WARN** on retry with attempt number, delay, and request scope (namespace, date range) so logs are diagnosable.

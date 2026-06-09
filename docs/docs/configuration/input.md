@@ -1,5 +1,23 @@
 # Input Source
 
+Input connectors are configured under `data_sources:` in `skippr.yml`.
+
+```yaml
+pipelines:
+  events:
+    data_source: data_sources.events
+
+data_sources:
+  events:
+    S3:
+      s3_bucket: my-source-bucket
+      s3_prefix: events/
+```
+
+Use `skippr connect source <kind>` when a connector supports guided setup. Environment variables are best kept for secrets and deployment overrides.
+
+## Environment overrides
+
 ## DATA_SOURCE_PLUGIN_NAME
 
 The input connector to use for reading data.
@@ -96,4 +114,4 @@ Optional YAML: `url`, `format`, `batch_size_bytes`, `batch_size_seconds`. Gzip-c
 |---|---|---|
 | *(none required)* | | Reads from standard input |
 
-Optional YAML: `mode` (`batch`, read until EOF — default; `stream`, continuous) and `format`. Typical use: pipe data into Skippr, e.g. `cat data.json | skipprd sync --pipeline my_pipeline`. See the [Stdin connector docs](../connectors/inputs/stdin.md) for details.
+Optional YAML: `mode` (`batch`, read until EOF — default; `stream`, continuous) and `format`. Typical use: pipe data into Skippr, e.g. `cat data.json | skippr sync --pipeline my_pipeline`. See the [Stdin connector docs](../connectors/inputs/stdin.md) for details.

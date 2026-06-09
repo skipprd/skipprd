@@ -1,5 +1,6 @@
 //! `skippr vector ingest-docs` — declarative file walk, chunk, embed, Lance upsert (tenant bucket).
 
+use std::collections::HashMap;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -12,13 +13,65 @@ use react_suite_data_engineer::PipelineName;
 use walkdir::WalkDir;
 
 use crate::api_client;
-use crate::public_config::{SkipprProjectConfig, VectorSourceMode};
+use crate::public_config::{VectorIngestPipelineSpec, VectorSourceEntry, VectorSourceMode};
 use crate::react_host::vector::LanceVectorStore;
 use crate::translate;
 
 const DEFAULT_CHUNK_CHARS: usize = 1200;
 const DEFAULT_CHUNK_OVERLAP: usize = 120;
 const EMBED_BATCH: usize = 32;
+
+fn load_vector_sources(
+    engine_yaml: &serde_yaml::Value,
+) -> Result<HashMap<String, VectorSourceEntry>, String> {
+    let Some(value) = engine_yaml.get("vector_sources") else {
+        return Ok(HashMap::new());
+    };
+    serde_yaml::from_value(value.clone())
+        .map_err(|e| format!("failed to parse vector_sources from skippr.yml: {e}"))
+}
+
+fn vector_ingest_pipeline_spec(
+    engine_yaml: &serde_yaml::Value,
+    pipeline_name: &str,
+) -> Result<VectorIngestPipelineSpec, String> {
+    let name = pipeline_name.trim();
+    if name.is_empty() {
+        return Err("pipeline name must not be empty".to_string());
+    }
+    let pipeline = engine_yaml
+        .get("pipelines")
+        .and_then(|pipelines| pipelines.get(name))
+        .ok_or_else(|| {
+            format!(
+                "skippr.yml has no pipelines.{name} entry; add vector_source: <vector_sources key>, or pass --pipeline <name>"
+            )
+        })?;
+    let mapping = pipeline
+        .as_mapping()
+        .ok_or_else(|| format!("pipelines.{name} must be a mapping"))?;
+    let vector_source = mapping
+        .get(serde_yaml::Value::String("vector_source".to_string()))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "pipelines.{name} must set vector_source: <key> matching an entry under vector_sources"
+            )
+        })?
+        .to_string();
+    let yaml_usize = |key: &str| {
+        mapping
+            .get(serde_yaml::Value::String(key.to_string()))
+            .and_then(|value| value.as_u64().map(|n| n as usize))
+    };
+    Ok(VectorIngestPipelineSpec {
+        vector_source,
+        chunk_chars: yaml_usize("chunk_chars"),
+        chunk_overlap: yaml_usize("chunk_overlap"),
+    })
+}
 
 fn posix_rel(path: &Path, root: &Path) -> String {
     path.strip_prefix(root)
@@ -95,20 +148,20 @@ pub async fn run_vector_ingest_docs(args: VectorIngestDocsArgs) {
         }
     };
 
-    let public_cfg = match SkipprProjectConfig::load_resolved_from(&cfg_path) {
-        Ok(c) => c,
+    let vector_sources = match load_vector_sources(&engine_yaml) {
+        Ok(sources) => sources,
         Err(e) => {
             eprintln!("[skippr] ERROR: {e}");
             std::process::exit(1);
         }
     };
 
-    if public_cfg.vector_sources.is_empty() {
+    if vector_sources.is_empty() {
         eprintln!("[skippr] ERROR: skippr.yml must define vector_sources for ingest-docs.");
         std::process::exit(1);
     }
 
-    let pipeline_spec = match public_cfg.vector_ingest_pipeline_spec(&args.pipeline) {
+    let pipeline_spec = match vector_ingest_pipeline_spec(&engine_yaml, &args.pipeline) {
         Ok(s) => s,
         Err(e) => {
             eprintln!("[skippr] ERROR: {e}");
@@ -124,11 +177,11 @@ pub async fn run_vector_ingest_docs(args: VectorIngestDocsArgs) {
         .map(|s| s.to_string())
         .unwrap_or_else(|| pipeline_spec.vector_source.clone());
 
-    let Some(entry) = public_cfg.vector_sources.get(&source_key).cloned() else {
+    let Some(entry) = vector_sources.get(&source_key).cloned() else {
         eprintln!(
             "[skippr] ERROR: unknown vector_sources key '{source_key}' (from pipelines.{}.vector_source or --vector-source). Known: {:?}",
             args.pipeline.trim(),
-            public_cfg.vector_sources.keys().collect::<Vec<_>>()
+            vector_sources.keys().collect::<Vec<_>>()
         );
         std::process::exit(1);
     };
@@ -385,8 +438,8 @@ pub async fn run_vector_ingest_docs(args: VectorIngestDocsArgs) {
         }
     };
 
-    let mut react_file =
-        translate::react_config_file_for_vector_doc_ingest(&public_cfg.project, &workspace);
+    let project = args.pipeline.trim();
+    let mut react_file = translate::react_config_file_for_vector_doc_ingest(project, &workspace);
     if let Err(e) = translate::apply_authenticated_overlay(
         &mut react_file,
         &srv_creds,

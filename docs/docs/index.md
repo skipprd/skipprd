@@ -1,38 +1,28 @@
-# Skippr Developer & Maintainer Docs
+# Skippr Docs
 
-Skippr is a Rust ingestion host plus a published runtime plugin ecosystem. The host binary owns pipeline orchestration, WAL lifecycle, schema state, and durable offsets; connector crates are built and published separately, then resolved from the runtime plugin registry at `install.skippr.io`.
+Skippr is a data pipeline CLI and runtime for configuring sources, sinks, warehouses, models, and vector ingestion from one `skippr.yml` file.
 
-This docs site is now organized for repository maintainers first. Operator-facing install and quick-start material is still here, but the high-signal entry points are the maintainer guides and architecture pages.
+Most users start with the `skippr` product CLI. The lighter `skipprd` binary runs the same engine commands against the same `skippr.yml` and is useful for engine-only deployments, Lambda images, and runtime plugin testing.
 
 ## Start here
 
-- [Repository Map](maintainers/repository-map.md) for the current workspace layout and ownership boundaries
-- [Local Development](maintainers/local-development.md) for the commands that match CI and the fastest local verification loops
-- [Runtime Plugins](maintainers/runtime-plugins.md) for the Cargo-driven plugin catalog, manifest generation, cache layout, and version pinning model
-- [Runtime Plugin Contract](maintainers/runtime-plugin-contract.md) for the WAL-first durability rules, TCP runtime session shape, and crash matrix
-- [Runtime E2E Harness](maintainers/runtime-e2e-harness.md) for the local and CI AWS acceptance flows
-- [Release Workflow](maintainers/release-workflow.md) for the tag-driven host and runtime plugin publishing pipeline
+- [Installation](getting-started/install.md) — install `skippr` and optionally `skipprd`
+- [Quick Start](getting-started/quickstart.md) — configure S3 to Athena with `skippr.yml`
+- [skippr.yml reference](configuration/skippr-yml.md) — the canonical config shape
+- [Warehouses](configuration/warehouses.md) — query/model/catalog providers, separate from ingest sinks
+- [CLI overview](cli/overview.md) — which commands are shared and which are `skippr`-only
 
 ## Current operating model
 
-- **Single host binary**: `skipprd` runs discovery, sync, query, WAL replay, compaction, and schema coordination.
-- **Published runtime plugins**: source, sink, and schema plugins are resolved from the latest published manifest index by default, with optional per-plugin version pins.
-- **Host-owned offsets**: the durable `sled` offsets database lives in the host process only; runtime source plugins read resume state from the host over the TCP runtime protocol.
-- **Generated plugin manifests**: plugin metadata comes from each plugin crate's `Cargo.toml`, not committed manifest templates.
-- **CI-backed crash recovery**: chaos-mode and deadletter scenarios are exercised through the shared runtime e2e harness and release workflow.
+- **One config**: `skippr.yml` is the product and engine contract.
+- **Two binaries**: `skippr` is the full product CLI; `skipprd` is the lightweight engine runtime.
+- **Shared engine commands**: `discover`, `sync`, and engine query/schema commands read the same pipeline config through either binary.
+- **Runtime plugins**: source, sink, and schema plugins are resolved from `install.skippr.io` on demand.
+- **Separate warehouse providers**: `warehouses` drive query/model/catalog workflows and do not replace `data_sinks`.
 
-## High-signal commands
+## Maintainer docs
 
-```bash
-cargo check --workspace
-cargo test -p skipprd -- --nocapture
-python3 -m unittest discover -s .github/scripts -p 'test_*.py'
-mkdocs build -f docs/mkdocs.yml --strict
-```
-
-## Operator docs
-
-If you are using Skippr rather than maintaining it, start with [Installation](getting-started/install.md) and the [Quick Start](getting-started/quickstart.md).
+Repository internals, runtime plugin contracts, CI harnesses, and release workflow live under [Maintainers](maintainers/repository-map.md).
 
 ## License
 

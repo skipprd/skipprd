@@ -1,6 +1,6 @@
-site_name: Skippr Developer & Maintainer Docs
+site_name: Skippr Docs
 repo_url: https://github.com/skipprd/skipprd
-site_description: Developer and maintainer guide for Skippr's ingest host, runtime plugin system, CI harness, and release workflow.
+site_description: Skippr product, configuration, CLI, connector, and maintainer documentation.
 docs_dir: docs
 site_dir: public-docs
 theme:
@@ -28,6 +28,95 @@ extra_css:
   - stylesheets/app.css
 nav:
   - Home: index.md
+  - Get Started:
+      - Installation: getting-started/install.md
+      - Quick Start: getting-started/quickstart.md
+  - Configuration:
+      - Overview: configuration/overview.md
+      - skippr.yml: configuration/skippr-yml.md
+      - Pipeline & Workspace: configuration/pipeline.md
+      - Input Source: configuration/input.md
+      - Output Destination: configuration/output.md
+      - Warehouses: configuration/warehouses.md
+      - Transforms: configuration/transforms.md
+      - Buffering & WAL: configuration/buffering.md
+      - DynamoDB offset store: configuration/offset-store-dynamodb.md
+      - Advanced: configuration/advanced.md
+  - CLI:
+      - Overview: cli/overview.md
+      - discover: cli/discover.md
+      - sync: cli/sync.md
+      - query: cli/query.md
+      - schema: cli/schema.md
+      - sql-help: cli/sql-help.md
+      - benchmark: cli/benchmark.md
+  - Connectors:
+      - Inputs:
+          - Databases:
+              - ClickHouse: connectors/inputs/clickhouse.md
+              - DynamoDB: connectors/inputs/dynamodb.md
+              - MongoDB: connectors/inputs/mongodb.md
+              - MotherDuck: connectors/inputs/motherduck.md
+              - MSSQL: connectors/inputs/mssql.md
+              - MySQL: connectors/inputs/mysql.md
+              - PostgreSQL: connectors/inputs/postgres.md
+              - Redshift: connectors/inputs/redshift.md
+          - Object Stores:
+              - Delta Lake: connectors/inputs/delta_lake.md
+              - Local File: connectors/inputs/file.md
+              - S3: connectors/inputs/s3.md
+              - SFTP: connectors/inputs/sftp.md
+          - Streaming:
+              - Kafka: connectors/inputs/kafka.md
+              - SQS: connectors/inputs/sqs.md
+              - Kinesis: connectors/inputs/kinesis.md
+              - AMQP (RabbitMQ): connectors/inputs/amqp.md
+              - SNS: connectors/inputs/sns.md
+              - EventBridge: connectors/inputs/eventbridge.md
+              - MQTT: connectors/inputs/mqtt.md
+              - WebSocket: connectors/inputs/websocket.md
+          - HTTP:
+              - Google Analytics (GA4): connectors/inputs/google_analytics.md
+              - Google Search Console: connectors/inputs/google_search_console.md
+              - Google SERP Ranks: connectors/inputs/google_serp_ranks.md
+              - Apple App Store SERP: connectors/inputs/apple_app_store_serp.md
+              - Apple Search Ads: connectors/inputs/apple_search_ads.md
+              - HTTP Client: connectors/inputs/http_client.md
+              - HTTP Server: connectors/inputs/http_server.md
+          - Other:
+              - Socket (TCP/UDP/Unix): connectors/inputs/socket.md
+              - StatsD: connectors/inputs/statsd.md
+              - Stdin: connectors/inputs/stdin.md
+              - PCAP: connectors/inputs/pcap.md
+      - Outputs:
+          - Ingest Sinks:
+              - Athena (S3 + Glue): connectors/outputs/athena.md
+              - BigQuery: connectors/outputs/bigquery.md
+              - ClickHouse: connectors/outputs/clickhouse.md
+              - Databricks: connectors/outputs/databricks.md
+              - MotherDuck: connectors/outputs/motherduck.md
+              - Postgres: connectors/outputs/postgres.md
+              - Redshift: connectors/outputs/redshift.md
+              - Snowflake: connectors/outputs/snowflake.md
+              - Synapse: connectors/outputs/synapse.md
+          - Cloud Storage:
+              - S3: connectors/outputs/s3.md
+              - GCS: connectors/outputs/gcs.md
+              - Azure Blob: connectors/outputs/azure_blob.md
+              - SFTP: connectors/outputs/sftp.md
+          - Messaging:
+              - AMQP (RabbitMQ): connectors/outputs/amqp.md
+          - Other:
+              - Local File: connectors/outputs/file.md
+              - Stdout: connectors/outputs/stdout.md
+  - SQL Reference: sql/reference.md
+  - Architecture:
+      - How Skippr Works: concepts/how-it-works.md
+      - Exactly-Once Delivery: concepts/exactly-once.md
+      - Schema Discovery & Evolution: concepts/schema.md
+      - Source Landing Semantics: concepts/source-landing-semantics.md
+      - GA4 Bronze & Modeling: concepts/ga4-bronze-and-modeling.md
+      - Deadletters: concepts/deadletters.md
   - Maintainers:
       - Repository Map: maintainers/repository-map.md
       - Local Development: maintainers/local-development.md
@@ -36,93 +125,6 @@ nav:
       - Runtime E2E Harness: maintainers/runtime-e2e-harness.md
       - Release Workflow: maintainers/release-workflow.md
       - Apple Search Ads Plugin: maintainers/apple-search-ads-plugin.md
-  - Architecture:
-      - How Skippr Works: concepts/how-it-works.md
-      - Exactly-Once Delivery: concepts/exactly-once.md
-      - Schema Discovery & Evolution: concepts/schema.md
-      - Source Landing Semantics: concepts/source-landing-semantics.md
-      - GA4 Bronze & Modeling: concepts/ga4-bronze-and-modeling.md
-      - Deadletters: concepts/deadletters.md
-  - Operator Guides:
-      - Installation: getting-started/install.md
-      - Quick Start: getting-started/quickstart.md
-  - Reference:
-      - CLI:
-          - discover: cli/discover.md
-          - sync: cli/sync.md
-          - query: cli/query.md
-          - schema: cli/schema.md
-          - sql-help: cli/sql-help.md
-          - benchmark: cli/benchmark.md
-      - SQL Reference: sql/reference.md
-      - Configuration:
-          - Overview: configuration/overview.md
-          - Pipeline & Workspace: configuration/pipeline.md
-          - Input Source: configuration/input.md
-          - Output Destination: configuration/output.md
-          - Transforms: configuration/transforms.md
-          - Buffering & WAL: configuration/buffering.md
-          - DynamoDB offset store: configuration/offset-store-dynamodb.md
-          - Advanced: configuration/advanced.md
-      - Connectors:
-          - Inputs:
-              - Databases:
-                  - ClickHouse: connectors/inputs/clickhouse.md
-                  - DynamoDB: connectors/inputs/dynamodb.md
-                  - MongoDB: connectors/inputs/mongodb.md
-                  - MotherDuck: connectors/inputs/motherduck.md
-                  - MSSQL: connectors/inputs/mssql.md
-                  - MySQL: connectors/inputs/mysql.md
-                  - PostgreSQL: connectors/inputs/postgres.md
-                  - Redshift: connectors/inputs/redshift.md
-              - Object Stores:
-                  - Delta Lake: connectors/inputs/delta_lake.md
-                  - Local File: connectors/inputs/file.md
-                  - S3: connectors/inputs/s3.md
-                  - SFTP: connectors/inputs/sftp.md
-              - Streaming:
-                  - Kafka: connectors/inputs/kafka.md
-                  - SQS: connectors/inputs/sqs.md
-                  - Kinesis: connectors/inputs/kinesis.md
-                  - AMQP (RabbitMQ): connectors/inputs/amqp.md
-                  - SNS: connectors/inputs/sns.md
-                  - EventBridge: connectors/inputs/eventbridge.md
-                  - MQTT: connectors/inputs/mqtt.md
-                  - WebSocket: connectors/inputs/websocket.md
-              - HTTP:
-                  - Google Analytics (GA4): connectors/inputs/google_analytics.md
-                  - Google Search Console: connectors/inputs/google_search_console.md
-                  - Google SERP Ranks: connectors/inputs/google_serp_ranks.md
-                  - Apple App Store SERP: connectors/inputs/apple_app_store_serp.md
-                  - Apple Search Ads: connectors/inputs/apple_search_ads.md
-                  - HTTP Client: connectors/inputs/http_client.md
-                  - HTTP Server: connectors/inputs/http_server.md
-              - Other:
-                  - Socket (TCP/UDP/Unix): connectors/inputs/socket.md
-                  - StatsD: connectors/inputs/statsd.md
-                  - Stdin: connectors/inputs/stdin.md
-                  - PCAP: connectors/inputs/pcap.md
-          - Outputs:
-              - Warehouses:
-                  - Athena (S3 + Glue): connectors/outputs/athena.md
-                  - BigQuery: connectors/outputs/bigquery.md
-                  - ClickHouse: connectors/outputs/clickhouse.md
-                  - Databricks: connectors/outputs/databricks.md
-                  - MotherDuck: connectors/outputs/motherduck.md
-                  - Postgres: connectors/outputs/postgres.md
-                  - Redshift: connectors/outputs/redshift.md
-                  - Snowflake: connectors/outputs/snowflake.md
-                  - Synapse: connectors/outputs/synapse.md
-              - Cloud Storage:
-                  - S3: connectors/outputs/s3.md
-                  - GCS: connectors/outputs/gcs.md
-                  - Azure Blob: connectors/outputs/azure_blob.md
-                  - SFTP: connectors/outputs/sftp.md
-              - Messaging:
-                  - AMQP (RabbitMQ): connectors/outputs/amqp.md
-              - Other:
-                  - Local File: connectors/outputs/file.md
-                  - Stdout: connectors/outputs/stdout.md
   - Operations:
       - Logging Event Map: operations/logging.md
       - Troubleshooting: operations/troubleshooting.md

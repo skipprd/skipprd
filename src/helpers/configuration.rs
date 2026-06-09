@@ -54,6 +54,11 @@ pub struct Skippr {
     pub tenant: Option<String>,
     pub skippr_s3_bucket: Option<String>,
     pub skipprd_el_storage_mode: Option<String>,
+    /// Default warehouse key used by product CLI/modeling commands.
+    ///
+    /// The engine does not use this directly; it is accepted here so `skipprd`
+    /// and `skippr` can read the same canonical `skippr.yml`.
+    pub default_warehouse: Option<String>,
     /// Dedicated S3 bucket for WAL segments (falls back to skippr_s3_bucket).
     pub wal_s3_bucket: Option<String>,
     /// Offset store backend: `sled` (default) or `dynamodb`.
@@ -91,6 +96,14 @@ pub struct Stats {
 pub struct SemanticLayerSettings {
     pub llm_enabled: Option<bool>,
     pub llm_debounce_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct PipelineModelConfig {
+    /// Warehouse key under top-level `warehouses:` for query/model/catalog work.
+    pub warehouse: Option<String>,
+    /// dbt project directory used by product CLI modeling commands.
+    pub dbt_project: Option<String>,
 }
 
 pub type DataSourcePluginConfig = PluginConfigEntry;
@@ -147,6 +160,8 @@ pub struct Pipeline {
     pub deadletter_sink: Option<String>,
     pub stats: Option<Stats>,
     pub semantic_layer: Option<SemanticLayerSettings>,
+    /// Product CLI modeling config. Ignored by the engine runtime.
+    pub model: Option<PipelineModelConfig>,
     /// CDC configuration. When present, the pipeline runs in CDC mode and
     /// validates source/sink compatibility at startup.
     pub cdc: Option<CdcPipelineConfig>,
@@ -199,6 +214,17 @@ pub struct Config {
     pub deadletter_sinks: Option<HashMap<String, DataSinkEntry>>,
     #[serde(alias = "schema_outputs")]
     pub schema_sinks: Option<HashMap<String, SchemaSinkConfig>>,
+    /// Query/model/catalog warehouse providers used by the product CLI.
+    ///
+    /// Kept as generic JSON so the lightweight engine accepts the canonical
+    /// product config without depending on warehouse provider crates.
+    pub warehouses: Option<HashMap<String, Value>>,
+    /// Product CLI dbt settings. Ignored by the engine runtime.
+    pub dbt: Option<Value>,
+    /// Product CLI vector source settings. Ignored by the engine runtime.
+    pub vector_sources: Option<HashMap<String, Value>>,
+    /// Product CLI LLM settings. Ignored by the engine runtime.
+    pub llm: Option<Value>,
 }
 
 pub static APP_CONFIG: Lazy<Arc<TimedRwLock<Option<Config>>>> =
@@ -323,6 +349,7 @@ impl Config {
                 tenant: None,
                 skippr_s3_bucket: None,
                 skipprd_el_storage_mode: None,
+                default_warehouse: None,
                 wal_s3_bucket: None,
                 offset_store: None,
                 offset_dynamodb_table: None,
@@ -332,6 +359,10 @@ impl Config {
             data_sinks: None,
             deadletter_sinks: None,
             schema_sinks: None,
+            warehouses: None,
+            dbt: None,
+            vector_sources: None,
+            llm: None,
         }
     }
 
@@ -1175,6 +1206,7 @@ impl Config {
                     deadletter_sink: None,
                     stats: None,
                     semantic_layer: None,
+                    model: None,
                     cdc: None,
                 }
             }
@@ -3276,6 +3308,7 @@ data_sinks:
             tenant: None,
             skippr_s3_bucket: None,
             skipprd_el_storage_mode: Some("local".to_string()),
+            default_warehouse: None,
             wal_s3_bucket: None,
             offset_store: None,
             offset_dynamodb_table: None,
@@ -3312,6 +3345,7 @@ data_sinks:
             deadletter_sink: None,
             stats: None,
             semantic_layer: None,
+            model: None,
             cdc: None,
         };
         let config = Config {
@@ -3320,6 +3354,7 @@ data_sinks:
                 tenant: None,
                 skippr_s3_bucket: None,
                 skipprd_el_storage_mode: None,
+                default_warehouse: None,
                 wal_s3_bucket: None,
                 offset_store: None,
                 offset_dynamodb_table: None,
@@ -3329,6 +3364,10 @@ data_sinks:
             data_sinks: None,
             deadletter_sinks: Some(HashMap::new()),
             schema_sinks: None,
+            warehouses: None,
+            dbt: None,
+            vector_sources: None,
+            llm: None,
         };
 
         assert!(
@@ -3358,6 +3397,7 @@ data_sinks:
             deadletter_sink: Some("deadletter_sinks.missing".to_string()),
             stats: None,
             semantic_layer: None,
+            model: None,
             cdc: None,
         };
         let config = Config {
@@ -3366,6 +3406,7 @@ data_sinks:
                 tenant: None,
                 skippr_s3_bucket: None,
                 skipprd_el_storage_mode: None,
+                default_warehouse: None,
                 wal_s3_bucket: None,
                 offset_store: None,
                 offset_dynamodb_table: None,
@@ -3375,6 +3416,10 @@ data_sinks:
             data_sinks: None,
             deadletter_sinks: Some(HashMap::new()),
             schema_sinks: None,
+            warehouses: None,
+            dbt: None,
+            vector_sources: None,
+            llm: None,
         };
 
         assert!(Config::resolve_deadletter_plugin_config_for(&config, &pipeline).is_err());
@@ -3511,65 +3556,50 @@ data_sinks:
         let original_pipeline_name = PIPELINE_NAME.read().clone();
         ENV_CACHE.write().clear();
 
-        let config: Config = serde_json::from_value(json!({
-            "skippr": {
-                "workspace": "default",
-                "tenant": "default",
-                "skippr_s3_bucket": "skippr-e2e-sample-data-output"
-            },
-            "pipelines": {
-                "bike_hire": {
-                    "data_source": "data_sources.input",
-                    "data_sink": "data_sinks.output",
-                    "deadletter_sink": "deadletter_sinks.deadletters"
-                }
-            },
-            "data_sources": {
-                "input": {
-                    "S3": {
-                        "version": "1.2.3",
-                        "s3_bucket": "source-bucket",
-                        "s3_prefix": "input/"
-                    }
-                }
-            },
-            "data_sinks": {
-                "output": {
-                    "schema_sink": "schema_sinks.output_schema",
-                    "Athena": {
-                        "version": "2.3.4",
-                        "athena_workgroup_name": "bikehire",
-                        "s3_bucket": "output-bucket",
-                        "athena_results_s3_bucket": "output-bucket",
-                        "s3_prefix": "bikehire"
-                    }
-                }
-            },
-            "deadletter_sinks": {
-                "deadletters": {
-                    "schema_sink": "schema_sinks.deadletter_schema",
-                    "S3": {
-                        "version": "4.5.6",
-                        "s3_bucket": "deadletters-bucket",
-                        "s3_prefix": "deadletters/"
-                    }
-                }
-            },
-            "schema_sinks": {
-                "output_schema": {
-                    "Glue": {
-                        "version": "3.4.5",
-                        "glue_database_name": "datalake"
-                    }
-                },
-                "deadletter_schema": {
-                    "Glue": {
-                        "version": "5.6.7",
-                        "glue_database_name": "deadletters"
-                    }
-                }
-            }
-        }))
+        let config: Config = serde_yaml::from_str(
+            r#"
+skippr:
+  workspace: default
+  tenant: default
+  skippr_s3_bucket: skippr-e2e-sample-data-output
+pipelines:
+  bike_hire:
+    data_source: data_sources.input
+    data_sink: data_sinks.output
+    deadletter_sink: deadletter_sinks.deadletters
+data_sources:
+  input:
+    S3:
+      version: 1.2.3
+      s3_bucket: source-bucket
+      s3_prefix: input/
+data_sinks:
+  output:
+    schema_sink: schema_sinks.output_schema
+    Athena:
+      version: 2.3.4
+      athena_workgroup_name: bikehire
+      s3_bucket: output-bucket
+      athena_results_s3_bucket: output-bucket
+      s3_prefix: bikehire
+deadletter_sinks:
+  deadletters:
+    schema_sink: schema_sinks.deadletter_schema
+    S3:
+      version: 4.5.6
+      s3_bucket: deadletters-bucket
+      s3_prefix: deadletters/
+schema_sinks:
+  output_schema:
+    Glue:
+      version: 3.4.5
+      glue_database_name: datalake
+  deadletter_schema:
+    Glue:
+      version: 5.6.7
+      glue_database_name: deadletters
+"#,
+        )
         .unwrap();
 
         *APP_CONFIG.write() = Some(config);

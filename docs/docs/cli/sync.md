@@ -1,11 +1,12 @@
-# skipprd sync
+# sync
 
 Ingest data from the source, buffer through the WAL, compact into Parquet, and upload to the destination.
 
 ## Usage
 
 ```bash
-skipprd sync --pipeline <name> [--once] [--output <mode>] [--log [LEVEL]]
+skippr sync --pipeline <name> [--once] [--output <mode>] [--log [LEVEL]]
+skipprd --config skippr.yml sync --pipeline <name> [--once] [--output <mode>] [--log [LEVEL]]
 ```
 
 ## Flags
@@ -30,21 +31,13 @@ skipprd sync --pipeline <name> [--once] [--output <mode>] [--log [LEVEL]]
 ## Example
 
 ```bash
-DATA_SOURCE_PLUGIN_NAME=s3 \
-DATA_SOURCE_S3_BUCKET=my-source-bucket \
-DATA_SOURCE_S3_PREFIX=events/ \
-DATA_OUTPUT_S3_BUCKET=my-output-bucket \
-DATA_OUTPUT_S3_PREFIX=warehouse/events \
-SCHEMA_OUTPUT_GLUE_DATABASE_NAME=my_database \
-SKIPPR_S3_BUCKET=my-state-bucket \
-PIPELINE_NAME=events \
-skipprd sync --log
+skippr --config skippr.yml sync --pipeline events --log
 ```
 
 ### Batch sync with structured output
 
 ```bash
-skipprd sync --pipeline el_mssql --once --output json
+skippr sync --pipeline el_mssql --once --output json
 ```
 
 This runs a single pass and emits JSON events to stdout:

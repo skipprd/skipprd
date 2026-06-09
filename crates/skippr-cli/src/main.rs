@@ -1970,16 +1970,11 @@ fn warn_and_normalize_legacy_cli_config(value: &mut serde_yaml::Value) -> Result
     }
     if value.get("providers").is_some() {
         return Err(
-            "skippr.yml no longer supports top-level providers:. Remove providers: and configure warehouses under data_sinks."
+            "skippr.yml no longer supports top-level providers:. Remove providers:; configure query/model/catalog destinations under top-level warehouses: and ingest write targets under data_sinks:."
                 .to_string(),
         );
     }
     if let Some(mapping) = value.as_mapping_mut() {
-        if mapping.remove(yaml_key("dbt")).is_some() {
-            eprintln!(
-                "[skippr] WARNING: ignoring legacy top-level dbt: config; model dbt settings are now derived from built-in defaults."
-            );
-        }
         if let Some(skippr) = mapping
             .get_mut(yaml_key("skippr"))
             .and_then(|v| v.as_mapping_mut())
@@ -2128,6 +2123,61 @@ fn pipeline_data_sink_name(
         .to_string())
 }
 
+fn pipeline_model_mapping<'a>(
+    engine_cfg: &'a serde_yaml::Value,
+    pipeline: &str,
+) -> Result<Option<&'a serde_yaml::Mapping>, String> {
+    let pipeline_cfg = pipeline_config(engine_cfg, pipeline)?;
+    pipeline_cfg
+        .get("model")
+        .map(|value| {
+            value
+                .as_mapping()
+                .ok_or_else(|| format!("pipelines.{pipeline}.model must be a mapping"))
+        })
+        .transpose()
+}
+
+fn pipeline_warehouse_name(
+    engine_cfg: &serde_yaml::Value,
+    pipeline: &str,
+) -> Result<Option<String>, String> {
+    if let Some(model) = pipeline_model_mapping(engine_cfg, pipeline)? {
+        if let Some(name) = yaml_str(model, "warehouse") {
+            return Ok(Some(
+                name.strip_prefix("warehouses.")
+                    .unwrap_or(&name)
+                    .to_string(),
+            ));
+        }
+    }
+    if let Some(default) = yaml_string_at(engine_cfg, &["skippr", "default_warehouse"]) {
+        return Ok(Some(
+            default
+                .strip_prefix("warehouses.")
+                .unwrap_or(default)
+                .to_string(),
+        ));
+    }
+    let warehouses = engine_cfg
+        .get("warehouses")
+        .and_then(|value| value.as_mapping());
+    let Some(warehouses) = warehouses else {
+        return Ok(None);
+    };
+    if warehouses.get(yaml_key("primary")).is_some() {
+        return Ok(Some("primary".to_string()));
+    }
+    if warehouses.len() == 1 {
+        return Ok(warehouses
+            .keys()
+            .filter_map(|key| key.as_str())
+            .next()
+            .map(str::to_string));
+    }
+    Ok(None)
+}
+
 fn pipeline_data_source_name(
     engine_cfg: &serde_yaml::Value,
     pipeline: &str,
@@ -2200,10 +2250,22 @@ fn schema_sink_config_for_data_sink(
         .strip_prefix("schema_sinks.")
         .unwrap_or(schema_sink_ref)
         .trim();
+    schema_sink_config_from_name(
+        engine_cfg,
+        schema_sink_name,
+        &format!("data_sinks.{data_sink_name}.schema_sink"),
+    )
+}
+
+fn schema_sink_config_from_name(
+    engine_cfg: &serde_yaml::Value,
+    schema_sink_name: &str,
+    ref_label: &str,
+) -> Result<Option<SchemaSinkConfig>, String> {
     let schema_sink = engine_cfg
         .get("schema_sinks")
         .and_then(|schema_sinks| schema_sinks.get(schema_sink_name))
-        .ok_or_else(|| format!("data_sinks.{data_sink_name}.schema_sink references unknown schema_sinks.{schema_sink_name}"))?;
+        .ok_or_else(|| format!("{ref_label} references unknown schema_sinks.{schema_sink_name}"))?;
     if let Some(glue) = schema_sink.get("Glue") {
         let glue_database_name = glue
             .get("glue_database_name")
@@ -2219,6 +2281,30 @@ fn schema_sink_config_for_data_sink(
     Err(format!(
         "schema_sinks.{schema_sink_name} must contain a supported schema sink config such as Glue"
     ))
+}
+
+fn pipeline_schema_sink_config(
+    engine_cfg: &serde_yaml::Value,
+    pipeline: &str,
+) -> Result<Option<SchemaSinkConfig>, String> {
+    let pipeline_cfg = pipeline_config(engine_cfg, pipeline)?;
+    let schema_sink_ref = pipeline_cfg
+        .get("schema_sink")
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
+    let Some(schema_sink_ref) = schema_sink_ref else {
+        return Ok(None);
+    };
+    let schema_sink_name = schema_sink_ref
+        .strip_prefix("schema_sinks.")
+        .unwrap_or(schema_sink_ref)
+        .trim();
+    schema_sink_config_from_name(
+        engine_cfg,
+        schema_sink_name,
+        &format!("pipelines.{pipeline}.schema_sink"),
+    )
 }
 
 fn yaml_str(map: &serde_yaml::Mapping, key: &str) -> Option<String> {
@@ -2739,6 +2825,31 @@ fn warehouse_config_from_data_sink(
     Ok((warehouse, schema_sink))
 }
 
+fn warehouse_config_from_warehouse(
+    engine_cfg: &serde_yaml::Value,
+    warehouse_name: &str,
+) -> Result<WarehouseConfig, String> {
+    let warehouses = engine_cfg
+        .get("warehouses")
+        .and_then(|warehouses| warehouses.as_mapping())
+        .ok_or_else(|| "skippr.yml does not define warehouses".to_string())?;
+    let value = warehouses.get(yaml_key(warehouse_name)).ok_or_else(|| {
+        let known = warehouses
+            .keys()
+            .filter_map(|key| key.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "skippr.yml does not define warehouse '{}'. Known warehouses: {}",
+            warehouse_name,
+            if known.is_empty() { "<none>" } else { &known }
+        )
+    })?;
+    serde_yaml::from_value::<WarehouseConfig>(value.clone()).map_err(|e| {
+        format!("warehouses.{warehouse_name} must be a supported warehouse provider config: {e}")
+    })
+}
+
 fn dbt_schema_name(project: &str) -> String {
     let schema = project
         .chars()
@@ -2764,7 +2875,15 @@ pub(crate) fn react_config_from_pipeline_config(
     pipeline: &str,
 ) -> Result<ReactConfigFile, String> {
     let data_sink_name = pipeline_data_sink_name(value, pipeline)?;
-    let (warehouse, schema_sink) = warehouse_config_from_data_sink(value, &data_sink_name)?;
+    let schema_sink = match pipeline_schema_sink_config(value, pipeline)? {
+        Some(schema_sink) => Some(schema_sink),
+        None => schema_sink_config_for_data_sink(value, &data_sink_name)?,
+    };
+    let warehouse = if let Some(warehouse_name) = pipeline_warehouse_name(value, pipeline)? {
+        warehouse_config_from_warehouse(value, &warehouse_name)?
+    } else {
+        warehouse_config_from_data_sink(value, &data_sink_name)?.0
+    };
     let source = pipeline_data_source_name(value, pipeline)?
         .as_deref()
         .map(|source_name| source_config_from_data_source(value, source_name))
@@ -2815,6 +2934,31 @@ fn set_plugin_section(
     section_mapping_mut(value, section).insert(yaml_key(name), yaml_plugin_entry(plugin, config));
 }
 
+fn set_default_warehouse(value: &mut serde_yaml::Value, warehouse: &str) {
+    let skippr = section_mapping_mut(value, "skippr");
+    skippr.insert(yaml_key("default_warehouse"), yaml_key(warehouse));
+}
+
+fn set_warehouse_section(
+    value: &mut serde_yaml::Value,
+    name: &str,
+    kind: &str,
+    config: serde_json::Value,
+) {
+    let mut map = match config {
+        serde_json::Value::Object(map) => map,
+        _ => serde_json::Map::new(),
+    };
+    map.insert(
+        "kind".to_string(),
+        serde_json::Value::String(kind.to_ascii_lowercase()),
+    );
+    section_mapping_mut(value, "warehouses").insert(
+        yaml_key(name),
+        serde_yaml::to_value(serde_json::Value::Object(map)).expect("warehouse config is yaml"),
+    );
+}
+
 fn set_primary_pipeline_refs(
     value: &mut serde_yaml::Value,
     source: Option<&str>,
@@ -2841,6 +2985,12 @@ fn set_primary_pipeline_refs(
             yaml_key("data_sink"),
             yaml_key(&format!("data_sinks.{sink}")),
         );
+        let model = pipeline
+            .entry(yaml_key("model"))
+            .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
+            .as_mapping_mut()
+            .expect("pipeline.model is mapping");
+        model.insert(yaml_key("warehouse"), yaml_key("primary"));
     }
 }
 
@@ -4073,15 +4223,20 @@ async fn cmd_init(name: &str, explicit_config: &Option<PathBuf>, output: &str) {
     let raw = format!(
         r#"skippr:
   workspace: {name}
+  default_warehouse: primary
 
 pipelines:
   {name}:
     data_source: data_sources.source
     data_sink: data_sinks.warehouse
+    model:
+      warehouse: primary
 
 data_sources: {{}}
 data_sinks: {{}}
 schema_sinks: {{}}
+warehouses: {{}}
+vector_sources: {{}}
 "#
     );
     let cfg: serde_yaml::Value = serde_yaml::from_str(&raw).expect("valid default skippr.yaml");
@@ -4486,16 +4641,18 @@ fn cmd_connect_warehouse(kind: WarehouseKind, explicit_config: &Option<PathBuf>,
     match load_cli_raw_config_for_save(explicit_config) {
         Ok(mut cfg) => {
             let (plugin, config) = warehouse_plugin_and_config(kind);
-            set_plugin_section(&mut cfg, "data_sinks", "warehouse", plugin, config);
+            set_plugin_section(&mut cfg, "data_sinks", "warehouse", plugin, config.clone());
+            set_warehouse_section(&mut cfg, "primary", plugin, config);
+            set_default_warehouse(&mut cfg, "primary");
             set_primary_pipeline_refs(&mut cfg, None, Some("warehouse"));
             if let Err(e) = save_engine_config(explicit_config, &cfg) {
                 eprintln!("error: {}", e);
                 std::process::exit(1);
             }
             if is_json_output(output) {
-                emit_connect_result(output, explicit_config, plugin, "data_sinks.warehouse");
+                emit_connect_result(output, explicit_config, plugin, "warehouses.primary");
             } else {
-                println!("Configured warehouse data sink 'warehouse' ({plugin}) in skippr.yml");
+                println!("Configured warehouse 'primary' ({plugin}) and data sink 'warehouse' in skippr.yml");
             }
             return;
         }
@@ -9589,9 +9746,11 @@ mod tests {
         assert!(config.exists());
         let contents = fs::read_to_string(&config).unwrap();
         assert!(contents.contains("test-project"));
+        assert!(contents.contains("default_warehouse: primary"));
+        assert!(contents.contains("warehouses: {}"));
+        assert!(contents.contains("vector_sources: {}"));
         assert!(!contents.contains("tenant:"));
         assert!(!contents.contains("react:"));
-        assert!(!contents.contains("dbt:"));
     }
 
     #[tokio::test]
@@ -9675,6 +9834,60 @@ data_sinks:
             "expected unset env diagnostic, got: {:?}",
             missing
         );
+    }
+
+    #[test]
+    fn skipprd_config_accepts_product_cli_sections() {
+        let cfg: skipprd::helpers::configuration::Config = serde_yaml::from_str(
+            r#"
+skippr:
+  workspace: demo
+  default_warehouse: primary
+pipelines:
+  demo:
+    data_source: data_sources.source
+    data_sink: data_sinks.sink
+    model:
+      warehouse: primary
+data_sources:
+  source:
+    S3:
+      s3_bucket: raw
+data_sinks:
+  sink:
+    Athena: {}
+warehouses:
+  primary:
+    kind: athena
+    schema: modeled
+vector_sources:
+  docs:
+    root: docs
+    include: ["**/*.md"]
+dbt:
+  target: primary
+llm:
+  provider: openai_compat
+"#,
+        )
+        .expect("canonical skippr.yml should parse as skipprd::Config");
+
+        assert_eq!(
+            cfg.skippr
+                .as_ref()
+                .and_then(|skippr| skippr.default_warehouse.as_deref()),
+            Some("primary")
+        );
+        assert!(cfg
+            .warehouses
+            .as_ref()
+            .is_some_and(|items| items.contains_key("primary")));
+        assert!(cfg
+            .vector_sources
+            .as_ref()
+            .is_some_and(|items| items.contains_key("docs")));
+        assert!(cfg.dbt.is_some());
+        assert!(cfg.llm.is_some());
     }
 
     #[test]
@@ -9813,6 +10026,65 @@ data_sinks:
                 .and_then(|naming| naming.get("target_schema"))
                 .and_then(|schema| schema.as_str()),
             Some("cursor_semantic_validation")
+        );
+    }
+
+    #[test]
+    fn react_config_prefers_top_level_warehouse_for_modeling() {
+        let cfg: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+skippr:
+  workspace: demo
+  default_warehouse: primary
+pipelines:
+  demo:
+    data_source: data_sources.source
+    data_sink: data_sinks.landing
+    model:
+      warehouse: primary
+data_sources:
+  source:
+    S3:
+      s3_bucket: raw-source
+data_sinks:
+  landing:
+    schema_sink: schema_sinks.glue
+    Athena:
+      workgroup: ingest-workgroup
+schema_sinks:
+  glue:
+    Glue:
+      glue_database_name: bronze
+warehouses:
+  primary:
+    kind: athena
+    workgroup: model-workgroup
+    schema: modeled
+    result_s3: s3://query-results/
+"#,
+        )
+        .expect("yaml");
+
+        let internal = react_config_from_pipeline_config(&cfg, "demo").expect("internal config");
+        let providers = internal.providers.expect("providers");
+        let wh = providers
+            .get("warehouse")
+            .and_then(|v| v.as_object())
+            .expect("warehouse object");
+
+        assert_eq!(wh.get("kind").and_then(|v| v.as_str()), Some("athena"));
+        assert_eq!(
+            wh.get("workgroup").and_then(|v| v.as_str()),
+            Some("model-workgroup")
+        );
+        assert_eq!(wh.get("schema").and_then(|v| v.as_str()), Some("modeled"));
+        assert_eq!(
+            providers
+                .get("el")
+                .and_then(|el| el.get("schema_sink"))
+                .and_then(|sink| sink.get("kind"))
+                .and_then(|kind| kind.as_str()),
+            Some("glue")
         );
     }
 
@@ -10020,7 +10292,7 @@ react:
     }
 
     #[test]
-    fn cli_config_warns_and_drops_legacy_tenant_and_dbt() {
+    fn cli_config_keeps_product_sections_and_drops_legacy_tenant() {
         let mut cfg: serde_yaml::Value = serde_yaml::from_str(
             r#"
 skippr:
@@ -10028,13 +10300,17 @@ skippr:
   tenant: old-tenant
 dbt:
   target: prod
+warehouses:
+  primary:
+    kind: athena
 "#,
         )
         .expect("yaml");
 
         warn_and_normalize_legacy_cli_config(&mut cfg).expect("normalize legacy keys");
 
-        assert!(cfg.get("dbt").is_none());
+        assert!(cfg.get("dbt").is_some());
+        assert!(cfg.get("warehouses").is_some());
         assert!(cfg
             .get("skippr")
             .and_then(|skippr| skippr.get("tenant"))

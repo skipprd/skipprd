@@ -1,6 +1,31 @@
 # Output Destination
 
+Ingest outputs are configured under `data_sinks:` and optional `schema_sinks:` in `skippr.yml`.
+
+```yaml
+pipelines:
+  events:
+    data_sink: data_sinks.landing
+    schema_sink: schema_sinks.catalog
+
+data_sinks:
+  landing:
+    Athena:
+      s3_bucket: my-warehouse-bucket
+      s3_prefix: bronze/events
+      glue_database_name: bronze_events
+      athena_workgroup_name: primary
+      athena_results_s3_bucket: athena-results
+
+schema_sinks:
+  catalog:
+    Glue:
+      glue_database_name: bronze_events
+```
+
 Skippr resolves runtime sink and schema plugins on demand. Athena remains the primary reference destination, but the output registry now maps to independently versioned runtime plugins rather than a bundled host binary.
+
+`data_sinks` write landed data. Query/model/catalog providers live separately under [`warehouses`](warehouses.md).
 
 In YAML config, sink and schema connector blocks can include an optional `version` field to pin an individual published runtime plugin version.
 

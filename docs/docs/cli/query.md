@@ -1,11 +1,14 @@
-# skipprd query
+# query
 
-Run SQL against destination tables, manage pipelines and schemas.
+Run SQL against configured data, manage pipelines and schemas.
+
+`skippr query` is the product-facing command. `skipprd query` remains available for engine-only SQL, pipeline management, schema management, and WAL streaming.
 
 ## Usage
 
 ```bash
-skipprd query --sql "<SQL>" [--watch <seconds>] [--plain] [--log [LEVEL]]
+skippr query --sql "<SQL>" [--watch <seconds>] [--plain] [--log [LEVEL]]
+skipprd --config skippr.yml query --sql "<SQL>" [--watch <seconds>] [--plain] [--log [LEVEL]]
 ```
 
 ## Flags
@@ -22,37 +25,37 @@ skipprd query --sql "<SQL>" [--watch <seconds>] [--plain] [--log [LEVEL]]
 Query a table:
 
 ```bash
-skipprd query --sql "SELECT COUNT(*) FROM bikehire"
+skippr query --sql "SELECT COUNT(*) FROM bikehire"
 ```
 
 Live watch:
 
 ```bash
-skipprd query --sql "SELECT COUNT(*) FROM bikehire" --watch 5
+skippr query --sql "SELECT COUNT(*) FROM bikehire" --watch 5
 ```
 
 Pipeline management:
 
 ```bash
-skipprd query --sql "ENABLE PIPELINE bikehire"
-skipprd query --sql "DISABLE PIPELINE bikehire"
-skipprd query --sql "RESET PIPELINE bikehire"
-skipprd query --sql "DROP PIPELINE bikehire"
+skippr query --sql "ENABLE PIPELINE bikehire"
+skippr query --sql "DISABLE PIPELINE bikehire"
+skippr query --sql "RESET PIPELINE bikehire"
+skippr query --sql "DROP PIPELINE bikehire"
 ```
 
 Schema management:
 
 ```bash
-skipprd query --sql "SCHEMA DUMP bikehire TO 'schema.json'"
-skipprd query --sql "LOAD SCHEMA 'schema.json' INTO bikehire"
-skipprd query --sql "ALTER SCHEMA bikehire DROP COLUMN old_field"
-skipprd query --sql "ALTER SCHEMA bikehire ALTER COLUMN price TYPE DECIMAL(10,2)"
+skippr query --sql "SCHEMA DUMP bikehire TO 'schema.json'"
+skippr query --sql "LOAD SCHEMA 'schema.json' INTO bikehire"
+skippr query --sql "ALTER SCHEMA bikehire DROP COLUMN old_field"
+skippr query --sql "ALTER SCHEMA bikehire ALTER COLUMN price TYPE DECIMAL(10,2)"
 ```
 
 Stream from the WAL:
 
 ```bash
-skipprd query --sql "STREAM * FROM bikehire LIMIT 100"
+skipprd --config skippr.yml query --sql "STREAM * FROM bikehire LIMIT 100"
 ```
 
 See the [SQL Reference](../sql/reference.md) for all supported statements.

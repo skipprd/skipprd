@@ -17,6 +17,14 @@ command -v tar >/dev/null 2>&1 || { echo >&2 "Error: tar is required but not ins
 OWNER="skipprd"
 REPO="skipprd"
 DEST="${SKIPPR_INSTALL_DIR:-/usr/local/bin}"
+REQUESTED_BINARY="${SKIPPR_BINARY:-skippr}"
+case "$REQUESTED_BINARY" in
+  skippr|skipprd|skippr-admin) ;;
+  *)
+    echo >&2 "Error: unsupported SKIPPR_BINARY=$REQUESTED_BINARY (expected skippr, skipprd, or skippr-admin)"
+    exit 1
+    ;;
+esac
 
 if [[ "$OS" == "Darwin" && "$ARCH" == "arm64" ]]; then
   ASSET_PATTERN="macos_arm64.tar.gz"
@@ -39,13 +47,13 @@ fi
 # Resolve release URL — use SKIPPR_VERSION to pin, otherwise latest
 if [[ -n "${SKIPPR_VERSION:-}" ]]; then
   RELEASE_URL="https://api.github.com/repos/$OWNER/$REPO/releases/tags/$SKIPPR_VERSION"
-  echo "Installing skipprd $SKIPPR_VERSION for $OS/$ARCH..."
+  echo "Installing $REQUESTED_BINARY $SKIPPR_VERSION for $OS/$ARCH..."
 else
   RELEASE_URL="https://api.github.com/repos/$OWNER/$REPO/releases/latest"
-  echo "Installing latest skipprd for $OS/$ARCH..."
+  echo "Installing latest $REQUESTED_BINARY for $OS/$ARCH..."
 fi
 
-DOWNLOAD_URL=$(curl -sf "$RELEASE_URL" | grep "browser_download_url.*$ASSET_PATTERN" | cut -d '"' -f 4)
+DOWNLOAD_URL=$(curl -sf "$RELEASE_URL" | grep "browser_download_url.*${REQUESTED_BINARY}-${ASSET_PATTERN}" | cut -d '"' -f 4 | head -1)
 
 if [[ -z "${DOWNLOAD_URL:-}" ]]; then
   echo >&2 "Error: no release asset matching $ASSET_PATTERN found at $RELEASE_URL"
@@ -63,14 +71,14 @@ mkdir -p "$TEMP_DIR"
 tar -xzf "$TEMP_PATH" -C "$TEMP_DIR"
 
 # Find the extracted binary
-EXTRACTED=$(find "$TEMP_DIR" -name skipprd -type f | head -1)
+EXTRACTED=$(find "$TEMP_DIR" -name "$REQUESTED_BINARY" -type f | head -1)
 if [[ -z "$EXTRACTED" ]]; then
-  echo >&2 "Error: skipprd binary not found in archive."
+  echo >&2 "Error: $REQUESTED_BINARY binary not found in archive."
   exit 1
 fi
 
-mv "$EXTRACTED" "$DEST/skipprd"
-chmod +x "$DEST/skipprd"
+mv "$EXTRACTED" "$DEST/$REQUESTED_BINARY"
+chmod +x "$DEST/$REQUESTED_BINARY"
 
-echo "Installed skipprd to $DEST/skipprd"
-"$DEST/skipprd" --version 2>/dev/null || true
+echo "Installed $REQUESTED_BINARY to $DEST/$REQUESTED_BINARY"
+"$DEST/$REQUESTED_BINARY" --version 2>/dev/null || true

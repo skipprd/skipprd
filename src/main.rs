@@ -127,6 +127,9 @@ async fn async_main() {
 
     let cli: Cli = Cli::parse();
 
+    if let Some(config) = &cli.config {
+        Config::setenv("SKIPPR_CONFIG_FILE", &config.to_string_lossy());
+    }
     if let Some(wal_storage) = &cli.wal_storage {
         Config::set_wal_storage(wal_storage);
     }
