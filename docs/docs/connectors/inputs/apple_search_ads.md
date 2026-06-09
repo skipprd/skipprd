@@ -48,4 +48,3 @@ For short-lived smoke tests you can provide `access_token` instead of client cre
 | `apple_search_ads.keyword_daily` | full |
 | `apple_search_ads.search_term_daily` | full |
 
-See [maintainer doc](../../maintainers/apple-search-ads-plugin.md) for runtime behavior and testing.

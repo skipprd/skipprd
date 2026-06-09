@@ -51,6 +51,7 @@ nav:
       - sql-help: cli/sql-help.md
       - benchmark: cli/benchmark.md
   - Connectors:
+      - Overview: connectors/index.md
       - Inputs:
           - Databases:
               - ClickHouse: connectors/inputs/clickhouse.md
@@ -78,11 +79,23 @@ nav:
           - HTTP:
               - Google Analytics (GA4): connectors/inputs/google_analytics.md
               - Google Search Console: connectors/inputs/google_search_console.md
-              - Google SERP Ranks: connectors/inputs/google_serp_ranks.md
-              - Apple App Store SERP: connectors/inputs/apple_app_store_serp.md
+              - Bing Webmaster Tools: connectors/inputs/bing_webmaster_tools.md
               - Apple Search Ads: connectors/inputs/apple_search_ads.md
               - HTTP Client: connectors/inputs/http_client.md
               - HTTP Server: connectors/inputs/http_server.md
+          - SaaS & APIs:
+              - Google Ads: connectors/inputs/google_ads.md
+              - Meta Ads: connectors/inputs/meta_ads.md
+              - Meta Instagram Ads: connectors/inputs/meta_instagram_ads.md
+              - LinkedIn Ads: connectors/inputs/linkedin_ads.md
+              - X Ads: connectors/inputs/x_ads.md
+              - AdRoll Ads: connectors/inputs/adroll_ads.md
+              - Stripe: connectors/inputs/stripe.md
+              - Shopify Admin: connectors/inputs/shopify_admin.md
+              - HubSpot CRM: connectors/inputs/hubspot_crm.md
+              - Xero Accounting: connectors/inputs/xero_accounting.md
+              - Revolut Business: connectors/inputs/revolut_business.md
+              - SumUp: connectors/inputs/sumup.md
           - Other:
               - Socket (TCP/UDP/Unix): connectors/inputs/socket.md
               - StatsD: connectors/inputs/statsd.md
@@ -94,6 +107,7 @@ nav:
               - BigQuery: connectors/outputs/bigquery.md
               - ClickHouse: connectors/outputs/clickhouse.md
               - Databricks: connectors/outputs/databricks.md
+              - Iceberg: connectors/outputs/iceberg.md
               - MotherDuck: connectors/outputs/motherduck.md
               - Postgres: connectors/outputs/postgres.md
               - Redshift: connectors/outputs/redshift.md
@@ -109,6 +123,20 @@ nav:
           - Other:
               - Local File: connectors/outputs/file.md
               - Stdout: connectors/outputs/stdout.md
+      - Schema Sinks:
+          - Glue: connectors/schema_sinks/glue.md
+          - Iceberg: connectors/schema_sinks/iceberg.md
+      - Warehouses:
+          - Athena: connectors/warehouses/athena.md
+          - Snowflake: connectors/warehouses/snowflake.md
+          - Postgres: connectors/warehouses/postgres.md
+          - BigQuery: connectors/warehouses/bigquery.md
+          - Databricks: connectors/warehouses/databricks.md
+          - Redshift: connectors/warehouses/redshift.md
+          - ClickHouse: connectors/warehouses/clickhouse.md
+          - MotherDuck: connectors/warehouses/motherduck.md
+          - Synapse: connectors/warehouses/synapse.md
+          - MSSQL: connectors/warehouses/mssql.md
   - SQL Reference: sql/reference.md
   - Architecture:
       - How Skippr Works: concepts/how-it-works.md

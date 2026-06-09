@@ -1,6 +1,6 @@
 # Warehouses
 
-`warehouses` configure query, modeling, catalog, and dbt behavior for the `skippr` product CLI.
+`warehouses` configure query, modeling, catalog, and dbt behavior for the `skippr` CLI.
 
 They do **not** replace `data_sinks`.
 
@@ -29,50 +29,23 @@ warehouses:
     result_s3: s3://athena-query-results/
 ```
 
-`pipelines.<name>.model.warehouse` selects a warehouse for that pipeline. If it is omitted, Skippr uses `skippr.default_warehouse`.
+`pipelines.<name>.model.warehouse` selects a warehouse for that pipeline. If omitted, Skippr uses `skippr.default_warehouse`.
 
-## Athena
+## Provider reference
 
-```yaml
-warehouses:
-  primary:
-    kind: athena
-    workgroup: primary
-    region: us-east-1
-    catalog: AwsDataCatalog
-    schema: analytics
-    result_s3: s3://athena-query-results/
-```
+| `kind` | Doc |
+| --- | --- |
+| `athena` | [Athena](../connectors/warehouses/athena.md) |
+| `snowflake` | [Snowflake](../connectors/warehouses/snowflake.md) |
+| `postgres` | [Postgres](../connectors/warehouses/postgres.md) |
+| `bigquery` | [BigQuery](../connectors/warehouses/bigquery.md) |
+| `databricks` | [Databricks](../connectors/warehouses/databricks.md) |
+| `redshift` | [Redshift](../connectors/warehouses/redshift.md) |
+| `clickhouse` | [ClickHouse](../connectors/warehouses/clickhouse.md) |
+| `motherduck` | [MotherDuck](../connectors/warehouses/motherduck.md) |
+| `synapse` | [Synapse](../connectors/warehouses/synapse.md) |
+| `mssql` | [MSSQL](../connectors/warehouses/mssql.md) |
 
-## Snowflake
+Use [data sink](../connectors/index.md#data-sinks) connector pages for ingest configuration. Use the warehouse pages above for query and modeling.
 
-```yaml
-warehouses:
-  primary:
-    kind: snowflake
-    account: my-org-my-account
-    user: ${SNOWFLAKE_USER}
-    private_key_path: ${SNOWFLAKE_PRIVATE_KEY_PATH}
-    database: ANALYTICS
-    schema: RAW
-    warehouse: COMPUTE_WH
-    role: TRANSFORMER
-```
-
-## Postgres
-
-```yaml
-warehouses:
-  primary:
-    kind: postgres
-    database: analytics
-    schema: public
-```
-
-Connection secrets can come from environment variables such as `POSTGRES_HOST`, `POSTGRES_USER`, and `POSTGRES_PASSWORD`.
-
-## Other providers
-
-Skippr warehouse providers also cover BigQuery, Databricks, Redshift, ClickHouse, MotherDuck, Synapse, and MSSQL where the data-engineering suite supports those capabilities.
-
-Use output connector pages for ingest/write configuration. Use this page for query/model/catalog configuration.
+See the [connector index](../connectors/index.md) for the full list of sources, sinks, and schema sinks.

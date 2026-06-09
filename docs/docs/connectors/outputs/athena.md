@@ -6,9 +6,9 @@ The primary output destination. Writes Snappy-compressed Parquet to S3 and manag
 
 1. Converts compacted WAL segments into Parquet with Snappy compression
 2. Uploads Parquet via S3 multipart upload
-3. Creates the Glue database if it doesn't exist
-4. Creates or updates Glue tables with the discovered schema (columns, types, serde)
-5. Registers Hive-style partitions for time-bucketed data
+3. Registers data in the AWS Glue Data Catalog (database, tables, partitions)
+
+Catalog DDL can be driven by a paired [Glue schema sink](../schema_sinks/glue.md) or handled inline during ingest.
 
 ## Configuration
 
@@ -48,14 +48,21 @@ If Athena is used as a `deadletter_sink`, deadletters are written to the configu
 | `PARQUET_MULTIPART_PART_BYTES` | `67108864` (64 MB) | Part size for multipart upload |
 | `GLUE_MAX_CONCURRENCY` | `2` | Max concurrent Glue API calls |
 
-## Glue table format
+## Schema sink pairing
 
-Tables are created as `EXTERNAL_TABLE` with:
+```yaml
+pipelines:
+  events:
+    data_sink: data_sinks.landing
+    schema_sink: schema_sinks.catalog
 
-- SerDe: `ParquetHiveSerDe`
-- Input format: `MapredParquetInputFormat`
-- Compression: Snappy
-- Partition keys derived from time bucketing configuration, or from [source namespace contracts](../../concepts/source-landing-semantics.md) (for example `date` for [GA4](../inputs/google_analytics.md))
+schema_sinks:
+  catalog:
+    Glue:
+      glue_database_name: my_database
+```
+
+See [Glue schema sink](../schema_sinks/glue.md) for catalog configuration. Partition keys follow time bucketing or [source namespace contracts](../../concepts/source-landing-semantics.md) (for example `date` for [GA4](../inputs/google_analytics.md)).
 
 ## Partitioned API sources
 

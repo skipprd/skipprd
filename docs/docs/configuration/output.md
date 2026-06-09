@@ -23,11 +23,15 @@ schema_sinks:
       glue_database_name: bronze_events
 ```
 
-Skippr resolves runtime sink and schema plugins on demand. Athena remains the primary reference destination, but the output registry now maps to independently versioned runtime plugins rather than a bundled host binary.
+`data_sinks` write landed data. `schema_sinks` manage destination catalog DDL where that is separate from the data sink. Query and modeling use [`warehouses`](warehouses.md).
 
-`data_sinks` write landed data. Query/model/catalog providers live separately under [`warehouses`](warehouses.md).
+Optional `version:` on a sink or schema block pins that connector to a specific release.
 
-In YAML config, sink and schema connector blocks can include an optional `version` field to pin an individual published runtime plugin version.
+Connector reference:
+
+- [Data sinks](../connectors/index.md#data-sinks) — Athena, Snowflake, Iceberg, S3, and others
+- [Schema sinks](../connectors/schema_sinks/glue.md) — Glue, Iceberg catalog DDL
+- [Connector index](../connectors/index.md) — full list
 
 ## Athena output configuration
 
@@ -35,7 +39,7 @@ In YAML config, sink and schema connector blocks can include an optional `versio
 |---|---|---|
 | `DATA_OUTPUT_S3_BUCKET` | *(required)* | S3 bucket for destination Parquet files |
 | `DATA_OUTPUT_S3_PREFIX` | | Key prefix for Parquet output |
-| `SCHEMA_OUTPUT_GLUE_DATABASE_NAME` | *(required)* | AWS Glue database name. Created automatically if it doesn't exist. |
+| `SCHEMA_OUTPUT_GLUE_DATABASE_NAME` | *(required)* | AWS Glue database name. See [Glue schema sink](../connectors/schema_sinks/glue.md). |
 | `DATA_OUTPUT_ATHENA_WORKGROUP_NAME` | | Athena workgroup name |
 | `DATA_OUTPUT_ATHENA_RESULTS_S3_BUCKET` | | S3 bucket for Athena query results |
 | `DATA_OUTPUT_MAX_ASYNC_UPLOADS` | `16` | Maximum concurrent Parquet multipart uploads to S3 |
@@ -52,7 +56,7 @@ s3://{DATA_OUTPUT_S3_BUCKET}/{DATA_OUTPUT_S3_PREFIX}/{namespace}/
     {segment_id}.parquet
 ```
 
-Glue tables are created per namespace within the configured database. Hive-style partitions are registered automatically.
+Glue tables are created per namespace within the configured database. Hive-style partitions are registered automatically. For explicit catalog wiring, use a [Glue schema sink](../connectors/schema_sinks/glue.md).
 
 ## AWS credentials
 
