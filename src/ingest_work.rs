@@ -4,7 +4,7 @@ use crate::discover::{
 };
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, OffsetTypes, OffsetValue, Offsets};
-use crate::helpers::Helpers;
+use crate::helpers::{Helpers, IngestTransformSnapshot};
 use crate::ingest::ingest::ingest;
 use crate::runtime_plugins::protocol::{RuntimeExecutionMode, RuntimeRawIngestBatch};
 use crate::runtime_plugins::schema_state::bump_pipeline_schema_version;
@@ -1632,12 +1632,8 @@ impl Ingest {
 
         let _default_schema_hash = format!("{:?}", md5::compute(Helpers::random_str(10)));
 
-        let flatten = Config::truth_value(
-            &Config::get_transform_config()
-                .flatten_events
-                .or(Some("no".to_string()))
-                .unwrap(),
-        );
+        let transform_snap = IngestTransformSnapshot::capture();
+        let flatten = transform_snap.flatten;
 
         let data_dir = Config::get_data_dir();
         let _output_dir = format!("{}/ingest_buffer", data_dir);
@@ -1688,10 +1684,7 @@ impl Ingest {
             Err(_) => Default::default(),
         };
 
-        let entity_field_dot = match Config::get_transform_config().record_field_path {
-            Some(ref field) => field.clone(),
-            None => "".to_string(),
-        };
+        let entity_field_dot = transform_snap.record_field_path.clone();
 
         let mut buf: HashMap<(String, String, String, Option<i64>, String), IngestBufferBatch> =
             HashMap::with_capacity(32);
@@ -1925,10 +1918,11 @@ impl Ingest {
                         storage_namespace(&{
                             let mut namesapce_cache =
                                 PARSE_NAMESPACE_CACHE.with(|cache| cache.read().unwrap().clone());
-                            let ns = Helpers::parse_namespace_field(
+                            let ns = Helpers::parse_namespace_field_with_fields(
                                 &record,
                                 batch_namespace_override.clone(),
                                 &mut namesapce_cache,
+                                &transform_snap.namespace_fields,
                             );
                             if namesapce_cache
                                 != PARSE_NAMESPACE_CACHE.with(|cache| cache.read().unwrap().clone())
@@ -1941,10 +1935,15 @@ impl Ingest {
                         })
                     };
 
-                    let allowed_values =
-                        PARTITION_ALLOWED_VALUES_CACHE.with(|cache| cache.read().unwrap().clone());
-                    let skpr_partition = Helpers::parse_partition_field(&record, allowed_values);
-                    let skpr_time = Helpers::parse_time_field(&record);
+                    let skpr_partition = PARTITION_ALLOWED_VALUES_CACHE.with(|cache| {
+                        Helpers::parse_partition_field_with_fields(
+                            &record,
+                            &cache.read().unwrap(),
+                            &transform_snap.partition_fields,
+                        )
+                    });
+                    let skpr_time =
+                        Helpers::parse_time_field_with_fields(&record, &transform_snap.time_fields);
 
                     let mut skpr_time_bucket: Option<i64> = None;
 

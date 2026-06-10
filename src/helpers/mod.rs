@@ -32,6 +32,34 @@ pub mod timed_rwlock;
 
 use crate::discover::date_formats::DateFormats;
 use crate::discover::Metadata;
+
+/// Transform strings read once per `process_batch` to avoid per-record config locks.
+#[derive(Clone, Debug)]
+pub struct IngestTransformSnapshot {
+    pub partition_fields: String,
+    pub namespace_fields: String,
+    pub time_fields: String,
+    pub record_field_path: String,
+    pub flatten: bool,
+}
+
+impl IngestTransformSnapshot {
+    pub fn capture() -> Self {
+        let transform = Config::get_transform_config();
+        Self {
+            partition_fields: Config::get_transform_batch_partition_fields(),
+            namespace_fields: Config::get_transform_namespace_fields(),
+            time_fields: Config::get_transform_batch_time_fields(),
+            record_field_path: transform.record_field_path.unwrap_or_default(),
+            flatten: Config::truth_value(
+                &transform
+                    .flatten_events
+                    .unwrap_or_else(|| "no".to_string()),
+            ),
+        }
+    }
+}
+
 #[cfg(test)]
 use crate::discover::SkipprDataType;
 use crate::helpers::configuration::Config;
@@ -360,13 +388,25 @@ impl Helpers {
     }
 
     pub fn parse_partition_field(message: &Value, clean_allowed_values: HashSet<String>) -> String {
+        Self::parse_partition_field_with_fields(
+            message,
+            &clean_allowed_values,
+            &Config::get_transform_batch_partition_fields(),
+        )
+    }
+
+    pub fn parse_partition_field_with_fields(
+        message: &Value,
+        clean_allowed_values: &HashSet<String>,
+        partition_fields: &str,
+    ) -> String {
         let mut clean_partition: String = "".to_string();
 
         // optional: partition by composite key
-        if !Config::get_transform_batch_partition_fields().is_empty() {
+        if !partition_fields.is_empty() {
             let mut partitions = vec![];
 
-            for entity_field_dot in Config::get_transform_batch_partition_fields().split(',') {
+            for entity_field_dot in partition_fields.split(',') {
                 // strip whitespace
                 let entity_field_dot = entity_field_dot.trim();
 
@@ -422,6 +462,20 @@ impl Helpers {
         namespace: String,
         parse_namespace_cache: &mut HashMap<String, String>,
     ) -> String {
+        Self::parse_namespace_field_with_fields(
+            message,
+            namespace,
+            parse_namespace_cache,
+            &Config::get_transform_namespace_fields(),
+        )
+    }
+
+    pub fn parse_namespace_field_with_fields(
+        message: &Value,
+        namespace: String,
+        parse_namespace_cache: &mut HashMap<String, String>,
+        namespace_fields: &str,
+    ) -> String {
         let mut clean_namespace = namespace.clone();
 
         if !parse_namespace_cache.contains_key(&namespace)
@@ -429,10 +483,10 @@ impl Helpers {
         {
             clean_namespace = Helpers::clean_field_name(clean_namespace);
 
-            if !Config::get_transform_namespace_fields().is_empty() {
+            if !namespace_fields.is_empty() {
                 let mut namespaces = vec!["".to_string()];
 
-                for entity_field_dot in Config::get_transform_namespace_fields().split(',') {
+                for entity_field_dot in namespace_fields.split(',') {
                     match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
                         Some(entity_value) => {
                             namespaces.push(entity_value.as_str().unwrap().to_string());
@@ -463,14 +517,18 @@ impl Helpers {
         num_digits > 10
     }
     pub fn parse_time_field(message: &Value) -> Option<i64> {
+        Self::parse_time_field_with_fields(message, &Config::get_transform_batch_time_fields())
+    }
+
+    pub fn parse_time_field_with_fields(message: &Value, time_fields: &str) -> Option<i64> {
         // Only process if time fields are configured
-        if Config::get_transform_batch_time_fields().is_empty() {
+        if time_fields.is_empty() {
             return None;
         }
 
         // Support nested time fields via array dot notation
         // For user confirmed event time fields, use the first one that matches
-        for field_dot in Config::get_transform_batch_time_fields().split(',') {
+        for field_dot in time_fields.split(',') {
             if let Some(value) = Helpers::get_nested_value_from_dot_notation(message, field_dot) {
                 match value {
                     // Handle string timestamps
@@ -1422,7 +1480,7 @@ mod parse_partition_tests {
     #[serial]
     fn test_parse_partition_field_no_config() {
         let message = json!({"foo": "bar", "abc1": "def"});
-        Config::setenv("TRANSFORM_BATCH_PARTITION_FIELDS", "");
+        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "NULL_VALUE");
         let partition = Helpers::parse_partition_field(&message, HashSet::new());
         assert_eq!(partition, "");
     }
@@ -1485,7 +1543,7 @@ mod parse_partition_allowed_values_tests {
     #[serial]
     fn test_parse_partition_field_no_config() {
         let message = json!({"foo": "bar", "abc1": "def"});
-        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "");
+        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "NULL_VALUE");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "bar");
 
         let allowed_values = Config::get_partition_allowed_values();
@@ -1584,7 +1642,7 @@ mod parse_partition_not_allowed_values_tests {
     #[serial]
     fn test_parse_partition_field_no_config() {
         let message = json!({"foo": "bar", "abc1": "def"});
-        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "");
+        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "NULL_VALUE");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "nah");
 
         let allowed_values = Config::get_partition_allowed_values();
