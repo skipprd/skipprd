@@ -218,6 +218,87 @@ fn slow_ingest_blocking(
 
 use crate::ingest::deadletter::{self, DeadletterRecord};
 
+fn try_serialize_arrow_batch(
+    schema: SchemaRef,
+    values: &[&serde_json::Value],
+) -> Result<Vec<RecordBatch>, String> {
+    let mut decoder = ArrowJsonReaderBuilder::new(schema)
+        .build_decoder()
+        .map_err(|e| format!("build_decoder: {e}"))?;
+    decoder
+        .serialize(values)
+        .map_err(|e| format!("serialize: {e}"))?;
+    match decoder.flush() {
+        Ok(Some(b)) => Ok(vec![b]),
+        Ok(None) => Err("flush returned no batch".into()),
+        Err(e) => Err(format!("flush: {e}")),
+    }
+}
+
+fn bisect_serialize_indices(
+    schema: SchemaRef,
+    records: &[IngestRecord],
+    indices: &[usize],
+) -> (Vec<RecordBatch>, Vec<usize>) {
+    if indices.is_empty() {
+        return (vec![], vec![]);
+    }
+    let values: Vec<&serde_json::Value> = indices
+        .iter()
+        .map(|&i| records[i].normalized.inner())
+        .collect();
+    match try_serialize_arrow_batch(schema.clone(), &values) {
+        Ok(batches) => (batches, vec![]),
+        Err(_) if indices.len() == 1 => (vec![], vec![indices[0]]),
+        Err(_) => {
+            let mid = indices.len() / 2;
+            let (left, right) = indices.split_at(mid);
+            let (mut ok, mut fail) = bisect_serialize_indices(schema.clone(), records, left);
+            let (right_ok, right_fail) = bisect_serialize_indices(schema, records, right);
+            ok.extend(right_ok);
+            fail.extend(right_fail);
+            (ok, fail)
+        }
+    }
+}
+
+fn max_offset_pos_among(records: &[IngestRecord], indices: &[usize]) -> Option<u64> {
+    if indices.is_empty() {
+        None
+    } else {
+        Some(
+            indices
+                .iter()
+                .map(|&i| records[i]._offset_pos)
+                .max()
+                .unwrap_or(0),
+        )
+    }
+}
+
+fn set_entry_offsets_max(entry: &mut IngestBufferBatch, max_pos: u64) {
+    for pos in entry.offsets.values_mut() {
+        *pos = max_pos;
+    }
+}
+
+fn merge_dl_offsets_for_records(
+    dl_offsets: &mut HashMap<OffsetKey, u64>,
+    entry: &IngestBufferBatch,
+    records: &[IngestRecord],
+    indices: &[usize],
+) {
+    let Some(max_pos) = max_offset_pos_among(records, indices) else {
+        return;
+    };
+    if let Some((ok, _)) = entry.offsets.iter().next() {
+        dl_offsets
+            .entry(ok.clone())
+            .and_modify(|p| *p = (*p).max(max_pos))
+            .or_insert(max_pos);
+    }
+}
+
 /// Physical metadata / warehouse table key for a source namespace.
 ///
 /// Delegates to [`Helpers::clean_field_name`] (same rules as legacy namespace parsing):
@@ -1643,6 +1724,7 @@ impl Ingest {
                         _namespace: ns.clone(),
                         _partition: part.clone(),
                         _time: time_b.clone(),
+                        _offset_pos: pos,
                     });
             };
         for ingest_batch in datas.iter() {
@@ -1961,81 +2043,101 @@ impl Ingest {
         // recovery.
         for (k, entry) in buf.iter_mut() {
             let records_vec = raw_values.remove(k).unwrap_or_default();
-            let try_serialize = |schema: SchemaRef,
-                                 values: &Vec<&serde_json::Value>|
-             -> Result<Vec<RecordBatch>, String> {
-                let mut decoder = ArrowJsonReaderBuilder::new(schema)
-                    .build_decoder()
-                    .map_err(|e| format!("build_decoder: {e}"))?;
-                decoder
-                    .serialize(values)
-                    .map_err(|e| format!("serialize: {e}"))?;
-                match decoder.flush() {
-                    Ok(Some(b)) => Ok(vec![b]),
-                    Ok(None) => Err("flush returned no batch".into()),
-                    Err(e) => Err(format!("flush: {e}")),
-                }
-            };
-
-            let values_ref: Vec<&serde_json::Value> =
-                records_vec.iter().map(|r| r.normalized.inner()).collect();
-            if values_ref.is_empty() {
+            if records_vec.is_empty() {
                 continue;
             }
 
-            // The ingest worker publishes schema and default templates before
-            // returning evolved normalized records, so this should succeed
-            // without attempting late schema evolution.
-            match try_serialize(entry.schema.clone(), &values_ref) {
-                Ok(batches) => {
-                    entry.record_batches = Some(batches);
-                    continue;
-                }
-                Err(first_err) => {
-                    let skpr_namespace = entry._namespace.clone();
-                    let off_key_str = match entry.offsets.iter().next() {
-                        Some((k, _)) => format!("{}:{}", k.namespace, k.partition),
-                        None => String::new(),
-                    };
-                    let arrow_err_msg = format!(
-                        "Arrow serialization invariant failed after ingest-time evolution: {}",
-                        first_err
-                    );
-                    warn!(
-                        "{} (ns={}, records={})",
-                        arrow_err_msg,
-                        skpr_namespace,
-                        records_vec.len()
-                    );
-                    for (idx, rec) in records_vec.iter().enumerate() {
-                        dl_records.push(DeadletterRecord {
-                            namespace: skpr_namespace.clone(),
-                            record: rec.source.inner().to_string(),
-                            error: arrow_err_msg.clone(),
-                            failure_code: "ARROW_SERIALIZE".to_string(),
-                            event_time: rec._time,
-                            source_uri: String::new(),
-                            offset_key: off_key_str.clone(),
-                            offset_pos: idx as u64,
-                        });
-                    }
-                    for (ok, pos) in entry.offsets.iter() {
-                        dl_offsets
-                            .entry(ok.clone())
-                            .and_modify(|p| *p = (*p).max(*pos))
-                            .or_insert(*pos);
-                    }
-                    if Config::debug_enabled() {
-                        debug!(
-                            "Batch serialize invariant failed: ns={} err={} deadlettered",
-                            entry._namespace, first_err
-                        );
+            let all_indices: Vec<usize> = (0..records_vec.len()).collect();
+            let (batches, failed_indices) = bisect_serialize_indices(
+                entry.schema.clone(),
+                &records_vec,
+                &all_indices,
+            );
+
+            if failed_indices.is_empty() {
+                entry.record_batches = Some(batches);
+                if let Some(rows) = cdc_row_buf.remove(k) {
+                    if !rows.is_empty() {
+                        entry.cdc_rows = Some(rows);
                     }
                 }
+                continue;
+            }
+
+            let failed_set: std::collections::HashSet<usize> =
+                failed_indices.iter().copied().collect();
+            let success_indices: Vec<usize> = all_indices
+                .into_iter()
+                .filter(|i| !failed_set.contains(i))
+                .collect();
+
+            if !batches.is_empty() {
+                entry.record_batches = Some(batches);
+                if let Some(max_pos) = max_offset_pos_among(&records_vec, &success_indices) {
+                    set_entry_offsets_max(entry, max_pos);
+                }
+                if let Some(all_cdc) = cdc_row_buf.remove(k) {
+                    if all_cdc.len() == records_vec.len() {
+                        let filtered: Vec<_> = success_indices
+                            .iter()
+                            .map(|&i| all_cdc[i].clone())
+                            .collect();
+                        if !filtered.is_empty() {
+                            entry.cdc_rows = Some(filtered);
+                        }
+                    }
+                }
+            } else {
+                cdc_row_buf.remove(k);
+            }
+
+            let skpr_namespace = entry._namespace.clone();
+            let off_key_str = match entry.offsets.iter().next() {
+                Some((ok, _)) => format!("{}:{}", ok.namespace, ok.partition),
+                None => String::new(),
+            };
+            let arrow_err_msg =
+                "Arrow serialization invariant failed after ingest-time evolution".to_string();
+            warn!(
+                "{} (ns={}, failed={}, total={})",
+                arrow_err_msg,
+                skpr_namespace,
+                failed_indices.len(),
+                records_vec.len()
+            );
+            for &idx in &failed_indices {
+                let rec = &records_vec[idx];
+                dl_records.push(DeadletterRecord {
+                    namespace: skpr_namespace.clone(),
+                    record: rec.source.inner().to_string(),
+                    error: arrow_err_msg.clone(),
+                    failure_code: "ARROW_SERIALIZE".to_string(),
+                    event_time: rec._time,
+                    source_uri: String::new(),
+                    offset_key: off_key_str.clone(),
+                    offset_pos: rec._offset_pos,
+                });
+            }
+            merge_dl_offsets_for_records(
+                &mut dl_offsets,
+                entry,
+                &records_vec,
+                &failed_indices,
+            );
+            if Config::debug_enabled() {
+                debug!(
+                    "Serialize bisect: ns={} deadlettered={} succeeded={}",
+                    entry._namespace,
+                    failed_indices.len(),
+                    success_indices.len()
+                );
             }
         }
 
         for (k, entry) in buf.iter_mut() {
+            if entry.cdc_rows.is_some() {
+                continue;
+            }
             if let Some(rows) = cdc_row_buf.remove(k) {
                 if !rows.is_empty() {
                     entry.cdc_rows = Some(rows);

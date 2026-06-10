@@ -267,6 +267,29 @@ pub fn fast_set_value_optimized(
     }
 }
 
+/// Fast-path evolution runs on a metadata clone; only accept results whose target
+/// field already exists in live metadata so new siblings route to slow ingest.
+fn accept_fast_path_evolution(
+    input_field: &str,
+    result: &ResolvedFieldValue,
+    live: &HashMap<String, Metadata>,
+) -> bool {
+    result.field == input_field || live.contains_key(&result.field)
+}
+
+fn try_fast_path_evolution(
+    field: &str,
+    value: &Value,
+    metadata: &HashMap<String, Metadata>,
+    flatten: bool,
+) -> Option<ResolvedFieldValue> {
+    let mut meta_ev = metadata.clone();
+    match Evolution::apply_evolution_factory(field, value, &mut meta_ev, flatten) {
+        Ok(v) if accept_fast_path_evolution(field, &v, metadata) => Some(v),
+        _ => None,
+    }
+}
+
 /// Optimized version of match_scalar_value_fast that uses the DataType enum
 #[inline]
 pub fn match_scalar_value_optimized(
@@ -315,10 +338,8 @@ pub fn match_scalar_value_optimized(
                     value: Value::String(b.to_string()),
                 });
             } else if apply_evolution {
-                let mut _meta_ev = metadata.clone();
-                match Evolution::apply_evolution_factory(field, value, &mut _meta_ev, flatten) {
-                    Ok(v) => return Ok(v),
-                    Err(_) => {}
+                if let Some(v) = try_fast_path_evolution(field, value, metadata, flatten) {
+                    return Ok(v);
                 }
             }
 
@@ -345,10 +366,8 @@ pub fn match_scalar_value_optimized(
             }
 
             if apply_evolution {
-                let mut _meta_ev = metadata.clone();
-                match Evolution::apply_evolution_factory(field, value, &mut _meta_ev, flatten) {
-                    Ok(v) => return Ok(v),
-                    Err(_) => {}
+                if let Some(v) = try_fast_path_evolution(field, value, metadata, flatten) {
+                    return Ok(v);
                 }
             }
 
@@ -392,10 +411,8 @@ pub fn match_scalar_value_optimized(
             }
 
             if apply_evolution {
-                let mut _meta_ev = metadata.clone();
-                match Evolution::apply_evolution_factory(field, value, &mut _meta_ev, flatten) {
-                    Ok(v) => return Ok(v),
-                    Err(_) => {}
+                if let Some(v) = try_fast_path_evolution(field, value, metadata, flatten) {
+                    return Ok(v);
                 }
             }
 
@@ -441,10 +458,8 @@ pub fn match_scalar_value_optimized(
             }
 
             if apply_evolution {
-                let mut _meta_ev = metadata.clone();
-                match Evolution::apply_evolution_factory(field, value, &mut _meta_ev, flatten) {
-                    Ok(v) => return Ok(v),
-                    Err(_) => {}
+                if let Some(v) = try_fast_path_evolution(field, value, metadata, flatten) {
+                    return Ok(v);
                 }
             }
 
@@ -473,10 +488,8 @@ pub fn match_scalar_value_optimized(
             }
 
             if apply_evolution {
-                let mut _meta_ev = metadata.clone();
-                match Evolution::apply_evolution_factory(field, value, &mut _meta_ev, flatten) {
-                    Ok(v) => return Ok(v),
-                    Err(_) => {}
+                if let Some(v) = try_fast_path_evolution(field, value, metadata, flatten) {
+                    return Ok(v);
                 }
             }
 
@@ -501,10 +514,8 @@ pub fn match_scalar_value_optimized(
             }
 
             if apply_evolution {
-                let mut _meta_ev = metadata.clone();
-                match Evolution::apply_evolution_factory(field, value, &mut _meta_ev, flatten) {
-                    Ok(v) => return Ok(v),
-                    Err(_) => {}
+                if let Some(v) = try_fast_path_evolution(field, value, metadata, flatten) {
+                    return Ok(v);
                 }
             }
 
@@ -549,10 +560,8 @@ pub fn match_scalar_value_optimized(
             }
 
             if apply_evolution {
-                let mut _meta_ev = metadata.clone();
-                match Evolution::apply_evolution_factory(field, value, &mut _meta_ev, flatten) {
-                    Ok(v) => return Ok(v),
-                    Err(_) => {}
+                if let Some(v) = try_fast_path_evolution(field, value, metadata, flatten) {
+                    return Ok(v);
                 }
             }
 

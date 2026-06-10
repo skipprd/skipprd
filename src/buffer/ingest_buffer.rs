@@ -277,6 +277,7 @@ pub struct IngestRecord {
     pub(crate) _time: Option<i64>,
     pub(crate) source: SourceRecord,
     pub(crate) normalized: NormalizedRecord,
+    pub(crate) _offset_pos: u64,
 }
 
 pub struct IngestBufferBatch {
