@@ -1700,6 +1700,7 @@ impl Ingest {
         > = HashMap::new();
 
         let pipeline_name_cached = Config::get_pipeline_name();
+        let mut schema_hash_cache: HashMap<String, SchemaHash> = HashMap::new();
         // Helper to enqueue a single record into current buffers using latest stable schema
         let mut enqueue_record =
             |ns: &String,
@@ -1710,10 +1711,29 @@ impl Ingest {
              ok: &OffsetKey,
              pos: u64,
              cdc_meta: Option<crate::plugins::cdc::WalRowMeta>| {
-                let md_snapshot = METADATA.load();
-                let schema_hash =
-                    Ingest::load_stable_schema_hash(ns, &md_snapshot.metadata, flatten);
-                drop(md_snapshot);
+                let version = ARROW_SCHEMA_VERSION
+                    .get(ns.as_str())
+                    .map(|v| v.value().load(Ordering::Acquire))
+                    .unwrap_or(0);
+                let version_key = format!("{version}");
+                let schema_hash = if let Some(cached) = schema_hash_cache.get(ns) {
+                    if cached.hash == version_key {
+                        cached.clone()
+                    } else {
+                        let md_snapshot = METADATA.load();
+                        let sh =
+                            Ingest::load_stable_schema_hash(ns, &md_snapshot.metadata, flatten);
+                        drop(md_snapshot);
+                        schema_hash_cache.insert(ns.clone(), sh.clone());
+                        sh
+                    }
+                } else {
+                    let md_snapshot = METADATA.load();
+                    let sh = Ingest::load_stable_schema_hash(ns, &md_snapshot.metadata, flatten);
+                    drop(md_snapshot);
+                    schema_hash_cache.insert(ns.clone(), sh.clone());
+                    sh
+                };
                 let key = (
                     primary_sink_ref.clone(),
                     ns.clone(),
@@ -1812,45 +1832,39 @@ impl Ingest {
             let mut decode_line: u64 = 0;
             for record in records {
                 decode_line += 1;
-                match record.as_object() {
-                    Some(_v) => unwrapped_records.push(record),
-                    None => {
-                        match record.as_array() {
-                            Some(v) => {
-                                unwrapped_records.extend(v.iter().cloned());
-                            }
-                            None => {
-                                let line_idx = (decode_line as usize).saturating_sub(1);
-                                let line_str = ingest_batch
-                                    .data
-                                    .lines()
-                                    .nth(line_idx)
-                                    .unwrap_or("");
-                                let bad_offset_pos = ingest_batch.offset_pos_for_line(decode_line);
+                match record {
+                    Value::Object(_) => unwrapped_records.push(record),
+                    Value::Array(v) => unwrapped_records.extend(v),
+                    _ => {
+                        let line_idx = (decode_line as usize).saturating_sub(1);
+                        let line_str = ingest_batch
+                            .data
+                            .lines()
+                            .nth(line_idx)
+                            .unwrap_or("");
+                        let bad_offset_pos = ingest_batch.offset_pos_for_line(decode_line);
 
-                                dl_records.push(DeadletterRecord {
-                                    namespace: Config::get_pipeline_name(),
-                                    record: line_str.to_string(),
-                                    error: "Source data is not an object or array".to_string(),
-                                    failure_code: "INPUT_FORMAT".to_string(),
-                                    event_time: None,
-                                    source_uri: ingest_batch.source_uri.clone(),
-                                    offset_key: format!(
-                                        "{}:{}",
-                                        ingest_batch.offset_key.namespace,
-                                        ingest_batch.offset_key.partition
-                                    ),
-                                    offset_pos: bad_offset_pos,
-                                });
-                                merge_dl_offset_for_key(
-                                    &mut dl_offsets,
-                                    &ingest_batch.offset_key,
-                                    bad_offset_pos,
-                                );
-                            }
-                        }
+                        dl_records.push(DeadletterRecord {
+                            namespace: Config::get_pipeline_name(),
+                            record: line_str.to_string(),
+                            error: "Source data is not an object or array".to_string(),
+                            failure_code: "INPUT_FORMAT".to_string(),
+                            event_time: None,
+                            source_uri: ingest_batch.source_uri.clone(),
+                            offset_key: format!(
+                                "{}:{}",
+                                ingest_batch.offset_key.namespace,
+                                ingest_batch.offset_key.partition
+                            ),
+                            offset_pos: bad_offset_pos,
+                        });
+                        merge_dl_offset_for_key(
+                            &mut dl_offsets,
+                            &ingest_batch.offset_key,
+                            bad_offset_pos,
+                        );
                     }
-                };
+                }
             }
 
             if let Some(cdc_rows) = ingest_batch.cdc_rows() {
@@ -1915,24 +1929,15 @@ impl Ingest {
                         // Already normalized in `IngestBatch::new`.
                         batch_namespace_override.clone()
                     } else {
-                        storage_namespace(&{
-                            let mut namesapce_cache =
-                                PARSE_NAMESPACE_CACHE.with(|cache| cache.read().unwrap().clone());
-                            let ns = Helpers::parse_namespace_field_with_fields(
+                        storage_namespace(&PARSE_NAMESPACE_CACHE.with(|cache| {
+                            let mut namespace_cache = cache.write().unwrap();
+                            Helpers::parse_namespace_field_with_fields(
                                 &record,
                                 batch_namespace_override.clone(),
-                                &mut namesapce_cache,
+                                &mut namespace_cache,
                                 &transform_snap.namespace_fields,
-                            );
-                            if namesapce_cache
-                                != PARSE_NAMESPACE_CACHE.with(|cache| cache.read().unwrap().clone())
-                            {
-                                PARSE_NAMESPACE_CACHE.with(|cache| cache.write().unwrap().clear());
-                                PARSE_NAMESPACE_CACHE
-                                    .with(|cache| cache.write().unwrap().extend(namesapce_cache));
-                            }
-                            ns
-                        })
+                            )
+                        }))
                     };
 
                     let skpr_partition = PARTITION_ALLOWED_VALUES_CACHE.with(|cache| {
