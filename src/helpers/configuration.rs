@@ -3284,11 +3284,12 @@ data_sinks:
     #[test]
     #[serial]
     fn offset_store_partition_key_is_derived() {
-        Config::setenv("TENANT", "tenant-a");
-        Config::setenv("WORKSPACE_NAME", "workspace-b");
+        ENV_CACHE.write().clear();
+        Config::set_evncache("TENANT", "tenant-a");
+        Config::set_evncache("WORKSPACE_NAME", "workspace-b");
+        Config::set_evncache("PIPELINE_NAME", "google_analytics");
         PIPELINE_NAME.write().clear();
         PIPELINE_NAME.write().push_str("google_analytics");
-        ENV_CACHE.write().clear();
         assert_eq!(
             Config::offset_store_partition_key(),
             "tenant-a#workspace-b#google_analytics"
