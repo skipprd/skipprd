@@ -4,8 +4,14 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{RwLock, RwLockReadGuard, RwLockWriteGuard};
 use std::time::{Duration, Instant};
 
+fn lock_profiling_enabled() -> bool {
+    std::env::var("SKIPPR_LOCK_PROFILE")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+}
+
 lazy_static! {
-    static ref PROFILE_PERFORMANCE: bool = true;
+    static ref PROFILE_PERFORMANCE: bool = lock_profiling_enabled();
     static ref WAITING_ON: DashMap<String, Instant> = DashMap::new();
     pub static ref TOTAL_WAIT_TIMES: DashMap<String, AtomicU64> = DashMap::new();
 }
