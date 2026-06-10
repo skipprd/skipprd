@@ -359,11 +359,12 @@ pub fn match_scalar_value_optimized(
         }
         SkipprDataType::Integer => {
             if let Some(i) = value.as_i64() {
-                // Ensure 32-bit range
-                return Ok(ResolvedFieldValue {
-                    field: output_field_name,
-                    value: Value::Number(serde_json::Number::from(i as i32)),
-                });
+                if let Ok(i32v) = i32::try_from(i) {
+                    return Ok(ResolvedFieldValue {
+                        field: output_field_name,
+                        value: Value::Number(serde_json::Number::from(i32v)),
+                    });
+                }
             } else if let Some(s) = value.as_str() {
                 // Try parsing string as integer
                 if let Ok(i) = s.parse::<i32>() {
@@ -2099,6 +2100,34 @@ mod tests_fast_path_ingest {
         DEFAULT_NESTED_MESSAGE
             .write()
             .insert(namespace.to_string(), message);
+    }
+
+    #[test]
+    fn test_integer_i32_range_enforced() {
+        let mut metadata = HashMap::new();
+        let mut int_meta = Metadata::new().unwrap();
+        int_meta.determined_type = SkipprDataType::Integer;
+        metadata.insert("count".to_string(), int_meta);
+
+        let in_range = match_scalar_value_optimized(
+            "count",
+            &SkipprDataType::Integer,
+            &json!(42i64),
+            &metadata,
+            false,
+            false,
+        );
+        assert!(in_range.is_ok());
+
+        let overflow = match_scalar_value_optimized(
+            "count",
+            &SkipprDataType::Integer,
+            &json!(i64::from(i32::MAX) + 1),
+            &metadata,
+            false,
+            false,
+        );
+        assert!(overflow.is_err());
     }
 
     #[test]
