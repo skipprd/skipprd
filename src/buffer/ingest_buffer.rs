@@ -360,6 +360,36 @@ impl GlobalSegment {
         self.updated_at = SystemTime::now();
         (batches, offsets, cdc_meta, bytes)
     }
+
+    /// Re-merge a failed live flush back into the accumulator so data is not lost.
+    fn restore_after_failed_flush(
+        &mut self,
+        batches: HashMap<PartitionKey, Vec<RecordBatch>>,
+        offsets: HashMap<OffsetKey, u64>,
+        cdc_meta: HashMap<PartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
+        bytes: u64,
+    ) {
+        for (key, batch_vec) in batches {
+            self.batches
+                .entry(key.clone())
+                .or_insert_with(|| Vec::with_capacity(64))
+                .extend(batch_vec);
+            if let Some(rows) = cdc_meta.get(&key) {
+                self.cdc_meta
+                    .entry(key)
+                    .or_insert_with(|| Vec::with_capacity(64))
+                    .extend(rows.iter().cloned());
+            }
+        }
+        for (k, v) in offsets {
+            self.offsets
+                .entry(k)
+                .and_modify(|p| *p = (*p).max(v))
+                .or_insert(v);
+        }
+        self.bytes = self.bytes.saturating_add(bytes);
+        self.updated_at = SystemTime::now();
+    }
 }
 
 fn serialize_cdc_meta_to_blobs(
@@ -601,7 +631,7 @@ impl Buffers {
                     "Segment write failed ({}): id={} err={}",
                     context, snapshot_id, err
                 );
-                return Ok(None);
+                return Err(ArrowError::ExternalError(Box::new(err)));
             }
         };
 
@@ -680,12 +710,21 @@ impl Buffers {
                 break;
             };
 
-            let mut snapshot = snap_arc.lock().unwrap();
-            if let Some(write_result) =
-                Self::persist_snapshot_to_wal(&mut snapshot, offsets_db, "drain rotated").await?
-            {
-                uploaded_bytes += write_result.meta.total_bytes;
-                rows += write_result.total_rows;
+            let persist_result = {
+                let mut snapshot = snap_arc.lock().unwrap();
+                Self::persist_snapshot_to_wal(&mut snapshot, offsets_db, "drain rotated").await
+            };
+            match persist_result {
+                Ok(Some(write_result)) => {
+                    uploaded_bytes += write_result.meta.total_bytes;
+                    rows += write_result.total_rows;
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    let mut q = SEGMENT_SNAPSHOTS.lock().unwrap();
+                    q.push_front(snap_arc);
+                    return Err(e);
+                }
             }
         }
 
@@ -728,9 +767,16 @@ impl Buffers {
             part_meta_blobs,
         );
 
-        match Self::persist_snapshot_to_wal(&mut snapshot, offsets_db, "live flush").await? {
-            Some(result) => Ok((result.total_rows, result.meta.total_bytes)),
-            None => Ok((0, 0)),
+        match Self::persist_snapshot_to_wal(&mut snapshot, offsets_db, "live flush").await {
+            Ok(Some(result)) => Ok((result.total_rows, result.meta.total_bytes)),
+            Ok(None) => Ok((0, 0)),
+            Err(e) => {
+                let batches = std::mem::take(&mut snapshot.batches);
+                let offsets = std::mem::take(&mut snapshot.offsets);
+                let mut guard = SEGMENT_LIVE.lock().unwrap();
+                guard.restore_after_failed_flush(batches, offsets, to_flush_cdc, total_bytes);
+                Err(e)
+            }
         }
     }
 

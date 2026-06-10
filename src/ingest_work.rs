@@ -2163,7 +2163,9 @@ impl Ingest {
                     Err(err) => error!("Ingest: WAL flush returned error: {}", err),
                 }
             }
-            let _ = flush_result;
+            if let Err(err) = flush_result {
+                panic!("WAL flush failed: {err}");
+            }
         }
     }
 
