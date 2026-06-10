@@ -632,6 +632,14 @@ impl Metadata {
      * @param {string} field
      * @returns {string}
      */
+    fn expected_out_field_name(metadata: &HashMap<String, Metadata>, field: &str) -> String {
+        match metadata.get(field) {
+            Some(meta) if !meta.out_field_name.is_empty() => meta.out_field_name.clone(),
+            Some(_) => field.to_string(),
+            None => field.to_string(),
+        }
+    }
+
     pub fn get_field_out_field_name(metadata: &HashMap<String, Metadata>, field: &str) -> String {
         use std::cell::RefCell;
         use std::collections::HashMap;
@@ -641,29 +649,24 @@ impl Metadata {
             static FIELD_NAME_CACHE: RefCell<HashMap<String, String>> = RefCell::new(HashMap::new());
         }
 
-        // Check cache first
-        let cached_name = FIELD_NAME_CACHE.with(|cache| cache.borrow().get(field).cloned());
+        let out_field_name = Self::expected_out_field_name(metadata, field);
 
-        if let Some(cached) = cached_name {
-            return cached;
+        // Reject stale entries when the same field name maps differently in another namespace.
+        let cache_hit = FIELD_NAME_CACHE.with(|cache| {
+            cache
+                .borrow()
+                .get(field)
+                .map(|cached| cached == &out_field_name)
+                .unwrap_or(false)
+        });
+        if cache_hit {
+            return out_field_name;
         }
 
-        // Cache miss, perform the lookup
-        let out_field_name = match metadata.get(field) {
-            Some(metadata) => {
-                if !metadata.out_field_name.is_empty() {
-                    metadata.out_field_name.clone()
-                } else {
-                    field.to_string()
-                }
-            }
-            None => field.to_string(),
-        };
-
-        // Store result in cache
         FIELD_NAME_CACHE.with(|cache| {
-            let mut cache_ref = cache.borrow_mut();
-            cache_ref.insert(field.to_string(), out_field_name.clone());
+            cache
+                .borrow_mut()
+                .insert(field.to_string(), out_field_name.clone());
         });
 
         out_field_name
@@ -2201,6 +2204,37 @@ impl AnalyseSchema {
                 })
                 .or_insert(value);
         }
+    }
+}
+
+#[cfg(test)]
+mod field_out_field_name_cache_tests {
+    use super::*;
+
+    #[test]
+    fn cache_invalidates_when_same_field_maps_differently() {
+        let mut ns_a = HashMap::new();
+        let mut id_a = Metadata::new().unwrap();
+        id_a.out_field_name = "legacy_id".to_string();
+        ns_a.insert("id".to_string(), id_a);
+
+        let mut ns_b = HashMap::new();
+        let mut id_b = Metadata::new().unwrap();
+        id_b.out_field_name = "user_id".to_string();
+        ns_b.insert("id".to_string(), id_b);
+
+        assert_eq!(
+            Metadata::get_field_out_field_name(&ns_a, "id"),
+            "legacy_id"
+        );
+        assert_eq!(
+            Metadata::get_field_out_field_name(&ns_b, "id"),
+            "user_id"
+        );
+        assert_eq!(
+            Metadata::get_field_out_field_name(&ns_a, "id"),
+            "legacy_id"
+        );
     }
 }
 
