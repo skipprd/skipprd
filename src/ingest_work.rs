@@ -292,11 +292,19 @@ fn merge_dl_offsets_for_records(
         return;
     };
     if let Some((ok, _)) = entry.offsets.iter().next() {
-        dl_offsets
-            .entry(ok.clone())
-            .and_modify(|p| *p = (*p).max(max_pos))
-            .or_insert(max_pos);
+        merge_dl_offset_for_key(dl_offsets, ok, max_pos);
     }
+}
+
+fn merge_dl_offset_for_key(
+    dl_offsets: &mut HashMap<OffsetKey, u64>,
+    offset_key: &OffsetKey,
+    offset_pos: u64,
+) {
+    dl_offsets
+        .entry(offset_key.clone())
+        .and_modify(|p| *p = (*p).max(offset_pos))
+        .or_insert(offset_pos);
 }
 
 /// Physical metadata / warehouse table key for a source namespace.
@@ -1785,7 +1793,9 @@ impl Ingest {
 
             let mut unwrapped_records: Vec<Value> = Vec::with_capacity(records.len());
 
+            let mut decode_line: u64 = 0;
             for record in records {
+                decode_line += 1;
                 match record.as_object() {
                     Some(_v) => unwrapped_records.push(record),
                     None => {
@@ -1794,20 +1804,13 @@ impl Ingest {
                                 unwrapped_records.extend(v.iter().cloned());
                             }
                             None => {
-                                let line_no = if batch_line == 0
-                                    || batch_line > ingest_batch.data.lines().count() as u64
-                                {
-                                    1
-                                } else {
-                                    batch_line - 1
-                                };
-
-                                // deadletter
-                                let line_str = match ingest_batch.data.lines().nth(line_no as usize)
-                                {
-                                    Some(line) => line,
-                                    None => "",
-                                };
+                                let line_idx = (decode_line as usize).saturating_sub(1);
+                                let line_str = ingest_batch
+                                    .data
+                                    .lines()
+                                    .nth(line_idx)
+                                    .unwrap_or("");
+                                let bad_offset_pos = ingest_batch.offset_pos_for_line(decode_line);
 
                                 dl_records.push(DeadletterRecord {
                                     namespace: Config::get_pipeline_name(),
@@ -1821,8 +1824,13 @@ impl Ingest {
                                         ingest_batch.offset_key.namespace,
                                         ingest_batch.offset_key.partition
                                     ),
-                                    offset_pos: batch_line,
+                                    offset_pos: bad_offset_pos,
                                 });
+                                merge_dl_offset_for_key(
+                                    &mut dl_offsets,
+                                    &ingest_batch.offset_key,
+                                    bad_offset_pos,
+                                );
                             }
                         }
                     }
@@ -1854,6 +1862,7 @@ impl Ingest {
                         None => "",
                     };
 
+                    let empty_offset_pos = ingest_batch.offset_pos_for_line(batch_line);
                     dl_records.push(DeadletterRecord {
                         namespace: Config::get_pipeline_name(),
                         record: line_str.to_string(),
@@ -1865,8 +1874,13 @@ impl Ingest {
                             "{}:{}",
                             ingest_batch.offset_key.namespace, ingest_batch.offset_key.partition
                         ),
-                        offset_pos: batch_line,
+                        offset_pos: empty_offset_pos,
                     });
+                    merge_dl_offset_for_key(
+                        &mut dl_offsets,
+                        &ingest_batch.offset_key,
+                        empty_offset_pos,
+                    );
 
                     continue;
                 }
@@ -1973,8 +1987,13 @@ impl Ingest {
                                             ingest_batch.offset_key.namespace,
                                             ingest_batch.offset_key.partition
                                         ),
-                                        offset_pos: batch_line,
+                                        offset_pos,
                                     });
+                                    merge_dl_offset_for_key(
+                                        &mut dl_offsets,
+                                        &ingest_batch.offset_key,
+                                        offset_pos,
+                                    );
                                     Value::Null
                                 }
                             }
