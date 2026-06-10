@@ -728,6 +728,19 @@ impl Offsets {
         old_ivec
     }
 
+    /// Read the durable offset tuple for a partition with a single store lookup.
+    pub fn snapshot_value(&self, key: &OffsetKey) -> Option<OffsetValue> {
+        let mut backing_bytes = self.get(key)?;
+        let layout: LayoutVerified<&mut [u8], OffsetValue> =
+            LayoutVerified::new_unaligned(&mut *backing_bytes).expect("bytes do not fit schema");
+        let value: &OffsetValue = layout.into_ref();
+        Some(OffsetValue {
+            filesize: value.filesize,
+            line: value.line,
+            closed: value.closed,
+        })
+    }
+
     pub fn get(&self, key: &OffsetKey) -> Option<IVec> {
         #[cfg(feature = "offset-store-dynamodb")]
         if let Some(dynamo) = self.dynamo_store() {

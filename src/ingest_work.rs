@@ -3,7 +3,7 @@ use crate::discover::{
     AnalyseSchema, Metadata, OutputMetadata, PipelineMetadata, NUM_ANALYSED_RECORDS,
 };
 use crate::helpers::configuration::Config;
-use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
+use crate::helpers::offsets::{OffsetKey, OffsetTypes, OffsetValue, Offsets};
 use crate::helpers::Helpers;
 use crate::ingest::ingest::ingest;
 use crate::runtime_plugins::protocol::{RuntimeExecutionMode, RuntimeRawIngestBatch};
@@ -305,6 +305,29 @@ fn merge_dl_offset_for_key(
         .entry(offset_key.clone())
         .and_modify(|p| *p = (*p).max(offset_pos))
         .or_insert(offset_pos);
+}
+
+/// Whether a record at `offset_pos` should be ingested given one offset snapshot.
+/// Immutable inputs rely on `Closed`; line positions apply only to CDC or explicit `offset_pos`.
+fn should_ingest_at_offset(
+    snapshot: Option<&OffsetValue>,
+    is_cdc_batch: bool,
+    track_position: bool,
+    offset_pos: u64,
+) -> bool {
+    if is_cdc_batch {
+        return true;
+    }
+    let Some(snap) = snapshot else {
+        return true;
+    };
+    if snap.closed.get() != 0 {
+        return false;
+    }
+    if track_position && snap.line.get() >= offset_pos {
+        return false;
+    }
+    true
 }
 
 /// Physical metadata / warehouse table key for a source namespace.
@@ -1743,10 +1766,10 @@ impl Ingest {
                 .clone()
                 .unwrap_or_else(|| pipeline_name_cached.clone());
 
-            let has_offsets =
-                offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Closed, 0);
-            let current_line_offset =
-                offset_db_clone.validate(&ingest_batch.offset_key, OffsetTypes::Position, 0);
+            let offset_snapshot =
+                offset_db_clone.snapshot_value(&ingest_batch.offset_key);
+            let is_cdc_batch = ingest_batch.cdc_rows().is_some();
+            let track_position = is_cdc_batch || ingest_batch.offset_pos.is_some();
 
             let mut records: Vec<Value> = match decode_records(format, &ingest_batch.data) {
                 Ok(records) => records,
@@ -1887,19 +1910,12 @@ impl Ingest {
 
                 let offset_pos = ingest_batch.offset_pos_for_line(batch_line);
 
-                let is_cdc_batch = ingest_batch.cdc_rows().is_some();
-
-                if is_cdc_batch
-                    || has_offsets.is_none()
-                    || current_line_offset.is_none()
-                    || (Some(true) == has_offsets
-                        && Some(true)
-                            == offset_db_clone.validate(
-                                &ingest_batch.offset_key,
-                                OffsetTypes::Position,
-                                offset_pos,
-                            ))
-                {
+                if should_ingest_at_offset(
+                    offset_snapshot.as_ref(),
+                    is_cdc_batch,
+                    track_position,
+                    offset_pos,
+                ) {
                     i += 1;
 
                     let skpr_namespace = if ingest_batch.namespace.is_some() {
@@ -2486,6 +2502,45 @@ mod empty_ingest_tasks_tests {
         let output = Arc::new(noop);
 
         ingest.ingest_file(&empty_tasks, &offsets, output);
+    }
+}
+
+#[cfg(test)]
+mod offset_gate_tests {
+    use super::*;
+    use zerocopy::U64;
+
+    fn snap(line: u64, closed: u64) -> OffsetValue {
+        OffsetValue {
+            filesize: U64::new(0),
+            line: U64::new(line),
+            closed: U64::new(closed),
+        }
+    }
+
+    #[test]
+    fn closed_partition_skips_non_cdc() {
+        let snap = snap(0, 1);
+        assert!(!should_ingest_at_offset(Some(&snap), false, false, 1));
+    }
+
+    #[test]
+    fn cdc_ignores_closed_gate() {
+        let snap = snap(0, 1);
+        assert!(should_ingest_at_offset(Some(&snap), true, true, 1));
+    }
+
+    #[test]
+    fn position_tracked_when_explicit_offset_pos() {
+        let snap = snap(10, 0);
+        assert!(!should_ingest_at_offset(Some(&snap), false, true, 5));
+        assert!(should_ingest_at_offset(Some(&snap), false, true, 11));
+    }
+
+    #[test]
+    fn immutable_sources_ignore_line_without_track_position() {
+        let snap = snap(10, 0);
+        assert!(should_ingest_at_offset(Some(&snap), false, false, 1));
     }
 }
 
