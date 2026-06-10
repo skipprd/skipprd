@@ -2382,9 +2382,7 @@ impl Ingest {
         if did_update_schema {
             if let Some(ns_meta) = metadata.get(skpr_namespace) {
                 let template = create_default_nested_message(&ns_meta.fields);
-                DEFAULT_NESTED_MESSAGE
-                    .write()
-                    .insert(skpr_namespace.to_string(), template);
+                DEFAULT_NESTED_MESSAGE.insert(skpr_namespace.to_string(), Arc::new(template));
             }
         }
 
@@ -2466,9 +2464,7 @@ impl Ingest {
         if did_update_schema {
             if let Some(ns_meta) = metadata.get(skpr_namespace) {
                 let template = create_default_nested_message(&ns_meta.fields);
-                DEFAULT_NESTED_MESSAGE
-                    .write()
-                    .insert(skpr_namespace.to_string(), template);
+                DEFAULT_NESTED_MESSAGE.insert(skpr_namespace.to_string(), Arc::new(template));
             }
         }
 

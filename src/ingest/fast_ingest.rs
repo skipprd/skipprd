@@ -11,8 +11,8 @@ use crate::discover::date_formats::DateFormats;
 use crate::discover::evolution::Evolution;
 use crate::discover::{AnalyseSchema, Metadata, SkipprDataType};
 
-use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::helpers::Helpers;
+use dashmap::DashMap;
 use crate::ingest::ingest::ResolvedFieldValue;
 
 #[allow(unused_imports)]
@@ -20,13 +20,8 @@ use crate::discover::DateCandidate;
 #[allow(unused_imports)]
 use chrono::{DateTime, FixedOffset, NaiveDateTime, Utc};
 
-pub static DEFAULT_NESTED_MESSAGE: Lazy<Arc<TimedRwLock<HashMap<String, Value>>>> =
-    Lazy::new(|| {
-        Arc::new(TimedRwLock::new(
-            "default_message".to_string(),
-            HashMap::new(),
-        ))
-    });
+pub static DEFAULT_NESTED_MESSAGE: Lazy<Arc<DashMap<String, Arc<Value>>>> =
+    Lazy::new(|| Arc::new(DashMap::new()));
 
 pub fn create_default_nested_message(metadata: &HashMap<String, Metadata>) -> Value {
     let mut message = Value::Object(Map::new());
@@ -111,8 +106,8 @@ pub fn fast_path_ingest(
     flatten: bool,
 ) -> Result<Value, Box<dyn Error>> {
     // Get the template message once
-    let mut _message = match DEFAULT_NESTED_MESSAGE.read().get(namespace) {
-        Some(m) => m.clone(),
+    let mut _message = match DEFAULT_NESTED_MESSAGE.get(namespace) {
+        Some(m) => m.as_ref().clone(),
         None => {
             return Err("No default message template found".into());
         }
@@ -283,6 +278,12 @@ fn try_fast_path_evolution(
     metadata: &HashMap<String, Metadata>,
     flatten: bool,
 ) -> Option<ResolvedFieldValue> {
+    let has_evolution = metadata
+        .get(field)
+        .is_some_and(|m| !m.evolution.is_empty());
+    if !has_evolution {
+        return None;
+    }
     let mut meta_ev = metadata.clone();
     match Evolution::apply_evolution_factory(field, value, &mut meta_ev, flatten) {
         Ok(v) if accept_fast_path_evolution(field, &v, metadata) => Some(v),
@@ -2106,9 +2107,7 @@ mod tests_fast_path_ingest {
             "tags": []
         });
 
-        DEFAULT_NESTED_MESSAGE
-            .write()
-            .insert(namespace.to_string(), message);
+        DEFAULT_NESTED_MESSAGE.insert(namespace.to_string(), Arc::new(message));
     }
 
     #[test]

@@ -60,8 +60,8 @@ pub fn ingest(
     // let mut message: Value = Value::Null;
     let mut message: Value;
     {
-        message = match DEFAULT_NESTED_MESSAGE.read().get(namespace) {
-            Some(m) => m.clone(),
+        message = match DEFAULT_NESTED_MESSAGE.get(namespace) {
+            Some(m) => m.as_ref().clone(),
             None => {
                 debug!(
                     "ingest: no DEFAULT_NESTED_MESSAGE for ns={}, starting with empty object",
