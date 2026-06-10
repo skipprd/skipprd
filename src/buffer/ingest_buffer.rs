@@ -501,8 +501,11 @@ impl Buffers {
                 || last_update_elapsed >= time_threshold)
                 && seg.bytes > 0;
             if should_rotate {
+                let rotated_bytes = seg.bytes;
                 let (batches, offsets, cdc_meta, total_bytes) = seg.take();
                 seg.flushed_at = SystemTime::now();
+                drop(seg);
+
                 let mut meta: HashMap<PartitionKey, SegmentPartitionMeta> = HashMap::new();
                 for (k, v) in batches.iter() {
                     let bytes_estimate = v.iter().map(|b| b.get_array_memory_size() as u64).sum();
@@ -525,7 +528,7 @@ impl Buffers {
                 );
                 if Config::log_wal_enabled() || Config::debug_enabled() {
                     let part_count = snapshot.meta.len();
-                    let reason = if seg.bytes >= byte_threshold {
+                    let reason = if rotated_bytes >= byte_threshold {
                         "size"
                     } else {
                         "time"
@@ -538,6 +541,7 @@ impl Buffers {
                 if let Ok(mut q) = SEGMENT_SNAPSHOTS.lock() {
                     q.push_back(Arc::new(std::sync::Mutex::new(snapshot)));
                 }
+                seg = SEGMENT_LIVE.lock().unwrap();
             }
             seg.add(
                 key,

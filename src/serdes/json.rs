@@ -31,9 +31,7 @@ impl SerdeJson {
     }
 
     pub fn deserialize(record: &str) -> Vec<Value> {
-        // Pre-allocate with a reasonable capacity
-        let estimated_size = (record.lines().count() + 1).max(4);
-        let mut messages: Vec<Value> = Vec::with_capacity(estimated_size);
+        let mut messages: Vec<Value> = Vec::with_capacity(16);
 
         // Use the optimized parser
         let enable_sq = Self::is_single_quote_parsing_enabled();

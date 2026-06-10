@@ -339,14 +339,17 @@ pub fn storage_namespace(namespace: &str) -> String {
     Helpers::clean_field_name(namespace.to_string())
 }
 
+static STORAGE_PATH_NON_ALNUM: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r"[^a-z0-9_]+").expect("valid regex"));
+static STORAGE_PATH_COLLAPSE: Lazy<regex::Regex> =
+    Lazy::new(|| regex::Regex::new(r"_+").expect("valid regex"));
+
 /// Sanitize a path token (partition value or simple key) without field-name rules
 /// (no leading-digit strip, no `item_` prefix for numeric-only tokens).
 fn storage_path_token(raw: &str) -> String {
     let lower = raw.to_lowercase();
-    let re = regex::Regex::new(r"[^a-z0-9_]+").expect("valid regex");
-    let collapsed = regex::Regex::new(r"_+").expect("valid regex");
-    let out = re.replace_all(&lower, "_");
-    collapsed
+    let out = STORAGE_PATH_NON_ALNUM.replace_all(&lower, "_");
+    STORAGE_PATH_COLLAPSE
         .replace_all(out.as_ref(), "_")
         .trim_matches('_')
         .to_string()
@@ -622,7 +625,6 @@ pub struct Ingest {
     /// Sum of `IngestBatch::bytes` for tasks not yet signaled complete on `tx`
     /// (queued or running). Paired with completion messages on `tx`.
     outstanding_bytes: Arc<AtomicUsize>,
-    schema_hashes: DashMap<String, SchemaHash>,
     analyse_schema: AnalyseSchema,
     throughput_window: Arc<RwLock<VecDeque<(Instant, u64)>>>,
     throughput_lock: Arc<RwLock<()>>,
@@ -1149,8 +1151,6 @@ impl Ingest {
                         let tx = tx_clone.clone();
                         let offset_db_clone = ingest_task.offset_db.clone();
                         let datas_clone = ingest_task.datas.clone();
-                        let mut schema_hashes = DashMap::new();
-
                         let shared_output_clone = ingest_task.shared_output.clone();
 
                         // Increment active count before spawning
@@ -1169,7 +1169,6 @@ impl Ingest {
                                     Ingest::process_batch(
                                         &datas_clone,
                                         &offset_db_clone,
-                                        &mut schema_hashes,
                                         queued_handle,
                                         shared_output_clone,
                                     );
@@ -1184,23 +1183,6 @@ impl Ingest {
             }
             debug!("Monitoring thread exited");
         });
-
-        // Schema hashes
-        let schema_hashes = DashMap::new();
-
-        for item in ARROW_SCHEMA.iter() {
-            let namespace = item.key().clone();
-            let schema: SchemaRef = Arc::clone(&item.value().load());
-            let version = ARROW_SCHEMA_VERSION
-                .get(&namespace)
-                .map(|v| v.value().load(Ordering::Relaxed))
-                .unwrap_or(0);
-            let schema_hash = SchemaHash {
-                schema: Arc::clone(&schema),
-                hash: format!("{}", version),
-            };
-            schema_hashes.insert(namespace, schema_hash);
-        }
 
         let analyse_schema: AnalyseSchema = AnalyseSchema { i: 0 };
         let throughput_window = Arc::new(RwLock::new(VecDeque::with_capacity(100)));
@@ -1219,7 +1201,6 @@ impl Ingest {
             active_count,
             queue_length,
             outstanding_bytes,
-            schema_hashes,
             analyse_schema,
             throughput_window,
             throughput_lock,
@@ -1459,7 +1440,6 @@ impl Ingest {
                     let tx = self.tx.clone();
                     let offset_db_clone = offset_db.clone();
                     let datas_clone = datas.datas.clone();
-                    let mut schema_hashes = self.schema_hashes.clone();
                     let handle = runtime::Handle::current();
                     let shared_output_clone = shared_output.clone();
                     let completed_bytes: u64 = datas_clone.iter().map(|b| b.bytes as u64).sum();
@@ -1481,7 +1461,6 @@ impl Ingest {
                             Ingest::process_batch(
                                 &datas_clone,
                                 &offset_db_clone,
-                                &mut schema_hashes,
                                 handle,
                                 shared_output_clone,
                             );
@@ -1605,7 +1584,6 @@ impl Ingest {
     fn process_batch(
         datas: &Arc<Vec<IngestBatch>>,
         offset_db_clone: &Arc<Offsets>,
-        _schema_hashes: &mut DashMap<String, SchemaHash>,
         handle: runtime::Handle,
         shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) {

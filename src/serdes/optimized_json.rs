@@ -36,6 +36,19 @@ impl OptimizedJsonParser {
 
     /// Parse JSON with optimized handling for special cases
     pub fn parse(&self, input: &str) -> Vec<Value> {
+        let trimmed = input.trim();
+
+        // NDJSON fast path: skip the whole-payload parse that always fails for multi-line inputs.
+        if !self.needs_processing(input)
+            && trimmed.contains('\n')
+            && !trimmed.starts_with('[')
+        {
+            let result = self.parse_line_by_line(input);
+            if !result.is_empty() {
+                return result;
+            }
+        }
+
         // First try standard parsing
         match serde_json::from_str::<Value>(input) {
             Ok(Value::Array(values)) => return values,
