@@ -53,7 +53,10 @@ jobs:
             fi
           elif [[ "${{ startsWith(github.ref, 'refs/tags/') }}" == "true" ]]; then
             tag="${{ github.ref_name }}"
-            if [[ "$tag" != test* ]] && [[ "$tag" != *-full ]]; then
+            # Full CI: scratch tags (test*), explicit -full suffix, or minor releases (x.y.0).
+            if [[ "$tag" == test* ]] || [[ "$tag" == *-full ]] || [[ "$tag" =~ ^[0-9]+\.[0-9]+\.0$ ]]; then
+              fast=false
+            else
               fast=true
             fi
           fi
