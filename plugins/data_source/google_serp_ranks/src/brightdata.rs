@@ -72,57 +72,101 @@ impl BrightDataClient {
         } else {
             SerpDevice::Desktop
         };
-        let search_url = build_search_url(&job.keyword, &job.country, &job.language, device, 0);
-        let search_url_hash = hash_search_url(&search_url);
+        let page_starts = page_starts_for_rescan(job.hint_last_position, job.max_depth);
+        let page_count = page_starts.len();
+        let mut merged: Option<WorkerJobResult> = None;
+        let mut first_hash: Option<String> = None;
+        let mut pages_fetched = 0u32;
 
-        info!(
-            keyword = %job.keyword,
-            zone = %self.zone,
-            search_url = %search_url,
-            "Bright Data SERP: requesting parsed results"
-        );
+        for page_start in page_starts {
+            let search_url =
+                build_search_url(&job.keyword, &job.country, &job.language, device, page_start);
+            let search_url_hash = hash_search_url(&search_url);
+            if first_hash.is_none() {
+                first_hash = Some(search_url_hash.clone());
+            }
 
-        let body = serde_json::json!({
-            "zone": self.zone,
-            "url": search_url,
-            "format": "raw",
-            "data_format": "parsed_light"
-        });
+            info!(
+                keyword = %job.keyword,
+                zone = %self.zone,
+                page_start,
+                search_url = %search_url,
+                "Bright Data SERP: requesting parsed results"
+            );
 
-        let endpoint = format!("{}/request", self.api_base.trim_end_matches('/'));
-        let response = self
-            .http
-            .post(&endpoint)
-            .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
-            .header(CONTENT_TYPE, "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(std::io::Error::other)?;
+            let body = serde_json::json!({
+                "zone": self.zone,
+                "url": search_url,
+                "format": "raw",
+                "data_format": "parsed_light"
+            });
 
-        let status = response.status();
-        let raw_text = response.text().await.map_err(std::io::Error::other)?;
+            let endpoint = format!("{}/request", self.api_base.trim_end_matches('/'));
+            let response = self
+                .http
+                .post(&endpoint)
+                .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
+                .header(CONTENT_TYPE, "application/json")
+                .json(&body)
+                .send()
+                .await
+                .map_err(std::io::Error::other)?;
 
-        if !status.is_success() {
-            return Ok(error_result(
+            let status = response.status();
+            let raw_text = response.text().await.map_err(std::io::Error::other)?;
+
+            if !status.is_success() {
+                return Ok(error_result(
+                    job,
+                    first_hash.unwrap_or(search_url_hash),
+                    "BRIGHTDATA_HTTP_ERROR",
+                    format!("Bright Data HTTP {}: {}", status, truncate(&raw_text, 500)),
+                ));
+            }
+
+            let parsed = parse_response_payload(&raw_text)?;
+            if let Some(reason) = detect_blocked(&parsed, &raw_text) {
+                return Ok(blocked_result(
+                    job,
+                    first_hash.unwrap_or(search_url_hash),
+                    reason,
+                    &parsed,
+                    pages_fetched + 1,
+                ));
+            }
+
+            let page_result = build_success_result(
                 job,
                 search_url_hash,
-                "BRIGHTDATA_HTTP_ERROR",
-                format!("Bright Data HTTP {}: {}", status, truncate(&raw_text, 500)),
-            ));
+                &parsed,
+                &self.config,
+                page_start,
+            );
+            pages_fetched += 1;
+            merged = Some(merge_page_results(merged.take(), page_result, job));
+
+            if merged
+                .as_ref()
+                .is_some_and(|result| should_stop_pagination(job, result))
+            {
+                break;
+            }
+
+            if organic_entries(&parsed).is_empty() {
+                break;
+            }
+
+            if pages_fetched < page_count as u32 {
+                tokio::time::sleep(Duration::from_millis(self.config.min_query_interval_ms)).await;
+            }
         }
 
-        let parsed = parse_response_payload(&raw_text)?;
-        if let Some(reason) = detect_blocked(&parsed, &raw_text) {
-            return Ok(blocked_result(job, search_url_hash, reason, &parsed));
-        }
-
-        Ok(build_success_result(
+        Ok(merged.unwrap_or_else(|| error_result(
             job,
-            search_url_hash,
-            &parsed,
-            &self.config,
-        ))
+            first_hash.unwrap_or_else(|| "sha256:empty".into()),
+            "BRIGHTDATA_EMPTY",
+            "No SERP pages fetched".into(),
+        )))
     }
 
     pub async fn throttle_delay(&self) {
@@ -269,11 +313,81 @@ fn row_snippet(row: &BrightOrganicRow) -> Option<String> {
     row.description.clone().or_else(|| row.snippet.clone())
 }
 
-fn row_position(row: &BrightOrganicRow, index: usize) -> u32 {
+fn row_position(row: &BrightOrganicRow, index: usize, page_start: u32) -> u32 {
     row.global_rank
         .or(row.rank)
         .or(row.position)
-        .unwrap_or((index + 1) as u32)
+        .unwrap_or(page_start + (index as u32) + 1)
+}
+
+fn page_starts_for_rescan(last_position: Option<u32>, max_depth: u32) -> Vec<u32> {
+    let max_pages = ((max_depth as usize + 9) / 10).clamp(1, 10);
+    let linear: Vec<u32> = (0..max_pages as u32).map(|page| page * 10).collect();
+    let Some(position) = last_position.filter(|value| *value > 0) else {
+        return linear;
+    };
+    let expected = ((position.saturating_sub(1)) / 10) * 10;
+    let mut ordered = vec![expected];
+    for step in 1..max_pages {
+        if ordered.len() >= 10 {
+            break;
+        }
+        let lower = expected.saturating_sub(step as u32 * 10);
+        if lower != expected && !ordered.contains(&lower) {
+            ordered.push(lower);
+        }
+        let upper = expected + (step as u32) * 10;
+        if upper < max_pages as u32 * 10 && !ordered.contains(&upper) {
+            ordered.push(upper);
+        }
+    }
+    for start in linear {
+        if !ordered.contains(&start) {
+            ordered.push(start);
+        }
+    }
+    ordered.sort();
+    ordered.into_iter().take(10).collect()
+}
+
+fn should_stop_pagination(job: &WorkerJobRequest, result: &WorkerJobResult) -> bool {
+    if job.stop_after_first_target_match && result.target_matches.iter().any(|row| row.found) {
+        return true;
+    }
+    result.results_inspected >= job.max_depth
+}
+
+fn merge_page_results(
+    prior: Option<WorkerJobResult>,
+    page: WorkerJobResult,
+    job: &WorkerJobRequest,
+) -> WorkerJobResult {
+    let Some(mut merged) = prior else {
+        return page;
+    };
+    merged.pages_fetched = merged.pages_fetched.saturating_add(page.pages_fetched);
+    merged.results_inspected = merged.results_inspected.saturating_add(page.results_inspected);
+    if job.capture_results {
+        merged.organic_results.extend(page.organic_results);
+    }
+    for (index, target) in merged.target_matches.iter_mut().enumerate() {
+        let page_match = page.target_matches.get(index);
+        if let Some(candidate) = page_match {
+            if !target.found && candidate.found {
+                *target = candidate.clone();
+            } else if target.found
+                && candidate.found
+                && candidate.position.unwrap_or(u32::MAX) < target.position.unwrap_or(u32::MAX)
+            {
+                *target = candidate.clone();
+            }
+        }
+    }
+    merged.status = page.status;
+    merged.blocked_reason = page.blocked_reason;
+    merged.ok = merged.ok && page.ok;
+    merged.error = page.error.or(merged.error);
+    merged
 }
 
 fn build_success_result(
@@ -281,6 +395,7 @@ fn build_success_result(
     search_url_hash: String,
     parsed: &Value,
     config: &DataSourceGoogleSerpRanksPluginConfig,
+    page_start: u32,
 ) -> WorkerJobResult {
     let entries = organic_entries(parsed);
     let max_depth = job.max_depth as usize;
@@ -307,7 +422,7 @@ fn build_success_result(
         if domain.is_empty() {
             continue;
         }
-        let position = row_position(entry, idx);
+        let position = row_position(entry, idx, page_start);
         if job.capture_results {
             organic_results.push(OrganicResultRow {
                 position,
@@ -315,7 +430,7 @@ fn build_success_result(
                 url: url.clone(),
                 domain: domain.clone(),
                 snippet: row_snippet(entry),
-                page_start: 0,
+                page_start,
             });
         }
 
@@ -327,7 +442,7 @@ fn build_success_result(
                         slot.matched_url = Some(url.clone());
                         slot.matched_domain = Some(domain.clone());
                         slot.position = Some(position);
-                        slot.page_start = Some(0);
+                        slot.page_start = Some(page_start);
                     }
                 }
             }
@@ -359,6 +474,7 @@ fn blocked_result(
     search_url_hash: String,
     reason: String,
     parsed: &Value,
+    pages_fetched: u32,
 ) -> WorkerJobResult {
     let entries = organic_entries(parsed);
     WorkerJobResult {
@@ -369,7 +485,7 @@ fn blocked_result(
         organic_results: vec![],
         target_matches: vec![],
         results_inspected: entries.len() as u32,
-        pages_fetched: 1,
+        pages_fetched,
         search_url_hash: Some(search_url_hash),
         error: None,
     }
@@ -454,6 +570,8 @@ mod tests {
             capture_results: true,
             navigation_timeout_ms: 45_000,
             user_agent: None,
+            hint_last_position: None,
+            hint_last_page_start: None,
         };
         let parsed: Value = serde_json::from_str(
             r#"{"organic":[{"link":"https://www.example.com/","title":"Ex","global_rank":2}]}"#,
@@ -481,7 +599,7 @@ mod tests {
             brightdata_zone: Some("serp_api1".into()),
             brightdata_api_base: None,
         };
-        let result = build_success_result(&job, "sha256:test".into(), &parsed, &cfg);
+        let result = build_success_result(&job, "sha256:test".into(), &parsed, &cfg, 0);
         assert_eq!(result.status, "ok");
         assert!(result.target_matches[0].found);
         assert_eq!(result.target_matches[0].position, Some(2));

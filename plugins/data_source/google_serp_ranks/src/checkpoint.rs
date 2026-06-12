@@ -3,7 +3,7 @@ use skippr_runtime_sdk::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, 
 use skippr_runtime_sdk::plugins::SourceSyncContext;
 use skippr_runtime_sdk::source_compat::load_checkpoint_payload;
 
-pub const CHECKPOINT_PAYLOAD_VERSION: u32 = 1;
+pub const CHECKPOINT_PAYLOAD_VERSION: u32 = 2;
 const KEY_PREFIX: &str = "google_serp_ranks:query";
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -18,6 +18,10 @@ pub enum QueryTerminalStatus {
 pub struct QueryCheckpoint {
     pub run_date: String,
     pub status: QueryTerminalStatus,
+    #[serde(default)]
+    pub last_position: Option<u32>,
+    #[serde(default)]
+    pub last_page_start: Option<u32>,
 }
 
 pub fn query_checkpoint_key(keyword: &str, country: &str, language: &str, device: &str) -> String {
@@ -77,6 +81,8 @@ mod tests {
         let cp = QueryCheckpoint {
             run_date: "2026-05-30".into(),
             status: QueryTerminalStatus::Completed,
+            last_position: None,
+            last_page_start: None,
         };
         assert!(should_skip_query_today(Some(&cp), "2026-05-30", false));
         assert!(!should_skip_query_today(Some(&cp), "2026-05-31", false));
@@ -96,6 +102,8 @@ mod tests {
         let cp = QueryCheckpoint {
             run_date: "2026-05-30".into(),
             status: QueryTerminalStatus::Blocked,
+            last_position: None,
+            last_page_start: None,
         };
         let json = serde_json::to_string(&cp).unwrap();
         let decoded: QueryCheckpoint = serde_json::from_str(&json).unwrap();

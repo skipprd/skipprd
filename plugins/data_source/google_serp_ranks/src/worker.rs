@@ -22,6 +22,10 @@ pub struct WorkerJobRequest {
     pub navigation_timeout_ms: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub user_agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint_last_position: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hint_last_page_start: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -70,6 +74,7 @@ pub fn build_job_request(
     keyword: &str,
     max_depth: u32,
     targets: Vec<String>,
+    prior: Option<&crate::checkpoint::QueryCheckpoint>,
 ) -> WorkerJobRequest {
     WorkerJobRequest {
         job_id: Uuid::new_v4().to_string(),
@@ -83,6 +88,8 @@ pub fn build_job_request(
         capture_results: config.capture_results,
         navigation_timeout_ms: config.navigation_timeout_ms,
         user_agent: config.user_agent.clone(),
+        hint_last_position: prior.and_then(|cp| cp.last_position),
+        hint_last_page_start: prior.and_then(|cp| cp.last_page_start),
     }
 }
 
@@ -277,6 +284,7 @@ mod tests {
             "no-such-fixture-keyword-xyz",
             10,
             vec!["x.com".into()],
+            None,
         );
         let err = client.run_job(&job).await.unwrap_err();
         assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
@@ -308,7 +316,7 @@ mod tests {
             brightdata_api_base: None,
         };
         cfg.device = SerpDevice::Mobile;
-        let job = build_job_request(&cfg, "kw", 10, vec!["example.com".into()]);
+        let job = build_job_request(&cfg, "kw", 10, vec!["example.com".into()], None);
         assert_eq!(job.device, "mobile");
     }
 }

@@ -229,43 +229,53 @@ impl DataSource for DataSourceGoogleSerpRanksPlugin {
         let mut queries_run = 0u32;
 
         for keyword in &keywords {
-            if !discover {
-                let prior = load_query_checkpoint(
+            let prior = if discover {
+                None
+            } else {
+                load_query_checkpoint(
                     ctx.as_ref(),
                     keyword,
                     &self.config.country,
                     &self.config.language,
                     self.config.device.as_str(),
-                );
-                if should_skip_query_today(
+                )
+            };
+            if !discover
+                && should_skip_query_today(
                     prior.as_ref(),
                     &run_date,
                     self.config.force_refresh_today,
-                ) {
-                    info!(keyword = %keyword, "Google SERP: skipping query already checked today");
-                    run_rows.push(self.run_daily_row(
-                        &run_date,
-                        keyword,
-                        &WorkerJobResult {
-                            job_id: String::new(),
-                            ok: true,
-                            status: "skipped".into(),
-                            blocked_reason: None,
-                            organic_results: vec![],
-                            target_matches: vec![],
-                            results_inspected: 0,
-                            pages_fetched: 0,
-                            search_url_hash: None,
-                            error: None,
-                        },
-                        0,
-                        true,
-                    ));
-                    continue;
-                }
+                )
+            {
+                info!(keyword = %keyword, "Google SERP: skipping query already checked today");
+                run_rows.push(self.run_daily_row(
+                    &run_date,
+                    keyword,
+                    &WorkerJobResult {
+                        job_id: String::new(),
+                        ok: true,
+                        status: "skipped".into(),
+                        blocked_reason: None,
+                        organic_results: vec![],
+                        target_matches: vec![],
+                        results_inspected: 0,
+                        pages_fetched: 0,
+                        search_url_hash: None,
+                        error: None,
+                    },
+                    0,
+                    true,
+                ));
+                continue;
             }
 
-            let job = build_job_request(&self.config, keyword, max_depth, targets.clone());
+            let job = build_job_request(
+                &self.config,
+                keyword,
+                max_depth,
+                targets.clone(),
+                prior.as_ref(),
+            );
             let started = Instant::now();
             info!(
                 keyword = %keyword,
@@ -294,9 +304,22 @@ impl DataSource for DataSourceGoogleSerpRanksPlugin {
             queries_run += 1;
 
             if !discover {
+                let best_position = result
+                    .target_matches
+                    .iter()
+                    .filter_map(|row| row.position)
+                    .min();
+                let best_page_start = result
+                    .target_matches
+                    .iter()
+                    .filter(|row| row.found)
+                    .filter_map(|row| row.page_start)
+                    .min();
                 let checkpoint = QueryCheckpoint {
                     run_date: run_date.clone(),
                     status: Self::terminal_status(&result),
+                    last_position: best_position,
+                    last_page_start: best_page_start,
                 };
                 store_query_checkpoint(
                     ctx.as_ref(),
@@ -534,6 +557,8 @@ mod tests {
             &QueryCheckpoint {
                 run_date: run_date.clone(),
                 status: QueryTerminalStatus::Completed,
+                last_position: None,
+                last_page_start: None,
             },
         )
         .expect("seed checkpoint");
@@ -568,6 +593,8 @@ mod tests {
             &QueryCheckpoint {
                 run_date: run_date_today(),
                 status: QueryTerminalStatus::Completed,
+                last_position: None,
+                last_page_start: None,
             },
         )
         .expect("seed checkpoint");
