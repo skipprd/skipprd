@@ -93,6 +93,32 @@ struct SlowIngestTask {
 static SLOW_INGEST_TX: once_cell::sync::OnceCell<mpsc::Sender<SlowIngestTask>> =
     once_cell::sync::OnceCell::new();
 
+/// Create an ingest thread pool, backing off thread count when the OS returns EAGAIN.
+fn build_ingest_thread_pool(requested: usize) -> (ThreadPool, usize) {
+    let requested = requested.max(1);
+    let mut threads = requested;
+    loop {
+        match std::panic::catch_unwind(|| ThreadPool::new(threads)) {
+            Ok(pool) => {
+                if threads != requested {
+                    warn!(
+                        "Reduced ingest thread pool from {requested} to {threads} after thread spawn failure (EAGAIN)"
+                    );
+                }
+                return (pool, threads);
+            }
+            Err(_) => {
+                if threads <= 1 {
+                    panic!(
+                        "Failed to create ingest thread pool even with 1 thread (os error 11 / EAGAIN)"
+                    );
+                }
+                threads = (threads / 2).max(1);
+            }
+        }
+    }
+}
+
 fn ensure_slow_ingest_worker() {
     if SLOW_INGEST_TX.get().is_some() {
         return;
@@ -1082,7 +1108,15 @@ impl Ingest {
         let queue_lock_clone = queue_lock.clone();
         let queue_cv_clone = queue_cv.clone();
 
-        let thread_pool = Arc::new(ThreadPool::new(num_cpus));
+        let (thread_pool, effective_cpus) = build_ingest_thread_pool(num_cpus);
+        if effective_cpus != num_cpus {
+            info!(
+                "Using {} ingest threads (requested {})",
+                effective_cpus, num_cpus
+            );
+        }
+        let num_cpus = effective_cpus;
+        let thread_pool = Arc::new(thread_pool);
         let thread_pool_clone = thread_pool.clone();
 
         let shared_handle = INGEST_RT.handle().clone();

@@ -53,8 +53,11 @@ impl BrightDataClient {
             .clone()
             .filter(|u| !u.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_API_BASE.to_string());
+        // Bright Data can reject HTTP/2 from some egress paths (e.g. Lambda); stick to HTTP/1.1.
         let http = Client::builder()
             .timeout(Duration::from_secs(120))
+            .connect_timeout(Duration::from_secs(30))
+            .http1_only()
             .build()
             .map_err(std::io::Error::other)?;
         Ok(Self {
