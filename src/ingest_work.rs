@@ -207,7 +207,16 @@ fn merge_inject_fields(record: &mut Value, fields: &HashMap<String, Value>) {
     }
     if let Some(obj) = record.as_object_mut() {
         for (key, value) in fields {
-            obj.insert(key.clone(), value.clone());
+            let insert = match obj.get(key) {
+                None => true,
+                Some(existing) => {
+                    existing.is_null()
+                        || matches!(existing.as_str(), Some(s) if s.is_empty())
+                }
+            };
+            if insert {
+                obj.insert(key.clone(), value.clone());
+            }
         }
     }
 }
@@ -2575,11 +2584,37 @@ mod transform_inject_fields_tests {
     }
 
     #[test]
-    fn merge_inject_fields_overwrites_existing_keys() {
+    fn merge_inject_fields_preserves_existing_non_empty_values() {
         let fields = HashMap::from([("workspace_id".to_string(), json!("new"))]);
         let mut record = json!({"workspace_id": "old", "event": "click"});
         merge_inject_fields(&mut record, &fields);
-        assert_eq!(record["workspace_id"], "new");
+        assert_eq!(record["workspace_id"], "old");
+    }
+
+    #[test]
+    fn merge_inject_fields_fills_missing_domain() {
+        let fields = HashMap::from([("domain".to_string(), json!("skippr.io"))]);
+        let mut record = json!({"event": "click"});
+        merge_inject_fields(&mut record, &fields);
+        assert_eq!(record["domain"], "skippr.io");
+    }
+
+    #[test]
+    fn merge_inject_fields_preserves_organic_serp_domain() {
+        let fields = HashMap::from([
+            ("workspace_id".to_string(), json!("ws-1")),
+            ("domain_id".to_string(), json!("skippr.io")),
+            ("domain".to_string(), json!("skippr.io")),
+        ]);
+        let mut record = json!({
+            "keyword": "data pipeline",
+            "domain": "snowflake.com",
+            "url": "https://www.snowflake.com/en/data-cloud/"
+        });
+        merge_inject_fields(&mut record, &fields);
+        assert_eq!(record["domain"], "snowflake.com");
+        assert_eq!(record["domain_id"], "skippr.io");
+        assert_eq!(record["workspace_id"], "ws-1");
     }
 }
 

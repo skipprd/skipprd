@@ -509,6 +509,8 @@ mod tests {
         assert_eq!(targets[0]["position"], 3);
 
         assert_eq!(ctx.rows_for_namespace(NAMESPACE_RESULT_DAILY).len(), 1);
+        let results = ctx.rows_for_namespace(NAMESPACE_RESULT_DAILY);
+        assert_eq!(results[0]["domain"], "example.com");
         assert!(ctx
             .submitted_namespaces()
             .iter()
