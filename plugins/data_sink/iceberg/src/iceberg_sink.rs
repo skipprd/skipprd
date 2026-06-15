@@ -582,6 +582,16 @@ impl DataSinkIcebergPlugin {
                 Ok(table) => return Ok(table),
                 Err(err) => {
                     let err = err.to_string();
+                    if is_duplicate_iceberg_file_error(&err) {
+                        info!(
+                            "Iceberg append commit for {} already applied (idempotent WAL replay)",
+                            table_ident
+                        );
+                        return catalog
+                            .load_table(&table_ident)
+                            .await
+                            .map_err(|err| io::Error::other(err.to_string()));
+                    }
                     warn!(
                         "Iceberg append commit attempt {} failed for {}: {}",
                         attempt, table_ident, err
@@ -624,6 +634,16 @@ impl DataSinkIcebergPlugin {
                 Ok(table) => return Ok(table),
                 Err(err) => {
                     let err = err.to_string();
+                    if is_duplicate_iceberg_file_error(&err) {
+                        info!(
+                            "Iceberg equality-delta commit for {} already applied (idempotent WAL replay)",
+                            table_ident
+                        );
+                        return catalog
+                            .load_table(&table_ident)
+                            .await
+                            .map_err(|err| io::Error::other(err.to_string()));
+                    }
                     warn!(
                         "Iceberg equality-delta commit attempt {} failed for {}: {}",
                         attempt, table_ident, err
@@ -1623,6 +1643,14 @@ mod tests {
     }
 
     #[test]
+    fn is_duplicate_iceberg_file_error_detects_wal_replay_commit_clash() {
+        assert!(is_duplicate_iceberg_file_error(
+            "DataInvalid => Cannot add files that are already referenced by table, files: s3a://bucket/x.parquet"
+        ));
+        assert!(!is_duplicate_iceberg_file_error("AccessDenied"));
+    }
+
+    #[test]
     fn commit_files_partition_routes_data_only_to_fast_append_path() {
         let table = make_v2_minimal_table_for_tests();
         let data_file = DataFileBuilder::default()
@@ -1779,6 +1807,10 @@ mod tests {
         assert!(!is_s3_not_found_code(Some("AccessDenied")));
         assert!(!is_s3_not_found_error_text("AccessDenied"));
     }
+}
+
+fn is_duplicate_iceberg_file_error(err: &str) -> bool {
+    err.contains("Cannot add files that are already referenced by table")
 }
 
 fn partition_commit_files(

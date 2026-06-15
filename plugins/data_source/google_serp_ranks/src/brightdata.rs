@@ -10,7 +10,7 @@ use url::Url;
 
 use crate::config::{DataSourceGoogleSerpRanksPluginConfig, SerpDevice};
 use crate::domain::{domain_matches_target, normalize_domain};
-use crate::worker::{OrganicResultRow, TargetMatchRow, WorkerJobRequest, WorkerJobResult};
+use crate::worker::{OrganicResultRow, SerpFeatureFlags, TargetMatchRow, WorkerJobRequest, WorkerJobResult};
 
 pub const API_KEY_ENV: &str = "BRIGHTDATA_API_KEY";
 pub const ZONE_ENV: &str = "BRIGHTDATA_ZONE";
@@ -390,7 +390,120 @@ fn merge_page_results(
     merged.blocked_reason = page.blocked_reason;
     merged.ok = merged.ok && page.ok;
     merged.error = page.error.or(merged.error);
+    merged.serp_features = Some(merge_serp_features(
+        merged.serp_features.as_ref().unwrap_or(&SerpFeatureFlags::default()),
+        page.serp_features.as_ref().unwrap_or(&SerpFeatureFlags::default()),
+    ));
     merged
+}
+
+fn merge_serp_features(a: &SerpFeatureFlags, b: &SerpFeatureFlags) -> SerpFeatureFlags {
+    SerpFeatureFlags {
+        has_ai_overview: a.has_ai_overview || b.has_ai_overview,
+        has_paa: a.has_paa || b.has_paa,
+        has_video: a.has_video || b.has_video,
+        has_sitelinks: a.has_sitelinks || b.has_sitelinks,
+        has_featured_snippet: a.has_featured_snippet || b.has_featured_snippet,
+        owns_featured_snippet: a.owns_featured_snippet || b.owns_featured_snippet,
+        has_local_pack: a.has_local_pack || b.has_local_pack,
+        has_shopping: a.has_shopping || b.has_shopping,
+        has_images: a.has_images || b.has_images,
+        has_knowledge_graph: a.has_knowledge_graph || b.has_knowledge_graph,
+        has_answer_box: a.has_answer_box || b.has_answer_box,
+        has_related_searches: a.has_related_searches || b.has_related_searches,
+    }
+}
+
+fn value_has_content(value: &Value) -> bool {
+    match value {
+        Value::Array(items) => !items.is_empty(),
+        Value::Object(map) => !map.is_empty(),
+        Value::String(text) => !text.trim().is_empty(),
+        Value::Bool(flag) => *flag,
+        Value::Number(_) => true,
+        _ => false,
+    }
+}
+
+fn parsed_has_keys(parsed: &Value, keys: &[&str]) -> bool {
+    keys.iter().any(|key| {
+        parsed
+            .get(*key)
+            .map(value_has_content)
+            .unwrap_or(false)
+    })
+}
+
+fn urls_from_value(value: &Value, out: &mut Vec<String>) {
+    match value {
+        Value::String(text) if text.contains("://") || text.contains('.') => {
+            out.push(text.clone());
+        }
+        Value::Array(items) => {
+            for item in items {
+                urls_from_value(item, out);
+            }
+        }
+        Value::Object(map) => {
+            for key in ["link", "url", "href", "displayed_link"] {
+                if let Some(url) = map.get(key).and_then(|v| v.as_str()) {
+                    out.push(url.to_string());
+                }
+            }
+            for child in map.values() {
+                urls_from_value(child, out);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn owns_featured_snippet(parsed: &Value, targets: &[String]) -> bool {
+    let featured_keys = ["featured_snippet", "answer_box", "instant_answer"];
+    for key in featured_keys {
+        let Some(block) = parsed.get(key) else {
+            continue;
+        };
+        let mut urls = Vec::new();
+        urls_from_value(block, &mut urls);
+        for url in urls {
+            let domain = normalize_domain(&url);
+            if domain.is_empty() {
+                continue;
+            }
+            if targets
+                .iter()
+                .any(|target| domain_matches_target(&domain, target))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub fn extract_serp_features(parsed: &Value, targets: &[String]) -> SerpFeatureFlags {
+    let has_featured_snippet = parsed_has_keys(
+        parsed,
+        &["featured_snippet", "answer_box", "instant_answer"],
+    );
+    SerpFeatureFlags {
+        has_ai_overview: parsed_has_keys(parsed, &["ai_overview", "generative_ai", "sge"]),
+        has_paa: parsed_has_keys(
+            parsed,
+            &["people_also_ask", "related_questions", "paa"],
+        ),
+        has_video: parsed_has_keys(parsed, &["videos", "video", "video_results"]),
+        has_sitelinks: parsed_has_keys(parsed, &["sitelinks", "inline_sitelinks"]),
+        has_featured_snippet,
+        owns_featured_snippet: has_featured_snippet && owns_featured_snippet(parsed, targets),
+        has_local_pack: parsed_has_keys(parsed, &["local_pack", "local_results", "maps"]),
+        has_shopping: parsed_has_keys(parsed, &["shopping", "shopping_results", "ads_shopping"]),
+        has_images: parsed_has_keys(parsed, &["images", "image_results"]),
+        has_knowledge_graph: parsed_has_keys(parsed, &["knowledge_graph", "knowledge", "knowledge_panel"]),
+        has_answer_box: parsed_has_keys(parsed, &["answer_box", "instant_answer"]),
+        has_related_searches: parsed_has_keys(parsed, &["related_searches", "related_searches_list"]),
+    }
 }
 
 fn build_success_result(
@@ -457,6 +570,7 @@ fn build_success_result(
     }
 
     let results_inspected = entries.len().min(max_depth) as u32;
+    let serp_features = extract_serp_features(parsed, &targets);
 
     WorkerJobResult {
         job_id: job.job_id.clone(),
@@ -468,6 +582,7 @@ fn build_success_result(
         results_inspected,
         pages_fetched: 1,
         search_url_hash: Some(search_url_hash),
+        serp_features: Some(serp_features),
         error: None,
     }
 }
@@ -490,6 +605,7 @@ fn blocked_result(
         results_inspected: entries.len() as u32,
         pages_fetched,
         search_url_hash: Some(search_url_hash),
+        serp_features: Some(extract_serp_features(parsed, &job.targets)),
         error: None,
     }
 }
@@ -521,6 +637,7 @@ fn error_result(
         results_inspected: 0,
         pages_fetched: 0,
         search_url_hash: Some(search_url_hash),
+        serp_features: None,
         error: Some(serde_json::json!({
             "code": code,
             "message": message,
@@ -539,6 +656,12 @@ mod tests {
         assert!(url.contains("q=pizza"));
         assert!(url.contains("gl=us"));
         assert!(url.contains("brd_json=1"));
+    }
+
+    #[test]
+    fn build_search_url_mobile_includes_brd_mobile() {
+        let url = build_search_url("pizza", "us", "en", SerpDevice::Mobile, 0);
+        assert!(url.contains("brd_mobile=1"));
     }
 
     #[test]
@@ -606,5 +729,67 @@ mod tests {
         assert_eq!(result.status, "ok");
         assert!(result.target_matches[0].found);
         assert_eq!(result.target_matches[0].position, Some(2));
+        assert!(!result.serp_features.as_ref().unwrap().has_featured_snippet);
+    }
+
+    #[test]
+    fn extract_serp_features_from_parsed_light_blocks() {
+        let parsed: Value = serde_json::from_str(
+            r#"{
+              "organic":[{"link":"https://www.example.com/","title":"Ex","global_rank":2}],
+              "people_also_ask":[{"question":"what is example"}],
+              "videos":[{"link":"https://www.youtube.com/watch?v=abc"}],
+              "featured_snippet":{"link":"https://www.example.com/snippet"}
+            }"#,
+        )
+        .unwrap();
+        let features = extract_serp_features(&parsed, &["example.com".into()]);
+        assert!(features.has_paa);
+        assert!(features.has_video);
+        assert!(features.has_featured_snippet);
+        assert!(features.owns_featured_snippet);
+    }
+
+    #[test]
+    fn extract_serp_features_empty_payload_all_false() {
+        let parsed: Value = serde_json::from_str(r#"{"organic":[]}"#).unwrap();
+        let features = extract_serp_features(&parsed, &["example.com".into()]);
+        assert!(!features.has_ai_overview);
+        assert!(!features.has_paa);
+        assert!(!features.has_featured_snippet);
+        assert!(!features.owns_featured_snippet);
+    }
+
+    #[test]
+    fn competitor_owns_featured_snippet_not_target() {
+        let parsed: Value = serde_json::from_str(
+            r#"{"featured_snippet":{"link":"https://www.rival.com/page"}}"#,
+        )
+        .unwrap();
+        let features = extract_serp_features(&parsed, &["example.com".into()]);
+        assert!(features.has_featured_snippet);
+        assert!(!features.owns_featured_snippet);
+    }
+
+    #[test]
+    fn error_result_emits_no_serp_features() {
+        let job = WorkerJobRequest {
+            job_id: "j".into(),
+            keyword: "test".into(),
+            country: "us".into(),
+            language: "en".into(),
+            device: "desktop".into(),
+            max_depth: 10,
+            targets: vec!["example.com".into()],
+            stop_after_first_target_match: true,
+            capture_results: true,
+            navigation_timeout_ms: 45_000,
+            user_agent: None,
+            hint_last_position: None,
+            hint_last_page_start: None,
+        };
+        let result = error_result(&job, "sha256:err".into(), "fetch_failed", "timeout".into());
+        assert_eq!(result.status, "error");
+        assert!(result.serp_features.is_none());
     }
 }

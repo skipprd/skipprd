@@ -6,6 +6,7 @@ import {
   buildSearchUrl,
   detectBlockedPage,
   extractOrganicResults,
+  extractSerpFeatures,
   findTargetMatches,
   hashSearchUrl,
   normalizeDomain,
@@ -76,6 +77,14 @@ async function runJob(job) {
   let pagesFetched = 0;
   let blockedReason = null;
   let searchUrlHash = null;
+  let serpFeatures = {
+    has_ai_overview: false,
+    has_paa: false,
+    has_video: false,
+    has_sitelinks: false,
+    has_featured_snippet: false,
+    owns_featured_snippet: false,
+  };
 
   try {
     for (let start = 0; start < maxDepth && !blockedReason; start += 10) {
@@ -106,6 +115,10 @@ async function runJob(job) {
         break;
       }
 
+      if (pagesFetched === 1) {
+        serpFeatures = await extractSerpFeatures(page, targets);
+      }
+
       const pageResults = await extractOrganicResults(page, start);
       if (pageResults.length === 0) {
         break;
@@ -132,6 +145,7 @@ async function runJob(job) {
         results_inspected: organicResults.length,
         pages_fetched: pagesFetched,
         search_url_hash: searchUrlHash,
+        serp_features: serpFeatures,
         error: null,
       };
     }
@@ -149,6 +163,7 @@ async function runJob(job) {
       results_inspected: Math.min(organicResults.length, maxDepth),
       pages_fetched: pagesFetched,
       search_url_hash: searchUrlHash,
+      serp_features: serpFeatures,
       error: null,
     };
   } catch (err) {
@@ -162,6 +177,7 @@ async function runJob(job) {
       results_inspected: organicResults.length,
       pages_fetched: pagesFetched,
       search_url_hash: searchUrlHash,
+      serp_features: serpFeatures,
       error: {
         code: 'NAVIGATION_ERROR',
         message: String(err?.message || err),

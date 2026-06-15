@@ -89,7 +89,58 @@ export function domainMatchesTarget(domain, targets) {
 }
 
 /**
- * Extract organic web results from a Google SERP HTML page.
+ * Detect SERP feature blocks on the first results page.
+ * @param {import('playwright-core').Page} page
+ * @param {string[]} targets
+ */
+export async function extractSerpFeatures(page, targets) {
+  return page.evaluate((targetDomains) => {
+    const normalize = (input) => {
+      if (!input) return '';
+      let value = String(input).trim().toLowerCase();
+      value = value.replace(/^https?:\/\//, '').split('/')[0] ?? value;
+      if (value.startsWith('www.')) value = value.slice(4);
+      return value;
+    };
+    const targetSet = (targetDomains || []).map(normalize).filter(Boolean);
+    const ownsDomain = (root) => {
+      if (!root || !targetSet.length) return false;
+      const links = root.querySelectorAll('a[href]');
+      for (const anchor of links) {
+        const href = anchor.getAttribute('href') || '';
+        const host = normalize(href.includes('://') ? href : `https://${href}`);
+        if (targetSet.some((target) => host === target || host.endsWith(`.${target}`))) {
+          return true;
+        }
+      }
+      return false;
+    };
+
+    const hasAiOverview = Boolean(
+      document.querySelector('[data-subtree="aim"], .LGOjhe, [data-attrid="SGE"], .Y3BBE'),
+    );
+    const hasPaa = Boolean(
+      document.querySelector('[jsname="Cpkphb"], .related-question-pair, [data-q]'),
+    );
+    const hasVideo = Boolean(document.querySelector('video, [data-attrid="kc:/video"], g-scrolling-carousel'));
+    const hasSitelinks = Boolean(document.querySelector('.HiHjFd, .usJj9c, table.jmjoTe'));
+    const featuredRoot =
+      document.querySelector('[data-attrid="wa:/description"]')?.closest('.g, .xpdopen') ||
+      document.querySelector('.xpdopen .g');
+    const hasFeaturedSnippet = Boolean(featuredRoot);
+    const ownsFeaturedSnippet = hasFeaturedSnippet && ownsDomain(featuredRoot);
+
+    return {
+      has_ai_overview: hasAiOverview,
+      has_paa: hasPaa,
+      has_video: hasVideo,
+      has_sitelinks: hasSitelinks,
+      has_featured_snippet: hasFeaturedSnippet,
+      owns_featured_snippet: ownsFeaturedSnippet,
+    };
+  }, targets);
+}
+
  * @param {import('playwright-core').Page} page
  * @param {number} pageStart - zero-based offset for this SERP page
  */

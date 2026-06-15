@@ -100,6 +100,7 @@ impl DataSourceGoogleSerpRanksPlugin {
         elapsed_ms: u128,
         skipped: bool,
     ) -> Value {
+        let features = result.serp_features.clone().unwrap_or_default();
         json!({
             "run_date": run_date,
             "keyword": keyword,
@@ -116,6 +117,18 @@ impl DataSourceGoogleSerpRanksPlugin {
             "skipped_same_day": skipped,
             "worker_ok": result.ok,
             "error_code": result.error.as_ref().and_then(|e| e.get("code")).and_then(|c| c.as_str()),
+            "has_ai_overview": features.has_ai_overview,
+            "has_paa": features.has_paa,
+            "has_video": features.has_video,
+            "has_sitelinks": features.has_sitelinks,
+            "has_featured_snippet": features.has_featured_snippet,
+            "owns_featured_snippet": features.owns_featured_snippet,
+            "has_local_pack": features.has_local_pack,
+            "has_shopping": features.has_shopping,
+            "has_images": features.has_images,
+            "has_knowledge_graph": features.has_knowledge_graph,
+            "has_answer_box": features.has_answer_box,
+            "has_related_searches": features.has_related_searches,
         })
     }
 
@@ -261,6 +274,7 @@ impl DataSource for DataSourceGoogleSerpRanksPlugin {
                         results_inspected: 0,
                         pages_fetched: 0,
                         search_url_hash: None,
+                        serp_features: None,
                         error: None,
                     },
                     0,
@@ -431,6 +445,7 @@ mod tests {
                 results_inspected: 0,
                 pages_fetched: 0,
                 search_url_hash: None,
+                serp_features: None,
                 error: None,
             }),
             QueryTerminalStatus::Completed
@@ -446,6 +461,7 @@ mod tests {
                 results_inspected: 0,
                 pages_fetched: 1,
                 search_url_hash: None,
+                serp_features: None,
                 error: None,
             }),
             QueryTerminalStatus::Blocked
@@ -461,6 +477,7 @@ mod tests {
                 results_inspected: 0,
                 pages_fetched: 0,
                 search_url_hash: None,
+                serp_features: None,
                 error: Some(serde_json::json!({"code": "NAVIGATION_ERROR"})),
             }),
             QueryTerminalStatus::Error

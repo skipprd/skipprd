@@ -98,6 +98,13 @@ mod tests {
     }
 
     #[test]
+    fn query_checkpoint_key_isolates_device() {
+        let desktop = query_checkpoint_key("widgets", "uk", "en", "desktop");
+        let mobile = query_checkpoint_key("widgets", "uk", "en", "mobile");
+        assert_ne!(desktop, mobile);
+    }
+
+    #[test]
     fn checkpoint_serde_roundtrip() {
         let cp = QueryCheckpoint {
             run_date: "2026-05-30".into(),

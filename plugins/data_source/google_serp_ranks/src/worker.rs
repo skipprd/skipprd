@@ -48,6 +48,34 @@ pub struct TargetMatchRow {
     pub found: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
+pub struct SerpFeatureFlags {
+    #[serde(default)]
+    pub has_ai_overview: bool,
+    #[serde(default)]
+    pub has_paa: bool,
+    #[serde(default)]
+    pub has_video: bool,
+    #[serde(default)]
+    pub has_sitelinks: bool,
+    #[serde(default)]
+    pub has_featured_snippet: bool,
+    #[serde(default)]
+    pub owns_featured_snippet: bool,
+    #[serde(default)]
+    pub has_local_pack: bool,
+    #[serde(default)]
+    pub has_shopping: bool,
+    #[serde(default)]
+    pub has_images: bool,
+    #[serde(default)]
+    pub has_knowledge_graph: bool,
+    #[serde(default)]
+    pub has_answer_box: bool,
+    #[serde(default)]
+    pub has_related_searches: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct WorkerJobResult {
     pub job_id: String,
@@ -65,6 +93,8 @@ pub struct WorkerJobResult {
     pub pages_fetched: u32,
     #[serde(default)]
     pub search_url_hash: Option<String>,
+    #[serde(default)]
+    pub serp_features: Option<SerpFeatureFlags>,
     #[serde(default)]
     pub error: Option<serde_json::Value>,
 }
