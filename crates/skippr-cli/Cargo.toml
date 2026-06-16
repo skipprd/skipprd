@@ -32,6 +32,7 @@ react-suite-data-engineer = { path = "../skipprd-react-suite-data-engineer" }
 react-module-storage-s3.workspace = true
 react-module-storage-local.workspace = true
 react-module-provider-vector-lance.workspace = true
+lancedb = { version = "0.30.0", features = ["aws"] }
 react-module-provider-postgres = { path = "../skipprd-react-suite-data-engineer/src/modules/provider-postgres" }
 react-module-provider-bigquery = { path = "../skipprd-react-suite-data-engineer/src/modules/provider-bigquery" }
 react-module-provider-athena = { path = "../skipprd-react-suite-data-engineer/src/modules/provider-athena" }
