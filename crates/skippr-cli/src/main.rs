@@ -2278,6 +2278,19 @@ fn schema_sink_config_from_name(
             .to_string();
         return Ok(Some(SchemaSinkConfig::Glue { glue_database_name }));
     }
+    if let Some(iceberg) = schema_sink.get("Iceberg") {
+        let glue_database_name = iceberg
+            .get("catalog")
+            .and_then(|catalog| catalog.get("database"))
+            .and_then(|value| value.as_str())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                format!("schema_sinks.{schema_sink_name}.Iceberg.catalog.database is required")
+            })?
+            .to_string();
+        return Ok(Some(SchemaSinkConfig::Glue { glue_database_name }));
+    }
     Err(format!(
         "schema_sinks.{schema_sink_name} must contain a supported schema sink config such as Glue"
     ))
@@ -2707,6 +2720,9 @@ fn source_config_from_data_source(
             instagram_filter: yaml_bool(plugin_cfg, "instagram_filter"),
             streams: yaml_string_vec(plugin_cfg, "streams"),
         }),
+        "DataForSeoSeoOpportunities" => Ok(SourceConfig::File {
+            path: Some("/dev/null".to_string()),
+        }),
         other => Err(format!(
             "data_sources.{data_source_name}.{other} is not supported by lineage config translation"
         )),
@@ -2753,6 +2769,30 @@ fn warehouse_config_from_data_sink(
                     ))
                 }),
                 schema: yaml_str(plugin_cfg, "schema").or(schema_from_sink),
+            }
+        }
+        "iceberg" => {
+            let catalog = plugin_cfg
+                .get(yaml_key("catalog"))
+                .and_then(|value| value.as_mapping());
+            let schema_from_sink = match &schema_sink {
+                Some(SchemaSinkConfig::Glue { glue_database_name }) => {
+                    Some(glue_database_name.clone())
+                }
+                None => None,
+            };
+            WarehouseConfig::Athena {
+                workgroup: catalog
+                    .and_then(|m| yaml_str(m, "workgroup"))
+                    .or_else(|| yaml_str(plugin_cfg, "workgroup")),
+                region: catalog
+                    .and_then(|m| yaml_str(m, "region"))
+                    .or_else(|| yaml_str(plugin_cfg, "region")),
+                result_s3: yaml_str(plugin_cfg, "athena_results_s3")
+                    .or_else(|| yaml_str(plugin_cfg, "result_s3")),
+                schema: catalog
+                    .and_then(|m| yaml_str(m, "database"))
+                    .or(schema_from_sink),
             }
         }
         "snowflake" => WarehouseConfig::Snowflake {

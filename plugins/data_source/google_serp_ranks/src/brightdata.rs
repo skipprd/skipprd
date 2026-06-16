@@ -10,7 +10,9 @@ use url::Url;
 
 use crate::config::{DataSourceGoogleSerpRanksPluginConfig, SerpDevice};
 use crate::domain::{domain_matches_target, normalize_domain};
-use crate::worker::{OrganicResultRow, SerpFeatureFlags, TargetMatchRow, WorkerJobRequest, WorkerJobResult};
+use crate::worker::{
+    OrganicResultRow, SerpFeatureFlags, TargetMatchRow, WorkerJobRequest, WorkerJobResult,
+};
 
 pub const API_KEY_ENV: &str = "BRIGHTDATA_API_KEY";
 pub const ZONE_ENV: &str = "BRIGHTDATA_ZONE";
@@ -82,8 +84,13 @@ impl BrightDataClient {
         let mut pages_fetched = 0u32;
 
         for page_start in page_starts {
-            let search_url =
-                build_search_url(&job.keyword, &job.country, &job.language, device, page_start);
+            let search_url = build_search_url(
+                &job.keyword,
+                &job.country,
+                &job.language,
+                device,
+                page_start,
+            );
             let search_url_hash = hash_search_url(&search_url);
             if first_hash.is_none() {
                 first_hash = Some(search_url_hash.clone());
@@ -138,13 +145,8 @@ impl BrightDataClient {
                 ));
             }
 
-            let page_result = build_success_result(
-                job,
-                search_url_hash,
-                &parsed,
-                &self.config,
-                page_start,
-            );
+            let page_result =
+                build_success_result(job, search_url_hash, &parsed, &self.config, page_start);
             pages_fetched += 1;
             merged = Some(merge_page_results(merged.take(), page_result, job));
 
@@ -164,12 +166,14 @@ impl BrightDataClient {
             }
         }
 
-        Ok(merged.unwrap_or_else(|| error_result(
-            job,
-            first_hash.unwrap_or_else(|| "sha256:empty".into()),
-            "BRIGHTDATA_EMPTY",
-            "No SERP pages fetched".into(),
-        )))
+        Ok(merged.unwrap_or_else(|| {
+            error_result(
+                job,
+                first_hash.unwrap_or_else(|| "sha256:empty".into()),
+                "BRIGHTDATA_EMPTY",
+                "No SERP pages fetched".into(),
+            )
+        }))
     }
 
     pub async fn throttle_delay(&self) {
@@ -369,7 +373,9 @@ fn merge_page_results(
         return page;
     };
     merged.pages_fetched = merged.pages_fetched.saturating_add(page.pages_fetched);
-    merged.results_inspected = merged.results_inspected.saturating_add(page.results_inspected);
+    merged.results_inspected = merged
+        .results_inspected
+        .saturating_add(page.results_inspected);
     if job.capture_results {
         merged.organic_results.extend(page.organic_results);
     }
@@ -391,8 +397,13 @@ fn merge_page_results(
     merged.ok = merged.ok && page.ok;
     merged.error = page.error.or(merged.error);
     merged.serp_features = Some(merge_serp_features(
-        merged.serp_features.as_ref().unwrap_or(&SerpFeatureFlags::default()),
-        page.serp_features.as_ref().unwrap_or(&SerpFeatureFlags::default()),
+        merged
+            .serp_features
+            .as_ref()
+            .unwrap_or(&SerpFeatureFlags::default()),
+        page.serp_features
+            .as_ref()
+            .unwrap_or(&SerpFeatureFlags::default()),
     ));
     merged
 }
@@ -426,12 +437,8 @@ fn value_has_content(value: &Value) -> bool {
 }
 
 fn parsed_has_keys(parsed: &Value, keys: &[&str]) -> bool {
-    keys.iter().any(|key| {
-        parsed
-            .get(*key)
-            .map(value_has_content)
-            .unwrap_or(false)
-    })
+    keys.iter()
+        .any(|key| parsed.get(*key).map(value_has_content).unwrap_or(false))
 }
 
 fn urls_from_value(value: &Value, out: &mut Vec<String>) {
@@ -488,21 +495,53 @@ pub fn extract_serp_features(parsed: &Value, targets: &[String]) -> SerpFeatureF
         &["featured_snippet", "answer_box", "instant_answer"],
     );
     SerpFeatureFlags {
-        has_ai_overview: parsed_has_keys(parsed, &["ai_overview", "generative_ai", "sge"]),
-        has_paa: parsed_has_keys(
+        has_ai_overview: parsed_has_keys(
             parsed,
-            &["people_also_ask", "related_questions", "paa"],
+            &["ai_overview", "ai_overviews", "generative_ai", "sge"],
         ),
-        has_video: parsed_has_keys(parsed, &["videos", "video", "video_results"]),
-        has_sitelinks: parsed_has_keys(parsed, &["sitelinks", "inline_sitelinks"]),
+        has_paa: parsed_has_keys(parsed, &["people_also_ask", "related_questions", "paa"]),
+        has_video: parsed_has_keys(
+            parsed,
+            &["videos", "video", "video_results", "inline_videos"],
+        ),
+        has_sitelinks: parsed_has_keys(
+            parsed,
+            &["sitelinks", "inline_sitelinks", "expanded_sitelinks"],
+        ),
         has_featured_snippet,
         owns_featured_snippet: has_featured_snippet && owns_featured_snippet(parsed, targets),
-        has_local_pack: parsed_has_keys(parsed, &["local_pack", "local_results", "maps"]),
-        has_shopping: parsed_has_keys(parsed, &["shopping", "shopping_results", "ads_shopping"]),
-        has_images: parsed_has_keys(parsed, &["images", "image_results"]),
-        has_knowledge_graph: parsed_has_keys(parsed, &["knowledge_graph", "knowledge", "knowledge_panel"]),
+        has_local_pack: parsed_has_keys(
+            parsed,
+            &["local_pack", "local_results", "local_results_map", "maps"],
+        ),
+        has_shopping: parsed_has_keys(
+            parsed,
+            &[
+                "shopping",
+                "shopping_results",
+                "ads_shopping",
+                "popular_products",
+            ],
+        ),
+        has_images: parsed_has_keys(parsed, &["images", "image_results", "inline_images"]),
+        has_knowledge_graph: parsed_has_keys(
+            parsed,
+            &[
+                "knowledge_graph",
+                "knowledge",
+                "knowledge_panel",
+                "knowledge_card",
+            ],
+        ),
         has_answer_box: parsed_has_keys(parsed, &["answer_box", "instant_answer"]),
-        has_related_searches: parsed_has_keys(parsed, &["related_searches", "related_searches_list"]),
+        has_related_searches: parsed_has_keys(
+            parsed,
+            &[
+                "related_searches",
+                "related_searches_list",
+                "related_queries",
+            ],
+        ),
     }
 }
 
@@ -751,6 +790,39 @@ mod tests {
     }
 
     #[test]
+    fn extract_serp_features_from_brightdata_feature_fixture() {
+        let parsed: Value = serde_json::from_str(
+            r#"{
+              "ai_overviews":[{"text":"AI summary"}],
+              "related_questions":[{"question":"what is example"}],
+              "inline_videos":[{"link":"https://www.youtube.com/watch?v=abc"}],
+              "expanded_sitelinks":[{"link":"https://www.example.com/features"}],
+              "featured_snippet":{"link":"https://www.example.com/snippet"},
+              "local_results_map":[{"title":"Example HQ"}],
+              "popular_products":[{"title":"Example plan"}],
+              "inline_images":[{"image":"https://images.example.com/a.jpg"}],
+              "knowledge_card":{"title":"Example"},
+              "answer_box":{"answer":"42"},
+              "related_queries":["example pricing"]
+            }"#,
+        )
+        .unwrap();
+        let features = extract_serp_features(&parsed, &["example.com".into()]);
+        assert!(features.has_ai_overview);
+        assert!(features.has_paa);
+        assert!(features.has_video);
+        assert!(features.has_sitelinks);
+        assert!(features.has_featured_snippet);
+        assert!(features.owns_featured_snippet);
+        assert!(features.has_local_pack);
+        assert!(features.has_shopping);
+        assert!(features.has_images);
+        assert!(features.has_knowledge_graph);
+        assert!(features.has_answer_box);
+        assert!(features.has_related_searches);
+    }
+
+    #[test]
     fn extract_serp_features_empty_payload_all_false() {
         let parsed: Value = serde_json::from_str(r#"{"organic":[]}"#).unwrap();
         let features = extract_serp_features(&parsed, &["example.com".into()]);
@@ -762,10 +834,9 @@ mod tests {
 
     #[test]
     fn competitor_owns_featured_snippet_not_target() {
-        let parsed: Value = serde_json::from_str(
-            r#"{"featured_snippet":{"link":"https://www.rival.com/page"}}"#,
-        )
-        .unwrap();
+        let parsed: Value =
+            serde_json::from_str(r#"{"featured_snippet":{"link":"https://www.rival.com/page"}}"#)
+                .unwrap();
         let features = extract_serp_features(&parsed, &["example.com".into()]);
         assert!(features.has_featured_snippet);
         assert!(!features.owns_featured_snippet);

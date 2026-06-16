@@ -62,9 +62,15 @@ async fn authenticate_headless(
     explicit_config: &Option<PathBuf>,
     target: HeadlessTarget,
 ) -> Result<HeadlessAuthContext, String> {
-    let engine_cfg = crate::load_cli_execution_config(explicit_config)
-        .map_err(|e| format!("{e}\nRun 'skippr init <project>' first."))
-        .ok();
+    let engine_cfg = match &target {
+        HeadlessTarget::Pipeline(_) => Some(
+            crate::load_cli_execution_config(explicit_config)
+                .map_err(|e| format!("{e}\nRun 'skippr init <project>' first."))?,
+        ),
+        HeadlessTarget::GenericIdeBootstrap => {
+            crate::load_cli_execution_config(explicit_config).ok()
+        }
+    };
     let pipeline = match &target {
         HeadlessTarget::Pipeline(pipeline) => Some(pipeline.clone()),
         HeadlessTarget::GenericIdeBootstrap => None,
