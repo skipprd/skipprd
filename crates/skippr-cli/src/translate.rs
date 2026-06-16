@@ -1894,11 +1894,15 @@ pub fn s3_credentials_from_auth(creds: &crate::api_client::CredentialsResponse) 
     let expires_at = chrono::DateTime::parse_from_rfc3339(&creds.credentials.expiration)
         .ok()
         .map(|dt| dt.with_timezone(&chrono::Utc));
+    let region = std::env::var("SKIPPR_AWS_REGION")
+        .or_else(|_| std::env::var("AWS_REGION"))
+        .or_else(|_| std::env::var("AWS_DEFAULT_REGION"))
+        .unwrap_or_else(|_| "us-east-1".to_string());
     S3Credentials {
         access_key_id: creds.credentials.access_key_id.clone(),
         secret_access_key: creds.credentials.secret_access_key.clone(),
         session_token: Some(creds.credentials.session_token.clone()),
-        region: "us-east-1".to_string(),
+        region,
         expires_at,
         provider: None,
     }
