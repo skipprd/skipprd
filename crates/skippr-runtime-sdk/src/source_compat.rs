@@ -5,5 +5,5 @@ pub use crate::source_sync::{
 };
 pub use skippr_core::ingest_work::{IngestBatch, ThroughputMetrics};
 pub use skippr_core::plugins::source_sync::{
-    OffsetValidationEntry, SourcePayloadTask, SourceSyncContext,
+    OffsetValidationEntry, PayloadAck, PayloadSubmissionBatch, SourcePayloadTask, SourceSyncContext,
 };

@@ -1565,7 +1565,7 @@ mod tests_evolution_type_matrix {
 
     #[test]
     fn string_to_double() {
-        assert_evolves_ok(SkipprDataType::String, SkipprDataType::Double, json!(3.14));
+        assert_evolves_ok(SkipprDataType::String, SkipprDataType::Double, json!(3.15));
     }
 
     #[test]
@@ -1624,7 +1624,7 @@ mod tests_evolution_type_matrix {
 
     #[test]
     fn integer_to_double() {
-        assert_evolves_ok(SkipprDataType::Integer, SkipprDataType::Double, json!(3.14));
+        assert_evolves_ok(SkipprDataType::Integer, SkipprDataType::Double, json!(3.15));
     }
 
     #[test]
@@ -1676,7 +1676,7 @@ mod tests_evolution_type_matrix {
 
     #[test]
     fn long_to_double() {
-        assert_evolves_ok(SkipprDataType::Long, SkipprDataType::Double, json!(3.14));
+        assert_evolves_ok(SkipprDataType::Long, SkipprDataType::Double, json!(3.15));
     }
 
     #[test]
@@ -1770,7 +1770,7 @@ mod tests_evolution_type_matrix {
 
     #[test]
     fn boolean_to_double() {
-        assert_evolves_ok(SkipprDataType::Boolean, SkipprDataType::Double, json!(3.14));
+        assert_evolves_ok(SkipprDataType::Boolean, SkipprDataType::Double, json!(3.15));
     }
 
     // ── record → X ──────────────────────────────────────────
@@ -1814,7 +1814,7 @@ mod tests_evolution_type_matrix {
         assert_evolves_ok(
             SkipprDataType::Timestamp,
             SkipprDataType::Double,
-            json!(3.14),
+            json!(3.15),
         );
     }
 
@@ -1883,7 +1883,7 @@ mod tests_evolution_type_matrix {
         arr_md.determined_type = SkipprDataType::Array;
         arr_md.determined_type_values = Some(SkipprDataType::String);
         root.insert("f_array".to_string(), arr_md);
-        let val = json!([1, "two", true, null, 3.14]);
+        let val = json!([1, "two", true, null, 3.15]);
         let res = Evolution::apply_evolution_factory("f", &val, &mut root, false);
         assert!(res.is_ok(), "mixed array should not panic");
     }
@@ -2208,14 +2208,14 @@ mod tests_evolution_depth_matrix {
 
         root.insert("l0_record".into(), l0_rec);
 
-        let val = json!({"l1": {"l2": {"l3": {"leaf": 3.14}}}});
+        let val = json!({"l1": {"l2": {"l3": {"leaf": 3.15}}}});
         let r0 = Evolution::apply_evolution_factory("l0", &val, &mut root, false).unwrap();
         assert_eq!(r0.field, "l0_record");
 
         let r_leaf = evolve_at_depth(
             &mut root,
             &["l0_record", "l1_record", "l2_record", "l3_record", "leaf"],
-            &json!(3.14),
+            &json!(3.15),
         )
         .unwrap();
         assert_eq!(r_leaf.field, "leaf_double");
@@ -2250,7 +2250,7 @@ mod tests_evolution_depth_matrix {
         let targets = [
             (SkipprDataType::Long, json!(42i64)),
             (SkipprDataType::Integer, json!(42)),
-            (SkipprDataType::Double, json!(3.14)),
+            (SkipprDataType::Double, json!(3.15)),
             (SkipprDataType::Boolean, json!(true)),
             (SkipprDataType::Timestamp, json!(1700000000i64)),
             (SkipprDataType::TimestampMilli, json!(1700000000123i64)),

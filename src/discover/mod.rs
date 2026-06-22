@@ -3755,7 +3755,7 @@ mod tests_roundtrip {
         if let Some(outer_mut) = metadata.get_mut("outer") {
             let _ = Evolution::evolve_field(
                 &"inner".to_string(),
-                &json!(3.14),
+                &json!(3.15),
                 Some("outer"),
                 Some("record"),
                 &mut outer_mut.fields,
@@ -3800,7 +3800,7 @@ mod tests_roundtrip {
 
         let r2 = Evolution::evolve_field(
             &"val".to_string(),
-            &json!(3.14),
+            &json!(3.15),
             None,
             None,
             &mut metadata,

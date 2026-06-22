@@ -3,8 +3,8 @@ pub mod s3_wal_body_cache;
 pub mod s3_wal_memory_budget;
 pub mod segment_file;
 pub mod segment_object;
-pub mod wal_writer;
 pub mod wal_store;
+pub mod wal_writer;
 // wal_accumulator removed in simplified model
 
 use chrono::{DateTime, Datelike, TimeZone, Timelike, Utc};

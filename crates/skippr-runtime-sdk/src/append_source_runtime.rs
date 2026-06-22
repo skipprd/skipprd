@@ -438,7 +438,9 @@ pub async fn run_append_data_source_main(
     let control = RuntimeSourceControl::new();
     let mut shutdown_rx = control.subscribe_shutdown();
     let reader_control = control.clone();
-    let ingest_ack_client = Arc::new(RuntimeIngestAckClient::new());
+    let ingest_ack_client = Arc::new(RuntimeIngestAckClient::new(
+        start.source_ingest_window.clone(),
+    ));
     let reader_ingest_ack_client = ingest_ack_client.clone();
     tokio::spawn(async move {
         let _ = run_runtime_source_host_frame_loop(
@@ -479,7 +481,7 @@ pub async fn run_append_data_source_main(
 
     let sync_ctx: Arc<dyn SourceSyncContext> = Arc::new(sync_ctx);
     let sync_result = {
-        let sync_fut = source.sync(sync_ctx);
+        let sync_fut = source.sync(sync_ctx.clone());
         tokio::pin!(sync_fut);
         tokio::select! {
             result = &mut sync_fut => Some(result),
@@ -509,6 +511,7 @@ pub async fn run_append_data_source_main(
 
     match sync_result {
         Ok(()) => {
+            sync_ctx.drain_payload_acks()?;
             if suppress_data_relay {
                 control_writer
                     .write(&PluginFrame::SourceEvent(SourceEvent::SchemaStateUpdate(
@@ -536,7 +539,10 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::protocol::{RuntimeExecutionContext, RuntimeOutputLayout, RuntimeSourceConfig};
+    use crate::protocol::{
+        RuntimeExecutionContext, RuntimeOutputLayout, RuntimeSourceConfig,
+        RuntimeSourceIngestWindow,
+    };
 
     fn source_start_request(once: bool) -> SourceStartRequest {
         SourceStartRequest {
@@ -549,6 +555,7 @@ mod tests {
             },
             config: RuntimeSourceConfig(RuntimePluginConfigEnvelope::new("Test", json!({}))),
             once,
+            source_ingest_window: RuntimeSourceIngestWindow::default(),
         }
     }
 

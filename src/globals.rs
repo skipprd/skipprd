@@ -25,8 +25,7 @@ pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<TimedRwLock<AtomicBool>> = La
 });
 
 /// Set when DATA_DIR is exhausted and no reclaimable WAL remains to compact.
-pub static DATA_DIR_CAPACITY_EXCEEDED: Lazy<AtomicBool> =
-    Lazy::new(|| AtomicBool::new(false));
+pub static DATA_DIR_CAPACITY_EXCEEDED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 pub static DATA_DIR_INGEST_PAUSED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 
 static DATA_DIR_CAPACITY_ERROR: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));

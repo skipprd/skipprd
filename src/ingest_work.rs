@@ -211,8 +211,7 @@ fn merge_inject_fields(record: &mut Value, fields: &HashMap<String, Value>) {
             let insert = match obj.get(key) {
                 None => true,
                 Some(existing) => {
-                    existing.is_null()
-                        || matches!(existing.as_str(), Some(s) if s.is_empty())
+                    existing.is_null() || matches!(existing.as_str(), Some(s) if s.is_empty())
                 }
             };
             if insert {
@@ -854,12 +853,8 @@ impl Ingest {
             let min_free_bytes = Self::min_free_bytes();
             let below_min_free = avail_bytes < min_free_bytes;
             let above_high_watermark = used_pct >= high_watermark as f64;
-            let should_block = Self::data_dir_should_block(
-                avail_bytes,
-                used_pct,
-                high_watermark,
-                min_free_bytes,
-            );
+            let should_block =
+                Self::data_dir_should_block(avail_bytes, used_pct, high_watermark, min_free_bytes);
 
             if !paused {
                 if !should_block {
@@ -902,12 +897,7 @@ impl Ingest {
                 }
             }
 
-            if Self::data_dir_should_resume(
-                avail_bytes,
-                used_pct,
-                low_watermark,
-                min_free_bytes,
-            ) {
+            if Self::data_dir_should_resume(avail_bytes, used_pct, low_watermark, min_free_bytes) {
                 set_data_dir_ingest_paused(false);
                 info!(
                     "Resuming ingest: DATA_DIR usage {:.1}% is below low watermark {}% (free {} / total {}).",
@@ -1315,6 +1305,10 @@ impl Ingest {
                                 }));
                             if result.is_err() {
                                 error!("Queued ingest task panicked; forcing completion signal");
+                                crate::buffer::wal_writer::fail_request(
+                                    submit_id,
+                                    "queued ingest task panicked",
+                                );
                             }
                             let _ = tx.send(completed_bytes);
                         });
@@ -1622,6 +1616,10 @@ impl Ingest {
                         }));
                         if result.is_err() {
                             error!("Active ingest task panicked; forcing completion signal");
+                            crate::buffer::wal_writer::fail_request(
+                                submit_id,
+                                "active ingest task panicked",
+                            );
                         }
                         let _ = tx.send(completed_bytes);
                     });
@@ -1746,7 +1744,10 @@ impl Ingest {
     ) {
         if !Self::wait_for_data_dir_capacity() {
             if submit_id != 0 {
-                crate::buffer::wal_writer::complete_request_without_wal(submit_id);
+                crate::buffer::wal_writer::fail_request(
+                    submit_id,
+                    "DATA_DIR capacity exhausted before ingest task could write WAL",
+                );
             }
             return;
         }
@@ -1917,8 +1918,7 @@ impl Ingest {
                 .clone()
                 .unwrap_or_else(|| pipeline_name_cached.clone());
 
-            let offset_snapshot =
-                offset_db_clone.snapshot_value(&ingest_batch.offset_key);
+            let offset_snapshot = offset_db_clone.snapshot_value(&ingest_batch.offset_key);
             let is_cdc_batch = ingest_batch.cdc_rows().is_some();
             let track_position = is_cdc_batch || ingest_batch.offset_pos.is_some();
 
@@ -1975,11 +1975,7 @@ impl Ingest {
                     Value::Array(v) => unwrapped_records.extend(v),
                     _ => {
                         let line_idx = (decode_line as usize).saturating_sub(1);
-                        let line_str = ingest_batch
-                            .data
-                            .lines()
-                            .nth(line_idx)
-                            .unwrap_or("");
+                        let line_str = ingest_batch.data.lines().nth(line_idx).unwrap_or("");
                         let bad_offset_pos = ingest_batch.offset_pos_for_line(decode_line);
 
                         dl_records.push(DeadletterRecord {
@@ -2225,11 +2221,8 @@ impl Ingest {
             }
 
             let all_indices: Vec<usize> = (0..records_vec.len()).collect();
-            let (batches, failed_indices) = bisect_serialize_indices(
-                entry.schema.clone(),
-                &records_vec,
-                &all_indices,
-            );
+            let (batches, failed_indices) =
+                bisect_serialize_indices(entry.schema.clone(), &records_vec, &all_indices);
 
             if failed_indices.is_empty() {
                 entry.record_batches = Some(batches);
@@ -2295,12 +2288,7 @@ impl Ingest {
                     offset_pos: rec._offset_pos,
                 });
             }
-            merge_dl_offsets_for_records(
-                &mut dl_offsets,
-                entry,
-                &records_vec,
-                &failed_indices,
-            );
+            merge_dl_offsets_for_records(&mut dl_offsets, entry, &records_vec, &failed_indices);
             if Config::debug_enabled() {
                 debug!(
                     "Serialize bisect: ns={} deadlettered={} succeeded={}",

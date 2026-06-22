@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -131,6 +131,10 @@ pub fn complete_request_without_wal(request_id: u64) {
     complete_request_unit(request_id, &Ok(()));
 }
 
+pub fn fail_request(request_id: u64, message: impl Into<String>) {
+    complete_request_unit(request_id, &Err(message.into()));
+}
+
 pub async fn flush_and_drain(offsets_db: Arc<Offsets>) -> Result<(), ArrowError> {
     let Some(tx) = WAL_WRITER_TX.get() else {
         return crate::buffer::ingest_buffer::flush_all_segments_direct(offsets_db).await;
@@ -141,14 +145,14 @@ pub async fn flush_and_drain(offsets_db: Arc<Offsets>) -> Result<(), ArrowError>
         done: done_tx,
     })
     .await
-    .map_err(|_| ArrowError::ExternalError(Box::new(std::io::Error::other("WAL writer is stopped"))))?;
-    done_rx
-        .await
-        .map_err(|_| {
-            ArrowError::ExternalError(Box::new(std::io::Error::other(
-                "WAL writer flush response dropped",
-            )))
-        })?
+    .map_err(|_| {
+        ArrowError::ExternalError(Box::new(std::io::Error::other("WAL writer is stopped")))
+    })?;
+    done_rx.await.map_err(|_| {
+        ArrowError::ExternalError(Box::new(std::io::Error::other(
+            "WAL writer flush response dropped",
+        )))
+    })?
 }
 
 pub fn pending_count() -> usize {
@@ -219,8 +223,7 @@ async fn run_writer(mut rx: mpsc::Receiver<WalWriterCommand>) {
                 WAL_WRITER_PENDING_BYTES.fetch_add(unit.arrow_bytes, Ordering::Relaxed);
                 match Buffers::append_batches_to_live(unit.batches) {
                     Ok(added_bytes) => {
-                        WAL_WRITER_COALESCE_BYTES_TOTAL
-                            .fetch_add(added_bytes, Ordering::Relaxed);
+                        WAL_WRITER_COALESCE_BYTES_TOTAL.fetch_add(added_bytes, Ordering::Relaxed);
                         WAL_WRITER_COALESCE_BATCHES_TOTAL.fetch_add(1, Ordering::Relaxed);
                         pending_acks.push((unit.done, ack_started, arrow_bytes, unit.submit_id));
                         if Config::log_wal_enabled() {
@@ -236,8 +239,8 @@ async fn run_writer(mut rx: mpsc::Receiver<WalWriterCommand>) {
                     }
                     Err(err) => {
                         WAL_WRITER_PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
-                        WAL_WRITER_PENDING_BYTES
-                            .fetch_sub(unit.arrow_bytes, Ordering::Relaxed);
+                        WAL_WRITER_PENDING_BYTES.fetch_sub(unit.arrow_bytes, Ordering::Relaxed);
+                        complete_request_unit(unit.submit_id, &Err(err.clone()));
                         let _ = unit.done.send(Err(err));
                     }
                 }
@@ -248,7 +251,8 @@ async fn run_writer(mut rx: mpsc::Receiver<WalWriterCommand>) {
                 }
             }
             Some(WalWriterCommand::Flush { offsets_db, done }) => {
-                let result = flush_everything(&offsets_db, &mut pending_acks, &mut last_flush).await;
+                let result =
+                    flush_everything(&offsets_db, &mut pending_acks, &mut last_flush).await;
                 let _ = done.send(result);
                 pending_offsets = None;
             }
@@ -289,10 +293,7 @@ async fn flush_live_and_ack(
     WAL_WRITER_PERSIST_LATENCY_NS_TOTAL.fetch_add(elapsed_ns, Ordering::Relaxed);
     WAL_WRITER_PERSIST_COUNT.fetch_add(1, Ordering::Relaxed);
 
-    let ack_result = result
-        .as_ref()
-        .map(|_| ())
-        .map_err(|err| err.to_string());
+    let ack_result = result.as_ref().map(|_| ()).map_err(|err| err.to_string());
     let acked = std::mem::take(pending_acks);
     for (done, queued_at, bytes, submit_id) in acked {
         WAL_WRITER_PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
@@ -346,5 +347,19 @@ mod tests {
         let rx = register_request_ack(request_id, 2);
         complete_request_unit(request_id, &Err("persist failed".to_string()));
         assert_eq!(rx.await.unwrap(), Err("persist failed".to_string()));
+    }
+
+    #[tokio::test]
+    async fn request_ack_can_be_failed_explicitly() {
+        let request_id = 9_000_003;
+        let rx = register_request_ack(request_id, 1);
+        fail_request(request_id, "capacity exhausted");
+        assert_eq!(rx.await.unwrap(), Err("capacity exhausted".to_string()));
+    }
+
+    #[tokio::test]
+    async fn empty_request_ack_completes_immediately() {
+        let rx = register_request_ack(9_000_004, 0);
+        assert_eq!(rx.await.unwrap(), Ok(()));
     }
 }

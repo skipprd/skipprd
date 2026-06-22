@@ -484,6 +484,7 @@ impl DataSourceS3Plugin {
         let mut current_batch: Vec<IngestBatch> = Vec::new();
         let mut current_bytes: usize = 0;
         let mut pending_tasks: Vec<SourcePayloadTask> = Vec::with_capacity(total_cpus);
+        let mut accepted_submissions = Vec::new();
         // Bound total bytes staged in memory before dispatching to ingest threads
         // Use dynamic pending cap if memory manager is active; fallback to env default
         let is_ci_pending = runtime_is_ci();
@@ -556,10 +557,15 @@ impl DataSourceS3Plugin {
                                 pending_bytes_sum
                             );
                         }
-                        let metrics =
-                            ctx.submit_payload_tasks(std::mem::take(&mut pending_tasks))?;
-                        self.active_threads = metrics.active_cores;
-                        self.optimal_chunk_size = metrics.optimal_chunk_size;
+                        let submission =
+                            ctx.submit_payload_tasks_accepted(std::mem::take(&mut pending_tasks))?;
+                        self.active_threads = submission.metrics.active_cores;
+                        self.optimal_chunk_size = submission.metrics.optimal_chunk_size;
+                        accepted_submissions.push(submission);
+                        if accepted_submissions.len() >= 1024 {
+                            ctx.wait_payload_acks(&accepted_submissions)?;
+                            accepted_submissions.clear();
+                        }
                         pending_bytes_sum = 0;
                     }
                 }
@@ -568,7 +574,6 @@ impl DataSourceS3Plugin {
 
         if !current_batch.is_empty() {
             let batch_bytes = current_bytes;
-            let _ = pending_bytes_sum.saturating_add(batch_bytes);
             let batch = std::mem::take(&mut current_batch);
             if runtime_log_wal_enabled() {
                 let first_key = batch
@@ -596,9 +601,13 @@ impl DataSourceS3Plugin {
                     pending_tasks.len()
                 );
             }
-            let _ = ctx.submit_payload_tasks(pending_tasks)?;
+            accepted_submissions.push(ctx.submit_payload_tasks_accepted(pending_tasks)?);
         }
 
+        if !accepted_submissions.is_empty() {
+            ctx.wait_payload_acks(&accepted_submissions)?;
+        }
+        ctx.drain_payload_acks()?;
         info!("S3 stream pipeline complete; source payloads submitted to host ingest");
         Ok(())
     }

@@ -11,6 +11,29 @@ pub struct SourcePayloadTask {
     pub batches: Vec<IngestBatch>,
 }
 
+#[derive(Clone, Debug)]
+pub struct PayloadSubmissionBatch {
+    pub request_ids: Vec<u64>,
+    pub bytes: usize,
+    pub metrics: ThroughputMetrics,
+}
+
+impl PayloadSubmissionBatch {
+    pub fn already_durable(metrics: ThroughputMetrics) -> Self {
+        Self {
+            request_ids: Vec::new(),
+            bytes: 0,
+            metrics,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PayloadAck {
+    pub request_id: u64,
+    pub result: Result<(), String>,
+}
+
 /// Generic offset validation request entry. Source plugins map domain keys into this shape.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OffsetValidationEntry {
@@ -26,6 +49,45 @@ pub trait SourceSyncContext: Send + Sync {
         &self,
         tasks: Vec<SourcePayloadTask>,
     ) -> Result<ThroughputMetrics, io::Error>;
+
+    /// Submit payload tasks and return once the host has accepted them.
+    ///
+    /// Implementations that do not support asynchronous ACKs can keep the old
+    /// behavior by using the default implementation, which waits for durability
+    /// via `submit_payload_tasks`.
+    fn submit_payload_tasks_accepted(
+        &self,
+        tasks: Vec<SourcePayloadTask>,
+    ) -> Result<PayloadSubmissionBatch, io::Error> {
+        self.submit_payload_tasks(tasks)
+            .map(PayloadSubmissionBatch::already_durable)
+    }
+
+    /// Compatibility helper for callers that still need submit to be a durability barrier.
+    fn submit_payload_tasks_and_wait(
+        &self,
+        tasks: Vec<SourcePayloadTask>,
+    ) -> Result<ThroughputMetrics, io::Error> {
+        let submission = self.submit_payload_tasks_accepted(tasks)?;
+        self.wait_payload_acks(std::slice::from_ref(&submission))?;
+        Ok(submission.metrics)
+    }
+
+    /// Wait until the listed accepted payload submissions are WAL-durable.
+    fn wait_payload_acks(&self, submissions: &[PayloadSubmissionBatch]) -> Result<(), io::Error> {
+        let _ = submissions;
+        Ok(())
+    }
+
+    /// Drain any accepted payload submissions that are still waiting for durability.
+    fn drain_payload_acks(&self) -> Result<(), io::Error> {
+        Ok(())
+    }
+
+    /// Return current source-side in-flight payload request count and byte budget.
+    fn payload_in_flight(&self) -> (usize, usize) {
+        (0, 0)
+    }
 
     /// Batch offset validation for list-time filtering and similar hot paths.
     fn validate_offset_batch(

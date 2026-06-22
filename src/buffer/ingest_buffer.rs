@@ -454,9 +454,7 @@ impl Buffers {
             .unwrap_or_default()
     }
 
-    pub(crate) fn append_batches_to_live(
-        batches: Vec<IngestBufferBatch>,
-    ) -> Result<u64, String> {
+    pub(crate) fn append_batches_to_live(batches: Vec<IngestBufferBatch>) -> Result<u64, String> {
         let mut added_bytes = 0u64;
         for mut ingest_buffer_batch in batches.into_iter() {
             let sink_ref = ingest_buffer_batch.sink_ref.clone();

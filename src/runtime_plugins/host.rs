@@ -40,13 +40,13 @@ use crate::runtime_plugins::manifest::RuntimePluginManifest;
 use crate::runtime_plugins::offset_service::OffsetServiceEndpoint;
 use crate::runtime_plugins::protocol::{
     HandshakeRequest, HostDataFrame, HostFrame, PluginDataFrame, PluginFrame, RuntimeBinding,
-    RuntimeCheckpointUpdate, RuntimeExecutionContext, RuntimeExecutionMode,
+    RuntimeCheckpointUpdate, RuntimeExecutionContext, RuntimeExecutionMode, RuntimeIngestAck,
     RuntimeOffsetMaterializationHint, RuntimeOutputLayout, RuntimeRequestAck, RuntimeSchemaConfig,
     RuntimeSchemaInstallRequest, RuntimeSchemaState, RuntimeSchemaStateInstallRequest,
     RuntimeSessionHello, RuntimeSinkConfig, RuntimeSinkInstallRequest, RuntimeSinkPayload,
-    RuntimeSourceConfig, SchemaRunRequest, SinkRunRequest, SourceEvent, SourceStartRequest,
-    RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
-    SKIPPR_RUNTIME_OFFSET_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
+    RuntimeSourceConfig, RuntimeSourceIngestWindow, SchemaRunRequest, SinkRunRequest, SourceEvent,
+    SourceStartRequest, RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV,
+    SKIPPR_RUNTIME_DATA_ADDR_ENV, SKIPPR_RUNTIME_OFFSET_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use crate::runtime_plugins::schema_state::{
     apply_runtime_source_schema_state, bump_pipeline_schema_version,
@@ -524,7 +524,17 @@ fn build_source_start_request_for_pipeline(
         context: runtime_execution_context(pipeline_name, execution_mode),
         config: source_config,
         once: source_once || execution_mode == RuntimeExecutionMode::Discover,
+        source_ingest_window: runtime_source_ingest_window(),
     })
+}
+
+fn runtime_source_ingest_window() -> RuntimeSourceIngestWindow {
+    let worker_cap = runtime_source_blocking_spawn_cap().max(1);
+    let wal_cap = crate::buffer::wal_writer::queue_capacity().max(1);
+    RuntimeSourceIngestWindow {
+        max_in_flight_requests: worker_cap.saturating_add(wal_cap).clamp(2, 64),
+        max_in_flight_bytes: 512 * 1024 * 1024,
+    }
 }
 
 fn skippr_type_for_arrow(data_type: &ArrowDataType) -> SkipprDataType {
@@ -874,7 +884,8 @@ pub async fn sync_runtime_input_plugin(
     let mut data_completed = false;
     let mut saw_unflushed_batches = false;
     let mut pending_source_tasks: JoinSet<io::Result<()>> = JoinSet::new();
-    let (ingest_ack_tx, mut ingest_ack_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
+    let (ingest_ack_tx, mut ingest_ack_rx) =
+        tokio::sync::mpsc::unbounded_channel::<RuntimeIngestAck>();
     let ingest = Arc::new(Ingest::new_for_execution(execution_mode));
     let mut control_reader = BufferedRuntimeFrameReader::new();
     let mut data_reader = BufferedRuntimeFrameReader::new();
@@ -971,6 +982,10 @@ pub async fn sync_runtime_input_plugin(
             break;
         }
 
+        while let Ok(ack) = ingest_ack_rx.try_recv() {
+            connection.send(&HostFrame::IngestAck(ack)).await?;
+        }
+
         if let Some(payload) = data_reader.take_frame_payload()? {
             let data_frame = tokio::task::spawn_blocking(move || decode_plugin_data_frame(payload))
                 .await
@@ -979,16 +994,27 @@ pub async fn sync_runtime_input_plugin(
                 })??;
             match data_frame {
                 PluginDataFrame::SourcePayloadBatches { request_id, tasks } => {
-                    if !tasks.is_empty() {
+                    let non_empty_tasks = tasks.iter().filter(|task| !task.is_empty()).count();
+                    if non_empty_tasks == 0 {
+                        let _ = ingest_ack_tx.send(RuntimeIngestAck {
+                            request_id,
+                            error: None,
+                        });
+                    } else {
                         let ack_rx = crate::buffer::wal_writer::register_request_ack(
                             request_id,
-                            tasks.len(),
+                            non_empty_tasks,
                         );
                         let ack_tx = ingest_ack_tx.clone();
                         tokio::spawn(async move {
-                            if matches!(ack_rx.await, Ok(Ok(()))) {
-                                let _ = ack_tx.send(request_id);
-                            }
+                            let error = match ack_rx.await {
+                                Ok(Ok(())) => None,
+                                Ok(Err(err)) => Some(err.to_string()),
+                                Err(err) => {
+                                    Some(format!("runtime ingest ack channel dropped: {err}"))
+                                }
+                            };
+                            let _ = ack_tx.send(RuntimeIngestAck { request_id, error });
                         });
                         let raw_frame_bytes: usize =
                             tasks.iter().flat_map(|t| t.iter()).map(|b| b.bytes).sum();
@@ -1009,30 +1035,69 @@ pub async fn sync_runtime_input_plugin(
                                 runtime_source_blocking_spawn_cap()
                             );
                         }
-                        runtime_source_throttle_blocking_tasks(&mut pending_source_tasks).await?;
+                        if let Err(err) =
+                            runtime_source_throttle_blocking_tasks(&mut pending_source_tasks).await
+                        {
+                            crate::buffer::wal_writer::fail_request(request_id, err.to_string());
+                            return Err(err);
+                        }
                         let offsets = offsets.clone();
                         let shared_output = shared_output.clone();
                         let ingest = ingest.clone();
                         pending_source_tasks.spawn_blocking(move || {
-                            ingest_source_payload_batches_into_core(
-                                request_id,
-                                tasks,
-                                offsets,
-                                shared_output,
-                                ingest,
-                            )
+                            let result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    ingest_source_payload_batches_into_core(
+                                        request_id,
+                                        tasks,
+                                        offsets,
+                                        shared_output,
+                                        ingest,
+                                    )
+                                }));
+                            match result {
+                                Ok(Ok(())) => Ok(()),
+                                Ok(Err(err)) => {
+                                    crate::buffer::wal_writer::fail_request(
+                                        request_id,
+                                        err.to_string(),
+                                    );
+                                    Err(err)
+                                }
+                                Err(_) => {
+                                    let message = "runtime source ingest task panicked".to_string();
+                                    crate::buffer::wal_writer::fail_request(
+                                        request_id,
+                                        message.clone(),
+                                    );
+                                    Err(io::Error::other(message))
+                                }
+                            }
                         });
                         saw_unflushed_batches = true;
                     }
                 }
-                PluginDataFrame::IngestBatches { request_id, batches } => {
-                    if !batches.is_empty() {
+                PluginDataFrame::IngestBatches {
+                    request_id,
+                    batches,
+                } => {
+                    if batches.is_empty() {
+                        let _ = ingest_ack_tx.send(RuntimeIngestAck {
+                            request_id,
+                            error: None,
+                        });
+                    } else {
                         let ack_rx = crate::buffer::wal_writer::register_request_ack(request_id, 1);
                         let ack_tx = ingest_ack_tx.clone();
                         tokio::spawn(async move {
-                            if matches!(ack_rx.await, Ok(Ok(()))) {
-                                let _ = ack_tx.send(request_id);
-                            }
+                            let error = match ack_rx.await {
+                                Ok(Ok(())) => None,
+                                Ok(Err(err)) => Some(err.to_string()),
+                                Err(err) => {
+                                    Some(format!("runtime ingest ack channel dropped: {err}"))
+                                }
+                            };
+                            let _ = ack_tx.send(RuntimeIngestAck { request_id, error });
                         });
                         if Config::debug_enabled() || Config::log_wal_enabled() {
                             let total_bytes: usize = batches
@@ -1058,18 +1123,45 @@ pub async fn sync_runtime_input_plugin(
                                 offset_sample
                             );
                         }
-                        runtime_source_throttle_blocking_tasks(&mut pending_source_tasks).await?;
+                        if let Err(err) =
+                            runtime_source_throttle_blocking_tasks(&mut pending_source_tasks).await
+                        {
+                            crate::buffer::wal_writer::fail_request(request_id, err.to_string());
+                            return Err(err);
+                        }
                         let offsets = offsets.clone();
                         let shared_output = shared_output.clone();
                         pending_source_tasks.spawn_blocking(move || {
-                            INGEST_RT
-                                .handle()
-                                .block_on(ingest_runtime_batches_into_core(
-                                    request_id,
-                                    batches,
-                                    offsets,
-                                    shared_output,
-                                ))
+                            let result =
+                                std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                    INGEST_RT
+                                        .handle()
+                                        .block_on(ingest_runtime_batches_into_core(
+                                            request_id,
+                                            batches,
+                                            offsets,
+                                            shared_output,
+                                        ))
+                                }));
+                            match result {
+                                Ok(Ok(())) => Ok(()),
+                                Ok(Err(err)) => {
+                                    crate::buffer::wal_writer::fail_request(
+                                        request_id,
+                                        err.to_string(),
+                                    );
+                                    Err(err)
+                                }
+                                Err(_) => {
+                                    let message =
+                                        "runtime prepared ingest task panicked".to_string();
+                                    crate::buffer::wal_writer::fail_request(
+                                        request_id,
+                                        message.clone(),
+                                    );
+                                    Err(io::Error::other(message))
+                                }
+                            }
                         });
                         saw_unflushed_batches = true;
                     }
@@ -1151,10 +1243,10 @@ pub async fn sync_runtime_input_plugin(
 
         tokio::select! {
             biased;
-            maybe_request_id = ingest_ack_rx.recv() => {
-                if let Some(request_id) = maybe_request_id {
+            maybe_ack = ingest_ack_rx.recv() => {
+                if let Some(ack) = maybe_ack {
                     connection
-                        .send(&HostFrame::IngestAck(RuntimeRequestAck { request_id }))
+                        .send(&HostFrame::IngestAck(ack))
                         .await?;
                     continue;
                 }

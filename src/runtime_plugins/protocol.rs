@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 // separate from the skippr/React adapter's CLI subprocess JSON summaries.
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 12;
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 13;
 pub const SKIPPR_RUNTIME_CONTROL_ADDR_ENV: &str = "SKIPPR_RUNTIME_CONTROL_ADDR";
 pub const SKIPPR_RUNTIME_DATA_ADDR_ENV: &str = "SKIPPR_RUNTIME_DATA_ADDR";
 pub const SKIPPR_RUNTIME_OFFSET_ADDR_ENV: &str = "SKIPPR_RUNTIME_OFFSET_ADDR";
@@ -307,12 +307,29 @@ pub struct HandshakeResponse {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeSourceIngestWindow {
+    pub max_in_flight_requests: usize,
+    pub max_in_flight_bytes: usize,
+}
+
+impl Default for RuntimeSourceIngestWindow {
+    fn default() -> Self {
+        Self {
+            max_in_flight_requests: 8,
+            max_in_flight_bytes: 512 * 1024 * 1024,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SourceStartRequest {
     pub context: RuntimeExecutionContext,
     pub config: RuntimeSourceConfig,
     // Keep this trailing so v7 runtimes can decode RunSource and ignore it.
     #[serde(default)]
     pub once: bool,
+    #[serde(default)]
+    pub source_ingest_window: RuntimeSourceIngestWindow,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -409,6 +426,12 @@ pub struct RuntimeRequestAck {
     pub request_id: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeIngestAck {
+    pub request_id: u64,
+    pub error: Option<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum SourceEvent {
     SchemaStateUpdate(RuntimeSchemaState),
@@ -456,7 +479,7 @@ pub enum HostFrame {
     RunSource(SourceStartRequest),
     RunSink(SinkRunRequest),
     RunSchema(SchemaRunRequest),
-    IngestAck(RuntimeRequestAck),
+    IngestAck(RuntimeIngestAck),
     OffsetResponse(RuntimeOffsetRpcResponse),
     Shutdown,
 }
@@ -536,6 +559,7 @@ mod tests {
                 serde_json::json!({}),
             )),
             once: true,
+            source_ingest_window: RuntimeSourceIngestWindow::default(),
         });
 
         let bytes = bincode::serialize(&frame).unwrap();

@@ -1,20 +1,20 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::SyncSender;
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::{Arc, Condvar, Mutex as StdMutex};
 
 use skippr_core::helpers::offsets::{OffsetKey, OffsetTypes};
 use skippr_core::ingest_work::{IngestBatch, ThroughputMetrics};
 use skippr_core::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
 use skippr_core::plugins::source_sync::{
-    OffsetValidationEntry, SourcePayloadTask, SourceSyncContext,
+    OffsetValidationEntry, PayloadSubmissionBatch, SourcePayloadTask, SourceSyncContext,
 };
 use skippr_core::runtime_plugins::protocol::{
-    HostOffsetFrame, PluginDataFrame, PluginOffsetFrame, RuntimeCheckpointUpdate, RuntimeRequestAck,
+    HostOffsetFrame, PluginDataFrame, PluginOffsetFrame, RuntimeCheckpointUpdate, RuntimeIngestAck,
     RuntimeOffsetMaterializationHint, RuntimeOffsetValidationEntry, RuntimeRawIngestBatch,
-    RuntimeSessionHello, RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_OFFSET_ADDR_ENV,
-    SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
+    RuntimeSessionHello, RuntimeSourceIngestWindow, RUNTIME_PROTOCOL_VERSION,
+    SKIPPR_RUNTIME_OFFSET_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use skippr_core::runtime_plugins::wire::{read_frame, write_frame};
 use tokio::net::TcpStream;
@@ -59,16 +59,37 @@ fn chunk_source_payload_tasks(
     chunks
 }
 
+struct IngestAckState {
+    pending: HashMap<u64, usize>,
+    completed: HashMap<u64, Result<(), String>>,
+    in_flight_requests: usize,
+    in_flight_bytes: usize,
+}
+
 pub(crate) struct RuntimeIngestAckClient {
-    pending: Arc<StdMutex<HashMap<u64, SyncSender<Result<(), String>>>>>,
+    state: Arc<(StdMutex<IngestAckState>, Condvar)>,
     next_request_id: AtomicU64,
+    max_in_flight_requests: usize,
+    max_in_flight_bytes: usize,
 }
 
 impl RuntimeIngestAckClient {
-    pub(crate) fn new() -> Self {
+    pub(crate) fn new(window: RuntimeSourceIngestWindow) -> Self {
+        let max_in_flight_requests = window.max_in_flight_requests.clamp(1, 64);
+        let max_in_flight_bytes = window.max_in_flight_bytes.max(1024 * 1024);
         Self {
-            pending: Arc::new(StdMutex::new(HashMap::new())),
+            state: Arc::new((
+                StdMutex::new(IngestAckState {
+                    pending: HashMap::new(),
+                    completed: HashMap::new(),
+                    in_flight_requests: 0,
+                    in_flight_bytes: 0,
+                }),
+                Condvar::new(),
+            )),
             next_request_id: AtomicU64::new(1),
+            max_in_flight_requests,
+            max_in_flight_bytes,
         }
     }
 
@@ -76,21 +97,90 @@ impl RuntimeIngestAckClient {
         self.next_request_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    fn register_request(&self, request_id: u64, tx: SyncSender<Result<(), String>>) {
-        self.pending.lock().unwrap().insert(request_id, tx);
+    fn wait_for_capacity(&self, request_bytes: usize) {
+        let (lock, cv) = &*self.state;
+        let mut guard = lock.lock().unwrap();
+        while guard.in_flight_requests >= self.max_in_flight_requests
+            || (guard.in_flight_bytes > 0
+                && guard.in_flight_bytes.saturating_add(request_bytes) > self.max_in_flight_bytes)
+        {
+            guard = cv.wait(guard).unwrap();
+        }
     }
 
-    pub(crate) fn resolve_ack(&self, ack: RuntimeRequestAck) {
-        if let Some(tx) = self.pending.lock().unwrap().remove(&ack.request_id) {
-            let _ = tx.send(Ok(()));
+    fn register_request(&self, request_id: u64, request_bytes: usize) {
+        let (lock, cv) = &*self.state;
+        let mut guard = lock.lock().unwrap();
+        guard.pending.insert(request_id, request_bytes);
+        guard.in_flight_requests = guard.in_flight_requests.saturating_add(1);
+        guard.in_flight_bytes = guard.in_flight_bytes.saturating_add(request_bytes);
+        cv.notify_all();
+    }
+
+    pub(crate) fn resolve_ack(&self, ack: RuntimeIngestAck) {
+        let (lock, cv) = &*self.state;
+        let mut guard = lock.lock().unwrap();
+        if let Some(bytes) = guard.pending.remove(&ack.request_id) {
+            guard.in_flight_requests = guard.in_flight_requests.saturating_sub(1);
+            guard.in_flight_bytes = guard.in_flight_bytes.saturating_sub(bytes);
         }
+        let result = ack.error.map_or(Ok(()), Err);
+        guard.completed.insert(ack.request_id, result);
+        cv.notify_all();
     }
 
     pub(crate) fn fail_all(&self, message: String) {
-        let pending = std::mem::take(&mut *self.pending.lock().unwrap());
-        for (_, tx) in pending {
-            let _ = tx.send(Err(message.clone()));
+        let (lock, cv) = &*self.state;
+        let mut guard = lock.lock().unwrap();
+        let pending = std::mem::take(&mut guard.pending);
+        for (request_id, _) in pending {
+            guard.completed.insert(request_id, Err(message.clone()));
         }
+        guard.in_flight_requests = 0;
+        guard.in_flight_bytes = 0;
+        cv.notify_all();
+    }
+
+    fn wait_for_request_ids(&self, request_ids: &[u64]) -> Result<(), io::Error> {
+        let mut remaining: HashSet<u64> = request_ids.iter().copied().collect();
+        let (lock, cv) = &*self.state;
+        let mut guard = lock.lock().unwrap();
+        while !remaining.is_empty() {
+            let completed_ids = remaining
+                .iter()
+                .copied()
+                .filter(|request_id| guard.completed.contains_key(request_id))
+                .collect::<Vec<_>>();
+            for request_id in completed_ids {
+                remaining.remove(&request_id);
+                match guard.completed.remove(&request_id).unwrap() {
+                    Ok(()) => {}
+                    Err(err) => return Err(io::Error::other(err)),
+                }
+            }
+            if !remaining.is_empty() {
+                guard = cv.wait(guard).unwrap();
+            }
+        }
+        Ok(())
+    }
+
+    fn drain(&self) -> Result<(), io::Error> {
+        let (lock, cv) = &*self.state;
+        let mut guard = lock.lock().unwrap();
+        while !guard.pending.is_empty() {
+            guard = cv.wait(guard).unwrap();
+        }
+        let completed = std::mem::take(&mut guard.completed);
+        for (_, result) in completed {
+            result.map_err(io::Error::other)?;
+        }
+        Ok(())
+    }
+
+    fn in_flight(&self) -> (usize, usize) {
+        let guard = self.state.0.lock().unwrap();
+        (guard.in_flight_requests, guard.in_flight_bytes)
     }
 }
 
@@ -273,8 +363,16 @@ impl SourceSyncContext for RuntimeSourceSyncContext {
         &self,
         tasks: Vec<SourcePayloadTask>,
     ) -> Result<ThroughputMetrics, io::Error> {
+        self.submit_payload_tasks_accepted(tasks)
+            .map(|submission| submission.metrics)
+    }
+
+    fn submit_payload_tasks_accepted(
+        &self,
+        tasks: Vec<SourcePayloadTask>,
+    ) -> Result<PayloadSubmissionBatch, io::Error> {
         if self.suppress_payloads || tasks.is_empty() {
-            return Ok(self.last_metrics());
+            return Ok(PayloadSubmissionBatch::already_durable(self.last_metrics()));
         }
 
         let runtime_tasks = tasks
@@ -295,21 +393,61 @@ impl SourceSyncContext for RuntimeSourceSyncContext {
             })
             .collect::<Vec<_>>();
 
+        let mut request_ids = Vec::new();
+        let total_bytes = runtime_tasks
+            .iter()
+            .flat_map(|task| task.iter())
+            .map(|batch| batch.bytes)
+            .sum::<usize>();
+
         for chunk in chunk_source_payload_tasks(runtime_tasks) {
             let request_id = self.ingest_ack_client.next_request_id();
-            let (tx, rx) = std::sync::mpsc::sync_channel(1);
-            self.ingest_ack_client.register_request(request_id, tx);
-            block_on_handle(&self.control_writer.handle, async {
+            let request_bytes = chunk
+                .iter()
+                .flat_map(|task| task.iter())
+                .map(|batch| batch.bytes)
+                .sum::<usize>();
+            self.ingest_ack_client.wait_for_capacity(request_bytes);
+            self.ingest_ack_client
+                .register_request(request_id, request_bytes);
+            if let Err(err) = block_on_handle(&self.control_writer.handle, async {
                 self.data_writer
-                    .write(&PluginDataFrame::SourcePayloadBatches { request_id, tasks: chunk })
+                    .write(&PluginDataFrame::SourcePayloadBatches {
+                        request_id,
+                        tasks: chunk,
+                    })
                     .await
-            })?;
-            rx.recv()
-                .map_err(|err| io::Error::other(format!("runtime ingest ack dropped: {err}")))?
-                .map_err(io::Error::other)?;
+            }) {
+                self.ingest_ack_client.resolve_ack(RuntimeIngestAck {
+                    request_id,
+                    error: Some(format!("failed to submit runtime ingest payload: {err}")),
+                });
+                return Err(err);
+            }
+            request_ids.push(request_id);
         }
 
-        Ok(self.last_metrics())
+        Ok(PayloadSubmissionBatch {
+            request_ids,
+            bytes: total_bytes,
+            metrics: self.last_metrics(),
+        })
+    }
+
+    fn wait_payload_acks(&self, submissions: &[PayloadSubmissionBatch]) -> Result<(), io::Error> {
+        let request_ids = submissions
+            .iter()
+            .flat_map(|submission| submission.request_ids.iter().copied())
+            .collect::<Vec<_>>();
+        self.ingest_ack_client.wait_for_request_ids(&request_ids)
+    }
+
+    fn drain_payload_acks(&self) -> Result<(), io::Error> {
+        self.ingest_ack_client.drain()
+    }
+
+    fn payload_in_flight(&self) -> (usize, usize) {
+        self.ingest_ack_client.in_flight()
     }
 
     fn validate_offset_batch(
@@ -387,7 +525,7 @@ pub fn submit_payload_batches(
             optimal_chunk_size: 0,
         });
     }
-    ctx.submit_payload_tasks(vec![source_payload_task(batches)])
+    ctx.submit_payload_tasks_and_wait(vec![source_payload_task(batches)])
 }
 
 /// Submit multiple schedulable batch groups to host-owned ingest.
@@ -407,7 +545,7 @@ pub fn submit_payload_batch_groups(
         .into_iter()
         .map(source_payload_task)
         .collect::<Vec<_>>();
-    ctx.submit_payload_tasks(tasks)
+    ctx.submit_payload_tasks_and_wait(tasks)
 }
 
 /// Returns true when a Closed partition was already ingested and should be skipped.
@@ -478,4 +616,73 @@ pub fn offset_validation_entry(
 
 pub fn source_payload_task(batches: Vec<IngestBatch>) -> SourcePayloadTask {
     SourcePayloadTask { batches }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use skippr_core::runtime_plugins::protocol::RuntimeSourceIngestWindow;
+
+    fn test_ack_client() -> RuntimeIngestAckClient {
+        RuntimeIngestAckClient::new(RuntimeSourceIngestWindow {
+            max_in_flight_requests: 2,
+            max_in_flight_bytes: 1024,
+        })
+    }
+
+    #[test]
+    fn ingest_ack_client_propagates_nack() {
+        let client = test_ack_client();
+        client.register_request(7, 128);
+        assert_eq!(client.in_flight(), (1, 128));
+
+        client.resolve_ack(RuntimeIngestAck {
+            request_id: 7,
+            error: Some("wal failed".to_string()),
+        });
+
+        let err = client.wait_for_request_ids(&[7]).unwrap_err();
+        assert!(err.to_string().contains("wal failed"));
+        assert_eq!(client.in_flight(), (0, 0));
+    }
+
+    #[test]
+    fn ingest_ack_client_drains_successful_completions() {
+        let client = test_ack_client();
+        client.register_request(8, 64);
+        client.resolve_ack(RuntimeIngestAck {
+            request_id: 8,
+            error: None,
+        });
+
+        client.drain().unwrap();
+        assert_eq!(client.in_flight(), (0, 0));
+    }
+
+    #[test]
+    fn ingest_ack_client_fail_all_completes_pending_requests() {
+        let client = test_ack_client();
+        client.register_request(9, 64);
+        client.register_request(10, 64);
+
+        client.fail_all("host stopped".to_string());
+
+        let err = client.wait_for_request_ids(&[9, 10]).unwrap_err();
+        assert!(err.to_string().contains("host stopped"));
+        assert_eq!(client.in_flight(), (0, 0));
+    }
+
+    #[test]
+    fn ingest_ack_client_allows_oversized_request_when_window_empty() {
+        let client = test_ack_client();
+        client.wait_for_capacity(2048);
+        client.register_request(11, 2048);
+        assert_eq!(client.in_flight(), (1, 2048));
+
+        client.resolve_ack(RuntimeIngestAck {
+            request_id: 11,
+            error: None,
+        });
+        client.drain().unwrap();
+    }
 }
