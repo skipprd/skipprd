@@ -62,7 +62,11 @@ pub fn start(ingest_threads: usize) {
     let (tx, rx) = mpsc::channel::<WalWriterCommand>(capacity);
     if WAL_WRITER_TX.set(tx).is_ok() {
         WAL_WRITER_CAPACITY.store(capacity, Ordering::Relaxed);
-        tokio::spawn(run_writer(rx));
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(run_writer(rx));
+        } else {
+            crate::ingest_work::INGEST_RT.spawn(run_writer(rx));
+        }
         info!("WAL writer started with queue_capacity={}", capacity);
     }
 }
