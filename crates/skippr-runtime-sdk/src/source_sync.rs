@@ -11,7 +11,7 @@ use skippr_core::plugins::source_sync::{
     OffsetValidationEntry, SourcePayloadTask, SourceSyncContext,
 };
 use skippr_core::runtime_plugins::protocol::{
-    HostOffsetFrame, PluginDataFrame, PluginOffsetFrame, RuntimeCheckpointUpdate,
+    HostOffsetFrame, PluginDataFrame, PluginOffsetFrame, RuntimeCheckpointUpdate, RuntimeRequestAck,
     RuntimeOffsetMaterializationHint, RuntimeOffsetValidationEntry, RuntimeRawIngestBatch,
     RuntimeSessionHello, RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_OFFSET_ADDR_ENV,
     SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
@@ -37,6 +37,7 @@ fn chunk_source_payload_tasks(
     for task in runtime_tasks {
         current.push(task);
         let encoded_len = bincode::serialize(&PluginDataFrame::SourcePayloadBatches {
+            request_id: 0,
             tasks: current.clone(),
         })
         .map(|bytes| bytes.len())
@@ -56,6 +57,41 @@ fn chunk_source_payload_tasks(
         chunks.push(current);
     }
     chunks
+}
+
+pub(crate) struct RuntimeIngestAckClient {
+    pending: Arc<StdMutex<HashMap<u64, SyncSender<Result<(), String>>>>>,
+    next_request_id: AtomicU64,
+}
+
+impl RuntimeIngestAckClient {
+    pub(crate) fn new() -> Self {
+        Self {
+            pending: Arc::new(StdMutex::new(HashMap::new())),
+            next_request_id: AtomicU64::new(1),
+        }
+    }
+
+    fn next_request_id(&self) -> u64 {
+        self.next_request_id.fetch_add(1, Ordering::Relaxed)
+    }
+
+    fn register_request(&self, request_id: u64, tx: SyncSender<Result<(), String>>) {
+        self.pending.lock().unwrap().insert(request_id, tx);
+    }
+
+    pub(crate) fn resolve_ack(&self, ack: RuntimeRequestAck) {
+        if let Some(tx) = self.pending.lock().unwrap().remove(&ack.request_id) {
+            let _ = tx.send(Ok(()));
+        }
+    }
+
+    pub(crate) fn fail_all(&self, message: String) {
+        let pending = std::mem::take(&mut *self.pending.lock().unwrap());
+        for (_, tx) in pending {
+            let _ = tx.send(Err(message.clone()));
+        }
+    }
 }
 
 enum OffsetServiceResponse {
@@ -191,6 +227,7 @@ pub struct RuntimeSourceSyncContext {
     control_writer: ControlWriter,
     data_writer: DataWriter,
     offset_client: Arc<RuntimeOffsetClient>,
+    ingest_ack_client: Arc<RuntimeIngestAckClient>,
     suppress_payloads: bool,
     metrics: Arc<StdMutex<ThroughputMetrics>>,
 }
@@ -199,6 +236,7 @@ impl RuntimeSourceSyncContext {
     pub(crate) async fn new(
         control_writer: ControlWriter,
         data_writer: DataWriter,
+        ingest_ack_client: Arc<RuntimeIngestAckClient>,
         suppress_payloads: bool,
     ) -> io::Result<(Self, tokio::net::tcp::OwnedReadHalf)> {
         let (offset_client, offset_reader) = RuntimeOffsetClient::connect().await?;
@@ -208,6 +246,7 @@ impl RuntimeSourceSyncContext {
                 control_writer,
                 data_writer,
                 offset_client,
+                ingest_ack_client,
                 suppress_payloads,
                 metrics: Arc::new(StdMutex::new(ThroughputMetrics {
                     bytes_per_second: 0,
@@ -257,11 +296,17 @@ impl SourceSyncContext for RuntimeSourceSyncContext {
             .collect::<Vec<_>>();
 
         for chunk in chunk_source_payload_tasks(runtime_tasks) {
+            let request_id = self.ingest_ack_client.next_request_id();
+            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+            self.ingest_ack_client.register_request(request_id, tx);
             block_on_handle(&self.control_writer.handle, async {
                 self.data_writer
-                    .write(&PluginDataFrame::SourcePayloadBatches { tasks: chunk })
+                    .write(&PluginDataFrame::SourcePayloadBatches { request_id, tasks: chunk })
                     .await
             })?;
+            rx.recv()
+                .map_err(|err| io::Error::other(format!("runtime ingest ack dropped: {err}")))?
+                .map_err(io::Error::other)?;
         }
 
         Ok(self.last_metrics())

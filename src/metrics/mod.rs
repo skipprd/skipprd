@@ -28,11 +28,47 @@ pub static LAST_WAL_WRITE_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static LAST_WAL_WRITE_ROWS_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static LAST_WAL_COMPACTED_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static LAST_WAL_COMPACTED_FILES_TOTAL: AtomicU64 = AtomicU64::new(0);
+pub static LAST_PRINT_WAL_COMPACTIONS_STARTED: AtomicU64 = AtomicU64::new(0);
+pub static LAST_PRINT_WAL_COMPACTIONS_COMPLETED: AtomicU64 = AtomicU64::new(0);
 pub static LAST_PARQUET_PERSISTED_BYTES_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static LAST_PARQUET_PERSISTED_ROWS_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static LAST_PARQUET_PERSISTED_OBJECTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 // Printer-only delta state (separate from upload deltas)
 pub static LAST_PRINT_MESSAGES_TOTAL: AtomicU64 = AtomicU64::new(0);
+
+#[cfg(unix)]
+fn data_dir_disk_usage() -> Option<(u64, f64)> {
+    use std::ffi::CString;
+    use std::os::unix::ffi::OsStrExt;
+    use std::path::Path;
+
+    let data_dir = Config::get_data_dir();
+    let path = Path::new(&data_dir);
+    let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
+    let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+    let rc = unsafe { libc::statvfs(c_path.as_ptr(), stats.as_mut_ptr()) };
+    if rc != 0 {
+        return None;
+    }
+    let stats = unsafe { stats.assume_init() };
+    let block_size = u128::from(if stats.f_frsize > 0 {
+        stats.f_frsize
+    } else {
+        stats.f_bsize
+    });
+    let total_bytes = u64::try_from(u128::from(stats.f_blocks).checked_mul(block_size)?).ok()?;
+    let avail_bytes = u64::try_from(u128::from(stats.f_bavail).checked_mul(block_size)?).ok()?;
+    if total_bytes == 0 {
+        return None;
+    }
+    let used_pct = 100.0 - ((avail_bytes as f64 * 100.0) / total_bytes as f64);
+    Some((avail_bytes, used_pct))
+}
+
+#[cfg(not(unix))]
+fn data_dir_disk_usage() -> Option<(u64, f64)> {
+    None
+}
 
 const VERSION: Option<&str> = option_env!("CARGO_PKG_VERSION");
 
@@ -520,6 +556,28 @@ impl Metrics {
                     let last_dead = LAST_PRINT_DEAD_TOTAL.swap(deadletters_total_counter, Ordering::SeqCst);
                     let dead_current = deadletters_total_counter.saturating_sub(last_dead);
 
+                    let wal_pending_count = crate::buffer::wal_writer::pending_count();
+                    let wal_pending_bytes = crate::buffer::wal_writer::pending_bytes();
+                    let wal_queue_cap = crate::buffer::wal_writer::queue_capacity();
+                    let wal_inflight = crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT.load(Ordering::SeqCst);
+                    let wal_started_total = crate::metrics::counters::WAL_COMPACTIONS_STARTED.load(Ordering::SeqCst);
+                    let wal_completed_total = crate::metrics::counters::WAL_COMPACTIONS_COMPLETED.load(Ordering::SeqCst);
+                    let wal_started_min = wal_started_total.saturating_sub(
+                        LAST_PRINT_WAL_COMPACTIONS_STARTED.swap(wal_started_total, Ordering::SeqCst),
+                    );
+                    let wal_completed_min = wal_completed_total.saturating_sub(
+                        LAST_PRINT_WAL_COMPACTIONS_COMPLETED.swap(wal_completed_total, Ordering::SeqCst),
+                    );
+                    let reclaimable_partitions = crate::buffer::ingest_buffer::Buffers::reclaimable_wal_partition_count(10_000);
+                    let data_dir_paused = crate::data_dir_ingest_paused();
+                    let should_print_wal_digest = wal_pending_count > 0
+                        || wal_pending_bytes > 0
+                        || wal_inflight > 0
+                        || wal_started_min > 0
+                        || wal_completed_min > 0
+                        || reclaimable_partitions > 0
+                        || data_dir_paused;
+
                     if ingested_current > 0 {
                         info!("Messages per Min: {}", ingested_current);
                         info!("Messages Fixed per Min: {}", fixed_current);
@@ -551,6 +609,39 @@ impl Metrics {
                         // for (key, value) in total_times.iter() {
                         //     println!("{}: {}ms", key, value.as_millis());
                         // }
+                    }
+
+                    if ingested_current > 0 || should_print_wal_digest {
+                        let wal_target = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(Ordering::SeqCst);
+                        info!(
+                            "WAL writer: queue={}/{}, pending={}/{}, coalesce_avg={}, persist_avg={:.2}ms, ack_avg={:.2}ms",
+                            wal_pending_count,
+                            wal_queue_cap,
+                            wal_pending_count,
+                            Helpers::human_readable_size(wal_pending_bytes as u64),
+                            Helpers::human_readable_size(crate::buffer::wal_writer::coalesce_avg_bytes()),
+                            crate::buffer::wal_writer::persist_avg_ms(),
+                            crate::buffer::wal_writer::ack_avg_ms(),
+                        );
+                        info!(
+                            "WAL compaction: target={}, inflight={}, started/min={}, completed/min={}, reclaimable_partitions={}, paused={}",
+                            wal_target,
+                            wal_inflight,
+                            wal_started_min,
+                            wal_completed_min,
+                            reclaimable_partitions,
+                            data_dir_paused,
+                        );
+                        if let Some((free_bytes, used_pct)) = data_dir_disk_usage() {
+                            info!(
+                                "DATA_DIR: paused={}, usage={:.1}%, free={}",
+                                data_dir_paused,
+                                used_pct,
+                                Helpers::human_readable_size(free_bytes),
+                            );
+                        } else {
+                            info!("DATA_DIR: paused={}, usage=n/a, free=n/a", data_dir_paused);
+                        }
                     }
 
                     handle_clone.spawn(async move {

@@ -22,7 +22,7 @@ use {
     nix::unistd::Pid,
 };
 
-use crate::buffer::ingest_buffer::{flush_all_segments, Buffers, IngestBufferBatch};
+use crate::buffer::ingest_buffer::{flush_all_segments, IngestBufferBatch};
 use crate::discover::{OutputMetadata, SkipprDataType};
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetTypes, Offsets};
@@ -612,9 +612,10 @@ fn apply_derived_runtime_schema(namespace: String, schema: &SchemaRef) {
 }
 
 async fn ingest_runtime_batches_into_core(
+    request_id: u64,
     batches: Vec<crate::runtime_plugins::protocol::RuntimeIngestPartitionBatch>,
     offsets: Arc<Offsets>,
-    shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+    _shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
 ) -> io::Result<()> {
     if batches.is_empty() {
         return Ok(());
@@ -669,14 +670,28 @@ async fn ingest_runtime_batches_into_core(
         });
     }
 
-    let mut buffers = Buffers::new();
-    buffers.write(buffer_batches);
+    let arrow_bytes = buffer_batches
+        .iter()
+        .flat_map(|batch| batch.record_batches.as_ref().into_iter().flatten())
+        .map(|batch| batch.get_array_memory_size())
+        .sum::<usize>();
     crate::metrics::counters::add_messages(total_rows);
     crate::metrics::counters::add_source_bytes(total_bytes);
-    buffers
-        .flush(offsets, shared_output)
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    crate::buffer::wal_writer::submit(crate::buffer::wal_writer::WalCommitUnit {
+        submit_id: request_id,
+        batches: buffer_batches,
+        offsets_db: offsets,
+        raw_bytes: total_bytes as usize,
+        arrow_bytes,
+        done: done_tx,
+    })
+    .await
+    .map_err(io::Error::other)?;
+    done_rx
         .await
-        .map_err(|err| io::Error::other(err.to_string()))
+        .map_err(|err| io::Error::other(format!("WAL writer response dropped: {err}")))?
+        .map_err(io::Error::other)
 }
 
 fn decode_plugin_data_frame(payload: Vec<u8>) -> io::Result<PluginDataFrame> {
@@ -684,6 +699,7 @@ fn decode_plugin_data_frame(payload: Vec<u8>) -> io::Result<PluginDataFrame> {
 }
 
 fn ingest_source_payload_batches_into_core(
+    request_id: u64,
     tasks: Vec<Vec<crate::runtime_plugins::protocol::RuntimeRawIngestBatch>>,
     offsets: Arc<Offsets>,
     shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
@@ -699,11 +715,10 @@ fn ingest_source_payload_batches_into_core(
             continue;
         }
         let batches = task.into_iter().map(IngestBatch::from).collect::<Vec<_>>();
-        ingest_tasks.add(IngestTask::new(
-            batches,
-            offsets.clone(),
-            shared_output.clone(),
-        ));
+        ingest_tasks.add(
+            IngestTask::new(batches, offsets.clone(), shared_output.clone())
+                .with_submit_id(request_id),
+        );
     }
     let ingest_tasks = Arc::new(ingest_tasks);
     let _ = ingest.ingest_file(&ingest_tasks, &offsets, shared_output);
@@ -859,6 +874,7 @@ pub async fn sync_runtime_input_plugin(
     let mut data_completed = false;
     let mut saw_unflushed_batches = false;
     let mut pending_source_tasks: JoinSet<io::Result<()>> = JoinSet::new();
+    let (ingest_ack_tx, mut ingest_ack_rx) = tokio::sync::mpsc::unbounded_channel::<u64>();
     let ingest = Arc::new(Ingest::new_for_execution(execution_mode));
     let mut control_reader = BufferedRuntimeFrameReader::new();
     let mut data_reader = BufferedRuntimeFrameReader::new();
@@ -962,8 +978,18 @@ pub async fn sync_runtime_input_plugin(
                     io::Error::other(format!("runtime data frame decode failed: {err}"))
                 })??;
             match data_frame {
-                PluginDataFrame::SourcePayloadBatches { tasks } => {
+                PluginDataFrame::SourcePayloadBatches { request_id, tasks } => {
                     if !tasks.is_empty() {
+                        let ack_rx = crate::buffer::wal_writer::register_request_ack(
+                            request_id,
+                            tasks.len(),
+                        );
+                        let ack_tx = ingest_ack_tx.clone();
+                        tokio::spawn(async move {
+                            if matches!(ack_rx.await, Ok(Ok(()))) {
+                                let _ = ack_tx.send(request_id);
+                            }
+                        });
                         let raw_frame_bytes: usize =
                             tasks.iter().flat_map(|t| t.iter()).map(|b| b.bytes).sum();
                         if Config::debug_enabled() || Config::log_wal_enabled() {
@@ -989,6 +1015,7 @@ pub async fn sync_runtime_input_plugin(
                         let ingest = ingest.clone();
                         pending_source_tasks.spawn_blocking(move || {
                             ingest_source_payload_batches_into_core(
+                                request_id,
                                 tasks,
                                 offsets,
                                 shared_output,
@@ -998,8 +1025,15 @@ pub async fn sync_runtime_input_plugin(
                         saw_unflushed_batches = true;
                     }
                 }
-                PluginDataFrame::IngestBatches { batches } => {
+                PluginDataFrame::IngestBatches { request_id, batches } => {
                     if !batches.is_empty() {
+                        let ack_rx = crate::buffer::wal_writer::register_request_ack(request_id, 1);
+                        let ack_tx = ingest_ack_tx.clone();
+                        tokio::spawn(async move {
+                            if matches!(ack_rx.await, Ok(Ok(()))) {
+                                let _ = ack_tx.send(request_id);
+                            }
+                        });
                         if Config::debug_enabled() || Config::log_wal_enabled() {
                             let total_bytes: usize = batches
                                 .iter()
@@ -1031,6 +1065,7 @@ pub async fn sync_runtime_input_plugin(
                             INGEST_RT
                                 .handle()
                                 .block_on(ingest_runtime_batches_into_core(
+                                    request_id,
                                     batches,
                                     offsets,
                                     shared_output,
@@ -1116,6 +1151,14 @@ pub async fn sync_runtime_input_plugin(
 
         tokio::select! {
             biased;
+            maybe_request_id = ingest_ack_rx.recv() => {
+                if let Some(request_id) = maybe_request_id {
+                    connection
+                        .send(&HostFrame::IngestAck(RuntimeRequestAck { request_id }))
+                        .await?;
+                    continue;
+                }
+            }
             control_ready = connection.control.readable(), if !control_completed => {
                 match control_ready {
                     Ok(()) => control_reader.fill_from_ready(&connection.control).map_err(|err| {

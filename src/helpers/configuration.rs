@@ -1170,6 +1170,13 @@ impl Config {
         }
     }
 
+    pub fn wal_rotation_thresholds() -> (u64, u64) {
+        (
+            Self::get_wal_bytes_per_file(),
+            Self::get_wal_max_delay_seconds(),
+        )
+    }
+
     pub fn get_pipelines() -> Vec<String> {
         let config = Config::get();
 

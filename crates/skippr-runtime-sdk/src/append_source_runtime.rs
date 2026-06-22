@@ -25,7 +25,9 @@ use crate::protocol::{
     SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
     SKIPPR_RUNTIME_EXECUTION_MODE_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
-use crate::source_sync::{run_offset_service_reader_loop, RuntimeSourceSyncContext};
+use crate::source_sync::{
+    run_offset_service_reader_loop, RuntimeIngestAckClient, RuntimeSourceSyncContext,
+};
 use crate::wire::{read_frame_or_eof, write_frame};
 
 #[derive(Debug, Parser)]
@@ -227,19 +229,27 @@ impl RuntimeSourceControl {
 async fn run_runtime_source_host_frame_loop(
     mut reader: OwnedReadHalf,
     control: Arc<RuntimeSourceControl>,
+    ingest_ack_client: Arc<RuntimeIngestAckClient>,
 ) -> io::Result<()> {
-    match read_frame_or_eof::<_, HostFrame>(&mut reader).await? {
-        Some(HostFrame::Shutdown) | None => {
-            control.shutdown(None);
-            Ok(())
-        }
-        Some(other) => {
-            let err = io::Error::other(format!(
-                "unexpected host control frame after source start: {:?}",
-                other
-            ));
-            control.shutdown(Some(err.to_string()));
-            Err(err)
+    loop {
+        match read_frame_or_eof::<_, HostFrame>(&mut reader).await? {
+            Some(HostFrame::IngestAck(ack)) => {
+                ingest_ack_client.resolve_ack(ack);
+            }
+            Some(HostFrame::Shutdown) | None => {
+                ingest_ack_client.fail_all("runtime source host shut down".to_string());
+                control.shutdown(None);
+                return Ok(());
+            }
+            Some(other) => {
+                let err = io::Error::other(format!(
+                    "unexpected host control frame after source start: {:?}",
+                    other
+                ));
+                ingest_ack_client.fail_all(err.to_string());
+                control.shutdown(Some(err.to_string()));
+                return Err(err);
+            }
         }
     }
 }
@@ -428,8 +438,15 @@ pub async fn run_append_data_source_main(
     let control = RuntimeSourceControl::new();
     let mut shutdown_rx = control.subscribe_shutdown();
     let reader_control = control.clone();
+    let ingest_ack_client = Arc::new(RuntimeIngestAckClient::new());
+    let reader_ingest_ack_client = ingest_ack_client.clone();
     tokio::spawn(async move {
-        let _ = run_runtime_source_host_frame_loop(control_reader, reader_control).await;
+        let _ = run_runtime_source_host_frame_loop(
+            control_reader,
+            reader_control,
+            reader_ingest_ack_client,
+        )
+        .await;
     });
 
     let source_once = start.once;
@@ -450,6 +467,7 @@ pub async fn run_append_data_source_main(
     let (sync_ctx, offset_reader) = RuntimeSourceSyncContext::new(
         control_writer.clone(),
         data_writer.clone(),
+        ingest_ack_client,
         suppress_data_relay,
     )
     .await?;

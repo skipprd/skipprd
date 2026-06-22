@@ -447,6 +447,68 @@ impl Buffers {
         Buffers
     }
 
+    pub(crate) fn live_segment_bytes() -> u64 {
+        SEGMENT_LIVE
+            .lock()
+            .map(|guard| guard.bytes)
+            .unwrap_or_default()
+    }
+
+    pub(crate) fn append_batches_to_live(
+        batches: Vec<IngestBufferBatch>,
+    ) -> Result<u64, String> {
+        let mut added_bytes = 0u64;
+        for mut ingest_buffer_batch in batches.into_iter() {
+            let sink_ref = ingest_buffer_batch.sink_ref.clone();
+            let namespace = ingest_buffer_batch._namespace.clone();
+            let partition = ingest_buffer_batch._partition.clone();
+            let time = ingest_buffer_batch._time;
+            let shard = if ingest_buffer_batch._shard.is_empty() {
+                schema_fingerprint(&ingest_buffer_batch.schema)
+            } else {
+                ingest_buffer_batch._shard.clone()
+            };
+            let key = PartitionKey {
+                sink_ref,
+                namespace,
+                partition,
+                time,
+                shard,
+            };
+
+            let mut batches_vec = ingest_buffer_batch
+                .record_batches
+                .take()
+                .unwrap_or_default();
+            if batches_vec.is_empty() {
+                if Config::log_wal_enabled() {
+                    debug!(
+                        "WAL: skipped write ns={} part={} time={:?} (no record batches)",
+                        ingest_buffer_batch._namespace,
+                        ingest_buffer_batch._partition,
+                        ingest_buffer_batch._time
+                    );
+                }
+                continue;
+            }
+            let batch_bytes = batches_vec
+                .iter()
+                .map(|b| b.get_array_memory_size() as u64)
+                .sum::<u64>();
+            added_bytes = added_bytes.saturating_add(batch_bytes);
+            let mut seg = SEGMENT_LIVE
+                .lock()
+                .map_err(|_| "WAL live segment lock poisoned".to_string())?;
+            seg.add(
+                key,
+                batches_vec.drain(..).collect(),
+                &ingest_buffer_batch.offsets,
+                ingest_buffer_batch.cdc_rows.take(),
+            );
+        }
+        Ok(added_bytes)
+    }
+
     // store selection moved to WalStoreFactory
 
     // moved to SegmentFile::build_commit_header_bytes
@@ -489,9 +551,7 @@ impl Buffers {
                 continue;
             }
 
-            // Thresholds (apply in write): 4MB or 60s elapsed since last flush or update
-            let byte_threshold = 4 * 1024 * 1024u64;
-            let time_threshold = 60u64; // seconds default
+            let (byte_threshold, time_threshold) = Config::wal_rotation_thresholds();
 
             let mut seg = SEGMENT_LIVE.lock().unwrap();
             let age_secs = seg.flushed_at.elapsed().map(|d| d.as_secs()).unwrap_or(0);
@@ -716,7 +776,7 @@ impl Buffers {
             };
 
             let persist_result = {
-                let mut snapshot = snap_arc.lock().unwrap();
+                let mut snapshot = snap_arc.lock().unwrap().clone();
                 Self::persist_snapshot_to_wal(&mut snapshot, offsets_db, "drain rotated").await
             };
             match persist_result {
@@ -734,6 +794,12 @@ impl Buffers {
         }
 
         Ok((rows, uploaded_bytes))
+    }
+
+    pub(crate) async fn flush_snapshot_queue_for_writer(
+        offsets_db: &Offsets,
+    ) -> Result<(u64, u64), ArrowError> {
+        Self::flush_snapshot_queue_to_wal(offsets_db).await
     }
 
     async fn flush_live_segment_to_wal(offsets_db: &Offsets) -> Result<(u64, u64), ArrowError> {
@@ -783,6 +849,12 @@ impl Buffers {
                 Err(e)
             }
         }
+    }
+
+    pub(crate) async fn flush_live_segment_for_writer(
+        offsets_db: &Offsets,
+    ) -> Result<(u64, u64), ArrowError> {
+        Self::flush_live_segment_to_wal(offsets_db).await
     }
 
     pub fn start_compactor_service(
@@ -979,6 +1051,8 @@ impl Buffers {
     ) -> bool {
         use futures::stream::StreamExt;
         let mut made_progress = false;
+        let ingest_paused = crate::data_dir_ingest_paused();
+        let force = force || ingest_paused;
         let mut concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
             .load(std::sync::atomic::Ordering::Relaxed)
             .clamp(1, 64) as usize;
@@ -987,7 +1061,9 @@ impl Buffers {
                 crate::metrics::counters::ACTIVE_THREADS.load(std::sync::atomic::Ordering::Relaxed);
             let queued_ingest =
                 crate::metrics::counters::QUEUE_LENGTH.load(std::sync::atomic::Ordering::Relaxed);
-            if active_ingest > 0 || queued_ingest > 0 {
+            let backlog_high = Self::reclaimable_wal_partition_count(concurrency.saturating_mul(2))
+                >= concurrency.saturating_mul(2);
+            if !backlog_high && (active_ingest > 0 || queued_ingest > 0) {
                 concurrency = 1;
                 if Config::debug_enabled() || Config::log_wal_enabled() {
                     debug!(
@@ -995,6 +1071,11 @@ impl Buffers {
                         active_ingest, queued_ingest
                     );
                 }
+            } else if backlog_high && (Config::debug_enabled() || Config::log_wal_enabled()) {
+                debug!(
+                    "Compactor: WAL backlog high; keeping compaction concurrency={} active_threads={} queued_tasks={}",
+                    concurrency, active_ingest, queued_ingest
+                );
             }
         }
 
@@ -1126,7 +1207,7 @@ impl Buffers {
         !Self::next_compaction_candidates(1, true).is_empty()
     }
 
-    fn reclaimable_wal_partition_count(limit: usize) -> usize {
+    pub(crate) fn reclaimable_wal_partition_count(limit: usize) -> usize {
         Self::next_compaction_candidates(limit, true).len()
     }
 
@@ -2921,6 +3002,12 @@ pub async fn drain_all_partitions(
 
 /// Force-flush all segments to WAL files regardless of thresholds.
 pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowError> {
+    crate::buffer::wal_writer::flush_and_drain(offsets_db).await
+}
+
+/// Force-flush all segments without going through the WAL writer command queue.
+/// Used by the writer itself and as a fallback before the writer has started.
+pub(crate) async fn flush_all_segments_direct(offsets_db: Arc<Offsets>) -> Result<(), ArrowError> {
     let bytes: u64 = 0;
     let mut rows: u64 = 0;
     let mut uploaded_bytes: u64 = 0;

@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 // separate from the skippr/React adapter's CLI subprocess JSON summaries.
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 11;
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 12;
 pub const SKIPPR_RUNTIME_CONTROL_ADDR_ENV: &str = "SKIPPR_RUNTIME_CONTROL_ADDR";
 pub const SKIPPR_RUNTIME_DATA_ADDR_ENV: &str = "SKIPPR_RUNTIME_DATA_ADDR";
 pub const SKIPPR_RUNTIME_OFFSET_ADDR_ENV: &str = "SKIPPR_RUNTIME_OFFSET_ADDR";
@@ -456,6 +456,7 @@ pub enum HostFrame {
     RunSource(SourceStartRequest),
     RunSink(SinkRunRequest),
     RunSchema(SchemaRunRequest),
+    IngestAck(RuntimeRequestAck),
     OffsetResponse(RuntimeOffsetRpcResponse),
     Shutdown,
 }
@@ -481,9 +482,11 @@ pub enum HostDataFrame {
 pub enum PluginDataFrame {
     /// Host-owned ingest payloads emitted by runtime source plugins.
     SourcePayloadBatches {
+        request_id: u64,
         tasks: Vec<Vec<RuntimeRawIngestBatch>>,
     },
     IngestBatches {
+        request_id: u64,
         batches: Vec<RuntimeIngestPartitionBatch>,
     },
     CheckpointUpdate {
@@ -592,6 +595,7 @@ mod tests {
         use crate::helpers::offsets::OffsetKey;
 
         let frame = PluginDataFrame::SourcePayloadBatches {
+            request_id: 42,
             tasks: vec![vec![RuntimeRawIngestBatch {
                 offset_key: OffsetKey::new("orders", "partition-1"),
                 data: "{}\n".into(),
@@ -606,9 +610,10 @@ mod tests {
         let bytes = bincode::serialize(&frame).unwrap();
         let decoded: PluginDataFrame = bincode::deserialize(&bytes).unwrap();
 
-        let PluginDataFrame::SourcePayloadBatches { tasks } = decoded else {
+        let PluginDataFrame::SourcePayloadBatches { request_id, tasks } = decoded else {
             panic!("expected SourcePayloadBatches frame");
         };
+        assert_eq!(request_id, 42);
         assert_eq!(tasks[0][0].offset_pos, None);
         assert_eq!(tasks[0][0].source_uri, "mysql://localhost/orders");
     }

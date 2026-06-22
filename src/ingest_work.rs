@@ -10,7 +10,8 @@ use crate::runtime_plugins::protocol::{RuntimeExecutionMode, RuntimeRawIngestBat
 use crate::runtime_plugins::schema_state::bump_pipeline_schema_version;
 use crate::serdes::decode::decode_records;
 use crate::{
-    record_data_dir_capacity_error, ARROW_SCHEMA, ARROW_SCHEMA_VERSION, METADATA, RUNNING,
+    data_dir_ingest_paused, record_data_dir_capacity_error, set_data_dir_ingest_paused,
+    ARROW_SCHEMA, ARROW_SCHEMA_VERSION, METADATA, RUNNING,
 };
 use dashmap::DashMap;
 use std::sync::atomic::AtomicBool;
@@ -22,8 +23,6 @@ static SCHEMA_PREP_LOCKS: once_cell::sync::Lazy<DashMap<String, Arc<std::sync::M
 // Single-flight guard for metadata evolution per namespace
 static EVOLUTION_LOCKS: once_cell::sync::Lazy<DashMap<String, Arc<std::sync::Mutex<()>>>> =
     once_cell::sync::Lazy::new(|| DashMap::new());
-static DATA_DIR_INGEST_PAUSED: once_cell::sync::Lazy<AtomicBool> =
-    once_cell::sync::Lazy::new(|| AtomicBool::new(false));
 static DISCOVERY_COMPLETE: once_cell::sync::Lazy<AtomicBool> =
     once_cell::sync::Lazy::new(|| AtomicBool::new(false));
 static DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS: once_cell::sync::Lazy<AtomicU64> =
@@ -603,6 +602,7 @@ pub struct IngestTask {
     pub(crate) datas: Arc<Vec<IngestBatch>>,
     offset_db: Arc<Offsets>,
     shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+    submit_id: u64,
 }
 
 impl IngestTask {
@@ -615,7 +615,13 @@ impl IngestTask {
             datas: Arc::new(datas),
             offset_db,
             shared_output,
+            submit_id: 0,
         }
+    }
+
+    pub fn with_submit_id(mut self, submit_id: u64) -> Self {
+        self.submit_id = submit_id;
+        self
     }
 }
 
@@ -834,12 +840,12 @@ impl Ingest {
         let Some((high_watermark, low_watermark)) = Self::data_dir_watermarks() else {
             return true;
         };
-        let mut paused = DATA_DIR_INGEST_PAUSED.load(Ordering::SeqCst);
+        let mut paused = data_dir_ingest_paused();
 
         loop {
             let Some((avail_bytes, total_bytes, used_pct)) = Self::data_dir_disk_usage() else {
                 if paused {
-                    DATA_DIR_INGEST_PAUSED.store(false, Ordering::SeqCst);
+                    set_data_dir_ingest_paused(false);
                 }
                 return true;
             };
@@ -874,11 +880,12 @@ impl Ingest {
                     return false;
                 }
                 paused = true;
-                DATA_DIR_INGEST_PAUSED.store(true, Ordering::SeqCst);
+                set_data_dir_ingest_paused(true);
+                Buffers::wake_compactor();
                 DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS.store(0, Ordering::Relaxed);
                 if below_min_free {
                     warn!(
-                        "Pausing ingest: free {} is below minimum {} (usage {:.1}%, total {}). Background compaction will continue.",
+                        "Pausing ingest: free {} is below minimum {} (usage {:.1}%, total {}). Force compaction will run with raised concurrency until resume thresholds are met.",
                         Helpers::human_readable_size(avail_bytes),
                         Helpers::human_readable_size(min_free_bytes),
                         used_pct,
@@ -886,7 +893,7 @@ impl Ingest {
                     );
                 } else {
                     warn!(
-                        "Pausing ingest: DATA_DIR usage {:.1}% is above high watermark {}% (free {} / total {}). Background compaction will continue.",
+                        "Pausing ingest: DATA_DIR usage {:.1}% is above high watermark {}% (free {} / total {}). Force compaction will run with raised concurrency until resume thresholds are met.",
                         used_pct,
                         high_watermark,
                         Helpers::human_readable_size(avail_bytes),
@@ -901,7 +908,7 @@ impl Ingest {
                 low_watermark,
                 min_free_bytes,
             ) {
-                DATA_DIR_INGEST_PAUSED.store(false, Ordering::SeqCst);
+                set_data_dir_ingest_paused(false);
                 info!(
                     "Resuming ingest: DATA_DIR usage {:.1}% is below low watermark {}% (free {} / total {}).",
                     used_pct,
@@ -1212,6 +1219,7 @@ impl Ingest {
             );
         }
         let num_cpus = effective_cpus;
+        crate::buffer::wal_writer::start(num_cpus);
         let thread_pool = Arc::new(thread_pool);
         let thread_pool_clone = thread_pool.clone();
 
@@ -1282,6 +1290,7 @@ impl Ingest {
                         let offset_db_clone = ingest_task.offset_db.clone();
                         let datas_clone = ingest_task.datas.clone();
                         let shared_output_clone = ingest_task.shared_output.clone();
+                        let submit_id = ingest_task.submit_id;
 
                         // Increment active count before spawning
                         active_count_clone.fetch_add(1, AcqRel);
@@ -1301,6 +1310,7 @@ impl Ingest {
                                         &offset_db_clone,
                                         queued_handle,
                                         shared_output_clone,
+                                        submit_id,
                                     );
                                 }));
                             if result.is_err() {
@@ -1354,13 +1364,16 @@ impl Ingest {
         let mut last_report_time = Instant::now();
         while self.queue_length.load(Ordering::SeqCst) > 0
             || self.outstanding_bytes.load(Ordering::SeqCst) > 0
+            || crate::buffer::wal_writer::has_pending_work()
         {
             if last_report_time.elapsed() > Duration::from_secs(5) {
                 info!(
-                    "Draining ingest queue: {} tasks outstanding ({} active), outstanding_bytes={}",
+                    "Draining ingest queue: {} tasks outstanding ({} active), outstanding_bytes={}, wal_pending_count={}, wal_pending_bytes={}",
                     self.queue_length.load(Ordering::SeqCst),
                     self.active_count.load(Ordering::SeqCst),
                     self.outstanding_bytes.load(Ordering::SeqCst),
+                    crate::buffer::wal_writer::pending_count(),
+                    crate::buffer::wal_writer::pending_bytes(),
                 );
                 last_report_time = Instant::now();
             }
@@ -1582,6 +1595,7 @@ impl Ingest {
                     let datas_clone = datas.datas.clone();
                     let handle = runtime::Handle::current();
                     let shared_output_clone = shared_output.clone();
+                    let submit_id = datas.submit_id;
                     let completed_bytes: u64 = datas_clone.iter().map(|b| b.bytes as u64).sum();
 
                     // Increment active count and queue length before spawning
@@ -1603,6 +1617,7 @@ impl Ingest {
                                 &offset_db_clone,
                                 handle,
                                 shared_output_clone,
+                                submit_id,
                             );
                         }));
                         if result.is_err() {
@@ -1619,6 +1634,7 @@ impl Ingest {
                         datas: datas.datas.clone(),
                         offset_db: offset_db.clone(),
                         shared_output: shared_output.clone(),
+                        submit_id: datas.submit_id,
                     });
 
                     // Increment queue length when adding to queue
@@ -1725,9 +1741,13 @@ impl Ingest {
         datas: &Arc<Vec<IngestBatch>>,
         offset_db_clone: &Arc<Offsets>,
         handle: runtime::Handle,
-        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        _shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        submit_id: u64,
     ) {
         if !Self::wait_for_data_dir_capacity() {
+            if submit_id != 0 {
+                crate::buffer::wal_writer::complete_request_without_wal(submit_id);
+            }
             return;
         }
         let _guard = handle.enter();
@@ -1761,8 +1781,6 @@ impl Ingest {
         let _aprox_now = SystemTime::now();
 
         let _updated_schema = "no".to_string();
-
-        let buffers = Buffers::new();
 
         if Config::debug_enabled() || Config::log_wal_enabled() {
             let input_bytes: usize = datas.iter().map(|batch| batch.bytes).sum();
@@ -2376,8 +2394,7 @@ impl Ingest {
             }
         }
 
-        // Batch write: aggregate all partition batches and flush once to avoid tiny WALs
-        let mut buffers_copy = buffers;
+        // Batch write: aggregate all partition batches and enqueue once for the WAL writer.
         let all_batches: Vec<IngestBufferBatch> = buf.into_values().collect();
         if Config::debug_enabled() {
             debug!(
@@ -2406,27 +2423,34 @@ impl Ingest {
                     })
                     .collect();
                 info!(
-                    "Ingest: flushing {} record batches across {} partitions with {} offsets sample_partitions={:?}",
+                    "Ingest: enqueueing {} record batches across {} partitions with {} offsets sample_partitions={:?}",
                     total_batches,
                     all_batches.len(),
                     total_offsets,
                     partition_sample
                 );
             }
-            buffers_copy.write(all_batches);
-            let fut = buffers_copy.flush(offset_db_clone.clone(), shared_output.clone());
-            let h = tokio::runtime::Handle::try_current()
-                .expect("flush must run inside a tokio runtime");
-            let flush_result = h.block_on(fut);
-            if Config::debug_enabled() || Config::log_wal_enabled() {
-                match &flush_result {
-                    Ok(()) => info!("Ingest: WAL flush completed successfully"),
-                    Err(err) => error!("Ingest: WAL flush returned error: {}", err),
-                }
+            let arrow_bytes = all_batches
+                .iter()
+                .flat_map(|batch| batch.record_batches.as_ref().into_iter().flatten())
+                .map(|batch| batch.get_array_memory_size())
+                .sum::<usize>();
+            let raw_bytes = datas.iter().map(|batch| batch.bytes).sum::<usize>();
+            let (done_tx, _done_rx) = tokio::sync::oneshot::channel();
+            let unit = crate::buffer::wal_writer::WalCommitUnit {
+                submit_id,
+                batches: all_batches,
+                offsets_db: offset_db_clone.clone(),
+                raw_bytes,
+                arrow_bytes,
+                done: done_tx,
+            };
+            if let Err(err) = handle.block_on(crate::buffer::wal_writer::submit(unit)) {
+                error!("Ingest: WAL writer enqueue failed: {}", err);
+                panic!("WAL writer enqueue failed: {err}");
             }
-            if let Err(err) = flush_result {
-                panic!("WAL flush failed: {err}");
-            }
+        } else if submit_id != 0 {
+            crate::buffer::wal_writer::complete_request_without_wal(submit_id);
         }
     }
 

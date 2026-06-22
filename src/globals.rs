@@ -27,6 +27,7 @@ pub static OUTPUT_GRACEFUL_SHUTDOWN_COMPLETE: Lazy<TimedRwLock<AtomicBool>> = La
 /// Set when DATA_DIR is exhausted and no reclaimable WAL remains to compact.
 pub static DATA_DIR_CAPACITY_EXCEEDED: Lazy<AtomicBool> =
     Lazy::new(|| AtomicBool::new(false));
+pub static DATA_DIR_INGEST_PAUSED: Lazy<AtomicBool> = Lazy::new(|| AtomicBool::new(false));
 
 static DATA_DIR_CAPACITY_ERROR: Lazy<Mutex<Option<String>>> = Lazy::new(|| Mutex::new(None));
 
@@ -42,6 +43,14 @@ pub fn data_dir_capacity_exceeded() -> bool {
 
 pub fn take_data_dir_capacity_error() -> Option<String> {
     DATA_DIR_CAPACITY_ERROR.lock().unwrap().take()
+}
+
+pub fn data_dir_ingest_paused() -> bool {
+    DATA_DIR_INGEST_PAUSED.load(Ordering::SeqCst)
+}
+
+pub fn set_data_dir_ingest_paused(paused: bool) {
+    DATA_DIR_INGEST_PAUSED.store(paused, Ordering::SeqCst);
 }
 
 pub static LOGGER: Lazy<Arc<tokio::sync::RwLock<Logger>>> = Lazy::new(|| Logger::new(100));
