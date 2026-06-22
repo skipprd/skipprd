@@ -708,6 +708,13 @@ fn ingest_source_payload_batches_into_core(
     let ingest_tasks = Arc::new(ingest_tasks);
     let _ = ingest.ingest_file(&ingest_tasks, &offsets, shared_output);
     ingest.log_wal_ingest_pressure_snapshot();
+    if crate::data_dir_capacity_exceeded() {
+        return Err(io::Error::other(
+            crate::take_data_dir_capacity_error().unwrap_or_else(|| {
+                "DATA_DIR capacity exhausted and no reclaimable WAL remains to compact".to_string()
+            }),
+        ));
+    }
     Ok(())
 }
 

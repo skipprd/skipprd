@@ -9,7 +9,9 @@ use crate::ingest::ingest::ingest;
 use crate::runtime_plugins::protocol::{RuntimeExecutionMode, RuntimeRawIngestBatch};
 use crate::runtime_plugins::schema_state::bump_pipeline_schema_version;
 use crate::serdes::decode::decode_records;
-use crate::{ARROW_SCHEMA, ARROW_SCHEMA_VERSION, METADATA, RUNNING};
+use crate::{
+    record_data_dir_capacity_error, ARROW_SCHEMA, ARROW_SCHEMA_VERSION, METADATA, RUNNING,
+};
 use dashmap::DashMap;
 use std::sync::atomic::AtomicBool;
 // Per-namespace schema readiness flag to eliminate first-batch races
@@ -768,9 +770,69 @@ impl Ingest {
             .unwrap_or(Self::DEFAULT_MIN_FREE_BYTES)
     }
 
-    fn wait_for_data_dir_capacity() {
+    fn data_dir_should_block(
+        avail_bytes: u64,
+        used_pct: f64,
+        high_watermark: u8,
+        min_free_bytes: u64,
+    ) -> bool {
+        avail_bytes < min_free_bytes || used_pct >= high_watermark as f64
+    }
+
+    fn data_dir_should_resume(
+        avail_bytes: u64,
+        used_pct: f64,
+        low_watermark: u8,
+        min_free_bytes: u64,
+    ) -> bool {
+        avail_bytes >= min_free_bytes && used_pct <= low_watermark as f64
+    }
+
+    fn data_dir_capacity_fatal_message(
+        avail_bytes: u64,
+        total_bytes: u64,
+        used_pct: f64,
+        min_free_bytes: u64,
+        high_watermark: u8,
+        below_min_free: bool,
+        above_high_watermark: bool,
+    ) -> String {
+        let mut reasons = Vec::new();
+        if below_min_free {
+            reasons.push(format!(
+                "free space {} is below minimum {}",
+                Helpers::human_readable_size(avail_bytes),
+                Helpers::human_readable_size(min_free_bytes)
+            ));
+        }
+        if above_high_watermark {
+            reasons.push(format!(
+                "usage {:.1}% is above high watermark {}%",
+                used_pct, high_watermark
+            ));
+        }
+        format!(
+            "DATA_DIR capacity exhausted ({}, total {}). This pipeline has no reclaimable committed WAL to compact. Free disk or clean another pipeline before retrying.",
+            reasons.join("; "),
+            Helpers::human_readable_size(total_bytes)
+        )
+    }
+
+    fn throughput_metrics(&self) -> ThroughputMetrics {
+        ThroughputMetrics {
+            bytes_per_second: self.get_current_throughput(),
+            active_cores: self.active_count.load(Ordering::Acquire),
+            queue_length: self.queue_length.load(Ordering::Acquire),
+            optimal_chunk_size: self.optimal_chunk_size.load(Ordering::Acquire),
+        }
+    }
+
+    fn wait_for_data_dir_capacity() -> bool {
+        if crate::data_dir_capacity_exceeded() {
+            return false;
+        }
         let Some((high_watermark, low_watermark)) = Self::data_dir_watermarks() else {
-            return;
+            return true;
         };
         let mut paused = DATA_DIR_INGEST_PAUSED.load(Ordering::SeqCst);
 
@@ -779,41 +841,66 @@ impl Ingest {
                 if paused {
                     DATA_DIR_INGEST_PAUSED.store(false, Ordering::SeqCst);
                 }
-                return;
+                return true;
             };
 
-            // Primary guard: absolute free space floor
-            // Secondary guard: percentage watermark (only enforced when free < min)
+            // Independent guards: absolute free-space floor and percentage high watermark.
             let min_free_bytes = Self::min_free_bytes();
             let below_min_free = avail_bytes < min_free_bytes;
-            let should_block = below_min_free
-                || (used_pct >= high_watermark as f64 && avail_bytes < min_free_bytes * 2);
+            let above_high_watermark = used_pct >= high_watermark as f64;
+            let should_block = Self::data_dir_should_block(
+                avail_bytes,
+                used_pct,
+                high_watermark,
+                min_free_bytes,
+            );
 
             if !paused {
                 if !should_block {
-                    return;
+                    return true;
                 }
                 if !Buffers::has_reclaimable_wal() {
-                    panic!(
-                        "DATA_DIR has insufficient free space (free {} / total {}, min free {}). This pipeline has no reclaimable committed WAL to compact. Free disk or clean another pipeline before retrying.",
-                        Helpers::human_readable_size(avail_bytes),
-                        Helpers::human_readable_size(total_bytes),
-                        Helpers::human_readable_size(min_free_bytes)
+                    let message = Self::data_dir_capacity_fatal_message(
+                        avail_bytes,
+                        total_bytes,
+                        used_pct,
+                        min_free_bytes,
+                        high_watermark,
+                        below_min_free,
+                        above_high_watermark,
                     );
+                    error!("{}", message);
+                    record_data_dir_capacity_error(message);
+                    return false;
                 }
                 paused = true;
                 DATA_DIR_INGEST_PAUSED.store(true, Ordering::SeqCst);
                 DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS.store(0, Ordering::Relaxed);
-                warn!(
-                    "Pausing ingest: free {} is below minimum {} (usage {:.1}%, total {}). Background compaction will continue.",
-                    Helpers::human_readable_size(avail_bytes),
-                    Helpers::human_readable_size(min_free_bytes),
-                    used_pct,
-                    Helpers::human_readable_size(total_bytes)
-                );
+                if below_min_free {
+                    warn!(
+                        "Pausing ingest: free {} is below minimum {} (usage {:.1}%, total {}). Background compaction will continue.",
+                        Helpers::human_readable_size(avail_bytes),
+                        Helpers::human_readable_size(min_free_bytes),
+                        used_pct,
+                        Helpers::human_readable_size(total_bytes)
+                    );
+                } else {
+                    warn!(
+                        "Pausing ingest: DATA_DIR usage {:.1}% is above high watermark {}% (free {} / total {}). Background compaction will continue.",
+                        used_pct,
+                        high_watermark,
+                        Helpers::human_readable_size(avail_bytes),
+                        Helpers::human_readable_size(total_bytes)
+                    );
+                }
             }
 
-            if avail_bytes >= min_free_bytes {
+            if Self::data_dir_should_resume(
+                avail_bytes,
+                used_pct,
+                low_watermark,
+                min_free_bytes,
+            ) {
                 DATA_DIR_INGEST_PAUSED.store(false, Ordering::SeqCst);
                 info!(
                     "Resuming ingest: DATA_DIR usage {:.1}% is below low watermark {}% (free {} / total {}).",
@@ -822,7 +909,7 @@ impl Ingest {
                     Helpers::human_readable_size(avail_bytes),
                     Helpers::human_readable_size(total_bytes)
                 );
-                return;
+                return true;
             }
 
             let now_secs = SystemTime::now()
@@ -842,7 +929,7 @@ impl Ingest {
             }
 
             if !RUNNING.read().load(Ordering::SeqCst) {
-                return;
+                return true;
             }
 
             std::thread::sleep(Duration::from_secs(1));
@@ -1337,6 +1424,12 @@ impl Ingest {
         offset_db: &Arc<Offsets>,
         shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) -> ThroughputMetrics {
+        if crate::data_dir_capacity_exceeded() {
+            info!("Waiting for remaining ingest tasks after DATA_DIR capacity exhaustion");
+            self.wait_for_completion();
+            return self.throughput_metrics();
+        }
+
         // If we're not running, exit after current threads finish.
         if !RUNNING.read().load(Ordering::SeqCst) {
             info!("Waiting for remaining threads to complete");
@@ -1445,7 +1538,11 @@ impl Ingest {
             let mut _active_threads_snapshot = self.active_count.load(Ordering::SeqCst);
 
             for datas in ingest_batches.tasks.iter() {
-                Self::wait_for_data_dir_capacity();
+                if !Self::wait_for_data_dir_capacity() {
+                    info!("Stopping ingest after DATA_DIR capacity exhaustion");
+                    self.wait_for_completion();
+                    return self.throughput_metrics();
+                }
                 let task_bytes: usize = datas.datas.iter().map(|v| v.bytes).sum();
                 let byte_budget =
                     Self::autotuned_ingest_admission_budget_bytes(self.num_cpus).max(task_bytes);
@@ -1630,7 +1727,9 @@ impl Ingest {
         handle: runtime::Handle,
         shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) {
-        Self::wait_for_data_dir_capacity();
+        if !Self::wait_for_data_dir_capacity() {
+            return;
+        }
         let _guard = handle.enter();
 
         if offset_db_clone.is_remote() {
@@ -2651,6 +2750,8 @@ mod ingest_admission_tests {
 mod data_dir_watermark_tests {
     use super::Ingest;
 
+    const GB: u64 = 1024 * 1024 * 1024;
+
     #[test]
     fn zero_high_watermark_disables_pause() {
         assert_eq!(Ingest::normalize_data_dir_watermarks(0, 80), None);
@@ -2670,6 +2771,42 @@ mod data_dir_watermark_tests {
             Ingest::normalize_data_dir_watermarks(92, 80),
             Some((92, 80))
         );
+    }
+
+    #[test]
+    fn should_block_on_percentage_even_with_plenty_of_absolute_free_space() {
+        let min_free = 5 * GB;
+        // 1 TB total, 50 GB free (~95% used) — above min_free but above 90% watermark.
+        assert!(Ingest::data_dir_should_block(50 * GB, 95.0, 90, min_free));
+    }
+
+    #[test]
+    fn should_block_on_absolute_floor() {
+        let min_free = 5 * GB;
+        assert!(Ingest::data_dir_should_block(4 * GB, 96.0, 90, min_free));
+    }
+
+    #[test]
+    fn should_block_on_large_disk_above_high_watermark() {
+        let min_free = 5 * GB;
+        // 10 TB total, 800 GB free (~92% used).
+        assert!(Ingest::data_dir_should_block(800 * GB, 92.0, 90, min_free));
+    }
+
+    #[test]
+    fn should_not_block_when_below_high_watermark_and_above_min_free() {
+        let min_free = 5 * GB;
+        assert!(!Ingest::data_dir_should_block(100 * GB, 70.0, 90, min_free));
+    }
+
+    #[test]
+    fn should_not_resume_until_both_absolute_and_percentage_clear() {
+        let min_free = 5 * GB;
+        // Enough absolute free space but usage still above low watermark.
+        assert!(!Ingest::data_dir_should_resume(6 * GB, 85.0, 80, min_free));
+        assert!(Ingest::data_dir_should_resume(6 * GB, 80.0, 80, min_free));
+        // Usage cleared but absolute floor not met.
+        assert!(!Ingest::data_dir_should_resume(4 * GB, 75.0, 80, min_free));
     }
 }
 
