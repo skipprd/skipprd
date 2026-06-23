@@ -16,8 +16,9 @@ pub use traits::{
     AtLeastOnceMessageDelivery, ConfiguredSink, DataSink, DataSource, DeterministicObjectOverwrite,
     FinalStateIdempotentApply, HasSchemaSinkSpec, HasSinkSpec, NonRetryableDebugOutput, SchemaSink,
     SchemaSinkSpec, SchemaSource, SchemaSyncRequest, SftpAtLeastOnce, SftpAtomicRename, SinkSpec,
-    SinkWriteContext, SinkWriteOutcome, SinkWriteRejection, SinkWriteSupport, SourceCdcContract,
-    SourceCdcMode, SourceExecutionContract, SourceOnceContract, TransactionalTableCommit,
+    SinkWriteContext, SinkWriteOutcome, SinkWriteRejection, SinkWriteSemantics, SinkWriteSupport,
+    SourceCdcContract, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
+    TransactionalTableCommit,
 };
 
 /// No-op output plugin used by `discover` mode to run the input pipeline

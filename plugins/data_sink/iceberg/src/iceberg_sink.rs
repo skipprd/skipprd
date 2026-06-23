@@ -153,8 +153,7 @@ impl DataSink for DataSinkIcebergPlugin {
                 compaction_id: String::new(),
                 idempotency_key: String::new(),
                 wal_refs: Vec::new(),
-                write_semantics:
-                    skippr_runtime_sdk::buffer::compaction_transaction::SinkWriteSemantics::AtLeastOnce,
+                write_semantics: skippr_runtime_sdk::plugins::SinkWriteSemantics::AtLeastOnce,
                 schema_fingerprint: String::new(),
                 cdc_ctx,
                 source_contract: None,

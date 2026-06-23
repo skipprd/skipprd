@@ -5,9 +5,9 @@ use std::collections::BTreeMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use crate::buffer::compaction_transaction::{
-    SinkGroupingSupport, SinkRetrySemantics, SinkWriteSemantics,
-};
+pub use crate::buffer::compaction_transaction::SinkWriteSemantics;
+
+use crate::buffer::compaction_transaction::{SinkGroupingSupport, SinkRetrySemantics};
 use crate::discover::OutputMetadata;
 use crate::plugins::cdc::{SinkCapability, SourceCapability, SyncContext};
 use crate::plugins::source_contract::SourceNamespaceContract;
