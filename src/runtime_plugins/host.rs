@@ -667,7 +667,7 @@ async fn ingest_runtime_batches_into_core(
             _namespace: namespace,
             _partition: storage_partition(&batch.partition),
             _time: batch.time,
-            _shard: batch.shard,
+            _schema_fingerprint: batch.schema_fingerprint,
             schema,
             record_batches: Some(record_batches),
             cdc_rows: batch.cdc_rows,

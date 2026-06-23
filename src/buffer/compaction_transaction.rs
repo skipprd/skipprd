@@ -85,7 +85,7 @@ impl WalPartRef {
         out.extend_from_slice(self.key.partition.as_bytes());
         out.push(0);
         out.extend_from_slice(&self.key.time.unwrap_or(0).to_le_bytes());
-        out.extend_from_slice(self.key.shard.as_bytes());
+        out.extend_from_slice(self.key.schema_fingerprint.as_bytes());
         if let Some(hash) = self.cdc_meta_hash {
             out.extend_from_slice(&hash);
         }
@@ -102,7 +102,7 @@ impl WalPartRef {
             namespace: self.key.namespace.clone(),
             partition: self.key.partition.clone(),
             time: self.key.time,
-            shard: self.key.shard.clone(),
+            schema_fingerprint: self.key.schema_fingerprint.clone(),
             cdc_meta_hash: self.cdc_meta_hash,
         }
     }
@@ -260,7 +260,7 @@ mod tests {
                 namespace: "ns".to_string(),
                 partition: "p=1".to_string(),
                 time: Some(1),
-                shard: "s".to_string(),
+                schema_fingerprint: "schema".to_string(),
             },
             cdc_meta_hash: None,
         }

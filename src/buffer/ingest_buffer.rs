@@ -308,7 +308,7 @@ pub struct IngestBufferBatch {
     pub(crate) _namespace: String,
     pub(crate) _partition: String,
     pub(crate) _time: Option<i64>,
-    pub(crate) _shard: String,
+    pub(crate) _schema_fingerprint: String,
     pub(crate) schema: SchemaRef,
     pub(crate) record_batches: Option<Vec<RecordBatch>>,
     /// Per-row CDC metadata aligned 1:1 with the rows in `record_batches`.
@@ -483,17 +483,17 @@ impl Buffers {
             let namespace = ingest_buffer_batch._namespace.clone();
             let partition = ingest_buffer_batch._partition.clone();
             let time = ingest_buffer_batch._time;
-            let shard = if ingest_buffer_batch._shard.is_empty() {
+            let schema_fingerprint = if ingest_buffer_batch._schema_fingerprint.is_empty() {
                 schema_fingerprint(&ingest_buffer_batch.schema)
             } else {
-                ingest_buffer_batch._shard.clone()
+                ingest_buffer_batch._schema_fingerprint.clone()
             };
             let key = PartitionKey {
                 sink_ref,
                 namespace,
                 partition,
                 time,
-                shard,
+                schema_fingerprint,
             };
 
             let mut batches_vec = ingest_buffer_batch
@@ -541,18 +541,18 @@ impl Buffers {
             let namespace = ingest_buffer_batch._namespace.clone();
             let partition = ingest_buffer_batch._partition.clone();
             let time = ingest_buffer_batch._time.clone();
-            // Ensure shard key reflects schema so schemas do not mix in one segment
-            let shard = if ingest_buffer_batch._shard.is_empty() {
+            // Ensure the key reflects schema so schemas do not mix in one segment.
+            let schema_fingerprint = if ingest_buffer_batch._schema_fingerprint.is_empty() {
                 schema_fingerprint(&ingest_buffer_batch.schema)
             } else {
-                ingest_buffer_batch._shard.clone()
+                ingest_buffer_batch._schema_fingerprint.clone()
             };
             let key = PartitionKey {
                 sink_ref,
                 namespace,
                 partition,
                 time,
-                shard,
+                schema_fingerprint,
             };
 
             let mut batches_vec = ingest_buffer_batch
@@ -1393,7 +1393,7 @@ impl Buffers {
         for idx in meta.index.iter() {
             hasher.update(idx.key.namespace.as_bytes());
             hasher.update([0]);
-            hasher.update(idx.key.shard.as_bytes());
+            hasher.update(idx.key.schema_fingerprint.as_bytes());
             hasher.update([0]);
         }
         hex::encode(hasher.finalize())
@@ -1406,15 +1406,25 @@ impl Buffers {
     ) -> String {
         let kind = if cdc_meta.is_some() { "cdc" } else { "append" };
         format!(
-            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            "{}\n{}\n{}\n{}\n{}\n{}",
             idx.key.sink_ref,
             idx.key.namespace,
             idx.key.partition,
             idx.key.time.unwrap_or(0),
-            idx.key.shard,
             schema_fingerprint,
             kind
         )
+    }
+
+    fn schema_fingerprint_for_group(
+        idx: &SegmentPartitionIndexEntry,
+        meta: &SegmentFileMetadata,
+    ) -> String {
+        if idx.key.schema_fingerprint.is_empty() {
+            Self::schema_fingerprint_for_meta(meta)
+        } else {
+            idx.key.schema_fingerprint.clone()
+        }
     }
 
     fn next_compaction_transactions(
@@ -1453,7 +1463,6 @@ impl Buffers {
 
         for entry in SEGMENT_CACHE.iter() {
             let cached = entry.value();
-            let schema_fingerprint = Self::schema_fingerprint_for_meta(&cached.meta);
             for idx in cached.meta.index.iter() {
                 if Self::is_source_tombstoned(&cached.source, &idx.key) {
                     continue;
@@ -1477,6 +1486,7 @@ impl Buffers {
                         continue;
                     }
                 };
+                let schema_fingerprint = Self::schema_fingerprint_for_group(idx, &cached.meta);
                 let key = Self::grouping_key(idx, &cdc_meta, &schema_fingerprint);
                 let wal_ref = WalPartRef {
                     segment_id: cached.source.segment_id().to_string(),
@@ -1560,7 +1570,7 @@ impl Buffers {
         let sink_ref = first.idx.key.sink_ref.clone();
         let namespace = first.idx.key.namespace.clone();
         let schema_fingerprint = if schema_fingerprint_hint.is_empty() {
-            Self::schema_fingerprint_for_meta(&first.meta)
+            Self::schema_fingerprint_for_group(&first.idx, &first.meta)
         } else {
             schema_fingerprint_hint
         };
@@ -1570,7 +1580,7 @@ impl Buffers {
             Some(&namespace),
             Some(&first.idx.key.partition),
             first.idx.key.time,
-            Some(&first.idx.key.shard),
+            Some(&first.idx.key.schema_fingerprint),
         );
         let refs = entries
             .iter()
@@ -1618,7 +1628,7 @@ impl Buffers {
             safe(&key.namespace),
             safe(&key.partition),
             time,
-            safe(&key.shard)
+            safe(&key.schema_fingerprint)
         );
         Buffers::tombstone_dir().join(file)
     }
@@ -2294,7 +2304,7 @@ impl Buffers {
         let namespace = idx.key.namespace.clone();
         let partition = idx.key.partition.clone();
         let time = idx.key.time;
-        let shard = idx.key.shard.clone();
+        let schema_fingerprint = idx.key.schema_fingerprint.clone();
         let seg_display = source.display_name();
         let mut out_key = BufferChunker::encode_chunk_name(
             "output",
@@ -2302,7 +2312,7 @@ impl Buffers {
             Some(&namespace),
             Some(&partition),
             time,
-            Some(&shard),
+            Some(&schema_fingerprint),
         );
         let compaction_id = Buffers::compaction_id_for_source(source, idx);
         out_key = format!("{}-c={}", out_key, compaction_id);
@@ -2350,8 +2360,8 @@ impl Buffers {
         };
         if Config::debug_enabled() || Config::log_wal_enabled() {
             debug!(
-                "Compactor: start ns={} part={} time={} shard={} seg={} start={} len={} bytes={} out_key={}",
-                namespace, partition, time.unwrap_or(0), shard, seg_display, idx.start, idx.len, idx.bytes, out_key
+                "Compactor: start ns={} part={} time={} schema_fingerprint={} seg={} start={} len={} bytes={} out_key={}",
+                namespace, partition, time.unwrap_or(0), schema_fingerprint, seg_display, idx.start, idx.len, idx.bytes, out_key
             );
         }
 
@@ -3532,8 +3542,66 @@ mod tests_wal_commit {
         s3_wal_body_cache::clear_for_tests();
     }
 
+    fn test_part(
+        namespace: &str,
+        time: i64,
+        schema_fingerprint: &str,
+        start: u64,
+    ) -> SegmentPartitionIndexEntry {
+        SegmentPartitionIndexEntry {
+            key: PartitionKey {
+                sink_ref: "data_sinks.ds_datalake".to_string(),
+                namespace: namespace.to_string(),
+                partition: "".to_string(),
+                time: Some(time),
+                schema_fingerprint: schema_fingerprint.to_string(),
+            },
+            bytes: 1024,
+            updated_at_secs: 0,
+            start,
+            len: 1024,
+        }
+    }
+
+    fn test_meta(index: Vec<SegmentPartitionIndexEntry>) -> SegmentFileMetadata {
+        SegmentFileMetadata {
+            created_at_secs: 0,
+            total_bytes: index.iter().map(|idx| idx.bytes).sum(),
+            num_partitions: index.len() as u32,
+            offsets: StdHashMap::new(),
+            index,
+        }
+    }
+
     fn commit_exists(seg_path: &PathBuf) -> bool {
         seg_path.with_extension("seg.commit").exists()
+    }
+
+    #[test]
+    fn grouped_compaction_key_ignores_unrelated_segment_contents() {
+        let target_a = test_part("truck_status_idle", 1669334400, "schema-a", 0);
+        let target_b = test_part("truck_status_idle", 1669334400, "schema-a", 4096);
+        let meta_a = test_meta(vec![
+            target_a.clone(),
+            test_part("truck_rotation", 1669334400, "schema-b", 1024),
+        ]);
+        let meta_b = test_meta(vec![
+            test_part("truck_geofence_enter", 1669334400, "schema-c", 2048),
+            target_b.clone(),
+        ]);
+
+        let key_a = Buffers::grouping_key(
+            &target_a,
+            &None,
+            &Buffers::schema_fingerprint_for_group(&target_a, &meta_a),
+        );
+        let key_b = Buffers::grouping_key(
+            &target_b,
+            &None,
+            &Buffers::schema_fingerprint_for_group(&target_b, &meta_b),
+        );
+
+        assert_eq!(key_a, key_b);
     }
 
     #[test]
@@ -3546,7 +3614,7 @@ mod tests_wal_commit {
             namespace: "ns".to_string(),
             partition: "".to_string(),
             time: Some(0),
-            shard: "shard".to_string(),
+            schema_fingerprint: "schema".to_string(),
         };
         let mut batches: StdHashMap<PartitionKey, Vec<RecordBatch>> = StdHashMap::new();
         batches.insert(key.clone(), vec![make_batch()]);
@@ -3576,7 +3644,7 @@ mod tests_wal_commit {
             namespace: "ns".to_string(),
             partition: "".to_string(),
             time: Some(0),
-            shard: "shard".to_string(),
+            schema_fingerprint: "schema".to_string(),
         };
         let mut batches: StdHashMap<PartitionKey, Vec<RecordBatch>> = StdHashMap::new();
         batches.insert(key.clone(), vec![make_batch()]);
@@ -3609,7 +3677,7 @@ mod tests_wal_commit {
             namespace: "ns".to_string(),
             partition: "part".to_string(),
             time: Some(0),
-            shard: "shard".to_string(),
+            schema_fingerprint: "schema".to_string(),
         };
         let mut batches: StdHashMap<PartitionKey, Vec<RecordBatch>> = StdHashMap::new();
         batches.insert(key.clone(), vec![make_batch()]);
@@ -3697,7 +3765,7 @@ mod tests_wal_commit {
             _namespace: "ns".to_string(),
             _partition: "".to_string(),
             _time: Some(0),
-            _shard: String::new(),
+            _schema_fingerprint: String::new(),
             schema,
             record_batches: Some(vec![batch]),
             cdc_rows: None,
@@ -3744,7 +3812,7 @@ mod tests_wal_commit {
             namespace: "ns".to_string(),
             partition: "".to_string(),
             time: Some(0),
-            shard: "shard".to_string(),
+            schema_fingerprint: "schema".to_string(),
         };
         let mut batches: StdHashMap<PartitionKey, Vec<RecordBatch>> = StdHashMap::new();
         batches.insert(key, vec![make_batch()]);
@@ -3937,16 +4005,16 @@ fn load_partition_segment_counter(
     namespace: &str,
     partition: &str,
     time: Option<i64>,
-    shard: &str,
+    schema_fingerprint: &str,
 ) -> Option<u64> {
-    let dir = WalFile::get_wal_partition_dir(namespace, partition, time, shard);
+    let dir = WalFile::get_wal_partition_dir(namespace, partition, time, schema_fingerprint);
     let base = BufferChunker::encode_chunk_name(
         "ingest",
         Some(sink_ref),
         Some(namespace),
         Some(partition),
         time,
-        Some(shard),
+        Some(schema_fingerprint),
     );
     let path = PathBuf::from(format!("{}/{}-segment.counter", dir, base));
     if let Ok(s) = fs::read_to_string(path) {
@@ -3961,17 +4029,17 @@ fn persist_partition_segment_counter(
     namespace: &str,
     partition: &str,
     time: Option<i64>,
-    shard: &str,
+    schema_fingerprint: &str,
     next_segment_id: u64,
 ) {
-    let dir = WalFile::get_wal_partition_dir(namespace, partition, time, shard);
+    let dir = WalFile::get_wal_partition_dir(namespace, partition, time, schema_fingerprint);
     let base = BufferChunker::encode_chunk_name(
         "ingest",
         Some(sink_ref),
         Some(namespace),
         Some(partition),
         time,
-        Some(shard),
+        Some(schema_fingerprint),
     );
     let path = PathBuf::from(format!("{}/{}-segment.counter", dir, base));
     let _ = fs::write(path, next_segment_id.to_string());
@@ -3988,7 +4056,7 @@ pub struct WalPartition {
     pub(crate) sink_ref: String,
     pub(crate) partition: String,
     pub(crate) time: Option<i64>,
-    pub(crate) shard: String,
+    pub(crate) schema_fingerprint: String,
 }
 
 impl WalPartition {
@@ -4076,7 +4144,7 @@ impl WalPartition {
             Some(&self.namespace),
             Some(&self.partition),
             self.time,
-            Some(&self.shard),
+            Some(&self.schema_fingerprint),
         );
 
         // NOTE: offsets are committed AFTER successful upload now (moved below)
@@ -4164,10 +4232,10 @@ impl WalPartition {
         let batch_error_counter = Arc::new(std::sync::atomic::AtomicU64::new(0));
         if Config::debug_enabled() || Config::log_wal_enabled() {
             debug!(
-                "Compactor: start ns={} part={} shard={} time={} files={} out_key={}",
+                "Compactor: start ns={} part={} schema_fingerprint={} time={} files={} out_key={}",
                 self.namespace,
                 self.partition,
-                self.shard,
+                self.schema_fingerprint,
                 self.time.unwrap_or(0),
                 files.len(),
                 output_file_name
@@ -4466,7 +4534,7 @@ pub struct WalFile {
     pub(crate) namespace: String,
     pub(crate) partition: String,
     pub(crate) time: Option<i64>,
-    pub(crate) shard: String,
+    pub(crate) schema_fingerprint: String,
     pub(crate) bytes: u64,
     #[allow(dead_code)]
     pub(crate) file: Arc<TimedRwLock<Option<File>>>,
@@ -4480,11 +4548,16 @@ impl WalFile {
         namespace: &str,
         partition: &str,
         time: Option<i64>,
-        shard: &str,
+        schema_fingerprint: &str,
         offsets: HashMap<OffsetKey, u64>,
     ) -> io::Result<Self> {
-        let path_str =
-            Self::generate_temp_wal_file_name(sink_ref, namespace, partition, time, shard);
+        let path_str = Self::generate_temp_wal_file_name(
+            sink_ref,
+            namespace,
+            partition,
+            time,
+            schema_fingerprint,
+        );
         let path = PathBuf::from(&path_str);
 
         // Ensure file exists and then allow the fp to drop out of scope to limit open file handles
@@ -4506,7 +4579,7 @@ impl WalFile {
             namespace: namespace.to_string(),
             partition: partition.to_string(),
             time,
-            shard: shard.to_string(),
+            schema_fingerprint: schema_fingerprint.to_string(),
             file: Arc::new(TimedRwLock::new("wal_file".to_string(), None)),
             updated_at: SystemTime::now(),
             offsets,
@@ -4540,7 +4613,8 @@ impl WalFile {
         let time = BufferChunker::decode_file_time(path.to_str().unwrap());
         let time = if time > 0 { Some(time) } else { None };
 
-        let shard = BufferChunker::decode_file_shard(path.to_str().unwrap());
+        let schema_fingerprint =
+            BufferChunker::decode_file_schema_fingerprint(path.to_str().unwrap());
 
         let metadata = file.metadata()?;
 
@@ -4555,7 +4629,7 @@ impl WalFile {
             namespace,
             partition,
             time,
-            shard,
+            schema_fingerprint,
             file: Arc::new(TimedRwLock::new("wal_file".to_string(), None)),
             updated_at,
             offsets,
@@ -4703,7 +4777,7 @@ impl WalFile {
         _namespace: &str,
         _partition: &str,
         _time: Option<i64>,
-        shard: &str,
+        schema_fingerprint: &str,
     ) -> String {
         let data_dir = Config::get_data_dir();
 
@@ -4711,12 +4785,12 @@ impl WalFile {
         // let run_id = metrics_guard.run_id.clone();
         let output_dir = &format!("{}/ingest_buffer", data_dir);
 
-        let shard = match shard {
+        let schema_fingerprint = match schema_fingerprint {
             "" => "none",
-            _ => shard,
+            _ => schema_fingerprint,
         };
 
-        let wal_partition_dir = format!("{}/{}", output_dir, shard);
+        let wal_partition_dir = format!("{}/{}", output_dir, schema_fingerprint);
 
         fs::create_dir_all(&wal_partition_dir).expect("Failed to create WAL partition directories");
 
@@ -4728,7 +4802,7 @@ impl WalFile {
         namespace: &str,
         partition: &str,
         time: Option<i64>,
-        shard: &str,
+        schema_fingerprint: &str,
     ) -> String {
         let wal_file_name = BufferChunker::encode_chunk_name(
             "ingest",
@@ -4736,10 +4810,11 @@ impl WalFile {
             Some(namespace),
             Some(partition),
             time,
-            Some(shard),
+            Some(schema_fingerprint),
         );
 
-        let wal_partition_dir = WalFile::get_wal_partition_dir(namespace, partition, time, shard);
+        let wal_partition_dir =
+            WalFile::get_wal_partition_dir(namespace, partition, time, schema_fingerprint);
 
         let wal_file_name = format!(
             "{}/{}&id={}",
@@ -4819,7 +4894,7 @@ pub fn _get_partition_dir(
     _namespace: &str,
     _partition: &str,
     _time: Option<i64>,
-    shard: &str,
+    schema_fingerprint: &str,
 ) -> String {
     let data_dir = Config::get_data_dir();
 
@@ -4827,12 +4902,12 @@ pub fn _get_partition_dir(
     // let run_id = metrics_guard.run_id.clone();
     let output_dir = &format!("{}/ingest_buffer", data_dir);
 
-    let shard = match shard {
+    let schema_fingerprint = match schema_fingerprint {
         "" => "none",
-        _ => shard,
+        _ => schema_fingerprint,
     };
 
-    let wal_partition_dir = format!("{}/{}", output_dir, shard);
+    let wal_partition_dir = format!("{}/{}", output_dir, schema_fingerprint);
 
     fs::create_dir_all(&wal_partition_dir).expect("Failed to create WAL partition directories");
 

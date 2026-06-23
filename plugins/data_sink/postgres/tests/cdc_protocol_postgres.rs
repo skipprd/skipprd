@@ -45,7 +45,7 @@ fn cdc_wal_roundtrip_with_postgres_metadata() {
         namespace: "users".to_string(),
         partition: "".to_string(),
         time: None,
-        shard: "".to_string(),
+        schema_fingerprint: "".to_string(),
     };
 
     let schema = arrow::datatypes::Schema::new(vec![

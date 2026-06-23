@@ -67,7 +67,7 @@ pub fn wal_refs_fingerprint(wal_refs: &[RuntimeWalPartRef]) -> String {
                 wal_ref.namespace,
                 wal_ref.partition,
                 wal_ref.time,
-                wal_ref.shard
+                wal_ref.schema_fingerprint
             )
         })
         .collect::<Vec<_>>();

@@ -124,7 +124,7 @@ fn reference_path_full_lifecycle_insert_update_delete() {
         namespace: "users".to_string(),
         partition: "".to_string(),
         time: None,
-        shard: "".to_string(),
+        schema_fingerprint: "".to_string(),
     };
 
     let batch = make_batch();

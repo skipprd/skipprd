@@ -398,7 +398,7 @@ pub struct RuntimeIngestPartitionBatch {
     pub namespace: String,
     pub partition: String,
     pub time: Option<i64>,
-    pub shard: String,
+    pub schema_fingerprint: String,
     pub offsets: Vec<RuntimeOffsetPosition>,
     pub arrow_stream_bytes: Vec<u8>,
     pub cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
@@ -444,7 +444,7 @@ pub struct RuntimeWalPartRef {
     pub namespace: String,
     pub partition: String,
     pub time: Option<i64>,
-    pub shard: String,
+    pub schema_fingerprint: String,
     pub cdc_meta_hash: Option<[u8; 32]>,
 }
 

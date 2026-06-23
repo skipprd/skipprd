@@ -351,7 +351,7 @@ mod tests {
                 namespace: "users".to_string(),
                 partition: String::new(),
                 time: None,
-                shard: String::new(),
+                schema_fingerprint: String::new(),
                 cdc_meta_hash: None,
             }],
             write_semantics: SinkWriteSemantics::IdempotentAtLeastOnce,

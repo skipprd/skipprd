@@ -17,7 +17,7 @@ pub struct PartitionKey {
     pub namespace: String,
     pub partition: String,
     pub time: Option<i64>,
-    pub shard: String,
+    pub schema_fingerprint: String,
 }
 
 const MAGIC: &[u8; 4] = b"SEGF";
@@ -546,7 +546,7 @@ mod tests_wal_writer {
             namespace: "ns".to_string(),
             partition: "".to_string(),
             time: Some(0),
-            shard: "shard".to_string(),
+            schema_fingerprint: "schema".to_string(),
         };
         batches.insert(key.clone(), vec![make_batch()]);
         let mut parts_meta: HashMap<PartitionKey, (u64, SystemTime)> = HashMap::new();
@@ -606,7 +606,7 @@ mod tests_wal_writer {
             namespace: "ns".to_string(),
             partition: "".to_string(),
             time: Some(0),
-            shard: "shard".to_string(),
+            schema_fingerprint: "schema".to_string(),
         };
         let batch = make_batch();
         let mut batches: HashMap<PartitionKey, Vec<RecordBatch>> = HashMap::new();
@@ -671,7 +671,7 @@ mod tests_wal_writer {
             namespace: "tbl".to_string(),
             partition: "".to_string(),
             time: None,
-            shard: "".to_string(),
+            schema_fingerprint: "".to_string(),
         };
         let batch = make_batch();
         let mut batches: HashMap<PartitionKey, Vec<RecordBatch>> = HashMap::new();

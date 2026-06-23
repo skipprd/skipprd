@@ -86,7 +86,7 @@ fn reference_path_wal_cdc_metadata_roundtrip() {
         namespace: "users".to_string(),
         partition: "".to_string(),
         time: None,
-        shard: "".to_string(),
+        schema_fingerprint: "".to_string(),
     };
 
     let batch = make_batch();
@@ -141,7 +141,7 @@ fn reference_path_wal_append_mode_has_empty_meta() {
         namespace: "logs".to_string(),
         partition: "".to_string(),
         time: None,
-        shard: "".to_string(),
+        schema_fingerprint: "".to_string(),
     };
 
     let batch = make_batch();
