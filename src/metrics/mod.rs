@@ -654,12 +654,30 @@ impl Metrics {
                             data_dir_paused,
                         );
                         if let Some((free_bytes, used_pct)) = data_dir_disk_usage() {
-                            info!(
-                                "DATA_DIR: paused={}, usage={:.1}%, free={}",
-                                data_dir_paused,
-                                used_pct,
-                                Helpers::human_readable_size(free_bytes),
-                            );
+                            let pause_progress = if data_dir_paused {
+                                Some(crate::buffer::ingest_buffer::Buffers::pause_progress_snapshot())
+                            } else {
+                                None
+                            };
+                            if let Some(progress) = pause_progress {
+                                info!(
+                                    "DATA_DIR: paused={}, usage={:.1}%, free={}, segs_remaining={}, reclaimable_partitions={}, wal_compactions_inflight={}, uploads_inflight={}",
+                                    data_dir_paused,
+                                    used_pct,
+                                    Helpers::human_readable_size(free_bytes),
+                                    progress.segs_remaining,
+                                    progress.reclaimable_partitions,
+                                    progress.wal_compactions_in_flight,
+                                    progress.uploads_in_flight,
+                                );
+                            } else {
+                                info!(
+                                    "DATA_DIR: paused={}, usage={:.1}%, free={}",
+                                    data_dir_paused,
+                                    used_pct,
+                                    Helpers::human_readable_size(free_bytes),
+                                );
+                            }
                         } else {
                             info!("DATA_DIR: paused={}, usage=n/a, free=n/a", data_dir_paused);
                         }

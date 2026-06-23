@@ -978,9 +978,19 @@ impl DataSinkAthenaPlugin {
                 return Err(e);
             }
         };
+        let partition_summary = if partition_values.is_empty() {
+            format!("s3://{}/{}/", bucket, full_key.trim_end_matches('/'))
+        } else {
+            format!(
+                "s3://{}/{}/ values={:?}",
+                bucket,
+                full_key.trim_end_matches('/'),
+                partition_values
+            )
+        };
         info!(
-            "Uploaded {} to S3 (rows={}, bytes={})",
-            final_key, rows_written, uploaded_bytes
+            "Uploaded s3://{}/{} to S3 (rows={}, bytes={}, namespace={}, partitions={})",
+            bucket, final_key, rows_written, uploaded_bytes, namespace, partition_summary
         );
         debug!(
             "Uploader: complete key={} upload_id={} parts={} total_bytes={} rows={}",
@@ -2266,6 +2276,10 @@ impl AwsAthena {
                 )
                 .await
                 .map(|_| ())?;
+                info!(
+                    "Glue partition updated: {}.{} values={:?} location=s3://{}/",
+                    database, table_name, partition_values, path
+                );
             }
             Err(_) => {
                 AwsAthena::backoff_retry(
@@ -2293,7 +2307,10 @@ impl AwsAthena {
                 )
                 .await
                 .map(|_| ())?;
-                info!("Created new Athena partition");
+                info!(
+                    "Glue partition created: {}.{} values={:?} location=s3://{}/",
+                    database, table_name, partition_values, path
+                );
             }
         }
 

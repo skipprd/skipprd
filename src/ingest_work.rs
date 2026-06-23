@@ -878,21 +878,26 @@ impl Ingest {
                 set_data_dir_ingest_paused(true);
                 Buffers::wake_compactor();
                 DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS.store(0, Ordering::Relaxed);
+                let progress = crate::buffer::ingest_buffer::Buffers::pause_progress_snapshot();
                 if below_min_free {
                     warn!(
-                        "Pausing ingest: free {} is below minimum {} (usage {:.1}%, total {}). Force compaction will run with raised concurrency until resume thresholds are met.",
+                        "Pausing ingest: free {} is below minimum {} (usage {:.1}%, total {}). Force compaction will run with raised concurrency until resume thresholds are met. WAL state: segs_remaining={}, reclaimable_partitions={}",
                         Helpers::human_readable_size(avail_bytes),
                         Helpers::human_readable_size(min_free_bytes),
                         used_pct,
-                        Helpers::human_readable_size(total_bytes)
+                        Helpers::human_readable_size(total_bytes),
+                        progress.segs_remaining,
+                        progress.reclaimable_partitions,
                     );
                 } else {
                     warn!(
-                        "Pausing ingest: DATA_DIR usage {:.1}% is above high watermark {}% (free {} / total {}). Force compaction will run with raised concurrency until resume thresholds are met.",
+                        "Pausing ingest: DATA_DIR usage {:.1}% is above high watermark {}% (free {} / total {}). Force compaction will run with raised concurrency until resume thresholds are met. WAL state: segs_remaining={}, reclaimable_partitions={}",
                         used_pct,
                         high_watermark,
                         Helpers::human_readable_size(avail_bytes),
-                        Helpers::human_readable_size(total_bytes)
+                        Helpers::human_readable_size(total_bytes),
+                        progress.segs_remaining,
+                        progress.reclaimable_partitions,
                     );
                 }
             }
@@ -916,12 +921,20 @@ impl Ingest {
             let last_log = DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS.load(Ordering::Relaxed);
             if now_secs.saturating_sub(last_log) >= 30 {
                 DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS.store(now_secs, Ordering::Relaxed);
+                let progress = crate::buffer::ingest_buffer::Buffers::pause_progress_snapshot();
                 info!(
-                    "Ingest remains paused: DATA_DIR usage {:.1}% is above resume watermark {}% (free {} / total {}).",
+                    "Ingest remains paused: DATA_DIR usage {:.1}% (resume below {}%, free {} / total {}). Reclaiming WAL: segs_remaining={}, reclaimable_partitions={}, wal_compactions_inflight={}, uploads_inflight={}, wal_compactions_completed={}, wal_txn_completed={}, wal_refs_tombstoned={}",
                     used_pct,
                     low_watermark,
                     Helpers::human_readable_size(avail_bytes),
-                    Helpers::human_readable_size(total_bytes)
+                    Helpers::human_readable_size(total_bytes),
+                    progress.segs_remaining,
+                    progress.reclaimable_partitions,
+                    progress.wal_compactions_in_flight,
+                    progress.uploads_in_flight,
+                    progress.wal_compactions_completed,
+                    progress.wal_txn_completed,
+                    progress.wal_refs_tombstoned,
                 );
             }
 

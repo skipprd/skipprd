@@ -35,6 +35,7 @@ use futures::stream::StreamExt as FuturesStreamExt;
 use hex;
 use once_cell::sync::Lazy;
 use once_cell::sync::Lazy as OnceLazy;
+use rayon::prelude::*;
 use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -45,8 +46,8 @@ use std::io::{BufReader, Read, Seek, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering as AtomicOrdering;
+use std::sync::atomic::{AtomicU64, AtomicUsize};
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll as TaskPoll};
 use std::time::SystemTime;
@@ -1941,6 +1942,24 @@ impl Buffers {
         count
     }
 
+    /// Snapshot for DATA_DIR pause progress logs.
+    pub fn pause_progress_snapshot() -> WalPauseProgress {
+        WalPauseProgress {
+            segs_remaining: Self::segs_remaining(),
+            reclaimable_partitions: Self::reclaimable_wal_partition_count(10_000),
+            wal_compactions_in_flight: crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
+                .load(AtomicOrdering::Relaxed),
+            uploads_in_flight: crate::metrics::counters::UPLOADS_IN_FLIGHT
+                .load(AtomicOrdering::Relaxed),
+            wal_compactions_completed: crate::metrics::counters::WAL_COMPACTIONS_COMPLETED
+                .load(AtomicOrdering::Relaxed),
+            wal_txn_completed: crate::metrics::counters::WAL_COMPACTION_TRANSACTIONS_COMPLETED
+                .load(AtomicOrdering::Relaxed),
+            wal_refs_tombstoned: crate::metrics::counters::WAL_COMPACTION_REFS_TOMBSTONED
+                .load(AtomicOrdering::Relaxed),
+        }
+    }
+
     fn read_entry_batches(
         entry: &CompactionEntry,
         s3_resolved: Option<Arc<Vec<u8>>>,
@@ -2251,6 +2270,13 @@ impl Buffers {
         }
         crate::metrics::counters::add_wal_compaction_completed(work.entries.len() as u64);
         crate::metrics::counters::add_wal_compaction_transaction_completed(1);
+        info!(
+            "WAL grouped compaction complete: namespace={} wal_parts={} compaction_id={} target={}",
+            work.txn.namespace,
+            work.entries.len(),
+            work.txn.id,
+            work.txn.target_filename
+        );
         Self::tombstone_grouped_work(&work);
         crate::metrics::counters::add_wal_compaction_refs_tombstoned(work.entries.len() as u64);
         remove_manifest(&work.txn.id)?;
@@ -2995,10 +3021,32 @@ where
         .collect()
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WalPauseProgress {
+    pub segs_remaining: usize,
+    pub reclaimable_partitions: usize,
+    pub wal_compactions_in_flight: usize,
+    pub uploads_in_flight: usize,
+    pub wal_compactions_completed: u64,
+    pub wal_txn_completed: u64,
+    pub wal_refs_tombstoned: u64,
+}
+
+fn wal_index_progress_every() -> usize {
+    Config::getenv("WAL_INDEX_PROGRESS_EVERY", "500")
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(500)
+}
+
+struct RecoveredSegmentMeta {
+    path: PathBuf,
+    meta: SegmentFileMetadata,
+}
+
 pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
     let started = std::time::Instant::now();
-    let mut count = 0u64;
-    let mut bytes = 0u64;
     let mut dir_entries_scanned = 0u64;
     let mut commit_markers_seen = 0u64;
 
@@ -3030,59 +3078,108 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
         "WAL scan examined {} entries (commit_markers_seen={}, committed_seg_candidates={})",
         dir_entries_scanned, commit_markers_seen, seg_files_count
     );
+
+    let progress_every = wal_index_progress_every();
+    if seg_files_count > 0 {
+        info!(
+            "WAL indexing: reading metadata for {} segment files (parallel, progress every {})",
+            seg_files_count, progress_every
+        );
+    }
+
+    let indexed_count = AtomicUsize::new(0);
+    let failed_count = AtomicUsize::new(0);
+    let recovered_segments: Vec<RecoveredSegmentMeta> = seg_files
+        .par_iter()
+        .filter_map(|file_path| {
+            let seg = SegmentFile {
+                path: file_path.clone(),
+            };
+            match seg.read_metadata() {
+                Ok(meta) => {
+                    let n = indexed_count.fetch_add(1, AtomicOrdering::Relaxed) + 1;
+                    if n % progress_every == 0 || n == seg_files_count {
+                        let elapsed = started.elapsed().as_secs_f64();
+                        let rate = if elapsed > 0.0 {
+                            n as f64 / elapsed
+                        } else {
+                            0.0
+                        };
+                        info!(
+                            "WAL indexing progress: {}/{} segment files ({:.1}%, ~{:.0} files/s)",
+                            n,
+                            seg_files_count,
+                            (n as f64 * 100.0) / seg_files_count as f64,
+                            rate
+                        );
+                    }
+                    Some(RecoveredSegmentMeta {
+                        path: file_path.clone(),
+                        meta,
+                    })
+                }
+                Err(e) => {
+                    failed_count.fetch_add(1, AtomicOrdering::Relaxed);
+                    warn!(
+                        "Failed to read segment metadata {}: {}",
+                        file_path.to_string_lossy(),
+                        e
+                    );
+                    None
+                }
+            }
+        })
+        .collect();
+
+    let failures = failed_count.load(AtomicOrdering::Relaxed);
+    if failures > 0 {
+        warn!(
+            "WAL indexing: {} of {} segment files failed metadata read",
+            failures, seg_files_count
+        );
+    }
+
+    let mut count = 0u64;
+    let mut bytes = 0u64;
     let mut namespaces: HashSet<String> = HashSet::new();
     let mut namespace_partition_files: HashMap<PartitionKey, u64> = HashMap::new();
     let mut namespace_partition_bytes: HashMap<PartitionKey, u64> = HashMap::new();
-
     let mut committed_offsets: u64 = 0;
 
-    for file_path in seg_files {
-        let seg = SegmentFile {
-            path: file_path.clone(),
-        };
-        match seg.read_metadata() {
-            Ok(meta) => {
-                if Config::debug_enabled() || Config::log_wal_enabled() {
-                    let partition_sample: Vec<String> = meta
-                        .index
-                        .iter()
-                        .take(3)
-                        .map(|idx| {
-                            format!("{}/{}/{}B", idx.key.namespace, idx.key.partition, idx.bytes)
-                        })
-                        .collect();
-                    info!(
-                        "WAL recover disk: segment={} partitions={} offsets={} total_bytes={} partition_sample={:?} offset_sample={:?}",
-                        file_path.to_string_lossy(),
-                        meta.index.len(),
-                        meta.offsets.len(),
-                        meta.total_bytes,
-                        partition_sample,
-                        offset_sample(meta.offsets.iter(), 3)
-                    );
-                }
-                for idx in meta.index.iter() {
-                    let key = idx.key.clone();
-                    namespaces.insert(key.namespace.clone());
-                    *namespace_partition_files.entry(key.clone()).or_insert(0) += 1;
-                    *namespace_partition_bytes.entry(key.clone()).or_insert(0) =
-                        (*namespace_partition_bytes.get(&key).unwrap_or(&0))
-                            .saturating_add(idx.bytes);
-                }
-                bytes = bytes.saturating_add(meta.total_bytes);
-                count = count.saturating_add(1);
-                mark_offsets_durable_in_wal(offsets_db.as_ref(), meta.offsets.iter());
-                committed_offsets = committed_offsets.saturating_add(meta.offsets.len() as u64);
-                Buffers::segment_cache_register(SegmentSource::Disk(file_path), meta);
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to read segment metadata {}: {}",
-                    file_path.to_string_lossy(),
-                    e
-                );
-            }
+    for recovered in recovered_segments {
+        let RecoveredSegmentMeta {
+            path: file_path,
+            meta,
+        } = recovered;
+        if Config::debug_enabled() || Config::log_wal_enabled() {
+            let partition_sample: Vec<String> = meta
+                .index
+                .iter()
+                .take(3)
+                .map(|idx| format!("{}/{}/{}B", idx.key.namespace, idx.key.partition, idx.bytes))
+                .collect();
+            info!(
+                "WAL recover disk: segment={} partitions={} offsets={} total_bytes={} partition_sample={:?} offset_sample={:?}",
+                file_path.to_string_lossy(),
+                meta.index.len(),
+                meta.offsets.len(),
+                meta.total_bytes,
+                partition_sample,
+                offset_sample(meta.offsets.iter(), 3)
+            );
         }
+        for idx in meta.index.iter() {
+            let key = idx.key.clone();
+            namespaces.insert(key.namespace.clone());
+            *namespace_partition_files.entry(key.clone()).or_insert(0) += 1;
+            *namespace_partition_bytes.entry(key.clone()).or_insert(0) =
+                (*namespace_partition_bytes.get(&key).unwrap_or(&0)).saturating_add(idx.bytes);
+        }
+        bytes = bytes.saturating_add(meta.total_bytes);
+        count = count.saturating_add(1);
+        mark_offsets_durable_in_wal(offsets_db.as_ref(), meta.offsets.iter());
+        committed_offsets = committed_offsets.saturating_add(meta.offsets.len() as u64);
+        Buffers::segment_cache_register(SegmentSource::Disk(file_path), meta);
     }
 
     let elapsed = started.elapsed().as_secs_f64();
@@ -3309,6 +3406,42 @@ pub async fn wal_recover(offsets_db: Arc<Offsets>) -> io::Result<()> {
         return wal_recover_s3(offsets_db).await;
     }
     wal_recover_disk(offsets_db)
+}
+
+#[cfg(test)]
+mod wal_index_progress_tests {
+    use super::wal_index_progress_every;
+    use crate::helpers::configuration::Config;
+    use serial_test::serial;
+
+    #[test]
+    #[serial]
+    fn wal_index_progress_every_defaults_to_500() {
+        let old = std::env::var("WAL_INDEX_PROGRESS_EVERY").ok();
+        std::env::remove_var("WAL_INDEX_PROGRESS_EVERY");
+        Config::set_evncache("WAL_INDEX_PROGRESS_EVERY", "");
+        assert_eq!(wal_index_progress_every(), 500);
+        if let Some(value) = old {
+            Config::setenv("WAL_INDEX_PROGRESS_EVERY", &value);
+        } else {
+            std::env::remove_var("WAL_INDEX_PROGRESS_EVERY");
+            Config::set_evncache("WAL_INDEX_PROGRESS_EVERY", "");
+        }
+    }
+
+    #[test]
+    #[serial]
+    fn wal_index_progress_every_honors_env_override() {
+        let old = std::env::var("WAL_INDEX_PROGRESS_EVERY").ok();
+        Config::setenv("WAL_INDEX_PROGRESS_EVERY", "1000");
+        assert_eq!(wal_index_progress_every(), 1000);
+        if let Some(value) = old {
+            Config::setenv("WAL_INDEX_PROGRESS_EVERY", &value);
+        } else {
+            std::env::remove_var("WAL_INDEX_PROGRESS_EVERY");
+            Config::set_evncache("WAL_INDEX_PROGRESS_EVERY", "");
+        }
+    }
 }
 
 #[cfg(test)]

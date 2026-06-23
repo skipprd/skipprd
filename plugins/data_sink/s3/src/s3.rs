@@ -171,7 +171,16 @@ impl DataSinkS3Plugin {
         counters::add_parquet_bytes(byte_count);
         counters::add_upload(1);
         counters::dec_uploads_in_flight();
-        info!("Uploaded to S3: {}", final_key);
+        info!(
+            "Uploaded s3://{}/{} to S3 (rows={}, bytes={}, namespace={}, partition_prefix=s3://{}/{}/)",
+            self.config.s3_bucket,
+            final_key,
+            row_count,
+            byte_count,
+            namespace,
+            self.config.s3_bucket,
+            full_key.trim_end_matches('/')
+        );
         Ok(())
     }
 }
