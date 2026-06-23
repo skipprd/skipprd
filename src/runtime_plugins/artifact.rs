@@ -1,12 +1,17 @@
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+use reqwest::StatusCode;
 use sha2::{Digest, Sha256};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::runtime_plugins::manifest::{RuntimePluginArtifact, RuntimePluginManifest};
+
+const ARTIFACT_DOWNLOAD_MAX_ATTEMPTS: usize = 4;
+const ARTIFACT_DOWNLOAD_INITIAL_BACKOFF_MS: u64 = 200;
 
 pub async fn resolve_plugin_executable(
     manifest_path: &Path,
@@ -127,10 +132,52 @@ async fn download_artifact(url: &str, destination: &Path) -> io::Result<()> {
         fs::create_dir_all(parent).await?;
     }
 
+    let bytes = download_artifact_bytes(url).await?;
+
+    let mut file = fs::File::create(destination).await?;
+    file.write_all(&bytes).await?;
+    file.flush().await?;
+    set_executable_permissions(destination).await?;
+    Ok(())
+}
+
+async fn download_artifact_bytes(url: &str) -> io::Result<bytes::Bytes> {
+    let mut last_error: Option<io::Error> = None;
+    for attempt in 1..=ARTIFACT_DOWNLOAD_MAX_ATTEMPTS {
+        match download_artifact_bytes_once(url).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(err) if attempt < ARTIFACT_DOWNLOAD_MAX_ATTEMPTS && is_retryable_io_error(&err) => {
+                let backoff = artifact_download_backoff(attempt);
+                warn!(
+                    "runtime artifact download failed transiently attempt={}/{} backoff_ms={} url={} error={}",
+                    attempt,
+                    ARTIFACT_DOWNLOAD_MAX_ATTEMPTS,
+                    backoff.as_millis(),
+                    url,
+                    err
+                );
+                last_error = Some(err);
+                tokio::time::sleep(backoff).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| io::Error::other(format!("runtime artifact download failed for {url}"))))
+}
+
+async fn download_artifact_bytes_once(url: &str) -> io::Result<bytes::Bytes> {
     let response = reqwest::get(url)
         .await
-        .map_err(|err| io::Error::other(format!("runtime artifact download failed: {}", err)))?;
+        .map_err(|err| retryable_error(format!("runtime artifact download failed: {}", err)))?;
     if !response.status().is_success() {
+        if is_retryable_status(response.status()) {
+            return Err(retryable_error(format!(
+                "runtime artifact download returned status {} for {}",
+                response.status(),
+                url
+            )));
+        }
         return Err(io::Error::other(format!(
             "runtime artifact download returned status {} for {}",
             response.status(),
@@ -138,15 +185,30 @@ async fn download_artifact(url: &str, destination: &Path) -> io::Result<()> {
         )));
     }
 
-    let bytes = response.bytes().await.map_err(|err| {
-        io::Error::other(format!("runtime artifact download read failed: {}", err))
-    })?;
+    response
+        .bytes()
+        .await
+        .map_err(|err| retryable_error(format!("runtime artifact download read failed: {}", err)))
+}
 
-    let mut file = fs::File::create(destination).await?;
-    file.write_all(&bytes).await?;
-    file.flush().await?;
-    set_executable_permissions(destination).await?;
-    Ok(())
+fn artifact_download_backoff(attempt: usize) -> Duration {
+    Duration::from_millis(
+        ARTIFACT_DOWNLOAD_INITIAL_BACKOFF_MS * (1_u64 << attempt.saturating_sub(1)),
+    )
+}
+
+fn is_retryable_status(status: StatusCode) -> bool {
+    status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+fn retryable_error(message: String) -> io::Error {
+    io::Error::new(io::ErrorKind::Interrupted, message)
+}
+
+fn is_retryable_io_error(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::Interrupted
 }
 
 async fn verify_sha256(path: &Path, expected: Option<&str>) -> io::Result<()> {
@@ -184,4 +246,37 @@ async fn set_executable_permissions(path: &Path) -> io::Result<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{artifact_download_backoff, is_retryable_status};
+
+    #[test]
+    fn transient_artifact_download_statuses_are_retryable() {
+        assert!(is_retryable_status(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        ));
+        assert!(is_retryable_status(reqwest::StatusCode::BAD_GATEWAY));
+        assert!(is_retryable_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_retryable_status(reqwest::StatusCode::REQUEST_TIMEOUT));
+        assert!(!is_retryable_status(reqwest::StatusCode::NOT_FOUND));
+        assert!(!is_retryable_status(reqwest::StatusCode::FORBIDDEN));
+    }
+
+    #[test]
+    fn artifact_download_backoff_is_exponential() {
+        assert_eq!(
+            artifact_download_backoff(1),
+            std::time::Duration::from_millis(200)
+        );
+        assert_eq!(
+            artifact_download_backoff(2),
+            std::time::Duration::from_millis(400)
+        );
+        assert_eq!(
+            artifact_download_backoff(3),
+            std::time::Duration::from_millis(800)
+        );
+    }
 }

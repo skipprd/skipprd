@@ -1,14 +1,15 @@
 use std::fs as std_fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use reqwest::header::{CACHE_CONTROL, PRAGMA, USER_AGENT};
+use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::runtime_plugins::host::ResolvedRuntimePlugin;
 use crate::runtime_plugins::manifest::RuntimePluginManifest;
@@ -18,6 +19,8 @@ const DEFAULT_DISCOVERY_BASE_URL: &str = "https://install.skippr.io/releases/run
 const METADATA_REFRESH_QUERY_PARAM: &str = "skippr_metadata_refresh";
 const LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR_ENV: &str = "SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR";
 const USE_LOCAL_PLUGIN_CODE_ENV: &str = "USE_LOCAL_PLUGIN_CODE";
+const METADATA_FETCH_MAX_ATTEMPTS: usize = 4;
+const METADATA_FETCH_INITIAL_BACKOFF_MS: u64 = 200;
 
 #[derive(Clone, Debug, Deserialize)]
 struct RuntimePluginIndex {
@@ -460,6 +463,49 @@ fn append_metadata_refresh_query(url: &str, refresh_token: &str) -> io::Result<S
 }
 
 async fn fetch_metadata_bytes(client: &reqwest::Client, url: &str) -> io::Result<Vec<u8>> {
+    let mut last_error: Option<io::Error> = None;
+    for attempt in 1..=METADATA_FETCH_MAX_ATTEMPTS {
+        match fetch_metadata_bytes_once(client, url).await {
+            Ok(bytes) => return Ok(bytes),
+            Err(err) if attempt < METADATA_FETCH_MAX_ATTEMPTS && is_retryable_io_error(&err) => {
+                let backoff = metadata_fetch_backoff(attempt);
+                warn!(
+                    "runtime discovery request failed transiently attempt={}/{} backoff_ms={} url={} error={}",
+                    attempt,
+                    METADATA_FETCH_MAX_ATTEMPTS,
+                    backoff.as_millis(),
+                    url,
+                    err
+                );
+                last_error = Some(err);
+                tokio::time::sleep(backoff).await;
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last_error
+        .unwrap_or_else(|| io::Error::other(format!("runtime discovery request failed for {url}"))))
+}
+
+fn metadata_fetch_backoff(attempt: usize) -> Duration {
+    Duration::from_millis(METADATA_FETCH_INITIAL_BACKOFF_MS * (1_u64 << attempt.saturating_sub(1)))
+}
+
+fn is_retryable_status(status: StatusCode) -> bool {
+    status == StatusCode::REQUEST_TIMEOUT
+        || status == StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+}
+
+fn retryable_error(message: String) -> io::Error {
+    io::Error::new(io::ErrorKind::Interrupted, message)
+}
+
+fn is_retryable_io_error(err: &io::Error) -> bool {
+    err.kind() == io::ErrorKind::Interrupted
+}
+
+async fn fetch_metadata_bytes_once(client: &reqwest::Client, url: &str) -> io::Result<Vec<u8>> {
     let refresh_token = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -473,9 +519,16 @@ async fn fetch_metadata_bytes(client: &reqwest::Client, url: &str) -> io::Result
         .header(PRAGMA, "no-cache")
         .send()
         .await
-        .map_err(|err| io::Error::other(format!("runtime discovery request failed: {err}")))?;
+        .map_err(|err| retryable_error(format!("runtime discovery request failed: {err}")))?;
 
     if !response.status().is_success() {
+        if is_retryable_status(response.status()) {
+            return Err(retryable_error(format!(
+                "runtime discovery request returned status {} for {}",
+                response.status(),
+                url
+            )));
+        }
         return Err(io::Error::other(format!(
             "runtime discovery request returned status {} for {}",
             response.status(),
@@ -487,7 +540,7 @@ async fn fetch_metadata_bytes(client: &reqwest::Client, url: &str) -> io::Result
         .bytes()
         .await
         .map(|bytes| bytes.to_vec())
-        .map_err(|err| io::Error::other(format!("runtime discovery read failed: {err}")))
+        .map_err(|err| retryable_error(format!("runtime discovery read failed: {err}")))
 }
 
 #[cfg(test)]
@@ -502,10 +555,11 @@ mod tests {
     use crate::runtime_plugins::protocol::RuntimePluginKind;
 
     use super::{
-        append_metadata_refresh_query, configured_runtime_plugin_version,
-        latest_manifest_index_url, manifest_cache_key, missing_runtime_plugin_message,
-        resolve_local_runtime_plugin, rewrite_manifest_url_version, runtime_plugin_cache_root,
-        use_local_plugin_code, RuntimePluginIndex, RuntimePluginIndexEntry,
+        append_metadata_refresh_query, configured_runtime_plugin_version, is_retryable_status,
+        latest_manifest_index_url, manifest_cache_key, metadata_fetch_backoff,
+        missing_runtime_plugin_message, resolve_local_runtime_plugin, rewrite_manifest_url_version,
+        runtime_plugin_cache_root, use_local_plugin_code, RuntimePluginIndex,
+        RuntimePluginIndexEntry,
     };
 
     fn local_manifest_json(plugin_name: &str, kind: RuntimePluginKind, executable: &str) -> String {
@@ -581,6 +635,34 @@ mod tests {
         )
         .unwrap();
         assert!(refreshed.contains("skippr_metadata_refresh=123"));
+    }
+
+    #[test]
+    fn transient_registry_statuses_are_retryable() {
+        assert!(is_retryable_status(
+            reqwest::StatusCode::SERVICE_UNAVAILABLE
+        ));
+        assert!(is_retryable_status(reqwest::StatusCode::BAD_GATEWAY));
+        assert!(is_retryable_status(reqwest::StatusCode::TOO_MANY_REQUESTS));
+        assert!(is_retryable_status(reqwest::StatusCode::REQUEST_TIMEOUT));
+        assert!(!is_retryable_status(reqwest::StatusCode::NOT_FOUND));
+        assert!(!is_retryable_status(reqwest::StatusCode::UNAUTHORIZED));
+    }
+
+    #[test]
+    fn metadata_fetch_backoff_is_bounded_and_exponential() {
+        assert_eq!(
+            metadata_fetch_backoff(1),
+            std::time::Duration::from_millis(200)
+        );
+        assert_eq!(
+            metadata_fetch_backoff(2),
+            std::time::Duration::from_millis(400)
+        );
+        assert_eq!(
+            metadata_fetch_backoff(3),
+            std::time::Duration::from_millis(800)
+        );
     }
 
     #[test]
