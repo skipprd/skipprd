@@ -194,6 +194,7 @@ static SEGMENT_SNAPSHOTS: Lazy<
 // Global single-flight guard to avoid double compaction of the same partition region
 static COMPACTION_IN_FLIGHT: OnceLazy<DashMap<(String, u64, u64), ()>> =
     OnceLazy::new(|| DashMap::new());
+static SWEEP_CYCLE_COUNTER: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 
 /// In-memory cache of committed WAL segments.
 /// Populated on startup (wal_recover) and during ingest (flush).
@@ -1003,6 +1004,10 @@ impl Buffers {
         let mut drain_reply: Option<tokio::sync::oneshot::Sender<bool>> = None;
         let mut consecutive_failures: u32 = 0;
         loop {
+            let ingest_paused = crate::data_dir_ingest_paused();
+            if ingest_paused {
+                crate::ingest::tuner::paused_tick(num_cpus::get());
+            }
             let force = drain_reply.is_some();
             let did_work =
                 Self::run_compaction_cycle(force, shared_output.clone(), offsets_db.clone()).await;
@@ -1026,6 +1031,18 @@ impl Buffers {
                 tokio_sleep(TokioDuration::from_millis(backoff_ms)).await;
             }
 
+            if did_work || ingest_paused || force {
+                while let Ok(cmd) = rx.try_recv() {
+                    match cmd {
+                        CompactorCommand::Wake => {}
+                        CompactorCommand::DrainAndStop(reply) => {
+                            drain_reply = Some(reply);
+                        }
+                    }
+                }
+                continue;
+            }
+
             tokio::select! {
                 cmd = rx.recv() => {
                     match cmd {
@@ -1036,7 +1053,7 @@ impl Buffers {
                         None => break,
                     }
                 }
-                _ = tokio_sleep(TokioDuration::from_millis(500)) => {}
+                _ = tokio_sleep(TokioDuration::from_millis(100)) => {}
             }
         }
         COMPACTOR_STARTED.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -1051,29 +1068,38 @@ impl Buffers {
         let mut made_progress = false;
         let ingest_paused = crate::data_dir_ingest_paused();
         let force = force || ingest_paused;
+        let num_cpus = num_cpus::get().max(2);
+        let (_, max_wal) = crate::ingest::tuner::tuning_maxima(num_cpus);
         let mut concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
             .load(std::sync::atomic::Ordering::Relaxed)
-            .clamp(1, 64) as usize;
-        if !force {
+            .clamp(1, max_wal) as usize;
+        if force {
+            concurrency = concurrency.max(num_cpus).min(max_wal);
+        } else {
             let active_ingest =
                 crate::metrics::counters::ACTIVE_THREADS.load(std::sync::atomic::Ordering::Relaxed);
             let queued_ingest =
                 crate::metrics::counters::QUEUE_LENGTH.load(std::sync::atomic::Ordering::Relaxed);
-            let backlog_high = Self::reclaimable_wal_partition_count(concurrency.saturating_mul(2))
-                >= concurrency.saturating_mul(2);
-            if !backlog_high && (active_ingest > 0 || queued_ingest > 0) {
-                concurrency = 1;
-                if Config::debug_enabled() || Config::log_wal_enabled() {
+            let reclaimable =
+                Self::reclaimable_wal_partition_count(num_cpus.saturating_mul(2));
+            let ingest_busy = active_ingest > 0 || queued_ingest > 0;
+            if ingest_busy {
+                let floor = if reclaimable >= num_cpus.saturating_mul(8) {
+                    num_cpus.min(max_wal)
+                } else if reclaimable >= num_cpus.saturating_mul(2) {
+                    (num_cpus / 2).max(4).min(max_wal)
+                } else if reclaimable >= 4 {
+                    2
+                } else {
+                    1
+                };
+                concurrency = concurrency.max(floor);
+                if floor > 1 && (Config::debug_enabled() || Config::log_wal_enabled()) {
                     debug!(
-                        "Compactor: ingest busy; limiting background compaction concurrency active_threads={} queued_tasks={}",
-                        active_ingest, queued_ingest
+                        "Compactor: ingest busy with WAL backlog reclaimable={} floor={} active_threads={} queued_tasks={}",
+                        reclaimable, floor, active_ingest, queued_ingest
                     );
                 }
-            } else if backlog_high && (Config::debug_enabled() || Config::log_wal_enabled()) {
-                debug!(
-                    "Compactor: WAL backlog high; keeping compaction concurrency={} active_threads={} queued_tasks={}",
-                    concurrency, active_ingest, queued_ingest
-                );
             }
         }
 
@@ -1104,7 +1130,7 @@ impl Buffers {
             made_progress = true;
         }
         if made_progress && !is_s3_wal() {
-            Self::sweep_segment_cleanup();
+            Self::maybe_sweep_segment_cleanup(force);
         }
         made_progress
     }
@@ -1442,6 +1468,67 @@ impl Buffers {
         (scanned, removed, errors)
     }
 
+    fn maybe_sweep_segment_cleanup(force_full: bool) {
+        let cycle = SWEEP_CYCLE_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+        if force_full || cycle % 60 == 0 {
+            Self::sweep_segment_cleanup();
+        } else {
+            Self::sweep_segment_cleanup_cached();
+        }
+    }
+
+    fn sweep_segment_cleanup_cached() {
+        for entry in SEGMENT_CACHE.iter() {
+            let cached = entry.value();
+            let seg_path = match &cached.source {
+                SegmentSource::Disk(path) => path.clone(),
+                SegmentSource::S3 { .. } => continue,
+            };
+            let commit = seg_path.with_extension("seg.commit");
+            if !commit.exists() {
+                continue;
+            }
+            let remaining = cached
+                .meta
+                .index
+                .iter()
+                .filter(|idx| !Self::is_source_tombstoned(&cached.source, &idx.key))
+                .count();
+            if remaining == 0 {
+                Self::remove_fully_compacted_disk_segment(&seg_path, &cached.meta);
+            }
+        }
+    }
+
+    fn remove_fully_compacted_disk_segment(seg_path: &PathBuf, meta: &SegmentFileMetadata) {
+        match Self::remove_disk_segment_and_commit_marker(seg_path) {
+            Ok(cleanup) => {
+                if matches!(cleanup, DiskSegmentCleanup::Removed) {
+                    info!(
+                        "Removed fully-compacted segment {}",
+                        seg_path.to_string_lossy()
+                    );
+                }
+                if let Some(id) = seg_path.file_stem().and_then(|s| s.to_str()) {
+                    Self::segment_cache_remove(id);
+                }
+                for part in meta.index.iter() {
+                    let tp = Self::partition_tombstone_path(seg_path, &part.key);
+                    if tp.exists() {
+                        if let Err(e) = fs::remove_file(&tp) {
+                            error!("Failed to remove tombstone {:?}: {}", tp, e);
+                        }
+                    }
+                }
+            }
+            Err(e) => error!(
+                "Failed to remove fully-compacted segment {}: {}",
+                seg_path.to_string_lossy(),
+                e
+            ),
+        }
+    }
+
     fn sweep_segment_cleanup() {
         let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
         if !seg_dir.exists() {
@@ -1470,30 +1557,7 @@ impl Buffers {
                         }
                     }
                     if remaining == 0 {
-                        match Self::remove_disk_segment_and_commit_marker(&p) {
-                            Ok(cleanup) => {
-                                if matches!(cleanup, DiskSegmentCleanup::Removed) {
-                                    info!(
-                                        "Removed fully-compacted segment {}",
-                                        p.to_string_lossy()
-                                    );
-                                }
-                                // remove all tombstones for this segment
-                                for part in m.index.iter() {
-                                    let tp = Self::partition_tombstone_path(&p, &part.key);
-                                    if tp.exists() {
-                                        if let Err(e) = fs::remove_file(&tp) {
-                                            error!("Failed to remove tombstone {:?}: {}", tp, e);
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => error!(
-                                "Failed to remove fully-compacted segment {}: {}",
-                                p.to_string_lossy(),
-                                e
-                            ),
-                        }
+                        Self::remove_fully_compacted_disk_segment(&p, &m);
                     }
                 }
             }

@@ -929,6 +929,8 @@ impl Ingest {
                 return true;
             }
 
+            crate::ingest::tuner::paused_tick(num_cpus::get());
+            Buffers::wake_compactor();
             std::thread::sleep(Duration::from_secs(1));
         }
     }

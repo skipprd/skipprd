@@ -84,8 +84,26 @@ fn update_retry_ema_x100() -> u64 {
     ema
 }
 
+/// CPU-shaped upload/WAL maxima used by periodic and drain/pause tuning.
+pub fn tuning_maxima(num_cpus: usize) -> (usize, usize) {
+    let max_upload = Config::getenv("UPLOAD_CONCURRENCY_MAX", "")
+        .parse::<usize>()
+        .ok()
+        .filter(|v| *v > 0)
+        .unwrap_or_else(|| (num_cpus.saturating_mul(4)).clamp(16, 256));
+    let max_wal = Config::getenv("WAL_COMPACTION_CONCURRENCY_MAX", "")
+        .parse::<usize>()
+        .ok()
+        .filter(|v| *v > 0)
+        .unwrap_or_else(|| (num_cpus.saturating_mul(2)).clamp(8, 128));
+    (max_upload, max_wal)
+}
+
 /// Apply one-time environment overrides and CI caps for upload, WAL compaction, and S3 download.
 pub fn apply_env_caps() {
+    let num_cpus = num_cpus::get().max(2);
+    let (default_upload, default_wal) = tuning_maxima(num_cpus);
+
     // Upload concurrency override (no CI-specific caps)
     if let Ok(v) = Config::getenv("UPLOAD_CONCURRENCY", "").parse::<usize>() {
         if v > 0 {
@@ -94,6 +112,15 @@ pub fn apply_env_caps() {
             if Config::log_wal_enabled() {
                 info!("tune: upload_concurrency set by env={}", v);
             }
+        }
+    } else {
+        crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET
+            .store(default_upload, std::sync::atomic::Ordering::Relaxed);
+        if Config::log_wal_enabled() {
+            info!(
+                "tune: upload_concurrency seeded from cpu count={} -> {}",
+                num_cpus, default_upload
+            );
         }
     }
     // WAL compaction concurrency override
@@ -104,6 +131,15 @@ pub fn apply_env_caps() {
             if Config::log_wal_enabled() {
                 info!("tune: wal_compaction set by env={}", v);
             }
+        }
+    } else {
+        crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
+            .store(default_wal, std::sync::atomic::Ordering::Relaxed);
+        if Config::log_wal_enabled() {
+            info!(
+                "tune: wal_compaction seeded from cpu count={} -> {}",
+                num_cpus, default_wal
+            );
         }
     }
     // S3 download concurrency override (global target). Per-plugin may still clamp via memory semaphore
@@ -122,17 +158,8 @@ pub fn apply_env_caps() {
 /// Periodic tuning tick: adjusts upload, WAL compaction, and S3 download targets.
 /// Includes error-aware throttling using EMA of WAL retries.
 pub fn tick(active: usize, capacity: usize, queued: usize, pressure: f64) {
-    // Use env-defined maxima or reasonable defaults; no CI-specific caps
-    let max_upload = Config::getenv("UPLOAD_CONCURRENCY_MAX", "")
-        .parse::<usize>()
-        .ok()
-        .filter(|v| *v > 0)
-        .unwrap_or(32);
-    let max_wal = Config::getenv("WAL_COMPACTION_CONCURRENCY_MAX", "")
-        .parse::<usize>()
-        .ok()
-        .filter(|v| *v > 0)
-        .unwrap_or(16);
+    let num_cpus = num_cpus::get().max(2);
+    let (max_upload, max_wal) = tuning_maxima(num_cpus);
     let max_dl = Config::getenv("S3_DOWNLOAD_CONCURRENCY_MAX", "")
         .parse::<usize>()
         .ok()
@@ -267,16 +294,7 @@ pub fn drain_tick(num_cpus: usize, has_backlog: bool) {
         return;
     }
 
-    let max_upload = Config::getenv("UPLOAD_CONCURRENCY_MAX", "")
-        .parse::<usize>()
-        .ok()
-        .filter(|v| *v > 0)
-        .unwrap_or_else(|| (num_cpus.saturating_mul(2)).clamp(16, 128));
-    let max_wal = Config::getenv("WAL_COMPACTION_CONCURRENCY_MAX", "")
-        .parse::<usize>()
-        .ok()
-        .filter(|v| *v > 0)
-        .unwrap_or_else(|| num_cpus.clamp(4, 64));
+    let (max_upload, max_wal) = tuning_maxima(num_cpus);
 
     let ema = update_retry_ema_x100();
     let upload_cur = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed);
@@ -307,6 +325,33 @@ pub fn drain_tick(num_cpus: usize, has_backlog: bool) {
         info!(
             "drain tune: upload_concurrency {} -> {}, wal_compaction {} -> {} (retry_ema_x100={})",
             upload_cur, upload_next, wal_cur, wal_next, ema
+        );
+    }
+}
+
+/// DATA_DIR ingest pause: jump compaction/upload concurrency to CPU-shaped maxima immediately.
+pub fn paused_tick(num_cpus: usize) {
+    let (max_upload, max_wal) = tuning_maxima(num_cpus);
+    let ema = update_retry_ema_x100();
+    if ema > 200 {
+        return;
+    }
+
+    let upload_cur = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed);
+    let wal_cur =
+        crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(Ordering::Relaxed);
+    if upload_cur != max_upload {
+        crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET
+            .store(max_upload, Ordering::Relaxed);
+    }
+    if wal_cur != max_wal {
+        crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
+            .store(max_wal, Ordering::Relaxed);
+    }
+    if (upload_cur != max_upload || wal_cur != max_wal) && Config::log_wal_enabled() {
+        info!(
+            "pause tune: upload_concurrency {} -> {}, wal_compaction {} -> {} (cpus={})",
+            upload_cur, max_upload, wal_cur, max_wal, num_cpus
         );
     }
 }
@@ -474,5 +519,38 @@ mod throughput_window_tests {
             MIN_THROUGHPUT_RATE_WINDOW,
         );
         assert!((t - 1000.0).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod tuning_tests {
+    use super::{paused_tick, tuning_maxima};
+    use crate::metrics::counters::{
+        UPLOAD_CONCURRENCY_TARGET, WAL_COMPACTION_CONCURRENCY_TARGET,
+    };
+    use std::sync::atomic::Ordering;
+
+    #[test]
+    fn tuning_maxima_scales_with_cpu_count() {
+        let (upload, wal) = tuning_maxima(32);
+        assert!(upload >= 64);
+        assert!(wal >= 32);
+    }
+
+    #[test]
+    fn paused_tick_sets_cpu_shaped_targets() {
+        let cpus = 16usize;
+        let (expected_upload, expected_wal) = tuning_maxima(cpus);
+        UPLOAD_CONCURRENCY_TARGET.store(4, Ordering::Relaxed);
+        WAL_COMPACTION_CONCURRENCY_TARGET.store(2, Ordering::Relaxed);
+        paused_tick(cpus);
+        assert_eq!(
+            UPLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed),
+            expected_upload
+        );
+        assert_eq!(
+            WAL_COMPACTION_CONCURRENCY_TARGET.load(Ordering::Relaxed),
+            expected_wal
+        );
     }
 }
