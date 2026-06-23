@@ -44,9 +44,10 @@ use crate::runtime_plugins::protocol::{
     RuntimeOffsetMaterializationHint, RuntimeOutputLayout, RuntimeRequestAck, RuntimeSchemaConfig,
     RuntimeSchemaInstallRequest, RuntimeSchemaState, RuntimeSchemaStateInstallRequest,
     RuntimeSessionHello, RuntimeSinkConfig, RuntimeSinkInstallRequest, RuntimeSinkPayload,
-    RuntimeSourceConfig, RuntimeSourceIngestWindow, SchemaRunRequest, SinkRunRequest, SourceEvent,
-    SourceStartRequest, RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV,
-    SKIPPR_RUNTIME_DATA_ADDR_ENV, SKIPPR_RUNTIME_OFFSET_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
+    RuntimeSinkWriteResult, RuntimeSourceConfig, RuntimeSourceIngestWindow, SchemaRunRequest,
+    SinkRunRequest, SourceEvent, SourceStartRequest, RUNTIME_PROTOCOL_VERSION,
+    SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV, SKIPPR_RUNTIME_OFFSET_ADDR_ENV,
+    SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use crate::runtime_plugins::schema_state::{
     apply_runtime_source_schema_state, bump_pipeline_schema_version,
@@ -1188,6 +1189,10 @@ pub async fn sync_runtime_input_plugin(
                         let ctx = crate::plugins::SinkWriteContext {
                             filename: write.filename,
                             compaction_id: write.compaction_id,
+                            idempotency_key: write.idempotency_key,
+                            wal_refs: write.wal_refs,
+                            write_semantics: write.write_semantics,
+                            schema_fingerprint: write.schema_fingerprint,
                             cdc_ctx: write.cdc_ctx.as_ref(),
                             source_contract: source_contract.as_ref(),
                         };
@@ -1368,6 +1373,7 @@ fn should_retry_runtime_connection(err: &io::Error) -> bool {
 
 pub struct RuntimeDataSinkPlugin {
     install_request: RuntimeSinkInstallRequest,
+    capability: &'static cdc::SinkCapability,
     connection: Mutex<RuntimeChildConnection>,
 }
 
@@ -1378,6 +1384,19 @@ impl RuntimeDataSinkPlugin {
         binding: RuntimeBinding,
         config: RuntimeSinkConfig,
     ) -> io::Result<Self> {
+        let capability = resolved
+            .manifest
+            .sink_capability
+            .as_ref()
+            .map(|capability| {
+                Box::leak(Box::new(capability.to_cdc_capability())) as &'static cdc::SinkCapability
+            })
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "runtime sink manifest '{}' is missing sink capability",
+                    resolved.manifest.name
+                ))
+            })?;
         let install_request = RuntimeSinkInstallRequest {
             context: runtime_execution_context(&pipeline_name, RuntimeExecutionMode::Sync),
             binding,
@@ -1386,6 +1405,7 @@ impl RuntimeDataSinkPlugin {
         let connection = RuntimeChildConnection::spawn(resolved, pipeline_name, None, None).await?;
         let plugin = Self {
             install_request,
+            capability,
             connection: Mutex::new(connection),
         };
         {
@@ -1503,6 +1523,24 @@ impl RuntimeDataSinkPlugin {
                     crate::metrics::counters::add_parquet_rows(row_count);
                     return Ok(());
                 }
+                Ok(PluginFrame::SinkWriteAck(ack)) if ack.request_id == request.request_id => {
+                    match ack.result {
+                        RuntimeSinkWriteResult::Applied
+                        | RuntimeSinkWriteResult::AlreadyApplied => {
+                            crate::metrics::counters::add_parquet_rows(row_count);
+                            return Ok(());
+                        }
+                        RuntimeSinkWriteResult::RejectedNonIdempotent => {
+                            return Err(io::Error::other(
+                                "runtime sink rejected non-idempotent write",
+                            ));
+                        }
+                        RuntimeSinkWriteResult::RetryableFailure { message }
+                        | RuntimeSinkWriteResult::FatalFailure { message } => {
+                            return Err(io::Error::other(message));
+                        }
+                    }
+                }
                 Ok(PluginFrame::Error(err)) => return Err(io::Error::other(err)),
                 Ok(PluginFrame::SchemaStateRefreshRequired(_refresh)) => {
                     if schema_refreshes >= 3 {
@@ -1579,6 +1617,11 @@ impl DataSink for RuntimeDataSinkPlugin {
             crate::plugins::SinkWriteContext {
                 filename,
                 compaction_id: String::new(),
+                idempotency_key: String::new(),
+                wal_refs: Vec::new(),
+                write_semantics:
+                    crate::buffer::compaction_transaction::SinkWriteSemantics::AtLeastOnce,
+                schema_fingerprint: String::new(),
                 cdc_ctx,
                 source_contract: None,
             },
@@ -1611,6 +1654,18 @@ impl DataSink for RuntimeDataSinkPlugin {
             } else {
                 ctx.compaction_id.clone()
             },
+            idempotency_key: if ctx.idempotency_key.is_empty() {
+                if ctx.compaction_id.is_empty() {
+                    runtime_compaction_id(&ctx.filename)
+                } else {
+                    ctx.compaction_id.clone()
+                }
+            } else {
+                ctx.idempotency_key.clone()
+            },
+            wal_refs: ctx.wal_refs.clone(),
+            write_semantics: ctx.write_semantics,
+            schema_fingerprint: ctx.schema_fingerprint.clone(),
             binding: self.install_request.binding,
             required_schema_version: schema_state.version,
             filename: ctx.filename,
@@ -1621,8 +1676,8 @@ impl DataSink for RuntimeDataSinkPlugin {
             .await
     }
 
-    fn capability(&self) -> Option<&'static cdc::SinkCapability> {
-        None
+    fn capability(&self) -> &'static cdc::SinkCapability {
+        self.capability
     }
 
     async fn install_schema_state(

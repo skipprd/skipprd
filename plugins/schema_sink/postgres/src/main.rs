@@ -15,6 +15,12 @@ struct PostgresSchemaRuntimePlugin {
     inner: DataSinkPostgresPlugin,
 }
 
+skippr_runtime_sdk::declare_schema_sink_spec!(
+    PostgresSchemaSinkSpec,
+    PostgresSchemaRuntimePlugin,
+    "Postgres"
+);
+
 #[async_trait::async_trait]
 impl SchemaSink for PostgresSchemaRuntimePlugin {
     async fn sync_schema(

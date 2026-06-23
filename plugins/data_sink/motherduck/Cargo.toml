@@ -38,3 +38,5 @@ can_manage_skippr_columns = true
 can_maintain_tombstone_tables = true
 can_compare_order_tokens = true
 supports_transactions = true
+retry_semantics = "FinalStateIdempotent"
+grouping_support = "FinalStateBatches"

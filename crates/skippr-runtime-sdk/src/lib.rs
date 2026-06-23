@@ -7,6 +7,7 @@ pub mod runtime_main;
 pub mod runtime_offsets;
 pub mod sdk;
 pub mod sink_compat;
+pub mod sink_idempotency;
 pub mod sink_runtime_entry;
 pub mod site_quality_worker;
 pub mod site_security_worker;
@@ -15,4 +16,38 @@ pub mod source_sync;
 pub mod wire;
 
 pub use skippr_core::RUNNING;
-pub use skippr_core::{converters, discover, helpers, ingest, lineage, metrics, plugins, serdes};
+pub use skippr_core::{
+    buffer, converters, discover, helpers, ingest, lineage, metrics, plugins, serdes,
+};
+
+#[macro_export]
+macro_rules! declare_sink_spec {
+    ($spec:ident, $plugin:ty, $capability:path, $support:ty) => {
+        pub struct $spec;
+
+        impl $crate::plugins::SinkSpec for $spec {
+            const NAME: &'static str = $capability.name;
+            const CAPABILITY: $crate::plugins::cdc::SinkCapability = $capability;
+            type WriteSupport = $support;
+        }
+
+        impl $crate::plugins::HasSinkSpec for $plugin {
+            type Spec = $spec;
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! declare_schema_sink_spec {
+    ($spec:ident, $plugin:ty, $name:expr) => {
+        pub struct $spec;
+
+        impl $crate::plugins::SchemaSinkSpec for $spec {
+            const NAME: &'static str = $name;
+        }
+
+        impl $crate::plugins::HasSchemaSinkSpec for $plugin {
+            type Spec = $spec;
+        }
+    };
+}

@@ -341,8 +341,7 @@ pub fn paused_tick(num_cpus: usize) {
     let wal_cur =
         crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(Ordering::Relaxed);
     if upload_cur != max_upload {
-        crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET
-            .store(max_upload, Ordering::Relaxed);
+        crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.store(max_upload, Ordering::Relaxed);
     }
     if wal_cur != max_wal {
         crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
@@ -525,9 +524,7 @@ mod throughput_window_tests {
 #[cfg(test)]
 mod tuning_tests {
     use super::{paused_tick, tuning_maxima};
-    use crate::metrics::counters::{
-        UPLOAD_CONCURRENCY_TARGET, WAL_COMPACTION_CONCURRENCY_TARGET,
-    };
+    use crate::metrics::counters::{UPLOAD_CONCURRENCY_TARGET, WAL_COMPACTION_CONCURRENCY_TARGET};
     use std::sync::atomic::Ordering;
 
     #[test]

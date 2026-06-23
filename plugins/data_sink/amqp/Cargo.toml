@@ -35,3 +35,5 @@ can_manage_skippr_columns = false
 can_maintain_tombstone_tables = false
 can_compare_order_tokens = false
 supports_transactions = false
+retry_semantics = "AtLeastOnce"
+grouping_support = "CdcEncodedBatches"

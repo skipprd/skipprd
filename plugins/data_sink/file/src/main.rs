@@ -32,6 +32,13 @@ struct FileSinkRuntimePlugin {
     order_fields: Vec<String>,
 }
 
+skippr_runtime_sdk::declare_sink_spec!(
+    FileSinkSpec,
+    FileSinkRuntimePlugin,
+    skippr_runtime_sdk::plugins::cdc::sink_capabilities::FILE,
+    skippr_runtime_sdk::plugins::DeterministicObjectOverwrite
+);
+
 #[async_trait]
 impl DataSink for FileSinkRuntimePlugin {
     async fn sync(
@@ -40,16 +47,51 @@ impl DataSink for FileSinkRuntimePlugin {
         filename: String,
         cdc_ctx: Option<&cdc::SyncContext>,
     ) -> Result<(), io::Error> {
-        let stream = match cdc_ctx {
-            Some(ctx) => cdc_encode::augment_stream_with_cdc_columns(stream, &ctx.part_meta),
+        self.sync_with_context(
+            stream,
+            skippr_runtime_sdk::plugins::SinkWriteContext {
+                filename,
+                compaction_id: String::new(),
+                idempotency_key: String::new(),
+                wal_refs: Vec::new(),
+                write_semantics:
+                    skippr_runtime_sdk::buffer::compaction_transaction::SinkWriteSemantics::AtLeastOnce,
+                schema_fingerprint: String::new(),
+                cdc_ctx,
+                source_contract: None,
+            },
+        )
+        .await
+    }
+
+    async fn sync_with_context(
+        &self,
+        stream: SendableRecordBatchStream,
+        ctx: skippr_runtime_sdk::plugins::SinkWriteContext<'_>,
+    ) -> Result<(), io::Error> {
+        ctx.validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
+            .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
+        let stream = match ctx.cdc_ctx {
+            Some(cdc) => cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
             None => stream,
+        };
+        let object_stem = if ctx.idempotency_key.is_empty() {
+            None
+        } else {
+            Some(
+                skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
+                    &ctx.idempotency_key,
+                    "",
+                )?,
+            )
         };
         sync_file_sink(
             &self.config,
             &self.data_dir,
             &self.order_fields,
             stream,
-            filename,
+            ctx.filename,
+            object_stem.as_deref(),
         )
         .await
     }
@@ -63,6 +105,10 @@ impl DataSink for FileSinkRuntimePlugin {
         >,
     ) -> Result<(), io::Error> {
         Ok(())
+    }
+
+    fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
+        &skippr_runtime_sdk::plugins::cdc::sink_capabilities::FILE
     }
 }
 
@@ -98,6 +144,7 @@ async fn sync_file_sink(
     order_fields: &[String],
     stream: SendableRecordBatchStream,
     filename: String,
+    object_stem: Option<&str>,
 ) -> io::Result<()> {
     use skippr_runtime_sdk::metrics::counters;
 
@@ -128,8 +175,10 @@ async fn sync_file_sink(
         full_key = format!("{}/{}", full_key, time_key);
     }
 
-    let md5_digest = md5::compute(&filename);
-    let output_name = format!("{}/{}", full_key, hex::encode(md5_digest.0));
+    let object_stem = object_stem
+        .map(str::to_string)
+        .unwrap_or_else(|| hex::encode(md5::compute(&filename).0));
+    let output_name = format!("{}/{}", full_key, object_stem);
     let output_file = Path::new(&format!(
         "{}/output_buffer/{}.parquet",
         data_dir, output_name

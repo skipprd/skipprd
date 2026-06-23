@@ -131,6 +131,13 @@ pub struct DataSinkIcebergPlugin {
     schema_state: RwLock<InstalledIcebergSchemaState>,
 }
 
+skippr_runtime_sdk::declare_sink_spec!(
+    IcebergSinkSpec,
+    DataSinkIcebergPlugin,
+    skippr_runtime_sdk::plugins::cdc::sink_capabilities::ICEBERG,
+    skippr_runtime_sdk::plugins::TransactionalTableCommit
+);
+
 #[async_trait]
 impl DataSink for DataSinkIcebergPlugin {
     async fn sync(
@@ -144,6 +151,11 @@ impl DataSink for DataSinkIcebergPlugin {
             SinkWriteContext {
                 filename,
                 compaction_id: String::new(),
+                idempotency_key: String::new(),
+                wal_refs: Vec::new(),
+                write_semantics:
+                    skippr_runtime_sdk::buffer::compaction_transaction::SinkWriteSemantics::AtLeastOnce,
+                schema_fingerprint: String::new(),
                 cdc_ctx,
                 source_contract: None,
             },
@@ -160,8 +172,15 @@ impl DataSink for DataSinkIcebergPlugin {
             Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
             None => stream,
         };
+        let object_stem = if ctx.idempotency_key.is_empty() {
+            None
+        } else {
+            Some(ctx.idempotency_key.as_str())
+        };
         if ctx.cdc_ctx.is_some() {
-            return self.native_append(stream, ctx.filename, ctx.cdc_ctx).await;
+            return self
+                .native_append(stream, ctx.filename, ctx.cdc_ctx, object_stem)
+                .await;
         }
         let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
         let resolved_contract = ctx
@@ -178,7 +197,10 @@ impl DataSink for DataSinkIcebergPlugin {
         }
         ensure_source_contract_for_policy(&namespace, policy, resolved_contract.as_ref())?;
         match policy {
-            WritePolicy::Append => self.native_append(stream, ctx.filename, None).await,
+            WritePolicy::Append => {
+                self.native_append(stream, ctx.filename, None, object_stem)
+                    .await
+            }
             WritePolicy::MergeByKey | WritePolicy::ReplacePartition | WritePolicy::ReplaceTable => {
                 let contract = resolved_contract.ok_or_else(|| {
                     io::Error::new(
@@ -189,14 +211,14 @@ impl DataSink for DataSinkIcebergPlugin {
                         ),
                     )
                 })?;
-                self.native_policy_write(stream, ctx.filename, &contract, policy)
+                self.native_policy_write(stream, ctx.filename, &contract, policy, object_stem)
                     .await
             }
         }
     }
 
-    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
-        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::ICEBERG)
+    fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
+        &skippr_runtime_sdk::plugins::cdc::sink_capabilities::ICEBERG
     }
 
     async fn install_schema_state(
@@ -250,6 +272,7 @@ impl DataSinkIcebergPlugin {
         stream: SendableRecordBatchStream,
         filename: String,
         cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
+        object_stem: Option<&str>,
     ) -> Result<(), io::Error> {
         let namespace = BufferChunker::decode_file_namespace(&filename);
         let metadata = self.namespace_metadata(&namespace).await?;
@@ -290,7 +313,13 @@ impl DataSinkIcebergPlugin {
             row_count = parquet_bytes.num_rows as u64;
             if row_count > 0 {
                 let data_file_uri = self
-                    .write_parquet_file(&namespace, "data", &filename, parquet_bytes.bytes.clone())
+                    .write_parquet_file(
+                        &namespace,
+                        "data",
+                        &filename,
+                        object_stem,
+                        parquet_bytes.bytes.clone(),
+                    )
                     .await?;
                 commit_files.push(self.build_data_file(
                     &table,
@@ -339,7 +368,13 @@ impl DataSinkIcebergPlugin {
             let delete_row_count = delete_bytes.num_rows as u64;
             if delete_row_count > 0 {
                 let delete_file_uri = self
-                    .write_parquet_file(&namespace, "delete", &filename, delete_bytes.bytes)
+                    .write_parquet_file(
+                        &namespace,
+                        "delete",
+                        &filename,
+                        object_stem,
+                        delete_bytes.bytes,
+                    )
                     .await?;
                 commit_files.push(self.build_data_file(
                     &table,
@@ -381,6 +416,7 @@ impl DataSinkIcebergPlugin {
         filename: String,
         contract: &SourceNamespaceContract,
         policy: WritePolicy,
+        object_stem: Option<&str>,
     ) -> Result<(), io::Error> {
         use iceberg::Catalog;
 
@@ -405,7 +441,9 @@ impl DataSinkIcebergPlugin {
                 );
             }
             self.ensure_table(&catalog, &namespace, &metadata).await?;
-            return self.native_append(stream, filename, None).await;
+            return self
+                .native_append(stream, filename, None, object_stem)
+                .await;
         }
 
         let table = self.ensure_table(&catalog, &namespace, &metadata).await?;
@@ -463,7 +501,13 @@ impl DataSinkIcebergPlugin {
             let delete_row_count = delete_bytes.num_rows as u64;
             if delete_row_count > 0 {
                 let delete_file_uri = self
-                    .write_parquet_file(&namespace, "delete", &filename, delete_bytes.bytes)
+                    .write_parquet_file(
+                        &namespace,
+                        "delete",
+                        &filename,
+                        object_stem,
+                        delete_bytes.bytes,
+                    )
                     .await?;
                 commit_files.push(self.build_data_file(
                     &table,
@@ -486,7 +530,13 @@ impl DataSinkIcebergPlugin {
             row_count = parquet_bytes.num_rows as u64;
             if row_count > 0 {
                 let data_file_uri = self
-                    .write_parquet_file(&namespace, "data", &filename, parquet_bytes.bytes.clone())
+                    .write_parquet_file(
+                        &namespace,
+                        "data",
+                        &filename,
+                        object_stem,
+                        parquet_bytes.bytes.clone(),
+                    )
                     .await?;
                 commit_files.push(self.build_data_file(
                     &table,
@@ -848,13 +898,16 @@ impl DataSinkIcebergPlugin {
         namespace: &str,
         content_dir: &str,
         filename: &str,
+        object_stem: Option<&str>,
         bytes: bytes::Bytes,
     ) -> Result<String, io::Error> {
         let table_location = self.table_location(namespace).ok_or_else(|| {
             io::Error::other("Iceberg sink requires table_location_prefix for data file writes")
         })?;
         let (bucket, table_prefix) = parse_s3_uri(&table_location)?;
-        let digest = hex::encode(md5::compute(filename).0);
+        let digest = object_stem
+            .map(str::to_string)
+            .unwrap_or_else(|| hex::encode(md5::compute(filename).0));
         let key = format!(
             "{}/{}/{}.parquet",
             table_prefix.trim_matches('/'),

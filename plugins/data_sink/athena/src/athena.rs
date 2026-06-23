@@ -116,6 +116,13 @@ pub struct DataSinkAthenaPlugin {
     schema_state: RwLock<InstalledAthenaSchemaState>,
 }
 
+skippr_runtime_sdk::declare_sink_spec!(
+    AthenaSinkSpec,
+    DataSinkAthenaPlugin,
+    skippr_runtime_sdk::plugins::cdc::sink_capabilities::ATHENA,
+    skippr_runtime_sdk::plugins::DeterministicObjectOverwrite
+);
+
 #[derive(Debug, Default)]
 struct InstalledAthenaSchemaState {
     version: u64,
@@ -211,6 +218,11 @@ impl DataSink for DataSinkAthenaPlugin {
             SinkWriteContext {
                 filename,
                 compaction_id: String::new(),
+                idempotency_key: String::new(),
+                wal_refs: Vec::new(),
+                write_semantics:
+                    skippr_runtime_sdk::buffer::compaction_transaction::SinkWriteSemantics::AtLeastOnce,
+                schema_fingerprint: String::new(),
                 cdc_ctx,
                 source_contract: None,
             },
@@ -259,12 +271,17 @@ impl DataSink for DataSinkAthenaPlugin {
             ctx.filename,
             write_policy,
             resolved_contract.as_ref(),
+            if ctx.idempotency_key.is_empty() {
+                None
+            } else {
+                Some(ctx.idempotency_key.as_str())
+            },
         )
         .await
     }
 
-    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
-        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::ATHENA)
+    fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
+        &skippr_runtime_sdk::plugins::cdc::sink_capabilities::ATHENA
     }
 
     async fn install_schema_state(
@@ -413,6 +430,7 @@ impl DataSinkAthenaPlugin {
         filename: String,
         write_policy: WritePolicy,
         source_contract: Option<&SourceNamespaceContract>,
+        object_stem: Option<&str>,
     ) -> Result<(), std::io::Error> {
         let _bucket = &self.config.s3_bucket;
         let key = &self.config.s3_prefix;
@@ -615,10 +633,11 @@ impl DataSinkAthenaPlugin {
             WritePolicy::Append => {}
         }
 
-        // Use deterministic hashed filename to avoid leaking internal encodings
-        let md5_digest = md5::compute(&filename);
-        let md5_string = hex::encode(&md5_digest.0);
-        let final_key = format!("{}/{}.parquet", full_key, md5_string);
+        // Use grouped idempotency keys directly; legacy writes keep hashed filenames.
+        let object_stem = object_stem
+            .map(str::to_string)
+            .unwrap_or_else(|| hex::encode(md5::compute(&filename).0));
+        let final_key = format!("{}/{}.parquet", full_key, object_stem);
 
         // Prepare S3 tagging string
         let tags_str = tags
@@ -2498,7 +2517,7 @@ fn contract_partition_delete_prefix(
 #[cfg(test)]
 mod contract_schema_tests {
     use super::*;
-    use arrow::array::{Int64Array, StringArray};
+    use arrow::array::StringArray;
     use arrow::datatypes::{DataType, Field, Schema};
     use aws_sdk_glue::types::Column;
     use skippr_runtime_sdk::plugins::source_contract::{FieldPath, WritePolicy};

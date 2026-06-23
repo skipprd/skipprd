@@ -30,6 +30,13 @@ pub struct DataSinkAmqpPlugin {
     config: DataSinkAmqpPluginConfig,
 }
 
+skippr_runtime_sdk::declare_sink_spec!(
+    AmqpSinkSpec,
+    DataSinkAmqpPlugin,
+    skippr_runtime_sdk::plugins::cdc::sink_capabilities::AMQP,
+    skippr_runtime_sdk::plugins::AtLeastOnceMessageDelivery
+);
+
 #[async_trait]
 impl DataSink for DataSinkAmqpPlugin {
     async fn sync(
@@ -140,8 +147,8 @@ impl DataSink for DataSinkAmqpPlugin {
         Ok(())
     }
 
-    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
-        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::AMQP)
+    fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
+        &skippr_runtime_sdk::plugins::cdc::sink_capabilities::AMQP
     }
 }
 

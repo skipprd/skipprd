@@ -64,7 +64,9 @@ fn default_config_schema_version() -> u32 {
 impl RuntimePluginManifest {
     pub fn load_from_path(path: &Path) -> io::Result<Self> {
         let bytes = fs::read(path)?;
-        serde_json::from_slice(&bytes).map_err(|err| io::Error::other(err.to_string()))
+        let manifest: Self =
+            serde_json::from_slice(&bytes).map_err(|err| io::Error::other(err.to_string()))?;
+        Ok(manifest)
     }
 
     pub fn current_target() -> String {

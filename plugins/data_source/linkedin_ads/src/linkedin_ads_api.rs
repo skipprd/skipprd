@@ -42,6 +42,7 @@ impl LinkedInAdsApiClient {
             rest_version,
         }
     }
+    #[allow(dead_code)]
     pub fn build_request(
         &self,
         stream: &LinkedInStreamDef,

@@ -125,7 +125,11 @@ data_sinks:
                     "config_schema_version": 1,
                     "args": [],
                     "source_capability": None,
-                    "sink_capability": {"name": "snowflake"},
+                    "sink_capability": {
+                        "name": "snowflake",
+                        "retry_semantics": "FinalStateIdempotent",
+                        "grouping_support": "FinalStateBatches",
+                    },
                 },
                 {
                     "package_name": "skippr-plugin-data-sink-athena",
@@ -140,7 +144,11 @@ data_sinks:
                     "config_schema_version": 1,
                     "args": [],
                     "source_capability": None,
-                    "sink_capability": {"name": "athena"},
+                    "sink_capability": {
+                        "name": "athena",
+                        "retry_semantics": "DeterministicOverwrite",
+                        "grouping_support": "CdcEncodedBatches",
+                    },
                 },
             ]
 

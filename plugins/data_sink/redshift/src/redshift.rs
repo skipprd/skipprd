@@ -61,6 +61,19 @@ pub struct DataSinkRedshiftPlugin {
     s3_client: Option<S3Client>,
 }
 
+skippr_runtime_sdk::declare_sink_spec!(
+    RedshiftSinkSpec,
+    DataSinkRedshiftPlugin,
+    skippr_runtime_sdk::plugins::cdc::sink_capabilities::REDSHIFT,
+    skippr_runtime_sdk::plugins::FinalStateIdempotentApply
+);
+
+skippr_runtime_sdk::declare_schema_sink_spec!(
+    RedshiftSchemaSinkSpec,
+    DataSinkRedshiftPlugin,
+    "Redshift"
+);
+
 impl DataSinkRedshiftPlugin {
     pub async fn new_with_config(
         buffer_name: String,
@@ -692,8 +705,8 @@ impl DataSink for DataSinkRedshiftPlugin {
         result
     }
 
-    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
-        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::REDSHIFT)
+    fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
+        &skippr_runtime_sdk::plugins::cdc::sink_capabilities::REDSHIFT
     }
 }
 

@@ -2223,18 +2223,9 @@ mod field_out_field_name_cache_tests {
         id_b.out_field_name = "user_id".to_string();
         ns_b.insert("id".to_string(), id_b);
 
-        assert_eq!(
-            Metadata::get_field_out_field_name(&ns_a, "id"),
-            "legacy_id"
-        );
-        assert_eq!(
-            Metadata::get_field_out_field_name(&ns_b, "id"),
-            "user_id"
-        );
-        assert_eq!(
-            Metadata::get_field_out_field_name(&ns_a, "id"),
-            "legacy_id"
-        );
+        assert_eq!(Metadata::get_field_out_field_name(&ns_a, "id"), "legacy_id");
+        assert_eq!(Metadata::get_field_out_field_name(&ns_b, "id"), "user_id");
+        assert_eq!(Metadata::get_field_out_field_name(&ns_a, "id"), "legacy_id");
     }
 }
 

@@ -15,6 +15,8 @@ struct GlueAthenaSchemaSync {
     config: DataSinkAthenaPluginConfig,
 }
 
+skippr_runtime_sdk::declare_schema_sink_spec!(GlueSchemaSinkSpec, GlueAthenaSchemaSync, "Glue");
+
 #[async_trait]
 impl SchemaSink for GlueAthenaSchemaSync {
     async fn sync_schema(

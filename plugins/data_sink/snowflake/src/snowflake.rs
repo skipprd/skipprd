@@ -129,6 +129,19 @@ pub struct DataSinkSnowflakePlugin {
     schema_state: tokio::sync::RwLock<BTreeMap<String, OutputMetadata>>,
 }
 
+skippr_runtime_sdk::declare_sink_spec!(
+    SnowflakeSinkSpec,
+    DataSinkSnowflakePlugin,
+    skippr_runtime_sdk::plugins::cdc::sink_capabilities::SNOWFLAKE,
+    skippr_runtime_sdk::plugins::FinalStateIdempotentApply
+);
+
+skippr_runtime_sdk::declare_schema_sink_spec!(
+    SnowflakeSchemaSinkSpec,
+    DataSinkSnowflakePlugin,
+    "Snowflake"
+);
+
 const TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(50 * 60);
 const SESSION_TOKEN_TTL: std::time::Duration = std::time::Duration::from_secs(3 * 3600);
 
@@ -2555,8 +2568,8 @@ impl DataSink for DataSinkSnowflakePlugin {
         }
     }
 
-    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
-        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::SNOWFLAKE)
+    fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
+        &skippr_runtime_sdk::plugins::cdc::sink_capabilities::SNOWFLAKE
     }
 
     async fn install_schema_state(

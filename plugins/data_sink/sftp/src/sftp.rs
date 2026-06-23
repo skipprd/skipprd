@@ -33,6 +33,13 @@ pub struct DataSinkSftpPlugin {
     config: DataSinkSftpPluginConfig,
 }
 
+skippr_runtime_sdk::declare_sink_spec!(
+    SftpSinkSpec,
+    DataSinkSftpPlugin,
+    skippr_runtime_sdk::plugins::cdc::sink_capabilities::SFTP,
+    skippr_runtime_sdk::plugins::SftpAtomicRename
+);
+
 #[async_trait]
 impl DataSink for DataSinkSftpPlugin {
     async fn sync(
@@ -41,8 +48,32 @@ impl DataSink for DataSinkSftpPlugin {
         filename: String,
         cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
-        let stream = match cdc_ctx {
-            Some(ctx) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &ctx.part_meta),
+        self.sync_with_context(
+            stream,
+            skippr_runtime_sdk::plugins::SinkWriteContext {
+                filename,
+                compaction_id: String::new(),
+                idempotency_key: String::new(),
+                wal_refs: Vec::new(),
+                write_semantics:
+                    skippr_runtime_sdk::buffer::compaction_transaction::SinkWriteSemantics::AtLeastOnce,
+                schema_fingerprint: String::new(),
+                cdc_ctx,
+                source_contract: None,
+            },
+        )
+        .await
+    }
+
+    async fn sync_with_context(
+        &self,
+        stream: SendableRecordBatchStream,
+        ctx: skippr_runtime_sdk::plugins::SinkWriteContext<'_>,
+    ) -> Result<(), std::io::Error> {
+        ctx.validate_grouped::<skippr_runtime_sdk::plugins::SftpAtomicRename>()
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))?;
+        let stream = match ctx.cdc_ctx {
+            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
             None => stream,
         };
         use skippr_runtime_sdk::metrics::counters;
@@ -74,25 +105,40 @@ impl DataSink for DataSinkSftpPlugin {
             .sftp()
             .map_err(|e| std::io::Error::other(e.to_string()))?;
 
-        let md5_digest = md5::compute(&filename);
+        let object_stem = if ctx.idempotency_key.is_empty() {
+            hex::encode(md5::compute(&ctx.filename).0)
+        } else {
+            skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
+                &ctx.idempotency_key,
+                "",
+            )?
+        };
         let remote_file_path = format!(
             "{}/{}.parquet",
             self.config.remote_path.trim_end_matches('/'),
-            hex::encode(md5_digest.0)
+            object_stem
         );
+        let remote_tmp_path = format!("{remote_file_path}.tmp");
 
         let mut remote_file = sftp
-            .create(std::path::Path::new(&remote_file_path))
+            .create(std::path::Path::new(&remote_tmp_path))
             .map_err(|e| std::io::Error::other(e.to_string()))?;
         remote_file.write_all(&parquet_bytes.bytes)?;
+        drop(remote_file);
+        sftp.rename(
+            std::path::Path::new(&remote_tmp_path),
+            std::path::Path::new(&remote_file_path),
+            None,
+        )
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
 
         info!("SFTP: uploaded to {}", remote_file_path);
         counters::dec_uploads_in_flight();
         Ok(())
     }
 
-    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
-        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::SFTP)
+    fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
+        &skippr_runtime_sdk::plugins::cdc::sink_capabilities::SFTP
     }
 }
 

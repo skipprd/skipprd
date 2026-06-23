@@ -10,6 +10,7 @@ pub struct ParquetBytes {
     pub bytes: Bytes,
     pub size_bytes: u64,
     pub num_rows: u64,
+    #[allow(dead_code)]
     pub meta_data: ParquetMetaData,
 }
 

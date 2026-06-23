@@ -3,6 +3,11 @@ enum PersistenceState {
     MemoryOnly,
     Persisted,
 }
+use crate::buffer::compaction_transaction::{
+    load_pending_manifests, persist_manifest, remove_manifest, CompactionTransaction,
+    SegmentSourceDescriptor, SinkGroupingSupport, SinkRetrySemantics, SinkWriteSemantics,
+    WalPartRef,
+};
 use crate::buffer::s3_wal_body_cache;
 use crate::buffer::segment_file::{
     PartitionKey, SegmentFile, SegmentFileMetadata, SegmentPartitionIndexEntry,
@@ -14,6 +19,7 @@ use crate::helpers::offsets::{OffsetKey, OffsetTypes, Offsets};
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::helpers::Helpers;
 use crate::metrics::counters as metrics_hot;
+use crate::plugins::cdc::SinkCapability;
 use crate::plugins::DataSink;
 use crate::METRICS;
 use arrow::array::RecordBatch;
@@ -31,7 +37,7 @@ use once_cell::sync::Lazy;
 use once_cell::sync::Lazy as OnceLazy;
 use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::future::Future;
 use std::io::{BufReader, Read, Seek, Write};
@@ -205,6 +211,20 @@ struct CachedSegment {
 }
 
 static SEGMENT_CACHE: OnceLazy<DashMap<String, CachedSegment>> = OnceLazy::new(DashMap::new);
+
+#[derive(Clone)]
+struct CompactionEntry {
+    source: SegmentSource,
+    meta: SegmentFileMetadata,
+    idx: SegmentPartitionIndexEntry,
+    wal_ref: WalPartRef,
+    cdc_meta: Option<crate::plugins::cdc::WalPartMeta>,
+}
+
+struct CompactionWork {
+    txn: CompactionTransaction,
+    entries: Vec<CompactionEntry>,
+}
 
 fn linux_vm_rss_kb() -> Option<u64> {
     #[cfg(target_os = "linux")]
@@ -1080,8 +1100,7 @@ impl Buffers {
                 crate::metrics::counters::ACTIVE_THREADS.load(std::sync::atomic::Ordering::Relaxed);
             let queued_ingest =
                 crate::metrics::counters::QUEUE_LENGTH.load(std::sync::atomic::Ordering::Relaxed);
-            let reclaimable =
-                Self::reclaimable_wal_partition_count(num_cpus.saturating_mul(2));
+            let reclaimable = Self::reclaimable_wal_partition_count(num_cpus.saturating_mul(2));
             let ingest_busy = active_ingest > 0 || queued_ingest > 0;
             if ingest_busy {
                 let floor = if reclaimable >= num_cpus.saturating_mul(8) {
@@ -1101,6 +1120,40 @@ impl Buffers {
                     );
                 }
             }
+        }
+
+        let output_capability = shared_output.capability();
+        if Self::grouped_compaction_enabled()
+            && Self::grouped_compaction_supported(output_capability)
+        {
+            loop {
+                let works =
+                    Self::next_compaction_transactions(concurrency, force, output_capability);
+                if works.is_empty() {
+                    break;
+                }
+                let mut cycle_progress = false;
+                let mut in_flight: futures::stream::FuturesUnordered<
+                    Pin<Box<dyn Future<Output = bool> + Send>>,
+                > = futures::stream::FuturesUnordered::new();
+                for work in works {
+                    let out = shared_output.clone();
+                    in_flight.push(Box::pin(async move {
+                        Self::compact_grouped_work(work, out).await.unwrap_or(false)
+                    }));
+                }
+                while let Some(compacted) = in_flight.next().await {
+                    cycle_progress |= compacted;
+                }
+                if !cycle_progress {
+                    break;
+                }
+                made_progress = true;
+            }
+            if made_progress && !is_s3_wal() {
+                Self::maybe_sweep_segment_cleanup(force);
+            }
+            return made_progress;
         }
 
         loop {
@@ -1233,6 +1286,310 @@ impl Buffers {
 
     pub(crate) fn reclaimable_wal_partition_count(limit: usize) -> usize {
         Self::next_compaction_candidates(limit, true).len()
+    }
+
+    fn grouped_compaction_enabled() -> bool {
+        Config::getenv("WAL_GROUPED_COMPACTION", "1") != "0"
+    }
+
+    fn compaction_group_target_bytes() -> u64 {
+        Config::getenv("WAL_COMPACTION_GROUP_TARGET_BYTES", "")
+            .parse::<u64>()
+            .ok()
+            .filter(|v| *v > 0)
+            .unwrap_or(128 * 1024 * 1024)
+    }
+
+    fn compaction_group_max_parts() -> usize {
+        Config::getenv("WAL_COMPACTION_GROUP_MAX_PARTS", "")
+            .parse::<usize>()
+            .ok()
+            .filter(|v| *v > 0)
+            .unwrap_or(512)
+    }
+
+    fn grouped_compaction_supported(capability: &SinkCapability) -> bool {
+        !matches!(capability.grouping_support, SinkGroupingSupport::None)
+            && !matches!(capability.retry_semantics, SinkRetrySemantics::NonRetryable)
+    }
+
+    fn grouped_write_semantics(capability: &SinkCapability) -> SinkWriteSemantics {
+        match capability.retry_semantics {
+            SinkRetrySemantics::TransactionalIdempotent
+            | SinkRetrySemantics::FinalStateIdempotent => SinkWriteSemantics::ExactOnce,
+            SinkRetrySemantics::DeterministicOverwrite => SinkWriteSemantics::IdempotentAtLeastOnce,
+            SinkRetrySemantics::AtLeastOnce | SinkRetrySemantics::NonRetryable => {
+                SinkWriteSemantics::AtLeastOnce
+            }
+        }
+    }
+
+    fn source_descriptor(source: &SegmentSource) -> SegmentSourceDescriptor {
+        match source {
+            SegmentSource::Disk(path) => SegmentSourceDescriptor::Disk { path: path.clone() },
+            SegmentSource::S3 { bucket, key, .. } => SegmentSourceDescriptor::S3 {
+                bucket: bucket.clone(),
+                key: key.clone(),
+            },
+        }
+    }
+
+    fn source_cdc_meta(
+        source: &SegmentSource,
+        key: &PartitionKey,
+    ) -> io::Result<Option<crate::plugins::cdc::WalPartMeta>> {
+        let blobs_result: io::Result<std::collections::HashMap<PartitionKey, Vec<u8>>> =
+            match source {
+                SegmentSource::Disk(seg_path) => match std::fs::File::open(seg_path) {
+                    Ok(mut f) => SegmentFile::read_part_meta_blobs_from_reader(&mut f),
+                    Err(e) => Err(e),
+                },
+                SegmentSource::S3 {
+                    body: Some(data), ..
+                } => {
+                    let mut cursor = io::Cursor::new(data.as_ref());
+                    SegmentFile::read_part_meta_blobs_from_reader(&mut cursor)
+                }
+                SegmentSource::S3 {
+                    body: None,
+                    bucket,
+                    key,
+                } => {
+                    let rt = tokio::runtime::Handle::current();
+                    let data = tokio::task::block_in_place(|| {
+                        rt.block_on(s3_wal_body_cache::get_or_fetch(
+                            bucket,
+                            key,
+                            source.segment_id(),
+                        ))
+                    })?;
+                    let mut cursor = io::Cursor::new(data.as_ref());
+                    SegmentFile::read_part_meta_blobs_from_reader(&mut cursor)
+                }
+            };
+        let blobs = blobs_result?;
+        let Some(blob) = blobs.get(key).filter(|blob| !blob.is_empty()) else {
+            return Ok(None);
+        };
+        let meta = bincode::deserialize::<crate::plugins::cdc::WalPartMeta>(blob)
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        meta.validate()
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        Ok(Some(meta))
+    }
+
+    fn cdc_meta_hash(meta: &Option<crate::plugins::cdc::WalPartMeta>) -> Option<[u8; 32]> {
+        let meta = meta.as_ref()?;
+        let bytes = bincode::serialize(meta).ok()?;
+        let digest = Sha256::digest(bytes);
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&digest);
+        Some(out)
+    }
+
+    fn schema_fingerprint_for_meta(meta: &SegmentFileMetadata) -> String {
+        let mut hasher = Sha256::new();
+        for idx in meta.index.iter() {
+            hasher.update(idx.key.namespace.as_bytes());
+            hasher.update([0]);
+            hasher.update(idx.key.shard.as_bytes());
+            hasher.update([0]);
+        }
+        hex::encode(hasher.finalize())
+    }
+
+    fn grouping_key(
+        idx: &SegmentPartitionIndexEntry,
+        cdc_meta: &Option<crate::plugins::cdc::WalPartMeta>,
+        schema_fingerprint: &str,
+    ) -> String {
+        let kind = if cdc_meta.is_some() { "cdc" } else { "append" };
+        format!(
+            "{}\n{}\n{}\n{}\n{}\n{}\n{}",
+            idx.key.sink_ref,
+            idx.key.namespace,
+            idx.key.partition,
+            idx.key.time.unwrap_or(0),
+            idx.key.shard,
+            schema_fingerprint,
+            kind
+        )
+    }
+
+    fn next_compaction_transactions(
+        limit: usize,
+        force: bool,
+        capability: &SinkCapability,
+    ) -> Vec<CompactionWork> {
+        let now_secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let target_bytes = Self::compaction_group_target_bytes();
+        let max_parts = Self::compaction_group_max_parts();
+        let mut groups: HashMap<String, (Vec<CompactionEntry>, u64)> = HashMap::new();
+        let mut out = Vec::with_capacity(limit);
+
+        match load_pending_manifests() {
+            Ok(pending) => {
+                for txn in pending {
+                    if out.len() >= limit {
+                        return out;
+                    }
+                    if let Some(work) = Self::work_from_manifest(txn) {
+                        out.push(work);
+                    }
+                }
+            }
+            Err(err) => warn!(
+                "Compactor: failed to load pending transaction manifests: {}",
+                err
+            ),
+        }
+        if !out.is_empty() {
+            return out;
+        }
+
+        for entry in SEGMENT_CACHE.iter() {
+            let cached = entry.value();
+            let schema_fingerprint = Self::schema_fingerprint_for_meta(&cached.meta);
+            for idx in cached.meta.index.iter() {
+                if Self::is_source_tombstoned(&cached.source, &idx.key) {
+                    continue;
+                }
+                let inflight_key = (cached.source.display_name(), idx.start, idx.len);
+                if COMPACTION_IN_FLIGHT.contains_key(&inflight_key) {
+                    continue;
+                }
+                if !Self::should_compact(idx.bytes, idx.updated_at_secs, now_secs, force) {
+                    continue;
+                }
+                let cdc_meta = match Self::source_cdc_meta(&cached.source, &idx.key) {
+                    Ok(meta) => meta,
+                    Err(err) => {
+                        warn!(
+                            "Compactor: skipping grouped candidate seg={} key={:?}; cdc metadata read failed: {}",
+                            cached.source.display_name(),
+                            idx.key,
+                            err
+                        );
+                        continue;
+                    }
+                };
+                let key = Self::grouping_key(idx, &cdc_meta, &schema_fingerprint);
+                let wal_ref = WalPartRef {
+                    segment_id: cached.source.segment_id().to_string(),
+                    source: Self::source_descriptor(&cached.source),
+                    start: idx.start,
+                    len: idx.len,
+                    key: idx.key.clone(),
+                    cdc_meta_hash: Self::cdc_meta_hash(&cdc_meta),
+                };
+                let entry = CompactionEntry {
+                    source: cached.source.clone(),
+                    meta: cached.meta.clone(),
+                    idx: idx.clone(),
+                    wal_ref,
+                    cdc_meta,
+                };
+                let group = groups.entry(key).or_insert_with(|| (Vec::new(), 0));
+                if group.0.len() >= max_parts || group.1.saturating_add(idx.bytes) > target_bytes {
+                    if let Some(work) = Self::build_compaction_work(
+                        std::mem::take(&mut group.0),
+                        schema_fingerprint.clone(),
+                        capability,
+                    ) {
+                        out.push(work);
+                        if out.len() >= limit {
+                            return out;
+                        }
+                    }
+                    group.1 = 0;
+                }
+                group.1 = group.1.saturating_add(idx.bytes);
+                group.0.push(entry);
+            }
+        }
+
+        for (_, (entries, _bytes)) in groups {
+            if out.len() >= limit {
+                break;
+            }
+            if let Some(work) = Self::build_compaction_work(entries, String::new(), capability) {
+                out.push(work);
+            }
+        }
+        out
+    }
+
+    fn work_from_manifest(txn: CompactionTransaction) -> Option<CompactionWork> {
+        let mut entries = Vec::with_capacity(txn.refs.len());
+        for wal_ref in txn.refs.iter() {
+            let cached = SEGMENT_CACHE.get(&wal_ref.segment_id)?;
+            let idx = cached.meta.index.iter().find(|idx| {
+                idx.start == wal_ref.start && idx.len == wal_ref.len && idx.key == wal_ref.key
+            })?;
+            if Self::is_source_tombstoned(&cached.source, &idx.key) {
+                continue;
+            }
+            let cdc_meta = Self::source_cdc_meta(&cached.source, &idx.key)
+                .ok()
+                .flatten();
+            entries.push(CompactionEntry {
+                source: cached.source.clone(),
+                meta: cached.meta.clone(),
+                idx: idx.clone(),
+                wal_ref: wal_ref.clone(),
+                cdc_meta,
+            });
+        }
+        if entries.is_empty() {
+            let _ = remove_manifest(&txn.id);
+            return None;
+        }
+        Some(CompactionWork { txn, entries })
+    }
+
+    fn build_compaction_work(
+        entries: Vec<CompactionEntry>,
+        schema_fingerprint_hint: String,
+        capability: &SinkCapability,
+    ) -> Option<CompactionWork> {
+        let first = entries.first()?;
+        let sink_ref = first.idx.key.sink_ref.clone();
+        let namespace = first.idx.key.namespace.clone();
+        let schema_fingerprint = if schema_fingerprint_hint.is_empty() {
+            Self::schema_fingerprint_for_meta(&first.meta)
+        } else {
+            schema_fingerprint_hint
+        };
+        let mut out_key = BufferChunker::encode_chunk_name(
+            "output",
+            Some(&sink_ref),
+            Some(&namespace),
+            Some(&first.idx.key.partition),
+            first.idx.key.time,
+            Some(&first.idx.key.shard),
+        );
+        let refs = entries
+            .iter()
+            .map(|entry| entry.wal_ref.clone())
+            .collect::<Vec<_>>();
+        let txn = CompactionTransaction::new(
+            sink_ref,
+            namespace,
+            schema_fingerprint,
+            crate::plugins::source_contract::WritePolicy::Append,
+            Self::grouped_write_semantics(capability),
+            refs,
+            String::new(),
+        );
+        out_key = format!("{}-c={}", out_key, txn.id);
+        let txn = CompactionTransaction {
+            target_filename: out_key,
+            ..txn
+        };
+        Some(CompactionWork { txn, entries })
     }
 
     fn compaction_file_len(
@@ -1582,6 +1939,322 @@ impl Buffers {
             }
         }
         count
+    }
+
+    fn read_entry_batches(
+        entry: &CompactionEntry,
+        s3_resolved: Option<Arc<Vec<u8>>>,
+    ) -> io::Result<Vec<RecordBatch>> {
+        match (&s3_resolved, &entry.source) {
+            (Some(data), SegmentSource::S3 { .. }) => {
+                let start = entry.idx.start as usize;
+                let end = start.saturating_add(entry.idx.len as usize).min(data.len());
+                let mut cursor = io::Cursor::new(&data[start..end]);
+                match StreamReader::try_new(&mut cursor, None) {
+                    Ok(reader) => reader
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|err| io::Error::other(err.to_string())),
+                    Err(_) => {
+                        let mut cursor = io::Cursor::new(&data[start..]);
+                        StreamReader::try_new(&mut cursor, None)
+                            .map_err(|err| io::Error::other(err.to_string()))?
+                            .collect::<Result<Vec<_>, _>>()
+                            .map_err(|err| io::Error::other(err.to_string()))
+                    }
+                }
+            }
+            (None, SegmentSource::Disk(seg_path)) => {
+                let mut file = OpenOptions::new().read(true).open(seg_path)?;
+                file.seek(io::SeekFrom::Start(entry.idx.start))?;
+                let reader = io::BufReader::new(file);
+                use std::io::Read as IoRead;
+                let mut take = reader.take(entry.idx.len);
+                match StreamReader::try_new(&mut take, None) {
+                    Ok(reader) => reader
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(|err| io::Error::other(err.to_string())),
+                    Err(err) => {
+                        let err_str = err.to_string();
+                        if err_str.contains("failed to fill whole buffer")
+                            || err_str.contains("UnexpectedEof")
+                        {
+                            let mut file = OpenOptions::new().read(true).open(seg_path)?;
+                            file.seek(io::SeekFrom::Start(entry.idx.start))?;
+                            let reader = io::BufReader::new(file);
+                            StreamReader::try_new(reader, None)
+                                .map_err(|err| io::Error::other(err.to_string()))?
+                                .collect::<Result<Vec<_>, _>>()
+                                .map_err(|err| io::Error::other(err.to_string()))
+                        } else {
+                            Err(io::Error::other(err_str))
+                        }
+                    }
+                }
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "grouped compaction source/body mismatch",
+            )),
+        }
+    }
+
+    async fn resolve_entry_s3_body(entry: &CompactionEntry) -> io::Result<Option<Arc<Vec<u8>>>> {
+        match &entry.source {
+            SegmentSource::S3 {
+                body: Some(body), ..
+            } => Ok(Some(body.clone())),
+            SegmentSource::S3 {
+                body: None,
+                bucket,
+                key,
+            } => s3_wal_body_cache::get_or_fetch(bucket, key, entry.source.segment_id())
+                .await
+                .map(Some),
+            SegmentSource::Disk(_) => Ok(None),
+        }
+    }
+
+    fn batch_stream_from_vec(
+        batches: Vec<RecordBatch>,
+        schema: SchemaRef,
+        expected_cdc_rows: Option<u64>,
+    ) -> SendableRecordBatchStream {
+        struct VecBatchStream {
+            schema: SchemaRef,
+            batches: VecDeque<RecordBatch>,
+            expected_cdc_rows: Option<u64>,
+            seen_rows: u64,
+            emitted_cdc_count_error: bool,
+        }
+
+        impl futures::Stream for VecBatchStream {
+            type Item = Result<RecordBatch, DataFusionError>;
+
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                _cx: &mut TaskContext<'_>,
+            ) -> TaskPoll<Option<Self::Item>> {
+                if let Some(batch) = self.batches.pop_front() {
+                    self.seen_rows = self.seen_rows.saturating_add(batch.num_rows() as u64);
+                    return TaskPoll::Ready(Some(Ok(batch)));
+                }
+                if let Some(expected) = self.expected_cdc_rows {
+                    if !self.emitted_cdc_count_error && self.seen_rows != expected {
+                        self.emitted_cdc_count_error = true;
+                        return TaskPoll::Ready(Some(Err(DataFusionError::Internal(format!(
+                            "CDC grouped WAL metadata expected {} rows but Arrow stream produced {} rows",
+                            expected, self.seen_rows
+                        )))));
+                    }
+                }
+                TaskPoll::Ready(None)
+            }
+        }
+
+        impl RecordBatchStream for VecBatchStream {
+            fn schema(&self) -> SchemaRef {
+                self.schema.clone()
+            }
+        }
+
+        Box::pin(VecBatchStream {
+            schema,
+            batches: VecDeque::from(batches),
+            expected_cdc_rows,
+            seen_rows: 0,
+            emitted_cdc_count_error: false,
+        })
+    }
+
+    async fn build_grouped_stream(
+        work: &CompactionWork,
+    ) -> io::Result<(
+        SendableRecordBatchStream,
+        Option<crate::plugins::cdc::SyncContext>,
+        u64,
+    )> {
+        let mut batches = Vec::new();
+        let mut schema: Option<SchemaRef> = None;
+        let mut cdc_rows = Vec::new();
+        let mut saw_cdc = false;
+        let mut saw_append = false;
+        let mut total_rows = 0u64;
+
+        for entry in work.entries.iter() {
+            let s3_body = Self::resolve_entry_s3_body(entry).await?;
+            let entry_batches = Self::read_entry_batches(entry, s3_body)?;
+            for batch in entry_batches {
+                if let Some(existing) = &schema {
+                    if existing.as_ref() != batch.schema().as_ref() {
+                        return Err(io::Error::other(format!(
+                            "grouped compaction schema mismatch for transaction {}",
+                            work.txn.id
+                        )));
+                    }
+                } else {
+                    schema = Some(batch.schema());
+                }
+                total_rows = total_rows.saturating_add(batch.num_rows() as u64);
+                batches.push(batch);
+            }
+
+            if let Some(meta) = &entry.cdc_meta {
+                saw_cdc = true;
+                cdc_rows.extend(meta.rows.clone());
+            } else {
+                saw_append = true;
+            }
+        }
+
+        if saw_cdc && saw_append {
+            return Err(io::Error::other(format!(
+                "grouped compaction transaction {} mixed CDC and append WAL parts",
+                work.txn.id
+            )));
+        }
+
+        let schema = schema.unwrap_or_else(|| Arc::new(arrow_schema::Schema::empty()));
+        let cdc_ctx = if saw_cdc {
+            let part_meta = crate::plugins::cdc::WalPartMeta::cdc(cdc_rows, total_rows)
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            let contract = crate::plugins::cdc::get_namespace_cdc_contract(&work.txn.namespace);
+            Some(crate::plugins::cdc::SyncContext {
+                part_meta,
+                contract,
+            })
+        } else {
+            None
+        };
+        let stream = Self::batch_stream_from_vec(
+            batches,
+            schema,
+            cdc_ctx.as_ref().map(|ctx| ctx.part_meta.row_count),
+        );
+        Ok((stream, cdc_ctx, total_rows))
+    }
+
+    fn mark_work_in_flight(work: &CompactionWork) -> bool {
+        let mut inserted = Vec::new();
+        for entry in work.entries.iter() {
+            let key = (entry.source.display_name(), entry.idx.start, entry.idx.len);
+            if COMPACTION_IN_FLIGHT.insert(key.clone(), ()).is_some() {
+                for key in inserted {
+                    COMPACTION_IN_FLIGHT.remove(&key);
+                }
+                return false;
+            }
+            inserted.push(key);
+        }
+        true
+    }
+
+    fn release_work_in_flight(work: &CompactionWork) {
+        for entry in work.entries.iter() {
+            COMPACTION_IN_FLIGHT.remove(&(
+                entry.source.display_name(),
+                entry.idx.start,
+                entry.idx.len,
+            ));
+        }
+    }
+
+    fn tombstone_grouped_work(work: &CompactionWork) {
+        let _ = fs::create_dir_all(Self::tombstone_dir());
+        for entry in work.entries.iter() {
+            let tpath = Self::tombstone_path_for_source(&entry.source, &entry.idx.key);
+            if let Err(err) = fs::write(&tpath, b"") {
+                error!("Failed to write tombstone {:?}: {}", tpath, err);
+            }
+        }
+        for entry in work.entries.iter() {
+            let all_tombstoned = entry
+                .meta
+                .index
+                .iter()
+                .all(|part| Self::is_source_tombstoned(&entry.source, &part.key));
+            if all_tombstoned {
+                match &entry.source {
+                    SegmentSource::Disk(seg_path) => {
+                        Self::remove_fully_compacted_disk_segment(seg_path, &entry.meta);
+                    }
+                    SegmentSource::S3 { key, bucket, .. } => {
+                        let key = key.clone();
+                        let bucket = bucket.clone();
+                        let segment_id = entry.source.segment_id().to_string();
+                        tokio::spawn(async move {
+                            let client = crate::helpers::s3::get_s3_client().await;
+                            let commit_key = format!("{}.commit", key);
+                            let _ = client
+                                .delete_object()
+                                .bucket(&bucket)
+                                .key(&key)
+                                .send()
+                                .await;
+                            let _ = client
+                                .delete_object()
+                                .bucket(&bucket)
+                                .key(&commit_key)
+                                .send()
+                                .await;
+                            Buffers::segment_cache_remove(&segment_id);
+                        });
+                    }
+                }
+            }
+        }
+    }
+
+    async fn compact_grouped_work(
+        work: CompactionWork,
+        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+    ) -> io::Result<bool> {
+        if work.entries.is_empty() || !Self::mark_work_in_flight(&work) {
+            return Ok(false);
+        }
+        struct WorkGuard<'a>(&'a CompactionWork);
+        impl<'a> Drop for WorkGuard<'a> {
+            fn drop(&mut self) {
+                Buffers::release_work_in_flight(self.0);
+                crate::metrics::counters::dec_wal_compactions_in_flight();
+            }
+        }
+        crate::metrics::counters::add_wal_compaction_started(work.entries.len() as u64);
+        crate::metrics::counters::add_wal_compaction_transaction_started(1);
+        crate::metrics::counters::inc_wal_compactions_in_flight();
+        let _guard = WorkGuard(&work);
+
+        persist_manifest(&work.txn)?;
+        let (batch_stream, cdc_ctx, _rows) = Self::build_grouped_stream(&work).await?;
+        let source_contract =
+            crate::plugins::source_contract::namespace_source_contract(&work.txn.namespace);
+        let sink_ctx = crate::plugins::SinkWriteContext {
+            filename: work.txn.target_filename.clone(),
+            compaction_id: work.txn.id.clone(),
+            idempotency_key: work.txn.id.clone(),
+            wal_refs: work
+                .txn
+                .refs
+                .iter()
+                .map(WalPartRef::to_runtime_ref)
+                .collect(),
+            write_semantics: work.txn.semantics,
+            schema_fingerprint: work.txn.schema_fingerprint.clone(),
+            cdc_ctx: cdc_ctx.as_ref(),
+            source_contract: source_contract.as_ref(),
+        };
+        if let Err(err) = shared_output
+            .sync_with_context(batch_stream, sink_ctx)
+            .await
+        {
+            crate::metrics::counters::add_wal_compaction_transaction_failed(1);
+            return Err(err);
+        }
+        crate::metrics::counters::add_wal_compaction_completed(work.entries.len() as u64);
+        crate::metrics::counters::add_wal_compaction_transaction_completed(1);
+        Self::tombstone_grouped_work(&work);
+        crate::metrics::counters::add_wal_compaction_refs_tombstoned(work.entries.len() as u64);
+        remove_manifest(&work.txn.id)?;
+        Ok(true)
     }
 
     async fn compact_segment_partition_source(
@@ -2071,7 +2744,11 @@ impl Buffers {
             crate::plugins::source_contract::namespace_source_contract(&namespace);
         let sink_ctx = crate::plugins::SinkWriteContext {
             filename: out_key.clone(),
+            idempotency_key: compaction_id.clone(),
             compaction_id,
+            wal_refs: Vec::new(),
+            write_semantics: crate::buffer::compaction_transaction::SinkWriteSemantics::AtLeastOnce,
+            schema_fingerprint: String::new(),
             cdc_ctx: cdc_ctx.as_ref(),
             source_contract: source_contract.as_ref(),
         };
@@ -3493,7 +4170,11 @@ impl WalPartition {
             crate::plugins::source_contract::namespace_source_contract(&wal_namespace);
         let wal_sink_ctx = crate::plugins::SinkWriteContext {
             filename: output_file_name.clone(),
+            idempotency_key: wal_compaction_id.clone(),
             compaction_id: wal_compaction_id,
+            wal_refs: Vec::new(),
+            write_semantics: crate::buffer::compaction_transaction::SinkWriteSemantics::AtLeastOnce,
+            schema_fingerprint: String::new(),
             cdc_ctx: None,
             source_contract: wal_source_contract.as_ref(),
         };

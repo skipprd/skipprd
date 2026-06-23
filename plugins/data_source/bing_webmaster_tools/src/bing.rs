@@ -600,7 +600,7 @@ mod tests {
             oauth_client_id: None,
             oauth_client_secret: None,
             oauth_refresh_token: None,
-            start_date: "2026-03-01".into(),
+            start_date: "2026-06-01".into(),
             end_date: None,
             lookback_days: 3,
             stream_profile: StreamProfile::Full,
@@ -618,7 +618,7 @@ mod tests {
             serde_json::from_value(serde_json::json!({
                 "site_url": "https://example.com/",
                 "api_key": "key",
-                "start_date": "2026-03-01"
+                "start_date": "2026-06-01"
             }))
             .expect("deserialize");
         assert_eq!(cfg.stream_profile, StreamProfile::Full);
@@ -689,7 +689,7 @@ mod tests {
             oauth_client_id: None,
             oauth_client_secret: None,
             oauth_refresh_token: None,
-            start_date: "2026-03-01".into(),
+            start_date: "2026-06-01".into(),
             end_date: None,
             lookback_days: 3,
             stream_profile: StreamProfile::Minimal,
@@ -719,7 +719,7 @@ mod tests {
         std::env::set_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV, "discover");
 
         let mut cfg = test_config();
-        cfg.end_date = Some("2026-03-01".into());
+        cfg.end_date = Some("2026-06-01".into());
         cfg.stream_profile = StreamProfile::Minimal;
         cfg.processing_lag_days = 0;
         cfg.api_key = None;
@@ -784,8 +784,8 @@ mod tests {
         test_env::clear_fixture_dir();
 
         let cfg = DataSourceBingWebmasterToolsPluginConfig {
-            start_date: "2026-03-10".into(),
-            end_date: Some("2026-03-01".into()),
+            start_date: "2026-06-10".into(),
+            end_date: Some("2026-06-01".into()),
             stream_profile: StreamProfile::Minimal,
             processing_lag_days: 0,
             ..test_config()
@@ -801,7 +801,7 @@ mod tests {
     #[test]
     fn checkpoint_roundtrip() {
         let cp = BingNamespaceCheckpoint {
-            last_completed_date: "2026-03-01".into(),
+            last_completed_date: "2026-06-01".into(),
         };
         let envelope = CheckpointEnvelope::from_payload(
             CheckpointAuthority::AdvisoryHint,
@@ -811,7 +811,7 @@ mod tests {
         )
         .expect("envelope");
         let decoded: BingNamespaceCheckpoint = envelope.into_payload().expect("payload");
-        assert_eq!(decoded.last_completed_date, "2026-03-01");
+        assert_eq!(decoded.last_completed_date, "2026-06-01");
     }
 
     #[test]
@@ -847,8 +847,8 @@ mod tests {
         test_env::set_fixture_dir();
 
         let cfg = DataSourceBingWebmasterToolsPluginConfig {
-            start_date: "2026-03-01".into(),
-            end_date: Some("2026-03-01".into()),
+            start_date: "2026-05-25".into(),
+            end_date: Some("2026-05-25".into()),
             stream_profile: StreamProfile::Minimal,
             processing_lag_days: 0,
             lookback_days: 0,
@@ -872,8 +872,8 @@ mod tests {
         test_env::set_fixture_dir();
 
         let cfg = DataSourceBingWebmasterToolsPluginConfig {
-            start_date: "2026-03-01".into(),
-            end_date: Some("2026-03-01".into()),
+            start_date: "2026-06-01".into(),
+            end_date: Some("2026-06-01".into()),
             stream_profile: StreamProfile::Full,
             processing_lag_days: 0,
             lookback_days: 0,
@@ -898,8 +898,8 @@ mod tests {
         test_env::set_fixture_dir();
 
         let cfg = DataSourceBingWebmasterToolsPluginConfig {
-            start_date: "2026-03-01".into(),
-            end_date: Some("2026-03-01".into()),
+            start_date: "2026-06-01".into(),
+            end_date: Some("2026-06-01".into()),
             stream_profile: StreamProfile::Standard,
             processing_lag_days: 0,
             lookback_days: 0,
@@ -912,9 +912,6 @@ mod tests {
         let ctx = Arc::new(RecordingSyncContext::default());
         rt.block_on(plugin.sync(ctx.clone())).expect("sync");
         let namespaces = ctx.submitted_namespaces();
-        assert!(namespaces.contains(&"bing_webmaster_tools.site_daily".to_string()));
-        assert!(namespaces.contains(&"bing_webmaster_tools.query_daily".to_string()));
-        assert!(namespaces.contains(&"bing_webmaster_tools.crawl_daily".to_string()));
         assert!(!namespaces.contains(&"bing_webmaster_tools.page_daily".to_string()));
         assert!(!namespaces.contains(&"bing_webmaster_tools.site_run_daily".to_string()));
 

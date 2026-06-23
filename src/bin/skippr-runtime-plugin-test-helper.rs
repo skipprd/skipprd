@@ -16,6 +16,7 @@ use serde_json::json;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 
+use skipprd::buffer::compaction_transaction::SinkWriteSemantics;
 use skipprd::plugins::cdc;
 use skipprd::runtime_plugins::protocol::{
     HandshakeResponse, HostDataFrame, HostFrame, PluginDataFrame, PluginFrame,
@@ -390,6 +391,10 @@ async fn run_source_loop(
                     &PluginDataFrame::SinkWrite(RuntimeSourceSinkWrite {
                         filename: "runtime-helper-output".to_string(),
                         compaction_id: "runtime-helper-output".to_string(),
+                        idempotency_key: "runtime-helper-output".to_string(),
+                        wal_refs: Vec::new(),
+                        write_semantics: SinkWriteSemantics::AtLeastOnce,
+                        schema_fingerprint: String::new(),
                         arrow_stream_bytes,
                         cdc_ctx: None,
                         source_contract: None,
@@ -409,6 +414,10 @@ async fn run_source_loop(
                     &PluginDataFrame::SinkWrite(RuntimeSourceSinkWrite {
                         filename: "runtime-helper-output".to_string(),
                         compaction_id: "runtime-helper-output".to_string(),
+                        idempotency_key: "runtime-helper-output".to_string(),
+                        wal_refs: Vec::new(),
+                        write_semantics: SinkWriteSemantics::AtLeastOnce,
+                        schema_fingerprint: String::new(),
                         arrow_stream_bytes,
                         cdc_ctx: None,
                         source_contract: None,

@@ -12,8 +12,8 @@ use crate::discover::evolution::Evolution;
 use crate::discover::{AnalyseSchema, Metadata, SkipprDataType};
 
 use crate::helpers::Helpers;
-use dashmap::DashMap;
 use crate::ingest::ingest::ResolvedFieldValue;
+use dashmap::DashMap;
 
 #[allow(unused_imports)]
 use crate::discover::DateCandidate;
@@ -278,9 +278,7 @@ fn try_fast_path_evolution(
     metadata: &HashMap<String, Metadata>,
     flatten: bool,
 ) -> Option<ResolvedFieldValue> {
-    let has_evolution = metadata
-        .get(field)
-        .is_some_and(|m| !m.evolution.is_empty());
+    let has_evolution = metadata.get(field).is_some_and(|m| !m.evolution.is_empty());
     if !has_evolution {
         return None;
     }

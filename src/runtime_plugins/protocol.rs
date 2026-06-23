@@ -1,5 +1,8 @@
 use std::collections::BTreeMap;
 
+use crate::buffer::compaction_transaction::{
+    SinkGroupingSupport, SinkRetrySemantics, SinkWriteSemantics,
+};
 // `skippr-runtime-sdk` re-exports this module because the current dependency
 // graph is `skippr-runtime-sdk -> skippr-core -> skippr`.
 use crate::discover::OutputMetadata;
@@ -16,7 +19,7 @@ use serde::{Deserialize, Serialize};
 // separate from the skippr/React adapter's CLI subprocess JSON summaries.
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 13;
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 14;
 pub const SKIPPR_RUNTIME_CONTROL_ADDR_ENV: &str = "SKIPPR_RUNTIME_CONTROL_ADDR";
 pub const SKIPPR_RUNTIME_DATA_ADDR_ENV: &str = "SKIPPR_RUNTIME_DATA_ADDR";
 pub const SKIPPR_RUNTIME_OFFSET_ADDR_ENV: &str = "SKIPPR_RUNTIME_OFFSET_ADDR";
@@ -101,10 +104,12 @@ pub struct RuntimeSinkCapabilityDescriptor {
     pub supports_replace_partition: bool,
     #[serde(default)]
     pub supports_primary_key_metadata: bool,
+    pub retry_semantics: SinkRetrySemantics,
+    pub grouping_support: SinkGroupingSupport,
 }
 
-impl From<&'static SinkCapability> for RuntimeSinkCapabilityDescriptor {
-    fn from(value: &'static SinkCapability) -> Self {
+impl From<&SinkCapability> for RuntimeSinkCapabilityDescriptor {
+    fn from(value: &SinkCapability) -> Self {
         let flags = Self::default_write_policy_flags_for_sink(value.name);
         Self {
             name: value.name.to_string(),
@@ -117,6 +122,8 @@ impl From<&'static SinkCapability> for RuntimeSinkCapabilityDescriptor {
             supports_replace_table: flags.supports_replace_table,
             supports_replace_partition: flags.supports_replace_partition,
             supports_primary_key_metadata: Self::supports_primary_key_metadata_for_sink(value.name),
+            retry_semantics: value.retry_semantics,
+            grouping_support: value.grouping_support,
         }
     }
 }
@@ -153,6 +160,8 @@ impl RuntimeSinkCapabilityDescriptor {
             can_maintain_tombstone_tables: self.can_maintain_tombstone_tables,
             can_compare_order_tokens: self.can_compare_order_tokens,
             supports_transactions: self.supports_transactions,
+            retry_semantics: self.retry_semantics,
+            grouping_support: self.grouping_support,
         }
     }
 }
@@ -413,6 +422,10 @@ pub struct RuntimeRawIngestBatch {
 pub struct RuntimeSourceSinkWrite {
     pub filename: String,
     pub compaction_id: String,
+    pub idempotency_key: String,
+    pub wal_refs: Vec<RuntimeWalPartRef>,
+    pub write_semantics: SinkWriteSemantics,
+    pub schema_fingerprint: String,
     pub arrow_stream_bytes: Vec<u8>,
     pub cdc_ctx: Option<SyncContext>,
     /// Always present on the bincode wire (use `None` when unset). Do not use
@@ -422,8 +435,37 @@ pub struct RuntimeSourceSinkWrite {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeWalPartRef {
+    pub segment_id: String,
+    pub source: String,
+    pub start: u64,
+    pub len: u64,
+    pub sink_ref: String,
+    pub namespace: String,
+    pub partition: String,
+    pub time: Option<i64>,
+    pub shard: String,
+    pub cdc_meta_hash: Option<[u8; 32]>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RuntimeRequestAck {
     pub request_id: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum RuntimeSinkWriteResult {
+    Applied,
+    AlreadyApplied,
+    RejectedNonIdempotent,
+    RetryableFailure { message: String },
+    FatalFailure { message: String },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeSinkWriteAck {
+    pub request_id: u64,
+    pub result: RuntimeSinkWriteResult,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -443,6 +485,10 @@ pub enum SourceEvent {
 pub struct SinkRunRequest {
     pub request_id: u64,
     pub compaction_id: String,
+    pub idempotency_key: String,
+    pub wal_refs: Vec<RuntimeWalPartRef>,
+    pub write_semantics: SinkWriteSemantics,
+    pub schema_fingerprint: String,
     pub binding: RuntimeBinding,
     pub required_schema_version: u64,
     pub filename: String,
@@ -491,6 +537,7 @@ pub enum PluginFrame {
     SourceEvent(SourceEvent),
     OffsetRequest(RuntimeOffsetRpcRequest),
     SinkAck(RuntimeRequestAck),
+    SinkWriteAck(RuntimeSinkWriteAck),
     SchemaAck(RuntimeRequestAck),
     SchemaStateRefreshRequired(RuntimeSchemaRefreshRequest),
     Error(String),
@@ -603,6 +650,10 @@ mod tests {
         let bytes = bincode::serialize(&SinkRunRequest {
             request_id: 1,
             compaction_id: "c1".into(),
+            idempotency_key: "c1".into(),
+            wal_refs: Vec::new(),
+            write_semantics: SinkWriteSemantics::AtLeastOnce,
+            schema_fingerprint: String::new(),
             binding: RuntimeBinding::Primary,
             required_schema_version: 0,
             filename: "f".into(),
@@ -647,6 +698,10 @@ mod tests {
         let frame = PluginDataFrame::SinkWrite(RuntimeSourceSinkWrite {
             filename: "orders/part-0001.arrow".into(),
             compaction_id: "c1".into(),
+            idempotency_key: "c1".into(),
+            wal_refs: Vec::new(),
+            write_semantics: SinkWriteSemantics::AtLeastOnce,
+            schema_fingerprint: String::new(),
             arrow_stream_bytes: vec![1, 2, 3],
             cdc_ctx: None,
             source_contract: None,
@@ -679,6 +734,10 @@ mod tests {
         let bytes = bincode::serialize(&SinkRunRequest {
             request_id: 2,
             compaction_id: "c2".into(),
+            idempotency_key: "c2".into(),
+            wal_refs: Vec::new(),
+            write_semantics: SinkWriteSemantics::AtLeastOnce,
+            schema_fingerprint: String::new(),
             binding: RuntimeBinding::Primary,
             required_schema_version: 1,
             filename: "ns/part.parquet".into(),
@@ -741,6 +800,7 @@ mod tests {
 
     #[test]
     fn athena_sink_capability_handshake_matches_plugin_manifest_metadata() {
+        use crate::buffer::compaction_transaction::{SinkGroupingSupport, SinkRetrySemantics};
         use crate::plugins::cdc::{sink_capabilities, SinkGuaranteeTier};
 
         let handshake = RuntimeSinkCapabilityDescriptor::from(&sink_capabilities::ATHENA);
@@ -755,6 +815,8 @@ mod tests {
             supports_replace_table: true,
             supports_replace_partition: true,
             supports_primary_key_metadata: true,
+            retry_semantics: SinkRetrySemantics::DeterministicOverwrite,
+            grouping_support: SinkGroupingSupport::CdcEncodedBatches,
         };
         assert_eq!(handshake, manifest);
     }

@@ -2,7 +2,9 @@ use std::future::Future;
 use std::io;
 
 use skippr_core::helpers::logging::init_logging;
-use skippr_core::plugins::{DataSink, SchemaSink, SchemaSyncRequest};
+use skippr_core::plugins::{
+    DataSink, HasSchemaSinkSpec, HasSinkSpec, SchemaSink, SchemaSyncRequest, SinkWriteOutcome,
+};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
 
@@ -10,8 +12,9 @@ use crate::protocol::{
     HandshakeResponse, HostDataFrame, HostFrame, PluginFrame, RuntimeBinding, RuntimePluginKind,
     RuntimeRequestAck, RuntimeSchemaInstallRequest, RuntimeSchemaRefreshRequest,
     RuntimeSchemaState, RuntimeSchemaStateInstallRequest, RuntimeSessionHello,
-    RuntimeSinkCapabilityDescriptor, RuntimeSinkInstallRequest, SchemaRunRequest, SinkRunRequest,
-    RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
+    RuntimeSinkCapabilityDescriptor, RuntimeSinkInstallRequest, RuntimeSinkWriteAck,
+    RuntimeSinkWriteResult, SchemaRunRequest, SinkRunRequest, RUNTIME_PROTOCOL_VERSION,
+    SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
     SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use crate::sdk::decode_record_batch_stream;
@@ -128,7 +131,7 @@ pub async fn run_runtime_data_sink_plugin<P, F, Fut>(
     mut build: F,
 ) -> io::Result<()>
 where
-    P: DataSink + Send + Sync,
+    P: DataSink + HasSinkSpec + Send + Sync,
     F: FnMut(RuntimeSinkInstallRequest) -> Fut,
     Fut: Future<Output = io::Result<P>>,
 {
@@ -178,13 +181,24 @@ where
         return Err(io::Error::other("runtime protocol version mismatch"));
     }
 
+    let spec_capability = <P::Spec as skippr_core::plugins::SinkSpec>::CAPABILITY;
+    let spec_descriptor = RuntimeSinkCapabilityDescriptor::from(&spec_capability);
+    if let Some(ref declared) = sink_capability {
+        if declared != &spec_descriptor {
+            return Err(io::Error::other(format!(
+                "{}: runtime sink capability argument does not match SinkSpec: arg={:?} spec={:?}",
+                bin_name, declared, spec_descriptor
+            )));
+        }
+    }
+
     control_writer
         .write(&PluginFrame::HandshakeAck(HandshakeResponse {
             protocol_version: RUNTIME_PROTOCOL_VERSION,
             kind: RuntimePluginKind::DataSink,
             plugin_name: handshake_display_name.to_string(),
             source_capability: None,
-            sink_capability,
+            sink_capability: Some(spec_descriptor),
             supports_schema,
         }))
         .await
@@ -258,7 +272,7 @@ where
                 }
                 let arrow_stream_bytes =
                     read_sink_payload(&mut data_reader, request.request_id).await?;
-                if let Err(err) = run_sink_request(
+                let outcome = match run_sink_request(
                     request.clone(),
                     arrow_stream_bytes,
                     &primary_plugin,
@@ -266,18 +280,27 @@ where
                 )
                 .await
                 {
-                    let message = format!(
-                        "{}: runtime sink request {} failed: {}",
-                        bin_name, request.request_id, err
-                    );
-                    let _ = control_writer
-                        .write(&PluginFrame::Error(message.clone()))
-                        .await;
-                    return Err(io::Error::other(message));
-                }
+                    Ok(outcome) => outcome,
+                    Err(err) => {
+                        let message = format!(
+                            "{}: runtime sink request {} failed: {}",
+                            bin_name, request.request_id, err
+                        );
+                        let _ = control_writer
+                            .write(&PluginFrame::Error(message.clone()))
+                            .await;
+                        return Err(io::Error::other(message));
+                    }
+                };
                 control_writer
-                    .write(&PluginFrame::SinkAck(RuntimeRequestAck {
+                    .write(&PluginFrame::SinkWriteAck(RuntimeSinkWriteAck {
                         request_id: request.request_id,
+                        result: match outcome {
+                            SinkWriteOutcome::Applied => RuntimeSinkWriteResult::Applied,
+                            SinkWriteOutcome::AlreadyApplied => {
+                                RuntimeSinkWriteResult::AlreadyApplied
+                            }
+                        },
                     }))
                     .await
                     .map_err(|err| {
@@ -371,9 +394,9 @@ async fn run_sink_request<P>(
     arrow_stream_bytes: Vec<u8>,
     primary_plugin: &Option<P>,
     deadletter_plugin: &Option<P>,
-) -> io::Result<()>
+) -> io::Result<SinkWriteOutcome>
 where
-    P: DataSink + Send + Sync,
+    P: DataSink + HasSinkSpec + Send + Sync,
 {
     let plugin_slot = match request.binding {
         RuntimeBinding::Primary => primary_plugin,
@@ -386,6 +409,10 @@ where
     let SinkRunRequest {
         filename,
         compaction_id,
+        idempotency_key,
+        wal_refs,
+        write_semantics,
+        schema_fingerprint,
         cdc_ctx,
         source_contract,
         ..
@@ -393,10 +420,16 @@ where
     let ctx = skippr_core::plugins::SinkWriteContext {
         filename,
         compaction_id,
+        idempotency_key,
+        wal_refs,
+        write_semantics,
+        schema_fingerprint,
         cdc_ctx: cdc_ctx.as_ref(),
         source_contract: source_contract.as_ref(),
     };
-    plugin.sync_with_context(stream, ctx).await
+    ctx.validate_grouped::<<P::Spec as skippr_core::plugins::SinkSpec>::WriteSupport>()
+        .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
+    plugin.sync_with_context_result(stream, ctx).await
 }
 
 pub async fn run_runtime_schema_sink_plugin<P, F, Fut>(
@@ -406,7 +439,7 @@ pub async fn run_runtime_schema_sink_plugin<P, F, Fut>(
     mut build: F,
 ) -> io::Result<()>
 where
-    P: SchemaSink + Send + Sync,
+    P: SchemaSink + HasSchemaSinkSpec + Send + Sync,
     F: FnMut(RuntimeSchemaInstallRequest) -> Fut,
     Fut: Future<Output = io::Result<P>>,
 {
@@ -448,6 +481,14 @@ where
             )))
             .await?;
         return Err(io::Error::other("runtime protocol version mismatch"));
+    }
+    if <P::Spec as skippr_core::plugins::SchemaSinkSpec>::NAME != handshake_display_name {
+        return Err(io::Error::other(format!(
+            "{}: runtime schema sink display name '{}' does not match SchemaSinkSpec '{}'",
+            bin_name,
+            handshake_display_name,
+            <P::Spec as skippr_core::plugins::SchemaSinkSpec>::NAME
+        )));
     }
 
     control_writer
@@ -538,7 +579,7 @@ async fn install_schema_sink<P, F, Fut>(
     build: &mut F,
 ) -> io::Result<()>
 where
-    P: SchemaSink + Send + Sync,
+    P: SchemaSink + HasSchemaSinkSpec + Send + Sync,
     F: FnMut(RuntimeSchemaInstallRequest) -> Fut,
     Fut: Future<Output = io::Result<P>>,
 {
@@ -568,7 +609,7 @@ async fn apply_schema_state_to_schema_sinks<P>(
     schema_state: &mut Option<RuntimeSchemaState>,
 ) -> io::Result<()>
 where
-    P: SchemaSink + Send + Sync,
+    P: SchemaSink + HasSchemaSinkSpec + Send + Sync,
 {
     *schema_state = Some(request.schema_state.clone());
     if let Some(plugin) = primary_plugin.as_ref() {
@@ -597,7 +638,7 @@ async fn run_schema_request<P>(
     deadletter_plugin: &Option<P>,
 ) -> io::Result<()>
 where
-    P: SchemaSink + Send + Sync,
+    P: SchemaSink + HasSchemaSinkSpec + Send + Sync,
 {
     let plugin_slot = match request.binding {
         RuntimeBinding::Primary => primary_plugin,

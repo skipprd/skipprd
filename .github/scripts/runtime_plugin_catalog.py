@@ -377,6 +377,12 @@ def validate_plugin_metadata(package: dict, plugin_metadata: dict) -> dict:
         raise SystemExit(
             f"runtime sink plugin package {package['name']} must declare sink_capability"
         )
+    if kind == "DataSink" and sink_capability is not None:
+        for required_key in ("retry_semantics", "grouping_support"):
+            if required_key not in sink_capability:
+                raise SystemExit(
+                    f"runtime sink plugin package {package['name']} sink_capability must declare {required_key}"
+                )
     if kind == "SchemaSink" and (source_capability or sink_capability):
         raise SystemExit(
             f"runtime schema plugin package {package['name']} cannot declare source/sink capabilities"

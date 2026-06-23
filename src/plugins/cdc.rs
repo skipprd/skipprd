@@ -430,6 +430,8 @@ pub struct SinkCapability {
     pub can_maintain_tombstone_tables: bool,
     pub can_compare_order_tokens: bool,
     pub supports_transactions: bool,
+    pub retry_semantics: crate::buffer::compaction_transaction::SinkRetrySemantics,
+    pub grouping_support: crate::buffer::compaction_transaction::SinkGroupingSupport,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -935,6 +937,9 @@ pub mod source_capabilities {
 
 pub mod sink_capabilities {
     use super::*;
+    use crate::buffer::compaction_transaction::{
+        SinkGroupingSupport as Grouping, SinkRetrySemantics as Retry,
+    };
 
     pub const POSTGRES: SinkCapability = SinkCapability {
         name: "Postgres",
@@ -943,6 +948,8 @@ pub mod sink_capabilities {
         can_maintain_tombstone_tables: true,
         can_compare_order_tokens: true,
         supports_transactions: true,
+        retry_semantics: Retry::FinalStateIdempotent,
+        grouping_support: Grouping::FinalStateBatches,
     };
 
     pub const SNOWFLAKE: SinkCapability = SinkCapability {
@@ -952,6 +959,8 @@ pub mod sink_capabilities {
         can_maintain_tombstone_tables: true,
         can_compare_order_tokens: true,
         supports_transactions: true,
+        retry_semantics: Retry::FinalStateIdempotent,
+        grouping_support: Grouping::FinalStateBatches,
     };
 
     pub const BIGQUERY: SinkCapability = SinkCapability {
@@ -961,6 +970,8 @@ pub mod sink_capabilities {
         can_maintain_tombstone_tables: true,
         can_compare_order_tokens: true,
         supports_transactions: true,
+        retry_semantics: Retry::FinalStateIdempotent,
+        grouping_support: Grouping::FinalStateBatches,
     };
 
     pub const REDSHIFT: SinkCapability = SinkCapability {
@@ -970,6 +981,8 @@ pub mod sink_capabilities {
         can_maintain_tombstone_tables: true,
         can_compare_order_tokens: true,
         supports_transactions: true,
+        retry_semantics: Retry::FinalStateIdempotent,
+        grouping_support: Grouping::FinalStateBatches,
     };
 
     pub const DATABRICKS: SinkCapability = SinkCapability {
@@ -979,6 +992,8 @@ pub mod sink_capabilities {
         can_maintain_tombstone_tables: true,
         can_compare_order_tokens: true,
         supports_transactions: true,
+        retry_semantics: Retry::FinalStateIdempotent,
+        grouping_support: Grouping::FinalStateBatches,
     };
 
     pub const MOTHERDUCK: SinkCapability = SinkCapability {
@@ -988,15 +1003,19 @@ pub mod sink_capabilities {
         can_maintain_tombstone_tables: true,
         can_compare_order_tokens: true,
         supports_transactions: true,
+        retry_semantics: Retry::FinalStateIdempotent,
+        grouping_support: Grouping::FinalStateBatches,
     };
 
     pub const CLICKHOUSE: SinkCapability = SinkCapability {
         name: "Clickhouse",
-        guarantee_tier: SinkGuaranteeTier::ExactOnceCdcEligible,
+        guarantee_tier: SinkGuaranteeTier::CdcEncodedOnly,
         can_manage_skippr_columns: true,
         can_maintain_tombstone_tables: true,
         can_compare_order_tokens: true,
         supports_transactions: false,
+        retry_semantics: Retry::AtLeastOnce,
+        grouping_support: Grouping::CdcEncodedBatches,
     };
 
     pub const SYNAPSE: SinkCapability = SinkCapability {
@@ -1006,6 +1025,8 @@ pub mod sink_capabilities {
         can_maintain_tombstone_tables: true,
         can_compare_order_tokens: true,
         supports_transactions: true,
+        retry_semantics: Retry::FinalStateIdempotent,
+        grouping_support: Grouping::FinalStateBatches,
     };
 
     pub const ATHENA: SinkCapability = SinkCapability {
@@ -1015,6 +1036,8 @@ pub mod sink_capabilities {
         can_maintain_tombstone_tables: false,
         can_compare_order_tokens: false,
         supports_transactions: false,
+        retry_semantics: Retry::DeterministicOverwrite,
+        grouping_support: Grouping::CdcEncodedBatches,
     };
 
     pub const ICEBERG: SinkCapability = SinkCapability {
@@ -1024,6 +1047,8 @@ pub mod sink_capabilities {
         can_maintain_tombstone_tables: true,
         can_compare_order_tokens: true,
         supports_transactions: true,
+        retry_semantics: Retry::TransactionalIdempotent,
+        grouping_support: Grouping::FinalStateBatches,
     };
 
     pub const S3: SinkCapability = SinkCapability {
@@ -1033,6 +1058,8 @@ pub mod sink_capabilities {
         can_maintain_tombstone_tables: false,
         can_compare_order_tokens: false,
         supports_transactions: false,
+        retry_semantics: Retry::DeterministicOverwrite,
+        grouping_support: Grouping::CdcEncodedBatches,
     };
 
     pub const GCS: SinkCapability = SinkCapability {
@@ -1042,6 +1069,8 @@ pub mod sink_capabilities {
         can_maintain_tombstone_tables: false,
         can_compare_order_tokens: false,
         supports_transactions: false,
+        retry_semantics: Retry::DeterministicOverwrite,
+        grouping_support: Grouping::CdcEncodedBatches,
     };
 
     pub const AZURE_BLOB: SinkCapability = SinkCapability {
@@ -1051,6 +1080,8 @@ pub mod sink_capabilities {
         can_maintain_tombstone_tables: false,
         can_compare_order_tokens: false,
         supports_transactions: false,
+        retry_semantics: Retry::DeterministicOverwrite,
+        grouping_support: Grouping::CdcEncodedBatches,
     };
 
     pub const FILE: SinkCapability = SinkCapability {
@@ -1060,6 +1091,8 @@ pub mod sink_capabilities {
         can_maintain_tombstone_tables: false,
         can_compare_order_tokens: false,
         supports_transactions: false,
+        retry_semantics: Retry::DeterministicOverwrite,
+        grouping_support: Grouping::CdcEncodedBatches,
     };
 
     pub const SFTP: SinkCapability = SinkCapability {
@@ -1069,6 +1102,8 @@ pub mod sink_capabilities {
         can_maintain_tombstone_tables: false,
         can_compare_order_tokens: false,
         supports_transactions: false,
+        retry_semantics: Retry::DeterministicOverwrite,
+        grouping_support: Grouping::CdcEncodedBatches,
     };
 
     pub const AMQP: SinkCapability = SinkCapability {
@@ -1078,6 +1113,8 @@ pub mod sink_capabilities {
         can_maintain_tombstone_tables: false,
         can_compare_order_tokens: false,
         supports_transactions: false,
+        retry_semantics: Retry::AtLeastOnce,
+        grouping_support: Grouping::CdcEncodedBatches,
     };
 
     pub const STDOUT: SinkCapability = SinkCapability {
@@ -1087,6 +1124,8 @@ pub mod sink_capabilities {
         can_maintain_tombstone_tables: false,
         can_compare_order_tokens: false,
         supports_transactions: false,
+        retry_semantics: Retry::NonRetryable,
+        grouping_support: Grouping::None,
     };
 
     /// Look up a sink capability by plugin name.
@@ -1239,9 +1278,23 @@ mod tests {
             "Stdout",
         ];
         for name in &names {
+            let capability = sink_capabilities::by_name(name).unwrap_or_else(|| {
+                panic!("missing sink capability for '{}'", name);
+            });
             assert!(
-                sink_capabilities::by_name(name).is_some(),
-                "missing sink capability for '{}'",
+                !matches!(
+                    capability.retry_semantics,
+                    crate::buffer::compaction_transaction::SinkRetrySemantics::NonRetryable
+                ) || *name == "Stdout",
+                "non-debug sink '{}' must declare retryable/idempotent semantics",
+                name
+            );
+            assert!(
+                !matches!(
+                    capability.grouping_support,
+                    crate::buffer::compaction_transaction::SinkGroupingSupport::None
+                ) || *name == "Stdout",
+                "non-debug sink '{}' must declare grouped compaction support",
                 name
             );
         }

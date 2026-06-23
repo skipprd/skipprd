@@ -32,6 +32,13 @@ pub struct DataSinkS3Plugin {
     config: DataSinkS3PluginConfig,
 }
 
+skippr_runtime_sdk::declare_sink_spec!(
+    S3SinkSpec,
+    DataSinkS3Plugin,
+    skippr_runtime_sdk::plugins::cdc::sink_capabilities::S3,
+    skippr_runtime_sdk::plugins::DeterministicObjectOverwrite
+);
+
 #[async_trait]
 impl DataSink for DataSinkS3Plugin {
     async fn sync(
@@ -47,8 +54,33 @@ impl DataSink for DataSinkS3Plugin {
         self.inner_sync(stream, filename).await
     }
 
-    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
-        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::S3)
+    async fn sync_with_context(
+        &self,
+        stream: SendableRecordBatchStream,
+        ctx: skippr_runtime_sdk::plugins::SinkWriteContext<'_>,
+    ) -> Result<(), std::io::Error> {
+        ctx.validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))?;
+        let stream = match ctx.cdc_ctx {
+            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            None => stream,
+        };
+        let object_stem = if ctx.idempotency_key.is_empty() {
+            None
+        } else {
+            Some(
+                skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
+                    &ctx.idempotency_key,
+                    "",
+                )?,
+            )
+        };
+        self.inner_sync_with_object_stem(stream, ctx.filename, object_stem.as_deref())
+            .await
+    }
+
+    fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
+        &skippr_runtime_sdk::plugins::cdc::sink_capabilities::S3
     }
 }
 
@@ -74,6 +106,16 @@ impl DataSinkS3Plugin {
         &self,
         stream: SendableRecordBatchStream,
         filename: String,
+    ) -> Result<(), std::io::Error> {
+        self.inner_sync_with_object_stem(stream, filename, None)
+            .await
+    }
+
+    async fn inner_sync_with_object_stem(
+        &self,
+        stream: SendableRecordBatchStream,
+        filename: String,
+        object_stem: Option<&str>,
     ) -> Result<(), std::io::Error> {
         use skippr_runtime_sdk::metrics::counters;
         counters::inc_uploads_in_flight();
@@ -101,8 +143,10 @@ impl DataSinkS3Plugin {
             Err(_e) => {}
         };
 
-        let md5_digest = md5::compute(&filename);
-        let final_key = format!("{}/{}.parquet", full_key, hex::encode(&md5_digest.0));
+        let object_stem = object_stem
+            .map(str::to_string)
+            .unwrap_or_else(|| hex::encode(md5::compute(&filename).0));
+        let final_key = format!("{}/{}.parquet", full_key, object_stem);
 
         let parquet_bytes = serialize_to_parquet(stream).await.map_err(|e| {
             counters::dec_uploads_in_flight();

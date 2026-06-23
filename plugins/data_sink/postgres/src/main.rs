@@ -16,6 +16,13 @@ struct PostgresSinkRuntimePlugin {
     inner: DataSinkPostgresPlugin,
 }
 
+skippr_runtime_sdk::declare_sink_spec!(
+    PostgresSinkSpec,
+    PostgresSinkRuntimePlugin,
+    skippr_runtime_sdk::plugins::cdc::sink_capabilities::POSTGRES,
+    skippr_runtime_sdk::plugins::FinalStateIdempotentApply
+);
+
 #[async_trait::async_trait]
 impl DataSink for PostgresSinkRuntimePlugin {
     async fn sync(
@@ -25,6 +32,10 @@ impl DataSink for PostgresSinkRuntimePlugin {
         cdc_ctx: Option<&SyncContext>,
     ) -> Result<(), io::Error> {
         self.inner.sync(stream, filename, cdc_ctx).await
+    }
+
+    fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
+        &skippr_runtime_sdk::plugins::cdc::sink_capabilities::POSTGRES
     }
 }
 

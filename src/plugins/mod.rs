@@ -13,8 +13,11 @@ pub use source_contract::{
 };
 pub use source_sync::{OffsetValidationEntry, SourcePayloadTask, SourceSyncContext};
 pub use traits::{
-    DataSink, DataSource, SchemaSink, SchemaSource, SchemaSyncRequest, SinkWriteContext,
-    SourceCdcContract, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
+    AtLeastOnceMessageDelivery, ConfiguredSink, DataSink, DataSource, DeterministicObjectOverwrite,
+    FinalStateIdempotentApply, HasSchemaSinkSpec, HasSinkSpec, NonRetryableDebugOutput, SchemaSink,
+    SchemaSinkSpec, SchemaSource, SchemaSyncRequest, SftpAtLeastOnce, SftpAtomicRename, SinkSpec,
+    SinkWriteContext, SinkWriteOutcome, SinkWriteRejection, SinkWriteSupport, SourceCdcContract,
+    SourceCdcMode, SourceExecutionContract, SourceOnceContract, TransactionalTableCommit,
 };
 
 /// No-op output plugin used by `discover` mode to run the input pipeline
@@ -30,5 +33,9 @@ impl DataSink for NoopOutputPlugin {
         _cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
         Ok(())
+    }
+
+    fn capability(&self) -> &'static crate::plugins::cdc::SinkCapability {
+        &crate::plugins::cdc::sink_capabilities::STDOUT
     }
 }

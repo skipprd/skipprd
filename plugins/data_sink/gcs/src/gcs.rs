@@ -34,6 +34,13 @@ pub struct DataSinkGcsPlugin {
     config: DataSinkGcsPluginConfig,
 }
 
+skippr_runtime_sdk::declare_sink_spec!(
+    GcsSinkSpec,
+    DataSinkGcsPlugin,
+    skippr_runtime_sdk::plugins::cdc::sink_capabilities::GCS,
+    skippr_runtime_sdk::plugins::DeterministicObjectOverwrite
+);
+
 #[async_trait]
 impl DataSink for DataSinkGcsPlugin {
     async fn sync(
@@ -42,14 +49,38 @@ impl DataSink for DataSinkGcsPlugin {
         filename: String,
         cdc_ctx: Option<&skippr_runtime_sdk::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
-        let stream = match cdc_ctx {
-            Some(ctx) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &ctx.part_meta),
+        self.sync_with_context(
+            stream,
+            skippr_runtime_sdk::plugins::SinkWriteContext {
+                filename,
+                compaction_id: String::new(),
+                idempotency_key: String::new(),
+                wal_refs: Vec::new(),
+                write_semantics:
+                    skippr_runtime_sdk::buffer::compaction_transaction::SinkWriteSemantics::AtLeastOnce,
+                schema_fingerprint: String::new(),
+                cdc_ctx,
+                source_contract: None,
+            },
+        )
+        .await
+    }
+
+    async fn sync_with_context(
+        &self,
+        stream: SendableRecordBatchStream,
+        ctx: skippr_runtime_sdk::plugins::SinkWriteContext<'_>,
+    ) -> Result<(), std::io::Error> {
+        ctx.validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))?;
+        let stream = match ctx.cdc_ctx {
+            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
             None => stream,
         };
         use skippr_runtime_sdk::metrics::counters;
         counters::inc_uploads_in_flight();
 
-        let namespace = BufferChunker::decode_file_namespace(&filename);
+        let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
         let prefix = self
             .config
             .prefix
@@ -65,17 +96,24 @@ impl DataSink for DataSinkGcsPlugin {
             format!("{}/{}", prefix, namespace)
         };
 
-        let partition_path = BufferChunker::decode_file_partition(&filename);
+        let partition_path = BufferChunker::decode_file_partition(&ctx.filename);
         if !partition_path.is_empty() {
             full_key = format!("{}/{}", full_key, partition_path);
         }
 
-        if let Ok(k) = TimePartitioner::new(&filename).process() {
+        if let Ok(k) = TimePartitioner::new(&ctx.filename).process() {
             full_key = format!("{}/{}", full_key, k);
         }
 
-        let md5_digest = md5::compute(&filename);
-        let final_key = format!("{}/{}.parquet", full_key, hex::encode(md5_digest.0));
+        let object_stem = if ctx.idempotency_key.is_empty() {
+            hex::encode(md5::compute(&ctx.filename).0)
+        } else {
+            skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
+                &ctx.idempotency_key,
+                "",
+            )?
+        };
+        let final_key = format!("{}/{}.parquet", full_key, object_stem);
 
         let parquet_bytes = serialize_to_parquet(stream).await.map_err(|e| {
             counters::dec_uploads_in_flight();
@@ -96,8 +134,8 @@ impl DataSink for DataSinkGcsPlugin {
         Ok(())
     }
 
-    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
-        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::GCS)
+    fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
+        &skippr_runtime_sdk::plugins::cdc::sink_capabilities::GCS
     }
 }
 

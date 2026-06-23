@@ -188,6 +188,19 @@ pub struct DataSinkClickhousePlugin {
     client: Client,
 }
 
+skippr_runtime_sdk::declare_sink_spec!(
+    ClickhouseSinkSpec,
+    DataSinkClickhousePlugin,
+    skippr_runtime_sdk::plugins::cdc::sink_capabilities::CLICKHOUSE,
+    skippr_runtime_sdk::plugins::AtLeastOnceMessageDelivery
+);
+
+skippr_runtime_sdk::declare_schema_sink_spec!(
+    ClickhouseSchemaSinkSpec,
+    DataSinkClickhousePlugin,
+    "Clickhouse"
+);
+
 impl DataSinkClickhousePlugin {
     pub async fn new_with_config(
         buffer_name: String,
@@ -797,8 +810,8 @@ impl DataSink for DataSinkClickhousePlugin {
         Ok(())
     }
 
-    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
-        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::CLICKHOUSE)
+    fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
+        &skippr_runtime_sdk::plugins::cdc::sink_capabilities::CLICKHOUSE
     }
 }
 

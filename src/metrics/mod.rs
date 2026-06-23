@@ -562,11 +562,29 @@ impl Metrics {
                     let wal_inflight = crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT.load(Ordering::SeqCst);
                     let wal_started_total = crate::metrics::counters::WAL_COMPACTIONS_STARTED.load(Ordering::SeqCst);
                     let wal_completed_total = crate::metrics::counters::WAL_COMPACTIONS_COMPLETED.load(Ordering::SeqCst);
+                    let wal_txn_started_total = crate::metrics::counters::WAL_COMPACTION_TRANSACTIONS_STARTED.load(Ordering::SeqCst);
+                    let wal_txn_completed_total = crate::metrics::counters::WAL_COMPACTION_TRANSACTIONS_COMPLETED.load(Ordering::SeqCst);
+                    let wal_refs_tombstoned_total = crate::metrics::counters::WAL_COMPACTION_REFS_TOMBSTONED.load(Ordering::SeqCst);
                     let wal_started_min = wal_started_total.saturating_sub(
                         LAST_PRINT_WAL_COMPACTIONS_STARTED.swap(wal_started_total, Ordering::SeqCst),
                     );
                     let wal_completed_min = wal_completed_total.saturating_sub(
                         LAST_PRINT_WAL_COMPACTIONS_COMPLETED.swap(wal_completed_total, Ordering::SeqCst),
+                    );
+                    static LAST_PRINT_WAL_TXN_STARTED: once_cell::sync::Lazy<std::sync::atomic::AtomicU64> =
+                        once_cell::sync::Lazy::new(|| std::sync::atomic::AtomicU64::new(0));
+                    static LAST_PRINT_WAL_TXN_COMPLETED: once_cell::sync::Lazy<std::sync::atomic::AtomicU64> =
+                        once_cell::sync::Lazy::new(|| std::sync::atomic::AtomicU64::new(0));
+                    static LAST_PRINT_WAL_REFS_TOMBSTONED: once_cell::sync::Lazy<std::sync::atomic::AtomicU64> =
+                        once_cell::sync::Lazy::new(|| std::sync::atomic::AtomicU64::new(0));
+                    let wal_txn_started_min = wal_txn_started_total.saturating_sub(
+                        LAST_PRINT_WAL_TXN_STARTED.swap(wal_txn_started_total, Ordering::SeqCst),
+                    );
+                    let wal_txn_completed_min = wal_txn_completed_total.saturating_sub(
+                        LAST_PRINT_WAL_TXN_COMPLETED.swap(wal_txn_completed_total, Ordering::SeqCst),
+                    );
+                    let wal_refs_tombstoned_min = wal_refs_tombstoned_total.saturating_sub(
+                        LAST_PRINT_WAL_REFS_TOMBSTONED.swap(wal_refs_tombstoned_total, Ordering::SeqCst),
                     );
                     let reclaimable_partitions = crate::buffer::ingest_buffer::Buffers::reclaimable_wal_partition_count(10_000);
                     let data_dir_paused = crate::data_dir_ingest_paused();
@@ -624,11 +642,14 @@ impl Metrics {
                             crate::buffer::wal_writer::ack_avg_ms(),
                         );
                         info!(
-                            "WAL compaction: target={}, inflight={}, started/min={}, completed/min={}, reclaimable_partitions={}, paused={}",
+                            "WAL compaction: target={}, inflight={}, started/min={}, completed/min={}, txn_started/min={}, txn_completed/min={}, refs_tombstoned/min={}, reclaimable_partitions={}, paused={}",
                             wal_target,
                             wal_inflight,
                             wal_started_min,
                             wal_completed_min,
+                            wal_txn_started_min,
+                            wal_txn_completed_min,
+                            wal_refs_tombstoned_min,
                             reclaimable_partitions,
                             data_dir_paused,
                         );

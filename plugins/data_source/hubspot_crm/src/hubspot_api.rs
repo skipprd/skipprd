@@ -7,8 +7,10 @@ const API_BASE: &str = "https://api.hubapi.com";
 #[derive(Clone)]
 pub struct HubspotApiClient {
     pub http: RetryableHttpClient,
+    #[allow(dead_code)]
     pub hub_id: String,
     access_token: String,
+    #[allow(dead_code)]
     pub min_interval_ms: u64,
 }
 

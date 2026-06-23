@@ -222,6 +222,20 @@ class RuntimePluginCatalogTests(unittest.TestCase):
                 },
             )
 
+    def test_validate_plugin_metadata_requires_sink_retry_and_grouping(self) -> None:
+        package = {"name": "skippr-plugin-data-sink-s3"}
+        with self.assertRaises(SystemExit):
+            runtime_plugin_catalog.validate_plugin_metadata(
+                package,
+                {
+                    "kind": "DataSink",
+                    "plugin_name": "S3",
+                    "sink_capability": {
+                        "name": "S3",
+                    },
+                },
+            )
+
     def test_manifest_payload_for_catalog_entry_preserves_metadata_shape(self) -> None:
         entry = {
             "manifest_name": "s3-runtime-source",

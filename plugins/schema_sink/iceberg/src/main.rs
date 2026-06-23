@@ -8,6 +8,8 @@ struct IcebergSchemaSync {
     inner: DataSinkIcebergPlugin,
 }
 
+skippr_runtime_sdk::declare_schema_sink_spec!(IcebergSchemaSinkSpec, IcebergSchemaSync, "Iceberg");
+
 #[async_trait::async_trait]
 impl skippr_runtime_sdk::plugins::SchemaSink for IcebergSchemaSync {
     async fn sync_schema(

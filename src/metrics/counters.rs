@@ -15,6 +15,10 @@ pub static WAL_COMPACTED_FILES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::
 pub static WAL_COMPACTED_ROWS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static WAL_COMPACTIONS_STARTED: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static WAL_COMPACTIONS_COMPLETED: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static WAL_COMPACTION_TRANSACTIONS_STARTED: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static WAL_COMPACTION_TRANSACTIONS_COMPLETED: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static WAL_COMPACTION_TRANSACTIONS_FAILED: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static WAL_COMPACTION_REFS_TOMBSTONED: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static WAL_COMPACTIONS_IN_FLIGHT: Lazy<std::sync::atomic::AtomicUsize> =
     Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
 
@@ -96,6 +100,22 @@ pub fn add_wal_compaction_started(n: u64) {
 #[inline]
 pub fn add_wal_compaction_completed(n: u64) {
     WAL_COMPACTIONS_COMPLETED.fetch_add(n, Ordering::Relaxed);
+}
+#[inline]
+pub fn add_wal_compaction_transaction_started(n: u64) {
+    WAL_COMPACTION_TRANSACTIONS_STARTED.fetch_add(n, Ordering::Relaxed);
+}
+#[inline]
+pub fn add_wal_compaction_transaction_completed(n: u64) {
+    WAL_COMPACTION_TRANSACTIONS_COMPLETED.fetch_add(n, Ordering::Relaxed);
+}
+#[inline]
+pub fn add_wal_compaction_transaction_failed(n: u64) {
+    WAL_COMPACTION_TRANSACTIONS_FAILED.fetch_add(n, Ordering::Relaxed);
+}
+#[inline]
+pub fn add_wal_compaction_refs_tombstoned(n: u64) {
+    WAL_COMPACTION_REFS_TOMBSTONED.fetch_add(n, Ordering::Relaxed);
 }
 #[inline]
 pub fn inc_wal_compactions_in_flight() {

@@ -263,6 +263,76 @@ pub fn delete_if_newer_sql<B: CdcApplyBackend>(
     )
 }
 
+#[allow(dead_code)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CdcBatchStatement {
+    Upsert {
+        all_col_names: Vec<String>,
+        all_col_values: Vec<String>,
+        business_key_names: Vec<String>,
+        order_token_hex: String,
+    },
+    Delete {
+        business_key_names: Vec<String>,
+        business_key_values: Vec<String>,
+        business_key_types: Vec<String>,
+        order_token_hex: String,
+    },
+}
+
+#[allow(dead_code)]
+pub fn batched_cdc_apply_sql<B: CdcApplyBackend>(
+    fq_table: &str,
+    fq_tombstone_table: &str,
+    statements: &[CdcBatchStatement],
+) -> String {
+    let mut body = String::new();
+    for statement in statements {
+        let sql = match statement {
+            CdcBatchStatement::Upsert {
+                all_col_names,
+                all_col_values,
+                business_key_names,
+                order_token_hex,
+            } => B::upsert_if_newer_sql(
+                fq_table,
+                fq_tombstone_table,
+                all_col_names,
+                all_col_values,
+                business_key_names,
+                order_token_hex,
+            ),
+            CdcBatchStatement::Delete {
+                business_key_names,
+                business_key_values,
+                business_key_types,
+                order_token_hex,
+            } => B::delete_if_newer_sql(
+                fq_table,
+                fq_tombstone_table,
+                business_key_names,
+                business_key_values,
+                business_key_types,
+                order_token_hex,
+            ),
+        };
+        let without_wrapping_tx = sql
+            .trim()
+            .strip_prefix(B::tx_begin().trim())
+            .unwrap_or(sql.trim())
+            .trim()
+            .strip_suffix(B::tx_commit().trim())
+            .unwrap_or(sql.trim())
+            .trim();
+        body.push_str(without_wrapping_tx);
+        if !without_wrapping_tx.ends_with(';') {
+            body.push(';');
+        }
+        body.push('\n');
+    }
+    format!("{}{}{}", B::tx_begin(), body, B::tx_commit())
+}
+
 fn find_business_key_value<'a>(
     all_col_names: &'a [String],
     all_col_values: &'a [String],

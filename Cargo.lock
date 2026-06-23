@@ -9679,8 +9679,6 @@ dependencies = [
 [[package]]
 name = "react"
 version = "1.5.0"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "c26a089f7c253676abd014d9278677459bc5a74c549f85dc2e1236d4514b4450"
 dependencies = [
  "async-trait",
  "axum",
@@ -9718,8 +9716,6 @@ dependencies = [
 [[package]]
 name = "react-core"
 version = "1.5.0"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "53a369a0dc2aa51e54fec40df11e31ac96fc6be71db77ce1bf8f998fcdb570be"
 dependencies = [
  "async-trait",
  "chrono",
@@ -9740,8 +9736,6 @@ dependencies = [
 [[package]]
 name = "react-http-protocol"
 version = "1.5.0"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "06b3249ede47f0bb56c906a1a1f2025b1449a96e7f9ada0d3db1cbb4f43aa741"
 dependencies = [
  "serde",
  "serde_json",
@@ -9937,8 +9931,6 @@ dependencies = [
 [[package]]
 name = "react-module-provider-vector-lance"
 version = "1.5.0"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "049cc56758fbccbc57ab90114c8a0eed5a5c3237c80f7a61c8e475290beefca8"
 dependencies = [
  "arrow",
  "arrow-buffer",
@@ -9953,8 +9945,6 @@ dependencies = [
 [[package]]
 name = "react-module-storage-local"
 version = "1.5.0"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "1c95c1465ab9164166aae4f1791e44feed1f70b06f1820dc61d2b4b4271f1d30"
 dependencies = [
  "async-trait",
  "react-core",
@@ -9966,8 +9956,6 @@ dependencies = [
 [[package]]
 name = "react-module-storage-memory"
 version = "1.5.0"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "e592c3ac1423794eeeb853eb0414e15a7a2d983191eb1ab0f098afd8f7031ca7"
 dependencies = [
  "async-trait",
  "react-core",
@@ -9977,8 +9965,6 @@ dependencies = [
 [[package]]
 name = "react-module-storage-s3"
 version = "1.5.0"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "5418e7445269b3790a2ee1329c20910a21c4f8dbccde9662aa3ce7e407bfcd3a"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -10019,8 +10005,6 @@ dependencies = [
 [[package]]
 name = "react-suite-debugger"
 version = "1.5.0"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "b013b7ecb90b7e3ad399b7d6d900bfd0f360749fbfd9499ee799a25a0e073cc8"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10033,8 +10017,6 @@ dependencies = [
 [[package]]
 name = "react-transport"
 version = "1.5.0"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "78dded01b7c892894ae6384849405ccacdac8fd55ed7894a45d7e9b2866f3ca0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10056,8 +10038,6 @@ dependencies = [
 [[package]]
 name = "react-view"
 version = "1.5.0"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "444e300c49c12e8282997eff0b4054220dbeb7297e6c893e7adca8fae00e606b"
 dependencies = [
  "chrono",
  "react-core",

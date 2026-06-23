@@ -2,8 +2,12 @@ use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 use serde_derive::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::marker::PhantomData;
 use std::sync::Arc;
 
+use crate::buffer::compaction_transaction::{
+    SinkGroupingSupport, SinkRetrySemantics, SinkWriteSemantics,
+};
 use crate::discover::OutputMetadata;
 use crate::plugins::cdc::{SinkCapability, SourceCapability, SyncContext};
 use crate::plugins::source_contract::SourceNamespaceContract;
@@ -121,8 +125,184 @@ pub trait DataSource: Send + Sync {
 pub struct SinkWriteContext<'a> {
     pub filename: String,
     pub compaction_id: String,
+    pub idempotency_key: String,
+    pub wal_refs: Vec<crate::runtime_plugins::protocol::RuntimeWalPartRef>,
+    pub write_semantics: crate::buffer::compaction_transaction::SinkWriteSemantics,
+    pub schema_fingerprint: String,
     pub cdc_ctx: Option<&'a SyncContext>,
     pub source_contract: Option<&'a SourceNamespaceContract>,
+}
+
+impl SinkWriteContext<'_> {
+    pub fn is_grouped(&self) -> bool {
+        !self.wal_refs.is_empty()
+    }
+
+    pub fn validate_grouped<W: SinkWriteSupport>(&self) -> Result<(), SinkWriteRejection> {
+        if !self.is_grouped() {
+            return Ok(());
+        }
+        if self.idempotency_key.is_empty() {
+            return Err(SinkWriteRejection::MissingIdempotencyKey);
+        }
+        if W::GROUPING == SinkGroupingSupport::None {
+            return Err(SinkWriteRejection::UnsupportedGrouping {
+                grouping: W::GROUPING,
+            });
+        }
+        if matches!(self.write_semantics, SinkWriteSemantics::ExactOnce) && !W::EXACT_ONCE_ALLOWED {
+            return Err(SinkWriteRejection::UnsupportedExactOnce);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SinkWriteOutcome {
+    Applied,
+    AlreadyApplied,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SinkWriteRejection {
+    MissingIdempotencyKey,
+    UnsupportedGrouping { grouping: SinkGroupingSupport },
+    UnsupportedExactOnce,
+}
+
+impl std::fmt::Display for SinkWriteRejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MissingIdempotencyKey => write!(f, "grouped sink write missing idempotency key"),
+            Self::UnsupportedGrouping { grouping } => {
+                write!(f, "sink does not support grouped writes: {grouping:?}")
+            }
+            Self::UnsupportedExactOnce => {
+                write!(f, "sink does not support exact-once grouped writes")
+            }
+        }
+    }
+}
+
+impl std::error::Error for SinkWriteRejection {}
+
+pub trait SinkWriteSupport: 'static {
+    const RETRY: SinkRetrySemantics;
+    const GROUPING: SinkGroupingSupport;
+    const EXACT_ONCE_ALLOWED: bool;
+}
+
+pub struct DeterministicObjectOverwrite;
+impl SinkWriteSupport for DeterministicObjectOverwrite {
+    const RETRY: SinkRetrySemantics = SinkRetrySemantics::DeterministicOverwrite;
+    const GROUPING: SinkGroupingSupport = SinkGroupingSupport::CdcEncodedBatches;
+    const EXACT_ONCE_ALLOWED: bool = false;
+}
+
+pub struct TransactionalTableCommit;
+impl SinkWriteSupport for TransactionalTableCommit {
+    const RETRY: SinkRetrySemantics = SinkRetrySemantics::TransactionalIdempotent;
+    const GROUPING: SinkGroupingSupport = SinkGroupingSupport::FinalStateBatches;
+    const EXACT_ONCE_ALLOWED: bool = true;
+}
+
+pub struct FinalStateIdempotentApply;
+impl SinkWriteSupport for FinalStateIdempotentApply {
+    const RETRY: SinkRetrySemantics = SinkRetrySemantics::FinalStateIdempotent;
+    const GROUPING: SinkGroupingSupport = SinkGroupingSupport::FinalStateBatches;
+    const EXACT_ONCE_ALLOWED: bool = true;
+}
+
+pub struct AtLeastOnceMessageDelivery;
+impl SinkWriteSupport for AtLeastOnceMessageDelivery {
+    const RETRY: SinkRetrySemantics = SinkRetrySemantics::AtLeastOnce;
+    const GROUPING: SinkGroupingSupport = SinkGroupingSupport::CdcEncodedBatches;
+    const EXACT_ONCE_ALLOWED: bool = false;
+}
+
+pub struct NonRetryableDebugOutput;
+impl SinkWriteSupport for NonRetryableDebugOutput {
+    const RETRY: SinkRetrySemantics = SinkRetrySemantics::NonRetryable;
+    const GROUPING: SinkGroupingSupport = SinkGroupingSupport::None;
+    const EXACT_ONCE_ALLOWED: bool = false;
+}
+
+pub struct SftpAtomicRename;
+impl SinkWriteSupport for SftpAtomicRename {
+    const RETRY: SinkRetrySemantics = SinkRetrySemantics::DeterministicOverwrite;
+    const GROUPING: SinkGroupingSupport = SinkGroupingSupport::CdcEncodedBatches;
+    const EXACT_ONCE_ALLOWED: bool = false;
+}
+
+pub struct SftpAtLeastOnce;
+impl SinkWriteSupport for SftpAtLeastOnce {
+    const RETRY: SinkRetrySemantics = SinkRetrySemantics::AtLeastOnce;
+    const GROUPING: SinkGroupingSupport = SinkGroupingSupport::CdcEncodedBatches;
+    const EXACT_ONCE_ALLOWED: bool = false;
+}
+
+pub trait SinkSpec: 'static {
+    const NAME: &'static str;
+    const CAPABILITY: SinkCapability;
+    type WriteSupport: SinkWriteSupport;
+}
+
+pub trait HasSinkSpec {
+    type Spec: SinkSpec;
+}
+
+pub trait SchemaSinkSpec: 'static {
+    const NAME: &'static str;
+}
+
+pub trait HasSchemaSinkSpec {
+    type Spec: SchemaSinkSpec;
+}
+
+pub struct ConfiguredSink<S: SinkSpec, P> {
+    pub plugin: P,
+    _spec: PhantomData<S>,
+}
+
+impl<S: SinkSpec, P> ConfiguredSink<S, P> {
+    pub fn new(plugin: P) -> Self {
+        Self {
+            plugin,
+            _spec: PhantomData,
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! declare_sink_spec {
+    ($spec:ident, $plugin:ty, $capability:path, $support:ty) => {
+        pub struct $spec;
+
+        impl $crate::plugins::SinkSpec for $spec {
+            const NAME: &'static str = $capability.name;
+            const CAPABILITY: $crate::plugins::cdc::SinkCapability = $capability;
+            type WriteSupport = $support;
+        }
+
+        impl $crate::plugins::HasSinkSpec for $plugin {
+            type Spec = $spec;
+        }
+    };
+}
+
+#[macro_export]
+macro_rules! declare_schema_sink_spec {
+    ($spec:ident, $plugin:ty, $name:expr) => {
+        pub struct $spec;
+
+        impl $crate::plugins::SchemaSinkSpec for $spec {
+            const NAME: &'static str = $name;
+        }
+
+        impl $crate::plugins::HasSchemaSinkSpec for $plugin {
+            type Spec = $spec;
+        }
+    };
 }
 
 #[cfg(test)]
@@ -155,6 +335,39 @@ mod tests {
         );
         assert!(cdc.cdc.capability().is_some());
     }
+
+    #[test]
+    fn grouped_context_validation_enforces_support_marker() {
+        let ctx = SinkWriteContext {
+            filename: "namespace=users-c=abc".to_string(),
+            compaction_id: "abc".to_string(),
+            idempotency_key: "abc".to_string(),
+            wal_refs: vec![crate::runtime_plugins::protocol::RuntimeWalPartRef {
+                segment_id: "seg-1".to_string(),
+                source: "local".to_string(),
+                start: 0,
+                len: 10,
+                sink_ref: "primary".to_string(),
+                namespace: "users".to_string(),
+                partition: String::new(),
+                time: None,
+                shard: String::new(),
+                cdc_meta_hash: None,
+            }],
+            write_semantics: SinkWriteSemantics::IdempotentAtLeastOnce,
+            schema_fingerprint: "schema".to_string(),
+            cdc_ctx: None,
+            source_contract: None,
+        };
+
+        assert!(ctx
+            .validate_grouped::<DeterministicObjectOverwrite>()
+            .is_ok());
+        assert!(matches!(
+            ctx.validate_grouped::<NonRetryableDebugOutput>(),
+            Err(SinkWriteRejection::UnsupportedGrouping { .. })
+        ));
+    }
 }
 
 /// Writes record batches to a destination (S3, disk, database, etc.).
@@ -179,12 +392,17 @@ pub trait DataSink: Send + Sync {
         self.sync(stream, ctx.filename, ctx.cdc_ctx).await
     }
 
-    /// Return the compile-time capability descriptor for this sink.
-    /// Default returns `None` for backward compatibility with existing
-    /// connectors that have not yet declared capabilities.
-    fn capability(&self) -> Option<&'static SinkCapability> {
-        None
+    async fn sync_with_context_result(
+        &self,
+        stream: SendableRecordBatchStream,
+        ctx: SinkWriteContext<'_>,
+    ) -> Result<SinkWriteOutcome, std::io::Error> {
+        self.sync_with_context(stream, ctx).await?;
+        Ok(SinkWriteOutcome::Applied)
     }
+
+    /// Return the compile-time capability descriptor for this sink.
+    fn capability(&self) -> &'static SinkCapability;
 
     async fn install_schema_state(
         &self,

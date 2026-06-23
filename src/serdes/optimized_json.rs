@@ -39,10 +39,7 @@ impl OptimizedJsonParser {
         let trimmed = input.trim();
 
         // NDJSON fast path: skip the whole-payload parse that always fails for multi-line inputs.
-        if !self.needs_processing(input)
-            && trimmed.contains('\n')
-            && !trimmed.starts_with('[')
-        {
+        if !self.needs_processing(input) && trimmed.contains('\n') && !trimmed.starts_with('[') {
             let result = self.parse_line_by_line(input);
             if !result.is_empty() {
                 return result;

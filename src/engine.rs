@@ -376,7 +376,11 @@ impl DataSink for OutputRouter {
             crate::plugins::source_contract::namespace_source_contract(&namespace);
         let ctx = crate::plugins::SinkWriteContext {
             filename,
+            idempotency_key: compaction_id.clone(),
             compaction_id,
+            wal_refs: Vec::new(),
+            write_semantics: crate::buffer::compaction_transaction::SinkWriteSemantics::AtLeastOnce,
+            schema_fingerprint: String::new(),
             cdc_ctx,
             source_contract: source_contract.as_ref(),
         };
@@ -414,6 +418,13 @@ impl DataSink for OutputRouter {
                 .await?;
         }
         Ok(())
+    }
+
+    fn capability(&self) -> &'static crate::plugins::cdc::SinkCapability {
+        self.sinks
+            .get(&self.primary_sink_ref)
+            .map(|sink| sink.capability())
+            .unwrap_or(&crate::plugins::cdc::sink_capabilities::STDOUT)
     }
 }
 

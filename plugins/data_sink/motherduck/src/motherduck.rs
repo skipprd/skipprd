@@ -49,6 +49,19 @@ pub struct DataSinkMotherduckPlugin {
     client: Client,
 }
 
+skippr_runtime_sdk::declare_sink_spec!(
+    MotherduckSinkSpec,
+    DataSinkMotherduckPlugin,
+    skippr_runtime_sdk::plugins::cdc::sink_capabilities::MOTHERDUCK,
+    skippr_runtime_sdk::plugins::FinalStateIdempotentApply
+);
+
+skippr_runtime_sdk::declare_schema_sink_spec!(
+    MotherduckSchemaSinkSpec,
+    DataSinkMotherduckPlugin,
+    "Motherduck"
+);
+
 const MOTHERDUCK_SQL_ENDPOINT: &str = "https://api.motherduck.com/v1/sql";
 
 impl DataSinkMotherduckPlugin {
@@ -634,8 +647,8 @@ impl DataSink for DataSinkMotherduckPlugin {
         Ok(())
     }
 
-    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
-        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::MOTHERDUCK)
+    fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
+        &skippr_runtime_sdk::plugins::cdc::sink_capabilities::MOTHERDUCK
     }
 }
 

@@ -51,6 +51,19 @@ pub struct DataSinkSynapsePlugin {
     config: DataSinkSynapsePluginConfig,
 }
 
+skippr_runtime_sdk::declare_sink_spec!(
+    SynapseSinkSpec,
+    DataSinkSynapsePlugin,
+    skippr_runtime_sdk::plugins::cdc::sink_capabilities::SYNAPSE,
+    skippr_runtime_sdk::plugins::FinalStateIdempotentApply
+);
+
+skippr_runtime_sdk::declare_schema_sink_spec!(
+    SynapseSchemaSinkSpec,
+    DataSinkSynapsePlugin,
+    "Synapse"
+);
+
 #[async_trait]
 impl DataSink for DataSinkSynapsePlugin {
     async fn sync(
@@ -117,8 +130,8 @@ impl DataSink for DataSinkSynapsePlugin {
         Ok(())
     }
 
-    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
-        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::SYNAPSE)
+    fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
+        &skippr_runtime_sdk::plugins::cdc::sink_capabilities::SYNAPSE
     }
 }
 

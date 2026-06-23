@@ -56,6 +56,13 @@ pub struct DataSinkDatabricksPlugin {
     config: DataSinkDatabricksPluginConfig,
 }
 
+skippr_runtime_sdk::declare_sink_spec!(
+    DatabricksSinkSpec,
+    DataSinkDatabricksPlugin,
+    skippr_runtime_sdk::plugins::cdc::sink_capabilities::DATABRICKS,
+    skippr_runtime_sdk::plugins::FinalStateIdempotentApply
+);
+
 #[async_trait]
 impl DataSink for DataSinkDatabricksPlugin {
     async fn sync(
@@ -74,8 +81,8 @@ impl DataSink for DataSinkDatabricksPlugin {
         }
     }
 
-    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
-        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::DATABRICKS)
+    fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
+        &skippr_runtime_sdk::plugins::cdc::sink_capabilities::DATABRICKS
     }
 }
 
@@ -210,30 +217,15 @@ impl DataSinkDatabricksPlugin {
                 std::io::Error::other(format!("Delta collect: {}", e))
             })?;
 
-        let table_result =
-            deltalake::open_table_with_storage_options(table_url.clone(), storage_opts.clone())
-                .await;
-
-        match table_result {
-            Ok(table) => {
-                deltalake::DeltaOps(table)
-                    .write(delta_batches)
-                    .with_save_mode(deltalake::protocol::SaveMode::Append)
-                    .await
-                    .map_err(|e| std::io::Error::other(format!("Delta write: {}", e)))?;
-            }
-            Err(_) => {
-                let ops =
-                    deltalake::DeltaOps::try_from_url_with_storage_options(table_url, storage_opts)
-                        .await
-                        .map_err(|e| std::io::Error::other(format!("Delta init: {}", e)))?;
-
-                ops.write(delta_batches)
-                    .with_save_mode(deltalake::protocol::SaveMode::Append)
-                    .await
-                    .map_err(|e| std::io::Error::other(format!("Delta write: {}", e)))?;
-            }
-        }
+        let table =
+            deltalake::DeltaTable::try_from_url_with_storage_options(table_url, storage_opts)
+                .await
+                .map_err(|e| std::io::Error::other(format!("Delta init: {}", e)))?;
+        table
+            .write(delta_batches)
+            .with_save_mode(deltalake::protocol::SaveMode::Append)
+            .await
+            .map_err(|e| std::io::Error::other(format!("Delta write: {}", e)))?;
 
         counters::add_parquet_rows(total_rows);
         counters::add_upload(1);

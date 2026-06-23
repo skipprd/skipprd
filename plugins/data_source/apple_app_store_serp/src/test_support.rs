@@ -49,6 +49,7 @@ pub struct RecordingSyncContext {
 }
 
 impl RecordingSyncContext {
+    #[allow(dead_code)]
     pub fn submitted_namespaces(&self) -> Vec<String> {
         self.payload_tasks
             .lock()

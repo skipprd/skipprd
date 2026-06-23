@@ -689,7 +689,7 @@ mod tests {
     use std::sync::{LazyLock, Mutex};
 
     use super::*;
-    use crate::streams::{streams_for_profile, StreamProfile, FULL_STREAM_COUNT};
+    use crate::streams::{StreamProfile, FULL_STREAM_COUNT};
     use skippr_plugin_shared_api_source::DateWindow;
 
     static ENV_TEST_LOCK: LazyLock<Mutex<()>> = LazyLock::new(|| Mutex::new(()));

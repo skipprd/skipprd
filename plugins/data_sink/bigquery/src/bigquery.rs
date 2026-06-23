@@ -57,6 +57,19 @@ pub struct DataSinkBigqueryPlugin {
     token: tokio::sync::RwLock<Option<(String, std::time::Instant)>>,
 }
 
+skippr_runtime_sdk::declare_sink_spec!(
+    BigquerySinkSpec,
+    DataSinkBigqueryPlugin,
+    skippr_runtime_sdk::plugins::cdc::sink_capabilities::BIGQUERY,
+    skippr_runtime_sdk::plugins::FinalStateIdempotentApply
+);
+
+skippr_runtime_sdk::declare_schema_sink_spec!(
+    BigquerySchemaSinkSpec,
+    DataSinkBigqueryPlugin,
+    "Bigquery"
+);
+
 impl DataSinkBigqueryPlugin {
     pub async fn new_with_config(
         buffer_name: String,
@@ -908,8 +921,8 @@ impl DataSink for DataSinkBigqueryPlugin {
         }
     }
 
-    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
-        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::BIGQUERY)
+    fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
+        &skippr_runtime_sdk::plugins::cdc::sink_capabilities::BIGQUERY
     }
 }
 

@@ -8,6 +8,13 @@ use skippr_runtime_sdk::plugins::DataSink;
 
 pub struct DataSinkStdoutPlugin;
 
+skippr_runtime_sdk::declare_sink_spec!(
+    StdoutSinkSpec,
+    DataSinkStdoutPlugin,
+    skippr_runtime_sdk::plugins::cdc::sink_capabilities::STDOUT,
+    skippr_runtime_sdk::plugins::NonRetryableDebugOutput
+);
+
 impl DataSinkStdoutPlugin {
     pub async fn new(_buffer_name: String) -> Self {
         Self
@@ -42,7 +49,7 @@ impl DataSink for DataSinkStdoutPlugin {
         Ok(())
     }
 
-    fn capability(&self) -> Option<&'static skippr_runtime_sdk::plugins::cdc::SinkCapability> {
-        Some(&skippr_runtime_sdk::plugins::cdc::sink_capabilities::STDOUT)
+    fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
+        &skippr_runtime_sdk::plugins::cdc::sink_capabilities::STDOUT
     }
 }
