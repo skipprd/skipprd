@@ -51,9 +51,9 @@ Dedicated bucket for WAL segments only (recommended for Upfoundry). Keeps intern
 | | |
 |---|---|
 | **Environment variable** | `WAL_BYTES_PER_FILE` |
-| **Default** | `4194304` (4 MB) |
+| **Default** | Auto-derived from `BUFFER_THRESHOLD_BYTES`, clamped to 4-64 MiB |
 
-Target size for each WAL segment file. Larger segments reduce S3 request counts but increase memory usage during compaction.
+Optional target size override for each WAL segment file. By default the WAL target follows the pipeline buffer target so source batch, WAL, and compaction sizing stay aligned. Larger explicit overrides reduce S3 request counts but increase memory usage during compaction.
 
 ### WAL_MAX_DELAY_SECONDS
 
@@ -62,4 +62,4 @@ Target size for each WAL segment file. Larger segments reduce S3 request counts 
 | **Environment variable** | `WAL_MAX_DELAY_SECONDS` |
 | **Default** | `60` |
 
-Maximum age of a WAL segment before it is flushed, even if it hasn't reached the target size. Prevents data from sitting in the WAL during low-throughput periods.
+Coarse maximum age of a WAL segment before it is flushed, even if it hasn't reached the target size. Runtime ingest ACK latency is auto-tuned separately from observed throughput and persist latency, so this setting should rarely need adjustment.

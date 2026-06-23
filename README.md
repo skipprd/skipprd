@@ -222,8 +222,8 @@ Legacy and deployment environment variables include:
 | Variable | Default | Description |
 |---|---|---|
 | `WAL_STORAGE` | `disk` | `disk` or `s3` |
-| `WAL_BYTES_PER_FILE` | `4194304` | Target WAL segment size |
-| `WAL_MAX_DELAY_SECONDS` | `60` | Max segment age before flush |
+| `WAL_BYTES_PER_FILE` | auto | Optional WAL segment size override; defaults to `BUFFER_THRESHOLD_BYTES` clamped to 4-64 MiB |
+| `WAL_MAX_DELAY_SECONDS` | `60` | Coarse max segment age before flush; runtime ACK latency is auto-tuned |
 | `BUFFER_THRESHOLD_BYTES` | `10485760` | Buffer flush threshold (bytes) |
 | `BUFFER_THRESHOLD_SECONDS` | `60` | Buffer flush threshold (time) |
 | `DATA_DIR` | `./data` | Local dir for WAL + offsets DB |

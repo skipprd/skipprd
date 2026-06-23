@@ -50,8 +50,67 @@ static WAL_WRITER_ACK_COUNT: AtomicU64 = AtomicU64::new(0);
 static REQUEST_ACKS: Lazy<Mutex<HashMap<u64, RequestAckState>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
+const ACK_DELAY_MIN_MS: u64 = 100;
+const ACK_DELAY_COLD_START_MS: u64 = 250;
+const ACK_DELAY_MAX_MS: u64 = 500;
+const ACK_DELAY_PERSIST_LATENCY_MULTIPLIER: f64 = 4.0;
+
 fn writer_capacity(ingest_threads: usize) -> usize {
     ingest_threads.clamp(1, 32)
+}
+
+fn clamp_ack_delay_ms(ms: u64) -> u64 {
+    ms.clamp(ACK_DELAY_MIN_MS, ACK_DELAY_MAX_MS)
+}
+
+fn adaptive_ack_delay_ms(
+    live_segment_bytes: u64,
+    wal_target_bytes: u64,
+    submit_rate_bytes_per_sec: f64,
+    persist_avg_ms: f64,
+) -> u64 {
+    let latency_budget_ms = if persist_avg_ms > 0.0 {
+        clamp_ack_delay_ms((persist_avg_ms * ACK_DELAY_PERSIST_LATENCY_MULTIPLIER) as u64)
+    } else {
+        ACK_DELAY_COLD_START_MS
+    };
+
+    if live_segment_bytes >= wal_target_bytes {
+        return ACK_DELAY_MIN_MS;
+    }
+
+    if submit_rate_bytes_per_sec <= 0.0 {
+        return latency_budget_ms;
+    }
+
+    let remaining_bytes = wal_target_bytes.saturating_sub(live_segment_bytes);
+    if remaining_bytes == 0 {
+        return ACK_DELAY_MIN_MS;
+    }
+
+    let estimated_fill_ms = ((remaining_bytes as f64 / submit_rate_bytes_per_sec) * 1000.0) as u64;
+    clamp_ack_delay_ms(estimated_fill_ms.min(latency_budget_ms))
+}
+
+fn next_ack_deadline(
+    pending_acks: &[(oneshot::Sender<WalPersistResult>, Instant, u64, u64)],
+    live_segment_bytes: u64,
+    submit_rate_bytes_per_sec: f64,
+    max_delay: Duration,
+) -> Option<Instant> {
+    let oldest = pending_acks
+        .iter()
+        .map(|(_, queued_at, _, _)| *queued_at)
+        .min()?;
+    let adaptive_delay = Duration::from_millis(adaptive_ack_delay_ms(
+        live_segment_bytes,
+        Config::get_wal_bytes_per_file(),
+        submit_rate_bytes_per_sec,
+        persist_avg_ms(),
+    ));
+    let ack_deadline = oldest + adaptive_delay;
+    let max_deadline = oldest + max_delay;
+    Some(ack_deadline.min(max_deadline))
 }
 
 pub fn start(ingest_threads: usize) {
@@ -202,15 +261,24 @@ async fn run_writer(mut rx: mpsc::Receiver<WalWriterCommand>) {
     let mut pending_acks: Vec<(oneshot::Sender<WalPersistResult>, Instant, u64, u64)> = Vec::new();
     let mut pending_offsets: Option<Arc<Offsets>> = None;
     let mut last_flush = Instant::now();
+    let mut last_submit_at: Option<Instant> = None;
+    let mut submit_rate_bytes_per_sec = 0.0f64;
 
     loop {
-        let delay = Duration::from_secs(Config::get_wal_max_delay_seconds().max(1));
+        let max_delay = Duration::from_secs(Config::get_wal_max_delay_seconds().max(1));
         let next = if pending_acks.is_empty() {
             rx.recv().await
         } else {
+            let deadline = next_ack_deadline(
+                &pending_acks,
+                Buffers::live_segment_bytes(),
+                submit_rate_bytes_per_sec,
+                max_delay,
+            )
+            .unwrap_or_else(|| last_flush + max_delay);
             tokio::select! {
                 cmd = rx.recv() => cmd,
-                _ = tokio::time::sleep_until((last_flush + delay).into()) => None,
+                _ = tokio::time::sleep_until(deadline.into()) => None,
             }
         };
 
@@ -225,15 +293,30 @@ async fn run_writer(mut rx: mpsc::Receiver<WalWriterCommand>) {
                     Ok(added_bytes) => {
                         WAL_WRITER_COALESCE_BYTES_TOTAL.fetch_add(added_bytes, Ordering::Relaxed);
                         WAL_WRITER_COALESCE_BATCHES_TOTAL.fetch_add(1, Ordering::Relaxed);
+                        let now = Instant::now();
+                        if let Some(previous) = last_submit_at {
+                            let elapsed = now.saturating_duration_since(previous);
+                            if elapsed >= Duration::from_millis(1) && added_bytes > 0 {
+                                let instant_rate =
+                                    added_bytes as f64 / elapsed.as_secs_f64().max(0.001);
+                                submit_rate_bytes_per_sec = if submit_rate_bytes_per_sec > 0.0 {
+                                    (submit_rate_bytes_per_sec * 0.8) + (instant_rate * 0.2)
+                                } else {
+                                    instant_rate
+                                };
+                            }
+                        }
+                        last_submit_at = Some(now);
                         pending_acks.push((unit.done, ack_started, arrow_bytes, unit.submit_id));
                         if Config::log_wal_enabled() {
                             debug!(
-                                "WAL writer queued submit_id={} raw_bytes={} arrow_bytes={} live_bytes={} pending_count={}",
+                                "WAL writer queued submit_id={} raw_bytes={} arrow_bytes={} live_bytes={} pending_count={} submit_rate_bps={:.0}",
                                 unit.submit_id,
                                 unit.raw_bytes,
                                 unit.arrow_bytes,
                                 Buffers::live_segment_bytes(),
-                                pending_acks.len()
+                                pending_acks.len(),
+                                submit_rate_bytes_per_sec
                             );
                         }
                     }
@@ -247,6 +330,17 @@ async fn run_writer(mut rx: mpsc::Receiver<WalWriterCommand>) {
                 if Buffers::live_segment_bytes() >= Config::get_wal_bytes_per_file() {
                     if let Some(offsets) = pending_offsets.clone() {
                         flush_live_and_ack(&offsets, &mut pending_acks, &mut last_flush).await;
+                    }
+                } else if let Some(deadline) = next_ack_deadline(
+                    &pending_acks,
+                    Buffers::live_segment_bytes(),
+                    submit_rate_bytes_per_sec,
+                    max_delay,
+                ) {
+                    if Instant::now() >= deadline {
+                        if let Some(offsets) = pending_offsets.clone() {
+                            flush_live_and_ack(&offsets, &mut pending_acks, &mut last_flush).await;
+                        }
                     }
                 }
             }
@@ -329,6 +423,25 @@ mod tests {
         assert_eq!(writer_capacity(1), 1);
         assert_eq!(writer_capacity(8), 8);
         assert_eq!(writer_capacity(64), 32);
+    }
+
+    #[test]
+    fn adaptive_ack_delay_stays_within_latency_budget() {
+        assert_eq!(clamp_ack_delay_ms(10), ACK_DELAY_MIN_MS);
+        assert_eq!(clamp_ack_delay_ms(750), ACK_DELAY_MAX_MS);
+
+        assert_eq!(
+            adaptive_ack_delay_ms(0, 20 * 1024 * 1024, 0.0, 0.0),
+            ACK_DELAY_COLD_START_MS
+        );
+        assert_eq!(
+            adaptive_ack_delay_ms(19 * 1024 * 1024, 20 * 1024 * 1024, 100_000_000.0, 25.0),
+            ACK_DELAY_MIN_MS
+        );
+        assert_eq!(
+            adaptive_ack_delay_ms(0, 20 * 1024 * 1024, 1_000_000.0, 200.0),
+            ACK_DELAY_MAX_MS
+        );
     }
 
     #[tokio::test]

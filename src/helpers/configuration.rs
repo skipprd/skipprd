@@ -1135,21 +1135,32 @@ impl Config {
         default_prefix
     }
 
-    // Coalescing controls for WAL (reduce S3 requests)
-    // Target WAL object size in bytes (default 4 MiB)
+    fn default_wal_bytes_per_file() -> u64 {
+        const MIN_WAL_BYTES_PER_FILE: u64 = 4 * 1024 * 1024;
+        const MAX_WAL_BYTES_PER_FILE: u64 = 64 * 1024 * 1024;
+        Self::get_pipeline_buffer_threshold_bytes()
+            .clamp(MIN_WAL_BYTES_PER_FILE, MAX_WAL_BYTES_PER_FILE)
+    }
+
+    // Coalescing controls for WAL. By default the WAL segment target follows the
+    // pipeline buffer target so source batch, WAL, and compaction sizes do not drift.
     pub fn get_wal_bytes_per_file() -> u64 {
+        let default = Self::default_wal_bytes_per_file();
         if Config::get_envcache("WAL_BYTES_PER_FILE") != "" {
-            return Self::parse_cached_u64("WAL_BYTES_PER_FILE", 4 * 1024 * 1024);
+            return Self::parse_cached_u64("WAL_BYTES_PER_FILE", default);
         } else {
-            let val = Config::getenv("WAL_BYTES_PER_FILE", &(4 * 1024 * 1024).to_string());
+            let val = Config::getenv("WAL_BYTES_PER_FILE", "");
+            if val.is_empty() {
+                Config::set_evncache("WAL_BYTES_PER_FILE", &default.to_string());
+                return default;
+            }
             Config::set_evncache("WAL_BYTES_PER_FILE", &val);
             val.parse::<u64>().unwrap_or_else(|_| {
                 warn!(
                     "Invalid 'WAL_BYTES_PER_FILE' value '{}'. Falling back to default {}.",
-                    val,
-                    4 * 1024 * 1024
+                    val, default
                 );
-                4 * 1024 * 1024
+                default
             })
         }
     }
@@ -3532,6 +3543,91 @@ data_sinks:
         match original {
             Some(value) => std::env::set_var("BUFFER_THRESHOLD_BYTES", value),
             None => std::env::remove_var("BUFFER_THRESHOLD_BYTES"),
+        }
+        ENV_CACHE.write().clear();
+    }
+
+    #[test]
+    #[serial]
+    fn wal_bytes_per_file_defaults_to_pipeline_buffer_target() {
+        let original_config = APP_CONFIG.read().clone();
+        let original_pipeline_name = PIPELINE_NAME.read().clone();
+        let original_wal_bytes = std::env::var("WAL_BYTES_PER_FILE").ok();
+        let original_buffer_bytes = std::env::var("BUFFER_THRESHOLD_BYTES").ok();
+        ENV_CACHE.write().clear();
+        std::env::remove_var("WAL_BYTES_PER_FILE");
+        std::env::remove_var("BUFFER_THRESHOLD_BYTES");
+
+        let config: Config = serde_yaml::from_str(
+            r#"
+skippr:
+  workspace: default
+pipelines:
+  small:
+    buffer_threshold_bytes: 1024
+  bike_hire:
+    buffer_threshold_bytes: 20000000
+  large:
+    buffer_threshold_bytes: 134217728
+"#,
+        )
+        .unwrap();
+        *APP_CONFIG.write() = Some(config);
+
+        *PIPELINE_NAME.write() = "small".to_string();
+        ENV_CACHE.write().clear();
+        assert_eq!(Config::get_wal_bytes_per_file(), 4 * 1024 * 1024);
+
+        *PIPELINE_NAME.write() = "bike_hire".to_string();
+        ENV_CACHE.write().clear();
+        assert_eq!(Config::get_wal_bytes_per_file(), 20_000_000);
+
+        *PIPELINE_NAME.write() = "large".to_string();
+        ENV_CACHE.write().clear();
+        assert_eq!(Config::get_wal_bytes_per_file(), 64 * 1024 * 1024);
+
+        *APP_CONFIG.write() = original_config;
+        *PIPELINE_NAME.write() = original_pipeline_name;
+        match original_wal_bytes {
+            Some(value) => std::env::set_var("WAL_BYTES_PER_FILE", value),
+            None => std::env::remove_var("WAL_BYTES_PER_FILE"),
+        }
+        match original_buffer_bytes {
+            Some(value) => std::env::set_var("BUFFER_THRESHOLD_BYTES", value),
+            None => std::env::remove_var("BUFFER_THRESHOLD_BYTES"),
+        }
+        ENV_CACHE.write().clear();
+    }
+
+    #[test]
+    #[serial]
+    fn wal_bytes_per_file_env_override_wins() {
+        let original_config = APP_CONFIG.read().clone();
+        let original_pipeline_name = PIPELINE_NAME.read().clone();
+        let original_wal_bytes = std::env::var("WAL_BYTES_PER_FILE").ok();
+        ENV_CACHE.write().clear();
+        std::env::set_var("WAL_BYTES_PER_FILE", "8388608");
+
+        let config: Config = serde_yaml::from_str(
+            r#"
+skippr:
+  workspace: default
+pipelines:
+  bike_hire:
+    buffer_threshold_bytes: 20000000
+"#,
+        )
+        .unwrap();
+        *APP_CONFIG.write() = Some(config);
+        *PIPELINE_NAME.write() = "bike_hire".to_string();
+
+        assert_eq!(Config::get_wal_bytes_per_file(), 8 * 1024 * 1024);
+
+        *APP_CONFIG.write() = original_config;
+        *PIPELINE_NAME.write() = original_pipeline_name;
+        match original_wal_bytes {
+            Some(value) => std::env::set_var("WAL_BYTES_PER_FILE", value),
+            None => std::env::remove_var("WAL_BYTES_PER_FILE"),
         }
         ENV_CACHE.write().clear();
     }
