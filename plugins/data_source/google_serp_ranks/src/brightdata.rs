@@ -104,12 +104,7 @@ impl BrightDataClient {
                 "Bright Data SERP: requesting parsed results"
             );
 
-            let body = serde_json::json!({
-                "zone": self.zone,
-                "url": search_url,
-                "format": "raw",
-                "data_format": "parsed_light"
-            });
+            let body = Self::serp_api_request_body(&self.zone, &search_url, true);
 
             let endpoint = format!("{}/request", self.api_base.trim_end_matches('/'));
             let response = self
@@ -176,6 +171,40 @@ impl BrightDataClient {
         }))
     }
 
+    fn serp_api_request_body(zone: &str, search_url: &str, parsed_light: bool) -> Value {
+        if parsed_light {
+            serde_json::json!({
+                "zone": zone,
+                "url": search_url,
+                "format": "raw",
+                "data_format": "parsed_light"
+            })
+        } else {
+            // Full JSON (`general.results_cnt`) — URL already carries `brd_json=1`.
+            serde_json::json!({
+                "zone": zone,
+                "url": search_url,
+                "format": "raw",
+            })
+        }
+    }
+
+    async fn post_serp_request(&self, body: &Value) -> Result<(reqwest::StatusCode, String), std::io::Error> {
+        let endpoint = format!("{}/request", self.api_base.trim_end_matches('/'));
+        let response = self
+            .http
+            .post(&endpoint)
+            .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
+            .header(CONTENT_TYPE, "application/json")
+            .json(body)
+            .send()
+            .await
+            .map_err(std::io::Error::other)?;
+        let status = response.status();
+        let raw_text = response.text().await.map_err(std::io::Error::other)?;
+        Ok((status, raw_text))
+    }
+
     pub async fn throttle_delay(&self) {
         tokio::time::sleep(Duration::from_millis(self.config.min_query_interval_ms)).await;
     }
@@ -205,26 +234,9 @@ impl BrightDataClient {
             "Bright Data allintitle: requesting results count"
         );
 
-        let body = serde_json::json!({
-            "zone": self.zone,
-            "url": search_url,
-            "format": "raw",
-            "data_format": "parsed_light"
-        });
+        let body = Self::serp_api_request_body(&self.zone, &search_url, false);
 
-        let endpoint = format!("{}/request", self.api_base.trim_end_matches('/'));
-        let response = self
-            .http
-            .post(&endpoint)
-            .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
-            .header(CONTENT_TYPE, "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(std::io::Error::other)?;
-
-        let status = response.status();
-        let raw_text = response.text().await.map_err(std::io::Error::other)?;
+        let (status, raw_text) = self.post_serp_request(&body).await?;
         if !status.is_success() {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
@@ -239,7 +251,35 @@ impl BrightDataClient {
                 format!("Bright Data allintitle blocked: {reason}"),
             ));
         }
-        Ok(parse_results_cnt(&parsed))
+        if let Some(count) = parse_results_cnt(&parsed) {
+            return Ok(Some(count));
+        }
+
+        // Intermittent empty bodies from Bright Data under hub volume.
+        if raw_text.trim().is_empty() {
+            tokio::time::sleep(Duration::from_millis(750)).await;
+            let (retry_status, retry_text) = self.post_serp_request(&body).await?;
+            if !retry_status.is_success() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!(
+                        "Bright Data HTTP {}: {}",
+                        retry_status,
+                        truncate(&retry_text, 500)
+                    ),
+                ));
+            }
+            let retry_parsed = parse_response_payload(&retry_text)?;
+            if let Some(reason) = detect_blocked(&retry_parsed, &retry_text) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    format!("Bright Data allintitle blocked: {reason}"),
+                ));
+            }
+            return Ok(parse_results_cnt(&retry_parsed));
+        }
+
+        Ok(None)
     }
 }
 
@@ -777,6 +817,28 @@ mod tests {
     fn parse_results_cnt_missing_general() {
         let parsed: Value = serde_json::from_str(r#"{"organic":[]}"#).unwrap();
         assert_eq!(parse_results_cnt(&parsed), None);
+    }
+
+    #[test]
+    fn parsed_light_body_omits_results_cnt_field() {
+        let body = BrightDataClient::serp_api_request_body(
+            "serp_api1",
+            "https://www.google.com/search?q=allintitle%3Apizza&brd_json=1",
+            true,
+        );
+        assert_eq!(body["data_format"], "parsed_light");
+        let light: Value = serde_json::from_str(r#"{"organic":[]}"#).unwrap();
+        assert_eq!(parse_results_cnt(&light), None);
+    }
+
+    #[test]
+    fn allintitle_body_uses_full_json_not_parsed_light() {
+        let body = BrightDataClient::serp_api_request_body(
+            "serp_api1",
+            "https://www.google.com/search?q=allintitle%3Apizza&brd_json=1",
+            false,
+        );
+        assert!(body.get("data_format").is_none());
     }
 
     #[test]
