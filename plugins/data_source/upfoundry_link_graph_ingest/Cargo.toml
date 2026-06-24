@@ -1,6 +1,6 @@
 [package]
 name = "skippr-plugin-data-source-upfoundry-link-graph-ingest"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 
 [[bin]]
@@ -26,6 +26,7 @@ tokio.workspace = true
 tracing = "0.1"
 url = "2.3.1"
 reqwest = { workspace = true }
+sha2 = "0.10"
 
 [package.metadata.skippr-plugin]
 kind = "DataSource"

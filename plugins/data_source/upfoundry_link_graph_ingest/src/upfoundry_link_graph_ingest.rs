@@ -16,13 +16,14 @@ use skippr_runtime_sdk::plugins::{
 use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch};
 use tracing::info;
 
-use crate::cc::{domain_matches, load_url_candidates, CcIndexRequest};
+use crate::cc::{domain_hash, domain_matches, load_url_candidates, CcIndexRequest};
 use crate::config::UpfoundryLinkGraphIngestConfig;
 use crate::live::{fetch_live_html, LiveFetchConfig};
 use crate::ops_store::{
-    put_dim_anchor_parquet_object, put_dim_domain_parquet_object, put_dim_url_parquet_object,
-    put_dim_warc_file_parquet_object, put_edge_parquet_object, put_json_object,
-    put_page_parquet_object, staging_key, DimAnchorRow, DimDomainRow, DimUrlRow, DimWarcFileRow,
+    put_cc_urls_index_parquet_object, put_dim_anchor_parquet_object, put_dim_domain_parquet_object,
+    put_dim_url_parquet_object, put_dim_warc_file_parquet_object, put_edge_parquet_object,
+    put_json_object, put_page_parquet_object, staging_key, DimAnchorRow, DimDomainRow, DimUrlRow,
+    DimWarcFileRow,
 };
 use crate::streams::{all_namespace_contracts, NAMESPACE_AUDIT_SKIP, NAMESPACE_SITE_RUN_DAILY};
 use crate::warc::fetch_warc_html;
@@ -154,10 +155,11 @@ impl DataSource for UpfoundryLinkGraphIngestPlugin {
         let fixture_dir = Self::fixture_dir();
         let fixture_ref = fixture_dir.as_deref();
         let client = Self::s3_client().await?;
+        let root = self.config.corpus_root();
         let web_graph_stats = import_web_graph_priors(
             &client,
             &self.config.ops_bucket,
-            &self.config.corpus_root(),
+            &root,
             self.config.cc_web_graph_uri.as_deref(),
             fixture_ref,
             self.config.cc_web_graph_max_rows,
@@ -169,12 +171,50 @@ impl DataSource for UpfoundryLinkGraphIngestPlugin {
             frontier_domains: &self.config.frontier_domains,
             max_urls: self.config.max_urls_per_run,
             include_subdomains: self.config.include_subdomains,
+            ops_bucket: &self.config.ops_bucket,
+            ops_prefix: &self.config.ops_prefix,
             cc_index_base_uri: &self.config.cc_index_base_uri,
+            cc_urls_index_prefix: &self.config.cc_urls_index_prefix,
+            cc_index_source: &self.config.cc_index_source,
+            cc_direct_index_enabled: self.config.cc_direct_index_enabled,
             crawl_ids: self.config.crawl_ids(),
         })
         .await;
         let index_stats = index_result.stats;
         let candidates = index_result.records;
+        if index_stats.mode == "direct_datafusion_file" && !candidates.is_empty() {
+            for domain in &self.config.frontier_domains {
+                let domain_rows = candidates
+                    .iter()
+                    .filter(|record| {
+                        domain_matches(
+                            &record.url,
+                            &[domain.clone()],
+                            self.config.include_subdomains,
+                        )
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                if domain_rows.is_empty() {
+                    continue;
+                }
+                put_cc_urls_index_parquet_object(
+                    &client,
+                    &self.config.ops_bucket,
+                    &format!(
+                        "{root}{}/domain_hash={}/crawl_id={}/part-direct-{}.parquet",
+                        self.config.cc_urls_index_prefix.trim_matches('/'),
+                        domain_hash(domain),
+                        self.config.cc_crawl_id,
+                        run_date
+                    ),
+                    domain,
+                    &self.config.cc_crawl_id,
+                    &domain_rows,
+                )
+                .await?;
+            }
+        }
 
         let mut edge_rows: Vec<RawEdgeObservation> = Vec::new();
         let mut page_rows: Vec<RawPageFact> = Vec::new();
@@ -472,7 +512,6 @@ impl DataSource for UpfoundryLinkGraphIngestPlugin {
         );
         put_edge_parquet_object(&client, &self.config.ops_bucket, &edge_key, &edge_rows).await?;
         put_page_parquet_object(&client, &self.config.ops_bucket, &page_key, &page_rows).await?;
-        let root = self.config.corpus_root();
         let dim_url_rows = dim_urls.into_values().collect::<Vec<_>>();
         let dim_domain_rows = dim_domains.into_values().collect::<Vec<_>>();
         let dim_anchor_rows = dim_anchors.into_values().collect::<Vec<_>>();
@@ -568,6 +607,34 @@ impl DataSource for UpfoundryLinkGraphIngestPlugin {
             }),
         )
         .await?;
+        for domain in &self.config.frontier_domains {
+            put_json_object(
+                &client,
+                &self.config.ops_bucket,
+                &format!(
+                    "{root}state/cc_index_batch_state/domain_hash={}/crawl_id={}.json",
+                    domain_hash(domain),
+                    self.config.cc_crawl_id
+                ),
+                &json!({
+                    "cc_crawl_id": self.config.cc_crawl_id,
+                    "run_date": run_date,
+                    "frontier_domain": domain,
+                    "domain_hash": domain_hash(domain),
+                    "mode": index_stats.mode,
+                    "batches_attempted": index_stats.batches_attempted,
+                    "batches_failed": index_stats.batches_failed,
+                    "rows_selected": index_stats.rows_selected,
+                    "files_total": index_stats.files_total,
+                    "next_file_index": index_stats.next_file_index,
+                    "index_paths": index_stats.index_paths.clone(),
+                    "errors": index_stats.errors.clone(),
+                    "status": if index_stats.batches_failed == 0 { "complete" } else { "failed" },
+                    "updated_at": Utc::now().to_rfc3339(),
+                }),
+            )
+            .await?;
+        }
         put_json_object(
             &client,
             &self.config.ops_bucket,
@@ -653,6 +720,9 @@ mod tests {
             cc_crawl_id: "CC-MAIN-2025-01".into(),
             cc_crawl_ids: Vec::new(),
             cc_index_base_uri: "s3://commoncrawl/cc-index/table/cc-main/warc".into(),
+            cc_urls_index_prefix: "cc/urls_index".into(),
+            cc_index_source: "local_urls_index".into(),
+            cc_direct_index_enabled: false,
             max_urls_per_run: 100,
             max_links_per_page: 2000,
             monthly_window: 24,

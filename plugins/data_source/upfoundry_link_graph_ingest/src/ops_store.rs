@@ -1,3 +1,4 @@
+use crate::cc::CcUrlRecord;
 use arrow::array::{BooleanArray, Int64Array, RecordBatch, StringArray, UInt32Array, UInt64Array};
 use arrow::datatypes::{DataType, Field, Schema};
 use aws_sdk_s3::primitives::ByteStream;
@@ -364,6 +365,70 @@ pub async fn put_dim_warc_file_parquet_object(
             )),
             Arc::new(StringArray::from_iter_values(
                 rows.iter().map(|r| r.warc_filename.as_str()),
+            )),
+        ],
+    )
+    .map_err(std::io::Error::other)?;
+    put_parquet_object(client, bucket, key, parquet_bytes(batch)?).await
+}
+
+pub async fn put_cc_urls_index_parquet_object(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+    frontier_domain: &str,
+    crawl_id: &str,
+    rows: &[CcUrlRecord],
+) -> Result<(), std::io::Error> {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("frontier_domain", DataType::Utf8, false),
+        Field::new("url", DataType::Utf8, false),
+        Field::new("warc_filename", DataType::Utf8, false),
+        Field::new("warc_record_offset", DataType::Int64, false),
+        Field::new("warc_record_length", DataType::Int64, false),
+        Field::new("fetch_status", DataType::UInt32, true),
+        Field::new("content_mime_type", DataType::Utf8, false),
+        Field::new("fetch_time", DataType::Utf8, false),
+        Field::new("cc_crawl_id", DataType::Utf8, false),
+        Field::new("source", DataType::Utf8, false),
+        Field::new("query_execution_id", DataType::Utf8, false),
+        Field::new("imported_at", DataType::Utf8, false),
+    ]));
+    let imported_at = chrono::Utc::now().to_rfc3339();
+    let batch = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|_| frontier_domain),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.url.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.warc_filename.as_str()),
+            )),
+            Arc::new(Int64Array::from_iter_values(
+                rows.iter().map(|r| r.warc_record_offset),
+            )),
+            Arc::new(Int64Array::from_iter_values(
+                rows.iter().map(|r| r.warc_record_length),
+            )),
+            Arc::new(UInt32Array::from_iter(rows.iter().map(|r| r.fetch_status))),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.content_mime_type.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|r| r.fetch_time.as_str()),
+            )),
+            Arc::new(StringArray::from_iter_values(rows.iter().map(|_| crawl_id))),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|_| "direct_datafusion_file"),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|_| "direct_fallback"),
+            )),
+            Arc::new(StringArray::from_iter_values(
+                rows.iter().map(|_| imported_at.as_str()),
             )),
         ],
     )

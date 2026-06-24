@@ -3,9 +3,11 @@ use serde::{Deserialize, Serialize};
 use arrow::array::{Array, Int32Array, Int64Array, StringArray, UInt32Array, UInt64Array};
 use arrow::record_batch::RecordBatch;
 use aws_credential_types::provider::ProvideCredentials;
+use aws_sdk_s3::Client as S3Client;
 use datafusion::prelude::{ParquetReadOptions, SessionContext};
 use object_store::aws::AmazonS3Builder;
 use object_store::ObjectStore;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use url::Url;
 
@@ -30,6 +32,8 @@ pub struct CcIndexLoadStats {
     pub rows_selected: u32,
     pub batches_attempted: u32,
     pub batches_failed: u32,
+    pub files_total: u32,
+    pub next_file_index: u32,
     pub errors: Vec<String>,
 }
 
@@ -39,7 +43,12 @@ pub struct CcIndexRequest<'a> {
     pub frontier_domains: &'a [String],
     pub max_urls: u32,
     pub include_subdomains: bool,
+    pub ops_bucket: &'a str,
+    pub ops_prefix: &'a str,
     pub cc_index_base_uri: &'a str,
+    pub cc_urls_index_prefix: &'a str,
+    pub cc_index_source: &'a str,
+    pub cc_direct_index_enabled: bool,
     pub crawl_ids: Vec<String>,
 }
 
@@ -102,6 +111,31 @@ fn crawl_index_uri(base_uri: &str, crawl_id: &str) -> String {
     format!("{}/subset=warc/", crawl_root.trim_end_matches('/'))
 }
 
+pub(crate) fn domain_hash(domain: &str) -> String {
+    let digest =
+        Sha256::digest(format!("domain:{}", domain.trim().to_ascii_lowercase()).as_bytes());
+    digest[..16].iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn urls_index_uri(bucket: &str, ops_prefix: &str, urls_index_prefix: &str, domain: &str) -> String {
+    format!(
+        "s3://{}/{}/{}/domain_hash={}/",
+        bucket.trim(),
+        ops_prefix.trim_matches('/'),
+        urls_index_prefix.trim_matches('/'),
+        domain_hash(domain)
+    )
+}
+
+fn batch_state_key(ops_prefix: &str, domain: &str, crawl_id: &str) -> String {
+    format!(
+        "{}/state/cc_index_batch_state/domain_hash={}/crawl_id={}.json",
+        ops_prefix.trim_matches('/'),
+        domain_hash(domain),
+        crawl_id
+    )
+}
+
 fn sql_string(value: &str) -> String {
     format!("'{}'", value.replace('\'', "''"))
 }
@@ -158,7 +192,10 @@ fn i64_value(batch: &RecordBatch, name: &str, row: usize) -> Option<i64> {
     None
 }
 
-async fn register_s3_object_store(ctx: &SessionContext, s3_loc: &str) -> Result<(), std::io::Error> {
+async fn register_s3_object_store(
+    ctx: &SessionContext,
+    s3_loc: &str,
+) -> Result<(), std::io::Error> {
     let url = Url::parse(s3_loc).map_err(|err| std::io::Error::other(err.to_string()))?;
     if url.scheme() != "s3" {
         return Ok(());
@@ -202,6 +239,65 @@ async fn register_s3_object_store(ctx: &SessionContext, s3_loc: &str) -> Result<
     ctx.runtime_env()
         .register_object_store(&endpoint, store_arc);
     Ok(())
+}
+
+async fn s3_prefix_has_objects(s3_loc: &str) -> Result<bool, std::io::Error> {
+    let url = Url::parse(s3_loc).map_err(|err| std::io::Error::other(err.to_string()))?;
+    if url.scheme() != "s3" {
+        return Ok(std::path::Path::new(s3_loc).exists());
+    }
+    let bucket = url
+        .host_str()
+        .ok_or_else(|| std::io::Error::other(format!("missing S3 bucket in {s3_loc}")))?;
+    let prefix = url.path().trim_start_matches('/');
+    let conf = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .load()
+        .await;
+    let client = S3Client::new(&conf);
+    let resp = client
+        .list_objects_v2()
+        .bucket(bucket)
+        .prefix(prefix)
+        .max_keys(1)
+        .send()
+        .await
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    Ok(resp.key_count().unwrap_or_default() > 0)
+}
+
+async fn read_direct_file_cursor(
+    bucket: &str,
+    ops_prefix: &str,
+    domain: &str,
+    crawl_id: &str,
+) -> Result<u32, std::io::Error> {
+    let conf = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .load()
+        .await;
+    let client = S3Client::new(&conf);
+    let resp = match client
+        .get_object()
+        .bucket(bucket)
+        .key(batch_state_key(ops_prefix, domain, crawl_id))
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(_) => return Ok(0),
+    };
+    let bytes = resp
+        .body
+        .collect()
+        .await
+        .map_err(|err| std::io::Error::other(err.to_string()))?
+        .into_bytes();
+    let value = serde_json::from_slice::<serde_json::Value>(&bytes)
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    Ok(value
+        .get("next_file_index")
+        .and_then(|v| v.as_u64())
+        .and_then(|v| u32::try_from(v).ok())
+        .unwrap_or(0))
 }
 
 async fn query_index_path(
@@ -274,6 +370,128 @@ async fn query_index_path(
     Ok(records)
 }
 
+async fn query_local_urls_index_path(
+    path: &str,
+    frontier_domains: &[String],
+    crawl_ids: &[String],
+    limit: u32,
+) -> Result<Vec<CcUrlRecord>, std::io::Error> {
+    let ctx = SessionContext::new();
+    if path.starts_with("s3://") {
+        register_s3_object_store(&ctx, path).await?;
+    }
+    ctx.register_parquet("urls_index", path, ParquetReadOptions::default())
+        .await
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+
+    let domains = frontier_domains
+        .iter()
+        .map(|d| sql_string(&d.to_ascii_lowercase()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let crawls = crawl_ids
+        .iter()
+        .map(|d| sql_string(d))
+        .collect::<Vec<_>>()
+        .join(",");
+    let sql = format!(
+        r#"
+        SELECT
+          url,
+          warc_filename,
+          CAST(warc_record_offset AS BIGINT) AS warc_record_offset,
+          CAST(warc_record_length AS BIGINT) AS warc_record_length,
+          CAST(fetch_status AS BIGINT) AS fetch_status,
+          CAST(content_mime_type AS VARCHAR) AS content_mime_type,
+          CAST(fetch_time AS VARCHAR) AS fetch_time
+        FROM urls_index
+        WHERE lower(frontier_domain) IN ({domains})
+          AND cc_crawl_id IN ({crawls})
+          AND (fetch_status = 200 OR fetch_status IS NULL)
+          AND (content_mime_type LIKE 'text/html%' OR content_mime_type IS NULL)
+        LIMIT {limit}
+        "#
+    );
+    let df = ctx
+        .sql(&sql)
+        .await
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    let batches = df
+        .collect()
+        .await
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    let mut records = Vec::new();
+    for batch in batches {
+        for row in 0..batch.num_rows() {
+            let Some(url) = string_value(&batch, "url", row) else {
+                continue;
+            };
+            let Some(warc_filename) = string_value(&batch, "warc_filename", row) else {
+                continue;
+            };
+            records.push(CcUrlRecord {
+                url,
+                warc_filename,
+                warc_record_offset: i64_value(&batch, "warc_record_offset", row).unwrap_or(0),
+                warc_record_length: i64_value(&batch, "warc_record_length", row).unwrap_or(0),
+                fetch_status: i64_value(&batch, "fetch_status", row).and_then(|value| {
+                    if value >= 0 {
+                        u32::try_from(value).ok()
+                    } else {
+                        None
+                    }
+                }),
+                content_mime_type: string_value(&batch, "content_mime_type", row)
+                    .unwrap_or_else(|| "text/html".into()),
+                fetch_time: string_value(&batch, "fetch_time", row).unwrap_or_default(),
+            });
+        }
+    }
+    Ok(records)
+}
+
+async fn list_parquet_files(path: &str) -> Result<Vec<String>, std::io::Error> {
+    let url = Url::parse(path).map_err(|err| std::io::Error::other(err.to_string()))?;
+    if url.scheme() != "s3" {
+        return Ok(Vec::new());
+    }
+    let bucket = url
+        .host_str()
+        .ok_or_else(|| std::io::Error::other(format!("missing S3 bucket in {path}")))?;
+    let prefix = url.path().trim_start_matches('/');
+    let conf = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .region(aws_config::Region::new("us-east-1"))
+        .load()
+        .await;
+    let client = S3Client::new(&conf);
+    let mut token = None;
+    let mut files = Vec::new();
+    loop {
+        let resp = client
+            .list_objects_v2()
+            .bucket(bucket)
+            .prefix(prefix)
+            .set_continuation_token(token)
+            .send()
+            .await
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        for obj in resp.contents() {
+            let Some(key) = obj.key() else {
+                continue;
+            };
+            if key.ends_with(".parquet") {
+                files.push(format!("s3://{bucket}/{key}"));
+            }
+        }
+        token = resp.next_continuation_token().map(str::to_string);
+        if token.is_none() {
+            break;
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
 /// Load URL candidates from fixtures for tests, or from Common Crawl URL Index Parquet in production.
 pub async fn load_url_candidates(request: CcIndexRequest<'_>) -> CcIndexLoadResult {
     if request.fixture_dir.is_some() {
@@ -293,8 +511,73 @@ pub async fn load_url_candidates(request: CcIndexRequest<'_>) -> CcIndexLoadResu
         };
     }
 
+    if request.cc_index_source == "local_urls_index" {
+        let mut stats = CcIndexLoadStats {
+            mode: "local_urls_index".into(),
+            crawl_ids: request.crawl_ids.clone(),
+            ..Default::default()
+        };
+        let mut records = Vec::new();
+        for domain in request.frontier_domains {
+            if records.len() as u32 >= request.max_urls {
+                break;
+            }
+            let path = urls_index_uri(
+                request.ops_bucket,
+                request.ops_prefix,
+                request.cc_urls_index_prefix,
+                domain,
+            );
+            stats.index_paths.push(path.clone());
+            stats.batches_attempted += 1;
+            match s3_prefix_has_objects(&path).await {
+                Ok(true) => {
+                    let remaining = request.max_urls.saturating_sub(records.len() as u32);
+                    match query_local_urls_index_path(
+                        &path,
+                        request.frontier_domains,
+                        &request.crawl_ids,
+                        remaining,
+                    )
+                    .await
+                    {
+                        Ok(mut batch_records) => records.append(&mut batch_records),
+                        Err(err) => {
+                            stats.batches_failed += 1;
+                            stats.errors.push(format!("{path}: {err}"));
+                        }
+                    }
+                }
+                Ok(false) => {
+                    stats.mode = "local_urls_index_missing".into();
+                    stats
+                        .errors
+                        .push(format!("local URL index not found: {path}"));
+                }
+                Err(err) => {
+                    stats.batches_failed += 1;
+                    stats.errors.push(format!("{path}: {err}"));
+                }
+            }
+        }
+        stats.rows_selected = records.len() as u32;
+        return CcIndexLoadResult { records, stats };
+    }
+
+    if !request.cc_direct_index_enabled {
+        return CcIndexLoadResult {
+            records: Vec::new(),
+            stats: CcIndexLoadStats {
+                mode: "direct_index_disabled".into(),
+                crawl_ids: request.crawl_ids,
+                errors: vec!["direct Common Crawl index scans are disabled".into()],
+                ..Default::default()
+            },
+        };
+    }
+
     let mut stats = CcIndexLoadStats {
-        mode: "datafusion_parquet".into(),
+        mode: "direct_datafusion_file".into(),
         crawl_ids: request.crawl_ids.clone(),
         ..Default::default()
     };
@@ -303,22 +586,52 @@ pub async fn load_url_candidates(request: CcIndexRequest<'_>) -> CcIndexLoadResu
         if records.len() as u32 >= request.max_urls {
             break;
         }
-        let path = crawl_index_uri(request.cc_index_base_uri, crawl_id);
-        stats.index_paths.push(path.clone());
-        stats.batches_attempted += 1;
-        let remaining = request.max_urls.saturating_sub(records.len() as u32);
-        match query_index_path(
-            &path,
-            request.frontier_domains,
-            request.include_subdomains,
-            remaining,
-        )
-        .await
-        {
-            Ok(mut batch_records) => records.append(&mut batch_records),
+        let crawl_path = crawl_index_uri(request.cc_index_base_uri, crawl_id);
+        match list_parquet_files(&crawl_path).await {
+            Ok(files) => {
+                stats.files_total = stats.files_total.saturating_add(files.len() as u32);
+                let cursor_domain = request
+                    .frontier_domains
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("frontier");
+                let start_index = read_direct_file_cursor(
+                    request.ops_bucket,
+                    request.ops_prefix,
+                    cursor_domain,
+                    crawl_id,
+                )
+                .await
+                .unwrap_or(0) as usize;
+                let mut processed_index = start_index;
+                for (idx, path) in files.into_iter().enumerate().skip(start_index).take(1) {
+                    if records.len() as u32 >= request.max_urls {
+                        break;
+                    }
+                    processed_index = idx + 1;
+                    stats.index_paths.push(path.clone());
+                    stats.batches_attempted += 1;
+                    let remaining = request.max_urls.saturating_sub(records.len() as u32);
+                    match query_index_path(
+                        &path,
+                        request.frontier_domains,
+                        request.include_subdomains,
+                        remaining,
+                    )
+                    .await
+                    {
+                        Ok(mut batch_records) => records.append(&mut batch_records),
+                        Err(err) => {
+                            stats.batches_failed += 1;
+                            stats.errors.push(format!("{path}: {err}"));
+                        }
+                    }
+                }
+                stats.next_file_index = processed_index as u32;
+            }
             Err(err) => {
                 stats.batches_failed += 1;
-                stats.errors.push(format!("{path}: {err}"));
+                stats.errors.push(format!("{crawl_path}: {err}"));
             }
         }
     }
@@ -329,7 +642,7 @@ pub async fn load_url_candidates(request: CcIndexRequest<'_>) -> CcIndexLoadResu
 
 #[cfg(test)]
 mod tests {
-    use super::crawl_index_uri;
+    use super::{crawl_index_uri, domain_hash, urls_index_uri};
 
     #[test]
     fn crawl_index_uri_appends_subset_warc_partition() {
@@ -355,6 +668,60 @@ mod tests {
         assert_eq!(
             crawl_index_uri(base, "CC-MAIN-2025-08"),
             "s3://commoncrawl/cc-index/table/cc-main/warc/crawl=CC-MAIN-2025-08/subset=warc/"
+        );
+    }
+
+    #[test]
+    fn urls_index_uri_uses_domain_hash_partition() {
+        assert_eq!(domain_hash("Skippr.io"), domain_hash("skippr.io"),);
+        let uri = urls_index_uri(
+            "bucket",
+            "link-graph-corpus/",
+            "/cc/urls_index",
+            "skippr.io",
+        );
+        assert!(uri.starts_with("s3://bucket/link-graph-corpus/cc/urls_index/domain_hash="));
+        assert!(uri.ends_with('/'));
+    }
+
+    /// Live CC index probe — requires AWS creds with s3:ListBucket/GetObject on commoncrawl.
+    /// Run: AWS_PROFILE=skippr-prod cargo test -p skippr-plugin-data-source-upfoundry-link-graph-ingest query_cc_index_live -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "live Common Crawl S3 query"]
+    async fn query_cc_index_live_skippr_io_single_crawl() {
+        use super::{load_url_candidates, CcIndexRequest};
+        use std::time::Instant;
+
+        let started = Instant::now();
+        let result = load_url_candidates(CcIndexRequest {
+            fixture_dir: None,
+            frontier_domains: &["skippr.io".to_string()],
+            max_urls: 5,
+            include_subdomains: true,
+            ops_bucket: "unused",
+            ops_prefix: "link-graph-corpus",
+            cc_index_base_uri: "s3://commoncrawl/cc-index/table/cc-main/warc",
+            cc_urls_index_prefix: "cc/urls_index",
+            cc_index_source: "direct_datafusion_file",
+            cc_direct_index_enabled: true,
+            crawl_ids: vec!["CC-MAIN-2025-08".to_string()],
+        })
+        .await;
+
+        eprintln!("elapsed_secs={}", started.elapsed().as_secs());
+        eprintln!("stats={:?}", result.stats);
+        for row in &result.records {
+            eprintln!("url={}", row.url);
+        }
+
+        assert_eq!(
+            result.stats.batches_failed, 0,
+            "errors={:?}",
+            result.stats.errors
+        );
+        assert!(
+            result.stats.rows_selected > 0,
+            "expected skippr.io URLs in CC-MAIN-2025-08"
         );
     }
 }

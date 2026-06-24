@@ -20,6 +20,14 @@ fn default_web_graph_max_rows() -> u32 {
     1_000_000
 }
 
+fn default_cc_urls_index_prefix() -> String {
+    "cc/urls_index".into()
+}
+
+fn default_cc_index_source() -> String {
+    "local_urls_index".into()
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UpfoundryLinkGraphIngestConfig {
     /// Ops corpus bucket, e.g. upfoundry-prod-ops
@@ -38,6 +46,15 @@ pub struct UpfoundryLinkGraphIngestConfig {
     /// Common Crawl URL Index Parquet root. Supports `{crawl_id}` replacement.
     #[serde(default = "default_cc_index_base_uri")]
     pub cc_index_base_uri: String,
+    /// Local materialized URL index prefix under ops_prefix.
+    #[serde(default = "default_cc_urls_index_prefix")]
+    pub cc_urls_index_prefix: String,
+    /// Candidate source: local_urls_index (default), fixture, or direct_datafusion_file.
+    #[serde(default = "default_cc_index_source")]
+    pub cc_index_source: String,
+    /// Direct Common Crawl scans are debug/fallback only.
+    #[serde(default)]
+    pub cc_direct_index_enabled: bool,
     #[serde(default = "default_max_urls")]
     pub max_urls_per_run: u32,
     #[serde(default = "default_max_links_per_page")]
@@ -89,6 +106,12 @@ impl UpfoundryLinkGraphIngestConfig {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "monthly_window must be greater than zero",
+            ));
+        }
+        if self.cc_urls_index_prefix.trim().is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "cc_urls_index_prefix must not be empty",
             ));
         }
         if self.cc_web_graph_max_rows == 0 {
