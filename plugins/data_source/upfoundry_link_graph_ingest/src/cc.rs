@@ -2,7 +2,12 @@ use serde::{Deserialize, Serialize};
 
 use arrow::array::{Array, Int32Array, Int64Array, StringArray, UInt32Array, UInt64Array};
 use arrow::record_batch::RecordBatch;
+use aws_credential_types::provider::ProvideCredentials;
 use datafusion::prelude::{ParquetReadOptions, SessionContext};
+use object_store::aws::AmazonS3Builder;
+use object_store::ObjectStore;
+use std::sync::Arc;
+use url::Url;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CcUrlRecord {
@@ -153,6 +158,45 @@ fn i64_value(batch: &RecordBatch, name: &str, row: usize) -> Option<i64> {
     None
 }
 
+async fn register_s3_object_store(ctx: &SessionContext, s3_loc: &str) -> Result<(), std::io::Error> {
+    let url = Url::parse(s3_loc).map_err(|err| std::io::Error::other(err.to_string()))?;
+    if url.scheme() != "s3" {
+        return Ok(());
+    }
+    let bucket = url
+        .host_str()
+        .ok_or_else(|| std::io::Error::other(format!("missing S3 bucket in {s3_loc}")))?;
+    std::env::set_var("AWS_EC2_METADATA_DISABLED", "true");
+    let conf = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .load()
+        .await;
+    if let Some(region) = conf.region().map(|r| r.to_string()) {
+        std::env::set_var("AWS_REGION", &region);
+        std::env::set_var("AWS_DEFAULT_REGION", &region);
+    }
+    if let Some(provider) = conf.credentials_provider() {
+        let creds = provider
+            .provide_credentials()
+            .await
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        std::env::set_var("AWS_ACCESS_KEY_ID", creds.access_key_id());
+        std::env::set_var("AWS_SECRET_ACCESS_KEY", creds.secret_access_key());
+        if let Some(token) = creds.session_token() {
+            std::env::set_var("AWS_SESSION_TOKEN", token);
+        }
+    }
+    let store = AmazonS3Builder::from_env()
+        .with_bucket_name(bucket)
+        .build()
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    let store_arc: Arc<dyn ObjectStore> = Arc::new(store);
+    let endpoint = Url::parse(&format!("s3://{bucket}/"))
+        .map_err(|err| std::io::Error::other(err.to_string()))?;
+    ctx.runtime_env()
+        .register_object_store(&endpoint, store_arc);
+    Ok(())
+}
+
 async fn query_index_path(
     path: &str,
     frontier_domains: &[String],
@@ -160,6 +204,9 @@ async fn query_index_path(
     limit: u32,
 ) -> Result<Vec<CcUrlRecord>, std::io::Error> {
     let ctx = SessionContext::new();
+    if path.starts_with("s3://") {
+        register_s3_object_store(&ctx, path).await?;
+    }
     ctx.register_parquet("cc_index", path, ParquetReadOptions::default())
         .await
         .map_err(|err| std::io::Error::other(err.to_string()))?;

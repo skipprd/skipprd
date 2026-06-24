@@ -1,6 +1,6 @@
 [package]
 name = "skippr-plugin-data-source-upfoundry-link-graph-ingest"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 
 [[bin]]
@@ -11,9 +11,11 @@ path = "src/main.rs"
 arrow.workspace = true
 async-trait.workspace = true
 aws-config = "1.5.1"
+aws-credential-types = "1.2.0"
 aws-sdk-s3 = "1.32.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 datafusion.workspace = true
+object_store.workspace = true
 flate2 = "1.0.25"
 parquet.workspace = true
 serde.workspace = true
@@ -22,6 +24,7 @@ skippr-plugin-shared-link-graph = { path = "../../shared/link_graph" }
 skippr-runtime-sdk.workspace = true
 tokio.workspace = true
 tracing = "0.1"
+url = "2.3.1"
 reqwest = { workspace = true }
 
 [package.metadata.skippr-plugin]
