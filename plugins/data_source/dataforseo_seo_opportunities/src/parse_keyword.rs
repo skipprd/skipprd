@@ -51,12 +51,18 @@ pub fn parse_keyword_suggestion_items(
         let search_volume = info.get("search_volume").and_then(json_u64).unwrap_or(0);
         let cpc = info.get("cpc").and_then(json_f64);
         let competition = info.get("competition").and_then(json_f64);
-        let keyword_difficulty = info
+        let keyword_properties = item
+            .get("keyword_properties")
+            .cloned()
+            .unwrap_or(Value::Null);
+        let keyword_difficulty = keyword_properties
             .get("keyword_difficulty")
+            .or_else(|| info.get("keyword_difficulty"))
             .and_then(json_u64)
             .map(|n| n as u32);
-        let intent = info
+        let intent = item
             .get("search_intent_info")
+            .or_else(|| info.get("search_intent_info"))
             .and_then(|v| v.get("main_intent"))
             .and_then(|v| v.as_str())
             .map(str::to_string);
@@ -196,6 +202,10 @@ mod tests {
         assert_eq!(suggestions.len(), 3);
         assert_eq!(metrics.len(), 3);
         assert_eq!(suggestions[0]["keyword"], "meal planning app free");
+        assert_eq!(suggestions[0]["keyword_difficulty"], 28);
+        assert_eq!(suggestions[0]["intent"], "commercial");
+        assert_eq!(metrics[2]["keyword_difficulty"], 18);
+        assert_eq!(metrics[2]["intent"], "informational");
     }
 
     #[test]

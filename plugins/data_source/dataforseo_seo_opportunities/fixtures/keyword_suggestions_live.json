@@ -21,11 +21,13 @@
               "keyword_info": {
                 "search_volume": 2400,
                 "cpc": 1.25,
-                "competition": 0.42,
-                "keyword_difficulty": 28,
-                "search_intent_info": {
-                  "main_intent": "commercial"
-                }
+                "competition": 0.42
+              },
+              "keyword_properties": {
+                "keyword_difficulty": 28
+              },
+              "search_intent_info": {
+                "main_intent": "commercial"
               },
               "serp_info": {
                 "serp_item_types": ["organic", "people_also_ask", "related_searches"]
@@ -36,11 +38,13 @@
               "keyword_info": {
                 "search_volume": 8100,
                 "cpc": 2.10,
-                "competition": 0.55,
-                "keyword_difficulty": 45,
-                "search_intent_info": {
-                  "main_intent": "commercial"
-                }
+                "competition": 0.55
+              },
+              "keyword_properties": {
+                "keyword_difficulty": 45
+              },
+              "search_intent_info": {
+                "main_intent": "commercial"
               },
               "serp_info": {
                 "serp_item_types": ["organic", "featured_snippet", "people_also_ask"]
@@ -51,11 +55,13 @@
               "keyword_info": {
                 "search_volume": 320,
                 "cpc": 0.45,
-                "competition": 0.12,
-                "keyword_difficulty": 18,
-                "search_intent_info": {
-                  "main_intent": "informational"
-                }
+                "competition": 0.12
+              },
+              "keyword_properties": {
+                "keyword_difficulty": 18
+              },
+              "search_intent_info": {
+                "main_intent": "informational"
               },
               "serp_info": {
                 "serp_item_types": ["organic", "people_also_ask"]
