@@ -191,21 +191,11 @@ async fn register_s3_object_store(ctx: &SessionContext, s3_loc: &str) -> Result<
             std::env::set_var("AWS_SESSION_TOKEN", token);
         }
     }
-    let store = if bucket == "commoncrawl" {
-        // Public dataset; anonymous reads avoid IAM ListBucket on the shared bucket.
-        AmazonS3Builder::new()
-            .with_bucket_name(bucket)
-            .with_region(&region)
-            .with_skip_signature(true)
-            .build()
-            .map_err(|err: object_store::Error| std::io::Error::other(err.to_string()))?
-    } else {
-        AmazonS3Builder::from_env()
-            .with_bucket_name(bucket)
-            .with_region(&region)
-            .build()
-            .map_err(|err: object_store::Error| std::io::Error::other(err.to_string()))?
-    };
+    let store = AmazonS3Builder::from_env()
+        .with_bucket_name(bucket)
+        .with_region(&region)
+        .build()
+        .map_err(|err: object_store::Error| std::io::Error::other(err.to_string()))?;
     let store_arc: Arc<dyn ObjectStore> = Arc::new(store);
     let endpoint = Url::parse(&format!("s3://{bucket}/"))
         .map_err(|err| std::io::Error::other(err.to_string()))?;
