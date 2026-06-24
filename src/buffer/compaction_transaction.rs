@@ -8,6 +8,7 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+use tracing::warn;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum SegmentSourceDescriptor {
@@ -221,6 +222,48 @@ pub fn remove_manifest(id: &str) -> io::Result<()> {
     }
 }
 
+fn load_manifest_file(path: &Path) -> Option<CompactionTransaction> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            warn!(
+                "Compactor: failed to read compaction manifest {:?}: {}",
+                path, err
+            );
+            return None;
+        }
+    };
+    if bytes.is_empty() {
+        warn!(
+            "Compactor: removing empty compaction manifest {:?}",
+            path
+        );
+        if let Err(err) = fs::remove_file(path) {
+            warn!(
+                "Compactor: failed to remove empty compaction manifest {:?}: {}",
+                path, err
+            );
+        }
+        return None;
+    }
+    match serde_json::from_slice::<CompactionTransaction>(&bytes) {
+        Ok(txn) => Some(txn),
+        Err(err) => {
+            warn!(
+                "Compactor: removing corrupt compaction manifest {:?}: {}",
+                path, err
+            );
+            if let Err(remove_err) = fs::remove_file(path) {
+                warn!(
+                    "Compactor: failed to remove corrupt compaction manifest {:?}: {}",
+                    path, remove_err
+                );
+            }
+            None
+        }
+    }
+}
+
 pub fn load_pending_manifests() -> io::Result<Vec<CompactionTransaction>> {
     let dir = manifest_dir();
     if !dir.exists() {
@@ -233,9 +276,9 @@ pub fn load_pending_manifests() -> io::Result<Vec<CompactionTransaction>> {
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let bytes = fs::read(&path)?;
-        let txn =
-            serde_json::from_slice::<CompactionTransaction>(&bytes).map_err(io::Error::other)?;
+        let Some(txn) = load_manifest_file(&path) else {
+            continue;
+        };
         if !matches!(txn.state, CompactionTransactionState::Tombstoned) {
             out.push(txn);
         }
@@ -274,5 +317,59 @@ mod tests {
             deterministic_compaction_id("sink.main", "ns", "schema", WritePolicy::Append, &refs_a),
             deterministic_compaction_id("sink.main", "ns", "schema", WritePolicy::Append, &refs_b)
         );
+    }
+
+    #[test]
+    fn load_pending_manifests_skips_empty_and_corrupt_files() {
+        use crate::helpers::configuration::Config;
+        use std::sync::{Mutex, MutexGuard, OnceLock};
+
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        fn env_lock() -> MutexGuard<'static, ()> {
+            ENV_LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
+        }
+
+        let _guard = env_lock();
+        let temp = tempfile::tempdir().unwrap();
+        let old_data_dir = std::env::var("DATA_DIR").ok();
+        let old_root = std::env::var("SKIPPR_PIPELINE_DATA_ROOT").ok();
+        Config::setenv("DATA_DIR", temp.path().to_str().unwrap());
+        Config::setenv("SKIPPR_PIPELINE_DATA_ROOT", "true");
+
+        let comp_dir = manifest_dir();
+        fs::create_dir_all(&comp_dir).unwrap();
+
+        let good = CompactionTransaction::new(
+            "sink.main".to_string(),
+            "ns".to_string(),
+            "schema".to_string(),
+            WritePolicy::Append,
+            SinkWriteSemantics::AtLeastOnce,
+            vec![ref_for("good", 1)],
+            "out.parquet".to_string(),
+        );
+        persist_manifest(&good).unwrap();
+        fs::write(comp_dir.join("empty.json"), b"").unwrap();
+        fs::write(comp_dir.join("corrupt.json"), b"{not-json").unwrap();
+
+        let loaded = load_pending_manifests().unwrap();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].id, good.id);
+        assert!(!comp_dir.join("empty.json").exists());
+        assert!(!comp_dir.join("corrupt.json").exists());
+        assert!(comp_dir.join(format!("{}.json", good.id)).exists());
+
+        if let Some(value) = old_data_dir {
+            Config::setenv("DATA_DIR", &value);
+        } else {
+            std::env::remove_var("DATA_DIR");
+            Config::set_evncache("DATA_DIR", "");
+        }
+        if let Some(value) = old_root {
+            Config::setenv("SKIPPR_PIPELINE_DATA_ROOT", &value);
+        } else {
+            std::env::remove_var("SKIPPR_PIPELINE_DATA_ROOT");
+            Config::set_evncache("SKIPPR_PIPELINE_DATA_ROOT", "");
+        }
     }
 }
