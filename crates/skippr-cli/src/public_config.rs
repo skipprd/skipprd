@@ -818,6 +818,63 @@ pub enum SourceConfig {
         #[serde(default)]
         request_interval_ms: Option<u64>,
     },
+    #[serde(rename = "upfoundry_backlinks")]
+    UpfoundryBacklinks {
+        site: Option<String>,
+        #[serde(default)]
+        entity_kind: Option<String>,
+        entity_domain: Option<String>,
+        #[serde(default)]
+        primary_domain: Option<String>,
+        #[serde(default)]
+        competitor_name: Option<String>,
+        ops_bucket: Option<String>,
+        #[serde(default)]
+        ops_prefix: Option<String>,
+        #[serde(default)]
+        selected_snapshot_id: Option<String>,
+        #[serde(default)]
+        include_subdomains: Option<bool>,
+    },
+    #[serde(rename = "upfoundry_link_graph_ingest")]
+    UpfoundryLinkGraphIngest {
+        ops_bucket: Option<String>,
+        #[serde(default)]
+        ops_prefix: Option<String>,
+        #[serde(default)]
+        frontier_domains: Option<Vec<String>>,
+        cc_crawl_id: Option<String>,
+        #[serde(default)]
+        max_urls_per_run: Option<u32>,
+        #[serde(default)]
+        max_links_per_page: Option<u32>,
+        #[serde(default)]
+        monthly_window: Option<u32>,
+        #[serde(default)]
+        cc_web_graph_uri: Option<String>,
+        #[serde(default)]
+        cc_web_graph_max_rows: Option<u32>,
+        #[serde(default)]
+        live_crawl_enabled: Option<bool>,
+        #[serde(default)]
+        brightdata_proxy_escalation_enabled: Option<bool>,
+        #[serde(default)]
+        include_subdomains: Option<bool>,
+    },
+    #[serde(rename = "upfoundry_link_graph_compact")]
+    UpfoundryLinkGraphCompact {
+        ops_bucket: Option<String>,
+        #[serde(default)]
+        ops_prefix: Option<String>,
+        #[serde(default)]
+        max_staging_partitions: Option<u32>,
+        #[serde(default)]
+        pagerank_damping: Option<f64>,
+        #[serde(default)]
+        pagerank_max_iterations: Option<u32>,
+        #[serde(default)]
+        spam_model_version: Option<String>,
+    },
     #[serde(rename = "dataforseo_seo_opportunities")]
     DataForSeoSeoOpportunities {
         #[serde(default)]
@@ -1003,6 +1060,13 @@ impl SkipprProjectConfig {
             Some(SourceConfig::AppleSearchAds { .. }) => Some("apple_search_ads"),
             Some(SourceConfig::MetaInstagramAds { .. }) => Some("meta_instagram_ads"),
             Some(SourceConfig::DataForSeoBacklinks { .. }) => Some("dataforseo_backlinks"),
+            Some(SourceConfig::UpfoundryBacklinks { .. }) => Some("upfoundry_backlinks"),
+            Some(SourceConfig::UpfoundryLinkGraphIngest { .. }) => {
+                Some("upfoundry_link_graph_ingest")
+            }
+            Some(SourceConfig::UpfoundryLinkGraphCompact { .. }) => {
+                Some("upfoundry_link_graph_compact")
+            }
             Some(SourceConfig::DataForSeoSeoOpportunities { .. }) => {
                 Some("dataforseo_seo_opportunities")
             }

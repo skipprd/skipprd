@@ -1,0 +1,39 @@
+[package]
+name = "skippr-plugin-data-source-upfoundry-link-graph-ingest"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "skippr-plugin-data-source-upfoundry-link-graph-ingest"
+path = "src/main.rs"
+
+[dependencies]
+arrow.workspace = true
+async-trait.workspace = true
+aws-config = "1.5.1"
+aws-sdk-s3 = "1.32.0"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+datafusion.workspace = true
+flate2 = "1.0.25"
+parquet.workspace = true
+serde.workspace = true
+serde_json = "1.0.85"
+skippr-plugin-shared-link-graph = { path = "../../shared/link_graph" }
+skippr-runtime-sdk.workspace = true
+tokio.workspace = true
+tracing = "0.1"
+reqwest = { workspace = true }
+
+[package.metadata.skippr-plugin]
+kind = "DataSource"
+plugin_name = "UpfoundryLinkGraphIngest"
+
+[package.metadata.skippr-plugin.source_capability]
+name = "UpfoundryLinkGraphIngest"
+guarantee_tier = "IncrementalOnly"
+checkpoint_style = "CursorBased"
+bootstrap_style = "FullScan"
+order_model = "UnsupportedForFinalState"
+supports_deletes = false
+event_id_semantics = "None"
+declares_namespace_contracts = true

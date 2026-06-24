@@ -25,6 +25,9 @@ skipprd = { path = "../.." }
 skippr-runtime-sdk = { path = "../skippr-runtime-sdk" }
 skippr-plugin-data-source-dataforseo-backlinks = { path = "../../plugins/data_source/dataforseo_backlinks" }
 skippr-plugin-data-source-dataforseo-seo-opportunities = { path = "../../plugins/data_source/dataforseo_seo_opportunities" }
+skippr-plugin-data-source-upfoundry-backlinks = { path = "../../plugins/data_source/upfoundry_backlinks" }
+skippr-plugin-data-source-upfoundry-link-graph-ingest = { path = "../../plugins/data_source/upfoundry_link_graph_ingest" }
+skippr-plugin-data-source-upfoundry-link-graph-compact = { path = "../../plugins/data_source/upfoundry_link_graph_compact" }
 
 react-core.workspace = true
 react.workspace = true

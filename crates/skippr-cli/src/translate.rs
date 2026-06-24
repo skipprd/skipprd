@@ -1588,6 +1588,138 @@ pub fn to_internal(
                     }
                     serde_json::Value::Object(m)
                 }
+                SourceConfig::UpfoundryBacklinks {
+                    site,
+                    entity_kind,
+                    entity_domain,
+                    primary_domain,
+                    competitor_name,
+                    ops_bucket,
+                    ops_prefix,
+                    selected_snapshot_id,
+                    include_subdomains,
+                } => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("kind".into(), "upfoundry_backlinks".into());
+                    if let Some(v) = site {
+                        m.insert("site".into(), v.clone().into());
+                        m.insert("name".into(), format!("Upfoundry Backlinks {v}").into());
+                    }
+                    if let Some(v) = entity_kind {
+                        m.insert("entity_kind".into(), v.clone().into());
+                    }
+                    if let Some(v) = entity_domain {
+                        m.insert("entity_domain".into(), v.clone().into());
+                    }
+                    if let Some(v) = primary_domain {
+                        m.insert("primary_domain".into(), v.clone().into());
+                    }
+                    if let Some(v) = competitor_name {
+                        m.insert("competitor_name".into(), v.clone().into());
+                    }
+                    if let Some(v) = ops_bucket {
+                        m.insert("ops_bucket".into(), v.clone().into());
+                    }
+                    if let Some(v) = ops_prefix {
+                        m.insert("ops_prefix".into(), v.clone().into());
+                    }
+                    if let Some(v) = selected_snapshot_id {
+                        m.insert("selected_snapshot_id".into(), v.clone().into());
+                    }
+                    if let Some(v) = include_subdomains {
+                        m.insert("include_subdomains".into(), (*v).into());
+                    }
+                    serde_json::Value::Object(m)
+                }
+                SourceConfig::UpfoundryLinkGraphIngest {
+                    ops_bucket,
+                    ops_prefix,
+                    frontier_domains,
+                    cc_crawl_id,
+                    max_urls_per_run,
+                    max_links_per_page,
+                    monthly_window,
+                    cc_web_graph_uri,
+                    cc_web_graph_max_rows,
+                    live_crawl_enabled,
+                    brightdata_proxy_escalation_enabled,
+                    include_subdomains,
+                } => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("kind".into(), "upfoundry_link_graph_ingest".into());
+                    if let Some(v) = ops_bucket {
+                        m.insert("ops_bucket".into(), v.clone().into());
+                        m.insert("name".into(), "Upfoundry Link Graph Ingest".into());
+                    }
+                    if let Some(v) = ops_prefix {
+                        m.insert("ops_prefix".into(), v.clone().into());
+                    }
+                    if let Some(v) = frontier_domains {
+                        m.insert(
+                            "frontier_domains".into(),
+                            serde_json::to_value(v).unwrap_or_default(),
+                        );
+                    }
+                    if let Some(v) = cc_crawl_id {
+                        m.insert("cc_crawl_id".into(), v.clone().into());
+                    }
+                    if let Some(v) = max_urls_per_run {
+                        m.insert("max_urls_per_run".into(), (*v).into());
+                    }
+                    if let Some(v) = max_links_per_page {
+                        m.insert("max_links_per_page".into(), (*v).into());
+                    }
+                    if let Some(v) = monthly_window {
+                        m.insert("monthly_window".into(), (*v).into());
+                    }
+                    if let Some(v) = cc_web_graph_uri {
+                        m.insert("cc_web_graph_uri".into(), v.clone().into());
+                    }
+                    if let Some(v) = cc_web_graph_max_rows {
+                        m.insert("cc_web_graph_max_rows".into(), (*v).into());
+                    }
+                    if let Some(v) = live_crawl_enabled {
+                        m.insert("live_crawl_enabled".into(), (*v).into());
+                    }
+                    if let Some(v) = brightdata_proxy_escalation_enabled {
+                        m.insert("brightdata_proxy_escalation_enabled".into(), (*v).into());
+                    }
+                    if let Some(v) = include_subdomains {
+                        m.insert("include_subdomains".into(), (*v).into());
+                    }
+                    serde_json::Value::Object(m)
+                }
+                SourceConfig::UpfoundryLinkGraphCompact {
+                    ops_bucket,
+                    ops_prefix,
+                    max_staging_partitions,
+                    pagerank_damping,
+                    pagerank_max_iterations,
+                    spam_model_version,
+                } => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("kind".into(), "upfoundry_link_graph_compact".into());
+                    if let Some(v) = ops_bucket {
+                        m.insert("ops_bucket".into(), v.clone().into());
+                        m.insert("name".into(), "Upfoundry Link Graph Compact".into());
+                    }
+                    if let Some(v) = ops_prefix {
+                        m.insert("ops_prefix".into(), v.clone().into());
+                    }
+                    if let Some(v) = max_staging_partitions {
+                        m.insert("max_staging_partitions".into(), (*v).into());
+                    }
+                    if let Some(v) = pagerank_damping {
+                        m.insert("pagerank_damping".into(), (*v).into());
+                    }
+                    if let Some(v) = pagerank_max_iterations {
+                        m.insert("pagerank_max_iterations".into(), (*v).into());
+                    }
+                    if let Some(v) = spam_model_version {
+                        m.insert("spam_model_version".into(), v.clone().into());
+                    }
+                    serde_json::Value::Object(m)
+                }
                 SourceConfig::DataForSeoSeoOpportunities {
                     login,
                     password,

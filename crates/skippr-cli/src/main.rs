@@ -1314,6 +1314,69 @@ enum SourceKind {
         #[arg(long)]
         request_interval_ms: Option<u64>,
     },
+    /// Upfoundry global backlinks projection from the shared link-graph corpus.
+    UpfoundryBacklinks {
+        #[arg(long)]
+        site: Option<String>,
+        #[arg(long)]
+        entity_kind: Option<String>,
+        #[arg(long)]
+        entity_domain: Option<String>,
+        #[arg(long)]
+        primary_domain: Option<String>,
+        #[arg(long)]
+        competitor_name: Option<String>,
+        #[arg(long)]
+        ops_bucket: Option<String>,
+        #[arg(long)]
+        ops_prefix: Option<String>,
+        #[arg(long)]
+        selected_snapshot_id: Option<String>,
+        #[arg(long)]
+        include_subdomains: Option<bool>,
+    },
+    /// Upfoundry global link-graph ingest from Common Crawl URL Index/WARC.
+    UpfoundryLinkGraphIngest {
+        #[arg(long)]
+        ops_bucket: Option<String>,
+        #[arg(long)]
+        ops_prefix: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        frontier_domains: Option<Vec<String>>,
+        #[arg(long)]
+        cc_crawl_id: Option<String>,
+        #[arg(long)]
+        max_urls_per_run: Option<u32>,
+        #[arg(long)]
+        max_links_per_page: Option<u32>,
+        #[arg(long)]
+        monthly_window: Option<u32>,
+        #[arg(long)]
+        cc_web_graph_uri: Option<String>,
+        #[arg(long)]
+        cc_web_graph_max_rows: Option<u32>,
+        #[arg(long)]
+        live_crawl_enabled: Option<bool>,
+        #[arg(long)]
+        brightdata_proxy_escalation_enabled: Option<bool>,
+        #[arg(long)]
+        include_subdomains: Option<bool>,
+    },
+    /// Upfoundry global link-graph compaction and graph intelligence artifacts.
+    UpfoundryLinkGraphCompact {
+        #[arg(long)]
+        ops_bucket: Option<String>,
+        #[arg(long)]
+        ops_prefix: Option<String>,
+        #[arg(long)]
+        max_staging_partitions: Option<u32>,
+        #[arg(long)]
+        pagerank_damping: Option<f64>,
+        #[arg(long)]
+        pagerank_max_iterations: Option<u32>,
+        #[arg(long)]
+        spam_model_version: Option<String>,
+    },
     /// DataForSEO keyword research (MSV, KD, KGR). SERP rank tracking uses GoogleSerpRanks (Bright Data).
     DataForSeoSeoOpportunities {
         #[arg(long)]
@@ -3070,6 +3133,12 @@ fn u64_json(value: Option<u64>) -> Option<serde_json::Value> {
     value.map(|value| serde_json::Value::Number(value.into()))
 }
 
+fn f64_json(value: Option<f64>) -> Option<serde_json::Value> {
+    value
+        .and_then(serde_json::Number::from_f64)
+        .map(serde_json::Value::Number)
+}
+
 fn i64_json(value: Option<i64>) -> Option<serde_json::Value> {
     value.map(|value| serde_json::Value::Number(value.into()))
 }
@@ -4036,6 +4105,120 @@ fn source_plugin_and_config(kind: SourceKind) -> (&'static str, serde_json::Valu
                 ]),
             )
         }
+        SourceKind::UpfoundryBacklinks {
+            site,
+            entity_kind,
+            entity_domain,
+            primary_domain,
+            competitor_name,
+            ops_bucket,
+            ops_prefix,
+            selected_snapshot_id,
+            include_subdomains,
+        } => (
+            "UpfoundryBacklinks",
+            json_object(vec![
+                ("site", str_json(site)),
+                (
+                    "entity_kind",
+                    str_json(entity_kind.or_else(|| Some("target".to_string()))),
+                ),
+                ("entity_domain", str_json(entity_domain)),
+                ("primary_domain", str_json(primary_domain)),
+                ("competitor_name", str_json(competitor_name)),
+                ("ops_bucket", str_json(ops_bucket)),
+                (
+                    "ops_prefix",
+                    str_json(ops_prefix.or_else(|| Some("link-graph-corpus".to_string()))),
+                ),
+                ("selected_snapshot_id", str_json(selected_snapshot_id)),
+                (
+                    "include_subdomains",
+                    bool_json(include_subdomains.or(Some(true))),
+                ),
+            ]),
+        ),
+        SourceKind::UpfoundryLinkGraphIngest {
+            ops_bucket,
+            ops_prefix,
+            frontier_domains,
+            cc_crawl_id,
+            max_urls_per_run,
+            max_links_per_page,
+            monthly_window,
+            cc_web_graph_uri,
+            cc_web_graph_max_rows,
+            live_crawl_enabled,
+            brightdata_proxy_escalation_enabled,
+            include_subdomains,
+        } => (
+            "UpfoundryLinkGraphIngest",
+            json_object(vec![
+                ("ops_bucket", str_json(ops_bucket)),
+                (
+                    "ops_prefix",
+                    str_json(ops_prefix.or_else(|| Some("link-graph-corpus".to_string()))),
+                ),
+                ("frontier_domains", strings_json(frontier_domains)),
+                ("cc_crawl_id", str_json(cc_crawl_id)),
+                (
+                    "max_urls_per_run",
+                    u32_json(max_urls_per_run.or(Some(1000))),
+                ),
+                (
+                    "max_links_per_page",
+                    u32_json(max_links_per_page.or(Some(2000))),
+                ),
+                ("monthly_window", u32_json(monthly_window.or(Some(24)))),
+                ("cc_web_graph_uri", str_json(cc_web_graph_uri)),
+                (
+                    "cc_web_graph_max_rows",
+                    u32_json(cc_web_graph_max_rows.or(Some(1_000_000))),
+                ),
+                (
+                    "live_crawl_enabled",
+                    bool_json(live_crawl_enabled.or(Some(false))),
+                ),
+                (
+                    "brightdata_proxy_escalation_enabled",
+                    bool_json(brightdata_proxy_escalation_enabled.or(Some(false))),
+                ),
+                (
+                    "include_subdomains",
+                    bool_json(include_subdomains.or(Some(true))),
+                ),
+            ]),
+        ),
+        SourceKind::UpfoundryLinkGraphCompact {
+            ops_bucket,
+            ops_prefix,
+            max_staging_partitions,
+            pagerank_damping,
+            pagerank_max_iterations,
+            spam_model_version,
+        } => (
+            "UpfoundryLinkGraphCompact",
+            json_object(vec![
+                ("ops_bucket", str_json(ops_bucket)),
+                (
+                    "ops_prefix",
+                    str_json(ops_prefix.or_else(|| Some("link-graph-corpus".to_string()))),
+                ),
+                (
+                    "max_staging_partitions",
+                    u32_json(max_staging_partitions.or(Some(100))),
+                ),
+                (
+                    "pagerank_damping",
+                    f64_json(pagerank_damping.or(Some(0.85))),
+                ),
+                (
+                    "pagerank_max_iterations",
+                    u32_json(pagerank_max_iterations.or(Some(50))),
+                ),
+                ("spam_model_version", str_json(spam_model_version)),
+            ]),
+        ),
         SourceKind::DataForSeoSeoOpportunities {
             login,
             password,
@@ -5863,6 +6046,69 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
             max_pages,
             request_interval_ms,
         },
+        SourceKind::UpfoundryBacklinks {
+            site,
+            entity_kind,
+            entity_domain,
+            primary_domain,
+            competitor_name,
+            ops_bucket,
+            ops_prefix,
+            selected_snapshot_id,
+            include_subdomains,
+        } => SourceConfig::UpfoundryBacklinks {
+            site,
+            entity_kind,
+            entity_domain,
+            primary_domain,
+            competitor_name,
+            ops_bucket,
+            ops_prefix,
+            selected_snapshot_id,
+            include_subdomains,
+        },
+        SourceKind::UpfoundryLinkGraphIngest {
+            ops_bucket,
+            ops_prefix,
+            frontier_domains,
+            cc_crawl_id,
+            max_urls_per_run,
+            max_links_per_page,
+            monthly_window,
+            cc_web_graph_uri,
+            cc_web_graph_max_rows,
+            live_crawl_enabled,
+            brightdata_proxy_escalation_enabled,
+            include_subdomains,
+        } => SourceConfig::UpfoundryLinkGraphIngest {
+            ops_bucket,
+            ops_prefix,
+            frontier_domains,
+            cc_crawl_id,
+            max_urls_per_run,
+            max_links_per_page,
+            monthly_window,
+            cc_web_graph_uri,
+            cc_web_graph_max_rows,
+            live_crawl_enabled,
+            brightdata_proxy_escalation_enabled,
+            include_subdomains,
+        },
+        SourceKind::UpfoundryLinkGraphCompact {
+            ops_bucket,
+            ops_prefix,
+            max_staging_partitions,
+            pagerank_damping,
+            pagerank_max_iterations,
+            spam_model_version,
+        } => SourceConfig::UpfoundryLinkGraphCompact {
+            ops_bucket,
+            ops_prefix,
+            max_staging_partitions,
+            pagerank_damping,
+            pagerank_max_iterations,
+            spam_model_version,
+        },
         SourceKind::DataForSeoSeoOpportunities {
             login,
             password,
@@ -5961,6 +6207,9 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         SourceConfig::AppleSearchAds { .. } => "apple_search_ads",
         SourceConfig::MetaInstagramAds { .. } => "meta_instagram_ads",
         SourceConfig::DataForSeoBacklinks { .. } => "dataforseo_backlinks",
+        SourceConfig::UpfoundryBacklinks { .. } => "upfoundry_backlinks",
+        SourceConfig::UpfoundryLinkGraphIngest { .. } => "upfoundry_link_graph_ingest",
+        SourceConfig::UpfoundryLinkGraphCompact { .. } => "upfoundry_link_graph_compact",
         SourceConfig::DataForSeoSeoOpportunities { .. } => "dataforseo_seo_opportunities",
         SourceConfig::HttpClient { .. } => "http_client",
         SourceConfig::HttpServer { .. } => "http_server",
