@@ -84,13 +84,17 @@ fn load_fixture_url_candidates(
 
 fn crawl_index_uri(base_uri: &str, crawl_id: &str) -> String {
     let base = base_uri.trim_end_matches('/');
-    if base.contains("{crawl_id}") {
+    if base.contains("subset=") {
+        return format!("{base}/");
+    }
+    let crawl_root = if base.contains("{crawl_id}") {
         base.replace("{crawl_id}", crawl_id)
     } else if base.ends_with(crawl_id) || base.ends_with(&format!("crawl={crawl_id}")) {
         base.to_string()
     } else {
-        format!("{base}/crawl={crawl_id}/")
-    }
+        format!("{base}/crawl={crawl_id}")
+    };
+    format!("{}/subset=warc/", crawl_root.trim_end_matches('/'))
 }
 
 fn sql_string(value: &str) -> String {
@@ -267,6 +271,38 @@ pub async fn load_url_candidates(request: CcIndexRequest<'_>) -> CcIndexLoadResu
 
     stats.rows_selected = records.len() as u32;
     CcIndexLoadResult { records, stats }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::crawl_index_uri;
+
+    #[test]
+    fn crawl_index_uri_appends_subset_warc_partition() {
+        let base = "s3://commoncrawl/cc-index/table/cc-main/warc";
+        assert_eq!(
+            crawl_index_uri(base, "CC-MAIN-2025-08"),
+            "s3://commoncrawl/cc-index/table/cc-main/warc/crawl=CC-MAIN-2025-08/subset=warc/"
+        );
+    }
+
+    #[test]
+    fn crawl_index_uri_honors_crawl_id_placeholder() {
+        let base = "s3://commoncrawl/cc-index/table/cc-main/warc/crawl={crawl_id}";
+        assert_eq!(
+            crawl_index_uri(base, "CC-MAIN-2024-51"),
+            "s3://commoncrawl/cc-index/table/cc-main/warc/crawl=CC-MAIN-2024-51/subset=warc/"
+        );
+    }
+
+    #[test]
+    fn crawl_index_uri_preserves_explicit_subset() {
+        let base = "s3://commoncrawl/cc-index/table/cc-main/warc/crawl=CC-MAIN-2025-08/subset=warc";
+        assert_eq!(
+            crawl_index_uri(base, "CC-MAIN-2025-08"),
+            "s3://commoncrawl/cc-index/table/cc-main/warc/crawl=CC-MAIN-2025-08/subset=warc/"
+        );
+    }
 }
 
 pub fn domain_matches(url: &str, frontier_domains: &[String], include_subdomains: bool) -> bool {

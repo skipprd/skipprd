@@ -391,7 +391,8 @@ pub async fn put_json_object(
 }
 
 pub fn staging_key(prefix: &str, kind: &str, crawl_id: &str, run_date: &str, shard: u32) -> String {
+    let base = prefix.trim_end_matches('/');
     format!(
-        "{prefix}/raw/staging/{kind}/crawl_id={crawl_id}/date={run_date}/shard={shard:04}/part-00000.parquet"
+        "{base}/raw/staging/{kind}/crawl_id={crawl_id}/date={run_date}/shard={shard:04}/part-00000.parquet"
     )
 }
