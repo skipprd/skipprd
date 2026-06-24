@@ -179,6 +179,83 @@ impl BrightDataClient {
     pub async fn throttle_delay(&self) {
         tokio::time::sleep(Duration::from_millis(self.config.min_query_interval_ms)).await;
     }
+
+    /// Fetch `allintitle:{keyword}` and return Google's reported result count.
+    pub async fn fetch_allintitle_count(
+        &self,
+        keyword: &str,
+    ) -> Result<Option<u64>, std::io::Error> {
+        let device = if self.config.device == SerpDevice::Mobile {
+            SerpDevice::Mobile
+        } else {
+            SerpDevice::Desktop
+        };
+        let query = format!("allintitle:{keyword}");
+        let search_url = build_search_url(
+            &query,
+            &self.config.country,
+            &self.config.language,
+            device,
+            0,
+        );
+        info!(
+            keyword = %keyword,
+            zone = %self.zone,
+            search_url = %search_url,
+            "Bright Data allintitle: requesting results count"
+        );
+
+        let body = serde_json::json!({
+            "zone": self.zone,
+            "url": search_url,
+            "format": "raw",
+            "data_format": "parsed_light"
+        });
+
+        let endpoint = format!("{}/request", self.api_base.trim_end_matches('/'));
+        let response = self
+            .http
+            .post(&endpoint)
+            .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
+            .header(CONTENT_TYPE, "application/json")
+            .json(&body)
+            .send()
+            .await
+            .map_err(std::io::Error::other)?;
+
+        let status = response.status();
+        let raw_text = response.text().await.map_err(std::io::Error::other)?;
+        if !status.is_success() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Bright Data HTTP {}: {}", status, truncate(&raw_text, 500)),
+            ));
+        }
+
+        let parsed = parse_response_payload(&raw_text)?;
+        if let Some(reason) = detect_blocked(&parsed, &raw_text) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("Bright Data allintitle blocked: {reason}"),
+            ));
+        }
+        Ok(parse_results_cnt(&parsed))
+    }
+}
+
+/// Parse Bright Data `general.results_cnt` (allintitle total).
+pub fn parse_results_cnt(parsed: &Value) -> Option<u64> {
+    parsed
+        .get("general")
+        .and_then(|g| g.get("results_cnt"))
+        .and_then(json_u64)
+}
+
+fn json_u64(value: &Value) -> Option<u64> {
+    value
+        .as_u64()
+        .or_else(|| value.as_i64().and_then(|n| u64::try_from(n).ok()))
+        .or_else(|| value.as_f64().map(|n| n as u64))
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -690,6 +767,19 @@ mod tests {
     use crate::config::{SerpDevice, TargetEntry};
 
     #[test]
+    fn parse_results_cnt_from_fixture() {
+        let raw = include_str!("../fixtures/allintitle_brightdata.json");
+        let parsed: Value = serde_json::from_str(raw).unwrap();
+        assert_eq!(parse_results_cnt(&parsed), Some(42));
+    }
+
+    #[test]
+    fn parse_results_cnt_missing_general() {
+        let parsed: Value = serde_json::from_str(r#"{"organic":[]}"#).unwrap();
+        assert_eq!(parse_results_cnt(&parsed), None);
+    }
+
+    #[test]
     fn build_search_url_includes_gl_and_brd_json() {
         let url = build_search_url("pizza", "us", "en", SerpDevice::Desktop, 0);
         assert!(url.contains("q=pizza"));
@@ -763,6 +853,10 @@ mod tests {
             user_agent: None,
             brightdata_zone: Some("serp_api1".into()),
             brightdata_api_base: None,
+            include_allintitle: false,
+            allintitle_keywords: vec![],
+            allintitle_only: false,
+            max_allintitle_queries_per_run: None,
         };
         let result = build_success_result(&job, "sha256:test".into(), &parsed, &cfg, 0);
         assert_eq!(result.status, "ok");

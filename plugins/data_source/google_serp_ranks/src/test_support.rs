@@ -34,6 +34,10 @@ pub fn sample_config() -> DataSourceGoogleSerpRanksPluginConfig {
         user_agent: None,
         brightdata_zone: Some("serp_api1".into()),
         brightdata_api_base: None,
+        include_allintitle: false,
+        allintitle_keywords: vec![],
+        allintitle_only: false,
+        max_allintitle_queries_per_run: None,
     }
 }
 

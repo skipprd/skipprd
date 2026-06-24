@@ -13,14 +13,15 @@ use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch};
 use tracing::{info, warn};
 
+use crate::allintitle::build_allintitle_row;
 use crate::checkpoint::{
     load_query_checkpoint, should_skip_query_today, store_query_checkpoint, QueryCheckpoint,
     QueryTerminalStatus,
 };
 use crate::config::DataSourceGoogleSerpRanksPluginConfig;
 use crate::streams::{
-    active_namespaces, namespace_contract, NAMESPACE_RESULT_DAILY, NAMESPACE_RUN_DAILY,
-    NAMESPACE_TARGET_RANK_DAILY,
+    active_namespaces, namespace_contract, NAMESPACE_ALLINTITLE_DAILY, NAMESPACE_RESULT_DAILY,
+    NAMESPACE_RUN_DAILY, NAMESPACE_TARGET_RANK_DAILY,
 };
 use crate::worker::{build_job_request, WorkerClient, WorkerJobResult};
 
@@ -187,35 +188,46 @@ impl DataSourceGoogleSerpRanksPlugin {
             })
             .collect()
     }
-}
 
-#[async_trait]
-impl DataSource for DataSourceGoogleSerpRanksPlugin {
-    fn execution_contract(&self) -> SourceExecutionContract {
-        SourceExecutionContract::stream(SourceOnceContract::Finite)
-    }
-
-    fn source_namespace_contracts(&self) -> Vec<SourceNamespaceContract> {
-        active_namespaces(self.config.capture_results)
-            .into_iter()
-            .map(|ns| namespace_contract(ns))
-            .inspect(|c| {
-                c.validate()
-                    .expect("invalid google_serp_ranks namespace contract");
-            })
-            .collect()
-    }
-
-    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
-        self.config.validate()?;
-        for contract in self.source_namespace_contracts() {
-            contract
-                .validate()
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+    async fn sync_allintitle(
+        &self,
+        ctx: &dyn SourceSyncContext,
+        worker: &WorkerClient,
+        run_date: &str,
+    ) -> Result<(), std::io::Error> {
+        let site = self.config.primary_site();
+        let keywords = self.config.allintitle_keywords_for_run();
+        let mut rows = Vec::new();
+        for keyword in &keywords {
+            info!(keyword = %keyword, "Google SERP allintitle: fetching results count");
+            let count = match worker.fetch_allintitle_count(keyword).await {
+                Ok(count) => count,
+                Err(err) => {
+                    warn!(keyword = %keyword, error = %err, "Google SERP allintitle: fetch failed");
+                    None
+                }
+            };
+            rows.push(build_allintitle_row(
+                &site,
+                run_date,
+                keyword,
+                count,
+                &self.config.country,
+                &self.config.language,
+                self.config.device.as_str(),
+            ));
+            worker.throttle_delay().await;
         }
+        self.submit_namespace(ctx, NAMESPACE_ALLINTITLE_DAILY, run_date, rows)
+    }
 
-        let discover = runtime_is_discover_mode();
-        let run_date = self.run_date();
+    async fn sync_organic(
+        &self,
+        ctx: &dyn SourceSyncContext,
+        discover: bool,
+        run_date: &str,
+        worker: &WorkerClient,
+    ) -> Result<(), std::io::Error> {
         let keywords = self.config.queries_for_run(discover);
         let max_depth = self.config.effective_max_depth(discover);
         let targets = if discover {
@@ -235,7 +247,6 @@ impl DataSource for DataSourceGoogleSerpRanksPlugin {
             );
         }
 
-        let worker = WorkerClient::new(self.config.clone())?;
         let mut run_rows = Vec::new();
         let mut target_rows = Vec::new();
         let mut result_rows = Vec::new();
@@ -246,7 +257,7 @@ impl DataSource for DataSourceGoogleSerpRanksPlugin {
                 None
             } else {
                 load_query_checkpoint(
-                    ctx.as_ref(),
+                    ctx,
                     keyword,
                     &self.config.country,
                     &self.config.language,
@@ -256,13 +267,13 @@ impl DataSource for DataSourceGoogleSerpRanksPlugin {
             if !discover
                 && should_skip_query_today(
                     prior.as_ref(),
-                    &run_date,
+                    run_date,
                     self.config.force_refresh_today,
                 )
             {
                 info!(keyword = %keyword, "Google SERP: skipping query already checked today");
                 run_rows.push(self.run_daily_row(
-                    &run_date,
+                    run_date,
                     keyword,
                     &WorkerJobResult {
                         job_id: String::new(),
@@ -309,10 +320,10 @@ impl DataSource for DataSourceGoogleSerpRanksPlugin {
                 "Google SERP: query job finished"
             );
 
-            run_rows.push(self.run_daily_row(&run_date, keyword, &result, elapsed_ms, false));
-            target_rows.extend(self.target_rank_rows(&run_date, keyword, &result));
+            run_rows.push(self.run_daily_row(run_date, keyword, &result, elapsed_ms, false));
+            target_rows.extend(self.target_rank_rows(run_date, keyword, &result));
             if self.config.capture_results {
-                result_rows.extend(self.result_daily_rows(&run_date, keyword, &result));
+                result_rows.extend(self.result_daily_rows(run_date, keyword, &result));
             }
 
             queries_run += 1;
@@ -330,13 +341,13 @@ impl DataSource for DataSourceGoogleSerpRanksPlugin {
                     .filter_map(|row| row.page_start)
                     .min();
                 let checkpoint = QueryCheckpoint {
-                    run_date: run_date.clone(),
+                    run_date: run_date.to_string(),
                     status: Self::terminal_status(&result),
                     last_position: best_position,
                     last_page_start: best_page_start,
                 };
                 store_query_checkpoint(
-                    ctx.as_ref(),
+                    ctx,
                     keyword,
                     &self.config.country,
                     &self.config.language,
@@ -356,23 +367,65 @@ impl DataSource for DataSourceGoogleSerpRanksPlugin {
             worker.throttle_delay().await;
         }
 
-        self.submit_namespace(ctx.as_ref(), NAMESPACE_RUN_DAILY, &run_date, run_rows)?;
-        self.submit_namespace(
-            ctx.as_ref(),
-            NAMESPACE_TARGET_RANK_DAILY,
-            &run_date,
-            target_rows,
-        )?;
+        self.submit_namespace(ctx, NAMESPACE_RUN_DAILY, run_date, run_rows)?;
+        self.submit_namespace(ctx, NAMESPACE_TARGET_RANK_DAILY, run_date, target_rows)?;
         if self.config.capture_results {
-            self.submit_namespace(ctx.as_ref(), NAMESPACE_RESULT_DAILY, &run_date, result_rows)?;
+            self.submit_namespace(ctx, NAMESPACE_RESULT_DAILY, run_date, result_rows)?;
         }
 
         info!(
             run_date = %run_date,
             queries_run,
             keywords_total = keywords.len(),
-            "Google SERP sync complete"
+            "Google SERP organic sync complete"
         );
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl DataSource for DataSourceGoogleSerpRanksPlugin {
+    fn execution_contract(&self) -> SourceExecutionContract {
+        SourceExecutionContract::stream(SourceOnceContract::Finite)
+    }
+
+    fn source_namespace_contracts(&self) -> Vec<SourceNamespaceContract> {
+        active_namespaces(
+            self.config.capture_results,
+            self.config.include_allintitle,
+        )
+        .into_iter()
+        .map(|ns| namespace_contract(ns))
+        .inspect(|c| {
+            c.validate()
+                .expect("invalid google_serp_ranks namespace contract");
+        })
+        .collect()
+    }
+
+    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
+        self.config.validate()?;
+        for contract in self.source_namespace_contracts() {
+            contract
+                .validate()
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+
+        let discover = runtime_is_discover_mode();
+        let run_date = self.run_date();
+        let worker = WorkerClient::new(self.config.clone())?;
+
+        if !self.config.allintitle_only {
+            self.sync_organic(ctx.as_ref(), discover, &run_date, &worker)
+                .await?;
+        }
+
+        if self.config.include_allintitle {
+            self.sync_allintitle(ctx.as_ref(), &worker, &run_date)
+                .await?;
+        }
+
+        info!(run_date = %run_date, "Google SERP sync complete");
         Ok(())
     }
 }
@@ -406,7 +459,8 @@ mod tests {
         load_query_checkpoint, store_query_checkpoint, QueryCheckpoint, QueryTerminalStatus,
     };
     use crate::streams::{
-        NAMESPACE_RESULT_DAILY, NAMESPACE_RUN_DAILY, NAMESPACE_TARGET_RANK_DAILY,
+        NAMESPACE_ALLINTITLE_DAILY, NAMESPACE_RESULT_DAILY, NAMESPACE_RUN_DAILY,
+        NAMESPACE_TARGET_RANK_DAILY,
     };
     use crate::test_support::{
         clear_fixture_dir, sample_config, set_fixture_dir, RecordingSyncContext,
@@ -482,6 +536,29 @@ mod tests {
             }),
             QueryTerminalStatus::Error
         ));
+    }
+
+    #[tokio::test]
+    async fn happy_allintitle_only_emits_allintitle_rows() {
+        let _guard = env_lock();
+        set_fixture_dir();
+        std::env::remove_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV);
+
+        let mut cfg = sample_config();
+        cfg.allintitle_only = true;
+        cfg.include_allintitle = true;
+        cfg.allintitle_keywords = vec!["meal planning app free".into()];
+        let mut plugin = DataSourceGoogleSerpRanksPlugin::new(cfg).unwrap();
+        let ctx = Arc::new(RecordingSyncContext::default());
+        plugin.sync(ctx.clone()).await.expect("sync");
+
+        assert!(ctx.rows_for_namespace(NAMESPACE_RUN_DAILY).is_empty());
+        let allintitle = ctx.rows_for_namespace(NAMESPACE_ALLINTITLE_DAILY);
+        assert_eq!(allintitle.len(), 1);
+        assert_eq!(allintitle[0]["allintitle_count"], 42);
+        assert_eq!(allintitle[0]["query_status"], "ok");
+
+        clear_fixture_dir();
     }
 
     #[tokio::test]

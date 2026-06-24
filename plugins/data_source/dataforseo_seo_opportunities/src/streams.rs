@@ -13,7 +13,6 @@ pub const NAMESPACE_COMPETITOR_KEYWORD_DAILY: &str =
     "dataforseo_seo_opportunities.competitor_keyword_daily";
 pub const NAMESPACE_COMPETITOR_SITEMAP_URL_DAILY: &str =
     "dataforseo_seo_opportunities.competitor_sitemap_url_daily";
-pub const NAMESPACE_ALLINTITLE_DAILY: &str = "dataforseo_seo_opportunities.allintitle_daily";
 pub const NAMESPACE_RANK_TRACKING_DAILY: &str = "dataforseo_seo_opportunities.rank_tracking_daily";
 pub const NAMESPACE_AI_CITATION_OPPORTUNITY_DAILY: &str =
     "dataforseo_seo_opportunities.ai_citation_opportunity_daily";
@@ -32,7 +31,6 @@ pub const ALL_NAMESPACES: &[&str] = &[
     NAMESPACE_KEYWORD_CLUSTER_DAILY,
     NAMESPACE_COMPETITOR_KEYWORD_DAILY,
     NAMESPACE_COMPETITOR_SITEMAP_URL_DAILY,
-    NAMESPACE_ALLINTITLE_DAILY,
     NAMESPACE_RANK_TRACKING_DAILY,
     NAMESPACE_AI_CITATION_OPPORTUNITY_DAILY,
     NAMESPACE_CONTENT_BRIEF_DAILY,

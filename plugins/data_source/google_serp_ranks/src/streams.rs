@@ -5,11 +5,15 @@ use skippr_runtime_sdk::plugins::source_contract::{
 pub const NAMESPACE_RUN_DAILY: &str = "google_serp_ranks.run_daily";
 pub const NAMESPACE_TARGET_RANK_DAILY: &str = "google_serp_ranks.target_rank_daily";
 pub const NAMESPACE_RESULT_DAILY: &str = "google_serp_ranks.result_daily";
+pub const NAMESPACE_ALLINTITLE_DAILY: &str = "google_serp_ranks.allintitle_daily";
 
-pub fn active_namespaces(capture_results: bool) -> Vec<&'static str> {
+pub fn active_namespaces(capture_results: bool, include_allintitle: bool) -> Vec<&'static str> {
     let mut out = vec![NAMESPACE_RUN_DAILY, NAMESPACE_TARGET_RANK_DAILY];
     if capture_results {
         out.push(NAMESPACE_RESULT_DAILY);
+    }
+    if include_allintitle {
+        out.push(NAMESPACE_ALLINTITLE_DAILY);
     }
     out
 }
@@ -66,6 +70,23 @@ pub fn namespace_contract(namespace: &str) -> SourceNamespaceContract {
             description: "Organic SERP results captured during rank checks".into(),
             semantics: Some(SourceSemantics::MutableReport),
         },
+        NAMESPACE_ALLINTITLE_DAILY => SourceNamespaceContract {
+            namespace: namespace.to_string(),
+            primary_key: vec![
+                FieldPath::single("site"),
+                FieldPath::single("keyword"),
+                FieldPath::single("country"),
+                FieldPath::single("language"),
+                FieldPath::single("device"),
+                FieldPath::single("run_date"),
+            ],
+            cursor: Some(FieldPath::single("run_date")),
+            partition_key: vec![FieldPath::single("run_date")],
+            write_policy: WritePolicy::ReplacePartition,
+            refresh_window: None,
+            description: "Allintitle counts and KGR inputs from Bright Data".into(),
+            semantics: Some(SourceSemantics::MutableReport),
+        },
         other => panic!("unknown google_serp_ranks namespace: {other}"),
     }
 }
@@ -76,15 +97,16 @@ mod tests {
 
     #[test]
     fn contracts_validate() {
-        for ns in active_namespaces(true) {
+        for ns in active_namespaces(true, true) {
             namespace_contract(ns).validate().expect("valid contract");
         }
     }
 
     #[test]
     fn result_namespace_optional() {
-        let without = active_namespaces(false);
+        let without = active_namespaces(false, false);
         assert_eq!(without.len(), 2);
         assert!(!without.contains(&NAMESPACE_RESULT_DAILY));
+        assert!(!without.contains(&NAMESPACE_ALLINTITLE_DAILY));
     }
 }

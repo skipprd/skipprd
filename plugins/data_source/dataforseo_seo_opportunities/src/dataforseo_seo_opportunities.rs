@@ -20,7 +20,6 @@ use crate::client::DataForSeoClient;
 use crate::cluster::cluster_keywords_by_serp_overlap;
 use crate::config::{DataForSeoSeoOpportunitiesPluginConfig, StreamKind};
 use crate::content_brief::build_content_brief;
-use crate::parse_allintitle::parse_allintitle_result;
 use crate::parse_competitor::{
     parse_ranked_keyword_items, parse_sitemap_urls, CompetitorKeywordContext,
 };
@@ -28,8 +27,7 @@ use crate::parse_keyword::{parse_keyword_suggestion_items, parse_seed_rows, Keyw
 use crate::parse_serp::{compute_weak_spots, parse_serp_items, SerpParseContext};
 use crate::scoring::{compute_opportunity_score, OpportunityInputs};
 use crate::streams::{
-    NAMESPACE_AI_CITATION_OPPORTUNITY_DAILY, NAMESPACE_ALLINTITLE_DAILY,
-    NAMESPACE_COMPETITOR_KEYWORD_DAILY, NAMESPACE_COMPETITOR_SITEMAP_URL_DAILY,
+    NAMESPACE_AI_CITATION_OPPORTUNITY_DAILY, NAMESPACE_COMPETITOR_KEYWORD_DAILY, NAMESPACE_COMPETITOR_SITEMAP_URL_DAILY,
     NAMESPACE_CONTENT_BRIEF_DAILY, NAMESPACE_KEYWORD_CLUSTER_DAILY, NAMESPACE_KEYWORD_METRIC_DAILY,
     NAMESPACE_KEYWORD_SUGGESTION_DAILY, NAMESPACE_OPPORTUNITY_SCORE_DAILY,
     NAMESPACE_RANK_TRACKING_DAILY, NAMESPACE_SEED_KEYWORD_DAILY, NAMESPACE_SERP_FEATURE_DAILY,
@@ -71,8 +69,6 @@ struct KeywordRunState {
     pub forum_count: u32,
     pub ugc_count: u32,
     pub low_authority_count: u32,
-    pub kgr: Option<f64>,
-    pub allintitle_count: Option<u64>,
     pub own_rank: Option<u32>,
     pub serp_features: Vec<Value>,
     pub serp_results: Vec<Value>,
@@ -214,10 +210,6 @@ impl DataForSeoSeoOpportunitiesPlugin {
                     run_date.clone(),
                 ],
                 "Competitor sitemap URLs",
-            ),
-            NAMESPACE_ALLINTITLE_DAILY => (
-                vec![site.clone(), keyword.clone(), run_date.clone()],
-                "Allintitle and KGR metrics",
             ),
             NAMESPACE_RANK_TRACKING_DAILY => (
                 vec![
@@ -373,36 +365,6 @@ impl DataForSeoSeoOpportunitiesPlugin {
         }
         stats.tasks_ok += 1;
         Ok((task_result.items, task_result.result_body))
-    }
-
-    async fn fetch_allintitle(
-        &self,
-        keyword: &str,
-        stats: &mut RunStats,
-    ) -> Result<Option<Value>, std::io::Error> {
-        let query = format!("allintitle:{keyword}");
-        let task = json!({
-            "keyword": query,
-            "location_code": self.config.location_code,
-            "language_code": self.config.language_code,
-            "device": self.device_str(),
-            "depth": 1,
-        });
-        let response = self
-            .client
-            .post_serp_organic_advanced_live(vec![task], "allintitle_serp_live")
-            .await?;
-        stats.total_api_cost_usd += response.top_level_cost;
-        let Some(task_result) = response.tasks.into_iter().next() else {
-            return Ok(None);
-        };
-        stats.total_api_cost_usd += task_result.task_cost;
-        if !task_result.task_ok {
-            stats.tasks_error += 1;
-            return Ok(None);
-        }
-        stats.tasks_ok += 1;
-        Ok(task_result.result_body)
     }
 
     async fn fetch_competitor_keywords(
@@ -584,11 +546,6 @@ impl DataSource for DataForSeoSeoOpportunitiesPlugin {
         );
         add(
             &mut namespaces,
-            NAMESPACE_ALLINTITLE_DAILY,
-            self.config.stream_enabled(StreamKind::Allintitle),
-        );
-        add(
-            &mut namespaces,
             NAMESPACE_RANK_TRACKING_DAILY,
             self.config.stream_enabled(StreamKind::RankTracking),
         );
@@ -644,7 +601,6 @@ impl DataSource for DataForSeoSeoOpportunitiesPlugin {
         let mut serp_result_rows = Vec::new();
         let mut serp_feature_rows = Vec::new();
         let mut weak_spot_rows = Vec::new();
-        let mut allintitle_rows = Vec::new();
         let mut opportunity_rows = Vec::new();
         let mut ai_citation_rows = Vec::new();
         let mut rank_tracking_rows = Vec::new();
@@ -841,33 +797,6 @@ impl DataSource for DataForSeoSeoOpportunitiesPlugin {
                 }
             }
 
-            if self.config.stream_enabled(StreamKind::Allintitle)
-                && self.config.scoring.include_allintitle
-            {
-                if let Some(result_body) = self.fetch_allintitle(keyword, &mut stats).await? {
-                    let volume = keyword_states
-                        .get(keyword)
-                        .map(|s| s.search_volume)
-                        .unwrap_or(0);
-                    let row = parse_allintitle_result(
-                        &result_body,
-                        &self.site,
-                        &run_date,
-                        keyword,
-                        volume,
-                        self.config.location_code,
-                        &self.config.language_code,
-                        self.device_str(),
-                    );
-                    if let Some(state) = keyword_states.get_mut(keyword) {
-                        state.kgr = row.get("kgr").and_then(|v| v.as_f64());
-                        state.allintitle_count =
-                            row.get("allintitle_count").and_then(|v| v.as_u64());
-                    }
-                    allintitle_rows.push(row);
-                }
-            }
-
             if self.config.stream_enabled(StreamKind::OpportunityScores) {
                 if let Some(state) = keyword_states.get(keyword) {
                     let ai_score = ai_citation_score_from_features(
@@ -886,8 +815,6 @@ impl DataSource for DataForSeoSeoOpportunitiesPlugin {
                         low_authority_count: state.low_authority_count,
                         is_question: state.is_question,
                         intent: state.intent.clone(),
-                        kgr: state.kgr,
-                        allintitle_count: state.allintitle_count,
                         own_rank: state.own_rank,
                         has_matching_page: state.own_rank.is_some(),
                         ai_citation_score: ai_score,
@@ -1019,12 +946,6 @@ impl DataSource for DataForSeoSeoOpportunitiesPlugin {
             StreamKind::WeakSpots.as_str(),
             NAMESPACE_WEAK_SPOT_DAILY,
             weak_spot_rows,
-            &mut stats,
-        )?;
-        submit(
-            StreamKind::Allintitle.as_str(),
-            NAMESPACE_ALLINTITLE_DAILY,
-            allintitle_rows,
             &mut stats,
         )?;
         submit(
@@ -1248,12 +1169,11 @@ mod tests {
             .into_iter()
             .map(|c| c.namespace)
             .collect();
-        assert!(namespaces.contains(&NAMESPACE_ALLINTITLE_DAILY.to_string()));
         assert!(namespaces.contains(&NAMESPACE_OPPORTUNITY_SCORE_DAILY.to_string()));
         assert!(!namespaces.contains(&NAMESPACE_SERP_RESULT_DAILY.to_string()));
         assert!(!namespaces.contains(&NAMESPACE_WEAK_SPOT_DAILY.to_string()));
         assert!(!namespaces.contains(&NAMESPACE_COMPETITOR_SITEMAP_URL_DAILY.to_string()));
-        assert_eq!(namespaces.len(), 6);
+        assert_eq!(namespaces.len(), 5);
         clear_fixture_env();
     }
 
@@ -1268,9 +1188,8 @@ mod tests {
             .into_iter()
             .map(|c| c.namespace)
             .collect();
-        assert_eq!(namespaces.len(), 15);
+        assert_eq!(namespaces.len(), 14);
         assert!(namespaces.contains(&NAMESPACE_COMPETITOR_KEYWORD_DAILY.to_string()));
-        assert!(namespaces.contains(&NAMESPACE_ALLINTITLE_DAILY.to_string()));
         assert!(namespaces.contains(&NAMESPACE_CONTENT_BRIEF_DAILY.to_string()));
         clear_fixture_env();
     }
@@ -1317,7 +1236,6 @@ mod tests {
             NAMESPACE_SEED_KEYWORD_DAILY,
             NAMESPACE_KEYWORD_SUGGESTION_DAILY,
             NAMESPACE_KEYWORD_METRIC_DAILY,
-            NAMESPACE_ALLINTITLE_DAILY,
             NAMESPACE_OPPORTUNITY_SCORE_DAILY,
             NAMESPACE_SITE_RUN_DAILY,
         ] {
@@ -1345,7 +1263,6 @@ mod tests {
         plugin.sync(ctx.clone()).await.expect("full sync");
 
         assert!(ctx.payload_line_count(NAMESPACE_COMPETITOR_KEYWORD_DAILY) > 0);
-        assert!(ctx.payload_line_count(NAMESPACE_ALLINTITLE_DAILY) > 0);
         assert!(ctx.payload_line_count(NAMESPACE_KEYWORD_CLUSTER_DAILY) > 0);
 
         clear_fixture_env();

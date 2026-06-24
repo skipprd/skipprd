@@ -222,6 +222,32 @@ impl WorkerClient {
             .await;
         }
     }
+
+    pub async fn fetch_allintitle_count(
+        &self,
+        keyword: &str,
+    ) -> Result<Option<u64>, std::io::Error> {
+        if let Some(dir) = &self.fixture_dir {
+            let path = dir.join("allintitle_brightdata.json");
+            let raw = tokio::fs::read_to_string(&path)
+                .await
+                .map_err(std::io::Error::other)?;
+            let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("allintitle fixture: {e}"),
+                )
+            })?;
+            return Ok(crate::brightdata::parse_results_cnt(&parsed));
+        }
+        let client = self.brightdata.as_ref().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "Bright Data client not initialized",
+            )
+        })?;
+        client.fetch_allintitle_count(keyword).await
+    }
 }
 
 fn fixture_slug(keyword: &str) -> String {
@@ -286,6 +312,10 @@ mod tests {
             user_agent: None,
             brightdata_zone: Some("serp_api1".into()),
             brightdata_api_base: None,
+            include_allintitle: false,
+            allintitle_keywords: vec![],
+            allintitle_only: false,
+            max_allintitle_queries_per_run: None,
         };
         let client = WorkerClient::new(cfg).unwrap();
         let job = build_job_request(
@@ -310,6 +340,10 @@ mod tests {
                 user_agent: None,
                 brightdata_zone: Some("serp_api1".into()),
                 brightdata_api_base: None,
+                include_allintitle: false,
+                allintitle_keywords: vec![],
+                allintitle_only: false,
+                max_allintitle_queries_per_run: None,
             },
             "no-such-fixture-keyword-xyz",
             10,
@@ -344,6 +378,10 @@ mod tests {
             user_agent: None,
             brightdata_zone: None,
             brightdata_api_base: None,
+            include_allintitle: false,
+            allintitle_keywords: vec![],
+            allintitle_only: false,
+            max_allintitle_queries_per_run: None,
         };
         cfg.device = SerpDevice::Mobile;
         let job = build_job_request(&cfg, "kw", 10, vec!["example.com".into()], None);

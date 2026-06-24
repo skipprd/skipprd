@@ -56,7 +56,6 @@ pub enum StreamKind {
     KeywordClusters,
     CompetitorKeywords,
     CompetitorSitemaps,
-    Allintitle,
     RankTracking,
     AiCitationOpportunities,
     ContentBriefs,
@@ -69,7 +68,6 @@ impl StreamKind {
         &[
             StreamKind::KeywordSuggestions,
             StreamKind::KeywordMetrics,
-            StreamKind::Allintitle,
             StreamKind::OpportunityScores,
         ]
     }
@@ -106,7 +104,6 @@ impl StreamKind {
             StreamKind::KeywordClusters,
             StreamKind::CompetitorKeywords,
             StreamKind::CompetitorSitemaps,
-            StreamKind::Allintitle,
             StreamKind::RankTracking,
             StreamKind::AiCitationOpportunities,
             StreamKind::ContentBriefs,
@@ -124,7 +121,6 @@ impl StreamKind {
             StreamKind::KeywordClusters => "keyword_clusters",
             StreamKind::CompetitorKeywords => "competitor_keywords",
             StreamKind::CompetitorSitemaps => "competitor_sitemaps",
-            StreamKind::Allintitle => "allintitle",
             StreamKind::RankTracking => "rank_tracking",
             StreamKind::AiCitationOpportunities => "ai_citation_opportunities",
             StreamKind::ContentBriefs => "content_briefs",
@@ -196,10 +192,6 @@ pub struct ScoringConfig {
     pub prefer_question_keywords: bool,
     #[serde(default = "default_prefer_low_backlink_serps")]
     pub prefer_low_backlink_serps: bool,
-    #[serde(default = "default_include_allintitle")]
-    pub include_allintitle: bool,
-    #[serde(default = "default_include_kgr")]
-    pub include_kgr: bool,
 }
 
 fn default_min_search_volume() -> u32 {
@@ -222,14 +214,6 @@ fn default_prefer_low_backlink_serps() -> bool {
     true
 }
 
-fn default_include_allintitle() -> bool {
-    true
-}
-
-fn default_include_kgr() -> bool {
-    true
-}
-
 impl Default for ScoringConfig {
     fn default() -> Self {
         Self {
@@ -238,8 +222,6 @@ impl Default for ScoringConfig {
             weak_domain_rank_threshold: default_weak_domain_rank_threshold(),
             prefer_question_keywords: default_prefer_question_keywords(),
             prefer_low_backlink_serps: default_prefer_low_backlink_serps(),
-            include_allintitle: default_include_allintitle(),
-            include_kgr: default_include_kgr(),
         }
     }
 }

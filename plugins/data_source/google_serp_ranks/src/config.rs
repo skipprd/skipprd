@@ -73,6 +73,18 @@ pub struct DataSourceGoogleSerpRanksPluginConfig {
     /// Bright Data API base URL (default `https://api.brightdata.com`).
     #[serde(default)]
     pub brightdata_api_base: Option<String>,
+    /// Fetch `allintitle:{keyword}` counts via Bright Data (keyword hub KGR).
+    #[serde(default)]
+    pub include_allintitle: bool,
+    /// Keywords for allintitle fetches; defaults to `keywords` when empty.
+    #[serde(default)]
+    pub allintitle_keywords: Vec<String>,
+    /// When true, skip organic rank fetches and only emit allintitle_daily rows.
+    #[serde(default)]
+    pub allintitle_only: bool,
+    /// Cap allintitle queries per run (defaults to `max_queries_per_run`).
+    #[serde(default)]
+    pub max_allintitle_queries_per_run: Option<u32>,
 }
 
 fn default_country() -> String {
@@ -123,10 +135,16 @@ impl DataSourceGoogleSerpRanksPluginConfig {
                 ));
             }
         }
-        if self.keywords.is_empty() {
+        if self.keywords.is_empty() && !self.allintitle_only {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "keywords must include at least one query",
+            ));
+        }
+        if self.allintitle_only && self.allintitle_keywords_for_run().is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "allintitle_keywords must include at least one query when allintitle_only is true",
             ));
         }
         if self.max_depth == 0 || self.max_depth > MAX_DEPTH_CAP {
@@ -200,6 +218,32 @@ impl DataSourceGoogleSerpRanksPluginConfig {
         keywords.truncate(limit);
         keywords
     }
+
+    pub fn allintitle_keywords_for_run(&self) -> Vec<String> {
+        let source = if self.allintitle_keywords.is_empty() {
+            &self.keywords
+        } else {
+            &self.allintitle_keywords
+        };
+        let mut keywords: Vec<String> = source
+            .iter()
+            .map(|k| k.trim().to_string())
+            .filter(|k| !k.is_empty())
+            .collect();
+        let limit = self
+            .max_allintitle_queries_per_run
+            .unwrap_or(self.max_queries_per_run)
+            .min(keywords.len() as u32) as usize;
+        keywords.truncate(limit);
+        keywords
+    }
+
+    pub fn primary_site(&self) -> String {
+        self.targets
+            .first()
+            .map(|t| normalize_domain(&t.site))
+            .unwrap_or_default()
+    }
 }
 
 #[cfg(test)]
@@ -228,6 +272,10 @@ mod tests {
             user_agent: None,
             brightdata_zone: Some("serp_api1".into()),
             brightdata_api_base: None,
+            include_allintitle: false,
+            allintitle_keywords: vec![],
+            allintitle_only: false,
+            max_allintitle_queries_per_run: None,
         }
     }
 

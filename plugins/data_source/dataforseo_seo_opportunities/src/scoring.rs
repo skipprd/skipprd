@@ -14,8 +14,6 @@ pub struct OpportunityInputs {
     pub low_authority_count: u32,
     pub is_question: bool,
     pub intent: Option<String>,
-    pub kgr: Option<f64>,
-    pub allintitle_count: Option<u64>,
     pub own_rank: Option<u32>,
     pub has_matching_page: bool,
     pub ai_citation_score: f64,
@@ -70,19 +68,6 @@ pub fn compute_opportunity_score(
         positive.push("question_keyword".to_string());
     }
 
-    if let Some(kgr) = inputs.kgr {
-        if kgr <= 0.25 {
-            keyword_value_score += 12.0;
-            positive.push("golden_kgr".to_string());
-        } else if kgr <= 1.0 {
-            keyword_value_score += 6.0;
-            positive.push("good_kgr".to_string());
-        } else {
-            difficulty_penalty += 8.0;
-            negative.push("high_kgr".to_string());
-        }
-    }
-
     let content_fit_score = if inputs.has_matching_page {
         if inputs.own_rank.map(|r| r <= 20).unwrap_or(false) {
             35.0
@@ -127,8 +112,6 @@ pub fn compute_opportunity_score(
         "recommended_action": recommended_action,
         "search_volume": inputs.search_volume,
         "keyword_difficulty": inputs.keyword_difficulty,
-        "kgr": inputs.kgr,
-        "allintitle_count": inputs.allintitle_count,
         "location_code": location_code,
         "language_code": language_code,
         "device": device,
@@ -159,7 +142,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn golden_kgr_boosts_score() {
+    fn low_authority_domains_boost_score() {
         let inputs = OpportunityInputs {
             keyword: "meal planning app free".into(),
             search_volume: 2400,
@@ -171,14 +154,12 @@ mod tests {
             low_authority_count: 2,
             is_question: false,
             intent: Some("commercial".into()),
-            kgr: Some(0.017),
-            allintitle_count: Some(42),
             own_rank: None,
             has_matching_page: false,
             ai_citation_score: 20.0,
         };
         let row = compute_opportunity_score(
-            "picnic.com",
+            "example.com",
             "2026-05-30",
             &inputs,
             &ScoringConfig::default(),
@@ -188,7 +169,6 @@ mod tests {
         );
         assert!(row["opportunity_score"].as_f64().unwrap_or(0.0) > 0.0);
         let positives = row["top_positive_factors"].as_array().unwrap();
-        assert!(positives.iter().any(|v| v.as_str() == Some("golden_kgr")));
         assert!(positives
             .iter()
             .any(|v| v.as_str() == Some("low_authority_domains_ranking")));

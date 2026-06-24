@@ -7,7 +7,6 @@ pub mod cluster;
 pub mod config;
 pub mod content_brief;
 pub mod dataforseo_seo_opportunities;
-pub mod parse_allintitle;
 pub mod parse_competitor;
 pub mod parse_keyword;
 pub mod parse_serp;
