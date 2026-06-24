@@ -1,6 +1,6 @@
 [package]
 name = "skippr-plugin-data-source-upfoundry-link-graph-ingest"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 
 [[bin]]
