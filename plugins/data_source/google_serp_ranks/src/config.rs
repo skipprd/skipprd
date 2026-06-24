@@ -6,6 +6,8 @@ use crate::domain::normalize_domain;
 pub const MAX_DEPTH_CAP: u32 = 100;
 pub const MAX_QUERIES_PER_RUN_CAP: u32 = 100;
 pub const MIN_QUERY_INTERVAL_MS_FLOOR: u64 = 5_000;
+/// Hub post-process runs many allintitle queries inside the 15m Lambda budget.
+pub const ALLINTITLE_MIN_QUERY_INTERVAL_MS_FLOOR: u64 = 2_000;
 pub const DISCOVER_MAX_DEPTH: u32 = 10;
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -120,6 +122,14 @@ fn default_worker_node_path() -> String {
 }
 
 impl DataSourceGoogleSerpRanksPluginConfig {
+    fn min_query_interval_ms_floor(&self) -> u64 {
+        if self.allintitle_only {
+            ALLINTITLE_MIN_QUERY_INTERVAL_MS_FLOOR
+        } else {
+            MIN_QUERY_INTERVAL_MS_FLOOR
+        }
+    }
+
     pub fn validate(&self) -> Result<(), std::io::Error> {
         if self.targets.is_empty() {
             return Err(std::io::Error::new(
@@ -159,10 +169,11 @@ impl DataSourceGoogleSerpRanksPluginConfig {
                 format!("max_queries_per_run must be between 1 and {MAX_QUERIES_PER_RUN_CAP}"),
             ));
         }
-        if self.min_query_interval_ms < MIN_QUERY_INTERVAL_MS_FLOOR {
+        let interval_floor = self.min_query_interval_ms_floor();
+        if self.min_query_interval_ms < interval_floor {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                format!("min_query_interval_ms must be >= {MIN_QUERY_INTERVAL_MS_FLOOR}"),
+                format!("min_query_interval_ms must be >= {interval_floor}"),
             ));
         }
         if self.country.trim().is_empty() || self.language.trim().is_empty() {
@@ -366,5 +377,43 @@ mod tests {
         };
         assert_eq!(cfg.effective_max_depth(true), DISCOVER_MAX_DEPTH);
         assert_eq!(cfg.effective_max_depth(false), 50);
+    }
+
+    #[test]
+    fn allintitle_only_accepts_hub_throttle_interval() {
+        let cfg = DataSourceGoogleSerpRanksPluginConfig {
+            keywords: vec![],
+            allintitle_only: true,
+            allintitle_keywords: vec!["kw".into()],
+            min_query_interval_ms: 3_000,
+            ..sample_config()
+        };
+        assert!(cfg.validate().is_ok());
+    }
+
+    #[test]
+    fn allintitle_only_rejects_interval_below_hub_floor() {
+        let mut cfg = DataSourceGoogleSerpRanksPluginConfig {
+            keywords: vec![],
+            allintitle_only: true,
+            allintitle_keywords: vec!["kw".into()],
+            ..sample_config()
+        };
+        cfg.min_query_interval_ms = 1_000;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn max_allintitle_queries_caps_keyword_batch() {
+        let cfg = DataSourceGoogleSerpRanksPluginConfig {
+            allintitle_keywords: vec!["a".into(), "b".into(), "c".into(), "d".into()],
+            max_queries_per_run: 1,
+            max_allintitle_queries_per_run: Some(3),
+            ..sample_config()
+        };
+        assert_eq!(
+            cfg.allintitle_keywords_for_run(),
+            vec!["a".to_string(), "b".to_string(), "c".to_string()]
+        );
     }
 }
