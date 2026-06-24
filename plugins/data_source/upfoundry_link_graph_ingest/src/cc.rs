@@ -170,10 +170,16 @@ async fn register_s3_object_store(ctx: &SessionContext, s3_loc: &str) -> Result<
     let conf = aws_config::defaults(aws_config::BehaviorVersion::latest())
         .load()
         .await;
-    if let Some(region) = conf.region().map(|r| r.to_string()) {
-        std::env::set_var("AWS_REGION", &region);
-        std::env::set_var("AWS_DEFAULT_REGION", &region);
-    }
+    // Common Crawl lives in us-east-1; pipeline Lambdas run in eu-west-1.
+    let region = if bucket == "commoncrawl" {
+        "us-east-1".to_string()
+    } else {
+        conf.region()
+            .map(|r| r.to_string())
+            .unwrap_or_else(|| "us-east-1".to_string())
+    };
+    std::env::set_var("AWS_REGION", &region);
+    std::env::set_var("AWS_DEFAULT_REGION", &region);
     if let Some(provider) = conf.credentials_provider() {
         let creds = provider
             .provide_credentials()
@@ -187,8 +193,9 @@ async fn register_s3_object_store(ctx: &SessionContext, s3_loc: &str) -> Result<
     }
     let store = AmazonS3Builder::from_env()
         .with_bucket_name(bucket)
+        .with_region(&region)
         .build()
-        .map_err(|err| std::io::Error::other(err.to_string()))?;
+        .map_err(|err: object_store::Error| std::io::Error::other(err.to_string()))?;
     let store_arc: Arc<dyn ObjectStore> = Arc::new(store);
     let endpoint = Url::parse(&format!("s3://{bucket}/"))
         .map_err(|err| std::io::Error::other(err.to_string()))?;
