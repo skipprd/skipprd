@@ -465,6 +465,16 @@ impl IngestBatch {
         rows.filter(|rows| !rows.is_empty())
     }
 
+    pub fn normalized_offset_key(
+        namespace: impl Into<String>,
+        partition: impl Into<String>,
+    ) -> OffsetKey {
+        OffsetKey {
+            namespace: storage_namespace(&namespace.into()),
+            partition: storage_partition(&partition.into()),
+        }
+    }
+
     pub fn new(
         offset_key: OffsetKey,
         data: String,
@@ -473,9 +483,7 @@ impl IngestBatch {
         namespace: Option<String>,
         cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
     ) -> Self {
-        let mut offset_key = offset_key;
-        offset_key.namespace = storage_namespace(&offset_key.namespace);
-        offset_key.partition = storage_partition(&offset_key.partition);
+        let offset_key = Self::normalized_offset_key(offset_key.namespace, offset_key.partition);
         Self {
             offset_key,
             data,
@@ -564,6 +572,25 @@ mod ingest_batch_tests {
         );
 
         assert_eq!(batch.offset_pos_for_line(3), 3);
+    }
+
+    #[test]
+    fn normalized_offset_key_matches_constructor() {
+        let raw_key = OffsetKey::new("source-bucket", "raw/path/date=2026-06-24/file-1.json.gz");
+        let helper_key = IngestBatch::normalized_offset_key(
+            raw_key.namespace.clone(),
+            raw_key.partition.clone(),
+        );
+        let batch = IngestBatch::new(
+            raw_key,
+            "{}".to_string(),
+            2,
+            "s3://source-bucket/raw/path/date=2026-06-24/file-1.json.gz".to_string(),
+            None,
+            None,
+        );
+
+        assert_eq!(batch.offset_key, helper_key);
     }
 }
 

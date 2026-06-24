@@ -233,9 +233,11 @@ impl DataSourceS3Plugin {
             let validation_entries = items
                 .iter()
                 .map(|(key, _)| {
+                    let offset_key =
+                        IngestBatch::normalized_offset_key(s3_bucket_filter.clone(), key.clone());
                     offset_validation_entry(
-                        s3_bucket_filter.clone(),
-                        key.clone(),
+                        offset_key.namespace,
+                        offset_key.partition,
                         OffsetTypes::Closed,
                         1,
                     )
@@ -512,18 +514,17 @@ impl DataSourceS3Plugin {
                 let bytes = str_data.len();
                 current_bytes += bytes;
                 let source_uri = format!("s3://{}/{}", s3_bucket_outer, key);
-                current_batch.push(IngestBatch {
-                    offset_key: OffsetKey {
+                current_batch.push(IngestBatch::new(
+                    OffsetKey {
                         namespace: s3_bucket_ns.clone(),
                         partition: key,
                     },
-                    data: str_data,
+                    str_data,
                     bytes,
-                    offset_pos: None,
                     source_uri,
-                    namespace: None,
-                    cdc_rows: None,
-                });
+                    None,
+                    None,
+                ));
                 if current_bytes >= self.optimal_chunk_size {
                     let batch_bytes = current_bytes;
                     let batch = std::mem::take(&mut current_batch);
