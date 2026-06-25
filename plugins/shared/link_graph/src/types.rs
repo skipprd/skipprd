@@ -97,3 +97,29 @@ pub struct RawPageFact {
 fn default_parser_version() -> String {
     "link_graph_html_v1".into()
 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ArchiveRecordRef {
+    pub filename: String,
+    pub record_offset: i64,
+    pub record_length: i64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PageFetchRef {
+    pub source_url: String,
+    pub source_host: String,
+    pub source_url_id: u64,
+    pub source_domain_id: u64,
+    pub cc_crawl_id: String,
+    pub wat: ArchiveRecordRef,
+    pub warc: ArchiveRecordRef,
+    #[serde(default)]
+    pub fetch_status: Option<u32>,
+    #[serde(default)]
+    pub content_mime_type: String,
+    #[serde(default)]
+    pub fetch_time: String,
+    #[serde(default)]
+    pub source_role: String,
+}
