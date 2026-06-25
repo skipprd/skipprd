@@ -13577,7 +13577,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-upfoundry-link-graph-wat-index"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "aws-config",

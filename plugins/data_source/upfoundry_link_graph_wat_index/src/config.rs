@@ -5,11 +5,11 @@ fn default_bucket_count() -> u32 {
 }
 
 fn default_batch_size_bytes() -> usize {
-    512 * 1024 * 1024
+    32 * 1024 * 1024
 }
 
 fn default_max_records_per_batch() -> usize {
-    250_000
+    25_000
 }
 
 fn default_max_links_per_page() -> u32 {

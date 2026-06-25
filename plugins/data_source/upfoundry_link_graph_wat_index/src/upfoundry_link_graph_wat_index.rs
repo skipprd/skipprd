@@ -25,6 +25,9 @@ use crate::streams::{
 };
 use crate::wat_stream::{open_wat_stream, WatStreamOpenError};
 
+const MAX_TARGET_INDEX_BATCH_BYTES: usize = 32 * 1024 * 1024;
+const MAX_RUNTIME_PAYLOAD_FRAME_BYTES: usize = 128 * 1024 * 1024;
+
 #[derive(Debug, Clone, Serialize)]
 struct TargetIndexRow {
     crawl_id: String,
@@ -164,6 +167,19 @@ impl UpfoundryLinkGraphWatIndexPlugin {
         (target_domain_id % u64::from(self.config.target_domain_bucket_count)) as u32
     }
 
+    fn effective_batch_size_bytes(&self) -> usize {
+        self.config
+            .batch_size_bytes
+            .min(MAX_TARGET_INDEX_BATCH_BYTES)
+    }
+
+    fn ingest_batches_bytes(batches: &[IngestBatch]) -> usize {
+        batches
+            .iter()
+            .map(|batch| batch.bytes)
+            .fold(0usize, usize::saturating_add)
+    }
+
     fn rows_for_extraction(
         &self,
         wat_path: &str,
@@ -233,7 +249,7 @@ impl UpfoundryLinkGraphWatIndexPlugin {
         let batch = batches.entry(bucket).or_default();
         batch.bytes = batch.bytes.saturating_add(line.len() + 1);
         batch.rows.push(line);
-        if batch.bytes >= self.config.batch_size_bytes
+        if batch.bytes >= self.effective_batch_size_bytes()
             || batch.rows.len() >= self.config.max_records_per_batch
         {
             self.flush_bucket(bucket, batches, output)?;
@@ -332,6 +348,7 @@ impl DataSource for UpfoundryLinkGraphWatIndexPlugin {
         let mut skip_rows = Vec::new();
 
         for path in &paths {
+            let mut records_seen_in_object = 0usize;
             let mut stream = match open_wat_stream(path, self.config.max_wat_object_bytes).await {
                 Ok(stream) => stream,
                 Err(WatStreamOpenError::TooLarge {
@@ -364,7 +381,7 @@ impl DataSource for UpfoundryLinkGraphWatIndexPlugin {
                 if self
                     .config
                     .max_wat_records_per_object
-                    .is_some_and(|limit| records_seen as usize >= limit)
+                    .is_some_and(|limit| records_seen_in_object >= limit)
                 {
                     break;
                 }
@@ -390,6 +407,7 @@ impl DataSource for UpfoundryLinkGraphWatIndexPlugin {
                     continue;
                 };
                 records_seen = records_seen.saturating_add(1);
+                records_seen_in_object = records_seen_in_object.saturating_add(1);
                 let location = WatRecordLocation {
                     filename: path.to_string(),
                     record_offset: i64::try_from(record_offset).unwrap_or(0),
@@ -398,7 +416,9 @@ impl DataSource for UpfoundryLinkGraphWatIndexPlugin {
                 for row in self.rows_for_extraction(path, location, &value) {
                     rows_emitted = rows_emitted.saturating_add(1);
                     self.push_row(&mut pending, row, &mut ingest_batches)?;
-                    if ingest_batches.len() >= 16 {
+                    if Self::ingest_batches_bytes(&ingest_batches)
+                        >= MAX_RUNTIME_PAYLOAD_FRAME_BYTES
+                    {
                         submit_payload_batches(ctx.as_ref(), std::mem::take(&mut ingest_batches))?;
                     }
                 }
@@ -469,6 +489,46 @@ mod tests {
         let plugin = test_plugin();
         let id = domain_id("example.com");
         assert_eq!(plugin.target_bucket(id), (id % 32_768) as u32);
+    }
+
+    #[test]
+    fn effective_batch_size_clamps_oversized_config() {
+        let mut plugin = test_plugin();
+        plugin.config.batch_size_bytes = usize::MAX;
+
+        assert_eq!(
+            plugin.effective_batch_size_bytes(),
+            MAX_TARGET_INDEX_BATCH_BYTES
+        );
+    }
+
+    #[test]
+    fn ingest_batches_bytes_saturates_total_payload_size() {
+        let batches = vec![
+            IngestBatch {
+                offset_key: OffsetKey::new(NAMESPACE_TARGET_INDEX, "a"),
+                bytes: usize::MAX,
+                data: String::new(),
+                namespace: Some(NAMESPACE_TARGET_INDEX.to_string()),
+                source_uri: "test://wat".to_string(),
+                offset_pos: None,
+                cdc_rows: None,
+            },
+            IngestBatch {
+                offset_key: OffsetKey::new(NAMESPACE_TARGET_INDEX, "b"),
+                bytes: 1,
+                data: String::new(),
+                namespace: Some(NAMESPACE_TARGET_INDEX.to_string()),
+                source_uri: "test://wat".to_string(),
+                offset_pos: None,
+                cdc_rows: None,
+            },
+        ];
+
+        assert_eq!(
+            UpfoundryLinkGraphWatIndexPlugin::ingest_batches_bytes(&batches),
+            usize::MAX
+        );
     }
 
     #[test]
@@ -606,7 +666,8 @@ mod tests {
         while let Some((record_offset, record_length, payload)) =
             stream.next_member().await.unwrap()
         {
-            if let Some(value) = UpfoundryLinkGraphWatIndexPlugin::parse_wat_member_payload(&payload)
+            if let Some(value) =
+                UpfoundryLinkGraphWatIndexPlugin::parse_wat_member_payload(&payload)
             {
                 payloads.push((
                     WatRecordLocation {
@@ -629,8 +690,8 @@ mod tests {
             Some("https://source.example/page")
         );
 
-        let range = &bytes
-            [location.record_offset as usize..(location.record_offset + location.record_length) as usize];
+        let range = &bytes[location.record_offset as usize
+            ..(location.record_offset + location.record_length) as usize];
         let mut decoder = flate2::read::GzDecoder::new(range);
         let mut roundtrip = Vec::new();
         decoder.read_to_end(&mut roundtrip).unwrap();
