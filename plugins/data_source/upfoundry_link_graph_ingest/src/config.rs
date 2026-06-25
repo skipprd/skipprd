@@ -20,6 +20,10 @@ fn default_web_graph_max_rows() -> u32 {
     1_000_000
 }
 
+fn default_max_referrer_pages() -> u32 {
+    50_000
+}
+
 fn default_cc_urls_index_prefix() -> String {
     "cc/urls_index".into()
 }
@@ -72,6 +76,14 @@ pub struct UpfoundryLinkGraphIngestConfig {
     pub brightdata_proxy_escalation_enabled: bool,
     #[serde(default = "default_true")]
     pub include_subdomains: bool,
+    /// Optional JSONL selected from cc_wat_source_pages_by_target_domain_index.
+    #[serde(default)]
+    pub selected_referrer_page_refs_uri: Option<String>,
+    /// Stable run identifier used to keep staging, dimension, and manifest objects unique.
+    #[serde(default)]
+    pub corpus_run_id: Option<String>,
+    #[serde(default = "default_max_referrer_pages")]
+    pub max_referrer_pages_per_run: u32,
 }
 
 fn default_ops_prefix() -> String {
@@ -118,6 +130,12 @@ impl UpfoundryLinkGraphIngestConfig {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "cc_web_graph_max_rows must be greater than zero",
+            ));
+        }
+        if self.max_referrer_pages_per_run == 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "max_referrer_pages_per_run must be greater than zero",
             ));
         }
         Ok(())

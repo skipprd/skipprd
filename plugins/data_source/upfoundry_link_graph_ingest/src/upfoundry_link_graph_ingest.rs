@@ -1,13 +1,16 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::sync::Arc;
 
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
+use aws_sdk_s3::Client as S3Client;
 use chrono::Utc;
+use serde::{Deserialize, Deserializer};
 use serde_json::{json, Value};
 use skippr_plugin_shared_link_graph::{
-    anchor_id, canonicalize_url, domain_id, edge_id, edge_observation_id, parse_html_links, url_id,
-    warc_file_id, RawEdgeObservation, RawPageFact,
+    build_raw_page_observations, canonicalize_url, domain_id, parse_html_links,
+    parse_wat_metadata_record, url_id, warc_file_id, ArchiveRecordRef, PageFetchRef,
+    RawEdgeObservation, RawPageFact, WatRecordLocation,
 };
 use skippr_runtime_sdk::helpers::offsets::OffsetKey;
 use skippr_runtime_sdk::plugins::{
@@ -26,11 +29,80 @@ use crate::ops_store::{
     DimWarcFileRow,
 };
 use crate::streams::{all_namespace_contracts, NAMESPACE_AUDIT_SKIP, NAMESPACE_SITE_RUN_DAILY};
-use crate::warc::fetch_warc_html;
+use crate::warc::{fetch_warc_html, fetch_wat_json};
 use crate::webgraph::import_web_graph_priors;
 
 pub struct UpfoundryLinkGraphIngestPlugin {
     config: UpfoundryLinkGraphIngestConfig,
+}
+
+fn de_u64_from_string_or_number<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        Value::Number(n) => n
+            .as_u64()
+            .ok_or_else(|| serde::de::Error::custom("expected u64")),
+        Value::String(s) => s
+            .parse::<u64>()
+            .map_err(|err| serde::de::Error::custom(err.to_string())),
+        _ => Err(serde::de::Error::custom("expected u64 string or number")),
+    }
+}
+
+fn de_i64_from_string_or_number<'de, D>(deserializer: D) -> Result<i64, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        Value::Number(n) => n
+            .as_i64()
+            .ok_or_else(|| serde::de::Error::custom("expected i64")),
+        Value::String(s) => s
+            .parse::<i64>()
+            .map_err(|err| serde::de::Error::custom(err.to_string())),
+        _ => Err(serde::de::Error::custom("expected i64 string or number")),
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct SelectedReferrerPageRef {
+    source_url: String,
+    #[serde(deserialize_with = "de_u64_from_string_or_number")]
+    source_url_id: u64,
+    #[serde(deserialize_with = "de_u64_from_string_or_number")]
+    source_domain_id: u64,
+    #[serde(default)]
+    source_domain: String,
+    #[serde(default)]
+    source_host: String,
+    warc_filename: String,
+    #[serde(deserialize_with = "de_i64_from_string_or_number")]
+    warc_record_offset: i64,
+    #[serde(deserialize_with = "de_i64_from_string_or_number")]
+    warc_record_length: i64,
+    wat_filename: String,
+    #[serde(deserialize_with = "de_i64_from_string_or_number")]
+    wat_record_offset: i64,
+    #[serde(deserialize_with = "de_i64_from_string_or_number")]
+    wat_record_length: i64,
+    #[serde(default)]
+    fetch_status: Option<u32>,
+    #[serde(default)]
+    content_mime_type: String,
+    #[serde(default)]
+    fetch_time: String,
+}
+
+#[derive(Debug, Clone)]
+struct SelectedReferrerLoad {
+    rows: Vec<SelectedReferrerPageRef>,
+    status: String,
+    error: Option<String>,
+    invalid_rows: u32,
 }
 
 impl UpfoundryLinkGraphIngestPlugin {
@@ -43,31 +115,6 @@ impl UpfoundryLinkGraphIngestPlugin {
         std::env::var("SKIPPR_LINK_GRAPH_FIXTURE_DIR")
             .ok()
             .filter(|s| !s.trim().is_empty())
-    }
-
-    fn rel_flags(rel: &[String]) -> u32 {
-        let mut flags = 0u32;
-        for r in rel {
-            let r = r.to_ascii_lowercase();
-            if r == "nofollow" {
-                flags |= 1;
-            } else if r == "sponsored" {
-                flags |= 2;
-            } else if r == "ugc" {
-                flags |= 4;
-            }
-        }
-        flags
-    }
-
-    fn hex128(bytes: &[u8; 16]) -> String {
-        bytes.iter().map(|b| format!("{b:02x}")).collect()
-    }
-
-    fn status_indicates_broken(status: Option<u32>) -> bool {
-        status
-            .map(|status| !(200..400).contains(&status))
-            .unwrap_or(false)
     }
 
     fn page_quality_flags(
@@ -105,6 +152,97 @@ impl UpfoundryLinkGraphIngestPlugin {
     async fn s3_client() -> Result<aws_sdk_s3::Client, std::io::Error> {
         let cfg = aws_config::load_defaults(BehaviorVersion::latest()).await;
         Ok(aws_sdk_s3::Client::new(&cfg))
+    }
+
+    async fn read_text_uri(client: &S3Client, uri: &str) -> Result<String, std::io::Error> {
+        if let Some(path) = uri.strip_prefix("s3://") {
+            let (bucket, key) = path.split_once('/').ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid s3 uri")
+            })?;
+            let resp = client
+                .get_object()
+                .bucket(bucket)
+                .key(key)
+                .send()
+                .await
+                .map_err(|err| std::io::Error::other(err.to_string()))?;
+            return resp
+                .body
+                .collect()
+                .await
+                .map_err(|err| std::io::Error::other(err.to_string()))
+                .map(|bytes| String::from_utf8_lossy(&bytes.into_bytes()).to_string());
+        }
+        if uri.starts_with("http://") || uri.starts_with("https://") {
+            return reqwest::get(uri)
+                .await
+                .map_err(|err| std::io::Error::other(err.to_string()))?
+                .text()
+                .await
+                .map_err(|err| std::io::Error::other(err.to_string()));
+        }
+        std::fs::read_to_string(uri)
+    }
+
+    async fn load_selected_referrer_pages(
+        &self,
+        client: &S3Client,
+    ) -> SelectedReferrerLoad {
+        let Some(uri) = self.config.selected_referrer_page_refs_uri.as_deref() else {
+            return SelectedReferrerLoad {
+                rows: Vec::new(),
+                status: "not_configured".into(),
+                error: None,
+                invalid_rows: 0,
+            };
+        };
+        let content = match Self::read_text_uri(client, uri).await {
+            Ok(content) => content,
+            Err(err) => {
+                return SelectedReferrerLoad {
+                    rows: Vec::new(),
+                    status: "missing".into(),
+                    error: Some(err.to_string()),
+                    invalid_rows: 0,
+                };
+            }
+        };
+        let mut rows = Vec::new();
+        let mut seen = HashSet::new();
+        let mut invalid_rows = 0u32;
+        for (line_no, line) in content.lines().enumerate() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            let row: SelectedReferrerPageRef = match serde_json::from_str(line) {
+                Ok(row) => row,
+                Err(_) => {
+                    invalid_rows = invalid_rows.saturating_add(1);
+                    eprintln!(
+                        "invalid selected referrer row line={} uri={}",
+                        line_no.saturating_add(1),
+                        uri
+                    );
+                    continue;
+                }
+            };
+            if seen.insert(row.source_url_id) {
+                rows.push(row);
+            }
+            if rows.len() as u32 >= self.config.max_referrer_pages_per_run {
+                break;
+            }
+        }
+        SelectedReferrerLoad {
+            status: if invalid_rows > 0 {
+                "partial".into()
+            } else {
+                "loaded".into()
+            },
+            rows,
+            error: None,
+            invalid_rows,
+        }
     }
 
     fn submit_rows(
@@ -152,6 +290,11 @@ impl DataSource for UpfoundryLinkGraphIngestPlugin {
 
     async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         let run_date = Utc::now().format("%Y-%m-%d").to_string();
+        let run_id = self
+            .config
+            .corpus_run_id
+            .clone()
+            .unwrap_or_else(|| format!("{}-{}", self.config.cc_crawl_id, Utc::now().timestamp()));
         let fixture_dir = Self::fixture_dir();
         let fixture_ref = fixture_dir.as_deref();
         let client = Self::s3_client().await?;
@@ -182,6 +325,7 @@ impl DataSource for UpfoundryLinkGraphIngestPlugin {
         .await;
         let index_stats = index_result.stats;
         let candidates = index_result.records;
+        let selected_referrer_load = self.load_selected_referrer_pages(&client).await;
         if index_stats.mode == "direct_datafusion_file" && !candidates.is_empty() {
             for domain in &self.config.frontier_domains {
                 let domain_rows = candidates
@@ -229,6 +373,30 @@ impl DataSource for UpfoundryLinkGraphIngestPlugin {
         let mut warc_attempted = 0u32;
         let mut warc_parsed = 0u32;
         let urls_selected = candidates.len() as u32;
+        let referrer_selection_status = selected_referrer_load.status.clone();
+        let referrer_selection_error = selected_referrer_load.error.clone();
+        let referrer_selection_invalid_rows = selected_referrer_load.invalid_rows;
+        if let Some(error) = &referrer_selection_error {
+            skip_rows.push(json!({
+                "cc_crawl_id": self.config.cc_crawl_id,
+                "run_date": run_date,
+                "reason": "selected_referrer_input_unavailable",
+                "selected_referrer_page_refs_uri": self.config.selected_referrer_page_refs_uri,
+                "error": error,
+            }));
+        }
+        if referrer_selection_invalid_rows > 0 {
+            skip_rows.push(json!({
+                "cc_crawl_id": self.config.cc_crawl_id,
+                "run_date": run_date,
+                "reason": "selected_referrer_invalid_rows",
+                "selected_referrer_page_refs_uri": self.config.selected_referrer_page_refs_uri,
+                "invalid_rows": referrer_selection_invalid_rows,
+            }));
+        }
+        let selected_referrer_pages = selected_referrer_load.rows;
+        let referrer_pages_selected = selected_referrer_pages.len() as u32;
+        let mut referrer_pages_parsed = 0u32;
 
         for record in candidates {
             if !domain_matches(
@@ -359,10 +527,6 @@ impl DataSource for UpfoundryLinkGraphIngestPlugin {
                     warc_file_id: wf_id,
                     warc_filename: record.warc_filename.clone(),
                 });
-            let warc_record_id = format!(
-                "{}:{}:{}",
-                wf_id, record.warc_record_offset, record.warc_record_length
-            );
             let page_quality_flags = Self::page_quality_flags(
                 &source_canon.canonical,
                 raw_link_count,
@@ -370,27 +534,37 @@ impl DataSource for UpfoundryLinkGraphIngestPlugin {
                 links_truncated,
                 self.config.max_links_per_page,
             );
-            let source_is_broken = Self::status_indicates_broken(http_status_from);
-
-            page_rows.push(RawPageFact {
-                url_id: src_url_id,
-                domain_id: src_domain_id,
+            let page_ref = PageFetchRef {
+                source_url: source_canon.canonical.clone(),
+                source_host: source_canon.host.clone(),
+                source_url_id: src_url_id,
+                source_domain_id: src_domain_id,
                 cc_crawl_id: self.config.cc_crawl_id.clone(),
-                warc_file_id: wf_id,
-                warc_record_offset: record.warc_record_offset,
-                warc_record_length: record.warc_record_length,
+                wat: ArchiveRecordRef {
+                    filename: String::new(),
+                    record_offset: 0,
+                    record_length: 0,
+                },
+                warc: ArchiveRecordRef {
+                    filename: record.warc_filename.clone(),
+                    record_offset: record.warc_record_offset,
+                    record_length: record.warc_record_length,
+                },
                 fetch_status: http_status_from,
                 content_mime_type: content_mime_type.clone(),
                 fetch_time: record.fetch_time.clone(),
-                outbound_link_count: links.len() as u32,
-                stored_link_count: links.len() as u32,
-                links_truncated,
+                source_role: "frontier".into(),
+            };
+            let built = build_raw_page_observations(
+                &page_ref,
+                &links,
                 raw_link_count,
-                page_quality_flags: page_quality_flags.clone(),
-                canonicalization_version: source_canon.version.to_string(),
-                parser_version: "link_graph_html_v1".into(),
-                parse_status: parse_status.clone(),
-            });
+                links_truncated,
+                page_quality_flags.clone(),
+                &parse_status,
+                &discovered_by,
+            );
+            page_rows.push(built.page);
             warc_record_state.push(json!({
                 "cc_crawl_id": self.config.cc_crawl_id,
                 "url": source_canon.canonical.clone(),
@@ -417,83 +591,243 @@ impl DataSource for UpfoundryLinkGraphIngestPlugin {
                 "parse_status": parse_status.clone(),
             }));
 
-            for (ordinal, link) in links.iter().enumerate() {
-                let Some(target) = canonicalize_url(&link.target_url) else {
-                    continue;
-                };
-                let rel_sem = if link.rel.is_empty() {
-                    "none".to_string()
-                } else {
-                    link.rel.join(",")
-                };
-                let ctx_bucket = link.context.as_str();
-                let eid = edge_id(
-                    &source_canon.canonical,
-                    &target.canonical,
-                    &rel_sem,
-                    ctx_bucket,
-                );
-                let eid_hex = Self::hex128(&eid);
-                let obs = edge_observation_id(
-                    &eid,
-                    &self.config.cc_crawl_id,
-                    &warc_record_id,
-                    ordinal as u32,
-                );
-                let normalized_anchor = link
-                    .anchor_text
-                    .split_whitespace()
-                    .collect::<Vec<_>>()
-                    .join(" ");
-                let target_url_id = url_id(&target.canonical);
-                let target_domain_id = domain_id(&target.host);
-                let normalized_anchor_id = anchor_id(&normalized_anchor);
+            for edge in built.edges {
+                let target_domain = edge.domain_to.clone();
+                let target_url = edge.url_to.clone();
+                let target_domain_id = edge.domain_to_id;
+                let target_url_id = edge.url_to_id;
                 dim_domains
                     .entry(target_domain_id)
                     .or_insert_with(|| DimDomainRow {
                         domain_id: target_domain_id,
-                        domain: target.host.clone(),
+                        domain: target_domain,
                     });
                 dim_urls.entry(target_url_id).or_insert_with(|| DimUrlRow {
                     url_id: target_url_id,
-                    url: target.canonical.clone(),
+                    url: target_url,
                     domain_id: target_domain_id,
-                    canonicalization_version: target.version.to_string(),
+                    canonicalization_version: source_canon.version.to_string(),
                 });
                 dim_anchors
-                    .entry(normalized_anchor_id)
+                    .entry(edge.anchor_id)
                     .or_insert_with(|| DimAnchorRow {
-                        anchor_id: normalized_anchor_id,
-                        anchor_text: normalized_anchor.clone(),
+                        anchor_id: edge.anchor_id,
+                        anchor_text: edge.anchor_text.clone(),
                     });
-                edge_rows.push(RawEdgeObservation {
-                    edge_observation_id: Self::hex128(&obs),
-                    edge_id: eid_hex,
-                    url_from: source_canon.canonical.clone(),
-                    url_to: target.canonical.clone(),
-                    domain_from: source_canon.host.clone(),
-                    domain_to: target.host.clone(),
-                    url_from_id: src_url_id,
-                    url_to_id: target_url_id,
-                    domain_from_id: src_domain_id,
-                    domain_to_id: target_domain_id,
-                    anchor_text: normalized_anchor.clone(),
-                    anchor_id: normalized_anchor_id,
-                    link_context: ctx_bucket.to_string(),
-                    rel_flags: Self::rel_flags(&link.rel),
-                    is_image_link: link.is_image_link,
-                    link_ordinal: ordinal as u32,
-                    cc_crawl_id: self.config.cc_crawl_id.clone(),
-                    warc_file_id: wf_id,
-                    warc_record_offset: record.warc_record_offset,
-                    warc_record_length: record.warc_record_length,
-                    http_status_from,
-                    is_broken: source_is_broken,
-                    fetch_time: record.fetch_time.clone(),
-                    canonicalization_version: source_canon.version.to_string(),
-                    discovered_by: discovered_by.clone(),
-                });
+                edge_rows.push(edge);
             }
+        }
+
+        for selected in selected_referrer_pages {
+            let source_canon = match canonicalize_url(&selected.source_url) {
+                Some(c) => c,
+                None => {
+                    skip_rows.push(json!({
+                        "cc_crawl_id": self.config.cc_crawl_id,
+                        "url": selected.source_url,
+                        "run_date": run_date,
+                        "reason": "invalid_selected_referrer_url",
+                    }));
+                    continue;
+                }
+            };
+
+            let wat_parse = fetch_wat_json(
+                fixture_ref,
+                &selected.wat_filename,
+                selected.wat_record_offset,
+                selected.wat_record_length,
+            )
+            .await
+            .ok()
+            .and_then(|value| {
+                parse_wat_metadata_record(
+                    &self.config.cc_crawl_id,
+                    WatRecordLocation {
+                        filename: selected.wat_filename.clone(),
+                        record_offset: selected.wat_record_offset,
+                        record_length: selected.wat_record_length,
+                    },
+                    &value,
+                    self.config.max_links_per_page,
+                )
+            });
+
+            let (page_ref, links, raw_link_count, links_truncated, parse_status, discovered_by) =
+                if let Some(extraction) = wat_parse {
+                    (
+                        extraction.page_ref,
+                        extraction.links,
+                        extraction.raw_link_count,
+                        extraction.links_truncated,
+                        "parsed_wat".to_string(),
+                        "cc_wat_target_index".to_string(),
+                    )
+                } else {
+                    let html_result = fetch_warc_html(
+                        fixture_ref,
+                        &source_canon.canonical,
+                        &selected.warc_filename,
+                        selected.warc_record_offset,
+                        selected.warc_record_length,
+                    )
+                    .await;
+                    let html = match html_result {
+                        Ok(html) => html,
+                        Err(reason) => {
+                            skip_rows.push(json!({
+                                "cc_crawl_id": self.config.cc_crawl_id,
+                                "url": selected.source_url,
+                                "run_date": run_date,
+                                "reason": "selected_referrer_fetch_failed",
+                                "detail": reason,
+                            }));
+                            continue;
+                        }
+                    };
+                    let (links, raw_link_count, links_truncated) = parse_html_links(
+                        &source_canon.canonical,
+                        &html.html,
+                        self.config.max_links_per_page,
+                    );
+                    let source_host = if selected.source_host.trim().is_empty() {
+                        if selected.source_domain.trim().is_empty() {
+                            source_canon.host.clone()
+                        } else {
+                            selected.source_domain.clone()
+                        }
+                    } else {
+                        selected.source_host.clone()
+                    };
+                    (
+                        PageFetchRef {
+                            source_url: source_canon.canonical.clone(),
+                            source_host,
+                            source_url_id: selected.source_url_id,
+                            source_domain_id: selected.source_domain_id,
+                            cc_crawl_id: self.config.cc_crawl_id.clone(),
+                            wat: ArchiveRecordRef {
+                                filename: selected.wat_filename.clone(),
+                                record_offset: selected.wat_record_offset,
+                                record_length: selected.wat_record_length,
+                            },
+                            warc: ArchiveRecordRef {
+                                filename: selected.warc_filename.clone(),
+                                record_offset: selected.warc_record_offset,
+                                record_length: selected.warc_record_length,
+                            },
+                            fetch_status: selected.fetch_status,
+                            content_mime_type: if selected.content_mime_type.is_empty() {
+                                "text/html".into()
+                            } else {
+                                selected.content_mime_type.clone()
+                            },
+                            fetch_time: selected.fetch_time.clone(),
+                            source_role: "referrer".into(),
+                        },
+                        links,
+                        raw_link_count,
+                        links_truncated,
+                        if html.used_fixture {
+                            "parsed_referrer_fixture".to_string()
+                        } else {
+                            "parsed_referrer_warc".to_string()
+                        },
+                        "cc_wat_target_index_warc_fallback".to_string(),
+                    )
+                };
+
+            let wf_id = warc_file_id(&page_ref.warc.filename);
+            dim_domains
+                .entry(page_ref.source_domain_id)
+                .or_insert_with(|| DimDomainRow {
+                    domain_id: page_ref.source_domain_id,
+                    domain: page_ref.source_host.clone(),
+                });
+            dim_urls
+                .entry(page_ref.source_url_id)
+                .or_insert_with(|| DimUrlRow {
+                    url_id: page_ref.source_url_id,
+                    url: page_ref.source_url.clone(),
+                    domain_id: page_ref.source_domain_id,
+                    canonicalization_version: "v1".into(),
+                });
+            dim_warc_files
+                .entry(wf_id)
+                .or_insert_with(|| DimWarcFileRow {
+                    warc_file_id: wf_id,
+                    warc_filename: page_ref.warc.filename.clone(),
+                });
+            let page_quality_flags = Self::page_quality_flags(
+                &page_ref.source_url,
+                raw_link_count,
+                links.len() as u32,
+                links_truncated,
+                self.config.max_links_per_page,
+            );
+            let built = build_raw_page_observations(
+                &page_ref,
+                &links,
+                raw_link_count,
+                links_truncated,
+                page_quality_flags.clone(),
+                &parse_status,
+                &discovered_by,
+            );
+            page_rows.push(built.page);
+            warc_record_state.push(json!({
+                "cc_crawl_id": self.config.cc_crawl_id,
+                "url": page_ref.source_url,
+                "warc_file_id": wf_id,
+                "warc_filename": page_ref.warc.filename,
+                "warc_record_offset": page_ref.warc.record_offset,
+                "warc_record_length": page_ref.warc.record_length,
+                "wat_filename": page_ref.wat.filename,
+                "wat_record_offset": page_ref.wat.record_offset,
+                "wat_record_length": page_ref.wat.record_length,
+                "http_status": page_ref.fetch_status,
+                "content_mime_type": page_ref.content_mime_type,
+                "run_date": run_date,
+                "status": parse_status.clone(),
+                "source_role": page_ref.source_role,
+            }));
+            page_parse_state.push(json!({
+                "cc_crawl_id": self.config.cc_crawl_id,
+                "url_id": page_ref.source_url_id,
+                "domain_id": page_ref.source_domain_id,
+                "run_date": run_date,
+                "raw_link_count": raw_link_count,
+                "stored_link_count": links.len(),
+                "links_truncated": links_truncated,
+                "fetch_status": page_ref.fetch_status,
+                "content_mime_type": page_ref.content_mime_type,
+                "page_quality_flags": page_quality_flags,
+                "parse_status": parse_status.clone(),
+                "source_role": "referrer",
+            }));
+
+            for edge in built.edges {
+                dim_domains
+                    .entry(edge.domain_to_id)
+                    .or_insert_with(|| DimDomainRow {
+                        domain_id: edge.domain_to_id,
+                        domain: edge.domain_to.clone(),
+                    });
+                dim_urls.entry(edge.url_to_id).or_insert_with(|| DimUrlRow {
+                    url_id: edge.url_to_id,
+                    url: edge.url_to.clone(),
+                    domain_id: edge.domain_to_id,
+                    canonicalization_version: "v1".into(),
+                });
+                dim_anchors
+                    .entry(edge.anchor_id)
+                    .or_insert_with(|| DimAnchorRow {
+                        anchor_id: edge.anchor_id,
+                        anchor_text: edge.anchor_text.clone(),
+                    });
+                edge_rows.push(edge);
+            }
+            referrer_pages_parsed = referrer_pages_parsed.saturating_add(1);
         }
 
         let edge_key = staging_key(
@@ -501,6 +835,7 @@ impl DataSource for UpfoundryLinkGraphIngestPlugin {
             "edges",
             &self.config.cc_crawl_id,
             &run_date,
+            &run_id,
             0,
         );
         let page_key = staging_key(
@@ -508,6 +843,7 @@ impl DataSource for UpfoundryLinkGraphIngestPlugin {
             "pages",
             &self.config.cc_crawl_id,
             &run_date,
+            &run_id,
             0,
         );
         put_edge_parquet_object(&client, &self.config.ops_bucket, &edge_key, &edge_rows).await?;
@@ -520,8 +856,8 @@ impl DataSource for UpfoundryLinkGraphIngestPlugin {
             &client,
             &self.config.ops_bucket,
             &format!(
-                "{root}dims/dim_url/crawl_id={}/date={}/part-00000.parquet",
-                self.config.cc_crawl_id, run_date
+                "{root}dims/dim_url/crawl_id={}/date={}/run_id={}/part-00000.parquet",
+                self.config.cc_crawl_id, run_date, run_id
             ),
             &dim_url_rows,
         )
@@ -530,8 +866,8 @@ impl DataSource for UpfoundryLinkGraphIngestPlugin {
             &client,
             &self.config.ops_bucket,
             &format!(
-                "{root}dims/dim_domain/crawl_id={}/date={}/part-00000.parquet",
-                self.config.cc_crawl_id, run_date
+                "{root}dims/dim_domain/crawl_id={}/date={}/run_id={}/part-00000.parquet",
+                self.config.cc_crawl_id, run_date, run_id
             ),
             &dim_domain_rows,
         )
@@ -540,8 +876,8 @@ impl DataSource for UpfoundryLinkGraphIngestPlugin {
             &client,
             &self.config.ops_bucket,
             &format!(
-                "{root}dims/dim_anchor/crawl_id={}/date={}/part-00000.parquet",
-                self.config.cc_crawl_id, run_date
+                "{root}dims/dim_anchor/crawl_id={}/date={}/run_id={}/part-00000.parquet",
+                self.config.cc_crawl_id, run_date, run_id
             ),
             &dim_anchor_rows,
         )
@@ -550,10 +886,32 @@ impl DataSource for UpfoundryLinkGraphIngestPlugin {
             &client,
             &self.config.ops_bucket,
             &format!(
-                "{root}dims/dim_warc_file/crawl_id={}/date={}/part-00000.parquet",
-                self.config.cc_crawl_id, run_date
+                "{root}dims/dim_warc_file/crawl_id={}/date={}/run_id={}/part-00000.parquet",
+                self.config.cc_crawl_id, run_date, run_id
             ),
             &dim_warc_file_rows,
+        )
+        .await?;
+        let materialization_manifest_key = format!(
+            "{root}state/materialization/crawl_id={}/date={}/run_id={}.json",
+            self.config.cc_crawl_id, run_date, run_id
+        );
+        put_json_object(
+            &client,
+            &self.config.ops_bucket,
+            &materialization_manifest_key,
+            &json!({
+                "cc_crawl_id": self.config.cc_crawl_id,
+                "run_date": run_date,
+                "run_id": run_id,
+                "edge_staging_key": edge_key,
+                "page_staging_key": page_key,
+                "customer_pages_selected": urls_selected,
+                "referrer_pages_selected": referrer_pages_selected,
+                "referrer_pages_parsed": referrer_pages_parsed,
+                "edge_rows": edge_rows.len(),
+                "page_rows": page_rows.len(),
+            }),
         )
         .await?;
 
@@ -561,6 +919,8 @@ impl DataSource for UpfoundryLinkGraphIngestPlugin {
             urls_selected,
             warc_attempted,
             warc_parsed,
+            referrer_pages_selected,
+            referrer_pages_parsed,
             edges = edge_rows.len(),
             pages = page_rows.len(),
             skips = skip_rows.len(),
@@ -579,12 +939,19 @@ impl DataSource for UpfoundryLinkGraphIngestPlugin {
             &json!({
                 "cc_crawl_id": self.config.cc_crawl_id,
                 "run_date": run_date,
+                "run_id": run_id,
                 "frontier_domains": self.config.frontier_domains,
                 "urls_selected": urls_selected,
                 "max_urls_per_run": self.config.max_urls_per_run,
                 "frontier_exhausted": frontier_exhausted,
                 "warc_records_attempted": warc_attempted,
                 "warc_records_parsed": warc_parsed,
+                "referrer_pages_selected": referrer_pages_selected,
+                "referrer_pages_parsed": referrer_pages_parsed,
+                "referrer_selection_status": referrer_selection_status,
+                "referrer_selection_error": referrer_selection_error,
+                "referrer_selection_invalid_rows": referrer_selection_invalid_rows,
+                "materialization_manifest_key": materialization_manifest_key,
                 "cc_web_graph": web_graph_stats.clone(),
                 "cc_index": index_stats.clone(),
             }),
@@ -689,6 +1056,12 @@ impl DataSource for UpfoundryLinkGraphIngestPlugin {
                 "urls_selected": urls_selected,
                 "warc_records_attempted": warc_attempted,
                 "warc_records_parsed": warc_parsed,
+                "referrer_pages_selected": referrer_pages_selected,
+                "referrer_pages_parsed": referrer_pages_parsed,
+                "referrer_selection_status": referrer_selection_status,
+                "referrer_selection_error": referrer_selection_error,
+                "referrer_selection_invalid_rows": referrer_selection_invalid_rows,
+                "materialization_manifest_key": materialization_manifest_key,
                 "cc_index_mode": index_stats.mode,
                 "cc_index_batches_attempted": index_stats.batches_attempted,
                 "cc_index_batches_failed": index_stats.batches_failed,
@@ -731,6 +1104,9 @@ mod tests {
             live_crawl_enabled: false,
             brightdata_proxy_escalation_enabled: false,
             include_subdomains: true,
+            selected_referrer_page_refs_uri: None,
+            corpus_run_id: None,
+            max_referrer_pages_per_run: 50_000,
         };
         cfg.validate().expect("valid");
     }
