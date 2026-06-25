@@ -19,12 +19,14 @@ use tracing::info;
 use crate::config::UpfoundryBacklinksConfig;
 use crate::ops_reader::{
     latest_complete_manifest, load_edges_for_snapshot, load_manifest_for_snapshot,
-    load_pagerank_for_snapshot, load_spam_scores_for_snapshot, manifest_stale_reason, s3_client,
-    EdgeByTargetRow, PageRankRow, SpamScoreRow,
+    load_materialized_edges_from_manifest, load_pagerank_for_snapshot,
+    load_spam_scores_for_snapshot, manifest_stale_reason, s3_client, EdgeByTargetRow,
+    MaterializedEdgeRow, PageRankRow, SpamScoreRow,
 };
 use crate::streams::{
     ALL_NAMESPACES, NAMESPACE_ANCHOR_DAILY, NAMESPACE_BACKLINK_DAILY, NAMESPACE_HISTORY_DAILY,
-    NAMESPACE_REFERRING_DOMAIN_DAILY, NAMESPACE_SITE_RUN_DAILY, NAMESPACE_SUMMARY_DAILY,
+    NAMESPACE_OUTBOUND_CONTEXT_DAILY, NAMESPACE_REFERRING_DOMAIN_DAILY, NAMESPACE_SITE_RUN_DAILY,
+    NAMESPACE_SUMMARY_DAILY,
 };
 
 pub struct UpfoundryBacklinksPlugin {
@@ -112,6 +114,13 @@ impl UpfoundryBacklinksPlugin {
                 let mut pk = entity_pk.clone();
                 pk.push(FieldPath::single("edge_id"));
                 (pk, "Link history")
+            }
+            NAMESPACE_OUTBOUND_CONTEXT_DAILY => {
+                let mut pk = entity_pk.clone();
+                pk.push(FieldPath::single("edge_id"));
+                pk.push(FieldPath::single("url_from_id"));
+                pk.push(FieldPath::single("url_to_id"));
+                (pk, "Outbound links found on customer and referring pages")
             }
             _ => panic!("unknown namespace: {namespace}"),
         };
@@ -365,6 +374,61 @@ impl UpfoundryBacklinksPlugin {
             history_rows,
         )
     }
+
+    fn project_outbound_context_rows(
+        &self,
+        run_date: &str,
+        snapshot_id: &str,
+        edges: &[MaterializedEdgeRow],
+        target_domain_ids: &[u64],
+    ) -> Vec<Value> {
+        let mut rows = Vec::new();
+        for edge in edges.iter().take(self.config.max_outbound_rows) {
+            let source_is_target = target_domain_ids.contains(&edge.domain_from_id);
+            let target_is_target = target_domain_ids.contains(&edge.domain_to_id);
+            let mut row = self.envelope(run_date);
+            row.insert("corpus_snapshot_id".into(), json!(snapshot_id));
+            row.insert("edge_id".into(), json!(edge.edge_id));
+            row.insert("url_from".into(), json!(edge.url_from));
+            row.insert("url_to".into(), json!(edge.url_to));
+            row.insert("domain_from".into(), json!(edge.domain_from));
+            row.insert("domain_to".into(), json!(edge.domain_to));
+            row.insert("url_from_id".into(), json!(edge.url_from_id));
+            row.insert("url_to_id".into(), json!(edge.url_to_id));
+            row.insert("source_domain_id".into(), json!(edge.domain_from_id));
+            row.insert("target_domain_id".into(), json!(edge.domain_to_id));
+            row.insert("anchor_id".into(), json!(edge.anchor_id));
+            row.insert("anchor".into(), json!(edge.anchor_text));
+            row.insert("link_context".into(), json!(edge.link_context));
+            row.insert("rel_flags".into(), json!(edge.rel_flags));
+            row.insert("dofollow".into(), json!(edge.rel_flags & 1 == 0));
+            row.insert("is_image_link".into(), json!(edge.is_image_link));
+            row.insert("cc_crawl_id".into(), json!(edge.cc_crawl_id));
+            row.insert("warc_record_offset".into(), json!(edge.warc_record_offset));
+            row.insert("warc_record_length".into(), json!(edge.warc_record_length));
+            row.insert(
+                "http_status_from".into(),
+                edge.http_status_from
+                    .map(|status| json!(status))
+                    .unwrap_or(Value::Null),
+            );
+            row.insert("discovered_by".into(), json!(edge.discovered_by));
+            row.insert("source_is_customer_domain".into(), json!(source_is_target));
+            row.insert("target_is_customer_domain".into(), json!(target_is_target));
+            row.insert(
+                "context_role".into(),
+                json!(if source_is_target {
+                    "customer_page_outbound"
+                } else if target_is_target {
+                    "referrer_link_to_customer"
+                } else {
+                    "referrer_page_outbound"
+                }),
+            );
+            rows.push(Value::Object(row));
+        }
+        rows
+    }
 }
 
 #[async_trait]
@@ -463,11 +527,30 @@ impl DataSource for UpfoundryBacklinksPlugin {
             projection_index_stale,
             projection_index_stale_reason.as_deref(),
         );
+        let (materialized_edges, materialization_status, materialization_error) = if let Some(manifest_key) =
+            &self.config.materialization_manifest_key
+        {
+            match load_materialized_edges_from_manifest(&client, &self.config.ops_bucket, manifest_key)
+                .await
+            {
+                Ok(rows) => (rows, "loaded", None),
+                Err(err) => (Vec::new(), "degraded", Some(err.to_string())),
+            }
+        } else {
+            (Vec::new(), "not_configured", None)
+        };
+        let outbound_context = self.project_outbound_context_rows(
+            &run_date,
+            &snapshot_id,
+            &materialized_edges,
+            &target_ids,
+        );
 
         info!(
             snapshot_id,
             target = %self.config.entity_domain,
             edges = edges.len(),
+            outbound_context_rows = outbound_context.len(),
             "upfoundry backlinks projection complete"
         );
 
@@ -483,6 +566,17 @@ impl DataSource for UpfoundryBacklinksPlugin {
         self.submit_rows(ctx.as_ref(), NAMESPACE_HISTORY_DAILY, &run_date, history)?;
         self.submit_rows(
             ctx.as_ref(),
+            NAMESPACE_OUTBOUND_CONTEXT_DAILY,
+            &run_date,
+            outbound_context,
+        )?;
+        let materialization_degraded = materialization_error.is_some();
+        let run_status_partial = projection_index_stale || materialization_degraded;
+        let run_stale_reason = materialization_error
+            .as_deref()
+            .or(projection_index_stale_reason.as_deref());
+        self.submit_rows(
+            ctx.as_ref(),
             NAMESPACE_SITE_RUN_DAILY,
             &run_date,
             vec![json!({
@@ -492,13 +586,17 @@ impl DataSource for UpfoundryBacklinksPlugin {
                 "entity_kind": self.config.entity_kind.as_str(),
                 "corpus_snapshot_id": snapshot_id,
                 "projected_backlinks": edges.len(),
+                "projected_outbound_context_rows": materialized_edges.len().min(self.config.max_outbound_rows),
+                "materialization_manifest_key": self.config.materialization_manifest_key,
+                "materialization_status": materialization_status,
+                "materialization_error": materialization_error.clone(),
                 "tasks_ok": edges.len(),
-                "tasks_error": if projection_index_stale { 1 } else { 0 },
-                "projection_index_stale": projection_index_stale,
-                "projection_index_stale_reason": projection_index_stale_reason,
+                "tasks_error": if run_status_partial { 1 } else { 0 },
+                "projection_index_stale": run_status_partial,
+                "projection_index_stale_reason": run_stale_reason,
                 "pagerank_status": if pagerank.is_empty() { "missing" } else { "available" },
                 "spam_score_status": if spam_scores.is_empty() { "missing" } else { "available" },
-                "status": if projection_index_stale { "partial" } else { "complete" },
+                "status": if run_status_partial { "partial" } else { "complete" },
             })],
         )?;
 
@@ -511,10 +609,11 @@ mod tests {
     use std::collections::HashMap;
 
     use crate::entity::EntityKind;
-    use crate::ops_reader::{PageRankRow, SpamScoreRow};
+    use crate::config::UpfoundryBacklinksConfig;
+    use crate::ops_reader::{MaterializedEdgeRow, PageRankRow, SpamScoreRow};
     use skippr_plugin_shared_link_graph::domain_id;
 
-    use super::{entity_target_domain_ids, first_pagerank, first_spam_score};
+    use super::{entity_target_domain_ids, first_pagerank, first_spam_score, UpfoundryBacklinksPlugin};
 
     #[test]
     fn entity_kind_serializes() {
@@ -579,5 +678,62 @@ mod tests {
             first_spam_score(&spam_scores, &ids).unwrap().spam_score,
             Some(12)
         );
+    }
+
+    #[test]
+    fn outbound_context_uses_raw_edge_schema() {
+        let plugin = UpfoundryBacklinksPlugin {
+            config: UpfoundryBacklinksConfig {
+                site: "example.com".into(),
+                entity_kind: EntityKind::Target,
+                entity_domain: "example.com".into(),
+                domain_variants: vec![],
+                primary_domain: None,
+                competitor_name: None,
+                ops_bucket: "bucket".into(),
+                ops_prefix: "link-graph-corpus".into(),
+                selected_snapshot_id: None,
+                include_subdomains: true,
+                max_detail_rows: 100,
+                materialization_manifest_key: Some("manifest.json".into()),
+                max_outbound_rows: 10,
+            },
+        };
+        let edge = MaterializedEdgeRow {
+            edge_id: "edge-1".into(),
+            url_from: "https://source.example/page".into(),
+            url_to: "https://example.com/target".into(),
+            domain_from: "source.example".into(),
+            domain_to: "example.com".into(),
+            url_from_id: 1,
+            url_to_id: 2,
+            domain_from_id: domain_id("source.example"),
+            domain_to_id: domain_id("example.com"),
+            anchor_text: "Anchor".into(),
+            anchor_id: 3,
+            link_context: "body".into(),
+            rel_flags: 0,
+            is_image_link: false,
+            cc_crawl_id: "CC-MAIN-X".into(),
+            warc_record_offset: 10,
+            warc_record_length: 20,
+            http_status_from: Some(200),
+            discovered_by: "cc_wat_target_index".into(),
+        };
+        let rows = plugin.project_outbound_context_rows(
+            "2026-01-01",
+            "snapshot-1",
+            &[edge],
+            &[domain_id("example.com")],
+        );
+        let row = rows[0].as_object().unwrap();
+        assert_eq!(row.get("url_from").and_then(|v| v.as_str()), Some("https://source.example/page"));
+        assert_eq!(row.get("url_to").and_then(|v| v.as_str()), Some("https://example.com/target"));
+        assert_eq!(row.get("domain_from").and_then(|v| v.as_str()), Some("source.example"));
+        assert_eq!(row.get("domain_to").and_then(|v| v.as_str()), Some("example.com"));
+        assert_eq!(row.get("anchor").and_then(|v| v.as_str()), Some("Anchor"));
+        assert!(row.get("source_url").is_none());
+        assert!(row.get("target_url").is_none());
+        assert!(row.get("anchor_text").is_none());
     }
 }

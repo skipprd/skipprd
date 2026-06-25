@@ -23,6 +23,10 @@ pub struct UpfoundryBacklinksConfig {
     pub include_subdomains: bool,
     #[serde(default = "default_max_detail_rows")]
     pub max_detail_rows: usize,
+    #[serde(default)]
+    pub materialization_manifest_key: Option<String>,
+    #[serde(default = "default_max_outbound_rows")]
+    pub max_outbound_rows: usize,
 }
 
 fn default_ops_prefix() -> String {
@@ -31,6 +35,10 @@ fn default_ops_prefix() -> String {
 
 fn default_max_detail_rows() -> usize {
     10_000
+}
+
+fn default_max_outbound_rows() -> usize {
+    50_000
 }
 
 impl UpfoundryBacklinksConfig {

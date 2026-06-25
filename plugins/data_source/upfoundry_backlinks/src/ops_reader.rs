@@ -1,6 +1,6 @@
 use arrow::array::{
-    Array, BooleanArray, Float64Array, Int32Array, StringArray, UInt32Array, UInt64Array,
-    UInt8Array,
+    Array, BooleanArray, Float64Array, Int32Array, Int64Array, StringArray, UInt32Array,
+    UInt64Array, UInt8Array,
 };
 use arrow::record_batch::RecordBatch;
 use aws_config::BehaviorVersion;
@@ -76,6 +76,29 @@ pub struct SpamScoreRow {
     pub domain_id: u64,
     pub spam_score: Option<i32>,
     pub spam_score_status: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct MaterializedEdgeRow {
+    pub edge_id: String,
+    pub url_from: String,
+    pub url_to: String,
+    pub domain_from: String,
+    pub domain_to: String,
+    pub url_from_id: u64,
+    pub url_to_id: u64,
+    pub domain_from_id: u64,
+    pub domain_to_id: u64,
+    pub anchor_text: String,
+    pub anchor_id: u64,
+    pub link_context: String,
+    pub rel_flags: u32,
+    pub is_image_link: bool,
+    pub cc_crawl_id: String,
+    pub warc_record_offset: i64,
+    pub warc_record_length: i64,
+    pub http_status_from: Option<u32>,
+    pub discovered_by: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -268,6 +291,21 @@ async fn load_json_value(
         .map_err(|e| std::io::Error::other(e.to_string()))?
         .into_bytes();
     serde_json::from_slice(&bytes).map_err(std::io::Error::other)
+}
+
+pub async fn load_materialized_edges_from_manifest(
+    client: &Client,
+    bucket: &str,
+    manifest_key: &str,
+) -> Result<Vec<MaterializedEdgeRow>, std::io::Error> {
+    let manifest = load_json_value(client, bucket, manifest_key).await?;
+    let Some(edge_key) = manifest.get("edge_staging_key").and_then(Value::as_str) else {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("materialization manifest missing edge_staging_key: {manifest_key}"),
+        ));
+    };
+    load_materialized_edges_parquet_object(client, bucket, edge_key).await
 }
 
 fn edge_file_keys_for_target(manifest: &Value, target_domain_id: u64) -> Vec<String> {
@@ -512,6 +550,15 @@ fn u32_value(batch: &RecordBatch, name: &str, row: usize) -> Option<u32> {
     Some(arr.value(row))
 }
 
+fn i64_value(batch: &RecordBatch, name: &str, row: usize) -> Option<i64> {
+    let idx = batch.schema().index_of(name).ok()?;
+    let arr = batch.column(idx).as_any().downcast_ref::<Int64Array>()?;
+    if arr.is_null(row) {
+        return None;
+    }
+    Some(arr.value(row))
+}
+
 fn u8_value(batch: &RecordBatch, name: &str, row: usize) -> Option<u8> {
     let idx = batch.schema().index_of(name).ok()?;
     let arr = batch.column(idx).as_any().downcast_ref::<UInt8Array>()?;
@@ -546,6 +593,63 @@ fn bool_value(batch: &RecordBatch, name: &str, row: usize) -> Option<bool> {
         return None;
     }
     Some(arr.value(row))
+}
+
+async fn load_materialized_edges_parquet_object(
+    client: &Client,
+    bucket: &str,
+    key: &str,
+) -> Result<Vec<MaterializedEdgeRow>, std::io::Error> {
+    let resp = client
+        .get_object()
+        .bucket(bucket)
+        .key(key)
+        .send()
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let bytes = resp
+        .body
+        .collect()
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))?
+        .into_bytes();
+    let builder = ParquetRecordBatchReaderBuilder::try_new(bytes).map_err(std::io::Error::other)?;
+    let reader = builder.build().map_err(std::io::Error::other)?;
+    let mut rows = Vec::new();
+    for batch in reader {
+        let batch = batch.map_err(std::io::Error::other)?;
+        for row in 0..batch.num_rows() {
+            let Some(edge) = materialized_edge_from_batch(&batch, row) else {
+                continue;
+            };
+            rows.push(edge);
+        }
+    }
+    Ok(rows)
+}
+
+fn materialized_edge_from_batch(batch: &RecordBatch, row: usize) -> Option<MaterializedEdgeRow> {
+    Some(MaterializedEdgeRow {
+        edge_id: string_value(batch, "edge_id", row)?,
+        url_from: string_value(batch, "url_from", row).unwrap_or_default(),
+        url_to: string_value(batch, "url_to", row).unwrap_or_default(),
+        domain_from: string_value(batch, "domain_from", row).unwrap_or_default(),
+        domain_to: string_value(batch, "domain_to", row).unwrap_or_default(),
+        url_from_id: u64_value(batch, "url_from_id", row)?,
+        url_to_id: u64_value(batch, "url_to_id", row)?,
+        domain_from_id: u64_value(batch, "domain_from_id", row)?,
+        domain_to_id: u64_value(batch, "domain_to_id", row)?,
+        anchor_text: string_value(batch, "anchor_text", row).unwrap_or_default(),
+        anchor_id: u64_value(batch, "anchor_id", row).unwrap_or(0),
+        link_context: string_value(batch, "link_context", row).unwrap_or_default(),
+        rel_flags: u32_value(batch, "rel_flags", row).unwrap_or(0),
+        is_image_link: bool_value(batch, "is_image_link", row).unwrap_or(false),
+        cc_crawl_id: string_value(batch, "cc_crawl_id", row).unwrap_or_default(),
+        warc_record_offset: i64_value(batch, "warc_record_offset", row).unwrap_or(0),
+        warc_record_length: i64_value(batch, "warc_record_length", row).unwrap_or(0),
+        http_status_from: u32_value(batch, "http_status_from", row),
+        discovered_by: string_value(batch, "discovered_by", row).unwrap_or_default(),
+    })
 }
 
 fn edge_from_batch(batch: &RecordBatch, row: usize) -> Option<EdgeByTargetRow> {
