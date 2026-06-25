@@ -31,6 +31,20 @@ pub struct UpfoundryBacklinksPlugin {
     config: UpfoundryBacklinksConfig,
 }
 
+/// Match corpus edges whether the crawl normalized the host as apex or `www.`.
+fn entity_target_domain_ids(entity_domain: &str) -> Vec<u64> {
+    let lower = entity_domain.trim().to_ascii_lowercase();
+    let mut ids = vec![domain_id(&lower)];
+    if let Some(apex) = lower.strip_prefix("www.") {
+        ids.push(domain_id(apex));
+    } else {
+        ids.push(domain_id(&format!("www.{lower}")));
+    }
+    ids.sort_unstable();
+    ids.dedup();
+    ids
+}
+
 impl UpfoundryBacklinksPlugin {
     pub fn new(config: UpfoundryBacklinksConfig) -> Result<Self, std::io::Error> {
         config.validate()?;
@@ -366,19 +380,22 @@ impl DataSource for UpfoundryBacklinksPlugin {
             },
         };
         let projection_index_stale = projection_index_stale_reason.is_some();
-        let target_id = domain_id(&self.config.entity_domain.to_ascii_lowercase());
-        let all_edges = if projection_index_stale {
-            Vec::new()
-        } else {
-            load_edges_for_snapshot(
-                &client,
-                &self.config.ops_bucket,
-                &self.config.corpus_root(),
-                &snapshot_id,
-                target_id,
-            )
-            .await?
-        };
+        let target_ids = entity_target_domain_ids(&self.config.entity_domain);
+        let mut all_edges = Vec::new();
+        if !projection_index_stale {
+            for target_id in &target_ids {
+                all_edges.extend(
+                    load_edges_for_snapshot(
+                        &client,
+                        &self.config.ops_bucket,
+                        &self.config.corpus_root(),
+                        &snapshot_id,
+                        *target_id,
+                    )
+                    .await?,
+                );
+            }
+        }
         let pagerank_rows = load_pagerank_for_snapshot(
             &client,
             &self.config.ops_bucket,
@@ -403,10 +420,7 @@ impl DataSource for UpfoundryBacklinksPlugin {
             .into_iter()
             .map(|row| (row.domain_id, row))
             .collect();
-        let edges: Vec<EdgeByTargetRow> = all_edges
-            .into_iter()
-            .filter(|e| e.target_domain_id == target_id)
-            .collect();
+        let edges: Vec<EdgeByTargetRow> = all_edges;
 
         let (backlinks, summaries, referring, anchors, history) = self.project_rows(
             &run_date,

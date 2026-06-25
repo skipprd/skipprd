@@ -13512,7 +13512,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-upfoundry-backlinks"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow",
  "async-trait",
@@ -13552,7 +13552,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-upfoundry-link-graph-ingest"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "arrow",
  "async-trait",
