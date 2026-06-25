@@ -19,10 +19,16 @@ pub struct UpfoundryBacklinksConfig {
     pub selected_snapshot_id: Option<String>,
     #[serde(default)]
     pub include_subdomains: bool,
+    #[serde(default = "default_max_detail_rows")]
+    pub max_detail_rows: usize,
 }
 
 fn default_ops_prefix() -> String {
     "link-graph-corpus".into()
+}
+
+fn default_max_detail_rows() -> usize {
+    10_000
 }
 
 impl UpfoundryBacklinksConfig {

@@ -109,22 +109,26 @@ impl UpfoundryBacklinksPlugin {
         if rows.is_empty() {
             return Ok(());
         }
-        let payload = rows
-            .iter()
-            .map(|row| serde_json::to_string(row))
-            .collect::<Result<Vec<_>, _>>()?
-            .join("\n");
-        submit_payload_batches(
-            ctx,
-            vec![IngestBatch {
+        let mut batches = Vec::new();
+        for chunk in rows.chunks(1_000) {
+            let payload = chunk
+                .iter()
+                .map(serde_json::to_string)
+                .collect::<Result<Vec<_>, _>>()?
+                .join("\n");
+            batches.push(IngestBatch {
                 offset_key: OffsetKey::new(namespace, run_date.to_string()),
-                data: payload.clone(),
                 bytes: payload.len(),
+                data: payload,
                 namespace: Some(namespace.to_string()),
                 source_uri: format!("upfoundry-backlinks://{}", self.config.entity_domain),
                 offset_pos: None,
                 cdc_rows: None,
-            }],
+            });
+        }
+        submit_payload_batches(
+            ctx,
+            batches,
         )?;
         Ok(())
     }
@@ -165,84 +169,86 @@ impl UpfoundryBacklinksPlugin {
         for edge in edges {
             let source_rank = pagerank.get(&edge.source_domain_id);
             let target_spam = spam_scores.get(&edge.target_domain_id);
-            let mut row = self.envelope(run_date);
-            row.insert("corpus_snapshot_id".into(), json!(snapshot_id));
-            row.insert("edge_id".into(), json!(edge.edge_id));
-            row.insert("url_from".into(), json!(edge.url_from));
-            row.insert("url_to".into(), json!(edge.url_to));
-            row.insert("domain_from".into(), json!(edge.domain_from));
-            row.insert("target_domain".into(), json!(edge.domain_to));
-            row.insert("anchor".into(), json!(edge.anchor_text));
-            row.insert("url_from_id".into(), json!(edge.url_from_id));
-            row.insert("url_to_id".into(), json!(edge.url_to_id));
-            row.insert("source_domain_id".into(), json!(edge.source_domain_id));
-            row.insert("target_domain_id".into(), json!(edge.target_domain_id));
-            row.insert(
-                "target_domain_hash_bucket".into(),
-                json!(edge.target_domain_hash_bucket),
-            );
-            row.insert(
-                "source_domain_hash_bucket".into(),
-                json!(edge.source_domain_hash_bucket),
-            );
-            row.insert("anchor_id".into(), json!(edge.anchor_id));
-            row.insert("anchor_hash".into(), json!(edge.anchor_hash));
-            row.insert("link_context".into(), json!(edge.link_context));
-            row.insert("rel_semantics".into(), json!(edge.rel_semantics));
-            row.insert("first_seen".into(), json!(edge.first_seen));
-            row.insert("last_seen".into(), json!(edge.last_seen));
-            row.insert(
-                "lost_seen_date".into(),
-                edge.lost_seen_date
-                    .as_ref()
-                    .map(|v| json!(v))
-                    .unwrap_or(Value::Null),
-            );
-            row.insert("state".into(), json!(edge.state));
-            row.insert("rel_flags".into(), json!(edge.rel_flags));
-            row.insert("dofollow".into(), json!(edge.rel_flags & 1 == 0));
-            row.insert("is_image_link".into(), json!(edge.is_image_link));
-            row.insert(
-                "latest_edge_observation_id".into(),
-                json!(edge.latest_edge_observation_id),
-            );
-            row.insert("cc_crawl_id".into(), json!(edge.cc_crawl_id));
-            row.insert("warc_record_id".into(), json!(edge.warc_record_id));
-            row.insert(
-                "backlink_spam_score".into(),
-                target_spam
-                    .and_then(|score| score.spam_score.map(|value| json!(value)))
-                    .unwrap_or(Value::Null),
-            );
-            row.insert(
-                "page_from_rank".into(),
-                edge.page_from_rank
-                    .map(|rank| json!(rank))
-                    .or_else(|| source_rank.map(|rank| json!(rank.rank_percentile)))
-                    .unwrap_or(Value::Null),
-            );
-            row.insert(
-                "http_status_from".into(),
-                edge.http_status_from
-                    .map(|status| json!(status))
-                    .unwrap_or(Value::Null),
-            );
-            row.insert("is_broken".into(), json!(edge.is_broken));
-            row.insert(
-                "discovered_by".into(),
-                json!(if edge.discovered_by.is_empty() {
-                    "cc_warc"
-                } else {
-                    edge.discovered_by.as_str()
-                }),
-            );
-            row.insert(
-                "source_rank_percentile".into(),
-                source_rank
-                    .map(|rank| json!(rank.rank_percentile))
-                    .unwrap_or(Value::Null),
-            );
-            backlink_rows.push(Value::Object(row));
+            if backlink_rows.len() < self.config.max_detail_rows {
+                let mut row = self.envelope(run_date);
+                row.insert("corpus_snapshot_id".into(), json!(snapshot_id));
+                row.insert("edge_id".into(), json!(edge.edge_id));
+                row.insert("url_from".into(), json!(edge.url_from));
+                row.insert("url_to".into(), json!(edge.url_to));
+                row.insert("domain_from".into(), json!(edge.domain_from));
+                row.insert("target_domain".into(), json!(edge.domain_to));
+                row.insert("anchor".into(), json!(edge.anchor_text));
+                row.insert("url_from_id".into(), json!(edge.url_from_id));
+                row.insert("url_to_id".into(), json!(edge.url_to_id));
+                row.insert("source_domain_id".into(), json!(edge.source_domain_id));
+                row.insert("target_domain_id".into(), json!(edge.target_domain_id));
+                row.insert(
+                    "target_domain_hash_bucket".into(),
+                    json!(edge.target_domain_hash_bucket),
+                );
+                row.insert(
+                    "source_domain_hash_bucket".into(),
+                    json!(edge.source_domain_hash_bucket),
+                );
+                row.insert("anchor_id".into(), json!(edge.anchor_id));
+                row.insert("anchor_hash".into(), json!(edge.anchor_hash));
+                row.insert("link_context".into(), json!(edge.link_context));
+                row.insert("rel_semantics".into(), json!(edge.rel_semantics));
+                row.insert("first_seen".into(), json!(edge.first_seen));
+                row.insert("last_seen".into(), json!(edge.last_seen));
+                row.insert(
+                    "lost_seen_date".into(),
+                    edge.lost_seen_date
+                        .as_ref()
+                        .map(|v| json!(v))
+                        .unwrap_or(Value::Null),
+                );
+                row.insert("state".into(), json!(edge.state));
+                row.insert("rel_flags".into(), json!(edge.rel_flags));
+                row.insert("dofollow".into(), json!(edge.rel_flags & 1 == 0));
+                row.insert("is_image_link".into(), json!(edge.is_image_link));
+                row.insert(
+                    "latest_edge_observation_id".into(),
+                    json!(edge.latest_edge_observation_id),
+                );
+                row.insert("cc_crawl_id".into(), json!(edge.cc_crawl_id));
+                row.insert("warc_record_id".into(), json!(edge.warc_record_id));
+                row.insert(
+                    "backlink_spam_score".into(),
+                    target_spam
+                        .and_then(|score| score.spam_score.map(|value| json!(value)))
+                        .unwrap_or(Value::Null),
+                );
+                row.insert(
+                    "page_from_rank".into(),
+                    edge.page_from_rank
+                        .map(|rank| json!(rank))
+                        .or_else(|| source_rank.map(|rank| json!(rank.rank_percentile)))
+                        .unwrap_or(Value::Null),
+                );
+                row.insert(
+                    "http_status_from".into(),
+                    edge.http_status_from
+                        .map(|status| json!(status))
+                        .unwrap_or(Value::Null),
+                );
+                row.insert("is_broken".into(), json!(edge.is_broken));
+                row.insert(
+                    "discovered_by".into(),
+                    json!(if edge.discovered_by.is_empty() {
+                        "cc_warc"
+                    } else {
+                        edge.discovered_by.as_str()
+                    }),
+                );
+                row.insert(
+                    "source_rank_percentile".into(),
+                    source_rank
+                        .map(|rank| json!(rank.rank_percentile))
+                        .unwrap_or(Value::Null),
+                );
+                backlink_rows.push(Value::Object(row));
+            }
             *ref_domains.entry(edge.source_domain_id).or_insert(0) += 1;
             *anchors.entry(edge.anchor_id).or_insert(0) += 1;
         }
@@ -268,6 +274,7 @@ impl UpfoundryBacklinksPlugin {
             .collect();
         let history_rows = edges
             .iter()
+            .take(self.config.max_detail_rows)
             .map(|edge| {
                 let mut row = self.envelope(run_date);
                 row.insert("corpus_snapshot_id".into(), json!(snapshot_id));
