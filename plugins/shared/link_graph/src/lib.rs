@@ -10,7 +10,8 @@ pub mod wat;
 pub use canonical::{canonicalize_url, CanonicalUrl, CanonicalizationVersion};
 pub use html::parse_html_links;
 pub use ids::{
-    anchor_id, domain_id, edge_id, edge_observation_id, url_id, warc_file_id, Id128, Id64,
+    anchor_id, domain_id, edge_id, edge_observation_id, id64_string, url_id, warc_file_id, Id128,
+    Id64,
 };
 pub use raw::{build_raw_page_observations, RawBuildResult};
 pub use types::{ArchiveRecordRef, PageFetchRef, RawEdgeObservation, RawPageFact};

@@ -468,12 +468,13 @@ impl DataSinkAthenaPlugin {
         // Partitioning (contract keys first to match Glue table partition key order).
         let mut partition_values: Vec<String> = vec![];
 
-        let (contract_peek_batch, stream) =
-            if write_policy == WritePolicy::ReplacePartition && source_contract.is_some() {
-                Self::peek_first_batch(stream).await?
-            } else {
-                (None, stream)
-            };
+        let contract_has_partition_keys =
+            source_contract.is_some_and(|contract| !contract.partition_key.is_empty());
+        let (contract_peek_batch, stream) = if contract_has_partition_keys {
+            Self::peek_first_batch(stream).await?
+        } else {
+            (None, stream)
+        };
 
         if let (Some(contract), Some(batch)) = (source_contract, contract_peek_batch.as_ref()) {
             if !contract.partition_key.is_empty() {
@@ -560,9 +561,8 @@ impl DataSinkAthenaPlugin {
         } else {
             None
         };
-        let has_contract_partition_scope = source_contract
-            .zip(contract_peek_batch.as_ref())
-            .is_some_and(|(contract, _)| !contract.partition_key.is_empty());
+        let has_contract_partition_scope =
+            contract_has_partition_keys && contract_peek_batch.is_some();
         let has_partition_scope = !partition_path.is_empty()
             || !time_partition_str.is_empty()
             || has_contract_partition_scope;
@@ -2533,7 +2533,7 @@ fn contract_partition_delete_prefix(
 #[cfg(test)]
 mod contract_schema_tests {
     use super::*;
-    use arrow::array::StringArray;
+    use arrow::array::{Int32Array, StringArray};
     use arrow::datatypes::{DataType, Field, Schema};
     use aws_sdk_glue::types::Column;
     use skippr_runtime_sdk::plugins::source_contract::{FieldPath, WritePolicy};
@@ -2555,6 +2555,37 @@ mod contract_schema_tests {
         let schema = Arc::new(Schema::new(vec![Field::new("date", DataType::Utf8, false)]));
         let dates = StringArray::from(vec![date]);
         RecordBatch::try_new(schema, vec![Arc::new(dates)]).unwrap()
+    }
+
+    fn wat_append_partition_contract() -> SourceNamespaceContract {
+        SourceNamespaceContract {
+            namespace: "cc_wat_source_pages_by_target_domain_index".to_string(),
+            primary_key: vec![
+                FieldPath::single("crawl_id"),
+                FieldPath::single("target_domain_hash_bucket"),
+                FieldPath::single("target_domain_id"),
+                FieldPath::single("source_url_id"),
+            ],
+            cursor: Some(FieldPath::single("wat_path")),
+            partition_key: vec![
+                FieldPath::single("crawl_id"),
+                FieldPath::single("target_domain_hash_bucket"),
+            ],
+            write_policy: WritePolicy::Append,
+            refresh_window: None,
+            description: String::new(),
+            semantics: None,
+        }
+    }
+
+    fn wat_partition_batch(crawl_id: &str, bucket: i32) -> RecordBatch {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("crawl_id", DataType::Utf8, false),
+            Field::new("target_domain_hash_bucket", DataType::Int32, false),
+        ]));
+        let crawl_ids = StringArray::from(vec![crawl_id]);
+        let buckets = Int32Array::from(vec![bucket]);
+        RecordBatch::try_new(schema, vec![Arc::new(crawl_ids), Arc::new(buckets)]).unwrap()
     }
 
     #[test]
@@ -2587,6 +2618,29 @@ mod contract_schema_tests {
         let batch = batch_with_date("2024-01-15");
         let values = contract_partition_key_values(&contract, &batch).unwrap();
         assert_eq!(values, vec![("date".to_string(), "2024-01-15".to_string())]);
+    }
+
+    #[test]
+    fn append_contract_partition_key_values_match_wat_hive_layout() {
+        let contract = wat_append_partition_contract();
+        let batch = wat_partition_batch("CC-MAIN-2025-08", 12345);
+        let values = contract_partition_key_values(&contract, &batch).unwrap();
+        assert_eq!(
+            values,
+            vec![
+                ("crawl_id".to_string(), "CC-MAIN-2025-08".to_string()),
+                ("target_domain_hash_bucket".to_string(), "12345".to_string()),
+            ]
+        );
+        let path = values
+            .into_iter()
+            .map(|(column, value)| format!("{column}={value}"))
+            .collect::<Vec<_>>()
+            .join("/");
+        assert_eq!(
+            path,
+            "crawl_id=CC-MAIN-2025-08/target_domain_hash_bucket=12345"
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@ use chrono::Utc;
 use serde::Serialize;
 use serde_json::{json, Value};
 use skippr_plugin_shared_link_graph::{
-    canonicalize_url, domain_id, parse_wat_metadata_record, WatRecordLocation,
+    canonicalize_url, domain_id, id64_string, parse_wat_metadata_record, WatRecordLocation,
 };
 use skippr_runtime_sdk::helpers::offsets::OffsetKey;
 use skippr_runtime_sdk::plugins::{
@@ -29,11 +29,11 @@ use crate::wat_stream::{open_wat_stream, WatStreamOpenError};
 struct TargetIndexRow {
     crawl_id: String,
     target_domain_hash_bucket: u32,
-    target_domain_id: u64,
+    target_domain_id: String,
     target_domain: String,
-    source_url_id: u64,
+    source_url_id: String,
     source_url: String,
-    source_domain_id: u64,
+    source_domain_id: String,
     source_domain: String,
     source_host: String,
     warc_filename: String,
@@ -198,11 +198,11 @@ impl UpfoundryLinkGraphWatIndexPlugin {
                     Some(TargetIndexRow {
                         crawl_id: self.config.crawl_id.clone(),
                         target_domain_hash_bucket: self.target_bucket(target_domain_id),
-                        target_domain_id,
+                        target_domain_id: id64_string(target_domain_id),
                         target_domain,
-                        source_url_id: extraction.page_ref.source_url_id,
+                        source_url_id: id64_string(extraction.page_ref.source_url_id),
                         source_url: extraction.page_ref.source_url.clone(),
-                        source_domain_id: extraction.page_ref.source_domain_id,
+                        source_domain_id: id64_string(extraction.page_ref.source_domain_id),
                         source_domain: extraction.page_ref.source_host.clone(),
                         source_host: extraction.page_ref.source_host.clone(),
                         warc_filename: extraction.page_ref.warc.filename.clone(),
@@ -516,6 +516,52 @@ mod tests {
             .unwrap();
         assert_eq!(target.link_count_to_target, 2);
         assert_eq!(target.wat_record_offset, 10);
+        assert_eq!(
+            target.target_domain_id,
+            id64_string(domain_id("target.example"))
+        );
+    }
+
+    #[test]
+    fn target_index_row_serializes_hash_ids_as_json_strings() {
+        let plugin = test_plugin();
+        let record = json!({
+            "Container": {
+                "Filename": "crawl-data/CC-MAIN-X/segments/1/warc/source.warc.gz",
+                "Offset": 100,
+                "Gzip-Metadata": { "Deflate-Length": 200 }
+            },
+            "Envelope": {
+                "WARC-Header-Metadata": {
+                    "WARC-Target-URI": "https://source.example/page",
+                    "WARC-Date": "2026-01-01T00:00:00Z"
+                },
+                "Payload-Metadata": {
+                    "HTTP-Response-Metadata": {
+                        "Response-Message": { "Status": 200 },
+                        "Headers": { "Content-Type": "text/html" },
+                        "HTML-Metadata": {
+                            "Links": [
+                                { "path": "A@/href", "url": "https://target.example/a" }
+                            ]
+                        }
+                    }
+                }
+            }
+        });
+        let rows = plugin.rows_for_extraction(
+            "crawl-data/CC-MAIN-X/segments/1/wat/source.warc.wat.gz",
+            WatRecordLocation {
+                filename: "crawl-data/CC-MAIN-X/segments/1/wat/source.warc.wat.gz".into(),
+                record_offset: 10,
+                record_length: 20,
+            },
+            &record,
+        );
+        let value: Value = serde_json::to_value(&rows[0]).unwrap();
+        assert!(value["target_domain_id"].is_string());
+        assert!(value["source_url_id"].is_string());
+        assert!(value["source_domain_id"].is_string());
     }
 
     #[tokio::test]

@@ -47,6 +47,14 @@ pub fn edge_id(
     ))
 }
 
+/// Decimal string for opaque u64 hash IDs on the JSON / Athena wire.
+///
+/// Glue/Athena `string` is the correct storage type: values can exceed signed `bigint`.
+/// Parquet dictionary encoding still compresses repeated domain IDs well.
+pub fn id64_string(id: Id64) -> String {
+    id.to_string()
+}
+
 pub fn edge_observation_id(
     edge: &Id128,
     cc_crawl_id: &str,
@@ -70,5 +78,12 @@ mod tests {
         assert_ne!(u, 0);
         assert_ne!(d, 0);
         assert_eq!(url_id("https://skippr.io/"), u);
+    }
+
+    #[test]
+    fn id64_string_is_decimal() {
+        let id = domain_id("example.com");
+        assert_eq!(id64_string(id), id.to_string());
+        assert!(id > i64::MAX as u64);
     }
 }
