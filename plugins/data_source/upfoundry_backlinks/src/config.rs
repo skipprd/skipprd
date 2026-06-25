@@ -9,6 +9,8 @@ pub struct UpfoundryBacklinksConfig {
     pub entity_kind: EntityKind,
     pub entity_domain: String,
     #[serde(default)]
+    pub domain_variants: Vec<String>,
+    #[serde(default)]
     pub primary_domain: Option<String>,
     #[serde(default)]
     pub competitor_name: Option<String>,

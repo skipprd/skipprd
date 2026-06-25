@@ -31,18 +31,46 @@ pub struct UpfoundryBacklinksPlugin {
     config: UpfoundryBacklinksConfig,
 }
 
-/// Match corpus edges whether the crawl normalized the host as apex or `www.`.
-fn entity_target_domain_ids(entity_domain: &str) -> Vec<u64> {
-    let lower = entity_domain.trim().to_ascii_lowercase();
-    let mut ids = vec![domain_id(&lower)];
-    if let Some(apex) = lower.strip_prefix("www.") {
-        ids.push(domain_id(apex));
-    } else {
-        ids.push(domain_id(&format!("www.{lower}")));
+fn entity_target_domains(entity_domain: &str, domain_variants: &[String]) -> Vec<String> {
+    let canonical = entity_domain.trim().to_ascii_lowercase();
+    let mut domains = vec![canonical];
+    for domain in domain_variants
+        .iter()
+        .map(|domain| domain.trim().to_ascii_lowercase())
+        .filter(|domain| !domain.is_empty())
+    {
+        if !domains.contains(&domain) {
+            domains.push(domain);
+        }
     }
-    ids.sort_unstable();
-    ids.dedup();
+    domains
+}
+
+fn entity_target_domain_ids(entity_domain: &str, domain_variants: &[String]) -> Vec<u64> {
+    let mut ids = Vec::new();
+    for id in entity_target_domains(entity_domain, domain_variants)
+        .iter()
+        .map(|domain| domain_id(domain))
+    {
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
     ids
+}
+
+fn first_pagerank<'a>(
+    pagerank: &'a HashMap<u64, PageRankRow>,
+    target_domain_ids: &[u64],
+) -> Option<&'a PageRankRow> {
+    target_domain_ids.iter().find_map(|id| pagerank.get(id))
+}
+
+fn first_spam_score<'a>(
+    spam_scores: &'a HashMap<u64, SpamScoreRow>,
+    target_domain_ids: &[u64],
+) -> Option<&'a SpamScoreRow> {
+    target_domain_ids.iter().find_map(|id| spam_scores.get(id))
 }
 
 impl UpfoundryBacklinksPlugin {
@@ -126,10 +154,7 @@ impl UpfoundryBacklinksPlugin {
                 cdc_rows: None,
             });
         }
-        submit_payload_batches(
-            ctx,
-            batches,
-        )?;
+        submit_payload_batches(ctx, batches)?;
         Ok(())
     }
 
@@ -160,6 +185,7 @@ impl UpfoundryBacklinksPlugin {
         edges: &[EdgeByTargetRow],
         pagerank: &HashMap<u64, PageRankRow>,
         spam_scores: &HashMap<u64, SpamScoreRow>,
+        target_domain_ids: &[u64],
         projection_index_stale: bool,
         projection_index_stale_reason: Option<&str>,
     ) -> (Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>, Vec<Value>) {
@@ -308,22 +334,19 @@ impl UpfoundryBacklinksPlugin {
         );
         summary.insert(
             "rank".into(),
-            pagerank
-                .get(&domain_id(&self.config.entity_domain.to_ascii_lowercase()))
+            first_pagerank(pagerank, target_domain_ids)
                 .map(|rank| json!(rank.rank_percentile))
                 .unwrap_or(Value::Null),
         );
         summary.insert(
             "backlinks_spam_score".into(),
-            spam_scores
-                .get(&domain_id(&self.config.entity_domain.to_ascii_lowercase()))
+            first_spam_score(spam_scores, target_domain_ids)
                 .and_then(|score| score.spam_score.map(|value| json!(value)))
                 .unwrap_or(Value::Null),
         );
         summary.insert(
             "spam_score_status".into(),
-            spam_scores
-                .get(&domain_id(&self.config.entity_domain.to_ascii_lowercase()))
+            first_spam_score(spam_scores, target_domain_ids)
                 .map(|score| json!(score.spam_score_status))
                 .unwrap_or_else(|| json!("missing")),
         );
@@ -387,7 +410,8 @@ impl DataSource for UpfoundryBacklinksPlugin {
             },
         };
         let projection_index_stale = projection_index_stale_reason.is_some();
-        let target_ids = entity_target_domain_ids(&self.config.entity_domain);
+        let target_ids =
+            entity_target_domain_ids(&self.config.entity_domain, &self.config.domain_variants);
         let mut all_edges = Vec::new();
         if !projection_index_stale {
             for target_id in &target_ids {
@@ -435,6 +459,7 @@ impl DataSource for UpfoundryBacklinksPlugin {
             &edges,
             &pagerank,
             &spam_scores,
+            &target_ids,
             projection_index_stale,
             projection_index_stale_reason.as_deref(),
         );
@@ -483,10 +508,76 @@ impl DataSource for UpfoundryBacklinksPlugin {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use crate::entity::EntityKind;
+    use crate::ops_reader::{PageRankRow, SpamScoreRow};
+    use skippr_plugin_shared_link_graph::domain_id;
+
+    use super::{entity_target_domain_ids, first_pagerank, first_spam_score};
 
     #[test]
     fn entity_kind_serializes() {
         assert_eq!(EntityKind::Target.as_str(), "target");
+    }
+
+    #[test]
+    fn target_ids_use_explicit_variants_only() {
+        let canonical = domain_id("semrush.com");
+        let www = domain_id("www.semrush.com");
+
+        assert_eq!(
+            entity_target_domain_ids("semrush.com", &[]),
+            vec![canonical]
+        );
+        assert_eq!(
+            entity_target_domain_ids("semrush.com", &["www.semrush.com".into()]),
+            vec![canonical, www]
+        );
+    }
+
+    #[test]
+    fn authority_fallback_prefers_canonical_then_variants() {
+        let canonical = domain_id("semrush.com");
+        let www = domain_id("www.semrush.com");
+        let ids = vec![canonical, www];
+        let mut pagerank = HashMap::new();
+        pagerank.insert(
+            www,
+            PageRankRow {
+                node_id: www,
+                pagerank: 0.2,
+                rank_percentile: 22.0,
+                converged: true,
+            },
+        );
+        pagerank.insert(
+            canonical,
+            PageRankRow {
+                node_id: canonical,
+                pagerank: 0.9,
+                rank_percentile: 99.0,
+                converged: true,
+            },
+        );
+
+        assert_eq!(
+            first_pagerank(&pagerank, &ids).unwrap().rank_percentile,
+            99.0
+        );
+
+        let mut spam_scores = HashMap::new();
+        spam_scores.insert(
+            www,
+            SpamScoreRow {
+                domain_id: www,
+                spam_score: Some(12),
+                spam_score_status: "available".into(),
+            },
+        );
+        assert_eq!(
+            first_spam_score(&spam_scores, &ids).unwrap().spam_score,
+            Some(12)
+        );
     }
 }
