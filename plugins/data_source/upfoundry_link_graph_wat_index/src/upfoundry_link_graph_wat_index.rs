@@ -180,6 +180,16 @@ impl UpfoundryLinkGraphWatIndexPlugin {
             .fold(0usize, usize::saturating_add)
     }
 
+    fn submit_if_frame_full(
+        ctx: &dyn SourceSyncContext,
+        ingest_batches: &mut Vec<IngestBatch>,
+    ) -> Result<(), std::io::Error> {
+        if Self::ingest_batches_bytes(ingest_batches) >= MAX_RUNTIME_PAYLOAD_FRAME_BYTES {
+            submit_payload_batches(ctx, std::mem::take(ingest_batches))?;
+        }
+        Ok(())
+    }
+
     fn rows_for_extraction(
         &self,
         wat_path: &str,
@@ -416,11 +426,7 @@ impl DataSource for UpfoundryLinkGraphWatIndexPlugin {
                 for row in self.rows_for_extraction(path, location, &value) {
                     rows_emitted = rows_emitted.saturating_add(1);
                     self.push_row(&mut pending, row, &mut ingest_batches)?;
-                    if Self::ingest_batches_bytes(&ingest_batches)
-                        >= MAX_RUNTIME_PAYLOAD_FRAME_BYTES
-                    {
-                        submit_payload_batches(ctx.as_ref(), std::mem::take(&mut ingest_batches))?;
-                    }
+                    Self::submit_if_frame_full(ctx.as_ref(), &mut ingest_batches)?;
                 }
             }
             files_processed = files_processed.saturating_add(1);
@@ -428,6 +434,7 @@ impl DataSource for UpfoundryLinkGraphWatIndexPlugin {
         let buckets = pending.keys().copied().collect::<Vec<_>>();
         for bucket in buckets {
             self.flush_bucket(bucket, &mut pending, &mut ingest_batches)?;
+            Self::submit_if_frame_full(ctx.as_ref(), &mut ingest_batches)?;
         }
         if !ingest_batches.is_empty() {
             submit_payload_batches(ctx.as_ref(), ingest_batches)?;
