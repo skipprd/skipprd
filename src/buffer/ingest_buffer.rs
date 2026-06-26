@@ -3605,6 +3605,33 @@ mod tests_wal_commit {
     }
 
     #[test]
+    fn grouped_compaction_key_separates_distinct_wal_partitions() {
+        let mut part_a = test_part("cc_wat_source_pages_by_target_domain_index", 0, "schema", 0);
+        part_a.key.partition =
+            "p_crawl_id=cc_main_x/p_target_domain_hash_bucket=item_1".to_string();
+        let mut part_b = test_part(
+            "cc_wat_source_pages_by_target_domain_index",
+            0,
+            "schema",
+            4096,
+        );
+        part_b.key.partition =
+            "p_crawl_id=cc_main_x/p_target_domain_hash_bucket=item_2".to_string();
+        let meta = test_meta(vec![part_a.clone(), part_b.clone()]);
+        let key_a = Buffers::grouping_key(
+            &part_a,
+            &None,
+            &Buffers::schema_fingerprint_for_group(&part_a, &meta),
+        );
+        let key_b = Buffers::grouping_key(
+            &part_b,
+            &None,
+            &Buffers::schema_fingerprint_for_group(&part_b, &meta),
+        );
+        assert_ne!(key_a, key_b);
+    }
+
+    #[test]
     #[serial]
     fn test_write_seg_commit_header_roundtrip() {
         let (base, _guard) = setup_data_dir();

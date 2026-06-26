@@ -41,7 +41,7 @@ impl std::fmt::Display for WatStreamOpenError {
     }
 }
 
-async fn s3_client() -> S3Client {
+async fn default_s3_client() -> S3Client {
     let cfg = aws_config::load_defaults(BehaviorVersion::latest()).await;
     S3Client::new(&cfg)
 }
@@ -64,6 +64,8 @@ fn reject_if_too_large(
 pub async fn open_wat_stream(
     path: &str,
     max_wat_object_bytes: usize,
+    s3_client: Option<&S3Client>,
+    http_client: Option<&reqwest::Client>,
 ) -> Result<WatGzipStream<Pin<Box<dyn AsyncRead + Send + Unpin>>>, WatStreamOpenError> {
     if Path::new(path).exists() {
         let file = tokio::fs::File::open(path).await?;
@@ -79,7 +81,13 @@ pub async fn open_wat_stream(
                 "invalid s3 uri",
             ))
         })?;
-        let client = s3_client().await;
+        let owned_s3;
+        let client = if let Some(client) = s3_client {
+            client
+        } else {
+            owned_s3 = default_s3_client().await;
+            &owned_s3
+        };
         let head = client
             .head_object()
             .bucket(bucket)
@@ -87,7 +95,10 @@ pub async fn open_wat_stream(
             .send()
             .await
             .map_err(|err| WatStreamOpenError::Io(std::io::Error::other(err.to_string())))?;
-        reject_if_too_large(head.content_length().map(|n| n as u64), max_wat_object_bytes)?;
+        reject_if_too_large(
+            head.content_length().map(|n| n as u64),
+            max_wat_object_bytes,
+        )?;
 
         let output = client
             .get_object()
@@ -96,9 +107,7 @@ pub async fn open_wat_stream(
             .send()
             .await
             .map_err(|err| WatStreamOpenError::Io(std::io::Error::other(err.to_string())))?;
-        let reader = output
-            .body
-            .into_async_read();
+        let reader = output.body.into_async_read();
         return Ok(WatGzipStream::new(Box::pin(reader), max_wat_object_bytes));
     }
 
@@ -107,7 +116,13 @@ pub async fn open_wat_stream(
     } else {
         format!("https://data.commoncrawl.org/{path}")
     };
-    let client = reqwest::Client::new();
+    let owned_http;
+    let client = if let Some(client) = http_client {
+        client
+    } else {
+        owned_http = reqwest::Client::new();
+        &owned_http
+    };
     let head = client
         .head(&url)
         .send()
@@ -206,18 +221,20 @@ impl<R: AsyncRead + Unpin> WatGzipStream<R> {
             pos = pos.saturating_add(2).saturating_add(extra_len);
         }
         if flags & 0x08 != 0 {
-            while *compressed.get(pos).ok_or_else(|| {
-                std::io::Error::new(ErrorKind::UnexpectedEof, "gzip file name")
-            })? != 0
+            while *compressed
+                .get(pos)
+                .ok_or_else(|| std::io::Error::new(ErrorKind::UnexpectedEof, "gzip file name"))?
+                != 0
             {
                 pos += 1;
             }
             pos += 1;
         }
         if flags & 0x10 != 0 {
-            while *compressed.get(pos).ok_or_else(|| {
-                std::io::Error::new(ErrorKind::UnexpectedEof, "gzip comment")
-            })? != 0
+            while *compressed
+                .get(pos)
+                .ok_or_else(|| std::io::Error::new(ErrorKind::UnexpectedEof, "gzip comment"))?
+                != 0
             {
                 pos += 1;
             }
@@ -245,8 +262,8 @@ impl<R: AsyncRead + Unpin> WatGzipStream<R> {
                 .map_err(|err| {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
                 })?;
-            let written = usize::try_from(decoder.total_out().saturating_sub(before_out))
-                .unwrap_or(0);
+            let written =
+                usize::try_from(decoder.total_out().saturating_sub(before_out)).unwrap_or(0);
             payload.extend_from_slice(&out[..written]);
             if status == Status::StreamEnd {
                 break;
@@ -278,9 +295,7 @@ impl<R: AsyncRead + Unpin> WatGzipStream<R> {
     }
 
     /// Returns the compressed byte range and decompressed member payload.
-    pub async fn next_member(
-        &mut self,
-    ) -> Result<Option<(u64, u64, Vec<u8>)>, std::io::Error> {
+    pub async fn next_member(&mut self) -> Result<Option<(u64, u64, Vec<u8>)>, std::io::Error> {
         loop {
             let mut scan = 0usize;
             while scan < self.buffer.len() {

@@ -465,19 +465,19 @@ impl DataSinkAthenaPlugin {
             tags.insert("namespace".to_string(), namespace.to_string());
         }
 
-        // Partitioning (contract keys first to match Glue table partition key order).
+        // Partitioning: ReplacePartition may peek contract keys; Append trusts WAL filename only.
         let mut partition_values: Vec<String> = vec![];
 
-        let contract_has_partition_keys =
-            source_contract.is_some_and(|contract| !contract.partition_key.is_empty());
-        let (contract_peek_batch, stream) = if contract_has_partition_keys {
+        let contract_needs_peek = matches!(write_policy, WritePolicy::ReplacePartition)
+            && source_contract.is_some_and(|contract| !contract.partition_key.is_empty());
+        let (contract_peek_batch, stream) = if contract_needs_peek {
             Self::peek_first_batch(stream).await?
         } else {
             (None, stream)
         };
 
-        if let (Some(contract), Some(batch)) = (source_contract, contract_peek_batch.as_ref()) {
-            if !contract.partition_key.is_empty() {
+        if contract_needs_peek {
+            if let (Some(contract), Some(batch)) = (source_contract, contract_peek_batch.as_ref()) {
                 for (column, value) in contract_partition_key_values(contract, batch)? {
                     partition_values.push(value.clone());
                     tags.insert(column.clone(), value.clone());
@@ -487,6 +487,18 @@ impl DataSinkAthenaPlugin {
         }
 
         let partition_path = BufferChunker::decode_file_partition(&filename);
+
+        let append_requires_wal_partition = matches!(write_policy, WritePolicy::Append)
+            && source_contract.is_some_and(|contract| !contract.partition_key.is_empty());
+        if append_requires_wal_partition && partition_path.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Athena append for namespace {} has no WAL filename partition; configure pipeline batch_partition_fields so skipprd core routes rows into partitioned WAL segments before sink upload",
+                    namespace
+                ),
+            ));
+        }
 
         if !partition_path.is_empty() {
             let parts = partition_path.split('/');
@@ -561,8 +573,7 @@ impl DataSinkAthenaPlugin {
         } else {
             None
         };
-        let has_contract_partition_scope =
-            contract_has_partition_keys && contract_peek_batch.is_some();
+        let has_contract_partition_scope = contract_needs_peek && contract_peek_batch.is_some();
         let has_partition_scope = !partition_path.is_empty()
             || !time_partition_str.is_empty()
             || has_contract_partition_scope;
@@ -1215,6 +1226,7 @@ impl AwsAthena {
                                 namespace,
                                 schema,
                                 source_contract,
+                                None,
                             )
                         },
                         "create_table",
@@ -1252,6 +1264,7 @@ impl AwsAthena {
                             namespace,
                             schema,
                             source_contract,
+                            None,
                         )
                     },
                     "create_table",
@@ -1884,6 +1897,7 @@ impl AwsAthena {
         namespace: &str,
         metadata: &OutputMetadata,
         source_contract: Option<&SourceNamespaceContract>,
+        partition_columns_override: Option<&[Column]>,
     ) -> Result<bool, String> {
         let database = config.glue_database_name.clone();
         let table_name = namespace.to_string();
@@ -1910,7 +1924,9 @@ impl AwsAthena {
         let is_deadletter = binding == RuntimeBinding::Deadletter
             && namespace == skippr_runtime_sdk::sink_compat::deadletter::table_name();
         if !is_deadletter {
-            if let Some(contract) = source_contract {
+            if let Some(override_columns) = partition_columns_override {
+                partitions.extend(override_columns.iter().cloned());
+            } else if let Some(contract) = source_contract {
                 append_contract_glue_partition_keys(&mut partitions, contract, metadata);
             }
             AwsAthena::get_partition_by_fields(&context.output_layout, &mut partitions);
@@ -2173,6 +2189,9 @@ impl AwsAthena {
                         format!("failed to create Glue database '{}': {}", database, err)
                     })?;
                 }
+                let partition_columns_override = source_contract
+                    .filter(|contract| matches!(contract.write_policy, WritePolicy::Append))
+                    .map(|_| partition_columns_from_key(key, partition_values.len()));
                 AwsAthena::backoff_retry(
                     || {
                         AwsAthena::glue_create_table(
@@ -2182,6 +2201,7 @@ impl AwsAthena {
                             namespace,
                             metadata,
                             source_contract,
+                            partition_columns_override.as_deref(),
                         )
                     },
                     "create_table",
@@ -2468,6 +2488,26 @@ fn append_contract_glue_partition_keys(
     }
 }
 
+fn partition_columns_from_key(key: &str, expected_values: usize) -> Vec<Column> {
+    let mut names = key
+        .split('/')
+        .filter_map(|segment| segment.split_once('=').map(|(name, _)| name.to_string()))
+        .collect::<Vec<_>>();
+    if expected_values > 0 && names.len() > expected_values {
+        names = names.split_off(names.len() - expected_values);
+    }
+    names
+        .into_iter()
+        .map(|name| {
+            Column::builder()
+                .name(name)
+                .r#type("string")
+                .build()
+                .unwrap()
+        })
+        .collect()
+}
+
 fn contract_partition_key_values(
     contract: &SourceNamespaceContract,
     batch: &RecordBatch,
@@ -2690,6 +2730,42 @@ mod contract_schema_tests {
         let values = StringArray::from(vec!["x"]);
         let batch = RecordBatch::try_new(schema, vec![Arc::new(values)]).unwrap();
         assert!(contract_partition_key_values(&contract, &batch).is_err());
+    }
+
+    #[test]
+    fn append_wal_filename_partition_decodes_from_encoded_chunk_name() {
+        let filename = BufferChunker::encode_chunk_name(
+            "part-0001",
+            None,
+            Some("cc_wat_source_pages_by_target_domain_index"),
+            Some("p_crawl_id=cc_main_x/p_target_domain_hash_bucket=item_1"),
+            None,
+            None,
+        );
+        let partition_path = BufferChunker::decode_file_partition(&filename);
+        assert_eq!(
+            partition_path,
+            "p_crawl_id=cc_main_x/p_target_domain_hash_bucket=item_1"
+        );
+    }
+
+    #[test]
+    fn append_table_partition_columns_come_from_wal_key() {
+        let columns = partition_columns_from_key(
+            "link-graph-corpus/indexes/cc_wat_source_pages_by_target_domain_index/p_crawl_id=cc_main_x/p_target_domain_hash_bucket=item_1",
+            2,
+        );
+        let names = columns
+            .iter()
+            .map(|column| column.name().to_string())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            names,
+            vec![
+                "p_crawl_id".to_string(),
+                "p_target_domain_hash_bucket".to_string(),
+            ]
+        );
     }
 
     #[test]

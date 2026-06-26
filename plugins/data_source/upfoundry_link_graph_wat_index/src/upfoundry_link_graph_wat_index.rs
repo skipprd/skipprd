@@ -6,9 +6,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::Client as S3Client;
-use chrono::Utc;
 use serde::Serialize;
-use serde_json::{json, Value};
+use serde_json::Value;
 use skippr_plugin_shared_link_graph::{
     canonicalize_url, domain_id, id64_string, parse_wat_metadata_record, WatRecordLocation,
 };
@@ -16,22 +15,111 @@ use skippr_runtime_sdk::helpers::offsets::OffsetKey;
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceOnceContract, SourceSyncContext,
 };
-use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch};
-use tracing::info;
+use skippr_runtime_sdk::source_compat::{source_payload_task, IngestBatch, SourcePayloadTask};
+use tracing::{info, warn};
 
 use crate::config::UpfoundryLinkGraphWatIndexConfig;
-use crate::streams::{
-    all_namespace_contracts, NAMESPACE_AUDIT_SKIP, NAMESPACE_RUN_DAILY, NAMESPACE_TARGET_INDEX,
-};
+use crate::streams::{all_namespace_contracts, NAMESPACE_TARGET_INDEX};
 use crate::wat_stream::{open_wat_stream, WatStreamOpenError};
 
 const MAX_TARGET_INDEX_BATCH_BYTES: usize = 32 * 1024 * 1024;
-const MAX_RUNTIME_PAYLOAD_FRAME_BYTES: usize = 128 * 1024 * 1024;
+
+fn env_string(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|value| !value.is_empty())
+}
+
+fn env_truthy(name: &str) -> bool {
+    env_string(name).is_some_and(|value| {
+        value == "1"
+            || value.eq_ignore_ascii_case("true")
+            || value.eq_ignore_ascii_case("yes")
+            || value.eq_ignore_ascii_case("on")
+    })
+}
+
+fn runtime_is_ci() -> bool {
+    env_truthy("GITHUB_ACTIONS") || env_truthy("CI")
+}
+
+fn ingest_pending_max_bytes() -> usize {
+    env_string("INGEST_PENDING_MAX_BYTES")
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or_else(|| {
+            if runtime_is_ci() {
+                512 * 1024 * 1024
+            } else {
+                2 * 1024 * 1024 * 1024
+            }
+        })
+}
+
+struct IngestPipeline<'a> {
+    ctx: &'a dyn SourceSyncContext,
+    dispatch_cpus: usize,
+    pending_cap: usize,
+    pending_tasks: Vec<SourcePayloadTask>,
+    accepted_submissions: Vec<skippr_runtime_sdk::source_compat::PayloadSubmissionBatch>,
+    pending_bytes_sum: usize,
+}
+
+impl<'a> IngestPipeline<'a> {
+    fn new(ctx: &'a dyn SourceSyncContext) -> Self {
+        let dispatch_cpus = num_cpus::get().max(1);
+        Self {
+            ctx,
+            dispatch_cpus,
+            pending_cap: ingest_pending_max_bytes(),
+            pending_tasks: Vec::with_capacity(dispatch_cpus),
+            accepted_submissions: Vec::new(),
+            pending_bytes_sum: 0,
+        }
+    }
+
+    fn queue_batch(&mut self, batch: IngestBatch) -> Result<(), std::io::Error> {
+        self.pending_bytes_sum = self.pending_bytes_sum.saturating_add(batch.bytes);
+        self.pending_tasks.push(source_payload_task(vec![batch]));
+        self.dispatch_if_ready()
+    }
+
+    fn dispatch_if_ready(&mut self) -> Result<(), std::io::Error> {
+        if self.pending_tasks.len() < self.dispatch_cpus
+            && self.pending_bytes_sum < self.pending_cap
+        {
+            return Ok(());
+        }
+        self.dispatch_pending()
+    }
+
+    fn dispatch_pending(&mut self) -> Result<(), std::io::Error> {
+        if self.pending_tasks.is_empty() {
+            return Ok(());
+        }
+        let submission = self
+            .ctx
+            .submit_payload_tasks_accepted(std::mem::take(&mut self.pending_tasks))?;
+        self.accepted_submissions.push(submission);
+        self.pending_bytes_sum = 0;
+        if self.accepted_submissions.len() >= 1024 {
+            self.ctx.wait_payload_acks(&self.accepted_submissions)?;
+            self.accepted_submissions.clear();
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<(), std::io::Error> {
+        self.dispatch_pending()?;
+        if !self.accepted_submissions.is_empty() {
+            self.ctx.wait_payload_acks(&self.accepted_submissions)?;
+        }
+        self.ctx.drain_payload_acks()
+    }
+}
 
 #[derive(Debug, Clone, Serialize)]
 struct TargetIndexRow {
     crawl_id: String,
-    target_domain_hash_bucket: u32,
+    target_domain_hash_bucket: String,
     target_domain_id: String,
     target_domain: String,
     source_url_id: String,
@@ -74,18 +162,16 @@ impl UpfoundryLinkGraphWatIndexPlugin {
             .filter(|s| !s.trim().is_empty())
     }
 
-    async fn s3_client() -> S3Client {
-        let cfg = aws_config::load_defaults(BehaviorVersion::latest()).await;
-        S3Client::new(&cfg)
-    }
-
-    async fn read_uri(uri: &str) -> Result<Vec<u8>, std::io::Error> {
+    async fn read_uri(
+        uri: &str,
+        s3_client: &S3Client,
+        http_client: &reqwest::Client,
+    ) -> Result<Vec<u8>, std::io::Error> {
         if let Some(path) = uri.strip_prefix("s3://") {
             let (bucket, key) = path.split_once('/').ok_or_else(|| {
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, "invalid s3 uri")
             })?;
-            let client = Self::s3_client().await;
-            let resp = client
+            let resp = s3_client
                 .get_object()
                 .bucket(bucket)
                 .key(key)
@@ -101,7 +187,9 @@ impl UpfoundryLinkGraphWatIndexPlugin {
             return Ok(bytes.to_vec());
         }
         if uri.starts_with("http://") || uri.starts_with("https://") {
-            let bytes = reqwest::get(uri)
+            let bytes = http_client
+                .get(uri)
+                .send()
                 .await
                 .map_err(|err| std::io::Error::other(err.to_string()))?
                 .bytes()
@@ -112,7 +200,11 @@ impl UpfoundryLinkGraphWatIndexPlugin {
         std::fs::read(uri)
     }
 
-    async fn load_wat_paths(&self) -> Result<Vec<String>, std::io::Error> {
+    async fn load_wat_paths(
+        &self,
+        s3_client: &S3Client,
+        http_client: &reqwest::Client,
+    ) -> Result<Vec<String>, std::io::Error> {
         if let Some(dir) = Self::fixture_dir() {
             let manifest = Path::new(&dir).join("wat.paths");
             if manifest.exists() {
@@ -139,7 +231,7 @@ impl UpfoundryLinkGraphWatIndexPlugin {
                     "wat_paths_manifest_uri is required outside fixture mode",
                 )
             })?;
-        let mut bytes = Self::read_uri(uri).await?;
+        let mut bytes = Self::read_uri(uri, s3_client, http_client).await?;
         if uri.ends_with(".gz") {
             let mut decoder = flate2::read::MultiGzDecoder::new(bytes.as_slice());
             let mut out = Vec::new();
@@ -173,19 +265,58 @@ impl UpfoundryLinkGraphWatIndexPlugin {
             .min(MAX_TARGET_INDEX_BATCH_BYTES)
     }
 
-    fn ingest_batches_bytes(batches: &[IngestBatch]) -> usize {
-        batches
-            .iter()
-            .map(|batch| batch.bytes)
-            .fold(0usize, usize::saturating_add)
+    fn bucket_ingest_batch(&self, bucket: u32, batch: PendingBatch) -> Option<IngestBatch> {
+        if batch.rows.is_empty() {
+            return None;
+        }
+        let data = batch.rows.join("\n");
+        Some(IngestBatch {
+            offset_key: OffsetKey::new(
+                NAMESPACE_TARGET_INDEX,
+                format!("{}#{bucket:05}", self.config.crawl_id),
+            ),
+            bytes: data.len(),
+            data,
+            namespace: Some(NAMESPACE_TARGET_INDEX.to_string()),
+            source_uri: format!("commoncrawl-wat://{}", self.config.crawl_id),
+            offset_pos: None,
+            cdc_rows: None,
+        })
     }
 
-    fn submit_if_frame_full(
-        ctx: &dyn SourceSyncContext,
-        ingest_batches: &mut Vec<IngestBatch>,
+    fn push_row(
+        &self,
+        batches: &mut HashMap<u32, PendingBatch>,
+        row: TargetIndexRow,
+        pipeline: &mut IngestPipeline<'_>,
     ) -> Result<(), std::io::Error> {
-        if Self::ingest_batches_bytes(ingest_batches) >= MAX_RUNTIME_PAYLOAD_FRAME_BYTES {
-            submit_payload_batches(ctx, std::mem::take(ingest_batches))?;
+        let bucket = row
+            .target_domain_hash_bucket
+            .parse::<u32>()
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err))?;
+        let line = serde_json::to_string(&row)?;
+        let batch = batches.entry(bucket).or_default();
+        batch.bytes = batch.bytes.saturating_add(line.len() + 1);
+        batch.rows.push(line);
+        if batch.bytes >= self.effective_batch_size_bytes()
+            || batch.rows.len() >= self.config.max_records_per_batch
+        {
+            self.flush_bucket(bucket, batches, pipeline)?;
+        }
+        Ok(())
+    }
+
+    fn flush_bucket(
+        &self,
+        bucket: u32,
+        batches: &mut HashMap<u32, PendingBatch>,
+        pipeline: &mut IngestPipeline<'_>,
+    ) -> Result<(), std::io::Error> {
+        let Some(pending) = batches.remove(&bucket) else {
+            return Ok(());
+        };
+        if let Some(batch) = self.bucket_ingest_batch(bucket, pending) {
+            pipeline.queue_batch(batch)?;
         }
         Ok(())
     }
@@ -223,7 +354,7 @@ impl UpfoundryLinkGraphWatIndexPlugin {
                     }
                     Some(TargetIndexRow {
                         crawl_id: self.config.crawl_id.clone(),
-                        target_domain_hash_bucket: self.target_bucket(target_domain_id),
+                        target_domain_hash_bucket: self.target_bucket(target_domain_id).to_string(),
                         target_domain_id: id64_string(target_domain_id),
                         target_domain,
                         source_url_id: id64_string(extraction.page_ref.source_url_id),
@@ -247,83 +378,6 @@ impl UpfoundryLinkGraphWatIndexPlugin {
             )
             .collect()
     }
-
-    fn push_row(
-        &self,
-        batches: &mut HashMap<u32, PendingBatch>,
-        row: TargetIndexRow,
-        output: &mut Vec<IngestBatch>,
-    ) -> Result<(), std::io::Error> {
-        let bucket = row.target_domain_hash_bucket;
-        let line = serde_json::to_string(&row)?;
-        let batch = batches.entry(bucket).or_default();
-        batch.bytes = batch.bytes.saturating_add(line.len() + 1);
-        batch.rows.push(line);
-        if batch.bytes >= self.effective_batch_size_bytes()
-            || batch.rows.len() >= self.config.max_records_per_batch
-        {
-            self.flush_bucket(bucket, batches, output)?;
-        }
-        Ok(())
-    }
-
-    fn flush_bucket(
-        &self,
-        bucket: u32,
-        batches: &mut HashMap<u32, PendingBatch>,
-        output: &mut Vec<IngestBatch>,
-    ) -> Result<(), std::io::Error> {
-        let Some(batch) = batches.remove(&bucket) else {
-            return Ok(());
-        };
-        if batch.rows.is_empty() {
-            return Ok(());
-        }
-        let data = batch.rows.join("\n");
-        output.push(IngestBatch {
-            offset_key: OffsetKey::new(
-                NAMESPACE_TARGET_INDEX,
-                format!("{}#{bucket:05}", self.config.crawl_id),
-            ),
-            bytes: data.len(),
-            data,
-            namespace: Some(NAMESPACE_TARGET_INDEX.to_string()),
-            source_uri: format!("commoncrawl-wat://{}", self.config.crawl_id),
-            offset_pos: None,
-            cdc_rows: None,
-        });
-        Ok(())
-    }
-
-    fn submit_rows(
-        &self,
-        ctx: &dyn SourceSyncContext,
-        namespace: &str,
-        partition: String,
-        rows: Vec<Value>,
-    ) -> Result<(), std::io::Error> {
-        if rows.is_empty() {
-            return Ok(());
-        }
-        let data = rows
-            .iter()
-            .map(serde_json::to_string)
-            .collect::<Result<Vec<_>, _>>()?
-            .join("\n");
-        submit_payload_batches(
-            ctx,
-            vec![IngestBatch {
-                offset_key: OffsetKey::new(namespace, partition),
-                bytes: data.len(),
-                data,
-                namespace: Some(namespace.to_string()),
-                source_uri: format!("commoncrawl-wat://{}", self.config.crawl_id),
-                offset_pos: None,
-                cdc_rows: None,
-            }],
-        )?;
-        Ok(())
-    }
 }
 
 #[async_trait]
@@ -339,8 +393,11 @@ impl DataSource for UpfoundryLinkGraphWatIndexPlugin {
     }
 
     async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
-        let run_date = Utc::now().format("%Y-%m-%d").to_string();
-        let mut paths = self.load_wat_paths().await?;
+        let aws_cfg = aws_config::load_defaults(BehaviorVersion::latest()).await;
+        let s3_client = S3Client::new(&aws_cfg);
+        let http_client = reqwest::Client::new();
+
+        let mut paths = self.load_wat_paths(&s3_client, &http_client).await?;
         let start = self.config.wat_path_start.unwrap_or(0).min(paths.len());
         let end = self
             .config
@@ -351,38 +408,47 @@ impl DataSource for UpfoundryLinkGraphWatIndexPlugin {
         paths.truncate(self.config.max_wat_objects_per_sync);
 
         let mut pending: HashMap<u32, PendingBatch> = HashMap::new();
-        let mut ingest_batches = Vec::new();
+        let mut pipeline = IngestPipeline::new(ctx.as_ref());
         let mut files_processed = 0u32;
         let mut records_seen = 0u64;
         let mut rows_emitted = 0u64;
-        let mut skip_rows = Vec::new();
+        let mut skips_logged = 0u64;
 
         for path in &paths {
             let mut records_seen_in_object = 0usize;
-            let mut stream = match open_wat_stream(path, self.config.max_wat_object_bytes).await {
+            let mut stream = match open_wat_stream(
+                path,
+                self.config.max_wat_object_bytes,
+                Some(&s3_client),
+                Some(&http_client),
+            )
+            .await
+            {
                 Ok(stream) => stream,
                 Err(WatStreamOpenError::TooLarge {
                     compressed_bytes,
                     max_wat_object_bytes,
                 }) => {
-                    skip_rows.push(json!({
-                        "crawl_id": self.config.crawl_id,
-                        "wat_path": path,
-                        "run_date": run_date,
-                        "reason": "wat_object_too_large",
-                        "compressed_bytes": compressed_bytes,
-                        "max_wat_object_bytes": max_wat_object_bytes,
-                    }));
+                    warn!(
+                        crawl_id = %self.config.crawl_id,
+                        wat_path = %path,
+                        reason = "wat_object_too_large",
+                        compressed_bytes,
+                        max_wat_object_bytes,
+                        "skipping WAT object"
+                    );
+                    skips_logged = skips_logged.saturating_add(1);
                     continue;
                 }
                 Err(err) => {
-                    skip_rows.push(json!({
-                        "crawl_id": self.config.crawl_id,
-                        "wat_path": path,
-                        "run_date": run_date,
-                        "reason": "read_failed",
-                        "error": err.to_string(),
-                    }));
+                    warn!(
+                        crawl_id = %self.config.crawl_id,
+                        wat_path = %path,
+                        reason = "read_failed",
+                        error = %err,
+                        "skipping WAT object"
+                    );
+                    skips_logged = skips_logged.saturating_add(1);
                     continue;
                 }
             };
@@ -400,14 +466,15 @@ impl DataSource for UpfoundryLinkGraphWatIndexPlugin {
                     Ok(Some(member)) => member,
                     Ok(None) => break,
                     Err(err) => {
-                        skip_rows.push(json!({
-                            "crawl_id": self.config.crawl_id,
-                            "wat_path": path,
-                            "run_date": run_date,
-                            "reason": "parse_records_failed",
-                            "error": err.to_string(),
-                            "compressed_bytes_read": stream.bytes_read(),
-                        }));
+                        warn!(
+                            crawl_id = %self.config.crawl_id,
+                            wat_path = %path,
+                            reason = "parse_records_failed",
+                            error = %err,
+                            compressed_bytes_read = stream.bytes_read(),
+                            "stopping WAT object after parse failure"
+                        );
+                        skips_logged = skips_logged.saturating_add(1);
                         break;
                     }
                 };
@@ -425,40 +492,25 @@ impl DataSource for UpfoundryLinkGraphWatIndexPlugin {
                 };
                 for row in self.rows_for_extraction(path, location, &value) {
                     rows_emitted = rows_emitted.saturating_add(1);
-                    self.push_row(&mut pending, row, &mut ingest_batches)?;
-                    Self::submit_if_frame_full(ctx.as_ref(), &mut ingest_batches)?;
+                    self.push_row(&mut pending, row, &mut pipeline)?;
                 }
             }
             files_processed = files_processed.saturating_add(1);
         }
         let buckets = pending.keys().copied().collect::<Vec<_>>();
         for bucket in buckets {
-            self.flush_bucket(bucket, &mut pending, &mut ingest_batches)?;
-            Self::submit_if_frame_full(ctx.as_ref(), &mut ingest_batches)?;
+            self.flush_bucket(bucket, &mut pending, &mut pipeline)?;
         }
-        if !ingest_batches.is_empty() {
-            submit_payload_batches(ctx.as_ref(), ingest_batches)?;
-        }
-
-        self.submit_rows(
-            ctx.as_ref(),
-            NAMESPACE_RUN_DAILY,
-            run_date.clone(),
-            vec![json!({
-                "crawl_id": self.config.crawl_id,
-                "run_date": run_date,
-                "wat_files_selected": paths.len(),
-                "wat_files_processed": files_processed,
-                "records_seen": records_seen,
-                "rows_emitted": rows_emitted,
-                "target_domain_bucket_count": self.config.target_domain_bucket_count,
-            })],
-        )?;
-        self.submit_rows(ctx.as_ref(), NAMESPACE_AUDIT_SKIP, run_date, skip_rows)?;
+        pipeline.finish()?;
 
         info!(
             files_processed,
-            records_seen, rows_emitted, "wat index build complete"
+            records_seen,
+            rows_emitted,
+            skips_logged,
+            wat_files_selected = paths.len(),
+            target_domain_bucket_count = self.config.target_domain_bucket_count,
+            "wat index build complete"
         );
         Ok(())
     }
@@ -510,32 +562,19 @@ mod tests {
     }
 
     #[test]
-    fn ingest_batches_bytes_saturates_total_payload_size() {
-        let batches = vec![
-            IngestBatch {
-                offset_key: OffsetKey::new(NAMESPACE_TARGET_INDEX, "a"),
-                bytes: usize::MAX,
-                data: String::new(),
-                namespace: Some(NAMESPACE_TARGET_INDEX.to_string()),
-                source_uri: "test://wat".to_string(),
-                offset_pos: None,
-                cdc_rows: None,
-            },
-            IngestBatch {
-                offset_key: OffsetKey::new(NAMESPACE_TARGET_INDEX, "b"),
-                bytes: 1,
-                data: String::new(),
-                namespace: Some(NAMESPACE_TARGET_INDEX.to_string()),
-                source_uri: "test://wat".to_string(),
-                offset_pos: None,
-                cdc_rows: None,
-            },
-        ];
-
-        assert_eq!(
-            UpfoundryLinkGraphWatIndexPlugin::ingest_batches_bytes(&batches),
-            usize::MAX
-        );
+    fn bucket_ingest_batch_builds_target_index_payload() {
+        let plugin = test_plugin();
+        let batch = plugin
+            .bucket_ingest_batch(
+                42,
+                PendingBatch {
+                    rows: vec!["{\"crawl_id\":\"CC-MAIN-X\"}".to_string()],
+                    bytes: 24,
+                },
+            )
+            .unwrap();
+        assert_eq!(batch.namespace.as_deref(), Some(NAMESPACE_TARGET_INDEX));
+        assert!(batch.data.contains("CC-MAIN-X"));
     }
 
     #[test]
@@ -626,6 +665,7 @@ mod tests {
             &record,
         );
         let value: Value = serde_json::to_value(&rows[0]).unwrap();
+        assert!(value["target_domain_hash_bucket"].is_string());
         assert!(value["target_domain_id"].is_string());
         assert!(value["source_url_id"].is_string());
         assert!(value["source_domain_id"].is_string());

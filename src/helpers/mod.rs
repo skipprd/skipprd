@@ -1527,6 +1527,56 @@ mod parse_partition_tests {
         let partition = Helpers::parse_partition_field(&message, HashSet::new());
         assert_eq!(partition, "p_bar=baz/p_abc1=def");
     }
+
+    #[test]
+    fn wat_target_index_distinct_buckets_produce_distinct_wal_partitions() {
+        let row_a = json!({
+            "crawl_id": "CC-MAIN-X",
+            "target_domain_hash_bucket": "1",
+            "target_domain_id": "1",
+            "source_url_id": "10"
+        });
+        let row_b = json!({
+            "crawl_id": "CC-MAIN-X",
+            "target_domain_hash_bucket": "2",
+            "target_domain_id": "2",
+            "source_url_id": "20"
+        });
+        let fields = "crawl_id,target_domain_hash_bucket";
+        let partition_a =
+            Helpers::parse_partition_field_with_fields(&row_a, &HashSet::new(), fields);
+        let partition_b =
+            Helpers::parse_partition_field_with_fields(&row_b, &HashSet::new(), fields);
+        assert_eq!(
+            partition_a,
+            "p_crawl_id=cc_main_x/p_target_domain_hash_bucket=item_1"
+        );
+        assert_eq!(
+            partition_b,
+            "p_crawl_id=cc_main_x/p_target_domain_hash_bucket=item_2"
+        );
+        assert_ne!(partition_a, partition_b);
+    }
+
+    #[test]
+    fn wat_target_index_empty_partition_fields_collapses_to_single_partition() {
+        let row_a = json!({
+            "crawl_id": "CC-MAIN-X",
+            "target_domain_hash_bucket": "1",
+            "target_domain_id": "1",
+            "source_url_id": "10"
+        });
+        let row_b = json!({
+            "crawl_id": "CC-MAIN-X",
+            "target_domain_hash_bucket": "2",
+            "target_domain_id": "2",
+            "source_url_id": "20"
+        });
+        let partition_a = Helpers::parse_partition_field_with_fields(&row_a, &HashSet::new(), "");
+        let partition_b = Helpers::parse_partition_field_with_fields(&row_b, &HashSet::new(), "");
+        assert_eq!(partition_a, "");
+        assert_eq!(partition_b, "");
+    }
 }
 
 #[cfg(test)]
