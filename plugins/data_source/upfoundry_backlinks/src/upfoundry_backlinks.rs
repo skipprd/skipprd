@@ -527,18 +527,21 @@ impl DataSource for UpfoundryBacklinksPlugin {
             projection_index_stale,
             projection_index_stale_reason.as_deref(),
         );
-        let (materialized_edges, materialization_status, materialization_error) = if let Some(manifest_key) =
-            &self.config.materialization_manifest_key
-        {
-            match load_materialized_edges_from_manifest(&client, &self.config.ops_bucket, manifest_key)
+        let (materialized_edges, materialization_status, materialization_error) =
+            if let Some(manifest_key) = &self.config.materialization_manifest_key {
+                match load_materialized_edges_from_manifest(
+                    &client,
+                    &self.config.ops_bucket,
+                    manifest_key,
+                )
                 .await
-            {
-                Ok(rows) => (rows, "loaded", None),
-                Err(err) => (Vec::new(), "degraded", Some(err.to_string())),
-            }
-        } else {
-            (Vec::new(), "not_configured", None)
-        };
+                {
+                    Ok(rows) => (rows, "loaded", None),
+                    Err(err) => (Vec::new(), "degraded", Some(err.to_string())),
+                }
+            } else {
+                (Vec::new(), "not_configured", None)
+            };
         let outbound_context = self.project_outbound_context_rows(
             &run_date,
             &snapshot_id,
@@ -608,12 +611,14 @@ impl DataSource for UpfoundryBacklinksPlugin {
 mod tests {
     use std::collections::HashMap;
 
-    use crate::entity::EntityKind;
     use crate::config::UpfoundryBacklinksConfig;
+    use crate::entity::EntityKind;
     use crate::ops_reader::{MaterializedEdgeRow, PageRankRow, SpamScoreRow};
     use skippr_plugin_shared_link_graph::domain_id;
 
-    use super::{entity_target_domain_ids, first_pagerank, first_spam_score, UpfoundryBacklinksPlugin};
+    use super::{
+        entity_target_domain_ids, first_pagerank, first_spam_score, UpfoundryBacklinksPlugin,
+    };
 
     #[test]
     fn entity_kind_serializes() {
@@ -727,10 +732,22 @@ mod tests {
             &[domain_id("example.com")],
         );
         let row = rows[0].as_object().unwrap();
-        assert_eq!(row.get("url_from").and_then(|v| v.as_str()), Some("https://source.example/page"));
-        assert_eq!(row.get("url_to").and_then(|v| v.as_str()), Some("https://example.com/target"));
-        assert_eq!(row.get("domain_from").and_then(|v| v.as_str()), Some("source.example"));
-        assert_eq!(row.get("domain_to").and_then(|v| v.as_str()), Some("example.com"));
+        assert_eq!(
+            row.get("url_from").and_then(|v| v.as_str()),
+            Some("https://source.example/page")
+        );
+        assert_eq!(
+            row.get("url_to").and_then(|v| v.as_str()),
+            Some("https://example.com/target")
+        );
+        assert_eq!(
+            row.get("domain_from").and_then(|v| v.as_str()),
+            Some("source.example")
+        );
+        assert_eq!(
+            row.get("domain_to").and_then(|v| v.as_str()),
+            Some("example.com")
+        );
         assert_eq!(row.get("anchor").and_then(|v| v.as_str()), Some("Anchor"));
         assert!(row.get("source_url").is_none());
         assert!(row.get("target_url").is_none());

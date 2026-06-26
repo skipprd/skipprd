@@ -53,15 +53,6 @@ fn runtime_is_discover_mode() -> bool {
         .unwrap_or(false)
 }
 
-fn entity_pk_fields() -> Vec<FieldPath> {
-    vec![
-        FieldPath::single("site"),
-        FieldPath::single("target"),
-        FieldPath::single("entity_kind"),
-        FieldPath::single("competitor_name"),
-    ]
-}
-
 #[derive(Debug, Default)]
 struct RunStats {
     total_api_cost_usd: f64,
@@ -113,22 +104,23 @@ impl DataForSeoBacklinksPlugin {
 
     fn namespace_contract(namespace: &str) -> SourceNamespaceContract {
         let run_date = FieldPath::single("run_date");
+        let site = FieldPath::single("site");
+        let target = FieldPath::single("target");
+        let entity_kind = FieldPath::single("entity_kind");
+        let competitor = FieldPath::single("competitor_name");
+        let entity_pk = vec![site, target, entity_kind, competitor, run_date.clone()];
         let partition_key = vec![run_date.clone()];
-        let entity_pk = entity_pk_fields();
 
         let (primary_key, description) = match namespace {
             NAMESPACE_SITE_RUN_DAILY => (
                 vec![FieldPath::single("site"), run_date.clone()],
-                "DataForSEO backlinks daily run rollup",
+                "Upfoundry backlinks projection run rollup",
             ),
             NAMESPACE_BACKLINK_DAILY => {
                 let mut pk = entity_pk.clone();
-                pk.extend([
-                    FieldPath::single("url_from"),
-                    FieldPath::single("url_to"),
-                    run_date.clone(),
-                ]);
-                (pk, "DataForSEO backlink list daily snapshot")
+                pk.insert(4, FieldPath::single("url_from_id"));
+                pk.push(FieldPath::single("url_to_id"));
+                (pk, "Projected backlink rows")
             }
             NAMESPACE_PAGE_INTERSECTION_DAILY => (
                 vec![
@@ -136,29 +128,25 @@ impl DataForSeoBacklinksPlugin {
                     FieldPath::single("url_from"),
                     run_date.clone(),
                 ],
-                "DataForSEO page intersection daily snapshot",
+                "Page intersection daily snapshot",
             ),
-            NAMESPACE_SUMMARY_DAILY => {
-                let mut pk = entity_pk;
-                pk.push(run_date.clone());
-                (pk, "DataForSEO backlinks summary daily snapshot")
-            }
+            NAMESPACE_SUMMARY_DAILY => (entity_pk.clone(), "Projected backlink summary"),
             NAMESPACE_REFERRING_DOMAIN_DAILY => {
-                let mut pk = entity_pk;
-                pk.extend([FieldPath::single("domain"), run_date.clone()]);
-                (pk, "DataForSEO referring domains daily snapshot")
+                let mut pk = entity_pk.clone();
+                pk.push(FieldPath::single("source_domain_id"));
+                (pk, "Referring domain summary")
             }
             NAMESPACE_ANCHOR_DAILY => {
-                let mut pk = entity_pk;
-                pk.extend([FieldPath::single("anchor"), run_date.clone()]);
-                (pk, "DataForSEO anchors daily snapshot")
+                let mut pk = entity_pk.clone();
+                pk.push(FieldPath::single("anchor_id"));
+                (pk, "Anchor summary")
             }
             NAMESPACE_HISTORY_DAILY => {
-                let mut pk = entity_pk;
-                pk.extend([FieldPath::single("history_date"), run_date.clone()]);
-                (pk, "DataForSEO backlinks history daily snapshot")
+                let mut pk = entity_pk.clone();
+                pk.push(FieldPath::single("edge_id"));
+                (pk, "Link history")
             }
-            _ => (vec![run_date.clone()], "DataForSEO backlinks namespace"),
+            _ => (vec![run_date.clone()], "Upfoundry backlinks namespace"),
         };
 
         SourceNamespaceContract {
@@ -1024,7 +1012,7 @@ mod tests {
             },
         );
         assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0]["entity_kind"], "primary");
+        assert_eq!(rows[0]["entity_kind"], "target");
     }
 
     #[test]

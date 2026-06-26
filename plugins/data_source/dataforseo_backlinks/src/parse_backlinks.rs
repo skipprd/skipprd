@@ -1,5 +1,7 @@
 use serde_json::{json, Map, Value};
 
+use skippr_plugin_shared_backlinks::{apply_backlink_row_ids, finalize_canonical_row};
+
 use crate::config::BacklinkJob;
 use crate::config::MAX_OFFSET;
 use crate::entity::EntityParseContext;
@@ -112,6 +114,9 @@ fn parse_backlink_item(item: &Value, ctx: &BacklinkParseContext<'_>) -> Option<V
     }
     row.insert("api_cost_usd".into(), json!(ctx.api_cost_usd));
 
+    apply_backlink_row_ids(&mut row, url_from, url_to);
+    finalize_canonical_row(&mut row);
+
     Some(Value::Object(row))
 }
 
@@ -196,7 +201,7 @@ mod tests {
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["url_from"], "https://referrer.com/page");
         assert_eq!(rows[0]["target"], "example.com");
-        assert_eq!(rows[0]["entity_kind"], "primary");
+        assert_eq!(rows[0]["entity_kind"], "target");
         assert_eq!(rows[0]["rank"], 120);
     }
 

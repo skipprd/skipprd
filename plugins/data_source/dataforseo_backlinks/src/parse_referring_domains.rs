@@ -1,4 +1,6 @@
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
+
+use skippr_plugin_shared_backlinks::{apply_referring_domain_row_ids, finalize_canonical_row};
 
 use crate::entity::EntityParseContext;
 use crate::parse_util::{copy_fields, copy_json_fields};
@@ -55,5 +57,7 @@ fn parse_referring_domain_item(
     copy_fields(&mut row, item, REFERRING_DOMAIN_SCALAR_FIELDS);
     copy_json_fields(&mut row, item, REFERRING_DOMAIN_JSON_FIELDS);
     row.insert("api_cost_usd".into(), serde_json::json!(api_cost_usd));
+    apply_referring_domain_row_ids(&mut row, domain);
+    finalize_canonical_row(&mut row);
     Some(Value::Object(row))
 }

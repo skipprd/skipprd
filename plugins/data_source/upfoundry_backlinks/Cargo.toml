@@ -19,6 +19,7 @@ parquet.workspace = true
 serde.workspace = true
 serde_json = "1.0.85"
 skippr-plugin-shared-link-graph = { path = "../../shared/link_graph" }
+skippr-plugin-shared-backlinks = { path = "../../shared/backlinks" }
 skippr-runtime-sdk.workspace = true
 tokio.workspace = true
 tracing = "0.1"

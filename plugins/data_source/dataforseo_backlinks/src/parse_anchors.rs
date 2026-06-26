@@ -1,5 +1,7 @@
 use serde_json::{Map, Value};
 
+use skippr_plugin_shared_backlinks::{apply_anchor_row_ids, finalize_canonical_row};
+
 use crate::entity::EntityParseContext;
 use crate::parse_util::copy_fields;
 
@@ -40,5 +42,7 @@ fn parse_anchor_item(
     row.insert("anchor".into(), serde_json::json!(anchor));
     copy_fields(&mut row, item, ANCHOR_SCALAR_FIELDS);
     row.insert("api_cost_usd".into(), serde_json::json!(api_cost_usd));
+    apply_anchor_row_ids(&mut row, anchor);
+    finalize_canonical_row(&mut row);
     Some(Value::Object(row))
 }

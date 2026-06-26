@@ -1,5 +1,7 @@
 use serde_json::{Map, Value};
 
+use skippr_plugin_shared_backlinks::finalize_canonical_row;
+
 use crate::entity::EntityParseContext;
 use crate::parse_util::{copy_fields, copy_json_fields};
 
@@ -46,5 +48,6 @@ pub fn parse_summary_row(
     copy_fields(&mut row, result, SUMMARY_SCALAR_FIELDS);
     copy_json_fields(&mut row, result, SUMMARY_JSON_FIELDS);
     row.insert("api_cost_usd".into(), serde_json::json!(api_cost_usd));
+    finalize_canonical_row(&mut row);
     Some(Value::Object(row))
 }
