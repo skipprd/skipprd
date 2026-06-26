@@ -434,6 +434,36 @@ thread_local! {
     pub static PARTITION_ALLOWED_VALUES_CACHE: Lazy<RwLock<HashSet<String>>> = Lazy::new(|| RwLock::new(HashSet::new()));
 }
 
+fn cleaned_partition_allowed_values(raw: &str) -> HashSet<String> {
+    raw.split(',')
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| Helpers::clean_field_name(value.to_string()))
+        .filter(|value| !value.is_empty())
+        .collect()
+}
+
+#[cfg(test)]
+mod partition_allowed_values_tests {
+    use super::cleaned_partition_allowed_values;
+
+    #[test]
+    fn empty_partition_allowed_values_remain_unrestricted() {
+        assert!(cleaned_partition_allowed_values("").is_empty());
+        assert!(cleaned_partition_allowed_values(" , ").is_empty());
+    }
+
+    #[test]
+    fn partition_allowed_values_are_cleaned_and_filtered() {
+        let allowed = cleaned_partition_allowed_values("Foo Bar, 123, , baz");
+
+        assert!(allowed.contains("foo_bar"));
+        assert!(allowed.contains("item_123"));
+        assert!(allowed.contains("baz"));
+        assert_eq!(allowed.len(), 3);
+    }
+}
+
 #[derive(Clone, Debug)]
 struct SchemaHash {
     schema: SchemaRef,
@@ -1804,12 +1834,7 @@ impl Ingest {
         PARTITION_ALLOWED_VALUES_CACHE.with(|cache| {
             let mut w = cache.write().unwrap();
             if w.is_empty() {
-                w.extend(
-                    allowed_values
-                        .split(",")
-                        .map(|v| Helpers::clean_field_name(v.to_string()))
-                        .collect::<HashSet<String>>(),
-                );
+                w.extend(cleaned_partition_allowed_values(&allowed_values));
             }
         });
 

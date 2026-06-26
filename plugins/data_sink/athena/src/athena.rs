@@ -1926,10 +1926,13 @@ impl AwsAthena {
         if !is_deadletter {
             if let Some(override_columns) = partition_columns_override {
                 partitions.extend(override_columns.iter().cloned());
+                // WAL-derived append partitions already reflect the pipeline output layout.
             } else if let Some(contract) = source_contract {
                 append_contract_glue_partition_keys(&mut partitions, contract, metadata);
+                AwsAthena::get_partition_by_fields(&context.output_layout, &mut partitions);
+            } else {
+                AwsAthena::get_partition_by_fields(&context.output_layout, &mut partitions);
             }
-            AwsAthena::get_partition_by_fields(&context.output_layout, &mut partitions);
         }
 
         // Deadletters are always written flat to a dedicated sink, so do not

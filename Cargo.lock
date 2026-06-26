@@ -12290,7 +12290,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-athena"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "arrow",
  "async-trait",
