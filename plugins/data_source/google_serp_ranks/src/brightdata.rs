@@ -189,7 +189,10 @@ impl BrightDataClient {
         }
     }
 
-    async fn post_serp_request(&self, body: &Value) -> Result<(reqwest::StatusCode, String), std::io::Error> {
+    async fn post_serp_request(
+        &self,
+        body: &Value,
+    ) -> Result<(reqwest::StatusCode, String), std::io::Error> {
         let endpoint = format!("{}/request", self.api_base.trim_end_matches('/'));
         let response = self
             .http

@@ -780,8 +780,25 @@ impl DataForSeoBacklinksPlugin {
             "total_api_cost_usd": stats.total_api_cost_usd,
             "tasks_ok": stats.tasks_ok,
             "tasks_error": stats.tasks_error,
-            "rows_by_stream": stats.rows_by_stream,
+            "rows_by_stream": self.rows_by_stream_payload(stats),
         })
+    }
+
+    /// Always emit every enabled stream key so Iceberg/Glue never discover `struct<>`.
+    fn rows_by_stream_payload(&self, stats: &RunStats) -> Value {
+        let mut map = serde_json::Map::new();
+        for stream in self.config.enabled_streams() {
+            if stream == StreamKind::PageIntersection {
+                continue;
+            }
+            let count = stats
+                .rows_by_stream
+                .get(stream.as_str())
+                .copied()
+                .unwrap_or(0);
+            map.insert(stream.as_str().to_string(), json!(count));
+        }
+        Value::Object(map)
     }
 
     async fn sync_entity_streams(
@@ -1066,6 +1083,58 @@ mod tests {
         .unwrap();
         assert_eq!(row["backlinks"], 41245);
         assert_eq!(row["referring_domains"], 12372);
+    }
+
+    #[test]
+    fn site_run_row_emits_zeroed_stream_keys() {
+        let cfg = DataForSeoBacklinksPluginConfig {
+            login: Some("fixture".into()),
+            password: Some("fixture".into()),
+            site: Some("example.com".into()),
+            run_mode: RunMode::Backlinks,
+            backlink_jobs: vec![BacklinkJob {
+                target: "example.com".into(),
+                job_tag: None,
+                limit: Some(10),
+                mode: None,
+                backlinks_status_type: None,
+                filters: None,
+                order_by: None,
+                max_pages: Some(1),
+                include_subdomains: None,
+                exclude_internal_backlinks: None,
+            }],
+            intersection_jobs: vec![],
+            competitors: vec![],
+            streams: vec![
+                StreamKind::Backlinks,
+                StreamKind::Summary,
+                StreamKind::ReferringDomains,
+            ],
+            history: None,
+            rank_scale: None,
+            request_interval_ms: 0,
+            max_api_retries: 1,
+        };
+        let plugin = DataForSeoBacklinksPlugin::new(cfg).unwrap();
+        let row = plugin.site_run_row("2024-06-01", &RunStats::default());
+        let rows_by_stream = row["rows_by_stream"]
+            .as_object()
+            .expect("rows_by_stream object");
+        assert_eq!(
+            rows_by_stream.get("backlinks").and_then(|v| v.as_u64()),
+            Some(0)
+        );
+        assert_eq!(
+            rows_by_stream.get("summary").and_then(|v| v.as_u64()),
+            Some(0)
+        );
+        assert_eq!(
+            rows_by_stream
+                .get("referring_domains")
+                .and_then(|v| v.as_u64()),
+            Some(0)
+        );
     }
 
     #[test]

@@ -193,17 +193,13 @@ fn string_value(batch: &RecordBatch, name: &str, row: usize) -> Option<String> {
         if arr.is_null(row) {
             return None;
         }
-        return std::str::from_utf8(arr.value(row))
-            .ok()
-            .map(str::to_string);
+        return std::str::from_utf8(arr.value(row)).ok().map(str::to_string);
     }
     if let Some(arr) = col.as_any().downcast_ref::<LargeBinaryArray>() {
         if arr.is_null(row) {
             return None;
         }
-        return std::str::from_utf8(arr.value(row))
-            .ok()
-            .map(str::to_string);
+        return std::str::from_utf8(arr.value(row)).ok().map(str::to_string);
     }
     None
 }
@@ -446,7 +442,10 @@ async fn query_local_urls_index_path(
             }
             let content_mime_type = string_value(&batch, "content_mime_type", row)
                 .unwrap_or_else(|| "text/html".into());
-            if !content_mime_type.to_ascii_lowercase().starts_with("text/html") {
+            if !content_mime_type
+                .to_ascii_lowercase()
+                .starts_with("text/html")
+            {
                 continue;
             }
             let Some(url) = string_value(&batch, "url", row) else {
@@ -746,7 +745,10 @@ mod tests {
         .await;
 
         eprintln!("stats={:?}", result.stats);
-        assert!(result.stats.rows_selected > 0, "expected local semrush URL rows");
+        assert!(
+            result.stats.rows_selected > 0,
+            "expected local semrush URL rows"
+        );
         assert!(!result.records.is_empty());
     }
 

@@ -234,10 +234,7 @@ fn load_manifest_file(path: &Path) -> Option<CompactionTransaction> {
         }
     };
     if bytes.is_empty() {
-        warn!(
-            "Compactor: removing empty compaction manifest {:?}",
-            path
-        );
+        warn!("Compactor: removing empty compaction manifest {:?}", path);
         if let Err(err) = fs::remove_file(path) {
             warn!(
                 "Compactor: failed to remove empty compaction manifest {:?}: {}",

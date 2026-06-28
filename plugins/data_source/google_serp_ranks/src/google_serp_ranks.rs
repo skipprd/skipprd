@@ -390,17 +390,14 @@ impl DataSource for DataSourceGoogleSerpRanksPlugin {
     }
 
     fn source_namespace_contracts(&self) -> Vec<SourceNamespaceContract> {
-        active_namespaces(
-            self.config.capture_results,
-            self.config.include_allintitle,
-        )
-        .into_iter()
-        .map(|ns| namespace_contract(ns))
-        .inspect(|c| {
-            c.validate()
-                .expect("invalid google_serp_ranks namespace contract");
-        })
-        .collect()
+        active_namespaces(self.config.capture_results, self.config.include_allintitle)
+            .into_iter()
+            .map(|ns| namespace_contract(ns))
+            .inspect(|c| {
+                c.validate()
+                    .expect("invalid google_serp_ranks namespace contract");
+            })
+            .collect()
     }
 
     async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {

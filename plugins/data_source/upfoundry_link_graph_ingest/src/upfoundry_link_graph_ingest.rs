@@ -184,10 +184,7 @@ impl UpfoundryLinkGraphIngestPlugin {
         std::fs::read_to_string(uri)
     }
 
-    async fn load_selected_referrer_pages(
-        &self,
-        client: &S3Client,
-    ) -> SelectedReferrerLoad {
+    async fn load_selected_referrer_pages(&self, client: &S3Client) -> SelectedReferrerLoad {
         let Some(uri) = self.config.selected_referrer_page_refs_uri.as_deref() else {
             return SelectedReferrerLoad {
                 rows: Vec::new(),
@@ -290,11 +287,10 @@ impl DataSource for UpfoundryLinkGraphIngestPlugin {
 
     async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         let run_date = Utc::now().format("%Y-%m-%d").to_string();
-        let run_id = self
-            .config
-            .corpus_run_id
-            .clone()
-            .unwrap_or_else(|| format!("{}-{}", self.config.cc_crawl_id, Utc::now().timestamp()));
+        let run_id =
+            self.config.corpus_run_id.clone().unwrap_or_else(|| {
+                format!("{}-{}", self.config.cc_crawl_id, Utc::now().timestamp())
+            });
         let fixture_dir = Self::fixture_dir();
         let fixture_ref = fixture_dir.as_deref();
         let client = Self::s3_client().await?;
