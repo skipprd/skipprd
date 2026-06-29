@@ -1014,8 +1014,29 @@ impl DataSinkIcebergPlugin {
             .await
             .map_err(|err| io::Error::other(err.to_string()))?
         {
-            return catalog
+            let table = catalog
                 .load_table(&table_ident)
+                .await
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            let desired_schema = iceberg_schema_from_output_metadata(namespace, metadata)?;
+            if iceberg_schema_has_all_fields(table.metadata().current_schema(), &desired_schema) {
+                return Ok(table);
+            }
+
+            info!(
+                "Evolving Iceberg schema namespace={} table={} current_fields={} desired_fields={}",
+                namespace,
+                table_ident,
+                table.metadata().current_schema().as_struct().fields().len(),
+                desired_schema.as_struct().fields().len()
+            );
+            let tx = Transaction::new(&table);
+            let tx = tx
+                .replace_schema(desired_schema)
+                .apply(tx)
+                .map_err(|err| io::Error::other(err.to_string()))?;
+            return tx
+                .commit(catalog)
                 .await
                 .map_err(|err| io::Error::other(err.to_string()));
         }
@@ -1330,6 +1351,14 @@ fn apply_iceberg_field_ids_to_batches(
         .into_iter()
         .map(|batch| apply_iceberg_field_ids(batch, iceberg_schema))
         .collect()
+}
+
+fn iceberg_schema_has_all_fields(current: &Schema, desired: &Schema) -> bool {
+    desired
+        .as_struct()
+        .fields()
+        .iter()
+        .all(|field| current.field_by_name(&field.name).is_some())
 }
 
 fn apply_iceberg_field_ids(
