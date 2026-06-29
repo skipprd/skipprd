@@ -30,7 +30,6 @@ use crate::job::{
 use crate::streams::{all_namespace_contracts, NAMESPACE_TARGET_INDEX};
 use crate::wat_stream::{open_wat_stream, WatStreamOpenError};
 
-const MAX_TARGET_INDEX_BATCH_BYTES: usize = 32 * 1024 * 1024;
 const SQS_VISIBILITY_EXTEND_EVERY_PATHS: usize = 25;
 
 fn env_string(name: &str) -> Option<String> {
@@ -265,9 +264,7 @@ impl UpfoundryLinkGraphWatIndexPlugin {
     }
 
     fn effective_batch_size_bytes(&self) -> usize {
-        self.config
-            .batch_size_bytes
-            .min(MAX_TARGET_INDEX_BATCH_BYTES)
+        self.config.batch_size_bytes
     }
 
     fn bucket_ingest_batch(
@@ -865,14 +862,11 @@ mod tests {
     }
 
     #[test]
-    fn effective_batch_size_clamps_oversized_config() {
+    fn effective_batch_size_uses_configured_value() {
         let mut plugin = test_plugin();
-        plugin.config.batch_size_bytes = usize::MAX;
+        plugin.config.batch_size_bytes = 512 * 1024 * 1024;
 
-        assert_eq!(
-            plugin.effective_batch_size_bytes(),
-            MAX_TARGET_INDEX_BATCH_BYTES
-        );
+        assert_eq!(plugin.effective_batch_size_bytes(), 512 * 1024 * 1024);
     }
 
     #[test]
