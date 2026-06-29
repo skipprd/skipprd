@@ -29,9 +29,18 @@ pub struct ReplaceSchemaAction {
     schema: Schema,
 }
 
+/// A transactional action that removes all non-current schema history.
+pub struct RemoveOldSchemasAction;
+
 impl ReplaceSchemaAction {
     pub fn new(schema: Schema) -> Self {
         Self { schema }
+    }
+}
+
+impl RemoveOldSchemasAction {
+    pub fn new() -> Self {
+        Self
     }
 }
 
@@ -49,5 +58,27 @@ impl TransactionAction for ReplaceSchemaAction {
         }];
 
         Ok(ActionCommit::new(updates, requirements))
+    }
+}
+
+#[async_trait]
+impl TransactionAction for RemoveOldSchemasAction {
+    async fn commit(self: Arc<Self>, table: &Table) -> Result<ActionCommit> {
+        let current_schema_id = table.metadata().current_schema_id();
+        let schema_ids = table
+            .metadata()
+            .schemas_iter()
+            .map(|schema| schema.schema_id())
+            .filter(|schema_id| *schema_id != current_schema_id)
+            .collect::<Vec<_>>();
+
+        if schema_ids.is_empty() {
+            return Ok(ActionCommit::new(Vec::new(), Vec::new()));
+        }
+
+        Ok(ActionCommit::new(
+            vec![TableUpdate::RemoveSchemas { schema_ids }],
+            Vec::new(),
+        ))
     }
 }

@@ -1039,6 +1039,10 @@ impl DataSinkIcebergPlugin {
                 .replace_schema(evolved_schema)
                 .apply(tx)
                 .map_err(|err| io::Error::other(err.to_string()))?;
+            let tx = tx
+                .remove_old_schemas()
+                .apply(tx)
+                .map_err(|err| io::Error::other(err.to_string()))?;
             return tx
                 .commit(catalog)
                 .await

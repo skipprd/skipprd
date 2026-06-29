@@ -77,7 +77,7 @@ use crate::transaction::equality_delta::EqualityDeltaAppendAction;
 use crate::transaction::sort_order::ReplaceSortOrderAction;
 use crate::transaction::update_location::UpdateLocationAction;
 use crate::transaction::update_properties::UpdatePropertiesAction;
-use crate::transaction::update_schema::ReplaceSchemaAction;
+use crate::transaction::update_schema::{RemoveOldSchemasAction, ReplaceSchemaAction};
 use crate::transaction::update_statistics::UpdateStatisticsAction;
 use crate::transaction::upgrade_format_version::UpgradeFormatVersionAction;
 use crate::{Catalog, TableCommit, TableRequirement, TableUpdate};
@@ -143,6 +143,11 @@ impl Transaction {
     /// Replace table's current schema.
     pub fn replace_schema(&self, schema: crate::spec::Schema) -> ReplaceSchemaAction {
         ReplaceSchemaAction::new(schema)
+    }
+
+    /// Remove non-current schemas from table metadata.
+    pub fn remove_old_schemas(&self) -> RemoveOldSchemasAction {
+        RemoveOldSchemasAction::new()
     }
 
     /// Creates a fast append action.
