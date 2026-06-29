@@ -22,6 +22,10 @@ static SCHEMA_READY: once_cell::sync::Lazy<DashMap<String, AtomicBool>> =
     once_cell::sync::Lazy::new(|| DashMap::new());
 static SCHEMA_PREP_LOCKS: once_cell::sync::Lazy<DashMap<String, Arc<std::sync::Mutex<()>>>> =
     once_cell::sync::Lazy::new(|| DashMap::new());
+static SCHEMA_SYNC_LOCKS: once_cell::sync::Lazy<DashMap<String, Arc<std::sync::Mutex<()>>>> =
+    once_cell::sync::Lazy::new(|| DashMap::new());
+static SCHEMA_SYNCED_VERSION: once_cell::sync::Lazy<DashMap<String, AtomicU64>> =
+    once_cell::sync::Lazy::new(|| DashMap::new());
 // Single-flight guard for metadata evolution per namespace
 static EVOLUTION_LOCKS: once_cell::sync::Lazy<DashMap<String, Arc<tokio::sync::Mutex<()>>>> =
     once_cell::sync::Lazy::new(|| DashMap::new());
@@ -663,6 +667,39 @@ pub(crate) fn namespace_schema_version(ns: &str) -> u64 {
         .get(ns)
         .map(|v| v.value().load(Ordering::Acquire))
         .unwrap_or(0)
+}
+
+fn ensure_output_schema_synced_for_namespace(ns: &str) -> Result<(), String> {
+    if ns.is_empty() || ns.starts_with("_dl_") {
+        return Ok(());
+    }
+
+    let target_version = std::cmp::max(namespace_schema_version(ns), 1);
+    if SCHEMA_SYNCED_VERSION
+        .get(ns)
+        .map(|v| v.value().load(Ordering::Acquire) >= target_version)
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    let lock = SCHEMA_SYNC_LOCKS
+        .entry(ns.to_string())
+        .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
+        .clone();
+    let _guard = lock.lock().unwrap();
+
+    let target_version = std::cmp::max(namespace_schema_version(ns), 1);
+    let synced_entry = SCHEMA_SYNCED_VERSION
+        .entry(ns.to_string())
+        .or_insert_with(|| AtomicU64::new(0));
+    if synced_entry.load(Ordering::Acquire) >= target_version {
+        return Ok(());
+    }
+
+    INGEST_RT.block_on(Config::sync_output_schema_namespace_blocking(ns))?;
+    synced_entry.store(target_version, Ordering::Release);
+    Ok(())
 }
 
 /// Reload metadata when the namespace schema version advances (e.g. slow-path evolution).
@@ -3052,6 +3089,21 @@ impl Ingest {
 
         // Batch write: aggregate all partition batches and enqueue once for the WAL writer.
         let all_batches: Vec<IngestBufferBatch> = buf.into_values().collect();
+        let mut schema_sync_namespaces = HashSet::new();
+        for batch in &all_batches {
+            if !batch._namespace.starts_with("_dl_") {
+                schema_sync_namespaces.insert(batch._namespace.clone());
+            }
+        }
+        for namespace in schema_sync_namespaces {
+            if let Err(err) = ensure_output_schema_synced_for_namespace(&namespace) {
+                warn!(
+                    "Schema sync barrier failed for namespace {}; deferring batch without committing offsets: {}",
+                    namespace, err
+                );
+                return;
+            }
+        }
         if Config::debug_enabled() {
             debug!(
                 "Ingest: final buffered partition count before WAL flush = {}",
