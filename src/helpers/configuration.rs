@@ -2872,6 +2872,114 @@ impl Config {
         let _ = tx.send(namespace.to_string());
     }
 
+    pub async fn sync_output_schema_namespace_blocking(namespace: &str) -> Result<(), String> {
+        let ns = namespace.trim();
+        if ns.is_empty() {
+            return Err("namespace must not be empty".to_string());
+        }
+
+        let schema_plugin_name = Config::get_pipeline_schema_plugin_name();
+        if schema_plugin_name.is_empty() {
+            debug!("Schema sync: no schema sink configured for primary output");
+            return Ok(());
+        }
+
+        let flatten = Config::get_transform_flatten_events();
+        let md_snapshot = { METADATA.load().metadata.clone() };
+        let out_meta = if let Some(schema) = md_snapshot.get(ns) {
+            if flatten {
+                OutputMetadata::from_flatterened_metadata(schema)
+            } else {
+                OutputMetadata::from_metadata(schema)
+            }
+        } else {
+            crate::runtime_plugins::schema_state::runtime_schema_output_metadata(ns)
+                .ok_or_else(|| format!("Schema sync: namespace {} missing from metadata", ns))?
+        };
+
+        let runtime_version = Config::get_pipeline_schema_plugin_version().map_err(|err| {
+            format!(
+                "Schema sync: failed to resolve runtime schema plugin version: {}",
+                err
+            )
+        })?;
+        let runtime_config = Config::get_pipeline_output_plugin_config()
+            .map_err(|err| {
+                format!(
+                    "Schema sync: failed to resolve output plugin config: {}",
+                    err
+                )
+            })
+            .and_then(|cfg| {
+                crate::runtime_plugins::protocol::RuntimeSchemaConfig::try_from(cfg).map_err(
+                    |err| {
+                        format!(
+                            "Schema sync: failed to derive runtime schema config: {}",
+                            err
+                        )
+                    },
+                )
+            })?;
+
+        let resolved = crate::runtime_plugins::discovery::resolve_runtime_plugin(
+            crate::runtime_plugins::protocol::RuntimePluginKind::SchemaSink,
+            &schema_plugin_name,
+            runtime_version.as_deref(),
+        )
+        .await
+        .map_err(|err| {
+            format!(
+                "Schema sync: failed to resolve runtime schema manifest: {}",
+                err
+            )
+        })?;
+
+        let plugin = crate::runtime_plugins::host::RuntimeSchemaSinkPlugin::new(
+            resolved,
+            Config::get_pipeline_name(),
+            crate::runtime_plugins::protocol::RuntimeBinding::Primary,
+            runtime_config,
+        )
+        .await
+        .map_err(|err| {
+            format!(
+                "Schema sync: failed to initialize runtime schema plugin: {}",
+                err
+            )
+        })?;
+        let plugin: Box<dyn crate::plugins::SchemaSink + Send + Sync> = Box::new(plugin);
+
+        let sync_timeout = std::time::Duration::from_secs(
+            Config::getenv("SCHEMA_SYNC_TIMEOUT_SECONDS", "120")
+                .parse::<u64>()
+                .unwrap_or(120),
+        );
+        let source_contract = crate::METADATA.load().source_contract_for_namespace(ns);
+        let schema_request = crate::plugins::SchemaSyncRequest {
+            namespace: ns,
+            compaction_id: "",
+            source_contract: source_contract.as_ref(),
+        };
+
+        info!("Schema sync: blocking update for namespace {}", ns);
+        match tokio::time::timeout(
+            sync_timeout,
+            plugin.sync_schema_request(schema_request, &out_meta),
+        )
+        .await
+        {
+            Ok(Ok(_)) => {
+                info!("Schema sync: blocking sync complete for namespace {}", ns);
+                Ok(())
+            }
+            Ok(Err(e)) => Err(format!("Schema sync: failed for namespace {}: {}", ns, e)),
+            Err(_) => Err(format!(
+                "Schema sync: timed out for namespace {} after {:?}",
+                ns, sync_timeout
+            )),
+        }
+    }
+
     pub async fn init() {
         // Enforce reserved name policy early
         Self::assert_pipeline_not_reserved();

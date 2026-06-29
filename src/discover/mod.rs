@@ -329,6 +329,20 @@ impl crate::discover::PipelineMetadata {
         }
         changed
     }
+
+    pub fn normalize_namespace(&mut self, namespace: &str) -> Result<bool, String> {
+        if self.schema_id == 0 {
+            self.schema_id = DEFAULT_SCHEMA_ID;
+        }
+
+        let metadata = self
+            .metadata
+            .get_mut(namespace)
+            .ok_or_else(|| format!("No metadata for namespace {}", namespace))?;
+        let changed = Metadata::migrate_tree(namespace, metadata, self.schema_id, Vec::new());
+        Metadata::validate_field_identity(namespace, metadata)?;
+        Ok(changed)
+    }
 }
 
 const CURRENT_METADATA_VERSION: u32 = 3;
@@ -494,6 +508,50 @@ impl Metadata {
             }
         }
         changed
+    }
+
+    pub fn validate_field_identity(namespace: &str, metadata: &Metadata) -> Result<(), String> {
+        let mut seen = HashMap::<i32, String>::new();
+        Self::validate_field_identity_inner(namespace, metadata, Vec::new(), &mut seen)
+    }
+
+    fn validate_field_identity_inner(
+        namespace: &str,
+        metadata: &Metadata,
+        path: Vec<String>,
+        seen: &mut HashMap<i32, String>,
+    ) -> Result<(), String> {
+        for (field_name, child) in metadata.fields.iter() {
+            let output_name = if child.out_field_name.is_empty() {
+                field_name.clone()
+            } else {
+                child.out_field_name.clone()
+            };
+            let mut child_path = path.clone();
+            child_path.push(output_name);
+
+            if child.field_id == 0 {
+                return Err(format!(
+                    "namespace '{}' has zero field_id at '{}'",
+                    namespace,
+                    child_path.join(".")
+                ));
+            }
+
+            if let Some(previous_path) = seen.insert(child.field_id, child_path.join(".")) {
+                return Err(format!(
+                    "namespace '{}' has duplicate field_id {} at '{}' and '{}'",
+                    namespace,
+                    child.field_id,
+                    previous_path,
+                    child_path.join(".")
+                ));
+            }
+
+            Self::validate_field_identity_inner(namespace, child, child_path, seen)?;
+        }
+
+        Ok(())
     }
 
     fn infer_type_from_counters(types: &HashMap<SkipprDataType, u32>) -> String {
@@ -3638,6 +3696,53 @@ mod tests_roundtrip {
         assert!(!migrated.nullable);
         assert!(migrated.default_value.is_none());
         assert!(!pipeline.migrate_persisted_metadata());
+    }
+
+    #[test]
+    fn normalize_namespace_sets_ids_for_live_evolution() {
+        let mut root = Metadata::new().unwrap();
+        root.fields.insert(
+            "account".to_string(),
+            Metadata::new_with_type(SkipprDataType::Long, "account"),
+        );
+        root.fields.insert(
+            "time".to_string(),
+            Metadata::new_with_type(SkipprDataType::Date, "time"),
+        );
+        let mut pipeline = PipelineMetadata {
+            name: "pipeline".to_string(),
+            metadata: HashMap::from([("id_insert".to_string(), root)]),
+            sql: None,
+            enabled: true,
+            flattened: false,
+            metadata_version: 3,
+            schema_id: 1,
+            source_contracts: HashMap::new(),
+        };
+
+        assert!(pipeline.normalize_namespace("id_insert").unwrap());
+        let fields = &pipeline.metadata.get("id_insert").unwrap().fields;
+        let account = fields.get("account").unwrap();
+        let time = fields.get("time").unwrap();
+        assert_ne!(account.field_id, 0);
+        assert_ne!(time.field_id, 0);
+        assert_ne!(account.field_id, time.field_id);
+        assert_eq!(account.lineage_id, "id_insert:account");
+        assert_eq!(time.lineage_id, "id_insert:time");
+    }
+
+    #[test]
+    fn validate_field_identity_rejects_duplicate_ids() {
+        let mut root = Metadata::new().unwrap();
+        let mut first = Metadata::new_with_type(SkipprDataType::String, "userName");
+        first.field_id = 42;
+        let mut second = Metadata::new_with_type(SkipprDataType::String, "username");
+        second.field_id = 42;
+        root.fields.insert("userName".to_string(), first);
+        root.fields.insert("username".to_string(), second);
+
+        let err = Metadata::validate_field_identity("cube_events", &root).unwrap_err();
+        assert!(err.contains("duplicate field_id 42"));
     }
 
     fn discover_field(
