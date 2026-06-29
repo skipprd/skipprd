@@ -1,0 +1,24 @@
+skippr:
+  workspace: benchmark
+
+pipelines:
+  ingest_benchmark:
+    auto_approve: yes
+    env: test
+    buffer_threshold_bytes: 67108864
+    buffer_threshold_seconds: 600
+    data_source: data_sources.ingest_benchmark
+    data_sink: data_sinks.ingest_benchmark
+
+data_sources:
+  ingest_benchmark:
+    File:
+      format: json
+      batch_size_bytes: 67108864
+      path: ./tests/benchmark/ingest/fixtures
+
+data_sinks:
+  ingest_benchmark:
+    File:
+      format: parquet
+      output_dir: ./tests/benchmark/ingest/output
