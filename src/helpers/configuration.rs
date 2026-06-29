@@ -2628,9 +2628,11 @@ impl Config {
                     let md_snapshot = { METADATA.load().metadata.clone() };
                     let out_meta = if let Some(schema) = md_snapshot.get(&ns) {
                         Some(if flatten {
-                            OutputMetadata::from_flatterened_metadata(schema)
+                            OutputMetadata::from_flatterened_metadata_for_namespace(&ns, schema)
                         } else {
-                            OutputMetadata::from_metadata(schema)
+                            let mut out_meta = OutputMetadata::from_metadata(schema);
+                            OutputMetadata::repair_field_identity(&ns, &mut out_meta);
+                            out_meta
                         })
                     } else {
                         crate::runtime_plugins::schema_state::runtime_schema_output_metadata(&ns)
@@ -2888,9 +2890,11 @@ impl Config {
         let md_snapshot = { METADATA.load().metadata.clone() };
         let out_meta = if let Some(schema) = md_snapshot.get(ns) {
             if flatten {
-                OutputMetadata::from_flatterened_metadata(schema)
+                OutputMetadata::from_flatterened_metadata_for_namespace(ns, schema)
             } else {
-                OutputMetadata::from_metadata(schema)
+                let mut out_meta = OutputMetadata::from_metadata(schema);
+                OutputMetadata::repair_field_identity(ns, &mut out_meta);
+                out_meta
             }
         } else {
             crate::runtime_plugins::schema_state::runtime_schema_output_metadata(ns)

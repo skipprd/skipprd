@@ -1030,9 +1030,13 @@ impl DataSinkIcebergPlugin {
                 table.metadata().current_schema().as_struct().fields().len(),
                 desired_schema.as_struct().fields().len()
             );
+            let evolved_schema = merge_iceberg_schema_missing_fields(
+                table.metadata().current_schema(),
+                &desired_schema,
+            )?;
             let tx = Transaction::new(&table);
             let tx = tx
-                .replace_schema(desired_schema)
+                .replace_schema(evolved_schema)
                 .apply(tx)
                 .map_err(|err| io::Error::other(err.to_string()))?;
             return tx
@@ -1361,6 +1365,23 @@ fn iceberg_schema_has_all_fields(current: &Schema, desired: &Schema) -> bool {
         .all(|field| current.field_by_name(&field.name).is_some())
 }
 
+fn merge_iceberg_schema_missing_fields(
+    current: &Schema,
+    desired: &Schema,
+) -> Result<Schema, io::Error> {
+    let mut fields: Vec<Arc<NestedField>> = current.as_struct().fields().iter().cloned().collect();
+    for field in desired.as_struct().fields() {
+        if current.field_by_name(&field.name).is_none() {
+            fields.push(field.clone());
+        }
+    }
+    Schema::builder()
+        .with_schema_id(0)
+        .with_fields(fields)
+        .build()
+        .map_err(|err| io::Error::other(err.to_string()))
+}
+
 fn apply_iceberg_field_ids(
     batch: RecordBatch,
     iceberg_schema: &Schema,
@@ -1485,14 +1506,16 @@ fn iceberg_schema_from_output_metadata(
     metadata: &OutputMetadata,
 ) -> Result<Schema, io::Error> {
     let mut fields = Vec::new();
+    let mut seen_field_ids = HashMap::<i32, ()>::new();
     for (_, field) in metadata.child_fields() {
         fields.push(Arc::new(field_to_nested_field(
             namespace,
             field,
             Vec::new(),
+            &mut seen_field_ids,
         )?));
     }
-    append_cdc_encoded_fields(namespace, &mut fields);
+    append_cdc_encoded_fields(namespace, &mut fields, &mut seen_field_ids);
     Schema::builder()
         .with_schema_id(0)
         .with_fields(fields)
@@ -1500,13 +1523,19 @@ fn iceberg_schema_from_output_metadata(
         .map_err(|err| io::Error::other(err.to_string()))
 }
 
-fn append_cdc_encoded_fields(namespace: &str, fields: &mut Vec<Arc<NestedField>>) {
+fn append_cdc_encoded_fields(
+    namespace: &str,
+    fields: &mut Vec<Arc<NestedField>>,
+    seen_field_ids: &mut HashMap<i32, ()>,
+) {
     for name in ["_skippr_mutation", "_skippr_order_token"] {
         if fields.iter().any(|field| field.name == name) {
             continue;
         }
+        let field_id = unique_iceberg_field_id(namespace, &[name.to_string()], seen_field_ids);
+        seen_field_ids.insert(field_id, ());
         fields.push(Arc::new(NestedField::new(
-            crate::lineage::deterministic_field_id(namespace, &[name.to_string()]),
+            field_id,
             name,
             Type::Primitive(PrimitiveType::String),
             true,
@@ -1514,17 +1543,42 @@ fn append_cdc_encoded_fields(namespace: &str, fields: &mut Vec<Arc<NestedField>>
     }
 }
 
+fn unique_iceberg_field_id(
+    namespace: &str,
+    path: &[String],
+    seen_field_ids: &HashMap<i32, ()>,
+) -> i32 {
+    let mut candidate = crate::lineage::deterministic_field_id(namespace, path);
+    if candidate != 0 && !seen_field_ids.contains_key(&candidate) {
+        return candidate;
+    }
+
+    let mut attempt = 1u32;
+    loop {
+        let mut salted_path = path.to_vec();
+        salted_path.push(format!("__field_id_dedupe_{}", attempt));
+        candidate = crate::lineage::deterministic_field_id(namespace, &salted_path);
+        if candidate != 0 && !seen_field_ids.contains_key(&candidate) {
+            return candidate;
+        }
+        attempt += 1;
+    }
+}
+
 fn field_to_nested_field(
     namespace: &str,
     metadata: &OutputMetadata,
     mut path: Vec<String>,
+    seen_field_ids: &mut HashMap<i32, ()>,
 ) -> Result<NestedField, io::Error> {
     path.push(metadata.out_field_name().to_string());
-    let field_id = if metadata.field_id() != 0 {
+    let field_id = if metadata.field_id() != 0 && !seen_field_ids.contains_key(&metadata.field_id())
+    {
         metadata.field_id()
     } else {
-        crate::lineage::deterministic_field_id(namespace, &path)
+        unique_iceberg_field_id(namespace, &path, seen_field_ids)
     };
+    seen_field_ids.insert(field_id, ());
     let field_type = match metadata.determined_type() {
         SkipprDataType::Record => {
             let mut children = Vec::new();
@@ -1533,6 +1587,7 @@ fn field_to_nested_field(
                     namespace,
                     child,
                     path.clone(),
+                    seen_field_ids,
                 )?));
             }
             Type::Struct(iceberg::spec::StructType::new(children))
@@ -1545,7 +1600,9 @@ fn field_to_nested_field(
                 metadata
                     .child_fields()
                     .find(|(name, _)| name.as_str() == "0")
-                    .map(|(_, child)| field_to_nested_field(namespace, child, path.clone()))
+                    .map(|(_, child)| {
+                        field_to_nested_field(namespace, child, path.clone(), seen_field_ids)
+                    })
                     .transpose()?
                     .map(|field| *field.field_type)
                     .unwrap_or_else(|| Type::Struct(iceberg::spec::StructType::new(Vec::new())))
@@ -1556,8 +1613,11 @@ fn field_to_nested_field(
                         .unwrap_or(&SkipprDataType::String),
                 )
             };
+            let element_field_id =
+                unique_iceberg_field_id(namespace, &element_path, seen_field_ids);
+            seen_field_ids.insert(element_field_id, ());
             Type::List(ListType::new(Arc::new(NestedField::list_element(
-                crate::lineage::deterministic_field_id(namespace, &element_path),
+                element_field_id,
                 element_type,
                 true,
             ))))
@@ -1567,13 +1627,17 @@ fn field_to_nested_field(
             key_path.push("key".to_string());
             let mut value_path = path.clone();
             value_path.push("value".to_string());
+            let key_field_id = unique_iceberg_field_id(namespace, &key_path, seen_field_ids);
+            seen_field_ids.insert(key_field_id, ());
+            let value_field_id = unique_iceberg_field_id(namespace, &value_path, seen_field_ids);
+            seen_field_ids.insert(value_field_id, ());
             Type::Map(MapType::new(
                 Arc::new(NestedField::map_key_element(
-                    crate::lineage::deterministic_field_id(namespace, &key_path),
+                    key_field_id,
                     Type::Primitive(PrimitiveType::String),
                 )),
                 Arc::new(NestedField::map_value_element(
-                    crate::lineage::deterministic_field_id(namespace, &value_path),
+                    value_field_id,
                     primitive_type_for_skippr(
                         metadata
                             .determined_type_values()
@@ -1673,7 +1737,9 @@ mod tests {
             "fields": {}
         }));
 
-        let field = field_to_nested_field("orders", &metadata, Vec::new()).unwrap();
+        let mut seen_field_ids = HashMap::new();
+        let field =
+            field_to_nested_field("orders", &metadata, Vec::new(), &mut seen_field_ids).unwrap();
         assert_eq!(field.id, 10);
         assert!(field.required);
         assert!(matches!(
@@ -1707,8 +1773,13 @@ mod tests {
             "fields": {}
         }));
 
-        let array_field = field_to_nested_field("orders", &array_metadata, Vec::new()).unwrap();
-        let map_field = field_to_nested_field("orders", &map_metadata, Vec::new()).unwrap();
+        let mut seen_field_ids = HashMap::new();
+        let array_field =
+            field_to_nested_field("orders", &array_metadata, Vec::new(), &mut seen_field_ids)
+                .unwrap();
+        let map_field =
+            field_to_nested_field("orders", &map_metadata, Vec::new(), &mut seen_field_ids)
+                .unwrap();
 
         assert!(matches!(array_field.field_type.as_ref(), Type::List(_)));
         assert!(matches!(map_field.field_type.as_ref(), Type::Map(_)));

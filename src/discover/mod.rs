@@ -237,6 +237,50 @@ impl OutputMetadata {
 
         flatterened_metadata
     }
+
+    pub fn from_flatterened_metadata_for_namespace(
+        namespace: &str,
+        metadata: &Metadata,
+    ) -> OutputMetadata {
+        let mut flatterened_metadata = Self::from_flatterened_metadata(metadata);
+        Self::repair_field_identity(namespace, &mut flatterened_metadata);
+        flatterened_metadata
+    }
+
+    pub fn repair_field_identity(namespace: &str, metadata: &mut OutputMetadata) -> bool {
+        let mut changed = false;
+        let mut seen = HashMap::<i32, String>::new();
+        Self::repair_field_identity_inner(namespace, metadata, Vec::new(), &mut seen, &mut changed);
+        changed
+    }
+
+    fn repair_field_identity_inner(
+        namespace: &str,
+        metadata: &mut OutputMetadata,
+        path: Vec<String>,
+        seen: &mut HashMap<i32, String>,
+        changed: &mut bool,
+    ) {
+        for (field_name, child) in metadata.fields.iter_mut() {
+            let output_name = if child.out_field_name.is_empty() {
+                field_name.clone()
+            } else {
+                child.out_field_name.clone()
+            };
+            let mut child_path = path.clone();
+            child_path.push(output_name);
+            let path_string = child_path.join(".");
+
+            if child.field_id == 0 || seen.contains_key(&child.field_id) {
+                child.field_id =
+                    Metadata::unique_deterministic_field_id(namespace, &child_path, seen);
+                *changed = true;
+            }
+            seen.insert(child.field_id, path_string);
+
+            Self::repair_field_identity_inner(namespace, child, child_path, seen, changed);
+        }
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -553,7 +597,7 @@ impl Metadata {
         }
     }
 
-    fn unique_deterministic_field_id(
+    pub(crate) fn unique_deterministic_field_id(
         namespace: &str,
         path: &[String],
         seen: &HashMap<i32, String>,
@@ -3846,6 +3890,28 @@ mod tests_roundtrip {
         assert_ne!(user_name, username);
         assert_ne!(user_name, 0);
         assert_ne!(username, 0);
+    }
+
+    #[test]
+    fn flattened_array_output_metadata_reassigns_repeated_template_field_ids() {
+        let mut root = Metadata::new_with_type(SkipprDataType::Record, "");
+        let mut array = Metadata::new_with_type(SkipprDataType::Array, "items");
+        array.repetition_count = 2;
+        let mut element = Metadata::new_with_type(SkipprDataType::Record, "0");
+        let mut value = Metadata::new_with_type(SkipprDataType::String, "value");
+        value.field_id = 42;
+        element.fields.insert("value".to_string(), value);
+        array.fields.insert("0".to_string(), element);
+        root.fields.insert("items".to_string(), array);
+
+        let flattened =
+            OutputMetadata::from_flatterened_metadata_for_namespace("cube_events", &root);
+        let first = flattened.fields.get("items_0_value").unwrap().field_id;
+        let second = flattened.fields.get("items_1_value").unwrap().field_id;
+
+        assert_ne!(first, 0);
+        assert_ne!(second, 0);
+        assert_ne!(first, second);
     }
 
     fn discover_field(
