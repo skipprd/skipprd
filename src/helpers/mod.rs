@@ -41,15 +41,27 @@ pub struct IngestTransformSnapshot {
     pub time_fields: String,
     pub record_field_path: String,
     pub flatten: bool,
+    /// When true, partition routing can use a static empty string (no field parse).
+    pub skip_partition_parse: bool,
+    /// When true, event-time extraction is skipped entirely.
+    pub skip_time_parse: bool,
+    /// When true and batch namespace is fixed, namespace field parse is skipped.
+    pub skip_namespace_field_parse: bool,
 }
 
 impl IngestTransformSnapshot {
     pub fn capture() -> Self {
         let transform = Config::get_transform_config();
+        let partition_fields = Config::get_transform_batch_partition_fields();
+        let namespace_fields = Config::get_transform_namespace_fields();
+        let time_fields = Config::get_transform_batch_time_fields();
         Self {
-            partition_fields: Config::get_transform_batch_partition_fields(),
-            namespace_fields: Config::get_transform_namespace_fields(),
-            time_fields: Config::get_transform_batch_time_fields(),
+            skip_partition_parse: partition_fields.trim().is_empty(),
+            skip_time_parse: time_fields.trim().is_empty(),
+            skip_namespace_field_parse: namespace_fields.trim().is_empty(),
+            partition_fields,
+            namespace_fields,
+            time_fields,
             record_field_path: transform.record_field_path.unwrap_or_default(),
             flatten: Config::truth_value(
                 &transform.flatten_events.unwrap_or_else(|| "no".to_string()),

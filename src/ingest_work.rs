@@ -9,6 +9,8 @@ use crate::ingest::ingest::ingest;
 use crate::runtime_plugins::protocol::{RuntimeExecutionMode, RuntimeRawIngestBatch};
 use crate::runtime_plugins::schema_state::bump_pipeline_schema_version;
 use crate::serdes::decode::decode_records;
+use crate::serdes::input_format::InputFormat;
+use crate::serdes::ndjson_fast::NdjsonLineParser;
 use crate::{
     data_dir_ingest_paused, record_data_dir_capacity_error, set_data_dir_ingest_paused,
     ARROW_SCHEMA, ARROW_SCHEMA_VERSION, METADATA, RUNNING,
@@ -30,6 +32,7 @@ static DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS: once_cell::sync::Lazy<AtomicU64> =
 static TRANSFORM_INJECT_FIELDS: Lazy<HashMap<String, Value>> =
     Lazy::new(Config::get_transform_inject_fields);
 use crate::metrics::counters as metrics_hot;
+use crate::metrics::ingest_profile as ingest_profile;
 // Bounded concurrency for background metadata writes and Glue schema syncs
 static METADATA_WRITE_SEM: once_cell::sync::Lazy<Arc<tokio::sync::Semaphore>> =
     once_cell::sync::Lazy::new(|| Arc::new(tokio::sync::Semaphore::new(2)));
@@ -45,7 +48,7 @@ pub(crate) static INGEST_RT: once_cell::sync::Lazy<runtime::Runtime> =
 
 use once_cell::sync::Lazy;
 use serde_json::Value;
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use std::io::BufRead as _;
 
@@ -64,6 +67,10 @@ use std::sync::mpsc::Sender;
 
 use crate::buffer::ingest_buffer::{Buffers, IngestBufferBatch, IngestRecord};
 use crate::discover::evolution::{infer_specs_for_record, EvolutionProposal};
+use crate::ingest::exact_arrow::{
+    append_row_to_exact_partition, resolve_cached_exact_plan, ExactArrowPartition,
+    ExactArrowPlan,
+};
 use crate::ingest::fast_ingest::{
     create_default_nested_message, fast_path_ingest, DEFAULT_NESTED_MESSAGE,
 };
@@ -72,12 +79,12 @@ use crate::ingest::record_types::{NormalizedRecord, SourceRecord};
 
 use crate::converters::skippr_arrow::convert_skippr_to_arrow;
 use crate::plugins::DataSink;
+use arrow::compute::concat_batches;
 use arrow::datatypes;
 use arrow::error::ArrowError;
 use arrow::json::ReaderBuilder as ArrowJsonReaderBuilder;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::SchemaRef;
-use std::collections::VecDeque;
 use tokio::runtime;
 use tokio::sync::{mpsc, oneshot};
 // wal_accumulator removed
@@ -222,7 +229,178 @@ fn merge_inject_fields(record: &mut Value, fields: &HashMap<String, Value>) {
 }
 
 fn apply_transform_inject_fields(record: &mut Value) {
+    if TRANSFORM_INJECT_FIELDS.is_empty() {
+        return;
+    }
     merge_inject_fields(record, &*TRANSFORM_INJECT_FIELDS);
+}
+
+const EMPTY_PARTITION: &str = "";
+
+fn ndjson_object_stream_eligible(
+    format: InputFormat,
+    payload: &str,
+    entity_field_dot: &str,
+    is_cdc_batch: bool,
+) -> bool {
+    format == InputFormat::Json
+        && !Config::get_enable_single_quote_parsing()
+        && !Config::get_enable_unicode_parsing()
+        && entity_field_dot.is_empty()
+        && !is_cdc_batch
+        && {
+            let trimmed = payload.trim();
+            trimmed.contains('\n') && !trimmed.starts_with('[')
+        }
+}
+
+enum IngestFlattenItem {
+    Row {
+        line: u64,
+        value: Value,
+    },
+    NotObject {
+        line: String,
+        offset_pos: u64,
+    },
+    ParseError {
+        line: String,
+        offset_pos: u64,
+        error: String,
+    },
+}
+
+struct IngestFlattenIter<'a> {
+    source: IngestFlattenSource<'a>,
+    logical_line: u64,
+    queue: VecDeque<Value>,
+    ndjson_parser: NdjsonLineParser,
+}
+
+enum IngestFlattenSource<'a> {
+    Buffered(std::vec::IntoIter<Value>),
+    Ndjson(std::str::Lines<'a>),
+}
+
+impl<'a> IngestFlattenIter<'a> {
+    fn from_decoded(records: Vec<Value>) -> Self {
+        Self {
+            source: IngestFlattenSource::Buffered(records.into_iter()),
+            logical_line: 0,
+            queue: VecDeque::new(),
+            ndjson_parser: NdjsonLineParser::new(),
+        }
+    }
+
+    fn from_ndjson(payload: &'a str) -> Self {
+        Self {
+            source: IngestFlattenSource::Ndjson(payload.lines()),
+            logical_line: 0,
+            queue: VecDeque::new(),
+            ndjson_parser: NdjsonLineParser::new(),
+        }
+    }
+}
+
+impl Iterator for IngestFlattenIter<'_> {
+    type Item = IngestFlattenItem;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Some(value) = self.queue.pop_front() {
+                self.logical_line += 1;
+                return Some(IngestFlattenItem::Row {
+                    line: self.logical_line,
+                    value,
+                });
+            }
+
+            match &mut self.source {
+                IngestFlattenSource::Buffered(iter) => {
+                    let record = iter.next()?;
+                    self.logical_line += 1;
+                    match record {
+                        Value::Object(_) => {
+                            return Some(IngestFlattenItem::Row {
+                                line: self.logical_line,
+                                value: record,
+                            });
+                        }
+                        Value::Array(values) => {
+                            self.queue.extend(values);
+                            self.logical_line -= 1;
+                        }
+                        _ => {
+                            return Some(IngestFlattenItem::NotObject {
+                                line: record.to_string(),
+                                offset_pos: self.logical_line,
+                            });
+                        }
+                    }
+                }
+                IngestFlattenSource::Ndjson(lines) => {
+                    let line = lines.next()?;
+                    let trimmed = line.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    self.logical_line += 1;
+                    let parse_started = Instant::now();
+                    match self.ndjson_parser.parse_value(trimmed) {
+                        Ok(value) => match value {
+                            Value::Object(_) => {
+                                ingest_profile::add_decode_ns(
+                                    parse_started.elapsed().as_nanos() as u64,
+                                );
+                                return Some(IngestFlattenItem::Row {
+                                    line: self.logical_line,
+                                    value,
+                                });
+                            }
+                            Value::Array(values) => {
+                                ingest_profile::add_decode_ns(
+                                    parse_started.elapsed().as_nanos() as u64,
+                                );
+                                self.queue.extend(values);
+                                self.logical_line -= 1;
+                            }
+                            _ => {
+                                ingest_profile::add_decode_ns(
+                                    parse_started.elapsed().as_nanos() as u64,
+                                );
+                                return Some(IngestFlattenItem::NotObject {
+                                    line: trimmed.to_string(),
+                                    offset_pos: self.logical_line,
+                                });
+                            }
+                        },
+                        Err(err) => {
+                            ingest_profile::add_decode_ns(
+                                parse_started.elapsed().as_nanos() as u64,
+                            );
+                            return Some(IngestFlattenItem::ParseError {
+                                line: trimmed.to_string(),
+                                offset_pos: self.logical_line,
+                                error: err.to_string(),
+                            });
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn count_logical_ingest_records(records: &[Value]) -> usize {
+    let mut count = 0usize;
+    for record in records {
+        match record {
+            Value::Object(_) => count += 1,
+            Value::Array(values) => count += values.len(),
+            _ => count += 1,
+        }
+    }
+    count
 }
 
 fn slow_ingest_blocking(
@@ -252,6 +430,264 @@ fn slow_ingest_blocking(
 }
 
 use crate::ingest::deadletter::{self, DeadletterRecord};
+
+fn partition_key_for_record(
+    primary_sink_ref: &str,
+    ns: &str,
+    part: &str,
+    time_b: &Option<i64>,
+    schema_hash: &SchemaHash,
+) -> IngestPartitionKey {
+    (
+        primary_sink_ref.to_string(),
+        ns.to_string(),
+        part.to_string(),
+        time_b.clone(),
+        schema_hash.hash.clone(),
+    )
+}
+
+fn ensure_partition_buffer_entry<'a>(
+    buf: &'a mut HashMap<IngestPartitionKey, IngestBufferBatch>,
+    key: &IngestPartitionKey,
+    insert_with: impl FnOnce() -> IngestBufferBatch,
+) -> &'a mut IngestBufferBatch {
+    if !buf.contains_key(key) {
+        buf.insert(key.clone(), insert_with());
+    }
+    buf.get_mut(key).expect("partition buffer entry")
+}
+
+fn update_partition_offset(
+    entry: &mut IngestBufferBatch,
+    ok: &OffsetKey,
+    pos: u64,
+) {
+    match entry.offsets.get_mut(ok) {
+        Some(existing) => *existing = (*existing).max(pos),
+        None => {
+            entry.offsets.insert(ok.clone(), pos);
+        }
+    }
+}
+
+fn push_cdc_row_meta(
+    cdc_row_buf: &mut HashMap<IngestPartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
+    key: &IngestPartitionKey,
+    meta: crate::plugins::cdc::WalRowMeta,
+) {
+    if let Some(rows) = cdc_row_buf.get_mut(key) {
+        rows.push(meta);
+    } else {
+        cdc_row_buf.insert(key.clone(), vec![meta]);
+    }
+}
+
+fn track_partition_offset_with_key(
+    buf: &mut HashMap<IngestPartitionKey, IngestBufferBatch>,
+    primary_sink_ref: &str,
+    key: &IngestPartitionKey,
+    schema_hash: &SchemaHash,
+    ns: &str,
+    part: &str,
+    time_b: &Option<i64>,
+    ok: &OffsetKey,
+    pos: u64,
+    cdc_meta: Option<crate::plugins::cdc::WalRowMeta>,
+    cdc_row_buf: &mut HashMap<IngestPartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
+) {
+    let buffer_started = Instant::now();
+    let entry = ensure_partition_buffer_entry(buf, key, || IngestBufferBatch {
+        offsets: HashMap::new(),
+        sink_ref: primary_sink_ref.to_string(),
+        _namespace: ns.to_string(),
+        _partition: part.to_string(),
+        _time: time_b.clone(),
+        _schema_fingerprint: String::new(),
+        schema: schema_hash.schema.clone(),
+        record_batches: None,
+        cdc_rows: None,
+    });
+    update_partition_offset(entry, ok, pos);
+    if let Some(meta) = cdc_meta {
+        push_cdc_row_meta(cdc_row_buf, key, meta);
+    }
+    ingest_profile::add_buffer_offset_ns(buffer_started.elapsed().as_nanos() as u64);
+}
+
+fn track_partition_offset_with_schema(
+    buf: &mut HashMap<IngestPartitionKey, IngestBufferBatch>,
+    primary_sink_ref: &str,
+    schema_hash: &SchemaHash,
+    ns: &str,
+    part: &str,
+    time_b: &Option<i64>,
+    ok: &OffsetKey,
+    pos: u64,
+    cdc_meta: Option<crate::plugins::cdc::WalRowMeta>,
+    cdc_row_buf: &mut HashMap<IngestPartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
+) -> IngestPartitionKey {
+    let buffer_started = Instant::now();
+    let key = partition_key_for_record(primary_sink_ref, ns, part, time_b, schema_hash);
+    let entry = ensure_partition_buffer_entry(buf, &key, || IngestBufferBatch {
+        offsets: HashMap::new(),
+        sink_ref: primary_sink_ref.to_string(),
+        _namespace: ns.to_string(),
+        _partition: part.to_string(),
+        _time: time_b.clone(),
+        _schema_fingerprint: String::new(),
+        schema: schema_hash.schema.clone(),
+        record_batches: None,
+        cdc_rows: None,
+    });
+    update_partition_offset(entry, ok, pos);
+    if let Some(meta) = cdc_meta {
+        push_cdc_row_meta(cdc_row_buf, &key, meta);
+    }
+    ingest_profile::add_buffer_offset_ns(buffer_started.elapsed().as_nanos() as u64);
+    key
+}
+
+fn track_partition_offset(
+    buf: &mut HashMap<IngestPartitionKey, IngestBufferBatch>,
+    primary_sink_ref: &str,
+    schema_hash_cache: &mut HashMap<String, SchemaHash>,
+    flatten: bool,
+    ns: &str,
+    part: &str,
+    time_b: &Option<i64>,
+    ok: &OffsetKey,
+    pos: u64,
+    cdc_meta: Option<crate::plugins::cdc::WalRowMeta>,
+    cdc_row_buf: &mut HashMap<IngestPartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
+) -> IngestPartitionKey {
+    let schema_hash = resolve_partition_schema(ns, flatten, schema_hash_cache);
+    track_partition_offset_with_schema(
+        buf,
+        primary_sink_ref,
+        &schema_hash,
+        ns,
+        part,
+        time_b,
+        ok,
+        pos,
+        cdc_meta,
+        cdc_row_buf,
+    )
+}
+
+fn enqueue_legacy_record(
+    buf: &mut HashMap<IngestPartitionKey, IngestBufferBatch>,
+    raw_values: &mut HashMap<IngestPartitionKey, Vec<IngestRecord>>,
+    cdc_row_buf: &mut HashMap<IngestPartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
+    schema_hash_cache: &mut HashMap<String, SchemaHash>,
+    primary_sink_ref: &str,
+    flatten: bool,
+    ns: &str,
+    part: &str,
+    time_b: &Option<i64>,
+    source: SourceRecord,
+    normalized: NormalizedRecord,
+    ok: &OffsetKey,
+    pos: u64,
+    cdc_meta: Option<crate::plugins::cdc::WalRowMeta>,
+) {
+    let key = track_partition_offset(
+        buf,
+        primary_sink_ref,
+        schema_hash_cache,
+        flatten,
+        ns,
+        part,
+        time_b,
+        ok,
+        pos,
+        cdc_meta,
+        cdc_row_buf,
+    );
+    match raw_values.get_mut(&key) {
+        Some(records) => records.push(IngestRecord {
+            source,
+            normalized,
+            _namespace: ns.to_string(),
+            _partition: part.to_string(),
+            _time: time_b.clone(),
+            _offset_pos: pos,
+        }),
+        None => {
+            raw_values.insert(
+                key,
+                vec![IngestRecord {
+                    source,
+                    normalized,
+                    _namespace: ns.to_string(),
+                    _partition: part.to_string(),
+                    _time: time_b.clone(),
+                    _offset_pos: pos,
+                }],
+            );
+        }
+    }
+}
+
+fn resolve_partition_schema(
+    ns: &str,
+    flatten: bool,
+    cache: &mut HashMap<String, SchemaHash>,
+) -> SchemaHash {
+    let version = ARROW_SCHEMA_VERSION
+        .get(ns)
+        .map(|v| v.value().load(Ordering::Acquire))
+        .unwrap_or(0);
+    let version_key = format!("{version}");
+    if let Some(cached) = cache.get(ns) {
+        if cached.hash == version_key {
+            return cached.clone();
+        }
+    }
+    let md_snapshot = METADATA.load();
+    let sh = Ingest::load_stable_schema_hash(ns, &md_snapshot.metadata, flatten);
+    drop(md_snapshot);
+    cache.insert(ns.to_string(), sh.clone());
+    sh
+}
+
+pub(crate) fn namespace_schema_version(ns: &str) -> u64 {
+    ARROW_SCHEMA_VERSION
+        .get(ns)
+        .map(|v| v.value().load(Ordering::Acquire))
+        .unwrap_or(0)
+}
+
+/// Reload metadata when the namespace schema version advances (e.g. slow-path evolution).
+pub(crate) fn refresh_metadata_snapshot_for_namespace(
+    ns: &str,
+    snapshot: &mut Arc<PipelineMetadata>,
+    versions: &mut HashMap<String, u64>,
+) {
+    let version = namespace_schema_version(ns);
+    if versions.get(ns) == Some(&version) {
+        return;
+    }
+    let started = Instant::now();
+    *snapshot = METADATA.load().clone();
+    ingest_profile::add_metadata_load_ns(started.elapsed().as_nanos() as u64);
+    versions.insert(ns.to_string(), version);
+}
+
+fn merge_record_batches(
+    schema: SchemaRef,
+    batches: Vec<RecordBatch>,
+) -> Result<Vec<RecordBatch>, String> {
+    if batches.is_empty() {
+        return Ok(vec![]);
+    }
+    if batches.len() == 1 {
+        return Ok(batches);
+    }
+    let merged = concat_batches(&schema, &batches).map_err(|e| e.to_string())?;
+    Ok(vec![merged])
+}
 
 fn try_serialize_arrow_batch(
     schema: SchemaRef,
@@ -469,6 +905,8 @@ struct SchemaHash {
     schema: SchemaRef,
     hash: String,
 }
+
+type IngestPartitionKey = (String, String, String, Option<i64>, String);
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct IngestBatch {
@@ -1904,79 +2342,20 @@ impl Ingest {
             (String, String, String, Option<i64>, String),
             Vec<crate::plugins::cdc::WalRowMeta>,
         > = HashMap::new();
+        let mut exact_partitions: HashMap<IngestPartitionKey, ExactArrowPartition> =
+            HashMap::with_capacity(32);
+        let mut exact_plan_cache: HashMap<(String, String), Arc<ExactArrowPlan>> =
+            HashMap::with_capacity(8);
+        #[cfg(test)]
+        let use_exact_arrow =
+            !crate::metrics::ingest_profile::FORCE_LEGACY_INGEST_FOR_BENCHMARK.load(
+                std::sync::atomic::Ordering::Relaxed,
+            );
+        #[cfg(not(test))]
+        let use_exact_arrow = true;
 
         let pipeline_name_cached = Config::get_pipeline_name();
         let mut schema_hash_cache: HashMap<String, SchemaHash> = HashMap::new();
-        // Helper to enqueue a single record into current buffers using latest stable schema
-        let mut enqueue_record =
-            |ns: &String,
-             part: &String,
-             time_b: &Option<i64>,
-             source: SourceRecord,
-             normalized: NormalizedRecord,
-             ok: &OffsetKey,
-             pos: u64,
-             cdc_meta: Option<crate::plugins::cdc::WalRowMeta>| {
-                let version = ARROW_SCHEMA_VERSION
-                    .get(ns.as_str())
-                    .map(|v| v.value().load(Ordering::Acquire))
-                    .unwrap_or(0);
-                let version_key = format!("{version}");
-                let schema_hash = if let Some(cached) = schema_hash_cache.get(ns) {
-                    if cached.hash == version_key {
-                        cached.clone()
-                    } else {
-                        let md_snapshot = METADATA.load();
-                        let sh =
-                            Ingest::load_stable_schema_hash(ns, &md_snapshot.metadata, flatten);
-                        drop(md_snapshot);
-                        schema_hash_cache.insert(ns.clone(), sh.clone());
-                        sh
-                    }
-                } else {
-                    let md_snapshot = METADATA.load();
-                    let sh = Ingest::load_stable_schema_hash(ns, &md_snapshot.metadata, flatten);
-                    drop(md_snapshot);
-                    schema_hash_cache.insert(ns.clone(), sh.clone());
-                    sh
-                };
-                let key = (
-                    primary_sink_ref.clone(),
-                    ns.clone(),
-                    part.clone(),
-                    time_b.clone(),
-                    schema_hash.hash,
-                );
-                let buf_entry = buf.entry(key.clone()).or_insert_with(|| IngestBufferBatch {
-                    offsets: HashMap::new(),
-                    sink_ref: primary_sink_ref.clone(),
-                    _namespace: ns.clone(),
-                    _partition: part.clone(),
-                    _time: time_b.clone(),
-                    _schema_fingerprint: "".to_string(),
-                    schema: schema_hash.schema,
-                    record_batches: None,
-                    cdc_rows: None,
-                });
-                buf_entry.offsets.insert(ok.clone(), pos);
-                if let Some(meta) = cdc_meta {
-                    cdc_row_buf
-                        .entry(key.clone())
-                        .or_insert_with(|| Vec::with_capacity(64))
-                        .push(meta);
-                }
-                raw_values
-                    .entry(key)
-                    .or_insert_with(|| Vec::with_capacity(1024))
-                    .push(IngestRecord {
-                        source,
-                        normalized,
-                        _namespace: ns.clone(),
-                        _partition: part.clone(),
-                        _time: time_b.clone(),
-                        _offset_pos: pos,
-                    });
-            };
         for ingest_batch in datas.iter() {
             bytes += ingest_batch.data.len() as u64;
 
@@ -1989,65 +2368,91 @@ impl Ingest {
             let is_cdc_batch = ingest_batch.cdc_rows().is_some();
             let track_position = is_cdc_batch || ingest_batch.offset_pos.is_some();
 
-            let mut records: Vec<Value> = match decode_records(format, &ingest_batch.data) {
-                Ok(records) => records,
-                Err(err) => {
-                    let decode_offset_pos = ingest_batch.data.lines().count().max(1) as u64;
-                    dl_records.push(DeadletterRecord {
-                        namespace: Config::get_pipeline_name(),
-                        record: ingest_batch.data.clone(),
-                        error: err.to_string(),
-                        failure_code: "INPUT_FORMAT".to_string(),
-                        event_time: None,
-                        source_uri: ingest_batch.source_uri.clone(),
-                        offset_key: format!(
-                            "{}:{}",
-                            ingest_batch.offset_key.namespace, ingest_batch.offset_key.partition
-                        ),
-                        offset_pos: 1,
-                    });
-                    dl_offsets
-                        .entry(ingest_batch.offset_key.clone())
-                        .and_modify(|pos| *pos = (*pos).max(decode_offset_pos))
-                        .or_insert(decode_offset_pos);
-                    continue;
-                }
-            };
-            if Config::debug_enabled() {
-                debug!(
-                    "Ingest: decoded {} records for namespace={} format={}",
-                    records.len(),
-                    batch_namespace_override,
-                    format.as_str()
-                );
-            }
+            let use_ndjson_stream = ndjson_object_stream_eligible(
+                format,
+                &ingest_batch.data,
+                &entity_field_dot,
+                is_cdc_batch,
+            );
 
-            if !entity_field_dot.is_empty() {
-                records = match Helpers::process_values(&records, &entity_field_dot) {
-                    Some(records) => records,
-                    None => Vec::new(),
+            let flatten_started = Instant::now();
+            let flatten_iter = if use_ndjson_stream {
+                IngestFlattenIter::from_ndjson(&ingest_batch.data)
+            } else {
+                let decode_started = Instant::now();
+                let mut records: Vec<Value> = match decode_records(format, &ingest_batch.data) {
+                    Ok(records) => records,
+                    Err(err) => {
+                        ingest_profile::add_decode_ns(decode_started.elapsed().as_nanos() as u64);
+                        let decode_offset_pos = ingest_batch.data.lines().count().max(1) as u64;
+                        dl_records.push(DeadletterRecord {
+                            namespace: Config::get_pipeline_name(),
+                            record: ingest_batch.data.clone(),
+                            error: err.to_string(),
+                            failure_code: "INPUT_FORMAT".to_string(),
+                            event_time: None,
+                            source_uri: ingest_batch.source_uri.clone(),
+                            offset_key: format!(
+                                "{}:{}",
+                                ingest_batch.offset_key.namespace, ingest_batch.offset_key.partition
+                            ),
+                            offset_pos: 1,
+                        });
+                        dl_offsets
+                            .entry(ingest_batch.offset_key.clone())
+                            .and_modify(|pos| *pos = (*pos).max(decode_offset_pos))
+                            .or_insert(decode_offset_pos);
+                        continue;
+                    }
                 };
-            }
+                ingest_profile::add_decode_ns(decode_started.elapsed().as_nanos() as u64);
+                if Config::debug_enabled() {
+                    debug!(
+                        "Ingest: decoded {} records for namespace={} format={}",
+                        records.len(),
+                        batch_namespace_override,
+                        format.as_str()
+                    );
+                }
+
+                if !entity_field_dot.is_empty() {
+                    records = match Helpers::process_values(&records, &entity_field_dot) {
+                        Some(records) => records,
+                        None => Vec::new(),
+                    };
+                }
+
+                if let Some(cdc_rows) = ingest_batch.cdc_rows() {
+                    let logical_count = count_logical_ingest_records(&records);
+                    if cdc_rows.len() != logical_count {
+                        panic!(
+                            "CDC row metadata for {}:{} has {} entries but decoded {} logical records",
+                            ingest_batch.offset_key.namespace,
+                            ingest_batch.offset_key.partition,
+                            cdc_rows.len(),
+                            logical_count
+                        );
+                    }
+                }
+
+                IngestFlattenIter::from_decoded(records)
+            };
+            ingest_profile::add_unwrap_ns(flatten_started.elapsed().as_nanos() as u64);
 
             batch_line = 0;
             let mut cdc_row_idx: usize = 0;
 
-            let mut unwrapped_records: Vec<Value> = Vec::with_capacity(records.len());
+            let mut metadata_snapshot = METADATA.load().clone();
+            let mut metadata_versions: HashMap<String, u64> = HashMap::new();
+            let fixed_batch_namespace = ingest_batch.namespace.is_some();
+            let mut cached_exact_partition_key: Option<IngestPartitionKey> = None;
 
-            let mut decode_line: u64 = 0;
-            for record in records {
-                decode_line += 1;
-                match record {
-                    Value::Object(_) => unwrapped_records.push(record),
-                    Value::Array(v) => unwrapped_records.extend(v),
-                    _ => {
-                        let line_idx = (decode_line as usize).saturating_sub(1);
-                        let line_str = ingest_batch.data.lines().nth(line_idx).unwrap_or("");
-                        let bad_offset_pos = ingest_batch.offset_pos_for_line(decode_line);
-
+            for item in flatten_iter {
+                match item {
+                    IngestFlattenItem::NotObject { line, offset_pos } => {
                         dl_records.push(DeadletterRecord {
                             namespace: Config::get_pipeline_name(),
-                            record: line_str.to_string(),
+                            record: line,
                             error: "Source data is not an object or array".to_string(),
                             failure_code: "INPUT_FORMAT".to_string(),
                             event_time: None,
@@ -2057,32 +2462,44 @@ impl Ingest {
                                 ingest_batch.offset_key.namespace,
                                 ingest_batch.offset_key.partition
                             ),
-                            offset_pos: bad_offset_pos,
+                            offset_pos,
                         });
                         merge_dl_offset_for_key(
                             &mut dl_offsets,
                             &ingest_batch.offset_key,
-                            bad_offset_pos,
+                            offset_pos,
                         );
+                        continue;
                     }
-                }
-            }
-
-            if let Some(cdc_rows) = ingest_batch.cdc_rows() {
-                if cdc_rows.len() != unwrapped_records.len() {
-                    panic!(
-                        "CDC row metadata for {}:{} has {} entries but decoded {} logical records",
-                        ingest_batch.offset_key.namespace,
-                        ingest_batch.offset_key.partition,
-                        cdc_rows.len(),
-                        unwrapped_records.len()
-                    );
-                }
-            }
-
-            for mut record in unwrapped_records {
-                batch_line += 1;
-                cdc_row_idx += 1;
+                    IngestFlattenItem::ParseError {
+                        line,
+                        offset_pos,
+                        error,
+                    } => {
+                        dl_records.push(DeadletterRecord {
+                            namespace: Config::get_pipeline_name(),
+                            record: line,
+                            error,
+                            failure_code: "INPUT_FORMAT".to_string(),
+                            event_time: None,
+                            source_uri: ingest_batch.source_uri.clone(),
+                            offset_key: format!(
+                                "{}:{}",
+                                ingest_batch.offset_key.namespace,
+                                ingest_batch.offset_key.partition
+                            ),
+                            offset_pos,
+                        });
+                        merge_dl_offset_for_key(
+                            &mut dl_offsets,
+                            &ingest_batch.offset_key,
+                            offset_pos,
+                        );
+                        continue;
+                    }
+                    IngestFlattenItem::Row { line, value: mut record } => {
+                        batch_line = line;
+                        cdc_row_idx += 1;
 
                 if record.is_null()
                     || (record.is_object() && record.as_object().unwrap().is_empty())
@@ -2126,50 +2543,154 @@ impl Ingest {
                 ) {
                     i += 1;
 
-                    let skpr_namespace = if ingest_batch.namespace.is_some() {
-                        // Already normalized in `IngestBatch::new`.
-                        batch_namespace_override.clone()
-                    } else {
-                        storage_namespace(&PARSE_NAMESPACE_CACHE.with(|cache| {
-                            let mut namespace_cache = cache.write().unwrap();
-                            Helpers::parse_namespace_field_with_fields(
-                                &record,
-                                batch_namespace_override.clone(),
-                                &mut namespace_cache,
-                                &transform_snap.namespace_fields,
-                            )
-                        }))
-                    };
+                    let partition_started = Instant::now();
+                    let mut namespace_scratch: Option<String> = None;
+                    let skpr_partition_owned;
+                    let skpr_namespace: &str =
+                        if fixed_batch_namespace || transform_snap.skip_namespace_field_parse {
+                            &batch_namespace_override
+                        } else {
+                            namespace_scratch = Some(storage_namespace(&PARSE_NAMESPACE_CACHE.with(
+                                |cache| {
+                                    let mut namespace_cache = cache.write().unwrap();
+                                    Helpers::parse_namespace_field_with_fields(
+                                        &record,
+                                        batch_namespace_override.clone(),
+                                        &mut namespace_cache,
+                                        &transform_snap.namespace_fields,
+                                    )
+                                },
+                            )));
+                            namespace_scratch.as_deref().unwrap()
+                        };
 
-                    let skpr_partition = PARTITION_ALLOWED_VALUES_CACHE.with(|cache| {
-                        Helpers::parse_partition_field_with_fields(
+                    let skpr_partition: &str = if transform_snap.skip_partition_parse {
+                        EMPTY_PARTITION
+                    } else {
+                        skpr_partition_owned = PARTITION_ALLOWED_VALUES_CACHE.with(|cache| {
+                            Helpers::parse_partition_field_with_fields(
+                                &record,
+                                &cache.read().unwrap(),
+                                &transform_snap.partition_fields,
+                            )
+                        });
+                        &skpr_partition_owned
+                    };
+                    let skpr_time = if transform_snap.skip_time_parse {
+                        None
+                    } else {
+                        Helpers::parse_time_field_with_fields(
                             &record,
-                            &cache.read().unwrap(),
-                            &transform_snap.partition_fields,
+                            &transform_snap.time_fields,
                         )
-                    });
-                    let skpr_time =
-                        Helpers::parse_time_field_with_fields(&record, &transform_snap.time_fields);
+                    };
 
                     let mut skpr_time_bucket: Option<i64> = None;
 
-                    if skpr_time.is_some() {
-                        skpr_time_bucket =
-                            Some(BufferChunker::event_time_bucket(skpr_time.unwrap()));
+                    if let Some(event_time) = skpr_time {
+                        skpr_time_bucket = Some(BufferChunker::event_time_bucket(event_time));
 
-                        if skpr_time.unwrap() > latest_timestamp {
-                            latest_timestamp = skpr_time.unwrap();
+                        if event_time > latest_timestamp {
+                            latest_timestamp = event_time;
+                        }
+                    }
+                    ingest_profile::add_partition_ns(partition_started.elapsed().as_nanos() as u64);
+
+                    apply_transform_inject_fields(&mut record);
+
+                    refresh_metadata_snapshot_for_namespace(
+                        skpr_namespace,
+                        &mut metadata_snapshot,
+                        &mut metadata_versions,
+                    );
+
+                    let mut used_exact_arrow = false;
+                    if use_exact_arrow && !is_cdc_batch {
+                        if let Some(ns_metadata) = metadata_snapshot.metadata.get(skpr_namespace) {
+                            let schema_hash = resolve_partition_schema(
+                                skpr_namespace,
+                                flatten,
+                                &mut schema_hash_cache,
+                            );
+                            if let Some(plan) = resolve_cached_exact_plan(
+                                &mut exact_plan_cache,
+                                skpr_namespace,
+                                &schema_hash.hash,
+                                ns_metadata.fields.as_ref(),
+                                flatten,
+                                schema_hash.schema.clone(),
+                            ) {
+                                let needs_new_key = cached_exact_partition_key
+                                    .as_ref()
+                                    .map(|cached| {
+                                        cached.0 != primary_sink_ref
+                                            || cached.1 != skpr_namespace
+                                            || cached.2 != skpr_partition
+                                            || cached.3 != skpr_time_bucket
+                                            || cached.4 != schema_hash.hash
+                                    })
+                                    .unwrap_or(true);
+                                if needs_new_key {
+                                    cached_exact_partition_key = Some((
+                                        primary_sink_ref.clone(),
+                                        skpr_namespace.to_string(),
+                                        skpr_partition.to_string(),
+                                        skpr_time_bucket.clone(),
+                                        schema_hash.hash.clone(),
+                                    ));
+                                }
+                                let partition_key =
+                                    cached_exact_partition_key.as_ref().expect("partition key");
+                                let append_started = Instant::now();
+                                let append_result = append_row_to_exact_partition(
+                                    &mut exact_partitions,
+                                    partition_key,
+                                    plan,
+                                    &record,
+                                    ns_metadata.fields.as_ref(),
+                                    1024,
+                                );
+                                ingest_profile::add_exact_append_ns(
+                                    append_started.elapsed().as_nanos() as u64,
+                                );
+                                match append_result {
+                                    Ok(()) => {
+                                        ingest_profile::add_exact_arrow_rows(1);
+                                        let row_cdc_meta = ingest_batch
+                                            .cdc_rows
+                                            .as_ref()
+                                            .and_then(|rows| rows.get(cdc_row_idx - 1).cloned());
+                                        track_partition_offset_with_key(
+                                            &mut buf,
+                                            &primary_sink_ref,
+                                            partition_key,
+                                            &schema_hash,
+                                            skpr_namespace,
+                                            skpr_partition,
+                                            &skpr_time_bucket,
+                                            &ingest_batch.offset_key,
+                                            offset_pos,
+                                            row_cdc_meta,
+                                            &mut cdc_row_buf,
+                                        );
+                                        used_exact_arrow = true;
+                                        _j += 1;
+                                    }
+                                    Err(_) => {
+                                        ingest_profile::add_exact_arrow_fallback_rows(1);
+                                    }
+                                }
+                            }
                         }
                     }
 
-                    // Namespace creation is deferred to the slow-ingest worker
-                    // to avoid a read-then-write race where a second thread's
-                    // stale snapshot regresses already-evolved metadata.
+                    if used_exact_arrow {
+                        continue;
+                    }
 
-                    apply_transform_inject_fields(&mut record);
                     let source = SourceRecord::new(record);
-
-                    let msg = match METADATA.load().metadata.get(&skpr_namespace) {
+                    let fast_started = Instant::now();
+                    let msg = match metadata_snapshot.metadata.get(skpr_namespace) {
                         Some(metadata) => fast_path_ingest(
                             source.inner(),
                             metadata.fields.as_ref(),
@@ -2182,12 +2703,19 @@ impl Ingest {
                         )
                         .into()),
                     };
+                    ingest_profile::add_fast_path_ns(fast_started.elapsed().as_nanos() as u64);
 
                     let record_value = match msg {
                         Ok(msg) => msg,
                         Err(_err) => {
+                            let slow_started = Instant::now();
                             // Simple fallback: single-record slow path
-                            match slow_ingest_blocking(&skpr_namespace, &source, flatten) {
+                            let slow_result =
+                                slow_ingest_blocking(&skpr_namespace, &source, flatten);
+                            ingest_profile::add_slow_path_ns(
+                                slow_started.elapsed().as_nanos() as u64,
+                            );
+                            match slow_result {
                                 Ok(v) => v,
                                 Err(e) => {
                                     if Config::debug_enabled() {
@@ -2197,7 +2725,7 @@ impl Ingest {
                                         );
                                     }
                                     dl_records.push(DeadletterRecord {
-                                        namespace: skpr_namespace.clone(),
+                                        namespace: skpr_namespace.to_string(),
                                         record: source.inner().to_string(),
                                         error: e.to_string(),
                                         failure_code: "EVOLUTION_SLOW_PATH".to_string(),
@@ -2233,11 +2761,18 @@ impl Ingest {
                     }
 
                     let normalized = NormalizedRecord::new(record_value);
+                    ingest_profile::add_legacy_normalized_rows(1);
                     let row_cdc_meta = ingest_batch
                         .cdc_rows
                         .as_ref()
                         .and_then(|rows| rows.get(cdc_row_idx - 1).cloned());
-                    enqueue_record(
+                    enqueue_legacy_record(
+                        &mut buf,
+                        &mut raw_values,
+                        &mut cdc_row_buf,
+                        &mut schema_hash_cache,
+                        &primary_sink_ref,
+                        flatten,
                         &skpr_namespace,
                         &skpr_partition,
                         &skpr_time_bucket,
@@ -2251,6 +2786,8 @@ impl Ingest {
                     _j += 1;
 
                     // Stats tailer removed; no per-record stats emission
+                }
+                    }
                 }
             }
             if Config::debug_enabled() {
@@ -2281,18 +2818,117 @@ impl Ingest {
         // here means ingest-time normalization/schema publication missed that
         // invariant and should be handled as data-plane failure, not compaction
         // recovery.
+        let arrow_started = Instant::now();
         for (k, entry) in buf.iter_mut() {
-            let records_vec = raw_values.remove(k).unwrap_or_default();
-            if records_vec.is_empty() {
-                continue;
+            let mut batches: Vec<RecordBatch> = Vec::new();
+            if let Some(exact) = exact_partitions.remove(k) {
+                if !exact.builders.is_empty() {
+                    let finish_started = Instant::now();
+                    match exact.builders.finish() {
+                        Ok(batch) => batches.push(batch),
+                        Err(err) => {
+                            warn!(
+                                "Exact Arrow finish failed for ns={}: {}",
+                                entry._namespace, err
+                            );
+                        }
+                    }
+                    ingest_profile::add_exact_finish_ns(
+                        finish_started.elapsed().as_nanos() as u64,
+                    );
+                }
             }
 
-            let all_indices: Vec<usize> = (0..records_vec.len()).collect();
-            let (batches, failed_indices) =
-                bisect_serialize_indices(entry.schema.clone(), &records_vec, &all_indices);
+            let records_vec = raw_values.remove(k).unwrap_or_default();
+            if !records_vec.is_empty() {
+                let all_indices: Vec<usize> = (0..records_vec.len()).collect();
+                let (legacy_batches, failed_indices) =
+                    bisect_serialize_indices(entry.schema.clone(), &records_vec, &all_indices);
 
-            if failed_indices.is_empty() {
-                entry.record_batches = Some(batches);
+                if failed_indices.is_empty() {
+                    batches.extend(legacy_batches);
+                    if let Some(rows) = cdc_row_buf.remove(k) {
+                        if !rows.is_empty() {
+                            entry.cdc_rows = Some(rows);
+                        }
+                    }
+                } else {
+                    let failed_set: std::collections::HashSet<usize> =
+                        failed_indices.iter().copied().collect();
+                    let success_indices: Vec<usize> = all_indices
+                        .into_iter()
+                        .filter(|i| !failed_set.contains(i))
+                        .collect();
+
+                    batches.extend(legacy_batches);
+
+                    if !batches.is_empty() {
+                        if let Some(max_pos) =
+                            max_offset_pos_among(&records_vec, &success_indices)
+                        {
+                            set_entry_offsets_max(entry, max_pos);
+                        }
+                        if let Some(all_cdc) = cdc_row_buf.remove(k) {
+                            if all_cdc.len() == records_vec.len() {
+                                let filtered: Vec<_> = success_indices
+                                    .iter()
+                                    .map(|&i| all_cdc[i].clone())
+                                    .collect();
+                                if !filtered.is_empty() {
+                                    entry.cdc_rows = Some(filtered);
+                                }
+                            }
+                        }
+                    } else {
+                        cdc_row_buf.remove(k);
+                    }
+
+                    let skpr_namespace = entry._namespace.clone();
+                    let off_key_str = match entry.offsets.iter().next() {
+                        Some((ok, _)) => format!("{}:{}", ok.namespace, ok.partition),
+                        None => String::new(),
+                    };
+                    let arrow_err_msg =
+                        "Arrow serialization invariant failed after ingest-time evolution"
+                            .to_string();
+                    warn!(
+                        "{} (ns={}, failed={}, total={})",
+                        arrow_err_msg,
+                        skpr_namespace,
+                        failed_indices.len(),
+                        records_vec.len()
+                    );
+                    for &idx in &failed_indices {
+                        let rec = &records_vec[idx];
+                        dl_records.push(DeadletterRecord {
+                            namespace: skpr_namespace.clone(),
+                            record: rec.source.inner().to_string(),
+                            error: arrow_err_msg.clone(),
+                            failure_code: "ARROW_SERIALIZE".to_string(),
+                            event_time: rec._time,
+                            source_uri: String::new(),
+                            offset_key: off_key_str.clone(),
+                            offset_pos: rec._offset_pos,
+                        });
+                    }
+                    merge_dl_offsets_for_records(
+                        &mut dl_offsets,
+                        entry,
+                        &records_vec,
+                        &failed_indices,
+                    );
+                    if Config::debug_enabled() {
+                        debug!(
+                            "Serialize bisect: ns={} deadlettered={} succeeded={}",
+                            entry._namespace,
+                            failed_indices.len(),
+                            success_indices.len()
+                        );
+                    }
+                }
+            }
+
+            if batches.is_empty() {
                 if let Some(rows) = cdc_row_buf.remove(k) {
                     if !rows.is_empty() {
                         entry.cdc_rows = Some(rows);
@@ -2301,73 +2937,22 @@ impl Ingest {
                 continue;
             }
 
-            let failed_set: std::collections::HashSet<usize> =
-                failed_indices.iter().copied().collect();
-            let success_indices: Vec<usize> = all_indices
-                .into_iter()
-                .filter(|i| !failed_set.contains(i))
-                .collect();
-
-            if !batches.is_empty() {
-                entry.record_batches = Some(batches);
-                if let Some(max_pos) = max_offset_pos_among(&records_vec, &success_indices) {
-                    set_entry_offsets_max(entry, max_pos);
+            match merge_record_batches(entry.schema.clone(), batches) {
+                Ok(merged) => {
+                    entry.record_batches = Some(merged);
                 }
-                if let Some(all_cdc) = cdc_row_buf.remove(k) {
-                    if all_cdc.len() == records_vec.len() {
-                        let filtered: Vec<_> = success_indices
-                            .iter()
-                            .map(|&i| all_cdc[i].clone())
-                            .collect();
-                        if !filtered.is_empty() {
-                            entry.cdc_rows = Some(filtered);
-                        }
-                    }
+                Err(err) => {
+                    warn!(
+                        "Failed to merge record batches for ns={}: {}",
+                        entry._namespace, err
+                    );
                 }
-            } else {
-                cdc_row_buf.remove(k);
-            }
-
-            let skpr_namespace = entry._namespace.clone();
-            let off_key_str = match entry.offsets.iter().next() {
-                Some((ok, _)) => format!("{}:{}", ok.namespace, ok.partition),
-                None => String::new(),
-            };
-            let arrow_err_msg =
-                "Arrow serialization invariant failed after ingest-time evolution".to_string();
-            warn!(
-                "{} (ns={}, failed={}, total={})",
-                arrow_err_msg,
-                skpr_namespace,
-                failed_indices.len(),
-                records_vec.len()
-            );
-            for &idx in &failed_indices {
-                let rec = &records_vec[idx];
-                dl_records.push(DeadletterRecord {
-                    namespace: skpr_namespace.clone(),
-                    record: rec.source.inner().to_string(),
-                    error: arrow_err_msg.clone(),
-                    failure_code: "ARROW_SERIALIZE".to_string(),
-                    event_time: rec._time,
-                    source_uri: String::new(),
-                    offset_key: off_key_str.clone(),
-                    offset_pos: rec._offset_pos,
-                });
-            }
-            merge_dl_offsets_for_records(&mut dl_offsets, entry, &records_vec, &failed_indices);
-            if Config::debug_enabled() {
-                debug!(
-                    "Serialize bisect: ns={} deadlettered={} succeeded={}",
-                    entry._namespace,
-                    failed_indices.len(),
-                    success_indices.len()
-                );
             }
         }
+        ingest_profile::add_arrow_json_ns(arrow_started.elapsed().as_nanos() as u64);
 
         for (k, entry) in buf.iter_mut() {
-            if entry.cdc_rows.is_some() {
+            if entry.record_batches.is_some() {
                 continue;
             }
             if let Some(rows) = cdc_row_buf.remove(k) {
@@ -2500,13 +3085,42 @@ impl Ingest {
                 arrow_bytes,
                 done: done_tx,
             };
+            let wal_started = Instant::now();
             if let Err(err) = handle.block_on(crate::buffer::wal_writer::submit(unit)) {
                 error!("Ingest: WAL writer enqueue failed: {}", err);
                 panic!("WAL writer enqueue failed: {err}");
             }
+            ingest_profile::add_wal_enqueue_ns(wal_started.elapsed().as_nanos() as u64);
         } else if submit_id != 0 {
             crate::buffer::wal_writer::complete_request_without_wal(submit_id);
         }
+    }
+
+    /// Benchmark/test entrypoint for local ingest profiling.
+    #[cfg(test)]
+    pub fn run_process_batch_for_benchmark(
+        datas: &[IngestBatch],
+        offset_db: &Arc<Offsets>,
+        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        submit_id: u64,
+    ) {
+        let rt = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("benchmark runtime");
+        crate::buffer::wal_writer::start(1);
+        let handle = rt.handle().clone();
+        Self::process_batch(
+            &Arc::new(datas.to_vec()),
+            offset_db,
+            handle,
+            shared_output,
+            submit_id,
+        );
+        rt.block_on(async {
+            let _ = crate::buffer::wal_writer::flush_and_drain(offset_db.clone()).await;
+        });
     }
 
     pub fn prepare_arrow_schema_with_metadata(
@@ -2683,6 +3297,21 @@ impl Ingest {
             .store(true, Ordering::Relaxed);
 
         Ok(_schema_ref)
+    }
+}
+
+#[cfg(test)]
+mod ndjson_flatten_iter_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn ndjson_flatten_iter_yields_object_rows() {
+        let payload = format!("{}\n", json!({"id": "row-1", "value": 1}));
+        let mut iter = IngestFlattenIter::from_ndjson(&payload);
+        let item = iter.next().expect("one row");
+        assert!(matches!(item, IngestFlattenItem::Row { .. }));
+        assert!(iter.next().is_none());
     }
 }
 

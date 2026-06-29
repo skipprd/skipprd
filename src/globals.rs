@@ -52,6 +52,15 @@ pub fn set_data_dir_ingest_paused(paused: bool) {
     DATA_DIR_INGEST_PAUSED.store(paused, Ordering::SeqCst);
 }
 
+/// Reset process-wide ingest pause flags between benchmark / unit tests.
+#[cfg(test)]
+pub fn reset_data_dir_capacity_state_for_test() {
+    use std::sync::atomic::Ordering;
+    DATA_DIR_CAPACITY_EXCEEDED.store(false, Ordering::SeqCst);
+    set_data_dir_ingest_paused(false);
+    let _ = DATA_DIR_CAPACITY_ERROR.lock().unwrap().take();
+}
+
 pub static LOGGER: Lazy<Arc<tokio::sync::RwLock<Logger>>> = Lazy::new(|| Logger::new(100));
 pub static METRICS: Lazy<Arc<TimedRwLock<Metrics>>> =
     Lazy::new(|| Arc::new(TimedRwLock::new("metrics".to_string(), Metrics::new())));
