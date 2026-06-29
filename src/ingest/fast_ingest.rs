@@ -318,17 +318,11 @@ pub fn match_scalar_value_optimized(
                     field: output_field_name,
                     value: Value::String(s.to_string()),
                 });
-            } else if let Some(i) = value.as_i64() {
-                // Convert integer to string
+            } else if value.is_number() {
+                // Preserve large numeric identifiers exactly instead of round-tripping through f64.
                 return Ok(ResolvedFieldValue {
                     field: output_field_name,
-                    value: Value::String(i.to_string()),
-                });
-            } else if let Some(f) = value.as_f64() {
-                // Convert float to string
-                return Ok(ResolvedFieldValue {
-                    field: output_field_name,
-                    value: Value::String(f.to_string()),
+                    value: Value::String(value.to_string()),
                 });
             } else if let Some(b) = value.as_bool() {
                 // Convert boolean to string

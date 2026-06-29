@@ -1052,6 +1052,15 @@ fn looks_like_fixed_point_decimal(s: &str) -> bool {
     whole_trim.chars().all(|c| c.is_ascii_digit())
 }
 
+fn looks_like_integer_literal(s: &str) -> bool {
+    let s = s.trim();
+    let digits = s
+        .strip_prefix('+')
+        .or_else(|| s.strip_prefix('-'))
+        .unwrap_or(s);
+    !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+}
+
 fn get_type(value: &str) -> SkipprDataType {
     let _foo = "";
 
@@ -1077,12 +1086,16 @@ fn get_type(value: &str) -> SkipprDataType {
         }
         Err(..) => {
             let timmed_value = value.trim_matches('"');
-            let json_value: Result<i128, _> = serde_json::from_str(timmed_value);
+            let json_value: Result<i64, _> = serde_json::from_str(timmed_value);
             match json_value {
                 Ok(_) => {
                     return SkipprDataType::Long;
                 }
-                Err(_) => {}
+                Err(_) => {
+                    if looks_like_integer_literal(timmed_value) {
+                        return SkipprDataType::String;
+                    }
+                }
             }
         }
     }
@@ -2436,6 +2449,17 @@ mod get_type_bool_tests {
         let expected_type = SkipprDataType::Boolean;
 
         let subject = false;
+        assert_eq!(get_type(&mut subject.to_string()), expected_type);
+    }
+
+    #[test]
+    fn test_get_type_oversized_integer_literal_is_string() {
+        let expected_type = SkipprDataType::String;
+
+        let subject = "89011702278275678208";
+        assert_eq!(get_type(&mut subject.to_string()), expected_type);
+
+        let subject = "\"89011702278275678208\"";
         assert_eq!(get_type(&mut subject.to_string()), expected_type);
     }
 
