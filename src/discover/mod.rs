@@ -322,6 +322,9 @@ impl crate::discover::PipelineMetadata {
             if Metadata::migrate_tree(namespace, metadata, self.schema_id, Vec::new()) {
                 changed = true;
             }
+            if Metadata::repair_field_identity(namespace, metadata) {
+                changed = true;
+            }
         }
         if self.metadata_version < CURRENT_METADATA_VERSION {
             self.metadata_version = CURRENT_METADATA_VERSION;
@@ -339,7 +342,8 @@ impl crate::discover::PipelineMetadata {
             .metadata
             .get_mut(namespace)
             .ok_or_else(|| format!("No metadata for namespace {}", namespace))?;
-        let changed = Metadata::migrate_tree(namespace, metadata, self.schema_id, Vec::new());
+        let changed = Metadata::migrate_tree(namespace, metadata, self.schema_id, Vec::new())
+            | Metadata::repair_field_identity(namespace, metadata);
         Metadata::validate_field_identity(namespace, metadata)?;
         Ok(changed)
     }
@@ -513,6 +517,62 @@ impl Metadata {
     pub fn validate_field_identity(namespace: &str, metadata: &Metadata) -> Result<(), String> {
         let mut seen = HashMap::<i32, String>::new();
         Self::validate_field_identity_inner(namespace, metadata, Vec::new(), &mut seen)
+    }
+
+    pub fn repair_field_identity(namespace: &str, metadata: &mut Metadata) -> bool {
+        let mut changed = false;
+        let mut seen = HashMap::<i32, String>::new();
+        Self::repair_field_identity_inner(namespace, metadata, Vec::new(), &mut seen, &mut changed);
+        changed
+    }
+
+    fn repair_field_identity_inner(
+        namespace: &str,
+        metadata: &mut Metadata,
+        path: Vec<String>,
+        seen: &mut HashMap<i32, String>,
+        changed: &mut bool,
+    ) {
+        for (field_name, child) in metadata.fields.iter_mut() {
+            let output_name = if child.out_field_name.is_empty() {
+                field_name.clone()
+            } else {
+                child.out_field_name.clone()
+            };
+            let mut child_path = path.clone();
+            child_path.push(output_name);
+            let path_string = child_path.join(".");
+
+            if child.field_id == 0 || seen.contains_key(&child.field_id) {
+                child.field_id = Self::unique_deterministic_field_id(namespace, &child_path, seen);
+                *changed = true;
+            }
+            seen.insert(child.field_id, path_string);
+
+            Self::repair_field_identity_inner(namespace, child, child_path, seen, changed);
+        }
+    }
+
+    fn unique_deterministic_field_id(
+        namespace: &str,
+        path: &[String],
+        seen: &HashMap<i32, String>,
+    ) -> i32 {
+        let mut candidate = crate::lineage::deterministic_field_id(namespace, path);
+        if candidate != 0 && !seen.contains_key(&candidate) {
+            return candidate;
+        }
+
+        let mut attempt = 1u32;
+        loop {
+            let mut salted_path = path.to_vec();
+            salted_path.push(format!("__field_id_dedupe_{}", attempt));
+            candidate = crate::lineage::deterministic_field_id(namespace, &salted_path);
+            if candidate != 0 && !seen.contains_key(&candidate) {
+                return candidate;
+            }
+            attempt += 1;
+        }
     }
 
     fn validate_field_identity_inner(
@@ -3767,6 +3827,25 @@ mod tests_roundtrip {
 
         let err = Metadata::validate_field_identity("cube_events", &root).unwrap_err();
         assert!(err.contains("duplicate field_id 42"));
+    }
+
+    #[test]
+    fn repair_field_identity_reassigns_duplicate_persisted_ids() {
+        let mut root = Metadata::new().unwrap();
+        let mut first = Metadata::new_with_type(SkipprDataType::String, "userName");
+        first.field_id = 42;
+        let mut second = Metadata::new_with_type(SkipprDataType::String, "username");
+        second.field_id = 42;
+        root.fields.insert("userName".to_string(), first);
+        root.fields.insert("username".to_string(), second);
+
+        assert!(Metadata::repair_field_identity("cube_events", &mut root));
+        Metadata::validate_field_identity("cube_events", &root).unwrap();
+        let user_name = root.fields.get("userName").unwrap().field_id;
+        let username = root.fields.get("username").unwrap().field_id;
+        assert_ne!(user_name, username);
+        assert_ne!(user_name, 0);
+        assert_ne!(username, 0);
     }
 
     fn discover_field(
