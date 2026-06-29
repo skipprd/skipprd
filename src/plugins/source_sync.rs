@@ -3,7 +3,9 @@ use std::io;
 use crate::helpers::offsets::{OffsetKey, OffsetTypes};
 use crate::ingest_work::{IngestBatch, ThroughputMetrics};
 use crate::plugins::cdc::CheckpointEnvelope;
-use crate::runtime_plugins::protocol::RuntimeOffsetMaterializationHint;
+use crate::runtime_plugins::protocol::{
+    RuntimeIngestPartitionBatch, RuntimeOffsetMaterializationHint,
+};
 
 /// One schedulable unit of source payload for host-owned ingest.
 #[derive(Clone, Debug)]
@@ -61,6 +63,23 @@ pub trait SourceSyncContext: Send + Sync {
     ) -> Result<PayloadSubmissionBatch, io::Error> {
         self.submit_payload_tasks(tasks)
             .map(PayloadSubmissionBatch::already_durable)
+    }
+
+    /// Submit already-normalized Arrow IPC partition batches.
+    ///
+    /// Implementations that support runtime async ACKs should return once the
+    /// host accepts the request and complete the ACK only after durable WAL
+    /// persistence. Implementations that do not support Arrow IPC return an
+    /// error rather than silently falling back to a different semantic path.
+    fn submit_arrow_ipc_batches_accepted(
+        &self,
+        batches: Vec<RuntimeIngestPartitionBatch>,
+    ) -> Result<PayloadSubmissionBatch, io::Error> {
+        let _ = batches;
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "Arrow IPC source payloads require runtime source context support",
+        ))
     }
 
     /// Compatibility helper for callers that still need submit to be a durability barrier.

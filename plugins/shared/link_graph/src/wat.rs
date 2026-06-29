@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use std::collections::HashMap;
 use url::Url;
 
 use crate::canonical::canonicalize_url;
@@ -10,6 +11,21 @@ use crate::types::{ArchiveRecordRef, LinkContext, PageFetchRef, ParsedOutboundLi
 pub struct WatLinkExtraction {
     pub page_ref: PageFetchRef,
     pub links: Vec<ParsedOutboundLink>,
+    pub raw_link_count: u32,
+    pub links_truncated: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WatTargetDomainCount {
+    pub target_domain_id: u64,
+    pub target_domain: String,
+    pub link_count_to_target: u32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WatTargetIndexExtraction {
+    pub page_ref: PageFetchRef,
+    pub targets: Vec<WatTargetDomainCount>,
     pub raw_link_count: u32,
     pub links_truncated: bool,
 }
@@ -60,7 +76,7 @@ fn u32_at(root: &Value, paths: &[&[&str]]) -> Option<u32> {
     i64_at(root, paths).and_then(|n| u32::try_from(n).ok())
 }
 
-fn resolve_wat_url(source_url: &str, raw_url: &str) -> Option<String> {
+fn resolve_wat_url_from_base(base: &Url, raw_url: &str) -> Option<crate::canonical::CanonicalUrl> {
     let trimmed = raw_url.trim();
     if trimmed.is_empty()
         || trimmed.starts_with('#')
@@ -71,9 +87,13 @@ fn resolve_wat_url(source_url: &str, raw_url: &str) -> Option<String> {
     {
         return None;
     }
-    let base = Url::parse(source_url).ok()?;
     let resolved = base.join(trimmed).ok()?;
-    canonicalize_url(resolved.as_str()).map(|c| c.canonical)
+    canonicalize_url(resolved.as_str())
+}
+
+fn resolve_wat_url(source_url: &str, raw_url: &str) -> Option<String> {
+    let base = Url::parse(source_url).ok()?;
+    resolve_wat_url_from_base(&base, raw_url).map(|c| c.canonical)
 }
 
 fn rel_tokens(value: Option<&Value>) -> Vec<String> {
@@ -263,6 +283,95 @@ pub fn parse_wat_metadata_record(
             source_role: "wat_index".to_string(),
         },
         links,
+        raw_link_count,
+        links_truncated,
+    })
+}
+
+pub fn parse_wat_target_index_record(
+    cc_crawl_id: &str,
+    wat_location: WatRecordLocation,
+    json: &Value,
+    max_links: u32,
+) -> Option<WatTargetIndexExtraction> {
+    let source_url = string_at(
+        json,
+        &[&["Envelope", "WARC-Header-Metadata", "WARC-Target-URI"]],
+    )?;
+    let source = canonicalize_url(&source_url)?;
+    let source_base = Url::parse(&source.canonical).ok()?;
+    let warc = warc_ref(json)?;
+    let wat = ArchiveRecordRef {
+        filename: wat_location.filename,
+        record_offset: wat_location.record_offset,
+        record_length: wat_location.record_length,
+    };
+    let fetch_status = u32_at(
+        json,
+        &[&[
+            "Envelope",
+            "Payload-Metadata",
+            "HTTP-Response-Metadata",
+            "Response-Message",
+            "Status",
+        ]],
+    );
+    let fetch_time =
+        string_at(json, &[&["Envelope", "WARC-Header-Metadata", "WARC-Date"]]).unwrap_or_default();
+
+    let mut by_target: HashMap<u64, (String, u32)> = HashMap::new();
+    let mut raw_link_count = 0u32;
+    let mut accepted_links = 0u32;
+    let mut links_truncated = false;
+    for link in html_links(json) {
+        if !is_anchor_link(link) {
+            continue;
+        }
+        let Some(raw_url) = link.get("url").and_then(Value::as_str) else {
+            continue;
+        };
+        raw_link_count = raw_link_count.saturating_add(1);
+        if accepted_links >= max_links {
+            links_truncated = true;
+            continue;
+        }
+        let Some(target) = resolve_wat_url_from_base(&source_base, raw_url) else {
+            continue;
+        };
+        accepted_links = accepted_links.saturating_add(1);
+        let target_domain_id = domain_id(&target.host);
+        let entry = by_target
+            .entry(target_domain_id)
+            .or_insert((target.host, 0));
+        entry.1 = entry.1.saturating_add(1);
+    }
+
+    let targets = by_target
+        .into_iter()
+        .map(
+            |(target_domain_id, (target_domain, link_count_to_target))| WatTargetDomainCount {
+                target_domain_id,
+                target_domain,
+                link_count_to_target,
+            },
+        )
+        .collect();
+
+    Some(WatTargetIndexExtraction {
+        page_ref: PageFetchRef {
+            source_url_id: url_id(&source.canonical),
+            source_domain_id: domain_id(&source.host),
+            source_url: source.canonical,
+            source_host: source.host,
+            cc_crawl_id: cc_crawl_id.to_string(),
+            wat,
+            warc,
+            fetch_status,
+            content_mime_type: content_mime_type(json),
+            fetch_time,
+            source_role: "wat_index".to_string(),
+        },
+        targets,
         raw_link_count,
         links_truncated,
     })

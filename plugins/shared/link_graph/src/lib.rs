@@ -16,4 +16,7 @@ pub use ids::{
 pub use raw::{build_raw_page_observations, RawBuildResult};
 pub use types::{ArchiveRecordRef, PageFetchRef, RawEdgeObservation, RawPageFact};
 pub use types::{LinkContext, ParsedOutboundLink};
-pub use wat::{parse_wat_metadata_record, WatLinkExtraction, WatRecordLocation};
+pub use wat::{
+    parse_wat_metadata_record, parse_wat_target_index_record, WatLinkExtraction, WatRecordLocation,
+    WatTargetDomainCount, WatTargetIndexExtraction,
+};

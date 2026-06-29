@@ -143,10 +143,7 @@ pub fn plan_for_namespace(
         return None;
     }
 
-    let allowed_source_fields = columns
-        .iter()
-        .map(|col| col.source_field.clone())
-        .collect();
+    let allowed_source_fields = columns.iter().map(|col| col.source_field.clone()).collect();
 
     Some(ExactArrowPlan {
         schema,
@@ -295,7 +292,10 @@ fn is_empty_value(value: &Value) -> bool {
     value.is_null() || matches!(value.as_str(), Some(s) if s.is_empty())
 }
 
-fn append_string(builder: &mut StringBuilder, value: &Value) -> Result<(), ExactArrowFallbackReason> {
+fn append_string(
+    builder: &mut StringBuilder,
+    value: &Value,
+) -> Result<(), ExactArrowFallbackReason> {
     if let Some(s) = value.as_str() {
         builder.append_value(s);
         return Ok(());
@@ -329,34 +329,32 @@ fn append_long(builder: &mut Int64Builder, value: &Value) -> Result<(), ExactArr
     Err(ExactArrowFallbackReason::TypeMismatch)
 }
 
-fn append_int32(
-    builder: &mut Int32Builder,
-    value: &Value,
-) -> Result<(), ExactArrowFallbackReason> {
+fn append_int32(builder: &mut Int32Builder, value: &Value) -> Result<(), ExactArrowFallbackReason> {
     if let Some(i) = value.as_i64() {
         let i32v = i32::try_from(i).map_err(|_| ExactArrowFallbackReason::TypeMismatch)?;
         builder.append_value(i32v);
         return Ok(());
     }
     if let Some(s) = value.as_str() {
-        let i = s.parse::<i32>().map_err(|_| ExactArrowFallbackReason::TypeMismatch)?;
+        let i = s
+            .parse::<i32>()
+            .map_err(|_| ExactArrowFallbackReason::TypeMismatch)?;
         builder.append_value(i);
         return Ok(());
     }
     Err(ExactArrowFallbackReason::TypeMismatch)
 }
 
-fn append_int16(
-    builder: &mut Int16Builder,
-    value: &Value,
-) -> Result<(), ExactArrowFallbackReason> {
+fn append_int16(builder: &mut Int16Builder, value: &Value) -> Result<(), ExactArrowFallbackReason> {
     if let Some(i) = value.as_i64() {
         let i16v = i16::try_from(i).map_err(|_| ExactArrowFallbackReason::TypeMismatch)?;
         builder.append_value(i16v);
         return Ok(());
     }
     if let Some(s) = value.as_str() {
-        let i = s.parse::<i16>().map_err(|_| ExactArrowFallbackReason::TypeMismatch)?;
+        let i = s
+            .parse::<i16>()
+            .map_err(|_| ExactArrowFallbackReason::TypeMismatch)?;
         builder.append_value(i);
         return Ok(());
     }
@@ -370,14 +368,19 @@ fn append_int8(builder: &mut Int8Builder, value: &Value) -> Result<(), ExactArro
         return Ok(());
     }
     if let Some(s) = value.as_str() {
-        let i = s.parse::<i8>().map_err(|_| ExactArrowFallbackReason::TypeMismatch)?;
+        let i = s
+            .parse::<i8>()
+            .map_err(|_| ExactArrowFallbackReason::TypeMismatch)?;
         builder.append_value(i);
         return Ok(());
     }
     Err(ExactArrowFallbackReason::TypeMismatch)
 }
 
-fn append_bool(builder: &mut BooleanBuilder, value: &Value) -> Result<(), ExactArrowFallbackReason> {
+fn append_bool(
+    builder: &mut BooleanBuilder,
+    value: &Value,
+) -> Result<(), ExactArrowFallbackReason> {
     if let Some(b) = value.as_bool() {
         builder.append_value(b);
         return Ok(());
@@ -414,7 +417,9 @@ fn append_double(
         return Ok(());
     }
     if let Some(s) = value.as_str() {
-        let f = s.parse::<f64>().map_err(|_| ExactArrowFallbackReason::TypeMismatch)?;
+        let f = s
+            .parse::<f64>()
+            .map_err(|_| ExactArrowFallbackReason::TypeMismatch)?;
         builder.append_value(f);
         return Ok(());
     }
@@ -549,10 +554,7 @@ where
     let mut builders = ExactArrowBuilders::new(plan.as_ref(), capacity_hint)
         .map_err(|_| ExactArrowFallbackReason::BuilderError)?;
     try_append_row(plan.as_ref(), source, fields, &mut builders)?;
-    partitions.insert(
-        key.clone(),
-        ExactArrowPartition { plan, builders },
-    );
+    partitions.insert(key.clone(), ExactArrowPartition { plan, builders });
     Ok(())
 }
 
@@ -623,7 +625,8 @@ pub fn validate_exact_required_fields(
         template.insert(name, Value::Null);
     }
     let message = Value::Object(template);
-    validate_required_fields(fields, &message).map_err(|_| ExactArrowFallbackReason::MissingRequired)
+    validate_required_fields(fields, &message)
+        .map_err(|_| ExactArrowFallbackReason::MissingRequired)
 }
 
 #[cfg(test)]
@@ -681,9 +684,10 @@ mod tests {
     fn nested_schema_is_ineligible() {
         let mut fields = flat_metadata();
         let mut nested = Metadata::new_with_type(SkipprDataType::Record, "address");
-        nested
-            .fields
-            .insert("city".to_string(), Metadata::new_with_type(SkipprDataType::String, "city"));
+        nested.fields.insert(
+            "city".to_string(),
+            Metadata::new_with_type(SkipprDataType::String, "city"),
+        );
         fields.insert("address".to_string(), nested);
         assert!(!is_exact_arrow_eligible(&fields, false));
     }
@@ -698,8 +702,9 @@ mod tests {
         let mut ns_meta = Metadata::new_with_type(SkipprDataType::Record, namespace);
         ns_meta.fields = Box::new(fields.clone());
         pipeline.metadata.insert(namespace.to_string(), ns_meta);
-        let schema = Ingest::prepare_arrow_schema_with_metadata(namespace, &pipeline.metadata, false)
-            .expect("schema");
+        let schema =
+            Ingest::prepare_arrow_schema_with_metadata(namespace, &pipeline.metadata, false)
+                .expect("schema");
 
         let plan = plan_for_namespace(&fields, false, schema.clone()).expect("plan");
         let mut builders = ExactArrowBuilders::new(&plan, 4).expect("builders");
@@ -712,9 +717,8 @@ mod tests {
         let mut legacy_values = Vec::new();
         for row in &rows {
             try_append_row(&plan, row, &fields, &mut builders).expect("append");
-            legacy_values.push(
-                fast_path_ingest(row, &fields, namespace, false).expect("legacy normalize"),
-            );
+            legacy_values
+                .push(fast_path_ingest(row, &fields, namespace, false).expect("legacy normalize"));
         }
 
         let exact_batch = builders.finish().expect("exact batch");
@@ -736,11 +740,13 @@ mod tests {
         let mut ns_meta = Metadata::new_with_type(SkipprDataType::Record, namespace);
         ns_meta.fields = Box::new(fields.clone());
         pipeline.metadata.insert(namespace.to_string(), ns_meta);
-        let schema = Ingest::prepare_arrow_schema_with_metadata(namespace, &pipeline.metadata, false)
-            .expect("schema");
+        let schema =
+            Ingest::prepare_arrow_schema_with_metadata(namespace, &pipeline.metadata, false)
+                .expect("schema");
         let plan = plan_for_namespace(&fields, false, schema).expect("plan");
         let mut builders = ExactArrowBuilders::new(&plan, 1).expect("builders");
-        let row = json!({"id":"a","count":1,"active":true,"fetch_time":"2026-01-01T00:00:00Z","extra":1});
+        let row =
+            json!({"id":"a","count":1,"active":true,"fetch_time":"2026-01-01T00:00:00Z","extra":1});
         let err = try_append_row(&plan, &row, &fields, &mut builders).unwrap_err();
         assert_eq!(err, ExactArrowFallbackReason::TypeMismatch);
         assert_eq!(builders.len(), 0);
@@ -755,29 +761,17 @@ mod tests {
         let mut ns_meta = Metadata::new_with_type(SkipprDataType::Record, namespace);
         ns_meta.fields = Box::new(fields.clone());
         pipeline.metadata.insert(namespace.to_string(), ns_meta);
-        let schema = Ingest::prepare_arrow_schema_with_metadata(namespace, &pipeline.metadata, false)
-            .expect("schema");
+        let schema =
+            Ingest::prepare_arrow_schema_with_metadata(namespace, &pipeline.metadata, false)
+                .expect("schema");
 
         ingest_profile::reset_profile_counters();
         let mut cache = HashMap::new();
-        let p1 = resolve_cached_exact_plan(
-            &mut cache,
-            namespace,
-            "1",
-            &fields,
-            false,
-            schema.clone(),
-        )
-        .expect("plan");
-        let p2 = resolve_cached_exact_plan(
-            &mut cache,
-            namespace,
-            "1",
-            &fields,
-            false,
-            schema,
-        )
-        .expect("plan");
+        let p1 =
+            resolve_cached_exact_plan(&mut cache, namespace, "1", &fields, false, schema.clone())
+                .expect("plan");
+        let p2 = resolve_cached_exact_plan(&mut cache, namespace, "1", &fields, false, schema)
+            .expect("plan");
         assert!(Arc::ptr_eq(&p1, &p2));
         let snap = ingest_profile::snapshot();
         assert_eq!(snap.exact_plan_ns > 0, true, "first resolve builds plan");
@@ -820,15 +814,8 @@ mod tests {
             Ingest::prepare_arrow_schema_with_metadata(namespace, &pipeline2.metadata, false)
                 .expect("schema v2");
 
-        let p2 = resolve_cached_exact_plan(
-            &mut cache,
-            namespace,
-            "2",
-            &fields,
-            false,
-            schema_v2,
-        )
-        .expect("plan v2");
+        let p2 = resolve_cached_exact_plan(&mut cache, namespace, "2", &fields, false, schema_v2)
+            .expect("plan v2");
         assert!(!Arc::ptr_eq(&p1, &p2));
         assert_eq!(cache.len(), 2);
         assert!(p2.columns.iter().any(|c| c.source_field == "new_col"));
@@ -839,7 +826,10 @@ mod tests {
         let fields_a = flat_metadata();
         let fields_b = {
             let mut f = HashMap::new();
-            f.insert("x".to_string(), Metadata::new_with_type(SkipprDataType::Long, "x"));
+            f.insert(
+                "x".to_string(),
+                Metadata::new_with_type(SkipprDataType::Long, "x"),
+            );
             f
         };
         let ns_a = "ns_a";
@@ -880,8 +870,8 @@ mod tests {
         let schema_v1 =
             Ingest::prepare_arrow_schema_with_metadata(ns, &pipeline.metadata, false).unwrap();
         let mut cache = HashMap::new();
-        let plan_v1 = resolve_cached_exact_plan(&mut cache, ns, "1", &fields, false, schema_v1)
-            .unwrap();
+        let plan_v1 =
+            resolve_cached_exact_plan(&mut cache, ns, "1", &fields, false, schema_v1).unwrap();
         let row = json!({"id":"a","count":1,"active":true,"fetch_time":"2026-01-01T00:00:00Z"});
         append_row_to_exact_partition(
             &mut partitions,
@@ -903,8 +893,8 @@ mod tests {
         pipeline2.metadata.insert(ns.to_string(), ns_meta2);
         let schema_v2 =
             Ingest::prepare_arrow_schema_with_metadata(ns, &pipeline2.metadata, false).unwrap();
-        let plan_v2 = resolve_cached_exact_plan(&mut cache, ns, "2", &fields, false, schema_v2)
-            .unwrap();
+        let plan_v2 =
+            resolve_cached_exact_plan(&mut cache, ns, "2", &fields, false, schema_v2).unwrap();
         append_row_to_exact_partition(
             &mut partitions,
             &("sink".to_string(), "2".to_string()),
@@ -916,8 +906,18 @@ mod tests {
         .unwrap();
 
         assert_eq!(partitions.len(), 2);
-        assert_eq!(partitions[&("sink".to_string(), "1".to_string())].builders.len(), 1);
-        assert_eq!(partitions[&("sink".to_string(), "2".to_string())].builders.len(), 1);
+        assert_eq!(
+            partitions[&("sink".to_string(), "1".to_string())]
+                .builders
+                .len(),
+            1
+        );
+        assert_eq!(
+            partitions[&("sink".to_string(), "2".to_string())]
+                .builders
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -955,12 +955,9 @@ mod tests {
         ns_meta2.fields = Box::new(fields);
         pipeline2.metadata.insert(ns.to_string(), ns_meta2);
         METADATA.store(Arc::new(pipeline2));
-        let _schema_v2 = Ingest::prepare_arrow_schema_with_metadata(
-            ns,
-            &METADATA.load().metadata,
-            false,
-        )
-        .unwrap();
+        let _schema_v2 =
+            Ingest::prepare_arrow_schema_with_metadata(ns, &METADATA.load().metadata, false)
+                .unwrap();
 
         let v2 = crate::ingest_work::namespace_schema_version(ns);
         assert!(v2 > v1);
@@ -970,13 +967,11 @@ mod tests {
             &mut versions,
         );
         assert_eq!(versions.get(ns), Some(&v2));
-        assert!(
-            snapshot
-                .metadata
-                .get(ns)
-                .unwrap()
-                .fields
-                .contains_key("extra")
-        );
+        assert!(snapshot
+            .metadata
+            .get(ns)
+            .unwrap()
+            .fields
+            .contains_key("extra"));
     }
 }

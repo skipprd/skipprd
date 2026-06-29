@@ -7,3 +7,4 @@ pub use skippr_core::ingest_work::{IngestBatch, ThroughputMetrics};
 pub use skippr_core::plugins::source_sync::{
     OffsetValidationEntry, PayloadAck, PayloadSubmissionBatch, SourcePayloadTask, SourceSyncContext,
 };
+pub use skippr_core::runtime_plugins::protocol::RuntimeIngestPartitionBatch;

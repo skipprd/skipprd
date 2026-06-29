@@ -12,9 +12,9 @@ use skippr_core::plugins::source_sync::{
 };
 use skippr_core::runtime_plugins::protocol::{
     HostOffsetFrame, PluginDataFrame, PluginOffsetFrame, RuntimeCheckpointUpdate, RuntimeIngestAck,
-    RuntimeOffsetMaterializationHint, RuntimeOffsetValidationEntry, RuntimeRawIngestBatch,
-    RuntimeSessionHello, RuntimeSourceIngestWindow, RUNTIME_PROTOCOL_VERSION,
-    SKIPPR_RUNTIME_OFFSET_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
+    RuntimeIngestPartitionBatch, RuntimeOffsetMaterializationHint, RuntimeOffsetValidationEntry,
+    RuntimeRawIngestBatch, RuntimeSessionHello, RuntimeSourceIngestWindow,
+    RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_OFFSET_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use skippr_core::runtime_plugins::wire::{read_frame, write_frame};
 use tokio::net::TcpStream;
@@ -56,6 +56,39 @@ fn chunk_source_payload_tasks(
     if !current.is_empty() {
         chunks.push(current);
     }
+    chunks
+}
+
+fn chunk_arrow_ipc_batches(
+    batches: Vec<RuntimeIngestPartitionBatch>,
+) -> Vec<Vec<RuntimeIngestPartitionBatch>> {
+    let limit = MAX_SOURCE_PAYLOAD_FRAME_BYTES.saturating_sub(SOURCE_PAYLOAD_FRAME_HEADROOM);
+    let mut chunks: Vec<Vec<RuntimeIngestPartitionBatch>> = Vec::new();
+    let mut current: Vec<RuntimeIngestPartitionBatch> = Vec::new();
+
+    for batch in batches {
+        current.push(batch);
+        let encoded_len = bincode::serialize(&PluginDataFrame::IngestBatches {
+            request_id: 0,
+            batches: current.clone(),
+        })
+        .map(|bytes| bytes.len())
+        .unwrap_or(limit.saturating_add(1));
+        if encoded_len > limit {
+            let overflow = current
+                .pop()
+                .expect("chunk probe always has at least one batch");
+            if !current.is_empty() {
+                chunks.push(std::mem::take(&mut current));
+            }
+            current.push(overflow);
+        }
+    }
+
+    if !current.is_empty() {
+        chunks.push(current);
+    }
+
     chunks
 }
 
@@ -421,6 +454,52 @@ impl SourceSyncContext for RuntimeSourceSyncContext {
                 self.ingest_ack_client.resolve_ack(RuntimeIngestAck {
                     request_id,
                     error: Some(format!("failed to submit runtime ingest payload: {err}")),
+                });
+                return Err(err);
+            }
+            request_ids.push(request_id);
+        }
+
+        Ok(PayloadSubmissionBatch {
+            request_ids,
+            bytes: total_bytes,
+            metrics: self.last_metrics(),
+        })
+    }
+
+    fn submit_arrow_ipc_batches_accepted(
+        &self,
+        batches: Vec<RuntimeIngestPartitionBatch>,
+    ) -> Result<PayloadSubmissionBatch, io::Error> {
+        if self.suppress_payloads || batches.is_empty() {
+            return Ok(PayloadSubmissionBatch::already_durable(self.last_metrics()));
+        }
+
+        let total_bytes = batches
+            .iter()
+            .map(|batch| batch.arrow_stream_bytes.len())
+            .sum::<usize>();
+        let mut request_ids = Vec::new();
+        for chunk in chunk_arrow_ipc_batches(batches) {
+            let request_id = self.ingest_ack_client.next_request_id();
+            let request_bytes = chunk
+                .iter()
+                .map(|batch| batch.arrow_stream_bytes.len())
+                .sum::<usize>();
+            self.ingest_ack_client.wait_for_capacity(request_bytes);
+            self.ingest_ack_client
+                .register_request(request_id, request_bytes);
+            if let Err(err) = block_on_handle(&self.control_writer.handle, async {
+                self.data_writer
+                    .write(&PluginDataFrame::IngestBatches {
+                        request_id,
+                        batches: chunk,
+                    })
+                    .await
+            }) {
+                self.ingest_ack_client.resolve_ack(RuntimeIngestAck {
+                    request_id,
+                    error: Some(format!("failed to submit runtime Arrow IPC payload: {err}")),
                 });
                 return Err(err);
             }

@@ -1,5 +1,6 @@
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum InputFormat {
+    ArrowIpc,
     Csv,
     Xml,
     #[default]
@@ -12,11 +13,12 @@ impl InputFormat {
     }
 
     pub fn requires_whole_payload(self) -> bool {
-        matches!(self, Self::Csv | Self::Xml)
+        matches!(self, Self::ArrowIpc | Self::Csv | Self::Xml)
     }
 
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::ArrowIpc => "arrow_ipc",
             Self::Csv => "csv",
             Self::Xml => "xml",
             Self::Json => "json",
@@ -27,6 +29,7 @@ impl InputFormat {
 impl From<&str> for InputFormat {
     fn from(value: &str) -> Self {
         match value.trim().to_ascii_lowercase().as_str() {
+            "arrow" | "arrow_ipc" | "arrow-ipc" | "ipc" => Self::ArrowIpc,
             "csv" => Self::Csv,
             "xml" => Self::Xml,
             _ => Self::Json,
@@ -46,6 +49,7 @@ mod tests {
 
     #[test]
     fn csv_and_xml_require_whole_payloads() {
+        assert!(InputFormat::ArrowIpc.requires_whole_payload());
         assert!(InputFormat::Csv.requires_whole_payload());
         assert!(InputFormat::Xml.requires_whole_payload());
         assert!(!InputFormat::Json.requires_whole_payload());

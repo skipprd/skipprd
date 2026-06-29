@@ -102,10 +102,7 @@ mod tests {
 
     #[test]
     fn dedupe_id_normalizes_crawl_id() {
-        assert_eq!(
-            fifo_deduplication_id("CC-MAIN-2025-08"),
-            "cc_main_2025_08"
-        );
+        assert_eq!(fifo_deduplication_id("CC-MAIN-2025-08"), "cc_main_2025_08");
     }
 
     #[test]
@@ -134,15 +131,13 @@ mod tests {
             effective_checkpoint(Some(checkpoint.clone()), false),
             Some(checkpoint.clone())
         );
-        assert!(
-            effective_checkpoint(
-                Some(WatManifestCheckpoint {
-                    cleared: true,
-                    ..checkpoint
-                }),
-                false
-            )
-            .is_none()
-        );
+        assert!(effective_checkpoint(
+            Some(WatManifestCheckpoint {
+                cleared: true,
+                ..checkpoint
+            }),
+            false
+        )
+        .is_none());
     }
 }

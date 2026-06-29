@@ -18,12 +18,12 @@ use crate::discover::{
 use crate::helpers::configuration::{Config, PIPELINE_NAME};
 use crate::helpers::offsets::{OffsetKey, Offsets};
 use crate::ingest::fast_ingest::{create_default_nested_message, DEFAULT_NESTED_MESSAGE};
+use crate::ingest_work::storage_namespace;
 use crate::ingest_work::{Ingest, IngestBatch};
 use crate::metrics::ingest_profile::{self, IngestProfileSnapshot};
 use crate::plugins::NoopOutputPlugin;
 use crate::runtime_plugins::protocol::RuntimeExecutionMode;
 use crate::{METADATA, RUNNING};
-use crate::ingest_work::storage_namespace;
 
 #[derive(Debug, Clone, Copy)]
 pub enum BenchmarkFixture {
@@ -147,9 +147,7 @@ fn strings_heavy_row(i: usize) -> Value {
         "https://source-{}.example/{pad}/page?ref={pad}",
         i % 20_000
     ));
-    row["wat_path"] = json!(format!(
-        "s3://bucket/wat/{i}/{pad}/wat.wat.gz"
-    ));
+    row["wat_path"] = json!(format!("s3://bucket/wat/{i}/{pad}/wat.wat.gz"));
     row["target_domain"] = json!(format!("target-{}.{}.example", i % 10_000, &pad[..32]));
     row
 }
@@ -382,7 +380,9 @@ pub fn run_local_fixture_benchmark_with_options(
     }
 
     install_fixture_metadata(fixture);
-    RUNNING.write().store(true, std::sync::atomic::Ordering::SeqCst);
+    RUNNING
+        .write()
+        .store(true, std::sync::atomic::Ordering::SeqCst);
 
     let payload = read_ndjson(&input_path).expect("read fixture");
     let input_bytes = payload.len();
@@ -403,12 +403,7 @@ pub fn run_local_fixture_benchmark_with_options(
         Arc::new(Box::new(NoopOutputPlugin));
 
     let start = Instant::now();
-    Ingest::run_process_batch_for_benchmark(
-        &[batch],
-        &offsets,
-        output,
-        0,
-    );
+    Ingest::run_process_batch_for_benchmark(&[batch], &offsets, output, 0);
     let duration = start.elapsed();
     let profile = ingest_profile::snapshot();
     let records_per_sec = row_count as f64 / duration.as_secs_f64().max(1e-9);
@@ -461,7 +456,8 @@ mod tests {
     #[test]
     #[serial]
     fn generates_fixture_files() {
-        let dir = std::env::temp_dir().join(format!("skippr_ingest_fixture_{}", rand::random::<u64>()));
+        let dir =
+            std::env::temp_dir().join(format!("skippr_ingest_fixture_{}", rand::random::<u64>()));
         let path = dir.join("wat.ndjson");
         let bytes = write_fixture_ndjson(BenchmarkFixture::WatFlatExact, 10, &path).unwrap();
         assert!(bytes > 0);
@@ -473,7 +469,8 @@ mod tests {
     #[test]
     #[serial]
     fn local_wat_fixture_ingests_rows() {
-        let dir = std::env::temp_dir().join(format!("skippr_ingest_smoke_{}", rand::random::<u64>()));
+        let dir =
+            std::env::temp_dir().join(format!("skippr_ingest_smoke_{}", rand::random::<u64>()));
         let result = run_local_fixture_benchmark(BenchmarkFixture::WatFlatExact, Some(10), &dir);
         assert!(
             result.profile.exact_arrow_rows > 0,
@@ -487,7 +484,8 @@ mod tests {
     #[ignore = "benchmark; run with `cargo test ingest_benchmark -- --ignored --nocapture`"]
     #[serial]
     fn bench_legacy_wat_flat_exact_baseline() {
-        let dir = std::env::temp_dir().join(format!("skippr_ingest_bench_{}", rand::random::<u64>()));
+        let dir =
+            std::env::temp_dir().join(format!("skippr_ingest_bench_{}", rand::random::<u64>()));
         let result = run_local_fixture_benchmark_with_options(
             BenchmarkFixture::WatFlatExact,
             Some(10_000),
@@ -504,7 +502,8 @@ mod tests {
     #[ignore = "benchmark; run with `cargo test ingest_benchmark -- --ignored --nocapture`"]
     #[serial]
     fn bench_wat_flat_exact() {
-        let dir = std::env::temp_dir().join(format!("skippr_ingest_bench_{}", rand::random::<u64>()));
+        let dir =
+            std::env::temp_dir().join(format!("skippr_ingest_bench_{}", rand::random::<u64>()));
         let result = run_local_fixture_benchmark(
             BenchmarkFixture::WatFlatExact,
             Some(benchmark_rows(10_000)),
@@ -519,8 +518,10 @@ mod tests {
     #[ignore = "benchmark; run with `cargo test ingest_benchmark -- --ignored --nocapture`"]
     #[serial]
     fn bench_flat_exact_dates() {
-        let dir = std::env::temp_dir().join(format!("skippr_ingest_bench_{}", rand::random::<u64>()));
-        let result = run_local_fixture_benchmark(BenchmarkFixture::FlatExactDates, Some(10_000), &dir);
+        let dir =
+            std::env::temp_dir().join(format!("skippr_ingest_bench_{}", rand::random::<u64>()));
+        let result =
+            run_local_fixture_benchmark(BenchmarkFixture::FlatExactDates, Some(10_000), &dir);
         println!("{}", format_benchmark_report(&result));
         assert!(result.profile.exact_arrow_rows > 0);
         let _ = fs::remove_dir_all(dir);
@@ -530,8 +531,10 @@ mod tests {
     #[ignore = "benchmark; run with `cargo test ingest_benchmark -- --ignored --nocapture`"]
     #[serial]
     fn bench_strings_heavy() {
-        let dir = std::env::temp_dir().join(format!("skippr_ingest_bench_{}", rand::random::<u64>()));
-        let result = run_local_fixture_benchmark(BenchmarkFixture::StringsHeavy, Some(10_000), &dir);
+        let dir =
+            std::env::temp_dir().join(format!("skippr_ingest_bench_{}", rand::random::<u64>()));
+        let result =
+            run_local_fixture_benchmark(BenchmarkFixture::StringsHeavy, Some(10_000), &dir);
         println!("{}", format_benchmark_report(&result));
         assert!(result.profile.exact_arrow_rows > 0);
         let _ = fs::remove_dir_all(dir);
@@ -541,8 +544,10 @@ mod tests {
     #[ignore = "benchmark; run with `cargo test ingest_benchmark -- --ignored --nocapture`"]
     #[serial]
     fn bench_partition_skewed() {
-        let dir = std::env::temp_dir().join(format!("skippr_ingest_bench_{}", rand::random::<u64>()));
-        let result = run_local_fixture_benchmark(BenchmarkFixture::PartitionSkewed, Some(10_000), &dir);
+        let dir =
+            std::env::temp_dir().join(format!("skippr_ingest_bench_{}", rand::random::<u64>()));
+        let result =
+            run_local_fixture_benchmark(BenchmarkFixture::PartitionSkewed, Some(10_000), &dir);
         println!("{}", format_benchmark_report(&result));
         assert!(result.profile.exact_arrow_rows > 0);
         let _ = fs::remove_dir_all(dir);
@@ -552,7 +557,8 @@ mod tests {
     #[ignore = "benchmark; run with `cargo test ingest_benchmark -- --ignored --nocapture`"]
     #[serial]
     fn bench_fallback_mixed_fixture() {
-        let dir = std::env::temp_dir().join(format!("skippr_ingest_bench_{}", rand::random::<u64>()));
+        let dir =
+            std::env::temp_dir().join(format!("skippr_ingest_bench_{}", rand::random::<u64>()));
         let result = run_local_fixture_benchmark(BenchmarkFixture::FallbackMixed, Some(2000), &dir);
         println!("{}", format_benchmark_report(&result));
         assert!(result.profile.exact_arrow_fallback_rows > 0);

@@ -8,6 +8,8 @@ use crate::serdes::xml::{SerdeXml, XmlDecodeError};
 
 #[derive(Debug, Error)]
 pub enum DecodeError {
+    #[error("{0}")]
+    Unsupported(String),
     #[error(transparent)]
     Csv(#[from] CsvDecodeError),
     #[error(transparent)]
@@ -16,6 +18,9 @@ pub enum DecodeError {
 
 pub fn decode_records(format: InputFormat, payload: &str) -> Result<Vec<Value>, DecodeError> {
     match format {
+        InputFormat::ArrowIpc => Err(DecodeError::Unsupported(
+            "Arrow IPC input must be submitted through runtime Arrow IPC batches".to_string(),
+        )),
         InputFormat::Csv => SerderCsv::deserialize(payload).map_err(DecodeError::from),
         InputFormat::Xml => SerdeXml::deserialize(payload.as_bytes()).map_err(DecodeError::from),
         InputFormat::Json => Ok(SerdeJson::deserialize(payload)),
@@ -45,5 +50,11 @@ mod tests {
 
         assert_eq!(xml_records.len(), 1);
         assert_eq!(xml_records[0]["name"], "xml");
+    }
+
+    #[test]
+    fn arrow_ipc_is_not_text_decoded() {
+        let err = decode_records(InputFormat::ArrowIpc, "not arrow").unwrap_err();
+        assert!(err.to_string().contains("Arrow IPC input"));
     }
 }

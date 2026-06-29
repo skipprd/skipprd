@@ -650,12 +650,7 @@ async fn ingest_runtime_batches_into_core(
             .map(|batch| batch.schema())
             .unwrap_or_else(|| Arc::new(arrow::datatypes::Schema::empty()));
         let namespace = storage_namespace(&batch.namespace);
-        if !current_runtime_schema_state()
-            .namespaces
-            .contains_key(&namespace)
-        {
-            derived_namespaces.insert(namespace.clone(), output_metadata_for_arrow_schema(&schema));
-        }
+        derived_namespaces.insert(namespace.clone(), output_metadata_for_arrow_schema(&schema));
         let offsets_map = batch
             .offsets
             .into_iter()
@@ -675,10 +670,15 @@ async fn ingest_runtime_batches_into_core(
     }
     if !derived_namespaces.is_empty() {
         let version = bump_pipeline_schema_version();
-        apply_runtime_source_schema_state(RuntimeSchemaState {
+        let changed_namespaces = apply_runtime_source_schema_state(RuntimeSchemaState {
             version,
             namespaces: derived_namespaces,
         });
+        for namespace in changed_namespaces {
+            Config::sync_output_schema_namespace_blocking(&namespace)
+                .await
+                .map_err(io::Error::other)?;
+        }
     }
 
     let arrow_bytes = buffer_batches

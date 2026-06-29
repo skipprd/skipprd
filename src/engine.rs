@@ -761,6 +761,7 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
     info!("Syncing pipeline: {}", pipeline_name);
     // Stats tailer removed; catalogs built at end-of-run only
 
+    crate::metrics::ingest_profile::reset_profile_counters();
     clear_runtime_source_schema_state();
     METADATA.store(Arc::new(pipeline_metadata.clone()));
     if Config::get_pipeline_deadletters_ref().is_some() {
@@ -1157,6 +1158,25 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
             parquet_rows,
             parquet_bytes,
             parquet_objects
+        );
+        let profile = crate::metrics::ingest_profile::snapshot();
+        info!(
+            "Ingest profile: decode_ms={:.2} exact_plan_ms={:.2} exact_append_ms={:.2} exact_finish_ms={:.2} partition_ms={:.2} metadata_load_ms={:.2} unwrap_ms={:.2} buffer_offset_ms={:.2} fast_ms={:.2} slow_ms={:.2} arrow_json_ms={:.2} wal_enqueue_ms={:.2} exact_rows={} exact_fallback_rows={} legacy_rows={}",
+            profile.decode_ns as f64 / 1_000_000.0,
+            profile.exact_plan_ns as f64 / 1_000_000.0,
+            profile.exact_append_ns as f64 / 1_000_000.0,
+            profile.exact_finish_ns as f64 / 1_000_000.0,
+            profile.partition_ns as f64 / 1_000_000.0,
+            profile.metadata_load_ns as f64 / 1_000_000.0,
+            profile.unwrap_ns as f64 / 1_000_000.0,
+            profile.buffer_offset_ns as f64 / 1_000_000.0,
+            profile.fast_path_ns as f64 / 1_000_000.0,
+            profile.slow_path_ns as f64 / 1_000_000.0,
+            profile.arrow_json_ns as f64 / 1_000_000.0,
+            profile.wal_enqueue_ns as f64 / 1_000_000.0,
+            profile.exact_arrow_rows,
+            profile.exact_arrow_fallback_rows,
+            profile.legacy_normalized_rows
         );
     }
 

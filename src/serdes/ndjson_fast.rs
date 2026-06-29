@@ -42,8 +42,7 @@ impl NdjsonLineParser {
         if self.simd_buf.len() < padded_len {
             self.simd_buf.resize(padded_len, 0);
         }
-        simd_json::serde::from_slice::<Value>(&mut self.simd_buf)
-            .map_err(|err| err.to_string())
+        simd_json::serde::from_slice::<Value>(&mut self.simd_buf).map_err(|err| err.to_string())
     }
 }
 
