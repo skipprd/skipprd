@@ -1031,6 +1031,7 @@ impl DataSinkIcebergPlugin {
                 desired_schema.as_struct().fields().len()
             );
             let evolved_schema = merge_iceberg_schema_missing_fields(
+                namespace,
                 table.metadata().current_schema(),
                 &desired_schema,
             )?;
@@ -1370,13 +1371,24 @@ fn iceberg_schema_has_all_fields(current: &Schema, desired: &Schema) -> bool {
 }
 
 fn merge_iceberg_schema_missing_fields(
+    namespace: &str,
     current: &Schema,
     desired: &Schema,
 ) -> Result<Schema, io::Error> {
     let mut fields: Vec<Arc<NestedField>> = current.as_struct().fields().iter().cloned().collect();
+    let mut seen_field_ids = HashMap::<i32, ()>::new();
+    for field in current.as_struct().fields() {
+        collect_iceberg_field_ids(field, &mut seen_field_ids);
+    }
+
     for field in desired.as_struct().fields() {
         if current.field_by_name(&field.name).is_none() {
-            fields.push(field.clone());
+            fields.push(remap_iceberg_field_ids(
+                namespace,
+                field,
+                Vec::new(),
+                &mut seen_field_ids,
+            ));
         }
     }
     Schema::builder()
@@ -1384,6 +1396,88 @@ fn merge_iceberg_schema_missing_fields(
         .with_fields(fields)
         .build()
         .map_err(|err| io::Error::other(err.to_string()))
+}
+
+fn collect_iceberg_field_ids(field: &NestedField, seen_field_ids: &mut HashMap<i32, ()>) {
+    seen_field_ids.insert(field.id, ());
+    collect_iceberg_type_field_ids(&field.field_type, seen_field_ids);
+}
+
+fn collect_iceberg_type_field_ids(field_type: &Type, seen_field_ids: &mut HashMap<i32, ()>) {
+    match field_type {
+        Type::Primitive(_) => {}
+        Type::Struct(struct_type) => {
+            for child in struct_type.fields() {
+                collect_iceberg_field_ids(child, seen_field_ids);
+            }
+        }
+        Type::List(list_type) => {
+            collect_iceberg_field_ids(&list_type.element_field, seen_field_ids);
+        }
+        Type::Map(map_type) => {
+            collect_iceberg_field_ids(&map_type.key_field, seen_field_ids);
+            collect_iceberg_field_ids(&map_type.value_field, seen_field_ids);
+        }
+    }
+}
+
+fn remap_iceberg_field_ids(
+    namespace: &str,
+    field: &NestedField,
+    mut path: Vec<String>,
+    seen_field_ids: &mut HashMap<i32, ()>,
+) -> Arc<NestedField> {
+    path.push(field.name.clone());
+    let field_id = if field.id != 0 && !seen_field_ids.contains_key(&field.id) {
+        field.id
+    } else {
+        unique_iceberg_field_id(namespace, &path, seen_field_ids)
+    };
+    seen_field_ids.insert(field_id, ());
+    Arc::new(NestedField {
+        id: field_id,
+        name: field.name.clone(),
+        required: field.required,
+        field_type: Box::new(remap_iceberg_type_field_ids(
+            namespace,
+            &field.field_type,
+            path,
+            seen_field_ids,
+        )),
+        doc: field.doc.clone(),
+        initial_default: field.initial_default.clone(),
+        write_default: field.write_default.clone(),
+    })
+}
+
+fn remap_iceberg_type_field_ids(
+    namespace: &str,
+    field_type: &Type,
+    path: Vec<String>,
+    seen_field_ids: &mut HashMap<i32, ()>,
+) -> Type {
+    match field_type {
+        Type::Primitive(primitive) => Type::Primitive(primitive.clone()),
+        Type::Struct(struct_type) => Type::Struct(iceberg::spec::StructType::new(
+            struct_type
+                .fields()
+                .iter()
+                .map(|child| {
+                    remap_iceberg_field_ids(namespace, child, path.clone(), seen_field_ids)
+                })
+                .collect(),
+        )),
+        Type::List(list_type) => Type::List(ListType::new(remap_iceberg_field_ids(
+            namespace,
+            &list_type.element_field,
+            path,
+            seen_field_ids,
+        ))),
+        Type::Map(map_type) => Type::Map(MapType::new(
+            remap_iceberg_field_ids(namespace, &map_type.key_field, path.clone(), seen_field_ids),
+            remap_iceberg_field_ids(namespace, &map_type.value_field, path, seen_field_ids),
+        )),
+    }
 }
 
 fn apply_iceberg_field_ids(
@@ -1725,6 +1819,43 @@ mod tests {
 
     fn output_metadata(value: serde_json::Value) -> OutputMetadata {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn merge_schema_remaps_appended_field_ids_against_nested_current_ids() {
+        let current = Schema::builder()
+            .with_schema_id(0)
+            .with_fields(vec![Arc::new(NestedField::new(
+                10,
+                "detail",
+                Type::Struct(iceberg::spec::StructType::new(vec![Arc::new(
+                    NestedField::new(20, "inner", Type::Primitive(PrimitiveType::String), false),
+                )])),
+                false,
+            ))])
+            .build()
+            .unwrap();
+        let desired = Schema::builder()
+            .with_schema_id(0)
+            .with_fields(vec![Arc::new(NestedField::new(
+                20,
+                "new_top_level",
+                Type::Primitive(PrimitiveType::Long),
+                false,
+            ))])
+            .build()
+            .unwrap();
+
+        let merged = merge_iceberg_schema_missing_fields("cube_events", &current, &desired)
+            .expect("schema merge should remap colliding field ids");
+        let appended = merged.field_by_name("new_top_level").unwrap();
+
+        assert_ne!(appended.id, 20);
+        let mut seen = HashMap::new();
+        for field in merged.as_struct().fields() {
+            collect_iceberg_field_ids(field, &mut seen);
+        }
+        assert_eq!(seen.len(), 3);
     }
 
     #[test]
