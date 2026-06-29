@@ -168,6 +168,7 @@ struct SegmentSnapshot {
     batches: HashMap<PartitionKey, Vec<RecordBatch>>,
     meta: HashMap<PartitionKey, SegmentPartitionMeta>,
     part_meta_blobs: HashMap<PartitionKey, Vec<u8>>,
+    checkpoint_updates: Vec<(String, crate::plugins::cdc::CheckpointEnvelope)>,
 }
 
 impl SegmentSnapshot {
@@ -178,6 +179,7 @@ impl SegmentSnapshot {
         meta: HashMap<PartitionKey, SegmentPartitionMeta>,
         total_bytes: u64,
         part_meta_blobs: HashMap<PartitionKey, Vec<u8>>,
+        checkpoint_updates: Vec<(String, crate::plugins::cdc::CheckpointEnvelope)>,
     ) -> Self {
         let now = SystemTime::now();
         SegmentSnapshot {
@@ -190,6 +192,7 @@ impl SegmentSnapshot {
             batches,
             meta,
             part_meta_blobs,
+            checkpoint_updates,
         }
     }
 }
@@ -314,6 +317,8 @@ pub struct IngestBufferBatch {
     /// Per-row CDC metadata aligned 1:1 with the rows in `record_batches`.
     /// `None` means append-mode (no CDC metadata).
     pub(crate) cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
+    /// Checkpoint envelope to store when this batch's WAL segment is durably committed.
+    pub(crate) checkpoint_update: Option<(String, crate::plugins::cdc::CheckpointEnvelope)>,
 }
 
 // Single global segment that aggregates batches for all partitions
@@ -321,6 +326,7 @@ struct GlobalSegment {
     batches: HashMap<PartitionKey, Vec<RecordBatch>>,
     offsets: HashMap<OffsetKey, u64>,
     cdc_meta: HashMap<PartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
+    checkpoint_updates: Vec<(String, crate::plugins::cdc::CheckpointEnvelope)>,
     bytes: u64,
     updated_at: SystemTime,
     flushed_at: SystemTime,
@@ -333,6 +339,7 @@ impl GlobalSegment {
             batches: HashMap::with_capacity(64),
             offsets: HashMap::new(),
             cdc_meta: HashMap::new(),
+            checkpoint_updates: Vec::new(),
             bytes: 0,
             updated_at: now,
             flushed_at: now,
@@ -344,6 +351,7 @@ impl GlobalSegment {
         batches: Vec<RecordBatch>,
         offsets: &HashMap<OffsetKey, u64>,
         cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
+        checkpoint_update: Option<(String, crate::plugins::cdc::CheckpointEnvelope)>,
     ) {
         let mut add_bytes: u64 = 0;
         for b in batches.iter() {
@@ -365,6 +373,9 @@ impl GlobalSegment {
                 .and_modify(|p| *p = (*p).max(*v))
                 .or_insert(*v);
         }
+        if let Some(update) = checkpoint_update {
+            self.checkpoint_updates.push(update);
+        }
         self.bytes = self.bytes.saturating_add(add_bytes);
         self.updated_at = SystemTime::now();
     }
@@ -374,14 +385,16 @@ impl GlobalSegment {
         HashMap<PartitionKey, Vec<RecordBatch>>,
         HashMap<OffsetKey, u64>,
         HashMap<PartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
+        Vec<(String, crate::plugins::cdc::CheckpointEnvelope)>,
         u64,
     ) {
         let batches = std::mem::take(&mut self.batches);
         let offsets = std::mem::take(&mut self.offsets);
         let cdc_meta = std::mem::take(&mut self.cdc_meta);
+        let checkpoint_updates = std::mem::take(&mut self.checkpoint_updates);
         let bytes = std::mem::replace(&mut self.bytes, 0);
         self.updated_at = SystemTime::now();
-        (batches, offsets, cdc_meta, bytes)
+        (batches, offsets, cdc_meta, checkpoint_updates, bytes)
     }
 
     /// Re-merge a failed live flush back into the accumulator so data is not lost.
@@ -390,6 +403,7 @@ impl GlobalSegment {
         batches: HashMap<PartitionKey, Vec<RecordBatch>>,
         offsets: HashMap<OffsetKey, u64>,
         cdc_meta: HashMap<PartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
+        checkpoint_updates: Vec<(String, crate::plugins::cdc::CheckpointEnvelope)>,
         bytes: u64,
     ) {
         for (key, batch_vec) in batches {
@@ -410,6 +424,7 @@ impl GlobalSegment {
                 .and_modify(|p| *p = (*p).max(v))
                 .or_insert(v);
         }
+        self.checkpoint_updates.extend(checkpoint_updates);
         self.bytes = self.bytes.saturating_add(bytes);
         self.updated_at = SystemTime::now();
     }
@@ -524,6 +539,7 @@ impl Buffers {
                 batches_vec.drain(..).collect(),
                 &ingest_buffer_batch.offsets,
                 ingest_buffer_batch.cdc_rows.take(),
+                ingest_buffer_batch.checkpoint_update.take(),
             );
         }
         Ok(added_bytes)
@@ -582,7 +598,7 @@ impl Buffers {
                 && seg.bytes > 0;
             if should_rotate {
                 let rotated_bytes = seg.bytes;
-                let (batches, offsets, cdc_meta, total_bytes) = seg.take();
+                let (batches, offsets, cdc_meta, checkpoint_updates, total_bytes) = seg.take();
                 seg.flushed_at = SystemTime::now();
                 drop(seg);
 
@@ -605,6 +621,7 @@ impl Buffers {
                     meta,
                     total_bytes,
                     blobs,
+                    checkpoint_updates,
                 );
                 if Config::log_wal_enabled() || Config::debug_enabled() {
                     let part_count = snapshot.meta.len();
@@ -628,6 +645,7 @@ impl Buffers {
                 batches_vec.drain(..).collect(),
                 &ingest_buffer_batch.offsets,
                 ingest_buffer_batch.cdc_rows.take(),
+                ingest_buffer_batch.checkpoint_update.take(),
             );
         }
     }
@@ -743,6 +761,11 @@ impl Buffers {
             append_wal_debug_trace(&format!("persist_mark_offsets id={}", snapshot_id));
         }
         mark_offsets_durable_in_wal(offsets_db, snapshot.offsets.iter());
+        for (key, envelope) in snapshot.checkpoint_updates.iter() {
+            offsets_db
+                .store_checkpoint_envelope(key, envelope)
+                .map_err(|err| ArrowError::ExternalError(Box::new(std::io::Error::other(err))))?;
+        }
         if Config::debug_enabled() || Config::log_wal_enabled() {
             info!("WAL persist offsets durable id={}", snapshot_id);
             append_wal_debug_trace(&format!("persist_offsets_durable id={}", snapshot_id));
@@ -823,14 +846,14 @@ impl Buffers {
     }
 
     async fn flush_live_segment_to_wal(offsets_db: &Offsets) -> Result<(u64, u64), ArrowError> {
-        let (to_flush_batches, to_flush_offsets, to_flush_cdc, total_bytes) = {
+        let (to_flush_batches, to_flush_offsets, to_flush_cdc, to_flush_checkpoints, total_bytes) = {
             let mut guard = SEGMENT_LIVE.lock().unwrap();
             if guard.batches.is_empty() {
                 return Ok((0, 0));
             }
             guard.flushed_at = SystemTime::now();
-            let (b, o, c, bytes) = guard.take();
-            (b, o, c, bytes)
+            let (b, o, c, cp, bytes) = guard.take();
+            (b, o, c, cp, bytes)
         };
 
         let mut meta: HashMap<PartitionKey, SegmentPartitionMeta> = HashMap::new();
@@ -856,6 +879,7 @@ impl Buffers {
             meta,
             total_bytes,
             part_meta_blobs,
+            to_flush_checkpoints,
         );
 
         match Self::persist_snapshot_to_wal(&mut snapshot, offsets_db, "live flush").await {
@@ -865,7 +889,13 @@ impl Buffers {
                 let batches = std::mem::take(&mut snapshot.batches);
                 let offsets = std::mem::take(&mut snapshot.offsets);
                 let mut guard = SEGMENT_LIVE.lock().unwrap();
-                guard.restore_after_failed_flush(batches, offsets, to_flush_cdc, total_bytes);
+                guard.restore_after_failed_flush(
+                    batches,
+                    offsets,
+                    to_flush_cdc,
+                    std::mem::take(&mut snapshot.checkpoint_updates),
+                    total_bytes,
+                );
                 Err(e)
             }
         }
@@ -3796,6 +3826,7 @@ mod tests_wal_commit {
             schema,
             record_batches: Some(vec![batch]),
             cdc_rows: None,
+            checkpoint_update: None,
         };
 
         let mut buffers = Buffers::new();

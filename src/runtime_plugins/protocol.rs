@@ -402,6 +402,9 @@ pub struct RuntimeIngestPartitionBatch {
     pub offsets: Vec<RuntimeOffsetPosition>,
     pub arrow_stream_bytes: Vec<u8>,
     pub cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
+    /// When set, persisted atomically with this batch's WAL segment after offsets are durable.
+    #[serde(default)]
+    pub checkpoint_update: Option<RuntimeCheckpointUpdate>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]

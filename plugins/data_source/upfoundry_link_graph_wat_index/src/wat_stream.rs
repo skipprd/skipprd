@@ -1,3 +1,4 @@
+use std::io::Cursor;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::pin::Pin;
@@ -140,6 +141,98 @@ pub async fn open_wat_stream(
         .map_err(|err| std::io::Error::other(err.to_string()));
     let reader = StreamReader::new(stream);
     Ok(WatGzipStream::new(Box::pin(reader), max_wat_object_bytes))
+}
+
+pub fn open_wat_stream_from_bytes(
+    bytes: Vec<u8>,
+    max_wat_object_bytes: usize,
+) -> Result<WatGzipStream<Cursor<Vec<u8>>>, WatStreamOpenError> {
+    reject_if_too_large(Some(bytes.len() as u64), max_wat_object_bytes)?;
+    Ok(WatGzipStream::new(Cursor::new(bytes), max_wat_object_bytes))
+}
+
+pub async fn download_wat_bytes(
+    path: &str,
+    max_wat_object_bytes: usize,
+    s3_client: Option<&S3Client>,
+    http_client: Option<&reqwest::Client>,
+) -> Result<Vec<u8>, WatStreamOpenError> {
+    if Path::new(path).exists() {
+        let bytes = tokio::fs::read(path).await?;
+        reject_if_too_large(Some(bytes.len() as u64), max_wat_object_bytes)?;
+        return Ok(bytes);
+    }
+
+    if let Some(rest) = path.strip_prefix("s3://") {
+        let (bucket, key) = rest.split_once('/').ok_or_else(|| {
+            WatStreamOpenError::Io(std::io::Error::new(
+                ErrorKind::InvalidInput,
+                "invalid s3 uri",
+            ))
+        })?;
+        let owned_s3;
+        let client = if let Some(client) = s3_client {
+            client
+        } else {
+            owned_s3 = default_s3_client().await;
+            &owned_s3
+        };
+        let head = client
+            .head_object()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|err| WatStreamOpenError::Io(std::io::Error::other(err.to_string())))?;
+        reject_if_too_large(
+            head.content_length().map(|n| n as u64),
+            max_wat_object_bytes,
+        )?;
+        let output = client
+            .get_object()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await
+            .map_err(|err| WatStreamOpenError::Io(std::io::Error::other(err.to_string())))?;
+        let bytes = output
+            .body
+            .collect()
+            .await
+            .map_err(|err| WatStreamOpenError::Io(std::io::Error::other(err.to_string())))?
+            .into_bytes();
+        reject_if_too_large(Some(bytes.len() as u64), max_wat_object_bytes)?;
+        return Ok(bytes.to_vec());
+    }
+
+    let url = if path.starts_with("http://") || path.starts_with("https://") {
+        path.to_string()
+    } else {
+        format!("https://data.commoncrawl.org/{path}")
+    };
+    let owned_http;
+    let client = if let Some(client) = http_client {
+        client
+    } else {
+        owned_http = reqwest::Client::new();
+        &owned_http
+    };
+    let head = client
+        .head(&url)
+        .send()
+        .await
+        .map_err(|err| WatStreamOpenError::Io(std::io::Error::other(err.to_string())))?;
+    reject_if_too_large(head.content_length(), max_wat_object_bytes)?;
+    let bytes = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|err| WatStreamOpenError::Io(std::io::Error::other(err.to_string())))?
+        .bytes()
+        .await
+        .map_err(|err| WatStreamOpenError::Io(std::io::Error::other(err.to_string())))?;
+    reject_if_too_large(Some(bytes.len() as u64), max_wat_object_bytes)?;
+    Ok(bytes.to_vec())
 }
 
 pub struct WatGzipStream<R: AsyncRead + Unpin> {

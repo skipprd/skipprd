@@ -1,6 +1,6 @@
 [package]
 name = "skippr-plugin-data-source-upfoundry-link-graph-wat-index"
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 
 [[bin]]
@@ -8,7 +8,10 @@ name = "skippr-plugin-data-source-upfoundry-link-graph-wat-index"
 path = "src/main.rs"
 
 [dependencies]
+arrow.workspace = true
+arrow-schema.workspace = true
 async-trait.workspace = true
+bytes = "1.5.0"
 aws-config = "1.5.1"
 aws-sdk-s3 = "1.32.0"
 aws-sdk-sqs = "1.32.0"
@@ -18,7 +21,7 @@ serde.workspace = true
 serde_json.workspace = true
 skippr-plugin-shared-link-graph = { path = "../../shared/link_graph" }
 skippr-runtime-sdk.workspace = true
-tokio = { workspace = true, features = ["fs", "io-util"] }
+tokio = { workspace = true, features = ["fs", "io-util", "sync", "time", "macros"] }
 tokio-util = { version = "0.7", features = ["io", "io-util", "compat"], default-features = false }
 futures.workspace = true
 tracing.workspace = true

@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -24,6 +26,9 @@ pub struct WatManifestCheckpoint {
     pub total_paths: Option<usize>,
     #[serde(default)]
     pub cleared: bool,
+    /// Last durable gzip member index per manifest path (mid-file resume).
+    #[serde(default)]
+    pub path_member_cursors: BTreeMap<usize, u64>,
 }
 
 pub fn effective_checkpoint(
@@ -43,7 +48,12 @@ pub fn cleared_checkpoint(crawl_id: &str, manifest_uri: &str) -> WatManifestChec
         next_path_index: 0,
         total_paths: None,
         cleared: true,
+        path_member_cursors: BTreeMap::new(),
     }
+}
+
+pub fn path_offset_partition(crawl_id: &str, path_index: usize) -> String {
+    format!("{crawl_id}#wat:{path_index}")
 }
 
 pub fn checkpoint_key(crawl_id: &str) -> String {
@@ -61,6 +71,12 @@ pub fn fifo_deduplication_id(crawl_id: &str) -> String {
         .chars()
         .take(128)
         .collect()
+}
+
+pub struct ActiveSqsJob {
+    pub queue_url: String,
+    pub receipt_handle: String,
+    pub visibility_timeout_seconds: i32,
 }
 
 pub fn apply_path_cap(paths: &mut Vec<String>, max_wat_objects_per_sync: Option<usize>) {
@@ -125,6 +141,7 @@ mod tests {
             next_path_index: 99,
             total_paths: Some(100),
             cleared: false,
+            path_member_cursors: BTreeMap::new(),
         };
         assert!(effective_checkpoint(Some(checkpoint.clone()), true).is_none());
         assert_eq!(

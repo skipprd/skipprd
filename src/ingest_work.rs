@@ -517,6 +517,7 @@ fn track_partition_offset_with_key(
         schema: schema_hash.schema.clone(),
         record_batches: None,
         cdc_rows: None,
+        checkpoint_update: None,
     });
     update_partition_offset(entry, ok, pos);
     if let Some(meta) = cdc_meta {
@@ -549,6 +550,7 @@ fn track_partition_offset_with_schema(
         schema: schema_hash.schema.clone(),
         record_batches: None,
         cdc_rows: None,
+        checkpoint_update: None,
     });
     update_partition_offset(entry, ok, pos);
     if let Some(meta) = cdc_meta {
@@ -3052,6 +3054,7 @@ impl Ingest {
                             schema: dl_schema,
                             record_batches: Some(vec![batch]),
                             cdc_rows: None,
+                            checkpoint_update: None,
                         },
                     );
                     dl_offsets_committed = true;

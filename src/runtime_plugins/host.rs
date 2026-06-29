@@ -532,8 +532,14 @@ fn build_source_start_request_for_pipeline(
 fn runtime_source_ingest_window() -> RuntimeSourceIngestWindow {
     let worker_cap = runtime_source_blocking_spawn_cap().max(1);
     let wal_cap = crate::buffer::wal_writer::queue_capacity().max(1);
+    let default_max = worker_cap.saturating_add(wal_cap).clamp(2, 64);
+    let max_in_flight_requests = std::env::var("RUNTIME_SOURCE_MAX_IN_FLIGHT_REQUESTS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value >= 2)
+        .unwrap_or(default_max);
     RuntimeSourceIngestWindow {
-        max_in_flight_requests: worker_cap.saturating_add(wal_cap).clamp(2, 64),
+        max_in_flight_requests,
         max_in_flight_bytes: 512 * 1024 * 1024,
     }
 }
@@ -666,6 +672,9 @@ async fn ingest_runtime_batches_into_core(
             schema,
             record_batches: Some(record_batches),
             cdc_rows: batch.cdc_rows,
+            checkpoint_update: batch.checkpoint_update.map(|update| {
+                (update.key, update.envelope)
+            }),
         });
     }
     if !derived_namespaces.is_empty() {
