@@ -6,6 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_s3::Client as S3Client;
+use aws_sdk_sqs::Client as SqsClient;
 use serde::Serialize;
 use serde_json::Value;
 use skippr_plugin_shared_link_graph::{
@@ -15,14 +16,22 @@ use skippr_runtime_sdk::helpers::offsets::OffsetKey;
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceOnceContract, SourceSyncContext,
 };
-use skippr_runtime_sdk::source_compat::{source_payload_task, IngestBatch, SourcePayloadTask};
+use skippr_runtime_sdk::source_compat::{
+    load_checkpoint_payload, source_payload_task, store_checkpoint_payload, IngestBatch,
+    SourcePayloadTask,
+};
 use tracing::{info, warn};
 
 use crate::config::UpfoundryLinkGraphWatIndexConfig;
+use crate::job::{
+    apply_path_cap, checkpoint_key, cleared_checkpoint, default_manifest_uri, effective_checkpoint,
+    WatIndexJobMessage, WatManifestCheckpoint,
+};
 use crate::streams::{all_namespace_contracts, NAMESPACE_TARGET_INDEX};
 use crate::wat_stream::{open_wat_stream, WatStreamOpenError};
 
 const MAX_TARGET_INDEX_BATCH_BYTES: usize = 32 * 1024 * 1024;
+const SQS_VISIBILITY_EXTEND_EVERY_PATHS: usize = 25;
 
 fn env_string(name: &str) -> Option<String> {
     std::env::var(name).ok().filter(|value| !value.is_empty())
@@ -146,6 +155,12 @@ struct PendingBatch {
     bytes: usize,
 }
 
+struct ActiveSqsJob {
+    queue_url: String,
+    receipt_handle: String,
+    visibility_timeout_seconds: i32,
+}
+
 pub struct UpfoundryLinkGraphWatIndexPlugin {
     config: UpfoundryLinkGraphWatIndexConfig,
 }
@@ -201,7 +216,7 @@ impl UpfoundryLinkGraphWatIndexPlugin {
     }
 
     async fn load_wat_paths(
-        &self,
+        manifest_uri: &str,
         s3_client: &S3Client,
         http_client: &reqwest::Client,
     ) -> Result<Vec<String>, std::io::Error> {
@@ -221,18 +236,8 @@ impl UpfoundryLinkGraphWatIndexPlugin {
                 .to_string_lossy()
                 .to_string()]);
         }
-        let uri = self
-            .config
-            .wat_paths_manifest_uri
-            .as_deref()
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::InvalidInput,
-                    "wat_paths_manifest_uri is required outside fixture mode",
-                )
-            })?;
-        let mut bytes = Self::read_uri(uri, s3_client, http_client).await?;
-        if uri.ends_with(".gz") {
+        let mut bytes = Self::read_uri(manifest_uri, s3_client, http_client).await?;
+        if manifest_uri.ends_with(".gz") {
             let mut decoder = flate2::read::MultiGzDecoder::new(bytes.as_slice());
             let mut out = Vec::new();
             decoder.read_to_end(&mut out)?;
@@ -265,7 +270,12 @@ impl UpfoundryLinkGraphWatIndexPlugin {
             .min(MAX_TARGET_INDEX_BATCH_BYTES)
     }
 
-    fn bucket_ingest_batch(&self, bucket: u32, batch: PendingBatch) -> Option<IngestBatch> {
+    fn bucket_ingest_batch(
+        &self,
+        crawl_id: &str,
+        bucket: u32,
+        batch: PendingBatch,
+    ) -> Option<IngestBatch> {
         if batch.rows.is_empty() {
             return None;
         }
@@ -273,12 +283,12 @@ impl UpfoundryLinkGraphWatIndexPlugin {
         Some(IngestBatch {
             offset_key: OffsetKey::new(
                 NAMESPACE_TARGET_INDEX,
-                format!("{}#{bucket:05}", self.config.crawl_id),
+                format!("{crawl_id}#{bucket:05}"),
             ),
             bytes: data.len(),
             data,
             namespace: Some(NAMESPACE_TARGET_INDEX.to_string()),
-            source_uri: format!("commoncrawl-wat://{}", self.config.crawl_id),
+            source_uri: format!("commoncrawl-wat://{crawl_id}"),
             offset_pos: None,
             cdc_rows: None,
         })
@@ -286,6 +296,7 @@ impl UpfoundryLinkGraphWatIndexPlugin {
 
     fn push_row(
         &self,
+        crawl_id: &str,
         batches: &mut HashMap<u32, PendingBatch>,
         row: TargetIndexRow,
         pipeline: &mut IngestPipeline<'_>,
@@ -301,13 +312,14 @@ impl UpfoundryLinkGraphWatIndexPlugin {
         if batch.bytes >= self.effective_batch_size_bytes()
             || batch.rows.len() >= self.config.max_records_per_batch
         {
-            self.flush_bucket(bucket, batches, pipeline)?;
+            self.flush_bucket(crawl_id, bucket, batches, pipeline)?;
         }
         Ok(())
     }
 
     fn flush_bucket(
         &self,
+        crawl_id: &str,
         bucket: u32,
         batches: &mut HashMap<u32, PendingBatch>,
         pipeline: &mut IngestPipeline<'_>,
@@ -315,7 +327,7 @@ impl UpfoundryLinkGraphWatIndexPlugin {
         let Some(pending) = batches.remove(&bucket) else {
             return Ok(());
         };
-        if let Some(batch) = self.bucket_ingest_batch(bucket, pending) {
+        if let Some(batch) = self.bucket_ingest_batch(crawl_id, bucket, pending) {
             pipeline.queue_batch(batch)?;
         }
         Ok(())
@@ -323,16 +335,14 @@ impl UpfoundryLinkGraphWatIndexPlugin {
 
     fn rows_for_extraction(
         &self,
+        crawl_id: &str,
         wat_path: &str,
         location: WatRecordLocation,
         json: &Value,
     ) -> Vec<TargetIndexRow> {
-        let Some(extraction) = parse_wat_metadata_record(
-            &self.config.crawl_id,
-            location,
-            json,
-            self.config.max_links_per_page,
-        ) else {
+        let Some(extraction) =
+            parse_wat_metadata_record(crawl_id, location, json, self.config.max_links_per_page)
+        else {
             return Vec::new();
         };
         let mut by_target: HashMap<u64, (String, u32)> = HashMap::new();
@@ -353,7 +363,7 @@ impl UpfoundryLinkGraphWatIndexPlugin {
                         return None;
                     }
                     Some(TargetIndexRow {
-                        crawl_id: self.config.crawl_id.clone(),
+                        crawl_id: crawl_id.to_string(),
                         target_domain_hash_bucket: self.target_bucket(target_domain_id).to_string(),
                         target_domain_id: id64_string(target_domain_id),
                         target_domain,
@@ -378,43 +388,156 @@ impl UpfoundryLinkGraphWatIndexPlugin {
             )
             .collect()
     }
-}
 
-#[async_trait]
-impl DataSource for UpfoundryLinkGraphWatIndexPlugin {
-    fn execution_contract(&self) -> SourceExecutionContract {
-        SourceExecutionContract::stream(SourceOnceContract::Finite)
-    }
-
-    fn source_namespace_contracts(
+    fn resolve_manifest_uri(
         &self,
-    ) -> Vec<skippr_runtime_sdk::plugins::source_contract::SourceNamespaceContract> {
-        all_namespace_contracts()
+        crawl_id: &str,
+        job_manifest_uri: Option<&str>,
+        checkpoint: Option<&WatManifestCheckpoint>,
+    ) -> String {
+        job_manifest_uri
+            .map(str::to_string)
+            .or_else(|| self.config.wat_paths_manifest_uri.clone())
+            .or_else(|| checkpoint.map(|cp| cp.manifest_uri.clone()))
+            .unwrap_or_else(|| default_manifest_uri(crawl_id))
     }
 
-    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
-        let aws_cfg = aws_config::load_defaults(BehaviorVersion::latest()).await;
-        let s3_client = S3Client::new(&aws_cfg);
-        let http_client = reqwest::Client::new();
-
-        let mut paths = self.load_wat_paths(&s3_client, &http_client).await?;
-        let start = self.config.wat_path_start.unwrap_or(0).min(paths.len());
-        let end = self
+    async fn receive_sqs_job(
+        &self,
+        sqs_client: &SqsClient,
+    ) -> Result<Option<(WatIndexJobMessage, ActiveSqsJob)>, std::io::Error> {
+        let queue_url = self
             .config
-            .wat_path_end
-            .unwrap_or(paths.len())
-            .min(paths.len());
-        paths = paths[start..end].to_vec();
-        paths.truncate(self.config.max_wat_objects_per_sync);
+            .sqs_queue_url
+            .as_deref()
+            .filter(|url| !url.trim().is_empty())
+            .ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "sqs_queue_url is not configured",
+                )
+            })?;
+        let response = sqs_client
+            .receive_message()
+            .queue_url(queue_url)
+            .max_number_of_messages(1)
+            .wait_time_seconds(5)
+            .visibility_timeout(self.config.sqs_visibility_timeout_seconds)
+            .send()
+            .await
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        let Some(message) = response.messages.and_then(|messages| messages.into_iter().next())
+        else {
+            return Ok(None);
+        };
+        let body = message.body.unwrap_or_default();
+        let job: WatIndexJobMessage = serde_json::from_str(&body).map_err(|err| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("invalid WAT index SQS job payload: {err}"),
+            )
+        })?;
+        if job.crawl_id.trim().is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "WAT index SQS job missing crawlId",
+            ));
+        }
+        let receipt_handle = message.receipt_handle.ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "WAT index SQS job missing receipt handle",
+            )
+        })?;
+        Ok(Some((
+            job,
+            ActiveSqsJob {
+                queue_url: queue_url.to_string(),
+                receipt_handle,
+                visibility_timeout_seconds: self.config.sqs_visibility_timeout_seconds,
+            },
+        )))
+    }
 
+    async fn extend_sqs_visibility(&self, sqs_client: &SqsClient, job: &ActiveSqsJob) {
+        if let Err(err) = sqs_client
+            .change_message_visibility()
+            .queue_url(&job.queue_url)
+            .receipt_handle(&job.receipt_handle)
+            .visibility_timeout(job.visibility_timeout_seconds)
+            .send()
+            .await
+        {
+            warn!(
+                error = %err,
+                "failed to extend WAT index SQS message visibility"
+            );
+        }
+    }
+
+    async fn delete_sqs_job(&self, sqs_client: &SqsClient, job: &ActiveSqsJob) {
+        if let Err(err) = sqs_client
+            .delete_message()
+            .queue_url(&job.queue_url)
+            .receipt_handle(&job.receipt_handle)
+            .send()
+            .await
+        {
+            warn!(error = %err, "failed to delete completed WAT index SQS job");
+        }
+    }
+
+    async fn release_sqs_job_for_redelivery(&self, sqs_client: &SqsClient, job: &ActiveSqsJob) {
+        if let Err(err) = sqs_client
+            .change_message_visibility()
+            .queue_url(&job.queue_url)
+            .receipt_handle(&job.receipt_handle)
+            .visibility_timeout(0)
+            .send()
+            .await
+        {
+            warn!(
+                error = %err,
+                "failed to release WAT index SQS job for immediate redelivery"
+            );
+        }
+    }
+
+    fn clear_manifest_checkpoint(
+        &self,
+        ctx: &dyn SourceSyncContext,
+        crawl_id: &str,
+        manifest_uri: &str,
+    ) -> Result<(), std::io::Error> {
+        store_checkpoint_payload(
+            ctx,
+            &checkpoint_key(crawl_id),
+            &cleared_checkpoint(crawl_id, manifest_uri),
+        )
+    }
+
+    async fn process_paths(
+        &self,
+        ctx: Arc<dyn SourceSyncContext>,
+        sqs_client: Option<&SqsClient>,
+        sqs_job: Option<&ActiveSqsJob>,
+        crawl_id: &str,
+        manifest_uri: &str,
+        paths: &[String],
+        mut next_path_index: usize,
+        total_paths: usize,
+    ) -> Result<usize, std::io::Error> {
         let mut pending: HashMap<u32, PendingBatch> = HashMap::new();
         let mut pipeline = IngestPipeline::new(ctx.as_ref());
+        let s3_client = S3Client::new(&aws_config::load_defaults(BehaviorVersion::latest()).await);
+        let http_client = reqwest::Client::new();
         let mut files_processed = 0u32;
         let mut records_seen = 0u64;
         let mut rows_emitted = 0u64;
         let mut skips_logged = 0u64;
+        let ckpt_key = checkpoint_key(crawl_id);
 
-        for path in &paths {
+        for path in paths {
             let mut records_seen_in_object = 0usize;
             let mut stream = match open_wat_stream(
                 path,
@@ -430,7 +553,7 @@ impl DataSource for UpfoundryLinkGraphWatIndexPlugin {
                     max_wat_object_bytes,
                 }) => {
                     warn!(
-                        crawl_id = %self.config.crawl_id,
+                        crawl_id = %crawl_id,
                         wat_path = %path,
                         reason = "wat_object_too_large",
                         compressed_bytes,
@@ -438,17 +561,41 @@ impl DataSource for UpfoundryLinkGraphWatIndexPlugin {
                         "skipping WAT object"
                     );
                     skips_logged = skips_logged.saturating_add(1);
+                    next_path_index = next_path_index.saturating_add(1);
+                    store_checkpoint_payload(
+                        ctx.as_ref(),
+                        &ckpt_key,
+                        &WatManifestCheckpoint {
+                            crawl_id: crawl_id.to_string(),
+                            manifest_uri: manifest_uri.to_string(),
+                            next_path_index,
+                            total_paths: Some(total_paths),
+                            cleared: false,
+                        },
+                    )?;
                     continue;
                 }
                 Err(err) => {
                     warn!(
-                        crawl_id = %self.config.crawl_id,
+                        crawl_id = %crawl_id,
                         wat_path = %path,
                         reason = "read_failed",
                         error = %err,
                         "skipping WAT object"
                     );
                     skips_logged = skips_logged.saturating_add(1);
+                    next_path_index = next_path_index.saturating_add(1);
+                    store_checkpoint_payload(
+                        ctx.as_ref(),
+                        &ckpt_key,
+                        &WatManifestCheckpoint {
+                            crawl_id: crawl_id.to_string(),
+                            manifest_uri: manifest_uri.to_string(),
+                            next_path_index,
+                            total_paths: Some(total_paths),
+                            cleared: false,
+                        },
+                    )?;
                     continue;
                 }
             };
@@ -467,7 +614,7 @@ impl DataSource for UpfoundryLinkGraphWatIndexPlugin {
                     Ok(None) => break,
                     Err(err) => {
                         warn!(
-                            crawl_id = %self.config.crawl_id,
+                            crawl_id = %crawl_id,
                             wat_path = %path,
                             reason = "parse_records_failed",
                             error = %err,
@@ -490,28 +637,193 @@ impl DataSource for UpfoundryLinkGraphWatIndexPlugin {
                     record_offset: i64::try_from(record_offset).unwrap_or(0),
                     record_length: i64::try_from(record_length).unwrap_or(0),
                 };
-                for row in self.rows_for_extraction(path, location, &value) {
+                for row in self.rows_for_extraction(crawl_id, path, location, &value) {
                     rows_emitted = rows_emitted.saturating_add(1);
-                    self.push_row(&mut pending, row, &mut pipeline)?;
+                    self.push_row(crawl_id, &mut pending, row, &mut pipeline)?;
                 }
             }
+
             files_processed = files_processed.saturating_add(1);
+            next_path_index = next_path_index.saturating_add(1);
+            store_checkpoint_payload(
+                ctx.as_ref(),
+                &ckpt_key,
+                &WatManifestCheckpoint {
+                    crawl_id: crawl_id.to_string(),
+                    manifest_uri: manifest_uri.to_string(),
+                    next_path_index,
+                    total_paths: Some(total_paths),
+                    cleared: false,
+                },
+            )?;
+
+            if let (Some(sqs_client), Some(sqs_job)) = (sqs_client, sqs_job) {
+                if files_processed as usize % SQS_VISIBILITY_EXTEND_EVERY_PATHS == 0 {
+                    self.extend_sqs_visibility(sqs_client, sqs_job).await;
+                }
+            }
         }
+
         let buckets = pending.keys().copied().collect::<Vec<_>>();
         for bucket in buckets {
-            self.flush_bucket(bucket, &mut pending, &mut pipeline)?;
+            self.flush_bucket(crawl_id, bucket, &mut pending, &mut pipeline)?;
         }
         pipeline.finish()?;
 
         info!(
+            crawl_id = %crawl_id,
             files_processed,
             records_seen,
             rows_emitted,
             skips_logged,
             wat_files_selected = paths.len(),
+            next_path_index,
+            total_paths,
             target_domain_bucket_count = self.config.target_domain_bucket_count,
             "wat index build complete"
         );
+        Ok(next_path_index)
+    }
+}
+
+#[async_trait]
+impl DataSource for UpfoundryLinkGraphWatIndexPlugin {
+    fn execution_contract(&self) -> SourceExecutionContract {
+        SourceExecutionContract::stream(SourceOnceContract::Finite)
+    }
+
+    fn source_namespace_contracts(
+        &self,
+    ) -> Vec<skippr_runtime_sdk::plugins::source_contract::SourceNamespaceContract> {
+        all_namespace_contracts()
+    }
+
+    async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
+        let aws_cfg = aws_config::load_defaults(BehaviorVersion::latest()).await;
+        let s3_client = S3Client::new(&aws_cfg);
+        let http_client = reqwest::Client::new();
+        let sqs_client = if self.config.uses_sqs_jobs() {
+            Some(SqsClient::new(&aws_cfg))
+        } else {
+            None
+        };
+
+        let (
+            crawl_id,
+            manifest_uri,
+            sqs_job,
+            reset_checkpoint,
+            wat_path_start,
+            wat_path_end,
+            max_wat_objects_per_sync,
+        ) = if let Some(ref client) = sqs_client {
+            match self.receive_sqs_job(client).await? {
+                Some((job, active)) => {
+                    let manifest_uri = self.resolve_manifest_uri(
+                        &job.crawl_id,
+                        job.manifest_uri.as_deref(),
+                        None,
+                    );
+                    (
+                        job.crawl_id,
+                        manifest_uri,
+                        Some(active),
+                        job.reset_checkpoint,
+                        job.wat_path_start,
+                        job.wat_path_end,
+                        job.max_wat_objects_per_sync,
+                    )
+                }
+                None => {
+                    info!("no_wat_index_jobs");
+                    return Ok(());
+                }
+            }
+        } else {
+            let crawl_id = self.config.crawl_id.clone();
+            let manifest_uri = self
+                .config
+                .wat_paths_manifest_uri
+                .clone()
+                .unwrap_or_else(|| default_manifest_uri(&crawl_id));
+            (
+                crawl_id,
+                manifest_uri,
+                None,
+                false,
+                None,
+                None,
+                None,
+            )
+        };
+
+        let ckpt_key = checkpoint_key(&crawl_id);
+        let checkpoint = effective_checkpoint(
+            load_checkpoint_payload::<WatManifestCheckpoint>(ctx.as_ref(), &ckpt_key),
+            reset_checkpoint,
+        );
+        let manifest_uri = self.resolve_manifest_uri(
+            &crawl_id,
+            Some(manifest_uri.as_str()),
+            checkpoint.as_ref(),
+        );
+
+        let mut all_paths = Self::load_wat_paths(&manifest_uri, &s3_client, &http_client).await?;
+        let start = wat_path_start
+            .or(self.config.wat_path_start)
+            .unwrap_or(0)
+            .min(all_paths.len());
+        let end = wat_path_end
+            .or(self.config.wat_path_end)
+            .unwrap_or(all_paths.len())
+            .min(all_paths.len());
+        all_paths = all_paths[start..end].to_vec();
+        let total_paths = all_paths.len();
+
+        let next_path_index = checkpoint
+            .as_ref()
+            .map(|cp| cp.next_path_index.min(total_paths))
+            .unwrap_or(0);
+        if next_path_index >= total_paths {
+            info!(
+                crawl_id = %crawl_id,
+                total_paths,
+                "WAT index crawl already complete for manifest slice"
+            );
+            if let (Some(client), Some(job)) = (&sqs_client, &sqs_job) {
+                self.delete_sqs_job(client, job).await;
+                self.clear_manifest_checkpoint(ctx.as_ref(), &crawl_id, &manifest_uri)?;
+            }
+            return Ok(());
+        }
+
+        let mut paths = all_paths[next_path_index..].to_vec();
+        let max_objects = max_wat_objects_per_sync.or(self.config.max_wat_objects_per_sync);
+        apply_path_cap(&mut paths, max_objects);
+
+        let final_index = self
+            .process_paths(
+                ctx.clone(),
+                sqs_client.as_ref(),
+                sqs_job.as_ref(),
+                &crawl_id,
+                &manifest_uri,
+                &paths,
+                next_path_index,
+                total_paths,
+            )
+            .await?;
+
+        if final_index >= total_paths {
+            info!(crawl_id = %crawl_id, total_paths, "WAT index crawl complete");
+            if let (Some(client), Some(job)) = (&sqs_client, &sqs_job) {
+                self.delete_sqs_job(client, job).await;
+            }
+            self.clear_manifest_checkpoint(ctx.as_ref(), &crawl_id, &manifest_uri)?;
+        } else if let (Some(client), Some(job)) = (&sqs_client, &sqs_job) {
+            self.release_sqs_job_for_redelivery(client, job).await;
+        }
+
         Ok(())
     }
 }
@@ -535,10 +847,12 @@ mod tests {
             batch_size_bytes: 1024,
             max_records_per_batch: 10,
             max_links_per_page: 10,
-            max_wat_objects_per_sync: 1,
+            max_wat_objects_per_sync: Some(1),
             max_wat_object_bytes: 1024 * 1024,
             max_wat_records_per_object: None,
             include_subdomains: false,
+            sqs_queue_url: None,
+            sqs_visibility_timeout_seconds: 14_400,
         })
         .unwrap()
     }
@@ -566,6 +880,7 @@ mod tests {
         let plugin = test_plugin();
         let batch = plugin
             .bucket_ingest_batch(
+                "CC-MAIN-X",
                 42,
                 PendingBatch {
                     rows: vec!["{\"crawl_id\":\"CC-MAIN-X\"}".to_string()],
@@ -607,6 +922,7 @@ mod tests {
             }
         });
         let rows = plugin.rows_for_extraction(
+            "CC-MAIN-X",
             "crawl-data/CC-MAIN-X/segments/1/wat/source.warc.wat.gz",
             WatRecordLocation {
                 filename: "crawl-data/CC-MAIN-X/segments/1/wat/source.warc.wat.gz".into(),
@@ -656,6 +972,7 @@ mod tests {
             }
         });
         let rows = plugin.rows_for_extraction(
+            "CC-MAIN-X",
             "crawl-data/CC-MAIN-X/segments/1/wat/source.warc.wat.gz",
             WatRecordLocation {
                 filename: "crawl-data/CC-MAIN-X/segments/1/wat/source.warc.wat.gz".into(),
@@ -669,6 +986,28 @@ mod tests {
         assert!(value["target_domain_id"].is_string());
         assert!(value["source_url_id"].is_string());
         assert!(value["source_domain_id"].is_string());
+    }
+
+    #[test]
+    fn config_allows_sqs_without_static_crawl_id() {
+        let config = UpfoundryLinkGraphWatIndexConfig {
+            crawl_id: String::new(),
+            wat_paths_manifest_uri: None,
+            wat_path_start: None,
+            wat_path_end: None,
+            target_domain_bucket_count: 32_768,
+            batch_size_bytes: 1024,
+            max_records_per_batch: 10,
+            max_links_per_page: 10,
+            max_wat_objects_per_sync: None,
+            max_wat_object_bytes: 1024 * 1024,
+            max_wat_records_per_object: None,
+            include_subdomains: false,
+            sqs_queue_url: Some("https://sqs.eu-west-1.amazonaws.com/123/wat-index.fifo".into()),
+            sqs_visibility_timeout_seconds: 14_400,
+        };
+        assert!(config.validate().is_ok());
+        assert!(config.uses_sqs_jobs());
     }
 
     #[tokio::test]

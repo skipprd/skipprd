@@ -12806,7 +12806,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-dataforseo-backlinks"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -13580,11 +13580,12 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-upfoundry-link-graph-wat-index"
-version = "0.1.4"
+version = "0.1.6"
 dependencies = [
  "async-trait",
  "aws-config",
  "aws-sdk-s3",
+ "aws-sdk-sqs",
  "chrono",
  "flate2",
  "futures",

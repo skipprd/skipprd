@@ -16,16 +16,17 @@ fn default_max_links_per_page() -> u32 {
     2_000
 }
 
-fn default_max_wat_objects_per_sync() -> usize {
-    25
-}
-
 fn default_max_wat_object_bytes() -> usize {
     2 * 1024 * 1024 * 1024
 }
 
+fn default_sqs_visibility_timeout_seconds() -> i32 {
+    14_400
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct UpfoundryLinkGraphWatIndexConfig {
+    #[serde(default)]
     pub crawl_id: String,
     #[serde(default)]
     pub wat_paths_manifest_uri: Option<String>,
@@ -41,8 +42,9 @@ pub struct UpfoundryLinkGraphWatIndexConfig {
     pub max_records_per_batch: usize,
     #[serde(default = "default_max_links_per_page")]
     pub max_links_per_page: u32,
-    #[serde(default = "default_max_wat_objects_per_sync")]
-    pub max_wat_objects_per_sync: usize,
+    /// When `None`, process all remaining manifest paths in one sync (production default).
+    #[serde(default)]
+    pub max_wat_objects_per_sync: Option<usize>,
     #[serde(default = "default_max_wat_object_bytes")]
     pub max_wat_object_bytes: usize,
     /// When set, stop parsing each WAT object after this many gzip member records.
@@ -50,14 +52,27 @@ pub struct UpfoundryLinkGraphWatIndexConfig {
     pub max_wat_records_per_object: Option<usize>,
     #[serde(default)]
     pub include_subdomains: bool,
+    #[serde(default)]
+    pub sqs_queue_url: Option<String>,
+    #[serde(default = "default_sqs_visibility_timeout_seconds")]
+    pub sqs_visibility_timeout_seconds: i32,
 }
 
 impl UpfoundryLinkGraphWatIndexConfig {
+    pub fn uses_sqs_jobs(&self) -> bool {
+        self.sqs_queue_url
+            .as_ref()
+            .is_some_and(|url| !url.trim().is_empty())
+    }
+
     pub fn validate(&self) -> Result<(), std::io::Error> {
-        if self.crawl_id.trim().is_empty() {
+        let fixture_mode = std::env::var("SKIPPR_WAT_INDEX_FIXTURE_DIR")
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty());
+        if !self.uses_sqs_jobs() && self.crawl_id.trim().is_empty() && !fixture_mode {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
-                "crawl_id is required",
+                "crawl_id is required when sqs_queue_url is not configured",
             ));
         }
         if self.target_domain_bucket_count == 0 {
@@ -76,6 +91,12 @@ impl UpfoundryLinkGraphWatIndexConfig {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
                 "max_wat_object_bytes must be greater than zero",
+            ));
+        }
+        if self.sqs_visibility_timeout_seconds <= 0 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "sqs_visibility_timeout_seconds must be greater than zero",
             ));
         }
         Ok(())

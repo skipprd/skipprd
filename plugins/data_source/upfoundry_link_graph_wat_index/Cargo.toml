@@ -1,6 +1,6 @@
 [package]
 name = "skippr-plugin-data-source-upfoundry-link-graph-wat-index"
-version = "0.1.4"
+version = "0.1.6"
 edition = "2021"
 
 [[bin]]
@@ -11,6 +11,7 @@ path = "src/main.rs"
 async-trait.workspace = true
 aws-config = "1.5.1"
 aws-sdk-s3 = "1.32.0"
+aws-sdk-sqs = "1.32.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 flate2 = "1.0.25"
 serde.workspace = true
