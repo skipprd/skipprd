@@ -19,6 +19,7 @@ use crate::{METRICS, RUNNING};
 use tracing::{error, info};
 
 pub mod counters;
+pub mod ingest_profile;
 
 pub static LAST_MESSAGES_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static LAST_FIXED_TOTAL: AtomicU64 = AtomicU64::new(0);
