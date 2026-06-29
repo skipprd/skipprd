@@ -6,6 +6,7 @@ use std::io::{BufRead, BufReader, Lines, Result};
 use std::path::Path;
 
 use crate::helpers::configuration::Config;
+use crate::serdes::ndjson_fast::NdjsonLineParser;
 use crate::serdes::optimized_json::OptimizedJsonParser;
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -31,11 +32,42 @@ impl SerdeJson {
     }
 
     pub fn deserialize(record: &str) -> Vec<Value> {
+        let enable_sq = Self::is_single_quote_parsing_enabled();
+        let enable_unicode = Self::is_unicode_parsing_enabled();
+
+        // Standard NDJSON: one JSON object per line, no special parsing features.
+        if !enable_sq && !enable_unicode {
+            let trimmed = record.trim();
+            if trimmed.contains('\n') && !trimmed.starts_with('[') {
+                let estimated = record.bytes().filter(|&b| b == b'\n').count() + 1;
+                let mut messages = Vec::with_capacity(estimated);
+                let mut parsed_any = false;
+                let mut parser = NdjsonLineParser::new();
+                for line in record.lines() {
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    match parser.parse_value(line) {
+                        Ok(value) => {
+                            parsed_any = true;
+                            messages.push(value);
+                        }
+                        Err(_) => {
+                            parsed_any = false;
+                            break;
+                        }
+                    }
+                }
+                if parsed_any && !messages.is_empty() {
+                    return messages;
+                }
+            }
+        }
+
         let mut messages: Vec<Value> = Vec::with_capacity(16);
 
         // Use the optimized parser
-        let enable_sq = Self::is_single_quote_parsing_enabled();
-        let enable_unicode = Self::is_unicode_parsing_enabled();
         let parser = OptimizedJsonParser::new(enable_sq, enable_unicode);
 
         // Fast path: Try using the optimized parser first
