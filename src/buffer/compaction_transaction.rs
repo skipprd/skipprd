@@ -44,6 +44,25 @@ pub enum SinkGroupingSupport {
     FinalStateBatches,
 }
 
+impl SinkGroupingSupport {
+    pub const fn is_none(self) -> bool {
+        match self {
+            Self::None => true,
+            Self::AppendOnlyBatches | Self::CdcEncodedBatches | Self::FinalStateBatches => false,
+        }
+    }
+
+    pub const fn equals(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::None, Self::None) => true,
+            (Self::AppendOnlyBatches, Self::AppendOnlyBatches) => true,
+            (Self::CdcEncodedBatches, Self::CdcEncodedBatches) => true,
+            (Self::FinalStateBatches, Self::FinalStateBatches) => true,
+            _ => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub enum SinkWriteSemantics {
     ExactOnce,

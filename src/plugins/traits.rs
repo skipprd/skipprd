@@ -277,12 +277,11 @@ impl<S: SinkSpec, P> ConfiguredSink<S, P> {
 macro_rules! declare_sink_spec {
     ($spec:ident, $plugin:ty, $capability:path, $support:ty) => {
         const _: () = {
-            assert!(!matches!(
-                $capability.grouping_support,
-                $crate::buffer::compaction_transaction::SinkGroupingSupport::None
-            ));
+            assert!(!$capability.grouping_support.is_none());
             assert!(
-                $capability.grouping_support == <$support as $crate::plugins::SinkWriteSupport>::GROUPING
+                $capability
+                    .grouping_support
+                    .equals(<$support as $crate::plugins::SinkWriteSupport>::GROUPING)
             );
         };
 
