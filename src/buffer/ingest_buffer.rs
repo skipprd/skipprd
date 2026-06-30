@@ -38,7 +38,7 @@ use once_cell::sync::Lazy as OnceLazy;
 use rayon::prelude::*;
 use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{File, OpenOptions};
 use std::future::Future;
 use std::io::{BufReader, Read, Seek, Write};
@@ -1561,7 +1561,16 @@ impl Buffers {
     ) -> Option<CompactionWork> {
         let first = entries.first()?;
         let sink_ref = first.idx.key.sink_ref.clone();
-        let cap = output.capability_for_sink_ref(&sink_ref)?;
+        let cap = match output.capability_for_sink_ref(&sink_ref) {
+            Some(cap) => cap,
+            None => {
+                warn!(
+                    "Compactor: no sink registered for sink_ref={}",
+                    sink_ref
+                );
+                return None;
+            }
+        };
         let namespace = first.idx.key.namespace.clone();
         let schema_fingerprint = if schema_fingerprint_hint.is_empty() {
             Self::schema_fingerprint_for_group(&first.idx, &first.meta)
@@ -2008,6 +2017,56 @@ impl Buffers {
         }
     }
 
+    fn read_disk_entry_batches(
+        entry: &CompactionEntry,
+        seg_path: &Path,
+    ) -> io::Result<Vec<RecordBatch>> {
+        let mut file = OpenOptions::new().read(true).open(seg_path)?;
+        file.seek(io::SeekFrom::Start(entry.idx.start))?;
+        let reader = io::BufReader::new(file);
+        use std::io::Read as IoRead;
+        let mut take = reader.take(entry.idx.len);
+        match StreamReader::try_new(&mut take, None) {
+            Ok(stream_reader) => stream_reader
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|err| io::Error::other(err.to_string()))
+                .or_else(|err| {
+                    Self::maybe_quarantine_disk_read_error(entry, seg_path, &err)?;
+                    Err(err)
+                }),
+            Err(err) => {
+                let err_str = err.to_string();
+                if Self::is_truncated_stream_error(&err_str) {
+                    Self::quarantine_disk_read_error(entry, seg_path, &err_str);
+                    return Err(io::Error::other(err_str));
+                }
+                Err(io::Error::other(err_str))
+            }
+        }
+    }
+
+    fn quarantine_disk_read_error(entry: &CompactionEntry, seg_path: &Path, err_str: &str) {
+        let file_len = seg_path.metadata().map(|meta| meta.len()).unwrap_or(0);
+        let seg_display = entry.source.display_name();
+        let diag = format!(
+            "seg={} file_len={} start={} idx_len={} key={:?} error={}",
+            seg_display, file_len, entry.idx.start, entry.idx.len, entry.idx.key, err_str
+        );
+        Self::quarantine_truncated_disk_segment(seg_path, &diag, &seg_display);
+    }
+
+    fn maybe_quarantine_disk_read_error(
+        entry: &CompactionEntry,
+        seg_path: &Path,
+        err: &io::Error,
+    ) -> io::Result<()> {
+        let err_str = err.to_string();
+        if Self::is_truncated_stream_error(&err_str) {
+            Self::quarantine_disk_read_error(entry, seg_path, &err_str);
+        }
+        Ok(())
+    }
+
     fn read_entry_batches(
         entry: &CompactionEntry,
         s3_resolved: Option<Arc<Vec<u8>>>,
@@ -2031,40 +2090,7 @@ impl Buffers {
                 }
             }
             (None, SegmentSource::Disk(seg_path)) => {
-                let mut file = OpenOptions::new().read(true).open(seg_path)?;
-                file.seek(io::SeekFrom::Start(entry.idx.start))?;
-                let reader = io::BufReader::new(file);
-                use std::io::Read as IoRead;
-                let mut take = reader.take(entry.idx.len);
-                match StreamReader::try_new(&mut take, None) {
-                    Ok(reader) => reader
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(|err| io::Error::other(err.to_string())),
-                    Err(err) => {
-                        let err_str = err.to_string();
-                        if Self::is_truncated_stream_error(&err_str) {
-                            let file_len = seg_path
-                                .metadata()
-                                .map(|meta| meta.len())
-                                .unwrap_or(0);
-                            let seg_display = entry.source.display_name();
-                            let diag = format!(
-                                "seg={} file_len={} start={} idx_len={} key={:?} error={}",
-                                seg_display, file_len, entry.idx.start, entry.idx.len, entry.idx.key, err_str
-                            );
-                            Self::quarantine_truncated_disk_segment(seg_path, &diag, &seg_display);
-                            let mut file = OpenOptions::new().read(true).open(seg_path)?;
-                            file.seek(io::SeekFrom::Start(entry.idx.start))?;
-                            let reader = io::BufReader::new(file);
-                            StreamReader::try_new(reader, None)
-                                .map_err(|err| io::Error::other(err.to_string()))?
-                                .collect::<Result<Vec<_>, _>>()
-                                .map_err(|err| io::Error::other(err.to_string()))
-                        } else {
-                            Err(io::Error::other(err_str))
-                        }
-                    }
-                }
+                Self::read_disk_entry_batches(entry, seg_path)
             }
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -2130,15 +2156,28 @@ impl Buffers {
             None
         };
         let expected_cdc_rows = cdc_ctx.as_ref().map(|ctx| ctx.part_meta.row_count);
+        let total_entries = work.entries.len();
 
-        let (tx, rx) = mpsc::channel::<Result<RecordBatch, DataFusionError>>(
+        enum GroupedStreamMsg {
+            Batch {
+                entry_index: usize,
+                batch_index: usize,
+                batch: RecordBatch,
+            },
+            EntryDone {
+                entry_index: usize,
+                batch_count: usize,
+            },
+        }
+
+        let (tx, rx) = mpsc::channel::<Result<GroupedStreamMsg, DataFusionError>>(
             GROUPED_STREAM_CHANNEL_CAPACITY,
         );
         let entries = work.entries.clone();
         tokio::spawn(async move {
             use futures::stream::{self, StreamExt};
-            let producer = stream::iter(entries.into_iter())
-                .map(|entry| async move {
+            let producer = stream::iter(entries.into_iter().enumerate())
+                .map(|(entry_index, entry)| async move {
                     let s3_body = Buffers::resolve_entry_s3_body(&entry).await.map_err(|err| {
                         DataFusionError::External(Box::new(err))
                     })?;
@@ -2149,18 +2188,37 @@ impl Buffers {
                     .await
                     .map_err(|err| DataFusionError::External(Box::new(io::Error::other(err))))?
                     .map_err(|err| DataFusionError::External(Box::new(err)))?;
-                    Ok(batches)
+                    Ok((entry_index, batches))
                 })
                 .buffered(GROUPED_STREAM_PREFETCH_PARTS);
 
             let mut producer = std::pin::pin!(producer);
             while let Some(result) = producer.next().await {
                 match result {
-                    Ok(batches) => {
-                        for batch in batches {
-                            if tx.send(Ok(batch)).await.is_err() {
+                    Ok((entry_index, batches)) => {
+                        let batch_count = batches.len();
+                        for (batch_index, batch) in batches.into_iter().enumerate() {
+                            if tx
+                                .send(Ok(GroupedStreamMsg::Batch {
+                                    entry_index,
+                                    batch_index,
+                                    batch,
+                                }))
+                                .await
+                                .is_err()
+                            {
                                 return;
                             }
+                        }
+                        if tx
+                            .send(Ok(GroupedStreamMsg::EntryDone {
+                                entry_index,
+                                batch_count,
+                            }))
+                            .await
+                            .is_err()
+                        {
+                            return;
                         }
                     }
                     Err(err) => {
@@ -2173,11 +2231,81 @@ impl Buffers {
 
         struct GroupedWalBatchStream {
             schema: Option<SchemaRef>,
-            rx: mpsc::Receiver<Result<RecordBatch, DataFusionError>>,
+            rx: mpsc::Receiver<Result<GroupedStreamMsg, DataFusionError>>,
+            next_entry_index: usize,
+            next_batch_index: usize,
+            reorder: BTreeMap<(usize, usize), RecordBatch>,
+            entry_batch_counts: HashMap<usize, usize>,
+            entries_done: usize,
+            total_entries: usize,
             expected_cdc_rows: Option<u64>,
             seen_rows: u64,
             emitted_cdc_count_error: bool,
             finished: bool,
+        }
+
+        impl GroupedWalBatchStream {
+            fn try_emit_ready(&mut self) -> Option<Result<RecordBatch, DataFusionError>> {
+                loop {
+                    if self.next_entry_index >= self.total_entries {
+                        return None;
+                    }
+                    if let Some(expected_count) =
+                        self.entry_batch_counts.get(&self.next_entry_index)
+                    {
+                        if self.next_batch_index >= *expected_count {
+                            self.next_entry_index += 1;
+                            self.next_batch_index = 0;
+                            continue;
+                        }
+                    } else {
+                        return None;
+                    }
+                    match self
+                        .reorder
+                        .remove(&(self.next_entry_index, self.next_batch_index))
+                    {
+                        Some(batch) => {
+                            if let Some(existing) = &self.schema {
+                                if existing.as_ref() != batch.schema().as_ref() {
+                                    self.finished = true;
+                                    return Some(Err(DataFusionError::Internal(
+                                        "grouped compaction schema mismatch".to_string(),
+                                    )));
+                                }
+                            } else {
+                                self.schema = Some(batch.schema());
+                            }
+                            self.seen_rows =
+                                self.seen_rows.saturating_add(batch.num_rows() as u64);
+                            self.next_batch_index += 1;
+                            return Some(Ok(batch));
+                        }
+                        None => return None,
+                    }
+                }
+            }
+
+            fn finish_if_done(&mut self) -> TaskPoll<Option<Result<RecordBatch, DataFusionError>>> {
+                if self.entries_done < self.total_entries
+                    || !self.reorder.is_empty()
+                    || self.next_entry_index < self.total_entries
+                {
+                    return TaskPoll::Pending;
+                }
+                if let Some(expected) = self.expected_cdc_rows {
+                    if !self.emitted_cdc_count_error && self.seen_rows != expected {
+                        self.emitted_cdc_count_error = true;
+                        self.finished = true;
+                        return TaskPoll::Ready(Some(Err(DataFusionError::Internal(format!(
+                            "CDC grouped WAL metadata expected {} rows but Arrow stream produced {} rows",
+                            expected, self.seen_rows
+                        )))));
+                    }
+                }
+                self.finished = true;
+                TaskPoll::Ready(None)
+            }
         }
 
         impl futures::Stream for GroupedWalBatchStream {
@@ -2190,20 +2318,53 @@ impl Buffers {
                 if self.finished {
                     return TaskPoll::Ready(None);
                 }
+                if let Some(batch) = self.try_emit_ready() {
+                    return TaskPoll::Ready(Some(batch));
+                }
                 match self.rx.poll_recv(cx) {
-                    TaskPoll::Ready(Some(Ok(batch))) => {
-                        if let Some(existing) = &self.schema {
-                            if existing.as_ref() != batch.schema().as_ref() {
-                                self.finished = true;
-                                return TaskPoll::Ready(Some(Err(DataFusionError::Internal(
-                                    "grouped compaction schema mismatch".to_string(),
-                                ))));
+                    TaskPoll::Ready(Some(Ok(GroupedStreamMsg::Batch {
+                        entry_index,
+                        batch_index,
+                        batch,
+                    }))) => {
+                        if entry_index == self.next_entry_index
+                            && batch_index == self.next_batch_index
+                        {
+                            if let Some(existing) = &self.schema {
+                                if existing.as_ref() != batch.schema().as_ref() {
+                                    self.finished = true;
+                                    return TaskPoll::Ready(Some(Err(DataFusionError::Internal(
+                                        "grouped compaction schema mismatch".to_string(),
+                                    ))));
+                                }
+                            } else {
+                                self.schema = Some(batch.schema());
                             }
+                            self.seen_rows =
+                                self.seen_rows.saturating_add(batch.num_rows() as u64);
+                            self.next_batch_index += 1;
+                            TaskPoll::Ready(Some(Ok(batch)))
                         } else {
-                            self.schema = Some(batch.schema());
+                            self.reorder.insert((entry_index, batch_index), batch);
+                            if let Some(batch) = self.try_emit_ready() {
+                                TaskPoll::Ready(Some(batch))
+                            } else {
+                                cx.waker().wake_by_ref();
+                                TaskPoll::Pending
+                            }
                         }
-                        self.seen_rows = self.seen_rows.saturating_add(batch.num_rows() as u64);
-                        TaskPoll::Ready(Some(Ok(batch)))
+                    }
+                    TaskPoll::Ready(Some(Ok(GroupedStreamMsg::EntryDone {
+                        entry_index,
+                        batch_count,
+                    }))) => {
+                        self.entry_batch_counts.insert(entry_index, batch_count);
+                        self.entries_done += 1;
+                        if let Some(batch) = self.try_emit_ready() {
+                            TaskPoll::Ready(Some(batch))
+                        } else {
+                            self.finish_if_done()
+                        }
                     }
                     TaskPoll::Ready(Some(Err(err))) => {
                         self.finished = true;
@@ -2214,10 +2375,12 @@ impl Buffers {
                             if !self.emitted_cdc_count_error && self.seen_rows != expected {
                                 self.emitted_cdc_count_error = true;
                                 self.finished = true;
-                                return TaskPoll::Ready(Some(Err(DataFusionError::Internal(format!(
-                                    "CDC grouped WAL metadata expected {} rows but Arrow stream produced {} rows",
-                                    expected, self.seen_rows
-                                )))));
+                                return TaskPoll::Ready(Some(Err(DataFusionError::Internal(
+                                    format!(
+                                        "CDC grouped WAL metadata expected {} rows but Arrow stream produced {} rows",
+                                        expected, self.seen_rows
+                                    ),
+                                ))));
                             }
                         }
                         self.finished = true;
@@ -2239,6 +2402,12 @@ impl Buffers {
         let stream = Box::pin(GroupedWalBatchStream {
             schema: None,
             rx,
+            next_entry_index: 0,
+            next_batch_index: 0,
+            reorder: BTreeMap::new(),
+            entry_batch_counts: HashMap::new(),
+            entries_done: 0,
+            total_entries,
             expected_cdc_rows,
             seen_rows: 0,
             emitted_cdc_count_error: false,
@@ -2338,7 +2507,29 @@ impl Buffers {
         let _guard = WorkGuard(&work);
 
         persist_manifest(&work.txn)?;
-        let (batch_stream, cdc_ctx, _rows) = Self::build_grouped_stream(&work).await?;
+        let (batch_stream, cdc_ctx, _rows) = match Self::build_grouped_stream(&work).await {
+            Ok(stream) => stream,
+            Err(err) => {
+                let err_str = err.to_string();
+                Self::quarantine_truncated_entries(&work.entries, "grouped_read", &err_str);
+                let failure_key = format!("{}:{}", work.txn.sink_ref, work.txn.id);
+                let attempts = {
+                    let mut entry = COMPACT_FAILURES.entry(failure_key.clone()).or_insert(0);
+                    *entry += 1;
+                    *entry
+                };
+                error!(
+                    "Compactor: grouped stream build failed sink_ref={} namespace={} compaction_id={} attempt={} err={}",
+                    work.txn.sink_ref,
+                    work.txn.namespace,
+                    work.txn.id,
+                    attempts,
+                    err_str
+                );
+                crate::metrics::counters::add_wal_compaction_transaction_failed(1);
+                return Err(err);
+            }
+        };
         let source_contract =
             crate::plugins::source_contract::namespace_source_contract(&work.txn.namespace);
         let sink_ctx = crate::plugins::SinkWriteContext {
@@ -3458,6 +3649,20 @@ mod compaction_semantics_tests {
                 ),
             ]),
         }
+    }
+
+    #[test]
+    fn grouped_write_semantics_athena_not_exact_once() {
+        use crate::buffer::compaction_transaction::SinkWriteSemantics;
+        use crate::plugins::cdc::sink_capabilities;
+        assert_eq!(
+            Buffers::grouped_write_semantics(&sink_capabilities::ATHENA),
+            SinkWriteSemantics::IdempotentAtLeastOnce
+        );
+        assert_eq!(
+            Buffers::grouped_write_semantics(&sink_capabilities::ICEBERG),
+            SinkWriteSemantics::ExactOnce
+        );
     }
 
     #[test]
