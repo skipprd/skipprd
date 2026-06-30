@@ -286,6 +286,7 @@ pub fn load_pending_manifests() -> io::Result<Vec<CompactionTransaction>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serial_test::serial;
 
     fn ref_for(segment_id: &str, start: u64) -> WalPartRef {
         WalPartRef {
@@ -317,6 +318,7 @@ mod tests {
     }
 
     #[test]
+    #[serial]
     fn load_pending_manifests_skips_empty_and_corrupt_files() {
         use crate::helpers::configuration::Config;
         use std::sync::{Mutex, MutexGuard, OnceLock};
@@ -327,6 +329,7 @@ mod tests {
         }
 
         let _guard = env_lock();
+        Config::reset_envcache();
         let temp = tempfile::tempdir().unwrap();
         let old_data_dir = std::env::var("DATA_DIR").ok();
         let old_root = std::env::var("SKIPPR_PIPELINE_DATA_ROOT").ok();

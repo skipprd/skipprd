@@ -426,6 +426,15 @@ impl DataSink for OutputRouter {
             .map(|sink| sink.capability())
             .unwrap_or(&crate::plugins::cdc::sink_capabilities::STDOUT)
     }
+
+    fn capability_for_sink_ref(&self, sink_ref: &str) -> Option<&'static crate::plugins::cdc::SinkCapability> {
+        let key = if sink_ref.is_empty() {
+            self.primary_sink_ref.as_str()
+        } else {
+            sink_ref
+        };
+        self.sinks.get(key).map(|sink| sink.capability())
+    }
 }
 
 pub async fn run_schema(pipeline: &str) {
@@ -1506,5 +1515,64 @@ mod observability_tests {
                 .and_then(Value::as_str),
             Some("amount")
         );
+    }
+}
+
+#[cfg(test)]
+mod output_router_capability_tests {
+    use super::*;
+    use crate::plugins::cdc::sink_capabilities;
+    use crate::plugins::DataSink;
+    use async_trait::async_trait;
+    use datafusion::execution::SendableRecordBatchStream;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    struct StubSink(&'static crate::plugins::cdc::SinkCapability);
+
+    #[async_trait]
+    impl DataSink for StubSink {
+        async fn sync(
+            &self,
+            _stream: SendableRecordBatchStream,
+            _filename: String,
+            _cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
+        ) -> Result<(), std::io::Error> {
+            Ok(())
+        }
+
+        fn capability(&self) -> &'static crate::plugins::cdc::SinkCapability {
+            self.0
+        }
+    }
+
+    fn boxed_sink(cap: &'static crate::plugins::cdc::SinkCapability) -> Arc<Box<dyn DataSink + Send + Sync>> {
+        Arc::new(Box::new(StubSink(cap)))
+    }
+
+    #[test]
+    fn capability_for_sink_ref_is_strict_per_registered_sink() {
+        let primary = "data_sinks.ds_datalake".to_string();
+        let mut sinks = HashMap::new();
+        sinks.insert(primary.clone(), boxed_sink(&sink_capabilities::ICEBERG));
+        sinks.insert(
+            "deadletter_sinks.ds_deadletters".to_string(),
+            boxed_sink(&sink_capabilities::ATHENA),
+        );
+        let router = OutputRouter { primary_sink_ref: primary, sinks };
+
+        assert_eq!(
+            router
+                .capability_for_sink_ref("data_sinks.ds_datalake")
+                .map(|cap| cap.name),
+            Some("Iceberg")
+        );
+        assert_eq!(
+            router
+                .capability_for_sink_ref("deadletter_sinks.ds_deadletters")
+                .map(|cap| cap.name),
+            Some("Athena")
+        );
+        assert!(router.capability_for_sink_ref("unknown_sink").is_none());
     }
 }

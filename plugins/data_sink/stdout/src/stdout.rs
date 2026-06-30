@@ -12,7 +12,7 @@ skippr_runtime_sdk::declare_sink_spec!(
     StdoutSinkSpec,
     DataSinkStdoutPlugin,
     skippr_runtime_sdk::plugins::cdc::sink_capabilities::STDOUT,
-    skippr_runtime_sdk::plugins::NonRetryableDebugOutput
+    skippr_runtime_sdk::plugins::AtLeastOnceMessageDelivery
 );
 
 impl DataSinkStdoutPlugin {
@@ -47,6 +47,17 @@ impl DataSink for DataSinkStdoutPlugin {
             print!("{}", output);
         }
         Ok(())
+    }
+
+    async fn sync_with_context(
+        &self,
+        stream: SendableRecordBatchStream,
+        ctx: skippr_runtime_sdk::plugins::SinkWriteContext<'_>,
+    ) -> Result<(), std::io::Error> {
+        use skippr_runtime_sdk::plugins::AtLeastOnceMessageDelivery;
+        ctx.validate_grouped::<AtLeastOnceMessageDelivery>()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Unsupported, e))?;
+        self.sync(stream, ctx.filename, ctx.cdc_ctx).await
     }
 
     fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {

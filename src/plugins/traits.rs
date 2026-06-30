@@ -276,6 +276,16 @@ impl<S: SinkSpec, P> ConfiguredSink<S, P> {
 #[macro_export]
 macro_rules! declare_sink_spec {
     ($spec:ident, $plugin:ty, $capability:path, $support:ty) => {
+        const _: () = {
+            assert!(!matches!(
+                $capability.grouping_support,
+                $crate::buffer::compaction_transaction::SinkGroupingSupport::None
+            ));
+            assert!(
+                $capability.grouping_support == <$support as $crate::plugins::SinkWriteSupport>::GROUPING
+            );
+        };
+
         pub struct $spec;
 
         impl $crate::plugins::SinkSpec for $spec {
@@ -403,6 +413,12 @@ pub trait DataSink: Send + Sync {
 
     /// Return the compile-time capability descriptor for this sink.
     fn capability(&self) -> &'static SinkCapability;
+
+    /// Resolve capability for a persisted WAL `sink_ref`. Multi-sink routers override this.
+    fn capability_for_sink_ref(&self, sink_ref: &str) -> Option<&'static SinkCapability> {
+        let _ = sink_ref;
+        Some(self.capability())
+    }
 
     async fn install_schema_state(
         &self,

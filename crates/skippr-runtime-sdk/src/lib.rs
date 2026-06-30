@@ -23,6 +23,16 @@ pub use skippr_core::{
 #[macro_export]
 macro_rules! declare_sink_spec {
     ($spec:ident, $plugin:ty, $capability:path, $support:ty) => {
+        const _: () = {
+            assert!(!matches!(
+                $capability.grouping_support,
+                $crate::plugins::cdc::SinkGroupingSupport::None
+            ));
+            assert!(
+                $capability.grouping_support == <$support as $crate::plugins::SinkWriteSupport>::GROUPING
+            );
+        };
+
         pub struct $spec;
 
         impl $crate::plugins::SinkSpec for $spec {

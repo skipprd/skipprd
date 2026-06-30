@@ -31,4 +31,4 @@ can_maintain_tombstone_tables = false
 can_compare_order_tokens = false
 supports_transactions = false
 retry_semantics = "NonRetryable"
-grouping_support = "None"
+grouping_support = "CdcEncodedBatches"

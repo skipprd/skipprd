@@ -1119,13 +1119,13 @@ pub mod sink_capabilities {
 
     pub const STDOUT: SinkCapability = SinkCapability {
         name: "Stdout",
-        guarantee_tier: SinkGuaranteeTier::Unsupported,
+        guarantee_tier: SinkGuaranteeTier::CdcEncodedOnly,
         can_manage_skippr_columns: false,
         can_maintain_tombstone_tables: false,
         can_compare_order_tokens: false,
         supports_transactions: false,
-        retry_semantics: Retry::NonRetryable,
-        grouping_support: Grouping::None,
+        retry_semantics: Retry::AtLeastOnce,
+        grouping_support: Grouping::CdcEncodedBatches,
     };
 
     /// Look up a sink capability by plugin name.
@@ -1285,7 +1285,7 @@ mod tests {
                 !matches!(
                     capability.retry_semantics,
                     crate::buffer::compaction_transaction::SinkRetrySemantics::NonRetryable
-                ) || *name == "Stdout",
+                ),
                 "non-debug sink '{}' must declare retryable/idempotent semantics",
                 name
             );
@@ -1293,7 +1293,7 @@ mod tests {
                 !matches!(
                     capability.grouping_support,
                     crate::buffer::compaction_transaction::SinkGroupingSupport::None
-                ) || *name == "Stdout",
+                ),
                 "non-debug sink '{}' must declare grouped compaction support",
                 name
             );

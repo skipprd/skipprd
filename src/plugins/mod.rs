@@ -29,11 +29,26 @@ pub struct NoopOutputPlugin;
 impl DataSink for NoopOutputPlugin {
     async fn sync(
         &self,
-        _stream: datafusion::execution::SendableRecordBatchStream,
+        stream: datafusion::execution::SendableRecordBatchStream,
         _filename: String,
         _cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
     ) -> Result<(), std::io::Error> {
+        use futures::StreamExt;
+        let mut stream = stream;
+        while let Some(batch) = stream.next().await {
+            let _ = batch.map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
         Ok(())
+    }
+
+    async fn sync_with_context(
+        &self,
+        stream: datafusion::execution::SendableRecordBatchStream,
+        ctx: crate::plugins::SinkWriteContext<'_>,
+    ) -> Result<(), std::io::Error> {
+        ctx.validate_grouped::<crate::plugins::AtLeastOnceMessageDelivery>()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Unsupported, e))?;
+        self.sync(stream, ctx.filename, ctx.cdc_ctx).await
     }
 
     fn capability(&self) -> &'static crate::plugins::cdc::SinkCapability {

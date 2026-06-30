@@ -69,6 +69,23 @@ impl ResolvedRuntimePlugin {
     pub fn load(manifest_path: impl AsRef<Path>) -> io::Result<Self> {
         let manifest_path = manifest_path.as_ref().to_path_buf();
         let manifest = RuntimePluginManifest::load_from_path(&manifest_path)?;
+        if manifest.kind == crate::runtime_plugins::protocol::RuntimePluginKind::DataSink {
+            let capability = manifest.sink_capability.as_ref().ok_or_else(|| {
+                io::Error::other(format!(
+                    "runtime sink manifest '{}' is missing sink capability",
+                    manifest.name
+                ))
+            })?;
+            if matches!(
+                capability.grouping_support,
+                crate::buffer::compaction_transaction::SinkGroupingSupport::None
+            ) {
+                return Err(io::Error::other(format!(
+                    "runtime sink manifest '{}' declares grouping_support=None; grouped compaction requires a non-None grouping support",
+                    manifest.name
+                )));
+            }
+        }
         Ok(Self {
             manifest_path,
             manifest,
