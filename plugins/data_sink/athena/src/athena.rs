@@ -20,7 +20,7 @@ use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
 use skippr_runtime_sdk::metrics::counters as metrics_counters;
 use skippr_runtime_sdk::plugins::{SchemaSink, SchemaSyncRequest, SinkWriteOutcome};
 use skippr_runtime_sdk::sink_compat::BufferChunker;
-use skippr_runtime_sdk::sink_idempotency::{manifest_object_name, ObjectWriteManifest};
+use skippr_runtime_sdk::sink_idempotency::{sidecar_manifest_object_key, ObjectWriteManifest};
 
 use arrow::array::RecordBatch;
 use arrow::util::display::array_value_to_string;
@@ -716,7 +716,8 @@ impl DataSinkAthenaPlugin {
             .map(str::to_string)
             .unwrap_or_else(|| hex::encode(md5::compute(&filename).0));
         let final_key = format!("{}/{}.parquet", full_key, object_stem);
-        let idempotency_manifest_key = manifest_object_name(&final_key);
+        let idempotency_manifest_key =
+            sidecar_manifest_object_key(&self.config.s3_prefix, &namespace, &object_stem);
         if let Some(manifest) = idempotency_manifest {
             if self
                 .manifest_matches(&idempotency_manifest_key, manifest)

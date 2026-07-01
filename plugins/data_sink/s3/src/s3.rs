@@ -11,7 +11,7 @@ use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::plugins::{SinkWriteContext, SinkWriteOutcome};
 use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
 use skippr_runtime_sdk::sink_compat::BufferChunker;
-use skippr_runtime_sdk::sink_idempotency::{manifest_object_name, ObjectWriteManifest};
+use skippr_runtime_sdk::sink_idempotency::{sidecar_manifest_object_key, ObjectWriteManifest};
 use std::io;
 use tracing::info;
 
@@ -98,8 +98,9 @@ impl DataSink for DataSinkS3Plugin {
             &ctx.idempotency_key,
             "",
         )?;
-        let final_key = self.object_key_for_filename(&ctx.filename, &object_stem);
-        let manifest_key = manifest_object_name(&final_key);
+        let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
+        let manifest_key =
+            sidecar_manifest_object_key(&self.config.s3_prefix, &namespace, &object_stem);
         let expected_manifest = ObjectWriteManifest::from_context(
             ctx.compaction_id.clone(),
             ctx.idempotency_key.clone(),

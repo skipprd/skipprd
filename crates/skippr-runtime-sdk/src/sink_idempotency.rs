@@ -79,6 +79,26 @@ pub fn manifest_object_name(data_object_name: &str) -> String {
     format!("{data_object_name}.skippr-manifest.json")
 }
 
+pub fn sidecar_manifest_object_key(
+    root_prefix: &str,
+    namespace: &str,
+    data_object_name: &str,
+) -> String {
+    let root_prefix = root_prefix.trim_matches('/');
+    let namespace = namespace.trim_matches('/');
+    let manifest_name = manifest_object_name(data_object_name);
+    let mut parts = Vec::new();
+    if !root_prefix.is_empty() {
+        parts.push(root_prefix);
+    }
+    parts.push("_skippr-idempotency");
+    if !namespace.is_empty() {
+        parts.push(namespace);
+    }
+    parts.push(&manifest_name);
+    parts.join("/")
+}
+
 pub fn wal_refs_fingerprint(wal_refs: &[RuntimeWalPartRef]) -> String {
     let mut identities = wal_refs
         .iter()
@@ -171,5 +191,17 @@ mod tests {
         let refs = vec![wal_ref("a", 1)];
         let manifest = ObjectWriteManifest::from_context("c1", "k1", "schema-a", &refs);
         assert!(!manifest.matches_context("c1", "k1", "schema-b", &refs));
+    }
+
+    #[test]
+    fn sidecar_manifest_key_stays_out_of_table_prefix() {
+        assert_eq!(
+            sidecar_manifest_object_key("deadletters-archive", "_dl_events", "abc123"),
+            "deadletters-archive/_skippr-idempotency/_dl_events/abc123.skippr-manifest.json"
+        );
+        assert_eq!(
+            sidecar_manifest_object_key("/root/", "/events/", "abc123"),
+            "root/_skippr-idempotency/events/abc123.skippr-manifest.json"
+        );
     }
 }
