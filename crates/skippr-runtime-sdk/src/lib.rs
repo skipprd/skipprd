@@ -25,10 +25,16 @@ macro_rules! declare_sink_spec {
     ($spec:ident, $plugin:ty, $capability:path, $support:ty) => {
         const _: () = {
             assert!(!$capability.grouping_support.is_none());
+            assert!($capability
+                .grouping_support
+                .equals(<$support as $crate::plugins::SinkWriteSupport>::GROUPING));
+            assert!($capability
+                .retry_semantics
+                .equals(<$support as $crate::plugins::SinkWriteSupport>::RETRY));
             assert!(
-                $capability
-                    .grouping_support
-                    .equals(<$support as $crate::plugins::SinkWriteSupport>::GROUPING)
+                $capability.grouping_support.is_none()
+                    || !$capability.retry_semantics.requires_idempotent_replay()
+                    || <$support as $crate::plugins::SinkWriteSupport>::CAN_RETURN_ALREADY_APPLIED
             );
         };
 

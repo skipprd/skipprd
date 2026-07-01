@@ -35,6 +35,28 @@ pub enum SinkRetrySemantics {
     NonRetryable,
 }
 
+impl SinkRetrySemantics {
+    pub const fn equals(self, other: Self) -> bool {
+        match (self, other) {
+            (Self::TransactionalIdempotent, Self::TransactionalIdempotent) => true,
+            (Self::DeterministicOverwrite, Self::DeterministicOverwrite) => true,
+            (Self::FinalStateIdempotent, Self::FinalStateIdempotent) => true,
+            (Self::AtLeastOnce, Self::AtLeastOnce) => true,
+            (Self::NonRetryable, Self::NonRetryable) => true,
+            _ => false,
+        }
+    }
+
+    pub const fn requires_idempotent_replay(self) -> bool {
+        match self {
+            Self::TransactionalIdempotent
+            | Self::DeterministicOverwrite
+            | Self::FinalStateIdempotent => true,
+            Self::AtLeastOnce | Self::NonRetryable => false,
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 pub enum SinkGroupingSupport {
     #[default]
@@ -139,6 +161,10 @@ pub struct CompactionTransaction {
     pub refs: Vec<WalPartRef>,
     pub target_filename: String,
     pub created_at_secs: u64,
+    #[serde(default)]
+    pub updated_at_secs: u64,
+    #[serde(default)]
+    pub attempts: u32,
     pub state: CompactionTransactionState,
 }
 
@@ -173,14 +199,37 @@ impl CompactionTransaction {
             refs,
             target_filename,
             created_at_secs,
+            updated_at_secs: created_at_secs,
+            attempts: 0,
             state: CompactionTransactionState::Pending,
         }
     }
 
     pub fn with_state(mut self, state: CompactionTransactionState) -> Self {
         self.state = state;
+        self.updated_at_secs = now_secs();
         self
     }
+
+    pub fn mark_sent(mut self) -> Self {
+        self.state = CompactionTransactionState::Sent;
+        self.attempts = self.attempts.saturating_add(1);
+        self.updated_at_secs = now_secs();
+        self
+    }
+
+    pub fn mark_acked(mut self) -> Self {
+        self.state = CompactionTransactionState::Acked;
+        self.updated_at_secs = now_secs();
+        self
+    }
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 pub fn deterministic_compaction_id(
@@ -285,6 +334,12 @@ pub fn load_pending_manifests() -> io::Result<Vec<CompactionTransaction>> {
     if !dir.exists() {
         return Ok(Vec::new());
     }
+    let now = now_secs();
+    let sent_stale_secs = Config::getenv("WAL_COMPACTION_SENT_STALE_SECS", "300")
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(300);
     let mut out = Vec::new();
     for entry in fs::read_dir(dir)? {
         let entry = entry?;
@@ -292,9 +347,29 @@ pub fn load_pending_manifests() -> io::Result<Vec<CompactionTransaction>> {
         if path.extension().and_then(|s| s.to_str()) != Some("json") {
             continue;
         }
-        let Some(txn) = load_manifest_file(&path) else {
+        let Some(mut txn) = load_manifest_file(&path) else {
             continue;
         };
+        if txn.updated_at_secs == 0 {
+            txn.updated_at_secs = txn.created_at_secs;
+        }
+        if matches!(txn.state, CompactionTransactionState::Sent)
+            && now.saturating_sub(txn.updated_at_secs) < sent_stale_secs
+        {
+            continue;
+        }
+        if matches!(txn.state, CompactionTransactionState::Sent) {
+            warn!(
+                "Compactor: retrying stale sent manifest id={} sink_ref={} namespace={} age_secs={} attempts={}",
+                txn.id,
+                txn.sink_ref,
+                txn.namespace,
+                now.saturating_sub(txn.updated_at_secs),
+                txn.attempts,
+            );
+            txn.state = CompactionTransactionState::Pending;
+            txn.updated_at_secs = now;
+        }
         if !matches!(txn.state, CompactionTransactionState::Tombstoned) {
             out.push(txn);
         }

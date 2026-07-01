@@ -22,7 +22,10 @@ impl CompletionTracker {
     }
 
     pub fn member_cursor(&self, path_index: usize) -> u64 {
-        self.path_member_cursors.get(&path_index).copied().unwrap_or(0)
+        self.path_member_cursors
+            .get(&path_index)
+            .copied()
+            .unwrap_or(0)
     }
 
     pub fn record_member_progress(&mut self, path_index: usize, member_index: u64) {

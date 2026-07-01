@@ -45,9 +45,10 @@ use skippr_runtime_sdk::plugins::source_contract::{
     ensure_source_contract_for_policy, namespace_source_contract, validate_write_policy_for_sink,
     FieldPath, SinkWritePolicySupport, SourceNamespaceContract, WritePolicy,
 };
-use skippr_runtime_sdk::plugins::{DataSink, SchemaSink, SinkWriteContext};
+use skippr_runtime_sdk::plugins::{DataSink, SchemaSink, SinkWriteContext, SinkWriteOutcome};
 use skippr_runtime_sdk::protocol::{RuntimeBinding, RuntimeExecutionContext};
 use skippr_runtime_sdk::sink_compat::BufferChunker;
+use skippr_runtime_sdk::sink_idempotency::{manifest_object_name, ObjectWriteManifest};
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSinkIcebergPluginConfig {
@@ -216,6 +217,33 @@ impl DataSink for DataSinkIcebergPlugin {
         }
     }
 
+    async fn sync_with_context_result(
+        &self,
+        stream: SendableRecordBatchStream,
+        ctx: SinkWriteContext<'_>,
+    ) -> Result<SinkWriteOutcome, io::Error> {
+        if !ctx.is_grouped() {
+            self.sync_with_context(stream, ctx).await?;
+            return Ok(SinkWriteOutcome::Applied);
+        }
+        ctx.validate_grouped::<skippr_runtime_sdk::plugins::TransactionalTableCommit>()
+            .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
+        let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
+        let manifest = ObjectWriteManifest::from_context(
+            ctx.compaction_id.clone(),
+            ctx.idempotency_key.clone(),
+            ctx.schema_fingerprint.clone(),
+            &ctx.wal_refs,
+        );
+        let (bucket, key) = self.idempotency_manifest_location(&namespace, &ctx.idempotency_key)?;
+        if self.manifest_matches(&bucket, &key, &manifest).await? {
+            return Ok(SinkWriteOutcome::AlreadyApplied);
+        }
+        self.sync_with_context(stream, ctx).await?;
+        self.write_manifest(&bucket, &key, &manifest).await?;
+        Ok(SinkWriteOutcome::Applied)
+    }
+
     fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
         &skippr_runtime_sdk::plugins::cdc::sink_capabilities::ICEBERG
     }
@@ -226,6 +254,9 @@ impl DataSink for DataSinkIcebergPlugin {
         namespaces: &BTreeMap<String, OutputMetadata>,
     ) -> Result<(), io::Error> {
         let mut guard = self.schema_state.write().await;
+        if schema_version < guard.version {
+            return Ok(());
+        }
         guard.version = schema_version;
         guard.namespaces = namespaces.clone();
         Ok(())
@@ -924,6 +955,86 @@ impl DataSinkIcebergPlugin {
                 io::Error::other(format!("Failed to upload Iceberg data file: {err}"))
             })?;
         Ok(to_iceberg_s3_uri(&format!("s3://{}/{}", bucket, key)))
+    }
+
+    fn idempotency_manifest_location(
+        &self,
+        namespace: &str,
+        idempotency_key: &str,
+    ) -> Result<(String, String), io::Error> {
+        let table_location = self.table_location(namespace).ok_or_else(|| {
+            io::Error::other(
+                "Iceberg sink requires table_location_prefix for idempotency manifests",
+            )
+        })?;
+        let (bucket, table_prefix) = parse_s3_uri(&table_location)?;
+        let object_name = manifest_object_name(&format!("{idempotency_key}.json"));
+        Ok((
+            bucket,
+            format!(
+                "{}/metadata/skippr-idempotency/{}",
+                table_prefix.trim_matches('/'),
+                object_name
+            ),
+        ))
+    }
+
+    async fn manifest_matches(
+        &self,
+        bucket: &str,
+        key: &str,
+        expected: &ObjectWriteManifest,
+    ) -> io::Result<bool> {
+        let response = match self
+            .s3_client
+            .get_object()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                let err = err.to_string();
+                if err.contains("NoSuchKey") || err.contains("NotFound") {
+                    return Ok(false);
+                }
+                return Err(io::Error::other(format!(
+                    "Failed to read Iceberg idempotency manifest s3://{}/{}: {}",
+                    bucket, key, err
+                )));
+            }
+        };
+        let bytes = response
+            .body
+            .collect()
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))?
+            .into_bytes();
+        let manifest = ObjectWriteManifest::from_json_bytes(&bytes)?;
+        Ok(manifest == *expected)
+    }
+
+    async fn write_manifest(
+        &self,
+        bucket: &str,
+        key: &str,
+        manifest: &ObjectWriteManifest,
+    ) -> io::Result<()> {
+        self.s3_client
+            .put_object()
+            .bucket(bucket)
+            .key(key)
+            .body(ByteStream::from(manifest.to_json_bytes()?))
+            .send()
+            .await
+            .map_err(|err| {
+                io::Error::other(format!(
+                    "Failed to write Iceberg idempotency manifest s3://{}/{}: {}",
+                    bucket, key, err
+                ))
+            })?;
+        Ok(())
     }
 
     async fn plan_cdc_commit(

@@ -523,7 +523,10 @@ mod tests {
         let ipc = encode_record_batch_ipc(&batch).unwrap();
         assert!(!ipc.is_empty());
         assert_eq!(batch.num_rows(), rows.len());
-        assert_eq!(batch.schema().field_with_name("crawl_id").unwrap().name(), "crawl_id");
+        assert_eq!(
+            batch.schema().field_with_name("crawl_id").unwrap().name(),
+            "crawl_id"
+        );
         let _ = NAMESPACE_TARGET_INDEX;
     }
 

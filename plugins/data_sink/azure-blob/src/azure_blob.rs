@@ -8,8 +8,10 @@ use object_store::ObjectStore;
 use object_store::ObjectStoreExt;
 use serde_derive::Deserialize;
 use skippr_runtime_sdk::plugins::DataSink;
+use skippr_runtime_sdk::plugins::{SinkWriteContext, SinkWriteOutcome};
 use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
 use skippr_runtime_sdk::sink_compat::BufferChunker;
+use skippr_runtime_sdk::sink_idempotency::{manifest_object_name, ObjectWriteManifest};
 use std::io;
 use tracing::info;
 
@@ -70,7 +72,7 @@ impl DataSink for DataSinkAzureBlobPlugin {
     async fn sync_with_context(
         &self,
         stream: SendableRecordBatchStream,
-        ctx: skippr_runtime_sdk::plugins::SinkWriteContext<'_>,
+        ctx: SinkWriteContext<'_>,
     ) -> Result<(), std::io::Error> {
         ctx.validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))?;
@@ -135,6 +137,43 @@ impl DataSink for DataSinkAzureBlobPlugin {
         Ok(())
     }
 
+    async fn sync_with_context_result(
+        &self,
+        stream: SendableRecordBatchStream,
+        ctx: SinkWriteContext<'_>,
+    ) -> Result<SinkWriteOutcome, std::io::Error> {
+        if !ctx.is_grouped() {
+            self.sync_with_context(stream, ctx).await?;
+            return Ok(SinkWriteOutcome::Applied);
+        }
+        ctx.validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))?;
+        let object_stem = skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
+            &ctx.idempotency_key,
+            "",
+        )?;
+        let final_key = self.object_key_for_filename(&ctx.filename, &object_stem);
+        let manifest_path = ObjectPath::from(manifest_object_name(&final_key));
+        let expected_manifest = ObjectWriteManifest::from_context(
+            ctx.compaction_id.clone(),
+            ctx.idempotency_key.clone(),
+            ctx.schema_fingerprint.clone(),
+            &ctx.wal_refs,
+        );
+        if self
+            .manifest_matches(&manifest_path, &expected_manifest)
+            .await?
+        {
+            return Ok(SinkWriteOutcome::AlreadyApplied);
+        }
+        self.sync_with_context(stream, ctx).await?;
+        self.store
+            .put(&manifest_path, expected_manifest.to_json_bytes()?.into())
+            .await
+            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        Ok(SinkWriteOutcome::Applied)
+    }
+
     fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
         &skippr_runtime_sdk::plugins::cdc::sink_capabilities::AZURE_BLOB
     }
@@ -175,5 +214,53 @@ impl DataSinkAzureBlobPlugin {
             store: Box::new(store),
             config,
         })
+    }
+
+    fn object_key_for_filename(&self, filename: &str, object_stem: &str) -> String {
+        let namespace = BufferChunker::decode_file_namespace(filename);
+        let prefix = self
+            .config
+            .prefix
+            .as_deref()
+            .unwrap_or("")
+            .trim_matches('/');
+
+        let mut full_key = if namespace.is_empty() {
+            prefix.to_string()
+        } else if prefix.is_empty() {
+            namespace
+        } else {
+            format!("{}/{}", prefix, namespace)
+        };
+
+        let partition_path = BufferChunker::decode_file_partition(filename);
+        if !partition_path.is_empty() {
+            full_key = format!("{}/{}", full_key, partition_path);
+        }
+
+        let filename_owned = filename.to_string();
+        if let Ok(k) = TimePartitioner::new(&filename_owned).process() {
+            full_key = format!("{}/{}", full_key, k);
+        }
+
+        format!("{}/{}.parquet", full_key, object_stem)
+    }
+
+    async fn manifest_matches(
+        &self,
+        manifest_path: &ObjectPath,
+        expected: &ObjectWriteManifest,
+    ) -> io::Result<bool> {
+        let result = match self.store.get(manifest_path).await {
+            Ok(result) => result,
+            Err(object_store::Error::NotFound { .. }) => return Ok(false),
+            Err(err) => return Err(io::Error::other(err.to_string())),
+        };
+        let bytes = result
+            .bytes()
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        let manifest = ObjectWriteManifest::from_json_bytes(&bytes)?;
+        Ok(manifest == *expected)
     }
 }

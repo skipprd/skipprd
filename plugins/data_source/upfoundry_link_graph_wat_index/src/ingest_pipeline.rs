@@ -97,9 +97,9 @@ impl ArrowIngestPipeline {
         member_index: u64,
         builder: &mut TargetIndexBatchBuilder,
     ) -> Result<(), std::io::Error> {
-        let Some(batch) = builder.finish_record_batch().map_err(|err| {
-            std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string())
-        })?
+        let Some(batch) = builder
+            .finish_record_batch()
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::InvalidData, err.to_string()))?
         else {
             return Ok(());
         };
@@ -119,10 +119,7 @@ impl ArrowIngestPipeline {
                     position: member_index,
                 },
                 RuntimeOffsetPosition {
-                    key: OffsetKey::new(
-                        namespace_label(),
-                        format!("{crawl_id}#{bucket:05}"),
-                    ),
+                    key: OffsetKey::new(namespace_label(), format!("{crawl_id}#{bucket:05}")),
                     position: member_index,
                 },
             ],

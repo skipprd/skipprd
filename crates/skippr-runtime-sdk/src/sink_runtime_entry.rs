@@ -18,6 +18,7 @@ use crate::protocol::{
     SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use crate::sdk::decode_record_batch_stream;
+use crate::sink_idempotency::ObjectWriteManifest;
 use crate::wire::{read_frame_or_eof, write_frame};
 
 pub fn buffer_name_for_runtime_binding(binding: RuntimeBinding) -> String {
@@ -112,8 +113,64 @@ async fn read_sink_payload(reader: &mut OwnedReadHalf, request_id: u64) -> io::R
         Some(HostDataFrame::SinkPayload(payload)) if payload.request_id == request_id => {
             Ok(payload.arrow_stream_bytes)
         }
+        Some(HostDataFrame::SinkPayloadChunk(payload)) if payload.request_id == request_id => {
+            let mut chunks = payload.arrow_stream_bytes;
+            let mut expected_index = payload.chunk_index + 1;
+            if payload.chunk_index != 0 {
+                return Err(io::Error::other(format!(
+                    "sink payload chunk request {} started at index {}",
+                    request_id, payload.chunk_index
+                )));
+            }
+            if payload.final_chunk {
+                return Ok(chunks);
+            }
+            loop {
+                let frame = read_frame_or_eof::<_, HostDataFrame>(reader)
+                    .await
+                    .map_err(|err| {
+                        with_io_context(
+                            err,
+                            format!("runtime sink request {request_id} payload chunk read failed"),
+                        )
+                    })?;
+                match frame {
+                    Some(HostDataFrame::SinkPayloadChunk(payload))
+                        if payload.request_id == request_id
+                            && payload.chunk_index == expected_index =>
+                    {
+                        chunks.extend_from_slice(&payload.arrow_stream_bytes);
+                        expected_index = expected_index.saturating_add(1);
+                        if payload.final_chunk {
+                            return Ok(chunks);
+                        }
+                    }
+                    Some(HostDataFrame::SinkPayloadChunk(payload)) => {
+                        return Err(io::Error::other(format!(
+                            "sink payload chunk mismatch for request {}: got request {} chunk {}, expected chunk {}",
+                            request_id, payload.request_id, payload.chunk_index, expected_index
+                        )));
+                    }
+                    Some(HostDataFrame::SinkPayload(payload)) => {
+                        return Err(io::Error::other(format!(
+                            "unexpected full sink payload for request {} while reading chunks for request {}",
+                            payload.request_id, request_id
+                        )));
+                    }
+                    None => {
+                        return Err(io::Error::other(format!(
+                            "runtime host closed sink data channel before final chunk for request {request_id}"
+                        )));
+                    }
+                }
+            }
+        }
         Some(HostDataFrame::SinkPayload(payload)) => Err(io::Error::other(format!(
             "sink payload request id mismatch: expected {} got {}",
+            request_id, payload.request_id
+        ))),
+        Some(HostDataFrame::SinkPayloadChunk(payload)) => Err(io::Error::other(format!(
+            "sink payload chunk request id mismatch: expected {} got {}",
             request_id, payload.request_id
         ))),
         None => Err(io::Error::other(format!(
@@ -429,7 +486,94 @@ where
     };
     ctx.validate_grouped::<<P::Spec as skippr_core::plugins::SinkSpec>::WriteSupport>()
         .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
-    plugin.sync_with_context_result(stream, ctx).await
+    let is_grouped = ctx.is_grouped();
+    let replay_safe =
+        <<P::Spec as skippr_core::plugins::SinkSpec>::WriteSupport as skippr_core::plugins::SinkWriteSupport>::CAN_RETURN_ALREADY_APPLIED;
+    let ledger_manifest = if is_grouped && replay_safe {
+        Some(ObjectWriteManifest::from_context(
+            ctx.compaction_id.clone(),
+            ctx.idempotency_key.clone(),
+            ctx.schema_fingerprint.clone(),
+            &ctx.wal_refs,
+        ))
+    } else {
+        None
+    };
+    if let Some(manifest) = ledger_manifest.as_ref() {
+        if local_idempotency_manifest_matches(manifest)? {
+            return Ok(SinkWriteOutcome::AlreadyApplied);
+        }
+    }
+    let outcome = plugin.sync_with_context_result(stream, ctx).await?;
+    if is_grouped && outcome == SinkWriteOutcome::AlreadyApplied && !replay_safe {
+        return Err(io::Error::other(
+            "runtime sink returned AlreadyApplied without declaring idempotent replay support",
+        ));
+    }
+    if let Some(manifest) = ledger_manifest.as_ref() {
+        if matches!(
+            outcome,
+            SinkWriteOutcome::Applied | SinkWriteOutcome::AlreadyApplied
+        ) {
+            write_local_idempotency_manifest(manifest)?;
+        }
+    }
+    Ok(outcome)
+}
+
+fn local_idempotency_manifest_path(
+    manifest: &ObjectWriteManifest,
+) -> io::Result<std::path::PathBuf> {
+    let data_dir = std::env::var("DATA_DIR").unwrap_or_else(|_| ".".to_string());
+    if manifest.idempotency_key.trim().is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "grouped sink idempotency ledger requires a non-empty key",
+        ));
+    }
+    let safe_key = manifest
+        .idempotency_key
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_' | '.') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    Ok(std::path::Path::new(&data_dir)
+        .join("segment_buffer")
+        .join("sink_idempotency")
+        .join(format!("{safe_key}.json")))
+}
+
+fn local_idempotency_manifest_matches(manifest: &ObjectWriteManifest) -> io::Result<bool> {
+    let path = local_idempotency_manifest_path(manifest)?;
+    if !path.exists() {
+        return Ok(false);
+    }
+    let bytes = std::fs::read(&path)?;
+    let existing = ObjectWriteManifest::from_json_bytes(&bytes)?;
+    if existing == *manifest {
+        return Ok(true);
+    }
+    Err(io::Error::other(format!(
+        "idempotency ledger mismatch for key {} at {}",
+        manifest.idempotency_key,
+        path.to_string_lossy()
+    )))
+}
+
+fn write_local_idempotency_manifest(manifest: &ObjectWriteManifest) -> io::Result<()> {
+    let path = local_idempotency_manifest_path(manifest)?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, manifest.to_json_bytes()?)?;
+    std::fs::rename(tmp, path)?;
+    Ok(())
 }
 
 pub async fn run_runtime_schema_sink_plugin<P, F, Fut>(

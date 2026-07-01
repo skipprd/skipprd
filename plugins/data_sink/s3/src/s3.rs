@@ -6,8 +6,10 @@ use aws_sdk_s3::Client as S3Client;
 use datafusion::execution::SendableRecordBatchStream;
 use serde_derive::Deserialize;
 use skippr_runtime_sdk::plugins::DataSink;
+use skippr_runtime_sdk::plugins::{SinkWriteContext, SinkWriteOutcome};
 use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
 use skippr_runtime_sdk::sink_compat::BufferChunker;
+use skippr_runtime_sdk::sink_idempotency::{manifest_object_name, ObjectWriteManifest};
 use std::io;
 use tracing::info;
 
@@ -57,7 +59,7 @@ impl DataSink for DataSinkS3Plugin {
     async fn sync_with_context(
         &self,
         stream: SendableRecordBatchStream,
-        ctx: skippr_runtime_sdk::plugins::SinkWriteContext<'_>,
+        ctx: SinkWriteContext<'_>,
     ) -> Result<(), std::io::Error> {
         ctx.validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))?;
@@ -77,6 +79,43 @@ impl DataSink for DataSinkS3Plugin {
         };
         self.inner_sync_with_object_stem(stream, ctx.filename, object_stem.as_deref())
             .await
+    }
+
+    async fn sync_with_context_result(
+        &self,
+        stream: SendableRecordBatchStream,
+        ctx: SinkWriteContext<'_>,
+    ) -> Result<SinkWriteOutcome, std::io::Error> {
+        if !ctx.is_grouped() {
+            self.sync_with_context(stream, ctx).await?;
+            return Ok(SinkWriteOutcome::Applied);
+        }
+        ctx.validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))?;
+        let object_stem = skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
+            &ctx.idempotency_key,
+            "",
+        )?;
+        let final_key = self.object_key_for_filename(&ctx.filename, &object_stem);
+        let manifest_key = manifest_object_name(&final_key);
+        let expected_manifest = ObjectWriteManifest::from_context(
+            ctx.compaction_id.clone(),
+            ctx.idempotency_key.clone(),
+            ctx.schema_fingerprint.clone(),
+            &ctx.wal_refs,
+        );
+        if self
+            .manifest_matches(&manifest_key, &expected_manifest)
+            .await?
+        {
+            return Ok(SinkWriteOutcome::AlreadyApplied);
+        }
+        let ctx_filename = ctx.filename.clone();
+        self.inner_sync_with_object_stem(stream, ctx_filename, Some(&object_stem))
+            .await?;
+        self.write_manifest(&manifest_key, &expected_manifest)
+            .await?;
+        Ok(SinkWriteOutcome::Applied)
     }
 
     fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
@@ -120,33 +159,15 @@ impl DataSinkS3Plugin {
         use skippr_runtime_sdk::metrics::counters;
         counters::inc_uploads_in_flight();
 
-        let namespace = BufferChunker::decode_file_namespace(&filename);
-        let trimmed_key = self.config.s3_prefix.trim_matches('/').to_string();
-
-        let mut full_key = if namespace.is_empty() {
-            trimmed_key.clone()
-        } else if trimmed_key.is_empty() {
-            namespace.clone()
-        } else {
-            format!("{}/{}", trimmed_key, namespace)
-        };
-
-        let partition_path = BufferChunker::decode_file_partition(&filename);
-        if !partition_path.is_empty() {
-            full_key = format!("{}/{}", full_key, partition_path);
-        }
-
-        let _key = match TimePartitioner::new(&filename).process() {
-            Ok(k) => {
-                full_key = format!("{}/{}", full_key, k);
-            }
-            Err(_e) => {}
-        };
-
         let object_stem = object_stem
             .map(str::to_string)
             .unwrap_or_else(|| hex::encode(md5::compute(&filename).0));
-        let final_key = format!("{}/{}.parquet", full_key, object_stem);
+        let final_key = self.object_key_for_filename(&filename, &object_stem);
+        let namespace = BufferChunker::decode_file_namespace(&filename);
+        let full_key = final_key
+            .rsplit_once('/')
+            .map(|(prefix, _)| prefix.to_string())
+            .unwrap_or_default();
 
         let parquet_bytes = serialize_to_parquet(stream).await.map_err(|e| {
             counters::dec_uploads_in_flight();
@@ -181,6 +202,87 @@ impl DataSinkS3Plugin {
             self.config.s3_bucket,
             full_key.trim_end_matches('/')
         );
+        Ok(())
+    }
+
+    fn object_key_for_filename(&self, filename: &str, object_stem: &str) -> String {
+        let namespace = BufferChunker::decode_file_namespace(filename);
+        let trimmed_key = self.config.s3_prefix.trim_matches('/').to_string();
+
+        let mut full_key = if namespace.is_empty() {
+            trimmed_key
+        } else if trimmed_key.is_empty() {
+            namespace
+        } else {
+            format!("{}/{}", trimmed_key, namespace)
+        };
+
+        let partition_path = BufferChunker::decode_file_partition(filename);
+        if !partition_path.is_empty() {
+            full_key = format!("{}/{}", full_key, partition_path);
+        }
+
+        let filename_owned = filename.to_string();
+        if let Ok(k) = TimePartitioner::new(&filename_owned).process() {
+            full_key = format!("{}/{}", full_key, k);
+        }
+
+        format!("{}/{}.parquet", full_key, object_stem)
+    }
+
+    async fn manifest_matches(
+        &self,
+        manifest_key: &str,
+        expected: &ObjectWriteManifest,
+    ) -> io::Result<bool> {
+        let response = match self
+            .s3_client
+            .get_object()
+            .bucket(&self.config.s3_bucket)
+            .key(manifest_key)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                let err = err.to_string();
+                if err.contains("NoSuchKey") || err.contains("NotFound") {
+                    return Ok(false);
+                }
+                return Err(io::Error::other(format!(
+                    "Failed to read S3 idempotency manifest {}: {}",
+                    manifest_key, err
+                )));
+            }
+        };
+        let bytes = response
+            .body
+            .collect()
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))?
+            .into_bytes();
+        let manifest = ObjectWriteManifest::from_json_bytes(&bytes)?;
+        Ok(manifest == *expected)
+    }
+
+    async fn write_manifest(
+        &self,
+        manifest_key: &str,
+        manifest: &ObjectWriteManifest,
+    ) -> io::Result<()> {
+        self.s3_client
+            .put_object()
+            .bucket(&self.config.s3_bucket)
+            .key(manifest_key)
+            .body(ByteStream::from(manifest.to_json_bytes()?))
+            .send()
+            .await
+            .map_err(|err| {
+                io::Error::other(format!(
+                    "Failed to write S3 idempotency manifest {}: {}",
+                    manifest_key, err
+                ))
+            })?;
         Ok(())
     }
 }

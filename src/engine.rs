@@ -392,6 +392,14 @@ impl DataSink for OutputRouter {
         stream: SendableRecordBatchStream,
         ctx: crate::plugins::SinkWriteContext<'_>,
     ) -> Result<(), std::io::Error> {
+        self.sync_with_context_result(stream, ctx).await.map(|_| ())
+    }
+
+    async fn sync_with_context_result(
+        &self,
+        stream: SendableRecordBatchStream,
+        ctx: crate::plugins::SinkWriteContext<'_>,
+    ) -> Result<crate::plugins::SinkWriteOutcome, std::io::Error> {
         let sink_ref = BufferChunker::decode_file_sink_ref(&ctx.filename);
         let target_sink_ref = if sink_ref.is_empty() {
             self.primary_sink_ref.clone()
@@ -404,7 +412,7 @@ impl DataSink for OutputRouter {
                 target_sink_ref
             ))
         })?;
-        plugin.sync_with_context(stream, ctx).await
+        plugin.sync_with_context_result(stream, ctx).await
     }
 
     async fn install_schema_state(
@@ -427,7 +435,10 @@ impl DataSink for OutputRouter {
             .unwrap_or(&crate::plugins::cdc::sink_capabilities::STDOUT)
     }
 
-    fn capability_for_sink_ref(&self, sink_ref: &str) -> Option<&'static crate::plugins::cdc::SinkCapability> {
+    fn capability_for_sink_ref(
+        &self,
+        sink_ref: &str,
+    ) -> Option<&'static crate::plugins::cdc::SinkCapability> {
         let key = if sink_ref.is_empty() {
             self.primary_sink_ref.as_str()
         } else {
@@ -1546,7 +1557,9 @@ mod output_router_capability_tests {
         }
     }
 
-    fn boxed_sink(cap: &'static crate::plugins::cdc::SinkCapability) -> Arc<Box<dyn DataSink + Send + Sync>> {
+    fn boxed_sink(
+        cap: &'static crate::plugins::cdc::SinkCapability,
+    ) -> Arc<Box<dyn DataSink + Send + Sync>> {
         Arc::new(Box::new(StubSink(cap)))
     }
 
@@ -1559,7 +1572,10 @@ mod output_router_capability_tests {
             "deadletter_sinks.ds_deadletters".to_string(),
             boxed_sink(&sink_capabilities::ATHENA),
         );
-        let router = OutputRouter { primary_sink_ref: primary, sinks };
+        let router = OutputRouter {
+            primary_sink_ref: primary,
+            sinks,
+        };
 
         assert_eq!(
             router

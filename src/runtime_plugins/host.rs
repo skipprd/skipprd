@@ -34,7 +34,7 @@ use crate::ingest_work::{
     storage_namespace, storage_partition, Ingest, IngestBatch, IngestTask, IngestTasks, INGEST_RT,
 };
 use crate::plugins::cdc;
-use crate::plugins::{DataSink, SchemaSink, SchemaSyncRequest};
+use crate::plugins::{DataSink, SchemaSink, SchemaSyncRequest, SinkWriteOutcome};
 use crate::runtime_plugins::artifact::resolve_plugin_executable;
 use crate::runtime_plugins::manifest::RuntimePluginManifest;
 use crate::runtime_plugins::offset_service::OffsetServiceEndpoint;
@@ -44,10 +44,10 @@ use crate::runtime_plugins::protocol::{
     RuntimeOffsetMaterializationHint, RuntimeOutputLayout, RuntimeRequestAck, RuntimeSchemaConfig,
     RuntimeSchemaInstallRequest, RuntimeSchemaState, RuntimeSchemaStateInstallRequest,
     RuntimeSessionHello, RuntimeSinkConfig, RuntimeSinkInstallRequest, RuntimeSinkPayload,
-    RuntimeSinkWriteResult, RuntimeSourceConfig, RuntimeSourceIngestWindow, SchemaRunRequest,
-    SinkRunRequest, SourceEvent, SourceStartRequest, RUNTIME_PROTOCOL_VERSION,
-    SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV, SKIPPR_RUNTIME_OFFSET_ADDR_ENV,
-    SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
+    RuntimeSinkPayloadChunk, RuntimeSinkWriteResult, RuntimeSourceConfig,
+    RuntimeSourceIngestWindow, SchemaRunRequest, SinkRunRequest, SourceEvent, SourceStartRequest,
+    RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
+    SKIPPR_RUNTIME_OFFSET_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use crate::runtime_plugins::schema_state::{
     apply_runtime_source_schema_state, bump_pipeline_schema_version,
@@ -689,9 +689,9 @@ async fn ingest_runtime_batches_into_core(
             schema,
             record_batches: Some(record_batches),
             cdc_rows: batch.cdc_rows,
-            checkpoint_update: batch.checkpoint_update.map(|update| {
-                (update.key, update.envelope)
-            }),
+            checkpoint_update: batch
+                .checkpoint_update
+                .map(|update| (update.key, update.envelope)),
         });
     }
     if !derived_namespaces.is_empty() {
@@ -1397,6 +1397,36 @@ fn should_retry_runtime_connection(err: &io::Error) -> bool {
     )
 }
 
+fn runtime_timeout(name: &str, default_secs: u64) -> Duration {
+    Duration::from_secs(
+        Config::getenv(name, &default_secs.to_string())
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .unwrap_or(default_secs),
+    )
+}
+
+fn runtime_sink_request_timeout() -> Duration {
+    runtime_timeout("RUNTIME_SINK_REQUEST_TIMEOUT_SECS", 600)
+}
+
+fn runtime_sink_schema_timeout() -> Duration {
+    runtime_timeout("RUNTIME_SINK_SCHEMA_TIMEOUT_SECS", 120)
+}
+
+fn runtime_sink_payload_chunk_bytes() -> usize {
+    Config::getenv(
+        "RUNTIME_SINK_PAYLOAD_CHUNK_BYTES",
+        &(64 * 1024 * 1024).to_string(),
+    )
+    .parse::<usize>()
+    .ok()
+    .filter(|value| *value > 0)
+    .unwrap_or(64 * 1024 * 1024)
+    .min(MAX_RUNTIME_FRAME_BYTES.saturating_sub(64 * 1024))
+}
+
 pub struct RuntimeDataSinkPlugin {
     install_request: RuntimeSinkInstallRequest,
     capability: &'static cdc::SinkCapability,
@@ -1515,31 +1545,79 @@ impl RuntimeDataSinkPlugin {
             .await
     }
 
+    async fn send_sink_payload(
+        connection: &mut RuntimeChildConnection,
+        request_id: u64,
+        arrow_stream_bytes: &[u8],
+    ) -> io::Result<()> {
+        let chunk_size = runtime_sink_payload_chunk_bytes();
+        if arrow_stream_bytes.len().saturating_add(1024) <= chunk_size {
+            return connection
+                .send_data(&HostDataFrame::SinkPayload(RuntimeSinkPayload {
+                    request_id,
+                    arrow_stream_bytes: arrow_stream_bytes.to_vec(),
+                }))
+                .await;
+        }
+        for (chunk_index, chunk) in arrow_stream_bytes.chunks(chunk_size).enumerate() {
+            connection
+                .send_data(&HostDataFrame::SinkPayloadChunk(RuntimeSinkPayloadChunk {
+                    request_id,
+                    chunk_index: chunk_index as u32,
+                    final_chunk: (chunk_index + 1) * chunk_size >= arrow_stream_bytes.len(),
+                    arrow_stream_bytes: chunk.to_vec(),
+                }))
+                .await?;
+        }
+        Ok(())
+    }
+
     async fn send_sink_request(
         &self,
         request: SinkRunRequest,
         arrow_stream_bytes: Vec<u8>,
         row_count: u64,
-    ) -> io::Result<()> {
+    ) -> io::Result<SinkWriteOutcome> {
         let mut retried = false;
         let mut schema_refreshes = 0usize;
         loop {
             let mut guard = self.connection.lock().await;
             self.ensure_connection_ready(&mut guard).await?;
 
-            let send_result = guard.send(&HostFrame::RunSink(request.clone())).await;
-            let recv_result = match send_result {
-                Ok(_) => {
-                    let payload = HostDataFrame::SinkPayload(RuntimeSinkPayload {
-                        request_id: request.request_id,
-                        arrow_stream_bytes: arrow_stream_bytes.clone(),
-                    });
-                    match guard.send_data(&payload).await {
-                        Ok(()) => guard.recv().await,
-                        Err(err) => Err(err),
-                    }
+            let request_timeout = runtime_sink_request_timeout();
+            let recv_result = match timeout(request_timeout, async {
+                guard.send(&HostFrame::RunSink(request.clone())).await?;
+                Self::send_sink_payload(&mut guard, request.request_id, &arrow_stream_bytes)
+                    .await?;
+                guard.recv().await
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    warn!(
+                        "runtime sink request timed out request_id={} compaction_id={} timeout_secs={}",
+                        request.request_id,
+                        request.compaction_id,
+                        request_timeout.as_secs()
+                    );
+                    self.restart_and_reinstall(&mut guard).await?;
+                    return Err(io::Error::new(
+                        ErrorKind::TimedOut,
+                        format!(
+                            "runtime sink request {} timed out after {}s",
+                            request.request_id,
+                            request_timeout.as_secs()
+                        ),
+                    ));
                 }
-                Err(err) => Err(err),
+            };
+            let recv_result = match recv_result {
+                Ok(frame) => Ok(frame),
+                Err(err) => {
+                    self.restart_and_reinstall(&mut guard).await?;
+                    Err(err)
+                }
             };
 
             match recv_result {
@@ -1547,14 +1625,17 @@ impl RuntimeDataSinkPlugin {
                     if request_id == request.request_id =>
                 {
                     crate::metrics::counters::add_parquet_rows(row_count);
-                    return Ok(());
+                    return Ok(SinkWriteOutcome::Applied);
                 }
                 Ok(PluginFrame::SinkWriteAck(ack)) if ack.request_id == request.request_id => {
                     match ack.result {
-                        RuntimeSinkWriteResult::Applied
-                        | RuntimeSinkWriteResult::AlreadyApplied => {
+                        RuntimeSinkWriteResult::Applied => {
                             crate::metrics::counters::add_parquet_rows(row_count);
-                            return Ok(());
+                            return Ok(SinkWriteOutcome::Applied);
+                        }
+                        RuntimeSinkWriteResult::AlreadyApplied => {
+                            crate::metrics::counters::add_parquet_rows(row_count);
+                            return Ok(SinkWriteOutcome::AlreadyApplied);
                         }
                         RuntimeSinkWriteResult::RejectedNonIdempotent => {
                             return Err(io::Error::other(
@@ -1607,12 +1688,30 @@ impl RuntimeDataSinkPlugin {
         loop {
             let mut guard = self.connection.lock().await;
             self.ensure_connection_ready(&mut guard).await?;
-            match self
-                .send_schema_state_install(&mut guard, schema_version, namespaces)
-                .await
+            let schema_timeout = runtime_sink_schema_timeout();
+            match timeout(
+                schema_timeout,
+                self.send_schema_state_install(&mut guard, schema_version, namespaces),
+            )
+            .await
             {
-                Ok(()) => return Ok(()),
-                Err(err)
+                Err(_) => {
+                    warn!(
+                        "runtime sink schema state install timed out version={} timeout_secs={}",
+                        schema_version,
+                        schema_timeout.as_secs()
+                    );
+                    self.restart_and_reinstall(&mut guard).await?;
+                    return Err(io::Error::new(
+                        ErrorKind::TimedOut,
+                        format!(
+                            "runtime sink schema state install timed out after {}s",
+                            schema_timeout.as_secs()
+                        ),
+                    ));
+                }
+                Ok(Ok(())) => return Ok(()),
+                Ok(Err(err))
                     if !retried
                         && (guard.has_exited()? || should_retry_runtime_connection(&err)) =>
                 {
@@ -1624,7 +1723,7 @@ impl RuntimeDataSinkPlugin {
                     retried = true;
                     continue;
                 }
-                Err(err) => return Err(err),
+                Ok(Err(err)) => return Err(err),
             }
         }
     }
@@ -1660,13 +1759,25 @@ impl DataSink for RuntimeDataSinkPlugin {
         stream: datafusion::execution::SendableRecordBatchStream,
         ctx: crate::plugins::SinkWriteContext<'_>,
     ) -> Result<(), io::Error> {
+        self.sync_with_context_result(stream, ctx).await.map(|_| ())
+    }
+
+    async fn sync_with_context_result(
+        &self,
+        stream: datafusion::execution::SendableRecordBatchStream,
+        ctx: crate::plugins::SinkWriteContext<'_>,
+    ) -> Result<SinkWriteOutcome, io::Error> {
         if let Some(namespace) = query_value_from_runtime_filename(&ctx.filename, "namespace") {
-            apply_derived_runtime_schema(namespace, &stream.schema());
+            let schema = stream.schema();
+            if !schema.fields().is_empty() {
+                apply_derived_runtime_schema(namespace, &schema);
+            }
         }
         let schema_state = current_runtime_schema_state();
         self.install_schema_state_with_retry(schema_state.version, &schema_state.namespaces)
             .await?;
         let encoded_stream = encode_record_batch_stream_with_stats(stream).await?;
+        let schema_state = current_runtime_schema_state();
         let namespace = query_value_from_runtime_filename(&ctx.filename, "namespace");
         let source_contract = ctx.source_contract.cloned().or_else(|| {
             namespace

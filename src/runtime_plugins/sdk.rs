@@ -35,14 +35,32 @@ pub async fn encode_record_batch_stream(
 pub async fn encode_record_batch_stream_with_stats(
     mut stream: SendableRecordBatchStream,
 ) -> Result<EncodedRecordBatchStream, io::Error> {
-    let mut batches = Vec::new();
     let mut rows = 0u64;
+    let mut bytes = Vec::new();
+    let mut writer: Option<StreamWriter<&mut Vec<u8>>> = None;
     while let Some(batch_result) = stream.next().await {
         let batch = batch_result.map_err(|err| io::Error::other(err.to_string()))?;
         rows = rows.saturating_add(batch.num_rows() as u64);
-        batches.push(batch);
+        if writer.is_none() {
+            let options = IpcWriteOptions::default();
+            writer = Some(
+                StreamWriter::try_new_with_options(&mut bytes, &batch.schema(), options)
+                    .map_err(|err| io::Error::other(err.to_string()))?,
+            );
+        }
+        writer
+            .as_mut()
+            .expect("writer initialized")
+            .write(&batch)
+            .map_err(|err| io::Error::other(err.to_string()))?;
     }
-    let bytes = encode_record_batches(&batches)?;
+    if let Some(mut writer) = writer {
+        writer
+            .finish()
+            .map_err(|err| io::Error::other(err.to_string()))?;
+    } else {
+        bytes = encode_record_batches(&[])?;
+    }
     Ok(EncodedRecordBatchStream { bytes, rows })
 }
 

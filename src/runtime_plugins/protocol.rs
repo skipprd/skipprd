@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 // separate from the skippr/React adapter's CLI subprocess JSON summaries.
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 14;
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 15;
 pub const SKIPPR_RUNTIME_CONTROL_ADDR_ENV: &str = "SKIPPR_RUNTIME_CONTROL_ADDR";
 pub const SKIPPR_RUNTIME_DATA_ADDR_ENV: &str = "SKIPPR_RUNTIME_DATA_ADDR";
 pub const SKIPPR_RUNTIME_OFFSET_ADDR_ENV: &str = "SKIPPR_RUNTIME_OFFSET_ADDR";
@@ -509,6 +509,14 @@ pub struct RuntimeSinkPayload {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RuntimeSinkPayloadChunk {
+    pub request_id: u64,
+    pub chunk_index: u32,
+    pub final_chunk: bool,
+    pub arrow_stream_bytes: Vec<u8>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct SchemaRunRequest {
     pub request_id: u64,
     pub compaction_id: String,
@@ -549,6 +557,7 @@ pub enum PluginFrame {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum HostDataFrame {
     SinkPayload(RuntimeSinkPayload),
+    SinkPayloadChunk(RuntimeSinkPayloadChunk),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -718,6 +727,27 @@ mod tests {
         };
         assert!(decoded.source_contract.is_none());
         assert_eq!(decoded.filename, "orders/part-0001.arrow");
+    }
+
+    #[test]
+    fn sink_payload_chunk_roundtrips() {
+        let frame = HostDataFrame::SinkPayloadChunk(RuntimeSinkPayloadChunk {
+            request_id: 7,
+            chunk_index: 1,
+            final_chunk: false,
+            arrow_stream_bytes: vec![1, 2, 3],
+        });
+        let bytes = bincode::serialize(&frame).unwrap();
+        let decoded: HostDataFrame = bincode::deserialize(&bytes).unwrap();
+        match decoded {
+            HostDataFrame::SinkPayloadChunk(chunk) => {
+                assert_eq!(chunk.request_id, 7);
+                assert_eq!(chunk.chunk_index, 1);
+                assert!(!chunk.final_chunk);
+                assert_eq!(chunk.arrow_stream_bytes, vec![1, 2, 3]);
+            }
+            HostDataFrame::SinkPayload(_) => panic!("expected chunk"),
+        }
     }
 
     #[test]

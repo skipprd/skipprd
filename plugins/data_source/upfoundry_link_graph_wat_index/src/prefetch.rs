@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use aws_sdk_s3::Client as S3Client;
 use aws_sdk_sqs::Client as SqsClient;
+use futures::FutureExt;
 use skippr_plugin_shared_link_graph::WatRecordLocation;
 use skippr_runtime_sdk::plugins::SourceSyncContext;
 use tokio::sync::{mpsc, Mutex, Semaphore};
@@ -33,7 +34,10 @@ fn env_usize(name: &str, default: usize) -> usize {
 }
 
 fn download_concurrency_limit() -> usize {
-    env_usize("WAT_DOWNLOAD_CONCURRENCY", (num_cpus::get() / 4).max(2).min(32))
+    env_usize(
+        "WAT_DOWNLOAD_CONCURRENCY",
+        (num_cpus::get() / 4).max(2).min(32),
+    )
 }
 
 fn parse_concurrency_limit() -> usize {
@@ -65,7 +69,10 @@ impl ConcurrencyLimits {
         }
     }
 
-    fn spawn_autotune(self: Arc<Self>, ctx: Arc<dyn SourceSyncContext>) {
+    fn spawn_autotune(
+        self: Arc<Self>,
+        ctx: Arc<dyn SourceSyncContext>,
+    ) -> tokio::task::JoinHandle<()> {
         let limits = Arc::clone(&self);
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(tokio::time::Duration::from_millis(500));
@@ -99,7 +106,7 @@ impl ConcurrencyLimits {
                     Ordering::Relaxed,
                 );
             }
-        });
+        })
     }
 }
 
@@ -175,7 +182,9 @@ impl<'a> ParallelProcessPaths<'a> {
             download_concurrency_limit(),
             parse_concurrency_limit(),
         ));
-        concurrency_limits.clone().spawn_autotune(Arc::clone(&self.ctx));
+        let autotune_handle = concurrency_limits
+            .clone()
+            .spawn_autotune(Arc::clone(&self.ctx));
 
         let (ready_tx, ready_rx) = mpsc::channel::<ReadyWat>(prefetch_depth_limit());
         let (result_tx, mut result_rx) = mpsc::channel::<PathParseResult>(self.paths.len().max(1));
@@ -200,6 +209,7 @@ impl<'a> ParallelProcessPaths<'a> {
         let ready_bytes_dl = Arc::clone(&ready_bytes);
         let downloads_in_flight_dl = Arc::clone(&downloads_in_flight);
         let downloader = tokio::spawn(async move {
+            let mut downloads = tokio::task::JoinSet::new();
             for (path_index, path) in download_paths {
                 loop {
                     let pressure = ingest_backpressure_pressure(ctx_tune.as_ref());
@@ -222,81 +232,96 @@ impl<'a> ParallelProcessPaths<'a> {
                 };
                 downloads_in_flight_dl.fetch_add(1, Ordering::Relaxed);
 
-                let bytes = match download_wat_bytes(
-                    &path,
-                    max_object_bytes,
-                    Some(&s3_client),
-                    Some(&http_client),
-                )
-                .await
-                {
-                    Ok(bytes) => bytes,
-                    Err(WatStreamOpenError::TooLarge {
-                        compressed_bytes,
-                        max_wat_object_bytes,
-                    }) => {
-                        warn!(
-                            crawl_id = %crawl_id_dl,
-                            wat_path = %path,
-                            reason = "wat_object_too_large",
+                let s3_client = s3_client.clone();
+                let http_client = http_client.clone();
+                let crawl_id = crawl_id_dl.clone();
+                let ready_tx = ready_tx.clone();
+                let result_tx = result_tx_dl.clone();
+                let ready_bytes = Arc::clone(&ready_bytes_dl);
+                let ready_count = Arc::clone(&ready_count_dl);
+                let downloads_in_flight = Arc::clone(&downloads_in_flight_dl);
+                downloads.spawn(async move {
+                    let _permit = permit;
+                    let bytes = match download_wat_bytes(
+                        &path,
+                        max_object_bytes,
+                        Some(&s3_client),
+                        Some(&http_client),
+                    )
+                    .await
+                    {
+                        Ok(bytes) => bytes,
+                        Err(WatStreamOpenError::TooLarge {
                             compressed_bytes,
                             max_wat_object_bytes,
-                            "skipping WAT object"
-                        );
-                        let _ = result_tx_dl
-                            .send(PathParseResult {
-                                path_index,
-                                final_member_index: 0,
-                                records_seen: 0,
-                                rows_emitted: 0,
-                                skipped: true,
-                            })
-                            .await;
-                        drop(permit);
-                        downloads_in_flight_dl.fetch_sub(1, Ordering::Relaxed);
-                        continue;
-                    }
-                    Err(err) => {
-                        warn!(
-                            crawl_id = %crawl_id_dl,
-                            wat_path = %path,
-                            reason = "read_failed",
-                            error = %err,
-                            "skipping WAT object"
-                        );
-                        let _ = result_tx_dl
-                            .send(PathParseResult {
-                                path_index,
-                                final_member_index: 0,
-                                records_seen: 0,
-                                rows_emitted: 0,
-                                skipped: true,
-                            })
-                            .await;
-                        drop(permit);
-                        downloads_in_flight_dl.fetch_sub(1, Ordering::Relaxed);
-                        continue;
-                    }
-                };
+                        }) => {
+                            warn!(
+                                crawl_id = %crawl_id,
+                                wat_path = %path,
+                                reason = "wat_object_too_large",
+                                compressed_bytes,
+                                max_wat_object_bytes,
+                                "skipping WAT object"
+                            );
+                            let _ = result_tx
+                                .send(PathParseResult {
+                                    path_index,
+                                    final_member_index: 0,
+                                    records_seen: 0,
+                                    rows_emitted: 0,
+                                    skipped: true,
+                                })
+                                .await;
+                            downloads_in_flight.fetch_sub(1, Ordering::Relaxed);
+                            return;
+                        }
+                        Err(err) => {
+                            warn!(
+                                crawl_id = %crawl_id,
+                                wat_path = %path,
+                                reason = "read_failed",
+                                error = %err,
+                                "skipping WAT object"
+                            );
+                            let _ = result_tx
+                                .send(PathParseResult {
+                                    path_index,
+                                    final_member_index: 0,
+                                    records_seen: 0,
+                                    rows_emitted: 0,
+                                    skipped: true,
+                                })
+                                .await;
+                            downloads_in_flight.fetch_sub(1, Ordering::Relaxed);
+                            return;
+                        }
+                    };
 
-                ready_bytes_dl.fetch_add(bytes.len(), Ordering::Relaxed);
-                ready_count_dl.fetch_add(1, Ordering::Relaxed);
-                if ready_tx
-                    .send(ReadyWat {
-                        path_index,
-                        path,
-                        bytes,
-                    })
-                    .await
-                    .is_err()
-                {
-                    drop(permit);
-                    downloads_in_flight_dl.fetch_sub(1, Ordering::Relaxed);
-                    break;
+                    let byte_len = bytes.len();
+                    ready_bytes.fetch_add(byte_len, Ordering::Relaxed);
+                    ready_count.fetch_add(1, Ordering::Relaxed);
+                    if ready_tx
+                        .send(ReadyWat {
+                            path_index,
+                            path,
+                            bytes,
+                        })
+                        .await
+                        .is_err()
+                    {
+                        ready_count.fetch_sub(1, Ordering::Relaxed);
+                        ready_bytes.fetch_sub(byte_len, Ordering::Relaxed);
+                    }
+                    downloads_in_flight.fetch_sub(1, Ordering::Relaxed);
+                });
+
+                while downloads.len() >= limits_dl.download.load(Ordering::Relaxed).max(1) {
+                    if downloads.join_next().await.is_none() {
+                        break;
+                    }
                 }
-                drop(permit);
-                downloads_in_flight_dl.fetch_sub(1, Ordering::Relaxed);
             }
+            while downloads.join_next().await.is_some() {}
         });
 
         let mut ready_rx = ready_rx;
@@ -342,7 +367,7 @@ impl<'a> ParallelProcessPaths<'a> {
                     let parses_in_flight_spawn = Arc::clone(&parses_in_flight_parse);
                     join_set.spawn(async move {
                         let _permit = permit;
-                        let result = parse_ready_wat(
+                        let result = std::panic::AssertUnwindSafe(parse_ready_wat(
                             &config,
                             &crawl_id,
                             ready.path_index,
@@ -350,18 +375,35 @@ impl<'a> ParallelProcessPaths<'a> {
                             ready.bytes,
                             start_member,
                             pipeline,
-                        )
+                        ))
+                        .catch_unwind()
                         .await;
                         match result {
-                            Ok(stats) => {
+                            Ok(Ok(stats)) => {
                                 let _ = result_tx.send(stats).await;
                             }
-                            Err(err) => {
+                            Ok(Err(err)) => {
                                 warn!(
                                     crawl_id = %crawl_id,
                                     wat_path = %ready.path,
                                     error = %err,
                                     "parse worker failed"
+                                );
+                                let _ = result_tx
+                                    .send(PathParseResult {
+                                        path_index: ready.path_index,
+                                        final_member_index: 0,
+                                        records_seen: 0,
+                                        rows_emitted: 0,
+                                        skipped: true,
+                                    })
+                                    .await;
+                            }
+                            Err(_) => {
+                                warn!(
+                                    crawl_id = %crawl_id,
+                                    wat_path = %ready.path,
+                                    "parse worker panicked"
                                 );
                                 let _ = result_tx
                                     .send(PathParseResult {
@@ -426,6 +468,7 @@ impl<'a> ParallelProcessPaths<'a> {
 
         let _ = downloader.await;
         let _ = parse_workers.await;
+        autotune_handle.abort();
 
         let final_index = {
             let tracker = tracker.lock().await;

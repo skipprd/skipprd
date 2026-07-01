@@ -523,8 +523,46 @@ async fn read_sink_payload(reader: &mut OwnedReadHalf, request_id: u64) -> io::R
         Some(HostDataFrame::SinkPayload(payload)) if payload.request_id == request_id => {
             Ok(payload.arrow_stream_bytes)
         }
+        Some(HostDataFrame::SinkPayloadChunk(payload)) if payload.request_id == request_id => {
+            if payload.chunk_index != 0 {
+                return Err(io::Error::other(format!(
+                    "sink payload chunk request {} started at index {}",
+                    request_id, payload.chunk_index
+                )));
+            }
+            let mut bytes = payload.arrow_stream_bytes;
+            let mut expected_index = 1;
+            if payload.final_chunk {
+                return Ok(bytes);
+            }
+            loop {
+                match read_frame_or_eof::<_, HostDataFrame>(reader).await? {
+                    Some(HostDataFrame::SinkPayloadChunk(payload))
+                        if payload.request_id == request_id
+                            && payload.chunk_index == expected_index =>
+                    {
+                        bytes.extend_from_slice(&payload.arrow_stream_bytes);
+                        expected_index = expected_index.saturating_add(1);
+                        if payload.final_chunk {
+                            return Ok(bytes);
+                        }
+                    }
+                    Some(other) => {
+                        return Err(io::Error::other(format!(
+                            "unexpected sink payload frame while reading chunks: {:?}",
+                            other
+                        )));
+                    }
+                    None => return Err(io::Error::other("runtime host closed sink data channel")),
+                }
+            }
+        }
         Some(HostDataFrame::SinkPayload(payload)) => Err(io::Error::other(format!(
             "sink payload request id mismatch: expected {} got {}",
+            request_id, payload.request_id
+        ))),
+        Some(HostDataFrame::SinkPayloadChunk(payload)) => Err(io::Error::other(format!(
+            "sink payload chunk request id mismatch: expected {} got {}",
             request_id, payload.request_id
         ))),
         None => Err(io::Error::other("runtime host closed sink data channel")),

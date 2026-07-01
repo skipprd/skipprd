@@ -3,8 +3,10 @@ use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 use serde_derive::Deserialize;
 use skippr_runtime_sdk::plugins::DataSink;
+use skippr_runtime_sdk::plugins::{SinkWriteContext, SinkWriteOutcome};
+use skippr_runtime_sdk::sink_idempotency::{manifest_object_name, ObjectWriteManifest};
 use ssh2::Session;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use tracing::info;
 
@@ -67,7 +69,7 @@ impl DataSink for DataSinkSftpPlugin {
     async fn sync_with_context(
         &self,
         stream: SendableRecordBatchStream,
-        ctx: skippr_runtime_sdk::plugins::SinkWriteContext<'_>,
+        ctx: SinkWriteContext<'_>,
     ) -> Result<(), std::io::Error> {
         ctx.validate_grouped::<skippr_runtime_sdk::plugins::SftpAtomicRename>()
             .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))?;
@@ -136,6 +138,50 @@ impl DataSink for DataSinkSftpPlugin {
         Ok(())
     }
 
+    async fn sync_with_context_result(
+        &self,
+        stream: SendableRecordBatchStream,
+        ctx: SinkWriteContext<'_>,
+    ) -> Result<SinkWriteOutcome, std::io::Error> {
+        if !ctx.is_grouped() {
+            self.sync_with_context(stream, ctx).await?;
+            return Ok(SinkWriteOutcome::Applied);
+        }
+        ctx.validate_grouped::<skippr_runtime_sdk::plugins::SftpAtomicRename>()
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))?;
+        let object_stem = skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
+            &ctx.idempotency_key,
+            "",
+        )?;
+        let remote_file_path = self.remote_file_path(&object_stem);
+        let remote_manifest_path = format!(
+            "{}/{}",
+            self.config.remote_path.trim_end_matches('/'),
+            manifest_object_name(
+                remote_file_path
+                    .rsplit_once('/')
+                    .map(|(_, name)| name)
+                    .unwrap_or("output.parquet")
+            )
+        );
+        let expected_manifest = ObjectWriteManifest::from_context(
+            ctx.compaction_id.clone(),
+            ctx.idempotency_key.clone(),
+            ctx.schema_fingerprint.clone(),
+            &ctx.wal_refs,
+        );
+        if self
+            .remote_manifest_matches(&remote_manifest_path, &expected_manifest)
+            .await?
+        {
+            return Ok(SinkWriteOutcome::AlreadyApplied);
+        }
+        self.sync_with_context(stream, ctx).await?;
+        self.write_remote_manifest(&remote_manifest_path, &expected_manifest)
+            .await?;
+        Ok(SinkWriteOutcome::Applied)
+    }
+
     fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
         &skippr_runtime_sdk::plugins::cdc::sink_capabilities::SFTP
     }
@@ -144,5 +190,73 @@ impl DataSink for DataSinkSftpPlugin {
 impl DataSinkSftpPlugin {
     pub async fn new_with_config(_buffer_name: String, config: DataSinkSftpPluginConfig) -> Self {
         Self { config }
+    }
+
+    fn remote_file_path(&self, object_stem: &str) -> String {
+        format!(
+            "{}/{}.parquet",
+            self.config.remote_path.trim_end_matches('/'),
+            object_stem
+        )
+    }
+
+    fn connect(&self) -> Result<ssh2::Sftp, std::io::Error> {
+        let port = self.config.port.unwrap_or(22);
+        let tcp = TcpStream::connect(format!("{}:{}", self.config.host, port))?;
+        let mut sess = Session::new().map_err(|e| std::io::Error::other(e.to_string()))?;
+        sess.set_tcp_stream(tcp);
+        sess.handshake()
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+
+        if let Some(ref key_path) = self.config.private_key_path {
+            sess.userauth_pubkey_file(
+                &self.config.username,
+                None,
+                std::path::Path::new(key_path),
+                None,
+            )
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        } else if let Some(ref password) = self.config.password {
+            sess.userauth_password(&self.config.username, password)
+                .map_err(|e| std::io::Error::other(e.to_string()))?;
+        }
+
+        sess.sftp()
+            .map_err(|e| std::io::Error::other(e.to_string()))
+    }
+
+    async fn remote_manifest_matches(
+        &self,
+        path: &str,
+        expected: &ObjectWriteManifest,
+    ) -> Result<bool, std::io::Error> {
+        let sftp = self.connect()?;
+        let mut file = match sftp.open(std::path::Path::new(path)) {
+            Ok(file) => file,
+            Err(err) => {
+                let err = err.to_string();
+                if err.contains("No such file") || err.contains("not found") {
+                    return Ok(false);
+                }
+                return Err(std::io::Error::other(err));
+            }
+        };
+        let mut bytes = Vec::new();
+        file.read_to_end(&mut bytes)?;
+        let manifest = ObjectWriteManifest::from_json_bytes(&bytes)?;
+        Ok(manifest == *expected)
+    }
+
+    async fn write_remote_manifest(
+        &self,
+        path: &str,
+        manifest: &ObjectWriteManifest,
+    ) -> Result<(), std::io::Error> {
+        let sftp = self.connect()?;
+        let mut file = sftp
+            .create(std::path::Path::new(path))
+            .map_err(|e| std::io::Error::other(e.to_string()))?;
+        file.write_all(&manifest.to_json_bytes()?)?;
+        Ok(())
     }
 }

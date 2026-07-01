@@ -16,8 +16,9 @@ use aws_sdk_s3::Client as S3Client;
 use skippr_runtime_sdk::converters::skippr_hive::SkipprHive;
 use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
 use skippr_runtime_sdk::metrics::counters as metrics_counters;
-use skippr_runtime_sdk::plugins::{SchemaSink, SchemaSyncRequest};
+use skippr_runtime_sdk::plugins::{SchemaSink, SchemaSyncRequest, SinkWriteOutcome};
 use skippr_runtime_sdk::sink_compat::BufferChunker;
+use skippr_runtime_sdk::sink_idempotency::{manifest_object_name, ObjectWriteManifest};
 
 use arrow::array::RecordBatch;
 use arrow::util::display::array_value_to_string;
@@ -275,6 +276,67 @@ impl DataSink for DataSinkAthenaPlugin {
             } else {
                 Some(ctx.idempotency_key.as_str())
             },
+            None,
+        )
+        .await
+        .map(|_| ())
+    }
+
+    async fn sync_with_context_result(
+        &self,
+        stream: SendableRecordBatchStream,
+        ctx: SinkWriteContext<'_>,
+    ) -> Result<SinkWriteOutcome, std::io::Error> {
+        if !ctx.is_grouped() {
+            self.sync_with_context(stream, ctx).await?;
+            return Ok(SinkWriteOutcome::Applied);
+        }
+        ctx.validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
+            .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
+        let stream = match ctx.cdc_ctx {
+            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            None => stream,
+        };
+        let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
+        let resolved_contract = if ctx.cdc_ctx.is_some() {
+            None
+        } else {
+            ctx.source_contract
+                .cloned()
+                .or_else(|| namespace_source_contract(&namespace))
+        };
+        let write_policy = if ctx.cdc_ctx.is_some() {
+            WritePolicy::Append
+        } else {
+            resolved_contract
+                .as_ref()
+                .map(|c| c.write_policy)
+                .unwrap_or(WritePolicy::Append)
+        };
+        if ctx.cdc_ctx.is_none() {
+            if let Some(ref contract) = resolved_contract {
+                validate_write_policy_for_sink(contract, "Athena", ATHENA_WRITE_POLICY_SUPPORT)
+                    .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err.to_string()))?;
+            }
+            ensure_source_contract_for_policy(
+                &namespace,
+                write_policy,
+                resolved_contract.as_ref(),
+            )?;
+        }
+        let manifest = ObjectWriteManifest::from_context(
+            ctx.compaction_id.clone(),
+            ctx.idempotency_key.clone(),
+            ctx.schema_fingerprint.clone(),
+            &ctx.wal_refs,
+        );
+        self.inner_sync(
+            stream,
+            ctx.filename,
+            write_policy,
+            resolved_contract.as_ref(),
+            Some(ctx.idempotency_key.as_str()),
+            Some(&manifest),
         )
         .await
     }
@@ -289,6 +351,9 @@ impl DataSink for DataSinkAthenaPlugin {
         namespaces: &BTreeMap<String, OutputMetadata>,
     ) -> Result<(), std::io::Error> {
         let mut guard = self.schema_state.write().await;
+        if schema_version < guard.version {
+            return Ok(());
+        }
         guard.version = schema_version;
         guard.namespaces = namespaces.clone();
         Ok(())
@@ -430,7 +495,8 @@ impl DataSinkAthenaPlugin {
         write_policy: WritePolicy,
         source_contract: Option<&SourceNamespaceContract>,
         object_stem: Option<&str>,
-    ) -> Result<(), std::io::Error> {
+        idempotency_manifest: Option<&ObjectWriteManifest>,
+    ) -> Result<SinkWriteOutcome, std::io::Error> {
         let _bucket = &self.config.s3_bucket;
         let key = &self.config.s3_prefix;
 
@@ -648,6 +714,15 @@ impl DataSinkAthenaPlugin {
             .map(str::to_string)
             .unwrap_or_else(|| hex::encode(md5::compute(&filename).0));
         let final_key = format!("{}/{}.parquet", full_key, object_stem);
+        let idempotency_manifest_key = manifest_object_name(&final_key);
+        if let Some(manifest) = idempotency_manifest {
+            if self
+                .manifest_matches(&idempotency_manifest_key, manifest)
+                .await?
+            {
+                return Ok(SinkWriteOutcome::AlreadyApplied);
+            }
+        }
 
         // Prepare S3 tagging string
         let tags_str = tags
@@ -1063,6 +1138,66 @@ impl DataSinkAthenaPlugin {
             .await
             .map_err(io::Error::other)?;
         }
+        if let Some(manifest) = idempotency_manifest {
+            self.write_manifest(&idempotency_manifest_key, manifest)
+                .await?;
+        }
+        Ok(SinkWriteOutcome::Applied)
+    }
+
+    async fn manifest_matches(
+        &self,
+        manifest_key: &str,
+        expected: &ObjectWriteManifest,
+    ) -> io::Result<bool> {
+        let response = match self
+            .s3_client
+            .get_object()
+            .bucket(&self.config.s3_bucket)
+            .key(manifest_key)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(err) => {
+                let err = err.to_string();
+                if err.contains("NoSuchKey") || err.contains("NotFound") {
+                    return Ok(false);
+                }
+                return Err(io::Error::other(format!(
+                    "Failed to read Athena idempotency manifest {}: {}",
+                    manifest_key, err
+                )));
+            }
+        };
+        let bytes = response
+            .body
+            .collect()
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))?
+            .into_bytes();
+        let manifest = ObjectWriteManifest::from_json_bytes(&bytes)?;
+        Ok(manifest == *expected)
+    }
+
+    async fn write_manifest(
+        &self,
+        manifest_key: &str,
+        manifest: &ObjectWriteManifest,
+    ) -> io::Result<()> {
+        self.s3_client
+            .put_object()
+            .bucket(&self.config.s3_bucket)
+            .key(manifest_key)
+            .body(ByteStream::from(manifest.to_json_bytes()?))
+            .send()
+            .await
+            .map_err(|err| {
+                io::Error::other(format!(
+                    "Failed to write Athena idempotency manifest {}: {}",
+                    manifest_key, err
+                ))
+            })?;
         Ok(())
     }
 

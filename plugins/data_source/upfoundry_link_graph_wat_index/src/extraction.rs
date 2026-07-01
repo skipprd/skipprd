@@ -1,5 +1,7 @@
 use serde_json::Value;
-use skippr_plugin_shared_link_graph::{id64_string, parse_wat_target_index_record, WatRecordLocation};
+use skippr_plugin_shared_link_graph::{
+    id64_string, parse_wat_target_index_record, WatRecordLocation,
+};
 
 use crate::arrow_batch::TargetIndexArrowRow;
 use crate::config::UpfoundryLinkGraphWatIndexConfig;

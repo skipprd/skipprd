@@ -5,8 +5,7 @@ enum PersistenceState {
 }
 use crate::buffer::compaction_transaction::{
     load_pending_manifests, persist_manifest, remove_manifest, CompactionTransaction,
-    SegmentSourceDescriptor, SinkRetrySemantics, SinkWriteSemantics,
-    WalPartRef,
+    SegmentSourceDescriptor, SinkRetrySemantics, SinkWriteSemantics, WalPartRef,
 };
 use crate::buffer::s3_wal_body_cache;
 use crate::buffer::segment_file::{
@@ -135,8 +134,8 @@ static COMPACTOR_COMMAND_TX: Lazy<
 
 static COMPACT_FAILURES: Lazy<DashMap<String, u32>> = Lazy::new(DashMap::new);
 
-const COMPACTION_GROUP_TARGET_BYTES: u64 = 128 * 1024 * 1024;
-const COMPACTION_GROUP_MAX_PARTS: usize = 512;
+const DEFAULT_COMPACTION_GROUP_TARGET_BYTES: u64 = 64 * 1024 * 1024;
+const DEFAULT_COMPACTION_GROUP_MAX_PARTS: usize = 128;
 const GROUPED_STREAM_PREFETCH_PARTS: usize = 4;
 const GROUPED_STREAM_CHANNEL_CAPACITY: usize = 8;
 
@@ -1160,12 +1159,17 @@ impl Buffers {
 
         let _output_capability = shared_output.capability();
         loop {
-            let works =
-                Self::next_compaction_transactions(
-                    concurrency,
-                    force,
-                    shared_output.as_ref().as_ref(),
-                );
+            let currently_in_flight = crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
+                .load(std::sync::atomic::Ordering::Relaxed);
+            let available = concurrency.saturating_sub(currently_in_flight);
+            if available == 0 {
+                break;
+            }
+            let works = Self::next_compaction_transactions(
+                available,
+                force,
+                shared_output.as_ref().as_ref(),
+            );
             if works.is_empty() {
                 break;
             }
@@ -1179,14 +1183,30 @@ impl Buffers {
                 let namespace = work.txn.namespace.clone();
                 let compaction_id = work.txn.id.clone();
                 let target = work.txn.target_filename.clone();
+                let wal_parts = work.entries.len();
+                let timeout = Self::grouped_compaction_timeout();
                 in_flight.push(Box::pin(async move {
-                    match Self::compact_grouped_work(work, out).await {
-                        Ok(compacted) => compacted,
-                        Err(err) => {
+                    match tokio::time::timeout(timeout, Self::compact_grouped_work(work, out)).await {
+                        Ok(Ok(compacted)) => compacted,
+                        Ok(Err(err)) => {
                             error!(
                                 "Compactor: grouped compaction failed sink_ref={} namespace={} compaction_id={} target={} err={}",
                                 sink_ref, namespace, compaction_id, target, err
                             );
+                            false
+                        }
+                        Err(_) => {
+                            error!(
+                                "Compactor: grouped compaction timed out sink_ref={} namespace={} compaction_id={} target={} wal_parts={} timeout_secs={}",
+                                sink_ref,
+                                namespace,
+                                compaction_id,
+                                target,
+                                wal_parts,
+                                timeout.as_secs()
+                            );
+                            COMPACT_FAILURES.insert(format!("{}:{}", sink_ref, compaction_id), 1);
+                            crate::metrics::counters::add_wal_compaction_transaction_failed(1);
                             false
                         }
                     }
@@ -1204,6 +1224,16 @@ impl Buffers {
             Self::maybe_sweep_segment_cleanup(force);
         }
         made_progress
+    }
+
+    fn grouped_compaction_timeout() -> TokioDuration {
+        TokioDuration::from_secs(
+            Config::getenv("WAL_GROUPED_COMPACTION_TIMEOUT_SECS", "900")
+                .parse::<u64>()
+                .ok()
+                .filter(|value| *value > 0)
+                .unwrap_or(900),
+        )
     }
 
     fn partition_is_reclaimable(
@@ -1413,9 +1443,11 @@ impl Buffers {
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        let target_bytes = COMPACTION_GROUP_TARGET_BYTES;
-        let max_parts = COMPACTION_GROUP_MAX_PARTS;
+        let target_bytes = Self::compaction_group_target_bytes();
+        let max_parts = Self::compaction_group_max_parts();
+        let per_sink_limit = Self::compaction_per_sink_limit();
         let mut groups: HashMap<String, (Vec<CompactionEntry>, u64)> = HashMap::new();
+        let mut scheduled_by_sink: HashMap<String, usize> = HashMap::new();
         let mut out = Vec::with_capacity(limit);
 
         match load_pending_manifests() {
@@ -1425,6 +1457,13 @@ impl Buffers {
                         return out;
                     }
                     if let Some(work) = Self::work_from_manifest(txn, output) {
+                        let count = scheduled_by_sink
+                            .entry(work.txn.sink_ref.clone())
+                            .or_default();
+                        if *count >= per_sink_limit {
+                            continue;
+                        }
+                        *count += 1;
                         out.push(work);
                     }
                 }
@@ -1482,11 +1521,25 @@ impl Buffers {
                 };
                 let group = groups.entry(key).or_insert_with(|| (Vec::new(), 0));
                 if group.0.len() >= max_parts || group.1.saturating_add(idx.bytes) > target_bytes {
+                    let group_sink_ref =
+                        group.0.first().map(|entry| entry.idx.key.sink_ref.clone());
+                    if let Some(sink_ref) = group_sink_ref {
+                        let count = scheduled_by_sink.entry(sink_ref).or_default();
+                        if *count >= per_sink_limit {
+                            group.1 = group.1.saturating_add(idx.bytes);
+                            group.0.push(entry);
+                            continue;
+                        }
+                    }
                     if let Some(work) = Self::build_compaction_work(
                         std::mem::take(&mut group.0),
                         schema_fingerprint.clone(),
                         output,
                     ) {
+                        let count = scheduled_by_sink
+                            .entry(work.txn.sink_ref.clone())
+                            .or_default();
+                        *count += 1;
                         out.push(work);
                         if out.len() >= limit {
                             return out;
@@ -1504,16 +1557,56 @@ impl Buffers {
                 break;
             }
             if let Some(work) = Self::build_compaction_work(entries, String::new(), output) {
+                let count = scheduled_by_sink
+                    .entry(work.txn.sink_ref.clone())
+                    .or_default();
+                if *count >= per_sink_limit {
+                    continue;
+                }
+                *count += 1;
                 out.push(work);
             }
         }
         out
     }
 
+    fn compaction_group_target_bytes() -> u64 {
+        Config::getenv(
+            "WAL_COMPACTION_GROUP_TARGET_BYTES",
+            &DEFAULT_COMPACTION_GROUP_TARGET_BYTES.to_string(),
+        )
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_COMPACTION_GROUP_TARGET_BYTES)
+    }
+
+    fn compaction_group_max_parts() -> usize {
+        Config::getenv(
+            "WAL_COMPACTION_GROUP_MAX_PARTS",
+            &DEFAULT_COMPACTION_GROUP_MAX_PARTS.to_string(),
+        )
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_COMPACTION_GROUP_MAX_PARTS)
+    }
+
+    fn compaction_per_sink_limit() -> usize {
+        Config::getenv("WAL_COMPACTIONS_PER_SINK", "1")
+            .parse::<usize>()
+            .ok()
+            .filter(|value| *value > 0)
+            .unwrap_or(1)
+    }
+
     fn work_from_manifest(
         txn: CompactionTransaction,
         output: &dyn DataSink,
     ) -> Option<CompactionWork> {
+        if Self::manifest_refs_in_flight(&txn) {
+            return None;
+        }
         let sink_ref = txn.sink_ref.clone();
         let txn_id = txn.id.clone();
         let txn = match Self::patch_manifest_semantics(txn, output) {
@@ -1554,6 +1647,16 @@ impl Buffers {
         Some(CompactionWork { txn, entries })
     }
 
+    fn manifest_refs_in_flight(txn: &CompactionTransaction) -> bool {
+        txn.refs.iter().any(|wal_ref| {
+            COMPACTION_IN_FLIGHT.contains_key(&(
+                wal_ref.source.stable_id(),
+                wal_ref.start,
+                wal_ref.len,
+            ))
+        })
+    }
+
     fn build_compaction_work(
         entries: Vec<CompactionEntry>,
         schema_fingerprint_hint: String,
@@ -1564,10 +1667,7 @@ impl Buffers {
         let cap = match output.capability_for_sink_ref(&sink_ref) {
             Some(cap) => cap,
             None => {
-                warn!(
-                    "Compactor: no sink registered for sink_ref={}",
-                    sink_ref
-                );
+                warn!("Compactor: no sink registered for sink_ref={}", sink_ref);
                 return None;
             }
         };
@@ -1679,10 +1779,7 @@ impl Buffers {
             if !quarantined.insert(seg_display.clone()) {
                 continue;
             }
-            let file_len = entry
-                .source
-                .logical_byte_len(&entry.meta)
-                .unwrap_or(0);
+            let file_len = entry.source.logical_byte_len(&entry.meta).unwrap_or(0);
             let diag = format!(
                 "{diag_prefix} seg={} file_len={} start={} idx_len={} key={:?} error={}",
                 seg_display, file_len, entry.idx.start, entry.idx.len, entry.idx.key, err
@@ -1748,7 +1845,6 @@ impl Buffers {
         }
         Ok(cleanup)
     }
-
 
     #[cfg(not(windows))]
     fn fsync_dir(dir: &PathBuf) -> io::Result<()> {
@@ -2076,22 +2172,12 @@ impl Buffers {
                 let start = entry.idx.start as usize;
                 let end = start.saturating_add(entry.idx.len as usize).min(data.len());
                 let mut cursor = io::Cursor::new(&data[start..end]);
-                match StreamReader::try_new(&mut cursor, None) {
-                    Ok(reader) => reader
-                        .collect::<Result<Vec<_>, _>>()
-                        .map_err(|err| io::Error::other(err.to_string())),
-                    Err(_) => {
-                        let mut cursor = io::Cursor::new(&data[start..]);
-                        StreamReader::try_new(&mut cursor, None)
-                            .map_err(|err| io::Error::other(err.to_string()))?
-                            .collect::<Result<Vec<_>, _>>()
-                            .map_err(|err| io::Error::other(err.to_string()))
-                    }
-                }
+                StreamReader::try_new(&mut cursor, None)
+                    .map_err(|err| io::Error::other(err.to_string()))?
+                    .collect::<Result<Vec<_>, _>>()
+                    .map_err(|err| io::Error::other(err.to_string()))
             }
-            (None, SegmentSource::Disk(seg_path)) => {
-                Self::read_disk_entry_batches(entry, seg_path)
-            }
+            (None, SegmentSource::Disk(seg_path)) => Self::read_disk_entry_batches(entry, seg_path),
             _ => Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
                 "grouped compaction source/body mismatch",
@@ -2174,13 +2260,13 @@ impl Buffers {
             GROUPED_STREAM_CHANNEL_CAPACITY,
         );
         let entries = work.entries.clone();
-        tokio::spawn(async move {
+        let producer_handle = tokio::spawn(async move {
             use futures::stream::{self, StreamExt};
             let producer = stream::iter(entries.into_iter().enumerate())
                 .map(|(entry_index, entry)| async move {
-                    let s3_body = Buffers::resolve_entry_s3_body(&entry).await.map_err(|err| {
-                        DataFusionError::External(Box::new(err))
-                    })?;
+                    let s3_body = Buffers::resolve_entry_s3_body(&entry)
+                        .await
+                        .map_err(|err| DataFusionError::External(Box::new(err)))?;
                     let entry_for_blocking = entry.clone();
                     let batches = tokio::task::spawn_blocking(move || {
                         Buffers::read_entry_batches(&entry_for_blocking, s3_body)
@@ -2232,6 +2318,7 @@ impl Buffers {
         struct GroupedWalBatchStream {
             schema: Option<SchemaRef>,
             rx: mpsc::Receiver<Result<GroupedStreamMsg, DataFusionError>>,
+            producer_handle: tokio::task::JoinHandle<()>,
             next_entry_index: usize,
             next_batch_index: usize,
             reorder: BTreeMap<(usize, usize), RecordBatch>,
@@ -2276,8 +2363,7 @@ impl Buffers {
                             } else {
                                 self.schema = Some(batch.schema());
                             }
-                            self.seen_rows =
-                                self.seen_rows.saturating_add(batch.num_rows() as u64);
+                            self.seen_rows = self.seen_rows.saturating_add(batch.num_rows() as u64);
                             self.next_batch_index += 1;
                             return Some(Ok(batch));
                         }
@@ -2305,6 +2391,12 @@ impl Buffers {
                 }
                 self.finished = true;
                 TaskPoll::Ready(None)
+            }
+        }
+
+        impl Drop for GroupedWalBatchStream {
+            fn drop(&mut self) {
+                self.producer_handle.abort();
             }
         }
 
@@ -2340,8 +2432,7 @@ impl Buffers {
                             } else {
                                 self.schema = Some(batch.schema());
                             }
-                            self.seen_rows =
-                                self.seen_rows.saturating_add(batch.num_rows() as u64);
+                            self.seen_rows = self.seen_rows.saturating_add(batch.num_rows() as u64);
                             self.next_batch_index += 1;
                             TaskPoll::Ready(Some(Ok(batch)))
                         } else {
@@ -2402,6 +2493,7 @@ impl Buffers {
         let stream = Box::pin(GroupedWalBatchStream {
             schema: None,
             rx,
+            producer_handle,
             next_entry_index: 0,
             next_batch_index: 0,
             reorder: BTreeMap::new(),
@@ -2547,16 +2639,14 @@ impl Buffers {
             cdc_ctx: cdc_ctx.as_ref(),
             source_contract: source_contract.as_ref(),
         };
+        let sent_txn = work.txn.clone().mark_sent();
+        persist_manifest(&sent_txn)?;
         if let Err(err) = shared_output
-            .sync_with_context(batch_stream, sink_ctx)
+            .sync_with_context_result(batch_stream, sink_ctx)
             .await
         {
             let err_str = err.to_string();
-            Self::quarantine_truncated_entries(
-                &work.entries,
-                "grouped_sync",
-                &err_str,
-            );
+            Self::quarantine_truncated_entries(&work.entries, "grouped_sync", &err_str);
             let failure_key = format!("{}:{}", work.txn.sink_ref, work.txn.id);
             let attempts = {
                 let mut entry = COMPACT_FAILURES.entry(failure_key.clone()).or_insert(0);
@@ -2574,6 +2664,7 @@ impl Buffers {
             crate::metrics::counters::add_wal_compaction_transaction_failed(1);
             return Err(err);
         }
+        persist_manifest(&sent_txn.mark_acked())?;
         COMPACT_FAILURES.remove(&format!("{}:{}", work.txn.sink_ref, work.txn.id));
         crate::metrics::counters::add_wal_compaction_completed(work.entries.len() as u64);
         crate::metrics::counters::add_wal_compaction_transaction_completed(1);
@@ -3682,7 +3773,10 @@ mod compaction_semantics_tests {
             &output,
         )
         .expect("athena work");
-        assert_eq!(athena.txn.semantics, SinkWriteSemantics::IdempotentAtLeastOnce);
+        assert_eq!(
+            athena.txn.semantics,
+            SinkWriteSemantics::IdempotentAtLeastOnce
+        );
     }
 
     #[test]

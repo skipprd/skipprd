@@ -30,6 +30,28 @@ impl ObjectWriteManifest {
             wal_ref_count: wal_refs.len(),
         }
     }
+
+    pub fn matches_context(
+        &self,
+        compaction_id: &str,
+        idempotency_key: &str,
+        schema_fingerprint: &str,
+        wal_refs: &[RuntimeWalPartRef],
+    ) -> bool {
+        self.compaction_id == compaction_id
+            && self.idempotency_key == idempotency_key
+            && self.schema_fingerprint == schema_fingerprint
+            && self.wal_refs_fingerprint == wal_refs_fingerprint(wal_refs)
+            && self.wal_ref_count == wal_refs.len()
+    }
+
+    pub fn to_json_bytes(&self) -> io::Result<Vec<u8>> {
+        serde_json::to_vec_pretty(self).map_err(|err| io::Error::other(err.to_string()))
+    }
+
+    pub fn from_json_bytes(bytes: &[u8]) -> io::Result<Self> {
+        serde_json::from_slice(bytes).map_err(|err| io::Error::other(err.to_string()))
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -51,6 +73,10 @@ pub fn deterministic_object_name(idempotency_key: &str, extension: &str) -> io::
     } else {
         format!("{idempotency_key}.{extension}")
     })
+}
+
+pub fn manifest_object_name(data_object_name: &str) -> String {
+    format!("{data_object_name}.skippr-manifest.json")
 }
 
 pub fn wal_refs_fingerprint(wal_refs: &[RuntimeWalPartRef]) -> String {
@@ -111,4 +137,39 @@ pub fn cdc_message_envelope(
         "order_token": order_token,
         "row": row,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn wal_ref(segment_id: &str, start: u64) -> RuntimeWalPartRef {
+        RuntimeWalPartRef {
+            segment_id: segment_id.to_string(),
+            source: format!("s3://bucket/{segment_id}"),
+            start,
+            len: 10,
+            sink_ref: "sink.main".to_string(),
+            namespace: "ns".to_string(),
+            partition: "p=1".to_string(),
+            time: Some(1),
+            schema_fingerprint: "schema".to_string(),
+            cdc_meta_hash: None,
+        }
+    }
+
+    #[test]
+    fn object_manifest_matches_same_context_independent_of_ref_order() {
+        let refs = vec![wal_ref("b", 2), wal_ref("a", 1)];
+        let reversed = vec![wal_ref("a", 1), wal_ref("b", 2)];
+        let manifest = ObjectWriteManifest::from_context("c1", "k1", "schema", &refs);
+        assert!(manifest.matches_context("c1", "k1", "schema", &reversed));
+    }
+
+    #[test]
+    fn object_manifest_rejects_schema_mismatch() {
+        let refs = vec![wal_ref("a", 1)];
+        let manifest = ObjectWriteManifest::from_context("c1", "k1", "schema-a", &refs);
+        assert!(!manifest.matches_context("c1", "k1", "schema-b", &refs));
+    }
 }

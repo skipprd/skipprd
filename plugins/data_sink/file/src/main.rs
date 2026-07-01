@@ -12,8 +12,10 @@ use datafusion::execution::SendableRecordBatchStream;
 use serde_derive::{Deserialize, Serialize};
 use skippr_runtime_sdk::plugins::cdc;
 use skippr_runtime_sdk::plugins::DataSink;
+use skippr_runtime_sdk::plugins::{SinkWriteContext, SinkWriteOutcome};
 use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
 use skippr_runtime_sdk::sink_compat::BufferChunker;
+use skippr_runtime_sdk::sink_idempotency::{manifest_object_name, ObjectWriteManifest};
 use skippr_runtime_sdk::sink_runtime_entry::run_runtime_data_sink_plugin;
 use tracing::error;
 
@@ -66,7 +68,7 @@ impl DataSink for FileSinkRuntimePlugin {
     async fn sync_with_context(
         &self,
         stream: SendableRecordBatchStream,
-        ctx: skippr_runtime_sdk::plugins::SinkWriteContext<'_>,
+        ctx: SinkWriteContext<'_>,
     ) -> Result<(), io::Error> {
         ctx.validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
             .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
@@ -93,6 +95,53 @@ impl DataSink for FileSinkRuntimePlugin {
             object_stem.as_deref(),
         )
         .await
+    }
+
+    async fn sync_with_context_result(
+        &self,
+        stream: SendableRecordBatchStream,
+        ctx: SinkWriteContext<'_>,
+    ) -> Result<SinkWriteOutcome, io::Error> {
+        if !ctx.is_grouped() {
+            self.sync_with_context(stream, ctx).await?;
+            return Ok(SinkWriteOutcome::Applied);
+        }
+        ctx.validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
+            .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
+        let object_stem = skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
+            &ctx.idempotency_key,
+            "",
+        )?;
+        let output_file = output_file_path(&self.data_dir, &ctx.filename, &object_stem)?;
+        let manifest_file = output_file.with_file_name(manifest_object_name(
+            output_file
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("output.parquet"),
+        ));
+        let expected_manifest = ObjectWriteManifest::from_context(
+            ctx.compaction_id.clone(),
+            ctx.idempotency_key.clone(),
+            ctx.schema_fingerprint.clone(),
+            &ctx.wal_refs,
+        );
+        if manifest_file.exists() {
+            let bytes = fs::read(&manifest_file)?;
+            if ObjectWriteManifest::from_json_bytes(&bytes)? == expected_manifest {
+                return Ok(SinkWriteOutcome::AlreadyApplied);
+            }
+        }
+        sync_file_sink(
+            &self.config,
+            &self.data_dir,
+            &self.order_fields,
+            stream,
+            ctx.filename.clone(),
+            Some(&object_stem),
+        )
+        .await?;
+        fs::write(manifest_file, expected_manifest.to_json_bytes()?)?;
+        Ok(SinkWriteOutcome::Applied)
     }
 
     async fn install_schema_state(
@@ -158,31 +207,10 @@ async fn sync_file_sink(
 
     counters::inc_uploads_in_flight();
 
-    let namespace = BufferChunker::decode_file_namespace(&filename);
-    let mut full_key = if namespace.is_empty() {
-        String::new()
-    } else {
-        namespace
-    };
-
-    let partition = BufferChunker::decode_file_partition(&filename);
-    if !partition.is_empty() {
-        full_key = format!("{}/{}", full_key, partition);
-    }
-
-    if let Ok(time_key) = TimePartitioner::new(&filename).process() {
-        full_key = format!("{}/{}", full_key, time_key);
-    }
-
     let object_stem = object_stem
         .map(str::to_string)
         .unwrap_or_else(|| hex::encode(md5::compute(&filename).0));
-    let output_name = format!("{}/{}", full_key, object_stem);
-    let output_file = Path::new(&format!(
-        "{}/output_buffer/{}.parquet",
-        data_dir, output_name
-    ))
-    .to_path_buf();
+    let output_file = output_file_path(data_dir, &filename, &object_stem)?;
     let output_dir = output_file
         .parent()
         .ok_or_else(|| io::Error::other("output parquet path has no parent directory"))?;
@@ -214,4 +242,34 @@ async fn sync_file_sink(
     counters::add_upload(1);
     counters::dec_uploads_in_flight();
     Ok(())
+}
+
+fn output_file_path(
+    data_dir: &str,
+    filename: &str,
+    object_stem: &str,
+) -> io::Result<std::path::PathBuf> {
+    let namespace = BufferChunker::decode_file_namespace(filename);
+    let mut full_key = if namespace.is_empty() {
+        String::new()
+    } else {
+        namespace
+    };
+
+    let partition = BufferChunker::decode_file_partition(filename);
+    if !partition.is_empty() {
+        full_key = format!("{}/{}", full_key, partition);
+    }
+
+    let filename_owned = filename.to_string();
+    if let Ok(time_key) = TimePartitioner::new(&filename_owned).process() {
+        full_key = format!("{}/{}", full_key, time_key);
+    }
+
+    let output_name = format!("{}/{}", full_key, object_stem);
+    Ok(Path::new(&format!(
+        "{}/output_buffer/{}.parquet",
+        data_dir, output_name
+    ))
+    .to_path_buf())
 }

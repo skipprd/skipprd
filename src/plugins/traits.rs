@@ -190,6 +190,7 @@ pub trait SinkWriteSupport: 'static {
     const RETRY: SinkRetrySemantics;
     const GROUPING: SinkGroupingSupport;
     const EXACT_ONCE_ALLOWED: bool;
+    const CAN_RETURN_ALREADY_APPLIED: bool;
 }
 
 pub struct DeterministicObjectOverwrite;
@@ -197,6 +198,7 @@ impl SinkWriteSupport for DeterministicObjectOverwrite {
     const RETRY: SinkRetrySemantics = SinkRetrySemantics::DeterministicOverwrite;
     const GROUPING: SinkGroupingSupport = SinkGroupingSupport::CdcEncodedBatches;
     const EXACT_ONCE_ALLOWED: bool = false;
+    const CAN_RETURN_ALREADY_APPLIED: bool = true;
 }
 
 pub struct TransactionalTableCommit;
@@ -204,6 +206,7 @@ impl SinkWriteSupport for TransactionalTableCommit {
     const RETRY: SinkRetrySemantics = SinkRetrySemantics::TransactionalIdempotent;
     const GROUPING: SinkGroupingSupport = SinkGroupingSupport::FinalStateBatches;
     const EXACT_ONCE_ALLOWED: bool = true;
+    const CAN_RETURN_ALREADY_APPLIED: bool = true;
 }
 
 pub struct FinalStateIdempotentApply;
@@ -211,6 +214,7 @@ impl SinkWriteSupport for FinalStateIdempotentApply {
     const RETRY: SinkRetrySemantics = SinkRetrySemantics::FinalStateIdempotent;
     const GROUPING: SinkGroupingSupport = SinkGroupingSupport::FinalStateBatches;
     const EXACT_ONCE_ALLOWED: bool = true;
+    const CAN_RETURN_ALREADY_APPLIED: bool = true;
 }
 
 pub struct AtLeastOnceMessageDelivery;
@@ -218,6 +222,7 @@ impl SinkWriteSupport for AtLeastOnceMessageDelivery {
     const RETRY: SinkRetrySemantics = SinkRetrySemantics::AtLeastOnce;
     const GROUPING: SinkGroupingSupport = SinkGroupingSupport::CdcEncodedBatches;
     const EXACT_ONCE_ALLOWED: bool = false;
+    const CAN_RETURN_ALREADY_APPLIED: bool = false;
 }
 
 pub struct NonRetryableDebugOutput;
@@ -225,6 +230,7 @@ impl SinkWriteSupport for NonRetryableDebugOutput {
     const RETRY: SinkRetrySemantics = SinkRetrySemantics::NonRetryable;
     const GROUPING: SinkGroupingSupport = SinkGroupingSupport::None;
     const EXACT_ONCE_ALLOWED: bool = false;
+    const CAN_RETURN_ALREADY_APPLIED: bool = false;
 }
 
 pub struct SftpAtomicRename;
@@ -232,6 +238,7 @@ impl SinkWriteSupport for SftpAtomicRename {
     const RETRY: SinkRetrySemantics = SinkRetrySemantics::DeterministicOverwrite;
     const GROUPING: SinkGroupingSupport = SinkGroupingSupport::CdcEncodedBatches;
     const EXACT_ONCE_ALLOWED: bool = false;
+    const CAN_RETURN_ALREADY_APPLIED: bool = true;
 }
 
 pub struct SftpAtLeastOnce;
@@ -239,6 +246,7 @@ impl SinkWriteSupport for SftpAtLeastOnce {
     const RETRY: SinkRetrySemantics = SinkRetrySemantics::AtLeastOnce;
     const GROUPING: SinkGroupingSupport = SinkGroupingSupport::CdcEncodedBatches;
     const EXACT_ONCE_ALLOWED: bool = false;
+    const CAN_RETURN_ALREADY_APPLIED: bool = false;
 }
 
 pub trait SinkSpec: 'static {
@@ -278,10 +286,16 @@ macro_rules! declare_sink_spec {
     ($spec:ident, $plugin:ty, $capability:path, $support:ty) => {
         const _: () = {
             assert!(!$capability.grouping_support.is_none());
+            assert!($capability
+                .grouping_support
+                .equals(<$support as $crate::plugins::SinkWriteSupport>::GROUPING));
+            assert!($capability
+                .retry_semantics
+                .equals(<$support as $crate::plugins::SinkWriteSupport>::RETRY));
             assert!(
-                $capability
-                    .grouping_support
-                    .equals(<$support as $crate::plugins::SinkWriteSupport>::GROUPING)
+                $capability.grouping_support.is_none()
+                    || !$capability.retry_semantics.requires_idempotent_replay()
+                    || <$support as $crate::plugins::SinkWriteSupport>::CAN_RETURN_ALREADY_APPLIED
             );
         };
 
