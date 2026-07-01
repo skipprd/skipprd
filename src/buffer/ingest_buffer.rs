@@ -1227,13 +1227,18 @@ impl Buffers {
     }
 
     fn grouped_compaction_timeout() -> TokioDuration {
-        TokioDuration::from_secs(
-            Config::getenv("WAL_GROUPED_COMPACTION_TIMEOUT_SECS", "900")
-                .parse::<u64>()
-                .ok()
-                .filter(|value| *value > 0)
-                .unwrap_or(900),
-        )
+        let secs = Config::getenv("WAL_GROUPED_COMPACTION_TIMEOUT_SECS", "")
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .or_else(|| {
+                Config::getenv("RUNTIME_GROUPED_COMPACTION_TIMEOUT_SECS", "")
+                    .parse::<u64>()
+                    .ok()
+                    .filter(|value| *value > 0)
+            })
+            .unwrap_or(300);
+        TokioDuration::from_secs(secs)
     }
 
     fn partition_is_reclaimable(
