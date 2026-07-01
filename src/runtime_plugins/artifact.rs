@@ -1,17 +1,22 @@
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
 use reqwest::StatusCode;
 use sha2::{Digest, Sha256};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::Mutex;
 use tracing::{info, warn};
 
 use crate::runtime_plugins::manifest::{RuntimePluginArtifact, RuntimePluginManifest};
 
 const ARTIFACT_DOWNLOAD_MAX_ATTEMPTS: usize = 4;
 const ARTIFACT_DOWNLOAD_INITIAL_BACKOFF_MS: u64 = 200;
+static ARTIFACT_INSTALL_LOCKS: Lazy<DashMap<PathBuf, Arc<Mutex<()>>>> = Lazy::new(DashMap::new);
 
 pub async fn resolve_plugin_executable(
     manifest_path: &Path,
@@ -42,6 +47,8 @@ async fn resolve_artifact(
 ) -> io::Result<PathBuf> {
     if let Some(url) = artifact.url.as_deref() {
         let destination = install_destination(manifest_path, manifest, artifact)?;
+        let install_lock = artifact_install_lock(&destination);
+        let _install_guard = install_lock.lock().await;
         if destination.exists() {
             if verify_sha256(&destination, artifact.sha256.as_deref())
                 .await
@@ -94,6 +101,13 @@ async fn resolve_artifact(
     Ok(executable)
 }
 
+fn artifact_install_lock(destination: &Path) -> Arc<Mutex<()>> {
+    ARTIFACT_INSTALL_LOCKS
+        .entry(destination.to_path_buf())
+        .or_insert_with(|| Arc::new(Mutex::new(())))
+        .clone()
+}
+
 fn install_destination(
     manifest_path: &Path,
     manifest: &RuntimePluginManifest,
@@ -134,11 +148,35 @@ async fn download_artifact(url: &str, destination: &Path) -> io::Result<()> {
 
     let bytes = download_artifact_bytes(url).await?;
 
-    let mut file = fs::File::create(destination).await?;
+    let temp_destination = temp_artifact_destination(destination);
+    let mut file = fs::File::create(&temp_destination).await?;
     file.write_all(&bytes).await?;
     file.flush().await?;
-    set_executable_permissions(destination).await?;
+    file.sync_all().await?;
+    drop(file);
+    if let Err(err) = set_executable_permissions(&temp_destination).await {
+        let _ = fs::remove_file(&temp_destination).await;
+        return Err(err);
+    }
+    if let Err(err) = fs::rename(&temp_destination, destination).await {
+        let _ = fs::remove_file(&temp_destination).await;
+        return Err(err);
+    }
     Ok(())
+}
+
+fn temp_artifact_destination(destination: &Path) -> PathBuf {
+    let file_name = destination
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or("runtime-plugin");
+    let unique = format!(
+        ".{}.{}.{}.tmp",
+        file_name,
+        std::process::id(),
+        uuid::Uuid::new_v4()
+    );
+    destination.with_file_name(unique)
 }
 
 async fn download_artifact_bytes(url: &str) -> io::Result<bytes::Bytes> {
