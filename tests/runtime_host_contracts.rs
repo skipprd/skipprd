@@ -42,6 +42,7 @@ fn sink_capability_json(name: &str) -> serde_json::Value {
             "can_maintain_tombstone_tables": true,
             "can_compare_order_tokens": true,
             "supports_transactions": true,
+            "supports_bounded_grouped_stream": true,
             "retry_semantics": "FinalStateIdempotent",
             "grouping_support": "FinalStateBatches"
         }),
@@ -52,6 +53,7 @@ fn sink_capability_json(name: &str) -> serde_json::Value {
             "can_maintain_tombstone_tables": false,
             "can_compare_order_tokens": false,
             "supports_transactions": false,
+            "supports_bounded_grouped_stream": true,
             "retry_semantics": "DeterministicOverwrite",
             "grouping_support": "CdcEncodedBatches"
         }),
