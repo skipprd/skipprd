@@ -995,8 +995,7 @@ impl DataSinkIcebergPlugin {
         {
             Ok(response) => response,
             Err(err) => {
-                let err = err.to_string();
-                if err.contains("NoSuchKey") || err.contains("NotFound") {
+                if is_s3_get_object_not_found_error(&err) {
                     return Ok(false);
                 }
                 return Err(io::Error::other(format!(

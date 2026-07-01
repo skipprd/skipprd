@@ -1,6 +1,8 @@
 use super::parquet_util::serialize_to_parquet;
 use crate::helpers::configuration::DataSinkPluginConfig;
 use async_trait::async_trait;
+use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
+use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::Client as S3Client;
 use datafusion::execution::SendableRecordBatchStream;
@@ -245,8 +247,7 @@ impl DataSinkS3Plugin {
         {
             Ok(response) => response,
             Err(err) => {
-                let err = err.to_string();
-                if err.contains("NoSuchKey") || err.contains("NotFound") {
+                if is_s3_get_object_not_found_error(&err) {
                     return Ok(false);
                 }
                 return Err(io::Error::other(format!(
@@ -285,4 +286,39 @@ impl DataSinkS3Plugin {
             })?;
         Ok(())
     }
+}
+
+fn is_s3_get_object_not_found_error(err: &SdkError<GetObjectError>) -> bool {
+    if err
+        .raw_response()
+        .is_some_and(|response| response.status().as_u16() == 404)
+    {
+        return true;
+    }
+    if let Some(service_error) = err.as_service_error() {
+        if is_s3_not_found_code(service_error.code()) {
+            return true;
+        }
+        if service_error
+            .message()
+            .is_some_and(is_s3_not_found_error_text)
+        {
+            return true;
+        }
+    }
+    is_s3_not_found_error_text(&err.to_string())
+}
+
+fn is_s3_not_found_code(code: Option<&str>) -> bool {
+    matches!(
+        code,
+        Some("NoSuchKey" | "NotFound" | "NotFoundException" | "404")
+    )
+}
+
+fn is_s3_not_found_error_text(err: &str) -> bool {
+    err.contains("NoSuchKey")
+        || err.contains("NotFound")
+        || err.contains("status code: 404")
+        || err.contains("404 Not Found")
 }
