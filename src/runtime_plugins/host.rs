@@ -1667,12 +1667,13 @@ impl RuntimeDataSinkPlugin {
                     continue;
                 }
                 Ok(other) => {
-                    let err = io::Error::other(format!(
-                        "unexpected runtime sink frame: {:?}",
-                        other
-                    ));
+                    let err =
+                        io::Error::other(format!("unexpected runtime sink frame: {:?}", other));
                     if !retried && should_retry_runtime_connection(&err) {
-                        warn!("runtime sink request got stale frame, restarting child: {}", err);
+                        warn!(
+                            "runtime sink request got stale frame, restarting child: {}",
+                            err
+                        );
                         self.restart_and_reinstall(&mut guard).await?;
                         retried = true;
                         continue;
@@ -1979,12 +1980,13 @@ impl RuntimeSchemaSinkPlugin {
                     continue;
                 }
                 Ok(other) => {
-                    let err = io::Error::other(format!(
-                        "unexpected runtime schema frame: {:?}",
-                        other
-                    ));
+                    let err =
+                        io::Error::other(format!("unexpected runtime schema frame: {:?}", other));
                     if !retried && should_retry_runtime_connection(&err) {
-                        warn!("runtime schema request got stale frame, restarting child: {}", err);
+                        warn!(
+                            "runtime schema request got stale frame, restarting child: {}",
+                            err
+                        );
                         self.restart_and_reinstall(&mut guard).await?;
                         retried = true;
                         continue;

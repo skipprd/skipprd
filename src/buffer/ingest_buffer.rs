@@ -136,6 +136,8 @@ static COMPACT_FAILURES: Lazy<DashMap<String, u32>> = Lazy::new(DashMap::new);
 
 const DEFAULT_COMPACTION_GROUP_TARGET_BYTES: u64 = 64 * 1024 * 1024;
 const DEFAULT_COMPACTION_GROUP_MAX_PARTS: usize = 128;
+const DEFAULT_GROUPED_STREAM_EAGER_MAX_PARTS: usize = 16;
+const DEFAULT_GROUPED_STREAM_EAGER_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const GROUPED_STREAM_PREFETCH_PARTS: usize = 4;
 const GROUPED_STREAM_CHANNEL_CAPACITY: usize = 8;
 
@@ -2190,6 +2192,106 @@ impl Buffers {
         }
     }
 
+    fn grouped_stream_eager_max_parts() -> usize {
+        Config::getenv(
+            "WAL_GROUPED_STREAM_EAGER_MAX_PARTS",
+            &DEFAULT_GROUPED_STREAM_EAGER_MAX_PARTS.to_string(),
+        )
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_GROUPED_STREAM_EAGER_MAX_PARTS)
+    }
+
+    fn grouped_stream_eager_max_bytes() -> u64 {
+        Config::getenv(
+            "WAL_GROUPED_STREAM_EAGER_MAX_BYTES",
+            &DEFAULT_GROUPED_STREAM_EAGER_MAX_BYTES.to_string(),
+        )
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(DEFAULT_GROUPED_STREAM_EAGER_MAX_BYTES)
+    }
+
+    fn should_build_grouped_stream_eager(work: &CompactionWork) -> bool {
+        if work.entries.len() > Self::grouped_stream_eager_max_parts() {
+            return false;
+        }
+        let total_bytes = work
+            .entries
+            .iter()
+            .fold(0u64, |sum, entry| sum.saturating_add(entry.idx.bytes));
+        total_bytes <= Self::grouped_stream_eager_max_bytes()
+    }
+
+    async fn build_eager_grouped_stream(
+        work: &CompactionWork,
+        expected_cdc_rows: Option<u64>,
+    ) -> io::Result<SendableRecordBatchStream> {
+        let mut batches = Vec::new();
+        for entry in work.entries.iter() {
+            let s3_body = Self::resolve_entry_s3_body(entry).await?;
+            let entry_for_blocking = entry.clone();
+            let entry_batches = tokio::task::spawn_blocking(move || {
+                Self::read_entry_batches(&entry_for_blocking, s3_body)
+            })
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))??;
+            batches.extend(entry_batches);
+        }
+
+        let mut schema: Option<SchemaRef> = None;
+        let mut seen_rows = 0u64;
+        for batch in batches.iter() {
+            if let Some(existing) = &schema {
+                if existing.as_ref() != batch.schema().as_ref() {
+                    return Err(io::Error::other("grouped compaction schema mismatch"));
+                }
+            } else {
+                schema = Some(batch.schema());
+            }
+            seen_rows = seen_rows.saturating_add(batch.num_rows() as u64);
+        }
+
+        if let Some(expected) = expected_cdc_rows {
+            if seen_rows != expected {
+                return Err(io::Error::other(format!(
+                    "CDC grouped WAL metadata expected {} rows but Arrow stream produced {} rows",
+                    expected, seen_rows
+                )));
+            }
+        }
+
+        struct EagerGroupedWalBatchStream {
+            schema: SchemaRef,
+            batches: std::vec::IntoIter<RecordBatch>,
+        }
+
+        impl futures::Stream for EagerGroupedWalBatchStream {
+            type Item = Result<RecordBatch, DataFusionError>;
+
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                _cx: &mut TaskContext<'_>,
+            ) -> TaskPoll<Option<Self::Item>> {
+                TaskPoll::Ready(self.batches.next().map(Ok))
+            }
+        }
+
+        impl RecordBatchStream for EagerGroupedWalBatchStream {
+            fn schema(&self) -> SchemaRef {
+                self.schema.clone()
+            }
+        }
+
+        let schema = schema.unwrap_or_else(|| Arc::new(arrow_schema::Schema::empty()));
+        Ok(Box::pin(EagerGroupedWalBatchStream {
+            schema,
+            batches: batches.into_iter(),
+        }))
+    }
+
     async fn resolve_entry_s3_body(entry: &CompactionEntry) -> io::Result<Option<Arc<Vec<u8>>>> {
         match &entry.source {
             SegmentSource::S3 {
@@ -2248,6 +2350,11 @@ impl Buffers {
         };
         let expected_cdc_rows = cdc_ctx.as_ref().map(|ctx| ctx.part_meta.row_count);
         let total_entries = work.entries.len();
+
+        if Self::should_build_grouped_stream_eager(work) {
+            let stream = Self::build_eager_grouped_stream(work, expected_cdc_rows).await?;
+            return Ok((stream, cdc_ctx, total_rows));
+        }
 
         enum GroupedStreamMsg {
             Batch {
