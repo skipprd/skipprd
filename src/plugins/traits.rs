@@ -286,7 +286,6 @@ impl<'a> GroupedSinkWriteContext<'a> {
             ctx.idempotency_key = format!("{}-chunk-{:08}", self.idempotency_key, chunk_index);
             ctx.compaction_id = format!("{}-chunk-{:08}", self.compaction_id, chunk_index);
         }
-        ctx.wal_refs = Vec::new();
         ctx
     }
 
@@ -309,7 +308,7 @@ impl<'a> GroupedSinkWriteContext<'a> {
             filename,
             compaction_id,
             idempotency_key,
-            wal_refs: Vec::new(),
+            wal_refs: self.wal_refs.clone_vec(),
             write_semantics: self.write_semantics,
             schema_fingerprint: self.schema_fingerprint.clone(),
             cdc_ctx,
@@ -501,6 +500,18 @@ impl GroupedBatchReader {
 
             if rows >= self.config.max_rows || bytes >= self.config.max_bytes {
                 break;
+            }
+        }
+
+        if !self.finished && self.pending.is_none() {
+            match self.stream.next().await {
+                Some(Ok(batch)) => {
+                    self.pending = Some(batch);
+                }
+                Some(Err(err)) => return Err(io::Error::other(err.to_string())),
+                None => {
+                    self.finished = true;
+                }
             }
         }
 
@@ -815,6 +826,28 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn grouped_chunk_context_preserves_wal_refs_for_idempotency() {
+        let sink_ctx = SinkWriteContext {
+            filename: "namespace=users-c=abc".to_string(),
+            compaction_id: "abc".to_string(),
+            idempotency_key: "abc".to_string(),
+            wal_refs: vec![runtime_ref()],
+            write_semantics: SinkWriteSemantics::IdempotentAtLeastOnce,
+            schema_fingerprint: "schema".to_string(),
+            cdc_ctx: None,
+            source_contract: None,
+        };
+        let grouped = GroupedSinkWriteContext::try_from(sink_ctx).unwrap();
+
+        let chunk_ctx = grouped.chunk_sink_write_context_with_cdc(1, false, None);
+
+        assert!(chunk_ctx.is_grouped());
+        assert_eq!(chunk_ctx.wal_refs, grouped.wal_refs.clone_vec());
+        assert_eq!(chunk_ctx.compaction_id, "abc-chunk-00000001");
+        assert_eq!(chunk_ctx.idempotency_key, "abc-chunk-00000001");
+    }
+
     #[tokio::test]
     async fn grouped_batch_reader_emits_bounded_chunks_with_offsets() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
@@ -852,6 +885,35 @@ mod tests {
         assert_eq!(second.row_offset, 2);
         assert_eq!(second.rows, 1);
         assert!(second.final_chunk);
+        assert!(reader.next_chunk().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn grouped_batch_reader_marks_exact_limit_chunk_final_at_eof() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![1, 2]))],
+        )
+        .unwrap();
+        let stream: SendableRecordBatchStream = Box::pin(ChunkRecordBatchStream {
+            schema,
+            batches: vec![batch].into_iter(),
+        });
+        let refs = GroupedWalRefs::new(vec![runtime_ref()]).unwrap();
+        let key = GroupedWalPartitionKey::from_refs(&refs, "schema", None);
+        let mut reader = GroupedBatchReader::new(
+            stream,
+            key,
+            GroupedBatchReaderConfig {
+                max_rows: 2,
+                max_bytes: usize::MAX,
+            },
+        );
+
+        let chunk = reader.next_chunk().await.unwrap().unwrap();
+        assert_eq!(chunk.rows, 2);
+        assert!(chunk.final_chunk);
         assert!(reader.next_chunk().await.unwrap().is_none());
     }
 
