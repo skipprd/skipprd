@@ -47,6 +47,9 @@ type SchemaSyncWorkerState = (
 );
 static SCHEMA_SYNC_WORKER: Lazy<std::sync::Mutex<Option<SchemaSyncWorkerState>>> =
     Lazy::new(|| std::sync::Mutex::new(None));
+static BLOCKING_PRIMARY_SCHEMA_PLUGIN: Lazy<
+    std::sync::Mutex<Option<Arc<dyn crate::plugins::SchemaSink + Send + Sync>>>,
+> = Lazy::new(|| std::sync::Mutex::new(None));
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Skippr {
@@ -2874,33 +2877,18 @@ impl Config {
         let _ = tx.send(namespace.to_string());
     }
 
-    pub async fn sync_output_schema_namespace_blocking(namespace: &str) -> Result<(), String> {
-        let ns = namespace.trim();
-        if ns.is_empty() {
-            return Err("namespace must not be empty".to_string());
+    async fn blocking_primary_schema_plugin(
+    ) -> Result<Arc<dyn crate::plugins::SchemaSink + Send + Sync>, String> {
+        if let Some(plugin) = BLOCKING_PRIMARY_SCHEMA_PLUGIN
+            .lock()
+            .unwrap()
+            .as_ref()
+            .cloned()
+        {
+            return Ok(plugin);
         }
 
         let schema_plugin_name = Config::get_pipeline_schema_plugin_name();
-        if schema_plugin_name.is_empty() {
-            debug!("Schema sync: no schema sink configured for primary output");
-            return Ok(());
-        }
-
-        let flatten = Config::get_transform_flatten_events();
-        let md_snapshot = { METADATA.load().metadata.clone() };
-        let out_meta = if let Some(schema) = md_snapshot.get(ns) {
-            if flatten {
-                OutputMetadata::from_flatterened_metadata_for_namespace(ns, schema)
-            } else {
-                let mut out_meta = OutputMetadata::from_metadata(schema);
-                OutputMetadata::repair_field_identity(ns, &mut out_meta);
-                out_meta
-            }
-        } else {
-            crate::runtime_plugins::schema_state::runtime_schema_output_metadata(ns)
-                .ok_or_else(|| format!("Schema sync: namespace {} missing from metadata", ns))?
-        };
-
         let runtime_version = Config::get_pipeline_schema_plugin_version().map_err(|err| {
             format!(
                 "Schema sync: failed to resolve runtime schema plugin version: {}",
@@ -2951,7 +2939,40 @@ impl Config {
                 err
             )
         })?;
-        let plugin: Box<dyn crate::plugins::SchemaSink + Send + Sync> = Box::new(plugin);
+
+        let plugin: Arc<dyn crate::plugins::SchemaSink + Send + Sync> = Arc::new(plugin);
+        *BLOCKING_PRIMARY_SCHEMA_PLUGIN.lock().unwrap() = Some(plugin.clone());
+        Ok(plugin)
+    }
+
+    pub async fn sync_output_schema_namespace_blocking(namespace: &str) -> Result<(), String> {
+        let ns = namespace.trim();
+        if ns.is_empty() {
+            return Err("namespace must not be empty".to_string());
+        }
+
+        let schema_plugin_name = Config::get_pipeline_schema_plugin_name();
+        if schema_plugin_name.is_empty() {
+            debug!("Schema sync: no schema sink configured for primary output");
+            return Ok(());
+        }
+
+        let flatten = Config::get_transform_flatten_events();
+        let md_snapshot = { METADATA.load().metadata.clone() };
+        let out_meta = if let Some(schema) = md_snapshot.get(ns) {
+            if flatten {
+                OutputMetadata::from_flatterened_metadata_for_namespace(ns, schema)
+            } else {
+                let mut out_meta = OutputMetadata::from_metadata(schema);
+                OutputMetadata::repair_field_identity(ns, &mut out_meta);
+                out_meta
+            }
+        } else {
+            crate::runtime_plugins::schema_state::runtime_schema_output_metadata(ns)
+                .ok_or_else(|| format!("Schema sync: namespace {} missing from metadata", ns))?
+        };
+
+        let plugin = Self::blocking_primary_schema_plugin().await?;
 
         let sync_timeout = std::time::Duration::from_secs(
             Config::getenv("SCHEMA_SYNC_TIMEOUT_SECONDS", "120")

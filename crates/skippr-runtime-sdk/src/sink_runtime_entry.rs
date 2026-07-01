@@ -12,7 +12,8 @@ use crate::protocol::{
     HandshakeResponse, HostDataFrame, HostFrame, PluginFrame, RuntimeBinding, RuntimePluginKind,
     RuntimeRequestAck, RuntimeSchemaInstallRequest, RuntimeSchemaRefreshRequest,
     RuntimeSchemaState, RuntimeSchemaStateInstallRequest, RuntimeSessionHello,
-    RuntimeSinkCapabilityDescriptor, RuntimeSinkInstallRequest, RuntimeSinkWriteAck,
+    RuntimeSinkCapabilityDescriptor, RuntimeSinkInstallRequest, RuntimeSinkPayloadChunk,
+    RuntimeSinkPayloadMode, RuntimeSinkWriteAck,
     RuntimeSinkWriteResult, SchemaRunRequest, SinkRunRequest, RUNTIME_PROTOCOL_VERSION,
     SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
     SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
@@ -179,6 +180,53 @@ async fn read_sink_payload(reader: &mut OwnedReadHalf, request_id: u64) -> io::R
     }
 }
 
+async fn read_next_sink_payload_chunk(
+    reader: &mut OwnedReadHalf,
+    request_id: u64,
+    expected_index: u32,
+) -> io::Result<RuntimeSinkPayloadChunk> {
+    let frame = read_frame_or_eof::<_, HostDataFrame>(reader)
+        .await
+        .map_err(|err| {
+            with_io_context(
+                err,
+                format!("runtime sink request {request_id} payload chunk read failed"),
+            )
+        })?;
+    match frame {
+        Some(HostDataFrame::SinkPayloadChunk(payload))
+            if payload.request_id == request_id && payload.chunk_index == expected_index =>
+        {
+            Ok(payload)
+        }
+        Some(HostDataFrame::SinkPayloadChunk(payload)) => Err(io::Error::other(format!(
+            "sink payload chunk mismatch for request {}: got request {} chunk {}, expected chunk {}",
+            request_id, payload.request_id, payload.chunk_index, expected_index
+        ))),
+        Some(HostDataFrame::SinkPayload(payload)) => Err(io::Error::other(format!(
+            "unexpected full sink payload for grouped request {} while reading chunk {} from request {}",
+            request_id, expected_index, payload.request_id
+        ))),
+        None => Err(io::Error::other(format!(
+            "runtime host closed sink data channel before grouped request {request_id} chunk {expected_index}"
+        ))),
+    }
+}
+
+async fn drain_grouped_sink_payload(
+    reader: &mut OwnedReadHalf,
+    request_id: u64,
+) -> io::Result<()> {
+    let mut expected_index = 0u32;
+    loop {
+        let payload = read_next_sink_payload_chunk(reader, request_id, expected_index).await?;
+        if payload.final_chunk {
+            return Ok(());
+        }
+        expected_index = expected_index.saturating_add(1);
+    }
+}
+
 pub async fn run_runtime_data_sink_plugin<P, F, Fut>(
     expect_plugin_name: &'static str,
     handshake_display_name: &'static str,
@@ -309,7 +357,15 @@ where
                 if schema_refresh_needed(&schema_state, request.required_schema_version) {
                     // The host already sent the payload for this request on the data channel.
                     // Drain it before asking for a schema refresh so retries stay aligned.
-                    let _ = read_sink_payload(&mut data_reader, request.request_id).await?;
+                    match request.payload_mode {
+                        RuntimeSinkPayloadMode::FullStream => {
+                            let _ = read_sink_payload(&mut data_reader, request.request_id).await?;
+                        }
+                        RuntimeSinkPayloadMode::GroupedChunks => {
+                            drain_grouped_sink_payload(&mut data_reader, request.request_id)
+                                .await?;
+                        }
+                    }
                     write_schema_refresh_required(
                         &control_writer,
                         request.required_schema_version,
@@ -327,16 +383,29 @@ where
                     })?;
                     continue;
                 }
-                let arrow_stream_bytes =
-                    read_sink_payload(&mut data_reader, request.request_id).await?;
-                let outcome = match run_sink_request(
-                    request.clone(),
-                    arrow_stream_bytes,
-                    &primary_plugin,
-                    &deadletter_plugin,
-                )
-                .await
-                {
+                let outcome_result = match request.payload_mode {
+                    RuntimeSinkPayloadMode::FullStream => {
+                        let arrow_stream_bytes =
+                            read_sink_payload(&mut data_reader, request.request_id).await?;
+                        run_sink_request(
+                            request.clone(),
+                            arrow_stream_bytes,
+                            &primary_plugin,
+                            &deadletter_plugin,
+                        )
+                        .await
+                    }
+                    RuntimeSinkPayloadMode::GroupedChunks => {
+                        run_grouped_sink_request(
+                            request.clone(),
+                            &mut data_reader,
+                            &primary_plugin,
+                            &deadletter_plugin,
+                        )
+                        .await
+                    }
+                };
+                let outcome = match outcome_result {
                     Ok(outcome) => outcome,
                     Err(err) => {
                         let message = format!(
@@ -519,6 +588,99 @@ where
         }
     }
     Ok(outcome)
+}
+
+async fn run_grouped_sink_request<P>(
+    request: SinkRunRequest,
+    data_reader: &mut OwnedReadHalf,
+    primary_plugin: &Option<P>,
+    deadletter_plugin: &Option<P>,
+) -> io::Result<SinkWriteOutcome>
+where
+    P: DataSink + HasSinkSpec + Send + Sync,
+{
+    let plugin_slot = match request.binding {
+        RuntimeBinding::Primary => primary_plugin,
+        RuntimeBinding::Deadletter => deadletter_plugin,
+    };
+    let plugin = plugin_slot
+        .as_ref()
+        .ok_or_else(|| io::Error::other("runtime sink binding was not installed"))?;
+    let SinkRunRequest {
+        request_id,
+        filename,
+        compaction_id,
+        idempotency_key,
+        wal_refs,
+        write_semantics,
+        schema_fingerprint,
+        cdc_ctx,
+        source_contract,
+        ..
+    } = request;
+    let ctx = skippr_core::plugins::SinkWriteContext {
+        filename,
+        compaction_id,
+        idempotency_key,
+        wal_refs,
+        write_semantics,
+        schema_fingerprint,
+        cdc_ctx: cdc_ctx.as_ref(),
+        source_contract: source_contract.as_ref(),
+    };
+    ctx.validate_grouped::<<P::Spec as skippr_core::plugins::SinkSpec>::WriteSupport>()
+        .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
+    let grouped_ctx = skippr_core::plugins::GroupedSinkWriteContext::try_from(ctx)
+        .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
+    let replay_safe =
+        <<P::Spec as skippr_core::plugins::SinkSpec>::WriteSupport as skippr_core::plugins::SinkWriteSupport>::CAN_RETURN_ALREADY_APPLIED;
+    let ledger_manifest = if replay_safe {
+        Some(ObjectWriteManifest::from_context(
+            grouped_ctx.compaction_id.clone(),
+            grouped_ctx.idempotency_key.clone(),
+            grouped_ctx.schema_fingerprint.clone(),
+            grouped_ctx.wal_refs.as_slice(),
+        ))
+    } else {
+        None
+    };
+    if let Some(manifest) = ledger_manifest.as_ref() {
+        if local_idempotency_manifest_matches(manifest)? {
+            drain_grouped_sink_payload(data_reader, request_id).await?;
+            return Ok(SinkWriteOutcome::AlreadyApplied);
+        }
+    }
+
+    let mut expected_index = 0u32;
+    loop {
+        let payload = read_next_sink_payload_chunk(data_reader, request_id, expected_index).await?;
+        let stream = decode_record_batch_stream(payload.arrow_stream_bytes)?;
+        let chunk_cdc = grouped_ctx.chunk_cdc_context_for_range(
+            payload.chunk_index as u64,
+            payload.row_offset,
+            payload.rows,
+        )?;
+        let chunk_ctx = grouped_ctx.chunk_sink_write_context_with_cdc(
+            payload.chunk_index as u64,
+            payload.chunk_index == 0 && payload.final_chunk,
+            chunk_cdc.as_ref(),
+        );
+        let outcome = plugin.sync_with_context_result(stream, chunk_ctx).await?;
+        if outcome == SinkWriteOutcome::AlreadyApplied && !replay_safe {
+            return Err(io::Error::other(
+                "runtime sink returned AlreadyApplied without declaring idempotent replay support",
+            ));
+        }
+        if payload.final_chunk {
+            break;
+        }
+        expected_index = expected_index.saturating_add(1);
+    }
+
+    if let Some(manifest) = ledger_manifest.as_ref() {
+        write_local_idempotency_manifest(manifest)?;
+    }
+    Ok(SinkWriteOutcome::Applied)
 }
 
 fn local_idempotency_manifest_path(

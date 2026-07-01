@@ -343,6 +343,35 @@ impl DataSink for DataSinkAthenaPlugin {
         .await
     }
 
+    async fn sync_grouped(
+        &self,
+        mut reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
+        ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
+    ) -> Result<SinkWriteOutcome, std::io::Error> {
+        let schema = reader.schema();
+        let mut applied = false;
+        while let Some(chunk) = reader.next_chunk().await? {
+            let chunk_cdc = ctx.chunk_cdc_context(&chunk)?;
+            let chunk_ctx = ctx.chunk_sink_write_context_with_cdc(
+                chunk.chunk_index,
+                chunk.chunk_index == 0 && chunk.final_chunk,
+                chunk_cdc.as_ref(),
+            );
+            if self
+                .sync_with_context_result(chunk.into_stream(schema.clone()), chunk_ctx)
+                .await?
+                == SinkWriteOutcome::Applied
+            {
+                applied = true;
+            }
+        }
+        Ok(if applied {
+            SinkWriteOutcome::Applied
+        } else {
+            SinkWriteOutcome::AlreadyApplied
+        })
+    }
+
     fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
         &skippr_runtime_sdk::plugins::cdc::sink_capabilities::ATHENA
     }
@@ -988,38 +1017,16 @@ impl DataSinkAthenaPlugin {
             }
         }
 
-        // Materialize batches from stream
+        // Resolve ordering. For bounded grouped writes, ordering is applied
+        // within each incoming batch/row group only; no global sort metadata is emitted.
         let schema = stream.schema();
-        let mut raw_batches: Vec<arrow::array::RecordBatch> = Vec::new();
-        let mut rows_written: u64 = 0;
-        let mut batches_stream = stream;
-        while let Some(batch_res) = batches_stream.next().await {
-            let batch = batch_res.map_err(|e| {
-                io::Error::new(io::ErrorKind::Other, format!("Stream error: {}", e))
-            })?;
-            rows_written += batch.num_rows() as u64;
-            raw_batches.push(batch);
-            tokio::task::yield_now().await;
-        }
-
-        // Resolve ordering and sort if configured
         let order_fields =
             skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order_from_fields(
                 &schema,
                 &self.context.output_layout.order_fields,
             );
-        let sorted_batches =
-            skippr_runtime_sdk::converters::parquet_ordering::materialize_and_sort(
-                raw_batches,
-                &schema,
-                &order_fields,
-            )?;
-
         let row_group_size =
-            skippr_runtime_sdk::converters::parquet_ordering::estimate_row_group_size(
-                &sorted_batches,
-                &order_fields,
-            );
+            skippr_runtime_sdk::converters::parquet_ordering::default_streaming_row_group_size();
         let props = skippr_runtime_sdk::converters::parquet_ordering::build_writer_properties(
             &schema,
             &order_fields,
@@ -1042,8 +1049,17 @@ impl DataSinkAthenaPlugin {
                 )
             })?;
 
-        for (batch_index, batch) in sorted_batches.iter().enumerate() {
-            parquet_writer.write(batch).map_err(|e| {
+        let mut rows_written: u64 = 0;
+        let mut batch_index: usize = 0;
+        let mut batches_stream = stream;
+        while let Some(batch_res) = batches_stream.next().await {
+            let batch = batch_res.map_err(|e| {
+                io::Error::new(io::ErrorKind::Other, format!("Stream error: {}", e))
+            })?;
+            let batch =
+                skippr_runtime_sdk::converters::parquet_ordering::sort_batch(&batch, &order_fields)?;
+            rows_written += batch.num_rows() as u64;
+            parquet_writer.write(&batch).map_err(|e| {
                 io::Error::new(io::ErrorKind::Other, format!("Parquet write error: {}", e))
             })?;
             debug!(
@@ -1052,6 +1068,8 @@ impl DataSinkAthenaPlugin {
                 batch.num_rows(),
                 key_for_upload
             );
+            batch_index += 1;
+            tokio::task::yield_now().await;
         }
 
         let _meta = parquet_writer.close().map_err(|e| {

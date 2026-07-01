@@ -642,18 +642,34 @@ impl Metrics {
                             crate::buffer::wal_writer::persist_avg_ms(),
                             crate::buffer::wal_writer::ack_avg_ms(),
                         );
-                        info!(
-                            "WAL compaction: target={}, inflight={}, started/min={}, completed/min={}, txn_started/min={}, txn_completed/min={}, refs_tombstoned/min={}, reclaimable_partitions={}, paused={}",
-                            wal_target,
-                            wal_inflight,
-                            wal_started_min,
-                            wal_completed_min,
-                            wal_txn_started_min,
-                            wal_txn_completed_min,
-                            wal_refs_tombstoned_min,
-                            reclaimable_partitions,
-                            data_dir_paused,
-                        );
+                        if wal_inflight > 0 {
+                            info!(
+                                "WAL compaction: target={}, inflight={}, started/min={}, completed/min={}, txn_started/min={}, txn_completed/min={}, refs_tombstoned/min={}, reclaimable_partitions={}, paused={}, active_grouped=[{}]",
+                                wal_target,
+                                wal_inflight,
+                                wal_started_min,
+                                wal_completed_min,
+                                wal_txn_started_min,
+                                wal_txn_completed_min,
+                                wal_refs_tombstoned_min,
+                                reclaimable_partitions,
+                                data_dir_paused,
+                                crate::buffer::compaction_progress::format_in_flight_grouped_compactions(),
+                            );
+                        } else {
+                            info!(
+                                "WAL compaction: target={}, inflight={}, started/min={}, completed/min={}, txn_started/min={}, txn_completed/min={}, refs_tombstoned/min={}, reclaimable_partitions={}, paused={}",
+                                wal_target,
+                                wal_inflight,
+                                wal_started_min,
+                                wal_completed_min,
+                                wal_txn_started_min,
+                                wal_txn_completed_min,
+                                wal_refs_tombstoned_min,
+                                reclaimable_partitions,
+                                data_dir_paused,
+                            );
+                        }
                         if let Some((free_bytes, used_pct)) = data_dir_disk_usage() {
                             let pause_progress = if data_dir_paused {
                                 Some(crate::buffer::ingest_buffer::Buffers::pause_progress_snapshot())

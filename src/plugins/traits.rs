@@ -1,9 +1,17 @@
 use async_trait::async_trait;
+use arrow::record_batch::RecordBatch;
+use arrow_schema::SchemaRef;
+use datafusion::error::DataFusionError;
 use datafusion::execution::SendableRecordBatchStream;
+use datafusion::physical_plan::RecordBatchStream;
+use futures::StreamExt;
 use serde_derive::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::io;
 use std::marker::PhantomData;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 
 pub use crate::buffer::compaction_transaction::SinkWriteSemantics;
 
@@ -133,6 +141,384 @@ pub struct SinkWriteContext<'a> {
     pub source_contract: Option<&'a SourceNamespaceContract>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupedWalRefs(Vec<crate::runtime_plugins::protocol::RuntimeWalPartRef>);
+
+impl GroupedWalRefs {
+    pub fn new(
+        refs: Vec<crate::runtime_plugins::protocol::RuntimeWalPartRef>,
+    ) -> Result<Self, SinkWriteRejection> {
+        if refs.is_empty() {
+            return Err(SinkWriteRejection::MissingWalRefs);
+        }
+        Ok(Self(refs))
+    }
+
+    pub fn as_slice(&self) -> &[crate::runtime_plugins::protocol::RuntimeWalPartRef] {
+        &self.0
+    }
+
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn clone_vec(&self) -> Vec<crate::runtime_plugins::protocol::RuntimeWalPartRef> {
+        self.0.clone()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GroupedWalKind {
+    Append,
+    Cdc,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupedWalPartitionKey {
+    pub sink_ref: String,
+    pub namespace: String,
+    pub partition: String,
+    pub time: Option<i64>,
+    pub schema_fingerprint: String,
+    pub kind: GroupedWalKind,
+}
+
+impl GroupedWalPartitionKey {
+    pub fn from_refs(
+        refs: &GroupedWalRefs,
+        schema_fingerprint: &str,
+        cdc_ctx: Option<&SyncContext>,
+    ) -> Self {
+        let first = refs
+            .as_slice()
+            .first()
+            .expect("GroupedWalRefs guarantees at least one ref");
+        Self {
+            sink_ref: first.sink_ref.clone(),
+            namespace: first.namespace.clone(),
+            partition: first.partition.clone(),
+            time: first.time,
+            schema_fingerprint: if schema_fingerprint.is_empty() {
+                first.schema_fingerprint.clone()
+            } else {
+                schema_fingerprint.to_string()
+            },
+            kind: if cdc_ctx.is_some() {
+                GroupedWalKind::Cdc
+            } else {
+                GroupedWalKind::Append
+            },
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct GroupedSinkWriteContext<'a> {
+    pub filename: String,
+    pub compaction_id: String,
+    pub idempotency_key: String,
+    pub wal_refs: GroupedWalRefs,
+    pub grouping_key: GroupedWalPartitionKey,
+    pub write_semantics: crate::buffer::compaction_transaction::SinkWriteSemantics,
+    pub schema_fingerprint: String,
+    pub cdc_ctx: Option<&'a SyncContext>,
+    pub source_contract: Option<&'a SourceNamespaceContract>,
+}
+
+impl<'a> TryFrom<SinkWriteContext<'a>> for GroupedSinkWriteContext<'a> {
+    type Error = SinkWriteRejection;
+
+    fn try_from(ctx: SinkWriteContext<'a>) -> Result<Self, Self::Error> {
+        if ctx.idempotency_key.is_empty() {
+            return Err(SinkWriteRejection::MissingIdempotencyKey);
+        }
+        let wal_refs = GroupedWalRefs::new(ctx.wal_refs)?;
+        let grouping_key =
+            GroupedWalPartitionKey::from_refs(&wal_refs, &ctx.schema_fingerprint, ctx.cdc_ctx);
+        Ok(Self {
+            filename: ctx.filename,
+            compaction_id: ctx.compaction_id,
+            idempotency_key: ctx.idempotency_key,
+            wal_refs,
+            grouping_key,
+            write_semantics: ctx.write_semantics,
+            schema_fingerprint: ctx.schema_fingerprint,
+            cdc_ctx: ctx.cdc_ctx,
+            source_contract: ctx.source_contract,
+        })
+    }
+}
+
+impl<'a> GroupedSinkWriteContext<'a> {
+    pub fn to_sink_write_context(&self) -> SinkWriteContext<'a> {
+        SinkWriteContext {
+            filename: self.filename.clone(),
+            compaction_id: self.compaction_id.clone(),
+            idempotency_key: self.idempotency_key.clone(),
+            wal_refs: self.wal_refs.clone_vec(),
+            write_semantics: self.write_semantics,
+            schema_fingerprint: self.schema_fingerprint.clone(),
+            cdc_ctx: self.cdc_ctx,
+            source_contract: self.source_contract,
+        }
+    }
+
+    pub fn chunk_filename(&self, chunk_index: u64, final_single_chunk: bool) -> String {
+        if chunk_index == 0 && final_single_chunk {
+            self.filename.clone()
+        } else {
+            format!("{}&grouped_chunk={:08}", self.filename, chunk_index)
+        }
+    }
+
+    pub fn chunk_sink_write_context(
+        &self,
+        chunk_index: u64,
+        final_single_chunk: bool,
+    ) -> SinkWriteContext<'a> {
+        let mut ctx = self.to_sink_write_context();
+        ctx.filename = self.chunk_filename(chunk_index, final_single_chunk);
+        if !final_single_chunk {
+            ctx.idempotency_key = format!("{}-chunk-{:08}", self.idempotency_key, chunk_index);
+            ctx.compaction_id = format!("{}-chunk-{:08}", self.compaction_id, chunk_index);
+        }
+        ctx.wal_refs = Vec::new();
+        ctx
+    }
+
+    pub fn chunk_sink_write_context_with_cdc<'b>(
+        &'b self,
+        chunk_index: u64,
+        final_single_chunk: bool,
+        cdc_ctx: Option<&'b SyncContext>,
+    ) -> SinkWriteContext<'b> {
+        let filename = self.chunk_filename(chunk_index, final_single_chunk);
+        let (compaction_id, idempotency_key) = if final_single_chunk {
+            (self.compaction_id.clone(), self.idempotency_key.clone())
+        } else {
+            (
+                format!("{}-chunk-{:08}", self.compaction_id, chunk_index),
+                format!("{}-chunk-{:08}", self.idempotency_key, chunk_index),
+            )
+        };
+        SinkWriteContext {
+            filename,
+            compaction_id,
+            idempotency_key,
+            wal_refs: Vec::new(),
+            write_semantics: self.write_semantics,
+            schema_fingerprint: self.schema_fingerprint.clone(),
+            cdc_ctx,
+            source_contract: self.source_contract,
+        }
+    }
+
+    pub fn chunk_cdc_context(&self, chunk: &RecordBatchChunk) -> io::Result<Option<SyncContext>> {
+        self.chunk_cdc_context_for_range(chunk.chunk_index, chunk.row_offset, chunk.rows)
+    }
+
+    pub fn chunk_cdc_context_for_range(
+        &self,
+        chunk_index: u64,
+        row_offset: u64,
+        rows: u64,
+    ) -> io::Result<Option<SyncContext>> {
+        let Some(cdc) = self.cdc_ctx else {
+            return Ok(None);
+        };
+        let part_meta = match cdc.part_meta.kind {
+            crate::plugins::cdc::WalPartKind::Append => {
+                crate::plugins::cdc::WalPartMeta::append(rows)
+            }
+            crate::plugins::cdc::WalPartKind::Cdc => {
+                let start = row_offset as usize;
+                let end = start.saturating_add(rows as usize);
+                let rows = cdc.part_meta.rows.get(start..end).ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "CDC metadata slice out of range for grouped chunk {}: rows {}..{} of {}",
+                            chunk_index,
+                            start,
+                            end,
+                            cdc.part_meta.rows.len()
+                        ),
+                    )
+                })?;
+                crate::plugins::cdc::WalPartMeta::cdc(rows.to_vec(), rows.len() as u64)
+                    .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?
+            }
+        };
+        Ok(Some(SyncContext {
+            part_meta,
+            contract: cdc.contract.clone(),
+        }))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct RecordBatchChunk {
+    pub chunk_index: u64,
+    pub row_offset: u64,
+    pub final_chunk: bool,
+    pub rows: u64,
+    pub bytes: usize,
+    pub batches: Vec<RecordBatch>,
+}
+
+impl RecordBatchChunk {
+    pub fn into_stream(self, schema: SchemaRef) -> SendableRecordBatchStream {
+        Box::pin(ChunkRecordBatchStream {
+            schema,
+            batches: self.batches.into_iter(),
+        })
+    }
+}
+
+struct ChunkRecordBatchStream {
+    schema: SchemaRef,
+    batches: std::vec::IntoIter<RecordBatch>,
+}
+
+impl futures::Stream for ChunkRecordBatchStream {
+    type Item = Result<RecordBatch, DataFusionError>;
+
+    fn poll_next(
+        mut self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+    ) -> Poll<Option<Self::Item>> {
+        Poll::Ready(self.batches.next().map(Ok))
+    }
+}
+
+impl RecordBatchStream for ChunkRecordBatchStream {
+    fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct GroupedBatchReaderConfig {
+    pub max_rows: usize,
+    pub max_bytes: usize,
+}
+
+impl Default for GroupedBatchReaderConfig {
+    fn default() -> Self {
+        Self {
+            max_rows: 100_000,
+            max_bytes: 64 * 1024 * 1024,
+        }
+    }
+}
+
+pub struct GroupedBatchReader {
+    stream: SendableRecordBatchStream,
+    schema: SchemaRef,
+    grouping_key: GroupedWalPartitionKey,
+    config: GroupedBatchReaderConfig,
+    chunk_index: u64,
+    rows_emitted: u64,
+    pending: Option<RecordBatch>,
+    finished: bool,
+}
+
+impl GroupedBatchReader {
+    pub fn new(
+        stream: SendableRecordBatchStream,
+        grouping_key: GroupedWalPartitionKey,
+        config: GroupedBatchReaderConfig,
+    ) -> Self {
+        let schema = stream.schema();
+        Self {
+            stream,
+            schema,
+            grouping_key,
+            config,
+            chunk_index: 0,
+            rows_emitted: 0,
+            pending: None,
+            finished: false,
+        }
+    }
+
+    pub fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
+    }
+
+    pub fn grouping_key(&self) -> &GroupedWalPartitionKey {
+        &self.grouping_key
+    }
+
+    pub async fn next_chunk(&mut self) -> io::Result<Option<RecordBatchChunk>> {
+        if self.finished {
+            return Ok(None);
+        }
+
+        let mut batches = Vec::new();
+        let mut rows = 0usize;
+        let mut bytes = 0usize;
+
+        loop {
+            let next_batch = if let Some(batch) = self.pending.take() {
+                Some(batch)
+            } else {
+                match self.stream.next().await {
+                    Some(Ok(batch)) => Some(batch),
+                    Some(Err(err)) => return Err(io::Error::other(err.to_string())),
+                    None => None,
+                }
+            };
+
+            let Some(batch) = next_batch else {
+                self.finished = true;
+                if batches.is_empty() {
+                    return Ok(None);
+                }
+                break;
+            };
+
+            let batch_rows = batch.num_rows();
+            let batch_bytes = batch
+                .columns()
+                .iter()
+                .map(|column| column.get_array_memory_size())
+                .sum::<usize>();
+            let would_exceed = !batches.is_empty()
+                && (rows.saturating_add(batch_rows) > self.config.max_rows
+                    || bytes.saturating_add(batch_bytes) > self.config.max_bytes);
+            if would_exceed {
+                self.pending = Some(batch);
+                break;
+            }
+            rows = rows.saturating_add(batch_rows);
+            bytes = bytes.saturating_add(batch_bytes);
+            batches.push(batch);
+
+            if rows >= self.config.max_rows || bytes >= self.config.max_bytes {
+                break;
+            }
+        }
+
+        let chunk_index = self.chunk_index;
+        let row_offset = self.rows_emitted;
+        self.chunk_index = self.chunk_index.saturating_add(1);
+        self.rows_emitted = self.rows_emitted.saturating_add(rows as u64);
+        Ok(Some(RecordBatchChunk {
+            chunk_index,
+            row_offset,
+            final_chunk: self.finished,
+            rows: rows as u64,
+            bytes,
+            batches,
+        }))
+    }
+}
+
 impl SinkWriteContext<'_> {
     pub fn is_grouped(&self) -> bool {
         !self.wal_refs.is_empty()
@@ -166,6 +552,7 @@ pub enum SinkWriteOutcome {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SinkWriteRejection {
     MissingIdempotencyKey,
+    MissingWalRefs,
     UnsupportedGrouping { grouping: SinkGroupingSupport },
     UnsupportedExactOnce,
 }
@@ -174,6 +561,7 @@ impl std::fmt::Display for SinkWriteRejection {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::MissingIdempotencyKey => write!(f, "grouped sink write missing idempotency key"),
+            Self::MissingWalRefs => write!(f, "grouped sink write missing WAL references"),
             Self::UnsupportedGrouping { grouping } => {
                 write!(f, "sink does not support grouped writes: {grouping:?}")
             }
@@ -191,6 +579,17 @@ pub trait SinkWriteSupport: 'static {
     const GROUPING: SinkGroupingSupport;
     const EXACT_ONCE_ALLOWED: bool;
     const CAN_RETURN_ALREADY_APPLIED: bool;
+    const BOUNDED_GROUPED_STREAM: bool;
+    const GROUPED_CONTRACT: GroupedSinkContract;
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum GroupedSinkContract {
+    BoundedObjectWrite,
+    BoundedTransactionalApply,
+    BoundedAtLeastOnceEmit,
+    DebugDiscard,
+    Unsupported,
 }
 
 pub struct DeterministicObjectOverwrite;
@@ -199,6 +598,8 @@ impl SinkWriteSupport for DeterministicObjectOverwrite {
     const GROUPING: SinkGroupingSupport = SinkGroupingSupport::CdcEncodedBatches;
     const EXACT_ONCE_ALLOWED: bool = false;
     const CAN_RETURN_ALREADY_APPLIED: bool = true;
+    const BOUNDED_GROUPED_STREAM: bool = true;
+    const GROUPED_CONTRACT: GroupedSinkContract = GroupedSinkContract::BoundedObjectWrite;
 }
 
 pub struct TransactionalTableCommit;
@@ -207,6 +608,8 @@ impl SinkWriteSupport for TransactionalTableCommit {
     const GROUPING: SinkGroupingSupport = SinkGroupingSupport::FinalStateBatches;
     const EXACT_ONCE_ALLOWED: bool = true;
     const CAN_RETURN_ALREADY_APPLIED: bool = true;
+    const BOUNDED_GROUPED_STREAM: bool = true;
+    const GROUPED_CONTRACT: GroupedSinkContract = GroupedSinkContract::BoundedTransactionalApply;
 }
 
 pub struct FinalStateIdempotentApply;
@@ -215,6 +618,8 @@ impl SinkWriteSupport for FinalStateIdempotentApply {
     const GROUPING: SinkGroupingSupport = SinkGroupingSupport::FinalStateBatches;
     const EXACT_ONCE_ALLOWED: bool = true;
     const CAN_RETURN_ALREADY_APPLIED: bool = true;
+    const BOUNDED_GROUPED_STREAM: bool = true;
+    const GROUPED_CONTRACT: GroupedSinkContract = GroupedSinkContract::BoundedTransactionalApply;
 }
 
 pub struct AtLeastOnceMessageDelivery;
@@ -223,6 +628,8 @@ impl SinkWriteSupport for AtLeastOnceMessageDelivery {
     const GROUPING: SinkGroupingSupport = SinkGroupingSupport::CdcEncodedBatches;
     const EXACT_ONCE_ALLOWED: bool = false;
     const CAN_RETURN_ALREADY_APPLIED: bool = false;
+    const BOUNDED_GROUPED_STREAM: bool = true;
+    const GROUPED_CONTRACT: GroupedSinkContract = GroupedSinkContract::BoundedAtLeastOnceEmit;
 }
 
 pub struct NonRetryableDebugOutput;
@@ -231,6 +638,8 @@ impl SinkWriteSupport for NonRetryableDebugOutput {
     const GROUPING: SinkGroupingSupport = SinkGroupingSupport::None;
     const EXACT_ONCE_ALLOWED: bool = false;
     const CAN_RETURN_ALREADY_APPLIED: bool = false;
+    const BOUNDED_GROUPED_STREAM: bool = false;
+    const GROUPED_CONTRACT: GroupedSinkContract = GroupedSinkContract::Unsupported;
 }
 
 pub struct SftpAtomicRename;
@@ -239,6 +648,8 @@ impl SinkWriteSupport for SftpAtomicRename {
     const GROUPING: SinkGroupingSupport = SinkGroupingSupport::CdcEncodedBatches;
     const EXACT_ONCE_ALLOWED: bool = false;
     const CAN_RETURN_ALREADY_APPLIED: bool = true;
+    const BOUNDED_GROUPED_STREAM: bool = true;
+    const GROUPED_CONTRACT: GroupedSinkContract = GroupedSinkContract::BoundedObjectWrite;
 }
 
 pub struct SftpAtLeastOnce;
@@ -247,6 +658,8 @@ impl SinkWriteSupport for SftpAtLeastOnce {
     const GROUPING: SinkGroupingSupport = SinkGroupingSupport::CdcEncodedBatches;
     const EXACT_ONCE_ALLOWED: bool = false;
     const CAN_RETURN_ALREADY_APPLIED: bool = false;
+    const BOUNDED_GROUPED_STREAM: bool = true;
+    const GROUPED_CONTRACT: GroupedSinkContract = GroupedSinkContract::BoundedAtLeastOnceEmit;
 }
 
 pub trait SinkSpec: 'static {
@@ -297,6 +710,10 @@ macro_rules! declare_sink_spec {
                     || !$capability.retry_semantics.requires_idempotent_replay()
                     || <$support as $crate::plugins::SinkWriteSupport>::CAN_RETURN_ALREADY_APPLIED
             );
+            assert!(
+                $capability.grouping_support.is_none()
+                    || <$support as $crate::plugins::SinkWriteSupport>::BOUNDED_GROUPED_STREAM
+            );
         };
 
         pub struct $spec;
@@ -331,7 +748,24 @@ macro_rules! declare_schema_sink_spec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::Int64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
     use crate::plugins::cdc::source_capabilities;
+
+    fn runtime_ref() -> crate::runtime_plugins::protocol::RuntimeWalPartRef {
+        crate::runtime_plugins::protocol::RuntimeWalPartRef {
+            segment_id: "seg-1".to_string(),
+            source: "local".to_string(),
+            start: 0,
+            len: 10,
+            sink_ref: "primary".to_string(),
+            namespace: "users".to_string(),
+            partition: "p=1".to_string(),
+            time: Some(10),
+            schema_fingerprint: "schema".to_string(),
+            cdc_meta_hash: None,
+        }
+    }
 
     #[test]
     fn source_cdc_mode_uses_snake_case_config_strings() {
@@ -365,18 +799,7 @@ mod tests {
             filename: "namespace=users-c=abc".to_string(),
             compaction_id: "abc".to_string(),
             idempotency_key: "abc".to_string(),
-            wal_refs: vec![crate::runtime_plugins::protocol::RuntimeWalPartRef {
-                segment_id: "seg-1".to_string(),
-                source: "local".to_string(),
-                start: 0,
-                len: 10,
-                sink_ref: "primary".to_string(),
-                namespace: "users".to_string(),
-                partition: String::new(),
-                time: None,
-                schema_fingerprint: String::new(),
-                cdc_meta_hash: None,
-            }],
+            wal_refs: vec![runtime_ref()],
             write_semantics: SinkWriteSemantics::IdempotentAtLeastOnce,
             schema_fingerprint: "schema".to_string(),
             cdc_ctx: None,
@@ -390,6 +813,82 @@ mod tests {
             ctx.validate_grouped::<NonRetryableDebugOutput>(),
             Err(SinkWriteRejection::UnsupportedGrouping { .. })
         ));
+    }
+
+    #[tokio::test]
+    async fn grouped_batch_reader_emits_bounded_chunks_with_offsets() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let batch_one = RecordBatch::try_new(
+            schema.clone(),
+            vec![Arc::new(Int64Array::from(vec![1, 2]))],
+        )
+        .unwrap();
+        let batch_two =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![3]))])
+                .unwrap();
+        let stream: SendableRecordBatchStream = Box::pin(ChunkRecordBatchStream {
+            schema,
+            batches: vec![batch_one, batch_two].into_iter(),
+        });
+        let refs = GroupedWalRefs::new(vec![runtime_ref()]).unwrap();
+        let key = GroupedWalPartitionKey::from_refs(&refs, "schema", None);
+        let mut reader = GroupedBatchReader::new(
+            stream,
+            key,
+            GroupedBatchReaderConfig {
+                max_rows: 2,
+                max_bytes: usize::MAX,
+            },
+        );
+
+        let first = reader.next_chunk().await.unwrap().unwrap();
+        assert_eq!(first.chunk_index, 0);
+        assert_eq!(first.row_offset, 0);
+        assert_eq!(first.rows, 2);
+        assert!(!first.final_chunk);
+
+        let second = reader.next_chunk().await.unwrap().unwrap();
+        assert_eq!(second.chunk_index, 1);
+        assert_eq!(second.row_offset, 2);
+        assert_eq!(second.rows, 1);
+        assert!(second.final_chunk);
+        assert!(reader.next_chunk().await.unwrap().is_none());
+    }
+
+    #[test]
+    fn grouped_context_slices_cdc_metadata_by_chunk_offset() {
+        use crate::plugins::cdc::{MutationKind, SyncContext, WalPartMeta, WalRowMeta};
+
+        let rows = (0..4)
+            .map(|idx| WalRowMeta {
+                mutation: MutationKind::Insert,
+                event_id: vec![idx],
+                order_token: vec![idx],
+            })
+            .collect::<Vec<_>>();
+        let cdc_ctx = SyncContext {
+            part_meta: WalPartMeta::cdc(rows, 4).unwrap(),
+            contract: None,
+        };
+        let sink_ctx = SinkWriteContext {
+            filename: "namespace=users-c=abc".to_string(),
+            compaction_id: "abc".to_string(),
+            idempotency_key: "abc".to_string(),
+            wal_refs: vec![runtime_ref()],
+            write_semantics: SinkWriteSemantics::IdempotentAtLeastOnce,
+            schema_fingerprint: "schema".to_string(),
+            cdc_ctx: Some(&cdc_ctx),
+            source_contract: None,
+        };
+        let grouped = GroupedSinkWriteContext::try_from(sink_ctx).unwrap();
+
+        let sliced = grouped
+            .chunk_cdc_context_for_range(1, 2, 2)
+            .unwrap()
+            .expect("cdc context");
+        assert_eq!(sliced.part_meta.row_count, 2);
+        assert_eq!(sliced.part_meta.rows[0].event_id, vec![2]);
+        assert_eq!(sliced.part_meta.rows[1].event_id, vec![3]);
     }
 }
 
@@ -420,9 +919,25 @@ pub trait DataSink: Send + Sync {
         stream: SendableRecordBatchStream,
         ctx: SinkWriteContext<'_>,
     ) -> Result<SinkWriteOutcome, std::io::Error> {
+        if ctx.is_grouped() {
+            let grouped = GroupedSinkWriteContext::try_from(ctx)
+                .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
+            let reader = GroupedBatchReader::new(
+                stream,
+                grouped.grouping_key.clone(),
+                GroupedBatchReaderConfig::default(),
+            );
+            return self.sync_grouped(reader, grouped).await;
+        }
         self.sync_with_context(stream, ctx).await?;
         Ok(SinkWriteOutcome::Applied)
     }
+
+    async fn sync_grouped(
+        &self,
+        reader: GroupedBatchReader,
+        ctx: GroupedSinkWriteContext<'_>,
+    ) -> Result<SinkWriteOutcome, std::io::Error>;
 
     /// Return the compile-time capability descriptor for this sink.
     fn capability(&self) -> &'static SinkCapability;

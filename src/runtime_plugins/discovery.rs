@@ -3,13 +3,15 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use dashmap::DashMap;
+use once_cell::sync::Lazy;
 use reqwest::header::{CACHE_CONTROL, PRAGMA, USER_AGENT};
 use reqwest::StatusCode;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::runtime_plugins::host::ResolvedRuntimePlugin;
 use crate::runtime_plugins::manifest::RuntimePluginManifest;
@@ -19,8 +21,12 @@ const DEFAULT_DISCOVERY_BASE_URL: &str = "https://install.skippr.io/releases/run
 const METADATA_REFRESH_QUERY_PARAM: &str = "skippr_metadata_refresh";
 const LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR_ENV: &str = "SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR";
 const USE_LOCAL_PLUGIN_CODE_ENV: &str = "USE_LOCAL_PLUGIN_CODE";
+const MANIFEST_REFRESH_ENV: &str = "SKIPPR_RUNTIME_PLUGIN_MANIFEST_REFRESH";
 const METADATA_FETCH_MAX_ATTEMPTS: usize = 4;
 const METADATA_FETCH_INITIAL_BACKOFF_MS: u64 = 200;
+
+static RESOLVED_RUNTIME_PLUGINS: Lazy<DashMap<String, ResolvedRuntimePlugin>> =
+    Lazy::new(DashMap::new);
 
 #[derive(Clone, Debug, Deserialize)]
 struct RuntimePluginIndex {
@@ -177,11 +183,41 @@ pub fn validate_resolved_plugin(
     Ok(resolved)
 }
 
+fn resolved_runtime_plugin_cache_key(
+    expected_kind: RuntimePluginKind,
+    expected_plugin_name: &str,
+    configured_plugin_version: Option<&str>,
+) -> String {
+    format!(
+        "{expected_kind:?}:{expected_plugin_name}:{}",
+        configured_plugin_version
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .unwrap_or("latest")
+    )
+}
+
 pub async fn resolve_runtime_plugin(
     expected_kind: RuntimePluginKind,
     expected_plugin_name: &str,
     configured_plugin_version: Option<&str>,
 ) -> io::Result<ResolvedRuntimePlugin> {
+    let cache_key = resolved_runtime_plugin_cache_key(
+        expected_kind,
+        expected_plugin_name,
+        configured_plugin_version,
+    );
+    if let Some(cached) = RESOLVED_RUNTIME_PLUGINS.get(&cache_key) {
+        debug!(
+            "Using cached runtime {} plugin '{}' version={} manifest={}",
+            runtime_plugin_kind_label(expected_kind),
+            cached.manifest.plugin_name,
+            cached.manifest.version,
+            cached.manifest.name,
+        );
+        return validate_resolved_plugin(cached.clone(), expected_kind, expected_plugin_name);
+    }
+
     let resolved = if use_local_plugin_code() {
         match resolve_local_runtime_plugin(expected_kind, expected_plugin_name)? {
             Some(resolved) => resolved,
@@ -204,7 +240,8 @@ pub async fn resolve_runtime_plugin(
     };
 
     let resolved = validate_resolved_plugin(resolved, expected_kind, expected_plugin_name)?;
-    info!(
+    RESOLVED_RUNTIME_PLUGINS.insert(cache_key, resolved.clone());
+    debug!(
         "Resolved runtime {} plugin '{}' version={} manifest={} path={}",
         runtime_plugin_kind_label(expected_kind),
         resolved.manifest.plugin_name,
@@ -312,7 +349,7 @@ async fn discover_runtime_plugin(
     let client = reqwest::Client::new();
     let requested_plugin_version = configured_runtime_plugin_version(configured_plugin_version);
     let index_url = latest_manifest_index_url();
-    info!(
+    debug!(
         "Resolving runtime {} plugin '{}' from published registry requested_version='{}' index_url={}",
         runtime_plugin_kind_label(expected_kind),
         expected_plugin_name,
@@ -335,7 +372,7 @@ async fn discover_runtime_plugin(
         })?;
     let manifest_url = resolved_manifest_url(latest_entry, requested_plugin_version.as_deref())?;
     let cache_key = manifest_cache_key(&manifest_url, requested_plugin_version.as_deref());
-    info!(
+    debug!(
         "Resolved published runtime {} plugin '{}' via requested_version='{}' index_label='{}' manifest={} manifest_url={}",
         runtime_plugin_kind_label(expected_kind),
         expected_plugin_name,
@@ -411,23 +448,22 @@ async fn cache_manifest(
         .join("manifests")
         .join(cache_key);
     let manifest_path = manifest_dir.join(&entry.manifest_filename);
-    if manifest_path.exists() {
-        info!(
-            "Refreshing cached runtime plugin manifest metadata: plugin={} kind={:?} cache_key={} path={} url={}",
+    if manifest_path.exists() && !manifest_refresh_enabled() {
+        debug!(
+            "Using cached runtime plugin manifest: plugin={} kind={:?} cache_key={} path={}",
             entry.plugin_name,
             entry.kind,
             cache_key,
             manifest_path.display(),
-            manifest_url,
         );
+        return Ok(manifest_path);
     }
 
     info!(
-        "Downloading runtime plugin manifest: plugin={} kind={:?} cache_key={} url={} destination={}",
+        "Downloading runtime plugin manifest: plugin={} kind={:?} version={} path={}",
         entry.plugin_name,
         entry.kind,
         cache_key,
-        manifest_url,
         manifest_path.display(),
     );
     let bytes = fetch_metadata_bytes(client, manifest_url).await?;
@@ -435,14 +471,11 @@ async fn cache_manifest(
     let mut file = fs::File::create(&manifest_path).await?;
     file.write_all(&bytes).await?;
     file.flush().await?;
-    info!(
-        "Downloaded runtime plugin manifest: plugin={} kind={:?} cache_key={} path={}",
-        entry.plugin_name,
-        entry.kind,
-        cache_key,
-        manifest_path.display(),
-    );
     Ok(manifest_path)
+}
+
+fn manifest_refresh_enabled() -> bool {
+    env_truthy(MANIFEST_REFRESH_ENV)
 }
 
 async fn fetch_json<T>(client: &reqwest::Client, url: &str) -> io::Result<T>
@@ -556,8 +589,9 @@ mod tests {
 
     use super::{
         append_metadata_refresh_query, configured_runtime_plugin_version, is_retryable_status,
-        latest_manifest_index_url, manifest_cache_key, metadata_fetch_backoff,
-        missing_runtime_plugin_message, resolve_local_runtime_plugin, rewrite_manifest_url_version,
+        latest_manifest_index_url, manifest_cache_key, manifest_refresh_enabled,
+        metadata_fetch_backoff, missing_runtime_plugin_message, resolve_local_runtime_plugin,
+        resolved_runtime_plugin_cache_key, rewrite_manifest_url_version,
         runtime_plugin_cache_root, use_local_plugin_code, RuntimePluginIndex,
         RuntimePluginIndexEntry,
     };
@@ -576,6 +610,32 @@ mod tests {
             "supports_schema": false
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn resolved_runtime_plugin_cache_key_includes_kind_name_and_version() {
+        assert_eq!(
+            resolved_runtime_plugin_cache_key(
+                RuntimePluginKind::SchemaSink,
+                "Glue",
+                Some("0.1.2"),
+            ),
+            "SchemaSink:Glue:0.1.2"
+        );
+        assert_eq!(
+            resolved_runtime_plugin_cache_key(RuntimePluginKind::DataSink, "Athena", None),
+            "DataSink:Athena:latest"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn manifest_refresh_is_opt_in() {
+        std::env::remove_var("SKIPPR_RUNTIME_PLUGIN_MANIFEST_REFRESH");
+        assert!(!manifest_refresh_enabled());
+        std::env::set_var("SKIPPR_RUNTIME_PLUGIN_MANIFEST_REFRESH", "1");
+        assert!(manifest_refresh_enabled());
+        std::env::remove_var("SKIPPR_RUNTIME_PLUGIN_MANIFEST_REFRESH");
     }
 
     #[test]

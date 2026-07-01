@@ -14,11 +14,13 @@ pub use source_contract::{
 pub use source_sync::{OffsetValidationEntry, SourcePayloadTask, SourceSyncContext};
 pub use traits::{
     AtLeastOnceMessageDelivery, ConfiguredSink, DataSink, DataSource, DeterministicObjectOverwrite,
-    FinalStateIdempotentApply, HasSchemaSinkSpec, HasSinkSpec, NonRetryableDebugOutput, SchemaSink,
-    SchemaSinkSpec, SchemaSource, SchemaSyncRequest, SftpAtLeastOnce, SftpAtomicRename, SinkSpec,
-    SinkWriteContext, SinkWriteOutcome, SinkWriteRejection, SinkWriteSemantics, SinkWriteSupport,
-    SourceCdcContract, SourceCdcMode, SourceExecutionContract, SourceOnceContract,
-    TransactionalTableCommit,
+    FinalStateIdempotentApply, GroupedBatchReader, GroupedBatchReaderConfig,
+    GroupedSinkContract, GroupedSinkWriteContext, GroupedWalKind, GroupedWalPartitionKey,
+    GroupedWalRefs, HasSchemaSinkSpec, HasSinkSpec, NonRetryableDebugOutput, RecordBatchChunk,
+    SchemaSink, SchemaSinkSpec, SchemaSource, SchemaSyncRequest, SftpAtLeastOnce, SftpAtomicRename,
+    SinkSpec, SinkWriteContext, SinkWriteOutcome, SinkWriteRejection, SinkWriteSemantics,
+    SinkWriteSupport, SourceCdcContract, SourceCdcMode, SourceExecutionContract,
+    SourceOnceContract, TransactionalTableCommit,
 };
 
 /// No-op output plugin used by `discover` mode to run the input pipeline
@@ -49,6 +51,15 @@ impl DataSink for NoopOutputPlugin {
         ctx.validate_grouped::<crate::plugins::AtLeastOnceMessageDelivery>()
             .map_err(|e| std::io::Error::new(std::io::ErrorKind::Unsupported, e))?;
         self.sync(stream, ctx.filename, ctx.cdc_ctx).await
+    }
+
+    async fn sync_grouped(
+        &self,
+        mut reader: crate::plugins::GroupedBatchReader,
+        _ctx: crate::plugins::GroupedSinkWriteContext<'_>,
+    ) -> Result<crate::plugins::SinkWriteOutcome, std::io::Error> {
+        while let Some(_chunk) = reader.next_chunk().await? {}
+        Ok(crate::plugins::SinkWriteOutcome::Applied)
     }
 
     fn capability(&self) -> &'static crate::plugins::cdc::SinkCapability {

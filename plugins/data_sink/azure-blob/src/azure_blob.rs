@@ -174,6 +174,35 @@ impl DataSink for DataSinkAzureBlobPlugin {
         Ok(SinkWriteOutcome::Applied)
     }
 
+    async fn sync_grouped(
+        &self,
+        mut reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
+        ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
+    ) -> Result<SinkWriteOutcome, std::io::Error> {
+        let schema = reader.schema();
+        let mut applied = false;
+        while let Some(chunk) = reader.next_chunk().await? {
+            let chunk_cdc = ctx.chunk_cdc_context(&chunk)?;
+            let chunk_ctx = ctx.chunk_sink_write_context_with_cdc(
+                chunk.chunk_index,
+                chunk.chunk_index == 0 && chunk.final_chunk,
+                chunk_cdc.as_ref(),
+            );
+            if self
+                .sync_with_context_result(chunk.into_stream(schema.clone()), chunk_ctx)
+                .await?
+                == SinkWriteOutcome::Applied
+            {
+                applied = true;
+            }
+        }
+        Ok(if applied {
+            SinkWriteOutcome::Applied
+        } else {
+            SinkWriteOutcome::AlreadyApplied
+        })
+    }
+
     fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
         &skippr_runtime_sdk::plugins::cdc::sink_capabilities::AZURE_BLOB
     }

@@ -36,6 +36,10 @@ macro_rules! declare_sink_spec {
                     || !$capability.retry_semantics.requires_idempotent_replay()
                     || <$support as $crate::plugins::SinkWriteSupport>::CAN_RETURN_ALREADY_APPLIED
             );
+            assert!(
+                $capability.grouping_support.is_none()
+                    || <$support as $crate::plugins::SinkWriteSupport>::BOUNDED_GROUPED_STREAM
+            );
         };
 
         pub struct $spec;

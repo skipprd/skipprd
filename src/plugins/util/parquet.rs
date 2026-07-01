@@ -15,34 +15,20 @@ pub async fn serialize_to_parquet(
 ) -> Result<ParquetBytes, io::Error> {
     let schema = batches.schema();
 
-    let mut raw_batches: Vec<arrow::array::RecordBatch> = Vec::new();
-    while let Some(batch) = batches.next().await {
-        let batch = batch?;
-        raw_batches.push(batch);
-    }
-
     let order_fields = crate::converters::parquet_ordering::resolve_effective_order(&schema);
-    let sorted_batches = crate::converters::parquet_ordering::materialize_and_sort(
-        raw_batches,
-        &schema,
-        &order_fields,
-    )?;
-
-    let row_group_size = crate::converters::parquet_ordering::estimate_row_group_size(
-        &sorted_batches,
-        &order_fields,
-    );
     let props = crate::converters::parquet_ordering::build_writer_properties(
         &schema,
         &order_fields,
-        row_group_size,
+        crate::converters::parquet_ordering::default_streaming_row_group_size(),
     );
 
     let mut bytes = Vec::new();
     let mut writer = ArrowWriter::try_new(&mut bytes, schema, Some(props))?;
 
-    for batch in &sorted_batches {
-        writer.write(batch)?;
+    while let Some(batch) = batches.next().await {
+        let batch = batch?;
+        let batch = crate::converters::parquet_ordering::sort_batch(&batch, &order_fields)?;
+        writer.write(&batch)?;
     }
 
     let writer_meta = writer.close()?;

@@ -44,7 +44,7 @@ use crate::runtime_plugins::protocol::{
     RuntimeOffsetMaterializationHint, RuntimeOutputLayout, RuntimeRequestAck, RuntimeSchemaConfig,
     RuntimeSchemaInstallRequest, RuntimeSchemaState, RuntimeSchemaStateInstallRequest,
     RuntimeSessionHello, RuntimeSinkConfig, RuntimeSinkInstallRequest, RuntimeSinkPayload,
-    RuntimeSinkPayloadChunk, RuntimeSinkWriteResult, RuntimeSourceConfig,
+    RuntimeSinkPayloadChunk, RuntimeSinkPayloadMode, RuntimeSinkWriteResult, RuntimeSourceConfig,
     RuntimeSourceIngestWindow, SchemaRunRequest, SinkRunRequest, SourceEvent, SourceStartRequest,
     RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
     SKIPPR_RUNTIME_OFFSET_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
@@ -54,7 +54,7 @@ use crate::runtime_plugins::schema_state::{
     current_pipeline_schema_version, current_runtime_schema_state,
 };
 use crate::runtime_plugins::sdk::{
-    decode_record_batch_stream, decode_record_batch_stream_with_stats,
+    decode_record_batch_stream, decode_record_batch_stream_with_stats, encode_record_batches,
     encode_record_batch_stream_with_stats,
 };
 use crate::runtime_plugins::wire::{read_frame, write_frame, MAX_RUNTIME_FRAME_BYTES};
@@ -82,6 +82,12 @@ impl ResolvedRuntimePlugin {
             ) {
                 return Err(io::Error::other(format!(
                     "runtime sink manifest '{}' declares grouping_support=None; grouped compaction requires a non-None grouping support",
+                    manifest.name
+                )));
+            }
+            if !capability.supports_bounded_grouped_stream {
+                return Err(io::Error::other(format!(
+                    "runtime sink manifest '{}' does not advertise bounded grouped streaming; grouped compaction requires a protocol-16 bounded grouped sink",
                     manifest.name
                 )));
             }
@@ -1571,6 +1577,8 @@ impl RuntimeDataSinkPlugin {
                 .send_data(&HostDataFrame::SinkPayloadChunk(RuntimeSinkPayloadChunk {
                     request_id,
                     chunk_index: chunk_index as u32,
+                    row_offset: 0,
+                    rows: 0,
                     final_chunk: (chunk_index + 1) * chunk_size >= arrow_stream_bytes.len(),
                     arrow_stream_bytes: chunk.to_vec(),
                 }))
@@ -1742,6 +1750,110 @@ impl RuntimeDataSinkPlugin {
             }
         }
     }
+
+    async fn send_grouped_sink_request(
+        &self,
+        request: SinkRunRequest,
+        mut reader: crate::plugins::GroupedBatchReader,
+    ) -> io::Result<SinkWriteOutcome> {
+        let mut guard = self.connection.lock().await;
+        self.ensure_connection_ready(&mut guard).await?;
+        let request_timeout = runtime_sink_request_timeout();
+        let request_id = request.request_id;
+        let compaction_id = request.compaction_id.clone();
+        let recv_result = match timeout(request_timeout, async {
+            guard.send(&HostFrame::RunSink(request.clone())).await?;
+            let mut sent_chunks = 0u32;
+            let mut total_rows = 0u64;
+            while let Some(chunk) = reader.next_chunk().await? {
+                total_rows = total_rows.saturating_add(chunk.rows);
+                let final_chunk = chunk.final_chunk;
+                let arrow_stream_bytes = encode_record_batches(&chunk.batches)?;
+                guard
+                    .send_data(&HostDataFrame::SinkPayloadChunk(RuntimeSinkPayloadChunk {
+                        request_id,
+                        chunk_index: sent_chunks,
+                        row_offset: chunk.row_offset,
+                        rows: chunk.rows,
+                        final_chunk,
+                        arrow_stream_bytes,
+                    }))
+                    .await?;
+                sent_chunks = sent_chunks.saturating_add(1);
+            }
+            if sent_chunks == 0 {
+                guard
+                    .send_data(&HostDataFrame::SinkPayloadChunk(RuntimeSinkPayloadChunk {
+                        request_id,
+                        chunk_index: 0,
+                        row_offset: 0,
+                        rows: 0,
+                        final_chunk: true,
+                        arrow_stream_bytes: encode_record_batches(&[])?,
+                    }))
+                    .await?;
+            }
+            let frame = guard.recv().await?;
+            Ok::<_, io::Error>((frame, total_rows))
+        })
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                warn!(
+                    "runtime grouped sink request timed out request_id={} compaction_id={} timeout_secs={}",
+                    request_id,
+                    compaction_id,
+                    request_timeout.as_secs()
+                );
+                self.restart_and_reinstall(&mut guard).await?;
+                return Err(io::Error::new(
+                    ErrorKind::TimedOut,
+                    format!(
+                        "runtime grouped sink request {} timed out after {}s",
+                        request_id,
+                        request_timeout.as_secs()
+                    ),
+                ));
+            }
+        };
+
+        let (frame, total_rows) = match recv_result {
+            Ok(value) => value,
+            Err(err) => {
+                self.restart_and_reinstall(&mut guard).await?;
+                return Err(err);
+            }
+        };
+
+        match frame {
+            PluginFrame::SinkAck(RuntimeRequestAck { request_id: ack_id }) if ack_id == request_id => {
+                crate::metrics::counters::add_parquet_rows(total_rows);
+                Ok(SinkWriteOutcome::Applied)
+            }
+            PluginFrame::SinkWriteAck(ack) if ack.request_id == request_id => match ack.result {
+                RuntimeSinkWriteResult::Applied => {
+                    crate::metrics::counters::add_parquet_rows(total_rows);
+                    Ok(SinkWriteOutcome::Applied)
+                }
+                RuntimeSinkWriteResult::AlreadyApplied => Ok(SinkWriteOutcome::AlreadyApplied),
+                RuntimeSinkWriteResult::RejectedNonIdempotent => Err(io::Error::other(
+                    "runtime grouped sink rejected non-idempotent replay",
+                )),
+                RuntimeSinkWriteResult::RetryableFailure { message }
+                | RuntimeSinkWriteResult::FatalFailure { message } => Err(io::Error::other(message)),
+            },
+            PluginFrame::SchemaStateRefreshRequired(refresh) => Err(io::Error::other(format!(
+                "runtime grouped sink requested schema refresh after streaming payload started: required={} installed={}",
+                refresh.required_version, refresh.installed_version
+            ))),
+            PluginFrame::Error(message) => Err(io::Error::other(message)),
+            other => Err(io::Error::other(format!(
+                "unexpected runtime grouped sink response for request {}: {:?}",
+                request_id, other
+            ))),
+        }
+    }
 }
 
 #[async_trait]
@@ -1823,9 +1935,61 @@ impl DataSink for RuntimeDataSinkPlugin {
             filename: ctx.filename,
             cdc_ctx: ctx.cdc_ctx.cloned(),
             source_contract,
+            payload_mode: RuntimeSinkPayloadMode::FullStream,
         };
         self.send_sink_request(request, encoded_stream.bytes, encoded_stream.rows)
             .await
+    }
+
+    async fn sync_grouped(
+        &self,
+        reader: crate::plugins::GroupedBatchReader,
+        ctx: crate::plugins::GroupedSinkWriteContext<'_>,
+    ) -> Result<SinkWriteOutcome, io::Error> {
+        if let Some(namespace) = query_value_from_runtime_filename(&ctx.filename, "namespace") {
+            let schema = reader.schema();
+            if !schema.fields().is_empty() {
+                apply_derived_runtime_schema(namespace, &schema);
+            }
+        }
+        let schema_state = current_runtime_schema_state();
+        self.install_schema_state_with_retry(schema_state.version, &schema_state.namespaces)
+            .await?;
+
+        let schema_state = current_runtime_schema_state();
+        let namespace = query_value_from_runtime_filename(&ctx.filename, "namespace");
+        let source_contract = ctx.source_contract.cloned().or_else(|| {
+            namespace
+                .as_deref()
+                .and_then(crate::plugins::source_contract::namespace_source_contract)
+        });
+        let request = SinkRunRequest {
+            request_id: next_runtime_request_id(),
+            compaction_id: if ctx.compaction_id.is_empty() {
+                runtime_compaction_id(&ctx.filename)
+            } else {
+                ctx.compaction_id.clone()
+            },
+            idempotency_key: if ctx.idempotency_key.is_empty() {
+                if ctx.compaction_id.is_empty() {
+                    runtime_compaction_id(&ctx.filename)
+                } else {
+                    ctx.compaction_id.clone()
+                }
+            } else {
+                ctx.idempotency_key.clone()
+            },
+            wal_refs: ctx.wal_refs.clone_vec(),
+            write_semantics: ctx.write_semantics,
+            schema_fingerprint: ctx.schema_fingerprint.clone(),
+            binding: self.install_request.binding,
+            required_schema_version: schema_state.version,
+            filename: ctx.filename,
+            cdc_ctx: ctx.cdc_ctx.cloned(),
+            source_contract,
+            payload_mode: RuntimeSinkPayloadMode::GroupedChunks,
+        };
+        self.send_grouped_sink_request(request, reader).await
     }
 
     fn capability(&self) -> &'static cdc::SinkCapability {

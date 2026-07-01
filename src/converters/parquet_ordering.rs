@@ -71,7 +71,10 @@ pub fn log_unmatched_order_fields() {
 }
 
 /// Sort a single RecordBatch by the given column names (all ascending, nulls last).
-fn sort_batch(batch: &RecordBatch, order_fields: &[String]) -> Result<RecordBatch, std::io::Error> {
+pub fn sort_batch(
+    batch: &RecordBatch,
+    order_fields: &[String],
+) -> Result<RecordBatch, std::io::Error> {
     let schema = batch.schema();
     let sort_columns: Vec<SortColumn> = order_fields
         .iter()
@@ -213,13 +216,24 @@ pub fn build_writer_properties(
     order_fields: &[String],
     row_group_size: usize,
 ) -> WriterProperties {
+    build_writer_properties_with_sorting_metadata(schema, order_fields, row_group_size, false)
+}
+
+/// Build `WriterProperties`, declaring sorting metadata only when the caller
+/// can prove the whole file is globally sorted by `order_fields`.
+pub fn build_writer_properties_with_sorting_metadata(
+    schema: &SchemaRef,
+    order_fields: &[String],
+    row_group_size: usize,
+    declare_global_sorting: bool,
+) -> WriterProperties {
     let mut builder = WriterProperties::builder()
         .set_dictionary_enabled(false)
         .set_encoding(parquet::basic::Encoding::PLAIN)
         .set_compression(Compression::SNAPPY)
         .set_max_row_group_row_count(Some(row_group_size));
 
-    if !order_fields.is_empty() {
+    if declare_global_sorting && !order_fields.is_empty() {
         let sorting_cols: Vec<SortingColumn> = order_fields
             .iter()
             .filter_map(|name| {
@@ -236,6 +250,10 @@ pub fn build_writer_properties(
     }
 
     builder.build()
+}
+
+pub fn default_streaming_row_group_size() -> usize {
+    100_000
 }
 
 #[cfg(test)]
@@ -384,10 +402,22 @@ mod tests {
     }
 
     #[test]
-    fn test_build_writer_properties_sets_sorting_metadata() {
+    fn test_build_writer_properties_does_not_claim_global_sorting_by_default() {
         let schema = sample_schema();
         let props =
             build_writer_properties(&schema, &["id".to_string(), "name".to_string()], 100_000);
+        assert!(props.sorting_columns().is_none());
+    }
+
+    #[test]
+    fn test_build_writer_properties_can_set_sorting_metadata_when_proven() {
+        let schema = sample_schema();
+        let props = build_writer_properties_with_sorting_metadata(
+            &schema,
+            &["id".to_string(), "name".to_string()],
+            100_000,
+            true,
+        );
         let sorting = props.sorting_columns().unwrap();
         assert_eq!(sorting.len(), 2);
         assert_eq!(sorting[0].column_idx, 0); // id is index 0

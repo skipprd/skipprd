@@ -3,6 +3,10 @@ enum PersistenceState {
     MemoryOnly,
     Persisted,
 }
+use crate::buffer::compaction_progress::{
+    format_in_flight_grouped_compactions, CompactorDrainHeartbeat, CompactorDrainProgress,
+    GroupedCompactionPhase, GroupedCompactionTracker, WalCompactionCounterSnapshot,
+};
 use crate::buffer::compaction_transaction::{
     load_pending_manifests, persist_manifest, remove_manifest, CompactionTransaction,
     SegmentSourceDescriptor, SinkRetrySemantics, SinkWriteSemantics, WalPartRef,
@@ -962,6 +966,11 @@ impl Buffers {
         let num_cpus = num_cpus::get();
         let drain_started = std::time::Instant::now();
         let mut last_progress_log = std::time::Instant::now();
+        let drain_progress = CompactorDrainProgress::new();
+        let mut drain_heartbeat = CompactorDrainHeartbeat::new();
+        info!(
+            "Compactor drain: started waiting for grouped WAL compactions/uploads to finish"
+        );
         tokio::pin!(done_rx);
         let drain_result = loop {
             tokio::select! {
@@ -977,23 +986,33 @@ impl Buffers {
                     crate::ingest::tuner::drain_tick(num_cpus, has_backlog);
                     if last_progress_log.elapsed() >= std::time::Duration::from_secs(5) {
                         let remaining_sample = Self::reclaimable_wal_partition_count(10_000);
-                        let compacted_started = crate::metrics::counters::WAL_COMPACTIONS_STARTED
-                            .load(AtomicOrdering::Relaxed);
-                        let compacted_completed =
-                            crate::metrics::counters::WAL_COMPACTIONS_COMPLETED
-                                .load(AtomicOrdering::Relaxed);
-                        let failures = COMPACT_FAILURES.len();
+                        let counters = WalCompactionCounterSnapshot::capture();
+                        let since_drain = drain_progress.deltas_since_drain_start();
+                        let since_last = drain_heartbeat.deltas_since_last_log();
+                        let in_flight_summary = format_in_flight_grouped_compactions();
                         info!(
-                            "Compactor drain: waiting elapsed={:?} wal_in_flight={} uploads_in_flight={} reclaimable_wal={} remaining_partitions_sample={} compacted_started={} compacted_completed={} compact_failures={}",
-                            drain_started.elapsed(),
+                            "Compactor drain: waiting drain_elapsed={}s wal_in_flight={} uploads_in_flight={} reclaimable_partitions={} wal_parts_started={} wal_parts_completed={} wal_parts_since_drain=+{} wal_parts_since_last=+{} txn_started={} txn_completed={} txn_failed={} txn_since_drain=+{} txn_since_last=+{} active_grouped=[{}]",
+                            drain_started.elapsed().as_secs(),
                             wal_in_flight,
                             uploads_in_flight,
-                            reclaimable_wal,
                             remaining_sample,
-                            compacted_started,
-                            compacted_completed,
-                            failures
+                            counters.wal_parts_started,
+                            counters.wal_parts_completed,
+                            since_drain.wal_parts_completed,
+                            since_last.wal_parts_completed,
+                            counters.txn_started,
+                            counters.txn_completed,
+                            counters.txn_failed,
+                            since_drain.txn_completed,
+                            since_last.txn_completed,
+                            in_flight_summary,
                         );
+                        if wal_in_flight > 0 && since_last.wal_parts_completed == 0 && since_last.txn_completed == 0 {
+                            info!(
+                                "Compactor drain: no grouped compaction finished in the last {:?}; jobs still running (see active_grouped). Large backfills can sit in uploading_to_sink for several minutes before wal_parts_completed advances.",
+                                last_progress_log.elapsed()
+                            );
+                        }
                         last_progress_log = std::time::Instant::now();
                     }
                     if has_backlog && Config::log_wal_enabled() {
@@ -1020,6 +1039,14 @@ impl Buffers {
                     match handle.await {
                         Ok(()) => {
                             COMPACTOR_STARTED.store(false, std::sync::atomic::Ordering::Relaxed);
+                            let since_drain = drain_progress.deltas_since_drain_start();
+                            info!(
+                                "Compactor drain: finished drain_elapsed={}s wal_parts_completed_since_drain=+{} txn_completed_since_drain=+{} txn_failed_since_drain=+{}",
+                                drain_started.elapsed().as_secs(),
+                                since_drain.wal_parts_completed,
+                                since_drain.txn_completed,
+                                since_drain.txn_failed,
+                            );
                             true
                         }
                         Err(e) => {
@@ -1194,14 +1221,16 @@ impl Buffers {
                             false
                         }
                         Err(_) => {
+                            let active = format_in_flight_grouped_compactions();
                             error!(
-                                "Compactor: grouped compaction timed out sink_ref={} namespace={} compaction_id={} target={} wal_parts={} timeout_secs={}",
+                                "Compactor: grouped compaction timed out sink_ref={} namespace={} compaction_id={} target={} wal_parts={} timeout_secs={} active_grouped=[{}]",
                                 sink_ref,
                                 namespace,
                                 compaction_id,
                                 target,
                                 wal_parts,
-                                timeout.as_secs()
+                                timeout.as_secs(),
+                                active,
                             );
                             COMPACT_FAILURES.insert(format!("{}:{}", sink_ref, compaction_id), 1);
                             crate::metrics::counters::add_wal_compaction_transaction_failed(1);
@@ -2700,6 +2729,26 @@ impl Buffers {
         if work.entries.is_empty() || !Self::mark_work_in_flight(&work) {
             return Ok(false);
         }
+        let timeout = Self::grouped_compaction_timeout();
+        let job_started = std::time::Instant::now();
+        let mut progress = GroupedCompactionTracker::begin(
+            work.txn.id.clone(),
+            work.txn.namespace.clone(),
+            work.txn.sink_ref.clone(),
+            work.entries.len(),
+            timeout,
+            work.txn.attempts,
+        );
+        info!(
+            "Compactor: grouped compaction started namespace={} wal_parts={} sink_ref={} compaction_id={} timeout_secs={} manifest_state={:?} attempts={}",
+            work.txn.namespace,
+            work.entries.len(),
+            work.txn.sink_ref,
+            work.txn.id,
+            timeout.as_secs(),
+            work.txn.state,
+            work.txn.attempts,
+        );
         struct WorkGuard<'a>(&'a CompactionWork);
         impl<'a> Drop for WorkGuard<'a> {
             fn drop(&mut self) {
@@ -2713,7 +2762,8 @@ impl Buffers {
         let _guard = WorkGuard(&work);
 
         persist_manifest(&work.txn)?;
-        let (batch_stream, cdc_ctx, _rows) = match Self::build_grouped_stream(&work).await {
+        let stream_started = std::time::Instant::now();
+        let (batch_stream, cdc_ctx, rows) = match Self::build_grouped_stream(&work).await {
             Ok(stream) => stream,
             Err(err) => {
                 let err_str = err.to_string();
@@ -2725,17 +2775,29 @@ impl Buffers {
                     *entry
                 };
                 error!(
-                    "Compactor: grouped stream build failed sink_ref={} namespace={} compaction_id={} attempt={} err={}",
+                    "Compactor: grouped stream build failed sink_ref={} namespace={} compaction_id={} attempt={} wal_parts={} elapsed={}s err={}",
                     work.txn.sink_ref,
                     work.txn.namespace,
                     work.txn.id,
                     attempts,
+                    work.entries.len(),
+                    stream_started.elapsed().as_secs(),
                     err_str
                 );
                 crate::metrics::counters::add_wal_compaction_transaction_failed(1);
                 return Err(err);
             }
         };
+        progress.set_rows(rows);
+        progress.set_phase(GroupedCompactionPhase::UploadingToSink);
+        info!(
+            "Compactor: grouped compaction building_wal_stream complete namespace={} wal_parts={} rows={} elapsed={}s compaction_id={}",
+            work.txn.namespace,
+            work.entries.len(),
+            rows,
+            stream_started.elapsed().as_secs(),
+            work.txn.id,
+        );
         let source_contract =
             crate::plugins::source_contract::namespace_source_contract(&work.txn.namespace);
         let sink_ctx = crate::plugins::SinkWriteContext {
@@ -2753,12 +2815,39 @@ impl Buffers {
             cdc_ctx: cdc_ctx.as_ref(),
             source_contract: source_contract.as_ref(),
         };
+        let grouped_ctx = crate::plugins::GroupedSinkWriteContext::try_from(sink_ctx)
+            .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
+        if work.entries.len() >= 100
+            && (grouped_ctx.grouping_key.partition.is_empty()
+                || grouped_ctx.grouping_key.time.is_none())
+        {
+            warn!(
+                "Compactor: high-volume grouped write has empty partition/time grouping namespace={} sink_ref={} compaction_id={} wal_parts={} partition_empty={} time_empty={}",
+                grouped_ctx.grouping_key.namespace,
+                grouped_ctx.grouping_key.sink_ref,
+                grouped_ctx.compaction_id,
+                work.entries.len(),
+                grouped_ctx.grouping_key.partition.is_empty(),
+                grouped_ctx.grouping_key.time.is_none()
+            );
+        }
+        let grouped_reader = crate::plugins::GroupedBatchReader::new(
+            batch_stream,
+            grouped_ctx.grouping_key.clone(),
+            crate::plugins::GroupedBatchReaderConfig::default(),
+        );
         let sent_txn = work.txn.clone().mark_sent();
         persist_manifest(&sent_txn)?;
-        if let Err(err) = shared_output
-            .sync_with_context_result(batch_stream, sink_ctx)
-            .await
-        {
+        info!(
+            "Compactor: grouped compaction uploading_to_sink started namespace={} rows={} sink_ref={} compaction_id={} target={}",
+            work.txn.namespace,
+            rows,
+            work.txn.sink_ref,
+            work.txn.id,
+            work.txn.target_filename,
+        );
+        let upload_started = std::time::Instant::now();
+        if let Err(err) = shared_output.sync_grouped(grouped_reader, grouped_ctx).await {
             let err_str = err.to_string();
             Self::quarantine_truncated_entries(&work.entries, "grouped_sync", &err_str);
             let failure_key = format!("{}:{}", work.txn.sink_ref, work.txn.id);
@@ -2768,11 +2857,14 @@ impl Buffers {
                 *entry
             };
             error!(
-                "Compactor: grouped compact failed sink_ref={} namespace={} compaction_id={} attempt={} err={}",
+                "Compactor: grouped compact failed sink_ref={} namespace={} compaction_id={} attempt={} rows={} upload_elapsed={}s job_elapsed={}s err={}",
                 work.txn.sink_ref,
                 work.txn.namespace,
                 work.txn.id,
                 attempts,
+                rows,
+                upload_started.elapsed().as_secs(),
+                job_started.elapsed().as_secs(),
                 err_str
             );
             crate::metrics::counters::add_wal_compaction_transaction_failed(1);
@@ -2783,15 +2875,19 @@ impl Buffers {
         crate::metrics::counters::add_wal_compaction_completed(work.entries.len() as u64);
         crate::metrics::counters::add_wal_compaction_transaction_completed(1);
         info!(
-            "WAL grouped compaction complete: namespace={} wal_parts={} compaction_id={} target={}",
+            "Compactor: grouped compaction complete namespace={} wal_parts={} rows={} upload_elapsed={}s job_elapsed={}s compaction_id={} target={}",
             work.txn.namespace,
             work.entries.len(),
+            rows,
+            upload_started.elapsed().as_secs(),
+            job_started.elapsed().as_secs(),
             work.txn.id,
             work.txn.target_filename
         );
         Self::tombstone_grouped_work(&work);
         crate::metrics::counters::add_wal_compaction_refs_tombstoned(work.entries.len() as u64);
         remove_manifest(&work.txn.id)?;
+        progress.finish();
         Ok(true)
     }
 }
@@ -3786,6 +3882,15 @@ mod compaction_semantics_tests {
             _cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
         ) -> Result<(), std::io::Error> {
             Ok(())
+        }
+
+        async fn sync_grouped(
+            &self,
+            mut reader: crate::plugins::GroupedBatchReader,
+            _ctx: crate::plugins::GroupedSinkWriteContext<'_>,
+        ) -> Result<crate::plugins::SinkWriteOutcome, std::io::Error> {
+            while let Some(_chunk) = reader.next_chunk().await? {}
+            Ok(crate::plugins::SinkWriteOutcome::Applied)
         }
 
         fn capability(&self) -> &'static crate::plugins::cdc::SinkCapability {

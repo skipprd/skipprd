@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 // separate from the skippr/React adapter's CLI subprocess JSON summaries.
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 15;
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 16;
 pub const SKIPPR_RUNTIME_CONTROL_ADDR_ENV: &str = "SKIPPR_RUNTIME_CONTROL_ADDR";
 pub const SKIPPR_RUNTIME_DATA_ADDR_ENV: &str = "SKIPPR_RUNTIME_DATA_ADDR";
 pub const SKIPPR_RUNTIME_OFFSET_ADDR_ENV: &str = "SKIPPR_RUNTIME_OFFSET_ADDR";
@@ -104,6 +104,8 @@ pub struct RuntimeSinkCapabilityDescriptor {
     pub supports_replace_partition: bool,
     #[serde(default)]
     pub supports_primary_key_metadata: bool,
+    #[serde(default)]
+    pub supports_bounded_grouped_stream: bool,
     pub retry_semantics: SinkRetrySemantics,
     pub grouping_support: SinkGroupingSupport,
 }
@@ -122,6 +124,7 @@ impl From<&SinkCapability> for RuntimeSinkCapabilityDescriptor {
             supports_replace_table: flags.supports_replace_table,
             supports_replace_partition: flags.supports_replace_partition,
             supports_primary_key_metadata: Self::supports_primary_key_metadata_for_sink(value.name),
+            supports_bounded_grouped_stream: !value.grouping_support.is_none(),
             retry_semantics: value.retry_semantics,
             grouping_support: value.grouping_support,
         }
@@ -500,6 +503,15 @@ pub struct SinkRunRequest {
     /// `skip_serializing_if` here — bincode + serde will not apply defaults for omitted fields.
     #[serde(default)]
     pub source_contract: Option<SourceNamespaceContract>,
+    #[serde(default)]
+    pub payload_mode: RuntimeSinkPayloadMode,
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum RuntimeSinkPayloadMode {
+    #[default]
+    FullStream,
+    GroupedChunks,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -512,6 +524,8 @@ pub struct RuntimeSinkPayload {
 pub struct RuntimeSinkPayloadChunk {
     pub request_id: u64,
     pub chunk_index: u32,
+    pub row_offset: u64,
+    pub rows: u64,
     pub final_chunk: bool,
     pub arrow_stream_bytes: Vec<u8>,
 }
@@ -671,6 +685,7 @@ mod tests {
             filename: "f".into(),
             cdc_ctx: None,
             source_contract: None,
+            payload_mode: RuntimeSinkPayloadMode::FullStream,
         })
         .unwrap();
         let decoded: SinkRunRequest = bincode::deserialize(&bytes).unwrap();
@@ -734,6 +749,8 @@ mod tests {
         let frame = HostDataFrame::SinkPayloadChunk(RuntimeSinkPayloadChunk {
             request_id: 7,
             chunk_index: 1,
+            row_offset: 10,
+            rows: 5,
             final_chunk: false,
             arrow_stream_bytes: vec![1, 2, 3],
         });
@@ -743,6 +760,8 @@ mod tests {
             HostDataFrame::SinkPayloadChunk(chunk) => {
                 assert_eq!(chunk.request_id, 7);
                 assert_eq!(chunk.chunk_index, 1);
+                assert_eq!(chunk.row_offset, 10);
+                assert_eq!(chunk.rows, 5);
                 assert!(!chunk.final_chunk);
                 assert_eq!(chunk.arrow_stream_bytes, vec![1, 2, 3]);
             }
@@ -776,6 +795,7 @@ mod tests {
             filename: "ns/part.parquet".into(),
             cdc_ctx: None,
             source_contract: Some(contract.clone()),
+            payload_mode: RuntimeSinkPayloadMode::FullStream,
         })
         .unwrap();
         let decoded: SinkRunRequest = bincode::deserialize(&bytes).unwrap();
@@ -848,6 +868,7 @@ mod tests {
             supports_replace_table: true,
             supports_replace_partition: true,
             supports_primary_key_metadata: true,
+            supports_bounded_grouped_stream: true,
             retry_semantics: SinkRetrySemantics::DeterministicOverwrite,
             grouping_support: SinkGroupingSupport::CdcEncodedBatches,
         };

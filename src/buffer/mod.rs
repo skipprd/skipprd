@@ -1,3 +1,4 @@
+pub mod compaction_progress;
 pub mod compaction_transaction;
 pub mod ingest_buffer;
 pub mod s3_wal_body_cache;

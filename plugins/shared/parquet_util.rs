@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use arrow::array::RecordBatch;
 use arrow::compute::cast;
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
+use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
 use bytes::Bytes;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::StreamExt;
@@ -55,49 +55,41 @@ pub fn coerce_timestamp_dates_to_date32(
         .map_err(|err| io::Error::other(err.to_string()))
 }
 
-async fn collect_batches(
+async fn serialize_to_parquet_inner(
     mut batches: SendableRecordBatchStream,
     date_field_names: Option<&HashSet<String>>,
-) -> Result<Vec<RecordBatch>, io::Error> {
-    let mut raw_batches = Vec::new();
+) -> Result<ParquetBytes, io::Error> {
+    let first_batch = match batches.next().await {
+        Some(batch) => batch.map_err(|err| io::Error::other(err.to_string()))?,
+        None => return Err(io::Error::other("No rows to write to parquet")),
+    };
+    let first_batch = match date_field_names {
+        Some(names) => coerce_timestamp_dates_to_date32(first_batch, names)?,
+        None => first_batch,
+    };
+    let schema = first_batch.schema();
+    let order_fields =
+        skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order(&schema);
+    let props = skippr_runtime_sdk::converters::parquet_ordering::build_writer_properties(
+        &schema,
+        &order_fields,
+        skippr_runtime_sdk::converters::parquet_ordering::default_streaming_row_group_size(),
+    );
+    let mut bytes = Vec::new();
+    let mut writer = ArrowWriter::try_new(&mut bytes, schema, Some(props))?;
+    let first_batch =
+        skippr_runtime_sdk::converters::parquet_ordering::sort_batch(&first_batch, &order_fields)?;
+    writer.write(&first_batch)?;
+
     while let Some(batch) = batches.next().await {
         let batch = batch.map_err(|err| io::Error::other(err.to_string()))?;
         let batch = match date_field_names {
             Some(names) => coerce_timestamp_dates_to_date32(batch, names)?,
             None => batch,
         };
-        raw_batches.push(batch);
-    }
-    Ok(raw_batches)
-}
-
-fn write_parquet_batches(
-    raw_batches: Vec<RecordBatch>,
-    schema: SchemaRef,
-) -> Result<ParquetBytes, io::Error> {
-    let order_fields =
-        skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order(&schema);
-    let sorted_batches = skippr_runtime_sdk::converters::parquet_ordering::materialize_and_sort(
-        raw_batches,
-        &schema,
-        &order_fields,
-    )?;
-
-    let row_group_size = skippr_runtime_sdk::converters::parquet_ordering::estimate_row_group_size(
-        &sorted_batches,
-        &order_fields,
-    );
-    let props = skippr_runtime_sdk::converters::parquet_ordering::build_writer_properties(
-        &schema,
-        &order_fields,
-        row_group_size,
-    );
-
-    let mut bytes = Vec::new();
-    let mut writer = ArrowWriter::try_new(&mut bytes, schema, Some(props))?;
-
-    for batch in &sorted_batches {
-        writer.write(batch)?;
+        let batch =
+            skippr_runtime_sdk::converters::parquet_ordering::sort_batch(&batch, &order_fields)?;
+        writer.write(&batch)?;
     }
 
     let writer_meta = writer.close()?;
@@ -117,24 +109,14 @@ fn write_parquet_batches(
 pub async fn serialize_to_parquet(
     batches: SendableRecordBatchStream,
 ) -> Result<ParquetBytes, io::Error> {
-    let raw_batches = collect_batches(batches, None).await?;
-    if raw_batches.is_empty() {
-        return Err(io::Error::other("No rows to write to parquet"));
-    }
-    let schema = raw_batches[0].schema();
-    write_parquet_batches(raw_batches, schema)
+    serialize_to_parquet_inner(batches, None).await
 }
 
 pub async fn serialize_to_parquet_for_iceberg(
     batches: SendableRecordBatchStream,
     date_field_names: &HashSet<String>,
 ) -> Result<ParquetBytes, io::Error> {
-    let raw_batches = collect_batches(batches, Some(date_field_names)).await?;
-    if raw_batches.is_empty() {
-        return Err(io::Error::other("No rows to write to parquet"));
-    }
-    let schema = raw_batches[0].schema();
-    write_parquet_batches(raw_batches, schema)
+    serialize_to_parquet_inner(batches, Some(date_field_names)).await
 }
 
 #[cfg(test)]

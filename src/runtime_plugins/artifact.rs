@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use crate::runtime_plugins::manifest::{RuntimePluginArtifact, RuntimePluginManifest};
 
@@ -29,7 +29,7 @@ pub async fn resolve_plugin_executable(
     }
 
     let executable = manifest.resolve_executable(manifest_path)?;
-    info!(
+    debug!(
         "Using runtime plugin executable from manifest path: plugin={} kind={:?} version={} target={} path={}",
         manifest.plugin_name,
         manifest.kind,
@@ -55,30 +55,28 @@ async fn resolve_artifact(
                 .is_ok()
                 || artifact.sha256.is_none()
             {
-                info!(
-                    "Using cached runtime plugin binary: plugin={} kind={:?} version={} target={} path={} url={}",
+                debug!(
+                    "Using cached runtime plugin binary: plugin={} kind={:?} version={} target={} path={}",
                     manifest.plugin_name,
                     manifest.kind,
                     manifest.version,
                     RuntimePluginManifest::current_target(),
                     destination.display(),
-                    url,
                 );
                 return Ok(destination);
             }
         }
         info!(
-            "Downloading runtime plugin binary: plugin={} kind={:?} version={} target={} url={} destination={}",
+            "Downloading runtime plugin binary: plugin={} kind={:?} version={} target={} path={}",
             manifest.plugin_name,
             manifest.kind,
             manifest.version,
             RuntimePluginManifest::current_target(),
-            url,
             destination.display(),
         );
         download_artifact(url, &destination).await?;
         verify_sha256(&destination, artifact.sha256.as_deref()).await?;
-        info!(
+        debug!(
             "Downloaded runtime plugin binary: plugin={} kind={:?} version={} target={} path={}",
             manifest.plugin_name,
             manifest.kind,
@@ -90,7 +88,7 @@ async fn resolve_artifact(
     }
 
     let executable = manifest.resolve_executable_path(manifest_path, &artifact.executable)?;
-    info!(
+    debug!(
         "Using runtime plugin executable from manifest artifact: plugin={} kind={:?} version={} target={} path={}",
         manifest.plugin_name,
         manifest.kind,

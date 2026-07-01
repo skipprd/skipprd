@@ -415,6 +415,30 @@ impl DataSink for OutputRouter {
         plugin.sync_with_context_result(stream, ctx).await
     }
 
+    async fn sync_grouped(
+        &self,
+        reader: crate::plugins::GroupedBatchReader,
+        ctx: crate::plugins::GroupedSinkWriteContext<'_>,
+    ) -> Result<crate::plugins::SinkWriteOutcome, std::io::Error> {
+        let sink_ref = if ctx.grouping_key.sink_ref.is_empty() {
+            BufferChunker::decode_file_sink_ref(&ctx.filename)
+        } else {
+            ctx.grouping_key.sink_ref.clone()
+        };
+        let target_sink_ref = if sink_ref.is_empty() {
+            self.primary_sink_ref.clone()
+        } else {
+            sink_ref
+        };
+        let plugin = self.sinks.get(&target_sink_ref).ok_or_else(|| {
+            std::io::Error::other(format!(
+                "No output sink registered for persisted sink_ref '{}'",
+                target_sink_ref
+            ))
+        })?;
+        plugin.sync_grouped(reader, ctx).await
+    }
+
     async fn install_schema_state(
         &self,
         schema_version: u64,
@@ -1550,6 +1574,15 @@ mod output_router_capability_tests {
             _cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
         ) -> Result<(), std::io::Error> {
             Ok(())
+        }
+
+        async fn sync_grouped(
+            &self,
+            mut reader: crate::plugins::GroupedBatchReader,
+            _ctx: crate::plugins::GroupedSinkWriteContext<'_>,
+        ) -> Result<crate::plugins::SinkWriteOutcome, std::io::Error> {
+            while let Some(_chunk) = reader.next_chunk().await? {}
+            Ok(crate::plugins::SinkWriteOutcome::Applied)
         }
 
         fn capability(&self) -> &'static crate::plugins::cdc::SinkCapability {

@@ -147,6 +147,25 @@ impl DataSink for DataSinkAmqpPlugin {
         Ok(())
     }
 
+    async fn sync_grouped(
+        &self,
+        mut reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
+        ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
+    ) -> Result<skippr_runtime_sdk::plugins::SinkWriteOutcome, std::io::Error> {
+        let schema = reader.schema();
+        while let Some(chunk) = reader.next_chunk().await? {
+            let chunk_cdc = ctx.chunk_cdc_context(&chunk)?;
+            let chunk_ctx = ctx.chunk_sink_write_context_with_cdc(
+                chunk.chunk_index,
+                chunk.chunk_index == 0 && chunk.final_chunk,
+                chunk_cdc.as_ref(),
+            );
+            self.sync(chunk.into_stream(schema.clone()), chunk_ctx.filename, chunk_ctx.cdc_ctx)
+                .await?;
+        }
+        Ok(skippr_runtime_sdk::plugins::SinkWriteOutcome::Applied)
+    }
+
     fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
         &skippr_runtime_sdk::plugins::cdc::sink_capabilities::AMQP
     }

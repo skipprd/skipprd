@@ -27,26 +27,13 @@ pub async fn serialize_to_parquet_with_order_fields(
 ) -> Result<ParquetBytes, io::Error> {
     let schema = batches.schema();
 
-    let mut raw_batches = Vec::new();
-    while let Some(batch) = batches.next().await {
-        raw_batches.push(batch?);
-    }
-
     let order_fields =
         skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order_from_fields(
             &schema,
             configured_order_fields,
         );
-    let sorted_batches = skippr_runtime_sdk::converters::parquet_ordering::materialize_and_sort(
-        raw_batches,
-        &schema,
-        &order_fields,
-    )?;
-
-    let row_group_size = skippr_runtime_sdk::converters::parquet_ordering::estimate_row_group_size(
-        &sorted_batches,
-        &order_fields,
-    );
+    let row_group_size =
+        skippr_runtime_sdk::converters::parquet_ordering::default_streaming_row_group_size();
     let props = skippr_runtime_sdk::converters::parquet_ordering::build_writer_properties(
         &schema,
         &order_fields,
@@ -56,8 +43,11 @@ pub async fn serialize_to_parquet_with_order_fields(
     let mut bytes = Vec::new();
     let mut writer = ArrowWriter::try_new(&mut bytes, schema, Some(props))?;
 
-    for batch in &sorted_batches {
-        writer.write(batch)?;
+    while let Some(batch) = batches.next().await {
+        let batch = batch?;
+        let batch =
+            skippr_runtime_sdk::converters::parquet_ordering::sort_batch(&batch, &order_fields)?;
+        writer.write(&batch)?;
     }
 
     let writer_meta = writer.close()?;
