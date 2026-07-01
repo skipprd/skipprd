@@ -267,9 +267,5 @@ fn output_file_path(
     }
 
     let output_name = format!("{}/{}", full_key, object_stem);
-    Ok(Path::new(&format!(
-        "{}/output_buffer/{}.parquet",
-        data_dir, output_name
-    ))
-    .to_path_buf())
+    Ok(Path::new(&format!("{}/output/{}.parquet", data_dir, output_name)).to_path_buf())
 }

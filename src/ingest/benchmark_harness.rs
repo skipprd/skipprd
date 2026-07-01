@@ -334,7 +334,7 @@ fn prepare_benchmark_runtime(data_dir: &Path) {
     Config::try_build_config().expect("benchmark skippr.yml");
 
     let data_dir_str = Config::get_data_dir();
-    for sub in ["ingest_buffer", "ingest_buffer/done", "output_buffer"] {
+    for sub in ["segment_buffer", "output"] {
         let _ = fs::create_dir_all(format!("{data_dir_str}/{sub}"));
     }
 }

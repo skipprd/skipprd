@@ -140,7 +140,7 @@ fn process_reader<R: Read>(
 impl DataSourceLocalFilePlugin {
     pub async fn new() -> DataSourceLocalFilePlugin {
         let data_dir = Config::get_data_dir();
-        let temp_dir = &format!("{}/source_buffer", data_dir);
+        let temp_dir = &format!("{}/source", data_dir);
 
         match fs::create_dir(temp_dir) {
             Ok(_g) => {}
@@ -174,7 +174,7 @@ impl DataSourceLocalFilePlugin {
 
     pub fn with_runtime_config(config: DataSourceLocalFilePluginConfig) -> Self {
         let data_dir = Config::get_data_dir();
-        let temp_dir = format!("{}/source_buffer", data_dir);
+        let temp_dir = format!("{}/source", data_dir);
         let _ = fs::create_dir(&temp_dir);
         DataSourceLocalFilePlugin { temp_dir, config }
     }

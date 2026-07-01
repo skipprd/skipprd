@@ -159,9 +159,9 @@ pub fn parquet_column_names_in_dir(dir: &Path) -> Vec<String> {
     names.into_iter().collect()
 }
 
-pub fn output_buffer_dir(harness: &BatchE2eHarness) -> PathBuf {
+pub fn output_dir(harness: &BatchE2eHarness) -> PathBuf {
     harness
         .data_dir()
         .join(format!("{}_{}", TEST_WORKSPACE, harness.pipeline_name))
-        .join("output_buffer")
+        .join("output")
 }

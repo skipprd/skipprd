@@ -2998,17 +2998,8 @@ impl Config {
         }
 
         let data_dir = Config::get_data_dir();
-        let ingest_dir = &format!("{}/ingest_buffer", data_dir);
-        let output_dir = &format!("{}/output_buffer", data_dir);
-        match fs::create_dir(ingest_dir) {
-            Ok(_g) => {}
-            Err(_err) => {}
-        }
-        match fs::create_dir(format!("{}/done", ingest_dir)) {
-            Ok(_g) => {}
-            Err(_err) => {}
-        }
-        match fs::create_dir(output_dir) {
+        let segment_dir = &format!("{}/segment_buffer", data_dir);
+        match fs::create_dir_all(segment_dir) {
             Ok(_g) => {}
             Err(_err) => {}
         }

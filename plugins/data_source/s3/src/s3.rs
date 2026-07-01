@@ -143,7 +143,7 @@ impl DataSourceS3Plugin {
         context: RuntimeExecutionContext,
     ) -> DataSourceS3Plugin {
         let runtime_child_data_dir = format!("{}/runtime_source_children/s3", context.data_dir);
-        let temp_dir = format!("{}/source_buffer", runtime_child_data_dir);
+        let temp_dir = format!("{}/source", runtime_child_data_dir);
         let _ = fs::create_dir_all(&temp_dir);
         Self::from_config(config, temp_dir).await
     }

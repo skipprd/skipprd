@@ -2327,7 +2327,7 @@ impl Ingest {
         let flatten = transform_snap.flatten;
 
         let data_dir = Config::get_data_dir();
-        let _output_dir = format!("{}/ingest_buffer", data_dir);
+        let _output_dir = format!("{}/output", data_dir);
 
         let _aprox_now = SystemTime::now();
 

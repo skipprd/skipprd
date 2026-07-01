@@ -220,13 +220,13 @@ async fn run_sink_loop(
                     continue;
                 }
                 let arrow_stream_bytes = read_sink_payload(data_reader, request.request_id).await?;
-                if matches!(sink_scenario(cli), SinkScenario::WriteOutputBufferParquet) {
+                if matches!(sink_scenario(cli), SinkScenario::WriteOutputParquet) {
                     let context = state
                         .install_request
                         .as_ref()
                         .map(|install| &install.context)
                         .ok_or_else(|| io::Error::other("sink run received before install"))?;
-                    write_sink_request_to_output_buffer(arrow_stream_bytes, context).await?;
+                    write_sink_request_to_output(arrow_stream_bytes, context).await?;
                 }
                 state.run_count += 1;
                 write_sink_state_snapshot(cli, &state)?;
@@ -267,12 +267,12 @@ struct SinkHelperState {
 #[derive(Clone, Copy)]
 enum SinkScenario {
     AckOnly,
-    WriteOutputBufferParquet,
+    WriteOutputParquet,
 }
 
 fn sink_scenario(cli: &TestHelperCli) -> SinkScenario {
     match cli.scenario.as_str() {
-        "write_output_buffer_parquet" => SinkScenario::WriteOutputBufferParquet,
+        "write_output_parquet" => SinkScenario::WriteOutputParquet,
         _ => SinkScenario::AckOnly,
     }
 }
@@ -569,7 +569,7 @@ async fn read_sink_payload(reader: &mut OwnedReadHalf, request_id: u64) -> io::R
     }
 }
 
-async fn write_sink_request_to_output_buffer(
+async fn write_sink_request_to_output(
     arrow_stream_bytes: Vec<u8>,
     context: &skipprd::runtime_plugins::protocol::RuntimeExecutionContext,
 ) -> io::Result<()> {
@@ -583,7 +583,7 @@ async fn write_sink_request_to_output_buffer(
         return Ok(());
     }
 
-    let output_dir = PathBuf::from(&context.data_dir).join("output_buffer");
+    let output_dir = PathBuf::from(&context.data_dir).join("output");
     std::fs::create_dir_all(&output_dir)?;
 
     let output_path = output_dir.join("runtime-helper-output.parquet");

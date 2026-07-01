@@ -292,8 +292,8 @@ fn cleanup_discover_local_pipeline_artifacts(data_dir: &str) {
     }
 
     let paths: [&str; 5] = [
-        "ingest_buffer",
-        "output_buffer",
+        "source",
+        "output",
         "segment_buffer",
         "runtime_source_children",
         SLED_NAME,
@@ -465,13 +465,13 @@ pub async fn run_schema(pipeline: &str) {
 
     // @todo - check dir exists for provided table name, otherwise we end up creating erroneous dirs
 
-    // itterate over data dir output buffers
+    // iterate over local output files
     let data_dir = Config::get_data_dir();
-    let output_dir = format!("{}/output_buffer", data_dir);
+    let output_dir = format!("{}/output", data_dir);
 
     info!("Querying data dir: {}", output_dir);
 
-    // Use ListingTable for local output_buffer to inspect schema
+    // Use ListingTable for local file-sink output to inspect schema
     {
         use datafusion::datasource::file_format::parquet::ParquetFormat;
         use datafusion::datasource::listing::{
