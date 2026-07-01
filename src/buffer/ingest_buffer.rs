@@ -2566,7 +2566,13 @@ impl Buffers {
                         if let Some(batch) = self.try_emit_ready() {
                             TaskPoll::Ready(Some(batch))
                         } else {
-                            self.finish_if_done()
+                            let done = self.finish_if_done();
+                            if matches!(done, TaskPoll::Pending) {
+                                // We just consumed a channel item; poll_recv may not have registered
+                                // a wake for messages that were already buffered behind it.
+                                cx.waker().wake_by_ref();
+                            }
+                            done
                         }
                     }
                     TaskPoll::Ready(Some(Err(err))) => {
