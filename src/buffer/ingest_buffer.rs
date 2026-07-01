@@ -1237,7 +1237,7 @@ impl Buffers {
                     .ok()
                     .filter(|value| *value > 0)
             })
-            .unwrap_or(300);
+            .unwrap_or(900);
         TokioDuration::from_secs(secs)
     }
 
