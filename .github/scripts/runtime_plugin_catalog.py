@@ -350,6 +350,16 @@ def capability_descriptor(value: object, key: str) -> dict | None:
     return dict(value)
 
 
+def normalize_sink_capability(capability: dict) -> dict:
+    normalized = dict(capability)
+    grouping_support = normalized.get("grouping_support")
+    if grouping_support is not None:
+        normalized.setdefault(
+            "supports_bounded_grouped_stream", grouping_support != "None"
+        )
+    return normalized
+
+
 def validate_plugin_metadata(package: dict, plugin_metadata: dict) -> dict:
     kind = plugin_metadata.get("kind")
     if kind not in PLUGIN_KIND_SUFFIX:
@@ -383,6 +393,7 @@ def validate_plugin_metadata(package: dict, plugin_metadata: dict) -> dict:
                 raise SystemExit(
                     f"runtime sink plugin package {package['name']} sink_capability must declare {required_key}"
                 )
+        sink_capability = normalize_sink_capability(sink_capability)
     if kind == "SchemaSink" and (source_capability or sink_capability):
         raise SystemExit(
             f"runtime schema plugin package {package['name']} cannot declare source/sink capabilities"

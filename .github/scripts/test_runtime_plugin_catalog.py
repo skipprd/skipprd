@@ -236,6 +236,26 @@ class RuntimePluginCatalogTests(unittest.TestCase):
                 },
             )
 
+    def test_validate_plugin_metadata_normalizes_bounded_grouped_sink_capability(self) -> None:
+        package = {"name": "skippr-plugin-data-sink-iceberg"}
+
+        metadata = runtime_plugin_catalog.validate_plugin_metadata(
+            package,
+            {
+                "kind": "DataSink",
+                "plugin_name": "Iceberg",
+                "sink_capability": {
+                    "name": "Iceberg",
+                    "retry_semantics": "TransactionalIdempotent",
+                    "grouping_support": "FinalStateBatches",
+                },
+            },
+        )
+
+        self.assertTrue(
+            metadata["sink_capability"]["supports_bounded_grouped_stream"]
+        )
+
     def test_manifest_payload_for_catalog_entry_preserves_metadata_shape(self) -> None:
         entry = {
             "manifest_name": "s3-runtime-source",
