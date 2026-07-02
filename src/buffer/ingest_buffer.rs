@@ -5,6 +5,7 @@ enum PersistenceState {
 }
 use crate::buffer::compaction_progress::{
     format_in_flight_grouped_compactions, CompactorDrainHeartbeat, CompactorDrainProgress,
+    format_compactor_drain_status_summary,
     GroupedCompactionPhase, GroupedCompactionTracker, WalCompactionCounterSnapshot,
 };
 use crate::buffer::compaction_transaction::{
@@ -985,12 +986,23 @@ impl Buffers {
                         wal_in_flight > 0 || uploads_in_flight > 0 || reclaimable_wal;
                     crate::ingest::tuner::drain_tick(num_cpus, has_backlog);
                     if last_progress_log.elapsed() >= std::time::Duration::from_secs(5) {
+                        let interval = last_progress_log.elapsed();
                         let remaining_sample = Self::reclaimable_wal_partition_count(10_000);
                         let counters = WalCompactionCounterSnapshot::capture();
                         let since_drain = drain_progress.deltas_since_drain_start();
                         let since_last = drain_heartbeat.deltas_since_last_log();
                         let in_flight_summary = format_in_flight_grouped_compactions();
-                        info!(
+                        let status_summary = format_compactor_drain_status_summary(
+                            drain_started.elapsed(),
+                            interval,
+                            counters,
+                            since_last,
+                            remaining_sample,
+                            wal_in_flight,
+                            uploads_in_flight,
+                        );
+                        info!("{status_summary}");
+                        debug!(
                             "Compactor drain: waiting drain_elapsed={}s wal_in_flight={} uploads_in_flight={} reclaimable_partitions={} wal_parts_started={} wal_parts_completed={} wal_parts_since_drain=+{} wal_parts_since_last=+{} txn_started={} txn_completed={} txn_failed={} txn_since_drain=+{} txn_since_last=+{} active_grouped=[{}]",
                             drain_started.elapsed().as_secs(),
                             wal_in_flight,
@@ -1007,12 +1019,6 @@ impl Buffers {
                             since_last.txn_completed,
                             in_flight_summary,
                         );
-                        if wal_in_flight > 0 && since_last.wal_parts_completed == 0 && since_last.txn_completed == 0 {
-                            info!(
-                                "Compactor drain: no grouped compaction finished in the last {:?}; jobs still running (see active_grouped). Large backfills can sit in uploading_to_sink for several minutes before wal_parts_completed advances.",
-                                last_progress_log.elapsed()
-                            );
-                        }
                         last_progress_log = std::time::Instant::now();
                     }
                     if has_backlog && Config::log_wal_enabled() {
