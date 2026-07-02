@@ -1395,6 +1395,25 @@ impl AwsAthena {
                     })?;
                     return Ok(());
                 }
+                let existing_partition_keys = table
+                    .table()
+                    .and_then(|t| t.partition_keys.clone())
+                    .unwrap_or_default();
+                if try_heal_glue_partition_layout(
+                    context,
+                    binding,
+                    &config,
+                    namespace,
+                    schema,
+                    source_contract,
+                    &existing_partition_keys,
+                    None,
+                )
+                .await
+                .map_err(io::Error::other)?
+                {
+                    return Ok(());
+                }
                 AwsAthena::backoff_retry(
                     || AwsAthena::glue_update_table(&config, namespace, schema, table.clone()),
                     "update_table",
@@ -2072,39 +2091,20 @@ impl AwsAthena {
             .unwrap()
             .to_string();
 
-        let mut partitions: Vec<Column> = Vec::new();
+        let partitions = build_glue_partition_keys(
+            context,
+            binding,
+            namespace,
+            source_contract,
+            metadata,
+            partition_columns_override,
+        );
         let mut partition_indexes: Vec<PartitionIndex> = Vec::new();
         let mut partition_index_keys: Vec<String> = Vec::new();
-
-        let is_deadletter = binding == RuntimeBinding::Deadletter
-            && namespace == skippr_runtime_sdk::sink_compat::deadletter::table_name();
-        if !is_deadletter {
-            if let Some(override_columns) = partition_columns_override {
-                partitions.extend(override_columns.iter().cloned());
-                // WAL-derived append partitions already reflect the pipeline output layout.
-            } else if let Some(contract) = source_contract {
-                append_contract_glue_partition_keys(&mut partitions, contract, metadata);
-                AwsAthena::get_partition_by_fields(&context.output_layout, &mut partitions);
-            } else {
-                AwsAthena::get_partition_by_fields(&context.output_layout, &mut partitions);
-            }
-        }
-
-        // Deadletters are always written flat to a dedicated sink, so do not
-        // attach the pipeline's time partitioning config to their Glue table.
-        if !is_deadletter && !granularity_target.is_empty() {
+        if !granularity_target.is_empty() {
             for granularity in AwsAthena::time_partition_names_for_layout(&context.output_layout) {
-                partitions.push(
-                    Column::builder()
-                        .name(granularity.to_string())
-                        .r#type("int")
-                        .build()
-                        .unwrap(),
-                );
-
                 if partition_index_keys.len() < 3 {
                     partition_index_keys.push(granularity.to_string());
-
                     partition_indexes.push(
                         PartitionIndex::builder()
                             .index_name(granularity.to_string())
@@ -2113,7 +2113,6 @@ impl AwsAthena {
                             .unwrap(),
                     );
                 }
-
                 if granularity == granularity_target {
                     break;
                 }
@@ -2313,22 +2312,77 @@ impl AwsAthena {
                     .and_then(|table| table.partition_keys.clone())
                     .unwrap_or_default();
                 if existing_partition_keys.len() != partition_values.len() {
-                    let key_names = existing_partition_keys
-                        .iter()
-                        .map(|column| column.name.clone())
-                        .collect::<Vec<_>>();
-                    return Err(format!(
-                        "Glue partition mismatch for '{}.{}': table has {} partition keys {:?}, but Skippr generated {} partition values {:?} for key '{}'. Check the pipeline batch_partition_fields/time partition config or reset/recreate the external Glue table/schema sink state.",
-                        database,
+                    let partition_columns_override = source_contract
+                        .filter(|contract| matches!(contract.write_policy, WritePolicy::Append))
+                        .map(|_| partition_columns_from_key(key, partition_values.len()));
+                    if try_heal_glue_partition_layout(
+                        context,
+                        binding,
+                        config,
                         namespace,
-                        existing_partition_keys.len(),
-                        key_names,
-                        partition_values.len(),
-                        partition_values,
-                        key
-                    ));
+                        metadata,
+                        source_contract,
+                        &existing_partition_keys,
+                        partition_columns_override.as_deref(),
+                    )
+                    .await?
+                    {
+                        match glue_client
+                            .get_table()
+                            .database_name(&database)
+                            .name(&table_name)
+                            .send()
+                            .await
+                        {
+                            Ok(output) => {
+                                let healed_keys = output
+                                    .table()
+                                    .and_then(|table| table.partition_keys.clone())
+                                    .unwrap_or_default();
+                                if healed_keys.len() != partition_values.len() {
+                                    let key_names = healed_keys
+                                        .iter()
+                                        .map(|column| column.name.clone())
+                                        .collect::<Vec<_>>();
+                                    return Err(format!(
+                                        "Glue partition mismatch for '{}.{}': table has {} partition keys {:?}, but Skippr generated {} partition values {:?} for key '{}'. Check the pipeline batch_partition_fields/time partition config or reset/recreate the external Glue table/schema sink state.",
+                                        database,
+                                        namespace,
+                                        healed_keys.len(),
+                                        key_names,
+                                        partition_values.len(),
+                                        partition_values,
+                                        key
+                                    ));
+                                }
+                                healed_keys
+                            }
+                            Err(err) => {
+                                return Err(format!(
+                                    "failed to read Glue table '{}.{}' after partition layout heal: {}",
+                                    database, table_name, err
+                                ));
+                            }
+                        }
+                    } else {
+                        let key_names = existing_partition_keys
+                            .iter()
+                            .map(|column| column.name.clone())
+                            .collect::<Vec<_>>();
+                        return Err(format!(
+                            "Glue partition mismatch for '{}.{}': table has {} partition keys {:?}, but Skippr generated {} partition values {:?} for key '{}'. Check the pipeline batch_partition_fields/time partition config or reset/recreate the external Glue table/schema sink state.",
+                            database,
+                            namespace,
+                            existing_partition_keys.len(),
+                            key_names,
+                            partition_values.len(),
+                            partition_values,
+                            key
+                        ));
+                    }
+                } else {
+                    existing_partition_keys
                 }
-                existing_partition_keys
             }
             Err(SdkError::ServiceError(err))
                 if matches!(err.err(), GetTableError::EntityNotFoundException(_)) =>
@@ -2618,6 +2672,148 @@ fn hive_partition_type_for_column(metadata: &OutputMetadata, column: &str) -> St
     "string".to_string()
 }
 
+fn glue_partition_column_names(columns: &[Column]) -> Vec<String> {
+    columns
+        .iter()
+        .map(|column| column.name().to_string())
+        .collect()
+}
+
+fn partition_layout_mismatch(existing: &[Column], expected: &[Column]) -> bool {
+    glue_partition_column_names(existing) != glue_partition_column_names(expected)
+}
+
+fn build_glue_partition_keys(
+    context: &RuntimeExecutionContext,
+    binding: RuntimeBinding,
+    namespace: &str,
+    source_contract: Option<&SourceNamespaceContract>,
+    metadata: &OutputMetadata,
+    partition_columns_override: Option<&[Column]>,
+) -> Vec<Column> {
+    let is_deadletter = binding == RuntimeBinding::Deadletter
+        && namespace == skippr_runtime_sdk::sink_compat::deadletter::table_name();
+    if is_deadletter {
+        return Vec::new();
+    }
+
+    let mut partitions = Vec::new();
+    if let Some(override_columns) = partition_columns_override {
+        partitions.extend(override_columns.iter().cloned());
+    } else if let Some(contract) = source_contract {
+        append_contract_glue_partition_keys(&mut partitions, contract, metadata);
+        AwsAthena::get_partition_by_fields(&context.output_layout, &mut partitions);
+    } else {
+        AwsAthena::get_partition_by_fields(&context.output_layout, &mut partitions);
+    }
+
+    let granularity_target = context
+        .output_layout
+        .time_partition_granularity
+        .as_deref()
+        .unwrap_or("");
+    if !granularity_target.is_empty() {
+        for granularity in AwsAthena::time_partition_names_for_layout(&context.output_layout) {
+            partitions.push(
+                Column::builder()
+                    .name(granularity.to_string())
+                    .r#type("int")
+                    .build()
+                    .unwrap(),
+            );
+            if granularity == granularity_target {
+                break;
+            }
+        }
+    }
+    partitions
+}
+
+async fn glue_has_registered_partitions(
+    glue_client: &GlueClient,
+    database: &str,
+    table_name: &str,
+) -> Result<bool, String> {
+    match glue_client
+        .get_partitions()
+        .database_name(database)
+        .table_name(table_name)
+        .max_results(1)
+        .send()
+        .await
+    {
+        Ok(output) => Ok(!output.partitions().is_empty()),
+        Err(err) => Err(err.into_service_error().to_string()),
+    }
+}
+
+async fn try_heal_glue_partition_layout(
+    context: &RuntimeExecutionContext,
+    binding: RuntimeBinding,
+    config: &DataSinkAthenaPluginConfig,
+    namespace: &str,
+    metadata: &OutputMetadata,
+    source_contract: Option<&SourceNamespaceContract>,
+    existing_partition_keys: &[Column],
+    partition_columns_override: Option<&[Column]>,
+) -> Result<bool, String> {
+    if is_deadletter_athena_target(binding, namespace) {
+        return Ok(false);
+    }
+
+    let expected_partition_keys = build_glue_partition_keys(
+        context,
+        binding,
+        namespace,
+        source_contract,
+        metadata,
+        partition_columns_override,
+    );
+    if !partition_layout_mismatch(existing_partition_keys, &expected_partition_keys) {
+        return Ok(false);
+    }
+
+    let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
+        .load()
+        .await;
+    let glue_client = GlueClient::new(&aws_config);
+    if glue_has_registered_partitions(
+        &glue_client,
+        &config.glue_database_name,
+        namespace,
+    )
+    .await?
+    {
+        return Ok(false);
+    }
+
+    let existing_names = glue_partition_column_names(existing_partition_keys);
+    let expected_names = glue_partition_column_names(&expected_partition_keys);
+    info!(
+        "Rebuilding Glue table '{}.{}' to heal partition layout: {:?} -> {:?}",
+        config.glue_database_name, namespace, existing_names, expected_names
+    );
+
+    AwsAthena::backoff_retry(|| AwsAthena::glue_delete_table(config, namespace), "delete_table")
+        .await?;
+    AwsAthena::backoff_retry(
+        || {
+            AwsAthena::glue_create_table(
+                context,
+                binding,
+                config,
+                namespace,
+                metadata,
+                source_contract,
+                partition_columns_override,
+            )
+        },
+        "create_table",
+    )
+    .await?;
+    Ok(true)
+}
+
 fn append_contract_glue_partition_keys(
     partitions: &mut Vec<Column>,
     contract: &SourceNamespaceContract,
@@ -2784,6 +2980,49 @@ mod contract_schema_tests {
         let crawl_ids = StringArray::from(vec![crawl_id]);
         let buckets = Int32Array::from(vec![bucket]);
         RecordBatch::try_new(schema, vec![Arc::new(crawl_ids), Arc::new(buckets)]).unwrap()
+    }
+
+    #[test]
+    fn partition_layout_mismatch_detects_empty_vs_time_partitions() {
+        let existing: Vec<Column> = vec![];
+        let expected = vec![
+            Column::builder().name("year").r#type("int").build().unwrap(),
+            Column::builder().name("month").r#type("int").build().unwrap(),
+            Column::builder().name("day").r#type("int").build().unwrap(),
+        ];
+        assert!(partition_layout_mismatch(&existing, &expected));
+        assert!(!partition_layout_mismatch(&expected, &expected));
+    }
+
+    #[test]
+    fn build_glue_partition_keys_includes_day_granularity() {
+        use skippr_runtime_sdk::protocol::{
+            RuntimeExecutionContext, RuntimeExecutionMode, RuntimeOutputLayout,
+        };
+        let context = RuntimeExecutionContext {
+            pipeline_name: "device_data".to_string(),
+            workspace_name: "prod".to_string(),
+            data_dir: "/tmp".to_string(),
+            execution_mode: RuntimeExecutionMode::Sync,
+            output_layout: RuntimeOutputLayout {
+                partition_fields: vec![],
+                order_fields: vec![],
+                time_partition_granularity: Some("day".to_string()),
+                time_partition_prefix: None,
+            },
+        };
+        let keys = build_glue_partition_keys(
+            &context,
+            RuntimeBinding::Primary,
+            "device_data",
+            None,
+            &OutputMetadata::new(),
+            None,
+        );
+        assert_eq!(
+            glue_partition_column_names(&keys),
+            vec!["year", "month", "day"]
+        );
     }
 
     #[test]
