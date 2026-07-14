@@ -1,0 +1,80 @@
+skippr:
+  skippr_s3_bucket: upfoundry-prod-datalake
+  tenant: local-dfs-hub-debug
+  workspace: default
+  region: eu-west-1
+  skipprd_el_storage_mode: local
+
+pipelines:
+  dataforseo_seo_opportunities:
+    auto_approve: yes
+    env: test
+    buffer_threshold_bytes: 10000000
+    buffer_threshold_seconds: 600
+    reset_offsets: yes
+    data_source: data_sources.dataforseo_seo_opportunities
+    data_sink: data_sinks.tenant_athena
+    deadletter_sink: deadletter_sinks.deadletters
+    transform:
+      batch_time_fields: run_date
+      batch_time_unit: day
+      inject_fields:
+        workspace_id: "fde8e559-4e04-423e-bb9c-29ca5605d465"
+        domain_id: "skippr.io"
+        domain: "skippr.io"
+
+data_sources:
+  dataforseo_seo_opportunities:
+    DataForSeoSeoOpportunities:
+      site: "skippr.io"
+      location_code: 2840
+      language_code: en
+      device: desktop
+      run_mode: mvp
+      openai_enabled: false
+      request_interval_ms: 200
+      max_api_retries: 3
+      seed_keywords:
+        - "meal planning app"
+      streams:
+        - keyword_suggestions
+        - keyword_metrics
+        - opportunity_scores
+      limits:
+        max_generated_keywords: 25
+
+data_sinks:
+  tenant_athena:
+    Iceberg:
+      table_location_prefix: s3://upfoundry-prod-datalake/datalake/local-dfs-hub-debug/iceberg
+      catalog:
+        type: glue
+        warehouse: s3://upfoundry-prod-datalake/datalake/local-dfs-hub-debug/iceberg
+        database: upfoundry_local_dfs_hub_debug
+        region: eu-west-1
+      query_engine:
+        type: athena
+        workgroup: primary
+    schema_sink: schema_sinks.glue_tenant
+
+deadletter_sinks:
+  deadletters:
+    Athena:
+      athena_workgroup_name: primary
+      s3_bucket: upfoundry-prod-datalake
+      athena_results_s3_bucket: upfoundry-prod-datalake
+      s3_prefix: local-dfs-hub-debug/deadletters
+    schema_sink: schema_sinks.glue_deadletters
+
+schema_sinks:
+  glue_tenant:
+    Iceberg:
+      table_location_prefix: s3://upfoundry-prod-datalake/datalake/local-dfs-hub-debug/iceberg
+      catalog:
+        type: glue
+        warehouse: s3://upfoundry-prod-datalake/datalake/local-dfs-hub-debug/iceberg
+        database: upfoundry_local_dfs_hub_debug
+        region: eu-west-1
+  glue_deadletters:
+    Glue:
+      glue_database_name: upfoundry_local_dfs_hub_debug_deadletters

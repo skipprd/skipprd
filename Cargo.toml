@@ -179,6 +179,8 @@ serial_test = "1.0.0"
 assert_cmd = "2"
 predicates = "3"
 proptest = "1.10.0"
+skippr-plugin-data-source-dataforseo-seo-opportunities = { path = "plugins/data_source/dataforseo_seo_opportunities" }
+skippr-runtime-sdk = { path = "crates/skippr-runtime-sdk" }
 
 [target.'cfg(unix)'.dependencies]
 nix = "0.26.2"
