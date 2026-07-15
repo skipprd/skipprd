@@ -671,6 +671,27 @@ pub(crate) fn namespace_schema_version(ns: &str) -> u64 {
         .unwrap_or(0)
 }
 
+/// Pre-create Arrow templates and blocking Glue/Iceberg schema for every bundled namespace
+/// before parallel ingest. Without this, fast-path ingest fails with "No default message
+/// template found" on namespaces that have not yet flushed a successful batch.
+pub(crate) async fn warm_output_schemas_for_metadata(
+    metadata: &HashMap<String, Metadata>,
+    flatten: bool,
+) {
+    for ns in metadata.keys() {
+        if ns.is_empty() || ns.starts_with("_dl_") {
+            continue;
+        }
+        let _ = Ingest::prepare_arrow_schema_with_metadata(ns, metadata, flatten);
+        if let Err(err) = Config::sync_output_schema_namespace_blocking(ns.as_str()).await {
+            warn!(
+                "Schema pre-warm sync failed for namespace {}: {}",
+                ns, err
+            );
+        }
+    }
+}
+
 fn ensure_output_schema_synced_for_namespace(ns: &str) -> Result<(), String> {
     if ns.is_empty() || ns.starts_with("_dl_") {
         return Ok(());
@@ -3368,6 +3389,42 @@ impl Ingest {
             .store(true, Ordering::Relaxed);
 
         Ok(_schema_ref)
+    }
+}
+
+#[cfg(test)]
+mod warm_output_schemas_tests {
+    use super::*;
+    use crate::discover::{Metadata, PipelineMetadata, SkipprDataType};
+    use std::sync::Arc;
+
+    fn hub_namespace_metadata(ns: &str) -> Metadata {
+        let mut meta = Metadata::new_with_type(SkipprDataType::Record, ns);
+        meta.set_field(
+            "keyword",
+            Metadata::new_with_type(SkipprDataType::String, "keyword"),
+        );
+        meta.set_field(
+            "search_volume",
+            Metadata::new_with_type(SkipprDataType::Integer, "search_volume"),
+        );
+        meta
+    }
+
+    #[tokio::test]
+    async fn warm_from_tokio_runtime_does_not_panic_with_multiple_namespaces() {
+        let mut pipeline = PipelineMetadata::new();
+        for ns in [
+            "dataforseo_seo_opportunities_keyword_suggestion_daily",
+            "dataforseo_seo_opportunities_keyword_metric_daily",
+        ] {
+            pipeline
+                .metadata
+                .insert(ns.to_string(), hub_namespace_metadata(ns));
+        }
+        METADATA.store(Arc::new(pipeline));
+
+        warm_output_schemas_for_metadata(&METADATA.load().metadata, false).await;
     }
 }
 

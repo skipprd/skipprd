@@ -5,9 +5,10 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::{json, Value};
 use skippr_plugin_data_source_site_quality::sampling::{
-    homepage_url, normalize_site_origin, resolve_site_crawl_urls, resolve_url_list,
+    homepage_url, normalize_site_origin, resolve_url_list,
     resolve_url_list_async, HttpSitemapFetcher, StaticSitemapFetcher, UrlMode,
 };
+use skippr_plugin_shared_api_source::merge_crawl_progress;
 use skippr_runtime_sdk::helpers::offsets::OffsetKey;
 use skippr_runtime_sdk::plugins::source_contract::SourceNamespaceContract;
 use skippr_runtime_sdk::plugins::{
@@ -91,16 +92,6 @@ impl DataSourceSiteSecurityPlugin {
                 &fetcher,
                 self.config.respect_robots,
             );
-        }
-        if self.config.url_mode == UrlMode::SiteCrawl {
-            return resolve_site_crawl_urls(
-                &self.config.site,
-                self.config.max_pages_per_run,
-                self.config.max_crawl_depth,
-                &self.config.crawl_seed_urls,
-                self.config.respect_robots,
-            )
-            .await;
         }
         let fetcher = HttpSitemapFetcher::new()?;
         resolve_url_list_async(
@@ -343,7 +334,7 @@ impl DataSource for DataSourceSiteSecurityPlugin {
             }
         }
 
-        let site_run = json!({
+        let site_run = merge_crawl_progress(json!({
             "site": self.origin,
             "run_date": run_date,
             "pages_scanned": pages_ok + pages_failed,
@@ -352,7 +343,7 @@ impl DataSource for DataSourceSiteSecurityPlugin {
             "storage_entries": storage_rows.len(),
             "script_entries": script_rows.len(),
             "cookie_entries": cookie_rows.len(),
-        });
+        }));
 
         self.submit_namespace(
             ctx.as_ref(),

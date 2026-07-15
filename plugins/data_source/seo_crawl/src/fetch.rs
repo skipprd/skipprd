@@ -20,6 +20,7 @@ pub struct HttpFetcher {
     http: RetryableHttpClient,
     user_agent: String,
     fixture_dir: Option<String>,
+    max_response_bytes: usize,
 }
 
 impl HttpFetcher {
@@ -30,7 +31,13 @@ impl HttpFetcher {
             fixture_dir: std::env::var("SKIPPR_SEO_CRAWL_FIXTURE_DIR")
                 .ok()
                 .filter(|d| !d.trim().is_empty()),
+            max_response_bytes: 2_097_152,
         }
+    }
+
+    pub fn with_max_response_bytes(mut self, max_response_bytes: usize) -> Self {
+        self.max_response_bytes = max_response_bytes.max(1024);
+        self
     }
 
     pub fn with_fixture_dir(mut self, dir: impl Into<String>) -> Self {
@@ -133,6 +140,15 @@ impl HttpFetcher {
             .text()
             .await
             .map_err(|e| std::io::Error::other(e.to_string()))?;
+        let body = if body.len() > self.max_response_bytes {
+            let mut end = self.max_response_bytes.min(body.len());
+            while end > 0 && !body.is_char_boundary(end) {
+                end -= 1;
+            }
+            body[..end].to_string()
+        } else {
+            body
+        };
         Ok(FetchResponse {
             final_url,
             status,

@@ -158,6 +158,64 @@ pub async fn crawl_site(
     Ok(results)
 }
 
+pub async fn fetch_url_list(
+    origin: &SiteOrigin,
+    fetcher: &HttpFetcher,
+    renderer: Option<&WorkerClient>,
+    user_agent: &str,
+    respect_robots: bool,
+    urls: &[String],
+) -> Result<Vec<CrawlPageResult>, std::io::Error> {
+    let robots_url = format!("{}/robots.txt", origin.origin);
+    let robots_body = fetcher.get(&robots_url, origin).await.ok().map(|r| r.body);
+    let parsed_robots = robots_body.as_deref().map(parse_robots_txt);
+
+    let mut results = Vec::new();
+    for raw in urls {
+        let url = match crate::origin::normalize_url_for_crawl(raw, origin) {
+            Some(u) => u,
+            None => continue,
+        };
+        let path = url::Url::parse(&url)
+            .ok()
+            .map(|u| u.path().to_string())
+            .unwrap_or_else(|| "/".into());
+        if respect_robots {
+            if let Some(rules) = parsed_robots.as_ref() {
+                if !path_allowed(&path, rules, user_agent) {
+                    continue;
+                }
+            }
+        }
+        let response = match fetcher.get(&url, origin).await {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if response.status >= 400 {
+            continue;
+        }
+        let mut parsed = parse_fetched_page(&url, &response, origin);
+        if parsed.blocks.is_empty() {
+            if let Some(renderer) = renderer {
+                if let Ok(rendered) = renderer.render(&url).await {
+                    let mut rendered_parsed = parse_fetched_page(&url, &rendered, origin);
+                    if !rendered_parsed.blocks.is_empty() {
+                        rendered_parsed.extraction_method = "rendered_ok".into();
+                        rendered_parsed.extraction_failure_reason = None;
+                        parsed = rendered_parsed;
+                    }
+                }
+            }
+        }
+        results.push(CrawlPageResult {
+            url: url.clone(),
+            parsed,
+            status: response.status,
+        });
+    }
+    Ok(results)
+}
+
 pub fn seed_origin(site: &str) -> Result<SiteOrigin, std::io::Error> {
     normalize_site(site)
 }

@@ -34,6 +34,14 @@ pub struct DataSourceContentQualityPluginConfig {
     pub playwright_executable_path: Option<String>,
     #[serde(default)]
     pub seed_urls: Vec<String>,
+    #[serde(default)]
+    pub url_list: Vec<String>,
+    #[serde(default = "default_max_response_bytes")]
+    pub max_response_bytes: usize,
+}
+
+fn default_max_response_bytes() -> usize {
+    2_097_152
 }
 
 fn default_max_urls() -> u32 {

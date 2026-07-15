@@ -808,6 +808,15 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
     crate::metrics::ingest_profile::reset_profile_counters();
     clear_runtime_source_schema_state();
     METADATA.store(Arc::new(pipeline_metadata.clone()));
+    {
+        let flatten = Config::truth_value(
+            &Config::get_transform_config()
+                .flatten_events
+                .unwrap_or_else(|| "false".to_string()),
+        );
+        crate::ingest_work::warm_output_schemas_for_metadata(&pipeline_metadata.metadata, flatten)
+            .await;
+    }
     if Config::get_pipeline_deadletters_ref().is_some() {
         deadletter::ensure_namespace_registered();
     }

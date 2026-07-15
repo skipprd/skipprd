@@ -4,6 +4,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::{json, Value};
+use skippr_plugin_shared_api_source::merge_crawl_progress;
 use skippr_runtime_sdk::helpers::offsets::OffsetKey;
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceOnceContract, SourceSyncContext,
@@ -16,7 +17,7 @@ use crate::checkpoint::{
     content_unchanged, load_page_checkpoint, store_page_checkpoint, PageTechnicalCheckpoint,
 };
 use crate::config::DataSourceSeoCrawlPluginConfig;
-use crate::crawler::{crawl_site, seed_origin};
+use crate::crawler::{crawl_site, fetch_url_list, seed_origin};
 use crate::fetch::HttpFetcher;
 use crate::origin::SiteOrigin;
 use crate::robots::parse_robots_txt;
@@ -51,10 +52,11 @@ impl DataSourceSeoCrawlPlugin {
         }
         let origin = seed_origin(&config.site)?;
         let user_agent = config.user_agent.clone();
+        let max_response_bytes = config.max_response_bytes;
         Ok(Self {
             config,
             origin,
-            fetcher: HttpFetcher::new(&user_agent),
+            fetcher: HttpFetcher::new(&user_agent).with_max_response_bytes(max_response_bytes),
         })
     }
 
@@ -183,16 +185,27 @@ impl DataSource for DataSourceSeoCrawlPlugin {
 
         let (robots_row, sitemap_rows) = self.emit_discovery_rows(&crawl_date, &run_id).await?;
 
-        let pages = crawl_site(
-            &self.origin,
-            &self.fetcher,
-            &self.config.user_agent,
-            max_urls,
-            max_depth,
-            self.config.respect_robots,
-            &self.config.seed_urls,
-        )
-        .await?;
+        let pages = if self.config.url_list.is_empty() {
+            crawl_site(
+                &self.origin,
+                &self.fetcher,
+                &self.config.user_agent,
+                max_urls,
+                max_depth,
+                self.config.respect_robots,
+                &self.config.seed_urls,
+            )
+            .await?
+        } else {
+            fetch_url_list(
+                &self.origin,
+                &self.fetcher,
+                &self.config.user_agent,
+                self.config.respect_robots,
+                &self.config.url_list,
+            )
+            .await?
+        };
 
         let mut page_rows = Vec::new();
         let mut link_rows = Vec::new();
@@ -296,7 +309,7 @@ impl DataSource for DataSourceSeoCrawlPlugin {
             technical_scores.iter().sum::<f64>() / technical_scores.len() as f64
         };
 
-        let site_row = json!({
+        let site_row = merge_crawl_progress(json!({
             "site": site,
             "crawl_date": crawl_date,
             "run_id": run_id,
@@ -306,7 +319,7 @@ impl DataSource for DataSourceSeoCrawlPlugin {
             "sitemap_url_rows": sitemap_rows.len(),
             "status_code_histogram": status_histogram,
             "mean_technical_score": mean_technical,
-        });
+        }));
 
         issue_rows.extend(site_check_rows(
             &site,
@@ -374,6 +387,7 @@ mod tests {
             site: "https://example.com".into(),
             max_urls: 5,
             max_depth: 2,
+            max_response_bytes: 2_097_152,
             render_js: false,
             crawl_rate_per_second: 100.0,
             respect_robots: true,
@@ -383,6 +397,7 @@ mod tests {
             skip_unchanged_content: true,
             user_agent: "SkipprSeoCrawl/test".into(),
             seed_urls: Vec::new(),
+            url_list: Vec::new(),
         }
     }
 

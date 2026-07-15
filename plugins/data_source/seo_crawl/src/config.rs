@@ -28,6 +28,15 @@ pub struct DataSourceSeoCrawlPluginConfig {
     /// Extra paths or absolute URLs to seed the crawl queue (useful for JS SPAs with no static links).
     #[serde(default)]
     pub seed_urls: Vec<String>,
+    /// When non-empty, process only these URLs (discovery is external).
+    #[serde(default)]
+    pub url_list: Vec<String>,
+    #[serde(default = "default_max_response_bytes")]
+    pub max_response_bytes: usize,
+}
+
+fn default_max_response_bytes() -> usize {
+    2_097_152
 }
 
 fn default_max_urls() -> u32 {

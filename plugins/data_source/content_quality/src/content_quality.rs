@@ -5,6 +5,7 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::{json, Value};
 use skippr_plugin_shared_api_source::OpenAiChatClient;
+use skippr_plugin_shared_api_source::merge_crawl_progress;
 use skippr_runtime_sdk::helpers::offsets::OffsetKey;
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceOnceContract, SourceSyncContext,
@@ -17,7 +18,7 @@ use crate::checkpoint::{
     PageContentCheckpoint, PageScores,
 };
 use crate::config::DataSourceContentQualityPluginConfig;
-use crate::crawler::{crawl_site, seed_origin};
+use crate::crawler::{crawl_site, fetch_url_list, seed_origin};
 use crate::fetch::HttpFetcher;
 use crate::html::{mock_block_analysis, rollup_page_scores, ContentBlock};
 use crate::openai_blocks::analyze_blocks_batch;
@@ -126,17 +127,29 @@ impl DataSource for DataSourceContentQualityPlugin {
             None
         };
 
-        let pages = crawl_site(
-            &self.origin,
-            &self.fetcher,
-            renderer.as_ref(),
-            &self.config.user_agent,
-            self.config.max_urls,
-            self.config.max_depth,
-            self.config.respect_robots,
-            &self.config.seed_urls,
-        )
-        .await?;
+        let pages = if self.config.url_list.is_empty() {
+            crawl_site(
+                &self.origin,
+                &self.fetcher,
+                renderer.as_ref(),
+                &self.config.user_agent,
+                self.config.max_urls,
+                self.config.max_depth,
+                self.config.respect_robots,
+                &self.config.seed_urls,
+            )
+            .await?
+        } else {
+            fetch_url_list(
+                &self.origin,
+                &self.fetcher,
+                renderer.as_ref(),
+                &self.config.user_agent,
+                self.config.respect_robots,
+                &self.config.url_list,
+            )
+            .await?
+        };
 
         let mut page_rows = Vec::new();
         let mut block_rows = Vec::new();
@@ -334,14 +347,14 @@ impl DataSource for DataSourceContentQualityPlugin {
             aio_scores.iter().sum::<f64>() / aio_scores.len() as f64
         };
 
-        let site_row = json!({
+        let site_row = merge_crawl_progress(json!({
             "site": site,
             "run_date": run_date,
             "run_id": run_id,
             "urls_fetched": page_rows.len(),
             "mean_seo_content_score": mean_seo,
             "mean_aio_score": mean_aio,
-        });
+        }));
 
         let page_count = page_rows.len();
         let block_count = block_rows.len();

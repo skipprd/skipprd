@@ -5,6 +5,7 @@ use std::time::Instant;
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::{json, Value};
+use skippr_plugin_shared_api_source::merge_crawl_progress;
 use skippr_runtime_sdk::helpers::offsets::OffsetKey;
 use skippr_runtime_sdk::plugins::source_contract::SourceNamespaceContract;
 use skippr_runtime_sdk::plugins::{
@@ -84,16 +85,6 @@ impl DataSourceSiteQualityPlugin {
                 &fetcher,
                 self.config.respect_robots,
             );
-        }
-        if self.config.url_mode == UrlMode::SiteCrawl {
-            return crate::sampling::resolve_site_crawl_urls(
-                &self.config.site,
-                self.config.max_pages_per_run,
-                self.config.max_crawl_depth,
-                &self.config.crawl_seed_urls,
-                self.config.respect_robots,
-            )
-            .await;
         }
         let fetcher = HttpSitemapFetcher::new()?;
         resolve_url_list_async(
@@ -454,7 +445,7 @@ impl DataSource for DataSourceSiteQualityPlugin {
             )?;
         }
 
-        let site_run = json!({
+        let site_run = merge_crawl_progress(json!({
             "site": self.origin,
             "run_date": run_date,
             "pages_sampled": urls.len() as u32,
@@ -463,7 +454,7 @@ impl DataSource for DataSourceSiteQualityPlugin {
             "pages_failed": pages_failed,
             "lighthouse_enabled": self.config.lighthouse_enabled,
             "axe_enabled": self.config.axe_enabled,
-        });
+        }));
         self.submit_namespace(
             ctx.as_ref(),
             NAMESPACE_SITE_RUN_DAILY,

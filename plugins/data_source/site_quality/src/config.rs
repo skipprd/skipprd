@@ -90,7 +90,7 @@ pub struct DataSourceSiteQualityPluginConfig {
 }
 
 fn default_url_mode() -> UrlMode {
-    UrlMode::TldSample
+    UrlMode::UrlList
 }
 
 fn default_max_pages_per_run() -> u32 {

@@ -38,7 +38,7 @@ pub struct DataSourceSiteSecurityPluginConfig {
 }
 
 fn default_url_mode() -> UrlMode {
-    UrlMode::SiteCrawl
+    UrlMode::UrlList
 }
 
 fn default_max_pages_per_run() -> u32 {
