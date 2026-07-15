@@ -13926,7 +13926,6 @@ dependencies = [
  "signal-hook",
  "simd-json",
  "skippr-offset-store-dynamodb",
- "skippr-plugin-data-source-dataforseo-seo-opportunities",
  "skippr-runtime-sdk",
  "sled",
  "tar",
@@ -13946,6 +13945,17 @@ dependencies = [
  "yaml-rust",
  "zerocopy 0.6.6",
  "zip",
+]
+
+[[package]]
+name = "skipprd-dfs-hub-compat-tests"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "skippr-plugin-data-source-dataforseo-seo-opportunities",
+ "skippr-runtime-sdk",
+ "skipprd",
+ "tokio",
 ]
 
 [[package]]

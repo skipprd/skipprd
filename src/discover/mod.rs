@@ -428,6 +428,12 @@ pub struct Metadata {
 }
 
 impl Metadata {
+    #[cfg(feature = "dfs-hub-compat-tests")]
+    #[must_use]
+    pub fn compat_fields(&self) -> &HashMap<String, Metadata> {
+        self.fields.as_ref()
+    }
+
     #[inline]
     #[must_use]
     pub fn new() -> Result<Self, String> {

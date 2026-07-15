@@ -11,6 +11,7 @@ members = [
     "crates/skippr-runtime-sdk",
     "crates/skippr-cli",
     "crates/skippr-admin",
+    "crates/skipprd-dfs-hub-compat-tests",
     "crates/skipprd-react-suite-data-engineer",
     "crates/skipprd-react-suite-data-engineer/src/modules/provider-postgres",
     "crates/skipprd-react-suite-data-engineer/src/modules/provider-bigquery",
@@ -170,6 +171,8 @@ quick-xml = { version = "0.39.2", features = ["serialize"] }
 
 [features]
 stats_integration = []
+# Used only by crates/skipprd-dfs-hub-compat-tests (keeps plugin out of host dev-deps).
+dfs-hub-compat-tests = []
 # Release tarballs enable this so Lambda can use SKIPPR_OFFSET_STORE=dynamodb without
 # pulling aws-sdk-dynamodb into the default host dependency closure (CI boundary check).
 offset-store-dynamodb = ["dep:skippr-offset-store-dynamodb"]
@@ -179,7 +182,6 @@ serial_test = "1.0.0"
 assert_cmd = "2"
 predicates = "3"
 proptest = "1.10.0"
-skippr-plugin-data-source-dataforseo-seo-opportunities = { path = "plugins/data_source/dataforseo_seo_opportunities" }
 skippr-runtime-sdk = { path = "crates/skippr-runtime-sdk" }
 
 [target.'cfg(unix)'.dependencies]

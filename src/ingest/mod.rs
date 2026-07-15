@@ -8,7 +8,4 @@ pub mod sequencer;
 pub mod tuner;
 
 #[cfg(test)]
-mod dfs_hub_metadata_compat;
-
-#[cfg(test)]
 pub mod benchmark_harness;
