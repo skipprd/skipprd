@@ -93,9 +93,6 @@ pub struct DataSinkAthenaPluginConfig {
     #[serde(default)]
     pub glue_database_name: String,
     pub athena_results_s3_bucket: String,
-    /// When true, grouped compactions write one parquet object plus a grouped receipt.
-    #[serde(default)]
-    pub grouped_single_object: bool,
 }
 
 impl TryFrom<DataSinkPluginConfig> for DataSinkAthenaPluginConfig {
@@ -525,24 +522,12 @@ impl DataSinkAthenaPlugin {
         Ok(outcome)
     }
 
-    fn grouped_single_object_enabled(&self) -> bool {
-        self.config.grouped_single_object
-    }
-
     async fn should_use_legacy_grouped_chunks(
         &self,
         ctx: &skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
     ) -> io::Result<bool> {
-        if !self.grouped_single_object_enabled() {
-            return Ok(true);
-        }
-        if self
-            .legacy_chunk_manifest_exists(&ctx.compaction_id, &ctx.grouping_key.namespace)
-            .await?
-        {
-            return Ok(true);
-        }
-        Ok(false)
+        self.legacy_chunk_manifest_exists(&ctx.compaction_id, &ctx.grouping_key.namespace)
+            .await
     }
 
     async fn legacy_chunk_manifest_exists(
