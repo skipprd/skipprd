@@ -588,6 +588,7 @@ impl Metrics {
                         LAST_PRINT_WAL_REFS_TOMBSTONED.swap(wal_refs_tombstoned_total, Ordering::SeqCst),
                     );
                     let reclaimable_partitions = crate::buffer::ingest_buffer::Buffers::reclaimable_wal_partition_count(10_000);
+                    let pressure = crate::buffer::ingest_buffer::Buffers::wal_pressure_snapshot();
                     let data_dir_paused = crate::data_dir_ingest_paused();
                     let should_print_wal_digest = wal_pending_count > 0
                         || wal_pending_bytes > 0
@@ -644,7 +645,7 @@ impl Metrics {
                         );
                         if wal_inflight > 0 {
                             info!(
-                                "WAL compaction: target={}, inflight={}, started/min={}, completed/min={}, txn_started/min={}, txn_completed/min={}, refs_tombstoned/min={}, reclaimable_partitions={}, paused={}, active_grouped=[{}]",
+                                "WAL compaction: target={}, inflight={}, started/min={}, completed/min={}, txn_started/min={}, txn_completed/min={}, refs_tombstoned/min={}, pipeline={}, committed_segments={}, indexed_refs={}, schedulable_refs={}, sink_work_inflight={}, paused={}, active_grouped=[{}]",
                                 wal_target,
                                 wal_inflight,
                                 wal_started_min,
@@ -652,13 +653,17 @@ impl Metrics {
                                 wal_txn_started_min,
                                 wal_txn_completed_min,
                                 wal_refs_tombstoned_min,
-                                reclaimable_partitions,
+                                pressure.pipeline,
+                                pressure.committed_segments,
+                                pressure.indexed_refs,
+                                pressure.schedulable_refs,
+                                pressure.sink_work_in_flight,
                                 data_dir_paused,
                                 crate::buffer::compaction_progress::format_in_flight_grouped_compactions(),
                             );
                         } else {
                             info!(
-                                "WAL compaction: target={}, inflight={}, started/min={}, completed/min={}, txn_started/min={}, txn_completed/min={}, refs_tombstoned/min={}, reclaimable_partitions={}, paused={}",
+                                "WAL compaction: target={}, inflight={}, started/min={}, completed/min={}, txn_started/min={}, txn_completed/min={}, refs_tombstoned/min={}, pipeline={}, committed_segments={}, indexed_refs={}, schedulable_refs={}, sink_work_inflight={}, paused={}",
                                 wal_target,
                                 wal_inflight,
                                 wal_started_min,
@@ -666,7 +671,11 @@ impl Metrics {
                                 wal_txn_started_min,
                                 wal_txn_completed_min,
                                 wal_refs_tombstoned_min,
-                                reclaimable_partitions,
+                                pressure.pipeline,
+                                pressure.committed_segments,
+                                pressure.indexed_refs,
+                                pressure.schedulable_refs,
+                                pressure.sink_work_in_flight,
                                 data_dir_paused,
                             );
                         }
@@ -678,14 +687,19 @@ impl Metrics {
                             };
                             if let Some(progress) = pause_progress {
                                 info!(
-                                    "DATA_DIR: paused={}, usage={:.1}%, free={}, segs_remaining={}, reclaimable_partitions={}, wal_compactions_inflight={}, uploads_inflight={}",
+                                    "DATA_DIR: paused={}, usage={:.1}%, free={}, pipeline={}, committed_segments={}, indexed_refs={}, schedulable_refs={}, sink_work_inflight={}, wal_compactions_inflight={}, segments_deleted={}, bytes_reclaimed={}, last_progress_age_secs={:?}",
                                     data_dir_paused,
                                     used_pct,
                                     Helpers::human_readable_size(free_bytes),
-                                    progress.segs_remaining,
-                                    progress.reclaimable_partitions,
+                                    progress.pipeline,
+                                    progress.committed_segments,
+                                    progress.indexed_refs,
+                                    progress.schedulable_refs,
+                                    progress.sink_work_in_flight,
                                     progress.wal_compactions_in_flight,
-                                    progress.uploads_in_flight,
+                                    progress.segments_deleted_cumulative,
+                                    Helpers::human_readable_size(progress.bytes_reclaimed_cumulative),
+                                    progress.last_progress_age_secs,
                                 );
                             } else {
                                 info!(

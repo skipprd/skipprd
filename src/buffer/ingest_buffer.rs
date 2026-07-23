@@ -4,9 +4,9 @@ enum PersistenceState {
     Persisted,
 }
 use crate::buffer::compaction_progress::{
-    format_in_flight_grouped_compactions, CompactorDrainHeartbeat, CompactorDrainProgress,
-    format_compactor_drain_status_summary,
-    GroupedCompactionPhase, GroupedCompactionTracker, WalCompactionCounterSnapshot,
+    format_compactor_drain_status_summary, format_in_flight_grouped_compactions,
+    CompactorDrainHeartbeat, CompactorDrainProgress, GroupedCompactionPhase,
+    GroupedCompactionTracker, WalCompactionCounterSnapshot,
 };
 use crate::buffer::compaction_transaction::{
     load_pending_manifests, persist_manifest, remove_manifest, CompactionTransaction,
@@ -969,9 +969,7 @@ impl Buffers {
         let mut last_progress_log = std::time::Instant::now();
         let drain_progress = CompactorDrainProgress::new();
         let mut drain_heartbeat = CompactorDrainHeartbeat::new();
-        info!(
-            "Compactor drain: started waiting for grouped WAL compactions/uploads to finish"
-        );
+        info!("Compactor drain: started waiting for grouped WAL compactions/uploads to finish");
         tokio::pin!(done_rx);
         let drain_result = loop {
             tokio::select! {
@@ -1710,6 +1708,9 @@ impl Buffers {
             }
         };
         let namespace = first.idx.key.namespace.clone();
+        let write_policy = crate::plugins::source_contract::namespace_source_contract(&namespace)
+            .map(|contract| contract.write_policy)
+            .unwrap_or(crate::plugins::source_contract::WritePolicy::Append);
         let schema_fingerprint = if schema_fingerprint_hint.is_empty() {
             Self::schema_fingerprint_for_group(&first.idx, &first.meta)
         } else {
@@ -1731,7 +1732,7 @@ impl Buffers {
             sink_ref,
             namespace,
             schema_fingerprint,
-            crate::plugins::source_contract::WritePolicy::Append,
+            write_policy,
             Self::grouped_write_semantics(cap),
             refs,
             String::new(),
@@ -2020,13 +2021,24 @@ impl Buffers {
     fn maybe_sweep_segment_cleanup(force_full: bool) {
         let cycle = SWEEP_CYCLE_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
         if force_full || cycle % 60 == 0 {
-            Self::sweep_segment_cleanup();
+            let _ = Self::sweep_segment_cleanup();
         } else {
-            Self::sweep_segment_cleanup_cached();
+            let _ = Self::sweep_segment_cleanup_cached();
         }
     }
 
-    fn sweep_segment_cleanup_cached() {
+    fn segment_files_bytes(seg_path: &Path) -> u64 {
+        let seg_bytes = seg_path.metadata().map(|meta| meta.len()).unwrap_or(0);
+        let commit_bytes = seg_path
+            .with_extension("seg.commit")
+            .metadata()
+            .map(|meta| meta.len())
+            .unwrap_or(0);
+        seg_bytes.saturating_add(commit_bytes)
+    }
+
+    fn sweep_segment_cleanup_cached() -> WalSweepResult {
+        let mut result = WalSweepResult::default();
         for entry in SEGMENT_CACHE.iter() {
             let cached = entry.value();
             let seg_path = match &cached.source {
@@ -2044,15 +2056,24 @@ impl Buffers {
                 .filter(|idx| !Self::is_source_tombstoned(&cached.source, &idx.key))
                 .count();
             if remaining == 0 {
-                Self::remove_fully_compacted_disk_segment(&seg_path, &cached.meta);
+                Self::remove_fully_compacted_disk_segment(&seg_path, &cached.meta, &mut result);
             }
         }
+        result
     }
 
-    fn remove_fully_compacted_disk_segment(seg_path: &PathBuf, meta: &SegmentFileMetadata) {
+    fn remove_fully_compacted_disk_segment(
+        seg_path: &PathBuf,
+        meta: &SegmentFileMetadata,
+        sweep: &mut WalSweepResult,
+    ) {
+        let reclaim_bytes = Self::segment_files_bytes(seg_path);
         match Self::remove_disk_segment_and_commit_marker(seg_path) {
             Ok(cleanup) => {
                 if matches!(cleanup, DiskSegmentCleanup::Removed) {
+                    sweep.segments_deleted = sweep.segments_deleted.saturating_add(1);
+                    sweep.bytes_reclaimed = sweep.bytes_reclaimed.saturating_add(reclaim_bytes);
+                    crate::metrics::counters::record_wal_segment_reclaimed(reclaim_bytes);
                     info!(
                         "Removed fully-compacted segment {}",
                         seg_path.to_string_lossy()
@@ -2066,26 +2087,31 @@ impl Buffers {
                     if tp.exists() {
                         if let Err(e) = fs::remove_file(&tp) {
                             error!("Failed to remove tombstone {:?}: {}", tp, e);
+                            sweep.errors = sweep.errors.saturating_add(1);
                         }
                     }
                 }
             }
-            Err(e) => error!(
-                "Failed to remove fully-compacted segment {}: {}",
-                seg_path.to_string_lossy(),
-                e
-            ),
+            Err(e) => {
+                sweep.errors = sweep.errors.saturating_add(1);
+                error!(
+                    "Failed to remove fully-compacted segment {}: {}",
+                    seg_path.to_string_lossy(),
+                    e
+                );
+            }
         }
     }
 
-    fn sweep_segment_cleanup() {
+    fn sweep_segment_cleanup() -> WalSweepResult {
+        let mut result = WalSweepResult::default();
         let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
         if !seg_dir.exists() {
-            return;
+            return result;
         }
         let dir_iter = match fs::read_dir(&seg_dir) {
             Ok(r) => r,
-            Err(_) => return,
+            Err(_) => return result,
         };
         for entry in dir_iter {
             if let Ok(ent) = entry {
@@ -2106,11 +2132,117 @@ impl Buffers {
                         }
                     }
                     if remaining == 0 {
-                        Self::remove_fully_compacted_disk_segment(&p, &m);
+                        Self::remove_fully_compacted_disk_segment(&p, &m, &mut result);
                     }
                 }
             }
         }
+        result
+    }
+
+    /// Pressure-only full sweep: delete only commit-marked segments whose partitions are fully tombstoned.
+    pub fn sweep_pressure_safe() -> WalSweepResult {
+        Self::sweep_segment_cleanup()
+    }
+
+    fn indexed_wal_ref_count() -> usize {
+        SEGMENT_CACHE
+            .iter()
+            .map(|entry| entry.value().meta.index.len())
+            .sum()
+    }
+
+    fn index_committed_segment(path: PathBuf, meta: SegmentFileMetadata) -> usize {
+        let refs = meta.index.len();
+        Self::segment_cache_register(SegmentSource::Disk(path), meta);
+        refs
+    }
+
+    /// Reindex commit-marked segments missing from the in-memory cache.
+    pub fn reconcile_missing_cache_entries() -> WalReconcileResult {
+        let mut result = WalReconcileResult::default();
+        let seg_dir = PathBuf::from(format!("{}/segment_buffer/segs", Config::get_data_dir()));
+        if !seg_dir.exists() {
+            result.indexed_refs = Self::indexed_wal_ref_count();
+            result.schedulable_refs = Self::reclaimable_wal_partition_count(usize::MAX);
+            return result;
+        }
+        if let Ok(rd) = fs::read_dir(&seg_dir) {
+            for entry in rd.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("seg") {
+                    continue;
+                }
+                let commit = path.with_extension("seg.commit");
+                if !commit.exists() {
+                    continue;
+                }
+                result.committed_segments = result.committed_segments.saturating_add(1);
+                let segment_id = path
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .unwrap_or_default()
+                    .to_string();
+                if SEGMENT_CACHE.contains_key(&segment_id) {
+                    continue;
+                }
+                let seg = SegmentFile { path: path.clone() };
+                match seg.read_metadata() {
+                    Ok(meta) => {
+                        let refs = Self::index_committed_segment(path, meta);
+                        result.indexed_refs = result.indexed_refs.saturating_add(refs);
+                    }
+                    Err(err) => {
+                        result.unreadable_segments = result.unreadable_segments.saturating_add(1);
+                        warn!(
+                            "WAL reconcile: unreadable committed segment {}: {}",
+                            path.to_string_lossy(),
+                            err
+                        );
+                    }
+                }
+            }
+        }
+        if result.indexed_refs == 0 {
+            result.indexed_refs = Self::indexed_wal_ref_count();
+        }
+        result.schedulable_refs = Self::reclaimable_wal_partition_count(usize::MAX);
+        result
+    }
+
+    pub fn wal_pressure_snapshot() -> WalPressureSnapshot {
+        let now_secs = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        let last_progress = crate::metrics::counters::LAST_WAL_RECLAIM_PROGRESS_EPOCH_SECS
+            .load(AtomicOrdering::Relaxed);
+        let last_progress_age_secs = if last_progress == 0 {
+            None
+        } else {
+            Some(now_secs.saturating_sub(last_progress))
+        };
+        WalPressureSnapshot {
+            pipeline: Config::get_pipeline_name(),
+            committed_segments: Self::segs_remaining(),
+            indexed_refs: Self::indexed_wal_ref_count(),
+            schedulable_refs: Self::reclaimable_wal_partition_count(usize::MAX),
+            sink_work_in_flight: crate::buffer::compaction_progress::sink_work_in_flight_count(),
+            wal_compactions_in_flight: crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
+                .load(AtomicOrdering::Relaxed),
+            segments_deleted_cumulative: crate::metrics::counters::WAL_SEGMENTS_RECLAIMED_TOTAL
+                .load(AtomicOrdering::Relaxed),
+            bytes_reclaimed_cumulative: crate::metrics::counters::WAL_BYTES_RECLAIMED_TOTAL
+                .load(AtomicOrdering::Relaxed),
+            last_progress_age_secs,
+        }
+    }
+
+    pub fn current_pipeline_work_exhausted() -> bool {
+        let snapshot = Self::wal_pressure_snapshot();
+        snapshot.schedulable_refs == 0
+            && snapshot.wal_compactions_in_flight == 0
+            && snapshot.sink_work_in_flight == 0
     }
 
     pub fn segs_remaining() -> usize {
@@ -2135,13 +2267,19 @@ impl Buffers {
 
     /// Snapshot for DATA_DIR pause progress logs.
     pub fn pause_progress_snapshot() -> WalPauseProgress {
+        let pressure = Self::wal_pressure_snapshot();
         WalPauseProgress {
-            segs_remaining: Self::segs_remaining(),
-            reclaimable_partitions: Self::reclaimable_wal_partition_count(10_000),
-            wal_compactions_in_flight: crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
-                .load(AtomicOrdering::Relaxed),
-            uploads_in_flight: crate::metrics::counters::UPLOADS_IN_FLIGHT
-                .load(AtomicOrdering::Relaxed),
+            pipeline: pressure.pipeline,
+            committed_segments: pressure.committed_segments,
+            indexed_refs: pressure.indexed_refs,
+            schedulable_refs: pressure.schedulable_refs,
+            segs_remaining: pressure.committed_segments,
+            reclaimable_partitions: pressure.schedulable_refs,
+            sink_work_in_flight: pressure.sink_work_in_flight,
+            wal_compactions_in_flight: pressure.wal_compactions_in_flight,
+            segments_deleted_cumulative: pressure.segments_deleted_cumulative,
+            bytes_reclaimed_cumulative: pressure.bytes_reclaimed_cumulative,
+            last_progress_age_secs: pressure.last_progress_age_secs,
             wal_compactions_completed: crate::metrics::counters::WAL_COMPACTIONS_COMPLETED
                 .load(AtomicOrdering::Relaxed),
             wal_txn_completed: crate::metrics::counters::WAL_COMPACTION_TRANSACTIONS_COMPLETED
@@ -2699,7 +2837,12 @@ impl Buffers {
             if all_tombstoned {
                 match &entry.source {
                     SegmentSource::Disk(seg_path) => {
-                        Self::remove_fully_compacted_disk_segment(seg_path, &entry.meta);
+                        let mut sweep = WalSweepResult::default();
+                        Self::remove_fully_compacted_disk_segment(
+                            seg_path,
+                            &entry.meta,
+                            &mut sweep,
+                        );
                     }
                     SegmentSource::S3 { key, bucket, .. } => {
                         let key = key.clone();
@@ -2735,6 +2878,12 @@ impl Buffers {
         if work.entries.is_empty() || !Self::mark_work_in_flight(&work) {
             return Ok(false);
         }
+        let Some(_conflict_guard) =
+            crate::buffer::sink_conflict::try_acquire_sink_conflict(&work.txn)
+        else {
+            Self::release_work_in_flight(&work);
+            return Ok(false);
+        };
         let timeout = Self::grouped_compaction_timeout();
         let job_started = std::time::Instant::now();
         let mut progress = GroupedCompactionTracker::begin(
@@ -2853,7 +3002,10 @@ impl Buffers {
             work.txn.target_filename,
         );
         let upload_started = std::time::Instant::now();
-        if let Err(err) = shared_output.sync_grouped(grouped_reader, grouped_ctx).await {
+        if let Err(err) = shared_output
+            .sync_grouped(grouped_reader, grouped_ctx)
+            .await
+        {
             let err_str = err.to_string();
             Self::quarantine_truncated_entries(&work.entries, "grouped_sync", &err_str);
             let failure_key = format!("{}:{}", work.txn.sink_ref, work.txn.id);
@@ -2990,12 +3142,47 @@ where
         .collect()
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WalSweepResult {
+    pub segments_deleted: usize,
+    pub bytes_reclaimed: u64,
+    pub errors: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct WalReconcileResult {
+    pub committed_segments: usize,
+    pub indexed_refs: usize,
+    pub schedulable_refs: usize,
+    pub unreadable_segments: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WalPressureSnapshot {
+    pub pipeline: String,
+    pub committed_segments: usize,
+    pub indexed_refs: usize,
+    pub schedulable_refs: usize,
+    pub sink_work_in_flight: usize,
+    pub wal_compactions_in_flight: usize,
+    pub segments_deleted_cumulative: u64,
+    pub bytes_reclaimed_cumulative: u64,
+    pub last_progress_age_secs: Option<u64>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct WalPauseProgress {
+    pub pipeline: String,
+    pub committed_segments: usize,
+    pub indexed_refs: usize,
+    pub schedulable_refs: usize,
     pub segs_remaining: usize,
     pub reclaimable_partitions: usize,
+    pub sink_work_in_flight: usize,
     pub wal_compactions_in_flight: usize,
-    pub uploads_in_flight: usize,
+    pub segments_deleted_cumulative: u64,
+    pub bytes_reclaimed_cumulative: u64,
+    pub last_progress_age_secs: Option<u64>,
     pub wal_compactions_completed: u64,
     pub wal_txn_completed: u64,
     pub wal_refs_tombstoned: u64,

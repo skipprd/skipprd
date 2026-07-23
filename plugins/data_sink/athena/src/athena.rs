@@ -20,7 +20,10 @@ use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
 use skippr_runtime_sdk::metrics::counters as metrics_counters;
 use skippr_runtime_sdk::plugins::{SchemaSink, SchemaSyncRequest, SinkWriteOutcome};
 use skippr_runtime_sdk::sink_compat::BufferChunker;
-use skippr_runtime_sdk::sink_idempotency::{sidecar_manifest_object_key, ObjectWriteManifest};
+use skippr_runtime_sdk::sink_idempotency::{
+    legacy_chunk_idempotency_key, sidecar_manifest_object_key, GroupedWriteReceipt,
+    ObjectWriteManifest,
+};
 
 use arrow::array::RecordBatch;
 use arrow::util::display::array_value_to_string;
@@ -98,6 +101,13 @@ impl TryFrom<DataSinkPluginConfig> for DataSinkAthenaPluginConfig {
     fn try_from(entry: DataSinkPluginConfig) -> Result<Self, Self::Error> {
         entry.decode_for_plugin("Athena")
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InnerSyncApplied {
+    pub final_key: String,
+    pub rows: u64,
+    pub bytes: u64,
 }
 
 pub struct DataSinkAthenaPlugin {
@@ -294,7 +304,7 @@ impl DataSink for DataSinkAthenaPlugin {
             return Ok(SinkWriteOutcome::Applied);
         }
         ctx.validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
-            .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
+            .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err.to_string()))?;
         let stream = match ctx.cdc_ctx {
             Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
             None => stream,
@@ -341,6 +351,7 @@ impl DataSink for DataSinkAthenaPlugin {
             Some(&manifest),
         )
         .await
+        .map(|(outcome, _)| outcome)
     }
 
     async fn sync_grouped(
@@ -348,28 +359,13 @@ impl DataSink for DataSinkAthenaPlugin {
         mut reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
         ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
     ) -> Result<SinkWriteOutcome, std::io::Error> {
-        let schema = reader.schema();
-        let mut applied = false;
-        while let Some(chunk) = reader.next_chunk().await? {
-            let chunk_cdc = ctx.chunk_cdc_context(&chunk)?;
-            let chunk_ctx = ctx.chunk_sink_write_context_with_cdc(
-                chunk.chunk_index,
-                chunk.chunk_index == 0 && chunk.final_chunk,
-                chunk_cdc.as_ref(),
-            );
-            if self
-                .sync_with_context_result(chunk.into_stream(schema.clone()), chunk_ctx)
-                .await?
-                == SinkWriteOutcome::Applied
-            {
-                applied = true;
-            }
+        ctx.to_sink_write_context()
+            .validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
+            .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err.to_string()))?;
+        if self.should_use_legacy_grouped_chunks(&ctx).await? {
+            return self.sync_grouped_legacy_chunks(&mut reader, ctx).await;
         }
-        Ok(if applied {
-            SinkWriteOutcome::Applied
-        } else {
-            SinkWriteOutcome::AlreadyApplied
-        })
+        self.sync_grouped_single_object(reader, ctx).await
     }
 
     fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
@@ -431,6 +427,270 @@ impl SchemaSink for DataSinkAthenaPlugin {
 }
 
 impl DataSinkAthenaPlugin {
+    async fn sync_grouped_legacy_chunks(
+        &self,
+        reader: &mut skippr_runtime_sdk::plugins::GroupedBatchReader,
+        ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
+    ) -> Result<SinkWriteOutcome, std::io::Error> {
+        let schema = reader.schema();
+        let mut applied = false;
+        while let Some(chunk) = reader.next_chunk().await? {
+            let chunk_cdc = ctx.chunk_cdc_context(&chunk)?;
+            let chunk_ctx = ctx.chunk_sink_write_context_with_cdc(
+                chunk.chunk_index,
+                chunk.chunk_index == 0 && chunk.final_chunk,
+                chunk_cdc.as_ref(),
+            );
+            if self
+                .sync_with_context_result(chunk.into_stream(schema.clone()), chunk_ctx)
+                .await?
+                == SinkWriteOutcome::Applied
+            {
+                applied = true;
+            }
+        }
+        Ok(if applied {
+            SinkWriteOutcome::Applied
+        } else {
+            SinkWriteOutcome::AlreadyApplied
+        })
+    }
+
+    async fn sync_grouped_single_object(
+        &self,
+        mut reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
+        ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
+    ) -> Result<SinkWriteOutcome, std::io::Error> {
+        let schema = reader.schema();
+        let mut batches = Vec::new();
+        let mut transport_chunk_count = 0u32;
+        while let Some(chunk) = reader.next_chunk().await? {
+            transport_chunk_count = transport_chunk_count.saturating_add(1);
+            batches.extend(chunk.batches);
+        }
+        let stream = self.record_batches_to_stream(schema, batches);
+        let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
+        let resolved_contract = ctx
+            .source_contract
+            .cloned()
+            .or_else(|| namespace_source_contract(&namespace));
+        let write_policy = resolved_contract
+            .as_ref()
+            .map(|c| c.write_policy)
+            .unwrap_or(WritePolicy::Append);
+        let manifest = ObjectWriteManifest::from_context(
+            ctx.compaction_id.clone(),
+            ctx.idempotency_key.clone(),
+            ctx.schema_fingerprint.clone(),
+            &ctx.wal_refs.clone_vec(),
+        );
+        let receipt_key = ObjectWriteManifest::grouped_receipt_object_key(
+            &self.config.s3_prefix,
+            &namespace,
+            &ctx.compaction_id,
+        );
+        if let Some(existing) = self.read_grouped_receipt(&receipt_key).await? {
+            if existing.matches_manifest(&manifest) {
+                return Ok(SinkWriteOutcome::AlreadyApplied);
+            }
+            return Err(io::Error::other(format!(
+                "grouped receipt mismatch for compaction {}",
+                ctx.compaction_id
+            )));
+        }
+        let (outcome, applied) = self
+            .inner_sync(
+                stream,
+                ctx.filename.clone(),
+                write_policy,
+                resolved_contract.as_ref(),
+                Some(ctx.compaction_id.as_str()),
+                Some(&manifest),
+            )
+            .await?;
+        if matches!(&outcome, SinkWriteOutcome::Applied) {
+            if let Some(applied) = applied {
+                self.write_grouped_receipt_from_upload(
+                    &manifest,
+                    &namespace,
+                    &applied,
+                    transport_chunk_count,
+                )
+                .await?;
+            }
+        }
+        Ok(outcome)
+    }
+
+    fn grouped_single_object_enabled(&self) -> bool {
+        std::env::var("ATHENA_GROUPED_SINGLE_OBJECT")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
+    }
+
+    async fn should_use_legacy_grouped_chunks(
+        &self,
+        ctx: &skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
+    ) -> io::Result<bool> {
+        if !self.grouped_single_object_enabled() {
+            return Ok(true);
+        }
+        if self
+            .legacy_chunk_manifest_exists(&ctx.compaction_id, &ctx.grouping_key.namespace)
+            .await?
+        {
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
+    async fn legacy_chunk_manifest_exists(
+        &self,
+        compaction_id: &str,
+        namespace: &str,
+    ) -> io::Result<bool> {
+        for chunk_index in 0u64..256 {
+            let chunk_key = legacy_chunk_idempotency_key(compaction_id, chunk_index);
+            let manifest_key =
+                sidecar_manifest_object_key(&self.config.s3_prefix, namespace, &chunk_key);
+            if self.object_exists(&manifest_key).await? {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    async fn object_exists(&self, key: &str) -> io::Result<bool> {
+        match self
+            .s3_client
+            .head_object()
+            .bucket(&self.config.s3_bucket)
+            .key(key)
+            .send()
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(err) => {
+                if is_s3_not_found_error(&err) {
+                    Ok(false)
+                } else {
+                    Err(io::Error::other(err.to_string()))
+                }
+            }
+        }
+    }
+
+    fn record_batches_to_stream(
+        &self,
+        schema: Arc<arrow::datatypes::Schema>,
+        batches: Vec<RecordBatch>,
+    ) -> SendableRecordBatchStream {
+        struct VecRecordBatchStream {
+            schema: Arc<arrow::datatypes::Schema>,
+            batches: Vec<RecordBatch>,
+            idx: usize,
+        }
+
+        impl RecordBatchStream for VecRecordBatchStream {
+            fn schema(&self) -> Arc<arrow::datatypes::Schema> {
+                Arc::clone(&self.schema)
+            }
+        }
+
+        impl futures::Stream for VecRecordBatchStream {
+            type Item = Result<RecordBatch, datafusion::error::DataFusionError>;
+
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                _cx: &mut TaskContext<'_>,
+            ) -> TaskPoll<Option<Self::Item>> {
+                if let Some(batch) = self.batches.get(self.idx).cloned() {
+                    self.idx += 1;
+                    TaskPoll::Ready(Some(Ok(batch)))
+                } else {
+                    TaskPoll::Ready(None)
+                }
+            }
+        }
+
+        Box::pin(VecRecordBatchStream {
+            schema,
+            batches,
+            idx: 0,
+        })
+    }
+
+    async fn read_grouped_receipt(
+        &self,
+        receipt_key: &str,
+    ) -> io::Result<Option<GroupedWriteReceipt>> {
+        let response = match self
+            .s3_client
+            .get_object()
+            .bucket(&self.config.s3_bucket)
+            .key(receipt_key)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(err) if is_s3_get_object_not_found_error(&err) => return Ok(None),
+            Err(err) => return Err(io::Error::other(err.to_string())),
+        };
+        let bytes = response
+            .body
+            .collect()
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))?
+            .into_bytes();
+        Ok(Some(GroupedWriteReceipt::from_json_bytes(&bytes)?))
+    }
+
+    async fn write_grouped_receipt_from_upload(
+        &self,
+        manifest: &ObjectWriteManifest,
+        namespace: &str,
+        applied: &InnerSyncApplied,
+        transport_chunk_count: u32,
+    ) -> io::Result<()> {
+        let receipt_key = ObjectWriteManifest::grouped_receipt_object_key(
+            &self.config.s3_prefix,
+            namespace,
+            &manifest.compaction_id,
+        );
+        let head = self
+            .s3_client
+            .head_object()
+            .bucket(&self.config.s3_bucket)
+            .key(&applied.final_key)
+            .send()
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        let etag = head.e_tag().unwrap_or_default().to_string();
+        let receipt = GroupedWriteReceipt::from_manifest_and_upload(
+            manifest,
+            format!("s3://{}/{}", self.config.s3_bucket, applied.final_key),
+            etag,
+            None,
+            applied.rows,
+            applied.bytes,
+            transport_chunk_count,
+        );
+        self.s3_client
+            .put_object()
+            .bucket(&self.config.s3_bucket)
+            .key(&receipt_key)
+            .body(ByteStream::from(receipt.to_json_bytes()?))
+            .send()
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        Ok(())
+    }
+
     pub async fn new_with_config(
         context: RuntimeExecutionContext,
         binding: RuntimeBinding,
@@ -527,7 +787,7 @@ impl DataSinkAthenaPlugin {
         source_contract: Option<&SourceNamespaceContract>,
         object_stem: Option<&str>,
         idempotency_manifest: Option<&ObjectWriteManifest>,
-    ) -> Result<SinkWriteOutcome, std::io::Error> {
+    ) -> Result<(SinkWriteOutcome, Option<InnerSyncApplied>), std::io::Error> {
         let _bucket = &self.config.s3_bucket;
         let key = &self.config.s3_prefix;
 
@@ -752,7 +1012,7 @@ impl DataSinkAthenaPlugin {
                 .manifest_matches(&idempotency_manifest_key, manifest)
                 .await?
             {
-                return Ok(SinkWriteOutcome::AlreadyApplied);
+                return Ok((SinkWriteOutcome::AlreadyApplied, None));
             }
         }
 
@@ -1056,8 +1316,10 @@ impl DataSinkAthenaPlugin {
             let batch = batch_res.map_err(|e| {
                 io::Error::new(io::ErrorKind::Other, format!("Stream error: {}", e))
             })?;
-            let batch =
-                skippr_runtime_sdk::converters::parquet_ordering::sort_batch(&batch, &order_fields)?;
+            let batch = skippr_runtime_sdk::converters::parquet_ordering::sort_batch(
+                &batch,
+                &order_fields,
+            )?;
             rows_written += batch.num_rows() as u64;
             parquet_writer.write(&batch).map_err(|e| {
                 io::Error::new(io::ErrorKind::Other, format!("Parquet write error: {}", e))
@@ -1163,7 +1425,14 @@ impl DataSinkAthenaPlugin {
             self.write_manifest(&idempotency_manifest_key, manifest)
                 .await?;
         }
-        Ok(SinkWriteOutcome::Applied)
+        Ok((
+            SinkWriteOutcome::Applied,
+            Some(InnerSyncApplied {
+                final_key: final_key.clone(),
+                rows: rows_written,
+                bytes: uploaded_bytes,
+            }),
+        ))
     }
 
     async fn manifest_matches(
@@ -2777,13 +3046,7 @@ async fn try_heal_glue_partition_layout(
         .load()
         .await;
     let glue_client = GlueClient::new(&aws_config);
-    if glue_has_registered_partitions(
-        &glue_client,
-        &config.glue_database_name,
-        namespace,
-    )
-    .await?
-    {
+    if glue_has_registered_partitions(&glue_client, &config.glue_database_name, namespace).await? {
         return Ok(false);
     }
 
@@ -2794,8 +3057,11 @@ async fn try_heal_glue_partition_layout(
         config.glue_database_name, namespace, existing_names, expected_names
     );
 
-    AwsAthena::backoff_retry(|| AwsAthena::glue_delete_table(config, namespace), "delete_table")
-        .await?;
+    AwsAthena::backoff_retry(
+        || AwsAthena::glue_delete_table(config, namespace),
+        "delete_table",
+    )
+    .await?;
     AwsAthena::backoff_retry(
         || {
             AwsAthena::glue_create_table(
@@ -2986,8 +3252,16 @@ mod contract_schema_tests {
     fn partition_layout_mismatch_detects_empty_vs_time_partitions() {
         let existing: Vec<Column> = vec![];
         let expected = vec![
-            Column::builder().name("year").r#type("int").build().unwrap(),
-            Column::builder().name("month").r#type("int").build().unwrap(),
+            Column::builder()
+                .name("year")
+                .r#type("int")
+                .build()
+                .unwrap(),
+            Column::builder()
+                .name("month")
+                .r#type("int")
+                .build()
+                .unwrap(),
             Column::builder().name("day").r#type("int").build().unwrap(),
         ];
         assert!(partition_layout_mismatch(&existing, &expected));
@@ -3181,6 +3455,13 @@ mod contract_schema_tests {
         let err = contract_partition_delete_prefix("ns", "", &contract, &batch).unwrap_err();
         assert!(err.to_string().contains("partition_key"));
     }
+}
+
+fn is_s3_not_found_error(err: &impl ProvideErrorMetadata) -> bool {
+    matches!(
+        err.code(),
+        Some("NoSuchKey") | Some("NotFound") | Some("404")
+    )
 }
 
 fn is_s3_get_object_not_found_error(err: &S3SdkError<GetObjectError>) -> bool {

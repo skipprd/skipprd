@@ -684,10 +684,7 @@ pub(crate) async fn warm_output_schemas_for_metadata(
         }
         let _ = Ingest::prepare_arrow_schema_with_metadata(ns, metadata, flatten);
         if let Err(err) = Config::sync_output_schema_namespace_blocking(ns.as_str()).await {
-            warn!(
-                "Schema pre-warm sync failed for namespace {}: {}",
-                ns, err
-            );
+            warn!("Schema pre-warm sync failed for namespace {}: {}", ns, err);
         }
     }
 }
@@ -1259,6 +1256,14 @@ impl Drop for Ingest {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum DataDirCapacityDecision {
+    Continue,
+    EnterPause,
+    Resume,
+    Fatal { message: String },
+}
+
 impl Ingest {
     pub fn reset_discovery_progress() {
         *NUM_ANALYSED_RECORDS.write() = 0;
@@ -1354,6 +1359,94 @@ impl Ingest {
         avail_bytes >= min_free_bytes && used_pct <= low_watermark as f64
     }
 
+    fn data_dir_below_high_watermark(
+        used_pct: f64,
+        high_watermark: u8,
+        min_free_bytes: u64,
+        avail_bytes: u64,
+    ) -> bool {
+        avail_bytes >= min_free_bytes && used_pct < high_watermark as f64
+    }
+
+    fn evaluate_exhausted_pause_escape(
+        avail_bytes: u64,
+        total_bytes: u64,
+        used_pct: f64,
+        min_free_bytes: u64,
+        high_watermark: u8,
+        low_watermark: u8,
+        reconcile: &crate::buffer::ingest_buffer::WalReconcileResult,
+    ) -> DataDirCapacityDecision {
+        if reconcile.unreadable_segments > 0 {
+            return DataDirCapacityDecision::Fatal {
+                message: format!(
+                    "DATA_DIR pause escape found {} unreadable committed WAL segment(s) for pipeline {}; integrity check required before resuming ingest",
+                    reconcile.unreadable_segments,
+                    Config::get_pipeline_name()
+                ),
+            };
+        }
+
+        let pressure = crate::buffer::ingest_buffer::Buffers::wal_pressure_snapshot();
+        if reconcile.schedulable_refs > 0
+            || pressure.wal_compactions_in_flight > 0
+            || pressure.sink_work_in_flight > 0
+        {
+            return DataDirCapacityDecision::EnterPause;
+        }
+
+        let below_high = Self::data_dir_below_high_watermark(
+            used_pct,
+            high_watermark,
+            min_free_bytes,
+            avail_bytes,
+        );
+        if below_high {
+            if Self::data_dir_should_resume(avail_bytes, used_pct, low_watermark, min_free_bytes) {
+                return DataDirCapacityDecision::Resume;
+            }
+            return DataDirCapacityDecision::Resume;
+        }
+
+        let below_min_free = avail_bytes < min_free_bytes;
+        let above_high_watermark = used_pct >= high_watermark as f64;
+        DataDirCapacityDecision::Fatal {
+            message: Self::data_dir_capacity_fatal_message(
+                avail_bytes,
+                total_bytes,
+                used_pct,
+                min_free_bytes,
+                high_watermark,
+                below_min_free,
+                above_high_watermark,
+            ),
+        }
+    }
+
+    fn attempt_pause_escape(
+        avail_bytes: u64,
+        total_bytes: u64,
+        used_pct: f64,
+        min_free_bytes: u64,
+        high_watermark: u8,
+        low_watermark: u8,
+    ) -> DataDirCapacityDecision {
+        let _sweep = crate::buffer::ingest_buffer::Buffers::sweep_pressure_safe();
+        let reconcile = crate::buffer::ingest_buffer::Buffers::reconcile_missing_cache_entries();
+        let refreshed = Self::data_dir_disk_usage();
+        let (avail_bytes, total_bytes, used_pct) =
+            refreshed.unwrap_or((avail_bytes, total_bytes, used_pct));
+        Self::evaluate_exhausted_pause_escape(
+            avail_bytes,
+            total_bytes,
+            used_pct,
+            min_free_bytes,
+            high_watermark,
+            low_watermark,
+            &reconcile,
+        )
+    }
+
     fn data_dir_capacity_fatal_message(
         avail_bytes: u64,
         total_bytes: u64,
@@ -1410,7 +1503,6 @@ impl Ingest {
                 return true;
             };
 
-            // Independent guards: absolute free-space floor and percentage high watermark.
             let min_free_bytes = Self::min_free_bytes();
             let below_min_free = avail_bytes < min_free_bytes;
             let above_high_watermark = used_pct >= high_watermark as f64;
@@ -1422,44 +1514,60 @@ impl Ingest {
                     return true;
                 }
                 if !Buffers::has_reclaimable_wal() {
-                    let message = Self::data_dir_capacity_fatal_message(
+                    match Self::attempt_pause_escape(
                         avail_bytes,
                         total_bytes,
                         used_pct,
                         min_free_bytes,
                         high_watermark,
-                        below_min_free,
-                        above_high_watermark,
-                    );
-                    error!("{}", message);
-                    record_data_dir_capacity_error(message);
-                    return false;
+                        low_watermark,
+                    ) {
+                        DataDirCapacityDecision::Resume => return true,
+                        DataDirCapacityDecision::EnterPause => {
+                            paused = true;
+                            set_data_dir_ingest_paused(true);
+                            Buffers::wake_compactor();
+                        }
+                        DataDirCapacityDecision::Fatal { message } => {
+                            error!("{}", message);
+                            record_data_dir_capacity_error(message);
+                            return false;
+                        }
+                        DataDirCapacityDecision::Continue => return true,
+                    }
+                } else {
+                    paused = true;
+                    set_data_dir_ingest_paused(true);
+                    Buffers::wake_compactor();
                 }
-                paused = true;
-                set_data_dir_ingest_paused(true);
-                Buffers::wake_compactor();
-                DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS.store(0, Ordering::Relaxed);
-                let progress = crate::buffer::ingest_buffer::Buffers::pause_progress_snapshot();
-                if below_min_free {
-                    warn!(
-                        "Pausing ingest: free {} is below minimum {} (usage {:.1}%, total {}). Force compaction will run with raised concurrency until resume thresholds are met. WAL state: segs_remaining={}, reclaimable_partitions={}",
+                if paused {
+                    DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS.store(0, Ordering::Relaxed);
+                    let progress = crate::buffer::ingest_buffer::Buffers::pause_progress_snapshot();
+                    if below_min_free {
+                        warn!(
+                        "Pausing ingest: free {} is below minimum {} (usage {:.1}%, total {}). Force compaction will run with raised concurrency until resume thresholds are met. WAL state: pipeline={}, committed_segments={}, indexed_refs={}, schedulable_refs={}",
                         Helpers::human_readable_size(avail_bytes),
                         Helpers::human_readable_size(min_free_bytes),
                         used_pct,
                         Helpers::human_readable_size(total_bytes),
-                        progress.segs_remaining,
-                        progress.reclaimable_partitions,
+                        progress.pipeline,
+                        progress.committed_segments,
+                        progress.indexed_refs,
+                        progress.schedulable_refs,
                     );
-                } else {
-                    warn!(
-                        "Pausing ingest: DATA_DIR usage {:.1}% is above high watermark {}% (free {} / total {}). Force compaction will run with raised concurrency until resume thresholds are met. WAL state: segs_remaining={}, reclaimable_partitions={}",
+                    } else {
+                        warn!(
+                        "Pausing ingest: DATA_DIR usage {:.1}% is above high watermark {}% (free {} / total {}). Force compaction will run with raised concurrency until resume thresholds are met. WAL state: pipeline={}, committed_segments={}, indexed_refs={}, schedulable_refs={}",
                         used_pct,
                         high_watermark,
                         Helpers::human_readable_size(avail_bytes),
                         Helpers::human_readable_size(total_bytes),
-                        progress.segs_remaining,
-                        progress.reclaimable_partitions,
+                        progress.pipeline,
+                        progress.committed_segments,
+                        progress.indexed_refs,
+                        progress.schedulable_refs,
                     );
+                    }
                 }
             }
 
@@ -1475,6 +1583,41 @@ impl Ingest {
                 return true;
             }
 
+            if Buffers::current_pipeline_work_exhausted() {
+                match Self::attempt_pause_escape(
+                    avail_bytes,
+                    total_bytes,
+                    used_pct,
+                    min_free_bytes,
+                    high_watermark,
+                    low_watermark,
+                ) {
+                    DataDirCapacityDecision::Resume => {
+                        set_data_dir_ingest_paused(false);
+                        let progress =
+                            crate::buffer::ingest_buffer::Buffers::pause_progress_snapshot();
+                        info!(
+                            "Resuming ingest after exhausted-pipeline escape: DATA_DIR usage {:.1}% remains above low watermark {}% but current pipeline has no schedulable WAL (pipeline={}, committed_segments={}, indexed_refs={}, bytes_reclaimed={}, last_progress_age_secs={:?})",
+                            used_pct,
+                            low_watermark,
+                            progress.pipeline,
+                            progress.committed_segments,
+                            progress.indexed_refs,
+                            progress.bytes_reclaimed_cumulative,
+                            progress.last_progress_age_secs,
+                        );
+                        return true;
+                    }
+                    DataDirCapacityDecision::EnterPause => {}
+                    DataDirCapacityDecision::Fatal { message } => {
+                        error!("{}", message);
+                        record_data_dir_capacity_error(message);
+                        return false;
+                    }
+                    DataDirCapacityDecision::Continue => return true,
+                }
+            }
+
             let now_secs = SystemTime::now()
                 .duration_since(SystemTime::UNIX_EPOCH)
                 .unwrap_or_default()
@@ -1484,15 +1627,20 @@ impl Ingest {
                 DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS.store(now_secs, Ordering::Relaxed);
                 let progress = crate::buffer::ingest_buffer::Buffers::pause_progress_snapshot();
                 info!(
-                    "Ingest remains paused: DATA_DIR usage {:.1}% (resume below {}%, free {} / total {}). Reclaiming WAL: segs_remaining={}, reclaimable_partitions={}, wal_compactions_inflight={}, uploads_inflight={}, wal_compactions_completed={}, wal_txn_completed={}, wal_refs_tombstoned={}",
+                    "Ingest remains paused: DATA_DIR usage {:.1}% (resume below {}%, free {} / total {}). WAL pressure: pipeline={}, committed_segments={}, indexed_refs={}, schedulable_refs={}, sink_work_inflight={}, wal_compactions_inflight={}, segments_deleted={}, bytes_reclaimed={}, last_progress_age_secs={:?}, wal_compactions_completed={}, wal_txn_completed={}, wal_refs_tombstoned={}",
                     used_pct,
                     low_watermark,
                     Helpers::human_readable_size(avail_bytes),
                     Helpers::human_readable_size(total_bytes),
-                    progress.segs_remaining,
-                    progress.reclaimable_partitions,
+                    progress.pipeline,
+                    progress.committed_segments,
+                    progress.indexed_refs,
+                    progress.schedulable_refs,
+                    progress.sink_work_in_flight,
                     progress.wal_compactions_in_flight,
-                    progress.uploads_in_flight,
+                    progress.segments_deleted_cumulative,
+                    Helpers::human_readable_size(progress.bytes_reclaimed_cumulative),
+                    progress.last_progress_age_secs,
                     progress.wal_compactions_completed,
                     progress.wal_txn_completed,
                     progress.wal_refs_tombstoned,
@@ -3643,6 +3791,44 @@ mod data_dir_watermark_tests {
         assert!(Ingest::data_dir_should_resume(6 * GB, 80.0, 80, min_free));
         // Usage cleared but absolute floor not met.
         assert!(!Ingest::data_dir_should_resume(4 * GB, 75.0, 80, min_free));
+    }
+
+    #[test]
+    fn exhausted_escape_resumes_below_high_when_no_work() {
+        let reconcile = crate::buffer::ingest_buffer::WalReconcileResult {
+            committed_segments: 10,
+            indexed_refs: 0,
+            schedulable_refs: 0,
+            unreadable_segments: 0,
+        };
+        let decision = Ingest::evaluate_exhausted_pause_escape(
+            80 * GB,
+            200 * GB,
+            60.0,
+            5 * GB,
+            75,
+            60,
+            &reconcile,
+        );
+        assert_eq!(decision, super::DataDirCapacityDecision::Resume);
+    }
+
+    #[test]
+    fn exhausted_escape_fails_at_or_above_high() {
+        let reconcile = crate::buffer::ingest_buffer::WalReconcileResult::default();
+        let decision = Ingest::evaluate_exhausted_pause_escape(
+            10 * GB,
+            200 * GB,
+            95.0,
+            5 * GB,
+            90,
+            80,
+            &reconcile,
+        );
+        assert!(matches!(
+            decision,
+            super::DataDirCapacityDecision::Fatal { .. }
+        ));
     }
 }
 

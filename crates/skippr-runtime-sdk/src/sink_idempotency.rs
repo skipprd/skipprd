@@ -31,6 +31,14 @@ impl ObjectWriteManifest {
         }
     }
 
+    pub fn grouped_receipt_object_key(
+        root_prefix: &str,
+        namespace: &str,
+        compaction_id: &str,
+    ) -> String {
+        sidecar_manifest_object_key(root_prefix, namespace, compaction_id)
+    }
+
     pub fn matches_context(
         &self,
         compaction_id: &str,
@@ -52,6 +60,81 @@ impl ObjectWriteManifest {
     pub fn from_json_bytes(bytes: &[u8]) -> io::Result<Self> {
         serde_json::from_slice(bytes).map_err(|err| io::Error::other(err.to_string()))
     }
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct GroupedWriteReceipt {
+    #[serde(default = "grouped_write_receipt_version")]
+    pub version: u32,
+    pub compaction_id: String,
+    pub idempotency_key: String,
+    pub schema_fingerprint: String,
+    pub wal_refs_fingerprint: String,
+    pub wal_ref_count: usize,
+    pub final_s3_key: String,
+    pub etag: String,
+    #[serde(default)]
+    pub checksum: Option<String>,
+    pub rows: u64,
+    pub bytes: u64,
+    pub transport_chunk_count: u32,
+    pub completed_at_unix_secs: u64,
+}
+
+fn grouped_write_receipt_version() -> u32 {
+    2
+}
+
+impl GroupedWriteReceipt {
+    pub fn from_manifest_and_upload(
+        manifest: &ObjectWriteManifest,
+        final_s3_key: impl Into<String>,
+        etag: impl Into<String>,
+        checksum: Option<String>,
+        rows: u64,
+        bytes: u64,
+        transport_chunk_count: u32,
+    ) -> Self {
+        let completed_at_unix_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        Self {
+            version: grouped_write_receipt_version(),
+            compaction_id: manifest.compaction_id.clone(),
+            idempotency_key: manifest.idempotency_key.clone(),
+            schema_fingerprint: manifest.schema_fingerprint.clone(),
+            wal_refs_fingerprint: manifest.wal_refs_fingerprint.clone(),
+            wal_ref_count: manifest.wal_ref_count,
+            final_s3_key: final_s3_key.into(),
+            etag: etag.into(),
+            checksum,
+            rows,
+            bytes,
+            transport_chunk_count,
+            completed_at_unix_secs,
+        }
+    }
+
+    pub fn matches_manifest(&self, manifest: &ObjectWriteManifest) -> bool {
+        manifest.compaction_id == self.compaction_id
+            && manifest.idempotency_key == self.idempotency_key
+            && manifest.schema_fingerprint == self.schema_fingerprint
+            && manifest.wal_refs_fingerprint == self.wal_refs_fingerprint
+            && manifest.wal_ref_count == self.wal_ref_count
+    }
+
+    pub fn to_json_bytes(&self) -> io::Result<Vec<u8>> {
+        serde_json::to_vec_pretty(self).map_err(|err| io::Error::other(err.to_string()))
+    }
+
+    pub fn from_json_bytes(bytes: &[u8]) -> io::Result<Self> {
+        serde_json::from_slice(bytes).map_err(|err| io::Error::other(err.to_string()))
+    }
+}
+
+pub fn legacy_chunk_idempotency_key(compaction_id: &str, chunk_index: u64) -> String {
+    format!("{compaction_id}-chunk-{chunk_index:08}")
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

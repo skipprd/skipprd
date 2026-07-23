@@ -56,9 +56,16 @@ pub fn set_data_dir_ingest_paused(paused: bool) {
 #[cfg(test)]
 pub fn reset_data_dir_capacity_state_for_test() {
     use std::sync::atomic::Ordering;
+    use crate::metrics::counters::{
+        LAST_WAL_RECLAIM_PROGRESS_EPOCH_SECS, WAL_BYTES_RECLAIMED_TOTAL,
+        WAL_SEGMENTS_RECLAIMED_TOTAL,
+    };
     DATA_DIR_CAPACITY_EXCEEDED.store(false, Ordering::SeqCst);
     set_data_dir_ingest_paused(false);
     let _ = DATA_DIR_CAPACITY_ERROR.lock().unwrap().take();
+    WAL_SEGMENTS_RECLAIMED_TOTAL.store(0, Ordering::SeqCst);
+    WAL_BYTES_RECLAIMED_TOTAL.store(0, Ordering::SeqCst);
+    LAST_WAL_RECLAIM_PROGRESS_EPOCH_SECS.store(0, Ordering::SeqCst);
 }
 
 pub static LOGGER: Lazy<Arc<tokio::sync::RwLock<Logger>>> = Lazy::new(|| Logger::new(100));

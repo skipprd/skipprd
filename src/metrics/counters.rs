@@ -19,6 +19,9 @@ pub static WAL_COMPACTION_TRANSACTIONS_STARTED: Lazy<AtomicU64> = Lazy::new(|| A
 pub static WAL_COMPACTION_TRANSACTIONS_COMPLETED: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static WAL_COMPACTION_TRANSACTIONS_FAILED: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static WAL_COMPACTION_REFS_TOMBSTONED: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static WAL_SEGMENTS_RECLAIMED_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static WAL_BYTES_RECLAIMED_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static LAST_WAL_RECLAIM_PROGRESS_EPOCH_SECS: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static WAL_COMPACTIONS_IN_FLIGHT: Lazy<std::sync::atomic::AtomicUsize> =
     Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
 
@@ -116,6 +119,16 @@ pub fn add_wal_compaction_transaction_failed(n: u64) {
 #[inline]
 pub fn add_wal_compaction_refs_tombstoned(n: u64) {
     WAL_COMPACTION_REFS_TOMBSTONED.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn record_wal_segment_reclaimed(bytes: u64) {
+    WAL_SEGMENTS_RECLAIMED_TOTAL.fetch_add(1, Ordering::Relaxed);
+    WAL_BYTES_RECLAIMED_TOTAL.fetch_add(bytes, Ordering::Relaxed);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    LAST_WAL_RECLAIM_PROGRESS_EPOCH_SECS.store(now, Ordering::Relaxed);
 }
 #[inline]
 pub fn inc_wal_compactions_in_flight() {

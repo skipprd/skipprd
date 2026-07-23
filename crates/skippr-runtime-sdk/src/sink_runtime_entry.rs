@@ -13,14 +13,15 @@ use crate::protocol::{
     RuntimeRequestAck, RuntimeSchemaInstallRequest, RuntimeSchemaRefreshRequest,
     RuntimeSchemaState, RuntimeSchemaStateInstallRequest, RuntimeSessionHello,
     RuntimeSinkCapabilityDescriptor, RuntimeSinkInstallRequest, RuntimeSinkPayloadChunk,
-    RuntimeSinkPayloadMode, RuntimeSinkWriteAck,
-    RuntimeSinkWriteResult, SchemaRunRequest, SinkRunRequest, RUNTIME_PROTOCOL_VERSION,
-    SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
-    SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
+    RuntimeSinkPayloadMode, RuntimeSinkWriteAck, RuntimeSinkWriteResult, SchemaRunRequest,
+    SinkRunRequest, RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV,
+    SKIPPR_RUNTIME_DATA_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
-use crate::sdk::decode_record_batch_stream;
+use crate::sdk::{decode_record_batch_stream, record_batches_to_stream};
 use crate::sink_idempotency::ObjectWriteManifest;
 use crate::wire::{read_frame_or_eof, write_frame};
+use futures::StreamExt;
+use skippr_core::plugins::{GroupedBatchReader, GroupedBatchReaderConfig, GroupedSinkWriteContext};
 
 pub fn buffer_name_for_runtime_binding(binding: RuntimeBinding) -> String {
     match binding {
@@ -213,10 +214,7 @@ async fn read_next_sink_payload_chunk(
     }
 }
 
-async fn drain_grouped_sink_payload(
-    reader: &mut OwnedReadHalf,
-    request_id: u64,
-) -> io::Result<()> {
+async fn drain_grouped_sink_payload(reader: &mut OwnedReadHalf, request_id: u64) -> io::Result<()> {
     let mut expected_index = 0u32;
     loop {
         let payload = read_next_sink_payload_chunk(reader, request_id, expected_index).await?;
@@ -651,25 +649,17 @@ where
         }
     }
 
+    let mut all_batches = Vec::new();
+    let mut schema = None;
     let mut expected_index = 0u32;
     loop {
         let payload = read_next_sink_payload_chunk(data_reader, request_id, expected_index).await?;
-        let stream = decode_record_batch_stream(payload.arrow_stream_bytes)?;
-        let chunk_cdc = grouped_ctx.chunk_cdc_context_for_range(
-            payload.chunk_index as u64,
-            payload.row_offset,
-            payload.rows,
-        )?;
-        let chunk_ctx = grouped_ctx.chunk_sink_write_context_with_cdc(
-            payload.chunk_index as u64,
-            payload.chunk_index == 0 && payload.final_chunk,
-            chunk_cdc.as_ref(),
-        );
-        let outcome = plugin.sync_with_context_result(stream, chunk_ctx).await?;
-        if outcome == SinkWriteOutcome::AlreadyApplied && !replay_safe {
-            return Err(io::Error::other(
-                "runtime sink returned AlreadyApplied without declaring idempotent replay support",
-            ));
+        let mut stream = decode_record_batch_stream(payload.arrow_stream_bytes)?;
+        if schema.is_none() {
+            schema = Some(stream.schema());
+        }
+        while let Some(batch) = stream.next().await {
+            all_batches.push(batch?);
         }
         if payload.final_chunk {
             break;
@@ -677,10 +667,29 @@ where
         expected_index = expected_index.saturating_add(1);
     }
 
+    let schema = schema.ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "grouped sink request contained no schema",
+        )
+    })?;
+    let batch_stream = record_batches_to_stream(schema.clone(), all_batches);
+    let reader = GroupedBatchReader::new(
+        batch_stream,
+        grouped_ctx.grouping_key.clone(),
+        GroupedBatchReaderConfig::default(),
+    );
+    let outcome = plugin.sync_grouped(reader, grouped_ctx).await?;
+    if outcome == SinkWriteOutcome::AlreadyApplied && !replay_safe {
+        return Err(io::Error::other(
+            "runtime sink returned AlreadyApplied without declaring idempotent replay support",
+        ));
+    }
+
     if let Some(manifest) = ledger_manifest.as_ref() {
         write_local_idempotency_manifest(manifest)?;
     }
-    Ok(SinkWriteOutcome::Applied)
+    Ok(outcome)
 }
 
 fn local_idempotency_manifest_path(

@@ -111,6 +111,13 @@ fn format_duration_secs(duration: Duration) -> String {
     format!("{}s", duration.as_secs())
 }
 
+pub fn sink_work_in_flight_count() -> usize {
+    GROUPED_COMPACTION_JOBS
+        .iter()
+        .filter(|entry| entry.value().phase == GroupedCompactionPhase::UploadingToSink)
+        .count()
+}
+
 pub fn format_in_flight_grouped_compactions() -> String {
     if GROUPED_COMPACTION_JOBS.is_empty() {
         return "none".to_string();
@@ -155,6 +162,8 @@ fn format_grouped_compaction_job_detail(job: &GroupedCompactionJob) -> String {
     );
     if let Some(rows) = job.rows {
         let _ = write!(out, " rows={rows}");
+    } else if job.phase == GroupedCompactionPhase::UploadingToSink {
+        let _ = write!(out, " rows=n/a");
     }
     if job.manifest_attempts > 1 {
         let _ = write!(out, " attempts={}", job.manifest_attempts);
@@ -255,6 +264,8 @@ pub fn format_compactor_drain_status_summary(
         );
         if let Some(rows) = job.rows {
             let _ = write!(out, " rows={rows}");
+        } else if job.phase == GroupedCompactionPhase::UploadingToSink {
+            let _ = write!(out, " rows=n/a");
         }
     }
 

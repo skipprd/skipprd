@@ -88,6 +88,13 @@ pub fn decode_record_batch_stream(bytes: Vec<u8>) -> Result<SendableRecordBatchS
     decode_record_batch_stream_with_stats(bytes).map(|decoded| decoded.stream)
 }
 
+pub fn record_batches_to_stream(
+    schema: SchemaRef,
+    batches: Vec<RecordBatch>,
+) -> SendableRecordBatchStream {
+    Box::pin(VecRecordBatchStream::new(schema, batches))
+}
+
 pub fn decode_record_batch_stream_with_stats(
     bytes: Vec<u8>,
 ) -> Result<DecodedRecordBatchStream, io::Error> {
