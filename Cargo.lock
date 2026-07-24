@@ -13033,7 +13033,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-google-serp-ranks"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -13042,6 +13042,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "sha2 0.10.9",
+ "skippr-plugin-shared-api-source",
  "skippr-runtime-sdk",
  "tempfile",
  "tokio",
@@ -13606,7 +13607,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-upfoundry-link-graph-ingest"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "arrow",
  "async-trait",
@@ -13622,6 +13623,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "skippr-plugin-shared-api-source",
  "skippr-plugin-shared-link-graph",
  "skippr-runtime-sdk",
  "tokio",
