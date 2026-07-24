@@ -316,9 +316,34 @@ impl DataSourceGoogleSerpRanksPlugin {
                         keyword = %keyword,
                         job_id = %job.job_id,
                         error = %err,
-                        "Google SERP: Bright Data job failed"
+                        "Google SERP: Bright Data job failed; recording error row and continuing"
                     );
-                    return Err(err);
+                    WorkerJobResult {
+                        job_id: job.job_id.clone(),
+                        ok: false,
+                        status: "error".into(),
+                        blocked_reason: None,
+                        organic_results: vec![],
+                        target_matches: targets
+                            .iter()
+                            .map(|target| crate::worker::TargetMatchRow {
+                                target_site: target.clone(),
+                                matched_url: None,
+                                matched_domain: None,
+                                position: None,
+                                page_start: None,
+                                found: false,
+                            })
+                            .collect(),
+                        results_inspected: 0,
+                        pages_fetched: 0,
+                        search_url_hash: None,
+                        serp_features: None,
+                        error: Some(serde_json::json!({
+                            "code": "BRIGHTDATA_JOB_ERROR",
+                            "message": err.to_string(),
+                        })),
+                    }
                 }
             };
             let elapsed_ms = started.elapsed().as_millis();

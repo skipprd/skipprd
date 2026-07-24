@@ -108,104 +108,52 @@ impl BrightDataClient {
             );
 
             let body = Self::serp_api_request_body(&self.zone, &search_url, true);
-
             let endpoint = format!("{}/request", self.api_base.trim_end_matches('/'));
-            let response = self
-                .http
-                .post(&endpoint)
-                .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
-                .header(CONTENT_TYPE, "application/json")
-                .json(&body)
-                .send()
-                .await
-                .map_err(std::io::Error::other)?;
+            let fetch = self
+                .fetch_parsed_with_soft_retry(&job.keyword, &endpoint, &body, page_start)
+                .await?;
 
-            let status = response.status();
-            let mut raw_text = response.text().await.map_err(std::io::Error::other)?;
-
-            if !status.is_success() {
-                log_api_response_issue(
-                    "bright_data",
-                    &endpoint,
-                    "http_error",
-                    Some(status.as_u16()),
-                    &raw_text,
-                );
-                return Ok(error_result(
-                    job,
-                    first_hash.unwrap_or(search_url_hash),
-                    "BRIGHTDATA_HTTP_ERROR",
-                    format!(
-                        "Bright Data HTTP {}: {} ({})",
-                        status,
-                        truncate_response_body(&raw_text, 500),
-                        body_debug_suffix(&raw_text, 300)
-                    ),
-                ));
-            }
-
-            if raw_text.trim().is_empty() {
-                warn!(
-                    keyword = %job.keyword,
-                    zone = %self.zone,
-                    page_start,
-                    endpoint = %endpoint,
-                    "Bright Data SERP: empty response body; retrying once"
-                );
-                tokio::time::sleep(Duration::from_millis(750)).await;
-                let retry = self
-                    .http
-                    .post(&endpoint)
-                    .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
-                    .header(CONTENT_TYPE, "application/json")
-                    .json(&body)
-                    .send()
-                    .await
-                    .map_err(std::io::Error::other)?;
-                let retry_status = retry.status();
-                raw_text = retry.text().await.map_err(std::io::Error::other)?;
-                if !retry_status.is_success() {
-                    log_api_response_issue(
-                        "bright_data",
-                        &endpoint,
-                        "http_error_retry",
-                        Some(retry_status.as_u16()),
-                        &raw_text,
-                    );
+            let (status, raw_text, parsed) = match fetch {
+                SoftFetchOutcome::Parsed {
+                    status,
+                    raw_text,
+                    parsed,
+                } => (status, raw_text, parsed),
+                SoftFetchOutcome::HttpError { status, raw_text } => {
                     return Ok(error_result(
                         job,
                         first_hash.unwrap_or(search_url_hash),
                         "BRIGHTDATA_HTTP_ERROR",
                         format!(
                             "Bright Data HTTP {}: {} ({})",
-                            retry_status,
+                            status,
                             truncate_response_body(&raw_text, 500),
                             body_debug_suffix(&raw_text, 300)
                         ),
                     ));
                 }
-            }
-
-            let parsed = match parse_response_payload(&endpoint, &raw_text) {
-                Ok(parsed) => parsed,
-                Err(err) => {
-                    warn!(
-                        provider = "bright_data",
-                        keyword = %job.keyword,
-                        zone = %self.zone,
-                        page_start,
-                        endpoint = %endpoint,
-                        context = "invalid_json",
-                        "External API response issue"
-                    );
-                    log_api_response_issue(
-                        "bright_data",
-                        &endpoint,
-                        "invalid_json",
-                        Some(status.as_u16()),
-                        &raw_text,
-                    );
-                    return Err(err);
+                SoftFetchOutcome::SoftError { status, raw_text } => {
+                    // Prefer partial pages already fetched over aborting the whole keyword/job.
+                    if merged.is_some() {
+                        warn!(
+                            keyword = %job.keyword,
+                            page_start,
+                            http_status = status.map(|s| s.as_u16()),
+                            body_preview = %truncate_response_body(&raw_text, 120),
+                            "Bright Data soft error on later page; keeping earlier pages"
+                        );
+                        break;
+                    }
+                    return Ok(error_result(
+                        job,
+                        first_hash.unwrap_or(search_url_hash),
+                        "BRIGHTDATA_SOFT_ERROR",
+                        format!(
+                            "Bright Data soft error after retries (status={:?}, {})",
+                            status.map(|s| s.as_u16()),
+                            body_debug_suffix(&raw_text, 300)
+                        ),
+                    ));
                 }
             };
             info!(
@@ -276,25 +224,6 @@ impl BrightDataClient {
         }
     }
 
-    async fn post_serp_request(
-        &self,
-        body: &Value,
-    ) -> Result<(reqwest::StatusCode, String), std::io::Error> {
-        let endpoint = format!("{}/request", self.api_base.trim_end_matches('/'));
-        let response = self
-            .http
-            .post(&endpoint)
-            .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
-            .header(CONTENT_TYPE, "application/json")
-            .json(body)
-            .send()
-            .await
-            .map_err(std::io::Error::other)?;
-        let status = response.status();
-        let raw_text = response.text().await.map_err(std::io::Error::other)?;
-        Ok((status, raw_text))
-    }
-
     pub async fn throttle_delay(&self) {
         tokio::time::sleep(Duration::from_millis(self.config.min_query_interval_ms)).await;
     }
@@ -325,20 +254,23 @@ impl BrightDataClient {
         );
 
         let body = Self::serp_api_request_body(&self.zone, &search_url, false);
-
         let endpoint = format!("{}/request", self.api_base.trim_end_matches('/'));
-        let (status, raw_text) = self
-            .post_serp_with_empty_retry(keyword, &endpoint, &body, "allintitle")
+        let fetch = self
+            .fetch_parsed_with_soft_retry(keyword, &endpoint, &body, 0)
             .await?;
-        if !status.is_success() {
-            log_api_response_issue(
-                "bright_data",
-                &endpoint,
-                "allintitle_http_error",
-                Some(status.as_u16()),
-                &raw_text,
-            );
-            return Err(std::io::Error::new(
+        match fetch {
+            SoftFetchOutcome::Parsed {
+                raw_text, parsed, ..
+            } => {
+                if let Some(reason) = detect_blocked(&parsed, &raw_text) {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Bright Data allintitle blocked: {reason}"),
+                    ));
+                }
+                Ok(parse_results_cnt(&parsed))
+            }
+            SoftFetchOutcome::HttpError { status, raw_text } => Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!(
                     "Bright Data HTTP {}: {} ({})",
@@ -346,43 +278,181 @@ impl BrightDataClient {
                     truncate_response_body(&raw_text, 500),
                     body_debug_suffix(&raw_text, 300)
                 ),
-            ));
-        }
-
-        let parsed = match parse_response_payload(&endpoint, &raw_text) {
-            Ok(parsed) => parsed,
-            Err(err) => return Err(err),
-        };
-        if let Some(reason) = detect_blocked(&parsed, &raw_text) {
-            return Err(std::io::Error::new(
+            )),
+            SoftFetchOutcome::SoftError { status, raw_text } => Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("Bright Data allintitle blocked: {reason}"),
-            ));
+                format!(
+                    "Bright Data soft error after retries (status={:?}, {})",
+                    status.map(|s| s.as_u16()),
+                    body_debug_suffix(&raw_text, 300)
+                ),
+            )),
         }
-        Ok(parse_results_cnt(&parsed))
     }
 
-    async fn post_serp_with_empty_retry(
+    async fn fetch_parsed_with_soft_retry(
         &self,
         keyword: &str,
         endpoint: &str,
         body: &Value,
-        context: &str,
-    ) -> Result<(reqwest::StatusCode, String), std::io::Error> {
-        let (status, raw_text) = self.post_serp_request(body).await?;
-        if !raw_text.trim().is_empty() {
-            return Ok((status, raw_text));
+        page_start: u32,
+    ) -> Result<SoftFetchOutcome, std::io::Error> {
+        const MAX_ATTEMPTS: u32 = 3;
+        let mut last_status: Option<reqwest::StatusCode> = None;
+        let mut last_body = String::new();
+
+        for attempt in 1..=MAX_ATTEMPTS {
+            let (status, raw_text, brd_err_code, brd_err_msg) =
+                self.post_serp_request_with_headers(body).await?;
+            last_status = Some(status);
+            last_body = raw_text.clone();
+
+            if !status.is_success() {
+                log_api_response_issue(
+                    "bright_data",
+                    endpoint,
+                    "http_error",
+                    Some(status.as_u16()),
+                    &raw_text,
+                );
+                return Ok(SoftFetchOutcome::HttpError { status, raw_text });
+            }
+
+            if is_brightdata_soft_error_body(&raw_text) {
+                log_api_response_issue(
+                    "bright_data",
+                    endpoint,
+                    if raw_text.trim().is_empty() {
+                        "empty"
+                    } else {
+                        "soft_error_body"
+                    },
+                    Some(status.as_u16()),
+                    &raw_text,
+                );
+                warn!(
+                    keyword = %keyword,
+                    zone = %self.zone,
+                    page_start,
+                    endpoint = %endpoint,
+                    attempt,
+                    http_status = status.as_u16(),
+                    brd_err_code = brd_err_code.as_deref().unwrap_or(""),
+                    brd_err_msg = brd_err_msg.as_deref().unwrap_or(""),
+                    body_preview = %truncate_response_body(&raw_text, 120),
+                    "Bright Data soft error body; retrying"
+                );
+                if attempt < MAX_ATTEMPTS {
+                    let backoff_ms = 750u64.saturating_mul(attempt as u64);
+                    tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                    continue;
+                }
+                return Ok(SoftFetchOutcome::SoftError {
+                    status: Some(status),
+                    raw_text,
+                });
+            }
+
+            match parse_response_payload(endpoint, &raw_text) {
+                Ok(parsed) => {
+                    return Ok(SoftFetchOutcome::Parsed {
+                        status,
+                        raw_text,
+                        parsed,
+                    });
+                }
+                Err(_) => {
+                    // Non-JSON that didn't match soft-error heuristics — still retry once/twice.
+                    warn!(
+                        keyword = %keyword,
+                        page_start,
+                        attempt,
+                        http_status = status.as_u16(),
+                        body_preview = %truncate_response_body(&raw_text, 120),
+                        "Bright Data invalid JSON; retrying"
+                    );
+                    if attempt < MAX_ATTEMPTS {
+                        let backoff_ms = 750u64.saturating_mul(attempt as u64);
+                        tokio::time::sleep(Duration::from_millis(backoff_ms)).await;
+                        continue;
+                    }
+                    return Ok(SoftFetchOutcome::SoftError {
+                        status: Some(status),
+                        raw_text,
+                    });
+                }
+            }
         }
-        warn!(
-            keyword = %keyword,
-            zone = %self.zone,
-            endpoint = %endpoint,
-            context = %context,
-            "Bright Data: empty response body; retrying once"
-        );
-        tokio::time::sleep(Duration::from_millis(750)).await;
-        self.post_serp_request(body).await
+
+        Ok(SoftFetchOutcome::SoftError {
+            status: last_status,
+            raw_text: last_body,
+        })
     }
+
+    async fn post_serp_request_with_headers(
+        &self,
+        body: &Value,
+    ) -> Result<(reqwest::StatusCode, String, Option<String>, Option<String>), std::io::Error>
+    {
+        let endpoint = format!("{}/request", self.api_base.trim_end_matches('/'));
+        let response = self
+            .http
+            .post(&endpoint)
+            .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
+            .header(CONTENT_TYPE, "application/json")
+            .json(body)
+            .send()
+            .await
+            .map_err(std::io::Error::other)?;
+        let status = response.status();
+        let brd_err_code = response
+            .headers()
+            .get("x-brd-err-code")
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let brd_err_msg = response
+            .headers()
+            .get("x-brd-err-msg")
+            .or_else(|| response.headers().get("x-brd-error"))
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        let raw_text = response.text().await.map_err(std::io::Error::other)?;
+        Ok((status, raw_text, brd_err_code, brd_err_msg))
+    }
+}
+
+enum SoftFetchOutcome {
+    Parsed {
+        status: reqwest::StatusCode,
+        raw_text: String,
+        parsed: Value,
+    },
+    HttpError {
+        status: reqwest::StatusCode,
+        raw_text: String,
+    },
+    SoftError {
+        status: Option<reqwest::StatusCode>,
+        raw_text: String,
+    },
+}
+
+/// Bright Data sometimes returns HTTP 200 with an empty body or a plain-text
+/// soft error (e.g. "Error while processing request") instead of JSON.
+pub fn is_brightdata_soft_error_body(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let lower = trimmed.to_ascii_lowercase();
+    if lower.starts_with('{') || lower.starts_with('[') {
+        return false;
+    }
+    lower.contains("error while processing request")
+        || lower.contains("unexpected error")
+        || lower == "error"
+        || (!trimmed.starts_with('<') && serde_json::from_str::<Value>(trimmed).is_err())
 }
 
 /// Parse Bright Data `general.results_cnt` (allintitle total).
@@ -913,6 +983,16 @@ fn error_result(
 mod tests {
     use super::*;
     use crate::config::{SerpDevice, TargetEntry};
+
+    #[test]
+    fn soft_error_body_detects_empty_and_plain_text() {
+        assert!(is_brightdata_soft_error_body(""));
+        assert!(is_brightdata_soft_error_body("   "));
+        assert!(is_brightdata_soft_error_body("Error while processing request"));
+        assert!(is_brightdata_soft_error_body("Unexpected error. The server encountered an unexpected error while processing the request."));
+        assert!(!is_brightdata_soft_error_body(r#"{"organic":[]}"#));
+        assert!(!is_brightdata_soft_error_body(r#"[{"link":"https://x"}]"#));
+    }
 
     #[test]
     fn parse_response_payload_rejects_empty_body() {
