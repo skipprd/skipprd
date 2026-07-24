@@ -5,7 +5,10 @@ use reqwest::Client;
 use serde::Deserialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use tracing::info;
+use skippr_plugin_shared_api_source::{
+    body_debug_suffix, log_api_response_issue, truncate_response_body,
+};
+use tracing::{info, warn};
 use url::Url;
 
 use crate::config::{DataSourceGoogleSerpRanksPluginConfig, SerpDevice};
@@ -118,18 +121,102 @@ impl BrightDataClient {
                 .map_err(std::io::Error::other)?;
 
             let status = response.status();
-            let raw_text = response.text().await.map_err(std::io::Error::other)?;
+            let mut raw_text = response.text().await.map_err(std::io::Error::other)?;
 
             if !status.is_success() {
+                log_api_response_issue(
+                    "bright_data",
+                    &endpoint,
+                    "http_error",
+                    Some(status.as_u16()),
+                    &raw_text,
+                );
                 return Ok(error_result(
                     job,
                     first_hash.unwrap_or(search_url_hash),
                     "BRIGHTDATA_HTTP_ERROR",
-                    format!("Bright Data HTTP {}: {}", status, truncate(&raw_text, 500)),
+                    format!(
+                        "Bright Data HTTP {}: {} ({})",
+                        status,
+                        truncate_response_body(&raw_text, 500),
+                        body_debug_suffix(&raw_text, 300)
+                    ),
                 ));
             }
 
-            let parsed = parse_response_payload(&raw_text)?;
+            if raw_text.trim().is_empty() {
+                warn!(
+                    keyword = %job.keyword,
+                    zone = %self.zone,
+                    page_start,
+                    endpoint = %endpoint,
+                    "Bright Data SERP: empty response body; retrying once"
+                );
+                tokio::time::sleep(Duration::from_millis(750)).await;
+                let retry = self
+                    .http
+                    .post(&endpoint)
+                    .header(AUTHORIZATION, format!("Bearer {}", self.api_key))
+                    .header(CONTENT_TYPE, "application/json")
+                    .json(&body)
+                    .send()
+                    .await
+                    .map_err(std::io::Error::other)?;
+                let retry_status = retry.status();
+                raw_text = retry.text().await.map_err(std::io::Error::other)?;
+                if !retry_status.is_success() {
+                    log_api_response_issue(
+                        "bright_data",
+                        &endpoint,
+                        "http_error_retry",
+                        Some(retry_status.as_u16()),
+                        &raw_text,
+                    );
+                    return Ok(error_result(
+                        job,
+                        first_hash.unwrap_or(search_url_hash),
+                        "BRIGHTDATA_HTTP_ERROR",
+                        format!(
+                            "Bright Data HTTP {}: {} ({})",
+                            retry_status,
+                            truncate_response_body(&raw_text, 500),
+                            body_debug_suffix(&raw_text, 300)
+                        ),
+                    ));
+                }
+            }
+
+            let parsed = match parse_response_payload(&endpoint, &raw_text) {
+                Ok(parsed) => parsed,
+                Err(err) => {
+                    warn!(
+                        provider = "bright_data",
+                        keyword = %job.keyword,
+                        zone = %self.zone,
+                        page_start,
+                        endpoint = %endpoint,
+                        context = "invalid_json",
+                        "External API response issue"
+                    );
+                    log_api_response_issue(
+                        "bright_data",
+                        &endpoint,
+                        "invalid_json",
+                        Some(status.as_u16()),
+                        &raw_text,
+                    );
+                    return Err(err);
+                }
+            };
+            info!(
+                keyword = %job.keyword,
+                zone = %self.zone,
+                page_start,
+                http_status = status.as_u16(),
+                body_len = raw_text.len(),
+                organic_count = organic_entries(&parsed).len(),
+                "Bright Data SERP: received response"
+            );
             if let Some(reason) = detect_blocked(&parsed, &raw_text) {
                 return Ok(blocked_result(
                     job,
@@ -239,50 +326,62 @@ impl BrightDataClient {
 
         let body = Self::serp_api_request_body(&self.zone, &search_url, false);
 
-        let (status, raw_text) = self.post_serp_request(&body).await?;
+        let endpoint = format!("{}/request", self.api_base.trim_end_matches('/'));
+        let (status, raw_text) = self
+            .post_serp_with_empty_retry(keyword, &endpoint, &body, "allintitle")
+            .await?;
         if !status.is_success() {
+            log_api_response_issue(
+                "bright_data",
+                &endpoint,
+                "allintitle_http_error",
+                Some(status.as_u16()),
+                &raw_text,
+            );
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
-                format!("Bright Data HTTP {}: {}", status, truncate(&raw_text, 500)),
+                format!(
+                    "Bright Data HTTP {}: {} ({})",
+                    status,
+                    truncate_response_body(&raw_text, 500),
+                    body_debug_suffix(&raw_text, 300)
+                ),
             ));
         }
 
-        let parsed = parse_response_payload(&raw_text)?;
+        let parsed = match parse_response_payload(&endpoint, &raw_text) {
+            Ok(parsed) => parsed,
+            Err(err) => return Err(err),
+        };
         if let Some(reason) = detect_blocked(&parsed, &raw_text) {
             return Err(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("Bright Data allintitle blocked: {reason}"),
             ));
         }
-        if let Some(count) = parse_results_cnt(&parsed) {
-            return Ok(Some(count));
-        }
+        Ok(parse_results_cnt(&parsed))
+    }
 
-        // Intermittent empty bodies from Bright Data under hub volume.
-        if raw_text.trim().is_empty() {
-            tokio::time::sleep(Duration::from_millis(750)).await;
-            let (retry_status, retry_text) = self.post_serp_request(&body).await?;
-            if !retry_status.is_success() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!(
-                        "Bright Data HTTP {}: {}",
-                        retry_status,
-                        truncate(&retry_text, 500)
-                    ),
-                ));
-            }
-            let retry_parsed = parse_response_payload(&retry_text)?;
-            if let Some(reason) = detect_blocked(&retry_parsed, &retry_text) {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Bright Data allintitle blocked: {reason}"),
-                ));
-            }
-            return Ok(parse_results_cnt(&retry_parsed));
+    async fn post_serp_with_empty_retry(
+        &self,
+        keyword: &str,
+        endpoint: &str,
+        body: &Value,
+        context: &str,
+    ) -> Result<(reqwest::StatusCode, String), std::io::Error> {
+        let (status, raw_text) = self.post_serp_request(body).await?;
+        if !raw_text.trim().is_empty() {
+            return Ok((status, raw_text));
         }
-
-        Ok(None)
+        warn!(
+            keyword = %keyword,
+            zone = %self.zone,
+            endpoint = %endpoint,
+            context = %context,
+            "Bright Data: empty response body; retrying once"
+        );
+        tokio::time::sleep(Duration::from_millis(750)).await;
+        self.post_serp_request(body).await
     }
 }
 
@@ -301,12 +400,33 @@ fn json_u64(value: &Value) -> Option<u64> {
         .or_else(|| value.as_f64().map(|n| n as u64))
 }
 
-fn truncate(s: &str, max: usize) -> String {
-    if s.len() <= max {
-        s.to_string()
-    } else {
-        format!("{}…", &s[..max])
+fn parse_response_payload(endpoint: &str, raw: &str) -> Result<Value, std::io::Error> {
+    if raw.trim().is_empty() {
+        log_api_response_issue("bright_data", endpoint, "empty", None, raw);
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Bright Data response is empty ({})",
+                body_debug_suffix(raw, 300)
+            ),
+        ));
     }
+    let value: Value = serde_json::from_str(raw).map_err(|e| {
+        log_api_response_issue("bright_data", endpoint, "invalid_json", None, raw);
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "Bright Data response is not JSON: {e} ({})",
+                body_debug_suffix(raw, 300)
+            ),
+        )
+    })?;
+    if let Some(inner) = value.get("body").and_then(|b| b.as_str()) {
+        if let Ok(parsed) = serde_json::from_str::<Value>(inner) {
+            return Ok(parsed);
+        }
+    }
+    Ok(value)
 }
 
 pub fn build_search_url(
@@ -338,21 +458,6 @@ pub fn hash_search_url(url: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(url.as_bytes());
     format!("sha256:{:x}", hasher.finalize())
-}
-
-fn parse_response_payload(raw: &str) -> Result<Value, std::io::Error> {
-    let value: Value = serde_json::from_str(raw).map_err(|e| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            format!("Bright Data response is not JSON: {e}"),
-        )
-    })?;
-    if let Some(inner) = value.get("body").and_then(|b| b.as_str()) {
-        if let Ok(parsed) = serde_json::from_str::<Value>(inner) {
-            return Ok(parsed);
-        }
-    }
-    Ok(value)
 }
 
 fn detect_blocked(parsed: &Value, raw: &str) -> Option<String> {
@@ -810,6 +915,21 @@ mod tests {
     use crate::config::{SerpDevice, TargetEntry};
 
     #[test]
+    fn parse_response_payload_rejects_empty_body() {
+        let err = parse_response_payload("https://api.brightdata.com/request", "").unwrap_err();
+        assert!(err.to_string().contains("body_len=0"));
+    }
+
+    #[test]
+    fn parse_response_payload_includes_preview_on_invalid_json() {
+        let err =
+            parse_response_payload("https://api.brightdata.com/request", "not-json").unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("body_len="));
+        assert!(message.contains("preview=not-json"));
+    }
+
+    #[test]
     fn parse_results_cnt_from_fixture() {
         let raw = include_str!("../fixtures/allintitle_brightdata.json");
         let parsed: Value = serde_json::from_str(raw).unwrap();
@@ -870,7 +990,7 @@ mod tests {
                 }
             ]
         }"#;
-        let parsed = parse_response_payload(raw).unwrap();
+        let parsed = parse_response_payload("https://api.brightdata.com/request", raw).unwrap();
         let entries = organic_entries(&parsed);
         assert_eq!(entries.len(), 1);
         assert_eq!(row_url(&entries[0]).unwrap(), "https://www.example.com/");

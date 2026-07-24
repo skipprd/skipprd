@@ -309,7 +309,18 @@ impl DataSourceGoogleSerpRanksPlugin {
                 target_count = targets.len(),
                 "Google SERP: starting query job"
             );
-            let result = worker.run_job(&job).await?;
+            let result = match worker.run_job(&job).await {
+                Ok(result) => result,
+                Err(err) => {
+                    warn!(
+                        keyword = %keyword,
+                        job_id = %job.job_id,
+                        error = %err,
+                        "Google SERP: Bright Data job failed"
+                    );
+                    return Err(err);
+                }
+            };
             let elapsed_ms = started.elapsed().as_millis();
             info!(
                 keyword = %keyword,

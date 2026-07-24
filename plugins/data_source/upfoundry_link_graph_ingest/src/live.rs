@@ -1,6 +1,8 @@
 use std::time::Duration;
 
 use reqwest::header::{AUTHORIZATION, CONTENT_TYPE};
+use skippr_plugin_shared_api_source::{body_debug_suffix, log_api_response_issue};
+use tracing::warn;
 
 const BRIGHTDATA_API_KEY_ENV: &str = "BRIGHTDATA_API_KEY";
 const BRIGHTDATA_ZONE_ENV: &str = "BRIGHTDATA_ZONE";
@@ -124,32 +126,51 @@ async fn fetch_brightdata_html(page_url: &str) -> Result<FetchedHtml, String> {
         "url": page_url,
         "format": "raw",
     });
+    let endpoint = format!("{}/request", api_base.trim_end_matches('/'));
     let resp = client
-        .post(format!("{}/request", api_base.trim_end_matches('/')))
+        .post(&endpoint)
         .header(AUTHORIZATION, format!("Bearer {api_key}"))
         .header(CONTENT_TYPE, "application/json")
         .json(&body)
         .send()
         .await
         .map_err(|err| format!("brightdata_fetch_error: {err}"))?;
-    if !resp.status().is_success() {
-        return Err(format!("brightdata_fetch_status_{}", resp.status()));
-    }
-    let status = resp.status().as_u16();
-    let content_mime_type = resp
-        .headers()
-        .get(reqwest::header::CONTENT_TYPE)
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("text/html")
-        .to_ascii_lowercase();
+    let status = resp.status();
     let html = resp.text().await.map_err(|err| err.to_string())?;
+    if !status.is_success() {
+        log_api_response_issue(
+            "bright_data",
+            &endpoint,
+            "link_graph_html",
+            Some(status.as_u16()),
+            &html,
+        );
+        return Err(format!(
+            "brightdata_fetch_status_{status} ({})",
+            body_debug_suffix(&html, 300)
+        ));
+    }
+    if html.trim().is_empty() {
+        log_api_response_issue("bright_data", &endpoint, "link_graph_empty", Some(status.as_u16()), &html);
+        return Err(format!(
+            "brightdata_fetch_empty ({})",
+            body_debug_suffix(&html, 300)
+        ));
+    }
     if is_blank_or_blocked(&html) {
+        warn!(
+            provider = "bright_data",
+            endpoint = %endpoint,
+            page_url = %page_url,
+            body_len = html.len(),
+            "External API response issue: brightdata_blank_or_blocked"
+        );
         return Err("brightdata_blank_or_blocked".into());
     }
     Ok(FetchedHtml {
         html,
-        http_status: status,
-        content_mime_type,
+        http_status: status.as_u16(),
+        content_mime_type: "text/html".to_string(),
     })
 }
 

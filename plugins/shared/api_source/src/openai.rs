@@ -1,3 +1,6 @@
+use crate::response_debug::{
+    body_debug_suffix, log_api_response_issue, parse_json_response, truncate_response_body,
+};
 use crate::retry::{RetryConfig, RetryDecision, RetryableHttpClient};
 use tracing::warn;
 
@@ -79,17 +82,33 @@ impl OpenAiChatClient {
                 .and_then(|v| v.parse::<u64>().ok());
             match RetryableHttpClient::classify_status(status, retry_after) {
                 RetryDecision::Success => {
-                    let envelope: serde_json::Value = response
-                        .json()
+                    let text = response
+                        .text()
                         .await
                         .map_err(|e| std::io::Error::other(e.to_string()))?;
-                    return parse_chat_json_content(&envelope);
+                    let envelope = parse_json_response(
+                        "OpenAI",
+                        &url,
+                        "chat_completions",
+                        Some(status.as_u16()),
+                        &text,
+                    )?;
+                    return parse_chat_json_content(&envelope, &text);
                 }
                 RetryDecision::RetryAfter(delay) => {
                     attempt += 1;
                     if attempt >= self.http.config.max_attempts {
+                        let text = response.text().await.unwrap_or_default();
+                        log_api_response_issue(
+                            "openai",
+                            &url,
+                            "retry_exhausted",
+                            Some(status.as_u16()),
+                            &text,
+                        );
                         return Err(std::io::Error::other(format!(
-                            "OpenAI request failed after {attempt} attempts: HTTP {status}"
+                            "OpenAI request failed after {attempt} attempts: HTTP {status} ({})",
+                            body_debug_suffix(&text, 300)
                         )));
                     }
                     warn!(attempt, %status, "OpenAI transient error; backing off");
@@ -97,8 +116,17 @@ impl OpenAiChatClient {
                 }
                 RetryDecision::GiveUp => {
                     let text = response.text().await.unwrap_or_default();
+                    log_api_response_issue(
+                        "openai",
+                        &url,
+                        "http_error",
+                        Some(status.as_u16()),
+                        &text,
+                    );
                     return Err(std::io::Error::other(format!(
-                        "OpenAI request failed: HTTP {status} {text}"
+                        "OpenAI request failed: HTTP {status} {} ({})",
+                        truncate_response_body(&text, 500),
+                        body_debug_suffix(&text, 300)
                     )));
                 }
             }
@@ -108,20 +136,41 @@ impl OpenAiChatClient {
 
 fn parse_chat_json_content(
     envelope: &serde_json::Value,
+    raw_body: &str,
 ) -> Result<serde_json::Value, std::io::Error> {
     let content = envelope
         .pointer("/choices/0/message/content")
         .and_then(|v| v.as_str())
         .ok_or_else(|| {
+            log_api_response_issue(
+                "openai",
+                "/v1/chat/completions",
+                "missing_message_content",
+                Some(200),
+                raw_body,
+            );
             std::io::Error::new(
                 std::io::ErrorKind::InvalidData,
-                "OpenAI response missing choices[0].message.content",
+                format!(
+                    "OpenAI response missing choices[0].message.content ({})",
+                    body_debug_suffix(raw_body, 300)
+                ),
             )
         })?;
     serde_json::from_str(content).map_err(|e| {
+        log_api_response_issue(
+            "openai",
+            "/v1/chat/completions",
+            "invalid_message_json",
+            Some(200),
+            content,
+        );
         std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("OpenAI content is not valid JSON: {e}"),
+            format!(
+                "OpenAI content is not valid JSON: {e} ({})",
+                body_debug_suffix(content, 300)
+            ),
         )
     })
 }
@@ -150,7 +199,7 @@ mod tests {
                 }
             }]
         });
-        let parsed = parse_chat_json_content(&envelope).unwrap();
+        let parsed = parse_chat_json_content(&envelope, r#"{"choices":[{"message":{"content":"{\"score\": 0.9}"}}]}"#).unwrap();
         assert_eq!(parsed["score"], 0.9);
     }
 }

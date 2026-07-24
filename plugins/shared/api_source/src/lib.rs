@@ -7,6 +7,7 @@ pub mod date_window;
 pub mod json_extract;
 pub mod openai;
 pub mod pagination;
+pub mod response_debug;
 pub mod retry;
 
 pub use auth::{
@@ -19,4 +20,8 @@ pub use date_window::{DateWindow, DateWindowPlanner};
 pub use json_extract::json_rows_from_response;
 pub use openai::{OpenAiChatClient, OpenAiError};
 pub use pagination::{OffsetPagination, PageNumberPagination, TokenPagination};
+pub use response_debug::{
+    body_debug_suffix, log_api_response_issue, log_api_task_issue, parse_json_response,
+    truncate_response_body, DEFAULT_BODY_PREVIEW_LEN,
+};
 pub use retry::{RetryConfig, RetryDecision, RetryableHttpClient};

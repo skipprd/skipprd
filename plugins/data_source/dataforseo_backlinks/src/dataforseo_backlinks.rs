@@ -1008,7 +1008,7 @@ mod tests {
     fn parse_backlinks_items_from_fixture() {
         let body: serde_json::Value =
             serde_json::from_slice(&fixture_bytes("backlinks_live_page1")).unwrap();
-        let parsed = parse_live_response(&body).unwrap();
+        let parsed = parse_live_response("test", &body).unwrap();
         let task = &parsed.tasks[0];
         assert!(task.task_ok);
         let entity = SyncEntity {
@@ -1036,7 +1036,7 @@ mod tests {
     fn parse_intersection_items_from_fixture() {
         let body: serde_json::Value =
             serde_json::from_slice(&fixture_bytes("page_intersection_live_partial")).unwrap();
-        let parsed = parse_live_response(&body).unwrap();
+        let parsed = parse_live_response("test", &body).unwrap();
         let task = &parsed.tasks[0];
         let targets_config = serde_json::json!({ "1": "a.com", "2": "b.com" });
         let entity = SyncEntity {
@@ -1066,7 +1066,7 @@ mod tests {
     fn parse_summary_from_fixture() {
         let body: serde_json::Value =
             serde_json::from_slice(&fixture_bytes("summary_live")).unwrap();
-        let parsed = parse_live_response(&body).unwrap();
+        let parsed = parse_live_response("test", &body).unwrap();
         let task = &parsed.tasks[0];
         let entity = SyncEntity {
             site: "example".into(),

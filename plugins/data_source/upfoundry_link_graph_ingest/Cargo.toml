@@ -1,6 +1,6 @@
 [package]
 name = "skippr-plugin-data-source-upfoundry-link-graph-ingest"
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 
 [[bin]]
@@ -20,6 +20,7 @@ flate2 = "1.0.25"
 parquet.workspace = true
 serde.workspace = true
 serde_json = "1.0.85"
+skippr-plugin-shared-api-source = { path = "../../shared/api_source" }
 skippr-plugin-shared-link-graph = { path = "../../shared/link_graph" }
 skippr-runtime-sdk.workspace = true
 tokio.workspace = true

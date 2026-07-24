@@ -1,5 +1,8 @@
 use serde_json::{json, Value};
-use skippr_plugin_shared_api_source::{BasicAuth, RetryConfig, RetryableHttpClient};
+use skippr_plugin_shared_api_source::{
+    body_debug_suffix, log_api_response_issue, log_api_task_issue, parse_json_response,
+    truncate_response_body, BasicAuth, RetryConfig, RetryableHttpClient,
+};
 use tracing::warn;
 
 pub const BACKLINKS_LIVE_URL: &str = "https://api.dataforseo.com/v3/backlinks/backlinks/live";
@@ -178,32 +181,61 @@ impl DataForSeoClient {
 
             match RetryableHttpClient::classify_status(status, retry_after) {
                 skippr_plugin_shared_api_source::RetryDecision::Success => {
-                    let json: Value = response
-                        .json()
+                    let text = response
+                        .text()
                         .await
                         .map_err(|e| std::io::Error::other(e.to_string()))?;
-                    return parse_live_response(&json);
+                    let json = parse_json_response(
+                        "DataForSEO",
+                        url,
+                        "live",
+                        Some(status.as_u16()),
+                        &text,
+                    )?;
+                    return parse_live_response(url, &json);
                 }
                 skippr_plugin_shared_api_source::RetryDecision::RetryAfter(delay) => {
                     attempt += 1;
                     if attempt >= self.http.config.max_attempts {
+                        let text = response.text().await.unwrap_or_default();
+                        log_api_response_issue(
+                            "dataforseo",
+                            url,
+                            "retry_exhausted",
+                            Some(status.as_u16()),
+                            &text,
+                        );
                         return Err(std::io::Error::other(format!(
-                            "DataForSEO API failed after {attempt} attempts: HTTP {status}"
+                            "DataForSEO API failed after {attempt} attempts: HTTP {status} ({})",
+                            body_debug_suffix(&text, 300)
                         )));
                     }
-                    warn!(attempt, %status, "DataForSEO API retry");
+                    warn!(attempt, %status, endpoint = %url, "DataForSEO API retry");
                     self.http.backoff(attempt, delay).await;
                 }
                 skippr_plugin_shared_api_source::RetryDecision::GiveUp => {
                     let text = response.text().await.unwrap_or_default();
+                    log_api_response_issue(
+                        "dataforseo",
+                        url,
+                        "http_error",
+                        Some(status.as_u16()),
+                        &text,
+                    );
                     if status == reqwest::StatusCode::UNAUTHORIZED {
                         return Err(std::io::Error::new(
                             std::io::ErrorKind::PermissionDenied,
-                            format!("DataForSEO authentication failed: {text}"),
+                            format!(
+                                "DataForSEO authentication failed: {} ({})",
+                                truncate_response_body(&text, 500),
+                                body_debug_suffix(&text, 300)
+                            ),
                         ));
                     }
                     return Err(std::io::Error::other(format!(
-                        "DataForSEO API HTTP {status}: {text}"
+                        "DataForSEO API HTTP {status}: {} ({})",
+                        truncate_response_body(&text, 500),
+                        body_debug_suffix(&text, 300)
                     )));
                 }
             }
@@ -211,7 +243,7 @@ impl DataForSeoClient {
     }
 }
 
-pub fn parse_live_response(body: &Value) -> Result<LiveApiResponse, std::io::Error> {
+pub fn parse_live_response(endpoint: &str, body: &Value) -> Result<LiveApiResponse, std::io::Error> {
     let top_level_cost = body.get("cost").and_then(json_f64).unwrap_or(0.0);
     let tasks = body
         .get("tasks")
@@ -220,7 +252,7 @@ pub fn parse_live_response(body: &Value) -> Result<LiveApiResponse, std::io::Err
         .unwrap_or_default();
     let parsed = tasks
         .iter()
-        .map(parse_task)
+        .map(|task| parse_task(endpoint, task))
         .collect::<Result<Vec<_>, _>>()?;
     Ok(LiveApiResponse {
         top_level_cost,
@@ -228,7 +260,7 @@ pub fn parse_live_response(body: &Value) -> Result<LiveApiResponse, std::io::Err
     })
 }
 
-fn parse_task(task: &Value) -> Result<ParsedTaskResponse, std::io::Error> {
+fn parse_task(endpoint: &str, task: &Value) -> Result<ParsedTaskResponse, std::io::Error> {
     let task_status_code = task.get("status_code").and_then(json_i64).unwrap_or(0);
     let task_ok = task_status_code == TASK_OK_STATUS;
     let task_status_message = task
@@ -236,6 +268,15 @@ fn parse_task(task: &Value) -> Result<ParsedTaskResponse, std::io::Error> {
         .and_then(|v| v.as_str())
         .unwrap_or_default()
         .to_string();
+    if !task_ok {
+        log_api_task_issue(
+            "dataforseo",
+            endpoint,
+            "task_error",
+            task_status_code,
+            &task_status_message,
+        );
+    }
     let task_cost = task.get("cost").and_then(json_f64).unwrap_or(0.0);
 
     let result0 = task
@@ -290,7 +331,7 @@ fn load_fixture(dir: &str, name: &str) -> Result<LiveApiResponse, std::io::Error
         std::io::Error::new(std::io::ErrorKind::NotFound, format!("fixture {path}: {e}"))
     })?;
     let json: Value = serde_json::from_slice(&bytes).map_err(std::io::Error::other)?;
-    parse_live_response(&json)
+    parse_live_response("", &json)
 }
 
 fn json_f64(value: &Value) -> Option<f64> {

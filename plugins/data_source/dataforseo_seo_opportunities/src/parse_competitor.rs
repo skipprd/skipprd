@@ -145,7 +145,7 @@ mod tests {
         ))
         .unwrap();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
-        let parsed = parse_live_response(&body).unwrap();
+        let parsed = parse_live_response("test", &body).unwrap();
         let ctx = CompetitorKeywordContext {
             site: "picnic.com",
             run_date: "2026-05-30",
