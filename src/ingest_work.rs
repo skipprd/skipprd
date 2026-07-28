@@ -1261,6 +1261,10 @@ pub(crate) enum DataDirCapacityDecision {
     Continue,
     EnterPause,
     Resume,
+    /// Current pipeline WAL is drained but disk is still above the low watermark.
+    /// Stop this pipeline's ingest so the multi-pipeline sync loop can advance and
+    /// force-compact other pipelines. Does not poison process-global RUNNING.
+    YieldPipeline,
     Fatal { message: String },
 }
 
@@ -1359,6 +1363,7 @@ impl Ingest {
         avail_bytes >= min_free_bytes && used_pct <= low_watermark as f64
     }
 
+    #[allow(dead_code)]
     fn data_dir_below_high_watermark(
         used_pct: f64,
         high_watermark: u8,
@@ -1395,32 +1400,36 @@ impl Ingest {
             return DataDirCapacityDecision::EnterPause;
         }
 
-        let below_high = Self::data_dir_below_high_watermark(
-            used_pct,
-            high_watermark,
-            min_free_bytes,
-            avail_bytes,
-        );
-        if below_high {
-            if Self::data_dir_should_resume(avail_bytes, used_pct, low_watermark, min_free_bytes) {
-                return DataDirCapacityDecision::Resume;
-            }
+        if Self::data_dir_should_resume(avail_bytes, used_pct, low_watermark, min_free_bytes) {
             return DataDirCapacityDecision::Resume;
         }
 
-        let below_min_free = avail_bytes < min_free_bytes;
-        let above_high_watermark = used_pct >= high_watermark as f64;
-        DataDirCapacityDecision::Fatal {
-            message: Self::data_dir_capacity_fatal_message(
-                avail_bytes,
-                total_bytes,
-                used_pct,
-                min_free_bytes,
-                high_watermark,
-                below_min_free,
-                above_high_watermark,
-            ),
-        }
+        // WAL for this pipeline is drained but disk is still above the low watermark.
+        // Yield so sync can advance to another pipeline and force-compact there —
+        // do not resume ingest on this pipeline (thrash) or Fatal (process poison).
+        let _ = (total_bytes, high_watermark);
+        DataDirCapacityDecision::YieldPipeline
+    }
+
+    fn log_yield_pipeline_after_wal_drain(
+        avail_bytes: u64,
+        total_bytes: u64,
+        used_pct: f64,
+        low_watermark: u8,
+    ) {
+        let progress = crate::buffer::ingest_buffer::Buffers::pause_progress_snapshot();
+        info!(
+            "Yielding pipeline after WAL drain: DATA_DIR usage {:.1}% remains above low watermark {}% (free {} / total {}). Advancing so other pipelines can compact. pipeline={}, committed_segments={}, indexed_refs={}, bytes_reclaimed={}, last_progress_age_secs={:?}",
+            used_pct,
+            low_watermark,
+            Helpers::human_readable_size(avail_bytes),
+            Helpers::human_readable_size(total_bytes),
+            progress.pipeline,
+            progress.committed_segments,
+            progress.indexed_refs,
+            progress.bytes_reclaimed_cumulative,
+            progress.last_progress_age_secs,
+        );
     }
 
     fn attempt_pause_escape(
@@ -1447,6 +1456,7 @@ impl Ingest {
         )
     }
 
+    #[allow(dead_code)]
     fn data_dir_capacity_fatal_message(
         avail_bytes: u64,
         total_bytes: u64,
@@ -1528,6 +1538,17 @@ impl Ingest {
                             set_data_dir_ingest_paused(true);
                             Buffers::wake_compactor();
                         }
+                        DataDirCapacityDecision::YieldPipeline => {
+                            // Keep ingest paused so the next pipeline force-compacts immediately.
+                            set_data_dir_ingest_paused(true);
+                            Self::log_yield_pipeline_after_wal_drain(
+                                avail_bytes,
+                                total_bytes,
+                                used_pct,
+                                low_watermark,
+                            );
+                            return false;
+                        }
                         DataDirCapacityDecision::Fatal { message } => {
                             error!("{}", message);
                             record_data_dir_capacity_error(message);
@@ -1594,21 +1615,27 @@ impl Ingest {
                 ) {
                     DataDirCapacityDecision::Resume => {
                         set_data_dir_ingest_paused(false);
-                        let progress =
-                            crate::buffer::ingest_buffer::Buffers::pause_progress_snapshot();
                         info!(
-                            "Resuming ingest after exhausted-pipeline escape: DATA_DIR usage {:.1}% remains above low watermark {}% but current pipeline has no schedulable WAL (pipeline={}, committed_segments={}, indexed_refs={}, bytes_reclaimed={}, last_progress_age_secs={:?})",
+                            "Resuming ingest: DATA_DIR usage {:.1}% is at/below low watermark {}% after WAL drain (free {} / total {}).",
                             used_pct,
                             low_watermark,
-                            progress.pipeline,
-                            progress.committed_segments,
-                            progress.indexed_refs,
-                            progress.bytes_reclaimed_cumulative,
-                            progress.last_progress_age_secs,
+                            Helpers::human_readable_size(avail_bytes),
+                            Helpers::human_readable_size(total_bytes)
                         );
                         return true;
                     }
                     DataDirCapacityDecision::EnterPause => {}
+                    DataDirCapacityDecision::YieldPipeline => {
+                        // Keep ingest paused so the next pipeline force-compacts immediately.
+                        set_data_dir_ingest_paused(true);
+                        Self::log_yield_pipeline_after_wal_drain(
+                            avail_bytes,
+                            total_bytes,
+                            used_pct,
+                            low_watermark,
+                        );
+                        return false;
+                    }
                     DataDirCapacityDecision::Fatal { message } => {
                         error!("{}", message);
                         record_data_dir_capacity_error(message);
@@ -3794,7 +3821,7 @@ mod data_dir_watermark_tests {
     }
 
     #[test]
-    fn exhausted_escape_resumes_below_high_when_no_work() {
+    fn exhausted_escape_resumes_at_or_below_low_when_no_work() {
         let reconcile = crate::buffer::ingest_buffer::WalReconcileResult {
             committed_segments: 10,
             indexed_refs: 0,
@@ -3814,7 +3841,22 @@ mod data_dir_watermark_tests {
     }
 
     #[test]
-    fn exhausted_escape_fails_at_or_above_high() {
+    fn exhausted_escape_yields_between_low_and_high_when_no_work() {
+        let reconcile = crate::buffer::ingest_buffer::WalReconcileResult::default();
+        let decision = Ingest::evaluate_exhausted_pause_escape(
+            60 * GB,
+            200 * GB,
+            70.0,
+            5 * GB,
+            75,
+            60,
+            &reconcile,
+        );
+        assert_eq!(decision, super::DataDirCapacityDecision::YieldPipeline);
+    }
+
+    #[test]
+    fn exhausted_escape_yields_at_or_above_high_when_no_work() {
         let reconcile = crate::buffer::ingest_buffer::WalReconcileResult::default();
         let decision = Ingest::evaluate_exhausted_pause_escape(
             10 * GB,
@@ -3825,10 +3867,7 @@ mod data_dir_watermark_tests {
             80,
             &reconcile,
         );
-        assert!(matches!(
-            decision,
-            super::DataDirCapacityDecision::Fatal { .. }
-        ));
+        assert_eq!(decision, super::DataDirCapacityDecision::YieldPipeline);
     }
 }
 

@@ -2397,7 +2397,7 @@ impl Buffers {
     async fn build_eager_grouped_stream(
         work: &CompactionWork,
         expected_cdc_rows: Option<u64>,
-    ) -> io::Result<SendableRecordBatchStream> {
+    ) -> io::Result<(SendableRecordBatchStream, u64)> {
         let mut batches = Vec::new();
         for entry in work.entries.iter() {
             let s3_body = Self::resolve_entry_s3_body(entry).await?;
@@ -2455,10 +2455,13 @@ impl Buffers {
         }
 
         let schema = schema.unwrap_or_else(|| Arc::new(arrow_schema::Schema::empty()));
-        Ok(Box::pin(EagerGroupedWalBatchStream {
-            schema,
-            batches: batches.into_iter(),
-        }))
+        Ok((
+            Box::pin(EagerGroupedWalBatchStream {
+                schema,
+                batches: batches.into_iter(),
+            }),
+            seen_rows,
+        ))
     }
 
     async fn resolve_entry_s3_body(entry: &CompactionEntry) -> io::Result<Option<Arc<Vec<u8>>>> {
@@ -2483,6 +2486,8 @@ impl Buffers {
         SendableRecordBatchStream,
         Option<crate::plugins::cdc::SyncContext>,
         u64,
+        Arc<AtomicU64>,
+        bool,
     )> {
         let mut cdc_rows = Vec::new();
         let mut saw_cdc = false;
@@ -2521,8 +2526,12 @@ impl Buffers {
         let total_entries = work.entries.len();
 
         if Self::should_build_grouped_stream_eager(work) {
-            let stream = Self::build_eager_grouped_stream(work, expected_cdc_rows).await?;
-            return Ok((stream, cdc_ctx, total_rows));
+            let (stream, seen_rows) =
+                Self::build_eager_grouped_stream(work, expected_cdc_rows).await?;
+            // Prefer Arrow row count for append; CDC meta matches Arrow after validation.
+            let rows = if saw_cdc { total_rows } else { seen_rows };
+            let row_counter = Arc::new(AtomicU64::new(rows));
+            return Ok((stream, cdc_ctx, rows, row_counter, true));
         }
 
         enum GroupedStreamMsg {
@@ -2596,6 +2605,11 @@ impl Buffers {
             }
         });
 
+        // CDC: seed with metadata row count (known at build). Append: count Arrow rows as the
+        // stream is consumed so complete/fail logs are accurate.
+        let rows_known_at_build = saw_cdc;
+        let row_counter = Arc::new(AtomicU64::new(if saw_cdc { total_rows } else { 0 }));
+
         struct GroupedWalBatchStream {
             schema: Option<SchemaRef>,
             rx: mpsc::Receiver<Result<GroupedStreamMsg, DataFusionError>>,
@@ -2608,11 +2622,21 @@ impl Buffers {
             total_entries: usize,
             expected_cdc_rows: Option<u64>,
             seen_rows: u64,
+            row_counter: Arc<AtomicU64>,
+            count_into_counter: bool,
             emitted_cdc_count_error: bool,
             finished: bool,
         }
 
         impl GroupedWalBatchStream {
+            fn record_emitted_rows(&mut self, batch_rows: u64) {
+                self.seen_rows = self.seen_rows.saturating_add(batch_rows);
+                if self.count_into_counter {
+                    self.row_counter
+                        .fetch_add(batch_rows, AtomicOrdering::Relaxed);
+                }
+            }
+
             fn try_emit_ready(&mut self) -> Option<Result<RecordBatch, DataFusionError>> {
                 loop {
                     if self.next_entry_index >= self.total_entries {
@@ -2644,7 +2668,7 @@ impl Buffers {
                             } else {
                                 self.schema = Some(batch.schema());
                             }
-                            self.seen_rows = self.seen_rows.saturating_add(batch.num_rows() as u64);
+                            self.record_emitted_rows(batch.num_rows() as u64);
                             self.next_batch_index += 1;
                             return Some(Ok(batch));
                         }
@@ -2713,7 +2737,7 @@ impl Buffers {
                             } else {
                                 self.schema = Some(batch.schema());
                             }
-                            self.seen_rows = self.seen_rows.saturating_add(batch.num_rows() as u64);
+                            self.record_emitted_rows(batch.num_rows() as u64);
                             self.next_batch_index += 1;
                             TaskPoll::Ready(Some(Ok(batch)))
                         } else {
@@ -2789,10 +2813,18 @@ impl Buffers {
             total_entries,
             expected_cdc_rows,
             seen_rows: 0,
+            row_counter: row_counter.clone(),
+            count_into_counter: !saw_cdc,
             emitted_cdc_count_error: false,
             finished: false,
         });
-        Ok((stream, cdc_ctx, total_rows))
+        Ok((
+            stream,
+            cdc_ctx,
+            if saw_cdc { total_rows } else { 0 },
+            row_counter,
+            rows_known_at_build,
+        ))
     }
 
     fn mark_work_in_flight(work: &CompactionWork) -> bool {
@@ -2918,18 +2950,19 @@ impl Buffers {
 
         persist_manifest(&work.txn)?;
         let stream_started = std::time::Instant::now();
-        let (batch_stream, cdc_ctx, rows) = match Self::build_grouped_stream(&work).await {
-            Ok(stream) => stream,
-            Err(err) => {
-                let err_str = err.to_string();
-                Self::quarantine_truncated_entries(&work.entries, "grouped_read", &err_str);
-                let failure_key = format!("{}:{}", work.txn.sink_ref, work.txn.id);
-                let attempts = {
-                    let mut entry = COMPACT_FAILURES.entry(failure_key.clone()).or_insert(0);
-                    *entry += 1;
-                    *entry
-                };
-                error!(
+        let (batch_stream, cdc_ctx, rows, row_counter, rows_known_at_build) =
+            match Self::build_grouped_stream(&work).await {
+                Ok(stream) => stream,
+                Err(err) => {
+                    let err_str = err.to_string();
+                    Self::quarantine_truncated_entries(&work.entries, "grouped_read", &err_str);
+                    let failure_key = format!("{}:{}", work.txn.sink_ref, work.txn.id);
+                    let attempts = {
+                        let mut entry = COMPACT_FAILURES.entry(failure_key.clone()).or_insert(0);
+                        *entry += 1;
+                        *entry
+                    };
+                    error!(
                     "Compactor: grouped stream build failed sink_ref={} namespace={} compaction_id={} attempt={} wal_parts={} elapsed={}s err={}",
                     work.txn.sink_ref,
                     work.txn.namespace,
@@ -2939,17 +2972,22 @@ impl Buffers {
                     stream_started.elapsed().as_secs(),
                     err_str
                 );
-                crate::metrics::counters::add_wal_compaction_transaction_failed(1);
-                return Err(err);
-            }
-        };
+                    crate::metrics::counters::add_wal_compaction_transaction_failed(1);
+                    return Err(err);
+                }
+            };
         progress.set_rows(rows);
         progress.set_phase(GroupedCompactionPhase::UploadingToSink);
+        let rows_start_label = if rows_known_at_build {
+            rows.to_string()
+        } else {
+            "pending".to_string()
+        };
         info!(
             "Compactor: grouped compaction building_wal_stream complete namespace={} wal_parts={} rows={} elapsed={}s compaction_id={}",
             work.txn.namespace,
             work.entries.len(),
-            rows,
+            rows_start_label,
             stream_started.elapsed().as_secs(),
             work.txn.id,
         );
@@ -2996,7 +3034,7 @@ impl Buffers {
         info!(
             "Compactor: grouped compaction uploading_to_sink started namespace={} rows={} sink_ref={} compaction_id={} target={}",
             work.txn.namespace,
-            rows,
+            rows_start_label,
             work.txn.sink_ref,
             work.txn.id,
             work.txn.target_filename,
@@ -3014,13 +3052,14 @@ impl Buffers {
                 *entry += 1;
                 *entry
             };
+            let final_rows = row_counter.load(AtomicOrdering::Relaxed);
             error!(
                 "Compactor: grouped compact failed sink_ref={} namespace={} compaction_id={} attempt={} rows={} upload_elapsed={}s job_elapsed={}s err={}",
                 work.txn.sink_ref,
                 work.txn.namespace,
                 work.txn.id,
                 attempts,
-                rows,
+                final_rows,
                 upload_started.elapsed().as_secs(),
                 job_started.elapsed().as_secs(),
                 err_str
@@ -3028,6 +3067,8 @@ impl Buffers {
             crate::metrics::counters::add_wal_compaction_transaction_failed(1);
             return Err(err);
         }
+        let final_rows = row_counter.load(AtomicOrdering::Relaxed);
+        progress.set_rows(final_rows);
         persist_manifest(&sent_txn.mark_acked())?;
         COMPACT_FAILURES.remove(&format!("{}:{}", work.txn.sink_ref, work.txn.id));
         crate::metrics::counters::add_wal_compaction_completed(work.entries.len() as u64);
@@ -3036,7 +3077,7 @@ impl Buffers {
             "Compactor: grouped compaction complete namespace={} wal_parts={} rows={} upload_elapsed={}s job_elapsed={}s compaction_id={} target={}",
             work.txn.namespace,
             work.entries.len(),
-            rows,
+            final_rows,
             upload_started.elapsed().as_secs(),
             job_started.elapsed().as_secs(),
             work.txn.id,
