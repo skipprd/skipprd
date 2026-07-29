@@ -39,5 +39,6 @@ runs:
           # Clear any prior STS session from aws-actions/configure-aws-credentials
           echo "AWS_SESSION_TOKEN="
           echo "AWS_SECURITY_TOKEN="
+          echo "AWS_PROFILE="
         } >> "$GITHUB_ENV"
         echo "Configured AWS CLI → R2 endpoint ${endpoint} (bucket ${RELEASES_BUCKET:-skippr-web-install})"
