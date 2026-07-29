@@ -106,11 +106,19 @@ struct AddFundsResponse {
 }
 
 impl ApiClient {
+    fn http_client() -> reqwest::Client {
+        // Cloudflare bot fight mode rejects the default reqwest User-Agent on some edges.
+        reqwest::Client::builder()
+            .user_agent(concat!("skippr-cli/", env!("CARGO_PKG_VERSION")))
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new())
+    }
+
     /// Create an unauthenticated client (for sign-in, confirm, API key exchange).
     pub fn new(base_url: &str) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            http: reqwest::Client::new(),
+            http: Self::http_client(),
             tokens: None,
         }
     }
@@ -119,7 +127,7 @@ impl ApiClient {
     pub fn authenticated(base_url: &str, tokens: Arc<TokenProvider>) -> Self {
         Self {
             base_url: base_url.trim_end_matches('/').to_string(),
-            http: reqwest::Client::new(),
+            http: Self::http_client(),
             tokens: Some(tokens),
         }
     }

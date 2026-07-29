@@ -617,6 +617,10 @@ impl DataSinkAthenaPlugin {
                 ctx.compaction_id
             )));
         }
+        // Do not pass ObjectWriteManifest into inner_sync: it writes the sidecar to the
+        // same key as GroupedWriteReceipt. Concurrent retries would then parse the
+        // intermediate ObjectWriteManifest as a receipt and fail on `final_s3_key`.
+        // GroupedWriteReceipt is the sole idempotency record for this path.
         let (outcome, applied) = self
             .inner_sync(
                 stream,
@@ -624,7 +628,7 @@ impl DataSinkAthenaPlugin {
                 write_policy,
                 resolved_contract.as_ref(),
                 Some(ctx.compaction_id.as_str()),
-                Some(&manifest),
+                None,
             )
             .await?;
         if matches!(&outcome, SinkWriteOutcome::Applied) {
@@ -747,7 +751,22 @@ impl DataSinkAthenaPlugin {
             .await
             .map_err(|err| io::Error::other(err.to_string()))?
             .into_bytes();
-        Ok(Some(GroupedWriteReceipt::from_json_bytes(&bytes)?))
+        match GroupedWriteReceipt::from_json_bytes(&bytes) {
+            Ok(receipt) => Ok(Some(receipt)),
+            Err(err) => {
+                // Intermediate ObjectWriteManifest (or other non-receipt JSON) at the
+                // receipt key means a prior attempt did not finish writing the receipt —
+                // treat as absent so the caller can re-apply.
+                if ObjectWriteManifest::from_json_bytes(&bytes).is_ok() {
+                    warn!(
+                        "Ignoring incomplete idempotency object at {} (not a grouped receipt yet)",
+                        receipt_key
+                    );
+                    return Ok(None);
+                }
+                Err(err)
+            }
+        }
     }
 
     async fn write_grouped_receipt_from_upload(

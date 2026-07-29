@@ -1037,10 +1037,12 @@ def fresh_metadata_url(url: str) -> str:
 
 
 def metadata_request(url: str, *, method: str | None = None) -> urllib.request.Request:
+    # Cloudflare bot fight mode returns 403 for the default Python-urllib UA.
     return urllib.request.Request(
         fresh_metadata_url(url),
         method=method,
         headers={
+            "User-Agent": "skippr-runtime-e2e-harness/1.0",
             "Cache-Control": "no-cache, no-store, max-age=0",
             "Pragma": "no-cache",
         },
@@ -1057,7 +1059,14 @@ def download_url(
     print_step(f"Downloading {url}")
     destination.parent.mkdir(parents=True, exist_ok=True)
     try:
-        request = metadata_request(url) if fresh_metadata else url
+        request = (
+            metadata_request(url)
+            if fresh_metadata
+            else urllib.request.Request(
+                url,
+                headers={"User-Agent": "skippr-runtime-e2e-harness/1.0"},
+            )
+        )
         with urllib.request.urlopen(request) as response:
             with destination.open("wb") as handle:
                 shutil.copyfileobj(response, handle)
@@ -1071,7 +1080,8 @@ def download_url(
 
 def assert_remote_url_exists(url: str) -> None:
     print_step(f"Verifying {url}")
-    request = urllib.request.Request(url, method="HEAD")
+    headers = {"User-Agent": "skippr-runtime-e2e-harness/1.0"}
+    request = urllib.request.Request(url, method="HEAD", headers=headers)
     try:
         with urllib.request.urlopen(request):
             return
@@ -1079,7 +1089,7 @@ def assert_remote_url_exists(url: str) -> None:
         if err.code == 405:
             fallback_request = urllib.request.Request(
                 url,
-                headers={"Range": "bytes=0-0"},
+                headers={**headers, "Range": "bytes=0-0"},
             )
             try:
                 with urllib.request.urlopen(fallback_request):
@@ -1092,7 +1102,9 @@ def assert_remote_url_exists(url: str) -> None:
                 raise HarnessError(
                     f"artifact verification failed for {url}: {fallback_err}"
                 ) from fallback_err
-        raise HarnessError(f"artifact verification failed for {url}: HTTP {err.code}") from err
+        raise HarnessError(
+            f"artifact verification failed for {url}: HTTP {err.code}"
+        ) from err
     except urllib.error.URLError as err:
         raise HarnessError(f"artifact verification failed for {url}: {err}") from err
 

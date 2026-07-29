@@ -73,6 +73,7 @@ def metadata_request(url: str) -> urllib.request.Request:
     return urllib.request.Request(
         fresh_metadata_url(url),
         headers={
+            "User-Agent": "skippr-runtime-e2e-harness/1.0",
             "Cache-Control": "no-cache, no-store, max-age=0",
             "Pragma": "no-cache",
         },
