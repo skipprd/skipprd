@@ -1,0 +1,59 @@
+name: Configure R2 sccache credentials
+description: >
+  Point sccache (and AWS CLI cache helpers) at Cloudflare R2 bucket skippr-web-rust-cache.
+  Call after CodeArtifact token fetch so R2 AWS_* credentials do not break aws codeartifact.
+
+inputs:
+  account_id:
+    description: Cloudflare account ID (R2 endpoint host prefix)
+    required: true
+  access_key_id:
+    description: R2 S3 API access key id
+    required: true
+  secret_access_key:
+    description: R2 S3 API secret access key
+    required: true
+  key_prefix:
+    description: Optional SCCACHE_S3_KEY_PREFIX (leave empty to keep existing env)
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Export R2 sccache environment
+      shell: bash
+      env:
+        R2_ACCOUNT_ID: ${{ inputs.account_id }}
+        R2_ACCESS_KEY_ID: ${{ inputs.access_key_id }}
+        R2_SECRET_ACCESS_KEY: ${{ inputs.secret_access_key }}
+        KEY_PREFIX: ${{ inputs.key_prefix }}
+      run: |
+        set -euo pipefail
+        if [[ -z "${R2_ACCOUNT_ID}" || -z "${R2_ACCESS_KEY_ID}" || -z "${R2_SECRET_ACCESS_KEY}" ]]; then
+          echo "::error::R2_ACCOUNT_ID, R2_ACCESS_KEY_ID, and R2_SECRET_ACCESS_KEY must be set (GitHub Actions secrets)."
+          exit 1
+        fi
+        endpoint="https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
+        {
+          echo "AWS_ACCESS_KEY_ID=${R2_ACCESS_KEY_ID}"
+          echo "AWS_SECRET_ACCESS_KEY=${R2_SECRET_ACCESS_KEY}"
+          echo "AWS_DEFAULT_REGION=auto"
+          echo "AWS_REGION=auto"
+          echo "AWS_ENDPOINT_URL=${endpoint}"
+          echo "AWS_SESSION_TOKEN="
+          echo "AWS_SECURITY_TOKEN="
+          echo "AWS_PROFILE="
+          echo "RUST_BUILD_CACHE_BUCKET=skippr-web-rust-cache"
+          echo "RUST_BUILD_CACHE_REGION=auto"
+          echo "SCCACHE_BUCKET=skippr-web-rust-cache"
+          echo "SCCACHE_REGION=auto"
+          echo "SCCACHE_ENDPOINT=${endpoint}"
+          echo "SCCACHE_S3_USE_SSL=true"
+          # R2 does not use AWS SSE-S3 the same way; disable.
+          echo "SCCACHE_S3_SERVER_SIDE_ENCRYPTION=false"
+        } >> "$GITHUB_ENV"
+        if [[ -n "${KEY_PREFIX}" ]]; then
+          echo "SCCACHE_S3_KEY_PREFIX=${KEY_PREFIX}" >> "$GITHUB_ENV"
+        fi
+        echo "Configured sccache → R2 ${endpoint} (bucket skippr-web-rust-cache)"

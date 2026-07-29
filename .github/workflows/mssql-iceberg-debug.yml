@@ -63,12 +63,28 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
         run: |
           set -euo pipefail
-          token="$(aws codeartifact get-authorization-token \
-            --domain skippr \
-            --domain-owner 132355036174 \
-            --region us-east-1 \
-            --query authorizationToken \
-            --output text)"
+          access_key="${CODEARTIFACT_AWS_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}"
+          secret_key="${CODEARTIFACT_AWS_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
+          if [[ -z "${access_key}" || -z "${secret_key}" ]]; then
+            echo "::error::CodeArtifact credentials missing (CODEARTIFACT_AWS_* or AWS_*)."
+            exit 1
+          fi
+          token="$(
+            AWS_ACCESS_KEY_ID="${access_key}" \
+            AWS_SECRET_ACCESS_KEY="${secret_key}" \
+            AWS_SESSION_TOKEN="${CODEARTIFACT_AWS_SESSION_TOKEN:-}" \
+            AWS_SECURITY_TOKEN= \
+            AWS_PROFILE= \
+            AWS_ENDPOINT_URL= \
+            AWS_DEFAULT_REGION=us-east-1 \
+            AWS_REGION=us-east-1 \
+            aws codeartifact get-authorization-token \
+              --domain skippr \
+              --domain-owner 132355036174 \
+              --region us-east-1 \
+              --query authorizationToken \
+              --output text
+          )"
           echo "::add-mask::$token"
           echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
 
@@ -130,12 +146,28 @@ jobs:
           AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
         run: |
           set -euo pipefail
-          token="$(aws codeartifact get-authorization-token \
-            --domain skippr \
-            --domain-owner 132355036174 \
-            --region us-east-1 \
-            --query authorizationToken \
-            --output text)"
+          access_key="${CODEARTIFACT_AWS_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}"
+          secret_key="${CODEARTIFACT_AWS_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
+          if [[ -z "${access_key}" || -z "${secret_key}" ]]; then
+            echo "::error::CodeArtifact credentials missing (CODEARTIFACT_AWS_* or AWS_*)."
+            exit 1
+          fi
+          token="$(
+            AWS_ACCESS_KEY_ID="${access_key}" \
+            AWS_SECRET_ACCESS_KEY="${secret_key}" \
+            AWS_SESSION_TOKEN="${CODEARTIFACT_AWS_SESSION_TOKEN:-}" \
+            AWS_SECURITY_TOKEN= \
+            AWS_PROFILE= \
+            AWS_ENDPOINT_URL= \
+            AWS_DEFAULT_REGION=us-east-1 \
+            AWS_REGION=us-east-1 \
+            aws codeartifact get-authorization-token \
+              --domain skippr \
+              --domain-owner 132355036174 \
+              --region us-east-1 \
+              --query authorizationToken \
+              --output text
+          )"
           echo "::add-mask::$token"
           echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
 
@@ -206,10 +238,16 @@ jobs:
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      SCCACHE_BUCKET: skippr-web-rust-cache-prod
-      SCCACHE_REGION: us-east-1
+      CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+      CODEARTIFACT_AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+      SCCACHE_BUCKET: skippr-web-rust-cache
+      SCCACHE_REGION: auto
+      SCCACHE_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
       SCCACHE_S3_KEY_PREFIX: skipprd
-      SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "true"
+      SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "false"
       SCCACHE_S3_USE_SSL: "true"
       VCPKGRS_NO_ZLIB: "1"
       CARGO_BUILD_JOBS: "2"
@@ -225,12 +263,28 @@ jobs:
           AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
           AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
         run: |
-          token="$(aws codeartifact get-authorization-token \
-            --domain skippr \
-            --domain-owner 132355036174 \
-            --region us-east-1 \
-            --query authorizationToken \
-            --output text)"
+          access_key="${CODEARTIFACT_AWS_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}"
+          secret_key="${CODEARTIFACT_AWS_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
+          if [[ -z "${access_key}" || -z "${secret_key}" ]]; then
+            echo "::error::CodeArtifact credentials missing (CODEARTIFACT_AWS_* or AWS_*)."
+            exit 1
+          fi
+          token="$(
+            AWS_ACCESS_KEY_ID="${access_key}" \
+            AWS_SECRET_ACCESS_KEY="${secret_key}" \
+            AWS_SESSION_TOKEN="${CODEARTIFACT_AWS_SESSION_TOKEN:-}" \
+            AWS_SECURITY_TOKEN= \
+            AWS_PROFILE= \
+            AWS_ENDPOINT_URL= \
+            AWS_DEFAULT_REGION=us-east-1 \
+            AWS_REGION=us-east-1 \
+            aws codeartifact get-authorization-token \
+              --domain skippr \
+              --domain-owner 132355036174 \
+              --region us-east-1 \
+              --query authorizationToken \
+              --output text
+          )"
           echo "::add-mask::$token"
           echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
 
@@ -250,6 +304,13 @@ jobs:
           echo "RUSTC_WRAPPER=sccache" >> $env:GITHUB_ENV
           echo "SCCACHE_IDLE_TIMEOUT=0" >> $env:GITHUB_ENV
           echo "SCCACHE_IGNORE_SERVER_IO_ERROR=1" >> $env:GITHUB_ENV
+          # Job AWS_* is e2e AWS; point sccache at R2 for the cargo build.
+          echo "AWS_ACCESS_KEY_ID=$env:R2_ACCESS_KEY_ID" >> $env:GITHUB_ENV
+          echo "AWS_SECRET_ACCESS_KEY=$env:R2_SECRET_ACCESS_KEY" >> $env:GITHUB_ENV
+          echo "AWS_DEFAULT_REGION=auto" >> $env:GITHUB_ENV
+          echo "AWS_REGION=auto" >> $env:GITHUB_ENV
+          echo "AWS_ENDPOINT_URL=https://$env:R2_ACCOUNT_ID.r2.cloudflarestorage.com" >> $env:GITHUB_ENV
+          echo "AWS_PROFILE=" >> $env:GITHUB_ENV
 
       - name: Install protoc
         shell: pwsh
@@ -302,10 +363,11 @@ jobs:
       - name: Build skipprd and runtime plugins
         shell: pwsh
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-          AWS_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REGION: auto
+          AWS_ENDPOINT_URL: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
         run: |
           $ErrorActionPreference = "Stop"
           cargo build `

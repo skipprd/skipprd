@@ -29,12 +29,29 @@ runs:
     - name: Configure CodeArtifact Cargo access
       shell: bash
       run: |
-        token="$(aws codeartifact get-authorization-token \
-          --domain skippr \
-          --domain-owner 132355036174 \
-          --region us-east-1 \
-          --query authorizationToken \
-          --output text)"
+        # Prefer dedicated AWS keys; job AWS_* may point at R2 for sccache.
+        access_key="${CODEARTIFACT_AWS_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}"
+        secret_key="${CODEARTIFACT_AWS_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
+        if [[ -z "${access_key}" || -z "${secret_key}" ]]; then
+          echo "::error::CodeArtifact credentials missing (CODEARTIFACT_AWS_* or AWS_*)."
+          exit 1
+        fi
+        token="$(
+          AWS_ACCESS_KEY_ID="${access_key}" \
+          AWS_SECRET_ACCESS_KEY="${secret_key}" \
+          AWS_SESSION_TOKEN="${CODEARTIFACT_AWS_SESSION_TOKEN:-}" \
+          AWS_SECURITY_TOKEN= \
+          AWS_PROFILE= \
+          AWS_ENDPOINT_URL= \
+          AWS_DEFAULT_REGION=us-east-1 \
+          AWS_REGION=us-east-1 \
+          aws codeartifact get-authorization-token \
+            --domain skippr \
+            --domain-owner 132355036174 \
+            --region us-east-1 \
+            --query authorizationToken \
+            --output text
+        )"
         echo "::add-mask::$token"
         echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
     - name: Install sccache
@@ -48,6 +65,13 @@ runs:
       run: |
         echo "RUSTC_WRAPPER=sccache" >> $GITHUB_ENV
         echo "SCCACHE_IDLE_TIMEOUT=0" >> $GITHUB_ENV
+        if [[ -z "${SCCACHE_ENDPOINT:-}" && -n "${R2_ACCOUNT_ID:-}" ]]; then
+          echo "SCCACHE_ENDPOINT=https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" >> "$GITHUB_ENV"
+        fi
+        if [[ -z "${AWS_ENDPOINT_URL:-}" && -n "${R2_ACCOUNT_ID:-}" ]]; then
+          echo "AWS_ENDPOINT_URL=https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" >> "$GITHUB_ENV"
+        fi
+
     - name: Disable debuginfo generation
       # Disable full debug symbol generation to speed up CI build and keep memory down
       # "1" means line tables only, which is useful for panic tracebacks.

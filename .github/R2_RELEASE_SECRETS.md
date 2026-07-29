@@ -1,7 +1,7 @@
-# GitHub Actions secrets for Cloudflare R2 install CDN
+# GitHub Actions secrets for Cloudflare R2 (install CDN + sccache)
 
 Add these repository secrets on **skipprd/skipprd-private** (Settings → Secrets and variables → Actions).
-Also add them to the **Skippr** environment if that environment overrides secret scope for publish jobs.
+Also add them to the **Skippr** environment if that environment overrides secret scope for publish/build jobs.
 
 | Secret | Value | Notes |
 |--------|-------|-------|
@@ -9,9 +9,13 @@ Also add them to the **Skippr** environment if that environment overrides secret
 | `R2_ACCESS_KEY_ID` | R2 S3 API access key | Same as `OBJECTS_ACCESS_KEY_ID` |
 | `R2_SECRET_ACCESS_KEY` | R2 S3 API secret | Same as `OBJECTS_SECRET_ACCESS_KEY` |
 
-Endpoint used by CI: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`  
-Bucket: `skippr-web-install` (public via Worker `install.skippr.io`)
+Endpoint used by CI: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`
 
-**Not required for install/releases anymore:** `RELEASE_AWS_ACCESS_KEY_ID` / `RELEASE_AWS_SECRET_ACCESS_KEY` for those upload jobs (still used for sccache / e2e AWS until rust-cache cutover).
+| Bucket | Role |
+|--------|------|
+| `skippr-web-install` | Public install + releases (`install.skippr.io`) |
+| `skippr-web-rust-cache` | Private sccache + Windows vcpkg binary cache |
 
-Create R2 API tokens in Cloudflare dashboard → R2 → Manage R2 API Tokens → permission **Object Read & Write** on `skippr-web-install` (or account-wide for CI).
+Token permission: **Object Read & Write** on both buckets (or account-wide).
+
+**Still AWS (not R2):** `RELEASE_AWS_ACCESS_KEY_ID` / `RELEASE_AWS_SECRET_ACCESS_KEY` for CodeArtifact only. E2E jobs keep using `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` for real AWS resources.

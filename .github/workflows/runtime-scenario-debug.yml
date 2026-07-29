@@ -18,10 +18,16 @@ on:
         default: ""
 
 env:
-  SCCACHE_BUCKET: skippr-web-rust-cache-prod
-  SCCACHE_REGION: us-east-1
+  CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
+  CODEARTIFACT_AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
+  R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
+  R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+  R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+  SCCACHE_BUCKET: skippr-web-rust-cache
+  SCCACHE_REGION: auto
+  SCCACHE_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
   SCCACHE_S3_KEY_PREFIX: skipprd
-  SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "true"
+  SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "false"
   SCCACHE_S3_USE_SSL: "true"
 
 jobs:
@@ -36,9 +42,11 @@ jobs:
       - name: Prepare Rust builder
         uses: ./.github/actions/setup-builder
         env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_REGION: auto
+          AWS_ENDPOINT_URL: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
         with:
           rust-version: stable
 
