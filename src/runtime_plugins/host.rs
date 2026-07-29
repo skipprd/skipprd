@@ -1491,19 +1491,35 @@ impl RuntimeSinkConnectionPool {
     }
 
     /// Grow-only: spawn additional child workers when RUNTIME_SINK_POOL_TARGET rises.
+    /// New workers are installed with the same sink binding + schema state as the rest of the pool.
     async fn maybe_grow_to_target(&self) -> io::Result<()> {
         let target = runtime_sink_connection_pool_size();
         let mut workers = self.workers.lock().await;
         while workers.len() < target {
-            workers.push(Arc::new(Mutex::new(
-                RuntimeChildConnection::spawn(
-                    self.resolved.clone(),
-                    self.pipeline_name.clone(),
-                    None,
-                    None,
-                )
-                .await?,
-            )));
+            let mut connection = RuntimeChildConnection::spawn(
+                self.resolved.clone(),
+                self.pipeline_name.clone(),
+                None,
+                None,
+            )
+            .await?;
+            connection
+                .send(&HostFrame::InstallSink(self.install_request.clone()))
+                .await?;
+            expect_install_ack(&mut connection, "sink").await?;
+            let schema_state = current_runtime_schema_state();
+            connection
+                .send(&HostFrame::InstallSchemaState(
+                    RuntimeSchemaStateInstallRequest {
+                        schema_state: crate::runtime_plugins::protocol::RuntimeSchemaState {
+                            version: schema_state.version,
+                            namespaces: schema_state.namespaces.clone(),
+                        },
+                    },
+                ))
+                .await?;
+            expect_install_ack(&mut connection, "schema state").await?;
+            workers.push(Arc::new(Mutex::new(connection)));
             self.semaphore.add_permits(1);
             info!(
                 "tune: runtime_sink_pool grew to {} workers (target={})",
