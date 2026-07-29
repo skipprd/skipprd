@@ -42,10 +42,11 @@ pub static S3_DOWNLOAD_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> 
     Lazy::new(|| std::sync::atomic::AtomicUsize::new(256));
 /// Max concurrent grouped compactions per sink_ref (auto-tuned; env WAL_COMPACTIONS_PER_SINK overrides).
 pub static WAL_COMPACTIONS_PER_SINK_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
-    Lazy::new(|| std::sync::atomic::AtomicUsize::new(2));
+    Lazy::new(|| std::sync::atomic::AtomicUsize::new(1));
 /// Runtime sink child-process pool size (auto-tuned; env RUNTIME_SINK_CONNECTION_POOL_SIZE overrides).
+/// Starts at 1 until `apply_env_caps` seeds a CPU-shaped value (keeps single-worker host tests stable).
 pub static RUNTIME_SINK_POOL_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
-    Lazy::new(|| std::sync::atomic::AtomicUsize::new(2));
+    Lazy::new(|| std::sync::atomic::AtomicUsize::new(1));
 /// Athena Glue control-plane concurrency (auto-tuned in plugin; env ATHENA_GLUE_CONTROL_PLANE_CONCURRENCY overrides).
 pub static ATHENA_GLUE_CP_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
     Lazy::new(|| std::sync::atomic::AtomicUsize::new(2));
