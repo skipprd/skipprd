@@ -40,12 +40,25 @@ pub static WAL_COMPACTION_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsiz
     Lazy::new(|| std::sync::atomic::AtomicUsize::new(16));
 pub static S3_DOWNLOAD_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
     Lazy::new(|| std::sync::atomic::AtomicUsize::new(256));
+/// Max concurrent grouped compactions per sink_ref (auto-tuned; env WAL_COMPACTIONS_PER_SINK overrides).
+pub static WAL_COMPACTIONS_PER_SINK_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
+    Lazy::new(|| std::sync::atomic::AtomicUsize::new(2));
+/// Runtime sink child-process pool size (auto-tuned; env RUNTIME_SINK_CONNECTION_POOL_SIZE overrides).
+pub static RUNTIME_SINK_POOL_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
+    Lazy::new(|| std::sync::atomic::AtomicUsize::new(2));
+/// Athena Glue control-plane concurrency (auto-tuned in plugin; env ATHENA_GLUE_CONTROL_PLANE_CONCURRENCY overrides).
+pub static ATHENA_GLUE_CP_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
+    Lazy::new(|| std::sync::atomic::AtomicUsize::new(2));
 
 // WAL S3 error telemetry
 pub static S3_WAL_RETRIES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static S3_WAL_ERRORS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 // Exponential moving average of retries per tick, scaled by 100 (for decimals)
 pub static S3_WAL_RETRY_EMA_X100: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+
+// Glue/Athena control-plane retry telemetry (plugin-local when using runtime sinks)
+pub static GLUE_RETRIES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static GLUE_RETRY_EMA_X100: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 
 // Upload telemetry
 pub static UPLOADS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
@@ -205,6 +218,16 @@ pub fn add_s3_wal_error(n: u64) {
 #[inline]
 pub fn set_s3_wal_retry_ema_x100(v: u64) {
     S3_WAL_RETRY_EMA_X100.store(v, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn add_glue_retry(n: u64) {
+    GLUE_RETRIES_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn set_glue_retry_ema_x100(v: u64) {
+    GLUE_RETRY_EMA_X100.store(v, Ordering::Relaxed);
 }
 
 // (removed unused LLM/semantic add helpers)

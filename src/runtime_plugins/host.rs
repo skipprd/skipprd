@@ -1442,26 +1442,28 @@ fn runtime_sink_payload_chunk_bytes() -> usize {
 }
 
 fn runtime_sink_connection_pool_size() -> usize {
-    Config::getenv("RUNTIME_SINK_CONNECTION_POOL_SIZE", "1")
-        .parse::<usize>()
-        .ok()
-        .filter(|value| *value > 0)
-        .unwrap_or(1)
-        .min(16)
+    if let Ok(v) = Config::getenv("RUNTIME_SINK_CONNECTION_POOL_SIZE", "").parse::<usize>() {
+        if v > 0 {
+            return v.min(16);
+        }
+    }
+    crate::metrics::counters::RUNTIME_SINK_POOL_TARGET
+        .load(Ordering::Relaxed)
+        .clamp(1, 16)
 }
 
 struct RuntimeSinkConnectionPool {
     install_request: RuntimeSinkInstallRequest,
     resolved: ResolvedRuntimePlugin,
     pipeline_name: String,
-    workers: Vec<Mutex<RuntimeChildConnection>>,
+    workers: tokio::sync::Mutex<Vec<Arc<Mutex<RuntimeChildConnection>>>>,
     semaphore: Arc<tokio::sync::Semaphore>,
     next_worker: AtomicUsize,
 }
 
-struct RuntimeSinkWorkerLease<'a> {
+struct RuntimeSinkWorkerLease {
     _permit: tokio::sync::OwnedSemaphorePermit,
-    guard: tokio::sync::MutexGuard<'a, RuntimeChildConnection>,
+    worker: Arc<Mutex<RuntimeChildConnection>>,
 }
 
 impl RuntimeSinkConnectionPool {
@@ -1473,31 +1475,60 @@ impl RuntimeSinkConnectionPool {
         let pool_size = runtime_sink_connection_pool_size();
         let mut workers = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
-            workers.push(Mutex::new(
+            workers.push(Arc::new(Mutex::new(
                 RuntimeChildConnection::spawn(resolved.clone(), pipeline_name.clone(), None, None)
                     .await?,
-            ));
+            )));
         }
         Ok(Self {
             install_request,
             resolved,
             pipeline_name,
-            workers,
+            workers: tokio::sync::Mutex::new(workers),
             semaphore: Arc::new(tokio::sync::Semaphore::new(pool_size)),
             next_worker: AtomicUsize::new(0),
         })
     }
 
-    async fn acquire<'a>(&'a self) -> io::Result<RuntimeSinkWorkerLease<'a>> {
+    /// Grow-only: spawn additional child workers when RUNTIME_SINK_POOL_TARGET rises.
+    async fn maybe_grow_to_target(&self) -> io::Result<()> {
+        let target = runtime_sink_connection_pool_size();
+        let mut workers = self.workers.lock().await;
+        while workers.len() < target {
+            workers.push(Arc::new(Mutex::new(
+                RuntimeChildConnection::spawn(
+                    self.resolved.clone(),
+                    self.pipeline_name.clone(),
+                    None,
+                    None,
+                )
+                .await?,
+            )));
+            self.semaphore.add_permits(1);
+            info!(
+                "tune: runtime_sink_pool grew to {} workers (target={})",
+                workers.len(),
+                target
+            );
+        }
+        Ok(())
+    }
+
+    async fn acquire(&self) -> io::Result<RuntimeSinkWorkerLease> {
+        self.maybe_grow_to_target().await?;
         let permit = Arc::clone(&self.semaphore)
             .acquire_owned()
             .await
             .map_err(|_| io::Error::other("runtime sink worker pool closed"))?;
-        let idx = self.next_worker.fetch_add(1, Ordering::Relaxed) % self.workers.len();
-        let guard = self.workers[idx].lock().await;
+        let worker = {
+            let workers = self.workers.lock().await;
+            let len = workers.len().max(1);
+            let idx = self.next_worker.fetch_add(1, Ordering::Relaxed) % len;
+            Arc::clone(&workers[idx])
+        };
         Ok(RuntimeSinkWorkerLease {
             _permit: permit,
-            guard,
+            worker,
         })
     }
 
@@ -1556,7 +1587,10 @@ impl RuntimeDataSinkPlugin {
             capability,
             pool,
         };
-        for worker in plugin.pool.workers.iter() {
+        for worker in {
+            let workers = plugin.pool.workers.lock().await;
+            workers.iter().cloned().collect::<Vec<_>>()
+        } {
             let mut guard = worker.lock().await;
             match plugin.install_runtime_state(&mut guard).await {
                 Ok(()) => {}
@@ -1676,13 +1710,13 @@ impl RuntimeDataSinkPlugin {
         let mut schema_refreshes = 0usize;
         loop {
             let mut lease = self.pool.acquire().await?;
-            let guard = &mut lease.guard;
-            self.ensure_connection_ready(guard).await?;
+            let mut guard = lease.worker.lock().await;
+            self.ensure_connection_ready(&mut guard).await?;
 
             let request_timeout = runtime_sink_request_timeout();
             let recv_result = match timeout(request_timeout, async {
                 guard.send(&HostFrame::RunSink(request.clone())).await?;
-                Self::send_sink_payload(guard, request.request_id, &arrow_stream_bytes).await?;
+                Self::send_sink_payload(&mut guard, request.request_id, &arrow_stream_bytes).await?;
                 guard.recv().await
             })
             .await
@@ -1695,7 +1729,7 @@ impl RuntimeDataSinkPlugin {
                         request.compaction_id,
                         request_timeout.as_secs()
                     );
-                    self.restart_and_reinstall(guard).await?;
+                    self.restart_and_reinstall(&mut guard).await?;
                     return Err(io::Error::new(
                         ErrorKind::TimedOut,
                         format!(
@@ -1709,7 +1743,7 @@ impl RuntimeDataSinkPlugin {
             let recv_result = match recv_result {
                 Ok(frame) => Ok(frame),
                 Err(err) => {
-                    self.restart_and_reinstall(guard).await?;
+                    self.restart_and_reinstall(&mut guard).await?;
                     Err(err)
                 }
             };
@@ -1749,7 +1783,7 @@ impl RuntimeDataSinkPlugin {
                             "runtime sink repeatedly requested schema refresh",
                         ));
                     }
-                    self.install_latest_schema_state(guard).await?;
+                    self.install_latest_schema_state(&mut guard).await?;
                     schema_refreshes += 1;
                     continue;
                 }
@@ -1761,7 +1795,7 @@ impl RuntimeDataSinkPlugin {
                             "runtime sink request got stale frame, restarting child: {}",
                             err
                         );
-                        self.restart_and_reinstall(guard).await?;
+                        self.restart_and_reinstall(&mut guard).await?;
                         retried = true;
                         continue;
                     }
@@ -1772,7 +1806,7 @@ impl RuntimeDataSinkPlugin {
                         && (guard.has_exited()? || should_retry_runtime_connection(&err)) =>
                 {
                     warn!("runtime sink request failed, restarting child: {}", err);
-                    self.restart_and_reinstall(guard).await?;
+                    self.restart_and_reinstall(&mut guard).await?;
                     retried = true;
                     continue;
                 }
@@ -1786,7 +1820,9 @@ impl RuntimeDataSinkPlugin {
         schema_version: u64,
         namespaces: &BTreeMap<String, OutputMetadata>,
     ) -> io::Result<()> {
-        for worker in self.pool.workers.iter() {
+        self.pool.maybe_grow_to_target().await?;
+        let workers = self.pool.workers.lock().await;
+        for worker in workers.iter() {
             let mut guard = worker.lock().await;
             self.ensure_connection_ready(&mut guard).await?;
             self.send_schema_state_install(&mut guard, schema_version, namespaces)
@@ -1800,24 +1836,21 @@ impl RuntimeDataSinkPlugin {
         request: SinkRunRequest,
         mut reader: crate::plugins::GroupedBatchReader,
     ) -> io::Result<SinkWriteOutcome> {
-        let mut lease = self.pool.acquire().await?;
-        self.ensure_connection_ready(&mut lease.guard).await?;
+        let lease = self.pool.acquire().await?;
+        let mut guard = lease.worker.lock().await;
+        self.ensure_connection_ready(&mut guard).await?;
         let request_timeout = runtime_sink_request_timeout();
         let request_id = request.request_id;
         let compaction_id = request.compaction_id.clone();
         let recv_result = match timeout(request_timeout, async {
-            lease
-                .guard
-                .send(&HostFrame::RunSink(request.clone()))
-                .await?;
+            guard.send(&HostFrame::RunSink(request.clone())).await?;
             let mut sent_chunks = 0u32;
             let mut total_rows = 0u64;
             while let Some(chunk) = reader.next_chunk().await? {
                 total_rows = total_rows.saturating_add(chunk.rows);
                 let final_chunk = chunk.final_chunk;
                 let arrow_stream_bytes = encode_record_batches(&chunk.batches)?;
-                lease
-                    .guard
+                guard
                     .send_data(&HostDataFrame::SinkPayloadChunk(RuntimeSinkPayloadChunk {
                         request_id,
                         chunk_index: sent_chunks,
@@ -1830,8 +1863,7 @@ impl RuntimeDataSinkPlugin {
                 sent_chunks = sent_chunks.saturating_add(1);
             }
             if sent_chunks == 0 {
-                lease
-                    .guard
+                guard
                     .send_data(&HostDataFrame::SinkPayloadChunk(RuntimeSinkPayloadChunk {
                         request_id,
                         chunk_index: 0,
@@ -1842,7 +1874,7 @@ impl RuntimeDataSinkPlugin {
                     }))
                     .await?;
             }
-            let frame = lease.guard.recv().await?;
+            let frame = guard.recv().await?;
             Ok::<_, io::Error>((frame, total_rows))
         })
         .await
@@ -1855,7 +1887,7 @@ impl RuntimeDataSinkPlugin {
                     compaction_id,
                     request_timeout.as_secs()
                 );
-                self.restart_and_reinstall(&mut lease.guard).await?;
+                self.restart_and_reinstall(&mut guard).await?;
                 return Err(io::Error::new(
                     ErrorKind::TimedOut,
                     format!(
@@ -1870,7 +1902,7 @@ impl RuntimeDataSinkPlugin {
         let (frame, total_rows) = match recv_result {
             Ok(value) => value,
             Err(err) => {
-                self.restart_and_reinstall(&mut lease.guard).await?;
+                self.restart_and_reinstall(&mut guard).await?;
                 return Err(err);
             }
         };

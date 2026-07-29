@@ -4,6 +4,8 @@
 //! - a library (`skippr`) for reusable components (SQL runtime, adapters)
 //! - a binary (`src/main.rs`) for ingestion/CLI
 
+#![recursion_limit = "256"]
+
 // NOTE: This library is being split into cleaner module boundaries over time.
 // For now, we expose the existing modules so the library can compile and the binary can
 // progressively migrate off `mod ...` declarations.

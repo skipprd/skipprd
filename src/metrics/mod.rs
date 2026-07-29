@@ -438,6 +438,9 @@ impl Metrics {
                 // Tuning targets and runtime state
                 "upload_concurrency_target": crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(Ordering::SeqCst),
                 "wal_compaction_concurrency_target": crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(Ordering::SeqCst),
+                "wal_compactions_per_sink_target": crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET.load(Ordering::SeqCst),
+                "runtime_sink_pool_target": crate::metrics::counters::RUNTIME_SINK_POOL_TARGET.load(Ordering::SeqCst),
+                "athena_glue_cp_target": crate::metrics::counters::ATHENA_GLUE_CP_TARGET.load(Ordering::SeqCst),
                 "s3_download_concurrency_target": crate::metrics::counters::S3_DOWNLOAD_CONCURRENCY_TARGET.load(Ordering::SeqCst),
                 "active_threads": crate::metrics::counters::ACTIVE_THREADS.load(Ordering::SeqCst),
                 "queue_length": crate::metrics::counters::QUEUE_LENGTH.load(Ordering::SeqCst),

@@ -67,18 +67,130 @@ const ATHENA_WRITE_POLICY_SUPPORT: SinkWritePolicySupport = SinkWritePolicySuppo
     supports_replace_table: true,
 };
 
-// Global control-plane throttling and serialization
-const DEFAULT_GLUE_CONTROL_PLANE_CONCURRENCY: usize = 2;
-static GLUE_CP_SEM: Lazy<Semaphore> =
-    Lazy::new(|| Semaphore::new(DEFAULT_GLUE_CONTROL_PLANE_CONCURRENCY));
+// Global control-plane throttling and serialization (target auto-tuned; env overrides seed)
+static GLUE_CP_SEM: Lazy<Arc<Semaphore>> = Lazy::new(|| {
+    let permits = seed_athena_glue_cp_target();
+    Arc::new(Semaphore::new(permits.max(1)))
+});
 static ATHENA_WG_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static NAMESPACE_LOCKS: Lazy<DashMap<String, Arc<Mutex<()>>>> = Lazy::new(|| DashMap::new());
+static PARTITION_TASKS_IN_FLIGHT: Lazy<std::sync::atomic::AtomicUsize> =
+    Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
+static PARTITIONS_NOTIFY: Lazy<tokio::sync::Notify> = Lazy::new(tokio::sync::Notify::new);
 
 fn get_namespace_lock(namespace: &str) -> Arc<Mutex<()>> {
     NAMESPACE_LOCKS
         .entry(namespace.to_string())
         .or_insert_with(|| Arc::new(Mutex::new(())))
         .clone()
+}
+
+fn glue_cp_max() -> usize {
+    std::env::var("ATHENA_GLUE_CP_MAX")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(16)
+        .clamp(1, 32)
+}
+
+/// Seed Glue CP target from env or CPU; returns the target value.
+fn seed_athena_glue_cp_target() -> usize {
+    let max = glue_cp_max();
+    if let Ok(v) = std::env::var("ATHENA_GLUE_CONTROL_PLANE_CONCURRENCY") {
+        if let Ok(n) = v.parse::<usize>() {
+            if n > 0 {
+                let clamped = n.clamp(1, max);
+                metrics_counters::ATHENA_GLUE_CP_TARGET.store(clamped, Ordering::Relaxed);
+                info!("tune: athena_glue_cp set by env={}", clamped);
+                return clamped;
+            }
+        }
+    }
+    let num_cpus = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(2)
+        .max(2);
+    let seeded = (num_cpus / 8).clamp(2, max);
+    metrics_counters::ATHENA_GLUE_CP_TARGET.store(seeded, Ordering::Relaxed);
+    info!(
+        "tune: athena_glue_cp seeded from cpu count={} -> {}",
+        num_cpus, seeded
+    );
+    seeded
+}
+
+fn resize_glue_cp_sem_to_target() {
+    let target = metrics_counters::ATHENA_GLUE_CP_TARGET
+        .load(Ordering::Relaxed)
+        .clamp(1, glue_cp_max());
+    // Approximate current capacity: available + 1 if someone holds (same pattern as upload_sem).
+    let available = GLUE_CP_SEM.available_permits();
+    if target > available {
+        GLUE_CP_SEM.add_permits(target - available);
+    }
+    // Shrinking is best-effort: we cannot revoke held permits; future acquires still serialize
+    // via fewer effective concurrent holders when target drops (callers should check target).
+}
+
+async fn acquire_glue_cp_permit() -> tokio::sync::OwnedSemaphorePermit {
+    resize_glue_cp_sem_to_target();
+    // If target shrank below available, burn excess permits without blocking forever.
+    let target = metrics_counters::ATHENA_GLUE_CP_TARGET
+        .load(Ordering::Relaxed)
+        .max(1);
+    while GLUE_CP_SEM.available_permits() > target {
+        if let Ok(extra) = GLUE_CP_SEM.clone().try_acquire_owned() {
+            std::mem::forget(extra);
+        } else {
+            break;
+        }
+    }
+    GLUE_CP_SEM
+        .clone()
+        .acquire_owned()
+        .await
+        .expect("GLUE_CP_SEM closed")
+}
+
+fn note_glue_transient_retry() {
+    metrics_counters::add_glue_retry(1);
+    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let total = metrics_counters::GLUE_RETRIES_TOTAL.load(Ordering::Relaxed);
+    let last = LAST.swap(total, Ordering::SeqCst);
+    let delta = total.saturating_sub(last);
+    let prev = metrics_counters::GLUE_RETRY_EMA_X100.load(Ordering::Relaxed);
+    let ema = ((prev.saturating_mul(80)).saturating_add(delta.saturating_mul(100).saturating_mul(20)))
+        / 100;
+    metrics_counters::set_glue_retry_ema_x100(ema);
+    if ema > 200 {
+        let cur = metrics_counters::ATHENA_GLUE_CP_TARGET.load(Ordering::Relaxed);
+        let next = cur.saturating_sub(1).max(2);
+        if next != cur {
+            metrics_counters::ATHENA_GLUE_CP_TARGET.store(next, Ordering::Relaxed);
+            info!("tune: athena_glue_cp {} -> {} (glue_retry_ema_x100={})", cur, next, ema);
+        }
+    }
+}
+
+fn maybe_restore_glue_cp_target() {
+    let ema = metrics_counters::GLUE_RETRY_EMA_X100.load(Ordering::Relaxed);
+    if ema >= 50 {
+        return;
+    }
+    if std::env::var("ATHENA_GLUE_CONTROL_PLANE_CONCURRENCY").is_ok() {
+        return;
+    }
+    let max = glue_cp_max();
+    let cur = metrics_counters::ATHENA_GLUE_CP_TARGET.load(Ordering::Relaxed);
+    let next = cur.saturating_add(1).min(max);
+    if next != cur {
+        metrics_counters::ATHENA_GLUE_CP_TARGET.store(next, Ordering::Relaxed);
+        debug!(
+            "tune: athena_glue_cp {} -> {} (glue_retry_ema_x100={})",
+            cur, next, ema
+        );
+    }
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
@@ -491,6 +603,8 @@ impl DataSinkAthenaPlugin {
         );
         if let Some(existing) = self.read_grouped_receipt(&receipt_key).await? {
             if existing.matches_manifest(&manifest) {
+                self.schedule_glue_partition_from_s3_key(&namespace, &existing.final_s3_key)
+                    .await;
                 return Ok(SinkWriteOutcome::AlreadyApplied);
             }
             return Err(io::Error::other(format!(
@@ -684,6 +798,7 @@ impl DataSinkAthenaPlugin {
 
         let s3_client = S3Client::new(&aws_config);
         let athena_client = AthenaClient::new(&aws_config);
+        let _ = seed_athena_glue_cp_target();
         let tuned_uploads = skippr_runtime_sdk::metrics::counters::UPLOAD_CONCURRENCY_TARGET
             .load(std::sync::atomic::Ordering::Relaxed);
         let max_async_uploads = tuned_uploads.max(1);
@@ -993,6 +1108,15 @@ impl DataSinkAthenaPlugin {
                 .manifest_matches(&idempotency_manifest_key, manifest)
                 .await?
             {
+                if let Some(ref pm) = partition_metadata {
+                    self.schedule_glue_partition(
+                        namespace.clone(),
+                        partition_values.clone(),
+                        full_key.clone(),
+                        pm.clone(),
+                        source_contract.cloned(),
+                    );
+                }
                 return Ok((SinkWriteOutcome::AlreadyApplied, None));
             }
         }
@@ -1016,7 +1140,7 @@ impl DataSinkAthenaPlugin {
                 }
             }
         }
-        let _permit = self
+        let permit = self
             .upload_sem
             .clone()
             .acquire_owned()
@@ -1358,6 +1482,16 @@ impl DataSinkAthenaPlugin {
             upload_start.elapsed().as_nanos() as u64,
         );
         skippr_runtime_sdk::metrics::counters::dec_uploads_in_flight();
+        // Release upload concurrency before Glue catalog work (queryability, not durability).
+        drop(permit);
+        info!(
+            "s3_upload_complete ns={} key={} rows={} bytes={} upload_elapsed_ms={}",
+            namespace,
+            final_key,
+            rows_written,
+            uploaded_bytes,
+            upload_start.elapsed().as_millis()
+        );
         // Update manifest with the canonical namespace root prefix (absolute s3:// URL)
         // Canonical: s3://{bucket}/{s3_prefix}/{namespace}/
         let trimmed_key_root = key.trim_matches('/').to_string();
@@ -1389,18 +1523,13 @@ impl DataSinkAthenaPlugin {
         }
 
         if let Some(partition_metadata) = partition_metadata {
-            AwsAthena::glue_create_partition(
-                &self.context,
-                self.binding,
-                &self.config,
-                &namespace,
+            self.schedule_glue_partition(
+                namespace.clone(),
                 partition_values,
-                &full_key,
-                &partition_metadata,
-                source_contract,
-            )
-            .await
-            .map_err(io::Error::other)?;
+                full_key,
+                partition_metadata,
+                source_contract.cloned(),
+            );
         }
         if let Some(manifest) = idempotency_manifest {
             self.write_manifest(&idempotency_manifest_key, manifest)
@@ -1414,6 +1543,107 @@ impl DataSinkAthenaPlugin {
                 bytes: uploaded_bytes,
             }),
         ))
+    }
+
+    fn schedule_glue_partition(
+        &self,
+        namespace: String,
+        partition_values: Vec<String>,
+        full_key: String,
+        partition_metadata: OutputMetadata,
+        source_contract: Option<SourceNamespaceContract>,
+    ) {
+        if partition_values.is_empty() {
+            return;
+        }
+        let context = self.context.clone();
+        let binding = self.binding;
+        let config = self.config.clone();
+        PARTITION_TASKS_IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
+        info!(
+            "glue_partition_scheduled ns={} key={} values={:?} in_flight={}",
+            namespace,
+            full_key,
+            partition_values,
+            PARTITION_TASKS_IN_FLIGHT.load(Ordering::Relaxed)
+        );
+        tokio::spawn(async move {
+            let result = AwsAthena::glue_create_partition(
+                &context,
+                binding,
+                &config,
+                &namespace,
+                partition_values,
+                &full_key,
+                &partition_metadata,
+                source_contract.as_ref(),
+            )
+            .await;
+            match result {
+                Ok(_) => {}
+                Err(e) => {
+                    warn!(
+                        "Glue partition creation failed for '{}': {}",
+                        full_key, e
+                    );
+                }
+            }
+            PARTITION_TASKS_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
+            PARTITIONS_NOTIFY.notify_waiters();
+        });
+    }
+
+    async fn schedule_glue_partition_from_s3_key(&self, namespace: &str, final_s3_key: &str) {
+        let Some((full_key, partition_values)) =
+            partition_values_from_object_key(namespace, final_s3_key)
+        else {
+            return;
+        };
+        let pm = match self.namespace_metadata(namespace).await {
+            Ok(pm) => pm,
+            Err(err) => {
+                warn!(
+                    "AlreadyApplied: skip Glue partition ensure for '{}': {}",
+                    final_s3_key, err
+                );
+                return;
+            }
+        };
+        self.schedule_glue_partition(
+            namespace.to_string(),
+            partition_values,
+            full_key,
+            pm,
+            None,
+        );
+    }
+
+    /// Best-effort drain of background Glue partition tasks (plugin teardown / finalize).
+    pub async fn drain_partition_tasks(timeout: TokioDuration) {
+        let deadline = tokio::time::Instant::now() + timeout;
+        loop {
+            if PARTITION_TASKS_IN_FLIGHT.load(Ordering::Relaxed) == 0 {
+                return;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                warn!(
+                    "Timed out draining Glue partition tasks; {} still in flight",
+                    PARTITION_TASKS_IN_FLIGHT.load(Ordering::Relaxed)
+                );
+                return;
+            }
+            tokio::select! {
+                _ = PARTITIONS_NOTIFY.notified() => {}
+                _ = tokio_sleep(remaining) => {
+                    warn!(
+                        "Timed out draining Glue partition tasks; {} still in flight",
+                        PARTITION_TASKS_IN_FLIGHT.load(Ordering::Relaxed)
+                    );
+                    return;
+                }
+            }
+        }
     }
 
     async fn manifest_matches(
@@ -1509,7 +1739,10 @@ impl AwsAthena {
         let mut attempt: u32 = 0;
         loop {
             match op().await {
-                Ok(v) => return Ok(v),
+                Ok(v) => {
+                    maybe_restore_glue_cp_target();
+                    return Ok(v);
+                }
                 Err(e) => {
                     let s = e.to_string();
                     // Missing region/creds: don't spin forever, report once
@@ -1522,6 +1755,7 @@ impl AwsAthena {
                         || s.contains("ConcurrentModification")
                         || s == "RETRY_TRANSIENT"
                     {
+                        note_glue_transient_retry();
                         attempt += 1;
                         if attempt > 6 {
                             return Err(s);
@@ -1574,7 +1808,7 @@ impl AwsAthena {
         drop(_wg_guard);
 
         // Limit Glue control-plane concurrency globally
-        let _cp_permit = GLUE_CP_SEM.acquire().await.unwrap();
+        let _cp_permit = acquire_glue_cp_permit().await;
 
         // Serialize by namespace to avoid ConcurrentModificationException
         let ns_lock = get_namespace_lock(namespace);
@@ -2544,7 +2778,7 @@ impl AwsAthena {
         let glue_client = GlueClient::new(&aws_config);
 
         // Gate by global semaphore and per-namespace mutex
-        let _cp_permit = GLUE_CP_SEM.acquire().await.unwrap();
+        let _cp_permit = acquire_glue_cp_permit().await;
         let ns_lock = get_namespace_lock(namespace);
         let _ns_guard = ns_lock.lock().await;
 
@@ -3478,4 +3712,63 @@ fn is_s3_not_found_error_text(err: &str) -> bool {
         || err.contains("NotFound")
         || err.contains("status code: 404")
         || err.contains("404 Not Found")
+}
+
+/// Extract hive partition prefix + values from an object key / s3 URI.
+fn partition_values_from_object_key(
+    namespace: &str,
+    final_s3_key: &str,
+) -> Option<(String, Vec<String>)> {
+    let key = final_s3_key
+        .trim_start_matches("s3://")
+        .split_once('/')
+        .map(|(_, rest)| rest)
+        .unwrap_or(final_s3_key);
+    let key = key.trim_end_matches('/').trim_end_matches(".parquet");
+    let prefix = key.rsplit_once('/')?.0;
+    let mut partition_values = Vec::new();
+    let mut full_key_parts = Vec::new();
+    let mut seen_ns = false;
+    for part in prefix.split('/') {
+        if !seen_ns {
+            if part == namespace {
+                seen_ns = true;
+            }
+            full_key_parts.push(part.to_string());
+            continue;
+        }
+        if let Some((_k, v)) = part.split_once('=') {
+            partition_values.push(v.to_string());
+            full_key_parts.push(part.to_string());
+        }
+    }
+    if partition_values.is_empty() {
+        return None;
+    }
+    Some((full_key_parts.join("/"), partition_values))
+}
+
+#[cfg(test)]
+mod partition_schedule_tests {
+    use super::partition_values_from_object_key;
+
+    #[test]
+    fn extracts_hive_partitions_from_s3_uri() {
+        let (full_key, values) = partition_values_from_object_key(
+            "truck_status_idle",
+            "s3://bucket/prefix/truck_status_idle/year=2024/month=01/abcd1234",
+        )
+        .expect("partitions");
+        assert_eq!(full_key, "prefix/truck_status_idle/year=2024/month=01");
+        assert_eq!(values, vec!["2024".to_string(), "01".to_string()]);
+    }
+
+    #[test]
+    fn returns_none_without_hive_partitions() {
+        assert!(partition_values_from_object_key(
+            "truck_status_idle",
+            "s3://bucket/prefix/truck_status_idle/abcd1234.parquet",
+        )
+        .is_none());
+    }
 }

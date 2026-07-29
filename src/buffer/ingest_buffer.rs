@@ -1629,11 +1629,15 @@ impl Buffers {
     }
 
     fn compaction_per_sink_limit() -> usize {
-        Config::getenv("WAL_COMPACTIONS_PER_SINK", "1")
+        let max = crate::helpers::configuration::Config::getenv("WAL_COMPACTIONS_PER_SINK_MAX", "")
             .parse::<usize>()
             .ok()
             .filter(|value| *value > 0)
-            .unwrap_or(1)
+            .unwrap_or(32)
+            .clamp(1, 32);
+        crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .clamp(1, max)
     }
 
     fn work_from_manifest(

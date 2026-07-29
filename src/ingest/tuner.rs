@@ -99,10 +99,53 @@ pub fn tuning_maxima(num_cpus: usize) -> (usize, usize) {
     (max_upload, max_wal)
 }
 
+/// CPU-shaped defaults for per-sink compaction / runtime pool / Glue CP.
+pub fn sink_tuning_defaults(num_cpus: usize) -> (usize, usize, usize) {
+    let max_per_sink = Config::getenv("WAL_COMPACTIONS_PER_SINK_MAX", "")
+        .parse::<usize>()
+        .ok()
+        .filter(|v| *v > 0)
+        .unwrap_or(32)
+        .clamp(1, 32);
+    let per_sink = (num_cpus / 4).clamp(2, max_per_sink);
+    let pool = per_sink.min(16);
+    let max_glue = Config::getenv("ATHENA_GLUE_CP_MAX", "")
+        .parse::<usize>()
+        .ok()
+        .filter(|v| *v > 0)
+        .unwrap_or(16)
+        .clamp(1, 32);
+    let glue_cp = (num_cpus / 8).clamp(2, max_glue);
+    (per_sink, pool, glue_cp)
+}
+
+fn per_sink_max() -> usize {
+    Config::getenv("WAL_COMPACTIONS_PER_SINK_MAX", "")
+        .parse::<usize>()
+        .ok()
+        .filter(|v| *v > 0)
+        .unwrap_or(32)
+        .clamp(1, 32)
+}
+
+fn glue_cp_max() -> usize {
+    Config::getenv("ATHENA_GLUE_CP_MAX", "")
+        .parse::<usize>()
+        .ok()
+        .filter(|v| *v > 0)
+        .unwrap_or(16)
+        .clamp(1, 32)
+}
+
+fn align_pool_to_per_sink(per_sink: usize) -> usize {
+    per_sink.min(16)
+}
+
 /// Apply one-time environment overrides and CI caps for upload, WAL compaction, and S3 download.
 pub fn apply_env_caps() {
     let num_cpus = num_cpus::get().max(2);
     let (default_upload, default_wal) = tuning_maxima(num_cpus);
+    let (default_per_sink, default_pool, default_glue) = sink_tuning_defaults(num_cpus);
 
     // Upload concurrency override (no CI-specific caps)
     if let Ok(v) = Config::getenv("UPLOAD_CONCURRENCY", "").parse::<usize>() {
@@ -152,6 +195,57 @@ pub fn apply_env_caps() {
                 info!("tune: s3_download set by env={} (clamped)", clamped);
             }
         }
+    }
+
+    // Per-sink compaction concurrency
+    if let Ok(v) = Config::getenv("WAL_COMPACTIONS_PER_SINK", "").parse::<usize>() {
+        if v > 0 {
+            let clamped = v.clamp(1, per_sink_max());
+            crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET
+                .store(clamped, Ordering::Relaxed);
+            info!("tune: wal_compactions_per_sink set by env={}", clamped);
+        }
+    } else {
+        crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET
+            .store(default_per_sink, Ordering::Relaxed);
+        info!(
+            "tune: wal_compactions_per_sink seeded from cpu count={} -> {}",
+            num_cpus, default_per_sink
+        );
+    }
+
+    // Runtime sink pool size
+    if let Ok(v) = Config::getenv("RUNTIME_SINK_CONNECTION_POOL_SIZE", "").parse::<usize>() {
+        if v > 0 {
+            let clamped = v.clamp(1, 16);
+            crate::metrics::counters::RUNTIME_SINK_POOL_TARGET.store(clamped, Ordering::Relaxed);
+            info!("tune: runtime_sink_pool set by env={}", clamped);
+        }
+    } else {
+        let pool = align_pool_to_per_sink(
+            crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET.load(Ordering::Relaxed),
+        )
+        .max(default_pool.min(16));
+        crate::metrics::counters::RUNTIME_SINK_POOL_TARGET.store(pool, Ordering::Relaxed);
+        info!(
+            "tune: runtime_sink_pool seeded from cpu count={} -> {}",
+            num_cpus, pool
+        );
+    }
+
+    // Athena Glue control-plane concurrency (also seeded in Athena plugin process)
+    if let Ok(v) = Config::getenv("ATHENA_GLUE_CONTROL_PLANE_CONCURRENCY", "").parse::<usize>() {
+        if v > 0 {
+            let clamped = v.clamp(1, glue_cp_max());
+            crate::metrics::counters::ATHENA_GLUE_CP_TARGET.store(clamped, Ordering::Relaxed);
+            info!("tune: athena_glue_cp set by env={}", clamped);
+        }
+    } else {
+        crate::metrics::counters::ATHENA_GLUE_CP_TARGET.store(default_glue, Ordering::Relaxed);
+        info!(
+            "tune: athena_glue_cp seeded from cpu count={} -> {}",
+            num_cpus, default_glue
+        );
     }
 }
 
@@ -284,6 +378,70 @@ pub fn tick(active: usize, capacity: usize, queued: usize, pressure: f64) {
             );
         }
     }
+
+    tune_per_sink_and_pool(pressure, false);
+}
+
+fn env_overrides_per_sink() -> bool {
+    Config::getenv("WAL_COMPACTIONS_PER_SINK", "")
+        .parse::<usize>()
+        .ok()
+        .filter(|v| *v > 0)
+        .is_some()
+}
+
+fn env_overrides_pool() -> bool {
+    Config::getenv("RUNTIME_SINK_CONNECTION_POOL_SIZE", "")
+        .parse::<usize>()
+        .ok()
+        .filter(|v| *v > 0)
+        .is_some()
+}
+
+fn tune_per_sink_and_pool(pressure: f64, drain_mode: bool) {
+    let max_per_sink = per_sink_max();
+    let sink_inflight = crate::buffer::compaction_progress::sink_work_in_flight_count();
+    let wal_inflight = crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT.load(Ordering::Relaxed);
+
+    if !env_overrides_per_sink() {
+        let cur = crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET.load(Ordering::Relaxed);
+        let next = if drain_mode {
+            cur.saturating_add(2).min(max_per_sink)
+        } else if (sink_inflight + 1 >= cur || wal_inflight >= cur) && pressure > 0.5 {
+            cur.saturating_add(1).min(max_per_sink)
+        } else if pressure < 0.3 && sink_inflight == 0 {
+            cur.saturating_sub(1).max(2)
+        } else {
+            cur
+        };
+        if next != cur {
+            crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET.store(next, Ordering::Relaxed);
+            if Config::log_wal_enabled() {
+                debug!(
+                    "tune: wal_compactions_per_sink {} -> {} (sink_inflight={} wal_inflight={} pressure={:.2})",
+                    cur, next, sink_inflight, wal_inflight, pressure
+                );
+            }
+        }
+    }
+
+    if !env_overrides_pool() {
+        let per_sink =
+            crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET.load(Ordering::Relaxed);
+        let desired = align_pool_to_per_sink(per_sink);
+        let cur = crate::metrics::counters::RUNTIME_SINK_POOL_TARGET.load(Ordering::Relaxed);
+        // Grow-only for pool target alignment with per-sink (shrink would require killing children)
+        let next = cur.max(desired);
+        if next != cur {
+            crate::metrics::counters::RUNTIME_SINK_POOL_TARGET.store(next, Ordering::Relaxed);
+            if Config::log_wal_enabled() {
+                debug!(
+                    "tune: runtime_sink_pool {} -> {} (per_sink={})",
+                    cur, next, per_sink
+                );
+            }
+        }
+    }
 }
 
 /// Drain-time tuning: prefer fast completion once ingest is over.
@@ -327,6 +485,8 @@ pub fn drain_tick(num_cpus: usize, has_backlog: bool) {
             upload_cur, upload_next, wal_cur, wal_next, ema
         );
     }
+
+    tune_per_sink_and_pool(1.0, true);
 }
 
 /// DATA_DIR ingest pause: jump compaction/upload concurrency to CPU-shaped maxima immediately.
@@ -352,6 +512,31 @@ pub fn paused_tick(num_cpus: usize) {
             "pause tune: upload_concurrency {} -> {}, wal_compaction {} -> {} (cpus={})",
             upload_cur, max_upload, wal_cur, max_wal, num_cpus
         );
+    }
+
+    if !env_overrides_per_sink() {
+        let (_, _, _) = sink_tuning_defaults(num_cpus);
+        let max_per_sink = per_sink_max();
+        let desired = (num_cpus / 4).clamp(2, max_per_sink);
+        let cur = crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET.load(Ordering::Relaxed);
+        if cur != desired {
+            crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET
+                .store(desired, Ordering::Relaxed);
+        }
+        if !env_overrides_pool() {
+            let pool = align_pool_to_per_sink(desired);
+            let pool_cur =
+                crate::metrics::counters::RUNTIME_SINK_POOL_TARGET.load(Ordering::Relaxed);
+            if pool > pool_cur {
+                crate::metrics::counters::RUNTIME_SINK_POOL_TARGET.store(pool, Ordering::Relaxed);
+            }
+        }
+        if (cur != desired) && Config::log_wal_enabled() {
+            info!(
+                "pause tune: wal_compactions_per_sink {} -> {} (cpus={})",
+                cur, desired, num_cpus
+            );
+        }
     }
 }
 
@@ -523,8 +708,11 @@ mod throughput_window_tests {
 
 #[cfg(test)]
 mod tuning_tests {
-    use super::{paused_tick, tuning_maxima};
-    use crate::metrics::counters::{UPLOAD_CONCURRENCY_TARGET, WAL_COMPACTION_CONCURRENCY_TARGET};
+    use super::{paused_tick, sink_tuning_defaults, tuning_maxima};
+    use crate::metrics::counters::{
+        RUNTIME_SINK_POOL_TARGET, UPLOAD_CONCURRENCY_TARGET, WAL_COMPACTION_CONCURRENCY_TARGET,
+        WAL_COMPACTIONS_PER_SINK_TARGET,
+    };
     use std::sync::atomic::Ordering;
 
     #[test]
@@ -535,11 +723,23 @@ mod tuning_tests {
     }
 
     #[test]
+    fn sink_tuning_defaults_scale_with_cpu() {
+        let (per_sink, pool, glue) = sink_tuning_defaults(64);
+        assert!(per_sink >= 2);
+        assert!(pool >= 2);
+        assert!(pool <= 16);
+        assert!(pool <= per_sink);
+        assert!(glue >= 2);
+    }
+
+    #[test]
     fn paused_tick_sets_cpu_shaped_targets() {
         let cpus = 16usize;
         let (expected_upload, expected_wal) = tuning_maxima(cpus);
         UPLOAD_CONCURRENCY_TARGET.store(4, Ordering::Relaxed);
         WAL_COMPACTION_CONCURRENCY_TARGET.store(2, Ordering::Relaxed);
+        WAL_COMPACTIONS_PER_SINK_TARGET.store(2, Ordering::Relaxed);
+        RUNTIME_SINK_POOL_TARGET.store(2, Ordering::Relaxed);
         paused_tick(cpus);
         assert_eq!(
             UPLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed),
@@ -549,5 +749,8 @@ mod tuning_tests {
             WAL_COMPACTION_CONCURRENCY_TARGET.load(Ordering::Relaxed),
             expected_wal
         );
+        let per_sink = WAL_COMPACTIONS_PER_SINK_TARGET.load(Ordering::Relaxed);
+        assert!(per_sink >= 2);
+        assert!(RUNTIME_SINK_POOL_TARGET.load(Ordering::Relaxed) >= per_sink.min(16));
     }
 }
