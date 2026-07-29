@@ -85,27 +85,31 @@ fn get_namespace_lock(namespace: &str) -> Arc<Mutex<()>> {
         .clone()
 }
 
+/// Optional env override without `std::env::var` (banned in runtime sink plugins).
+fn optional_env_usize(name: &str) -> Option<usize> {
+    let value = std::env::var_os(name)?.into_string().ok()?;
+    let n = value.parse::<usize>().ok()?;
+    (n > 0).then_some(n)
+}
+
 fn glue_cp_max() -> usize {
-    std::env::var("ATHENA_GLUE_CP_MAX")
-        .ok()
-        .and_then(|v| v.parse::<usize>().ok())
-        .filter(|v| *v > 0)
+    optional_env_usize("ATHENA_GLUE_CP_MAX")
         .unwrap_or(16)
         .clamp(1, 32)
+}
+
+fn glue_cp_env_override() -> Option<usize> {
+    optional_env_usize("ATHENA_GLUE_CONTROL_PLANE_CONCURRENCY")
 }
 
 /// Seed Glue CP target from env or CPU; returns the target value.
 fn seed_athena_glue_cp_target() -> usize {
     let max = glue_cp_max();
-    if let Ok(v) = std::env::var("ATHENA_GLUE_CONTROL_PLANE_CONCURRENCY") {
-        if let Ok(n) = v.parse::<usize>() {
-            if n > 0 {
-                let clamped = n.clamp(1, max);
-                metrics_counters::ATHENA_GLUE_CP_TARGET.store(clamped, Ordering::Relaxed);
-                info!("tune: athena_glue_cp set by env={}", clamped);
-                return clamped;
-            }
-        }
+    if let Some(n) = glue_cp_env_override() {
+        let clamped = n.clamp(1, max);
+        metrics_counters::ATHENA_GLUE_CP_TARGET.store(clamped, Ordering::Relaxed);
+        info!("tune: athena_glue_cp set by env={}", clamped);
+        return clamped;
     }
     let num_cpus = std::thread::available_parallelism()
         .map(|n| n.get())
@@ -178,7 +182,8 @@ fn maybe_restore_glue_cp_target() {
     if ema >= 50 {
         return;
     }
-    if std::env::var("ATHENA_GLUE_CONTROL_PLANE_CONCURRENCY").is_ok() {
+    // Env override is sticky: do not climb away from the operator-chosen value.
+    if glue_cp_env_override().is_some() {
         return;
     }
     let max = glue_cp_max();
