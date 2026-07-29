@@ -1,84 +1,155 @@
-#!/usr/bin/env bash
+#!/bin/sh
+set -e
 
-set -euo pipefail
+# Public install CDN (Cloudflare Worker → R2 skippr-web-install). Not GitHub Releases.
+RELEASES_BASE_URL="${SKIPPR_RELEASES_BASE_URL:-https://install.skippr.io/releases}"
+INSTALL_DIR="${SKIPPR_INSTALL_DIR:-/usr/local/bin}"
+BINARY="${SKIPPR_BINARY:-skippr}"
 
-cleanup() {
-  rm -f "${TEMP_PATH:-}" 2>/dev/null
-  rm -rf "${TEMP_DIR:-}" 2>/dev/null
-}
-trap cleanup EXIT
-
-OS="$(uname)"
-ARCH="$(uname -m)"
-
-command -v curl >/dev/null 2>&1 || { echo >&2 "Error: curl is required but not installed."; exit 1; }
-command -v tar >/dev/null 2>&1 || { echo >&2 "Error: tar is required but not installed."; exit 1; }
-
-OWNER="skipprd"
-REPO="skipprd"
-DEST="${SKIPPR_INSTALL_DIR:-/usr/local/bin}"
-REQUESTED_BINARY="${SKIPPR_BINARY:-skippr}"
-case "$REQUESTED_BINARY" in
-  skippr|skipprd|skippr-admin) ;;
+case "$BINARY" in
+  skippr)
+    RELEASE_SUBDIR="skippr"
+    LATEST_RELEASE_URL="${RELEASES_BASE_URL}/latest-skippr.txt"
+    ;;
+  skipprd)
+    RELEASE_SUBDIR="skipprd"
+    LATEST_RELEASE_URL="${RELEASES_BASE_URL}/latest-skipprd.txt"
+    ;;
+  skippr-admin)
+    RELEASE_SUBDIR="skippr-admin"
+    LATEST_RELEASE_URL="${RELEASES_BASE_URL}/latest-skippr-admin.txt"
+    ;;
   *)
-    echo >&2 "Error: unsupported SKIPPR_BINARY=$REQUESTED_BINARY (expected skippr, skipprd, or skippr-admin)"
-    exit 1
+    err() { printf 'Error: %s\n' "$1" >&2; exit 1; }
+    err "unsupported SKIPPR_BINARY=$BINARY (expected skippr, skipprd, or skippr-admin)"
     ;;
 esac
 
-if [[ "$OS" == "Darwin" && "$ARCH" == "arm64" ]]; then
-  ASSET_PATTERN="macos_arm64.tar.gz"
-elif [[ "$OS" == "Darwin" ]]; then
-  ASSET_PATTERN="macos_x86.tar.gz"
-elif [[ "$OS" == "Linux" && "$ARCH" == "aarch64" ]]; then
-  ASSET_PATTERN="linux_arm64.tar.gz"
-elif [[ "$OS" == "Linux" ]]; then
-  ASSET_PATTERN="linux_x86.tar.gz"
-else
-  echo >&2 "Error: unsupported platform: OS=$OS ARCH=$ARCH"
-  exit 1
-fi
+say() {
+    printf '%s\n' "$1"
+}
 
-if [ ! -w "$DEST" ]; then
-  echo >&2 "Error: $DEST is not writable. Re-run with sudo or set SKIPPR_INSTALL_DIR to a writable path."
-  exit 1
-fi
+err() {
+    say "Error: $1" >&2
+    exit 1
+}
 
-# Resolve release URL — use SKIPPR_VERSION to pin, otherwise latest
-if [[ -n "${SKIPPR_VERSION:-}" ]]; then
-  RELEASE_URL="https://api.github.com/repos/$OWNER/$REPO/releases/tags/$SKIPPR_VERSION"
-  echo "Installing $REQUESTED_BINARY $SKIPPR_VERSION for $OS/$ARCH..."
-else
-  RELEASE_URL="https://api.github.com/repos/$OWNER/$REPO/releases/latest"
-  echo "Installing latest $REQUESTED_BINARY for $OS/$ARCH..."
-fi
+need_cmd() {
+    if ! command -v "$1" > /dev/null 2>&1; then
+        err "Required command not found: $1"
+    fi
+}
 
-DOWNLOAD_URL=$(curl -sf "$RELEASE_URL" | grep "browser_download_url.*${REQUESTED_BINARY}-${ASSET_PATTERN}" | cut -d '"' -f 4 | head -1)
+fetch_latest_tag() {
+    if [ -n "${SKIPPR_VERSION:-}" ]; then
+        printf '%s' "$SKIPPR_VERSION"
+        return
+    fi
+    curl -fsSL "$LATEST_RELEASE_URL" | tr -d '\r\n'
+}
 
-if [[ -z "${DOWNLOAD_URL:-}" ]]; then
-  echo >&2 "Error: no release asset matching $ASSET_PATTERN found at $RELEASE_URL"
-  exit 1
-fi
+validate_archive() {
+    local archive_path="$1"
+    local mime_type
 
-BIN_NAME=$(basename "$DOWNLOAD_URL")
-TEMP_PATH="/tmp/$BIN_NAME"
-TEMP_DIR="/tmp/skipprd_install_$$"
+    if command -v file > /dev/null 2>&1; then
+        mime_type="$(file -b --mime-type "$archive_path" 2>/dev/null || true)"
+        case "$mime_type" in
+            application/gzip|application/x-gzip) return 0 ;;
+            text/html|text/plain)
+                err "Download did not return a tar.gz archive. Check that the release asset exists for this platform."
+                ;;
+        esac
+    fi
+}
 
-echo "Downloading $BIN_NAME..."
-curl --progress-bar -fL "$DOWNLOAD_URL" -o "$TEMP_PATH"
+main() {
+    need_cmd curl
+    need_cmd tar
+    need_cmd uname
 
-mkdir -p "$TEMP_DIR"
-tar -xzf "$TEMP_PATH" -C "$TEMP_DIR"
+    say "Installing Skippr means accepting the Skippr EULA:"
+    say "  https://skippr.io/terms/eula"
+    say ""
 
-# Find the extracted binary
-EXTRACTED=$(find "$TEMP_DIR" -name "$REQUESTED_BINARY" -type f | head -1)
-if [[ -z "$EXTRACTED" ]]; then
-  echo >&2 "Error: $REQUESTED_BINARY binary not found in archive."
-  exit 1
-fi
+    local os arch target
 
-mv "$EXTRACTED" "$DEST/$REQUESTED_BINARY"
-chmod +x "$DEST/$REQUESTED_BINARY"
+    os="$(uname -s)"
+    arch="$(uname -m)"
 
-echo "Installed $REQUESTED_BINARY to $DEST/$REQUESTED_BINARY"
-"$DEST/$REQUESTED_BINARY" --version 2>/dev/null || true
+    case "$os" in
+        Darwin)
+            case "$arch" in
+                arm64|aarch64) target="macos_arm64" ;;
+                x86_64)        err "macOS x86_64 release assets are not published yet" ;;
+                *)             err "Unsupported macOS architecture: $arch" ;;
+            esac
+            ;;
+        Linux)
+            case "$arch" in
+                x86_64|amd64)  target="linux_x86" ;;
+                aarch64|arm64) err "Linux arm64 release assets are not published yet" ;;
+                *)             err "Unsupported Linux architecture: $arch" ;;
+            esac
+            ;;
+        MINGW*|MSYS*|CYGWIN*)
+            err "Windows detected. Install with PowerShell instead:  irm https://install.skippr.io/install.ps1 | iex"
+            ;;
+        *)
+            err "Unsupported operating system: $os"
+            ;;
+    esac
+
+    local tag url tmpdir
+
+    say "Detecting latest release..."
+    tag="$(fetch_latest_tag)"
+
+    if [ -z "$tag" ]; then
+        err "Could not determine latest release."
+    fi
+
+    say "Latest release: $tag ($BINARY)"
+
+    url="${RELEASES_BASE_URL}/${RELEASE_SUBDIR}/${tag}/${BINARY}-${target}.tar.gz"
+
+    tmpdir="$(mktemp -d)"
+    trap 'rm -rf "$tmpdir"' EXIT
+
+    say "Downloading $BINARY for $target from install.skippr.io..."
+    curl -fSL --progress-bar "$url" -o "$tmpdir/skippr.tar.gz"
+    validate_archive "$tmpdir/skippr.tar.gz"
+
+    say "Extracting..."
+    tar -xzf "$tmpdir/skippr.tar.gz" -C "$tmpdir"
+
+    local bin_path="$tmpdir/$BINARY-$target/$BINARY"
+    if [ ! -f "$bin_path" ]; then
+        bin_path="$(find "$tmpdir" -name "$BINARY" -type f | head -1)"
+    fi
+
+    if [ ! -f "$bin_path" ]; then
+        err "Binary not found in archive."
+    fi
+
+    chmod +x "$bin_path"
+
+    if [ -w "$INSTALL_DIR" ]; then
+        mv "$bin_path" "$INSTALL_DIR/$BINARY"
+    else
+        say "Installing to $INSTALL_DIR (requires sudo)..."
+        sudo mv "$bin_path" "$INSTALL_DIR/$BINARY"
+    fi
+
+    say ""
+    say "  $BINARY $tag installed to $INSTALL_DIR/$BINARY"
+    say ""
+    if [ "$BINARY" = "skippr" ]; then
+        say "  Get started:"
+        say "    skippr user login"
+        say "    skippr init my-project"
+        say ""
+    fi
+}
+
+main "$@"

@@ -24,7 +24,8 @@ env:
   DOCKER_HUB_REPO: skipprd
   ECR_HOST: 536671797322.dkr.ecr.us-east-1.amazonaws.com
   AWS_ECR_REGISTRY: $ECR_HOST/$COMPONENT_NAME
-  RELEASES_BUCKET: skippr-web-install-site-prod
+  # Public install CDN: Cloudflare R2 (Worker install.skippr.io → this bucket). Not AWS S3.
+  RELEASES_BUCKET: skippr-web-install
   SKIPPRD_RELEASE_SUBDIR: skipprd
   SKIPPR_RELEASE_SUBDIR: skippr
   SKIPPR_ADMIN_RELEASE_SUBDIR: skippr-admin
@@ -32,6 +33,7 @@ env:
   SKIPPRD_LATEST_POINTER: latest-skipprd.txt
   SKIPPR_LATEST_POINTER: latest-skippr.txt
   SKIPPR_ADMIN_LATEST_POINTER: latest-skippr-admin.txt
+  # sccache still on AWS until rust-cache cutover
   RUST_BUILD_CACHE_BUCKET: skippr-web-rust-cache-prod
   RUST_BUILD_CACHE_REGION: us-east-1
 
@@ -996,12 +998,12 @@ jobs:
               )
           PY
 
-      - name: Configure AWS credentials for runtime plugin upload
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure Cloudflare R2 credentials for runtime plugin upload
+        uses: ./.github/actions/configure-r2-releases
         with:
-          aws-access-key-id: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          account_id: ${{ secrets.R2_ACCOUNT_ID }}
+          access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
       - name: Upload runtime plugin artifacts and manifests
         shell: bash
@@ -1874,12 +1876,12 @@ jobs:
               tar -czvf "${dir}.tar.gz" "$dir/"
             fi
           done
-      - name: Configure AWS credentials for skipprd release upload
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure Cloudflare R2 credentials for skipprd release upload
+        uses: ./.github/actions/configure-r2-releases
         with:
-          aws-access-key-id: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          account_id: ${{ secrets.R2_ACCOUNT_ID }}
+          access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       - name: Upload skipprd binaries to install releases bucket
         run: |
           TAG="${{ github.ref_name }}"
@@ -1916,12 +1918,12 @@ jobs:
               tar -czvf "${dir}.tar.gz" "$dir/"
             fi
           done
-      - name: Configure AWS credentials for skippr release upload
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure Cloudflare R2 credentials for skippr release upload
+        uses: ./.github/actions/configure-r2-releases
         with:
-          aws-access-key-id: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          account_id: ${{ secrets.R2_ACCOUNT_ID }}
+          access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       - name: Upload skippr binaries to install releases bucket
         run: |
           TAG="${{ github.ref_name }}"
@@ -1935,6 +1937,10 @@ jobs:
           done
           printf '%s' "$TAG" > "$LATEST_POINTER"
           aws s3 cp "$LATEST_POINTER" "s3://${BUCKET}/releases/${LATEST_POINTER}" --cache-control "no-cache, no-store, must-revalidate"
+          # Root install scripts on the CDN (install.skippr.io/install.sh)
+          aws s3 cp install.sh "s3://${BUCKET}/install.sh" \
+            --content-type "text/x-shellscript; charset=utf-8" \
+            --cache-control "no-cache, no-store, must-revalidate"
 
   publish_github_release:
     name: Publish GitHub Release
@@ -1987,12 +1993,12 @@ jobs:
             skippr-admin-linux_x86.tar.gz \
             --repo skipprd/skipprd \
             --clobber
-      - name: Configure AWS credentials for skippr-admin release upload
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure Cloudflare R2 credentials for skippr-admin release upload
+        uses: ./.github/actions/configure-r2-releases
         with:
-          aws-access-key-id: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          account_id: ${{ secrets.R2_ACCOUNT_ID }}
+          access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       - name: Upload skippr-admin binaries to install releases bucket
         run: |
           TAG="${{ github.ref_name }}"
@@ -2046,12 +2052,12 @@ jobs:
             --output-dir "$GITHUB_WORKSPACE/runtime-plugin-release-macos"
           python3 -c 'from pathlib import Path; [print(path) for path in sorted(Path("runtime-plugin-release-macos").rglob("*")) if path.is_file()]'
 
-      - name: Configure AWS credentials for macOS release upload
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure Cloudflare R2 credentials for macOS release upload
+        uses: ./.github/actions/configure-r2-releases
         with:
-          aws-access-key-id: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          account_id: ${{ secrets.R2_ACCOUNT_ID }}
+          access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
       - name: Upload macOS binaries to install releases bucket
         shell: bash
@@ -2158,12 +2164,12 @@ jobs:
             --output-dir "$GITHUB_WORKSPACE/runtime-plugin-release-windows"
           python3 -c 'from pathlib import Path; [print(path) for path in sorted(Path("runtime-plugin-release-windows").rglob("*")) if path.is_file()]'
 
-      - name: Configure AWS credentials for Windows release upload
-        uses: aws-actions/configure-aws-credentials@v4
+      - name: Configure Cloudflare R2 credentials for Windows release upload
+        uses: ./.github/actions/configure-r2-releases
         with:
-          aws-access-key-id: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-          aws-region: us-east-1
+          account_id: ${{ secrets.R2_ACCOUNT_ID }}
+          access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
+          secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
 
       - name: Upload Windows binaries to install releases bucket
         shell: bash
