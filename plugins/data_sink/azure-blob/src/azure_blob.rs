@@ -1,18 +1,28 @@
-use super::parquet_util::serialize_to_parquet;
 use crate::helpers::configuration::DataSinkPluginConfig;
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
+use futures::StreamExt;
 use object_store::azure::MicrosoftAzureBuilder;
 use object_store::path::Path as ObjectPath;
 use object_store::ObjectStore;
 use object_store::ObjectStoreExt;
 use serde_derive::Deserialize;
+use skippr_object_writer::backends::ObjectStoreBackend;
+use skippr_object_writer::{
+    ObjectWriteError, ObjectWriteReceipt, ObjectWriteRequest, ObjectWriteSession,
+    ObjectWriterConfig,
+};
 use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::plugins::{SinkWriteContext, SinkWriteOutcome};
 use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
 use skippr_runtime_sdk::sink_compat::BufferChunker;
-use skippr_runtime_sdk::sink_idempotency::{manifest_object_name, ObjectWriteManifest};
+use skippr_runtime_sdk::sink_idempotency::{
+    legacy_chunk_idempotency_key, manifest_object_name, persisted_object_write_matches,
+    GroupedWriteReceipt, ObjectWriteManifest,
+};
+use std::collections::BTreeMap;
 use std::io;
+use std::sync::Arc;
 use tracing::info;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -34,7 +44,8 @@ impl TryFrom<DataSinkPluginConfig> for DataSinkAzureBlobPluginConfig {
 }
 
 pub struct DataSinkAzureBlobPlugin {
-    store: Box<dyn ObjectStore>,
+    store: Arc<dyn ObjectStore>,
+    object_backend: Arc<ObjectStoreBackend>,
     config: DataSinkAzureBlobPluginConfig,
 }
 
@@ -80,34 +91,6 @@ impl DataSink for DataSinkAzureBlobPlugin {
             Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
             None => stream,
         };
-        use skippr_runtime_sdk::metrics::counters;
-        counters::inc_uploads_in_flight();
-
-        let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
-        let prefix = self
-            .config
-            .prefix
-            .as_deref()
-            .unwrap_or("")
-            .trim_matches('/');
-
-        let mut full_key = if namespace.is_empty() {
-            prefix.to_string()
-        } else if prefix.is_empty() {
-            namespace.clone()
-        } else {
-            format!("{}/{}", prefix, namespace)
-        };
-
-        let partition_path = BufferChunker::decode_file_partition(&ctx.filename);
-        if !partition_path.is_empty() {
-            full_key = format!("{}/{}", full_key, partition_path);
-        }
-
-        if let Ok(k) = TimePartitioner::new(&ctx.filename).process() {
-            full_key = format!("{}/{}", full_key, k);
-        }
-
         let object_stem = if ctx.idempotency_key.is_empty() {
             hex::encode(md5::compute(&ctx.filename).0)
         } else {
@@ -116,23 +99,8 @@ impl DataSink for DataSinkAzureBlobPlugin {
                 "",
             )?
         };
-        let final_key = format!("{}/{}.parquet", full_key, object_stem);
-
-        let parquet_bytes = serialize_to_parquet(stream).await.map_err(|e| {
-            counters::dec_uploads_in_flight();
-            e
-        })?;
-
-        let path = ObjectPath::from(final_key.clone());
-        self.store
-            .put(&path, parquet_bytes.bytes.into())
-            .await
-            .map_err(|e| {
-                counters::dec_uploads_in_flight();
-                std::io::Error::other(e.to_string())
-            })?;
-
-        counters::dec_uploads_in_flight();
+        let final_key = self.object_key_for_filename(&ctx.filename, &object_stem);
+        self.write_stream(stream, &final_key).await?;
         info!("AzureBlob: uploaded {}", final_key);
         Ok(())
     }
@@ -166,11 +134,13 @@ impl DataSink for DataSinkAzureBlobPlugin {
         {
             return Ok(SinkWriteOutcome::AlreadyApplied);
         }
-        self.sync_with_context(stream, ctx).await?;
-        self.store
-            .put(&manifest_path, expected_manifest.to_json_bytes()?.into())
-            .await
-            .map_err(|err| std::io::Error::other(err.to_string()))?;
+        let stream = match ctx.cdc_ctx {
+            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            None => stream,
+        };
+        let receipt = self.write_stream(stream, &final_key).await?;
+        self.write_receipt(&manifest_path, &expected_manifest, &receipt)
+            .await?;
         Ok(SinkWriteOutcome::Applied)
     }
 
@@ -179,28 +149,39 @@ impl DataSink for DataSinkAzureBlobPlugin {
         mut reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
         ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
     ) -> Result<SinkWriteOutcome, std::io::Error> {
-        let schema = reader.schema();
-        let mut applied = false;
-        while let Some(chunk) = reader.next_chunk().await? {
-            let chunk_cdc = ctx.chunk_cdc_context(&chunk)?;
-            let chunk_ctx = ctx.chunk_sink_write_context_with_cdc(
-                chunk.chunk_index,
-                chunk.chunk_index == 0 && chunk.final_chunk,
-                chunk_cdc.as_ref(),
-            );
-            if self
-                .sync_with_context_result(chunk.into_stream(schema.clone()), chunk_ctx)
-                .await?
-                == SinkWriteOutcome::Applied
-            {
-                applied = true;
-            }
+        let object_stem = skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
+            &ctx.idempotency_key,
+            "",
+        )?;
+        let final_key = self.object_key_for_filename(&ctx.filename, &object_stem);
+        let manifest_path = ObjectPath::from(manifest_object_name(&final_key));
+        let expected_manifest = ObjectWriteManifest::from_context(
+            ctx.compaction_id.clone(),
+            ctx.idempotency_key.clone(),
+            ctx.schema_fingerprint.clone(),
+            ctx.wal_refs.as_slice(),
+        );
+        if self
+            .manifest_matches(&manifest_path, &expected_manifest)
+            .await?
+        {
+            return Ok(SinkWriteOutcome::AlreadyApplied);
         }
-        Ok(if applied {
-            SinkWriteOutcome::Applied
-        } else {
-            SinkWriteOutcome::AlreadyApplied
-        })
+        if self.legacy_chunk_state_exists(&ctx, 0).await? {
+            let receipt = self.sync_grouped_legacy_chunks(&mut reader, &ctx).await?;
+            self.write_receipt(&manifest_path, &expected_manifest, &receipt)
+                .await?;
+            return Ok(SinkWriteOutcome::Applied);
+        }
+        let (stream, _stream_progress) = reader.into_stream();
+        let stream = match ctx.cdc_ctx {
+            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            None => stream,
+        };
+        let receipt = self.write_stream(stream, &final_key).await?;
+        self.write_receipt(&manifest_path, &expected_manifest, &receipt)
+            .await?;
+        Ok(SinkWriteOutcome::Applied)
     }
 
     fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
@@ -238,9 +219,12 @@ impl DataSinkAzureBlobPlugin {
         let store = builder.build().map_err(|err| {
             io::Error::other(format!("Failed to build Azure blob store: {}", err))
         })?;
+        let store: Arc<dyn ObjectStore> = Arc::new(store);
+        let object_backend = Arc::new(ObjectStoreBackend::new(store.clone()));
 
         Ok(Self {
-            store: Box::new(store),
+            store,
+            object_backend,
             config,
         })
     }
@@ -275,6 +259,150 @@ impl DataSinkAzureBlobPlugin {
         format!("{}/{}.parquet", full_key, object_stem)
     }
 
+    fn legacy_chunk_manifest(
+        &self,
+        ctx: &skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
+        chunk_index: u64,
+    ) -> (String, ObjectPath, ObjectWriteManifest) {
+        let object_stem = legacy_chunk_idempotency_key(&ctx.idempotency_key, chunk_index);
+        let chunk_filename = ctx.chunk_filename(chunk_index, false);
+        let final_key = self.object_key_for_filename(&chunk_filename, &object_stem);
+        let manifest_path = ObjectPath::from(manifest_object_name(&final_key));
+        let manifest = ObjectWriteManifest::from_context(
+            legacy_chunk_idempotency_key(&ctx.compaction_id, chunk_index),
+            object_stem,
+            ctx.schema_fingerprint.clone(),
+            ctx.wal_refs.as_slice(),
+        );
+        (final_key, manifest_path, manifest)
+    }
+
+    async fn legacy_chunk_state_exists(
+        &self,
+        ctx: &skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
+        chunk_index: u64,
+    ) -> io::Result<bool> {
+        let (final_key, path, expected) = self.legacy_chunk_manifest(ctx, chunk_index);
+        if self.manifest_matches(&path, &expected).await? {
+            return Ok(true);
+        }
+        match self.store.head(&ObjectPath::from(final_key)).await {
+            Ok(_) => Ok(true),
+            Err(object_store::Error::NotFound { .. }) => Ok(false),
+            Err(error) => Err(io::Error::other(error.to_string())),
+        }
+    }
+
+    async fn sync_grouped_legacy_chunks(
+        &self,
+        reader: &mut skippr_runtime_sdk::plugins::GroupedBatchReader,
+        ctx: &skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
+    ) -> io::Result<ObjectWriteReceipt> {
+        let schema = reader.schema();
+        let mut object_key = None;
+        let mut rows = 0_u64;
+        let mut bytes = 0_u64;
+        let mut transport_chunk_count = 0_u32;
+        let mut etag = None;
+
+        while let Some(chunk) = reader.next_chunk().await? {
+            let (final_key, manifest_path, expected) =
+                self.legacy_chunk_manifest(ctx, chunk.chunk_index);
+            let chunk_rows = chunk.rows;
+            let (chunk_bytes, chunk_transport_count, chunk_etag) =
+                if self.manifest_matches(&manifest_path, &expected).await? {
+                    let head = self
+                        .store
+                        .head(&ObjectPath::from(final_key.clone()))
+                        .await
+                        .map_err(|error| io::Error::other(error.to_string()))?;
+                    (head.size, 1, head.e_tag)
+                } else {
+                    let chunk_cdc = ctx.chunk_cdc_context(&chunk)?;
+                    let stream = chunk.into_stream(schema.clone());
+                    let stream = match chunk_cdc.as_ref() {
+                        Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(
+                            stream,
+                            &cdc.part_meta,
+                        ),
+                        None => stream,
+                    };
+                    let receipt = self.write_stream(stream, &final_key).await?;
+                    (receipt.bytes, receipt.transport_chunk_count, receipt.etag)
+                };
+            object_key.get_or_insert(final_key);
+            rows = rows
+                .checked_add(chunk_rows)
+                .ok_or_else(|| io::Error::other("legacy grouped row count overflow"))?;
+            bytes = bytes
+                .checked_add(chunk_bytes)
+                .ok_or_else(|| io::Error::other("legacy grouped byte count overflow"))?;
+            transport_chunk_count = transport_chunk_count
+                .checked_add(chunk_transport_count)
+                .ok_or_else(|| io::Error::other("legacy grouped chunk count overflow"))?;
+            etag = chunk_etag;
+        }
+
+        Ok(ObjectWriteReceipt {
+            version: 1,
+            object_key: object_key
+                .ok_or_else(|| io::Error::other("No rows to write to parquet"))?,
+            upload_id: "legacy-chunk-replay".to_string(),
+            rows,
+            bytes,
+            transport_chunk_count,
+            parts: Vec::new(),
+            etag,
+            checksum: None,
+            version_id: None,
+            backend_metadata: BTreeMap::from([(
+                "compatibility".to_string(),
+                "legacy-read-only-chunks".to_string(),
+            )]),
+        })
+    }
+
+    async fn write_stream(
+        &self,
+        stream: SendableRecordBatchStream,
+        final_key: &str,
+    ) -> io::Result<ObjectWriteReceipt> {
+        use skippr_runtime_sdk::metrics::counters;
+
+        let schema = stream.schema();
+        let order_fields =
+            skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order(&schema);
+        let writer_properties =
+            skippr_runtime_sdk::converters::parquet_ordering::build_writer_properties(
+                &schema,
+                &order_fields,
+                skippr_runtime_sdk::converters::parquet_ordering::default_streaming_row_group_size(
+                ),
+            );
+        let batches = stream.map(move |batch| {
+            let batch = batch.map_err(ObjectWriteError::input)?;
+            skippr_runtime_sdk::converters::parquet_ordering::sort_batch(&batch, &order_fields)
+                .map_err(ObjectWriteError::input)
+        });
+        let session = ObjectWriteSession::new(
+            self.object_backend.clone(),
+            ObjectWriteRequest::new(final_key),
+            ObjectWriterConfig::default(),
+        )
+        .map_err(|error| io::Error::other(error.to_string()))?;
+
+        counters::inc_uploads_in_flight();
+        let result = session
+            .write_parquet(schema, writer_properties, batches)
+            .await;
+        counters::dec_uploads_in_flight();
+        let receipt = result.map_err(|error| io::Error::other(error.to_string()))?;
+        counters::add_parquet_rows(receipt.rows);
+        counters::add_parquet_bytes(receipt.bytes);
+        counters::add_upload(1);
+        Ok(receipt)
+    }
+
     async fn manifest_matches(
         &self,
         manifest_path: &ObjectPath,
@@ -289,7 +417,60 @@ impl DataSinkAzureBlobPlugin {
             .bytes()
             .await
             .map_err(|err| io::Error::other(err.to_string()))?;
-        let manifest = ObjectWriteManifest::from_json_bytes(&bytes)?;
-        Ok(manifest.matches_manifest(expected))
+        persisted_object_write_matches(&bytes, expected)
+    }
+
+    async fn write_receipt(
+        &self,
+        manifest_path: &ObjectPath,
+        manifest: &ObjectWriteManifest,
+        object_receipt: &ObjectWriteReceipt,
+    ) -> io::Result<()> {
+        let receipt = GroupedWriteReceipt::from_manifest_and_upload(
+            manifest,
+            format!(
+                "azure://{}/{}",
+                self.config.container, object_receipt.object_key
+            ),
+            object_receipt.etag.clone().unwrap_or_default(),
+            object_receipt.checksum.clone(),
+            object_receipt.rows,
+            object_receipt.bytes,
+            object_receipt.transport_chunk_count,
+        );
+        self.store
+            .put(manifest_path, receipt.to_json_bytes()?.into())
+            .await
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use object_store::memory::InMemory;
+
+    use super::*;
+
+    #[test]
+    fn deterministic_object_path_is_unchanged() {
+        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
+        let plugin = DataSinkAzureBlobPlugin {
+            store: store.clone(),
+            object_backend: Arc::new(ObjectStoreBackend::new(store)),
+            config: DataSinkAzureBlobPluginConfig {
+                account_name: "account".to_string(),
+                account_key: None,
+                sas_token: None,
+                container: "container".to_string(),
+                prefix: Some("/root/".to_string()),
+                format: None,
+            },
+        };
+
+        assert_eq!(
+            plugin.object_key_for_filename("namespace=events", "apply-0001"),
+            "root/events/apply-0001.parquet"
+        );
     }
 }

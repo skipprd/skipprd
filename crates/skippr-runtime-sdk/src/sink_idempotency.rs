@@ -217,6 +217,18 @@ impl GroupedWriteReceipt {
     }
 }
 
+/// Match either the canonical grouped receipt or a rollback-era object
+/// manifest stored at the same sidecar path.
+pub fn persisted_object_write_matches(
+    bytes: &[u8],
+    expected: &ObjectWriteManifest,
+) -> io::Result<bool> {
+    if let Ok(receipt) = GroupedWriteReceipt::from_json_bytes(bytes) {
+        return Ok(receipt.matches_manifest(expected));
+    }
+    Ok(ObjectWriteManifest::from_json_bytes(bytes)?.matches_manifest(expected))
+}
+
 pub fn legacy_chunk_idempotency_key(compaction_id: &str, chunk_index: u64) -> String {
     format!("{compaction_id}-chunk-{chunk_index:08}")
 }
@@ -419,6 +431,34 @@ mod tests {
         let receipt = GroupedWriteReceipt::from_json_bytes(&serde_json::to_vec(&json).unwrap())
             .expect("legacy receipt");
         assert!(receipt.matches_manifest(&manifest));
+    }
+
+    #[test]
+    fn grouped_receipt_remains_readable_as_legacy_object_manifest() {
+        let refs = vec![wal_ref("a", 1)];
+        let manifest = ObjectWriteManifest::from_context("c1", "k1", "schema", &refs);
+        let receipt = GroupedWriteReceipt::from_manifest_and_upload(
+            &manifest,
+            "gs://bucket/root/k1.parquet",
+            "etag",
+            Some("checksum".to_string()),
+            3,
+            100,
+            2,
+        );
+
+        let legacy_reader = ObjectWriteManifest::from_json_bytes(
+            &receipt.to_json_bytes().expect("serialize grouped receipt"),
+        )
+        .expect("new receipt must retain legacy manifest fields");
+        assert!(legacy_reader.matches_manifest(&manifest));
+        assert!(receipt.matches_manifest(&manifest));
+        assert!(
+            persisted_object_write_matches(&receipt.to_json_bytes().unwrap(), &manifest).unwrap()
+        );
+        assert!(
+            persisted_object_write_matches(&manifest.to_json_bytes().unwrap(), &manifest).unwrap()
+        );
     }
 
     #[test]

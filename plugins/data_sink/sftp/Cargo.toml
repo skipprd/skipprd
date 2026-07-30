@@ -10,6 +10,7 @@ path = "src/main.rs"
 [dependencies]
 clap.workspace = true
 tokio.workspace = true
+skippr-object-writer.workspace = true
 skippr-runtime-sdk.workspace = true
 arrow.workspace = true
 bytes.workspace = true

@@ -232,6 +232,35 @@ mod tests {
         assert_eq!(tokens.value(2), "abcdef0123456789");
     }
 
+    #[tokio::test]
+    async fn cdc_metadata_remains_aligned_across_streamed_chunks() {
+        let batch = make_test_batch();
+        let schema = batch.schema();
+        let stream: SendableRecordBatchStream = Box::pin(VecBatchStream {
+            schema,
+            batches: vec![batch.slice(0, 1), batch.slice(1, 2)],
+            index: 0,
+        });
+        let mut augmented = augment_stream_with_cdc_columns(stream, &make_test_wal_meta());
+
+        let first = augmented.next().await.unwrap().unwrap();
+        let second = augmented.next().await.unwrap().unwrap();
+        let first_tokens = first
+            .column(3)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let second_tokens = second
+            .column(3)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        assert_eq!(first_tokens.value(0), "0000000000000001");
+        assert_eq!(second_tokens.value(0), "0000000000000002");
+        assert_eq!(second_tokens.value(1), "abcdef0123456789");
+        assert!(augmented.next().await.is_none());
+    }
+
     #[test]
     fn test_build_augmented_schema() {
         let orig = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));

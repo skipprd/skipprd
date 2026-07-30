@@ -4,6 +4,8 @@
 //! channel to async multipart uploads, so neither the encoded object nor all of
 //! its parts are retained in memory.
 
+pub mod backends;
+
 use std::collections::BTreeMap;
 use std::error::Error;
 use std::future::Future;

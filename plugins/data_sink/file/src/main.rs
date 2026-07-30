@@ -1,21 +1,31 @@
+#[path = "../../../shared/cdc_encode.rs"]
 mod cdc_encode;
-mod parquet_util;
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io;
-use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use clap::Parser;
 use datafusion::execution::SendableRecordBatchStream;
+use futures::StreamExt;
 use serde_derive::{Deserialize, Serialize};
+use skippr_object_writer::backends::AtomicFileBackend;
+use skippr_object_writer::{
+    ObjectWriteError, ObjectWriteReceipt, ObjectWriteRequest, ObjectWriteSession,
+    ObjectWriterConfig,
+};
 use skippr_runtime_sdk::plugins::cdc;
 use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::plugins::{SinkWriteContext, SinkWriteOutcome};
 use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
 use skippr_runtime_sdk::sink_compat::BufferChunker;
-use skippr_runtime_sdk::sink_idempotency::{manifest_object_name, ObjectWriteManifest};
+use skippr_runtime_sdk::sink_idempotency::{
+    legacy_chunk_idempotency_key, manifest_object_name, persisted_object_write_matches,
+    GroupedWriteReceipt, ObjectWriteManifest,
+};
 use skippr_runtime_sdk::sink_runtime_entry::run_runtime_data_sink_plugin;
 use tracing::error;
 
@@ -32,6 +42,7 @@ struct FileSinkRuntimePlugin {
     config: DataSinkFilePluginConfig,
     data_dir: String,
     order_fields: Vec<String>,
+    object_backend: Arc<AtomicFileBackend>,
 }
 
 skippr_runtime_sdk::declare_sink_spec!(
@@ -90,11 +101,13 @@ impl DataSink for FileSinkRuntimePlugin {
             &self.config,
             &self.data_dir,
             &self.order_fields,
+            self.object_backend.clone(),
             stream,
             ctx.filename,
             object_stem.as_deref(),
         )
         .await
+        .map(|_| ())
     }
 
     async fn sync_with_context_result(
@@ -127,20 +140,25 @@ impl DataSink for FileSinkRuntimePlugin {
         );
         if manifest_file.exists() {
             let bytes = fs::read(&manifest_file)?;
-            if ObjectWriteManifest::from_json_bytes(&bytes)?.matches_manifest(&expected_manifest) {
+            if persisted_object_write_matches(&bytes, &expected_manifest)? {
                 return Ok(SinkWriteOutcome::AlreadyApplied);
             }
         }
-        sync_file_sink(
+        let stream = match ctx.cdc_ctx {
+            Some(cdc) => cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            None => stream,
+        };
+        let receipt = sync_file_sink(
             &self.config,
             &self.data_dir,
             &self.order_fields,
+            self.object_backend.clone(),
             stream,
             ctx.filename.clone(),
             Some(&object_stem),
         )
         .await?;
-        fs::write(manifest_file, expected_manifest.to_json_bytes()?)?;
+        write_local_receipt(&manifest_file, &expected_manifest, &receipt).await?;
         Ok(SinkWriteOutcome::Applied)
     }
 
@@ -149,28 +167,63 @@ impl DataSink for FileSinkRuntimePlugin {
         mut reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
         ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
     ) -> Result<SinkWriteOutcome, io::Error> {
-        let schema = reader.schema();
-        let mut applied = false;
-        while let Some(chunk) = reader.next_chunk().await? {
-            let chunk_cdc = ctx.chunk_cdc_context(&chunk)?;
-            let chunk_ctx = ctx.chunk_sink_write_context_with_cdc(
-                chunk.chunk_index,
-                chunk.chunk_index == 0 && chunk.final_chunk,
-                chunk_cdc.as_ref(),
-            );
-            if self
-                .sync_with_context_result(chunk.into_stream(schema.clone()), chunk_ctx)
-                .await?
-                == SinkWriteOutcome::Applied
-            {
-                applied = true;
+        let object_stem = skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
+            &ctx.idempotency_key,
+            "",
+        )?;
+        let output_file = output_file_path(&self.data_dir, &ctx.filename, &object_stem)?;
+        let manifest_file = output_file.with_file_name(manifest_object_name(
+            output_file
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("output.parquet"),
+        ));
+        let expected_manifest = ObjectWriteManifest::from_context(
+            ctx.compaction_id.clone(),
+            ctx.idempotency_key.clone(),
+            ctx.schema_fingerprint.clone(),
+            ctx.wal_refs.as_slice(),
+        );
+        if manifest_file.exists() {
+            let bytes = fs::read(&manifest_file)?;
+            if persisted_object_write_matches(&bytes, &expected_manifest)? {
+                return Ok(SinkWriteOutcome::AlreadyApplied);
             }
         }
-        Ok(if applied {
-            SinkWriteOutcome::Applied
-        } else {
-            SinkWriteOutcome::AlreadyApplied
-        })
+        let (legacy_output_file, legacy_manifest_file, legacy_manifest) =
+            legacy_file_chunk_manifest(&self.data_dir, &ctx, 0)?;
+        if local_manifest_matches(&legacy_manifest_file, &legacy_manifest)?
+            || legacy_output_file.exists()
+        {
+            let receipt = sync_file_legacy_chunks(
+                &self.config,
+                &self.data_dir,
+                &self.order_fields,
+                self.object_backend.clone(),
+                &mut reader,
+                &ctx,
+            )
+            .await?;
+            write_local_receipt(&manifest_file, &expected_manifest, &receipt).await?;
+            return Ok(SinkWriteOutcome::Applied);
+        }
+        let (stream, _stream_progress) = reader.into_stream();
+        let stream = match ctx.cdc_ctx {
+            Some(cdc) => cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            None => stream,
+        };
+        let receipt = sync_file_sink(
+            &self.config,
+            &self.data_dir,
+            &self.order_fields,
+            self.object_backend.clone(),
+            stream,
+            ctx.filename,
+            Some(&object_stem),
+        )
+        .await?;
+        write_local_receipt(&manifest_file, &expected_manifest, &receipt).await?;
+        Ok(SinkWriteOutcome::Applied)
     }
 
     async fn install_schema_state(
@@ -204,6 +257,7 @@ skippr_runtime_sdk::runtime_main!(async {
                 config,
                 data_dir: install.context.data_dir,
                 order_fields: install.context.output_layout.order_fields,
+                object_backend: Arc::new(AtomicFileBackend::new()),
             })
         },
     )
@@ -218,10 +272,11 @@ async fn sync_file_sink(
     config: &DataSinkFilePluginConfig,
     data_dir: &str,
     order_fields: &[String],
+    object_backend: Arc<AtomicFileBackend>,
     stream: SendableRecordBatchStream,
     filename: String,
     object_stem: Option<&str>,
-) -> io::Result<()> {
+) -> io::Result<ObjectWriteReceipt> {
     use skippr_runtime_sdk::metrics::counters;
 
     if let Some(output_dir) = config.output_dir.as_deref() {
@@ -233,42 +288,173 @@ async fn sync_file_sink(
         }
     }
 
-    counters::inc_uploads_in_flight();
-
     let object_stem = object_stem
         .map(str::to_string)
         .unwrap_or_else(|| hex::encode(md5::compute(&filename).0));
     let output_file = output_file_path(data_dir, &filename, &object_stem)?;
-    let output_dir = output_file
-        .parent()
-        .ok_or_else(|| io::Error::other("output parquet path has no parent directory"))?;
-    tokio::fs::create_dir_all(output_dir).await?;
+    let schema = stream.schema();
+    let effective_order =
+        skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order_from_fields(
+            &schema,
+            order_fields,
+        );
+    let writer_properties =
+        skippr_runtime_sdk::converters::parquet_ordering::build_writer_properties(
+            &schema,
+            &effective_order,
+            skippr_runtime_sdk::converters::parquet_ordering::default_streaming_row_group_size(),
+        );
+    let batches = stream.map(move |batch| {
+        let batch = batch.map_err(ObjectWriteError::input)?;
+        skippr_runtime_sdk::converters::parquet_ordering::sort_batch(&batch, &effective_order)
+            .map_err(ObjectWriteError::input)
+    });
+    let session = ObjectWriteSession::new(
+        object_backend,
+        ObjectWriteRequest::new(output_file.to_string_lossy()),
+        ObjectWriterConfig::default(),
+    )
+    .map_err(|error| io::Error::other(error.to_string()))?;
 
-    let parquet_bytes = parquet_util::serialize_to_parquet_with_order_fields(stream, order_fields)
-        .await
-        .map_err(|err| {
-            counters::dec_uploads_in_flight();
-            err
-        })?;
-
-    let file = fs::File::create(&output_file).map_err(|err| {
-        counters::dec_uploads_in_flight();
-        err
-    })?;
-    let mut buf_writer = std::io::BufWriter::new(file);
-    buf_writer.write_all(&parquet_bytes.bytes).map_err(|err| {
-        counters::dec_uploads_in_flight();
-        err
-    })?;
-    buf_writer.flush().map_err(|err| {
-        counters::dec_uploads_in_flight();
-        err
-    })?;
-
-    counters::add_parquet_rows(parquet_bytes.num_rows as u64);
-    counters::add_parquet_bytes(parquet_bytes.size_bytes);
-    counters::add_upload(1);
+    counters::inc_uploads_in_flight();
+    let result = session
+        .write_parquet(schema, writer_properties, batches)
+        .await;
     counters::dec_uploads_in_flight();
+    let receipt = result.map_err(|error| io::Error::other(error.to_string()))?;
+    counters::add_parquet_rows(receipt.rows);
+    counters::add_parquet_bytes(receipt.bytes);
+    counters::add_upload(1);
+    Ok(receipt)
+}
+
+fn legacy_file_chunk_manifest(
+    data_dir: &str,
+    ctx: &skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
+    chunk_index: u64,
+) -> io::Result<(PathBuf, PathBuf, ObjectWriteManifest)> {
+    let object_stem = legacy_chunk_idempotency_key(&ctx.idempotency_key, chunk_index);
+    let chunk_filename = ctx.chunk_filename(chunk_index, false);
+    let output_file = output_file_path(data_dir, &chunk_filename, &object_stem)?;
+    let manifest_file = output_file.with_file_name(manifest_object_name(
+        output_file
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("output.parquet"),
+    ));
+    let manifest = ObjectWriteManifest::from_context(
+        legacy_chunk_idempotency_key(&ctx.compaction_id, chunk_index),
+        object_stem,
+        ctx.schema_fingerprint.clone(),
+        ctx.wal_refs.as_slice(),
+    );
+    Ok((output_file, manifest_file, manifest))
+}
+
+fn local_manifest_matches(path: &Path, expected: &ObjectWriteManifest) -> io::Result<bool> {
+    let bytes = match fs::read(path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error),
+    };
+    persisted_object_write_matches(&bytes, expected)
+}
+
+async fn sync_file_legacy_chunks(
+    config: &DataSinkFilePluginConfig,
+    data_dir: &str,
+    order_fields: &[String],
+    object_backend: Arc<AtomicFileBackend>,
+    reader: &mut skippr_runtime_sdk::plugins::GroupedBatchReader,
+    ctx: &skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
+) -> io::Result<ObjectWriteReceipt> {
+    let schema = reader.schema();
+    let mut object_key = None;
+    let mut rows = 0_u64;
+    let mut bytes = 0_u64;
+    let mut transport_chunk_count = 0_u32;
+    let mut etag = None;
+
+    while let Some(chunk) = reader.next_chunk().await? {
+        let chunk_index = chunk.chunk_index;
+        let chunk_rows = chunk.rows;
+        let object_stem = legacy_chunk_idempotency_key(&ctx.idempotency_key, chunk_index);
+        let chunk_filename = ctx.chunk_filename(chunk_index, false);
+        let (output_file, manifest_file, expected) =
+            legacy_file_chunk_manifest(data_dir, ctx, chunk_index)?;
+        let (chunk_bytes, chunk_transport_count, chunk_etag) =
+            if local_manifest_matches(&manifest_file, &expected)? {
+                let metadata = fs::metadata(&output_file)?;
+                (metadata.len(), 1, Some(format!("local-{}", metadata.len())))
+            } else {
+                let chunk_cdc = ctx.chunk_cdc_context(&chunk)?;
+                let stream = chunk.into_stream(schema.clone());
+                let stream = match chunk_cdc.as_ref() {
+                    Some(cdc) => {
+                        cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta)
+                    }
+                    None => stream,
+                };
+                let receipt = sync_file_sink(
+                    config,
+                    data_dir,
+                    order_fields,
+                    object_backend.clone(),
+                    stream,
+                    chunk_filename,
+                    Some(&object_stem),
+                )
+                .await?;
+                (receipt.bytes, receipt.transport_chunk_count, receipt.etag)
+            };
+        object_key.get_or_insert_with(|| output_file.to_string_lossy().into_owned());
+        rows = rows
+            .checked_add(chunk_rows)
+            .ok_or_else(|| io::Error::other("legacy grouped row count overflow"))?;
+        bytes = bytes
+            .checked_add(chunk_bytes)
+            .ok_or_else(|| io::Error::other("legacy grouped byte count overflow"))?;
+        transport_chunk_count = transport_chunk_count
+            .checked_add(chunk_transport_count)
+            .ok_or_else(|| io::Error::other("legacy grouped chunk count overflow"))?;
+        etag = chunk_etag;
+    }
+
+    Ok(ObjectWriteReceipt {
+        version: 1,
+        object_key: object_key.ok_or_else(|| io::Error::other("No rows to write to parquet"))?,
+        upload_id: "legacy-chunk-replay".to_string(),
+        rows,
+        bytes,
+        transport_chunk_count,
+        parts: Vec::new(),
+        etag,
+        checksum: None,
+        version_id: None,
+        backend_metadata: BTreeMap::from([(
+            "compatibility".to_string(),
+            "legacy-read-only-chunks".to_string(),
+        )]),
+    })
+}
+
+async fn write_local_receipt(
+    manifest_file: &Path,
+    manifest: &ObjectWriteManifest,
+    object_receipt: &ObjectWriteReceipt,
+) -> io::Result<()> {
+    let receipt = GroupedWriteReceipt::from_manifest_and_upload(
+        manifest,
+        format!("file://{}", object_receipt.object_key),
+        object_receipt.etag.clone().unwrap_or_default(),
+        object_receipt.checksum.clone(),
+        object_receipt.rows,
+        object_receipt.bytes,
+        object_receipt.transport_chunk_count,
+    );
+    let temporary = manifest_file.with_extension("json.tmp");
+    tokio::fs::write(&temporary, receipt.to_json_bytes()?).await?;
+    tokio::fs::rename(&temporary, manifest_file).await?;
     Ok(())
 }
 
@@ -296,4 +482,17 @@ fn output_file_path(
 
     let output_name = format!("{}/{}", full_key, object_stem);
     Ok(Path::new(&format!("{}/output/{}.parquet", data_dir, output_name)).to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deterministic_output_path_is_unchanged() {
+        assert_eq!(
+            output_file_path("/data", "namespace=events", "apply-0001").unwrap(),
+            PathBuf::from("/data/output/events/apply-0001.parquet")
+        );
+    }
 }

@@ -1,18 +1,28 @@
-use super::parquet_util::serialize_to_parquet;
 use crate::helpers::configuration::DataSinkPluginConfig;
 use async_trait::async_trait;
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_s3::operation::get_object::GetObjectError;
 use aws_sdk_s3::primitives::ByteStream;
+use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::Client as S3Client;
 use datafusion::execution::SendableRecordBatchStream;
+use futures::StreamExt;
 use serde_derive::Deserialize;
+use skippr_object_writer::{
+    CompletionMetadata, MultipartUpload, ObjectPartReceipt, ObjectWriteBackend, ObjectWriteError,
+    ObjectWriteReceipt, ObjectWriteRequest, ObjectWriteSession, ObjectWriterConfig, PartMetadata,
+};
 use skippr_runtime_sdk::plugins::DataSink;
 use skippr_runtime_sdk::plugins::{SinkWriteContext, SinkWriteOutcome};
 use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
 use skippr_runtime_sdk::sink_compat::BufferChunker;
-use skippr_runtime_sdk::sink_idempotency::{sidecar_manifest_object_key, ObjectWriteManifest};
+use skippr_runtime_sdk::sink_idempotency::{
+    legacy_chunk_idempotency_key, persisted_object_write_matches, sidecar_manifest_object_key,
+    GroupedWriteReceipt, ObjectWriteManifest,
+};
+use std::collections::BTreeMap;
 use std::io;
+use std::sync::Arc;
 use tracing::info;
 
 #[derive(Debug, Deserialize, Clone)]
@@ -33,7 +43,136 @@ impl TryFrom<DataSinkPluginConfig> for DataSinkS3PluginConfig {
 
 pub struct DataSinkS3Plugin {
     s3_client: S3Client,
+    object_backend: Arc<S3ObjectBackend>,
     config: DataSinkS3PluginConfig,
+}
+
+struct S3ObjectBackend {
+    client: S3Client,
+    bucket: String,
+}
+
+#[async_trait]
+impl ObjectWriteBackend for S3ObjectBackend {
+    type Error = io::Error;
+
+    async fn begin(&self, request: &ObjectWriteRequest) -> Result<MultipartUpload, Self::Error> {
+        let response = self
+            .client
+            .create_multipart_upload()
+            .bucket(&self.bucket)
+            .key(&request.object_key)
+            .content_type(&request.content_type)
+            .set_metadata((!request.metadata.is_empty()).then(|| {
+                request
+                    .metadata
+                    .iter()
+                    .map(|(key, value)| (key.clone(), value.clone()))
+                    .collect()
+            }))
+            .send()
+            .await
+            .map_err(|error| io::Error::other(format!("Failed to begin S3 upload: {error}")))?;
+        let upload_id = response
+            .upload_id()
+            .ok_or_else(|| io::Error::other("S3 multipart upload returned no upload id"))?
+            .to_string();
+        Ok(MultipartUpload {
+            upload_id,
+            metadata: BTreeMap::from([
+                ("bucket".to_string(), self.bucket.clone()),
+                ("object_key".to_string(), request.object_key.clone()),
+            ]),
+        })
+    }
+
+    async fn upload_part(
+        &self,
+        upload: &MultipartUpload,
+        part_number: u32,
+        bytes: bytes::Bytes,
+    ) -> Result<PartMetadata, Self::Error> {
+        let part_number = i32::try_from(part_number)
+            .map_err(|_| io::Error::other("S3 part number exceeds i32::MAX"))?;
+        let response = self
+            .client
+            .upload_part()
+            .bucket(&self.bucket)
+            .key(
+                upload
+                    .metadata
+                    .get("object_key")
+                    .ok_or_else(|| io::Error::other("S3 upload is missing object key"))?,
+            )
+            .upload_id(&upload.upload_id)
+            .part_number(part_number)
+            .body(ByteStream::from(bytes))
+            .send()
+            .await
+            .map_err(|error| io::Error::other(format!("Failed to upload S3 part: {error}")))?;
+        Ok(PartMetadata {
+            etag: response.e_tag().map(str::to_string),
+            checksum: response.checksum_sha256().map(str::to_string),
+            metadata: BTreeMap::new(),
+        })
+    }
+
+    async fn complete(
+        &self,
+        upload: &MultipartUpload,
+        parts: &[ObjectPartReceipt],
+    ) -> Result<CompletionMetadata, Self::Error> {
+        let object_key = upload
+            .metadata
+            .get("object_key")
+            .ok_or_else(|| io::Error::other("S3 upload is missing object key"))?;
+        let completed_parts = parts
+            .iter()
+            .map(|part| {
+                let part_number = i32::try_from(part.part_number)
+                    .map_err(|_| io::Error::other("S3 part number exceeds i32::MAX"))?;
+                Ok(CompletedPart::builder()
+                    .set_e_tag(part.etag.clone())
+                    .part_number(part_number)
+                    .build())
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let response = self
+            .client
+            .complete_multipart_upload()
+            .bucket(&self.bucket)
+            .key(object_key)
+            .upload_id(&upload.upload_id)
+            .multipart_upload(
+                CompletedMultipartUpload::builder()
+                    .set_parts(Some(completed_parts))
+                    .build(),
+            )
+            .send()
+            .await
+            .map_err(|error| io::Error::other(format!("Failed to complete S3 upload: {error}")))?;
+        Ok(CompletionMetadata {
+            etag: response.e_tag().map(str::to_string),
+            checksum: response.checksum_sha256().map(str::to_string),
+            version_id: response.version_id().map(str::to_string),
+            metadata: BTreeMap::new(),
+        })
+    }
+
+    async fn abort(&self, upload: &MultipartUpload) -> Result<(), Self::Error> {
+        let Some(object_key) = upload.metadata.get("object_key") else {
+            return Ok(());
+        };
+        self.client
+            .abort_multipart_upload()
+            .bucket(&self.bucket)
+            .key(object_key)
+            .upload_id(&upload.upload_id)
+            .send()
+            .await
+            .map_err(|error| io::Error::other(format!("Failed to abort S3 upload: {error}")))?;
+        Ok(())
+    }
 }
 
 skippr_runtime_sdk::declare_sink_spec!(
@@ -113,10 +252,13 @@ impl DataSink for DataSinkS3Plugin {
         {
             return Ok(SinkWriteOutcome::AlreadyApplied);
         }
-        let ctx_filename = ctx.filename.clone();
-        self.inner_sync_with_object_stem(stream, ctx_filename, Some(&object_stem))
-            .await?;
-        self.write_manifest(&manifest_key, &expected_manifest)
+        let final_key = self.object_key_for_filename(&ctx.filename, &object_stem);
+        let stream = match ctx.cdc_ctx {
+            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            None => stream,
+        };
+        let receipt = self.write_stream(stream, &final_key).await?;
+        self.write_receipt(&manifest_key, &expected_manifest, &receipt)
             .await?;
         Ok(SinkWriteOutcome::Applied)
     }
@@ -126,28 +268,41 @@ impl DataSink for DataSinkS3Plugin {
         mut reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
         ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
     ) -> Result<SinkWriteOutcome, std::io::Error> {
-        let schema = reader.schema();
-        let mut applied = false;
-        while let Some(chunk) = reader.next_chunk().await? {
-            let chunk_cdc = ctx.chunk_cdc_context(&chunk)?;
-            let chunk_ctx = ctx.chunk_sink_write_context_with_cdc(
-                chunk.chunk_index,
-                chunk.chunk_index == 0 && chunk.final_chunk,
-                chunk_cdc.as_ref(),
-            );
-            if self
-                .sync_with_context_result(chunk.into_stream(schema.clone()), chunk_ctx)
-                .await?
-                == SinkWriteOutcome::Applied
-            {
-                applied = true;
-            }
+        let object_stem = skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
+            &ctx.idempotency_key,
+            "",
+        )?;
+        let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
+        let manifest_key =
+            sidecar_manifest_object_key(&self.config.s3_prefix, &namespace, &object_stem);
+        let expected_manifest = ObjectWriteManifest::from_context(
+            ctx.compaction_id.clone(),
+            ctx.idempotency_key.clone(),
+            ctx.schema_fingerprint.clone(),
+            ctx.wal_refs.as_slice(),
+        );
+        if self
+            .manifest_matches(&manifest_key, &expected_manifest)
+            .await?
+        {
+            return Ok(SinkWriteOutcome::AlreadyApplied);
         }
-        Ok(if applied {
-            SinkWriteOutcome::Applied
-        } else {
-            SinkWriteOutcome::AlreadyApplied
-        })
+        if self.legacy_chunk_state_exists(&ctx, 0).await? {
+            let receipt = self.sync_grouped_legacy_chunks(&mut reader, &ctx).await?;
+            self.write_receipt(&manifest_key, &expected_manifest, &receipt)
+                .await?;
+            return Ok(SinkWriteOutcome::Applied);
+        }
+        let final_key = self.object_key_for_filename(&ctx.filename, &object_stem);
+        let (stream, _stream_progress) = reader.into_stream();
+        let stream = match ctx.cdc_ctx {
+            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            None => stream,
+        };
+        let receipt = self.write_stream(stream, &final_key).await?;
+        self.write_receipt(&manifest_key, &expected_manifest, &receipt)
+            .await?;
+        Ok(SinkWriteOutcome::Applied)
     }
 
     fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
@@ -170,7 +325,15 @@ impl DataSinkS3Plugin {
                 .force_path_style(true);
         }
         let s3_client = S3Client::from_conf(s3_client_config.build());
-        Ok(Self { s3_client, config })
+        let object_backend = Arc::new(S3ObjectBackend {
+            client: s3_client.clone(),
+            bucket: config.s3_bucket.clone(),
+        });
+        Ok(Self {
+            s3_client,
+            object_backend,
+            config,
+        })
     }
 
     async fn inner_sync(
@@ -188,9 +351,6 @@ impl DataSinkS3Plugin {
         filename: String,
         object_stem: Option<&str>,
     ) -> Result<(), std::io::Error> {
-        use skippr_runtime_sdk::metrics::counters;
-        counters::inc_uploads_in_flight();
-
         let object_stem = object_stem
             .map(str::to_string)
             .unwrap_or_else(|| hex::encode(md5::compute(&filename).0));
@@ -201,35 +361,13 @@ impl DataSinkS3Plugin {
             .map(|(prefix, _)| prefix.to_string())
             .unwrap_or_default();
 
-        let parquet_bytes = serialize_to_parquet(stream).await.map_err(|e| {
-            counters::dec_uploads_in_flight();
-            e
-        })?;
-        let row_count = parquet_bytes.num_rows as u64;
-        let byte_count = parquet_bytes.size_bytes;
-
-        self.s3_client
-            .put_object()
-            .bucket(&self.config.s3_bucket)
-            .key(&final_key)
-            .body(ByteStream::from(parquet_bytes.bytes))
-            .send()
-            .await
-            .map_err(|e| {
-                counters::dec_uploads_in_flight();
-                std::io::Error::other(format!("Failed to upload to S3: {e}"))
-            })?;
-
-        counters::add_parquet_rows(row_count);
-        counters::add_parquet_bytes(byte_count);
-        counters::add_upload(1);
-        counters::dec_uploads_in_flight();
+        let receipt = self.write_stream(stream, &final_key).await?;
         info!(
             "Uploaded s3://{}/{} to S3 (rows={}, bytes={}, namespace={}, partition_prefix=s3://{}/{}/)",
             self.config.s3_bucket,
             final_key,
-            row_count,
-            byte_count,
+            receipt.rows,
+            receipt.bytes,
             namespace,
             self.config.s3_bucket,
             full_key.trim_end_matches('/')
@@ -262,6 +400,177 @@ impl DataSinkS3Plugin {
         format!("{}/{}.parquet", full_key, object_stem)
     }
 
+    fn legacy_chunk_manifest(
+        &self,
+        ctx: &skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
+        chunk_index: u64,
+    ) -> (String, String, ObjectWriteManifest) {
+        let object_stem = legacy_chunk_idempotency_key(&ctx.idempotency_key, chunk_index);
+        let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
+        let manifest_key =
+            sidecar_manifest_object_key(&self.config.s3_prefix, &namespace, &object_stem);
+        let manifest = ObjectWriteManifest::from_context(
+            legacy_chunk_idempotency_key(&ctx.compaction_id, chunk_index),
+            object_stem.clone(),
+            ctx.schema_fingerprint.clone(),
+            ctx.wal_refs.as_slice(),
+        );
+        (object_stem, manifest_key, manifest)
+    }
+
+    async fn legacy_chunk_state_exists(
+        &self,
+        ctx: &skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
+        chunk_index: u64,
+    ) -> io::Result<bool> {
+        let (object_stem, key, expected) = self.legacy_chunk_manifest(ctx, chunk_index);
+        if self.manifest_matches(&key, &expected).await? {
+            return Ok(true);
+        }
+        let chunk_filename = ctx.chunk_filename(chunk_index, false);
+        let final_key = self.object_key_for_filename(&chunk_filename, &object_stem);
+        match self
+            .s3_client
+            .head_object()
+            .bucket(&self.config.s3_bucket)
+            .key(final_key)
+            .send()
+            .await
+        {
+            Ok(_) => Ok(true),
+            Err(error) if is_s3_not_found_error_text(&error.to_string()) => Ok(false),
+            Err(error) => Err(io::Error::other(error.to_string())),
+        }
+    }
+
+    async fn sync_grouped_legacy_chunks(
+        &self,
+        reader: &mut skippr_runtime_sdk::plugins::GroupedBatchReader,
+        ctx: &skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
+    ) -> io::Result<ObjectWriteReceipt> {
+        let schema = reader.schema();
+        let mut object_key = None;
+        let mut rows = 0_u64;
+        let mut bytes = 0_u64;
+        let mut transport_chunk_count = 0_u32;
+        let mut etag = None;
+        let mut checksum = None;
+
+        while let Some(chunk) = reader.next_chunk().await? {
+            let (object_stem, manifest_key, expected) =
+                self.legacy_chunk_manifest(ctx, chunk.chunk_index);
+            let chunk_filename = ctx.chunk_filename(chunk.chunk_index, false);
+            let final_key = self.object_key_for_filename(&chunk_filename, &object_stem);
+            let chunk_rows = chunk.rows;
+            let (chunk_bytes, chunk_transport_count, chunk_etag, chunk_checksum) = if self
+                .manifest_matches(&manifest_key, &expected)
+                .await?
+            {
+                let head = self
+                    .s3_client
+                    .head_object()
+                    .bucket(&self.config.s3_bucket)
+                    .key(&final_key)
+                    .send()
+                    .await
+                    .map_err(|error| io::Error::other(error.to_string()))?;
+                (
+                    u64::try_from(head.content_length().unwrap_or_default()).unwrap_or_default(),
+                    1,
+                    head.e_tag().map(str::to_string),
+                    head.checksum_sha256().map(str::to_string),
+                )
+            } else {
+                let chunk_cdc = ctx.chunk_cdc_context(&chunk)?;
+                let stream = chunk.into_stream(schema.clone());
+                let stream = match chunk_cdc.as_ref() {
+                    Some(cdc) => {
+                        super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta)
+                    }
+                    None => stream,
+                };
+                let receipt = self.write_stream(stream, &final_key).await?;
+                (
+                    receipt.bytes,
+                    receipt.transport_chunk_count,
+                    receipt.etag,
+                    receipt.checksum,
+                )
+            };
+            object_key.get_or_insert(final_key);
+            rows = rows
+                .checked_add(chunk_rows)
+                .ok_or_else(|| io::Error::other("legacy grouped row count overflow"))?;
+            bytes = bytes
+                .checked_add(chunk_bytes)
+                .ok_or_else(|| io::Error::other("legacy grouped byte count overflow"))?;
+            transport_chunk_count = transport_chunk_count
+                .checked_add(chunk_transport_count)
+                .ok_or_else(|| io::Error::other("legacy grouped chunk count overflow"))?;
+            etag = chunk_etag;
+            checksum = chunk_checksum;
+        }
+
+        Ok(ObjectWriteReceipt {
+            version: 1,
+            object_key: object_key
+                .ok_or_else(|| io::Error::other("No rows to write to parquet"))?,
+            upload_id: "legacy-chunk-replay".to_string(),
+            rows,
+            bytes,
+            transport_chunk_count,
+            parts: Vec::new(),
+            etag,
+            checksum,
+            version_id: None,
+            backend_metadata: BTreeMap::from([(
+                "compatibility".to_string(),
+                "legacy-read-only-chunks".to_string(),
+            )]),
+        })
+    }
+
+    async fn write_stream(
+        &self,
+        stream: SendableRecordBatchStream,
+        final_key: &str,
+    ) -> io::Result<ObjectWriteReceipt> {
+        use skippr_runtime_sdk::metrics::counters;
+
+        let schema = stream.schema();
+        let order_fields =
+            skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order(&schema);
+        let writer_properties =
+            skippr_runtime_sdk::converters::parquet_ordering::build_writer_properties(
+                &schema,
+                &order_fields,
+                skippr_runtime_sdk::converters::parquet_ordering::default_streaming_row_group_size(
+                ),
+            );
+        let batches = stream.map(move |batch| {
+            let batch = batch.map_err(ObjectWriteError::input)?;
+            skippr_runtime_sdk::converters::parquet_ordering::sort_batch(&batch, &order_fields)
+                .map_err(ObjectWriteError::input)
+        });
+        let session = ObjectWriteSession::new(
+            self.object_backend.clone(),
+            ObjectWriteRequest::new(final_key),
+            ObjectWriterConfig::default(),
+        )
+        .map_err(|error| io::Error::other(error.to_string()))?;
+
+        counters::inc_uploads_in_flight();
+        let result = session
+            .write_parquet(schema, writer_properties, batches)
+            .await;
+        counters::dec_uploads_in_flight();
+        let receipt = result.map_err(|error| io::Error::other(error.to_string()))?;
+        counters::add_parquet_rows(receipt.rows);
+        counters::add_parquet_bytes(receipt.bytes);
+        counters::add_upload(1);
+        Ok(receipt)
+    }
+
     async fn manifest_matches(
         &self,
         manifest_key: &str,
@@ -292,25 +601,37 @@ impl DataSinkS3Plugin {
             .await
             .map_err(|err| io::Error::other(err.to_string()))?
             .into_bytes();
-        let manifest = ObjectWriteManifest::from_json_bytes(&bytes)?;
-        Ok(manifest.matches_manifest(expected))
+        persisted_object_write_matches(&bytes, expected)
     }
 
-    async fn write_manifest(
+    async fn write_receipt(
         &self,
         manifest_key: &str,
         manifest: &ObjectWriteManifest,
+        object_receipt: &ObjectWriteReceipt,
     ) -> io::Result<()> {
+        let receipt = GroupedWriteReceipt::from_manifest_and_upload(
+            manifest,
+            format!(
+                "s3://{}/{}",
+                self.config.s3_bucket, object_receipt.object_key
+            ),
+            object_receipt.etag.clone().unwrap_or_default(),
+            object_receipt.checksum.clone(),
+            object_receipt.rows,
+            object_receipt.bytes,
+            object_receipt.transport_chunk_count,
+        );
         self.s3_client
             .put_object()
             .bucket(&self.config.s3_bucket)
             .key(manifest_key)
-            .body(ByteStream::from(manifest.to_json_bytes()?))
+            .body(ByteStream::from(receipt.to_json_bytes()?))
             .send()
             .await
             .map_err(|err| {
                 io::Error::other(format!(
-                    "Failed to write S3 idempotency manifest {}: {}",
+                    "Failed to write S3 grouped receipt {}: {}",
                     manifest_key, err
                 ))
             })?;
@@ -351,4 +672,37 @@ fn is_s3_not_found_error_text(err: &str) -> bool {
         || err.contains("NotFound")
         || err.contains("status code: 404")
         || err.contains("404 Not Found")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deterministic_object_path_is_unchanged() {
+        let client = S3Client::from_conf(
+            aws_sdk_s3::config::Builder::new()
+                .behavior_version(aws_config::BehaviorVersion::latest())
+                .build(),
+        );
+        let config = DataSinkS3PluginConfig {
+            format: None,
+            endpoint_url: None,
+            s3_bucket: "bucket".to_string(),
+            s3_prefix: "/root/".to_string(),
+        };
+        let plugin = DataSinkS3Plugin {
+            s3_client: client.clone(),
+            object_backend: Arc::new(S3ObjectBackend {
+                client,
+                bucket: config.s3_bucket.clone(),
+            }),
+            config,
+        };
+
+        assert_eq!(
+            plugin.object_key_for_filename("namespace=events", "apply-0001"),
+            "root/events/apply-0001.parquet"
+        );
+    }
 }

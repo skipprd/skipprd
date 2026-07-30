@@ -452,6 +452,20 @@ impl GroupedBatchReader {
         &self.grouping_key
     }
 
+    /// Consume the grouped reader as one bounded batch stream.
+    ///
+    /// This preserves a batch already read ahead by `next_chunk` and otherwise
+    /// delegates directly to the source stream. It never collects subsequent
+    /// grouped chunks, allowing object sinks to encode one logical object for
+    /// the whole compaction envelope.
+    pub fn into_stream(self) -> SendableRecordBatchStream {
+        Box::pin(GroupedReaderRecordBatchStream {
+            schema: self.schema,
+            pending: self.pending,
+            stream: self.stream,
+        })
+    }
+
     pub async fn next_chunk(&mut self) -> io::Result<Option<RecordBatchChunk>> {
         if self.finished {
             return Ok(None);
@@ -992,6 +1006,43 @@ mod tests {
         assert_eq!(second.rows, 1);
         assert!(second.final_chunk);
         assert!(reader.next_chunk().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn grouped_batch_reader_into_stream_preserves_read_ahead_without_collecting() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let first_batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1, 2]))])
+                .unwrap();
+        let second_batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![3]))])
+                .unwrap();
+        let stream: SendableRecordBatchStream = Box::pin(ChunkRecordBatchStream {
+            schema,
+            batches: vec![first_batch, second_batch].into_iter(),
+        });
+        let refs = GroupedWalRefs::new(vec![runtime_ref()]).unwrap();
+        let key = GroupedWalPartitionKey::from_refs(&refs, "schema", None);
+        let mut reader = GroupedBatchReader::new(
+            stream,
+            key,
+            GroupedBatchReaderConfig {
+                max_rows: 2,
+                max_bytes: usize::MAX,
+            },
+        );
+
+        let first = reader.next_chunk().await.unwrap().unwrap();
+        assert_eq!(first.rows, 2);
+        let (remaining_stream, _) = reader.into_stream();
+        let remaining = remaining_stream
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].num_rows(), 1);
     }
 
     #[tokio::test]
