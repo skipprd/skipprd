@@ -459,6 +459,8 @@ pub struct DataSinkAthenaPlugin {
     context: RuntimeExecutionContext,
     binding: RuntimeBinding,
     config: DataSinkAthenaPluginConfig,
+    region: Option<String>,
+    catalog_id: Option<String>,
     // s3_bucket: String,
     // s3_prefix: String,
     // time_bucket: String,
@@ -1218,6 +1220,12 @@ impl DataSinkAthenaPlugin {
 
         let s3_client = S3Client::new(&aws_config);
         let athena_client = AthenaClient::new(&aws_config);
+        let region = aws_config
+            .region()
+            .map(|region| region.as_ref().to_string());
+        let catalog_id = std::env::var_os("AWS_GLUE_CATALOG_ID")
+            .and_then(|value| value.into_string().ok())
+            .filter(|value| !value.trim().is_empty());
         let _ = seed_athena_glue_cp_target();
         let tuned_uploads = skippr_runtime_sdk::metrics::counters::UPLOAD_CONCURRENCY_TARGET
             .load(std::sync::atomic::Ordering::Relaxed);
@@ -1229,6 +1237,8 @@ impl DataSinkAthenaPlugin {
             context,
             binding,
             config: athena_config,
+            region,
+            catalog_id,
             buffer_name: buffer_name,
             max_async_uploads: max_async_uploads as i64,
             upload_sem: Arc::new(Semaphore::new(max_async_uploads)),
@@ -1305,10 +1315,8 @@ impl DataSinkAthenaPlugin {
         );
         let payload = GluePartitionCatalogIntentV1 {
             version: 1,
-            region: std::env::var("AWS_REGION")
-                .ok()
-                .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok()),
-            catalog_id: std::env::var("AWS_GLUE_CATALOG_ID").ok(),
+            region: self.region.clone(),
+            catalog_id: self.catalog_id.clone(),
             database: self.config.glue_database_name.clone(),
             table: namespace.to_string(),
             partition_values: partition_values.clone(),

@@ -592,10 +592,10 @@ mod tests {
 
     use std::sync::Mutex;
 
-    static ENV_TEST_LOCK: Mutex<()> = Mutex::new(());
-
     fn env_test_lock() -> std::sync::MutexGuard<'static, ()> {
-        ENV_TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+        crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
     }
 
     fn test_config() -> DataSourceMetaInstagramAdsPluginConfig {

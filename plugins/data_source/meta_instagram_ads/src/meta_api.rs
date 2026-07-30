@@ -365,8 +365,9 @@ mod tests {
 
     #[test]
     fn load_fixture_insights_reads_account_file() {
-        static FIXTURE_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _lock = FIXTURE_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _lock = crate::ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
         let fixture_dir = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures");
         std::env::set_var("SKIPPR_META_INSTAGRAM_ADS_FIXTURE_DIR", fixture_dir);
         let client = MetaInsightsApiClient::new(

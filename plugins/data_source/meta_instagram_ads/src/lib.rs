@@ -6,3 +6,6 @@ mod meta_api;
 pub mod streams;
 
 pub use meta::*;
+
+#[cfg(test)]
+pub(crate) static ENV_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
