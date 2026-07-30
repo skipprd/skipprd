@@ -44,6 +44,38 @@ impl super::cdc_apply::CdcApplyBackend for BigqueryCdcBackend {
     fn merge_keyword() -> &'static str {
         "MERGE"
     }
+
+    fn ddl_add_order_token_column(fq_table: &str) -> String {
+        format!(
+            "ALTER TABLE {fq_table} ADD COLUMN IF NOT EXISTS `_skippr_order_token` {}",
+            Self::ORDER_TOKEN_TYPE,
+        )
+    }
+
+    fn ddl_create_tombstone_table(
+        fq_tombstone_table: &str,
+        business_key_cols: &[(String, String)],
+    ) -> String {
+        let mut column_defs = business_key_cols
+            .iter()
+            .map(|(name, target_type)| {
+                format!("`{}` {target_type} NOT NULL", name.replace('`', "\\`"))
+            })
+            .collect::<Vec<_>>();
+        column_defs.push(format!(
+            "`_skippr_order_token` {} NOT NULL",
+            Self::ORDER_TOKEN_TYPE
+        ));
+        let primary_key = business_key_cols
+            .iter()
+            .map(|(name, _)| format!("`{}`", name.replace('`', "\\`")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "CREATE TABLE IF NOT EXISTS {fq_tombstone_table} ({}, PRIMARY KEY ({primary_key}) NOT ENFORCED)",
+            column_defs.join(", ")
+        )
+    }
 }
 
 const JOB_POLL_MAX: u32 = 120;
@@ -687,11 +719,11 @@ impl DataSinkBigqueryPlugin {
         ctx: &skippr_runtime_sdk::plugins::cdc::SyncContext,
     ) -> Result<(), std::io::Error> {
         use super::cdc_apply::{
-            ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
-            upsert_if_newer_sql,
+            append_record_batch_to_cdc_apply, ddl_add_order_token_column,
+            ddl_create_tombstone_table, warehouse_bulk_cdc_sql, CdcApplyBatch, CdcApplyColumn,
+            CdcWarehouseDialect,
         };
         use skippr_runtime_sdk::metrics::counters;
-        use skippr_runtime_sdk::plugins::cdc::MutationKind;
 
         let contract = match ctx.contract.as_ref() {
             Some(c) if !c.business_key_columns.is_empty() => c,
@@ -722,10 +754,7 @@ impl DataSinkBigqueryPlugin {
             "`{}.{}.{}`",
             self.config.project, self.config.dataset, table_name
         );
-        let fq_table = format!(
-            "{}.{}.{}",
-            self.config.project, self.config.dataset, table_name
-        );
+        let fq_table = fq_table_ddl.clone();
 
         self.ensure_dataset().await.map_err(|e| {
             counters::dec_uploads_in_flight();
@@ -739,7 +768,7 @@ impl DataSinkBigqueryPlugin {
             })?;
 
         let tombstone_table = format!(
-            "{}.{}._skippr_tombstones_{}",
+            "`{}.{}._skippr_tombstones_{}`",
             self.config.project, self.config.dataset, table_name
         );
 
@@ -774,32 +803,18 @@ impl DataSinkBigqueryPlugin {
             info!(target: "bigquery", "CDC DDL applied for {}", fq_table);
         }
 
-        let bk_names_quoted: Vec<String> = contract
-            .business_key_columns
-            .iter()
-            .map(|bk| format!("\"{}\"", bk))
-            .collect();
-
-        let bk_types: Vec<String> = contract
-            .business_key_columns
-            .iter()
-            .map(|bk| {
-                col_defs
-                    .iter()
-                    .find(|(name, _)| name == bk)
-                    .map(|(_, t)| (*t).to_string())
-                    .unwrap_or_else(|| "STRING".to_string())
-            })
-            .collect();
-
-        let col_names_quoted: Vec<String> = arrow_schema
-            .fields()
-            .iter()
-            .map(|f| format!("\"{}\"", f.name().to_lowercase()))
-            .collect();
-
         let mut row_offset = 0usize;
-        let mut total_rows = 0usize;
+        let mut apply_batch = CdcApplyBatch {
+            columns: col_defs
+                .iter()
+                .map(|(name, target_type)| CdcApplyColumn {
+                    name: name.clone(),
+                    target_type: (*target_type).to_string(),
+                })
+                .collect(),
+            business_key_columns: contract.business_key_columns.clone(),
+            rows: Vec::new(),
+        };
 
         while let Some(batch_result) = stream.next().await {
             let batch =
@@ -808,92 +823,37 @@ impl DataSinkBigqueryPlugin {
             if num_rows == 0 {
                 continue;
             }
-
-            for row in 0..num_rows {
-                let meta_idx = row_offset + row;
-                let row_meta = ctx.part_meta.rows.get(meta_idx).ok_or_else(|| {
-                    std::io::Error::other(format!(
-                        "CDC row metadata missing at index {} (have {})",
-                        meta_idx,
-                        ctx.part_meta.rows.len()
-                    ))
-                })?;
-
-                let order_token_hex: String = row_meta
-                    .order_token
-                    .iter()
-                    .map(|b| format!("{:02x}", b))
-                    .collect();
-
-                match row_meta.mutation {
-                    MutationKind::Snapshot | MutationKind::Insert | MutationKind::Update => {
-                        let mut all_names = col_names_quoted.clone();
-                        all_names.push("\"_skippr_order_token\"".to_string());
-
-                        let mut all_values: Vec<String> = (0..batch.num_columns())
-                            .map(|col| Self::arrow_value_to_sql(batch.column(col).as_ref(), row))
-                            .collect();
-                        all_values.push(format!("FROM_HEX('{}')", order_token_hex));
-
-                        let sql = upsert_if_newer_sql::<BigqueryCdcBackend>(
-                            &fq_table,
-                            &tombstone_table,
-                            &all_names,
-                            &all_values,
-                            &bk_names_quoted,
-                            &order_token_hex,
-                        );
-
-                        if let Err(e) = self.execute_sql(&sql).await {
-                            error!("CDC upsert failed for {}: {}", fq_table, e);
-                            counters::dec_uploads_in_flight();
-                            return Err(std::io::Error::other(format!(
-                                "BigQuery CDC upsert: {}",
-                                e
-                            )));
-                        }
-                    }
-                    MutationKind::Delete => {
-                        let bk_values: Vec<String> = contract
-                            .business_key_columns
-                            .iter()
-                            .map(|bk| {
-                                let col_idx = arrow_schema
-                                    .fields()
-                                    .iter()
-                                    .position(|f| f.name().to_lowercase() == *bk)
-                                    .unwrap_or(0);
-                                Self::arrow_value_to_sql(batch.column(col_idx).as_ref(), row)
-                            })
-                            .collect();
-
-                        let sql = delete_if_newer_sql::<BigqueryCdcBackend>(
-                            &fq_table,
-                            &tombstone_table,
-                            &bk_names_quoted,
-                            &bk_values,
-                            &bk_types,
-                            &order_token_hex,
-                        );
-
-                        if let Err(e) = self.execute_sql(&sql).await {
-                            error!("CDC delete failed for {}: {}", fq_table, e);
-                            counters::dec_uploads_in_flight();
-                            return Err(std::io::Error::other(format!(
-                                "BigQuery CDC delete: {}",
-                                e
-                            )));
-                        }
-                    }
-                }
-            }
-
+            append_record_batch_to_cdc_apply(
+                &mut apply_batch,
+                &batch,
+                &ctx.part_meta.rows,
+                row_offset,
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
             row_offset += num_rows;
-            total_rows += num_rows;
-            counters::add_parquet_rows(num_rows as u64);
+        }
+
+        let total_rows = apply_batch.rows.len();
+        if total_rows > 0 {
+            let sql = warehouse_bulk_cdc_sql(
+                CdcWarehouseDialect::BigQuery,
+                &fq_table,
+                &tombstone_table,
+                &apply_batch,
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+            self.execute_sql(&sql.transactional_script(CdcWarehouseDialect::BigQuery))
+                .await
+                .map_err(|error| {
+                    counters::dec_uploads_in_flight();
+                    std::io::Error::other(format!("BigQuery bulk CDC apply: {error}"))
+                })?;
+            counters::add_parquet_rows(total_rows as u64);
             info!(
-                "CDC applied {} rows to {} (total: {})",
-                num_rows, table_name, total_rows
+                target: "bigquery",
+                "CDC bulk-staged and atomically applied {} rows to {}",
+                total_rows,
+                table_name
             );
         }
 
@@ -934,8 +894,12 @@ impl DataSink for DataSinkBigqueryPlugin {
                 chunk.chunk_index == 0 && chunk.final_chunk,
                 chunk_cdc.as_ref(),
             );
-            self.sync(chunk.into_stream(schema.clone()), chunk_ctx.filename, chunk_ctx.cdc_ctx)
-                .await?;
+            self.sync(
+                chunk.into_stream(schema.clone()),
+                chunk_ctx.filename,
+                chunk_ctx.cdc_ctx,
+            )
+            .await?;
         }
         Ok(skippr_runtime_sdk::plugins::SinkWriteOutcome::Applied)
     }
@@ -989,5 +953,29 @@ impl SchemaSink for DataSinkBigqueryPlugin {
         );
 
         self.ensure_table(&fq_table, &col_defs).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn bigquery_bulk_cdc_sql_quotes_keys_and_keeps_temp_ddl_atomic() {
+        let batch = crate::cdc_apply::warehouse_sql_test_batch();
+        let sql = crate::cdc_apply::warehouse_bulk_cdc_sql(
+            crate::cdc_apply::CdcWarehouseDialect::BigQuery,
+            "`project.dataset.users`",
+            "`project.dataset._skippr_tombstones_users`",
+            &batch,
+        )
+        .unwrap();
+        let script = sql.transactional_script(crate::cdc_apply::CdcWarehouseDialect::BigQuery);
+
+        assert!(script.starts_with("BEGIN TRANSACTION;"));
+        assert!(script.contains("CREATE TEMP TABLE"));
+        assert!(script.contains("FROM_HEX"));
+        assert!(script.contains("PARTITION BY stage.`tenant_id`, stage.`id`"));
+        assert_eq!(script.matches("MERGE INTO").count(), 4);
+        assert!(script.contains("DROP TABLE IF EXISTS"));
+        assert!(script.ends_with("COMMIT TRANSACTION;"));
     }
 }
