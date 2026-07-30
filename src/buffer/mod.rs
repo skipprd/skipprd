@@ -1,5 +1,6 @@
 pub mod compaction_index;
 pub mod compaction_progress;
+pub(crate) mod compaction_scheduler;
 pub mod compaction_transaction;
 pub mod completion_ledger;
 pub mod flush_execution_budget;
