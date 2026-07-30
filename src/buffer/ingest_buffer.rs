@@ -237,6 +237,28 @@ struct CompactionWork {
     entries: Vec<CompactionEntry>,
 }
 
+#[cfg(test)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GroupedCompactionTestEvent {
+    SinkSucceeded,
+    ManifestAcked,
+    SlicesTombstoned,
+}
+
+#[cfg(test)]
+type GroupedCompactionTestObserver =
+    Arc<dyn Fn(GroupedCompactionTestEvent) + Send + Sync + 'static>;
+
+#[cfg(test)]
+tokio::task_local! {
+    static GROUPED_COMPACTION_TEST_OBSERVER: GroupedCompactionTestObserver;
+}
+
+#[cfg(test)]
+fn observe_grouped_compaction_test_event(event: GroupedCompactionTestEvent) {
+    let _ = GROUPED_COMPACTION_TEST_OBSERVER.try_with(|observer| observer(event));
+}
+
 fn linux_vm_rss_kb() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -3071,9 +3093,13 @@ impl Buffers {
             crate::metrics::counters::add_wal_compaction_transaction_failed(1);
             return Err(err);
         }
+        #[cfg(test)]
+        observe_grouped_compaction_test_event(GroupedCompactionTestEvent::SinkSucceeded);
         let final_rows = row_counter.load(AtomicOrdering::Relaxed);
         progress.set_rows(final_rows);
         persist_manifest(&sent_txn.mark_acked())?;
+        #[cfg(test)]
+        observe_grouped_compaction_test_event(GroupedCompactionTestEvent::ManifestAcked);
         COMPACT_FAILURES.remove(&format!("{}:{}", work.txn.sink_ref, work.txn.id));
         crate::metrics::counters::add_wal_compaction_completed(work.entries.len() as u64);
         crate::metrics::counters::add_wal_compaction_transaction_completed(1);
@@ -3088,6 +3114,8 @@ impl Buffers {
             work.txn.target_filename
         );
         Self::tombstone_grouped_work(&work);
+        #[cfg(test)]
+        observe_grouped_compaction_test_event(GroupedCompactionTestEvent::SlicesTombstoned);
         crate::metrics::counters::add_wal_compaction_refs_tombstoned(work.entries.len() as u64);
         remove_manifest(&work.txn.id)?;
         progress.finish();
@@ -3648,11 +3676,14 @@ mod wal_index_progress_tests {
 #[cfg(test)]
 mod tests_wal_commit {
     use super::*;
+    use crate::buffer::compaction_transaction::CompactionTransactionState;
     use crate::buffer::segment_file::SegmentFile;
     use crate::helpers::configuration::Config;
+    use crate::plugins::SinkWriteOutcome;
     use arrow::array::Int32Array;
     use arrow::record_batch::RecordBatch;
     use arrow_schema::{DataType, Field, Schema};
+    use async_trait::async_trait;
     use serial_test::serial;
     use std::collections::HashMap as StdHashMap;
     use std::fs;
@@ -3766,6 +3797,142 @@ mod tests_wal_commit {
 
     fn commit_exists(seg_path: &PathBuf) -> bool {
         seg_path.with_extension("seg.commit").exists()
+    }
+
+    struct SyntheticDiskBacklog {
+        segment_path: PathBuf,
+        meta: SegmentFileMetadata,
+        entries: Vec<CompactionEntry>,
+    }
+
+    impl SyntheticDiskBacklog {
+        fn entry_for_sink(&self, sink_ref: &str) -> CompactionEntry {
+            self.entries
+                .iter()
+                .find(|entry| entry.idx.key.sink_ref == sink_ref)
+                .cloned()
+                .unwrap_or_else(|| panic!("missing synthetic WAL slice for {sink_ref}"))
+        }
+
+        fn work_for_sink(&self, sink_ref: &str) -> CompactionWork {
+            let entries = vec![self.entry_for_sink(sink_ref)];
+            let first = &entries[0];
+            let txn = CompactionTransaction::new(
+                first.idx.key.sink_ref.clone(),
+                first.idx.key.namespace.clone(),
+                first.idx.key.schema_fingerprint.clone(),
+                crate::plugins::source_contract::WritePolicy::Append,
+                SinkWriteSemantics::ExactOnce,
+                entries.iter().map(|entry| entry.wal_ref.clone()).collect(),
+                format!("synthetic-{}.parquet", first.wal_ref.segment_id),
+            );
+            CompactionWork { txn, entries }
+        }
+
+        fn tombstone_paths(&self) -> Vec<PathBuf> {
+            self.entries
+                .iter()
+                .map(|entry| Buffers::tombstone_path_for_source(&entry.source, &entry.idx.key))
+                .collect()
+        }
+    }
+
+    fn synthetic_disk_backlog(
+        base: &Path,
+        segment_id: &str,
+        sink_refs: &[&str],
+    ) -> SyntheticDiskBacklog {
+        let segf = SegmentFile::new(base, segment_id).unwrap();
+        let mut batches = StdHashMap::new();
+        let mut parts_meta = StdHashMap::new();
+        for (index, sink_ref) in sink_refs.iter().enumerate() {
+            let key = PartitionKey {
+                sink_ref: (*sink_ref).to_string(),
+                namespace: "synthetic_backlog".to_string(),
+                partition: format!("slice-{index}"),
+                time: Some(1_700_000_000),
+                schema_fingerprint: "schema-v1".to_string(),
+            };
+            batches.insert(key.clone(), vec![make_batch()]);
+            parts_meta.insert(key, (0, SystemTime::UNIX_EPOCH));
+        }
+        let offsets = StdHashMap::new();
+        let part_meta_blobs = StdHashMap::new();
+        let (meta, _rows, sha) = segf
+            .write_snapshot(&offsets, &batches, &parts_meta, &part_meta_blobs)
+            .unwrap();
+        Buffers::write_seg_commit(&segf.path, &sha, meta.num_partitions, meta.total_bytes).unwrap();
+
+        let source = SegmentSource::Disk(segf.path.clone());
+        let entries = meta
+            .index
+            .iter()
+            .cloned()
+            .map(|idx| {
+                let wal_ref = WalPartRef {
+                    segment_id: segment_id.to_string(),
+                    source: SegmentSourceDescriptor::Disk {
+                        path: segf.path.clone(),
+                    },
+                    start: idx.start,
+                    len: idx.len,
+                    key: idx.key.clone(),
+                    cdc_meta_hash: None,
+                };
+                CompactionEntry {
+                    source: source.clone(),
+                    meta: meta.clone(),
+                    idx,
+                    wal_ref,
+                    cdc_meta: None,
+                }
+            })
+            .collect();
+
+        SyntheticDiskBacklog {
+            segment_path: segf.path,
+            meta,
+            entries,
+        }
+    }
+
+    struct SyntheticGroupedSink {
+        failure: Option<&'static str>,
+    }
+
+    #[async_trait]
+    impl DataSink for SyntheticGroupedSink {
+        async fn sync(
+            &self,
+            _stream: SendableRecordBatchStream,
+            _filename: String,
+            _cdc_ctx: Option<&crate::plugins::cdc::SyncContext>,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn sync_grouped(
+            &self,
+            mut reader: crate::plugins::GroupedBatchReader,
+            _ctx: crate::plugins::GroupedSinkWriteContext<'_>,
+        ) -> io::Result<SinkWriteOutcome> {
+            while reader.next_chunk().await?.is_some() {}
+            match self.failure {
+                Some(message) => Err(io::Error::other(message)),
+                None => Ok(SinkWriteOutcome::Applied),
+            }
+        }
+
+        fn capability(&self) -> &'static crate::plugins::cdc::SinkCapability {
+            &crate::plugins::cdc::sink_capabilities::ICEBERG
+        }
+    }
+
+    fn manifest_state(path: &Path) -> CompactionTransactionState {
+        let bytes = fs::read(path).expect("compaction manifest should exist");
+        serde_json::from_slice::<CompactionTransaction>(&bytes)
+            .expect("compaction manifest should be valid")
+            .state
     }
 
     #[test]
@@ -4091,6 +4258,160 @@ mod tests_wal_commit {
         assert_eq!(cleanup, DiskSegmentCleanup::AlreadyMissing);
         assert!(!seg_path.exists());
         assert!(!commit_path.exists());
+    }
+
+    #[test]
+    #[serial]
+    fn disk_segment_survives_partial_tombstones_across_sink_refs() {
+        let (base, _guard) = setup_data_dir();
+        reset_in_memory_segments();
+        let backlog = synthetic_disk_backlog(
+            &base,
+            "multi-sink-segment",
+            &["data_sinks.ds_datalake", "deadletter_sinks.ds_deadletters"],
+        );
+        assert_eq!(backlog.meta.index.len(), 2);
+        let tombstones = backlog.tombstone_paths();
+
+        Buffers::tombstone_grouped_work(&backlog.work_for_sink("data_sinks.ds_datalake"));
+
+        assert!(backlog.segment_path.exists());
+        assert!(commit_exists(&backlog.segment_path));
+        assert_eq!(
+            tombstones.iter().filter(|path| path.exists()).count(),
+            1,
+            "one durable slice must remain before segment deletion"
+        );
+
+        Buffers::tombstone_grouped_work(&backlog.work_for_sink("deadletter_sinks.ds_deadletters"));
+
+        assert!(!backlog.segment_path.exists());
+        assert!(!commit_exists(&backlog.segment_path));
+        assert!(
+            tombstones.iter().all(|path| !path.exists()),
+            "segment cleanup removes tombstones only after every indexed slice is durable"
+        );
+        reset_in_memory_segments();
+    }
+
+    #[test]
+    #[serial]
+    fn grouped_compaction_acks_before_tombstoning_after_sink_success() {
+        let (base, _guard) = setup_data_dir();
+        reset_in_memory_segments();
+        let backlog =
+            synthetic_disk_backlog(&base, "successful-group", &["data_sinks.ds_datalake"]);
+        let work = backlog.work_for_sink("data_sinks.ds_datalake");
+        let manifest_path = crate::buffer::compaction_transaction::manifest_path_for(
+            &crate::buffer::compaction_transaction::manifest_dir(),
+            &work.txn.id,
+        );
+        let segment_path = backlog.segment_path.clone();
+        let commit_path = segment_path.with_extension("seg.commit");
+        let tombstones = backlog.tombstone_paths();
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_for_hook = observed.clone();
+        let manifest_for_hook = manifest_path.clone();
+        let observer: GroupedCompactionTestObserver = Arc::new(move |event| {
+            observed_for_hook.lock().unwrap().push(event);
+            match event {
+                GroupedCompactionTestEvent::SinkSucceeded => {
+                    assert_eq!(
+                        manifest_state(&manifest_for_hook),
+                        CompactionTransactionState::Sent
+                    );
+                    assert!(segment_path.exists());
+                    assert!(tombstones.iter().all(|path| !path.exists()));
+                }
+                GroupedCompactionTestEvent::ManifestAcked => {
+                    assert_eq!(
+                        manifest_state(&manifest_for_hook),
+                        CompactionTransactionState::Acked
+                    );
+                    assert!(segment_path.exists());
+                    assert!(tombstones.iter().all(|path| !path.exists()));
+                }
+                GroupedCompactionTestEvent::SlicesTombstoned => {
+                    assert_eq!(
+                        manifest_state(&manifest_for_hook),
+                        CompactionTransactionState::Acked
+                    );
+                    assert!(!segment_path.exists());
+                    assert!(!commit_path.exists());
+                }
+            }
+        });
+        let sink: Arc<Box<dyn DataSink + Send + Sync>> =
+            Arc::new(Box::new(SyntheticGroupedSink { failure: None }));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let compacted = runtime
+            .block_on(
+                GROUPED_COMPACTION_TEST_OBSERVER
+                    .scope(observer, Buffers::compact_grouped_work(work, sink)),
+            )
+            .unwrap();
+
+        assert!(compacted);
+        assert_eq!(
+            *observed.lock().unwrap(),
+            vec![
+                GroupedCompactionTestEvent::SinkSucceeded,
+                GroupedCompactionTestEvent::ManifestAcked,
+                GroupedCompactionTestEvent::SlicesTombstoned,
+            ]
+        );
+        assert!(!manifest_path.exists());
+        reset_in_memory_segments();
+    }
+
+    #[test]
+    #[serial]
+    fn grouped_compaction_failure_preserves_slices_and_segment() {
+        let (base, _guard) = setup_data_dir();
+        reset_in_memory_segments();
+        let backlog = synthetic_disk_backlog(&base, "failed-group", &["data_sinks.ds_datalake"]);
+        let work = backlog.work_for_sink("data_sinks.ds_datalake");
+        let failure_key = format!("{}:{}", work.txn.sink_ref, work.txn.id);
+        let manifest_path = crate::buffer::compaction_transaction::manifest_path_for(
+            &crate::buffer::compaction_transaction::manifest_dir(),
+            &work.txn.id,
+        );
+        let observed = Arc::new(Mutex::new(Vec::new()));
+        let observed_for_hook = observed.clone();
+        let observer: GroupedCompactionTestObserver = Arc::new(move |event| {
+            observed_for_hook.lock().unwrap().push(event);
+        });
+        let sink: Arc<Box<dyn DataSink + Send + Sync>> = Arc::new(Box::new(SyntheticGroupedSink {
+            failure: Some("synthetic sink failure"),
+        }));
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        let error = runtime
+            .block_on(
+                GROUPED_COMPACTION_TEST_OBSERVER
+                    .scope(observer, Buffers::compact_grouped_work(work, sink)),
+            )
+            .unwrap_err();
+
+        assert!(error.to_string().contains("synthetic sink failure"));
+        assert!(observed.lock().unwrap().is_empty());
+        assert!(backlog.segment_path.exists());
+        assert!(commit_exists(&backlog.segment_path));
+        assert!(backlog.tombstone_paths().iter().all(|path| !path.exists()));
+        assert_eq!(
+            manifest_state(&manifest_path),
+            CompactionTransactionState::Sent
+        );
+        COMPACT_FAILURES.remove(&failure_key);
+        fs::remove_file(manifest_path).unwrap();
+        reset_in_memory_segments();
     }
 }
 

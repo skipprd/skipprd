@@ -412,6 +412,64 @@ mod tests {
     }
 
     #[test]
+    fn deterministic_replay_id_is_stable_across_ref_order_with_cdc_metadata() {
+        let mut first = ref_for("segment-a", 1);
+        first.cdc_meta_hash = Some([0x11; 32]);
+        let mut second = ref_for("segment-b", 2);
+        second.cdc_meta_hash = Some([0x22; 32]);
+
+        let replay_a = CompactionTransaction::new(
+            "sink.main".to_string(),
+            "ns".to_string(),
+            "schema".to_string(),
+            WritePolicy::Append,
+            SinkWriteSemantics::ExactOnce,
+            vec![first.clone(), second.clone()],
+            "out.parquet".to_string(),
+        );
+        let replay_b = CompactionTransaction::new(
+            "sink.main".to_string(),
+            "ns".to_string(),
+            "schema".to_string(),
+            WritePolicy::Append,
+            SinkWriteSemantics::ExactOnce,
+            vec![second, first],
+            "out.parquet".to_string(),
+        );
+
+        assert_eq!(replay_a.id, replay_b.id);
+        assert_eq!(
+            replay_a.refs[0].to_runtime_ref().cdc_meta_hash,
+            Some([0x11; 32])
+        );
+    }
+
+    #[test]
+    fn deterministic_replay_id_changes_with_cdc_metadata() {
+        let mut original = ref_for("segment-a", 1);
+        original.cdc_meta_hash = Some([0x11; 32]);
+        let mut changed = original.clone();
+        changed.cdc_meta_hash = Some([0x12; 32]);
+
+        assert_ne!(
+            deterministic_compaction_id(
+                "sink.main",
+                "ns",
+                "schema",
+                WritePolicy::Append,
+                &[original],
+            ),
+            deterministic_compaction_id(
+                "sink.main",
+                "ns",
+                "schema",
+                WritePolicy::Append,
+                &[changed],
+            )
+        );
+    }
+
+    #[test]
     #[serial]
     fn load_pending_manifests_skips_empty_and_corrupt_files() {
         use crate::helpers::configuration::Config;
