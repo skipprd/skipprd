@@ -1164,24 +1164,24 @@ impl Buffers {
                 crate::metrics::counters::ACTIVE_THREADS.load(std::sync::atomic::Ordering::Relaxed);
             let queued_ingest =
                 crate::metrics::counters::QUEUE_LENGTH.load(std::sync::atomic::Ordering::Relaxed);
-            let reclaimable = Self::reclaimable_wal_partition_count(num_cpus.saturating_mul(2));
             let ingest_busy = active_ingest > 0 || queued_ingest > 0;
             if ingest_busy {
-                let floor = if reclaimable >= num_cpus.saturating_mul(8) {
-                    num_cpus.min(max_wal)
-                } else if reclaimable >= num_cpus.saturating_mul(2) {
-                    (num_cpus / 2).max(4).min(max_wal)
-                } else if reclaimable >= 4 {
-                    2
-                } else {
-                    1
-                };
-                concurrency = concurrency.max(floor);
-                if floor > 1 && (Config::debug_enabled() || Config::log_wal_enabled()) {
-                    debug!(
-                        "Compactor: ingest busy with WAL backlog reclaimable={} floor={} active_threads={} queued_tasks={}",
-                        reclaimable, floor, active_ingest, queued_ingest
-                    );
+                // Ceiling (not floor): preserve ingest capacity while work is in flight.
+                // Pause/force/drain paths above still ramp concurrency aggressively.
+                let ceiling = Config::getenv("WAL_COMPACTION_INGEST_SAFE_CAP", "2")
+                    .parse::<usize>()
+                    .ok()
+                    .filter(|v| *v > 0)
+                    .unwrap_or(2)
+                    .clamp(1, max_wal);
+                if concurrency > ceiling {
+                    if Config::debug_enabled() || Config::log_wal_enabled() {
+                        debug!(
+                            "Compactor: ingest busy; capping concurrency {} -> {} (active_threads={} queued_tasks={})",
+                            concurrency, ceiling, active_ingest, queued_ingest
+                        );
+                    }
+                    concurrency = ceiling;
                 }
             }
         }

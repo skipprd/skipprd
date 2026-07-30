@@ -100,6 +100,9 @@ pub fn tuning_maxima(num_cpus: usize) -> (usize, usize) {
 }
 
 /// CPU-shaped defaults for per-sink compaction / runtime pool / Glue CP.
+///
+/// Normal (ingest-active) seeding stays conservative so backlog draining cannot
+/// crowd out ingest. Pause/drain ticks still ramp toward higher CPU-shaped limits.
 pub fn sink_tuning_defaults(num_cpus: usize) -> (usize, usize, usize) {
     let max_per_sink = Config::getenv("WAL_COMPACTIONS_PER_SINK_MAX", "")
         .parse::<usize>()
@@ -107,7 +110,8 @@ pub fn sink_tuning_defaults(num_cpus: usize) -> (usize, usize, usize) {
         .filter(|v| *v > 0)
         .unwrap_or(32)
         .clamp(1, 32);
-    let per_sink = (num_cpus / 4).clamp(2, max_per_sink);
+    // Keep steady-state per-sink/pool low; paused_tick / drain_tick raise these.
+    let per_sink = 2usize.min(max_per_sink);
     let pool = per_sink.min(16);
     let max_glue = Config::getenv("ATHENA_GLUE_CP_MAX", "")
         .parse::<usize>()
@@ -115,6 +119,7 @@ pub fn sink_tuning_defaults(num_cpus: usize) -> (usize, usize, usize) {
         .filter(|v| *v > 0)
         .unwrap_or(16)
         .clamp(1, 32);
+    let _ = num_cpus;
     let glue_cp = (num_cpus / 8).clamp(2, max_glue);
     (per_sink, pool, glue_cp)
 }
@@ -251,6 +256,9 @@ pub fn apply_env_caps() {
 
 /// Periodic tuning tick: adjusts upload, WAL compaction, and S3 download targets.
 /// Includes error-aware throttling using EMA of WAL retries.
+///
+/// Ingest queue pressure must not increase compaction/upload concurrency — that
+/// starves the ingest path under load. Pause/drain ticks still ramp compaction.
 pub fn tick(active: usize, capacity: usize, queued: usize, pressure: f64) {
     let num_cpus = num_cpus::get().max(2);
     let (max_upload, max_wal) = tuning_maxima(num_cpus);
@@ -259,12 +267,11 @@ pub fn tick(active: usize, capacity: usize, queued: usize, pressure: f64) {
         .ok()
         .filter(|v| *v > 0)
         .unwrap_or(256);
+    let _ = (max_upload, max_wal);
 
-    // Upload tuning: grow when high pressure and full CPU; shrink when low pressure
+    // Upload tuning: never grow from ingest backlog pressure; shrink when quiet.
     let upload_cur = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed);
-    let upload_next = if active >= capacity && pressure > 0.8 {
-        upload_cur.saturating_add(1).min(max_upload)
-    } else if pressure < 0.4 {
+    let upload_next = if pressure < 0.4 {
         upload_cur.saturating_sub(1).max(4)
     } else {
         upload_cur
@@ -309,13 +316,10 @@ pub fn tick(active: usize, capacity: usize, queued: usize, pressure: f64) {
                     );
                 }
             }
-        } else if ema < 50 {
-            // Gentle restore bounded by max caps
+        } else if ema < 50 && pressure < 0.4 {
+            // Gentle restore of upload only when ingest is not under pressure.
             let uc = crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed);
-            let wc =
-                crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(Ordering::Relaxed);
             let new_uc = uc.saturating_add(1).min(max_upload);
-            let new_wc = wc.saturating_add(1).min(max_wal);
             if new_uc != uc {
                 crate::metrics::counters::UPLOAD_CONCURRENCY_TARGET
                     .store(new_uc, Ordering::Relaxed);
@@ -326,25 +330,13 @@ pub fn tick(active: usize, capacity: usize, queued: usize, pressure: f64) {
                     );
                 }
             }
-            if new_wc != wc {
-                crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
-                    .store(new_wc, Ordering::Relaxed);
-                if Config::log_wal_enabled() {
-                    debug!(
-                        "tune: wal_compaction {} -> {} (ema_wal_retry_x100={})",
-                        wc, new_wc, ema
-                    );
-                }
-            }
         }
     }
 
-    // WAL compaction tuning (pressure/CPU-based)
+    // WAL compaction: never grow from ingest queue pressure; shrink when quiet.
     let wal_cur =
         crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET.load(Ordering::Relaxed);
-    let wal_next = if active >= capacity && pressure > 0.8 {
-        wal_cur.saturating_add(1).min(max_wal)
-    } else if pressure < 0.4 {
+    let wal_next = if pressure < 0.4 {
         wal_cur.saturating_sub(1).max(2)
     } else {
         wal_cur
@@ -379,6 +371,7 @@ pub fn tick(active: usize, capacity: usize, queued: usize, pressure: f64) {
         }
     }
 
+    // Per-sink/pool growth is reserved for drain/pause — never from ingest pressure.
     tune_per_sink_and_pool(pressure, false);
 }
 
@@ -407,9 +400,8 @@ fn tune_per_sink_and_pool(pressure: f64, drain_mode: bool) {
         let cur = crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET.load(Ordering::Relaxed);
         let next = if drain_mode {
             cur.saturating_add(2).min(max_per_sink)
-        } else if (sink_inflight + 1 >= cur || wal_inflight >= cur) && pressure > 0.5 {
-            cur.saturating_add(1).min(max_per_sink)
         } else if pressure < 0.3 && sink_inflight == 0 {
+            // Ingest tick: only allow shrink, never grow from backlog pressure.
             cur.saturating_sub(1).max(2)
         } else {
             cur
@@ -430,8 +422,12 @@ fn tune_per_sink_and_pool(pressure: f64, drain_mode: bool) {
             crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET.load(Ordering::Relaxed);
         let desired = align_pool_to_per_sink(per_sink);
         let cur = crate::metrics::counters::RUNTIME_SINK_POOL_TARGET.load(Ordering::Relaxed);
-        // Grow-only for pool target alignment with per-sink (shrink would require killing children)
-        let next = cur.max(desired);
+        // Grow pool only in drain_mode; ingest tick must not spawn more sink children.
+        let next = if drain_mode {
+            cur.max(desired)
+        } else {
+            cur
+        };
         if next != cur {
             crate::metrics::counters::RUNTIME_SINK_POOL_TARGET.store(next, Ordering::Relaxed);
             if Config::log_wal_enabled() {
@@ -708,12 +704,20 @@ mod throughput_window_tests {
 
 #[cfg(test)]
 mod tuning_tests {
-    use super::{paused_tick, sink_tuning_defaults, tuning_maxima};
+    use super::{drain_tick, paused_tick, sink_tuning_defaults, tick, tuning_maxima};
     use crate::metrics::counters::{
-        RUNTIME_SINK_POOL_TARGET, UPLOAD_CONCURRENCY_TARGET, WAL_COMPACTION_CONCURRENCY_TARGET,
-        WAL_COMPACTIONS_PER_SINK_TARGET,
+        RUNTIME_SINK_POOL_TARGET, S3_WAL_RETRY_EMA_X100, UPLOAD_CONCURRENCY_TARGET,
+        WAL_COMPACTION_CONCURRENCY_TARGET, WAL_COMPACTIONS_PER_SINK_TARGET,
     };
     use std::sync::atomic::Ordering;
+
+    fn reset_tuning_globals() {
+        S3_WAL_RETRY_EMA_X100.store(0, Ordering::Relaxed);
+        UPLOAD_CONCURRENCY_TARGET.store(8, Ordering::Relaxed);
+        WAL_COMPACTION_CONCURRENCY_TARGET.store(4, Ordering::Relaxed);
+        WAL_COMPACTIONS_PER_SINK_TARGET.store(2, Ordering::Relaxed);
+        RUNTIME_SINK_POOL_TARGET.store(2, Ordering::Relaxed);
+    }
 
     #[test]
     fn tuning_maxima_scales_with_cpu_count() {
@@ -723,23 +727,40 @@ mod tuning_tests {
     }
 
     #[test]
-    fn sink_tuning_defaults_scale_with_cpu() {
+    fn sink_tuning_defaults_stay_conservative() {
         let (per_sink, pool, glue) = sink_tuning_defaults(64);
-        assert!(per_sink >= 2);
-        assert!(pool >= 2);
-        assert!(pool <= 16);
-        assert!(pool <= per_sink);
+        assert_eq!(per_sink, 2);
+        assert_eq!(pool, 2);
         assert!(glue >= 2);
     }
 
     #[test]
+    fn ingest_pressure_never_raises_compaction_targets() {
+        reset_tuning_globals();
+        let upload_before = UPLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed);
+        let wal_before = WAL_COMPACTION_CONCURRENCY_TARGET.load(Ordering::Relaxed);
+        let per_sink_before = WAL_COMPACTIONS_PER_SINK_TARGET.load(Ordering::Relaxed);
+        let pool_before = RUNTIME_SINK_POOL_TARGET.load(Ordering::Relaxed);
+
+        // Saturated ingest with high queue pressure must not grow compaction knobs.
+        tick(64, 64, 1000, 0.95);
+
+        assert!(UPLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed) <= upload_before);
+        assert!(WAL_COMPACTION_CONCURRENCY_TARGET.load(Ordering::Relaxed) <= wal_before);
+        assert!(WAL_COMPACTIONS_PER_SINK_TARGET.load(Ordering::Relaxed) <= per_sink_before);
+        assert_eq!(
+            RUNTIME_SINK_POOL_TARGET.load(Ordering::Relaxed),
+            pool_before
+        );
+    }
+
+    #[test]
     fn paused_tick_sets_cpu_shaped_targets() {
+        reset_tuning_globals();
         let cpus = 16usize;
         let (expected_upload, expected_wal) = tuning_maxima(cpus);
         UPLOAD_CONCURRENCY_TARGET.store(4, Ordering::Relaxed);
         WAL_COMPACTION_CONCURRENCY_TARGET.store(2, Ordering::Relaxed);
-        WAL_COMPACTIONS_PER_SINK_TARGET.store(2, Ordering::Relaxed);
-        RUNTIME_SINK_POOL_TARGET.store(2, Ordering::Relaxed);
         paused_tick(cpus);
         assert_eq!(
             UPLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed),
@@ -752,5 +773,20 @@ mod tuning_tests {
         let per_sink = WAL_COMPACTIONS_PER_SINK_TARGET.load(Ordering::Relaxed);
         assert!(per_sink >= 2);
         assert!(RUNTIME_SINK_POOL_TARGET.load(Ordering::Relaxed) >= per_sink.min(16));
+    }
+
+    #[test]
+    fn drain_tick_can_raise_compaction_without_ingest_tick() {
+        reset_tuning_globals();
+        UPLOAD_CONCURRENCY_TARGET.store(4, Ordering::Relaxed);
+        WAL_COMPACTION_CONCURRENCY_TARGET.store(2, Ordering::Relaxed);
+        WAL_COMPACTIONS_PER_SINK_TARGET.store(2, Ordering::Relaxed);
+        RUNTIME_SINK_POOL_TARGET.store(2, Ordering::Relaxed);
+
+        drain_tick(16, true);
+
+        assert!(UPLOAD_CONCURRENCY_TARGET.load(Ordering::Relaxed) >= 4);
+        assert!(WAL_COMPACTION_CONCURRENCY_TARGET.load(Ordering::Relaxed) >= 2);
+        assert!(WAL_COMPACTIONS_PER_SINK_TARGET.load(Ordering::Relaxed) >= 2);
     }
 }

@@ -8,12 +8,21 @@ where
         .ok()
         .and_then(|value| value.parse::<usize>().ok())
         .unwrap_or(32 * 1024 * 1024);
+    // Cap child plugin Tokio workers so each sink process cannot spawn ~num_cpus
+    // threads; 16 concurrent children on a 64-core host previously meant ~1k threads.
+    let worker_threads = std::env::var("SKIPPR_RUNTIME_PLUGIN_WORKER_THREADS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|value| *value > 0)
+        .unwrap_or(4)
+        .clamp(1, 16);
 
     let handle = std::thread::Builder::new()
         .name(thread_name.to_string())
         .stack_size(stack_size)
-        .spawn(|| {
+        .spawn(move || {
             let runtime = tokio::runtime::Builder::new_multi_thread()
+                .worker_threads(worker_threads)
                 .enable_all()
                 .build()
                 .expect("failed to build Tokio runtime");
