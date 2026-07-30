@@ -60,6 +60,9 @@ struct DecodedIntent {
     payload: GluePartitionCatalogIntentV1,
 }
 
+type GlueIntentGroupKey = (Option<String>, Option<String>, String, String);
+type GlueIntentGroups = BTreeMap<GlueIntentGroupKey, Vec<DecodedIntent>>;
+
 pub struct CatalogCoordinator {
     outbox: Arc<CatalogOutbox>,
     notify: Notify,
@@ -158,10 +161,7 @@ impl CatalogCoordinator {
             decoded.push(DecodedIntent { pending, payload });
         }
 
-        let mut groups: BTreeMap<
-            (Option<String>, Option<String>, String, String),
-            Vec<DecodedIntent>,
-        > = BTreeMap::new();
+        let mut groups: GlueIntentGroups = BTreeMap::new();
         for intent in decoded {
             groups
                 .entry((

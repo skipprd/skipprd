@@ -2264,46 +2264,39 @@ impl AwsAthena {
     }
 
     pub async fn delete_glue_database(database_name: &str) -> Result<bool, String> {
-        loop {
-            println!("Are you sure you want to drop the database? To confirm, please type the database name ('{}'). Type 'exit' or ctrl+c to cancel:", database_name);
+        println!("Are you sure you want to drop the database? To confirm, please type the database name ('{}'). Type 'exit' or ctrl+c to cancel:", database_name);
 
-            let mut input = String::new();
-            io::stdin().read_line(&mut input).unwrap_or_default();
+        let mut input = String::new();
+        io::stdin().read_line(&mut input).unwrap_or_default();
 
-            if input.trim() == database_name {
-                println!("Dropping database '{}'", database_name);
+        if input.trim() == database_name {
+            println!("Dropping database '{}'", database_name);
 
-                let mut timeout = 10;
+            let mut timeout = 10;
 
-                println!(
-                    "Waiting {} seconds before dropping database '{}', ctrl+c to cancel",
-                    timeout, database_name
-                );
+            println!(
+                "Waiting {} seconds before dropping database '{}', ctrl+c to cancel",
+                timeout, database_name
+            );
 
-                loop {
-                    if timeout > 0 {
-                        tokio::time::sleep(tokio::time::Duration::from_secs(timeout)).await;
-                        timeout -= 1;
-                    } else {
-                        break;
-                    }
+            loop {
+                if timeout > 0 {
+                    tokio::time::sleep(tokio::time::Duration::from_secs(timeout)).await;
+                    timeout -= 1;
+                } else {
+                    break;
                 }
-
-                break;
-            } else if input.trim().eq_ignore_ascii_case("exit") {
-                // println!("Drop canceled. Exiting without dropping database.");
-                return Err(format!(
-                    "Drop canceled. Exiting without dropping database '{}'.",
-                    database_name
-                ));
-            } else {
-                // println!("Incorrect database name. Please try again, or type 'exit' to cancel.");
-                return Err(format!(
-                    "Incorrect database name entered: '{}'.",
-                    input.trim()
-                ));
-                // The loop will continue, prompting the user again
             }
+        } else if input.trim().eq_ignore_ascii_case("exit") {
+            return Err(format!(
+                "Drop canceled. Exiting without dropping database '{}'.",
+                database_name
+            ));
+        } else {
+            return Err(format!(
+                "Incorrect database name entered: '{}'.",
+                input.trim()
+            ));
         }
 
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())

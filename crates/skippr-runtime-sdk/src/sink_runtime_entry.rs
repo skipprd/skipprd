@@ -909,6 +909,7 @@ where
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_multiplexed_sink_session<P>(
     prepare: PrepareSink,
     primary_plugin: Option<Arc<P>>,
@@ -1983,6 +1984,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn matching_local_ledger_is_cache_not_already_applied_authority() {
         static ENV_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
         let _guard = ENV_LOCK.get_or_init(|| StdMutex::new(())).lock().unwrap();
