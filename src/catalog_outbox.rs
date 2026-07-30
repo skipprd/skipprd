@@ -128,6 +128,8 @@ pub struct CatalogOutbox {
     entry_reads: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     persist_delay_ms: std::sync::atomic::AtomicU64,
+    #[cfg(test)]
+    directory_syncs: std::sync::atomic::AtomicUsize,
 }
 
 impl CatalogOutbox {
@@ -152,6 +154,8 @@ impl CatalogOutbox {
             entry_reads: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             persist_delay_ms: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(test)]
+            directory_syncs: std::sync::atomic::AtomicUsize::new(0),
         };
         Ok(outbox)
     }
@@ -210,7 +214,7 @@ impl CatalogOutbox {
             index.upsert(id, IndexedIntentMetadata::from_entry(&entry)?);
         }
         if index.directory_sync_required {
-            sync_directory(&self.pending_dir)?;
+            self.sync_pending_directory()?;
             index.directory_sync_required = false;
         }
         Ok(summary)
@@ -287,7 +291,7 @@ impl CatalogOutbox {
         fs::remove_file(&path)?;
         index.remove(&expected.id);
         index.directory_sync_required = true;
-        sync_directory(&self.pending_dir)?;
+        self.sync_pending_directory()?;
         index.directory_sync_required = false;
         Ok(ConditionalMutationResult::Applied)
     }
@@ -335,7 +339,7 @@ impl CatalogOutbox {
             IndexedIntentMetadata::from_entry(&entry)?,
         );
         index.directory_sync_required = true;
-        sync_directory(&self.pending_dir)?;
+        self.sync_pending_directory()?;
         index.directory_sync_required = false;
         Ok(ConditionalMutationResult::Applied)
     }
@@ -349,6 +353,14 @@ impl CatalogOutbox {
         self.entry_reads
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         read_entry(&self.entry_path(id))
+    }
+
+    fn sync_pending_directory(&self) -> io::Result<()> {
+        sync_directory(&self.pending_dir)?;
+        #[cfg(test)]
+        self.directory_syncs
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(())
     }
 
     #[cfg(test)]
@@ -368,6 +380,12 @@ impl CatalogOutbox {
             delay.as_millis() as u64,
             std::sync::atomic::Ordering::Relaxed,
         );
+    }
+
+    #[cfg(test)]
+    fn directory_sync_count(&self) -> usize {
+        self.directory_syncs
+            .load(std::sync::atomic::Ordering::Relaxed)
     }
 }
 
@@ -651,6 +669,11 @@ mod tests {
             .collect::<Vec<_>>();
         outbox.persist(&backlog).unwrap();
         assert_eq!(outbox.metadata_snapshot().pending_count, 128);
+        assert_eq!(
+            outbox.directory_sync_count(),
+            1,
+            "one multi-intent persist must coalesce directory fsync after all renames"
+        );
 
         outbox.reset_entry_read_count();
         outbox

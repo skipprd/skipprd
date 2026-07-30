@@ -2913,11 +2913,13 @@ impl RuntimeDataSinkPlugin {
         Ok(plugin)
     }
 
-    fn persist_catalog_intents(
+    async fn persist_catalog_intents(
         &self,
         intents: &[crate::runtime_plugins::protocol::CatalogIntent],
     ) -> io::Result<()> {
-        self.catalog_coordinator.persist(intents)
+        self.catalog_coordinator
+            .persist_async(intents.to_vec())
+            .await
     }
 
     async fn restart_worker_inner(
@@ -3202,7 +3204,7 @@ impl RuntimeDataSinkPlugin {
                         },
                 }) if request_id == request.request_id => {
                     validate_commit_receipt(&receipt, &prepare.envelope)?;
-                    self.persist_catalog_intents(&catalog_intents)?;
+                    self.persist_catalog_intents(&catalog_intents).await?;
                     return Ok(SinkWriteOutcome::AlreadyApplied);
                 }
                 PluginFrame::PrepareAck(PrepareAck {
@@ -3219,7 +3221,7 @@ impl RuntimeDataSinkPlugin {
                         let _ = self.restart_worker(&worker).await;
                         return Err(err);
                     }
-                    self.persist_catalog_intents(&ack.catalog_intents)?;
+                    self.persist_catalog_intents(&ack.catalog_intents).await?;
                     if let Some(rows) = ack.stats.rows {
                         crate::metrics::counters::add_parquet_rows(rows);
                     }
@@ -3467,7 +3469,7 @@ impl RuntimeDataSinkPlugin {
                         },
                 }) if ack_id == request_id => {
                     validate_commit_receipt(&receipt, &prepare.envelope)?;
-                    self.persist_catalog_intents(&catalog_intents)?;
+                    self.persist_catalog_intents(&catalog_intents).await?;
                     return Ok(SinkWriteOutcome::AlreadyApplied);
                 }
                 PluginFrame::PrepareAck(PrepareAck {
@@ -3505,7 +3507,7 @@ impl RuntimeDataSinkPlugin {
                         let _ = self.restart_worker(&worker).await;
                         return Err(err);
                     }
-                    self.persist_catalog_intents(&ack.catalog_intents)?;
+                    self.persist_catalog_intents(&ack.catalog_intents).await?;
                     if let Some(rows) = ack.stats.rows {
                         crate::metrics::counters::add_parquet_rows(rows);
                     }

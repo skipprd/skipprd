@@ -338,8 +338,10 @@ impl CatalogCoordinator {
         if let Some(existing) = coordinators.get(&key).and_then(Weak::upgrade) {
             return Ok(existing);
         }
+        let outbox = Arc::new(CatalogOutbox::open(path)?);
+        crate::metrics::counters::refresh_catalog_outbox_metrics(&outbox)?;
         let coordinator = Arc::new(Self {
-            outbox: Arc::new(CatalogOutbox::open(path)?),
+            outbox,
             executor: Arc::new(AwsGlueExecutor::default()),
             catalog_budget: process_catalog_operation_budget(),
             refresh_budget: true,
@@ -361,10 +363,19 @@ impl CatalogCoordinator {
         Ok(())
     }
 
+    pub async fn persist_async(self: &Arc<Self>, intents: Vec<CatalogIntent>) -> io::Result<()> {
+        let coordinator = Arc::clone(self);
+        tokio::task::spawn_blocking(move || coordinator.persist(&intents))
+            .await
+            .map_err(|err| {
+                io::Error::other(format!("catalog outbox persistence task failed: {err}"))
+            })?
+    }
+
     pub async fn drain_until_idle(&self, timeout: Duration) -> io::Result<()> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            if self.outbox.scan_pending(1)?.is_empty() {
+            if self.outbox.metadata_snapshot().pending_count == 0 {
                 return Ok(());
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
@@ -382,12 +393,16 @@ impl CatalogCoordinator {
     async fn drain_once(&self) -> io::Result<()> {
         let now = now_ms();
         let mut decoded = Vec::new();
-        for pending in self
-            .outbox
-            .scan_eligible_pending(now, RECOVERY_SCAN_LIMIT)?
-        {
+        let outbox = Arc::clone(&self.outbox);
+        let due = tokio::task::spawn_blocking(move || {
+            outbox.scan_eligible_pending(now, RECOVERY_SCAN_LIMIT)
+        })
+        .await
+        .map_err(|err| io::Error::other(format!("catalog due-load task failed: {err}")))??;
+        for pending in due {
             if pending.intent.identity.kind != CatalogIntentKind::UpsertPartition {
-                self.record_terminal_invalid(&pending, "unsupported catalog intent kind")?;
+                self.record_terminal_invalid(&pending, "unsupported catalog intent kind")
+                    .await?;
                 continue;
             }
             let payload: GluePartitionCatalogIntentV1 =
@@ -397,7 +412,8 @@ impl CatalogCoordinator {
                         self.record_terminal_invalid(
                             &pending,
                             format!("invalid durable Glue partition intent payload: {err}"),
-                        )?;
+                        )
+                        .await?;
                         continue;
                     }
                 };
@@ -408,7 +424,8 @@ impl CatalogCoordinator {
                 || payload.schema_namespace != pending.intent.identity.namespace
                 || payload.schema_version == 0
             {
-                self.record_terminal_invalid(&pending, "terminal invalid Glue partition intent")?;
+                self.record_terminal_invalid(&pending, "terminal invalid Glue partition intent")
+                    .await?;
                 continue;
             }
             decoded.push(DecodedIntent { pending, payload });
@@ -458,7 +475,7 @@ impl CatalogCoordinator {
         for intent in intents {
             match self.ensure_table_layout(&target, &intent).await {
                 Ok(()) => valid.push(intent),
-                Err(error) => self.record_glue_failure(&intent.pending, &error)?,
+                Err(error) => self.record_glue_failure(&intent.pending, &error).await?,
             }
         }
         let executor = Arc::clone(&self.executor);
@@ -485,13 +502,13 @@ impl CatalogCoordinator {
             match result {
                 Ok(Some(current)) => {
                     if current == intent.payload.location {
-                        self.outbox.mark_delivered_if(&intent.pending)?;
+                        self.mark_delivered(&intent.pending).await?;
                     } else {
                         self.update_partition(&target, &intent).await?;
                     }
                 }
                 Ok(None) => missing.push(intent),
-                Err(error) => self.record_glue_failure(&intent.pending, &error)?,
+                Err(error) => self.record_glue_failure(&intent.pending, &error).await?,
             }
         }
 
@@ -509,17 +526,20 @@ impl CatalogCoordinator {
                     for (intent, outcome) in batch.iter().zip(outcomes) {
                         match outcome {
                             GlueBatchCreateOutcome::Created => {
-                                self.outbox.mark_delivered_if(&intent.pending)?;
+                                self.mark_delivered(&intent.pending).await?;
                             }
-                            GlueBatchCreateOutcome::AlreadyExists => self.record_glue_failure(
-                                &intent.pending,
-                                &GlueApiError::new(
-                                    GlueApiErrorKind::AlreadyExists,
-                                    "AlreadyExistsException: recheck partition",
-                                ),
-                            )?,
+                            GlueBatchCreateOutcome::AlreadyExists => {
+                                self.record_glue_failure(
+                                    &intent.pending,
+                                    &GlueApiError::new(
+                                        GlueApiErrorKind::AlreadyExists,
+                                        "AlreadyExistsException: recheck partition",
+                                    ),
+                                )
+                                .await?
+                            }
                             GlueBatchCreateOutcome::Failed(error) => {
-                                self.record_glue_failure(&intent.pending, &error)?
+                                self.record_glue_failure(&intent.pending, &error).await?
                             }
                         }
                     }
@@ -535,12 +555,12 @@ impl CatalogCoordinator {
                         ),
                     );
                     for intent in batch {
-                        self.record_glue_failure(&intent.pending, &error)?;
+                        self.record_glue_failure(&intent.pending, &error).await?;
                     }
                 }
                 Err(error) => {
                     for intent in batch {
-                        self.record_glue_failure(&intent.pending, &error)?;
+                        self.record_glue_failure(&intent.pending, &error).await?;
                     }
                 }
             }
@@ -615,18 +635,44 @@ impl CatalogCoordinator {
         };
         match result {
             Ok(_) => {
-                if self.outbox.mark_delivered_if(&intent.pending)?
-                    == ConditionalMutationResult::Applied
+                if self.mark_delivered(&intent.pending).await? == ConditionalMutationResult::Applied
                 {
                     crate::metrics::counters::add_catalog_location_update(1);
                 }
             }
-            Err(error) => self.record_glue_failure(&intent.pending, &error)?,
+            Err(error) => self.record_glue_failure(&intent.pending, &error).await?,
         }
         Ok(())
     }
 
-    fn record_glue_failure(
+    async fn mark_delivered(
+        &self,
+        pending: &PendingCatalogIntent,
+    ) -> io::Result<ConditionalMutationResult> {
+        let outbox = Arc::clone(&self.outbox);
+        let pending = pending.clone();
+        tokio::task::spawn_blocking(move || outbox.mark_delivered_if(&pending))
+            .await
+            .map_err(|err| io::Error::other(format!("catalog delivery task failed: {err}")))?
+    }
+
+    async fn record_failure_durable(
+        &self,
+        pending: &PendingCatalogIntent,
+        error: String,
+        retry_after: Option<Duration>,
+        terminal: bool,
+    ) -> io::Result<ConditionalMutationResult> {
+        let outbox = Arc::clone(&self.outbox);
+        let pending = pending.clone();
+        tokio::task::spawn_blocking(move || {
+            outbox.record_failure_if(&pending, error, retry_after, terminal)
+        })
+        .await
+        .map_err(|err| io::Error::other(format!("catalog failure task failed: {err}")))?
+    }
+
+    async fn record_glue_failure(
         &self,
         pending: &PendingCatalogIntent,
         error: &GlueApiError,
@@ -639,8 +685,8 @@ impl CatalogCoordinator {
         );
         let delay = transient.then(|| retry_delay(pending.attempts));
         if self
-            .outbox
-            .record_failure_if(pending, &error.message, delay, !transient)?
+            .record_failure_durable(pending, error.message.clone(), delay, !transient)
+            .await?
             == ConditionalMutationResult::Applied
         {
             if transient {
@@ -652,12 +698,14 @@ impl CatalogCoordinator {
         Ok(())
     }
 
-    fn record_terminal_invalid(
+    async fn record_terminal_invalid(
         &self,
         pending: &PendingCatalogIntent,
         error: impl Into<String>,
     ) -> io::Result<()> {
-        if self.outbox.record_failure_if(pending, error, None, true)?
+        if self
+            .record_failure_durable(pending, error.into(), None, true)
+            .await?
             == ConditionalMutationResult::Applied
         {
             crate::metrics::counters::add_catalog_terminal_failure(1);
@@ -1287,5 +1335,31 @@ mod tests {
 
         assert!(coordinator.outbox.scan_pending(1).unwrap().is_empty());
         assert_eq!(executor.state.lock().unwrap().batch_sizes, vec![100, 1]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_persist_keeps_tokio_worker_responsive() {
+        let temp = tempfile::tempdir().unwrap();
+        let executor = Arc::new(MockGlueExecutor::default());
+        let coordinator = Arc::new(coordinator(
+            &temp,
+            Arc::clone(&executor),
+            CatalogOperationBudget::new(1),
+        ));
+        coordinator
+            .outbox
+            .set_persist_delay(Duration::from_millis(100));
+        let mut persist = Box::pin(coordinator.persist_async(vec![intent(
+            "2026-07-30",
+            "s3://bucket/day=30/",
+            1,
+        )]));
+
+        tokio::select! {
+            result = &mut persist => panic!("blocking persistence completed inline: {result:?}"),
+            _ = tokio::time::sleep(Duration::from_millis(20)) => {}
+        }
+        persist.await.unwrap();
+        assert_eq!(coordinator.outbox.metadata_snapshot().pending_count, 1);
     }
 }
