@@ -274,11 +274,11 @@ impl DataSinkMotherduckPlugin {
         ctx: &skippr_runtime_sdk::plugins::cdc::SyncContext,
     ) -> Result<(), std::io::Error> {
         use super::cdc_apply::{
-            ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
-            tombstone_table_name, upsert_if_newer_sql,
+            append_record_batch_to_cdc_apply, ddl_add_order_token_column,
+            ddl_create_tombstone_table, tombstone_table_name, warehouse_bulk_cdc_sql,
+            CdcApplyBatch, CdcApplyColumn, CdcWarehouseDialect,
         };
         use skippr_runtime_sdk::metrics::counters;
-        use skippr_runtime_sdk::plugins::cdc::MutationKind;
 
         let contract = match ctx.contract.as_ref() {
             Some(c) if !c.business_key_columns.is_empty() => c,
@@ -420,32 +420,18 @@ impl DataSinkMotherduckPlugin {
 
         let tombstone_table = tombstone_table_name(&fq_table);
 
-        let bk_names_quoted: Vec<String> = contract
-            .business_key_columns
-            .iter()
-            .map(|bk| format!("\"{}\"", bk))
-            .collect();
-
-        let bk_types: Vec<String> = contract
-            .business_key_columns
-            .iter()
-            .map(|bk| {
-                col_defs
-                    .iter()
-                    .find(|(name, _)| name == bk)
-                    .map(|(_, t)| (*t).to_string())
-                    .unwrap_or_else(|| "VARCHAR".to_string())
-            })
-            .collect();
-
-        let col_names_quoted: Vec<String> = arrow_schema
-            .fields()
-            .iter()
-            .map(|f| format!("\"{}\"", f.name().to_lowercase()))
-            .collect();
-
         let mut row_offset = 0usize;
-        let mut total_rows = 0usize;
+        let mut apply_batch = CdcApplyBatch {
+            columns: col_defs
+                .iter()
+                .map(|(name, target_type)| CdcApplyColumn {
+                    name: name.clone(),
+                    target_type: (*target_type).to_string(),
+                })
+                .collect(),
+            business_key_columns: contract.business_key_columns.clone(),
+            rows: Vec::new(),
+        };
 
         while let Some(batch_result) = stream.next().await {
             let batch =
@@ -454,86 +440,41 @@ impl DataSinkMotherduckPlugin {
             if num_rows == 0 {
                 continue;
             }
-
-            for row in 0..num_rows {
-                let meta_idx = row_offset + row;
-                let row_meta = ctx.part_meta.rows.get(meta_idx).ok_or_else(|| {
-                    std::io::Error::other(format!(
-                        "CDC row metadata missing at index {} (have {})",
-                        meta_idx,
-                        ctx.part_meta.rows.len()
-                    ))
-                })?;
-
-                let order_token_hex: String = row_meta
-                    .order_token
-                    .iter()
-                    .map(|b| format!("{:02x}", b))
-                    .collect();
-
-                match row_meta.mutation {
-                    MutationKind::Snapshot | MutationKind::Insert | MutationKind::Update => {
-                        let mut all_names = col_names_quoted.clone();
-                        all_names.push("\"_skippr_order_token\"".to_string());
-
-                        let mut all_values: Vec<String> = (0..batch.num_columns())
-                            .map(|col| Self::arrow_value_to_sql(batch.column(col).as_ref(), row))
-                            .collect();
-                        all_values.push(format!("'\\x{}'::BLOB", order_token_hex));
-
-                        let sql = upsert_if_newer_sql::<MotherduckCdcBackend>(
-                            &fq_table,
-                            &tombstone_table,
-                            &all_names,
-                            &all_values,
-                            &bk_names_quoted,
-                            &order_token_hex,
-                        );
-
-                        self.execute_sql(&sql).await.map_err(|e| {
-                            error!("CDC upsert failed for {}: {}", fq_table, e);
-                            counters::dec_uploads_in_flight();
-                            e
-                        })?;
-                    }
-                    MutationKind::Delete => {
-                        let bk_values: Vec<String> = contract
-                            .business_key_columns
-                            .iter()
-                            .map(|bk| {
-                                let col_idx = arrow_schema
-                                    .fields()
-                                    .iter()
-                                    .position(|f| f.name().to_lowercase() == *bk)
-                                    .unwrap_or(0);
-                                Self::arrow_value_to_sql(batch.column(col_idx).as_ref(), row)
-                            })
-                            .collect();
-
-                        let sql = delete_if_newer_sql::<MotherduckCdcBackend>(
-                            &fq_table,
-                            &tombstone_table,
-                            &bk_names_quoted,
-                            &bk_values,
-                            &bk_types,
-                            &order_token_hex,
-                        );
-
-                        self.execute_sql(&sql).await.map_err(|e| {
-                            error!("CDC delete failed for {}: {}", fq_table, e);
-                            counters::dec_uploads_in_flight();
-                            e
-                        })?;
-                    }
-                }
-            }
-
+            append_record_batch_to_cdc_apply(
+                &mut apply_batch,
+                &batch,
+                &ctx.part_meta.rows,
+                row_offset,
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
             row_offset += num_rows;
-            total_rows += num_rows;
-            counters::add_parquet_rows(num_rows as u64);
+        }
+
+        let total_rows = apply_batch.rows.len();
+        if total_rows > 0 {
+            let sql = warehouse_bulk_cdc_sql(
+                CdcWarehouseDialect::MotherDuck,
+                &fq_table,
+                &tombstone_table,
+                &apply_batch,
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+            self.execute_sql(&sql.transactional_script(CdcWarehouseDialect::MotherDuck))
+                .await
+                .map_err(|error| {
+                    error!(
+                        "MotherDuck bulk CDC apply failed for {}: {}",
+                        fq_table, error
+                    );
+                    counters::dec_uploads_in_flight();
+                    error
+                })?;
+            counters::add_parquet_rows(total_rows as u64);
             info!(
-                "CDC applied {} rows to {} (total: {})",
-                num_rows, table_name, total_rows
+                target: "motherduck",
+                "CDC bulk-staged and atomically applied {} rows to {}",
+                total_rows,
+                table_name
             );
         }
 
@@ -660,8 +601,12 @@ impl DataSink for DataSinkMotherduckPlugin {
                 chunk.chunk_index == 0 && chunk.final_chunk,
                 chunk_cdc.as_ref(),
             );
-            self.sync(chunk.into_stream(schema.clone()), chunk_ctx.filename, chunk_ctx.cdc_ctx)
-                .await?;
+            self.sync(
+                chunk.into_stream(schema.clone()),
+                chunk_ctx.filename,
+                chunk_ctx.cdc_ctx,
+            )
+            .await?;
         }
         Ok(skippr_runtime_sdk::plugins::SinkWriteOutcome::Applied)
     }
@@ -712,5 +657,28 @@ impl SchemaSink for DataSinkMotherduckPlugin {
             .collect();
 
         self.ensure_table(&table_name, &col_defs).await
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn motherduck_bulk_cdc_sql_is_one_duckdb_transaction() {
+        let batch = crate::cdc_apply::warehouse_sql_test_batch();
+        let sql = crate::cdc_apply::warehouse_bulk_cdc_sql(
+            crate::cdc_apply::CdcWarehouseDialect::MotherDuck,
+            "\"users\"",
+            "\"_skippr_tombstones_users\"",
+            &batch,
+        )
+        .unwrap();
+        let script = sql.transactional_script(crate::cdc_apply::CdcWarehouseDialect::MotherDuck);
+
+        assert!(script.starts_with("BEGIN TRANSACTION;"));
+        assert!(script.contains("CREATE TEMP TABLE"));
+        assert!(script.contains("'\\x01'::BLOB"));
+        assert_eq!(script.matches("MERGE INTO").count(), 4);
+        assert_eq!(script.matches("DROP TABLE IF EXISTS").count(), 2);
+        assert!(script.ends_with("COMMIT;"));
     }
 }
