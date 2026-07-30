@@ -660,6 +660,7 @@ async fn run_sink_loop(
                         })
                         .into_iter()
                         .collect();
+                    write_sink_state_snapshot(cli, &state)?;
                     write_frame(
                         control_writer,
                         &PluginFrame::PrepareAck(PrepareAck {
@@ -676,7 +677,6 @@ async fn run_sink_loop(
                         }),
                     )
                     .await?;
-                    write_sink_state_snapshot(cli, &state)?;
                     continue;
                 }
                 write_frame(
