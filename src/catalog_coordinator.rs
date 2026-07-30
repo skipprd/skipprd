@@ -3,16 +3,22 @@ use std::io;
 use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
 use aws_sdk_glue::error::SdkError;
 use aws_sdk_glue::operation::get_partition::GetPartitionError;
 use aws_sdk_glue::types::{Column, PartitionInput, SerDeInfo, StorageDescriptor};
 use aws_sdk_glue::Client as GlueClient;
 use aws_types::region::Region;
+use futures::{stream, StreamExt};
 use once_cell::sync::Lazy;
 use rand::Rng;
-use serde::Deserialize;
-use tokio::sync::{Notify, Semaphore};
+use serde::{Deserialize, Serialize};
+use tokio::sync::Notify;
 
+use crate::catalog_budget::{
+    process_catalog_operation_budget, refresh_process_catalog_operation_budget,
+    CatalogOperationBudget,
+};
 use crate::catalog_outbox::{CatalogOutbox, ConditionalMutationResult, PendingCatalogIntent};
 use crate::runtime_plugins::protocol::{CatalogIntent, CatalogIntentKind};
 
@@ -21,22 +27,14 @@ const RECOVERY_SCAN_LIMIT: usize = 10_000;
 
 static CATALOG_COORDINATORS: Lazy<std::sync::Mutex<HashMap<String, Weak<CatalogCoordinator>>>> =
     Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
-static CATALOG_OPERATION_BUDGET: Lazy<Arc<Semaphore>> = Lazy::new(|| {
-    Arc::new(Semaphore::new(
-        crate::ingest::tuner::current_flush_budget()
-            .catalog_operations
-            .max(1),
-    ))
-});
-
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct GlueColumnIntent {
     name: String,
     r#type: String,
     comment: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 struct GluePartitionCatalogIntentV1 {
     version: u32,
     region: Option<String>,
@@ -60,13 +58,274 @@ struct DecodedIntent {
     payload: GluePartitionCatalogIntentV1,
 }
 
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+struct GlueTarget {
+    region: Option<String>,
+    catalog_id: Option<String>,
+    database: String,
+    table: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GlueTableLayout {
+    partition_columns: Vec<GlueColumnIntent>,
+    storage_columns: Vec<GlueColumnIntent>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GluePartitionSpec {
+    values: Vec<String>,
+    location: String,
+    storage_columns: Vec<GlueColumnIntent>,
+    input_format: String,
+    output_format: String,
+    serde_library: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum GlueBatchCreateOutcome {
+    Created,
+    AlreadyExists,
+    Failed(GlueApiError),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GlueApiErrorKind {
+    Transient,
+    NotFound,
+    AlreadyExists,
+    Terminal,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct GlueApiError {
+    kind: GlueApiErrorKind,
+    message: String,
+}
+
+impl GlueApiError {
+    fn new(kind: GlueApiErrorKind, message: impl Into<String>) -> Self {
+        Self {
+            kind,
+            message: message.into(),
+        }
+    }
+}
+
+#[async_trait]
+trait GlueExecutor: Send + Sync {
+    async fn table_layout(&self, target: &GlueTarget) -> Result<GlueTableLayout, GlueApiError>;
+
+    async fn get_partition(
+        &self,
+        target: &GlueTarget,
+        values: &[String],
+    ) -> Result<Option<String>, GlueApiError>;
+
+    async fn batch_create_partitions(
+        &self,
+        target: &GlueTarget,
+        partitions: &[GluePartitionSpec],
+    ) -> Result<Vec<GlueBatchCreateOutcome>, GlueApiError>;
+
+    async fn update_partition(
+        &self,
+        target: &GlueTarget,
+        partition: &GluePartitionSpec,
+    ) -> Result<(), GlueApiError>;
+}
+
+#[derive(Default)]
+struct AwsGlueExecutor {
+    clients: tokio::sync::Mutex<HashMap<Option<String>, GlueClient>>,
+}
+
+impl AwsGlueExecutor {
+    async fn client(&self, region: &Option<String>) -> GlueClient {
+        if let Some(client) = self.clients.lock().await.get(region).cloned() {
+            return client;
+        }
+        let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
+        if let Some(region) = region.as_ref() {
+            loader = loader.region(Region::new(region.clone()));
+        }
+        let client = GlueClient::new(&loader.load().await);
+        self.clients
+            .lock()
+            .await
+            .insert(region.clone(), client.clone());
+        client
+    }
+}
+
+#[async_trait]
+impl GlueExecutor for AwsGlueExecutor {
+    async fn table_layout(&self, target: &GlueTarget) -> Result<GlueTableLayout, GlueApiError> {
+        let client = self.client(&target.region).await;
+        let mut request = client
+            .get_table()
+            .database_name(&target.database)
+            .name(&target.table);
+        if let Some(catalog_id) = target.catalog_id.as_ref() {
+            request = request.catalog_id(catalog_id);
+        }
+        let output = request
+            .send()
+            .await
+            .map_err(|err| classify_glue_error(err.to_string()))?;
+        let table = output.table().ok_or_else(|| {
+            GlueApiError::new(
+                GlueApiErrorKind::Transient,
+                "GetTable returned no table definition",
+            )
+        })?;
+        let to_column = |column: &Column| GlueColumnIntent {
+            name: column.name().to_string(),
+            r#type: column.r#type().unwrap_or("string").to_string(),
+            comment: column.comment().map(str::to_string),
+        };
+        Ok(GlueTableLayout {
+            partition_columns: table
+                .partition_keys
+                .as_deref()
+                .unwrap_or_default()
+                .iter()
+                .map(to_column)
+                .collect(),
+            storage_columns: table
+                .storage_descriptor()
+                .and_then(|descriptor| descriptor.columns.as_deref())
+                .unwrap_or_default()
+                .iter()
+                .map(to_column)
+                .collect(),
+        })
+    }
+
+    async fn get_partition(
+        &self,
+        target: &GlueTarget,
+        values: &[String],
+    ) -> Result<Option<String>, GlueApiError> {
+        let client = self.client(&target.region).await;
+        let mut request = client
+            .get_partition()
+            .database_name(&target.database)
+            .table_name(&target.table)
+            .set_partition_values(Some(values.to_vec()));
+        if let Some(catalog_id) = target.catalog_id.as_ref() {
+            request = request.catalog_id(catalog_id);
+        }
+        match request.send().await {
+            Ok(output) => Ok(Some(
+                output
+                    .partition()
+                    .and_then(|partition| partition.storage_descriptor())
+                    .and_then(|descriptor| descriptor.location())
+                    .unwrap_or_default()
+                    .to_string(),
+            )),
+            Err(SdkError::ServiceError(err))
+                if matches!(err.err(), GetPartitionError::EntityNotFoundException(_)) =>
+            {
+                Ok(None)
+            }
+            Err(err) => Err(classify_glue_error(err.to_string())),
+        }
+    }
+
+    async fn batch_create_partitions(
+        &self,
+        target: &GlueTarget,
+        partitions: &[GluePartitionSpec],
+    ) -> Result<Vec<GlueBatchCreateOutcome>, GlueApiError> {
+        let client = self.client(&target.region).await;
+        let inputs = partitions
+            .iter()
+            .map(partition_input)
+            .collect::<io::Result<Vec<_>>>()
+            .map_err(|err| GlueApiError::new(GlueApiErrorKind::Terminal, err.to_string()))?;
+        let mut request = client
+            .batch_create_partition()
+            .database_name(&target.database)
+            .table_name(&target.table)
+            .set_partition_input_list(Some(inputs));
+        if let Some(catalog_id) = target.catalog_id.as_ref() {
+            request = request.catalog_id(catalog_id);
+        }
+        let output = request
+            .send()
+            .await
+            .map_err(|err| classify_glue_error(err.to_string()))?;
+        let mut outcomes = vec![GlueBatchCreateOutcome::Created; partitions.len()];
+        let indexes = partitions
+            .iter()
+            .enumerate()
+            .map(|(index, partition)| (partition.values.clone(), index))
+            .collect::<HashMap<_, _>>();
+        for error in output.errors() {
+            let Some(index) = indexes.get(error.partition_values()).copied() else {
+                return Err(GlueApiError::new(
+                    GlueApiErrorKind::Transient,
+                    format!(
+                        "BatchCreatePartition returned an error for unknown values {:?}",
+                        error.partition_values()
+                    ),
+                ));
+            };
+            let code = error
+                .error_detail()
+                .and_then(|detail| detail.error_code())
+                .unwrap_or("UnknownGlueError");
+            let message = error
+                .error_detail()
+                .and_then(|detail| detail.error_message())
+                .unwrap_or(code);
+            outcomes[index] = if code.contains("AlreadyExists") {
+                GlueBatchCreateOutcome::AlreadyExists
+            } else {
+                GlueBatchCreateOutcome::Failed(classify_glue_error(format!("{code}: {message}")))
+            };
+        }
+        Ok(outcomes)
+    }
+
+    async fn update_partition(
+        &self,
+        target: &GlueTarget,
+        partition: &GluePartitionSpec,
+    ) -> Result<(), GlueApiError> {
+        let client = self.client(&target.region).await;
+        let mut request =
+            client
+                .update_partition()
+                .database_name(&target.database)
+                .table_name(&target.table)
+                .set_partition_value_list(Some(partition.values.clone()))
+                .partition_input(partition_input(partition).map_err(|err| {
+                    GlueApiError::new(GlueApiErrorKind::Terminal, err.to_string())
+                })?);
+        if let Some(catalog_id) = target.catalog_id.as_ref() {
+            request = request.catalog_id(catalog_id);
+        }
+        request
+            .send()
+            .await
+            .map(|_| ())
+            .map_err(|err| classify_glue_error(err.to_string()))
+    }
+}
+
 type GlueIntentGroupKey = (Option<String>, Option<String>, String, String);
 type GlueIntentGroups = BTreeMap<GlueIntentGroupKey, Vec<DecodedIntent>>;
 
 pub struct CatalogCoordinator {
     outbox: Arc<CatalogOutbox>,
+    executor: Arc<dyn GlueExecutor>,
+    catalog_budget: Arc<CatalogOperationBudget>,
+    refresh_budget: bool,
     notify: Notify,
-    table_layout_cache: tokio::sync::RwLock<HashMap<String, Vec<String>>>,
+    table_layout_cache: tokio::sync::RwLock<HashMap<String, GlueTableLayout>>,
     worker_abort: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
 }
 
@@ -81,6 +340,9 @@ impl CatalogCoordinator {
         }
         let coordinator = Arc::new(Self {
             outbox: Arc::new(CatalogOutbox::open(path)?),
+            executor: Arc::new(AwsGlueExecutor::default()),
+            catalog_budget: process_catalog_operation_budget(),
+            refresh_budget: true,
             notify: Notify::new(),
             table_layout_cache: tokio::sync::RwLock::new(HashMap::new()),
             worker_abort: std::sync::Mutex::new(None),
@@ -180,103 +442,105 @@ impl CatalogCoordinator {
         table: String,
         intents: Vec<DecodedIntent>,
     ) -> io::Result<()> {
-        let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
-        if let Some(region) = region {
-            loader = loader.region(Region::new(region));
+        let target = GlueTarget {
+            region,
+            catalog_id,
+            database,
+            table,
+        };
+        let concurrency = if self.refresh_budget {
+            refresh_process_catalog_operation_budget()
+        } else {
+            self.catalog_budget.target()
         }
-        let client = GlueClient::new(&loader.load().await);
-        if let Some(first) = intents.first() {
-            if let Err(error) = self
-                .ensure_table_layout(&client, catalog_id.as_deref(), &database, &table, first)
-                .await
-            {
-                for intent in &intents {
-                    self.record_aws_failure(&intent.pending, error.clone())?;
-                }
-                return Ok(());
-            }
-        }
-        let mut missing = Vec::new();
+        .max(1);
+        let mut valid = Vec::with_capacity(intents.len());
         for intent in intents {
-            let mut get = client
-                .get_partition()
-                .database_name(&database)
-                .table_name(&table)
-                .set_partition_values(Some(intent.payload.partition_values.clone()));
-            if let Some(catalog_id) = catalog_id.as_ref() {
-                get = get.catalog_id(catalog_id);
+            match self.ensure_table_layout(&target, &intent).await {
+                Ok(()) => valid.push(intent),
+                Err(error) => self.record_glue_failure(&intent.pending, &error)?,
             }
-            let get_result = {
-                let _permit = CATALOG_OPERATION_BUDGET
-                    .clone()
-                    .acquire_owned()
-                    .await
-                    .map_err(|_| io::Error::other("catalog operation budget closed"))?;
-                get.send().await
-            };
-            match get_result {
-                Ok(existing) => {
-                    let current = existing
-                        .partition()
-                        .and_then(|partition| partition.storage_descriptor())
-                        .and_then(|descriptor| descriptor.location())
-                        .unwrap_or_default();
+        }
+        let executor = Arc::clone(&self.executor);
+        let budget = Arc::clone(&self.catalog_budget);
+        let target_for_get = target.clone();
+        let inspected = stream::iter(valid)
+            .map(move |intent| {
+                let executor = Arc::clone(&executor);
+                let budget = Arc::clone(&budget);
+                let target = target_for_get.clone();
+                async move {
+                    let _permit = budget.acquire().await;
+                    let result = executor
+                        .get_partition(&target, &intent.payload.partition_values)
+                        .await;
+                    (intent, result)
+                }
+            })
+            .buffer_unordered(concurrency)
+            .collect::<Vec<_>>()
+            .await;
+        let mut missing = Vec::new();
+        for (intent, result) in inspected {
+            match result {
+                Ok(Some(current)) => {
                     if current == intent.payload.location {
                         self.outbox.mark_delivered_if(&intent.pending)?;
                     } else {
-                        self.update_partition(
-                            &client,
-                            catalog_id.as_deref(),
-                            &database,
-                            &table,
-                            &intent,
-                        )
-                        .await?;
+                        self.update_partition(&target, &intent).await?;
                     }
                 }
-                Err(SdkError::ServiceError(err))
-                    if matches!(err.err(), GetPartitionError::EntityNotFoundException(_)) =>
-                {
-                    missing.push(intent);
-                }
-                Err(err) => self.record_aws_failure(&intent.pending, err.to_string())?,
+                Ok(None) => missing.push(intent),
+                Err(error) => self.record_glue_failure(&intent.pending, &error)?,
             }
         }
 
         for batch in missing.chunks(GLUE_BATCH_CREATE_LIMIT) {
-            let _permit = CATALOG_OPERATION_BUDGET
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| io::Error::other("catalog operation budget closed"))?;
-            let inputs = batch
+            let specs = batch
                 .iter()
-                .map(|intent| partition_input(&intent.payload))
-                .collect::<io::Result<Vec<_>>>()?;
-            let mut create = client
-                .batch_create_partition()
-                .database_name(&database)
-                .table_name(&table)
-                .set_partition_input_list(Some(inputs));
-            if let Some(catalog_id) = catalog_id.as_ref() {
-                create = create.catalog_id(catalog_id);
-            }
-            match create.send().await {
-                Ok(output) if output.errors().is_empty() => {
-                    for intent in batch {
-                        self.outbox.mark_delivered_if(&intent.pending)?;
+                .map(|intent| partition_spec(&intent.payload))
+                .collect::<Vec<_>>();
+            let result = {
+                let _permit = self.catalog_budget.acquire().await;
+                self.executor.batch_create_partitions(&target, &specs).await
+            };
+            match result {
+                Ok(outcomes) if outcomes.len() == batch.len() => {
+                    for (intent, outcome) in batch.iter().zip(outcomes) {
+                        match outcome {
+                            GlueBatchCreateOutcome::Created => {
+                                self.outbox.mark_delivered_if(&intent.pending)?;
+                            }
+                            GlueBatchCreateOutcome::AlreadyExists => self.record_glue_failure(
+                                &intent.pending,
+                                &GlueApiError::new(
+                                    GlueApiErrorKind::AlreadyExists,
+                                    "AlreadyExistsException: recheck partition",
+                                ),
+                            )?,
+                            GlueBatchCreateOutcome::Failed(error) => {
+                                self.record_glue_failure(&intent.pending, &error)?
+                            }
+                        }
                     }
                     crate::metrics::counters::add_catalog_successful_batch(1);
                 }
-                Ok(output) => {
-                    let message = format!("BatchCreatePartition errors: {:?}", output.errors());
+                Ok(outcomes) => {
+                    let error = GlueApiError::new(
+                        GlueApiErrorKind::Transient,
+                        format!(
+                            "BatchCreatePartition returned {} outcomes for {} inputs",
+                            outcomes.len(),
+                            batch.len()
+                        ),
+                    );
                     for intent in batch {
-                        self.record_aws_failure(&intent.pending, message.clone())?;
+                        self.record_glue_failure(&intent.pending, &error)?;
                     }
                 }
-                Err(err) => {
+                Err(error) => {
                     for intent in batch {
-                        self.record_aws_failure(&intent.pending, err.to_string())?;
+                        self.record_glue_failure(&intent.pending, &error)?;
                     }
                 }
             }
@@ -286,17 +550,14 @@ impl CatalogCoordinator {
 
     async fn ensure_table_layout(
         &self,
-        client: &GlueClient,
-        catalog_id: Option<&str>,
-        database: &str,
-        table: &str,
+        target: &GlueTarget,
         intent: &DecodedIntent,
-    ) -> Result<(), String> {
+    ) -> Result<(), GlueApiError> {
         let cache_key = format!(
             "{}\0{}\0{}\0{}\0{}",
-            catalog_id.unwrap_or_default(),
-            database,
-            table,
+            target.catalog_id.as_deref().unwrap_or_default(),
+            target.database,
+            target.table,
             intent.payload.schema_namespace,
             intent.payload.schema_version
         );
@@ -308,39 +569,30 @@ impl CatalogCoordinator {
         {
             return Ok(());
         }
-        let _permit = CATALOG_OPERATION_BUDGET
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| "catalog operation budget closed".to_string())?;
-        let mut request = client.get_table().database_name(database).name(table);
-        if let Some(catalog_id) = catalog_id {
-            request = request.catalog_id(catalog_id);
-        }
-        let table_output = request.send().await.map_err(|err| err.to_string())?;
-        let actual = table_output
-            .table()
-            .and_then(|table| table.partition_keys.clone())
-            .unwrap_or_default()
-            .into_iter()
-            .map(|column| column.name().to_string())
-            .collect::<Vec<_>>();
-        let expected = intent
-            .payload
-            .partition_columns
-            .iter()
-            .map(|column| column.name.clone())
-            .collect::<Vec<_>>();
-        if actual != expected {
-            return Err(format!(
-                "InvalidInputException: Glue partition layout mismatch for '{database}.{table}': actual={actual:?} expected={expected:?}"
+        let actual = {
+            let _permit = self.catalog_budget.acquire().await;
+            self.executor.table_layout(target).await?
+        };
+        let expected = GlueTableLayout {
+            partition_columns: intent.payload.partition_columns.clone(),
+            storage_columns: intent.payload.storage_columns.clone(),
+        };
+        if !same_column_layout(&actual.partition_columns, &expected.partition_columns)
+            || !same_column_layout(&actual.storage_columns, &expected.storage_columns)
+        {
+            return Err(GlueApiError::new(
+                GlueApiErrorKind::Terminal,
+                format!(
+                    "Glue table layout mismatch for '{}.{}': actual={actual:?} expected={expected:?}",
+                    target.database, target.table
+                ),
             ));
         }
         let namespace_prefix = format!(
             "{}\0{}\0{}\0{}\0",
-            catalog_id.unwrap_or_default(),
-            database,
-            table,
+            target.catalog_id.as_deref().unwrap_or_default(),
+            target.database,
+            target.table,
             intent.payload.schema_namespace
         );
         let mut cache = self.table_layout_cache.write().await;
@@ -351,27 +603,15 @@ impl CatalogCoordinator {
 
     async fn update_partition(
         &self,
-        client: &GlueClient,
-        catalog_id: Option<&str>,
-        database: &str,
-        table: &str,
+        target: &GlueTarget,
         intent: &DecodedIntent,
     ) -> io::Result<()> {
-        let _permit = CATALOG_OPERATION_BUDGET
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|_| io::Error::other("catalog operation budget closed"))?;
-        let mut update = client
-            .update_partition()
-            .database_name(database)
-            .table_name(table)
-            .set_partition_value_list(Some(intent.payload.partition_values.clone()))
-            .partition_input(partition_input(&intent.payload)?);
-        if let Some(catalog_id) = catalog_id {
-            update = update.catalog_id(catalog_id);
-        }
-        match update.send().await {
+        let spec = partition_spec(&intent.payload);
+        let result = {
+            let _permit = self.catalog_budget.acquire().await;
+            self.executor.update_partition(target, &spec).await
+        };
+        match result {
             Ok(_) => {
                 if self.outbox.mark_delivered_if(&intent.pending)?
                     == ConditionalMutationResult::Applied
@@ -379,17 +619,26 @@ impl CatalogCoordinator {
                     crate::metrics::counters::add_catalog_location_update(1);
                 }
             }
-            Err(err) => self.record_aws_failure(&intent.pending, err.to_string())?,
+            Err(error) => self.record_glue_failure(&intent.pending, &error)?,
         }
         Ok(())
     }
 
-    fn record_aws_failure(&self, pending: &PendingCatalogIntent, error: String) -> io::Result<()> {
-        let transient = is_transient(&error);
+    fn record_glue_failure(
+        &self,
+        pending: &PendingCatalogIntent,
+        error: &GlueApiError,
+    ) -> io::Result<()> {
+        let transient = matches!(
+            error.kind,
+            GlueApiErrorKind::Transient
+                | GlueApiErrorKind::NotFound
+                | GlueApiErrorKind::AlreadyExists
+        );
         let delay = transient.then(|| retry_delay(pending.attempts));
         if self
             .outbox
-            .record_failure_if(pending, &error, delay, !transient)?
+            .record_failure_if(pending, &error.message, delay, !transient)?
             == ConditionalMutationResult::Applied
         {
             if transient {
@@ -466,8 +715,19 @@ pub async fn drain_catalog_outboxes(timeout: Duration) -> io::Result<()> {
     Ok(())
 }
 
-fn partition_input(payload: &GluePartitionCatalogIntentV1) -> io::Result<PartitionInput> {
-    let columns = payload
+fn partition_spec(payload: &GluePartitionCatalogIntentV1) -> GluePartitionSpec {
+    GluePartitionSpec {
+        values: payload.partition_values.clone(),
+        location: payload.location.clone(),
+        storage_columns: payload.storage_columns.clone(),
+        input_format: payload.input_format.clone(),
+        output_format: payload.output_format.clone(),
+        serde_library: payload.serde_library.clone(),
+    }
+}
+
+fn partition_input(partition: &GluePartitionSpec) -> io::Result<PartitionInput> {
+    let columns = partition
         .storage_columns
         .iter()
         .map(|column| {
@@ -480,25 +740,44 @@ fn partition_input(payload: &GluePartitionCatalogIntentV1) -> io::Result<Partiti
         })
         .collect::<io::Result<Vec<_>>>()?;
     Ok(PartitionInput::builder()
-        .set_values(Some(payload.partition_values.clone()))
+        .set_values(Some(partition.values.clone()))
         .parameters("parquet.compression", "SNAPPY")
         .storage_descriptor(
             StorageDescriptor::builder()
                 .set_columns(Some(columns))
                 .compressed(true)
-                .input_format(&payload.input_format)
-                .location(&payload.location)
-                .output_format(&payload.output_format)
+                .input_format(&partition.input_format)
+                .location(&partition.location)
+                .output_format(&partition.output_format)
                 .serde_info(
                     SerDeInfo::builder()
                         .parameters("serialization.format", "1")
-                        .serialization_library(&payload.serde_library)
+                        .serialization_library(&partition.serde_library)
                         .build(),
                 )
                 .stored_as_sub_directories(true)
                 .build(),
         )
         .build())
+}
+
+fn same_column_layout(left: &[GlueColumnIntent], right: &[GlueColumnIntent]) -> bool {
+    left.iter()
+        .map(|column| (&column.name, &column.r#type))
+        .eq(right.iter().map(|column| (&column.name, &column.r#type)))
+}
+
+fn classify_glue_error(error: String) -> GlueApiError {
+    let kind = if error.to_ascii_lowercase().contains("entitynotfound") {
+        GlueApiErrorKind::NotFound
+    } else if error.to_ascii_lowercase().contains("alreadyexist") {
+        GlueApiErrorKind::AlreadyExists
+    } else if is_transient(&error) {
+        GlueApiErrorKind::Transient
+    } else {
+        GlueApiErrorKind::Terminal
+    };
+    GlueApiError::new(kind, error)
 }
 
 fn is_transient(error: &str) -> bool {
@@ -535,6 +814,155 @@ fn now_ms() -> u64 {
 mod tests {
     use super::*;
     use crate::runtime_plugins::protocol::{CatalogIntentIdentity, CATALOG_INTENT_VERSION};
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+    use std::sync::Mutex as StdMutex;
+
+    #[derive(Default)]
+    struct MockGlueState {
+        layout: Option<Result<GlueTableLayout, GlueApiError>>,
+        layout_calls: usize,
+        get_results: HashMap<Vec<String>, VecDeque<Result<Option<String>, GlueApiError>>>,
+        batch_results: VecDeque<Result<Vec<GlueBatchCreateOutcome>, GlueApiError>>,
+        batch_sizes: Vec<usize>,
+        update_results: VecDeque<Result<(), GlueApiError>>,
+        updates: Vec<GluePartitionSpec>,
+    }
+
+    #[derive(Default)]
+    struct MockGlueExecutor {
+        state: StdMutex<MockGlueState>,
+        get_delay_ms: AtomicU64,
+        active_gets: AtomicUsize,
+        max_active_gets: AtomicUsize,
+    }
+
+    struct ActiveGet<'a>(&'a AtomicUsize);
+
+    impl Drop for ActiveGet<'_> {
+        fn drop(&mut self) {
+            self.0.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    #[async_trait]
+    impl GlueExecutor for MockGlueExecutor {
+        async fn table_layout(
+            &self,
+            _target: &GlueTarget,
+        ) -> Result<GlueTableLayout, GlueApiError> {
+            let mut state = self.state.lock().unwrap();
+            state.layout_calls += 1;
+            state
+                .layout
+                .clone()
+                .unwrap_or_else(|| Ok(expected_layout("bigint")))
+        }
+
+        async fn get_partition(
+            &self,
+            _target: &GlueTarget,
+            values: &[String],
+        ) -> Result<Option<String>, GlueApiError> {
+            let active = self.active_gets.fetch_add(1, Ordering::SeqCst) + 1;
+            self.max_active_gets.fetch_max(active, Ordering::SeqCst);
+            let _active = ActiveGet(&self.active_gets);
+            let delay = self.get_delay_ms.load(Ordering::SeqCst);
+            if delay > 0 {
+                tokio::time::sleep(Duration::from_millis(delay)).await;
+            }
+            self.state
+                .lock()
+                .unwrap()
+                .get_results
+                .get_mut(values)
+                .and_then(VecDeque::pop_front)
+                .unwrap_or(Ok(None))
+        }
+
+        async fn batch_create_partitions(
+            &self,
+            _target: &GlueTarget,
+            partitions: &[GluePartitionSpec],
+        ) -> Result<Vec<GlueBatchCreateOutcome>, GlueApiError> {
+            let mut state = self.state.lock().unwrap();
+            state.batch_sizes.push(partitions.len());
+            state
+                .batch_results
+                .pop_front()
+                .unwrap_or_else(|| Ok(vec![GlueBatchCreateOutcome::Created; partitions.len()]))
+        }
+
+        async fn update_partition(
+            &self,
+            _target: &GlueTarget,
+            partition: &GluePartitionSpec,
+        ) -> Result<(), GlueApiError> {
+            let mut state = self.state.lock().unwrap();
+            state.updates.push(partition.clone());
+            state.update_results.pop_front().unwrap_or(Ok(()))
+        }
+    }
+
+    fn column(name: &str, r#type: &str) -> GlueColumnIntent {
+        GlueColumnIntent {
+            name: name.to_string(),
+            r#type: r#type.to_string(),
+            comment: None,
+        }
+    }
+
+    fn expected_layout(storage_type: &str) -> GlueTableLayout {
+        GlueTableLayout {
+            partition_columns: vec![column("day", "string")],
+            storage_columns: vec![column("id", storage_type)],
+        }
+    }
+
+    fn intent(day: &str, location: &str, schema_version: u64) -> CatalogIntent {
+        let payload = GluePartitionCatalogIntentV1 {
+            version: 1,
+            region: Some("eu-west-1".into()),
+            catalog_id: Some("123456789012".into()),
+            database: "analytics".into(),
+            table: "events".into(),
+            partition_values: vec![day.into()],
+            location: location.into(),
+            storage_columns: vec![column("id", "bigint")],
+            partition_columns: vec![column("day", "string")],
+            input_format: "parquet-input".into(),
+            output_format: "parquet-output".into(),
+            serde_library: "parquet-serde".into(),
+            schema_namespace: "events".into(),
+            schema_version,
+        };
+        CatalogIntent {
+            version: CATALOG_INTENT_VERSION,
+            identity: CatalogIntentIdentity {
+                sink_ref: "primary".into(),
+                namespace: "events".into(),
+                kind: CatalogIntentKind::UpsertPartition,
+                key: serde_json::to_string(&payload.partition_values).unwrap(),
+            },
+            payload_json: serde_json::to_string(&payload).unwrap(),
+        }
+    }
+
+    fn coordinator(
+        temp: &tempfile::TempDir,
+        executor: Arc<MockGlueExecutor>,
+        budget: Arc<CatalogOperationBudget>,
+    ) -> CatalogCoordinator {
+        CatalogCoordinator {
+            outbox: Arc::new(CatalogOutbox::open(temp.path()).unwrap()),
+            executor,
+            catalog_budget: budget,
+            refresh_budget: false,
+            notify: Notify::new(),
+            table_layout_cache: tokio::sync::RwLock::new(HashMap::new()),
+            worker_abort: std::sync::Mutex::new(None),
+        }
+    }
 
     #[test]
     fn glue_batch_limit_and_backoff_are_bounded() {
@@ -549,12 +977,11 @@ mod tests {
     #[tokio::test]
     async fn malformed_payload_is_marked_terminal_instead_of_bubbling() {
         let temp = tempfile::tempdir().unwrap();
-        let coordinator = CatalogCoordinator {
-            outbox: Arc::new(CatalogOutbox::open(temp.path()).unwrap()),
-            notify: Notify::new(),
-            table_layout_cache: tokio::sync::RwLock::new(HashMap::new()),
-            worker_abort: std::sync::Mutex::new(None),
-        };
+        let coordinator = coordinator(
+            &temp,
+            Arc::new(MockGlueExecutor::default()),
+            CatalogOperationBudget::new(1),
+        );
         coordinator
             .persist(&[CatalogIntent {
                 version: CATALOG_INTENT_VERSION,
@@ -579,5 +1006,260 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("invalid durable Glue partition intent payload"));
+    }
+
+    #[tokio::test]
+    async fn partial_batch_only_retries_failed_partition() {
+        let temp = tempfile::tempdir().unwrap();
+        let executor = Arc::new(MockGlueExecutor::default());
+        executor
+            .state
+            .lock()
+            .unwrap()
+            .batch_results
+            .push_back(Ok(vec![
+                GlueBatchCreateOutcome::Created,
+                GlueBatchCreateOutcome::Failed(GlueApiError::new(
+                    GlueApiErrorKind::Transient,
+                    "ThrottlingException",
+                )),
+                GlueBatchCreateOutcome::Created,
+            ]));
+        let coordinator = coordinator(&temp, Arc::clone(&executor), CatalogOperationBudget::new(3));
+        coordinator
+            .persist(&[
+                intent("2026-07-30", "s3://bucket/day=30/", 1),
+                intent("2026-07-31", "s3://bucket/day=31/", 1),
+                intent("2026-08-01", "s3://bucket/day=01/", 1),
+            ])
+            .unwrap();
+
+        coordinator.drain_once().await.unwrap();
+
+        let pending = coordinator.outbox.scan_pending(10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].intent.identity.key.contains("2026-07-31"));
+        assert_eq!(pending[0].attempts, 1);
+        assert!(pending[0].next_attempt_at_ms > now_ms());
+        assert_eq!(executor.state.lock().unwrap().batch_sizes, vec![3]);
+    }
+
+    #[tokio::test]
+    async fn throttling_backoff_persists_and_retry_recovery_delivers() {
+        let temp = tempfile::tempdir().unwrap();
+        let executor = Arc::new(MockGlueExecutor::default());
+        executor.state.lock().unwrap().get_results.insert(
+            vec!["2026-07-30".into()],
+            VecDeque::from([
+                Err(GlueApiError::new(
+                    GlueApiErrorKind::Transient,
+                    "ThrottlingException",
+                )),
+                Ok(Some("s3://bucket/day=30/".into())),
+            ]),
+        );
+        let coordinator = coordinator(&temp, Arc::clone(&executor), CatalogOperationBudget::new(1));
+        coordinator
+            .persist(&[intent("2026-07-30", "s3://bucket/day=30/", 1)])
+            .unwrap();
+
+        coordinator.drain_once().await.unwrap();
+        let pending = coordinator.outbox.scan_pending(1).unwrap().remove(0);
+        assert_eq!(pending.attempts, 1);
+        assert!(pending.next_attempt_at_ms > now_ms());
+
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        coordinator.drain_once().await.unwrap();
+        assert!(coordinator.outbox.scan_pending(1).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn same_location_delivers_without_update() {
+        let temp = tempfile::tempdir().unwrap();
+        let executor = Arc::new(MockGlueExecutor::default());
+        executor.state.lock().unwrap().get_results.insert(
+            vec!["2026-07-30".into()],
+            VecDeque::from([Ok(Some("s3://bucket/day=30/".into()))]),
+        );
+        let coordinator = coordinator(&temp, Arc::clone(&executor), CatalogOperationBudget::new(1));
+        coordinator
+            .persist(&[intent("2026-07-30", "s3://bucket/day=30/", 1)])
+            .unwrap();
+
+        coordinator.drain_once().await.unwrap();
+
+        assert!(coordinator.outbox.scan_pending(1).unwrap().is_empty());
+        assert!(executor.state.lock().unwrap().updates.is_empty());
+    }
+
+    #[tokio::test]
+    async fn changed_location_updates_then_delivers() {
+        let temp = tempfile::tempdir().unwrap();
+        let executor = Arc::new(MockGlueExecutor::default());
+        executor.state.lock().unwrap().get_results.insert(
+            vec!["2026-07-30".into()],
+            VecDeque::from([Ok(Some("s3://bucket/old/".into()))]),
+        );
+        let coordinator = coordinator(&temp, Arc::clone(&executor), CatalogOperationBudget::new(1));
+        coordinator
+            .persist(&[intent("2026-07-30", "s3://bucket/day=30/", 1)])
+            .unwrap();
+
+        coordinator.drain_once().await.unwrap();
+
+        assert!(coordinator.outbox.scan_pending(1).unwrap().is_empty());
+        assert_eq!(
+            executor.state.lock().unwrap().updates[0].location,
+            "s3://bucket/day=30/"
+        );
+    }
+
+    #[tokio::test]
+    async fn entity_not_found_is_batched_for_create() {
+        let temp = tempfile::tempdir().unwrap();
+        let executor = Arc::new(MockGlueExecutor::default());
+        executor
+            .state
+            .lock()
+            .unwrap()
+            .get_results
+            .insert(vec!["2026-07-30".into()], VecDeque::from([Ok(None)]));
+        let coordinator = coordinator(&temp, Arc::clone(&executor), CatalogOperationBudget::new(1));
+        coordinator
+            .persist(&[intent("2026-07-30", "s3://bucket/day=30/", 1)])
+            .unwrap();
+
+        coordinator.drain_once().await.unwrap();
+
+        assert!(coordinator.outbox.scan_pending(1).unwrap().is_empty());
+        assert_eq!(executor.state.lock().unwrap().batch_sizes, vec![1]);
+    }
+
+    #[tokio::test]
+    async fn already_exists_remains_pending_for_safe_recheck() {
+        let temp = tempfile::tempdir().unwrap();
+        let executor = Arc::new(MockGlueExecutor::default());
+        {
+            let mut state = executor.state.lock().unwrap();
+            state.get_results.insert(
+                vec!["2026-07-30".into()],
+                VecDeque::from([Ok(None), Ok(Some("s3://bucket/day=30/".into()))]),
+            );
+            state
+                .batch_results
+                .push_back(Ok(vec![GlueBatchCreateOutcome::AlreadyExists]));
+        }
+        let coordinator = coordinator(&temp, Arc::clone(&executor), CatalogOperationBudget::new(1));
+        coordinator
+            .persist(&[intent("2026-07-30", "s3://bucket/day=30/", 1)])
+            .unwrap();
+
+        coordinator.drain_once().await.unwrap();
+        assert_eq!(coordinator.outbox.scan_pending(1).unwrap()[0].attempts, 1);
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        coordinator.drain_once().await.unwrap();
+        assert!(coordinator.outbox.scan_pending(1).unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn full_layout_mismatch_is_terminal() {
+        let temp = tempfile::tempdir().unwrap();
+        let executor = Arc::new(MockGlueExecutor::default());
+        executor.state.lock().unwrap().layout = Some(Ok(expected_layout("string")));
+        let coordinator = coordinator(&temp, Arc::clone(&executor), CatalogOperationBudget::new(1));
+        coordinator
+            .persist(&[intent("2026-07-30", "s3://bucket/day=30/", 1)])
+            .unwrap();
+
+        coordinator.drain_once().await.unwrap();
+
+        let pending = coordinator.outbox.scan_pending(1).unwrap().remove(0);
+        assert!(pending.terminal);
+        assert!(pending
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("table layout mismatch"));
+    }
+
+    #[tokio::test]
+    async fn schema_version_change_revalidates_and_replaces_layout_cache() {
+        let temp = tempfile::tempdir().unwrap();
+        let executor = Arc::new(MockGlueExecutor::default());
+        executor.state.lock().unwrap().get_results.insert(
+            vec!["2026-07-30".into()],
+            VecDeque::from([Ok(Some("s3://bucket/day=30/".into()))]),
+        );
+        let coordinator = coordinator(&temp, Arc::clone(&executor), CatalogOperationBudget::new(1));
+        coordinator
+            .persist(&[intent("2026-07-30", "s3://bucket/day=30/", 1)])
+            .unwrap();
+        coordinator.drain_once().await.unwrap();
+
+        executor.state.lock().unwrap().get_results.insert(
+            vec!["2026-07-31".into()],
+            VecDeque::from([Ok(Some("s3://bucket/day=31/".into()))]),
+        );
+        coordinator
+            .persist(&[intent("2026-07-31", "s3://bucket/day=31/", 2)])
+            .unwrap();
+        coordinator.drain_once().await.unwrap();
+
+        assert_eq!(executor.state.lock().unwrap().layout_calls, 2);
+        let cache = coordinator.table_layout_cache.read().await;
+        assert_eq!(cache.len(), 1);
+        assert!(cache.keys().next().unwrap().ends_with("\u{0}2"));
+    }
+
+    #[tokio::test]
+    async fn partition_inspection_uses_bounded_parallel_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let executor = Arc::new(MockGlueExecutor::default());
+        executor.get_delay_ms.store(50, Ordering::SeqCst);
+        {
+            let mut state = executor.state.lock().unwrap();
+            for day in ["30", "31", "01", "02"] {
+                state.get_results.insert(
+                    vec![day.into()],
+                    VecDeque::from([Ok(Some(format!("s3://bucket/day={day}/")))]),
+                );
+            }
+        }
+        let coordinator = coordinator(&temp, Arc::clone(&executor), CatalogOperationBudget::new(3));
+        coordinator
+            .persist(&[
+                intent("30", "s3://bucket/day=30/", 1),
+                intent("31", "s3://bucket/day=31/", 1),
+                intent("01", "s3://bucket/day=01/", 1),
+                intent("02", "s3://bucket/day=02/", 1),
+            ])
+            .unwrap();
+
+        coordinator.drain_once().await.unwrap();
+
+        assert!(coordinator.outbox.scan_pending(1).unwrap().is_empty());
+        assert_eq!(executor.max_active_gets.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn batch_create_never_exceeds_aws_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let executor = Arc::new(MockGlueExecutor::default());
+        let coordinator = coordinator(&temp, Arc::clone(&executor), CatalogOperationBudget::new(8));
+        let intents = (0..101)
+            .map(|index| {
+                intent(
+                    &format!("{index:03}"),
+                    &format!("s3://bucket/day={index:03}/"),
+                    1,
+                )
+            })
+            .collect::<Vec<_>>();
+        coordinator.persist(&intents).unwrap();
+
+        coordinator.drain_once().await.unwrap();
+
+        assert!(coordinator.outbox.scan_pending(1).unwrap().is_empty());
+        assert_eq!(executor.state.lock().unwrap().batch_sizes, vec![100, 1]);
     }
 }

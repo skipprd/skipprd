@@ -1640,6 +1640,55 @@ async fn runtime_schema_sink_restarts_after_io_disconnect() {
 }
 
 #[tokio::test]
+#[serial]
+async fn runtime_schema_ddl_shares_global_catalog_operation_budget() {
+    struct BudgetOverrideGuard;
+    impl Drop for BudgetOverrideGuard {
+        fn drop(&mut self) {
+            skipprd::catalog_budget::set_catalog_operation_budget_override_for_test(None);
+        }
+    }
+
+    skipprd::catalog_budget::set_catalog_operation_budget_override_for_test(Some(1));
+    let _override = BudgetOverrideGuard;
+    let budget = skipprd::catalog_budget::process_catalog_operation_budget();
+    let held_partition_permit = budget.acquire().await;
+    let temp = tempdir().unwrap();
+    let marker_path = temp.path().join("schema-global-catalog-budget.json");
+    let manifest_path = write_schema_manifest(
+        temp.path(),
+        "schema-global-catalog-budget",
+        "Glue",
+        "record_state",
+        Some(&helper_sha256()),
+        &helper_binary(),
+        Some(&marker_path),
+    );
+    let sink = RuntimeSchemaSinkPlugin::new(
+        ResolvedRuntimePlugin::load(&manifest_path).unwrap(),
+        "runtime_schema_global_catalog_budget".to_string(),
+        RuntimeBinding::Primary,
+        runtime_glue_schema_config(),
+    )
+    .await
+    .unwrap();
+
+    let run =
+        tokio::spawn(async move { sink.sync_schema("people", &sample_output_metadata()).await });
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert!(
+        !run.is_finished(),
+        "schema DDL must wait while partition work owns the global catalog permit"
+    );
+
+    drop(held_partition_permit);
+    run.await.unwrap().unwrap();
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(marker_path).unwrap()).unwrap();
+    assert_eq!(state["run_count"], 1);
+}
+
+#[tokio::test]
 async fn runtime_schema_sink_reuses_compaction_id_across_replays() {
     let temp = tempdir().unwrap();
     let marker_path = temp.path().join("schema-compaction-ids.json");

@@ -17,6 +17,7 @@ pub mod adapters;
 pub mod arr;
 pub mod benchmark;
 pub mod buffer;
+pub mod catalog_budget;
 pub mod catalog_coordinator;
 pub mod catalog_outbox;
 pub mod cli;

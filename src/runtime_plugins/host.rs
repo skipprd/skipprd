@@ -3894,6 +3894,8 @@ impl RuntimeSchemaSinkPlugin {
             )
             .await?;
 
+            crate::catalog_budget::refresh_process_catalog_operation_budget();
+            let _catalog_permit = crate::catalog_budget::acquire_catalog_operation_permit().await;
             let send_result = guard.send(&HostFrame::RunSchema(request.clone())).await;
             let recv_result = match send_result {
                 Ok(_) => guard.recv().await,
