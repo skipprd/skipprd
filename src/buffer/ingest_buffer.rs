@@ -1,8 +1,3 @@
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum PersistenceState {
-    MemoryOnly,
-    Persisted,
-}
 use crate::buffer::compaction_index::{
     CompactionGroupKey, CompactionIndex, CompactionKind, CompactionLaneKey, IndexedCompactionSlice,
     PlannedCompactionGroup,
@@ -153,29 +148,19 @@ const DEFAULT_GROUPED_STREAM_EAGER_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const GROUPED_STREAM_PREFETCH_PARTS: usize = 4;
 const GROUPED_STREAM_CHANNEL_CAPACITY: usize = 8;
 
-// Per-partition notify for quick wakeups
-#[allow(dead_code)]
-static PARTITION_NOTIFIES: Lazy<DashMap<PartitionKey, Arc<tokio::sync::Notify>>> =
-    Lazy::new(|| DashMap::new());
-
 // Global in-memory segment accumulator (reduces tiny WAL files across threads)
 static SEGMENT_LIVE: Lazy<Arc<std::sync::Mutex<GlobalSegment>>> =
     Lazy::new(|| Arc::new(std::sync::Mutex::new(GlobalSegment::new())));
 // Segment snapshot representation
 #[derive(Clone)]
-#[allow(dead_code)]
 struct SegmentPartitionMeta {
     bytes: u64,
     updated_at: SystemTime,
 }
 
-#[derive(Clone)]
-#[allow(dead_code)]
 struct SegmentSnapshot {
     id: String,
-    persistence: PersistenceState,
     created_at: SystemTime,
-    updated_at: SystemTime,
     total_bytes: u64,
     offsets: HashMap<OffsetKey, u64>,
     batches: HashMap<PartitionKey, Vec<RecordBatch>>,
@@ -197,9 +182,7 @@ impl SegmentSnapshot {
         let now = SystemTime::now();
         SegmentSnapshot {
             id,
-            persistence: PersistenceState::MemoryOnly,
             created_at: now,
-            updated_at: now,
             total_bytes,
             offsets,
             batches,
@@ -210,10 +193,6 @@ impl SegmentSnapshot {
     }
 }
 
-// Queue of snapshots produced by rotation in write()
-static SEGMENT_SNAPSHOTS: Lazy<
-    std::sync::Mutex<std::collections::VecDeque<Arc<std::sync::Mutex<SegmentSnapshot>>>>,
-> = Lazy::new(|| std::sync::Mutex::new(std::collections::VecDeque::with_capacity(8)));
 // Global single-flight guard to avoid double compaction of the same partition region
 static COMPACTION_IN_FLIGHT: OnceLazy<DashMap<(String, u64, u64), ()>> =
     OnceLazy::new(|| DashMap::new());
@@ -973,10 +952,6 @@ impl Buffers {
             .collect()
     }
 
-    pub fn new() -> Self {
-        Buffers
-    }
-
     pub(crate) fn live_segment_bytes() -> u64 {
         SEGMENT_LIVE
             .lock()
@@ -1038,148 +1013,11 @@ impl Buffers {
         Ok(added_bytes)
     }
 
-    // store selection moved to WalStoreFactory
-
-    // moved to SegmentFile::build_commit_header_bytes
-
-    // upload helpers removed; S3 writing is handled by WalStoreS3 via SegmentObject
-
-    pub fn write(&mut self, batches: Vec<IngestBufferBatch>) {
-        for mut ingest_buffer_batch in batches.into_iter() {
-            let sink_ref = ingest_buffer_batch.sink_ref.clone();
-            let namespace = ingest_buffer_batch._namespace.clone();
-            let partition = ingest_buffer_batch._partition.clone();
-            let time = ingest_buffer_batch._time.clone();
-            // Ensure the key reflects schema so schemas do not mix in one segment.
-            let schema_fingerprint = if ingest_buffer_batch._schema_fingerprint.is_empty() {
-                schema_fingerprint(&ingest_buffer_batch.schema)
-            } else {
-                ingest_buffer_batch._schema_fingerprint.clone()
-            };
-            let key = PartitionKey {
-                sink_ref,
-                namespace,
-                partition,
-                time,
-                schema_fingerprint,
-            };
-
-            let mut batches_vec = ingest_buffer_batch
-                .record_batches
-                .take()
-                .unwrap_or_default();
-            if batches_vec.is_empty() {
-                if Config::log_wal_enabled() {
-                    debug!(
-                        "WAL: skipped write ns={} part={} time={:?} (no record batches)",
-                        ingest_buffer_batch._namespace,
-                        ingest_buffer_batch._partition,
-                        ingest_buffer_batch._time
-                    );
-                }
-                continue;
-            }
-
-            let (byte_threshold, time_threshold) = Config::wal_rotation_thresholds();
-
-            let mut seg = SEGMENT_LIVE.lock().unwrap();
-            let age_secs = seg.flushed_at.elapsed().map(|d| d.as_secs()).unwrap_or(0);
-            let last_update_elapsed = seg.updated_at.elapsed().map(|d| d.as_secs()).unwrap_or(0);
-            let should_rotate = (seg.bytes >= byte_threshold
-                || age_secs >= time_threshold
-                || last_update_elapsed >= time_threshold)
-                && seg.bytes > 0;
-            if should_rotate {
-                let rotated_bytes = seg.bytes;
-                let (batches, offsets, cdc_meta, checkpoint_updates, total_bytes) = seg.take();
-                seg.flushed_at = SystemTime::now();
-                drop(seg);
-
-                let mut meta: HashMap<PartitionKey, SegmentPartitionMeta> = HashMap::new();
-                for (k, v) in batches.iter() {
-                    let bytes_estimate = v.iter().map(|b| b.get_array_memory_size() as u64).sum();
-                    meta.insert(
-                        k.clone(),
-                        SegmentPartitionMeta {
-                            bytes: bytes_estimate,
-                            updated_at: SystemTime::now(),
-                        },
-                    );
-                }
-                let blobs = serialize_cdc_meta_to_blobs(&cdc_meta, &batches);
-                let snapshot = SegmentSnapshot::new(
-                    Helpers::random_str(16),
-                    offsets,
-                    batches,
-                    meta,
-                    total_bytes,
-                    blobs,
-                    checkpoint_updates,
-                );
-                if Config::log_wal_enabled() || Config::debug_enabled() {
-                    let part_count = snapshot.meta.len();
-                    let reason = if rotated_bytes >= byte_threshold {
-                        "size"
-                    } else {
-                        "time"
-                    };
-                    info!(
-                        "Segment rotated: id={} reason={} total_bytes={} partitions={}",
-                        snapshot.id, reason, snapshot.total_bytes, part_count
-                    );
-                }
-                if let Ok(mut q) = SEGMENT_SNAPSHOTS.lock() {
-                    q.push_back(Arc::new(std::sync::Mutex::new(snapshot)));
-                    metrics_hot::set_wal_snapshot_ready_count(q.len());
-                }
-                seg = SEGMENT_LIVE.lock().unwrap();
-            }
-            seg.add(
-                key,
-                batches_vec.drain(..).collect(),
-                &ingest_buffer_batch.offsets,
-                ingest_buffer_batch.cdc_rows.take(),
-                ingest_buffer_batch.checkpoint_update.take(),
-            );
-        }
-    }
-
-    pub async fn flush(
-        &mut self,
-        offsets_db: Arc<Offsets>,
-        _shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
-    ) -> Result<(), ArrowError> {
-        let mut rows: u64 = 0;
-        let mut uploaded_bytes: u64 = 0;
-        let (snapshot_rows, snapshot_bytes) =
-            Self::flush_snapshot_queue_to_wal(offsets_db.as_ref()).await?;
-        rows += snapshot_rows;
-        uploaded_bytes += snapshot_bytes;
-
-        // `flush()` is the durability boundary for ingest tasks. If the live segment never
-        // reaches a later rotation point before a crash, it still needs to become WAL-visible.
-        let (live_rows, live_bytes) = Self::flush_live_segment_to_wal(offsets_db.as_ref()).await?;
-        rows += live_rows;
-        uploaded_bytes += live_bytes;
-
-        record_wal_write_metrics(rows, uploaded_bytes);
-
-        WAL_BYTES_TOTAL.fetch_add(uploaded_bytes, std::sync::atomic::Ordering::Relaxed);
-
-        Buffers::wake_compactor();
-
-        Ok(())
-    }
-
     async fn persist_snapshot_to_wal(
         snapshot: &mut SegmentSnapshot,
         offsets_db: &Offsets,
         context: &str,
-    ) -> Result<Option<SegmentWriteResult>, ArrowError> {
-        if snapshot.persistence != PersistenceState::MemoryOnly {
-            return Ok(None);
-        }
-
+    ) -> Result<SegmentWriteResult, ArrowError> {
         let snapshot_id = snapshot.id.clone();
         let partitions_meta = Self::segment_meta_to_store_meta(&snapshot.meta);
         let store = crate::buffer::wal_store::WalStoreFactory::for_batches(&snapshot.batches);
@@ -1243,7 +1081,6 @@ impl Buffers {
                 snapshot_id, write_result.total_rows, write_result.meta.total_bytes
             ));
         }
-        snapshot.persistence = PersistenceState::Persisted;
         if Config::debug_enabled() || Config::log_wal_enabled() {
             info!(
                 "WAL persist marking offsets durable id={} offset_sample={:?}",
@@ -1295,50 +1132,7 @@ impl Buffers {
         }
 
         metrics_hot::record_wal_segment_closure(snapshot.created_at.elapsed().unwrap_or_default());
-        Ok(Some(write_result))
-    }
-
-    async fn flush_snapshot_queue_to_wal(offsets_db: &Offsets) -> Result<(u64, u64), ArrowError> {
-        let mut rows: u64 = 0;
-        let mut uploaded_bytes: u64 = 0;
-
-        loop {
-            let next_snapshot_opt = {
-                let mut q = SEGMENT_SNAPSHOTS.lock().unwrap();
-                let next = q.pop_front();
-                metrics_hot::set_wal_snapshot_ready_count(q.len());
-                next
-            };
-            let Some(snap_arc) = next_snapshot_opt else {
-                break;
-            };
-
-            let persist_result = {
-                let mut snapshot = snap_arc.lock().unwrap().clone();
-                Self::persist_snapshot_to_wal(&mut snapshot, offsets_db, "drain rotated").await
-            };
-            match persist_result {
-                Ok(Some(write_result)) => {
-                    uploaded_bytes += write_result.meta.total_bytes;
-                    rows += write_result.total_rows;
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    let mut q = SEGMENT_SNAPSHOTS.lock().unwrap();
-                    q.push_front(snap_arc);
-                    metrics_hot::set_wal_snapshot_ready_count(q.len());
-                    return Err(e);
-                }
-            }
-        }
-
-        Ok((rows, uploaded_bytes))
-    }
-
-    pub(crate) async fn flush_snapshot_queue_for_writer(
-        offsets_db: &Offsets,
-    ) -> Result<(u64, u64), ArrowError> {
-        Self::flush_snapshot_queue_to_wal(offsets_db).await
+        Ok(write_result)
     }
 
     async fn flush_live_segment_to_wal(offsets_db: &Offsets) -> Result<(u64, u64), ArrowError> {
@@ -1379,8 +1173,7 @@ impl Buffers {
         );
 
         match Self::persist_snapshot_to_wal(&mut snapshot, offsets_db, "live flush").await {
-            Ok(Some(result)) => Ok((result.total_rows, result.meta.total_bytes)),
-            Ok(None) => Ok((0, 0)),
+            Ok(result) => Ok((result.total_rows, result.meta.total_bytes)),
             Err(e) => {
                 let batches = std::mem::take(&mut snapshot.batches);
                 let offsets = std::mem::take(&mut snapshot.offsets);
@@ -1653,9 +1446,6 @@ impl Buffers {
         };
         let measured_backlog = force
             || crate::metrics::counters::COMPACTION_PLANNER_READY_WORK_COUNT
-                .load(std::sync::atomic::Ordering::Relaxed)
-                > 0
-            || crate::metrics::counters::WAL_SNAPSHOT_READY_COUNT
                 .load(std::sync::atomic::Ordering::Relaxed)
                 > 0
             || crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
@@ -4410,10 +4200,6 @@ mod tests_wal_commit {
             let mut live = SEGMENT_LIVE.lock().unwrap();
             *live = GlobalSegment::new();
         }
-        {
-            let mut snapshots = SEGMENT_SNAPSHOTS.lock().unwrap();
-            snapshots.clear();
-        }
         SEGMENT_CACHE.clear();
         compaction_index().clear_all();
         metrics_hot::set_compaction_planner_ready_work_count(0);
@@ -4814,18 +4600,14 @@ mod tests_wal_commit {
             checkpoint_update: None,
         };
 
-        let mut buffers = Buffers::new();
-        buffers.write(vec![ingest_batch]);
+        Buffers::append_batches_to_live(vec![ingest_batch]).unwrap();
         assert_eq!(Buffers::segs_remaining(), 0);
 
-        let noop: Box<dyn crate::plugins::DataSink + Send + Sync> =
-            Box::new(crate::plugins::NoopOutputPlugin);
-        let output = Arc::new(noop);
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
             .unwrap();
-        rt.block_on(buffers.flush(offsets_db.clone(), output))
+        rt.block_on(flush_all_segments_direct(offsets_db.clone()))
             .unwrap();
 
         let seg_paths: Vec<PathBuf> = fs::read_dir(&base)
@@ -5420,16 +5202,7 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
 /// Force-flush all segments without going through the WAL writer command queue.
 /// Used by the writer itself and as a fallback before the writer has started.
 pub(crate) async fn flush_all_segments_direct(offsets_db: Arc<Offsets>) -> Result<(), ArrowError> {
-    let mut rows: u64 = 0;
-    let mut uploaded_bytes: u64 = 0;
-    let (snapshot_rows, snapshot_bytes) =
-        Buffers::flush_snapshot_queue_to_wal(offsets_db.as_ref()).await?;
-    rows += snapshot_rows;
-    uploaded_bytes += snapshot_bytes;
-
-    let (live_rows, live_bytes) = Buffers::flush_live_segment_to_wal(offsets_db.as_ref()).await?;
-    rows += live_rows;
-    uploaded_bytes += live_bytes;
+    let (rows, uploaded_bytes) = Buffers::flush_live_segment_to_wal(offsets_db.as_ref()).await?;
 
     record_wal_write_metrics(rows, uploaded_bytes);
     WAL_BYTES_TOTAL.fetch_add(uploaded_bytes, std::sync::atomic::Ordering::Relaxed);

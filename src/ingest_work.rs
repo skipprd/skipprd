@@ -2521,9 +2521,6 @@ impl Ingest {
                     crate::metrics::counters::COMPACTION_PLANNER_READY_WORK_COUNT
                         .load(Ordering::Relaxed)
                         > 0
-                        || crate::metrics::counters::WAL_SNAPSHOT_READY_COUNT
-                            .load(Ordering::Relaxed)
-                            > 0
                         || crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
                             .load(Ordering::Relaxed)
                             > 0;

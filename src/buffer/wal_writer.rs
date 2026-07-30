@@ -369,7 +369,6 @@ async fn flush_everything(
     last_flush: &mut Instant,
 ) -> Result<(), ArrowError> {
     flush_live_and_ack(offsets_db, pending_acks, last_flush).await;
-    Buffers::flush_snapshot_queue_for_writer(offsets_db.as_ref()).await?;
     Ok(())
 }
 
