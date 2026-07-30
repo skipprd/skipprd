@@ -61,8 +61,8 @@ use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
 use tracing::{debug, info, warn};
 
 const TIME_PARTITION_GRANULARITIES: [&str; 5] = ["year", "month", "day", "hour", "minute"];
-const ATHENA_MULTIPART_PART_SIZE: usize = 64 * 1024 * 1024;
-const ATHENA_BATCH_CHANNEL_CAPACITY: usize = 2;
+const ATHENA_MULTIPART_PART_SIZE: usize = 16 * 1024 * 1024;
+const ATHENA_BATCH_CHANNEL_CAPACITY: usize = 1;
 const ATHENA_BYTE_CHANNEL_CAPACITY: usize = 1;
 const ATHENA_MAX_IN_FLIGHT_PARTS: usize = 2;
 const ATHENA_MULTIPART_BEGIN_TIMEOUT_SECS: u64 = 120;
@@ -3503,11 +3503,11 @@ mod contract_schema_tests {
     #[test]
     fn athena_shared_writer_has_explicit_part_and_memory_bounds() {
         let config = athena_object_writer_config();
-        assert_eq!(config.part_size, 64 * 1024 * 1024);
+        assert_eq!(config.part_size, 16 * 1024 * 1024);
         assert_eq!(config.max_in_flight_parts, 2);
-        assert_eq!(config.batch_channel_capacity, 2);
+        assert_eq!(config.batch_channel_capacity, 1);
         assert_eq!(config.byte_channel_capacity, 1);
-        assert_eq!(config.transport_memory_bound_bytes(), 256 * 1024 * 1024);
+        assert_eq!(config.transport_memory_bound_bytes(), 64 * 1024 * 1024);
     }
 
     #[test]
