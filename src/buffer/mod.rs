@@ -5,11 +5,11 @@ pub mod compaction_transaction;
 pub mod completion_ledger;
 pub mod flush_execution_budget;
 pub mod ingest_buffer;
-pub mod sink_conflict;
 pub mod s3_wal_body_cache;
 pub mod s3_wal_memory_budget;
 pub mod segment_file;
 pub mod segment_object;
+pub mod sink_conflict;
 pub mod wal_store;
 pub mod wal_writer;
 // wal_accumulator removed in simplified model
