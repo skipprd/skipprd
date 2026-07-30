@@ -415,7 +415,9 @@ impl Default for GroupedBatchReaderConfig {
 }
 
 pub struct GroupedBatchReader {
-    stream: SendableRecordBatchStream,
+    stream: Option<SendableRecordBatchStream>,
+    chunk_stream:
+        Option<Pin<Box<dyn futures::Stream<Item = io::Result<RecordBatchChunk>> + Send + 'static>>>,
     schema: SchemaRef,
     grouping_key: GroupedWalPartitionKey,
     config: GroupedBatchReaderConfig,
@@ -433,10 +435,35 @@ impl GroupedBatchReader {
     ) -> Self {
         let schema = stream.schema();
         Self {
-            stream,
+            stream: Some(stream),
+            chunk_stream: None,
             schema,
             grouping_key,
             config,
+            chunk_index: 0,
+            rows_emitted: 0,
+            pending: None,
+            finished: false,
+        }
+    }
+
+    /// Build a reader over transport-preserved chunks.
+    ///
+    /// The producer remains responsible for validating chunk order, row offsets,
+    /// and final totals before yielding each chunk.
+    pub fn from_chunk_stream(
+        schema: SchemaRef,
+        grouping_key: GroupedWalPartitionKey,
+        chunk_stream: Pin<
+            Box<dyn futures::Stream<Item = io::Result<RecordBatchChunk>> + Send + 'static>,
+        >,
+    ) -> Self {
+        Self {
+            stream: None,
+            chunk_stream: Some(chunk_stream),
+            schema,
+            grouping_key,
+            config: GroupedBatchReaderConfig::default(),
             chunk_index: 0,
             rows_emitted: 0,
             pending: None,
@@ -456,6 +483,37 @@ impl GroupedBatchReader {
         if self.finished {
             return Ok(None);
         }
+        if let Some(chunk_stream) = self.chunk_stream.as_mut() {
+            let chunk = match chunk_stream.next().await {
+                Some(chunk) => chunk?,
+                None => {
+                    self.finished = true;
+                    return Ok(None);
+                }
+            };
+            if chunk.chunk_index != self.chunk_index
+                || chunk.row_offset != self.rows_emitted
+                || chunk.rows
+                    != chunk
+                        .batches
+                        .iter()
+                        .map(|batch| batch.num_rows() as u64)
+                        .sum::<u64>()
+            {
+                self.finished = true;
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "pre-chunked grouped stream mismatch at chunk {} row offset {}",
+                        chunk.chunk_index, chunk.row_offset
+                    ),
+                ));
+            }
+            self.chunk_index = self.chunk_index.saturating_add(1);
+            self.rows_emitted = self.rows_emitted.saturating_add(chunk.rows);
+            self.finished = chunk.final_chunk;
+            return Ok(Some(chunk));
+        }
 
         let mut batches = Vec::new();
         let mut rows = 0usize;
@@ -465,7 +523,13 @@ impl GroupedBatchReader {
             let next_batch = if let Some(batch) = self.pending.take() {
                 Some(batch)
             } else {
-                match self.stream.next().await {
+                match self
+                    .stream
+                    .as_mut()
+                    .expect("batch stream must be present")
+                    .next()
+                    .await
+                {
                     Some(Ok(batch)) => Some(batch),
                     Some(Err(err)) => return Err(io::Error::other(err.to_string())),
                     None => None,
@@ -503,7 +567,13 @@ impl GroupedBatchReader {
         }
 
         if !self.finished && self.pending.is_none() {
-            match self.stream.next().await {
+            match self
+                .stream
+                .as_mut()
+                .expect("batch stream must be present")
+                .next()
+                .await
+            {
                 Some(Ok(batch)) => {
                     self.pending = Some(batch);
                 }

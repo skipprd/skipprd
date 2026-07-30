@@ -1,12 +1,17 @@
 use std::collections::HashMap;
 use std::future::Future;
-use std::io;
+use std::io::{self, Cursor};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex as StdMutex};
+use std::task::{Context, Poll};
 
+use arrow::ipc::reader::StreamReader;
+use arrow::record_batch::RecordBatch;
+use arrow_schema::SchemaRef;
 use skippr_core::helpers::logging::init_logging;
 use skippr_core::plugins::{
-    DataSink, HasSchemaSinkSpec, HasSinkSpec, SchemaSink, SchemaSyncRequest, SinkPreflightOutcome,
-    SinkWriteOutcome,
+    DataSink, HasSchemaSinkSpec, HasSinkSpec, RecordBatchChunk, SchemaSink, SchemaSyncRequest,
+    SinkPreflightOutcome, SinkWriteOutcome,
 };
 #[cfg(test)]
 use tokio::io::AsyncRead;
@@ -26,12 +31,14 @@ use crate::protocol::{
     SinkWriteStats, RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV,
     SKIPPR_RUNTIME_DATA_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
-use crate::sdk::{decode_record_batch_stream, record_batches_to_stream};
+use crate::sdk::decode_record_batch_stream;
 use crate::sink_idempotency::ObjectWriteManifest;
 use crate::wire::{read_frame_or_eof, write_frame};
-use futures::StreamExt;
-use skippr_core::plugins::{GroupedBatchReader, GroupedBatchReaderConfig};
+use futures::Stream;
+use skippr_core::plugins::GroupedBatchReader;
 use skippr_core::sink_apply_identity::SINK_APPLY_ENVELOPE_V2;
+
+const SINK_DATA_ROUTE_CAPACITY: usize = 1;
 
 pub fn buffer_name_for_runtime_binding(binding: RuntimeBinding) -> String {
     match binding {
@@ -121,7 +128,9 @@ struct SinkDataRouter {
 
 impl SinkDataRouter {
     fn register(&self, request_id: u64) -> io::Result<mpsc::Receiver<HostDataFrame>> {
-        let (tx, rx) = mpsc::channel(8);
+        // One queued frame plus the frame currently consumed/decoded by the
+        // session bounds each route to at most two 128 MiB chunk envelopes.
+        let (tx, rx) = mpsc::channel(SINK_DATA_ROUTE_CAPACITY);
         let mut routes = self
             .routes
             .lock()
@@ -242,6 +251,250 @@ struct CollectedSinkPayload {
     chunks: Vec<SinkChunk>,
     rows: u64,
     bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RuntimeGroupedPayloadProgress {
+    chunks: u32,
+    rows: u64,
+    bytes: u64,
+    finished: bool,
+}
+
+struct DecodedRuntimeSinkChunk {
+    chunk_index: u32,
+    row_offset: u64,
+    rows: u64,
+    memory_bytes: usize,
+    batches: Vec<RecordBatch>,
+}
+
+fn decode_runtime_sink_chunk(
+    chunk: SinkChunk,
+    expected_request_id: u64,
+    expected_chunk_index: u32,
+    expected_row_offset: u64,
+    expected_schema: Option<&SchemaRef>,
+) -> io::Result<(SchemaRef, DecodedRuntimeSinkChunk, u64)> {
+    if chunk.request_id != expected_request_id
+        || chunk.chunk_index != expected_chunk_index
+        || chunk.row_offset != expected_row_offset
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "grouped sink chunk mismatch for request {}: got request {} chunk {} row offset {}, expected chunk {} row offset {}",
+                expected_request_id,
+                chunk.request_id,
+                chunk.chunk_index,
+                chunk.row_offset,
+                expected_chunk_index,
+                expected_row_offset
+            ),
+        ));
+    }
+    chunk.validate_bound().map_err(io::Error::other)?;
+    let wire_bytes = chunk.arrow_stream_bytes.len() as u64;
+    let reader = StreamReader::try_new(Cursor::new(chunk.arrow_stream_bytes), None)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+    let schema = reader.schema();
+    if expected_schema.is_some_and(|expected| expected.as_ref() != schema.as_ref()) {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "grouped sink chunk {} schema does not match the first chunk",
+                chunk.chunk_index
+            ),
+        ));
+    }
+    let batches = reader
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err.to_string()))?;
+    let decoded_rows = batches
+        .iter()
+        .map(|batch| batch.num_rows() as u64)
+        .sum::<u64>();
+    if decoded_rows != chunk.rows {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "grouped sink chunk {} row total mismatch: frame={} decoded={}",
+                chunk.chunk_index, chunk.rows, decoded_rows
+            ),
+        ));
+    }
+    let memory_bytes = batches
+        .iter()
+        .flat_map(|batch| batch.columns())
+        .map(|column| column.get_array_memory_size())
+        .sum();
+    Ok((
+        schema,
+        DecodedRuntimeSinkChunk {
+            chunk_index: chunk.chunk_index,
+            row_offset: chunk.row_offset,
+            rows: chunk.rows,
+            memory_bytes,
+            batches,
+        },
+        wire_bytes,
+    ))
+}
+
+impl DecodedRuntimeSinkChunk {
+    fn into_record_batch_chunk(self, final_chunk: bool) -> RecordBatchChunk {
+        RecordBatchChunk {
+            chunk_index: self.chunk_index as u64,
+            row_offset: self.row_offset,
+            final_chunk,
+            rows: self.rows,
+            bytes: self.memory_bytes,
+            batches: self.batches,
+        }
+    }
+}
+
+struct RuntimeGroupedChunkStream {
+    request_id: u64,
+    schema: SchemaRef,
+    receiver: mpsc::Receiver<HostDataFrame>,
+    pending: Option<DecodedRuntimeSinkChunk>,
+    progress: Arc<StdMutex<RuntimeGroupedPayloadProgress>>,
+    terminal: bool,
+}
+
+impl RuntimeGroupedChunkStream {
+    async fn start(
+        mut receiver: mpsc::Receiver<HostDataFrame>,
+        request_id: u64,
+    ) -> io::Result<(
+        SchemaRef,
+        Pin<Box<dyn Stream<Item = io::Result<RecordBatchChunk>> + Send + 'static>>,
+        Arc<StdMutex<RuntimeGroupedPayloadProgress>>,
+    )> {
+        let first = receiver.recv().await.ok_or_else(|| {
+            io::Error::new(
+                io::ErrorKind::UnexpectedEof,
+                format!(
+                    "runtime host closed grouped sink data channel before first chunk for request {request_id}"
+                ),
+            )
+        })?;
+        let HostDataFrame::SinkChunk(first) = first else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("grouped sink request {request_id} received FinishSink before first chunk"),
+            ));
+        };
+        let (schema, first, wire_bytes) = decode_runtime_sink_chunk(first, request_id, 0, 0, None)?;
+        let progress = Arc::new(StdMutex::new(RuntimeGroupedPayloadProgress {
+            chunks: 1,
+            rows: first.rows,
+            bytes: wire_bytes,
+            finished: false,
+        }));
+        let stream = Self {
+            request_id,
+            schema: Arc::clone(&schema),
+            receiver,
+            pending: Some(first),
+            progress: Arc::clone(&progress),
+            terminal: false,
+        };
+        Ok((schema, Box::pin(stream), progress))
+    }
+
+    fn fail(&mut self, err: io::Error) -> Poll<Option<io::Result<RecordBatchChunk>>> {
+        self.terminal = true;
+        self.pending = None;
+        Poll::Ready(Some(Err(err)))
+    }
+}
+
+impl Stream for RuntimeGroupedChunkStream {
+    type Item = io::Result<RecordBatchChunk>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if self.terminal {
+            return Poll::Ready(None);
+        }
+        let frame = match self.receiver.poll_recv(cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Some(frame)) => frame,
+            Poll::Ready(None) => {
+                let request_id = self.request_id;
+                return self.fail(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    format!(
+                        "runtime host closed grouped sink data channel before FinishSink for request {}",
+                        request_id
+                    ),
+                ));
+            }
+        };
+        match frame {
+            HostDataFrame::SinkChunk(chunk) => {
+                let snapshot = *self
+                    .progress
+                    .lock()
+                    .expect("runtime grouped sink progress poisoned");
+                let (schema, next, wire_bytes) = match decode_runtime_sink_chunk(
+                    chunk,
+                    self.request_id,
+                    snapshot.chunks,
+                    snapshot.rows,
+                    Some(&self.schema),
+                ) {
+                    Ok(decoded) => decoded,
+                    Err(err) => return self.fail(err),
+                };
+                debug_assert_eq!(schema.as_ref(), self.schema.as_ref());
+                {
+                    let mut progress = self
+                        .progress
+                        .lock()
+                        .expect("runtime grouped sink progress poisoned");
+                    progress.chunks = progress.chunks.saturating_add(1);
+                    progress.rows = progress.rows.saturating_add(next.rows);
+                    progress.bytes = progress.bytes.saturating_add(wire_bytes);
+                }
+                let previous = self
+                    .pending
+                    .replace(next)
+                    .expect("grouped sink stream must retain one pending chunk");
+                Poll::Ready(Some(Ok(previous.into_record_batch_chunk(false))))
+            }
+            HostDataFrame::FinishSink(finish) => {
+                let mut progress = self
+                    .progress
+                    .lock()
+                    .expect("runtime grouped sink progress poisoned");
+                if finish.request_id != self.request_id
+                    || finish.chunks != progress.chunks
+                    || finish.rows != progress.rows
+                    || finish.bytes != progress.bytes
+                {
+                    drop(progress);
+                    let request_id = self.request_id;
+                    return self.fail(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "FinishSink totals mismatch for grouped request {}",
+                            request_id
+                        ),
+                    ));
+                }
+                progress.finished = true;
+                drop(progress);
+                self.terminal = true;
+                let final_chunk = self
+                    .pending
+                    .take()
+                    .expect("grouped sink stream must retain its final chunk");
+                Poll::Ready(Some(Ok(final_chunk.into_record_batch_chunk(true))))
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -638,30 +891,35 @@ where
                 return Ok(());
             }
         };
-    let payload = read_sink_payload_channel(&mut data_receiver, request.request_id).await?;
-    let outcome = match request.payload_mode {
+    let (outcome, payload_rows, payload_bytes) = match request.payload_mode {
         RuntimeSinkPayloadMode::FullStream => {
+            // FullStream is one Arrow IPC stream split only for transport. Its
+            // framing is reassembled before decode; compaction uses the bounded
+            // GroupedChunks path below.
+            let payload = read_sink_payload_channel(&mut data_receiver, request.request_id).await?;
             let arrow_stream_bytes = payload
                 .chunks
                 .iter()
                 .flat_map(|chunk| chunk.arrow_stream_bytes.iter().copied())
                 .collect();
-            run_sink_request(
+            let outcome = run_sink_request(
                 request.clone(),
                 arrow_stream_bytes,
                 &primary_plugin,
                 &deadletter_plugin,
             )
-            .await?
+            .await?;
+            (outcome, payload.rows, payload.bytes)
         }
         RuntimeSinkPayloadMode::GroupedChunks => {
-            run_grouped_sink_request(
+            let (outcome, progress) = run_grouped_sink_request(
                 request.clone(),
-                &payload.chunks,
+                data_receiver,
                 &primary_plugin,
                 &deadletter_plugin,
             )
-            .await?
+            .await?;
+            (outcome, progress.rows, progress.bytes)
         }
     };
     if let Some(manifest) = ledger_manifest.as_ref() {
@@ -681,8 +939,8 @@ where
                 CommitReceiptAuthority::SinkWrite,
             ),
             stats: SinkWriteStats {
-                rows: Some(payload.rows),
-                bytes: Some(payload.bytes),
+                rows: Some(payload_rows),
+                bytes: Some(payload_bytes),
                 ..SinkWriteStats::default()
             },
             // Glue outbox migration owns production of catalog intents.
@@ -972,13 +1230,14 @@ where
 
 async fn run_grouped_sink_request<P>(
     request: SinkRunRequest,
-    chunks: &[SinkChunk],
+    receiver: mpsc::Receiver<HostDataFrame>,
     primary_plugin: &Option<Arc<P>>,
     deadletter_plugin: &Option<Arc<P>>,
-) -> io::Result<SinkWriteOutcome>
+) -> io::Result<(SinkWriteOutcome, RuntimeGroupedPayloadProgress)>
 where
     P: DataSink + HasSinkSpec + Send + Sync,
 {
+    let request_id = request.request_id;
     let plugin_slot = match request.binding {
         RuntimeBinding::Primary => primary_plugin,
         RuntimeBinding::Deadletter => deadletter_plugin,
@@ -1014,38 +1273,33 @@ where
     let replay_safe =
         <<P::Spec as skippr_core::plugins::SinkSpec>::WriteSupport as skippr_core::plugins::SinkWriteSupport>::CAN_RETURN_ALREADY_APPLIED;
 
-    let mut all_batches = Vec::new();
-    let mut schema = None;
-    for chunk in chunks {
-        let mut stream = decode_record_batch_stream(chunk.arrow_stream_bytes.clone())?;
-        if schema.is_none() {
-            schema = Some(stream.schema());
-        }
-        while let Some(batch) = stream.next().await {
-            all_batches.push(batch?);
-        }
-    }
-
-    let schema = schema.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            "grouped sink request contained no schema",
-        )
-    })?;
-    let batch_stream = record_batches_to_stream(schema.clone(), all_batches);
-    let reader = GroupedBatchReader::new(
-        batch_stream,
+    let (schema, chunk_stream, progress) =
+        RuntimeGroupedChunkStream::start(receiver, request_id).await?;
+    let reader = GroupedBatchReader::from_chunk_stream(
+        schema,
         grouped_ctx.grouping_key.clone(),
-        GroupedBatchReaderConfig::default(),
+        chunk_stream,
     );
     let outcome = plugin.sync_grouped(reader, grouped_ctx).await?;
+    let progress = *progress
+        .lock()
+        .expect("runtime grouped sink progress poisoned");
+    if !progress.finished {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "runtime grouped sink request {} returned before consuming FinishSink",
+                request_id
+            ),
+        ));
+    }
     if outcome == SinkWriteOutcome::AlreadyApplied && !replay_safe {
         return Err(io::Error::other(
             "runtime sink returned AlreadyApplied without declaring idempotent replay support",
         ));
     }
 
-    Ok(outcome)
+    Ok((outcome, progress))
 }
 
 fn local_idempotency_manifest_path(
@@ -1387,6 +1641,8 @@ where
 mod tests {
     use super::*;
     use crate::wire::write_frame;
+    use arrow::array::Int64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
     use skippr_core::plugins::cdc::{sink_capabilities, SinkCapability};
     use skippr_core::plugins::{
         DeterministicObjectOverwrite, GroupedBatchReader, HasSinkSpec, SinkSpec,
@@ -1430,6 +1686,93 @@ mod tests {
         }
     }
 
+    struct StreamingTestSink {
+        first_chunk_seen: Arc<tokio::sync::Notify>,
+        chunks: Arc<StdMutex<Vec<(u64, u64, bool)>>>,
+    }
+
+    impl HasSinkSpec for StreamingTestSink {
+        type Spec = TestSinkSpec;
+    }
+
+    #[async_trait::async_trait]
+    impl DataSink for StreamingTestSink {
+        async fn sync(
+            &self,
+            _stream: datafusion::execution::SendableRecordBatchStream,
+            _filename: String,
+            _cdc_ctx: Option<&skippr_core::plugins::cdc::SyncContext>,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn sync_grouped(
+            &self,
+            mut reader: GroupedBatchReader,
+            _ctx: skippr_core::plugins::GroupedSinkWriteContext<'_>,
+        ) -> io::Result<SinkWriteOutcome> {
+            while let Some(chunk) = reader.next_chunk().await? {
+                let mut chunks = self.chunks.lock().unwrap();
+                chunks.push((chunk.chunk_index, chunk.row_offset, chunk.final_chunk));
+                let first = chunks.len() == 1;
+                drop(chunks);
+                if first {
+                    self.first_chunk_seen.notify_one();
+                }
+            }
+            Ok(SinkWriteOutcome::Applied)
+        }
+
+        fn capability(&self) -> &'static SinkCapability {
+            &sink_capabilities::FILE
+        }
+    }
+
+    fn grouped_test_request(request_id: u64) -> SinkRunRequest {
+        SinkRunRequest {
+            request_id,
+            compaction_id: format!("c{request_id}"),
+            idempotency_key: format!("k{request_id}"),
+            wal_refs: vec![crate::protocol::RuntimeWalPartRef {
+                segment_id: "seg-1".into(),
+                source: "local".into(),
+                start: 0,
+                len: 10,
+                sink_ref: "primary".into(),
+                namespace: "events".into(),
+                partition: "day=2026-07-30".into(),
+                time: None,
+                schema_fingerprint: "schema".into(),
+                cdc_meta_hash: None,
+            }],
+            write_semantics:
+                skippr_core::buffer::compaction_transaction::SinkWriteSemantics::IdempotentAtLeastOnce,
+            schema_fingerprint: "schema".into(),
+            binding: RuntimeBinding::Primary,
+            required_schema_version: 3,
+            filename: "namespace=events".into(),
+            cdc_ctx: None,
+            source_contract: None,
+            payload_mode: RuntimeSinkPayloadMode::GroupedChunks,
+        }
+    }
+
+    fn encoded_test_chunk(request_id: u64, chunk_index: u32, row_offset: u64) -> SinkChunk {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let batch = RecordBatch::try_new(
+            schema,
+            vec![Arc::new(Int64Array::from(vec![chunk_index as i64]))],
+        )
+        .unwrap();
+        SinkChunk {
+            request_id,
+            chunk_index,
+            row_offset,
+            rows: 1,
+            arrow_stream_bytes: crate::sdk::encode_record_batches(&[batch]).unwrap(),
+        }
+    }
+
     #[tokio::test]
     async fn ready_payload_requires_explicit_finish_sink() {
         let (mut writer, mut reader) = tokio::io::duplex(4096);
@@ -1449,6 +1792,85 @@ mod tests {
 
         let err = read_sink_payload(&mut reader, 7).await.unwrap_err();
         assert!(err.to_string().contains("before FinishSink"));
+    }
+
+    #[tokio::test]
+    async fn grouped_chunks_stream_before_finish_with_bounded_backpressure() {
+        let request_id = 41;
+        let first_chunk_seen = Arc::new(tokio::sync::Notify::new());
+        let chunks = Arc::new(StdMutex::new(Vec::new()));
+        let sink = Arc::new(StreamingTestSink {
+            first_chunk_seen: Arc::clone(&first_chunk_seen),
+            chunks: Arc::clone(&chunks),
+        });
+        let (sender, receiver) = mpsc::channel(SINK_DATA_ROUTE_CAPACITY);
+        let request = grouped_test_request(request_id);
+        let run = tokio::spawn(async move {
+            run_grouped_sink_request(request, receiver, &Some(sink), &None).await
+        });
+
+        sender
+            .send(HostDataFrame::SinkChunk(encoded_test_chunk(
+                request_id, 0, 0,
+            )))
+            .await
+            .unwrap();
+        sender
+            .send(HostDataFrame::SinkChunk(encoded_test_chunk(
+                request_id, 1, 1,
+            )))
+            .await
+            .unwrap();
+        let seen = first_chunk_seen.notified();
+        tokio::time::timeout(std::time::Duration::from_secs(1), seen)
+            .await
+            .expect("sink should consume the first transport chunk before FinishSink");
+        assert!(!run.is_finished());
+
+        let finish = HostDataFrame::FinishSink(crate::protocol::FinishSink {
+            request_id,
+            chunks: 2,
+            rows: 2,
+            bytes: encoded_test_chunk(request_id, 0, 0)
+                .arrow_stream_bytes
+                .len() as u64
+                + encoded_test_chunk(request_id, 1, 1)
+                    .arrow_stream_bytes
+                    .len() as u64,
+        });
+        sender.send(finish).await.unwrap();
+        let (outcome, progress) = run.await.unwrap().unwrap();
+        assert_eq!(outcome, SinkWriteOutcome::Applied);
+        assert_eq!(
+            progress,
+            RuntimeGroupedPayloadProgress {
+                chunks: 2,
+                rows: 2,
+                bytes: progress.bytes,
+                finished: true,
+            }
+        );
+        assert_eq!(*chunks.lock().unwrap(), vec![(0, 0, false), (1, 1, true)]);
+
+        let (sender, mut receiver) = mpsc::channel(SINK_DATA_ROUTE_CAPACITY);
+        sender
+            .send(HostDataFrame::SinkChunk(encoded_test_chunk(
+                request_id, 0, 0,
+            )))
+            .await
+            .unwrap();
+        let blocked = sender.send(HostDataFrame::SinkChunk(encoded_test_chunk(
+            request_id, 1, 1,
+        )));
+        tokio::pin!(blocked);
+        assert!(
+            tokio::time::timeout(std::time::Duration::from_millis(25), &mut blocked)
+                .await
+                .is_err(),
+            "a second queued 128 MiB-capable frame must backpressure the demux"
+        );
+        let _ = receiver.recv().await.unwrap();
+        blocked.await.unwrap();
     }
 
     #[tokio::test]
