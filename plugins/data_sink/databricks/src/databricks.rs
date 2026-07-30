@@ -16,6 +16,9 @@ use skippr_runtime_sdk::sink_compat::BufferChunker;
 use tracing::{error, info};
 
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
+const DATABRICKS_BULK_CDC_BLOCKER: &str = "multi-table CDC transactions require DBR 18+ \
+    Unity Catalog managed tables with catalog commits enabled, which this connector cannot \
+    currently require for every configured target";
 
 pub struct DatabricksCdcBackend;
 
@@ -94,8 +97,12 @@ impl DataSink for DataSinkDatabricksPlugin {
                 chunk.chunk_index == 0 && chunk.final_chunk,
                 chunk_cdc.as_ref(),
             );
-            self.sync(chunk.into_stream(schema.clone()), chunk_ctx.filename, chunk_ctx.cdc_ctx)
-                .await?;
+            self.sync(
+                chunk.into_stream(schema.clone()),
+                chunk_ctx.filename,
+                chunk_ctx.cdc_ctx,
+            )
+            .await?;
         }
         Ok(skippr_runtime_sdk::plugins::SinkWriteOutcome::Applied)
     }
@@ -343,12 +350,23 @@ impl DataSinkDatabricksPlugin {
         namespace.replace('.', "_").to_lowercase()
     }
 
+    /// Databricks multi-table transactions require DBR 18+ plus Unity Catalog
+    /// managed tables with catalog commits enabled. This connector also
+    /// accepts ordinary/external Delta targets and cannot currently require or
+    /// verify those prerequisites. Keep the existing replay-guarded path until
+    /// the capability can be negotiated; bulk staging only one side would
+    /// weaken delete/replay safety.
     async fn sync_cdc(
         &self,
         mut stream: SendableRecordBatchStream,
         filename: String,
         ctx: &skippr_runtime_sdk::plugins::cdc::SyncContext,
     ) -> Result<(), std::io::Error> {
+        tracing::debug!(
+            target: "databricks",
+            blocker = DATABRICKS_BULK_CDC_BLOCKER,
+            "bulk CDC staging deferred"
+        );
         use super::cdc_apply::{
             ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
             tombstone_table_name, upsert_if_newer_sql,
@@ -572,5 +590,17 @@ impl DataSinkDatabricksPlugin {
             total_rows, catalog, schema, table_name
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::DATABRICKS_BULK_CDC_BLOCKER;
+
+    #[test]
+    fn bulk_cdc_blocker_records_required_transaction_prerequisites() {
+        assert!(DATABRICKS_BULK_CDC_BLOCKER.contains("DBR 18+"));
+        assert!(DATABRICKS_BULK_CDC_BLOCKER.contains("catalog commits"));
+        assert!(DATABRICKS_BULK_CDC_BLOCKER.contains("every configured target"));
     }
 }
