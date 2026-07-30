@@ -99,6 +99,13 @@ fn athena_object_writer_config() -> ObjectWriterConfig {
     }
 }
 
+fn sum_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
+    match (left, right) {
+        (None, None) => None,
+        (left, right) => Some(left.unwrap_or(0).saturating_add(right.unwrap_or(0))),
+    }
+}
+
 fn grouped_receipt_from_applied(
     manifest: &ObjectWriteManifest,
     bucket: &str,
@@ -748,9 +755,19 @@ impl DataSink for DataSinkAthenaPlugin {
         stream: SendableRecordBatchStream,
         ctx: SinkWriteContext<'_>,
     ) -> Result<SinkWriteOutcome, std::io::Error> {
+        self.sync_with_context_call_result(stream, ctx)
+            .await
+            .map(|result| result.outcome)
+    }
+
+    async fn sync_with_context_call_result(
+        &self,
+        stream: SendableRecordBatchStream,
+        ctx: SinkWriteContext<'_>,
+    ) -> Result<SinkCallResult, std::io::Error> {
         if !ctx.is_grouped() {
             self.sync_with_context(stream, ctx).await?;
-            return Ok(SinkWriteOutcome::Applied);
+            return Ok(SinkCallResult::outcome(SinkWriteOutcome::Applied));
         }
         ctx.validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
             .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err.to_string()))?;
@@ -791,16 +808,27 @@ impl DataSink for DataSinkAthenaPlugin {
             ctx.schema_fingerprint.clone(),
             &ctx.wal_refs,
         );
-        self.inner_sync(
-            stream,
-            ctx.filename,
-            write_policy,
-            resolved_contract.as_ref(),
-            Some(ctx.idempotency_key.as_str()),
-            Some(&manifest),
-        )
-        .await
-        .map(|(outcome, _)| outcome)
+        let (outcome, applied) = self
+            .inner_sync(
+                stream,
+                ctx.filename,
+                write_policy,
+                resolved_contract.as_ref(),
+                Some(ctx.idempotency_key.as_str()),
+                Some(&manifest),
+            )
+            .await?;
+        let mut result = SinkCallResult::outcome(outcome);
+        if let Some(applied) = applied {
+            result.stats = SinkWriteStats {
+                rows: (applied.rows > 0).then_some(applied.rows),
+                bytes: (applied.bytes > 0).then_some(applied.bytes),
+                objects: Some(1),
+                ..SinkWriteStats::default()
+            };
+            result.catalog_intents = applied.catalog_intents;
+        }
+        Ok(result)
     }
 
     async fn sync_grouped(
@@ -812,7 +840,10 @@ impl DataSink for DataSinkAthenaPlugin {
             .validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
             .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err.to_string()))?;
         if self.should_use_legacy_grouped_chunks(&ctx).await? {
-            return self.sync_grouped_legacy_chunks(&mut reader, ctx).await;
+            return self
+                .sync_grouped_legacy_chunks(&mut reader, ctx)
+                .await
+                .map(|result| result.outcome);
         }
         self.sync_grouped_single_object(reader, ctx)
             .await
@@ -828,10 +859,7 @@ impl DataSink for DataSinkAthenaPlugin {
             .validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
             .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err.to_string()))?;
         if self.should_use_legacy_grouped_chunks(&ctx).await? {
-            return self
-                .sync_grouped_legacy_chunks(&mut reader, ctx)
-                .await
-                .map(SinkCallResult::outcome);
+            return self.sync_grouped_legacy_chunks(&mut reader, ctx).await;
         }
         self.sync_grouped_single_object(reader, ctx).await
     }
@@ -911,9 +939,10 @@ impl DataSinkAthenaPlugin {
         &self,
         reader: &mut skippr_runtime_sdk::plugins::GroupedBatchReader,
         ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
-    ) -> Result<SinkWriteOutcome, std::io::Error> {
+    ) -> Result<SinkCallResult, std::io::Error> {
         let schema = reader.schema();
         let mut applied = false;
+        let mut result = SinkCallResult::outcome(SinkWriteOutcome::AlreadyApplied);
         while let Some(chunk) = reader.next_chunk().await? {
             let chunk_cdc = ctx.chunk_cdc_context(&chunk)?;
             let chunk_ctx = ctx.chunk_sink_write_context_with_cdc(
@@ -921,19 +950,23 @@ impl DataSinkAthenaPlugin {
                 chunk.chunk_index == 0 && chunk.final_chunk,
                 chunk_cdc.as_ref(),
             );
-            if self
-                .sync_with_context_result(chunk.into_stream(schema.clone()), chunk_ctx)
-                .await?
-                == SinkWriteOutcome::Applied
-            {
+            let chunk_result = self
+                .sync_with_context_call_result(chunk.into_stream(schema.clone()), chunk_ctx)
+                .await?;
+            if chunk_result.outcome == SinkWriteOutcome::Applied {
                 applied = true;
             }
+            result.stats.rows = sum_optional(result.stats.rows, chunk_result.stats.rows);
+            result.stats.bytes = sum_optional(result.stats.bytes, chunk_result.stats.bytes);
+            result.stats.objects = sum_optional(result.stats.objects, chunk_result.stats.objects);
+            result.catalog_intents.extend(chunk_result.catalog_intents);
         }
-        Ok(if applied {
+        result.outcome = if applied {
             SinkWriteOutcome::Applied
         } else {
             SinkWriteOutcome::AlreadyApplied
-        })
+        };
+        Ok(result)
     }
 
     async fn sync_grouped_single_object(
@@ -1601,7 +1634,17 @@ impl DataSinkAthenaPlugin {
                 .manifest_matches(&idempotency_manifest_key, manifest)
                 .await?
             {
-                return Ok((SinkWriteOutcome::AlreadyApplied, None));
+                return Ok((
+                    SinkWriteOutcome::AlreadyApplied,
+                    Some(InnerSyncApplied {
+                        final_key,
+                        rows: 0,
+                        bytes: 0,
+                        etag: None,
+                        checksum: None,
+                        catalog_intents,
+                    }),
+                ));
             }
         }
 
