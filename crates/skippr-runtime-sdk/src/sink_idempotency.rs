@@ -5,7 +5,8 @@ use async_trait::async_trait;
 use serde_derive::{Deserialize, Serialize};
 
 use crate::protocol::RuntimeWalPartRef;
-use skippr_core::sink_apply_identity::{canonical_wal_refs_fingerprint, SINK_APPLY_ENVELOPE_V2};
+pub use skippr_core::sink_apply_identity::canonical_wal_refs_fingerprint;
+use skippr_core::sink_apply_identity::SINK_APPLY_ENVELOPE_V2;
 
 fn is_false(value: &bool) -> bool {
     !*value

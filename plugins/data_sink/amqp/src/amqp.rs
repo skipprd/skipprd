@@ -300,10 +300,19 @@ fn encode_row(
         );
     }
     if !ctx.wal_refs.is_empty() {
-        let wal_refs = ctx
-            .wal_refs
-            .iter()
-            .map(|wal_ref| {
+        let fingerprint =
+            skippr_runtime_sdk::sink_idempotency::canonical_wal_refs_fingerprint(ctx.wal_refs);
+        map.insert(
+            "_skippr_wal_refs_fingerprint".to_string(),
+            serde_json::Value::String(fingerprint),
+        );
+        map.insert(
+            "_skippr_wal_ref_count".to_string(),
+            serde_json::Value::Number((ctx.wal_refs.len() as u64).into()),
+        );
+        if let [wal_ref] = ctx.wal_refs {
+            map.insert(
+                "_skippr_wal_ref".to_string(),
                 serde_json::json!({
                     "segment_id": wal_ref.segment_id,
                     "source": wal_ref.source,
@@ -315,13 +324,9 @@ fn encode_row(
                     "time": wal_ref.time,
                     "schema_fingerprint": wal_ref.schema_fingerprint,
                     "cdc_meta_hash": wal_ref.cdc_meta_hash.map(hex::encode),
-                })
-            })
-            .collect();
-        map.insert(
-            "_skippr_wal_refs".to_string(),
-            serde_json::Value::Array(wal_refs),
-        );
+                }),
+            );
+        }
     }
 
     serde_json::to_vec(&map).map_err(amqp_error)
@@ -804,6 +809,8 @@ mod tests {
             compaction_id: Some("compaction-19"),
             wal_refs: &wal_refs,
         };
+        let expected_fingerprint =
+            skippr_runtime_sdk::sink_idempotency::canonical_wal_refs_fingerprint(&wal_refs);
 
         let expected_mutations = ["snapshot", "insert", "update", "delete"];
         for (index, expected_mutation) in expected_mutations.iter().enumerate() {
@@ -820,12 +827,13 @@ mod tests {
                 format!("00{:02x}", index as u8 + 10)
             );
             assert_eq!(value["_skippr_compaction_id"], "compaction-19");
-            assert_eq!(value["_skippr_wal_refs"].as_array().unwrap().len(), 2);
-            assert_eq!(value["_skippr_wal_refs"][0]["segment_id"], "segment-a");
             assert_eq!(
-                value["_skippr_wal_refs"][0]["cdc_meta_hash"],
-                "abababababababababababababababababababababababababababababababab"
+                value["_skippr_wal_refs_fingerprint"],
+                expected_fingerprint
             );
+            assert_eq!(value["_skippr_wal_ref_count"], 2);
+            assert!(value.get("_skippr_wal_refs").is_none());
+            assert!(value.get("_skippr_wal_ref").is_none());
         }
     }
 }
