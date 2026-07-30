@@ -1081,15 +1081,13 @@ impl DataSinkAthenaPlugin {
         compaction_id: &str,
         namespace: &str,
     ) -> io::Result<bool> {
-        for chunk_index in 0u64..256 {
-            let chunk_key = legacy_chunk_idempotency_key(compaction_id, chunk_index);
-            let manifest_key =
-                sidecar_manifest_object_key(&self.config.s3_prefix, namespace, &chunk_key);
-            if self.object_exists(&manifest_key).await? {
-                return Ok(true);
-            }
-        }
-        Ok(false)
+        // Legacy grouped writes were ordered and always began with chunk zero.
+        // One authoritative sidecar probe preserves replay compatibility without
+        // placing hundreds of sequential S3 HEAD requests on every new write.
+        let chunk_key = legacy_chunk_idempotency_key(compaction_id, 0);
+        let manifest_key =
+            sidecar_manifest_object_key(&self.config.s3_prefix, namespace, &chunk_key);
+        self.object_exists(&manifest_key).await
     }
 
     async fn object_exists(&self, key: &str) -> io::Result<bool> {
