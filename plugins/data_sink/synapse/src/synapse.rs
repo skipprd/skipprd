@@ -10,7 +10,7 @@ use skippr_runtime_sdk::sink_compat::BufferChunker;
 use tiberius::{Client, Config as TibConfig};
 use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 
@@ -21,6 +21,14 @@ impl super::cdc_apply::CdcApplyBackend for SynapseCdcBackend {
 
     fn binary_literal(hex: &str) -> String {
         format!("CONVERT(VARBINARY(MAX), 0x{hex})")
+    }
+
+    fn tx_begin() -> &'static str {
+        "BEGIN TRANSACTION;\n"
+    }
+
+    fn tx_commit() -> &'static str {
+        "\nCOMMIT TRANSACTION;"
     }
 
     fn ddl_add_order_token_column(fq_table: &str) -> String {
@@ -223,8 +231,8 @@ impl DataSinkSynapsePlugin {
     ) -> Result<(), std::io::Error> {
         use super::cdc_apply::{
             append_record_batch_to_cdc_apply, ddl_add_order_token_column,
-            ddl_create_tombstone_table, warehouse_bulk_cdc_sql, CdcApplyBatch, CdcApplyColumn,
-            CdcWarehouseDialect,
+            ddl_create_tombstone_table, guarded_warehouse_cdc_row_sql, warehouse_bulk_cdc_sql,
+            CdcApplyBatch, CdcApplyColumn, CdcWarehouseDialect,
         };
         use skippr_runtime_sdk::metrics::counters;
 
@@ -363,29 +371,59 @@ impl DataSinkSynapsePlugin {
 
         let total_rows = apply_batch.rows.len();
         if total_rows > 0 {
-            let sql = warehouse_bulk_cdc_sql(
+            match warehouse_bulk_cdc_sql(
                 CdcWarehouseDialect::Synapse,
                 &fq_table,
                 &tombstone_table,
                 &apply_batch,
-            )
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-            client
-                .execute(
-                    sql.transactional_script(CdcWarehouseDialect::Synapse)
-                        .as_str(),
-                    &[],
-                )
-                .await
-                .map_err(|error| {
-                    error!("Synapse bulk CDC apply failed for {}: {}", fq_table, error);
+            ) {
+                Ok(sql) => {
+                    client
+                        .execute(
+                            sql.transactional_script(CdcWarehouseDialect::Synapse)
+                                .as_str(),
+                            &[],
+                        )
+                        .await
+                        .map_err(|error| {
+                            error!("Synapse bulk CDC apply failed for {}: {}", fq_table, error);
+                            counters::dec_uploads_in_flight();
+                            std::io::Error::other(error.to_string())
+                        })?;
+                }
+                Err(error) if error.is_warehouse_stage_limit() => {
+                    warn!(
+                        target: "synapse",
+                        "CDC chunk exceeds 1000-row/64 MiB staging envelope; using guarded row apply: {}",
+                        error
+                    );
+                    for row in &apply_batch.rows {
+                        let statement = guarded_warehouse_cdc_row_sql::<SynapseCdcBackend>(
+                            CdcWarehouseDialect::Synapse,
+                            &fq_table,
+                            &tombstone_table,
+                            &apply_batch,
+                            row,
+                        )
+                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                        client
+                            .execute(statement.as_str(), &[])
+                            .await
+                            .map_err(|error| {
+                                counters::dec_uploads_in_flight();
+                                std::io::Error::other(error.to_string())
+                            })?;
+                    }
+                }
+                Err(error) => {
                     counters::dec_uploads_in_flight();
-                    std::io::Error::other(error.to_string())
-                })?;
+                    return Err(std::io::Error::other(error.to_string()));
+                }
+            }
             counters::add_parquet_rows(total_rows as u64);
             info!(
                 target: "synapse",
-                "CDC bulk-staged and atomically applied {} rows to [{}].[{}]",
+                "CDC safely applied {} rows to [{}].[{}]",
                 total_rows,
                 schema,
                 table_name
@@ -424,5 +462,75 @@ mod tests {
         assert_eq!(script.matches("MERGE INTO").count(), 4);
         assert!(script.contains("ROLLBACK TRANSACTION"));
         assert!(script.matches("DROP TABLE IF EXISTS").count() >= 4);
+    }
+
+    #[test]
+    fn synapse_splits_values_rows_and_falls_back_before_batch_ceiling() {
+        assert!(crate::cdc_apply::CdcWarehouseDialect::Synapse
+            .validate_stage_row_count(100_000)
+            .is_ok());
+        assert!(crate::cdc_apply::CdcWarehouseDialect::Synapse
+            .validate_stage_row_count(100_001)
+            .unwrap_err()
+            .is_warehouse_stage_limit());
+        let split_batch = crate::cdc_apply::warehouse_sql_test_batch_with_rows(1_001, 8);
+        let split = crate::cdc_apply::warehouse_bulk_cdc_sql(
+            crate::cdc_apply::CdcWarehouseDialect::Synapse,
+            "[dbo].[users]",
+            "[dbo].[_skippr_tombstones_users]",
+            &split_batch,
+        )
+        .unwrap();
+        assert_eq!(
+            split
+                .setup_statements
+                .iter()
+                .filter(|statement| statement.starts_with("INSERT INTO"))
+                .count(),
+            2
+        );
+        assert!(
+            split
+                .transactional_script(crate::cdc_apply::CdcWarehouseDialect::Synapse)
+                .len()
+                <= 64 * 1024 * 1024
+        );
+
+        let hundred_thousand = crate::cdc_apply::warehouse_sql_test_batch_with_rows(100_000, 0);
+        let hundred_thousand_sql = crate::cdc_apply::warehouse_bulk_cdc_sql(
+            crate::cdc_apply::CdcWarehouseDialect::Synapse,
+            "[dbo].[users]",
+            "[dbo].[_skippr_tombstones_users]",
+            &hundred_thousand,
+        )
+        .unwrap();
+        assert_eq!(
+            hundred_thousand_sql
+                .setup_statements
+                .iter()
+                .filter(|statement| statement.starts_with("INSERT INTO"))
+                .count(),
+            100
+        );
+
+        let oversized = crate::cdc_apply::warehouse_sql_test_batch_with_rows(1, 2 * 1024 * 1024);
+        let error = crate::cdc_apply::warehouse_bulk_cdc_sql(
+            crate::cdc_apply::CdcWarehouseDialect::Synapse,
+            "[dbo].[users]",
+            "[dbo].[_skippr_tombstones_users]",
+            &oversized,
+        )
+        .unwrap_err();
+        assert!(error.is_warehouse_stage_limit());
+        let guarded = crate::cdc_apply::guarded_warehouse_cdc_sql::<super::SynapseCdcBackend>(
+            crate::cdc_apply::CdcWarehouseDialect::Synapse,
+            "[dbo].[users]",
+            "[dbo].[_skippr_tombstones_users]",
+            &oversized,
+        )
+        .unwrap();
+        assert_eq!(guarded.len(), 1);
+        assert!(guarded[0].starts_with("BEGIN TRANSACTION;"));
+        assert!(guarded[0].ends_with("COMMIT TRANSACTION;"));
     }
 }

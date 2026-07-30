@@ -9,7 +9,7 @@ use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
 use serde_derive::Deserialize;
 use tokio::time::{sleep, Duration};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 use dashmap::DashSet;
 use once_cell::sync::Lazy;
@@ -20,6 +20,8 @@ use skippr_runtime_sdk::plugins::{DataSink, SchemaSink};
 use skippr_runtime_sdk::sink_compat::BufferChunker;
 
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
+const REDSHIFT_CDC_S3_STAGE_BLOCKER: &str = "the current S3 COPY path serializes target-only \
+    Parquet and cannot load CDC metadata into the same BatchExecuteStatement transaction";
 
 pub struct RedshiftCdcBackend;
 
@@ -453,11 +455,16 @@ impl DataSinkRedshiftPlugin {
     ) -> Result<(), std::io::Error> {
         use super::cdc_apply::{
             append_record_batch_to_cdc_apply, ddl_add_order_token_column,
-            ddl_create_tombstone_table, tombstone_table_name, warehouse_bulk_cdc_sql,
-            CdcApplyBatch, CdcApplyColumn, CdcWarehouseDialect,
+            ddl_create_tombstone_table, guarded_warehouse_cdc_row_sql, tombstone_table_name,
+            warehouse_bulk_cdc_sql, CdcApplyBatch, CdcApplyColumn, CdcWarehouseDialect,
         };
         use skippr_runtime_sdk::metrics::counters;
 
+        tracing::debug!(
+            target: "redshift",
+            blocker = REDSHIFT_CDC_S3_STAGE_BLOCKER,
+            "using bounded Data API staging with guarded overflow"
+        );
         let contract = match ctx.contract.as_ref() {
             Some(c) if !c.business_key_columns.is_empty() => c,
             _ => {
@@ -602,24 +609,51 @@ impl DataSinkRedshiftPlugin {
 
         let total_rows = apply_batch.rows.len();
         if total_rows > 0 {
-            let sql = warehouse_bulk_cdc_sql(
+            match warehouse_bulk_cdc_sql(
                 CdcWarehouseDialect::Redshift,
                 &fq_table,
                 &tombstone_table,
                 &apply_batch,
-            )
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-            self.execute_transaction(sql.atomic_statements(), &sql.idempotency_key)
-                .await
-                .map_err(|error| {
-                    error!("Redshift bulk CDC apply failed for {}: {}", fq_table, error);
+            ) {
+                Ok(sql) => {
+                    self.execute_transaction(sql.atomic_statements(), &sql.idempotency_key)
+                        .await
+                        .map_err(|error| {
+                            error!("Redshift bulk CDC apply failed for {}: {}", fq_table, error);
+                            counters::dec_uploads_in_flight();
+                            error
+                        })?;
+                }
+                Err(error) if error.is_warehouse_stage_limit() => {
+                    warn!(
+                        target: "redshift",
+                        "CDC chunk exceeds Data API 100 KiB/40-statement envelope; using guarded row apply: {}",
+                        error
+                    );
+                    for row in &apply_batch.rows {
+                        let statement = guarded_warehouse_cdc_row_sql::<RedshiftCdcBackend>(
+                            CdcWarehouseDialect::Redshift,
+                            &fq_table,
+                            &tombstone_table,
+                            &apply_batch,
+                            row,
+                        )
+                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                        self.execute_statement(&statement).await.map_err(|error| {
+                            counters::dec_uploads_in_flight();
+                            error
+                        })?;
+                    }
+                }
+                Err(error) => {
                     counters::dec_uploads_in_flight();
-                    error
-                })?;
+                    return Err(std::io::Error::other(error.to_string()));
+                }
+            }
             counters::add_parquet_rows(total_rows as u64);
             info!(
                 target: "redshift",
-                "CDC bulk-staged and atomically applied {} rows to {}",
+                "CDC safely applied {} rows to {}",
                 total_rows,
                 table_name
             );
@@ -791,5 +825,60 @@ mod tests {
         assert_eq!(all_sql.matches("DROP TABLE IF EXISTS").count(), 2);
         assert!(sql.idempotency_key.starts_with("skippr-cdc-"));
         assert!(statements.len() <= 40);
+    }
+
+    #[test]
+    fn redshift_splits_under_data_api_limits_and_falls_back_by_row_cap() {
+        assert!(crate::cdc_apply::CdcWarehouseDialect::Redshift
+            .validate_stage_row_count(15_000)
+            .is_ok());
+        assert!(crate::cdc_apply::CdcWarehouseDialect::Redshift
+            .validate_stage_row_count(15_001)
+            .unwrap_err()
+            .is_warehouse_stage_limit());
+        assert!(crate::cdc_apply::CdcWarehouseDialect::Redshift
+            .validate_stage_row_count(100_000)
+            .unwrap_err()
+            .is_warehouse_stage_limit());
+        let split_batch = crate::cdc_apply::warehouse_sql_test_batch_with_rows(501, 8);
+        let split = crate::cdc_apply::warehouse_bulk_cdc_sql(
+            crate::cdc_apply::CdcWarehouseDialect::Redshift,
+            "\"users\"",
+            "\"_skippr_tombstones_users\"",
+            &split_batch,
+        )
+        .unwrap();
+        assert_eq!(
+            split
+                .setup_statements
+                .iter()
+                .filter(|statement| statement.starts_with("INSERT INTO"))
+                .count(),
+            2
+        );
+        assert!(split.atomic_statements().len() <= 40);
+        assert!(split
+            .atomic_statements()
+            .iter()
+            .all(|statement| statement.len() <= 90 * 1024));
+
+        let oversized = crate::cdc_apply::warehouse_sql_test_batch_with_rows(15_001, 0);
+        let error = crate::cdc_apply::warehouse_bulk_cdc_sql(
+            crate::cdc_apply::CdcWarehouseDialect::Redshift,
+            "\"users\"",
+            "\"_skippr_tombstones_users\"",
+            &oversized,
+        )
+        .unwrap_err();
+        assert!(error.is_warehouse_stage_limit());
+        let guarded = crate::cdc_apply::guarded_warehouse_cdc_sql::<super::RedshiftCdcBackend>(
+            crate::cdc_apply::CdcWarehouseDialect::Redshift,
+            "\"users\"",
+            "\"_skippr_tombstones_users\"",
+            &oversized,
+        )
+        .unwrap();
+        assert_eq!(guarded.len(), 15_001);
+        assert!(super::REDSHIFT_CDC_S3_STAGE_BLOCKER.contains("target-only"));
     }
 }
