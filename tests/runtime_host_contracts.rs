@@ -895,7 +895,11 @@ async fn schema_install_waits_for_active_multiplexed_applies() {
     let namespaces = BTreeMap::from([("people".to_string(), sample_output_metadata())]);
 
     let (apply, install) = tokio::join!(
-        sink.sync(sample_stream(), "schema-fence".to_string(), None),
+        sink.sync(
+            sample_stream(),
+            "namespace=people&schema-fence".to_string(),
+            None,
+        ),
         async {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             sink.install_schema_state(100_007, &namespaces).await
@@ -909,6 +913,48 @@ async fn schema_install_waits_for_active_multiplexed_applies() {
     let installs = json_u64_array(&state, "schema_install_active_counts");
     assert!(installs.len() >= 2);
     assert_eq!(*installs.last().unwrap(), 0);
+}
+
+#[tokio::test]
+#[serial]
+async fn unrelated_schema_install_proceeds_during_multiplexed_apply() {
+    let _target = RuntimeSinkPoolTargetGuard::set(2);
+    let _pool_size = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "1");
+    let _sessions = RuntimeEnvGuard::set("RUNTIME_SINK_SESSIONS_PER_CHILD", "2");
+    let _budget = RuntimeEnvGuard::set("RUNTIME_SINK_SESSION_BUDGET", "2");
+    let temp = tempdir().unwrap();
+    let marker_path = temp.path().join("multiplex-unrelated-schema.json");
+    let sink = multiplex_test_sink(
+        temp.path(),
+        "multiplex_schema_fence",
+        &marker_path,
+        "runtime_host_multiplex_unrelated_schema",
+    )
+    .await;
+    let namespaces = BTreeMap::from([("people".to_string(), sample_output_metadata())]);
+
+    let (apply, install) = tokio::join!(
+        sink.sync(
+            sample_stream(),
+            "namespace=events&unrelated-schema".to_string(),
+            None,
+        ),
+        async {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            sink.install_schema_state(100_008, &namespaces).await
+        },
+    );
+    apply.unwrap();
+    install.unwrap();
+
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(marker_path).unwrap()).unwrap();
+    let installs = json_u64_array(&state, "schema_install_active_counts");
+    assert!(installs.len() >= 2);
+    assert!(
+        *installs.last().unwrap() > 0,
+        "unrelated namespace publication must not wait for the active apply"
+    );
 }
 
 #[tokio::test]

@@ -66,7 +66,9 @@ use skippr_runtime_sdk::plugins::source_contract::{
 use skippr_runtime_sdk::plugins::{
     DataSink, SchemaSink, SinkPreflightOutcome, SinkWriteContext, SinkWriteOutcome,
 };
-use skippr_runtime_sdk::protocol::{RuntimeBinding, RuntimeExecutionContext};
+use skippr_runtime_sdk::protocol::{
+    RuntimeBinding, RuntimeExecutionContext, RuntimeSchemaState, SchemaDelta,
+};
 use skippr_runtime_sdk::sink_compat::BufferChunker;
 use skippr_runtime_sdk::sink_idempotency::{manifest_object_name, ObjectWriteManifest};
 
@@ -141,6 +143,7 @@ struct InstalledIcebergSchemaState {
     installed: bool,
     version: u64,
     namespaces: BTreeMap<String, OutputMetadata>,
+    namespace_versions: BTreeMap<String, u64>,
 }
 
 impl InstalledIcebergSchemaState {
@@ -155,7 +158,43 @@ impl InstalledIcebergSchemaState {
         self.installed = true;
         self.version = schema_version;
         self.namespaces = namespaces.clone();
+        self.namespace_versions = namespaces
+            .keys()
+            .map(|namespace| (namespace.clone(), schema_version))
+            .collect();
         true
+    }
+
+    fn install_snapshot(&mut self, schema_state: &RuntimeSchemaState) -> bool {
+        if self.installed && schema_state.version <= self.version {
+            return false;
+        }
+        self.installed = true;
+        self.version = schema_state.version;
+        self.namespaces = schema_state.namespaces.clone();
+        self.namespace_versions = schema_state.namespace_versions.clone();
+        true
+    }
+
+    fn install_delta(&mut self, delta: &SchemaDelta) -> Vec<String> {
+        let mut changed = Vec::new();
+        for (namespace, entry) in &delta.namespaces {
+            if self
+                .namespace_versions
+                .get(namespace)
+                .is_some_and(|installed| *installed >= entry.version)
+            {
+                continue;
+            }
+            self.namespaces
+                .insert(namespace.clone(), entry.metadata.clone());
+            self.namespace_versions
+                .insert(namespace.clone(), entry.version);
+            changed.push(namespace.clone());
+        }
+        self.installed = true;
+        self.version = self.version.max(delta.version);
+        changed
     }
 }
 
@@ -619,6 +658,31 @@ impl DataSink for DataSinkIcebergPlugin {
         }
         Ok(())
     }
+
+    async fn install_schema_snapshot(
+        &self,
+        schema_state: &RuntimeSchemaState,
+    ) -> Result<(), io::Error> {
+        let changed = {
+            let mut guard = self.schema_state.write().await;
+            guard.install_snapshot(schema_state)
+        };
+        if changed {
+            self.table_cache.write().await.clear();
+        }
+        Ok(())
+    }
+
+    async fn install_schema_delta(&self, delta: &SchemaDelta) -> Result<(), io::Error> {
+        let changed = self.schema_state.write().await.install_delta(delta);
+        if !changed.is_empty() {
+            let mut cache = self.table_cache.write().await;
+            for namespace in changed {
+                cache.remove(&namespace);
+            }
+        }
+        Ok(())
+    }
 }
 
 #[async_trait]
@@ -630,7 +694,14 @@ impl SchemaSink for DataSinkIcebergPlugin {
     ) -> Result<(), io::Error> {
         let catalog = self.glue_catalog().await?;
         let table = self.ensure_table(&catalog, namespace, metadata).await?;
-        let schema_version = self.schema_state.read().await.version;
+        let schema_version = self
+            .schema_state
+            .read()
+            .await
+            .namespace_versions
+            .get(namespace)
+            .copied()
+            .unwrap_or(0);
         self.table_cache.write().await.insert(
             namespace.to_string(),
             CachedIcebergTable {
@@ -685,7 +756,14 @@ impl DataSinkIcebergPlugin {
                 guard.version, namespace
             ))
         })?;
-        Ok((guard.version, metadata))
+        Ok((
+            guard
+                .namespace_versions
+                .get(namespace)
+                .copied()
+                .unwrap_or(0),
+            metadata,
+        ))
     }
 
     async fn table_for_write(
@@ -4158,6 +4236,48 @@ mod tests {
         assert!(!schema_version_invalidates_table_cache(7, 6));
         assert!(!schema_version_invalidates_table_cache(7, 7));
         assert!(schema_version_invalidates_table_cache(7, 8));
+    }
+
+    #[test]
+    fn installed_schema_delta_is_namespace_versioned_and_stale_safe() {
+        let initial = OutputMetadata::new();
+        let changed = output_metadata(json!({
+            "out_field_name": "",
+            "determined_type": "long",
+            "determined_type_values": "",
+            "fields": {}
+        }));
+        let mut state = InstalledIcebergSchemaState::default();
+        assert!(state.install_snapshot(&RuntimeSchemaState {
+            version: 8,
+            namespaces: BTreeMap::from([("events".to_string(), initial.clone())]),
+            namespace_versions: BTreeMap::from([("events".to_string(), 4)]),
+        }));
+
+        let changed_namespaces = state.install_delta(&SchemaDelta {
+            version: 100,
+            namespaces: BTreeMap::from([
+                (
+                    "events".to_string(),
+                    skippr_runtime_sdk::protocol::SchemaNamespaceDelta {
+                        version: 4,
+                        metadata: changed.clone(),
+                    },
+                ),
+                (
+                    "users".to_string(),
+                    skippr_runtime_sdk::protocol::SchemaNamespaceDelta {
+                        version: 2,
+                        metadata: changed,
+                    },
+                ),
+            ]),
+        });
+
+        assert_eq!(changed_namespaces, vec!["users".to_string()]);
+        assert_eq!(state.namespaces["events"], initial);
+        assert_eq!(state.namespace_versions["events"], 4);
+        assert_eq!(state.namespace_versions["users"], 2);
     }
 
     #[tokio::test]

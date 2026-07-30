@@ -129,7 +129,8 @@ async fn wait_for_runtime_source_once_idle(
 
 fn current_runtime_schema_state_from_core() -> RuntimeSchemaState {
     let metadata = METADATA.load();
-    let namespaces = metadata
+    let version = PIPELINE_SCHEMA_VERSION.load(Ordering::Acquire);
+    let namespaces: std::collections::BTreeMap<_, _> = metadata
         .metadata
         .iter()
         .map(|(namespace, schema)| {
@@ -142,7 +143,11 @@ fn current_runtime_schema_state_from_core() -> RuntimeSchemaState {
         })
         .collect();
     RuntimeSchemaState {
-        version: PIPELINE_SCHEMA_VERSION.load(Ordering::Acquire),
+        version,
+        namespace_versions: namespaces
+            .keys()
+            .map(|namespace| (namespace.clone(), version))
+            .collect(),
         namespaces,
     }
 }

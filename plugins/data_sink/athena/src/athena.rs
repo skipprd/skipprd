@@ -53,7 +53,9 @@ use skippr_runtime_sdk::plugins::source_contract::{
     SinkWritePolicySupport, SourceNamespaceContract, WritePolicy,
 };
 use skippr_runtime_sdk::plugins::{DataSink, SinkPreflightOutcome, SinkWriteContext};
-use skippr_runtime_sdk::protocol::{RuntimeBinding, RuntimeExecutionContext};
+use skippr_runtime_sdk::protocol::{
+    RuntimeBinding, RuntimeExecutionContext, RuntimeSchemaState, SchemaDelta,
+};
 use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
 use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::{Mutex, RwLock, Semaphore};
@@ -445,6 +447,7 @@ struct InstalledAthenaSchemaState {
     installed: bool,
     version: u64,
     namespaces: BTreeMap<String, OutputMetadata>,
+    namespace_versions: BTreeMap<String, u64>,
 }
 
 impl InstalledAthenaSchemaState {
@@ -455,6 +458,41 @@ impl InstalledAthenaSchemaState {
         self.installed = true;
         self.version = schema_version;
         self.namespaces = namespaces.clone();
+        self.namespace_versions = namespaces
+            .keys()
+            .map(|namespace| (namespace.clone(), schema_version))
+            .collect();
+    }
+
+    fn install_snapshot(&mut self, schema_state: &RuntimeSchemaState) {
+        if self.installed && schema_state.version <= self.version {
+            return;
+        }
+        self.installed = true;
+        self.version = schema_state.version;
+        self.namespaces = schema_state.namespaces.clone();
+        self.namespace_versions = schema_state.namespace_versions.clone();
+    }
+
+    fn install_delta(&mut self, delta: &SchemaDelta) -> usize {
+        let mut changed = 0;
+        for (namespace, entry) in &delta.namespaces {
+            if self
+                .namespace_versions
+                .get(namespace)
+                .is_some_and(|installed| *installed >= entry.version)
+            {
+                continue;
+            }
+            self.namespaces
+                .insert(namespace.clone(), entry.metadata.clone());
+            self.namespace_versions
+                .insert(namespace.clone(), entry.version);
+            changed += 1;
+        }
+        self.installed = true;
+        self.version = self.version.max(delta.version);
+        changed
     }
 }
 
@@ -732,6 +770,22 @@ impl DataSink for DataSinkAthenaPlugin {
     ) -> Result<(), std::io::Error> {
         let mut guard = self.schema_state.write().await;
         guard.install(schema_version, namespaces);
+        Ok(())
+    }
+
+    async fn install_schema_snapshot(
+        &self,
+        schema_state: &RuntimeSchemaState,
+    ) -> Result<(), std::io::Error> {
+        self.schema_state
+            .write()
+            .await
+            .install_snapshot(schema_state);
+        Ok(())
+    }
+
+    async fn install_schema_delta(&self, delta: &SchemaDelta) -> Result<(), std::io::Error> {
+        self.schema_state.write().await.install_delta(delta);
         Ok(())
     }
 }
@@ -3388,6 +3442,43 @@ mod contract_schema_tests {
         assert_eq!(state.version, 2);
         assert!(state.namespaces.contains_key("users"));
         assert!(!state.namespaces.contains_key("events"));
+    }
+
+    #[test]
+    fn schema_delta_uses_each_namespace_version_and_merges_only_changes() {
+        let initial = deadletter_output_metadata();
+        let changed = OutputMetadata::new();
+        let mut state = InstalledAthenaSchemaState::default();
+        state.install_snapshot(&RuntimeSchemaState {
+            version: 7,
+            namespaces: BTreeMap::from([("events".to_string(), initial.clone())]),
+            namespace_versions: BTreeMap::from([("events".to_string(), 3)]),
+        });
+
+        let applied = state.install_delta(&SchemaDelta {
+            version: 99,
+            namespaces: BTreeMap::from([
+                (
+                    "events".to_string(),
+                    skippr_runtime_sdk::protocol::SchemaNamespaceDelta {
+                        version: 3,
+                        metadata: changed.clone(),
+                    },
+                ),
+                (
+                    "users".to_string(),
+                    skippr_runtime_sdk::protocol::SchemaNamespaceDelta {
+                        version: 1,
+                        metadata: changed,
+                    },
+                ),
+            ]),
+        });
+
+        assert_eq!(applied, 1);
+        assert_eq!(state.namespaces["events"], initial);
+        assert_eq!(state.namespace_versions["events"], 3);
+        assert_eq!(state.namespace_versions["users"], 1);
     }
 
     fn wat_append_partition_contract() -> SourceNamespaceContract {

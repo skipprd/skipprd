@@ -25,6 +25,7 @@ use url::Url;
 
 use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
 use skippr_runtime_sdk::plugins::{DataSink, SchemaSink};
+use skippr_runtime_sdk::protocol::{RuntimeSchemaState, SchemaDelta};
 use skippr_runtime_sdk::sink_compat::BufferChunker;
 
 static ENSURED_SCHEMAS: Lazy<DashMap<String, Arc<tokio::sync::OnceCell<()>>>> =
@@ -129,6 +130,7 @@ pub struct DataSinkSnowflakePlugin {
     /// Cached v1 session token (always a session token, works for PUT)
     session_token: tokio::sync::RwLock<Option<(String, std::time::Instant)>>,
     schema_state: tokio::sync::RwLock<BTreeMap<String, OutputMetadata>>,
+    schema_versions: tokio::sync::RwLock<BTreeMap<String, u64>>,
 }
 
 skippr_runtime_sdk::declare_sink_spec!(
@@ -260,6 +262,7 @@ impl DataSinkSnowflakePlugin {
             token: Default::default(),
             session_token: Default::default(),
             schema_state: Default::default(),
+            schema_versions: Default::default(),
         }
     }
 
@@ -2736,6 +2739,35 @@ impl DataSink for DataSinkSnowflakePlugin {
         namespaces: &BTreeMap<String, OutputMetadata>,
     ) -> Result<(), std::io::Error> {
         *self.schema_state.write().await = namespaces.clone();
+        *self.schema_versions.write().await = namespaces
+            .keys()
+            .map(|namespace| (namespace.clone(), _schema_version))
+            .collect();
+        Ok(())
+    }
+
+    async fn install_schema_snapshot(
+        &self,
+        schema_state: &RuntimeSchemaState,
+    ) -> Result<(), std::io::Error> {
+        *self.schema_state.write().await = schema_state.namespaces.clone();
+        *self.schema_versions.write().await = schema_state.namespace_versions.clone();
+        Ok(())
+    }
+
+    async fn install_schema_delta(&self, delta: &SchemaDelta) -> Result<(), std::io::Error> {
+        let mut versions = self.schema_versions.write().await;
+        let mut schemas = self.schema_state.write().await;
+        for (namespace, entry) in &delta.namespaces {
+            if versions
+                .get(namespace)
+                .is_some_and(|installed| *installed >= entry.version)
+            {
+                continue;
+            }
+            schemas.insert(namespace.clone(), entry.metadata.clone());
+            versions.insert(namespace.clone(), entry.version);
+        }
         Ok(())
     }
 }

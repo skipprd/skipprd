@@ -283,6 +283,9 @@ pub struct RuntimeExecutionContext {
 pub struct RuntimeSchemaState {
     pub version: u64,
     pub namespaces: BTreeMap<String, OutputMetadata>,
+    /// Exact per-namespace publication watermarks. These are independent of
+    /// `version`, which is only the latest pipeline-wide schema event.
+    pub namespace_versions: BTreeMap<String, u64>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -319,6 +322,7 @@ pub struct RuntimeSchemaStateInstallRequest {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RuntimeSchemaRefreshRequest {
     pub request_id: u64,
+    pub namespace: String,
     pub required_version: u64,
     pub installed_version: u64,
 }
@@ -576,6 +580,7 @@ pub struct SinkRunRequest {
     pub write_semantics: SinkWriteSemantics,
     pub schema_fingerprint: String,
     pub binding: RuntimeBinding,
+    pub required_schema_namespace: String,
     pub required_schema_version: u64,
     pub filename: String,
     pub cdc_ctx: Option<SyncContext>,
@@ -787,6 +792,7 @@ mod tests {
             write_semantics: SinkWriteSemantics::AtLeastOnce,
             schema_fingerprint: String::new(),
             binding: RuntimeBinding::Primary,
+            required_schema_namespace: "ns".into(),
             required_schema_version: 0,
             filename: "f".into(),
             cdc_ctx: None,
@@ -908,6 +914,7 @@ mod tests {
             write_semantics: SinkWriteSemantics::AtLeastOnce,
             schema_fingerprint: String::new(),
             binding: RuntimeBinding::Primary,
+            required_schema_namespace: "google_analytics.events_daily".into(),
             required_schema_version: 1,
             filename: "ns/part.parquet".into(),
             cdc_ctx: None,

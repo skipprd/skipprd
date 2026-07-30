@@ -562,12 +562,25 @@ async fn run_sink_loop(
             }
             HostFrame::InstallSchemaDelta(delta) => {
                 if let Some(schema_state) = state.schema_state.as_mut() {
-                    schema_state.schema_state.version = delta.version;
+                    schema_state.schema_state.version =
+                        schema_state.schema_state.version.max(delta.version);
                     for (namespace, entry) in delta.namespaces {
+                        if schema_state
+                            .schema_state
+                            .namespace_versions
+                            .get(&namespace)
+                            .is_some_and(|installed| *installed >= entry.version)
+                        {
+                            continue;
+                        }
                         schema_state
                             .schema_state
                             .namespaces
-                            .insert(namespace, entry.metadata);
+                            .insert(namespace.clone(), entry.metadata);
+                        schema_state
+                            .schema_state
+                            .namespace_versions
+                            .insert(namespace, entry.version);
                     }
                 }
                 write_sink_state_snapshot(cli, &state)?;
@@ -597,11 +610,18 @@ async fn run_sink_loop(
                         control_writer,
                         &PluginFrame::SchemaStateRefreshRequired(RuntimeSchemaRefreshRequest {
                             request_id: request.request_id,
+                            namespace: request.required_schema_namespace.clone(),
                             required_version: request.required_schema_version,
                             installed_version: state
                                 .schema_state
                                 .as_ref()
-                                .map(|schema| schema.schema_state.version)
+                                .and_then(|schema| {
+                                    schema
+                                        .schema_state
+                                        .namespace_versions
+                                        .get(&request.required_schema_namespace)
+                                        .copied()
+                                })
                                 .unwrap_or(0),
                         }),
                     )
@@ -748,6 +768,32 @@ async fn run_schema_loop(
                 write_schema_state_snapshot(cli, &state)?;
                 write_frame(control_writer, &PluginFrame::Installed).await?;
             }
+            HostFrame::InstallSchemaDelta(delta) => {
+                if let Some(schema_state) = state.schema_state.as_mut() {
+                    schema_state.schema_state.version =
+                        schema_state.schema_state.version.max(delta.version);
+                    for (namespace, entry) in delta.namespaces {
+                        if schema_state
+                            .schema_state
+                            .namespace_versions
+                            .get(&namespace)
+                            .is_some_and(|installed| *installed >= entry.version)
+                        {
+                            continue;
+                        }
+                        schema_state
+                            .schema_state
+                            .namespaces
+                            .insert(namespace.clone(), entry.metadata);
+                        schema_state
+                            .schema_state
+                            .namespace_versions
+                            .insert(namespace, entry.version);
+                    }
+                }
+                write_schema_state_snapshot(cli, &state)?;
+                write_frame(control_writer, &PluginFrame::Installed).await?;
+            }
             HostFrame::RunSchema(request) => {
                 if cli.scenario == "crash_once" && should_crash_once(cli.marker_path.as_ref())? {
                     std::process::exit(1);
@@ -765,11 +811,18 @@ async fn run_schema_loop(
                         control_writer,
                         &PluginFrame::SchemaStateRefreshRequired(RuntimeSchemaRefreshRequest {
                             request_id: request.request_id,
+                            namespace: request.namespace.clone(),
                             required_version: request.required_schema_version,
                             installed_version: state
                                 .schema_state
                                 .as_ref()
-                                .map(|schema| schema.schema_state.version)
+                                .and_then(|schema| {
+                                    schema
+                                        .schema_state
+                                        .namespace_versions
+                                        .get(&request.namespace)
+                                        .copied()
+                                })
                                 .unwrap_or(0),
                         }),
                     )

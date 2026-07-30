@@ -15,6 +15,7 @@ static RUNTIME_SOURCE_SCHEMA_STATE: Lazy<ArcSwap<RuntimeSchemaState>> = Lazy::ne
     ArcSwap::new(Arc::new(RuntimeSchemaState {
         version: 0,
         namespaces: BTreeMap::new(),
+        namespace_versions: BTreeMap::new(),
     }))
 });
 static RUNTIME_SOURCE_SCHEMA_STATE_UPDATE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
@@ -36,6 +37,7 @@ pub fn clear_runtime_source_schema_state() {
     RUNTIME_SOURCE_SCHEMA_STATE.store(Arc::new(RuntimeSchemaState {
         version: 0,
         namespaces: BTreeMap::new(),
+        namespace_versions: BTreeMap::new(),
     }));
     RUNTIME_SOURCE_SCHEMA_NAMESPACE_VERSIONS
         .lock()
@@ -79,7 +81,13 @@ pub fn apply_runtime_source_schema_state(schema_state: RuntimeSchemaState) -> Ve
         .expect("runtime source schema state update lock poisoned");
     let current = RUNTIME_SOURCE_SCHEMA_STATE.load();
     let mut namespaces = current.namespaces.clone();
+    let mut namespace_versions = current.namespace_versions.clone();
     let mut effective_namespaces = metadata_schema_state_namespaces();
+    for namespace in effective_namespaces.keys() {
+        namespace_versions
+            .entry(namespace.clone())
+            .or_insert_with(|| crate::ingest_work::namespace_schema_version(namespace).max(1));
+    }
     for (namespace, output) in current.namespaces.iter() {
         effective_namespaces.insert(namespace.clone(), output.clone());
     }
@@ -87,24 +95,34 @@ pub fn apply_runtime_source_schema_state(schema_state: RuntimeSchemaState) -> Ve
     let update_version = schema_state.version;
     for (namespace, output) in schema_state.namespaces {
         let namespace = storage_namespace(&namespace);
+        let namespace_version = schema_state
+            .namespace_versions
+            .get(&namespace)
+            .copied()
+            .unwrap_or(update_version);
         if effective_namespaces
             .get(&namespace)
             .is_some_and(|current| output_schema_equivalent(current, &output))
+            && namespace_versions
+                .get(&namespace)
+                .is_some_and(|installed| *installed >= namespace_version)
         {
             continue;
         }
         effective_namespaces.insert(namespace.clone(), output.clone());
         namespaces.insert(namespace.clone(), output);
+        namespace_versions.insert(namespace.clone(), namespace_version);
         RUNTIME_SOURCE_SCHEMA_NAMESPACE_VERSIONS
             .lock()
             .expect("runtime source schema namespace versions lock poisoned")
-            .insert(namespace.clone(), update_version);
+            .insert(namespace.clone(), namespace_version);
         changed_namespaces.push(namespace);
     }
     let version = current.version.max(update_version);
     RUNTIME_SOURCE_SCHEMA_STATE.store(Arc::new(RuntimeSchemaState {
         version,
         namespaces,
+        namespace_versions,
     }));
     let _ = PIPELINE_SCHEMA_VERSION.fetch_max(version, Ordering::AcqRel);
     changed_namespaces
@@ -121,14 +139,27 @@ pub fn runtime_schema_namespace_version(namespace: &str) -> u64 {
 
 pub fn current_runtime_schema_state() -> RuntimeSchemaState {
     let mut namespaces = metadata_schema_state_namespaces();
+    let mut namespace_versions = namespaces
+        .keys()
+        .map(|namespace| {
+            (
+                namespace.clone(),
+                crate::ingest_work::namespace_schema_version(namespace).max(1),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
     let runtime_source_schema_state = RUNTIME_SOURCE_SCHEMA_STATE.load();
     for (namespace, output) in runtime_source_schema_state.namespaces.iter() {
         namespaces.insert(namespace.clone(), output.clone());
+    }
+    for (namespace, version) in runtime_source_schema_state.namespace_versions.iter() {
+        namespace_versions.insert(namespace.clone(), *version);
     }
 
     RuntimeSchemaState {
         version: current_pipeline_schema_version().max(runtime_source_schema_state.version),
         namespaces,
+        namespace_versions,
     }
 }
 
@@ -184,6 +215,7 @@ mod tests {
             let changed = apply_runtime_source_schema_state(RuntimeSchemaState {
                 version: 1,
                 namespaces: BTreeMap::from([("events".to_string(), output)]),
+                namespace_versions: BTreeMap::from([("events".to_string(), 1)]),
             });
 
             assert!(changed.is_empty());
@@ -204,6 +236,7 @@ mod tests {
             let changed = apply_runtime_source_schema_state(RuntimeSchemaState {
                 version: 1,
                 namespaces: BTreeMap::from([("events".to_string(), output)]),
+                namespace_versions: BTreeMap::from([("events".to_string(), 1)]),
             });
 
             assert!(changed.is_empty());
@@ -225,6 +258,10 @@ mod tests {
                 namespaces: BTreeMap::from([
                     ("events".to_string(), metadata_output),
                     ("users".to_string(), changed_output),
+                ]),
+                namespace_versions: BTreeMap::from([
+                    ("events".to_string(), 1),
+                    ("users".to_string(), 1),
                 ]),
             });
 

@@ -22,6 +22,7 @@ use crate::discover::OutputMetadata;
 use crate::plugins::cdc::{SinkCapability, SourceCapability, SyncContext};
 use crate::plugins::source_contract::SourceNamespaceContract;
 use crate::plugins::source_sync::SourceSyncContext;
+use crate::runtime_plugins::protocol::{RuntimeSchemaState, SchemaDelta};
 
 #[derive(Clone, Copy, Debug)]
 pub enum SourceCdcContract {
@@ -1335,6 +1336,27 @@ pub trait DataSink: Send + Sync {
         _namespaces: &BTreeMap<String, OutputMetadata>,
     ) -> Result<(), std::io::Error> {
         Ok(())
+    }
+
+    /// Install the complete schema snapshot delivered once when a runtime
+    /// child is created or restarted.
+    async fn install_schema_snapshot(
+        &self,
+        schema_state: &RuntimeSchemaState,
+    ) -> Result<(), std::io::Error> {
+        self.install_schema_state(schema_state.version, &schema_state.namespaces)
+            .await
+    }
+
+    /// Apply only changed namespaces. Sinks that cache schema state should
+    /// override this to merge entries and compare each entry's own version.
+    async fn install_schema_delta(&self, delta: &SchemaDelta) -> Result<(), std::io::Error> {
+        let namespaces = delta
+            .namespaces
+            .iter()
+            .map(|(namespace, entry)| (namespace.clone(), entry.metadata.clone()))
+            .collect();
+        self.install_schema_state(delta.version, &namespaces).await
     }
 }
 

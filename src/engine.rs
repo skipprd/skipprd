@@ -453,6 +453,26 @@ impl DataSink for OutputRouter {
         Ok(())
     }
 
+    async fn install_schema_snapshot(
+        &self,
+        schema_state: &crate::runtime_plugins::protocol::RuntimeSchemaState,
+    ) -> Result<(), std::io::Error> {
+        for plugin in self.sinks.values() {
+            plugin.install_schema_snapshot(schema_state).await?;
+        }
+        Ok(())
+    }
+
+    async fn install_schema_delta(
+        &self,
+        delta: &crate::runtime_plugins::protocol::SchemaDelta,
+    ) -> Result<(), std::io::Error> {
+        for plugin in self.sinks.values() {
+            plugin.install_schema_delta(delta).await?;
+        }
+        Ok(())
+    }
+
     fn capability(&self) -> &'static crate::plugins::cdc::SinkCapability {
         self.sinks
             .get(&self.primary_sink_ref)

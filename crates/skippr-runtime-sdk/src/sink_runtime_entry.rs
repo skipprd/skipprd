@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
 use std::io::{self, Cursor};
 use std::pin::Pin;
@@ -47,18 +47,26 @@ pub fn buffer_name_for_runtime_binding(binding: RuntimeBinding) -> String {
     }
 }
 
-fn installed_schema_version(schema_state: &Option<RuntimeSchemaState>) -> u64 {
-    schema_state
-        .as_ref()
-        .map(|state| state.version)
-        .unwrap_or(0)
+fn installed_schema_version(
+    schema_state: &Option<RuntimeSchemaState>,
+    namespace_versions: &BTreeMap<String, u64>,
+    namespace: &str,
+) -> u64 {
+    if schema_state.is_none() {
+        return 0;
+    }
+    namespace_versions.get(namespace).copied().unwrap_or(0)
 }
 
 fn schema_refresh_needed(
     schema_state: &Option<RuntimeSchemaState>,
+    namespace_versions: &BTreeMap<String, u64>,
+    required_schema_namespace: &str,
     required_schema_version: u64,
 ) -> bool {
-    schema_state.is_none() || installed_schema_version(schema_state) < required_schema_version
+    schema_state.is_none()
+        || installed_schema_version(schema_state, namespace_versions, required_schema_namespace)
+            < required_schema_version
 }
 
 #[derive(Clone)]
@@ -76,6 +84,34 @@ impl ControlWriter {
     async fn write(&self, frame: &PluginFrame) -> io::Result<()> {
         let mut guard = self.writer.lock().await;
         write_frame(&mut *guard, frame).await
+    }
+}
+
+#[derive(Default)]
+struct SchemaApplyFences {
+    global: Arc<tokio::sync::RwLock<()>>,
+    namespaces: StdMutex<HashMap<String, Arc<tokio::sync::RwLock<()>>>>,
+}
+
+impl SchemaApplyFences {
+    fn namespace(&self, namespace: &str) -> Arc<tokio::sync::RwLock<()>> {
+        self.namespaces
+            .lock()
+            .expect("runtime schema namespace fences poisoned")
+            .entry(namespace.to_string())
+            .or_insert_with(|| Arc::new(tokio::sync::RwLock::new(())))
+            .clone()
+    }
+
+    async fn lock_delta_namespaces(
+        &self,
+        delta: &SchemaDelta,
+    ) -> Vec<tokio::sync::OwnedRwLockWriteGuard<()>> {
+        let mut guards = Vec::with_capacity(delta.namespaces.len());
+        for namespace in delta.namespaces.keys() {
+            guards.push(self.namespace(namespace).write_owned().await);
+        }
+        guards
     }
 }
 
@@ -107,6 +143,7 @@ async fn connect_runtime_channel(addr_env: &str) -> io::Result<TcpStream> {
 async fn write_schema_refresh_required(
     writer: &ControlWriter,
     request_id: u64,
+    namespace: &str,
     required_schema_version: u64,
     installed_schema_version: u64,
 ) -> io::Result<()> {
@@ -114,6 +151,7 @@ async fn write_schema_refresh_required(
         .write(&PluginFrame::SchemaStateRefreshRequired(
             RuntimeSchemaRefreshRequest {
                 request_id,
+                namespace: namespace.to_string(),
                 required_version: required_schema_version,
                 installed_version: installed_schema_version,
             },
@@ -664,13 +702,14 @@ where
         .clamp(1, 64)
         .min(adapter_session_limit);
     let session_permits = Arc::new(tokio::sync::Semaphore::new(session_capacity));
-    let apply_fence = Arc::new(tokio::sync::RwLock::new(()));
+    let apply_fences = Arc::new(SchemaApplyFences::default());
     let data_router = SinkDataRouter::default();
     let mut data_demux = tokio::spawn(run_sink_data_demux(data_reader, data_router.clone()));
     let mut sessions = tokio::task::JoinSet::new();
     let mut primary_plugin: Option<Arc<P>> = None;
     let mut deadletter_plugin: Option<Arc<P>> = None;
     let mut schema_state: Option<RuntimeSchemaState> = None;
+    let mut schema_namespace_versions = BTreeMap::new();
 
     loop {
         let frame = tokio::select! {
@@ -703,7 +742,7 @@ where
         };
         match frame {
             HostFrame::InstallSink(request) => {
-                let _fence = apply_fence.write().await;
+                let _fence = Arc::clone(&apply_fences.global).write_owned().await;
                 install_sink(
                     expect_plugin_name,
                     request,
@@ -720,12 +759,13 @@ where
                     .map_err(|err| with_io_context(err, "runtime sink install ack write failed"))?;
             }
             HostFrame::InstallSchemaState(request) => {
-                let _fence = apply_fence.write().await;
+                let _fence = Arc::clone(&apply_fences.global).write_owned().await;
                 apply_schema_state_to_sinks(
                     &request,
                     &mut primary_plugin,
                     &mut deadletter_plugin,
                     &mut schema_state,
+                    &mut schema_namespace_versions,
                 )
                 .await
                 .map_err(|err| with_io_context(err, "runtime sink schema state install failed"))?;
@@ -737,12 +777,13 @@ where
                     })?;
             }
             HostFrame::InstallSchemaDelta(delta) => {
-                let _fence = apply_fence.write().await;
+                let _namespace_fences = apply_fences.lock_delta_namespaces(&delta).await;
                 apply_schema_delta_to_sinks(
                     &delta,
                     &mut primary_plugin,
                     &mut deadletter_plugin,
                     &mut schema_state,
+                    &mut schema_namespace_versions,
                 )
                 .await
                 .map_err(|err| with_io_context(err, "runtime sink schema delta install failed"))?;
@@ -771,13 +812,27 @@ where
                     .acquire_owned()
                     .await
                     .map_err(|_| io::Error::other("runtime sink session limiter closed"))?;
-                let apply_guard = Arc::clone(&apply_fence).read_owned().await;
-                if schema_refresh_needed(&schema_state, prepare.request.required_schema_version) {
+                let global_apply_guard = Arc::clone(&apply_fences.global).read_owned().await;
+                let namespace_apply_guard = apply_fences
+                    .namespace(&prepare.request.required_schema_namespace)
+                    .read_owned()
+                    .await;
+                if schema_refresh_needed(
+                    &schema_state,
+                    &schema_namespace_versions,
+                    &prepare.request.required_schema_namespace,
+                    prepare.request.required_schema_version,
+                ) {
                     write_schema_refresh_required(
                         &control_writer,
                         request_id,
+                        &prepare.request.required_schema_namespace,
                         prepare.request.required_schema_version,
-                        installed_schema_version(&schema_state),
+                        installed_schema_version(
+                            &schema_state,
+                            &schema_namespace_versions,
+                            &prepare.request.required_schema_namespace,
+                        ),
                     )
                     .await
                     .map_err(|err| {
@@ -789,7 +844,8 @@ where
                             ),
                         )
                     })?;
-                    drop(apply_guard);
+                    drop(namespace_apply_guard);
+                    drop(global_apply_guard);
                     drop(permit);
                     continue;
                 }
@@ -816,7 +872,8 @@ where
                         deadletter,
                         data_receiver,
                         writer.clone(),
-                        apply_guard,
+                        global_apply_guard,
+                        namespace_apply_guard,
                         permit,
                     )
                     .await;
@@ -858,7 +915,8 @@ async fn run_multiplexed_sink_session<P>(
     deadletter_plugin: Option<Arc<P>>,
     mut data_receiver: mpsc::Receiver<HostDataFrame>,
     control_writer: ControlWriter,
-    _apply_guard: tokio::sync::OwnedRwLockReadGuard<()>,
+    _global_apply_guard: tokio::sync::OwnedRwLockReadGuard<()>,
+    _namespace_apply_guard: tokio::sync::OwnedRwLockReadGuard<()>,
     _permit: tokio::sync::OwnedSemaphorePermit,
 ) -> io::Result<()>
 where
@@ -989,9 +1047,7 @@ where
     };
     let plugin = build(request).await?;
     if let Some(schema_state) = schema_state {
-        plugin
-            .install_schema_state(schema_state.version, &schema_state.namespaces)
-            .await?;
+        plugin.install_schema_snapshot(schema_state).await?;
     }
     *plugin_slot = Some(Arc::new(plugin));
     Ok(())
@@ -1002,27 +1058,23 @@ async fn apply_schema_state_to_sinks<P>(
     primary_plugin: &mut Option<Arc<P>>,
     deadletter_plugin: &mut Option<Arc<P>>,
     schema_state: &mut Option<RuntimeSchemaState>,
+    schema_namespace_versions: &mut BTreeMap<String, u64>,
 ) -> io::Result<()>
 where
     P: DataSink + Send + Sync,
 {
-    *schema_state = Some(request.schema_state.clone());
     if let Some(plugin) = primary_plugin.as_ref() {
         plugin
-            .install_schema_state(
-                request.schema_state.version,
-                &request.schema_state.namespaces,
-            )
+            .install_schema_snapshot(&request.schema_state)
             .await?;
     }
     if let Some(plugin) = deadletter_plugin.as_ref() {
         plugin
-            .install_schema_state(
-                request.schema_state.version,
-                &request.schema_state.namespaces,
-            )
+            .install_schema_snapshot(&request.schema_state)
             .await?;
     }
+    *schema_namespace_versions = request.schema_state.namespace_versions.clone();
+    *schema_state = Some(request.schema_state.clone());
     Ok(())
 }
 
@@ -1031,35 +1083,55 @@ async fn apply_schema_delta_to_sinks<P>(
     primary_plugin: &mut Option<Arc<P>>,
     deadletter_plugin: &mut Option<Arc<P>>,
     schema_state: &mut Option<RuntimeSchemaState>,
+    schema_namespace_versions: &mut BTreeMap<String, u64>,
 ) -> io::Result<()>
 where
     P: DataSink + Send + Sync,
 {
+    if schema_state.is_none() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "runtime sink received SchemaDelta before initial SchemaState",
+        ));
+    }
+    let effective = SchemaDelta {
+        version: delta.version,
+        namespaces: delta
+            .namespaces
+            .iter()
+            .filter(|(namespace, entry)| {
+                schema_namespace_versions
+                    .get(*namespace)
+                    .is_none_or(|installed| entry.version > *installed)
+            })
+            .map(|(namespace, entry)| (namespace.clone(), entry.clone()))
+            .collect(),
+    };
+    if effective.namespaces.is_empty() {
+        return Ok(());
+    }
+    if let Some(plugin) = primary_plugin.as_ref() {
+        plugin.install_schema_delta(&effective).await?;
+    }
+    if let Some(plugin) = deadletter_plugin.as_ref() {
+        plugin.install_schema_delta(&effective).await?;
+    }
     let state = schema_state.as_mut().ok_or_else(|| {
         io::Error::new(
             io::ErrorKind::InvalidData,
             "runtime sink received SchemaDelta before initial SchemaState",
         )
     })?;
-    if delta.version <= state.version {
-        return Ok(());
-    }
-    for (namespace, entry) in &delta.namespaces {
+    for (namespace, entry) in &effective.namespaces {
         state
             .namespaces
             .insert(namespace.clone(), entry.metadata.clone());
+        state
+            .namespace_versions
+            .insert(namespace.clone(), entry.version);
+        schema_namespace_versions.insert(namespace.clone(), entry.version);
     }
-    state.version = delta.version;
-    if let Some(plugin) = primary_plugin.as_ref() {
-        plugin
-            .install_schema_state(state.version, &state.namespaces)
-            .await?;
-    }
-    if let Some(plugin) = deadletter_plugin.as_ref() {
-        plugin
-            .install_schema_state(state.version, &state.namespaces)
-            .await?;
-    }
+    state.version = state.version.max(delta.version);
     Ok(())
 }
 
@@ -1432,6 +1504,7 @@ where
     let mut primary_plugin: Option<P> = None;
     let mut deadletter_plugin: Option<P> = None;
     let mut schema_state: Option<RuntimeSchemaState> = None;
+    let mut schema_namespace_versions = BTreeMap::new();
 
     loop {
         let Some(frame) = read_frame_or_eof::<_, HostFrame>(&mut control_reader).await? else {
@@ -1456,6 +1529,7 @@ where
                     &mut primary_plugin,
                     &mut deadletter_plugin,
                     &mut schema_state,
+                    &mut schema_namespace_versions,
                 )
                 .await?;
                 control_writer.write(&PluginFrame::Installed).await?;
@@ -1466,17 +1540,28 @@ where
                     &mut primary_plugin,
                     &mut deadletter_plugin,
                     &mut schema_state,
+                    &mut schema_namespace_versions,
                 )
                 .await?;
                 control_writer.write(&PluginFrame::Installed).await?;
             }
             HostFrame::RunSchema(request) => {
-                if schema_refresh_needed(&schema_state, request.required_schema_version) {
+                if schema_refresh_needed(
+                    &schema_state,
+                    &schema_namespace_versions,
+                    &request.namespace,
+                    request.required_schema_version,
+                ) {
                     write_schema_refresh_required(
                         &control_writer,
                         request.request_id,
+                        &request.namespace,
                         request.required_schema_version,
-                        installed_schema_version(&schema_state),
+                        installed_schema_version(
+                            &schema_state,
+                            &schema_namespace_versions,
+                            &request.namespace,
+                        ),
                     )
                     .await?;
                     continue;
@@ -1545,11 +1630,11 @@ async fn apply_schema_state_to_schema_sinks<P>(
     primary_plugin: &mut Option<P>,
     deadletter_plugin: &mut Option<P>,
     schema_state: &mut Option<RuntimeSchemaState>,
+    schema_namespace_versions: &mut BTreeMap<String, u64>,
 ) -> io::Result<()>
 where
     P: SchemaSink + HasSchemaSinkSpec + Send + Sync,
 {
-    *schema_state = Some(request.schema_state.clone());
     if let Some(plugin) = primary_plugin.as_ref() {
         plugin
             .install_schema_state(
@@ -1566,6 +1651,8 @@ where
             )
             .await?;
     }
+    *schema_namespace_versions = request.schema_state.namespace_versions.clone();
+    *schema_state = Some(request.schema_state.clone());
     Ok(())
 }
 
@@ -1574,6 +1661,7 @@ async fn apply_schema_delta_to_schema_sinks<P>(
     primary_plugin: &mut Option<P>,
     deadletter_plugin: &mut Option<P>,
     schema_state: &mut Option<RuntimeSchemaState>,
+    schema_namespace_versions: &mut BTreeMap<String, u64>,
 ) -> io::Result<()>
 where
     P: SchemaSink + HasSchemaSinkSpec + Send + Sync,
@@ -1584,25 +1672,23 @@ where
             "runtime schema sink received SchemaDelta before initial SchemaState",
         )
     })?;
-    if delta.version <= state.version {
-        return Ok(());
-    }
     for (namespace, entry) in &delta.namespaces {
+        if schema_namespace_versions
+            .get(namespace)
+            .is_some_and(|installed| *installed >= entry.version)
+        {
+            continue;
+        }
         state
             .namespaces
             .insert(namespace.clone(), entry.metadata.clone());
+        state
+            .namespace_versions
+            .insert(namespace.clone(), entry.version);
+        schema_namespace_versions.insert(namespace.clone(), entry.version);
     }
-    state.version = delta.version;
-    if let Some(plugin) = primary_plugin.as_ref() {
-        plugin
-            .install_schema_state(state.version, &state.namespaces)
-            .await?;
-    }
-    if let Some(plugin) = deadletter_plugin.as_ref() {
-        plugin
-            .install_schema_state(state.version, &state.namespaces)
-            .await?;
-    }
+    state.version = state.version.max(delta.version);
+    let _ = (primary_plugin, deadletter_plugin);
     Ok(())
 }
 
@@ -1755,6 +1841,7 @@ mod tests {
                 skippr_core::buffer::compaction_transaction::SinkWriteSemantics::IdempotentAtLeastOnce,
             schema_fingerprint: "schema".into(),
             binding: RuntimeBinding::Primary,
+            required_schema_namespace: "events".into(),
             required_schema_version: 3,
             filename: "namespace=events".into(),
             cdc_ctx: None,
@@ -1907,6 +1994,7 @@ mod tests {
                 skippr_core::buffer::compaction_transaction::SinkWriteSemantics::IdempotentAtLeastOnce,
             schema_fingerprint: "schema".into(),
             binding: RuntimeBinding::Primary,
+            required_schema_namespace: "events".into(),
             required_schema_version: 3,
             filename: "namespace=events".into(),
             cdc_ctx: None,
