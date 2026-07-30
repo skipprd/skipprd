@@ -87,6 +87,12 @@ impl ResolvedRuntimePlugin {
                     manifest.name
                 ))
             })?;
+            if capability.max_sessions_per_child == 0 {
+                return Err(io::Error::other(format!(
+                    "runtime sink manifest '{}' declares max_sessions_per_child=0",
+                    manifest.name
+                )));
+            }
             if matches!(
                 capability.grouping_support,
                 crate::buffer::compaction_transaction::SinkGroupingSupport::None
@@ -1547,39 +1553,55 @@ fn runtime_sink_payload_chunk_bytes() -> usize {
     .min(MAX_RUNTIME_FRAME_BYTES.saturating_sub(64 * 1024))
 }
 
-fn runtime_sink_process_target() -> usize {
-    // Compatibility mirror of the authoritative FlushBudgetSnapshot. Environment
-    // aliases are applied as hard caps by the tuner before this target is published.
+fn runtime_sink_global_session_budget() -> usize {
+    Config::getenv("RUNTIME_SINK_SESSION_BUDGET", "256")
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(256)
+        .clamp(1, 256)
+}
+
+fn runtime_sink_session_target() -> usize {
+    // Compatibility mirror of the authoritative FlushBudgetSnapshot.
     crate::ingest::tuner::apply_env_caps();
     crate::metrics::counters::RUNTIME_SINK_POOL_TARGET
         .load(Ordering::Relaxed)
-        .clamp(1, 16)
+        .clamp(1, 256)
+        .min(runtime_sink_global_session_budget())
 }
 
-fn runtime_sink_session_capacity() -> usize {
-    let process_target = runtime_sink_process_target();
+fn runtime_sink_process_cap() -> usize {
+    Config::getenv("RUNTIME_SINK_CONNECTION_POOL_SIZE", "16")
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(16)
+        .min(16)
+}
+
+fn runtime_sink_session_capacity(adapter_limit: usize) -> usize {
     let requested = Config::getenv("RUNTIME_SINK_SESSIONS_PER_CHILD", "2")
         .parse::<usize>()
         .ok()
         .filter(|value| *value > 0)
         .unwrap_or(2)
         .min(16);
-    let total_budget = Config::getenv(
-        "RUNTIME_SINK_SESSION_BUDGET",
-        &process_target.saturating_mul(2).to_string(),
-    )
-    .parse::<usize>()
-    .ok()
-    .filter(|value| *value > 0)
-    .unwrap_or_else(|| process_target.saturating_mul(2))
-    .min(256);
-    requested.min((total_budget / process_target).max(1))
+    requested
+        .min(adapter_limit.max(1))
+        .min(runtime_sink_global_session_budget())
+        .max(1)
+}
+
+fn div_ceil_usize(value: usize, divisor: usize) -> usize {
+    value.saturating_add(divisor.saturating_sub(1)) / divisor.max(1)
 }
 
 #[derive(Debug)]
 struct RuntimeSinkBudgetBinding {
     binding: RuntimeBinding,
     workers: usize,
+    session_capacity: usize,
 }
 
 #[derive(Debug)]
@@ -1592,14 +1614,17 @@ struct RuntimeSinkProcessBudgetState {
 
 /// One child-process budget shared by every runtime data sink in a pipeline.
 ///
-/// A pipeline declares its configured binding count before constructing pools so
-/// one initial permit remains reserved for each binding. Extra permits are split
-/// fairly; a busy primary cannot consume the deadletter binding's worker.
+/// The tuner target is total sink-session demand. Each binding receives a fair
+/// share, then converts that share to child processes using its immutable
+/// adapter/session capacity. The legacy connection-pool setting is only a hard
+/// process cap; every live binding still retains one child.
 pub(crate) struct RuntimeSinkProcessBudget {
     pipeline_name: String,
     state: std::sync::Mutex<RuntimeSinkProcessBudgetState>,
     #[cfg(test)]
-    fixed_target: Option<usize>,
+    fixed_session_target: Option<usize>,
+    #[cfg(test)]
+    fixed_process_cap: Option<usize>,
 }
 
 static RUNTIME_SINK_PROCESS_BUDGETS: Lazy<
@@ -1628,7 +1653,9 @@ impl RuntimeSinkProcessBudget {
                         last_clamp_log: None,
                     }),
                     #[cfg(test)]
-                    fixed_target: None,
+                    fixed_session_target: None,
+                    #[cfg(test)]
+                    fixed_process_cap: None,
                 });
                 budgets.insert(pipeline_name.to_string(), Arc::downgrade(&budget));
                 budget
@@ -1637,41 +1664,93 @@ impl RuntimeSinkProcessBudget {
         budget
     }
 
-    fn target(&self) -> usize {
+    fn session_target(&self) -> usize {
         #[cfg(test)]
-        if let Some(target) = self.fixed_target {
+        if let Some(target) = self.fixed_session_target {
             return target.max(1);
         }
-        runtime_sink_process_target()
+        runtime_sink_session_target()
+    }
+
+    fn process_cap(&self) -> usize {
+        #[cfg(test)]
+        if let Some(cap) = self.fixed_process_cap {
+            return cap.max(1);
+        }
+        runtime_sink_process_cap()
     }
 
     fn ensure_minimum_bindings(&self, minimum_bindings: usize) {
-        let target = self.target();
+        let process_cap = self.process_cap();
         let mut state = self
             .state
             .lock()
             .expect("runtime sink process budget poisoned");
         state.minimum_bindings = state.minimum_bindings.max(minimum_bindings.max(1));
-        Self::log_clamp_if_needed(&self.pipeline_name, target, &mut state);
+        Self::log_clamp_if_needed(&self.pipeline_name, process_cap, &mut state);
     }
 
     fn log_clamp_if_needed(
         pipeline_name: &str,
-        target: usize,
+        process_cap: usize,
         state: &mut RuntimeSinkProcessBudgetState,
     ) {
         let required = state.minimum_bindings.max(state.bindings.len()).max(1);
-        if target < required && state.last_clamp_log != Some((target, required)) {
+        if process_cap < required && state.last_clamp_log != Some((process_cap, required)) {
             warn!(
-                "runtime sink global process target {} is below {} configured bindings for pipeline '{}'; clamping total workers to {}",
-                target, required, pipeline_name, required
+                "runtime sink hard process cap {} is below {} configured bindings for pipeline '{}'; retaining one worker per binding",
+                process_cap, required, pipeline_name
             );
-            state.last_clamp_log = Some((target, required));
+            state.last_clamp_log = Some((process_cap, required));
         }
     }
 
-    fn register(self: &Arc<Self>, binding: RuntimeBinding) -> RuntimeSinkBudgetRegistration {
-        let target = self.target();
+    fn worker_allowances(
+        state: &RuntimeSinkProcessBudgetState,
+        session_target: usize,
+        process_cap: usize,
+    ) -> BTreeMap<usize, usize> {
+        let slot_count = state.minimum_bindings.max(state.bindings.len()).max(1);
+        let effective_sessions = session_target.max(slot_count);
+        let effective_process_cap = process_cap.max(slot_count);
+        let mut desired = vec![1usize; slot_count];
+        for (position, (_, binding)) in state.bindings.iter().enumerate() {
+            let fair_sessions = effective_sessions / slot_count
+                + usize::from(position < effective_sessions % slot_count);
+            desired[position] = div_ceil_usize(fair_sessions, binding.session_capacity).max(1);
+        }
+        let mut allowance = vec![1usize; slot_count];
+        let mut allocated = slot_count;
+        while allocated < effective_process_cap {
+            let mut progressed = false;
+            for position in 0..slot_count {
+                if allocated >= effective_process_cap {
+                    break;
+                }
+                if allowance[position] < desired[position] {
+                    allowance[position] += 1;
+                    allocated += 1;
+                    progressed = true;
+                }
+            }
+            if !progressed {
+                break;
+            }
+        }
+        state
+            .bindings
+            .keys()
+            .enumerate()
+            .map(|(position, id)| (*id, allowance[position]))
+            .collect()
+    }
+
+    fn register(
+        self: &Arc<Self>,
+        binding: RuntimeBinding,
+        session_capacity: usize,
+    ) -> RuntimeSinkBudgetRegistration {
+        let process_cap = self.process_cap();
         let binding_id = {
             let mut state = self
                 .state
@@ -1684,9 +1763,10 @@ impl RuntimeSinkProcessBudget {
                 RuntimeSinkBudgetBinding {
                     binding,
                     workers: 0,
+                    session_capacity: session_capacity.max(1),
                 },
             );
-            Self::log_clamp_if_needed(&self.pipeline_name, target, &mut state);
+            Self::log_clamp_if_needed(&self.pipeline_name, process_cap, &mut state);
             binding_id
         };
         RuntimeSinkBudgetRegistration {
@@ -1698,17 +1778,15 @@ impl RuntimeSinkProcessBudget {
     }
 
     fn try_reserve(&self, binding_id: usize, initial: bool) -> bool {
-        let target = self.target();
+        let session_target = self.session_target();
+        let process_cap = self.process_cap();
         let mut state = self
             .state
             .lock()
             .expect("runtime sink process budget poisoned");
-        Self::log_clamp_if_needed(&self.pipeline_name, target, &mut state);
-
-        let slot_count = state.minimum_bindings.max(state.bindings.len()).max(1);
-        let effective_target = target.max(slot_count);
-        let unregistered_slots = slot_count.saturating_sub(state.bindings.len());
-        let admitted_limit = effective_target.saturating_sub(unregistered_slots);
+        Self::log_clamp_if_needed(&self.pipeline_name, process_cap, &mut state);
+        let allowances = Self::worker_allowances(&state, session_target, process_cap);
+        let admitted_limit = allowances.values().sum::<usize>();
         let active_workers = state
             .bindings
             .values()
@@ -1717,20 +1795,26 @@ impl RuntimeSinkProcessBudget {
         if active_workers >= admitted_limit {
             return false;
         }
-
-        let Some(binding_position) = state.bindings.keys().position(|id| *id == binding_id) else {
-            return false;
-        };
-        let fair_workers = effective_target / slot_count
-            + usize::from(binding_position < effective_target % slot_count);
+        let allowance = allowances.get(&binding_id).copied().unwrap_or(0);
         let Some(binding_state) = state.bindings.get_mut(&binding_id) else {
             return false;
         };
-        if binding_state.workers >= fair_workers && !(initial && binding_state.workers == 0) {
+        if binding_state.workers >= allowance && !(initial && binding_state.workers == 0) {
             return false;
         }
         binding_state.workers = binding_state.workers.saturating_add(1);
         true
+    }
+
+    fn desired_workers(&self, binding_id: usize) -> usize {
+        let state = self
+            .state
+            .lock()
+            .expect("runtime sink process budget poisoned");
+        Self::worker_allowances(&state, self.session_target(), self.process_cap())
+            .get(&binding_id)
+            .copied()
+            .unwrap_or(1)
     }
 
     fn release(&self, binding_id: usize) {
@@ -1768,7 +1852,11 @@ impl RuntimeSinkProcessBudget {
     }
 
     #[cfg(test)]
-    fn new_for_test(target: usize, minimum_bindings: usize) -> Arc<Self> {
+    fn new_for_test(
+        session_target: usize,
+        process_cap: usize,
+        minimum_bindings: usize,
+    ) -> Arc<Self> {
         Arc::new(Self {
             pipeline_name: "runtime-sink-budget-test".to_string(),
             state: std::sync::Mutex::new(RuntimeSinkProcessBudgetState {
@@ -1777,7 +1865,8 @@ impl RuntimeSinkProcessBudget {
                 bindings: BTreeMap::new(),
                 last_clamp_log: None,
             }),
-            fixed_target: Some(target.max(1)),
+            fixed_session_target: Some(session_target.max(1)),
+            fixed_process_cap: Some(process_cap.max(1)),
         })
     }
 }
@@ -1821,6 +1910,10 @@ impl RuntimeSinkBudgetRegistration {
             .then(|| RuntimeSinkProcessPermit {
                 registration: self.clone(),
             })
+    }
+
+    fn desired_workers(&self) -> usize {
+        self.inner.budget.desired_workers(self.inner.binding_id)
     }
 
     fn binding(&self) -> RuntimeBinding {
@@ -2266,6 +2359,25 @@ impl RuntimeSinkSlotQueue {
         Some(worker)
     }
 
+    fn has_available(&self) -> bool {
+        !self
+            .state
+            .lock()
+            .expect("runtime sink slot queue poisoned")
+            .available
+            .is_empty()
+    }
+
+    fn remove_idle_worker(&self, worker_id: usize) -> bool {
+        let mut state = self.state.lock().expect("runtime sink slot queue poisoned");
+        if state.free_by_worker.get(&worker_id).copied() != Some(self.capacity_per_worker) {
+            return false;
+        }
+        state.free_by_worker.remove(&worker_id);
+        state.available.retain(|worker| worker.id != worker_id);
+        true
+    }
+
     fn release(&self, worker: Arc<RuntimeSinkWorker>) {
         let mut state = self.state.lock().expect("runtime sink slot queue poisoned");
         let free = state
@@ -2391,10 +2503,12 @@ impl RuntimeSinkConnectionPool {
         pipeline_name: String,
         install_request: RuntimeSinkInstallRequest,
         process_budget: Arc<RuntimeSinkProcessBudget>,
+        adapter_session_limit: usize,
     ) -> io::Result<Self> {
-        let budget_registration = process_budget.register(install_request.binding);
+        let session_capacity = runtime_sink_session_capacity(adapter_session_limit);
+        let budget_registration =
+            process_budget.register(install_request.binding, session_capacity);
         let process_permit = budget_registration.acquire_initial()?;
-        let session_capacity = runtime_sink_session_capacity();
         let (connection, schema_version) = spawn_installed_runtime_sink_connection(
             &resolved,
             &pipeline_name,
@@ -2429,47 +2543,83 @@ impl RuntimeSinkConnectionPool {
         })
     }
 
-    /// Grow toward this binding's fair share of the global process target.
-    ///
-    async fn maybe_grow_to_target(&self) -> io::Result<()> {
+    /// Spawn at most one child, and only after every existing child is full.
+    async fn maybe_grow_one(&self) -> io::Result<bool> {
         let mut workers = self.workers.lock().await;
-        while let Some(process_permit) = self.budget_registration.try_acquire_additional() {
-            let (connection, schema_version) = spawn_installed_runtime_sink_connection(
-                &self.resolved,
-                &self.pipeline_name,
-                &self.install_request,
-                self.slots.capacity_per_worker,
-            )
-            .await?;
-            let worker = Arc::new(RuntimeSinkWorker {
-                id: self.next_worker_id.fetch_add(1, Ordering::Relaxed),
-                connection: Mutex::new(connection),
-                restart_lock: Mutex::new(()),
-                installed_schema_version: AtomicU64::new(schema_version),
-                has_installed_schema: AtomicBool::new(true),
-                _process_permit: process_permit,
-            });
-            self.slots.add_worker(Arc::clone(&worker));
-            workers.push(worker);
-            self.worker_count.store(workers.len(), Ordering::Release);
-            info!(
-                "tune: runtime_sink_pool grew binding={:?} workers={} global_active={} global_target={}",
-                self.budget_registration.binding(),
-                workers.len(),
-                self.budget_registration.inner.budget.active_workers(),
-                self.budget_registration.inner.budget.target()
-            );
+        if self.slots.has_available() {
+            return Ok(false);
         }
-        Ok(())
+        let Some(process_permit) = self.budget_registration.try_acquire_additional() else {
+            return Ok(false);
+        };
+        let (connection, schema_version) = spawn_installed_runtime_sink_connection(
+            &self.resolved,
+            &self.pipeline_name,
+            &self.install_request,
+            self.slots.capacity_per_worker,
+        )
+        .await?;
+        let worker = Arc::new(RuntimeSinkWorker {
+            id: self.next_worker_id.fetch_add(1, Ordering::Relaxed),
+            connection: Mutex::new(connection),
+            restart_lock: Mutex::new(()),
+            installed_schema_version: AtomicU64::new(schema_version),
+            has_installed_schema: AtomicBool::new(true),
+            _process_permit: process_permit,
+        });
+        self.slots.add_worker(Arc::clone(&worker));
+        workers.push(worker);
+        self.worker_count.store(workers.len(), Ordering::Release);
+        info!(
+            "tune: runtime_sink_pool grew binding={:?} workers={} global_active={} session_target={} per_child={}",
+            self.budget_registration.binding(),
+            workers.len(),
+            self.budget_registration.inner.budget.active_workers(),
+            self.budget_registration.inner.budget.session_target(),
+            self.slots.capacity_per_worker,
+        );
+        Ok(true)
+    }
+
+    async fn maybe_shrink_idle(&self) {
+        let desired = self.budget_registration.desired_workers().max(1);
+        let mut removed = Vec::new();
+        {
+            let mut workers = self.workers.lock().await;
+            while workers.len() > desired {
+                let Some(position) = workers
+                    .iter()
+                    .rposition(|worker| self.slots.remove_idle_worker(worker.id))
+                else {
+                    break;
+                };
+                removed.push(workers.remove(position));
+            }
+            self.worker_count.store(workers.len(), Ordering::Release);
+            if !removed.is_empty() {
+                info!(
+                    "tune: runtime_sink_pool shrank binding={:?} workers={} removed={} session_target={} per_child={}",
+                    self.budget_registration.binding(),
+                    workers.len(),
+                    removed.len(),
+                    self.budget_registration.inner.budget.session_target(),
+                    self.slots.capacity_per_worker,
+                );
+            }
+        }
+        drop(removed);
     }
 
     async fn acquire(&self) -> io::Result<RuntimeSinkWorkerLease> {
         let _wait_metrics = RuntimeSinkPoolWaitMetrics::new();
-        self.maybe_grow_to_target().await?;
+        self.maybe_shrink_idle().await;
         let worker = loop {
             let notified = self.slots.notify.notified();
             if let Some(worker) = self.slots.try_acquire() {
                 break worker;
+            }
+            if self.maybe_grow_one().await? {
+                continue;
             }
             notified.await;
         };
@@ -2539,6 +2689,16 @@ pub struct RuntimeDataSinkPlugin {
 }
 
 impl RuntimeDataSinkPlugin {
+    #[doc(hidden)]
+    pub fn worker_count_for_test(&self) -> usize {
+        self.pool.worker_count.load(Ordering::Acquire)
+    }
+
+    #[doc(hidden)]
+    pub fn session_capacity_for_test(&self) -> usize {
+        self.pool.slots.capacity_per_worker
+    }
+
     pub async fn new(
         resolved: ResolvedRuntimePlugin,
         pipeline_name: String,
@@ -2580,6 +2740,7 @@ impl RuntimeDataSinkPlugin {
             pipeline_name.clone(),
             install_request.clone(),
             process_budget,
+            capability.max_sessions_per_child,
         )
         .await?;
         let plugin = Self {
@@ -2915,7 +3076,6 @@ impl RuntimeDataSinkPlugin {
             self.pool.record_schema_publication_skipped();
             return Ok(());
         }
-        self.pool.maybe_grow_to_target().await?;
         let _apply_guard = Arc::clone(&self.pool.schema_apply_fence)
             .write_owned()
             .await;
@@ -3681,9 +3841,9 @@ mod tests {
 
     #[test]
     fn runtime_sink_budget_caps_and_balances_two_bindings() {
-        let budget = RuntimeSinkProcessBudget::new_for_test(4, 2);
-        let primary = budget.register(RuntimeBinding::Primary);
-        let deadletter = budget.register(RuntimeBinding::Deadletter);
+        let budget = RuntimeSinkProcessBudget::new_for_test(8, 4, 2);
+        let primary = budget.register(RuntimeBinding::Primary, 2);
+        let deadletter = budget.register(RuntimeBinding::Deadletter, 2);
         let mut primary_permits = vec![primary.acquire_initial().unwrap()];
         let mut deadletter_permits = vec![deadletter.acquire_initial().unwrap()];
 
@@ -3707,9 +3867,9 @@ mod tests {
 
     #[test]
     fn runtime_sink_budget_clamps_below_binding_count() {
-        let budget = RuntimeSinkProcessBudget::new_for_test(1, 2);
-        let primary = budget.register(RuntimeBinding::Primary);
-        let deadletter = budget.register(RuntimeBinding::Deadletter);
+        let budget = RuntimeSinkProcessBudget::new_for_test(1, 1, 2);
+        let primary = budget.register(RuntimeBinding::Primary, 2);
+        let deadletter = budget.register(RuntimeBinding::Deadletter, 2);
         let primary_permit = primary.acquire_initial().unwrap();
         let deadletter_permit = deadletter.acquire_initial().unwrap();
 
@@ -3728,8 +3888,8 @@ mod tests {
 
     #[test]
     fn runtime_sink_budget_restart_and_drop_accounting_is_stable() {
-        let budget = RuntimeSinkProcessBudget::new_for_test(1, 1);
-        let binding = budget.register(RuntimeBinding::Primary);
+        let budget = RuntimeSinkProcessBudget::new_for_test(1, 1, 1);
+        let binding = budget.register(RuntimeBinding::Primary, 1);
         let worker_permit = binding.acquire_initial().unwrap();
 
         // A child restart replaces only RuntimeChildConnection; its worker-owned permit stays put.
@@ -3746,7 +3906,7 @@ mod tests {
     #[test]
     fn runtime_sink_budget_registry_can_reset_without_leaking_state() {
         let budget = RuntimeSinkProcessBudget::for_pipeline("budget-reset-test", 1);
-        let binding = budget.register(RuntimeBinding::Primary);
+        let binding = budget.register(RuntimeBinding::Primary, 1);
         let permit = binding.acquire_initial().unwrap();
         reset_runtime_sink_process_budgets_for_test();
 
@@ -3757,6 +3917,19 @@ mod tests {
         drop(permit);
         drop(binding);
         assert_eq!(budget.active_workers(), 0);
+    }
+
+    #[test]
+    fn runtime_sink_budget_derives_processes_from_session_capacity() {
+        let budget = RuntimeSinkProcessBudget::new_for_test(5, 16, 1);
+        let binding = budget.register(RuntimeBinding::Primary, 2);
+        let mut permits = vec![binding.acquire_initial().unwrap()];
+        while let Some(permit) = binding.try_acquire_additional() {
+            permits.push(permit);
+        }
+        assert_eq!(binding.desired_workers(), 3);
+        assert_eq!(binding.active_workers(), 3);
+        drop(permits);
     }
 
     #[test]

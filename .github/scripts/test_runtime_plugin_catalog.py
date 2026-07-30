@@ -420,6 +420,7 @@ skipprd = { path = "../.." }
                 "plugin_name": "Iceberg",
                 "sink_capability": {
                     "name": "Iceberg",
+                    "max_sessions_per_child": 1,
                     "retry_semantics": "TransactionalIdempotent",
                     "grouping_support": "FinalStateBatches",
                 },
@@ -429,6 +430,7 @@ skipprd = { path = "../.." }
         self.assertTrue(
             metadata["sink_capability"]["supports_bounded_grouped_stream"]
         )
+        self.assertEqual(metadata["sink_capability"]["max_sessions_per_child"], 1)
 
     def test_manifest_payload_for_catalog_entry_preserves_metadata_shape(self) -> None:
         entry = {

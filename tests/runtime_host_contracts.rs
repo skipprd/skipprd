@@ -41,6 +41,7 @@ fn sink_capability_json(name: &str) -> serde_json::Value {
     match name {
         "Postgres" => json!({
             "name": "Postgres",
+            "max_sessions_per_child": 1,
             "guarantee_tier": "ExactOnceCdcEligible",
             "can_manage_skippr_columns": true,
             "can_maintain_tombstone_tables": true,
@@ -52,6 +53,7 @@ fn sink_capability_json(name: &str) -> serde_json::Value {
         }),
         _ => json!({
             "name": "File",
+            "max_sessions_per_child": 4,
             "guarantee_tier": "CdcEncodedOnly",
             "can_manage_skippr_columns": false,
             "can_maintain_tombstone_tables": false,
@@ -254,6 +256,17 @@ fn schema_install_count(path: &Path) -> usize {
         .unwrap_or_default()
         .lines()
         .count()
+}
+
+fn multiplex_process_count(marker_path: &Path) -> usize {
+    let mut process_ids = std::fs::read_to_string(marker_path.with_extension("processes"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    process_ids.sort();
+    process_ids.dedup();
+    process_ids.len()
 }
 
 struct RuntimeSinkPoolTargetGuard {
@@ -497,18 +510,23 @@ async fn runtime_sink_pool_growth_installs_latest_schema_once_on_new_worker() {
     .unwrap();
     let startup_installs = schema_install_count(&marker_path);
     assert_eq!(startup_installs, 1);
-    skipprd::metrics::counters::RUNTIME_SINK_POOL_TARGET.store(2, Ordering::SeqCst);
+    skipprd::metrics::counters::RUNTIME_SINK_POOL_TARGET.store(4, Ordering::SeqCst);
 
-    sink.sync(sample_stream(), "pool-growth-1".to_string(), None)
-        .await
-        .unwrap();
+    let (first, second, third) = tokio::join!(
+        sink.sync(sample_stream(), "pool-growth-1".to_string(), None),
+        sink.sync(sample_stream(), "pool-growth-2".to_string(), None),
+        sink.sync(sample_stream(), "pool-growth-3".to_string(), None),
+    );
+    first.unwrap();
+    second.unwrap();
+    third.unwrap();
     assert_eq!(
         schema_install_count(&marker_path),
         startup_installs + 1,
         "only the new worker should receive the latest snapshot"
     );
 
-    sink.sync(sample_stream(), "pool-growth-2".to_string(), None)
+    sink.sync(sample_stream(), "pool-growth-4".to_string(), None)
         .await
         .unwrap();
     assert_eq!(schema_install_count(&marker_path), startup_installs + 1);
@@ -590,6 +608,7 @@ async fn prepare_already_applied_sends_zero_payload_bytes() {
 #[tokio::test]
 #[serial]
 async fn two_sink_sessions_interleave_on_one_runtime_child() {
+    let _target = RuntimeSinkPoolTargetGuard::set(2);
     let _pool_size = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "1");
     let _sessions = RuntimeEnvGuard::set("RUNTIME_SINK_SESSIONS_PER_CHILD", "2");
     let _budget = RuntimeEnvGuard::set("RUNTIME_SINK_SESSION_BUDGET", "2");
@@ -640,6 +659,7 @@ async fn two_sink_sessions_interleave_on_one_runtime_child() {
 #[tokio::test]
 #[serial]
 async fn per_child_session_capacity_bounds_in_flight_applies() {
+    let _target = RuntimeSinkPoolTargetGuard::set(2);
     let _pool_size = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "1");
     let _sessions = RuntimeEnvGuard::set("RUNTIME_SINK_SESSIONS_PER_CHILD", "2");
     let _budget = RuntimeEnvGuard::set("RUNTIME_SINK_SESSION_BUDGET", "2");
@@ -670,7 +690,123 @@ async fn per_child_session_capacity_bounds_in_flight_applies() {
 
 #[tokio::test]
 #[serial]
+async fn session_target_uses_ceiling_process_count_without_eager_growth() {
+    let _target = RuntimeSinkPoolTargetGuard::set(5);
+    let _process_cap = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "16");
+    let _sessions = RuntimeEnvGuard::set("RUNTIME_SINK_SESSIONS_PER_CHILD", "2");
+    let _budget = RuntimeEnvGuard::set("RUNTIME_SINK_SESSION_BUDGET", "5");
+    let temp = tempdir().unwrap();
+    let marker_path = temp.path().join("multiplex-process-demand.json");
+    let sink = multiplex_test_sink(
+        temp.path(),
+        "multiplex_process_hold",
+        &marker_path,
+        "runtime_host_session_demand",
+    )
+    .await;
+    assert_eq!(sink.worker_count_for_test(), 1);
+
+    let (one, two, three, four, five) = tokio::join!(
+        sink.sync(sample_stream(), "demand-1".to_string(), None),
+        sink.sync(sample_stream(), "demand-2".to_string(), None),
+        sink.sync(sample_stream(), "demand-3".to_string(), None),
+        sink.sync(sample_stream(), "demand-4".to_string(), None),
+        sink.sync(sample_stream(), "demand-5".to_string(), None),
+    );
+    one.unwrap();
+    two.unwrap();
+    three.unwrap();
+    four.unwrap();
+    five.unwrap();
+
+    assert_eq!(sink.worker_count_for_test(), 3);
+    assert_eq!(multiplex_process_count(&marker_path), 3);
+}
+
+#[tokio::test]
+#[serial]
+async fn adapter_capability_limits_effective_per_child_sessions() {
+    let _target = RuntimeSinkPoolTargetGuard::set(8);
+    let _process_cap = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "16");
+    let _sessions = RuntimeEnvGuard::set("RUNTIME_SINK_SESSIONS_PER_CHILD", "8");
+    let _budget = RuntimeEnvGuard::set("RUNTIME_SINK_SESSION_BUDGET", "8");
+    let temp = tempdir().unwrap();
+    let file_marker = temp.path().join("file-capacity.json");
+    let file_sink = multiplex_test_sink(
+        temp.path(),
+        "multiplex_delay",
+        &file_marker,
+        "runtime_host_file_adapter_limit",
+    )
+    .await;
+    assert_eq!(file_sink.session_capacity_for_test(), 4);
+
+    let postgres_marker = temp.path().join("postgres-capacity.json");
+    let postgres_manifest = write_sink_manifest(
+        temp.path(),
+        "postgres-session-limit-runtime-sink",
+        "Postgres",
+        "multiplex_delay",
+        "Postgres",
+        Some(&helper_sha256()),
+        &helper_binary(),
+        Some(&postgres_marker),
+    );
+    let postgres_sink = RuntimeDataSinkPlugin::new(
+        ResolvedRuntimePlugin::load(&postgres_manifest).unwrap(),
+        "runtime_host_postgres_adapter_limit".to_string(),
+        RuntimeBinding::Primary,
+        runtime_file_sink_config(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(postgres_sink.session_capacity_for_test(), 1);
+}
+
+#[tokio::test]
+#[serial]
+async fn runtime_sink_pool_shrinks_only_fully_idle_workers() {
+    let _target = RuntimeSinkPoolTargetGuard::set(6);
+    let _process_cap = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "16");
+    let _sessions = RuntimeEnvGuard::set("RUNTIME_SINK_SESSIONS_PER_CHILD", "2");
+    let _budget = RuntimeEnvGuard::set("RUNTIME_SINK_SESSION_BUDGET", "6");
+    let temp = tempdir().unwrap();
+    let marker_path = temp.path().join("multiplex-process-shrink.json");
+    let sink = multiplex_test_sink(
+        temp.path(),
+        "multiplex_process_hold",
+        &marker_path,
+        "runtime_host_session_shrink",
+    )
+    .await;
+
+    let (one, two, three, four, five, six) = tokio::join!(
+        sink.sync(sample_stream(), "shrink-1".to_string(), None),
+        sink.sync(sample_stream(), "shrink-2".to_string(), None),
+        sink.sync(sample_stream(), "shrink-3".to_string(), None),
+        sink.sync(sample_stream(), "shrink-4".to_string(), None),
+        sink.sync(sample_stream(), "shrink-5".to_string(), None),
+        sink.sync(sample_stream(), "shrink-6".to_string(), None),
+    );
+    one.unwrap();
+    two.unwrap();
+    three.unwrap();
+    four.unwrap();
+    five.unwrap();
+    six.unwrap();
+    assert_eq!(sink.worker_count_for_test(), 3);
+
+    skipprd::metrics::counters::RUNTIME_SINK_POOL_TARGET.store(2, Ordering::SeqCst);
+    sink.sync(sample_stream(), "shrink-after-backoff".to_string(), None)
+        .await
+        .unwrap();
+    assert_eq!(sink.worker_count_for_test(), 1);
+}
+
+#[tokio::test]
+#[serial]
 async fn one_multiplexed_session_failure_does_not_corrupt_another_ack() {
+    let _target = RuntimeSinkPoolTargetGuard::set(2);
     let _pool_size = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "1");
     let _sessions = RuntimeEnvGuard::set("RUNTIME_SINK_SESSIONS_PER_CHILD", "2");
     let _budget = RuntimeEnvGuard::set("RUNTIME_SINK_SESSION_BUDGET", "2");
@@ -707,6 +843,7 @@ async fn one_multiplexed_session_failure_does_not_corrupt_another_ack() {
 #[tokio::test]
 #[serial]
 async fn runtime_connection_death_fails_all_pending_sessions() {
+    let _target = RuntimeSinkPoolTargetGuard::set(2);
     let _pool_size = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "1");
     let _sessions = RuntimeEnvGuard::set("RUNTIME_SINK_SESSIONS_PER_CHILD", "2");
     let _budget = RuntimeEnvGuard::set("RUNTIME_SINK_SESSION_BUDGET", "2");
@@ -733,6 +870,7 @@ async fn runtime_connection_death_fails_all_pending_sessions() {
 #[tokio::test]
 #[serial]
 async fn schema_install_waits_for_active_multiplexed_applies() {
+    let _target = RuntimeSinkPoolTargetGuard::set(2);
     let _pool_size = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "1");
     let _sessions = RuntimeEnvGuard::set("RUNTIME_SINK_SESSIONS_PER_CHILD", "2");
     let _budget = RuntimeEnvGuard::set("RUNTIME_SINK_SESSION_BUDGET", "2");
@@ -767,6 +905,7 @@ async fn schema_install_waits_for_active_multiplexed_applies() {
 #[tokio::test]
 #[serial]
 async fn post_payload_disconnect_is_not_replayed_inside_same_call() {
+    let _target = RuntimeSinkPoolTargetGuard::set(2);
     let _pool_size = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "1");
     let _sessions = RuntimeEnvGuard::set("RUNTIME_SINK_SESSIONS_PER_CHILD", "2");
     let _budget = RuntimeEnvGuard::set("RUNTIME_SINK_SESSION_BUDGET", "2");

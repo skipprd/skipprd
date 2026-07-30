@@ -128,8 +128,10 @@ struct SinkDataRouter {
 
 impl SinkDataRouter {
     fn register(&self, request_id: u64) -> io::Result<mpsc::Receiver<HostDataFrame>> {
-        // One queued frame plus the frame currently consumed/decoded by the
-        // session bounds each route to at most two 128 MiB chunk envelopes.
+        // Capacity one provides real socket-reader backpressure. Grouped
+        // streaming retains one decoded look-ahead chunk to mark the final
+        // chunk, so a request has at most: one look-ahead, one queued frame,
+        // and one frame held by the shared demux while that queue is full.
         let (tx, rx) = mpsc::channel(SINK_DATA_ROUTE_CAPACITY);
         let mut routes = self
             .routes
@@ -635,6 +637,7 @@ where
 
     let spec_capability = <P::Spec as skippr_core::plugins::SinkSpec>::CAPABILITY;
     let spec_descriptor = RuntimeSinkCapabilityDescriptor::from(&spec_capability);
+    let adapter_session_limit = spec_descriptor.max_sessions_per_child.max(1);
     if let Some(ref declared) = sink_capability {
         if declared != &spec_descriptor {
             return Err(io::Error::other(format!(
@@ -656,7 +659,10 @@ where
         .await
         .map_err(|err| with_io_context(err, "runtime sink handshake ack write failed"))?;
 
-    let session_capacity = handshake.sink_session_capacity.clamp(1, 64);
+    let session_capacity = handshake
+        .sink_session_capacity
+        .clamp(1, 64)
+        .min(adapter_session_limit);
     let session_permits = Arc::new(tokio::sync::Semaphore::new(session_capacity));
     let apply_fence = Arc::new(tokio::sync::RwLock::new(()));
     let data_router = SinkDataRouter::default();

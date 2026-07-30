@@ -33,6 +33,7 @@ supports_schema = true
 
 [package.metadata.skippr-plugin.sink_capability]
 name = "Motherduck"
+max_sessions_per_child = 1
 guarantee_tier = "ExactOnceCdcEligible"
 can_manage_skippr_columns = true
 can_maintain_tombstone_tables = true

@@ -31,6 +31,7 @@ plugin_name = "Gcs"
 
 [package.metadata.skippr-plugin.sink_capability]
 name = "Gcs"
+max_sessions_per_child = 4
 guarantee_tier = "CdcEncodedOnly"
 can_manage_skippr_columns = false
 can_maintain_tombstone_tables = false

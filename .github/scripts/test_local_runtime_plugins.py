@@ -129,6 +129,7 @@ data_sinks:
                     "source_capability": None,
                     "sink_capability": {
                         "name": "snowflake",
+                        "max_sessions_per_child": 1,
                         "retry_semantics": "FinalStateIdempotent",
                         "grouping_support": "FinalStateBatches",
                     },
@@ -149,6 +150,7 @@ data_sinks:
                     "source_capability": None,
                     "sink_capability": {
                         "name": "athena",
+                        "max_sessions_per_child": 4,
                         "retry_semantics": "DeterministicOverwrite",
                         "grouping_support": "CdcEncodedBatches",
                     },

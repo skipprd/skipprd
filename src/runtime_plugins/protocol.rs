@@ -96,6 +96,7 @@ impl RuntimeSourceCapabilityDescriptor {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RuntimeSinkCapabilityDescriptor {
     pub name: String,
+    pub max_sessions_per_child: usize,
     pub guarantee_tier: SinkGuaranteeTier,
     pub can_manage_skippr_columns: bool,
     pub can_maintain_tombstone_tables: bool,
@@ -120,6 +121,7 @@ impl From<&SinkCapability> for RuntimeSinkCapabilityDescriptor {
         let flags = Self::default_write_policy_flags_for_sink(value.name);
         Self {
             name: value.name.to_string(),
+            max_sessions_per_child: value.max_sessions_per_child.max(1),
             guarantee_tier: value.guarantee_tier,
             can_manage_skippr_columns: value.can_manage_skippr_columns,
             can_maintain_tombstone_tables: value.can_maintain_tombstone_tables,
@@ -163,6 +165,7 @@ impl RuntimeSinkCapabilityDescriptor {
     pub fn to_cdc_capability(&self) -> SinkCapability {
         SinkCapability {
             name: Box::leak(self.name.clone().into_boxed_str()),
+            max_sessions_per_child: self.max_sessions_per_child.max(1),
             guarantee_tier: self.guarantee_tier,
             can_manage_skippr_columns: self.can_manage_skippr_columns,
             can_maintain_tombstone_tables: self.can_maintain_tombstone_tables,
@@ -1059,6 +1062,7 @@ mod tests {
         let handshake = RuntimeSinkCapabilityDescriptor::from(&sink_capabilities::ATHENA);
         let manifest = RuntimeSinkCapabilityDescriptor {
             name: "Athena".into(),
+            max_sessions_per_child: 4,
             guarantee_tier: SinkGuaranteeTier::CdcEncodedOnly,
             can_manage_skippr_columns: false,
             can_maintain_tombstone_tables: false,
@@ -1073,5 +1077,10 @@ mod tests {
             grouping_support: SinkGroupingSupport::CdcEncodedBatches,
         };
         assert_eq!(handshake, manifest);
+        assert_eq!(
+            RuntimeSinkCapabilityDescriptor::from(&sink_capabilities::POSTGRES)
+                .max_sessions_per_child,
+            1
+        );
     }
 }

@@ -518,6 +518,11 @@ def capability_descriptor(value: object, key: str) -> dict | None:
 
 def normalize_sink_capability(capability: dict) -> dict:
     normalized = dict(capability)
+    max_sessions = normalized.get("max_sessions_per_child")
+    if not isinstance(max_sessions, int) or isinstance(max_sessions, bool) or max_sessions < 1:
+        raise SystemExit(
+            "runtime sink capability max_sessions_per_child must be a positive integer"
+        )
     grouping_support = normalized.get("grouping_support")
     if grouping_support is not None:
         normalized.setdefault(
@@ -554,7 +559,11 @@ def validate_plugin_metadata(package: dict, plugin_metadata: dict) -> dict:
             f"runtime sink plugin package {package['name']} must declare sink_capability"
         )
     if kind == "DataSink" and sink_capability is not None:
-        for required_key in ("retry_semantics", "grouping_support"):
+        for required_key in (
+            "retry_semantics",
+            "grouping_support",
+            "max_sessions_per_child",
+        ):
             if required_key not in sink_capability:
                 raise SystemExit(
                     f"runtime sink plugin package {package['name']} sink_capability must declare {required_key}"

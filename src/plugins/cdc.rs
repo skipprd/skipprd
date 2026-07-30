@@ -425,6 +425,8 @@ pub enum EventIdSemantics {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SinkCapability {
     pub name: &'static str,
+    /// Immutable adapter limit for concurrent sessions sharing one plugin instance.
+    pub max_sessions_per_child: usize,
     pub guarantee_tier: SinkGuaranteeTier,
     pub can_manage_skippr_columns: bool,
     pub can_maintain_tombstone_tables: bool,
@@ -943,6 +945,7 @@ pub mod sink_capabilities {
 
     pub const POSTGRES: SinkCapability = SinkCapability {
         name: "Postgres",
+        max_sessions_per_child: 1,
         guarantee_tier: SinkGuaranteeTier::ExactOnceCdcEligible,
         can_manage_skippr_columns: true,
         can_maintain_tombstone_tables: true,
@@ -954,6 +957,7 @@ pub mod sink_capabilities {
 
     pub const SNOWFLAKE: SinkCapability = SinkCapability {
         name: "Snowflake",
+        max_sessions_per_child: 1,
         guarantee_tier: SinkGuaranteeTier::ExactOnceCdcEligible,
         can_manage_skippr_columns: true,
         can_maintain_tombstone_tables: true,
@@ -965,6 +969,7 @@ pub mod sink_capabilities {
 
     pub const BIGQUERY: SinkCapability = SinkCapability {
         name: "Bigquery",
+        max_sessions_per_child: 1,
         guarantee_tier: SinkGuaranteeTier::ExactOnceCdcEligible,
         can_manage_skippr_columns: true,
         can_maintain_tombstone_tables: true,
@@ -976,6 +981,7 @@ pub mod sink_capabilities {
 
     pub const REDSHIFT: SinkCapability = SinkCapability {
         name: "Redshift",
+        max_sessions_per_child: 1,
         guarantee_tier: SinkGuaranteeTier::ExactOnceCdcEligible,
         can_manage_skippr_columns: true,
         can_maintain_tombstone_tables: true,
@@ -987,6 +993,7 @@ pub mod sink_capabilities {
 
     pub const DATABRICKS: SinkCapability = SinkCapability {
         name: "Databricks",
+        max_sessions_per_child: 1,
         guarantee_tier: SinkGuaranteeTier::ExactOnceCdcEligible,
         can_manage_skippr_columns: true,
         can_maintain_tombstone_tables: true,
@@ -998,6 +1005,7 @@ pub mod sink_capabilities {
 
     pub const MOTHERDUCK: SinkCapability = SinkCapability {
         name: "Motherduck",
+        max_sessions_per_child: 1,
         guarantee_tier: SinkGuaranteeTier::ExactOnceCdcEligible,
         can_manage_skippr_columns: true,
         can_maintain_tombstone_tables: true,
@@ -1009,6 +1017,7 @@ pub mod sink_capabilities {
 
     pub const CLICKHOUSE: SinkCapability = SinkCapability {
         name: "Clickhouse",
+        max_sessions_per_child: 1,
         guarantee_tier: SinkGuaranteeTier::CdcEncodedOnly,
         can_manage_skippr_columns: true,
         can_maintain_tombstone_tables: true,
@@ -1020,6 +1029,7 @@ pub mod sink_capabilities {
 
     pub const SYNAPSE: SinkCapability = SinkCapability {
         name: "Synapse",
+        max_sessions_per_child: 1,
         guarantee_tier: SinkGuaranteeTier::ExactOnceCdcEligible,
         can_manage_skippr_columns: true,
         can_maintain_tombstone_tables: true,
@@ -1031,6 +1041,7 @@ pub mod sink_capabilities {
 
     pub const ATHENA: SinkCapability = SinkCapability {
         name: "Athena",
+        max_sessions_per_child: 4,
         guarantee_tier: SinkGuaranteeTier::CdcEncodedOnly,
         can_manage_skippr_columns: false,
         can_maintain_tombstone_tables: false,
@@ -1042,6 +1053,7 @@ pub mod sink_capabilities {
 
     pub const ICEBERG: SinkCapability = SinkCapability {
         name: "Iceberg",
+        max_sessions_per_child: 1,
         guarantee_tier: SinkGuaranteeTier::ExactOnceCdcEligible,
         can_manage_skippr_columns: true,
         can_maintain_tombstone_tables: true,
@@ -1053,6 +1065,7 @@ pub mod sink_capabilities {
 
     pub const S3: SinkCapability = SinkCapability {
         name: "S3",
+        max_sessions_per_child: 4,
         guarantee_tier: SinkGuaranteeTier::CdcEncodedOnly,
         can_manage_skippr_columns: false,
         can_maintain_tombstone_tables: false,
@@ -1064,6 +1077,7 @@ pub mod sink_capabilities {
 
     pub const GCS: SinkCapability = SinkCapability {
         name: "Gcs",
+        max_sessions_per_child: 4,
         guarantee_tier: SinkGuaranteeTier::CdcEncodedOnly,
         can_manage_skippr_columns: false,
         can_maintain_tombstone_tables: false,
@@ -1075,6 +1089,7 @@ pub mod sink_capabilities {
 
     pub const AZURE_BLOB: SinkCapability = SinkCapability {
         name: "AzureBlob",
+        max_sessions_per_child: 4,
         guarantee_tier: SinkGuaranteeTier::CdcEncodedOnly,
         can_manage_skippr_columns: false,
         can_maintain_tombstone_tables: false,
@@ -1086,6 +1101,7 @@ pub mod sink_capabilities {
 
     pub const FILE: SinkCapability = SinkCapability {
         name: "File",
+        max_sessions_per_child: 4,
         guarantee_tier: SinkGuaranteeTier::CdcEncodedOnly,
         can_manage_skippr_columns: false,
         can_maintain_tombstone_tables: false,
@@ -1097,6 +1113,7 @@ pub mod sink_capabilities {
 
     pub const SFTP: SinkCapability = SinkCapability {
         name: "Sftp",
+        max_sessions_per_child: 4,
         guarantee_tier: SinkGuaranteeTier::CdcEncodedOnly,
         can_manage_skippr_columns: false,
         can_maintain_tombstone_tables: false,
@@ -1108,6 +1125,7 @@ pub mod sink_capabilities {
 
     pub const AMQP: SinkCapability = SinkCapability {
         name: "Amqp",
+        max_sessions_per_child: 4,
         guarantee_tier: SinkGuaranteeTier::CdcEncodedOnly,
         can_manage_skippr_columns: false,
         can_maintain_tombstone_tables: false,
@@ -1119,6 +1137,7 @@ pub mod sink_capabilities {
 
     pub const STDOUT: SinkCapability = SinkCapability {
         name: "Stdout",
+        max_sessions_per_child: 4,
         guarantee_tier: SinkGuaranteeTier::CdcEncodedOnly,
         can_manage_skippr_columns: false,
         can_maintain_tombstone_tables: false,

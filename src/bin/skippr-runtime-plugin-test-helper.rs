@@ -216,6 +216,21 @@ fn write_multiplex_state(
     )
 }
 
+fn record_multiplex_process(marker_path: Option<&PathBuf>) -> io::Result<()> {
+    let Some(marker_path) = marker_path else {
+        return Ok(());
+    };
+    let process_path = marker_path.with_extension("processes");
+    if let Some(parent) = process_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(process_path)?;
+    writeln!(file, "{}", std::process::id())
+}
+
 async fn run_multiplex_sink_loop(
     cli: &TestHelperCli,
     session_capacity: usize,
@@ -310,6 +325,7 @@ async fn run_multiplex_sink_loop(
         };
         match frame {
             HostFrame::InstallSink(_) => {
+                record_multiplex_process(marker_path.as_ref())?;
                 let mut guard = writer.lock().await;
                 write_frame(&mut *guard, &PluginFrame::Installed).await?;
             }
@@ -405,6 +421,9 @@ async fn run_multiplex_sink_loop(
                     }
                     if scenario == "multiplex_delay" || scenario == "multiplex_schema_fence" {
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    if scenario == "multiplex_process_hold" {
+                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
                     }
                     {
                         let mut state = state.lock().await;

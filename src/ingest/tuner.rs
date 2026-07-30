@@ -660,13 +660,18 @@ fn caps_from_env(
         &["WAL_COMPACTIONS_PER_SINK_MAX", "WAL_COMPACTIONS_PER_SINK"],
         log_deprecation,
     );
-    let runtime_pool_cap = min_env_caps(
+    let runtime_session_cap = min_env_caps(
         caps.sink_sessions,
-        &["RUNTIME_SINK_CONNECTION_POOL_SIZE"],
-        log_deprecation,
-    )
-    .min(16);
-    caps.sink_sessions = caps.sink_sessions.min(per_sink_cap).min(runtime_pool_cap);
+        &[
+            "RUNTIME_SINK_SESSION_TARGET",
+            "RUNTIME_SINK_SESSION_BUDGET",
+        ],
+        false,
+    );
+    caps.sink_sessions = caps
+        .sink_sessions
+        .min(per_sink_cap)
+        .min(runtime_session_cap);
 
     let upload_cap = min_env_caps(
         caps.upload_sessions,
@@ -1338,6 +1343,8 @@ mod tuning_tests {
             "WAL_COMPACTIONS_PER_SINK_MAX",
             "WAL_COMPACTIONS_PER_SINK",
             "RUNTIME_SINK_CONNECTION_POOL_SIZE",
+            "RUNTIME_SINK_SESSION_TARGET",
+            "RUNTIME_SINK_SESSION_BUDGET",
             "UPLOAD_CONCURRENCY_MAX",
             "UPLOAD_CONCURRENCY",
             "ATHENA_GLUE_CP_MAX",
@@ -1350,6 +1357,7 @@ mod tuning_tests {
         std::env::set_var("WAL_COMPACTIONS_PER_SINK_MAX", "5");
         std::env::set_var("WAL_COMPACTIONS_PER_SINK", "3");
         std::env::set_var("RUNTIME_SINK_CONNECTION_POOL_SIZE", "4");
+        std::env::set_var("RUNTIME_SINK_SESSION_TARGET", "2");
         std::env::set_var("UPLOAD_CONCURRENCY_MAX", "10");
         std::env::set_var("UPLOAD_CONCURRENCY", "6");
         std::env::set_var("ATHENA_GLUE_CP_MAX", "5");
@@ -1359,7 +1367,7 @@ mod tuning_tests {
         assert_eq!(caps.scheduler_jobs, 7);
         assert_eq!(caps.decode_jobs, 7);
         assert_eq!(caps.ingest_safe_scheduler_jobs, 5);
-        assert_eq!(caps.sink_sessions, 3);
+        assert_eq!(caps.sink_sessions, 2);
         assert_eq!(caps.upload_sessions, 6);
         assert_eq!(caps.multipart_parts, 6);
         assert_eq!(caps.catalog_operations, 3);

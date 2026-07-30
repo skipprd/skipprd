@@ -25,6 +25,7 @@ plugin_name = "Stdout"
 
 [package.metadata.skippr-plugin.sink_capability]
 name = "Stdout"
+max_sessions_per_child = 4
 guarantee_tier = "Unsupported"
 can_manage_skippr_columns = false
 can_maintain_tombstone_tables = false
