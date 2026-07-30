@@ -66,6 +66,7 @@ type GlueIntentGroups = BTreeMap<GlueIntentGroupKey, Vec<DecodedIntent>>;
 pub struct CatalogCoordinator {
     outbox: Arc<CatalogOutbox>,
     notify: Notify,
+    table_layout_cache: tokio::sync::RwLock<HashMap<String, Vec<String>>>,
     worker_abort: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
 }
 
@@ -81,6 +82,7 @@ impl CatalogCoordinator {
         let coordinator = Arc::new(Self {
             outbox: Arc::new(CatalogOutbox::open(path)?),
             notify: Notify::new(),
+            table_layout_cache: tokio::sync::RwLock::new(HashMap::new()),
             worker_abort: std::sync::Mutex::new(None),
         });
         coordinator.start_worker();
@@ -194,6 +196,17 @@ impl CatalogCoordinator {
             loader = loader.region(Region::new(region));
         }
         let client = GlueClient::new(&loader.load().await);
+        if let Some(first) = intents.first() {
+            if let Err(error) = self
+                .ensure_table_layout(&client, catalog_id.as_deref(), &database, &table, first)
+                .await
+            {
+                for intent in &intents {
+                    self.record_aws_failure(&intent.pending, error.clone())?;
+                }
+                return Ok(());
+            }
+        }
         let mut missing = Vec::new();
         for intent in intents {
             let mut get = client
@@ -279,6 +292,71 @@ impl CatalogCoordinator {
                 }
             }
         }
+        Ok(())
+    }
+
+    async fn ensure_table_layout(
+        &self,
+        client: &GlueClient,
+        catalog_id: Option<&str>,
+        database: &str,
+        table: &str,
+        intent: &DecodedIntent,
+    ) -> Result<(), String> {
+        let cache_key = format!(
+            "{}\0{}\0{}\0{}\0{}",
+            catalog_id.unwrap_or_default(),
+            database,
+            table,
+            intent.payload.schema_namespace,
+            intent.payload.schema_version
+        );
+        if self
+            .table_layout_cache
+            .read()
+            .await
+            .contains_key(&cache_key)
+        {
+            return Ok(());
+        }
+        let _permit = CATALOG_OPERATION_BUDGET
+            .clone()
+            .acquire_owned()
+            .await
+            .map_err(|_| "catalog operation budget closed".to_string())?;
+        let mut request = client.get_table().database_name(database).name(table);
+        if let Some(catalog_id) = catalog_id {
+            request = request.catalog_id(catalog_id);
+        }
+        let table_output = request.send().await.map_err(|err| err.to_string())?;
+        let actual = table_output
+            .table()
+            .and_then(|table| table.partition_keys.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|column| column.name().to_string())
+            .collect::<Vec<_>>();
+        let expected = intent
+            .payload
+            .partition_columns
+            .iter()
+            .map(|column| column.name.clone())
+            .collect::<Vec<_>>();
+        if actual != expected {
+            return Err(format!(
+                "InvalidInputException: Glue partition layout mismatch for '{database}.{table}': actual={actual:?} expected={expected:?}"
+            ));
+        }
+        let namespace_prefix = format!(
+            "{}\0{}\0{}\0{}\0",
+            catalog_id.unwrap_or_default(),
+            database,
+            table,
+            intent.payload.schema_namespace
+        );
+        let mut cache = self.table_layout_cache.write().await;
+        cache.retain(|key, _| !key.starts_with(&namespace_prefix));
+        cache.insert(cache_key, actual);
         Ok(())
     }
 
