@@ -320,6 +320,66 @@ async fn runtime_sink_restarts_after_child_crash() {
 }
 
 #[tokio::test]
+async fn runtime_sink_global_budget_keeps_primary_and_deadletter_live() {
+    let temp = tempdir().unwrap();
+    let primary_marker = temp.path().join("primary-state.json");
+    let deadletter_marker = temp.path().join("deadletter-state.json");
+    let primary_manifest = write_sink_manifest(
+        temp.path(),
+        "budgeted-primary-runtime-sink",
+        "File",
+        "record_state",
+        "File",
+        Some(&helper_sha256()),
+        &helper_binary(),
+        Some(&primary_marker),
+    );
+    let deadletter_manifest = write_sink_manifest(
+        temp.path(),
+        "budgeted-deadletter-runtime-sink",
+        "File",
+        "record_state",
+        "File",
+        Some(&helper_sha256()),
+        &helper_binary(),
+        Some(&deadletter_marker),
+    );
+    let pipeline_name = "runtime_host_global_sink_budget".to_string();
+    let primary = RuntimeDataSinkPlugin::new(
+        ResolvedRuntimePlugin::load(&primary_manifest).unwrap(),
+        pipeline_name.clone(),
+        RuntimeBinding::Primary,
+        runtime_file_sink_config(),
+    )
+    .await
+    .unwrap();
+    let deadletter = RuntimeDataSinkPlugin::new(
+        ResolvedRuntimePlugin::load(&deadletter_manifest).unwrap(),
+        pipeline_name,
+        RuntimeBinding::Deadletter,
+        runtime_file_sink_config(),
+    )
+    .await
+    .unwrap();
+
+    let (primary_result, deadletter_result) = tokio::join!(
+        primary.sync(sample_stream(), "primary-budget-test".to_string(), None),
+        deadletter.sync(sample_stream(), "deadletter-budget-test".to_string(), None),
+    );
+    primary_result.unwrap();
+    deadletter_result.unwrap();
+
+    let primary_state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(primary_marker).unwrap()).unwrap();
+    let deadletter_state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(deadletter_marker).unwrap()).unwrap();
+    assert_eq!(primary_state["install_request"]["binding"], "Primary");
+    assert_eq!(deadletter_state["install_request"]["binding"], "Deadletter");
+    assert_eq!(primary_state["run_count"], 1);
+    assert_eq!(deadletter_state["run_count"], 1);
+}
+
+#[tokio::test]
 async fn runtime_sink_restarts_after_io_disconnect() {
     let temp = tempdir().unwrap();
     let marker_path = temp.path().join("disconnect-once.marker");

@@ -219,12 +219,12 @@ pub fn apply_env_caps() {
         );
     }
 
-    // Runtime sink pool size
+    // Global runtime sink child-process total across all configured bindings.
     if let Ok(v) = Config::getenv("RUNTIME_SINK_CONNECTION_POOL_SIZE", "").parse::<usize>() {
         if v > 0 {
             let clamped = v.clamp(1, 16);
             crate::metrics::counters::RUNTIME_SINK_POOL_TARGET.store(clamped, Ordering::Relaxed);
-            info!("tune: runtime_sink_pool set by env={}", clamped);
+            info!("tune: runtime_sink_global_pool set by env={}", clamped);
         }
     } else {
         let pool = align_pool_to_per_sink(
@@ -233,7 +233,7 @@ pub fn apply_env_caps() {
         .max(default_pool.min(16));
         crate::metrics::counters::RUNTIME_SINK_POOL_TARGET.store(pool, Ordering::Relaxed);
         info!(
-            "tune: runtime_sink_pool seeded from cpu count={} -> {}",
+            "tune: runtime_sink_global_pool seeded from cpu count={} -> {}",
             num_cpus, pool
         );
     }
@@ -371,7 +371,7 @@ pub fn tick(active: usize, capacity: usize, queued: usize, pressure: f64) {
         }
     }
 
-    // Per-sink/pool growth is reserved for drain/pause — never from ingest pressure.
+    // Per-sink/global-pool growth is reserved for drain/pause — never from ingest pressure.
     tune_per_sink_and_pool(pressure, false);
 }
 
@@ -407,7 +407,8 @@ fn tune_per_sink_and_pool(pressure: f64, drain_mode: bool) {
             cur
         };
         if next != cur {
-            crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET.store(next, Ordering::Relaxed);
+            crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET
+                .store(next, Ordering::Relaxed);
             if Config::log_wal_enabled() {
                 debug!(
                     "tune: wal_compactions_per_sink {} -> {} (sink_inflight={} wal_inflight={} pressure={:.2})",
@@ -422,17 +423,13 @@ fn tune_per_sink_and_pool(pressure: f64, drain_mode: bool) {
             crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET.load(Ordering::Relaxed);
         let desired = align_pool_to_per_sink(per_sink);
         let cur = crate::metrics::counters::RUNTIME_SINK_POOL_TARGET.load(Ordering::Relaxed);
-        // Grow pool only in drain_mode; ingest tick must not spawn more sink children.
-        let next = if drain_mode {
-            cur.max(desired)
-        } else {
-            cur
-        };
+        // Grow the global pool only in drain_mode; ingest tick must not spawn more sink children.
+        let next = if drain_mode { cur.max(desired) } else { cur };
         if next != cur {
             crate::metrics::counters::RUNTIME_SINK_POOL_TARGET.store(next, Ordering::Relaxed);
             if Config::log_wal_enabled() {
                 debug!(
-                    "tune: runtime_sink_pool {} -> {} (per_sink={})",
+                    "tune: runtime_sink_global_pool {} -> {} (per_sink={})",
                     cur, next, per_sink
                 );
             }
@@ -707,7 +704,7 @@ mod tuning_tests {
     use super::{drain_tick, paused_tick, sink_tuning_defaults, tick, tuning_maxima};
     use crate::metrics::counters::{
         RUNTIME_SINK_POOL_TARGET, S3_WAL_RETRY_EMA_X100, UPLOAD_CONCURRENCY_TARGET,
-        WAL_COMPACTION_CONCURRENCY_TARGET, WAL_COMPACTIONS_PER_SINK_TARGET,
+        WAL_COMPACTIONS_PER_SINK_TARGET, WAL_COMPACTION_CONCURRENCY_TARGET,
     };
     use std::sync::atomic::Ordering;
 

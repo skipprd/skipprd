@@ -163,6 +163,17 @@ Use pins sparingly. The intended steady state is:
 - plugins versioned per crate
 - runtime discovery using latest by default
 
+## Runtime sink process budget
+
+`RUNTIME_SINK_CONNECTION_POOL_SIZE` is retained for compatibility, but its value is the global
+total number of runtime data-sink child processes in the host, not a per-sink pool size.
+`RUNTIME_SINK_POOL_TARGET` has the same global-total meaning. Both are capped at 16.
+
+The host reserves at least one worker for every configured sink binding and divides remaining
+workers fairly between primary and deadletter. If the configured total is below the binding count,
+the host clamps it to that count and logs the clamp. Protocol v16 pools do not shrink after growth;
+idle reaping and child multiplexing are deferred to protocol v17.
+
 ## Shared helper code
 
 Small connector-agnostic helpers live under `plugins/shared/`.

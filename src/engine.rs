@@ -34,6 +34,7 @@ use crate::runtime_plugins::discovery::resolve_runtime_plugin;
 use crate::runtime_plugins::host::terminate_runtime_plugin_children;
 use crate::runtime_plugins::host::{
     sync_runtime_input_plugin, ResolvedRuntimePlugin, RuntimeDataSinkPlugin,
+    RuntimeSinkProcessBudget,
 };
 use crate::runtime_plugins::protocol::{
     RuntimeBinding, RuntimeExecutionMode, RuntimePluginKind, RuntimeSinkConfig,
@@ -1289,6 +1290,12 @@ pub async fn sync_output_plugin(
 ) -> Result<Box<dyn DataSink + Send + Sync>, io::Error> {
     info!("Output plugin: {}", plugin_name);
 
+    let pipeline_name = Config::get_pipeline_name();
+    let has_deadletter_binding = Config::get_pipeline_deadletters_ref().is_some();
+    let process_budget = RuntimeSinkProcessBudget::for_pipeline(
+        &pipeline_name,
+        1 + usize::from(has_deadletter_binding),
+    );
     let primary_sink_ref = Config::get_pipeline_output_sink_ref();
     let runtime_version = Config::get_pipeline_output_plugin_version().map_err(io::Error::other)?;
     let resolved = resolve_runtime_plugin(
@@ -1299,11 +1306,12 @@ pub async fn sync_output_plugin(
     .await?;
     let runtime_config = resolve_runtime_sink_config(RuntimeBinding::Primary)?;
     let primary_plugin = Box::new(
-        RuntimeDataSinkPlugin::new(
+        RuntimeDataSinkPlugin::new_with_process_budget(
             resolved,
-            Config::get_pipeline_name(),
+            pipeline_name,
             RuntimeBinding::Primary,
             runtime_config,
+            Arc::clone(&process_budget),
         )
         .await?,
     ) as Box<dyn DataSink + Send + Sync>;
@@ -1312,7 +1320,8 @@ pub async fn sync_output_plugin(
     sinks.insert(primary_sink_ref.clone(), Arc::new(primary_plugin));
 
     if let Some((deadletter_sink_ref, deadletter_plugin)) =
-        sync_deadletter_plugin("deadletters".to_string()).await?
+        sync_deadletter_plugin_with_process_budget("deadletters".to_string(), process_budget)
+            .await?
     {
         sinks.insert(deadletter_sink_ref, Arc::new(deadletter_plugin));
     }
@@ -1324,7 +1333,16 @@ pub async fn sync_output_plugin(
 }
 
 pub async fn sync_deadletter_plugin(
+    buffer_name: String,
+) -> Result<Option<(String, Box<dyn DataSink + Send + Sync>)>, io::Error> {
+    let pipeline_name = Config::get_pipeline_name();
+    let process_budget = RuntimeSinkProcessBudget::for_pipeline(&pipeline_name, 2);
+    sync_deadletter_plugin_with_process_budget(buffer_name, process_budget).await
+}
+
+async fn sync_deadletter_plugin_with_process_budget(
     _buffer_name: String,
+    process_budget: Arc<RuntimeSinkProcessBudget>,
 ) -> Result<Option<(String, Box<dyn DataSink + Send + Sync>)>, io::Error> {
     let sink_ref = match Config::get_pipeline_deadletters_ref() {
         Some(sink_ref) => sink_ref,
@@ -1345,11 +1363,12 @@ pub async fn sync_deadletter_plugin(
     .await?;
     let runtime_config = resolve_runtime_sink_config(RuntimeBinding::Deadletter)?;
     let plugin = Box::new(
-        RuntimeDataSinkPlugin::new(
+        RuntimeDataSinkPlugin::new_with_process_budget(
             resolved,
             Config::get_pipeline_name(),
             RuntimeBinding::Deadletter,
             runtime_config,
+            process_budget,
         )
         .await?,
     ) as Box<dyn DataSink + Send + Sync>;

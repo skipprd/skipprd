@@ -3,7 +3,7 @@ use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Instant;
 
 use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, SchemaRef};
@@ -1455,7 +1455,7 @@ fn runtime_sink_payload_chunk_bytes() -> usize {
     .min(MAX_RUNTIME_FRAME_BYTES.saturating_sub(64 * 1024))
 }
 
-fn runtime_sink_connection_pool_size() -> usize {
+fn runtime_sink_process_target() -> usize {
     if let Ok(v) = Config::getenv("RUNTIME_SINK_CONNECTION_POOL_SIZE", "").parse::<usize>() {
         if v > 0 {
             return v.min(16);
@@ -1466,18 +1466,316 @@ fn runtime_sink_connection_pool_size() -> usize {
         .clamp(1, 16)
 }
 
+#[derive(Debug)]
+struct RuntimeSinkBudgetBinding {
+    binding: RuntimeBinding,
+    workers: usize,
+}
+
+#[derive(Debug)]
+struct RuntimeSinkProcessBudgetState {
+    minimum_bindings: usize,
+    next_binding_id: usize,
+    bindings: BTreeMap<usize, RuntimeSinkBudgetBinding>,
+    last_clamp_log: Option<(usize, usize)>,
+}
+
+/// One child-process budget shared by every runtime data sink in a pipeline.
+///
+/// A pipeline declares its configured binding count before constructing pools so
+/// one initial permit remains reserved for each binding. Extra permits are split
+/// fairly; a busy primary cannot consume the deadletter binding's worker.
+pub(crate) struct RuntimeSinkProcessBudget {
+    pipeline_name: String,
+    state: std::sync::Mutex<RuntimeSinkProcessBudgetState>,
+    #[cfg(test)]
+    fixed_target: Option<usize>,
+}
+
+static RUNTIME_SINK_PROCESS_BUDGETS: Lazy<
+    std::sync::Mutex<HashMap<String, Weak<RuntimeSinkProcessBudget>>>,
+> = Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
+
+impl RuntimeSinkProcessBudget {
+    pub(crate) fn for_pipeline(
+        pipeline_name: &str,
+        minimum_bindings: usize,
+    ) -> Arc<RuntimeSinkProcessBudget> {
+        let mut budgets = RUNTIME_SINK_PROCESS_BUDGETS
+            .lock()
+            .expect("runtime sink process budget registry poisoned");
+        budgets.retain(|_, budget| budget.strong_count() > 0);
+        let budget = budgets
+            .get(pipeline_name)
+            .and_then(Weak::upgrade)
+            .unwrap_or_else(|| {
+                let budget = Arc::new(Self {
+                    pipeline_name: pipeline_name.to_string(),
+                    state: std::sync::Mutex::new(RuntimeSinkProcessBudgetState {
+                        minimum_bindings: minimum_bindings.max(1),
+                        next_binding_id: 0,
+                        bindings: BTreeMap::new(),
+                        last_clamp_log: None,
+                    }),
+                    #[cfg(test)]
+                    fixed_target: None,
+                });
+                budgets.insert(pipeline_name.to_string(), Arc::downgrade(&budget));
+                budget
+            });
+        budget.ensure_minimum_bindings(minimum_bindings);
+        budget
+    }
+
+    fn target(&self) -> usize {
+        #[cfg(test)]
+        if let Some(target) = self.fixed_target {
+            return target.max(1);
+        }
+        runtime_sink_process_target()
+    }
+
+    fn ensure_minimum_bindings(&self, minimum_bindings: usize) {
+        let target = self.target();
+        let mut state = self
+            .state
+            .lock()
+            .expect("runtime sink process budget poisoned");
+        state.minimum_bindings = state.minimum_bindings.max(minimum_bindings.max(1));
+        Self::log_clamp_if_needed(&self.pipeline_name, target, &mut state);
+    }
+
+    fn log_clamp_if_needed(
+        pipeline_name: &str,
+        target: usize,
+        state: &mut RuntimeSinkProcessBudgetState,
+    ) {
+        let required = state.minimum_bindings.max(state.bindings.len()).max(1);
+        if target < required && state.last_clamp_log != Some((target, required)) {
+            warn!(
+                "runtime sink global process target {} is below {} configured bindings for pipeline '{}'; clamping total workers to {}",
+                target, required, pipeline_name, required
+            );
+            state.last_clamp_log = Some((target, required));
+        }
+    }
+
+    fn register(self: &Arc<Self>, binding: RuntimeBinding) -> RuntimeSinkBudgetRegistration {
+        let target = self.target();
+        let binding_id = {
+            let mut state = self
+                .state
+                .lock()
+                .expect("runtime sink process budget poisoned");
+            let binding_id = state.next_binding_id;
+            state.next_binding_id = state.next_binding_id.saturating_add(1);
+            state.bindings.insert(
+                binding_id,
+                RuntimeSinkBudgetBinding {
+                    binding,
+                    workers: 0,
+                },
+            );
+            Self::log_clamp_if_needed(&self.pipeline_name, target, &mut state);
+            binding_id
+        };
+        RuntimeSinkBudgetRegistration {
+            inner: Arc::new(RuntimeSinkBudgetRegistrationInner {
+                budget: Arc::clone(self),
+                binding_id,
+            }),
+        }
+    }
+
+    fn try_reserve(&self, binding_id: usize, initial: bool) -> bool {
+        let target = self.target();
+        let mut state = self
+            .state
+            .lock()
+            .expect("runtime sink process budget poisoned");
+        Self::log_clamp_if_needed(&self.pipeline_name, target, &mut state);
+
+        let slot_count = state.minimum_bindings.max(state.bindings.len()).max(1);
+        let effective_target = target.max(slot_count);
+        let unregistered_slots = slot_count.saturating_sub(state.bindings.len());
+        let admitted_limit = effective_target.saturating_sub(unregistered_slots);
+        let active_workers = state
+            .bindings
+            .values()
+            .map(|binding| binding.workers)
+            .sum::<usize>();
+        if active_workers >= admitted_limit {
+            return false;
+        }
+
+        let Some(binding_position) = state.bindings.keys().position(|id| *id == binding_id) else {
+            return false;
+        };
+        let fair_workers = effective_target / slot_count
+            + usize::from(binding_position < effective_target % slot_count);
+        let Some(binding_state) = state.bindings.get_mut(&binding_id) else {
+            return false;
+        };
+        if binding_state.workers >= fair_workers && !(initial && binding_state.workers == 0) {
+            return false;
+        }
+        binding_state.workers = binding_state.workers.saturating_add(1);
+        true
+    }
+
+    fn release(&self, binding_id: usize) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("runtime sink process budget poisoned");
+        if let Some(binding) = state.bindings.get_mut(&binding_id) {
+            binding.workers = binding.workers.saturating_sub(1);
+        }
+    }
+
+    fn unregister(&self, binding_id: usize) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("runtime sink process budget poisoned");
+        if let Some(binding) = state.bindings.remove(&binding_id) {
+            debug_assert_eq!(
+                binding.workers, 0,
+                "runtime sink binding {:?} dropped with live budget permits",
+                binding.binding
+            );
+        }
+    }
+
+    fn active_workers(&self) -> usize {
+        self.state
+            .lock()
+            .expect("runtime sink process budget poisoned")
+            .bindings
+            .values()
+            .map(|binding| binding.workers)
+            .sum()
+    }
+
+    #[cfg(test)]
+    fn new_for_test(target: usize, minimum_bindings: usize) -> Arc<Self> {
+        Arc::new(Self {
+            pipeline_name: "runtime-sink-budget-test".to_string(),
+            state: std::sync::Mutex::new(RuntimeSinkProcessBudgetState {
+                minimum_bindings: minimum_bindings.max(1),
+                next_binding_id: 0,
+                bindings: BTreeMap::new(),
+                last_clamp_log: None,
+            }),
+            fixed_target: Some(target.max(1)),
+        })
+    }
+}
+
+#[cfg(test)]
+fn reset_runtime_sink_process_budgets_for_test() {
+    RUNTIME_SINK_PROCESS_BUDGETS
+        .lock()
+        .expect("runtime sink process budget registry poisoned")
+        .clear();
+}
+
+#[derive(Clone)]
+struct RuntimeSinkBudgetRegistration {
+    inner: Arc<RuntimeSinkBudgetRegistrationInner>,
+}
+
+struct RuntimeSinkBudgetRegistrationInner {
+    budget: Arc<RuntimeSinkProcessBudget>,
+    binding_id: usize,
+}
+
+impl RuntimeSinkBudgetRegistration {
+    fn acquire_initial(&self) -> io::Result<RuntimeSinkProcessPermit> {
+        if self.inner.budget.try_reserve(self.inner.binding_id, true) {
+            Ok(RuntimeSinkProcessPermit {
+                registration: self.clone(),
+            })
+        } else {
+            Err(io::Error::other(format!(
+                "runtime sink global process budget has no initial permit for {:?}",
+                self.binding()
+            )))
+        }
+    }
+
+    fn try_acquire_additional(&self) -> Option<RuntimeSinkProcessPermit> {
+        self.inner
+            .budget
+            .try_reserve(self.inner.binding_id, false)
+            .then(|| RuntimeSinkProcessPermit {
+                registration: self.clone(),
+            })
+    }
+
+    fn binding(&self) -> RuntimeBinding {
+        self.inner
+            .budget
+            .state
+            .lock()
+            .expect("runtime sink process budget poisoned")
+            .bindings
+            .get(&self.inner.binding_id)
+            .map(|binding| binding.binding)
+            .unwrap_or(RuntimeBinding::Primary)
+    }
+
+    #[cfg(test)]
+    fn active_workers(&self) -> usize {
+        self.inner
+            .budget
+            .state
+            .lock()
+            .expect("runtime sink process budget poisoned")
+            .bindings
+            .get(&self.inner.binding_id)
+            .map(|binding| binding.workers)
+            .unwrap_or(0)
+    }
+}
+
+impl Drop for RuntimeSinkBudgetRegistrationInner {
+    fn drop(&mut self) {
+        self.budget.unregister(self.binding_id);
+    }
+}
+
+struct RuntimeSinkProcessPermit {
+    registration: RuntimeSinkBudgetRegistration,
+}
+
+impl Drop for RuntimeSinkProcessPermit {
+    fn drop(&mut self) {
+        self.registration
+            .inner
+            .budget
+            .release(self.registration.inner.binding_id);
+    }
+}
+
+struct RuntimeSinkWorker {
+    connection: Mutex<RuntimeChildConnection>,
+    _process_permit: RuntimeSinkProcessPermit,
+}
+
 struct RuntimeSinkConnectionPool {
     install_request: RuntimeSinkInstallRequest,
     resolved: ResolvedRuntimePlugin,
     pipeline_name: String,
-    workers: tokio::sync::Mutex<Vec<Arc<Mutex<RuntimeChildConnection>>>>,
+    budget_registration: RuntimeSinkBudgetRegistration,
+    workers: tokio::sync::Mutex<Vec<Arc<RuntimeSinkWorker>>>,
     semaphore: Arc<tokio::sync::Semaphore>,
     next_worker: AtomicUsize,
 }
 
 struct RuntimeSinkWorkerLease {
     _permit: tokio::sync::OwnedSemaphorePermit,
-    worker: Arc<Mutex<RuntimeChildConnection>>,
+    worker: Arc<RuntimeSinkWorker>,
 }
 
 struct RuntimeSinkPoolWaitMetrics {
@@ -1505,31 +1803,35 @@ impl RuntimeSinkConnectionPool {
         resolved: ResolvedRuntimePlugin,
         pipeline_name: String,
         install_request: RuntimeSinkInstallRequest,
+        process_budget: Arc<RuntimeSinkProcessBudget>,
     ) -> io::Result<Self> {
-        let pool_size = runtime_sink_connection_pool_size();
-        let mut workers = Vec::with_capacity(pool_size);
-        for _ in 0..pool_size {
-            workers.push(Arc::new(Mutex::new(
-                RuntimeChildConnection::spawn(resolved.clone(), pipeline_name.clone(), None, None)
-                    .await?,
-            )));
-        }
+        let budget_registration = process_budget.register(install_request.binding);
+        let process_permit = budget_registration.acquire_initial()?;
+        let connection =
+            RuntimeChildConnection::spawn(resolved.clone(), pipeline_name.clone(), None, None)
+                .await?;
+        let workers = vec![Arc::new(RuntimeSinkWorker {
+            connection: Mutex::new(connection),
+            _process_permit: process_permit,
+        })];
         Ok(Self {
             install_request,
             resolved,
             pipeline_name,
             workers: tokio::sync::Mutex::new(workers),
-            semaphore: Arc::new(tokio::sync::Semaphore::new(pool_size)),
+            budget_registration,
+            semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             next_worker: AtomicUsize::new(0),
         })
     }
 
-    /// Grow-only: spawn additional child workers when RUNTIME_SINK_POOL_TARGET rises.
-    /// New workers are installed with the same sink binding + schema state as the rest of the pool.
+    /// Grow toward this binding's fair share of the global process target.
+    ///
+    /// Safe cross-pool shrink and worker multiplexing remain deferred to protocol v17. Protocol
+    /// v16 still stops grow-only multiplication: every spawn first owns one global permit.
     async fn maybe_grow_to_target(&self) -> io::Result<()> {
-        let target = runtime_sink_connection_pool_size();
         let mut workers = self.workers.lock().await;
-        while workers.len() < target {
+        while let Some(process_permit) = self.budget_registration.try_acquire_additional() {
             let mut connection = RuntimeChildConnection::spawn(
                 self.resolved.clone(),
                 self.pipeline_name.clone(),
@@ -1553,12 +1855,17 @@ impl RuntimeSinkConnectionPool {
                 ))
                 .await?;
             expect_install_ack(&mut connection, "schema state").await?;
-            workers.push(Arc::new(Mutex::new(connection)));
+            workers.push(Arc::new(RuntimeSinkWorker {
+                connection: Mutex::new(connection),
+                _process_permit: process_permit,
+            }));
             self.semaphore.add_permits(1);
             info!(
-                "tune: runtime_sink_pool grew to {} workers (target={})",
+                "tune: runtime_sink_pool grew binding={:?} workers={} global_active={} global_target={}",
+                self.budget_registration.binding(),
                 workers.len(),
-                target
+                self.budget_registration.inner.budget.active_workers(),
+                self.budget_registration.inner.budget.target()
             );
         }
         Ok(())
@@ -1609,6 +1916,18 @@ impl RuntimeDataSinkPlugin {
         binding: RuntimeBinding,
         config: RuntimeSinkConfig,
     ) -> io::Result<Self> {
+        let process_budget = RuntimeSinkProcessBudget::for_pipeline(&pipeline_name, 1);
+        Self::new_with_process_budget(resolved, pipeline_name, binding, config, process_budget)
+            .await
+    }
+
+    pub(crate) async fn new_with_process_budget(
+        resolved: ResolvedRuntimePlugin,
+        pipeline_name: String,
+        binding: RuntimeBinding,
+        config: RuntimeSinkConfig,
+        process_budget: Arc<RuntimeSinkProcessBudget>,
+    ) -> io::Result<Self> {
         let capability = resolved
             .manifest
             .sink_capability
@@ -1631,6 +1950,7 @@ impl RuntimeDataSinkPlugin {
             resolved.clone(),
             pipeline_name.clone(),
             install_request.clone(),
+            process_budget,
         )
         .await?;
         let plugin = Self {
@@ -1642,7 +1962,7 @@ impl RuntimeDataSinkPlugin {
             let workers = plugin.pool.workers.lock().await;
             workers.iter().cloned().collect::<Vec<_>>()
         } {
-            let mut guard = worker.lock().await;
+            let mut guard = worker.connection.lock().await;
             match plugin.install_runtime_state(&mut guard).await {
                 Ok(()) => {}
                 Err(err) if guard.has_exited()? || should_retry_runtime_connection(&err) => {
@@ -1760,8 +2080,8 @@ impl RuntimeDataSinkPlugin {
         let mut retried = false;
         let mut schema_refreshes = 0usize;
         loop {
-            let mut lease = self.pool.acquire().await?;
-            let mut guard = lease.worker.lock().await;
+            let lease = self.pool.acquire().await?;
+            let mut guard = lease.worker.connection.lock().await;
             self.ensure_connection_ready(&mut guard).await?;
 
             let request_timeout = runtime_sink_request_timeout();
@@ -1875,7 +2195,7 @@ impl RuntimeDataSinkPlugin {
         self.pool.maybe_grow_to_target().await?;
         let workers = self.pool.workers.lock().await;
         for worker in workers.iter() {
-            let mut guard = worker.lock().await;
+            let mut guard = worker.connection.lock().await;
             self.ensure_connection_ready(&mut guard).await?;
             self.send_schema_state_install(&mut guard, schema_version, namespaces)
                 .await?;
@@ -1889,7 +2209,7 @@ impl RuntimeDataSinkPlugin {
         mut reader: crate::plugins::GroupedBatchReader,
     ) -> io::Result<SinkWriteOutcome> {
         let lease = self.pool.acquire().await?;
-        let mut guard = lease.worker.lock().await;
+        let mut guard = lease.worker.connection.lock().await;
         self.ensure_connection_ready(&mut guard).await?;
         let request_timeout = runtime_sink_request_timeout();
         let request_id = request.request_id;
@@ -2394,10 +2714,11 @@ impl SchemaSink for RuntimeSchemaSinkPlugin {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::{Mutex, MutexGuard, OnceLock};
+    use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 
     use super::{
-        handle_runtime_offset_request, BufferedRuntimeFrameReader, MAX_RUNTIME_FRAME_BYTES,
+        handle_runtime_offset_request, reset_runtime_sink_process_budgets_for_test,
+        BufferedRuntimeFrameReader, RuntimeSinkProcessBudget, MAX_RUNTIME_FRAME_BYTES,
     };
     use crate::helpers::configuration::Config;
     use crate::helpers::offsets::{
@@ -2405,6 +2726,7 @@ mod tests {
         RuntimeOffsetValue,
     };
     use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
+    use crate::runtime_plugins::protocol::RuntimeBinding;
     use serde::{Deserialize, Serialize};
     use serial_test::serial;
     use tempfile::TempDir;
@@ -2491,6 +2813,86 @@ mod tests {
 
         let err = reader.take_frame::<TestFrame>().unwrap_err();
         assert!(err.to_string().contains("exceeds limit"));
+    }
+
+    #[test]
+    fn runtime_sink_budget_caps_and_balances_two_bindings() {
+        let budget = RuntimeSinkProcessBudget::new_for_test(4, 2);
+        let primary = budget.register(RuntimeBinding::Primary);
+        let deadletter = budget.register(RuntimeBinding::Deadletter);
+        let mut primary_permits = vec![primary.acquire_initial().unwrap()];
+        let mut deadletter_permits = vec![deadletter.acquire_initial().unwrap()];
+
+        while let Some(permit) = primary.try_acquire_additional() {
+            primary_permits.push(permit);
+        }
+        while let Some(permit) = deadletter.try_acquire_additional() {
+            deadletter_permits.push(permit);
+        }
+
+        assert_eq!(primary.active_workers(), 2);
+        assert_eq!(deadletter.active_workers(), 2);
+        assert_eq!(budget.active_workers(), 4);
+        assert!(primary.try_acquire_additional().is_none());
+        assert!(deadletter.try_acquire_additional().is_none());
+
+        drop(primary_permits);
+        drop(deadletter_permits);
+        assert_eq!(budget.active_workers(), 0);
+    }
+
+    #[test]
+    fn runtime_sink_budget_clamps_below_binding_count() {
+        let budget = RuntimeSinkProcessBudget::new_for_test(1, 2);
+        let primary = budget.register(RuntimeBinding::Primary);
+        let deadletter = budget.register(RuntimeBinding::Deadletter);
+        let primary_permit = primary.acquire_initial().unwrap();
+        let deadletter_permit = deadletter.acquire_initial().unwrap();
+
+        assert_eq!(primary.active_workers(), 1);
+        assert_eq!(deadletter.active_workers(), 1);
+        assert_eq!(budget.active_workers(), 2);
+        assert!(primary.try_acquire_additional().is_none());
+        assert!(deadletter.try_acquire_additional().is_none());
+
+        drop(primary_permit);
+        drop(deadletter_permit);
+        drop(primary);
+        drop(deadletter);
+        assert_eq!(budget.active_workers(), 0);
+    }
+
+    #[test]
+    fn runtime_sink_budget_restart_and_drop_accounting_is_stable() {
+        let budget = RuntimeSinkProcessBudget::new_for_test(1, 1);
+        let binding = budget.register(RuntimeBinding::Primary);
+        let worker_permit = binding.acquire_initial().unwrap();
+
+        // A child restart replaces only RuntimeChildConnection; its worker-owned permit stays put.
+        assert_eq!(binding.active_workers(), 1);
+        assert!(binding.try_acquire_additional().is_none());
+        assert_eq!(budget.active_workers(), 1);
+
+        drop(binding);
+        assert_eq!(budget.active_workers(), 1);
+        drop(worker_permit);
+        assert_eq!(budget.active_workers(), 0);
+    }
+
+    #[test]
+    fn runtime_sink_budget_registry_can_reset_without_leaking_state() {
+        let budget = RuntimeSinkProcessBudget::for_pipeline("budget-reset-test", 1);
+        let binding = budget.register(RuntimeBinding::Primary);
+        let permit = binding.acquire_initial().unwrap();
+        reset_runtime_sink_process_budgets_for_test();
+
+        let replacement = RuntimeSinkProcessBudget::for_pipeline("budget-reset-test", 1);
+        assert!(!Arc::ptr_eq(&budget, &replacement));
+        assert_eq!(replacement.active_workers(), 0);
+
+        drop(permit);
+        drop(binding);
+        assert_eq!(budget.active_workers(), 0);
     }
 
     #[test]

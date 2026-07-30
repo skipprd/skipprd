@@ -44,7 +44,7 @@ pub static S3_DOWNLOAD_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> 
 /// Max concurrent grouped compactions per sink_ref (auto-tuned; env WAL_COMPACTIONS_PER_SINK overrides).
 pub static WAL_COMPACTIONS_PER_SINK_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
     Lazy::new(|| std::sync::atomic::AtomicUsize::new(1));
-/// Runtime sink child-process pool size (auto-tuned; env RUNTIME_SINK_CONNECTION_POOL_SIZE overrides).
+/// Global runtime sink child-process total (auto-tuned; env RUNTIME_SINK_CONNECTION_POOL_SIZE overrides).
 /// Starts at 1 until `apply_env_caps` seeds a CPU-shaped value (keeps single-worker host tests stable).
 pub static RUNTIME_SINK_POOL_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
     Lazy::new(|| std::sync::atomic::AtomicUsize::new(1));
