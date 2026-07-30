@@ -7,6 +7,7 @@ use tokio::sync::{Mutex as AsyncMutex, Notify};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct SchemaPublicationKey {
+    scope: String,
     namespace: String,
     version: u64,
 }
@@ -14,8 +15,8 @@ struct SchemaPublicationKey {
 #[derive(Default)]
 struct SchemaCoordinatorState {
     flights: HashMap<SchemaPublicationKey, Arc<SchemaFlight>>,
-    namespace_locks: HashMap<String, Arc<AsyncMutex<()>>>,
-    published_versions: HashMap<String, u64>,
+    namespace_locks: HashMap<(String, String), Arc<AsyncMutex<()>>>,
+    published_versions: HashMap<(String, String), u64>,
 }
 
 #[derive(Default)]
@@ -79,7 +80,7 @@ impl SchemaFlightLeader {
             if result.is_ok() {
                 state
                     .published_versions
-                    .entry(self.key.namespace.clone())
+                    .entry((self.key.scope.clone(), self.key.namespace.clone()))
                     .and_modify(|version| *version = (*version).max(self.key.version))
                     .or_insert(self.key.version);
             }
@@ -105,8 +106,8 @@ impl Drop for SchemaFlightLeader {
     fn drop(&mut self) {
         if !self.completed {
             self.complete(Err(format!(
-                "schema publication for namespace '{}' version {} was cancelled",
-                self.key.namespace, self.key.version
+                "schema publication for scope '{}' namespace '{}' version {} was cancelled",
+                self.key.scope, self.key.namespace, self.key.version
             )));
         }
     }
@@ -130,6 +131,7 @@ impl SchemaCoordinator {
 
     pub(crate) async fn coordinate<F, Fut>(
         &self,
+        scope: &str,
         namespace: &str,
         version: u64,
         operation: F,
@@ -139,9 +141,11 @@ impl SchemaCoordinator {
         Fut: Future<Output = Result<(), String>>,
     {
         let key = SchemaPublicationKey {
+            scope: scope.to_string(),
             namespace: namespace.to_string(),
             version,
         };
+        let scope_namespace = (scope.to_string(), namespace.to_string());
         let (flight, namespace_lock, is_leader) = {
             let mut state = self
                 .inner
@@ -150,7 +154,7 @@ impl SchemaCoordinator {
                 .expect("schema coordinator state lock poisoned");
             if state
                 .published_versions
-                .get(namespace)
+                .get(&scope_namespace)
                 .is_some_and(|published| *published >= version)
             {
                 return Ok(());
@@ -161,7 +165,7 @@ impl SchemaCoordinator {
                 let flight = Arc::new(SchemaFlight::default());
                 let namespace_lock = state
                     .namespace_locks
-                    .entry(namespace.to_string())
+                    .entry(scope_namespace.clone())
                     .or_insert_with(|| Arc::new(AsyncMutex::new(())))
                     .clone();
                 state.flights.insert(key.clone(), Arc::clone(&flight));
@@ -187,7 +191,7 @@ impl SchemaCoordinator {
             .lock()
             .expect("schema coordinator state lock poisoned")
             .published_versions
-            .get(namespace)
+            .get(&scope_namespace)
             .is_some_and(|published| *published >= version);
         let result = if already_published {
             Ok(())
@@ -199,13 +203,14 @@ impl SchemaCoordinator {
     }
 
     #[cfg(test)]
-    fn waiter_count(&self, namespace: &str, version: u64) -> usize {
+    fn waiter_count(&self, scope: &str, namespace: &str, version: u64) -> usize {
         self.inner
             .state
             .lock()
             .expect("schema coordinator state lock poisoned")
             .flights
             .get(&SchemaPublicationKey {
+                scope: scope.to_string(),
                 namespace: namespace.to_string(),
                 version,
             })
@@ -235,7 +240,7 @@ mod tests {
         let async_release = Arc::clone(&release);
         let async_call = tokio::spawn(async move {
             async_coordinator
-                .coordinate("events", 7, || async move {
+                .coordinate("test", "events", 7, || async move {
                     async_calls.fetch_add(1, Ordering::SeqCst);
                     let _ = started_tx.send(());
                     async_release.acquire().await.unwrap().forget();
@@ -252,14 +257,14 @@ mod tests {
                 .enable_all()
                 .build()
                 .unwrap()
-                .block_on(blocking_coordinator.coordinate("events", 7, || async move {
+                .block_on(blocking_coordinator.coordinate("test", "events", 7, || async move {
                     blocking_calls.fetch_add(1, Ordering::SeqCst);
                     Ok(())
                 }))
         });
 
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while coordinator.waiter_count("events", 7) == 0 {
+            while coordinator.waiter_count("test", "events", 7) == 0 {
                 tokio::task::yield_now().await;
             }
         })
@@ -288,7 +293,7 @@ mod tests {
         let first_release = Arc::clone(&release);
         let first = tokio::spawn(async move {
             first_coordinator
-                .coordinate("events", 9, || async move {
+                .coordinate("test", "events", 9, || async move {
                     first_calls.fetch_add(1, Ordering::SeqCst);
                     let _ = started_tx.send(());
                     first_release.acquire().await.unwrap().forget();
@@ -302,7 +307,7 @@ mod tests {
         let second_calls = Arc::clone(&calls);
         let second = tokio::spawn(async move {
             second_coordinator
-                .coordinate("events", 9, || async move {
+                .coordinate("test", "events", 9, || async move {
                     second_calls.fetch_add(1, Ordering::SeqCst);
                     Ok(())
                 })
@@ -310,7 +315,7 @@ mod tests {
         });
 
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
-            while coordinator.waiter_count("events", 9) == 0 {
+            while coordinator.waiter_count("test", "events", 9) == 0 {
                 tokio::task::yield_now().await;
             }
         })
@@ -328,7 +333,7 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
 
         coordinator
-            .coordinate("events", 9, || async {
+            .coordinate("test", "events", 9, || async {
                 calls.fetch_add(1, Ordering::SeqCst);
                 Ok(())
             })
@@ -347,7 +352,7 @@ mod tests {
         let blocked_release = Arc::clone(&release);
         let blocked = tokio::spawn(async move {
             blocked_coordinator
-                .coordinate("blocked", 3, || async move {
+                .coordinate("test", "blocked", 3, || async move {
                     let _ = started_tx.send(());
                     blocked_release.acquire().await.unwrap().forget();
                     Ok(())
@@ -358,7 +363,7 @@ mod tests {
 
         tokio::time::timeout(
             std::time::Duration::from_secs(1),
-            coordinator.coordinate("unrelated", 3, || async { Ok(()) }),
+            coordinator.coordinate("test", "unrelated", 3, || async { Ok(()) }),
         )
         .await
         .expect("unrelated namespace should not wait")
@@ -366,5 +371,35 @@ mod tests {
 
         release.add_permits(1);
         blocked.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn identical_namespace_versions_are_isolated_by_scope() {
+        let coordinator = SchemaCoordinator::new();
+        let calls = AtomicUsize::new(0);
+
+        coordinator
+            .coordinate("pipeline-a", "events", 3, || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        coordinator
+            .coordinate("pipeline-b", "events", 3, || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        coordinator
+            .coordinate("pipeline-a", "events", 3, || async {
+                calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 }

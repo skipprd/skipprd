@@ -54,7 +54,7 @@ type SchemaSyncWorkerState = (
 static SCHEMA_SYNC_WORKER: Lazy<std::sync::Mutex<Option<SchemaSyncWorkerState>>> =
     Lazy::new(|| std::sync::Mutex::new(None));
 static BLOCKING_PRIMARY_SCHEMA_PLUGIN: Lazy<
-    std::sync::Mutex<Option<Arc<dyn crate::plugins::SchemaSink + Send + Sync>>>,
+    std::sync::Mutex<Option<(String, Arc<dyn crate::plugins::SchemaSink + Send + Sync>)>>,
 > = Lazy::new(|| std::sync::Mutex::new(None));
 static PRIMARY_SCHEMA_PLUGIN_INIT: Lazy<tokio::sync::Mutex<()>> =
     Lazy::new(|| tokio::sync::Mutex::new(()));
@@ -2836,21 +2836,34 @@ impl Config {
         }
     }
 
+    fn primary_schema_scope() -> String {
+        format!(
+            "{}:{}:{}:{}",
+            Config::get_workspace_name(),
+            Config::get_pipeline_name(),
+            Config::get_pipeline_output_sink_ref(),
+            Config::get_pipeline_schema_plugin_name()
+        )
+    }
+
     async fn blocking_primary_schema_plugin(
+        scope: &str,
     ) -> Result<Arc<dyn crate::plugins::SchemaSink + Send + Sync>, String> {
-        if let Some(plugin) = BLOCKING_PRIMARY_SCHEMA_PLUGIN
+        if let Some((_, plugin)) = BLOCKING_PRIMARY_SCHEMA_PLUGIN
             .lock()
             .unwrap()
             .as_ref()
+            .filter(|(cached_scope, _)| cached_scope == scope)
             .cloned()
         {
             return Ok(plugin);
         }
         let _init_guard = PRIMARY_SCHEMA_PLUGIN_INIT.lock().await;
-        if let Some(plugin) = BLOCKING_PRIMARY_SCHEMA_PLUGIN
+        if let Some((_, plugin)) = BLOCKING_PRIMARY_SCHEMA_PLUGIN
             .lock()
             .unwrap()
             .as_ref()
+            .filter(|(cached_scope, _)| cached_scope == scope)
             .cloned()
         {
             return Ok(plugin);
@@ -2909,7 +2922,8 @@ impl Config {
         })?;
 
         let plugin: Arc<dyn crate::plugins::SchemaSink + Send + Sync> = Arc::new(plugin);
-        *BLOCKING_PRIMARY_SCHEMA_PLUGIN.lock().unwrap() = Some(plugin.clone());
+        *BLOCKING_PRIMARY_SCHEMA_PLUGIN.lock().unwrap() =
+            Some((scope.to_string(), plugin.clone()));
         Ok(plugin)
     }
 
@@ -2919,15 +2933,16 @@ impl Config {
         out_meta: &OutputMetadata,
         sync_timeout: std::time::Duration,
     ) -> Result<(), String> {
+        let scope = Config::primary_schema_scope();
         SCHEMA_COORDINATOR
-            .coordinate(namespace, schema_version, || async {
+            .coordinate(&scope, namespace, schema_version, || async {
                 let schema_plugin_name = Config::get_pipeline_schema_plugin_name();
                 if schema_plugin_name.is_empty() {
                     debug!("Schema sync: no schema sink configured for primary output");
                     return Ok(());
                 }
 
-                let plugin = Self::blocking_primary_schema_plugin().await?;
+                let plugin = Self::blocking_primary_schema_plugin(&scope).await?;
                 let source_contract = crate::METADATA
                     .load()
                     .source_contract_for_namespace(namespace);

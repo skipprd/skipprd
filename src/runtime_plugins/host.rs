@@ -1828,7 +1828,7 @@ impl RuntimeSinkConnectionPool {
             budget_registration,
             semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             next_worker: AtomicUsize::new(0),
-            worker_count: AtomicUsize::new(pool_size),
+            worker_count: AtomicUsize::new(1),
             schema_publish_lock: tokio::sync::Mutex::new(()),
             has_published_schema_state: AtomicBool::new(false),
             published_schema_version: std::sync::atomic::AtomicU64::new(0),
@@ -1927,7 +1927,7 @@ impl RuntimeSinkConnectionPool {
         };
         let mut minimum_version: Option<u64> = None;
         for worker in workers {
-            let guard = worker.lock().await;
+            let guard = worker.connection.lock().await;
             let Some(installed_version) = guard.installed_schema_version else {
                 return;
             };
