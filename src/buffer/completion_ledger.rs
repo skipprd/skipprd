@@ -565,6 +565,7 @@ fn fsync_dir(_dir: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::buffer::segment_file::SegmentPartMetaSummary;
     use std::sync::Barrier;
 
     fn index(count: usize) -> Vec<SegmentPartitionIndexEntry> {
@@ -579,6 +580,10 @@ mod tests {
                 },
                 bytes: 1,
                 updated_at_secs: 0,
+                slice_ordinal: ordinal as u32,
+                part_meta_start: 0,
+                part_meta_len: 0,
+                part_meta_summary: SegmentPartMetaSummary::Append,
                 start: ordinal as u64,
                 len: 1,
             })

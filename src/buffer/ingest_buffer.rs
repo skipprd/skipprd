@@ -3005,7 +3005,7 @@ impl Buffers {
         metrics_hot::set_compaction_inflight_slice_count(COMPACTION_IN_FLIGHT.len());
     }
 
-    fn tombstone_grouped_work(work: &CompactionWork) {
+    fn tombstone_grouped_work(work: &CompactionWork) -> io::Result<()> {
         let ledger = Self::completion_ledger();
         let mut grouped: HashMap<String, (SegmentSource, SegmentFileMetadata, Vec<usize>)> =
             HashMap::new();
@@ -3028,9 +3028,7 @@ impl Buffers {
                 },
             )
             .collect::<Vec<_>>();
-        if let Err(err) = ledger.mark_complete_batch(&updates) {
-            error!("Failed to persist segment completion ledger: {}", err);
-        }
+        ledger.mark_complete_batch(&updates)?;
 
         for (segment_id, (source, meta, _)) in grouped {
             match ledger.all_complete(&segment_id, &meta.index) {
@@ -3072,14 +3070,15 @@ impl Buffers {
                 },
                 Ok(false) => {}
                 Err(err) => {
-                    error!(
-                        "Refusing to delete segment {} with unreadable completion ledger: {}",
+                    return Err(io::Error::other(format!(
+                        "refusing to delete segment {} with unreadable completion ledger: {}",
                         source.display_name(),
                         err
-                    );
+                    )));
                 }
             }
         }
+        Ok(())
     }
 
     async fn compact_grouped_work(
@@ -3260,6 +3259,9 @@ impl Buffers {
         persist_manifest(&sent_txn.mark_acked())?;
         #[cfg(test)]
         observe_grouped_compaction_test_event(GroupedCompactionTestEvent::ManifestAcked);
+        Self::tombstone_grouped_work(&work)?;
+        #[cfg(test)]
+        observe_grouped_compaction_test_event(GroupedCompactionTestEvent::SlicesTombstoned);
         COMPACT_FAILURES.remove(&format!("{}:{}", work.txn.sink_ref, work.txn.id));
         crate::metrics::counters::add_wal_compaction_completed(work.entries.len() as u64);
         crate::metrics::counters::add_wal_compaction_transaction_completed(1);
@@ -3273,9 +3275,6 @@ impl Buffers {
             work.txn.id,
             work.txn.target_filename
         );
-        Self::tombstone_grouped_work(&work);
-        #[cfg(test)]
-        observe_grouped_compaction_test_event(GroupedCompactionTestEvent::SlicesTombstoned);
         crate::metrics::counters::add_wal_compaction_refs_tombstoned(work.entries.len() as u64);
         remove_manifest(&work.txn.id)?;
         progress.finish();
@@ -4497,7 +4496,8 @@ mod tests_wal_commit {
         let ledger = Buffers::completion_ledger();
         let bitmap_path = ledger.bitmap_path("multi-sink-segment");
 
-        Buffers::tombstone_grouped_work(&backlog.work_for_sink("data_sinks.ds_datalake"));
+        Buffers::tombstone_grouped_work(&backlog.work_for_sink("data_sinks.ds_datalake"))
+            .unwrap();
 
         assert!(backlog.segment_path.exists());
         assert!(commit_exists(&backlog.segment_path));
@@ -4518,7 +4518,10 @@ mod tests_wal_commit {
             .all_complete("multi-sink-segment", &backlog.meta.index)
             .unwrap());
 
-        Buffers::tombstone_grouped_work(&backlog.work_for_sink("deadletter_sinks.ds_deadletters"));
+        Buffers::tombstone_grouped_work(
+            &backlog.work_for_sink("deadletter_sinks.ds_deadletters"),
+        )
+        .unwrap();
 
         assert!(!backlog.segment_path.exists());
         assert!(!commit_exists(&backlog.segment_path));
@@ -4544,7 +4547,9 @@ mod tests_wal_commit {
         fs::create_dir_all(Buffers::tombstone_dir()).unwrap();
         fs::write(ledger.bitmap_path("corrupt-completion"), b"SCBL\x01").unwrap();
 
-        Buffers::tombstone_grouped_work(&backlog.work_for_sink("data_sinks.ds_datalake"));
+        let result =
+            Buffers::tombstone_grouped_work(&backlog.work_for_sink("data_sinks.ds_datalake"));
+        assert!(result.is_err());
 
         assert!(backlog.segment_path.exists());
         assert!(commit_exists(&backlog.segment_path));
