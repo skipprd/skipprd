@@ -365,18 +365,14 @@ impl Drop for ManifestDirectoryScanMetrics {
     }
 }
 
-pub fn load_pending_manifests() -> io::Result<Vec<CompactionTransaction>> {
+/// Load every live manifest exactly as persisted. In-memory scheduling applies
+/// Sent staleness without rescanning this directory on every planner cycle.
+pub fn load_manifest_index() -> io::Result<Vec<CompactionTransaction>> {
     let mut scan_metrics = ManifestDirectoryScanMetrics::default();
     let dir = manifest_dir();
     if !dir.exists() {
         return Ok(Vec::new());
     }
-    let now = now_secs();
-    let sent_stale_secs = Config::getenv("WAL_COMPACTION_SENT_STALE_SECS", "300")
-        .parse::<u64>()
-        .ok()
-        .filter(|value| *value > 0)
-        .unwrap_or(300);
     let mut out = Vec::new();
     for entry in fs::read_dir(dir)? {
         scan_metrics.entries_examined = scan_metrics.entries_examined.saturating_add(1);
@@ -391,6 +387,22 @@ pub fn load_pending_manifests() -> io::Result<Vec<CompactionTransaction>> {
         if txn.updated_at_secs == 0 {
             txn.updated_at_secs = txn.created_at_secs;
         }
+        if !matches!(txn.state, CompactionTransactionState::Tombstoned) {
+            out.push(txn);
+        }
+    }
+    Ok(out)
+}
+
+pub fn load_pending_manifests() -> io::Result<Vec<CompactionTransaction>> {
+    let now = now_secs();
+    let sent_stale_secs = Config::getenv("WAL_COMPACTION_SENT_STALE_SECS", "300")
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(300);
+    let mut out = Vec::new();
+    for mut txn in load_manifest_index()? {
         if matches!(txn.state, CompactionTransactionState::Sent)
             && now.saturating_sub(txn.updated_at_secs) < sent_stale_secs
         {
@@ -408,9 +420,7 @@ pub fn load_pending_manifests() -> io::Result<Vec<CompactionTransaction>> {
             txn.state = CompactionTransactionState::Pending;
             txn.updated_at_secs = now;
         }
-        if !matches!(txn.state, CompactionTransactionState::Tombstoned) {
-            out.push(txn);
-        }
+        out.push(txn);
     }
     Ok(out)
 }

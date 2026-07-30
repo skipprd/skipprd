@@ -89,7 +89,7 @@ pub static COMPACTION_MANIFEST_DIRECTORY_SCANS_TOTAL: Lazy<AtomicU64> =
     Lazy::new(|| AtomicU64::new(0));
 pub static COMPACTION_MANIFEST_ENTRIES_EXAMINED_TOTAL: Lazy<AtomicU64> =
     Lazy::new(|| AtomicU64::new(0));
-/// No persistent ready queue exists yet; this is the most recent planner output size.
+/// Current number of compaction groups with at least one eligible queued slice.
 pub static COMPACTION_PLANNER_READY_WORK_COUNT: Lazy<AtomicUsize> =
     Lazy::new(|| AtomicUsize::new(0));
 pub static COMPACTION_INFLIGHT_SLICE_COUNT: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));

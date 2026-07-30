@@ -3,13 +3,17 @@ enum PersistenceState {
     MemoryOnly,
     Persisted,
 }
+use crate::buffer::compaction_index::{
+    CompactionGroupKey, CompactionIndex, CompactionKind, IndexedCompactionSlice,
+    PlannedCompactionGroup,
+};
 use crate::buffer::compaction_progress::{
     format_compactor_drain_status_summary, format_in_flight_grouped_compactions,
     CompactorDrainHeartbeat, CompactorDrainProgress, GroupedCompactionPhase,
     GroupedCompactionTracker, WalCompactionCounterSnapshot,
 };
 use crate::buffer::compaction_transaction::{
-    load_pending_manifests, persist_manifest, remove_manifest, CompactionTransaction,
+    load_manifest_index, persist_manifest, remove_manifest, CompactionTransaction,
     SegmentSourceDescriptor, SinkRetrySemantics, SinkWriteSemantics, WalPartRef,
 };
 use crate::buffer::completion_ledger::{SegmentCompletionLedger, SegmentCompletionUpdate};
@@ -225,6 +229,14 @@ struct CachedSegment {
 }
 
 static SEGMENT_CACHE: OnceLazy<DashMap<String, CachedSegment>> = OnceLazy::new(DashMap::new);
+static COMPACTION_INDEX: Lazy<std::sync::Mutex<CompactionIndex>> =
+    Lazy::new(|| std::sync::Mutex::new(CompactionIndex::default()));
+
+fn compaction_index() -> std::sync::MutexGuard<'static, CompactionIndex> {
+    COMPACTION_INDEX
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
 
 #[derive(Clone)]
 struct CompactionEntry {
@@ -1352,71 +1364,18 @@ impl Buffers {
         TokioDuration::from_secs(secs)
     }
 
-    fn partition_is_reclaimable(
-        idx: &SegmentPartitionIndexEntry,
-        meta: &SegmentFileMetadata,
-        ordinal: usize,
-        source: &SegmentSource,
-        now_secs: u64,
-        force: bool,
-    ) -> bool {
-        match Self::completion_ledger().is_complete(source.segment_id(), &meta.index, ordinal) {
-            Ok(true) => return false,
-            Ok(false) => {}
-            Err(err) => {
-                warn!(
-                    "Compactor: refusing segment with unreadable completion ledger seg={} err={}",
-                    source.display_name(),
-                    err
-                );
-                return false;
-            }
-        }
-        let inflight_key = (source.display_name(), idx.start, idx.len);
-        if COMPACTION_IN_FLIGHT.contains_key(&inflight_key) {
-            return false;
-        }
-        Self::should_compact(idx.bytes, idx.updated_at_secs, now_secs, force)
-    }
-
     pub fn has_reclaimable_wal() -> bool {
         Self::reclaimable_wal_partition_count(1) > 0
     }
 
     pub(crate) fn reclaimable_wal_partition_count(limit: usize) -> usize {
-        let now_secs = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_secs();
-        let mut count = 0usize;
-        for entry in SEGMENT_CACHE.iter() {
-            let cached = entry.value();
-            for (ordinal, idx) in cached.meta.index.iter().enumerate() {
-                if Self::partition_is_reclaimable(
-                    idx,
-                    &cached.meta,
-                    ordinal,
-                    &cached.source,
-                    now_secs,
-                    true,
-                ) {
-                    count += 1;
-                    if count >= limit {
-                        return count;
-                    }
-                }
-            }
-        }
-        count
-    }
-
-    fn should_compact(bytes: u64, updated_at_secs: u64, now_secs: u64, force: bool) -> bool {
-        if force {
-            return true;
-        }
-        let byte_threshold = Config::get_pipeline_buffer_threshold_bytes();
-        let time_threshold = Config::get_pipeline_buffer_threshold_seconds() as u64;
-        bytes >= byte_threshold || now_secs.saturating_sub(updated_at_secs) >= time_threshold
+        Self::ensure_manifest_index_loaded();
+        compaction_index().reclaimable_slice_count(
+            true,
+            Self::now_secs(),
+            Self::sent_manifest_stale_secs(),
+            limit,
+        )
     }
 
     fn grouped_write_semantics(capability: &SinkCapability) -> SinkWriteSemantics {
@@ -1434,11 +1393,62 @@ impl Buffers {
 
     fn segment_cache_register(source: SegmentSource, meta: SegmentFileMetadata) {
         let id = source.segment_id().to_string();
-        SEGMENT_CACHE.insert(id, CachedSegment { source, meta });
+        let source_id = source.display_name();
+        let source_descriptor = Self::source_descriptor(&source);
+        let ledger = Self::completion_ledger();
+        let mut indexed_slices = Vec::with_capacity(meta.index.len());
+        for (ordinal, idx) in meta.index.iter().enumerate() {
+            match ledger.is_complete(&id, &meta.index, ordinal) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(err) => {
+                    warn!(
+                        "Compactor: refusing to index segment {} with unreadable completion ledger: {}",
+                        source.display_name(),
+                        err
+                    );
+                    indexed_slices.clear();
+                    break;
+                }
+            }
+            let schema_fingerprint = Self::schema_fingerprint_for_group(idx, &meta);
+            let wal_ref = WalPartRef {
+                segment_id: id.clone(),
+                source: source_descriptor.clone(),
+                start: idx.start,
+                len: idx.len,
+                key: idx.key.clone(),
+                cdc_meta_hash: idx.part_meta_summary.canonical_hash(),
+            };
+            indexed_slices.push(IndexedCompactionSlice {
+                id: crate::buffer::compaction_index::CompactionSliceId {
+                    segment_id: id.clone(),
+                    source_id: source_id.clone(),
+                    start: idx.start,
+                    len: idx.len,
+                },
+                group_key: Self::grouping_key(idx, &schema_fingerprint),
+                index_entry: idx.clone(),
+                wal_ref,
+            });
+        }
+        SEGMENT_CACHE.insert(id.clone(), CachedSegment { source, meta });
+        let mut index = compaction_index();
+        index.register_segment(
+            &id,
+            indexed_slices,
+            Config::get_pipeline_buffer_threshold_bytes(),
+            Config::get_pipeline_buffer_threshold_seconds() as u64,
+            Self::now_secs(),
+        );
+        metrics_hot::set_compaction_planner_ready_work_count(index.ready_queue_depth());
     }
 
     fn segment_cache_remove(segment_id: &str) {
         SEGMENT_CACHE.remove(segment_id);
+        let mut index = compaction_index();
+        index.remove_segment(segment_id);
+        metrics_hot::set_compaction_planner_ready_work_count(index.ready_queue_depth());
         s3_wal_body_cache::remove(segment_id);
     }
 
@@ -1487,21 +1497,23 @@ impl Buffers {
         hex::encode(hasher.finalize())
     }
 
-    fn grouping_key(idx: &SegmentPartitionIndexEntry, schema_fingerprint: &str) -> String {
+    fn grouping_key(
+        idx: &SegmentPartitionIndexEntry,
+        schema_fingerprint: &str,
+    ) -> CompactionGroupKey {
         let kind = if idx.part_meta_summary.is_cdc() {
-            "cdc"
+            CompactionKind::Cdc
         } else {
-            "append"
+            CompactionKind::Append
         };
-        format!(
-            "{}\n{}\n{}\n{}\n{}\n{}",
-            idx.key.sink_ref,
-            idx.key.namespace,
-            idx.key.partition,
-            idx.key.time.unwrap_or(0),
-            schema_fingerprint,
-            kind
-        )
+        CompactionGroupKey {
+            sink_ref: idx.key.sink_ref.clone(),
+            namespace: idx.key.namespace.clone(),
+            partition: idx.key.partition.clone(),
+            time: idx.key.time,
+            schema_fingerprint: schema_fingerprint.to_string(),
+            kind,
+        }
     }
 
     fn schema_fingerprint_for_group(
@@ -1515,40 +1527,31 @@ impl Buffers {
         }
     }
 
-    fn next_compaction_transactions(
-        limit: usize,
-        force: bool,
-        output: &dyn DataSink,
-    ) -> Vec<CompactionWork> {
-        let mut planner_metrics = CompactionPlannerMetricGuard::new();
-        let now_secs = SystemTime::now()
+    fn now_secs() -> u64 {
+        SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
-            .as_secs();
-        let target_bytes = Self::compaction_group_target_bytes();
-        let max_parts = Self::compaction_group_max_parts();
-        let per_sink_limit = Self::compaction_per_sink_limit();
-        let mut groups: HashMap<String, (Vec<CompactionEntry>, u64)> = HashMap::new();
-        let mut scheduled_by_sink: HashMap<String, usize> = HashMap::new();
-        let mut out = Vec::with_capacity(limit);
+            .as_secs()
+    }
 
-        match load_pending_manifests() {
-            Ok(pending) => {
-                for txn in pending {
-                    if out.len() >= limit {
-                        metrics_hot::set_compaction_planner_ready_work_count(out.len());
-                        return out;
-                    }
-                    if let Some(work) = Self::work_from_manifest(txn, output) {
-                        let count = scheduled_by_sink
-                            .entry(work.txn.sink_ref.clone())
-                            .or_default();
-                        if *count >= per_sink_limit {
-                            continue;
-                        }
-                        *count += 1;
-                        out.push(work);
-                    }
+    fn sent_manifest_stale_secs() -> u64 {
+        Config::getenv("WAL_COMPACTION_SENT_STALE_SECS", "300")
+            .parse::<u64>()
+            .ok()
+            .filter(|value| *value > 0)
+            .unwrap_or(300)
+    }
+
+    fn ensure_manifest_index_loaded() {
+        if compaction_index().manifests_loaded() {
+            return;
+        }
+        match load_manifest_index() {
+            Ok(manifests) => {
+                let mut index = compaction_index();
+                if !index.manifests_loaded() {
+                    index.install_manifests(manifests);
+                    metrics_hot::set_compaction_planner_ready_work_count(index.ready_queue_depth());
                 }
             }
             Err(err) => warn!(
@@ -1556,106 +1559,117 @@ impl Buffers {
                 err
             ),
         }
+    }
+
+    fn persist_compaction_manifest(txn: &CompactionTransaction) -> io::Result<()> {
+        persist_manifest(txn)?;
+        let mut index = compaction_index();
+        index.upsert_manifest(txn.clone());
+        metrics_hot::set_compaction_planner_ready_work_count(index.ready_queue_depth());
+        Ok(())
+    }
+
+    fn remove_compaction_manifest(id: &str) -> io::Result<()> {
+        remove_manifest(id)?;
+        let mut index = compaction_index();
+        index.remove_manifest(id, Self::now_secs());
+        metrics_hot::set_compaction_planner_ready_work_count(index.ready_queue_depth());
+        Ok(())
+    }
+
+    fn next_compaction_transactions(
+        limit: usize,
+        force: bool,
+        output: &dyn DataSink,
+    ) -> Vec<CompactionWork> {
+        let mut planner_metrics = CompactionPlannerMetricGuard::new();
+        let now_secs = Self::now_secs();
+        let target_bytes = Self::compaction_group_target_bytes();
+        let max_parts = Self::compaction_group_max_parts();
+        let per_sink_limit = Self::compaction_per_sink_limit();
+        let mut out = Vec::with_capacity(limit);
+
+        Self::ensure_manifest_index_loaded();
+        let pending = compaction_index().reserve_ready_manifests(
+            limit,
+            per_sink_limit,
+            now_secs,
+            Self::sent_manifest_stale_secs(),
+        );
+        for reserved in pending {
+            let txn = reserved.txn;
+            if reserved.retried_stale {
+                warn!(
+                    "Compactor: retrying stale sent manifest id={} sink_ref={} namespace={} age_secs={} attempts={}",
+                    txn.id,
+                    txn.sink_ref,
+                    txn.namespace,
+                    reserved.stale_age_secs,
+                    txn.attempts,
+                );
+            }
+            planner_metrics.slices_examined = planner_metrics
+                .slices_examined
+                .saturating_add(txn.refs.len() as u64);
+            planner_metrics.segments_examined = planner_metrics.segments_examined.saturating_add(
+                txn.refs
+                    .iter()
+                    .map(|wal_ref| wal_ref.segment_id.as_str())
+                    .collect::<HashSet<_>>()
+                    .len() as u64,
+            );
+            let txn_id = txn.id.clone();
+            if let Some(work) = Self::work_from_manifest(txn, output) {
+                out.push(work);
+            } else {
+                compaction_index().release_manifest(&txn_id);
+            }
+        }
         if !out.is_empty() {
-            metrics_hot::set_compaction_planner_ready_work_count(out.len());
+            metrics_hot::set_compaction_planner_ready_work_count(
+                compaction_index().ready_queue_depth(),
+            );
             return out;
         }
 
-        for entry in SEGMENT_CACHE.iter() {
-            planner_metrics.segments_examined = planner_metrics.segments_examined.saturating_add(1);
-            let cached = entry.value();
-            for (ordinal, idx) in cached.meta.index.iter().enumerate() {
-                planner_metrics.slices_examined = planner_metrics.slices_examined.saturating_add(1);
-                match Self::completion_ledger().is_complete(
-                    cached.source.segment_id(),
-                    &cached.meta.index,
-                    ordinal,
-                ) {
-                    Ok(true) => continue,
-                    Ok(false) => {}
-                    Err(err) => {
-                        warn!(
-                            "Compactor: refusing candidate with unreadable completion ledger seg={} err={}",
-                            cached.source.display_name(),
-                            err
-                        );
-                        continue;
-                    }
-                }
-                let inflight_key = (cached.source.display_name(), idx.start, idx.len);
-                if COMPACTION_IN_FLIGHT.contains_key(&inflight_key) {
-                    continue;
-                }
-                if !Self::should_compact(idx.bytes, idx.updated_at_secs, now_secs, force) {
-                    continue;
-                }
-                let schema_fingerprint = Self::schema_fingerprint_for_group(idx, &cached.meta);
-                let key = Self::grouping_key(idx, &schema_fingerprint);
-                let wal_ref = WalPartRef {
-                    segment_id: cached.source.segment_id().to_string(),
-                    source: Self::source_descriptor(&cached.source),
-                    start: idx.start,
-                    len: idx.len,
-                    key: idx.key.clone(),
-                    cdc_meta_hash: idx.part_meta_summary.canonical_hash(),
-                };
-                let entry = CompactionEntry {
-                    source: cached.source.clone(),
-                    meta: cached.meta.clone(),
-                    ordinal,
-                    idx: idx.clone(),
-                    wal_ref,
-                };
-                let group = groups.entry(key).or_insert_with(|| (Vec::new(), 0));
-                if group.0.len() >= max_parts || group.1.saturating_add(idx.bytes) > target_bytes {
-                    let group_sink_ref =
-                        group.0.first().map(|entry| entry.idx.key.sink_ref.clone());
-                    if let Some(sink_ref) = group_sink_ref {
-                        let count = scheduled_by_sink.entry(sink_ref).or_default();
-                        if *count >= per_sink_limit {
-                            group.1 = group.1.saturating_add(idx.bytes);
-                            group.0.push(entry);
-                            continue;
-                        }
-                    }
-                    if let Some(work) = Self::build_compaction_work(
-                        std::mem::take(&mut group.0),
-                        schema_fingerprint.clone(),
-                        output,
-                    ) {
-                        let count = scheduled_by_sink
-                            .entry(work.txn.sink_ref.clone())
-                            .or_default();
-                        *count += 1;
-                        out.push(work);
-                        if out.len() >= limit {
-                            metrics_hot::set_compaction_planner_ready_work_count(out.len());
-                            return out;
-                        }
-                    }
-                    group.1 = 0;
-                }
-                group.1 = group.1.saturating_add(idx.bytes);
-                group.0.push(entry);
-            }
+        let plan = compaction_index().plan_ready(
+            limit,
+            force,
+            now_secs,
+            Config::get_pipeline_buffer_threshold_bytes(),
+            Config::get_pipeline_buffer_threshold_seconds() as u64,
+            target_bytes,
+            max_parts,
+            per_sink_limit,
+            HashMap::new(),
+        );
+        planner_metrics.segments_examined = planner_metrics
+            .segments_examined
+            .saturating_add(plan.segments_examined);
+        planner_metrics.slices_examined = planner_metrics
+            .slices_examined
+            .saturating_add(plan.slices_examined);
+        if plan.oversized_slices_deferred > 0 {
+            warn!(
+                "Compactor: deferred {} indivisible WAL slices larger than WAL_COMPACTION_GROUP_TARGET_BYTES={}",
+                plan.oversized_slices_deferred, target_bytes
+            );
         }
-
-        for (_, (entries, _bytes)) in groups {
-            if out.len() >= limit {
-                break;
-            }
-            if let Some(work) = Self::build_compaction_work(entries, String::new(), output) {
-                let count = scheduled_by_sink
-                    .entry(work.txn.sink_ref.clone())
-                    .or_default();
-                if *count >= per_sink_limit {
-                    continue;
-                }
-                *count += 1;
+        for planned in plan.groups {
+            let refs = planned
+                .slices
+                .iter()
+                .map(|slice| slice.wal_ref.clone())
+                .collect::<Vec<_>>();
+            if let Some(work) = Self::work_from_planned_group(planned, output) {
                 out.push(work);
+            } else {
+                compaction_index().release_refs(&refs, now_secs);
             }
         }
-        metrics_hot::set_compaction_planner_ready_work_count(out.len());
+        metrics_hot::set_compaction_planner_ready_work_count(
+            compaction_index().ready_queue_depth(),
+        );
         out
     }
 
@@ -1693,6 +1707,29 @@ impl Buffers {
             .clamp(1, max)
     }
 
+    fn work_from_planned_group(
+        planned: PlannedCompactionGroup,
+        output: &dyn DataSink,
+    ) -> Option<CompactionWork> {
+        let schema_fingerprint = planned.key.schema_fingerprint.clone();
+        let mut entries = Vec::with_capacity(planned.slices.len());
+        for slice in planned.slices {
+            let cached = SEGMENT_CACHE.get(&slice.id.segment_id)?;
+            if cached.source.display_name() != slice.id.source_id {
+                return None;
+            }
+            let ordinal = slice.index_entry.slice_ordinal as usize;
+            entries.push(CompactionEntry {
+                source: cached.source.clone(),
+                meta: cached.meta.clone(),
+                ordinal,
+                idx: slice.index_entry,
+                wal_ref: slice.wal_ref,
+            });
+        }
+        Self::build_compaction_work(entries, schema_fingerprint, output)
+    }
+
     fn work_from_manifest(
         txn: CompactionTransaction,
         output: &dyn DataSink,
@@ -1709,11 +1746,12 @@ impl Buffers {
                     "Compactor: manifest resume skipped unknown sink_ref={}",
                     sink_ref
                 );
-                let _ = remove_manifest(&txn_id);
+                let _ = Self::remove_compaction_manifest(&txn_id);
                 return None;
             }
         };
         let mut entries = Vec::with_capacity(txn.refs.len());
+        let mut completed_refs = Vec::new();
         for wal_ref in txn.refs.iter() {
             let cached = SEGMENT_CACHE.get(&wal_ref.segment_id)?;
             let (ordinal, idx) = cached.meta.index.iter().enumerate().find(|(_, idx)| {
@@ -1724,7 +1762,10 @@ impl Buffers {
                 &cached.meta.index,
                 ordinal,
             ) {
-                Ok(true) => continue,
+                Ok(true) => {
+                    completed_refs.push(wal_ref.clone());
+                    continue;
+                }
                 Ok(false) => {}
                 Err(err) => {
                     warn!(
@@ -1754,8 +1795,11 @@ impl Buffers {
                 wal_ref: wal_ref.clone(),
             });
         }
+        if !completed_refs.is_empty() {
+            compaction_index().complete_refs(&completed_refs);
+        }
         if entries.is_empty() {
-            let _ = remove_manifest(&txn.id);
+            let _ = Self::remove_compaction_manifest(&txn.id);
             return None;
         }
         Some(CompactionWork { txn, entries })
@@ -2217,10 +2261,7 @@ impl Buffers {
     }
 
     fn indexed_wal_ref_count() -> usize {
-        SEGMENT_CACHE
-            .iter()
-            .map(|entry| entry.value().meta.index.len())
-            .sum()
+        compaction_index().indexed_slice_count()
     }
 
     fn index_committed_segment(path: PathBuf, meta: SegmentFileMetadata) -> usize {
@@ -2985,6 +3026,10 @@ impl Buffers {
                 for key in inserted {
                     COMPACTION_IN_FLIGHT.remove(&key);
                 }
+                let mut index = compaction_index();
+                index.release_refs(&work.txn.refs, Self::now_secs());
+                index.release_manifest(&work.txn.id);
+                metrics_hot::set_compaction_planner_ready_work_count(index.ready_queue_depth());
                 metrics_hot::set_compaction_inflight_slice_count(COMPACTION_IN_FLIGHT.len());
                 return false;
             }
@@ -3003,6 +3048,10 @@ impl Buffers {
             ));
         }
         metrics_hot::set_compaction_inflight_slice_count(COMPACTION_IN_FLIGHT.len());
+        let mut index = compaction_index();
+        index.release_refs(&work.txn.refs, Self::now_secs());
+        index.release_manifest(&work.txn.id);
+        metrics_hot::set_compaction_planner_ready_work_count(index.ready_queue_depth());
     }
 
     fn tombstone_grouped_work(work: &CompactionWork) -> io::Result<()> {
@@ -3029,6 +3078,11 @@ impl Buffers {
             )
             .collect::<Vec<_>>();
         ledger.mark_complete_batch(&updates)?;
+        {
+            let mut index = compaction_index();
+            index.complete_refs(&work.txn.refs);
+            metrics_hot::set_compaction_planner_ready_work_count(index.ready_queue_depth());
+        }
 
         for (segment_id, (source, meta, _)) in grouped {
             match ledger.all_complete(&segment_id, &meta.index) {
@@ -3132,7 +3186,7 @@ impl Buffers {
                 .map(|entry| entry.source.segment_id().to_string()),
         );
 
-        persist_manifest(&work.txn)?;
+        Self::persist_compaction_manifest(&work.txn)?;
         let stream_started = std::time::Instant::now();
         let (batch_stream, cdc_ctx, rows, row_counter, rows_known_at_build) =
             match Self::build_grouped_stream(&work).await {
@@ -3214,7 +3268,7 @@ impl Buffers {
             crate::plugins::GroupedBatchReaderConfig::default(),
         );
         let sent_txn = work.txn.clone().mark_sent();
-        persist_manifest(&sent_txn)?;
+        Self::persist_compaction_manifest(&sent_txn)?;
         info!(
             "Compactor: grouped compaction uploading_to_sink started namespace={} rows={} sink_ref={} compaction_id={} target={}",
             work.txn.namespace,
@@ -3256,7 +3310,7 @@ impl Buffers {
         observe_grouped_compaction_test_event(GroupedCompactionTestEvent::SinkSucceeded);
         let final_rows = row_counter.load(AtomicOrdering::Relaxed);
         progress.set_rows(final_rows);
-        persist_manifest(&sent_txn.mark_acked())?;
+        Self::persist_compaction_manifest(&sent_txn.mark_acked())?;
         #[cfg(test)]
         observe_grouped_compaction_test_event(GroupedCompactionTestEvent::ManifestAcked);
         Self::tombstone_grouped_work(&work)?;
@@ -3276,7 +3330,7 @@ impl Buffers {
             work.txn.target_filename
         );
         crate::metrics::counters::add_wal_compaction_refs_tombstoned(work.entries.len() as u64);
-        remove_manifest(&work.txn.id)?;
+        Self::remove_compaction_manifest(&work.txn.id)?;
         progress.finish();
         Ok(true)
     }
@@ -3790,6 +3844,12 @@ impl WalIndexMetrics {
 }
 
 pub async fn wal_recover(offsets_db: Arc<Offsets>) -> io::Result<()> {
+    {
+        let mut index = compaction_index();
+        index.clear_for_recovery();
+        metrics_hot::set_compaction_planner_ready_work_count(0);
+    }
+    Buffers::ensure_manifest_index_loaded();
     if is_s3_wal() {
         return wal_recover_s3(offsets_db).await;
     }
@@ -3920,6 +3980,8 @@ mod tests_wal_commit {
             snapshots.clear();
         }
         SEGMENT_CACHE.clear();
+        compaction_index().clear_all();
+        metrics_hot::set_compaction_planner_ready_work_count(0);
         s3_wal_body_cache::clear_for_tests();
     }
 
@@ -4397,6 +4459,7 @@ mod tests_wal_commit {
         const PARTS: usize = 8;
         let (base, _guard) = setup_data_dir();
         reset_in_memory_segments();
+        crate::metrics::counters::reset_flush_metrics();
         let old_per_sink = crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET
             .swap(PARTS, AtomicOrdering::Relaxed);
 
@@ -4444,6 +4507,15 @@ mod tests_wal_commit {
             PARTS
         );
         assert_eq!(SegmentFile::full_part_meta_scan_count(), 0);
+        assert!(Buffers::next_compaction_transactions(PARTS, true, &sink).is_empty());
+        let planner = crate::metrics::counters::flush_metrics_snapshot();
+        assert_eq!(planner.compaction_planner_cycles_total, 2);
+        assert_eq!(planner.compaction_planner_segments_examined_total, 1);
+        assert_eq!(
+            planner.compaction_planner_slices_examined_total,
+            PARTS as u64
+        );
+        assert_eq!(planner.compaction_planner_ready_work_count, 0);
 
         crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET
             .store(old_per_sink, AtomicOrdering::Relaxed);

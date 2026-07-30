@@ -1,3 +1,4 @@
+pub mod compaction_index;
 pub mod compaction_progress;
 pub mod compaction_transaction;
 pub mod completion_ledger;
