@@ -607,6 +607,107 @@ async fn prepare_already_applied_sends_zero_payload_bytes() {
 
 #[tokio::test]
 #[serial]
+async fn authoritative_preflight_persists_catalog_intent_without_payload() {
+    let temp = tempdir().unwrap();
+    let _data_dir = RuntimeEnvGuard::set("DATA_DIR", temp.path().to_str().unwrap());
+    let marker_path = temp.path().join("already-applied-intent-state.json");
+    let manifest_path = write_sink_manifest(
+        temp.path(),
+        "already-applied-intent-runtime-sink",
+        "File",
+        "already_applied_with_intent",
+        "File",
+        Some(&helper_sha256()),
+        &helper_binary(),
+        Some(&marker_path),
+    );
+    let sink = RuntimeDataSinkPlugin::new(
+        ResolvedRuntimePlugin::load(&manifest_path).unwrap(),
+        "runtime_host_already_applied_intent".to_string(),
+        RuntimeBinding::Primary,
+        runtime_file_sink_config(),
+    )
+    .await
+    .unwrap();
+
+    sink.sync(
+        panic_on_poll_stream(),
+        "already-applied-intent-c=receipt-1".to_string(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(marker_path).unwrap()).unwrap();
+    assert_eq!(state["run_count"], 0);
+    assert_eq!(state["payload_bytes"], 0);
+    let outbox = skipprd::catalog_outbox::CatalogOutbox::open(Config::get_data_dir()).unwrap();
+    let pending = outbox.scan_pending(10).unwrap();
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].intent.identity.namespace, "events");
+}
+
+#[tokio::test]
+#[serial]
+async fn preflight_receipt_replay_repairs_failed_outbox_persist_without_payload() {
+    let temp = tempdir().unwrap();
+    let _data_dir = RuntimeEnvGuard::set("DATA_DIR", temp.path().to_str().unwrap());
+    let marker_path = temp.path().join("repair-outbox-state.json");
+    let manifest_path = write_sink_manifest(
+        temp.path(),
+        "repair-outbox-runtime-sink",
+        "File",
+        "already_applied_with_intent",
+        "File",
+        Some(&helper_sha256()),
+        &helper_binary(),
+        Some(&marker_path),
+    );
+    let sink = RuntimeDataSinkPlugin::new(
+        ResolvedRuntimePlugin::load(&manifest_path).unwrap(),
+        "runtime_host_repair_outbox".to_string(),
+        RuntimeBinding::Primary,
+        runtime_file_sink_config(),
+    )
+    .await
+    .unwrap();
+    let pending_dir = std::path::Path::new(&Config::get_data_dir())
+        .join("segment_buffer/catalog_outbox/v1/pending");
+    std::fs::remove_dir_all(&pending_dir).unwrap();
+    std::fs::write(&pending_dir, b"force persist failure").unwrap();
+
+    let first = sink
+        .sync(
+            panic_on_poll_stream(),
+            "repair-outbox-c=receipt-1".to_string(),
+            None,
+        )
+        .await;
+    assert!(
+        first.is_err(),
+        "slice completion must fail before intent persistence"
+    );
+
+    std::fs::remove_file(&pending_dir).unwrap();
+    std::fs::create_dir_all(&pending_dir).unwrap();
+    sink.sync(
+        panic_on_poll_stream(),
+        "repair-outbox-c=receipt-1".to_string(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(marker_path).unwrap()).unwrap();
+    assert_eq!(state["payload_bytes"], 0);
+    let outbox = skipprd::catalog_outbox::CatalogOutbox::open(Config::get_data_dir()).unwrap();
+    assert_eq!(outbox.scan_pending(10).unwrap().len(), 1);
+}
+
+#[tokio::test]
+#[serial]
 async fn two_sink_sessions_interleave_on_one_runtime_child() {
     let _target = RuntimeSinkPoolTargetGuard::set(2);
     let _pool_size = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "1");
@@ -902,7 +1003,7 @@ async fn schema_install_waits_for_active_multiplexed_applies() {
         ),
         async {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            sink.install_schema_state(100_007, &namespaces).await
+            sink.install_schema_state(u64::MAX, &namespaces).await
         },
     );
     apply.unwrap();
@@ -941,7 +1042,7 @@ async fn unrelated_schema_install_proceeds_during_multiplexed_apply() {
         ),
         async {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            sink.install_schema_state(100_008, &namespaces).await
+            sink.install_schema_state(u64::MAX - 1, &namespaces).await
         },
     );
     apply.unwrap();

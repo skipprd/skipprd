@@ -424,6 +424,8 @@ fn is_transient(error: &str) -> bool {
         "internalservice",
         "concurrentmodification",
         "connection",
+        "alreadyexist",
+        "entitynotfound",
     ]
     .iter()
     .any(|needle| error.contains(needle))
@@ -451,6 +453,8 @@ mod tests {
         assert_eq!(GLUE_BATCH_CREATE_LIMIT, 100);
         assert!(retry_delay(30) <= Duration::from_secs(60));
         assert!(is_transient("ThrottlingException"));
+        assert!(is_transient("AlreadyExistsException"));
+        assert!(is_transient("EntityNotFoundException"));
         assert!(!is_transient("InvalidInputException"));
     }
 }

@@ -23,12 +23,13 @@ use skipprd::buffer::compaction_transaction::SinkWriteSemantics;
 use skipprd::plugins::cdc;
 use skipprd::plugins::SinkWriteOutcome;
 use skipprd::runtime_plugins::protocol::{
-    CommitReceipt, CommitReceiptAuthority, HandshakeResponse, HostDataFrame, HostFrame,
-    PluginDataFrame, PluginFrame, PrepareAck, PrepareSinkResult, RuntimeCheckpointUpdate,
-    RuntimePluginKind, RuntimeRequestAck, RuntimeSchemaInstallRequest, RuntimeSchemaRefreshRequest,
-    RuntimeSchemaStateInstallRequest, RuntimeSessionHello, RuntimeSinkError,
-    RuntimeSinkInstallRequest, RuntimeSourceSinkWrite, SinkAck, SinkWriteStats, SourceEvent,
-    RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
+    CatalogIntent, CatalogIntentIdentity, CatalogIntentKind, CommitReceipt, CommitReceiptAuthority,
+    HandshakeResponse, HostDataFrame, HostFrame, PluginDataFrame, PluginFrame, PrepareAck,
+    PrepareSinkResult, RuntimeCheckpointUpdate, RuntimePluginKind, RuntimeRequestAck,
+    RuntimeSchemaInstallRequest, RuntimeSchemaRefreshRequest, RuntimeSchemaStateInstallRequest,
+    RuntimeSessionHello, RuntimeSinkError, RuntimeSinkInstallRequest, RuntimeSourceSinkWrite,
+    SinkAck, SinkWriteStats, SourceEvent, CATALOG_INTENT_VERSION, RUNTIME_PROTOCOL_VERSION,
+    SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
     SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use skipprd::runtime_plugins::sdk::{decode_record_batch_stream, encode_record_batch_stream};
@@ -642,7 +643,23 @@ async fn run_sink_loop(
                     .await?;
                     continue;
                 }
-                if cli.scenario == "already_applied" {
+                if matches!(
+                    cli.scenario.as_str(),
+                    "already_applied" | "already_applied_with_intent"
+                ) {
+                    let catalog_intents = (cli.scenario == "already_applied_with_intent")
+                        .then(|| CatalogIntent {
+                            version: CATALOG_INTENT_VERSION,
+                            identity: CatalogIntentIdentity {
+                                sink_ref: "primary".to_string(),
+                                namespace: "events".to_string(),
+                                kind: CatalogIntentKind::UpsertPartition,
+                                key: "[\"2026-07-30\"]".to_string(),
+                            },
+                            payload_json: "{\"test\":\"durable-preflight\"}".to_string(),
+                        })
+                        .into_iter()
+                        .collect();
                     write_frame(
                         control_writer,
                         &PluginFrame::PrepareAck(PrepareAck {
@@ -654,7 +671,7 @@ async fn run_sink_loop(
                                         authority: "test-helper".to_string(),
                                     },
                                 ),
-                                catalog_intents: Vec::new(),
+                                catalog_intents,
                             },
                         }),
                     )
