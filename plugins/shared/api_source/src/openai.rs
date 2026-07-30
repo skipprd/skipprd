@@ -199,7 +199,11 @@ mod tests {
                 }
             }]
         });
-        let parsed = parse_chat_json_content(&envelope, r#"{"choices":[{"message":{"content":"{\"score\": 0.9}"}}]}"#).unwrap();
+        let parsed = parse_chat_json_content(
+            &envelope,
+            r#"{"choices":[{"message":{"content":"{\"score\": 0.9}"}}]}"#,
+        )
+        .unwrap();
         assert_eq!(parsed["score"], 0.9);
     }
 }

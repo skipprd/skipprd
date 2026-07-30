@@ -393,8 +393,7 @@ impl BrightDataClient {
     async fn post_serp_request_with_headers(
         &self,
         body: &Value,
-    ) -> Result<(reqwest::StatusCode, String, Option<String>, Option<String>), std::io::Error>
-    {
+    ) -> Result<(reqwest::StatusCode, String, Option<String>, Option<String>), std::io::Error> {
         let endpoint = format!("{}/request", self.api_base.trim_end_matches('/'));
         let response = self
             .http
@@ -988,7 +987,9 @@ mod tests {
     fn soft_error_body_detects_empty_and_plain_text() {
         assert!(is_brightdata_soft_error_body(""));
         assert!(is_brightdata_soft_error_body("   "));
-        assert!(is_brightdata_soft_error_body("Error while processing request"));
+        assert!(is_brightdata_soft_error_body(
+            "Error while processing request"
+        ));
         assert!(is_brightdata_soft_error_body("Unexpected error. The server encountered an unexpected error while processing the request."));
         assert!(!is_brightdata_soft_error_body(r#"{"organic":[]}"#));
         assert!(!is_brightdata_soft_error_body(r#"[{"link":"https://x"}]"#));

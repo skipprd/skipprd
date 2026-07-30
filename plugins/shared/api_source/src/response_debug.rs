@@ -62,10 +62,19 @@ pub fn parse_json_response(
     body: &str,
 ) -> Result<Value, std::io::Error> {
     if body.trim().is_empty() {
-        log_api_response_issue(provider, endpoint, &format!("{context}_empty"), http_status, body);
+        log_api_response_issue(
+            provider,
+            endpoint,
+            &format!("{context}_empty"),
+            http_status,
+            body,
+        );
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
-            format!("{provider} response is empty ({})", body_debug_suffix(body, 300)),
+            format!(
+                "{provider} response is empty ({})",
+                body_debug_suffix(body, 300)
+            ),
         ));
     }
     serde_json::from_str(body).map_err(|e| {

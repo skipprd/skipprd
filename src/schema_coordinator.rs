@@ -257,10 +257,12 @@ mod tests {
                 .enable_all()
                 .build()
                 .unwrap()
-                .block_on(blocking_coordinator.coordinate("test", "events", 7, || async move {
-                    blocking_calls.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
-                }))
+                .block_on(
+                    blocking_coordinator.coordinate("test", "events", 7, || async move {
+                        blocking_calls.fetch_add(1, Ordering::SeqCst);
+                        Ok(())
+                    }),
+                )
         });
 
         tokio::time::timeout(std::time::Duration::from_secs(1), async {

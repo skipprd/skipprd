@@ -33,7 +33,8 @@ struct GroupedCompactionJob {
     manifest_attempts: u32,
 }
 
-static GROUPED_COMPACTION_JOBS: Lazy<DashMap<String, GroupedCompactionJob>> = Lazy::new(DashMap::new);
+static GROUPED_COMPACTION_JOBS: Lazy<DashMap<String, GroupedCompactionJob>> =
+    Lazy::new(DashMap::new);
 
 pub struct GroupedCompactionTracker {
     compaction_id: String,
@@ -134,11 +135,7 @@ pub fn format_in_flight_grouped_compactions() -> String {
         if idx > 0 {
             out.push_str("; ");
         }
-        let _ = write!(
-            out,
-            "{}",
-            format_grouped_compaction_job_detail(job),
-        );
+        let _ = write!(out, "{}", format_grouped_compaction_job_detail(job),);
     }
     out
 }
@@ -177,7 +174,11 @@ fn format_progress_bar(completed: u64, total: u64, width: usize) -> String {
     }
     let filled = ((completed as f64 / total as f64) * width as f64).round() as usize;
     let filled = filled.min(width);
-    format!("{}{}", "█".repeat(filled), "░".repeat(width.saturating_sub(filled)))
+    format!(
+        "{}{}",
+        "█".repeat(filled),
+        "░".repeat(width.saturating_sub(filled))
+    )
 }
 
 fn format_delta_per_interval(delta: u64, interval: Duration) -> String {
@@ -194,11 +195,7 @@ pub fn format_compactor_drain_status_summary(
     wal_in_flight: usize,
     uploads_in_flight: usize,
 ) -> String {
-    let wal_bar = format_progress_bar(
-        counters.wal_parts_completed,
-        counters.wal_parts_started,
-        20,
-    );
+    let wal_bar = format_progress_bar(counters.wal_parts_completed, counters.wal_parts_started, 20);
     let wal_delta = format_delta_per_interval(since_last.wal_parts_completed, interval);
     let txn_delta = format_delta_per_interval(since_last.txn_completed, interval);
 
@@ -234,8 +231,7 @@ pub fn format_compactor_drain_status_summary(
         .collect();
     jobs.sort_by(|a, b| a.started_at.cmp(&b.started_at));
 
-    let stalled =
-        since_last.wal_parts_completed == 0 && since_last.txn_completed == 0;
+    let stalled = since_last.wal_parts_completed == 0 && since_last.txn_completed == 0;
     if stalled {
         let _ = write!(out, " | no wal/txn progress/{}s", interval.as_secs());
     }

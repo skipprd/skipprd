@@ -5,8 +5,8 @@ use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::{json, Value};
 use skippr_plugin_data_source_site_quality::sampling::{
-    homepage_url, normalize_site_origin, resolve_url_list,
-    resolve_url_list_async, HttpSitemapFetcher, StaticSitemapFetcher, UrlMode,
+    homepage_url, normalize_site_origin, resolve_url_list, resolve_url_list_async,
+    HttpSitemapFetcher, StaticSitemapFetcher, UrlMode,
 };
 use skippr_plugin_shared_api_source::merge_crawl_progress;
 use skippr_runtime_sdk::helpers::offsets::OffsetKey;

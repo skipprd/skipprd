@@ -251,7 +251,10 @@ impl DataForSeoClient {
     }
 }
 
-pub fn parse_live_response(endpoint: &str, body: &Value) -> Result<LiveApiResponse, std::io::Error> {
+pub fn parse_live_response(
+    endpoint: &str,
+    body: &Value,
+) -> Result<LiveApiResponse, std::io::Error> {
     let top_level_cost = body.get("cost").and_then(json_f64).unwrap_or(0.0);
     let tasks = body
         .get("tasks")

@@ -254,6 +254,9 @@ fn dfs_hub_metadata_covers_plugin_emitted_fields() {
     missing.sort();
     missing.dedup();
     if !missing.is_empty() {
-        panic!("plugin fields missing from metadata:\n{}", missing.join("\n"));
+        panic!(
+            "plugin fields missing from metadata:\n{}",
+            missing.join("\n")
+        );
     }
 }

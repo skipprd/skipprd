@@ -2922,8 +2922,7 @@ impl Config {
         })?;
 
         let plugin: Arc<dyn crate::plugins::SchemaSink + Send + Sync> = Arc::new(plugin);
-        *BLOCKING_PRIMARY_SCHEMA_PLUGIN.lock().unwrap() =
-            Some((scope.to_string(), plugin.clone()));
+        *BLOCKING_PRIMARY_SCHEMA_PLUGIN.lock().unwrap() = Some((scope.to_string(), plugin.clone()));
         Ok(plugin)
     }
 

@@ -827,10 +827,7 @@ mod tests {
                 format!("00{:02x}", index as u8 + 10)
             );
             assert_eq!(value["_skippr_compaction_id"], "compaction-19");
-            assert_eq!(
-                value["_skippr_wal_refs_fingerprint"],
-                expected_fingerprint
-            );
+            assert_eq!(value["_skippr_wal_refs_fingerprint"], expected_fingerprint);
             assert_eq!(value["_skippr_wal_ref_count"], 2);
             assert!(value.get("_skippr_wal_refs").is_none());
             assert!(value.get("_skippr_wal_ref").is_none());

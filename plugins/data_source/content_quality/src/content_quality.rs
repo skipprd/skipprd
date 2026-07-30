@@ -4,8 +4,8 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use chrono::Utc;
 use serde_json::{json, Value};
-use skippr_plugin_shared_api_source::OpenAiChatClient;
 use skippr_plugin_shared_api_source::merge_crawl_progress;
+use skippr_plugin_shared_api_source::OpenAiChatClient;
 use skippr_runtime_sdk::helpers::offsets::OffsetKey;
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceOnceContract, SourceSyncContext,

@@ -55,11 +55,11 @@ pub fn set_data_dir_ingest_paused(paused: bool) {
 /// Reset process-wide ingest pause flags between benchmark / unit tests.
 #[cfg(test)]
 pub fn reset_data_dir_capacity_state_for_test() {
-    use std::sync::atomic::Ordering;
     use crate::metrics::counters::{
         LAST_WAL_RECLAIM_PROGRESS_EPOCH_SECS, WAL_BYTES_RECLAIMED_TOTAL,
         WAL_SEGMENTS_RECLAIMED_TOTAL,
     };
+    use std::sync::atomic::Ordering;
     DATA_DIR_CAPACITY_EXCEEDED.store(false, Ordering::SeqCst);
     set_data_dir_ingest_paused(false);
     let _ = DATA_DIR_CAPACITY_ERROR.lock().unwrap().take();

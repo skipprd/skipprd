@@ -151,7 +151,13 @@ async fn fetch_brightdata_html(page_url: &str) -> Result<FetchedHtml, String> {
         ));
     }
     if html.trim().is_empty() {
-        log_api_response_issue("bright_data", &endpoint, "link_graph_empty", Some(status.as_u16()), &html);
+        log_api_response_issue(
+            "bright_data",
+            &endpoint,
+            "link_graph_empty",
+            Some(status.as_u16()),
+            &html,
+        );
         return Err(format!(
             "brightdata_fetch_empty ({})",
             body_debug_suffix(&html, 300)

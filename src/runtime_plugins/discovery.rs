@@ -591,9 +591,8 @@ mod tests {
         append_metadata_refresh_query, configured_runtime_plugin_version, is_retryable_status,
         latest_manifest_index_url, manifest_cache_key, manifest_refresh_enabled,
         metadata_fetch_backoff, missing_runtime_plugin_message, resolve_local_runtime_plugin,
-        resolved_runtime_plugin_cache_key, rewrite_manifest_url_version,
-        runtime_plugin_cache_root, use_local_plugin_code, RuntimePluginIndex,
-        RuntimePluginIndexEntry,
+        resolved_runtime_plugin_cache_key, rewrite_manifest_url_version, runtime_plugin_cache_root,
+        use_local_plugin_code, RuntimePluginIndex, RuntimePluginIndexEntry,
     };
 
     fn local_manifest_json(plugin_name: &str, kind: RuntimePluginKind, executable: &str) -> String {
@@ -615,11 +614,7 @@ mod tests {
     #[test]
     fn resolved_runtime_plugin_cache_key_includes_kind_name_and_version() {
         assert_eq!(
-            resolved_runtime_plugin_cache_key(
-                RuntimePluginKind::SchemaSink,
-                "Glue",
-                Some("0.1.2"),
-            ),
+            resolved_runtime_plugin_cache_key(RuntimePluginKind::SchemaSink, "Glue", Some("0.1.2"),),
             "SchemaSink:Glue:0.1.2"
         );
         assert_eq!(

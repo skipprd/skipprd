@@ -823,8 +823,12 @@ impl DataSink for DataSinkClickhousePlugin {
                 chunk.chunk_index == 0 && chunk.final_chunk,
                 chunk_cdc.as_ref(),
             );
-            self.sync(chunk.into_stream(schema.clone()), chunk_ctx.filename, chunk_ctx.cdc_ctx)
-                .await?;
+            self.sync(
+                chunk.into_stream(schema.clone()),
+                chunk_ctx.filename,
+                chunk_ctx.cdc_ctx,
+            )
+            .await?;
         }
         Ok(skippr_runtime_sdk::plugins::SinkWriteOutcome::Applied)
     }
