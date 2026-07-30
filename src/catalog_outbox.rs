@@ -1,3 +1,4 @@
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -43,10 +44,90 @@ struct CatalogOutboxEnvelope {
     entry: PendingCatalogIntent,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct IndexedIntentMetadata {
+    created_at_ms: u64,
+    updated_at_ms: u64,
+    next_attempt_at_ms: u64,
+    terminal: bool,
+    generation_sha256: [u8; 32],
+    intent_sha256: [u8; 32],
+}
+
+impl IndexedIntentMetadata {
+    fn from_entry(entry: &PendingCatalogIntent) -> io::Result<Self> {
+        Ok(Self {
+            created_at_ms: entry.created_at_ms,
+            updated_at_ms: entry.updated_at_ms,
+            next_attempt_at_ms: entry.next_attempt_at_ms,
+            terminal: entry.terminal,
+            generation_sha256: entry_generation(entry)?,
+            intent_sha256: intent_generation(&entry.intent)?,
+        })
+    }
+}
+
+#[derive(Debug, Default)]
+struct OutboxIndex {
+    entries: BTreeMap<String, IndexedIntentMetadata>,
+    due: BTreeSet<(u64, String)>,
+    created: BTreeSet<(u64, String)>,
+    terminal_count: usize,
+    oldest_created_at_ms: Option<u64>,
+    directory_sync_required: bool,
+}
+
+impl OutboxIndex {
+    fn upsert(&mut self, id: String, metadata: IndexedIntentMetadata) {
+        self.remove(&id);
+        if metadata.terminal {
+            self.terminal_count += 1;
+        } else {
+            self.due.insert((metadata.next_attempt_at_ms, id.clone()));
+        }
+        self.created.insert((metadata.created_at_ms, id.clone()));
+        self.entries.insert(id, metadata);
+        self.oldest_created_at_ms = self.created.first().map(|(created, _)| *created);
+    }
+
+    fn remove(&mut self, id: &str) -> Option<IndexedIntentMetadata> {
+        let existing = self.entries.remove(id)?;
+        if existing.terminal {
+            self.terminal_count = self.terminal_count.saturating_sub(1);
+        } else {
+            self.due
+                .remove(&(existing.next_attempt_at_ms, id.to_string()));
+        }
+        self.created
+            .remove(&(existing.created_at_ms, id.to_string()));
+        self.oldest_created_at_ms = self.created.first().map(|(created, _)| *created);
+        Some(existing)
+    }
+
+    fn due_ids(&self, now_ms: u64, limit: usize) -> Vec<String> {
+        self.due
+            .range(..=(now_ms, String::from(char::MAX)))
+            .take(limit)
+            .map(|(_, id)| id.clone())
+            .collect()
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct CatalogOutboxMetadataSnapshot {
+    pub pending_count: usize,
+    pub terminal_count: usize,
+    pub oldest_created_at_ms: Option<u64>,
+}
+
 #[derive(Debug)]
 pub struct CatalogOutbox {
     pending_dir: PathBuf,
-    mutation_lock: std::sync::Mutex<()>,
+    mutation_lock: std::sync::Mutex<OutboxIndex>,
+    #[cfg(test)]
+    entry_reads: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    persist_delay_ms: std::sync::atomic::AtomicU64,
 }
 
 impl CatalogOutbox {
@@ -63,13 +144,15 @@ impl CatalogOutbox {
                 .parent()
                 .expect("catalog outbox pending directory has a parent"),
         )?;
+        let index = recover_index(&pending_dir)?;
         let outbox = Self {
             pending_dir,
-            mutation_lock: std::sync::Mutex::new(()),
+            mutation_lock: std::sync::Mutex::new(index),
+            #[cfg(test)]
+            entry_reads: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            persist_delay_ms: std::sync::atomic::AtomicU64::new(0),
         };
-        // Recovery is fail-closed: opening a pipeline with one corrupt pending
-        // intent must surface the error before any entry can be dropped.
-        outbox.validate_pending()?;
         Ok(outbox)
     }
 
@@ -78,29 +161,37 @@ impl CatalogOutbox {
     }
 
     pub fn persist(&self, intents: &[CatalogIntent]) -> io::Result<CatalogOutboxPersistSummary> {
-        let _guard = self
+        let mut index = self
             .mutation_lock
             .lock()
             .expect("catalog outbox mutation lock poisoned");
+        #[cfg(test)]
+        std::thread::sleep(Duration::from_millis(
+            self.persist_delay_ms
+                .load(std::sync::atomic::Ordering::Relaxed),
+        ));
         let mut summary = CatalogOutboxPersistSummary::default();
         for intent in intents {
             let id = stable_intent_id(&intent.identity)?;
             let path = self.entry_path(&id);
             let now = now_ms();
-            let entry = if path.exists() {
-                let mut existing = read_entry(&path)?;
-                if existing.intent == *intent {
+            let intent_sha256 = intent_generation(intent)?;
+            let entry = if let Some(existing) = index.entries.get(&id) {
+                if existing.intent_sha256 == intent_sha256 {
                     summary.coalesced += 1;
                     continue;
                 }
-                existing.intent = intent.clone();
-                existing.updated_at_ms = now;
-                existing.attempts = 0;
-                existing.next_attempt_at_ms = 0;
-                existing.last_error = None;
-                existing.terminal = false;
                 summary.updated += 1;
-                existing
+                PendingCatalogIntent {
+                    id: id.clone(),
+                    intent: intent.clone(),
+                    created_at_ms: existing.created_at_ms,
+                    updated_at_ms: now,
+                    attempts: 0,
+                    next_attempt_at_ms: 0,
+                    last_error: None,
+                    terminal: false,
+                }
             } else {
                 summary.inserted += 1;
                 PendingCatalogIntent {
@@ -114,22 +205,25 @@ impl CatalogOutbox {
                     terminal: false,
                 }
             };
-            write_entry_atomic(&path, &entry)?;
+            write_entry_atomic_rename(&path, &entry)?;
+            index.directory_sync_required = true;
+            index.upsert(id, IndexedIntentMetadata::from_entry(&entry)?);
+        }
+        if index.directory_sync_required {
+            sync_directory(&self.pending_dir)?;
+            index.directory_sync_required = false;
         }
         Ok(summary)
     }
 
     pub fn scan_pending(&self, limit: usize) -> io::Result<Vec<PendingCatalogIntent>> {
+        let index = self
+            .mutation_lock
+            .lock()
+            .expect("catalog outbox mutation lock poisoned");
         let mut pending = Vec::with_capacity(limit.min(1_024));
-        for entry in fs::read_dir(&self.pending_dir)? {
-            let path = entry?.path();
-            if path.extension().is_none_or(|ext| ext != "json") {
-                continue;
-            }
-            pending.push(read_entry(&path)?);
-            if pending.len() >= limit {
-                break;
-            }
+        for id in index.entries.keys().take(limit) {
+            pending.push(self.read_indexed_entry(id)?);
         }
         Ok(pending)
     }
@@ -139,30 +233,48 @@ impl CatalogOutbox {
         now_ms: u64,
         limit: usize,
     ) -> io::Result<Vec<PendingCatalogIntent>> {
-        let mut pending = Vec::with_capacity(limit.min(1_024));
-        for entry in fs::read_dir(&self.pending_dir)? {
-            let path = entry?.path();
-            if path.extension().is_none_or(|ext| ext != "json") {
-                continue;
-            }
-            let entry = read_entry(&path)?;
-            if pending.len() < limit && !entry.terminal && entry.next_attempt_at_ms <= now_ms {
-                pending.push(entry);
-            }
+        let index = self
+            .mutation_lock
+            .lock()
+            .expect("catalog outbox mutation lock poisoned");
+        let ids = index.due_ids(now_ms, limit);
+        let mut pending = Vec::with_capacity(ids.len());
+        for id in ids {
+            pending.push(self.read_indexed_entry(&id)?);
         }
         Ok(pending)
+    }
+
+    pub fn metadata_snapshot(&self) -> CatalogOutboxMetadataSnapshot {
+        let index = self
+            .mutation_lock
+            .lock()
+            .expect("catalog outbox mutation lock poisoned");
+        CatalogOutboxMetadataSnapshot {
+            pending_count: index.entries.len(),
+            terminal_count: index.terminal_count,
+            oldest_created_at_ms: index.oldest_created_at_ms,
+        }
     }
 
     pub fn mark_delivered_if(
         &self,
         expected: &PendingCatalogIntent,
     ) -> io::Result<ConditionalMutationResult> {
-        let _guard = self
+        let mut index = self
             .mutation_lock
             .lock()
             .expect("catalog outbox mutation lock poisoned");
+        let expected_generation = entry_generation(expected)?;
+        if index
+            .entries
+            .get(&expected.id)
+            .is_none_or(|metadata| metadata.generation_sha256 != expected_generation)
+        {
+            return Ok(ConditionalMutationResult::Stale);
+        }
         let path = self.entry_path(&expected.id);
-        let current = match read_entry(&path) {
+        let current = match self.read_indexed_entry(&expected.id) {
             Ok(current) => current,
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 return Ok(ConditionalMutationResult::Stale)
@@ -173,7 +285,10 @@ impl CatalogOutbox {
             return Ok(ConditionalMutationResult::Stale);
         }
         fs::remove_file(&path)?;
+        index.remove(&expected.id);
+        index.directory_sync_required = true;
         sync_directory(&self.pending_dir)?;
+        index.directory_sync_required = false;
         Ok(ConditionalMutationResult::Applied)
     }
 
@@ -184,12 +299,20 @@ impl CatalogOutbox {
         retry_after: Option<Duration>,
         terminal: bool,
     ) -> io::Result<ConditionalMutationResult> {
-        let _guard = self
+        let mut index = self
             .mutation_lock
             .lock()
             .expect("catalog outbox mutation lock poisoned");
+        let expected_generation = entry_generation(expected)?;
+        if index
+            .entries
+            .get(&expected.id)
+            .is_none_or(|metadata| metadata.generation_sha256 != expected_generation)
+        {
+            return Ok(ConditionalMutationResult::Stale);
+        }
         let path = self.entry_path(&expected.id);
-        let mut entry = match read_entry(&path) {
+        let mut entry = match self.read_indexed_entry(&expected.id) {
             Ok(entry) => entry,
             Err(err) if err.kind() == io::ErrorKind::NotFound => {
                 return Ok(ConditionalMutationResult::Stale)
@@ -206,7 +329,14 @@ impl CatalogOutbox {
             .unwrap_or(0);
         entry.last_error = Some(error.into());
         entry.terminal = terminal;
-        write_entry_atomic(&path, &entry)?;
+        write_entry_atomic_rename(&path, &entry)?;
+        index.upsert(
+            expected.id.clone(),
+            IndexedIntentMetadata::from_entry(&entry)?,
+        );
+        index.directory_sync_required = true;
+        sync_directory(&self.pending_dir)?;
+        index.directory_sync_required = false;
         Ok(ConditionalMutationResult::Applied)
     }
 
@@ -214,21 +344,68 @@ impl CatalogOutbox {
         self.pending_dir.join(format!("{id}.json"))
     }
 
-    fn validate_pending(&self) -> io::Result<()> {
-        for entry in fs::read_dir(&self.pending_dir)? {
-            let path = entry?.path();
-            if path.extension().is_some_and(|ext| ext == "json") {
-                read_entry(&path)?;
-            }
-        }
-        Ok(())
+    fn read_indexed_entry(&self, id: &str) -> io::Result<PendingCatalogIntent> {
+        #[cfg(test)]
+        self.entry_reads
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        read_entry(&self.entry_path(id))
     }
+
+    #[cfg(test)]
+    fn reset_entry_read_count(&self) {
+        self.entry_reads
+            .store(0, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    fn entry_read_count(&self) -> usize {
+        self.entry_reads.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_persist_delay(&self, delay: Duration) {
+        self.persist_delay_ms.store(
+            delay.as_millis() as u64,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+    }
+}
+
+fn recover_index(pending_dir: &Path) -> io::Result<OutboxIndex> {
+    let mut index = OutboxIndex::default();
+    for entry in fs::read_dir(pending_dir)? {
+        let path = entry?.path();
+        if path.extension().is_none_or(|ext| ext != "json") {
+            continue;
+        }
+        let entry = read_entry(&path)?;
+        if index.entries.contains_key(&entry.id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("duplicate catalog outbox identity '{}'", entry.id),
+            ));
+        }
+        index.upsert(entry.id.clone(), IndexedIntentMetadata::from_entry(&entry)?);
+    }
+    Ok(index)
 }
 
 pub fn stable_intent_id(identity: &CatalogIntentIdentity) -> io::Result<String> {
     let bytes = serde_json::to_vec(identity)
         .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
     Ok(hex::encode(Sha256::digest(bytes)))
+}
+
+fn entry_generation(entry: &PendingCatalogIntent) -> io::Result<[u8; 32]> {
+    let bytes =
+        serde_json::to_vec(entry).map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    Ok(Sha256::digest(bytes).into())
+}
+
+fn intent_generation(intent: &CatalogIntent) -> io::Result<[u8; 32]> {
+    let bytes = serde_json::to_vec(intent)
+        .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+    Ok(Sha256::digest(bytes).into())
 }
 
 fn now_ms() -> u64 {
@@ -282,7 +459,7 @@ fn read_entry(path: &Path) -> io::Result<PendingCatalogIntent> {
     Ok(envelope.entry)
 }
 
-fn write_entry_atomic(path: &Path, entry: &PendingCatalogIntent) -> io::Result<()> {
+fn write_entry_atomic_rename(path: &Path, entry: &PendingCatalogIntent) -> io::Result<()> {
     let envelope = CatalogOutboxEnvelope {
         version: CATALOG_OUTBOX_FORMAT_VERSION,
         checksum_sha256: checksum(entry)?,
@@ -302,10 +479,7 @@ fn write_entry_atomic(path: &Path, entry: &PendingCatalogIntent) -> io::Result<(
         file.write_all(&bytes)?;
         file.sync_all()?;
         fs::rename(&tmp, path)?;
-        sync_directory(
-            path.parent()
-                .expect("catalog outbox entry path has a parent"),
-        )
+        Ok(())
     })() {
         let _ = fs::remove_file(&tmp);
         return Err(err);
@@ -444,6 +618,10 @@ mod tests {
         assert!(eligible
             .iter()
             .all(|entry| { matches!(entry.intent.identity.key.as_str(), "day=3" | "day=4") }));
+        let snapshot = outbox.metadata_snapshot();
+        assert_eq!(snapshot.pending_count, 5);
+        assert_eq!(snapshot.terminal_count, 2);
+        assert!(snapshot.oldest_created_at_ms.is_some());
     }
 
     #[test]
@@ -459,8 +637,86 @@ mod tests {
             .path();
         fs::copy(original, outbox.pending_dir().join("wrong-id.json")).unwrap();
 
-        let err = outbox.scan_eligible_pending(now_ms(), 1).unwrap_err();
+        let err = CatalogOutbox::open(temp.path()).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
         assert!(err.to_string().contains("identity validation"));
+    }
+
+    #[test]
+    fn indexed_hot_paths_read_only_new_or_selected_entries() {
+        let temp = tempfile::tempdir().unwrap();
+        let outbox = CatalogOutbox::open(temp.path()).unwrap();
+        let backlog = (0..128)
+            .map(|index| intent_for(&format!("day={index:03}"), &format!("s3://{index:03}")))
+            .collect::<Vec<_>>();
+        outbox.persist(&backlog).unwrap();
+        assert_eq!(outbox.metadata_snapshot().pending_count, 128);
+
+        outbox.reset_entry_read_count();
+        outbox
+            .persist(&[intent_for("day=new", "s3://new")])
+            .unwrap();
+        crate::metrics::counters::refresh_catalog_outbox_metrics(&outbox).unwrap();
+        assert_eq!(
+            outbox.entry_read_count(),
+            0,
+            "persist and metric publication must not reread backlog payloads"
+        );
+
+        outbox.reset_entry_read_count();
+        let selected = outbox.scan_eligible_pending(now_ms(), 7).unwrap();
+        assert_eq!(selected.len(), 7);
+        assert_eq!(
+            outbox.entry_read_count(),
+            7,
+            "due selection must read only selected payloads"
+        );
+
+        outbox.reset_entry_read_count();
+        let deterministic = outbox.scan_pending(3).unwrap();
+        assert_eq!(deterministic.len(), 3);
+        assert!(deterministic
+            .windows(2)
+            .all(|window| window[0].id < window[1].id));
+        assert_eq!(outbox.entry_read_count(), 3);
+    }
+
+    #[test]
+    fn recovery_rebuilds_exact_metadata_and_due_indexes() {
+        let temp = tempfile::tempdir().unwrap();
+        let outbox = CatalogOutbox::open(temp.path()).unwrap();
+        outbox
+            .persist(&[
+                intent_for("day=due", "s3://due"),
+                intent_for("day=future", "s3://future"),
+                intent_for("day=terminal", "s3://terminal"),
+            ])
+            .unwrap();
+        let mut entries = outbox.scan_pending(10).unwrap();
+        entries.sort_by(|left, right| left.intent.identity.key.cmp(&right.intent.identity.key));
+        let future = entries
+            .iter()
+            .find(|entry| entry.intent.identity.key == "day=future")
+            .unwrap();
+        outbox
+            .record_failure_if(future, "future", Some(Duration::from_secs(3_600)), false)
+            .unwrap();
+        let terminal = entries
+            .iter()
+            .find(|entry| entry.intent.identity.key == "day=terminal")
+            .unwrap();
+        outbox
+            .record_failure_if(terminal, "terminal", None, true)
+            .unwrap();
+        let before = outbox.metadata_snapshot();
+        drop(outbox);
+
+        let recovered = CatalogOutbox::open(temp.path()).unwrap();
+        assert_eq!(recovered.metadata_snapshot(), before);
+        recovered.reset_entry_read_count();
+        let due = recovered.scan_eligible_pending(now_ms(), 10).unwrap();
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].intent.identity.key, "day=due");
+        assert_eq!(recovered.entry_read_count(), 1);
     }
 }

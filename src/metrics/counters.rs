@@ -74,6 +74,7 @@ pub static S3_WAL_RETRY_EMA_X100: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(
 pub static GLUE_RETRIES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static GLUE_RETRY_EMA_X100: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static CATALOG_OUTBOX_PENDING: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
+pub static CATALOG_OUTBOX_TERMINAL_COUNT: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
 pub static CATALOG_OUTBOX_OLDEST_AGE_SECS: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static CATALOG_OUTBOX_RETRIES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static CATALOG_OUTBOX_TERMINAL_FAILURES: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
@@ -601,24 +602,17 @@ pub fn add_catalog_location_update(n: u64) {
 pub fn refresh_catalog_outbox_metrics(
     outbox: &crate::catalog_outbox::CatalogOutbox,
 ) -> std::io::Result<()> {
-    const METRIC_SCAN_LIMIT: usize = 100_000;
-    let pending = outbox.scan_pending(METRIC_SCAN_LIMIT + 1)?;
-    if pending.len() > METRIC_SCAN_LIMIT {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "catalog outbox pending count exceeds bounded metrics scan limit",
-        ));
-    }
-    CATALOG_OUTBOX_PENDING.store(pending.len(), Ordering::Relaxed);
-    DATA_DURABLE_CATALOG_PENDING.store(pending.len() as u64, Ordering::Relaxed);
+    let snapshot = outbox.metadata_snapshot();
+    CATALOG_OUTBOX_PENDING.store(snapshot.pending_count, Ordering::Relaxed);
+    CATALOG_OUTBOX_TERMINAL_COUNT.store(snapshot.terminal_count, Ordering::Relaxed);
+    DATA_DURABLE_CATALOG_PENDING.store(snapshot.pending_count as u64, Ordering::Relaxed);
     let now_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_millis() as u64;
-    let oldest_age = pending
-        .iter()
-        .map(|entry| now_ms.saturating_sub(entry.created_at_ms) / 1_000)
-        .max()
+    let oldest_age = snapshot
+        .oldest_created_at_ms
+        .map(|created| now_ms.saturating_sub(created) / 1_000)
         .unwrap_or(0);
     CATALOG_OUTBOX_OLDEST_AGE_SECS.store(oldest_age, Ordering::Relaxed);
     Ok(())
