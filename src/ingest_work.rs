@@ -1006,6 +1006,21 @@ impl IngestBatch {
         }
     }
 
+    /// Offset key as observed by host ingest after the runtime plugin → host round trip.
+    ///
+    /// Runtime sources normalize once in [`IngestBatch::new`], serialize the already-normalized
+    /// key across the wire, then the host reconstructs via [`From<RuntimeRawIngestBatch>`] which
+    /// calls [`IngestBatch::new`] again. `storage_partition` is not always idempotent (numeric
+    /// path segments under `flatten_events`), so list-time validation must use this twice-applied
+    /// form to match Closed offsets written by prior host ingest.
+    pub fn runtime_roundtrip_offset_key(
+        namespace: impl Into<String>,
+        partition: impl Into<String>,
+    ) -> OffsetKey {
+        let once = Self::normalized_offset_key(namespace, partition);
+        Self::normalized_offset_key(once.namespace, once.partition)
+    }
+
     pub fn new(
         offset_key: OffsetKey,
         data: String,
@@ -1122,6 +1137,45 @@ mod ingest_batch_tests {
         );
 
         assert_eq!(batch.offset_key, helper_key);
+    }
+
+    #[test]
+    fn runtime_roundtrip_offset_key_matches_host_after_wire() {
+        // Production device_data has flatten_events=yes. Under that mode, clean_field_name
+        // keeps numeric-only segments as digits then strips leading digits, so one vs two
+        // normalizations diverge (empty path segments appear after the first pass and are
+        // dropped on the second).
+        Config::reset_envcache();
+        Config::set_evncache("TRANSFORM_FLATTEN_EVENTS", "yes");
+
+        let bucket = "production-datastorage-stac-rawdevicejson568138dc-1djhnp70ebsko";
+        // Unique suffix avoids CLEAN_FIELD_CACHE pollution from other tests.
+        let object_key = "data/2021/05/19/11/Production-DataStorage-Stack-v3firehose-roundtrip-probe-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
+
+        let once = IngestBatch::normalized_offset_key(bucket, object_key);
+        let plugin_batch = IngestBatch::new(
+            OffsetKey::new(bucket, object_key),
+            "{}".to_string(),
+            2,
+            format!("s3://{bucket}/{object_key}"),
+            None,
+            None,
+        );
+        assert_eq!(plugin_batch.offset_key, once);
+
+        let wire: RuntimeRawIngestBatch = plugin_batch.clone().into();
+        let host_batch = IngestBatch::from(wire);
+        let roundtrip = IngestBatch::runtime_roundtrip_offset_key(bucket, object_key);
+
+        assert_eq!(host_batch.offset_key, roundtrip);
+        assert_ne!(
+            once.partition, roundtrip.partition,
+            "production key shape must exercise non-idempotent storage_partition under flatten_events; once={:?} roundtrip={:?}",
+            once.partition,
+            roundtrip.partition
+        );
+
+        Config::reset_envcache();
     }
 }
 

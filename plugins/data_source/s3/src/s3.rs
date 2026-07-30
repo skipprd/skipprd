@@ -233,8 +233,12 @@ impl DataSourceS3Plugin {
             let validation_entries = items
                 .iter()
                 .map(|(key, _)| {
-                    let offset_key =
-                        IngestBatch::normalized_offset_key(s3_bucket_filter.clone(), key.clone());
+                    // Match the key host ingest uses after the runtime wire round-trip
+                    // (normalize twice). Existing Closed offsets were written under that form.
+                    let offset_key = IngestBatch::runtime_roundtrip_offset_key(
+                        s3_bucket_filter.clone(),
+                        key.clone(),
+                    );
                     offset_validation_entry(
                         offset_key.namespace,
                         offset_key.partition,
