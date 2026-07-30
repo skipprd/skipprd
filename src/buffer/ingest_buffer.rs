@@ -1478,10 +1478,15 @@ impl Buffers {
         } else {
             crate::ingest::tuner::FlushMode::Ingest
         };
+        let ready_work = compaction_index().reclaimable_slice_count(
+            force,
+            Self::now_secs(),
+            Self::sent_manifest_stale_secs(),
+            usize::MAX,
+        );
+        metrics_hot::set_compaction_planner_ready_work_count(ready_work);
         let measured_backlog = force
-            || crate::metrics::counters::COMPACTION_PLANNER_READY_WORK_COUNT
-                .load(std::sync::atomic::Ordering::Relaxed)
-                > 0
+            || ready_work > 0
             || crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
                 .load(std::sync::atomic::Ordering::Relaxed)
                 > 0;
