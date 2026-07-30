@@ -1,0 +1,21 @@
+[package]
+name = "skippr-object-writer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Backend-agnostic bounded streaming object writer for Skippr sinks"
+
+[dependencies]
+arrow-array.workspace = true
+arrow-schema.workspace = true
+async-trait.workspace = true
+bytes.workspace = true
+futures.workspace = true
+parquet.workspace = true
+serde.workspace = true
+serde_derive.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["macros", "rt", "sync"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "sync", "time"] }

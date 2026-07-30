@@ -12304,6 +12304,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippr-object-writer"
+version = "0.1.0"
+dependencies = [
+ "arrow-array",
+ "arrow-schema",
+ "async-trait",
+ "bytes",
+ "futures",
+ "parquet",
+ "serde",
+ "serde_derive",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "skippr-offset-store-dynamodb"
 version = "0.1.0"
 dependencies = [
