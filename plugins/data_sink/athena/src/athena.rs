@@ -15,6 +15,10 @@ use aws_sdk_s3::primitives::ByteStream;
 use aws_sdk_s3::types::{CompletedMultipartUpload, CompletedPart};
 use aws_sdk_s3::types::{Delete, ObjectIdentifier};
 use aws_sdk_s3::Client as S3Client;
+use skippr_object_writer::{
+    CompletionMetadata, MultipartUpload, ObjectPartReceipt, ObjectWriteBackend, ObjectWriteError,
+    ObjectWriteRequest, ObjectWriteSession, ObjectWriterConfig, PartMetadata,
+};
 use skippr_runtime_sdk::converters::skippr_hive::SkipprHive;
 use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
 use skippr_runtime_sdk::metrics::counters as metrics_counters;
@@ -34,15 +38,12 @@ use bytes::Bytes;
 use datafusion::physical_plan::RecordBatchStream;
 use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::StreamExt;
-use parquet::arrow::ArrowWriter;
 use std::collections::{BTreeMap, HashMap};
 use std::io;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll as TaskPoll};
-use tokio::task::block_in_place;
 
-use super::parquet_util::serialize_to_parquet;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use rand::Rng;
@@ -60,6 +61,52 @@ use tokio::time::{sleep as tokio_sleep, Duration as TokioDuration};
 use tracing::{debug, info, warn};
 
 const TIME_PARTITION_GRANULARITIES: [&str; 5] = ["year", "month", "day", "hour", "minute"];
+const ATHENA_MULTIPART_PART_SIZE: usize = 64 * 1024 * 1024;
+const ATHENA_BATCH_CHANNEL_CAPACITY: usize = 2;
+const ATHENA_BYTE_CHANNEL_CAPACITY: usize = 1;
+const ATHENA_MAX_IN_FLIGHT_PARTS: usize = 2;
+const ATHENA_MULTIPART_BEGIN_TIMEOUT_SECS: u64 = 120;
+const ATHENA_MULTIPART_PART_TIMEOUT_SECS: u64 = 300;
+const ATHENA_MULTIPART_COMPLETE_TIMEOUT_SECS: u64 = 600;
+
+fn athena_object_key(
+    full_key: &str,
+    filename: &str,
+    object_stem: Option<&str>,
+) -> (String, String) {
+    let object_stem = object_stem
+        .map(str::to_string)
+        .unwrap_or_else(|| hex::encode(md5::compute(filename).0));
+    let final_key = format!("{full_key}/{object_stem}.parquet");
+    (object_stem, final_key)
+}
+
+fn athena_object_writer_config() -> ObjectWriterConfig {
+    ObjectWriterConfig {
+        part_size: ATHENA_MULTIPART_PART_SIZE,
+        batch_channel_capacity: ATHENA_BATCH_CHANNEL_CAPACITY,
+        byte_channel_capacity: ATHENA_BYTE_CHANNEL_CAPACITY,
+        max_in_flight_parts: ATHENA_MAX_IN_FLIGHT_PARTS,
+    }
+}
+
+fn grouped_receipt_from_applied(
+    manifest: &ObjectWriteManifest,
+    bucket: &str,
+    applied: &InnerSyncApplied,
+    verified_etag: String,
+    transport_chunk_count: u32,
+) -> GroupedWriteReceipt {
+    GroupedWriteReceipt::from_manifest_and_upload(
+        manifest,
+        format!("s3://{bucket}/{}", applied.final_key),
+        verified_etag,
+        applied.checksum.clone(),
+        applied.rows,
+        applied.bytes,
+        transport_chunk_count,
+    )
+}
 
 const ATHENA_WRITE_POLICY_SUPPORT: SinkWritePolicySupport = SinkWritePolicySupport {
     supports_merge_by_key: false,
@@ -164,7 +211,8 @@ fn note_glue_transient_retry() {
     let last = LAST.swap(total, Ordering::SeqCst);
     let delta = total.saturating_sub(last);
     let prev = metrics_counters::GLUE_RETRY_EMA_X100.load(Ordering::Relaxed);
-    let ema = ((prev.saturating_mul(80)).saturating_add(delta.saturating_mul(100).saturating_mul(20)))
+    let ema = ((prev.saturating_mul(80))
+        .saturating_add(delta.saturating_mul(100).saturating_mul(20)))
         / 100;
     metrics_counters::set_glue_retry_ema_x100(ema);
     if ema > 200 {
@@ -172,7 +220,10 @@ fn note_glue_transient_retry() {
         let next = cur.saturating_sub(1).max(2);
         if next != cur {
             metrics_counters::ATHENA_GLUE_CP_TARGET.store(next, Ordering::Relaxed);
-            info!("tune: athena_glue_cp {} -> {} (glue_retry_ema_x100={})", cur, next, ema);
+            info!(
+                "tune: athena_glue_cp {} -> {} (glue_retry_ema_x100={})",
+                cur, next, ema
+            );
         }
     }
 }
@@ -212,6 +263,196 @@ pub struct DataSinkAthenaPluginConfig {
     pub athena_results_s3_bucket: String,
 }
 
+#[derive(Clone)]
+struct AthenaS3ObjectWriteBackend {
+    client: S3Client,
+    bucket: String,
+    object_key: String,
+    tagging: String,
+}
+
+impl AthenaS3ObjectWriteBackend {
+    fn new(client: S3Client, bucket: String, object_key: String, tagging: String) -> Self {
+        Self {
+            client,
+            bucket,
+            object_key,
+            tagging,
+        }
+    }
+
+    fn validate_request_key(&self, request: &ObjectWriteRequest) -> io::Result<()> {
+        if request.object_key == self.object_key {
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Athena S3 backend configured for key '{}' but received '{}'",
+                    self.object_key, request.object_key
+                ),
+            ))
+        }
+    }
+}
+
+#[async_trait]
+impl ObjectWriteBackend for AthenaS3ObjectWriteBackend {
+    type Error = io::Error;
+
+    async fn begin(&self, request: &ObjectWriteRequest) -> Result<MultipartUpload, Self::Error> {
+        self.validate_request_key(request)?;
+        let metadata = request
+            .metadata
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect::<HashMap<_, _>>();
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(ATHENA_MULTIPART_BEGIN_TIMEOUT_SECS),
+            self.client
+                .create_multipart_upload()
+                .bucket(&self.bucket)
+                .key(&request.object_key)
+                .content_type(&request.content_type)
+                .tagging(&self.tagging)
+                .set_metadata((!metadata.is_empty()).then_some(metadata))
+                .send(),
+        )
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "Timeout initiating multipart upload",
+            )
+        })?
+        .map_err(|error| {
+            io::Error::other(format!("Failed to initiate multipart upload: {error}"))
+        })?;
+        let upload_id = response.upload_id().unwrap_or_default().to_string();
+        if upload_id.is_empty() {
+            return Err(io::Error::other("Missing upload_id from S3"));
+        }
+        Ok(MultipartUpload {
+            upload_id,
+            metadata: BTreeMap::new(),
+        })
+    }
+
+    async fn upload_part(
+        &self,
+        upload: &MultipartUpload,
+        part_number: u32,
+        bytes: Bytes,
+    ) -> Result<PartMetadata, Self::Error> {
+        let part_number = i32::try_from(part_number)
+            .map_err(|_| io::Error::other("S3 multipart part number exceeded i32::MAX"))?;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(ATHENA_MULTIPART_PART_TIMEOUT_SECS),
+            self.client
+                .upload_part()
+                .bucket(&self.bucket)
+                .key(&self.object_key)
+                .upload_id(&upload.upload_id)
+                .part_number(part_number)
+                .body(ByteStream::from(bytes))
+                .send(),
+        )
+        .await
+        .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "upload_part timed out"))?
+        .map_err(|error| io::Error::other(format!("upload_part failed: {error}")))?;
+        let etag = response.e_tag().unwrap_or_default().to_string();
+        if etag.is_empty() {
+            return Err(io::Error::other(format!(
+                "upload_part returned no ETag for part {part_number}"
+            )));
+        }
+        Ok(PartMetadata {
+            etag: Some(etag),
+            checksum: None,
+            metadata: BTreeMap::new(),
+        })
+    }
+
+    async fn complete(
+        &self,
+        upload: &MultipartUpload,
+        parts: &[ObjectPartReceipt],
+    ) -> Result<CompletionMetadata, Self::Error> {
+        let completed_parts = parts
+            .iter()
+            .map(|part| {
+                let part_number = i32::try_from(part.part_number)
+                    .map_err(|_| io::Error::other("S3 multipart part number exceeded i32::MAX"))?;
+                let etag = part.etag.clone().ok_or_else(|| {
+                    io::Error::other(format!(
+                        "S3 multipart part {} has no ETag",
+                        part.part_number
+                    ))
+                })?;
+                Ok(CompletedPart::builder()
+                    .part_number(part_number)
+                    .e_tag(etag)
+                    .build())
+            })
+            .collect::<io::Result<Vec<_>>>()?;
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(ATHENA_MULTIPART_COMPLETE_TIMEOUT_SECS),
+            self.client
+                .complete_multipart_upload()
+                .bucket(&self.bucket)
+                .key(&self.object_key)
+                .upload_id(&upload.upload_id)
+                .multipart_upload(
+                    CompletedMultipartUpload::builder()
+                        .set_parts(Some(completed_parts))
+                        .build(),
+                )
+                .send(),
+        )
+        .await
+        .map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::TimedOut,
+                "complete_multipart_upload timed out",
+            )
+        })?
+        .map_err(|error| io::Error::other(format!("complete_multipart_upload failed: {error}")))?;
+        Ok(CompletionMetadata {
+            etag: response.e_tag().map(str::to_string),
+            checksum: None,
+            version_id: response.version_id().map(str::to_string),
+            metadata: BTreeMap::new(),
+        })
+    }
+
+    async fn abort(&self, upload: &MultipartUpload) -> Result<(), Self::Error> {
+        self.client
+            .abort_multipart_upload()
+            .bucket(&self.bucket)
+            .key(&self.object_key)
+            .upload_id(&upload.upload_id)
+            .send()
+            .await
+            .map_err(|error| io::Error::other(format!("abort_multipart_upload failed: {error}")))?;
+        Ok(())
+    }
+}
+
+struct UploadInFlightGuard;
+
+impl UploadInFlightGuard {
+    fn start() -> Self {
+        metrics_counters::inc_uploads_in_flight();
+        Self
+    }
+}
+
+impl Drop for UploadInFlightGuard {
+    fn drop(&mut self) {
+        metrics_counters::dec_uploads_in_flight();
+    }
+}
+
 impl TryFrom<DataSinkPluginConfig> for DataSinkAthenaPluginConfig {
     type Error = String;
 
@@ -225,6 +466,8 @@ pub struct InnerSyncApplied {
     pub final_key: String,
     pub rows: u64,
     pub bytes: u64,
+    pub etag: Option<String>,
+    pub checksum: Option<String>,
 }
 
 pub struct DataSinkAthenaPlugin {
@@ -583,17 +826,9 @@ impl DataSinkAthenaPlugin {
 
     async fn sync_grouped_single_object(
         &self,
-        mut reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
+        reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
         ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
     ) -> Result<SinkWriteOutcome, std::io::Error> {
-        let schema = reader.schema();
-        let mut batches = Vec::new();
-        let mut transport_chunk_count = 0u32;
-        while let Some(chunk) = reader.next_chunk().await? {
-            transport_chunk_count = transport_chunk_count.saturating_add(1);
-            batches.extend(chunk.batches);
-        }
-        let stream = self.record_batches_to_stream(schema, batches);
         let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
         let resolved_contract = ctx
             .source_contract
@@ -625,6 +860,7 @@ impl DataSinkAthenaPlugin {
                 ctx.compaction_id
             )));
         }
+        let (stream, stream_progress) = reader.into_stream();
         // Do not pass ObjectWriteManifest into inner_sync: it writes the sidecar to the
         // same key as GroupedWriteReceipt. Concurrent retries would then parse the
         // intermediate ObjectWriteManifest as a receipt and fail on `final_s3_key`.
@@ -645,7 +881,7 @@ impl DataSinkAthenaPlugin {
                     &manifest,
                     &namespace,
                     &applied,
-                    transport_chunk_count,
+                    stream_progress.transport_chunk_count(),
                 )
                 .await?;
             }
@@ -695,46 +931,6 @@ impl DataSinkAthenaPlugin {
                 }
             }
         }
-    }
-
-    fn record_batches_to_stream(
-        &self,
-        schema: Arc<arrow::datatypes::Schema>,
-        batches: Vec<RecordBatch>,
-    ) -> SendableRecordBatchStream {
-        struct VecRecordBatchStream {
-            schema: Arc<arrow::datatypes::Schema>,
-            batches: Vec<RecordBatch>,
-            idx: usize,
-        }
-
-        impl RecordBatchStream for VecRecordBatchStream {
-            fn schema(&self) -> Arc<arrow::datatypes::Schema> {
-                Arc::clone(&self.schema)
-            }
-        }
-
-        impl futures::Stream for VecRecordBatchStream {
-            type Item = Result<RecordBatch, datafusion::error::DataFusionError>;
-
-            fn poll_next(
-                mut self: Pin<&mut Self>,
-                _cx: &mut TaskContext<'_>,
-            ) -> TaskPoll<Option<Self::Item>> {
-                if let Some(batch) = self.batches.get(self.idx).cloned() {
-                    self.idx += 1;
-                    TaskPoll::Ready(Some(Ok(batch)))
-                } else {
-                    TaskPoll::Ready(None)
-                }
-            }
-        }
-
-        Box::pin(VecRecordBatchStream {
-            schema,
-            batches,
-            idx: 0,
-        })
     }
 
     async fn read_grouped_receipt(
@@ -797,14 +993,29 @@ impl DataSinkAthenaPlugin {
             .send()
             .await
             .map_err(|err| io::Error::other(err.to_string()))?;
-        let etag = head.e_tag().unwrap_or_default().to_string();
-        let receipt = GroupedWriteReceipt::from_manifest_and_upload(
+        let etag = head
+            .e_tag()
+            .filter(|etag| !etag.is_empty())
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "S3 HEAD returned no ETag for grouped object {}",
+                    applied.final_key
+                ))
+            })?
+            .to_string();
+        if let Some(completed_etag) = applied.etag.as_deref() {
+            if completed_etag != etag {
+                return Err(io::Error::other(format!(
+                    "S3 ETag mismatch for grouped object {}: complete returned {}, HEAD returned {}",
+                    applied.final_key, completed_etag, etag
+                )));
+            }
+        }
+        let receipt = grouped_receipt_from_applied(
             manifest,
-            format!("s3://{}/{}", self.config.s3_bucket, applied.final_key),
+            &self.config.s3_bucket,
+            applied,
             etag,
-            None,
-            applied.rows,
-            applied.bytes,
             transport_chunk_count,
         );
         self.s3_client
@@ -1129,10 +1340,7 @@ impl DataSinkAthenaPlugin {
         }
 
         // Use grouped idempotency keys directly; legacy writes keep hashed filenames.
-        let object_stem = object_stem
-            .map(str::to_string)
-            .unwrap_or_else(|| hex::encode(md5::compute(&filename).0));
-        let final_key = format!("{}/{}.parquet", full_key, object_stem);
+        let (object_stem, final_key) = athena_object_key(&full_key, &filename, object_stem);
         let idempotency_manifest_key =
             sidecar_manifest_object_key(&self.config.s3_prefix, &namespace, &object_stem);
         if let Some(manifest) = idempotency_manifest {
@@ -1179,7 +1387,7 @@ impl DataSinkAthenaPlugin {
             .await
             .map_err(|_| io::Error::new(io::ErrorKind::Other, "Semaphore closed"))?;
         let upload_start = std::time::Instant::now();
-        skippr_runtime_sdk::metrics::counters::inc_uploads_in_flight();
+        let upload_metrics = UploadInFlightGuard::start();
 
         let bucket = self.config.s3_bucket.clone();
 
@@ -1190,229 +1398,6 @@ impl DataSinkAthenaPlugin {
         );
 
         let key_for_upload = final_key.clone();
-
-        // Initiate multipart upload with timeout
-        let create_out = match tokio::time::timeout(
-            std::time::Duration::from_secs(120),
-            self.s3_client
-                .create_multipart_upload()
-                .bucket(&bucket)
-                .key(&key_for_upload)
-                .content_type("application/octet-stream")
-                .tagging(tags_str)
-                .send(),
-        )
-        .await
-        {
-            Ok(Ok(v)) => v,
-            Ok(Err(e)) => {
-                skippr_runtime_sdk::metrics::counters::dec_uploads_in_flight();
-                return Err(io::Error::new(
-                    io::ErrorKind::Other,
-                    format!(
-                        "Failed to initiate multipart upload: {}",
-                        e.into_service_error()
-                    ),
-                ));
-            }
-            Err(_) => {
-                skippr_runtime_sdk::metrics::counters::dec_uploads_in_flight();
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "Timeout initiating multipart upload",
-                ));
-            }
-        };
-        let upload_id = create_out.upload_id().unwrap_or("").to_string();
-        if upload_id.is_empty() {
-            skippr_runtime_sdk::metrics::counters::dec_uploads_in_flight();
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "Missing upload_id from S3",
-            ));
-        }
-
-        // Writer that uploads parts as bytes are produced
-        struct MultipartWriter {
-            client: S3Client,
-            bucket: String,
-            key: String,
-            upload_id: String,
-            part_size: usize,
-            buffer: Vec<u8>,
-            next_part: i32,
-            parts: Vec<CompletedPart>,
-            total_bytes: u64,
-        }
-
-        impl MultipartWriter {
-            fn new(
-                client: S3Client,
-                bucket: String,
-                key: String,
-                upload_id: String,
-                part_size: usize,
-            ) -> Self {
-                Self {
-                    client,
-                    bucket,
-                    key,
-                    upload_id,
-                    part_size: part_size.max(5 * 1024 * 1024),
-                    buffer: Vec::with_capacity(part_size.max(5 * 1024 * 1024)),
-                    next_part: 1,
-                    parts: Vec::new(),
-                    total_bytes: 0,
-                }
-            }
-
-            fn upload_chunk_blocking(&mut self, chunk: Vec<u8>) -> io::Result<()> {
-                let client = self.client.clone();
-                let bucket = self.bucket.clone();
-                let key = self.key.clone();
-                let upload_id = self.upload_id.clone();
-                let part_number = self.next_part;
-                self.next_part += 1;
-                self.total_bytes += chunk.len() as u64;
-                // println!(
-                //     "uploading part {} for {} (size={}, total={})",
-                //     part_number,
-                //     key,
-                //     Helpers::human_readable_size((chunk.len()) as u64),
-                //     Helpers::human_readable_size(self.total_bytes)
-                // );
-                block_in_place(|| {
-                    let body = ByteStream::from(Bytes::from(chunk));
-                    let fut = async move {
-                        tokio::time::timeout(
-                            std::time::Duration::from_secs(300),
-                            client
-                                .upload_part()
-                                .bucket(bucket)
-                                .key(key)
-                                .upload_id(upload_id)
-                                .part_number(part_number)
-                                .body(body)
-                                .send(),
-                        )
-                        .await
-                    };
-                    match tokio::runtime::Handle::current().block_on(fut) {
-                        Ok(Ok(resp)) => {
-                            let etag = resp.e_tag().unwrap_or("").to_string();
-                            let part = CompletedPart::builder()
-                                .e_tag(etag)
-                                .part_number(part_number)
-                                .build();
-                            self.parts.push(part);
-                            Ok(())
-                        }
-                        Ok(Err(e)) => Err(io::Error::new(
-                            io::ErrorKind::Other,
-                            format!("upload_part failed: {}", e.into_service_error()),
-                        )),
-                        Err(_) => Err(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            "upload_part timed out",
-                        )),
-                    }
-                })
-            }
-
-            fn flush_full_parts(&mut self) -> io::Result<()> {
-                while self.buffer.len() >= self.part_size {
-                    let chunk = self.buffer.drain(..self.part_size).collect::<Vec<u8>>();
-                    self.upload_chunk_blocking(chunk)?;
-                }
-                Ok(())
-            }
-
-            fn complete(&mut self) -> io::Result<u64> {
-                // Upload remaining as final part (can be < 5MiB)
-                if !self.buffer.is_empty() {
-                    let chunk = std::mem::take(&mut self.buffer);
-                    self.upload_chunk_blocking(chunk)?;
-                }
-                // Complete multipart upload
-                let client = self.client.clone();
-                let bucket = self.bucket.clone();
-                let key = self.key.clone();
-                let upload_id = self.upload_id.clone();
-                let parts = self.parts.clone();
-                debug!(
-                    "completing multipart upload for {} (parts={}, total={})",
-                    key,
-                    parts.len(),
-                    Helpers::human_readable_size(self.total_bytes)
-                );
-                block_in_place(|| {
-                    let fut = async move {
-                        tokio::time::timeout(
-                            std::time::Duration::from_secs(600),
-                            client
-                                .complete_multipart_upload()
-                                .bucket(bucket)
-                                .key(key)
-                                .upload_id(upload_id)
-                                .multipart_upload(
-                                    CompletedMultipartUpload::builder()
-                                        .set_parts(Some(parts))
-                                        .build(),
-                                )
-                                .send(),
-                        )
-                        .await
-                    };
-                    match tokio::runtime::Handle::current().block_on(fut) {
-                        Ok(Ok(_)) => Ok(()),
-                        Ok(Err(e)) => Err(io::Error::new(
-                            io::ErrorKind::Other,
-                            format!(
-                                "complete_multipart_upload failed: {}",
-                                e.into_service_error()
-                            ),
-                        )),
-                        Err(_) => Err(io::Error::new(
-                            io::ErrorKind::TimedOut,
-                            "complete_multipart_upload timed out",
-                        )),
-                    }
-                })?;
-                Ok(self.total_bytes)
-            }
-
-            fn abort(&self) {
-                let client = self.client.clone();
-                let bucket = self.bucket.clone();
-                let key = self.key.clone();
-                let upload_id = self.upload_id.clone();
-                let _ = block_in_place(|| {
-                    let fut = async move {
-                        client
-                            .abort_multipart_upload()
-                            .bucket(bucket)
-                            .key(key)
-                            .upload_id(upload_id)
-                            .send()
-                            .await
-                    };
-                    tokio::runtime::Handle::current().block_on(fut).map(|_| ())
-                });
-            }
-        }
-
-        impl std::io::Write for MultipartWriter {
-            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-                self.buffer.extend_from_slice(buf);
-                // Upload any full parts
-                self.flush_full_parts()?;
-                Ok(buf.len())
-            }
-            fn flush(&mut self) -> std::io::Result<()> {
-                // No-op; completion will upload the tail
-                Ok(())
-            }
-        }
 
         // Resolve ordering. For bounded grouped writes, ordering is applied
         // within each incoming batch/row group only; no global sort metadata is emitted.
@@ -1429,61 +1414,33 @@ impl DataSinkAthenaPlugin {
             &order_fields,
             row_group_size,
         );
-
-        let mut writer = MultipartWriter::new(
+        let sorted_batches = stream.map({
+            let order_fields = order_fields.clone();
+            move |batch| {
+                let batch = batch.map_err(ObjectWriteError::input)?;
+                skippr_runtime_sdk::converters::parquet_ordering::sort_batch(&batch, &order_fields)
+                    .map_err(ObjectWriteError::input)
+            }
+        });
+        let backend = Arc::new(AthenaS3ObjectWriteBackend::new(
             self.s3_client.clone(),
             bucket.clone(),
             key_for_upload.clone(),
-            upload_id.clone(),
-            64 * 1024 * 1024,
-        );
-
-        let mut parquet_writer =
-            ArrowWriter::try_new(&mut writer, schema, Some(props)).map_err(|e| {
-                io::Error::new(
-                    io::ErrorKind::Other,
-                    format!("Failed to init ArrowWriter: {}", e),
-                )
-            })?;
-
-        let mut rows_written: u64 = 0;
-        let mut batch_index: usize = 0;
-        let mut batches_stream = stream;
-        while let Some(batch_res) = batches_stream.next().await {
-            let batch = batch_res.map_err(|e| {
-                io::Error::new(io::ErrorKind::Other, format!("Stream error: {}", e))
-            })?;
-            let batch = skippr_runtime_sdk::converters::parquet_ordering::sort_batch(
-                &batch,
-                &order_fields,
-            )?;
-            rows_written += batch.num_rows() as u64;
-            parquet_writer.write(&batch).map_err(|e| {
-                io::Error::new(io::ErrorKind::Other, format!("Parquet write error: {}", e))
-            })?;
-            debug!(
-                "Uploader: wrote batch idx={} rows={} key={}",
-                batch_index,
-                batch.num_rows(),
-                key_for_upload
-            );
-            batch_index += 1;
-            tokio::task::yield_now().await;
-        }
-
-        let _meta = parquet_writer.close().map_err(|e| {
-            io::Error::new(io::ErrorKind::Other, format!("Parquet close error: {}", e))
-        })?;
-
-        let uploaded_bytes = match writer.complete() {
-            Ok(sz) => sz,
-            Err(e) => {
-                // Best-effort abort
-                writer.abort();
-                skippr_runtime_sdk::metrics::counters::dec_uploads_in_flight();
-                return Err(e);
-            }
+            tags_str,
+        ));
+        let request = ObjectWriteRequest {
+            object_key: key_for_upload.clone(),
+            content_type: "application/octet-stream".to_string(),
+            metadata: BTreeMap::new(),
         };
+        let writer_config = athena_object_writer_config();
+        let receipt = ObjectWriteSession::new(backend, request, writer_config)
+            .map_err(|error| io::Error::other(error.to_string()))?
+            .write_parquet(schema, props, sorted_batches)
+            .await
+            .map_err(|error| io::Error::other(error.to_string()))?;
+        let rows_written = receipt.rows;
+        let uploaded_bytes = receipt.bytes;
         let partition_summary = if partition_values.is_empty() {
             format!("s3://{}/{}/", bucket, full_key.trim_end_matches('/'))
         } else {
@@ -1501,8 +1458,8 @@ impl DataSinkAthenaPlugin {
         debug!(
             "Uploader: complete key={} upload_id={} parts={} total_bytes={} rows={}",
             key_for_upload,
-            upload_id,
-            writer.parts.len(),
+            receipt.upload_id,
+            receipt.parts.len(),
             uploaded_bytes,
             rows_written
         );
@@ -1513,8 +1470,8 @@ impl DataSinkAthenaPlugin {
         skippr_runtime_sdk::metrics::counters::add_upload_latency_ns(
             upload_start.elapsed().as_nanos() as u64,
         );
-        skippr_runtime_sdk::metrics::counters::dec_uploads_in_flight();
         // Release upload concurrency before Glue catalog work (queryability, not durability).
+        drop(upload_metrics);
         drop(permit);
         info!(
             "s3_upload_complete ns={} key={} rows={} bytes={} upload_elapsed_ms={}",
@@ -1573,6 +1530,8 @@ impl DataSinkAthenaPlugin {
                 final_key: final_key.clone(),
                 rows: rows_written,
                 bytes: uploaded_bytes,
+                etag: receipt.etag,
+                checksum: receipt.checksum,
             }),
         ))
     }
@@ -1614,10 +1573,7 @@ impl DataSinkAthenaPlugin {
             match result {
                 Ok(_) => {}
                 Err(e) => {
-                    warn!(
-                        "Glue partition creation failed for '{}': {}",
-                        full_key, e
-                    );
+                    warn!("Glue partition creation failed for '{}': {}", full_key, e);
                 }
             }
             PARTITION_TASKS_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
@@ -1641,13 +1597,7 @@ impl DataSinkAthenaPlugin {
                 return;
             }
         };
-        self.schedule_glue_partition(
-            namespace.to_string(),
-            partition_values,
-            full_key,
-            pm,
-            None,
-        );
+        self.schedule_glue_partition(namespace.to_string(), partition_values, full_key, pm, None);
     }
 
     /// Best-effort drain of background Glue partition tasks (plugin teardown / finalize).
@@ -1731,30 +1681,6 @@ impl DataSinkAthenaPlugin {
                 ))
             })?;
         Ok(())
-    }
-
-    #[allow(dead_code)]
-    async fn upload_object(
-        _client: S3Client,
-        _bucket: String,
-        _key: String,
-        stream: SendableRecordBatchStream,
-        tag_hashmap: HashMap<String, String>,
-    ) -> Result<(), std::io::Error> {
-        let _tags = tag_hashmap
-            .iter()
-            .map(|(k, v)| format!("{}={}", k, v))
-            .collect::<Vec<String>>()
-            .join("&");
-
-        // Serialize to parquet asynchronously
-        let parquet = serialize_to_parquet(stream).await?;
-
-        // Create the upload body stream
-        let _body = ByteStream::from(parquet.bytes);
-
-        // NOTE: Unused now; upload is performed in inner_sync with concurrency gating
-        unreachable!("upload_object is not used after enabling gated concurrency in inner_sync")
     }
 }
 
@@ -3512,6 +3438,76 @@ mod contract_schema_tests {
         let crawl_ids = StringArray::from(vec![crawl_id]);
         let buckets = Int32Array::from(vec![bucket]);
         RecordBatch::try_new(schema, vec![Arc::new(crawl_ids), Arc::new(buckets)]).unwrap()
+    }
+
+    #[test]
+    fn shared_writer_preserves_legacy_and_grouped_object_keys() {
+        let filename = "namespace=users-p=region%3Deu-c=segment-1";
+        let legacy_stem = hex::encode(md5::compute(filename).0);
+        assert_eq!(
+            athena_object_key("root/users/region=eu", filename, None),
+            (
+                legacy_stem.clone(),
+                format!("root/users/region=eu/{legacy_stem}.parquet")
+            )
+        );
+        assert_eq!(
+            athena_object_key("root/users/region=eu", filename, Some("compaction-0001")),
+            (
+                "compaction-0001".to_string(),
+                "root/users/region=eu/compaction-0001.parquet".to_string()
+            )
+        );
+    }
+
+    #[test]
+    fn grouped_receipt_fields_match_the_completed_shared_write() {
+        let manifest = ObjectWriteManifest {
+            compaction_id: "compaction-0001".to_string(),
+            idempotency_key: "apply-0001".to_string(),
+            schema_fingerprint: "schema-1".to_string(),
+            wal_refs_fingerprint: "legacy-wal-fingerprint".to_string(),
+            wal_ref_count: 2,
+            identity_version: Some(2),
+            wal_refs_fingerprint_v2: Some("canonical-wal-fingerprint".to_string()),
+            has_cdc_metadata: true,
+        };
+        let applied = InnerSyncApplied {
+            final_key: "root/users/region=eu/compaction-0001.parquet".to_string(),
+            rows: 123,
+            bytes: 456,
+            etag: Some("\"multipart-etag-2\"".to_string()),
+            checksum: None,
+        };
+
+        let receipt = grouped_receipt_from_applied(
+            &manifest,
+            "warehouse",
+            &applied,
+            "\"multipart-etag-2\"".to_string(),
+            3,
+        );
+
+        assert!(receipt.matches_manifest(&manifest));
+        assert_eq!(
+            receipt.final_s3_key,
+            "s3://warehouse/root/users/region=eu/compaction-0001.parquet"
+        );
+        assert_eq!(receipt.etag, "\"multipart-etag-2\"");
+        assert_eq!(receipt.checksum, None);
+        assert_eq!(receipt.rows, 123);
+        assert_eq!(receipt.bytes, 456);
+        assert_eq!(receipt.transport_chunk_count, 3);
+    }
+
+    #[test]
+    fn athena_shared_writer_has_explicit_part_and_memory_bounds() {
+        let config = athena_object_writer_config();
+        assert_eq!(config.part_size, 64 * 1024 * 1024);
+        assert_eq!(config.max_in_flight_parts, 2);
+        assert_eq!(config.batch_channel_capacity, 2);
+        assert_eq!(config.byte_channel_capacity, 1);
+        assert_eq!(config.transport_memory_bound_bytes(), 256 * 1024 * 1024);
     }
 
     #[test]

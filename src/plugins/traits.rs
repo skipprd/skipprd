@@ -1,15 +1,17 @@
-use async_trait::async_trait;
 use arrow::record_batch::RecordBatch;
 use arrow_schema::SchemaRef;
+use async_trait::async_trait;
 use datafusion::error::DataFusionError;
 use datafusion::execution::SendableRecordBatchStream;
 use datafusion::physical_plan::RecordBatchStream;
 use futures::StreamExt;
 use serde_derive::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::io;
 use std::marker::PhantomData;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -386,10 +388,7 @@ struct ChunkRecordBatchStream {
 impl futures::Stream for ChunkRecordBatchStream {
     type Item = Result<RecordBatch, DataFusionError>;
 
-    fn poll_next(
-        mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
-    ) -> Poll<Option<Self::Item>> {
+    fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         Poll::Ready(self.batches.next().map(Ok))
     }
 }
@@ -527,6 +526,114 @@ impl GroupedBatchReader {
             bytes,
             batches,
         }))
+    }
+
+    /// Flatten bounded chunks into their original batch sequence without
+    /// materializing the full grouped envelope.
+    ///
+    /// The returned progress handle counts transport chunks after they are
+    /// pulled from this reader. The stream does not request the next chunk
+    /// until every batch in the current chunk has been consumed.
+    pub fn into_stream(self) -> (SendableRecordBatchStream, GroupedBatchStreamProgress) {
+        let progress = GroupedBatchStreamProgress::default();
+        let stream = GroupedBatchStream {
+            schema: self.schema(),
+            reader: Some(self),
+            pending_batches: Vec::new().into_iter(),
+            pending_chunk: None,
+            progress: progress.clone(),
+            finished: false,
+        };
+        (Box::pin(stream), progress)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct GroupedBatchStreamProgress {
+    transport_chunk_count: Arc<AtomicU32>,
+}
+
+impl GroupedBatchStreamProgress {
+    pub fn transport_chunk_count(&self) -> u32 {
+        self.transport_chunk_count.load(Ordering::Relaxed)
+    }
+
+    fn note_chunk(&self) {
+        let _ = self.transport_chunk_count.fetch_update(
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+            |count| Some(count.saturating_add(1)),
+        );
+    }
+}
+
+type PendingGroupedChunk = Pin<
+    Box<
+        dyn Future<Output = (GroupedBatchReader, io::Result<Option<RecordBatchChunk>>)>
+            + Send
+            + 'static,
+    >,
+>;
+
+struct GroupedBatchStream {
+    schema: SchemaRef,
+    reader: Option<GroupedBatchReader>,
+    pending_batches: std::vec::IntoIter<RecordBatch>,
+    pending_chunk: Option<PendingGroupedChunk>,
+    progress: GroupedBatchStreamProgress,
+    finished: bool,
+}
+
+impl futures::Stream for GroupedBatchStream {
+    type Item = Result<RecordBatch, DataFusionError>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        loop {
+            if let Some(batch) = self.pending_batches.next() {
+                return Poll::Ready(Some(Ok(batch)));
+            }
+            if self.finished {
+                return Poll::Ready(None);
+            }
+            if self.pending_chunk.is_none() {
+                let mut reader = self
+                    .reader
+                    .take()
+                    .expect("grouped stream reader must be available");
+                self.pending_chunk = Some(Box::pin(async move {
+                    let chunk = reader.next_chunk().await;
+                    (reader, chunk)
+                }));
+            }
+
+            let pending = self
+                .pending_chunk
+                .as_mut()
+                .expect("grouped chunk future must be available");
+            let (reader, result) = match pending.as_mut().poll(cx) {
+                Poll::Ready(result) => result,
+                Poll::Pending => return Poll::Pending,
+            };
+            self.pending_chunk = None;
+            self.reader = Some(reader);
+            match result {
+                Ok(Some(chunk)) => {
+                    self.progress.note_chunk();
+                    self.pending_batches = chunk.batches.into_iter();
+                }
+                Ok(None) => self.finished = true,
+                Err(error) => {
+                    self.finished = true;
+                    return Poll::Ready(Some(Err(DataFusionError::Execution(error.to_string()))));
+                }
+            }
+        }
+    }
+}
+
+impl RecordBatchStream for GroupedBatchStream {
+    fn schema(&self) -> SchemaRef {
+        Arc::clone(&self.schema)
     }
 }
 
@@ -759,9 +866,10 @@ macro_rules! declare_schema_sink_spec {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::plugins::cdc::source_capabilities;
     use arrow::array::Int64Array;
     use arrow::datatypes::{DataType, Field, Schema};
-    use crate::plugins::cdc::source_capabilities;
+    use std::sync::atomic::{AtomicUsize, Ordering as AtomicOrdering};
 
     fn runtime_ref() -> crate::runtime_plugins::protocol::RuntimeWalPartRef {
         crate::runtime_plugins::protocol::RuntimeWalPartRef {
@@ -851,11 +959,9 @@ mod tests {
     #[tokio::test]
     async fn grouped_batch_reader_emits_bounded_chunks_with_offsets() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
-        let batch_one = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(Int64Array::from(vec![1, 2]))],
-        )
-        .unwrap();
+        let batch_one =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1, 2]))])
+                .unwrap();
         let batch_two =
             RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![3]))])
                 .unwrap();
@@ -891,11 +997,9 @@ mod tests {
     #[tokio::test]
     async fn grouped_batch_reader_marks_exact_limit_chunk_final_at_eof() {
         let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
-        let batch = RecordBatch::try_new(
-            schema.clone(),
-            vec![Arc::new(Int64Array::from(vec![1, 2]))],
-        )
-        .unwrap();
+        let batch =
+            RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vec![1, 2]))])
+                .unwrap();
         let stream: SendableRecordBatchStream = Box::pin(ChunkRecordBatchStream {
             schema,
             batches: vec![batch].into_iter(),
@@ -915,6 +1019,97 @@ mod tests {
         assert_eq!(chunk.rows, 2);
         assert!(chunk.final_chunk);
         assert!(reader.next_chunk().await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn grouped_batch_reader_stream_flattens_lazily_in_row_order() {
+        struct CountingBatchStream {
+            schema: SchemaRef,
+            batches: std::vec::IntoIter<RecordBatch>,
+            consumed: Arc<AtomicUsize>,
+        }
+
+        impl futures::Stream for CountingBatchStream {
+            type Item = Result<RecordBatch, DataFusionError>;
+
+            fn poll_next(
+                mut self: Pin<&mut Self>,
+                _cx: &mut Context<'_>,
+            ) -> Poll<Option<Self::Item>> {
+                let next = self.batches.next();
+                if next.is_some() {
+                    self.consumed.fetch_add(1, AtomicOrdering::Relaxed);
+                }
+                Poll::Ready(next.map(Ok))
+            }
+        }
+
+        impl RecordBatchStream for CountingBatchStream {
+            fn schema(&self) -> SchemaRef {
+                Arc::clone(&self.schema)
+            }
+        }
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)]));
+        let batches = [1_i64, 2, 3]
+            .into_iter()
+            .map(|value| {
+                RecordBatch::try_new(
+                    schema.clone(),
+                    vec![Arc::new(Int64Array::from(vec![value]))],
+                )
+                .unwrap()
+            })
+            .collect::<Vec<_>>();
+        let consumed = Arc::new(AtomicUsize::new(0));
+        let source: SendableRecordBatchStream = Box::pin(CountingBatchStream {
+            schema,
+            batches: batches.into_iter(),
+            consumed: consumed.clone(),
+        });
+        let refs = GroupedWalRefs::new(vec![runtime_ref()]).unwrap();
+        let key = GroupedWalPartitionKey::from_refs(&refs, "schema", None);
+        let reader = GroupedBatchReader::new(
+            source,
+            key,
+            GroupedBatchReaderConfig {
+                max_rows: 1,
+                max_bytes: usize::MAX,
+            },
+        );
+
+        let (mut stream, progress) = reader.into_stream();
+        assert_eq!(consumed.load(AtomicOrdering::Relaxed), 0);
+
+        let first = stream.next().await.unwrap().unwrap();
+        assert_eq!(
+            first
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .unwrap()
+                .value(0),
+            1
+        );
+        assert!(
+            consumed.load(AtomicOrdering::Relaxed) < 3,
+            "flattening must not precollect the grouped envelope"
+        );
+
+        let mut values = vec![1];
+        while let Some(batch) = stream.next().await {
+            let batch = batch.unwrap();
+            values.push(
+                batch
+                    .column(0)
+                    .as_any()
+                    .downcast_ref::<Int64Array>()
+                    .unwrap()
+                    .value(0),
+            );
+        }
+        assert_eq!(values, vec![1, 2, 3]);
+        assert_eq!(progress.transport_chunk_count(), 3);
     }
 
     #[test]

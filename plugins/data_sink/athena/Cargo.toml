@@ -11,6 +11,7 @@ path = "src/main.rs"
 clap.workspace = true
 tokio.workspace = true
 skippr-runtime-sdk.workspace = true
+skippr-object-writer = { path = "../../../crates/skippr-object-writer" }
 
 arrow = { version = "58.3.0", features = ["ipc_compression"] }
 async-trait = "0.1.77"

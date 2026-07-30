@@ -159,3 +159,33 @@ fn runtime_sink_and_schema_plugins_use_sdk_entrypoints() {
         violations.join("\n")
     );
 }
+
+#[test]
+fn athena_data_upload_stays_on_the_shared_async_object_writer() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let path = root.join("plugins/data_sink/athena/src/athena.rs");
+    let contents = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {}", path.display(), err));
+
+    for forbidden in [
+        "struct MultipartWriter",
+        "block_in_place",
+        "Handle::current().block_on",
+        "batches.extend(chunk.batches)",
+        "record_batches_to_stream",
+    ] {
+        assert!(
+            !contents.contains(forbidden),
+            "Athena data uploads must not contain legacy token '{}'",
+            forbidden
+        );
+    }
+    assert!(
+        contents.contains("ObjectWriteSession::new"),
+        "Athena data uploads must use skippr-object-writer"
+    );
+    assert!(
+        contents.contains("reader.into_stream()"),
+        "Athena grouped writes must flatten chunks without precollection"
+    );
+}
