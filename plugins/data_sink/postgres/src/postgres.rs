@@ -7,8 +7,9 @@ use once_cell::sync::Lazy;
 use tracing::{error, info};
 
 use crate::cdc_apply::{
-    ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
-    tombstone_table_name, upsert_if_newer_sql,
+    apply_postgres_cdc_batch, ddl_add_order_token_column, ddl_create_tombstone_table,
+    tombstone_table_name, CdcApplyBatch, CdcApplyColumn, CdcApplyMutation, CdcApplyRow,
+    CdcApplyRowMetadata, CdcApplyValue,
 };
 use crate::config::DataSinkPostgresPluginConfig;
 use skippr_runtime_sdk::converters::skippr_arrow::convert_skippr_to_arrow;
@@ -287,6 +288,25 @@ impl DataSinkPostgresPlugin {
         }
     }
 
+    async fn execute_cdc_batch(
+        &self,
+        fq_table: &str,
+        fq_tombstone_table: &str,
+        batch: &CdcApplyBatch,
+    ) -> Result<usize, std::io::Error> {
+        self.get_client().await?;
+        let result = {
+            let mut guard = self.client.lock().await;
+            let client = guard.as_mut().expect("Postgres client initialized");
+            apply_postgres_cdc_batch(client, fq_table, fq_tombstone_table, batch).await
+        };
+        if result.is_err() {
+            let mut guard = self.client.lock().await;
+            *guard = None;
+        }
+        result
+    }
+
     fn arrow_type_to_postgres(dt: &ArrowDataType) -> &'static str {
         match dt {
             ArrowDataType::Boolean => "BOOLEAN",
@@ -302,94 +322,86 @@ impl DataSinkPostgresPlugin {
         }
     }
 
-    fn arrow_value_to_sql(array: &dyn Array, row: usize) -> String {
+    fn arrow_value_to_cdc_value(array: &dyn Array, row: usize) -> CdcApplyValue {
         if array.is_null(row) {
-            return "NULL".to_string();
+            return CdcApplyValue::Null;
         }
         match array.data_type() {
             ArrowDataType::Boolean => {
                 let a = array.as_any().downcast_ref::<BooleanArray>().unwrap();
-                if a.value(row) { "TRUE" } else { "FALSE" }.to_string()
+                CdcApplyValue::Boolean(a.value(row))
             }
-            ArrowDataType::Int8 => format!(
-                "{}",
+            ArrowDataType::Int8 => CdcApplyValue::Signed(
                 array
                     .as_any()
                     .downcast_ref::<Int8Array>()
                     .unwrap()
-                    .value(row)
+                    .value(row) as i64,
             ),
-            ArrowDataType::Int16 => format!(
-                "{}",
+            ArrowDataType::Int16 => CdcApplyValue::Signed(
                 array
                     .as_any()
                     .downcast_ref::<Int16Array>()
                     .unwrap()
-                    .value(row)
+                    .value(row) as i64,
             ),
-            ArrowDataType::Int32 => format!(
-                "{}",
+            ArrowDataType::Int32 => CdcApplyValue::Signed(
                 array
                     .as_any()
                     .downcast_ref::<Int32Array>()
                     .unwrap()
-                    .value(row)
+                    .value(row) as i64,
             ),
-            ArrowDataType::Int64 => format!(
-                "{}",
+            ArrowDataType::Int64 => CdcApplyValue::Signed(
                 array
                     .as_any()
                     .downcast_ref::<Int64Array>()
                     .unwrap()
-                    .value(row)
+                    .value(row),
             ),
-            ArrowDataType::UInt8 => format!(
-                "{}",
+            ArrowDataType::UInt8 => CdcApplyValue::Unsigned(
                 array
                     .as_any()
                     .downcast_ref::<UInt8Array>()
                     .unwrap()
-                    .value(row)
+                    .value(row) as u64,
             ),
-            ArrowDataType::UInt16 => format!(
-                "{}",
+            ArrowDataType::UInt16 => CdcApplyValue::Unsigned(
                 array
                     .as_any()
                     .downcast_ref::<UInt16Array>()
                     .unwrap()
-                    .value(row)
+                    .value(row) as u64,
             ),
-            ArrowDataType::UInt32 => format!(
-                "{}",
+            ArrowDataType::UInt32 => CdcApplyValue::Unsigned(
                 array
                     .as_any()
                     .downcast_ref::<UInt32Array>()
                     .unwrap()
-                    .value(row)
+                    .value(row) as u64,
             ),
-            ArrowDataType::UInt64 => format!(
-                "{}",
+            ArrowDataType::UInt64 => CdcApplyValue::Unsigned(
                 array
                     .as_any()
                     .downcast_ref::<UInt64Array>()
                     .unwrap()
-                    .value(row)
+                    .value(row),
             ),
-            ArrowDataType::Float32 => format!(
-                "{}",
+            ArrowDataType::Float32 => CdcApplyValue::Float(
                 array
                     .as_any()
                     .downcast_ref::<Float32Array>()
                     .unwrap()
                     .value(row)
+                    .to_string(),
             ),
-            ArrowDataType::Float64 => format!(
-                "{}",
+            ArrowDataType::Float64 => CdcApplyValue::Float(
                 array
                     .as_any()
                     .downcast_ref::<Float64Array>()
                     .unwrap()
                     .value(row)
+                    .to_string(),
             ),
             ArrowDataType::Date32 => {
                 let days = array
@@ -399,7 +411,7 @@ impl DataSinkPostgresPlugin {
                     .value(row);
                 let date = chrono::NaiveDate::from_num_days_from_ce_opt(days + 719_163)
                     .unwrap_or_default();
-                format!("'{}'", date.format("%Y-%m-%d"))
+                CdcApplyValue::Date(date.format("%Y-%m-%d").to_string())
             }
             ArrowDataType::Date64 => {
                 let ms = array
@@ -409,7 +421,7 @@ impl DataSinkPostgresPlugin {
                     .value(row);
                 let secs = ms / 1000;
                 let dt = chrono::DateTime::from_timestamp(secs, 0).unwrap_or_default();
-                format!("'{}'", dt.format("%Y-%m-%d"))
+                CdcApplyValue::Date(dt.format("%Y-%m-%d").to_string())
             }
             ArrowDataType::Timestamp(unit, _) => {
                 let ts = match unit {
@@ -452,22 +464,43 @@ impl DataSinkPostgresPlugin {
                     }
                 };
                 let dt = ts.unwrap_or_default();
-                format!("'{}'", dt.format("%Y-%m-%d %H:%M:%S%.6f"))
+                CdcApplyValue::Timestamp(dt.format("%Y-%m-%d %H:%M:%S%.6f").to_string())
             }
             ArrowDataType::Utf8 => {
                 let a = array.as_any().downcast_ref::<StringArray>().unwrap();
-                format!("'{}'", a.value(row).replace('\'', "''"))
+                CdcApplyValue::Text(a.value(row).to_string())
             }
             ArrowDataType::LargeUtf8 => {
                 let a = array.as_any().downcast_ref::<LargeStringArray>().unwrap();
-                format!("'{}'", a.value(row).replace('\'', "''"))
+                CdcApplyValue::Text(a.value(row).to_string())
             }
             _ => {
                 let a = array.as_any().downcast_ref::<StringArray>();
                 match a {
-                    Some(s) => format!("'{}'", s.value(row).replace('\'', "''")),
-                    None => "NULL".to_string(),
+                    Some(s) => CdcApplyValue::Text(s.value(row).to_string()),
+                    None => CdcApplyValue::Null,
                 }
+            }
+        }
+    }
+
+    fn arrow_value_to_sql(array: &dyn Array, row: usize) -> String {
+        match Self::arrow_value_to_cdc_value(array, row) {
+            CdcApplyValue::Null => "NULL".to_string(),
+            CdcApplyValue::Boolean(value) => {
+                if value {
+                    "TRUE".to_string()
+                } else {
+                    "FALSE".to_string()
+                }
+            }
+            CdcApplyValue::Signed(value) => value.to_string(),
+            CdcApplyValue::Unsigned(value) => value.to_string(),
+            CdcApplyValue::Float(value) => value,
+            CdcApplyValue::Text(value)
+            | CdcApplyValue::Date(value)
+            | CdcApplyValue::Timestamp(value) => {
+                format!("'{}'", value.replace('\'', "''"))
             }
         }
     }
@@ -703,37 +736,25 @@ impl DataSinkPostgresPlugin {
         }
 
         let tombstone_table = tombstone_table_name(&fq_table);
-
-        let bk_names_quoted: Vec<String> = contract
-            .business_key_columns
-            .iter()
-            .map(|bk| format!("\"{}\"", bk))
-            .collect();
-
-        let bk_types: Vec<String> = contract
-            .business_key_columns
-            .iter()
-            .map(|bk| {
-                col_defs
-                    .iter()
-                    .find(|(name, _)| name == bk)
-                    .map(|(_, t)| (*t).to_string())
-                    .unwrap_or_else(|| "TEXT".to_string())
-            })
-            .collect();
-
-        let col_names_quoted: Vec<String> = arrow_schema
-            .fields()
-            .iter()
-            .map(|f| format!("\"{}\"", f.name().to_lowercase()))
-            .collect();
+        let mut apply_batch = CdcApplyBatch {
+            columns: col_defs
+                .iter()
+                .map(|(name, target_type)| CdcApplyColumn {
+                    name: name.clone(),
+                    target_type: (*target_type).to_string(),
+                })
+                .collect(),
+            business_key_columns: contract.business_key_columns.clone(),
+            rows: Vec::new(),
+        };
 
         let mut row_offset = 0usize;
-        let mut total_rows = 0usize;
 
         while let Some(batch_result) = stream.next().await {
-            let batch =
-                batch_result.map_err(|e| std::io::Error::other(format!("stream error: {}", e)))?;
+            let batch = batch_result.map_err(|e| {
+                counters::dec_uploads_in_flight();
+                std::io::Error::other(format!("stream error: {}", e))
+            })?;
             let num_rows = batch.num_rows();
             if num_rows == 0 {
                 continue;
@@ -742,6 +763,7 @@ impl DataSinkPostgresPlugin {
             for row in 0..num_rows {
                 let meta_idx = row_offset + row;
                 let row_meta = ctx.part_meta.rows.get(meta_idx).ok_or_else(|| {
+                    counters::dec_uploads_in_flight();
                     std::io::Error::other(format!(
                         "CDC row metadata missing at index {} (have {})",
                         meta_idx,
@@ -749,75 +771,47 @@ impl DataSinkPostgresPlugin {
                     ))
                 })?;
 
-                let order_token_hex: String = row_meta
-                    .order_token
-                    .iter()
-                    .map(|b| format!("{:02x}", b))
-                    .collect();
-
-                match row_meta.mutation {
+                let mutation = match row_meta.mutation {
                     MutationKind::Snapshot | MutationKind::Insert | MutationKind::Update => {
-                        let mut all_names = col_names_quoted.clone();
-                        all_names.push("\"_skippr_order_token\"".to_string());
-
-                        let mut all_values: Vec<String> = (0..batch.num_columns())
-                            .map(|col| Self::arrow_value_to_sql(batch.column(col).as_ref(), row))
-                            .collect();
-                        all_values.push(format!("decode('{}', 'hex')", order_token_hex));
-
-                        let sql = upsert_if_newer_sql::<PostgresCdcBackend>(
-                            &fq_table,
-                            &tombstone_table,
-                            &all_names,
-                            &all_values,
-                            &bk_names_quoted,
-                            &order_token_hex,
-                        );
-
-                        self.execute_sql(&sql).await.map_err(|e| {
-                            error!("CDC upsert failed for {}: {}", fq_table, e);
-                            counters::dec_uploads_in_flight();
-                            e
-                        })?;
+                        CdcApplyMutation::Upsert
                     }
-                    MutationKind::Delete => {
-                        let bk_values: Vec<String> = contract
-                            .business_key_columns
-                            .iter()
-                            .map(|bk| {
-                                let col_idx = arrow_schema
-                                    .fields()
-                                    .iter()
-                                    .position(|f| f.name().to_lowercase() == *bk)
-                                    .unwrap_or(0);
-                                Self::arrow_value_to_sql(batch.column(col_idx).as_ref(), row)
-                            })
-                            .collect();
-
-                        let sql = delete_if_newer_sql::<PostgresCdcBackend>(
-                            &fq_table,
-                            &tombstone_table,
-                            &bk_names_quoted,
-                            &bk_values,
-                            &bk_types,
-                            &order_token_hex,
-                        );
-
-                        self.execute_sql(&sql).await.map_err(|e| {
-                            error!("CDC delete failed for {}: {}", fq_table, e);
-                            counters::dec_uploads_in_flight();
-                            e
-                        })?;
-                    }
-                }
+                    MutationKind::Delete => CdcApplyMutation::Delete,
+                };
+                let values = (0..batch.num_columns())
+                    .map(|column| {
+                        Self::arrow_value_to_cdc_value(batch.column(column).as_ref(), row)
+                    })
+                    .collect();
+                apply_batch.rows.push(CdcApplyRow {
+                    metadata: CdcApplyRowMetadata {
+                        mutation,
+                        event_id: row_meta.event_id.clone(),
+                        order_token: row_meta.order_token.clone(),
+                        source_ordinal: meta_idx as u64,
+                    },
+                    values,
+                });
             }
 
             row_offset += num_rows;
-            total_rows += num_rows;
-            counters::add_parquet_rows(num_rows as u64);
+        }
+
+        let total_rows = apply_batch.rows.len();
+        if total_rows > 0 {
+            if let Err(e) = self
+                .execute_cdc_batch(&fq_table, &tombstone_table, &apply_batch)
+                .await
+            {
+                error!("Postgres bulk CDC apply failed for {}: {}", fq_table, e);
+                counters::dec_uploads_in_flight();
+                return Err(e);
+            }
+            counters::add_parquet_rows(total_rows as u64);
             info!(
-                "CDC applied {} rows to {} (total: {})",
-                num_rows, table_name, total_rows
+                target: "postgres",
+                "CDC bulk-staged and atomically applied {} rows to {}",
+                total_rows,
+                table_name
             );
         }
 

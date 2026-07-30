@@ -12,6 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 async-trait.workspace = true
+bytes.workspace = true
 chrono = "0.4.44"
 clap.workspace = true
 dashmap.workspace = true

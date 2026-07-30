@@ -7,7 +7,9 @@ use std::time::SystemTime;
 
 use skippr_plugin_data_sink_postgres::{
     ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
-    tombstone_table_name, upsert_if_newer_sql, PostgresCdcBackend,
+    postgres_bulk_cdc_sql, tombstone_table_name, upsert_if_newer_sql, CdcApplyBatch,
+    CdcApplyColumn, CdcApplyMutation, CdcApplyRow, CdcApplyRowMetadata, CdcApplyValue,
+    PostgresCdcBackend,
 };
 use skippr_runtime_sdk::plugins::cdc::*;
 use skippr_runtime_sdk::progress::OffsetKey;
@@ -43,6 +45,50 @@ fn make_batch() -> arrow::record_batch::RecordBatch {
         ],
     )
     .unwrap()
+}
+
+fn bulk_apply_batch(rows: Vec<CdcApplyRow>) -> CdcApplyBatch {
+    CdcApplyBatch {
+        columns: vec![
+            CdcApplyColumn {
+                name: "tenant_id".to_string(),
+                target_type: "BIGINT".to_string(),
+            },
+            CdcApplyColumn {
+                name: "id".to_string(),
+                target_type: "BIGINT".to_string(),
+            },
+            CdcApplyColumn {
+                name: "name".to_string(),
+                target_type: "TEXT".to_string(),
+            },
+        ],
+        business_key_columns: vec!["tenant_id".to_string(), "id".to_string()],
+        rows,
+    }
+}
+
+fn bulk_apply_row(
+    mutation: CdcApplyMutation,
+    ordinal: u64,
+    token: u8,
+    tenant_id: i64,
+    id: i64,
+    name: &str,
+) -> CdcApplyRow {
+    CdcApplyRow {
+        metadata: CdcApplyRowMetadata {
+            mutation,
+            event_id: format!("event-{ordinal}").into_bytes(),
+            order_token: vec![token],
+            source_ordinal: ordinal,
+        },
+        values: vec![
+            CdcApplyValue::Signed(tenant_id),
+            CdcApplyValue::Signed(id),
+            CdcApplyValue::Text(name.to_string()),
+        ],
+    }
 }
 
 #[test]
@@ -272,4 +318,80 @@ fn reference_path_replay_and_stale_write_invariants() {
         "00000064",
     );
     assert!(delete_sql.contains("_skippr_order_token\" < EXCLUDED.\"_skippr_order_token\""));
+}
+
+#[test]
+fn reference_bulk_path_generates_one_set_based_apply_for_mixed_rows() {
+    let batch = bulk_apply_batch(vec![
+        bulk_apply_row(CdcApplyMutation::Upsert, 0, 1, 10, 1, "first"),
+        bulk_apply_row(CdcApplyMutation::Upsert, 1, 1, 10, 1, "replay"),
+        bulk_apply_row(CdcApplyMutation::Delete, 2, 3, 10, 1, ""),
+        bulk_apply_row(CdcApplyMutation::Upsert, 3, 2, 20, 1, "other tenant"),
+        bulk_apply_row(CdcApplyMutation::Upsert, 4, 4, 20, 2, "other key"),
+        bulk_apply_row(CdcApplyMutation::Upsert, 5, 1, 20, 1, "stale"),
+    ]);
+
+    let sql = postgres_bulk_cdc_sql(
+        "\"public\".\"users\"",
+        "\"public\".\"_skippr_tombstones_users\"",
+        &batch,
+    )
+    .unwrap();
+
+    assert!(sql.create_stage_table.starts_with("CREATE TEMP TABLE"));
+    assert!(sql.create_stage_table.ends_with("ON COMMIT DROP;"));
+    assert!(sql.copy_into_stage.starts_with("COPY pg_temp."));
+    assert!(sql.copy_into_stage.ends_with("WITH (FORMAT text)"));
+    assert!(sql.materialize_winners.contains("ROW_NUMBER() OVER"));
+    assert!(sql
+        .materialize_winners
+        .contains("PARTITION BY stage.\"tenant_id\", stage.\"id\""));
+    assert!(sql.materialize_winners.contains(
+        "ORDER BY stage.\"_skippr_cdc_order_token\" DESC, \
+         stage.\"_skippr_cdc_ordinal\" ASC"
+    ));
+    assert_eq!(
+        sql.apply_winners
+            .matches("INSERT INTO \"public\".\"users\" AS target")
+            .count(),
+        1
+    );
+    assert!(sql
+        .apply_winners
+        .contains("ON CONFLICT (\"tenant_id\", \"id\") DO UPDATE"));
+    assert!(sql
+        .apply_winners
+        .contains("DELETE FROM \"public\".\"users\" AS target"));
+    assert!(sql
+        .apply_winners
+        .contains("INSERT INTO \"public\".\"_skippr_tombstones_users\" AS tombstone"));
+    assert!(sql
+        .apply_winners
+        .contains("DELETE FROM \"public\".\"_skippr_tombstones_users\" AS tombstone"));
+    assert!(!sql.apply_winners.contains("BEGIN;"));
+    assert!(!sql.apply_winners.contains("COMMIT;"));
+}
+
+#[test]
+fn reference_bulk_path_rejects_missing_business_key_column() {
+    let mut batch = bulk_apply_batch(vec![bulk_apply_row(
+        CdcApplyMutation::Upsert,
+        0,
+        1,
+        10,
+        1,
+        "first",
+    )]);
+    batch.business_key_columns.push("missing".to_string());
+
+    let error = postgres_bulk_cdc_sql(
+        "\"public\".\"users\"",
+        "\"public\".\"_skippr_tombstones_users\"",
+        &batch,
+    )
+    .unwrap_err();
+
+    assert!(error
+        .to_string()
+        .contains("\"missing\" is not in the batch"));
 }

@@ -12556,6 +12556,7 @@ dependencies = [
  "arrow",
  "async-trait",
  "bincode",
+ "bytes",
  "chrono",
  "clap",
  "dashmap 5.5.3",

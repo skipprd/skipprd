@@ -263,6 +263,173 @@ pub fn delete_if_newer_sql<B: CdcApplyBackend>(
     )
 }
 
+/// Sink-neutral scalar values carried by a bounded CDC apply batch.
+///
+/// Values are kept out of backend SQL syntax so adapters can use native bulk
+/// loading without interpolating one SQL statement per row.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CdcApplyValue {
+    Null,
+    Boolean(bool),
+    Signed(i64),
+    Unsigned(u64),
+    Float(String),
+    Text(String),
+    Date(String),
+    Timestamp(String),
+}
+
+/// Target-column metadata required by a CDC reference adapter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CdcApplyColumn {
+    pub name: String,
+    pub target_type: String,
+}
+
+/// Apply-level mutation after collapsing snapshot/insert/update to upsert.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CdcApplyMutation {
+    Upsert,
+    Delete,
+}
+
+/// Per-row metadata aligned with the row values in a `CdcApplyBatch`.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CdcApplyRowMetadata {
+    pub mutation: CdcApplyMutation,
+    pub event_id: Vec<u8>,
+    pub order_token: Vec<u8>,
+    /// Stable input position used only to make equal-token replays
+    /// deterministic while reducing a batch to one winner per business key.
+    pub source_ordinal: u64,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CdcApplyRow {
+    pub metadata: CdcApplyRowMetadata,
+    pub values: Vec<CdcApplyValue>,
+}
+
+/// A bounded, grouped CDC chunk ready for a sink reference adapter.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CdcApplyBatch {
+    pub columns: Vec<CdcApplyColumn>,
+    pub business_key_columns: Vec<String>,
+    pub rows: Vec<CdcApplyRow>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum CdcApplyBatchError {
+    NoColumns,
+    NoBusinessKeyColumns,
+    EmptyTargetType {
+        column: String,
+    },
+    DuplicateColumn {
+        column: String,
+    },
+    MissingBusinessKeyColumn {
+        column: String,
+    },
+    RowWidth {
+        row: usize,
+        expected: usize,
+        actual: usize,
+    },
+    EmptyOrderToken {
+        row: usize,
+    },
+    DuplicateSourceOrdinal {
+        ordinal: u64,
+    },
+}
+
+impl std::fmt::Display for CdcApplyBatchError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NoColumns => write!(f, "CDC apply batch has no target columns"),
+            Self::NoBusinessKeyColumns => {
+                write!(f, "CDC apply batch has no business key columns")
+            }
+            Self::EmptyTargetType { column } => {
+                write!(f, "CDC target column {column:?} has no target type")
+            }
+            Self::DuplicateColumn { column } => {
+                write!(f, "CDC target column {column:?} is duplicated")
+            }
+            Self::MissingBusinessKeyColumn { column } => {
+                write!(f, "CDC business key column {column:?} is not in the batch")
+            }
+            Self::RowWidth {
+                row,
+                expected,
+                actual,
+            } => write!(f, "CDC row {row} has {actual} values; expected {expected}"),
+            Self::EmptyOrderToken { row } => {
+                write!(f, "CDC row {row} has an empty order token")
+            }
+            Self::DuplicateSourceOrdinal { ordinal } => {
+                write!(f, "CDC source ordinal {ordinal} is duplicated")
+            }
+        }
+    }
+}
+
+impl std::error::Error for CdcApplyBatchError {}
+
+impl CdcApplyBatch {
+    pub fn validate(&self) -> Result<(), CdcApplyBatchError> {
+        if self.columns.is_empty() {
+            return Err(CdcApplyBatchError::NoColumns);
+        }
+        if self.business_key_columns.is_empty() {
+            return Err(CdcApplyBatchError::NoBusinessKeyColumns);
+        }
+
+        let mut column_names = std::collections::HashSet::new();
+        for column in &self.columns {
+            if column.target_type.trim().is_empty() {
+                return Err(CdcApplyBatchError::EmptyTargetType {
+                    column: column.name.clone(),
+                });
+            }
+            if !column_names.insert(column.name.as_str()) {
+                return Err(CdcApplyBatchError::DuplicateColumn {
+                    column: column.name.clone(),
+                });
+            }
+        }
+        for business_key in &self.business_key_columns {
+            if !column_names.contains(business_key.as_str()) {
+                return Err(CdcApplyBatchError::MissingBusinessKeyColumn {
+                    column: business_key.clone(),
+                });
+            }
+        }
+
+        let mut ordinals = std::collections::HashSet::new();
+        for (row_idx, row) in self.rows.iter().enumerate() {
+            if row.values.len() != self.columns.len() {
+                return Err(CdcApplyBatchError::RowWidth {
+                    row: row_idx,
+                    expected: self.columns.len(),
+                    actual: row.values.len(),
+                });
+            }
+            if row.metadata.order_token.is_empty() {
+                return Err(CdcApplyBatchError::EmptyOrderToken { row: row_idx });
+            }
+            if !ordinals.insert(row.metadata.source_ordinal) {
+                return Err(CdcApplyBatchError::DuplicateSourceOrdinal {
+                    ordinal: row.metadata.source_ordinal,
+                });
+            }
+        }
+
+        Ok(())
+    }
+}
+
 #[allow(dead_code)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CdcBatchStatement {
@@ -375,7 +542,10 @@ fn qualified_matches(names: &[String], values: &[String], qualifier: Option<&str
 
 #[cfg(test)]
 mod tests {
-    use super::tombstone_table_name;
+    use super::{
+        tombstone_table_name, CdcApplyBatch, CdcApplyBatchError, CdcApplyColumn, CdcApplyMutation,
+        CdcApplyRow, CdcApplyRowMetadata, CdcApplyValue,
+    };
 
     #[test]
     fn tombstone_table_name_with_schema() {
@@ -390,6 +560,63 @@ mod tests {
         assert_eq!(
             tombstone_table_name("users"),
             "\"_skippr_tombstones_users\""
+        );
+    }
+
+    #[test]
+    fn typed_batch_validates_row_alignment_and_business_keys() {
+        let batch = CdcApplyBatch {
+            columns: vec![
+                CdcApplyColumn {
+                    name: "tenant_id".to_string(),
+                    target_type: "BIGINT".to_string(),
+                },
+                CdcApplyColumn {
+                    name: "id".to_string(),
+                    target_type: "BIGINT".to_string(),
+                },
+            ],
+            business_key_columns: vec!["tenant_id".to_string(), "id".to_string()],
+            rows: vec![CdcApplyRow {
+                metadata: CdcApplyRowMetadata {
+                    mutation: CdcApplyMutation::Upsert,
+                    event_id: b"event-1".to_vec(),
+                    order_token: vec![1],
+                    source_ordinal: 0,
+                },
+                values: vec![CdcApplyValue::Signed(7), CdcApplyValue::Signed(42)],
+            }],
+        };
+
+        assert_eq!(batch.validate(), Ok(()));
+    }
+
+    #[test]
+    fn typed_batch_rejects_bad_row_width() {
+        let batch = CdcApplyBatch {
+            columns: vec![CdcApplyColumn {
+                name: "id".to_string(),
+                target_type: "BIGINT".to_string(),
+            }],
+            business_key_columns: vec!["id".to_string()],
+            rows: vec![CdcApplyRow {
+                metadata: CdcApplyRowMetadata {
+                    mutation: CdcApplyMutation::Delete,
+                    event_id: b"event-1".to_vec(),
+                    order_token: vec![1],
+                    source_ordinal: 0,
+                },
+                values: vec![],
+            }],
+        };
+
+        assert_eq!(
+            batch.validate(),
+            Err(CdcApplyBatchError::RowWidth {
+                row: 0,
+                expected: 1,
+                actual: 0,
+            })
         );
     }
 }
