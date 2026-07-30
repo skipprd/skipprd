@@ -196,11 +196,6 @@ impl CatalogCoordinator {
         let client = GlueClient::new(&loader.load().await);
         let mut missing = Vec::new();
         for intent in intents {
-            let _permit = CATALOG_OPERATION_BUDGET
-                .clone()
-                .acquire_owned()
-                .await
-                .map_err(|_| io::Error::other("catalog operation budget closed"))?;
             let mut get = client
                 .get_partition()
                 .database_name(&database)
@@ -209,7 +204,15 @@ impl CatalogCoordinator {
             if let Some(catalog_id) = catalog_id.as_ref() {
                 get = get.catalog_id(catalog_id);
             }
-            match get.send().await {
+            let get_result = {
+                let _permit = CATALOG_OPERATION_BUDGET
+                    .clone()
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| io::Error::other("catalog operation budget closed"))?;
+                get.send().await
+            };
+            match get_result {
                 Ok(existing) => {
                     let current = existing
                         .partition()

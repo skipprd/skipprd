@@ -37,9 +37,10 @@ struct CatalogOutboxEnvelope {
     entry: PendingCatalogIntent,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct CatalogOutbox {
     pending_dir: PathBuf,
+    mutation_lock: std::sync::Mutex<()>,
 }
 
 impl CatalogOutbox {
@@ -56,10 +57,13 @@ impl CatalogOutbox {
                 .parent()
                 .expect("catalog outbox pending directory has a parent"),
         )?;
-        let outbox = Self { pending_dir };
+        let outbox = Self {
+            pending_dir,
+            mutation_lock: std::sync::Mutex::new(()),
+        };
         // Recovery is fail-closed: opening a pipeline with one corrupt pending
         // intent must surface the error before any entry can be dropped.
-        outbox.scan_pending(usize::MAX)?;
+        outbox.validate_pending()?;
         Ok(outbox)
     }
 
@@ -68,6 +72,10 @@ impl CatalogOutbox {
     }
 
     pub fn persist(&self, intents: &[CatalogIntent]) -> io::Result<CatalogOutboxPersistSummary> {
+        let _guard = self
+            .mutation_lock
+            .lock()
+            .expect("catalog outbox mutation lock poisoned");
         let mut summary = CatalogOutboxPersistSummary::default();
         for intent in intents {
             let id = stable_intent_id(&intent.identity)?;
@@ -106,19 +114,25 @@ impl CatalogOutbox {
     }
 
     pub fn scan_pending(&self, limit: usize) -> io::Result<Vec<PendingCatalogIntent>> {
-        let mut paths = fs::read_dir(&self.pending_dir)?
-            .map(|entry| entry.map(|entry| entry.path()))
-            .collect::<io::Result<Vec<_>>>()?;
-        paths.retain(|path| path.extension().is_some_and(|ext| ext == "json"));
-        paths.sort();
-        let mut pending = Vec::with_capacity(paths.len().min(limit));
-        for path in paths.into_iter().take(limit) {
+        let mut pending = Vec::with_capacity(limit.min(1_024));
+        for entry in fs::read_dir(&self.pending_dir)? {
+            let path = entry?.path();
+            if path.extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
             pending.push(read_entry(&path)?);
+            if pending.len() >= limit {
+                break;
+            }
         }
         Ok(pending)
     }
 
     pub fn mark_delivered(&self, id: &str) -> io::Result<()> {
+        let _guard = self
+            .mutation_lock
+            .lock()
+            .expect("catalog outbox mutation lock poisoned");
         let path = self.entry_path(id);
         match fs::remove_file(&path) {
             Ok(()) => sync_directory(&self.pending_dir),
@@ -134,6 +148,10 @@ impl CatalogOutbox {
         retry_after: Option<Duration>,
         terminal: bool,
     ) -> io::Result<()> {
+        let _guard = self
+            .mutation_lock
+            .lock()
+            .expect("catalog outbox mutation lock poisoned");
         let path = self.entry_path(id);
         let mut entry = read_entry(&path)?;
         entry.attempts = entry.attempts.saturating_add(1);
@@ -148,6 +166,16 @@ impl CatalogOutbox {
 
     fn entry_path(&self, id: &str) -> PathBuf {
         self.pending_dir.join(format!("{id}.json"))
+    }
+
+    fn validate_pending(&self) -> io::Result<()> {
+        for entry in fs::read_dir(&self.pending_dir)? {
+            let path = entry?.path();
+            if path.extension().is_some_and(|ext| ext == "json") {
+                read_entry(&path)?;
+            }
+        }
+        Ok(())
     }
 }
 

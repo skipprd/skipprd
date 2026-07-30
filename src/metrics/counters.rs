@@ -601,7 +601,14 @@ pub fn add_catalog_location_update(n: u64) {
 pub fn refresh_catalog_outbox_metrics(
     outbox: &crate::catalog_outbox::CatalogOutbox,
 ) -> std::io::Result<()> {
-    let pending = outbox.scan_pending(usize::MAX)?;
+    const METRIC_SCAN_LIMIT: usize = 100_000;
+    let pending = outbox.scan_pending(METRIC_SCAN_LIMIT + 1)?;
+    if pending.len() > METRIC_SCAN_LIMIT {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "catalog outbox pending count exceeds bounded metrics scan limit",
+        ));
+    }
     CATALOG_OUTBOX_PENDING.store(pending.len(), Ordering::Relaxed);
     DATA_DURABLE_CATALOG_PENDING.store(pending.len() as u64, Ordering::Relaxed);
     let now_ms = std::time::SystemTime::now()
