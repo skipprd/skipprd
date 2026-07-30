@@ -12,6 +12,7 @@ use crate::buffer::compaction_transaction::{
     load_pending_manifests, persist_manifest, remove_manifest, CompactionTransaction,
     SegmentSourceDescriptor, SinkRetrySemantics, SinkWriteSemantics, WalPartRef,
 };
+use crate::buffer::completion_ledger::{SegmentCompletionLedger, SegmentCompletionUpdate};
 use crate::buffer::s3_wal_body_cache;
 #[cfg(test)]
 use crate::buffer::segment_file::SegmentPartMetaSummary;
@@ -229,6 +230,7 @@ static SEGMENT_CACHE: OnceLazy<DashMap<String, CachedSegment>> = OnceLazy::new(D
 struct CompactionEntry {
     source: SegmentSource,
     meta: SegmentFileMetadata,
+    ordinal: usize,
     idx: SegmentPartitionIndexEntry,
     wal_ref: WalPartRef,
 }
@@ -1352,12 +1354,23 @@ impl Buffers {
 
     fn partition_is_reclaimable(
         idx: &SegmentPartitionIndexEntry,
+        meta: &SegmentFileMetadata,
+        ordinal: usize,
         source: &SegmentSource,
         now_secs: u64,
         force: bool,
     ) -> bool {
-        if Self::is_source_tombstoned(source, &idx.key) {
-            return false;
+        match Self::completion_ledger().is_complete(source.segment_id(), &meta.index, ordinal) {
+            Ok(true) => return false,
+            Ok(false) => {}
+            Err(err) => {
+                warn!(
+                    "Compactor: refusing segment with unreadable completion ledger seg={} err={}",
+                    source.display_name(),
+                    err
+                );
+                return false;
+            }
         }
         let inflight_key = (source.display_name(), idx.start, idx.len);
         if COMPACTION_IN_FLIGHT.contains_key(&inflight_key) {
@@ -1378,8 +1391,15 @@ impl Buffers {
         let mut count = 0usize;
         for entry in SEGMENT_CACHE.iter() {
             let cached = entry.value();
-            for idx in cached.meta.index.iter() {
-                if Self::partition_is_reclaimable(idx, &cached.source, now_secs, true) {
+            for (ordinal, idx) in cached.meta.index.iter().enumerate() {
+                if Self::partition_is_reclaimable(
+                    idx,
+                    &cached.meta,
+                    ordinal,
+                    &cached.source,
+                    now_secs,
+                    true,
+                ) {
                     count += 1;
                     if count >= limit {
                         return count;
@@ -1544,10 +1564,23 @@ impl Buffers {
         for entry in SEGMENT_CACHE.iter() {
             planner_metrics.segments_examined = planner_metrics.segments_examined.saturating_add(1);
             let cached = entry.value();
-            for idx in cached.meta.index.iter() {
+            for (ordinal, idx) in cached.meta.index.iter().enumerate() {
                 planner_metrics.slices_examined = planner_metrics.slices_examined.saturating_add(1);
-                if Self::is_source_tombstoned(&cached.source, &idx.key) {
-                    continue;
+                match Self::completion_ledger().is_complete(
+                    cached.source.segment_id(),
+                    &cached.meta.index,
+                    ordinal,
+                ) {
+                    Ok(true) => continue,
+                    Ok(false) => {}
+                    Err(err) => {
+                        warn!(
+                            "Compactor: refusing candidate with unreadable completion ledger seg={} err={}",
+                            cached.source.display_name(),
+                            err
+                        );
+                        continue;
+                    }
                 }
                 let inflight_key = (cached.source.display_name(), idx.start, idx.len);
                 if COMPACTION_IN_FLIGHT.contains_key(&inflight_key) {
@@ -1569,6 +1602,7 @@ impl Buffers {
                 let entry = CompactionEntry {
                     source: cached.source.clone(),
                     meta: cached.meta.clone(),
+                    ordinal,
                     idx: idx.clone(),
                     wal_ref,
                 };
@@ -1682,11 +1716,25 @@ impl Buffers {
         let mut entries = Vec::with_capacity(txn.refs.len());
         for wal_ref in txn.refs.iter() {
             let cached = SEGMENT_CACHE.get(&wal_ref.segment_id)?;
-            let idx = cached.meta.index.iter().find(|idx| {
+            let (ordinal, idx) = cached.meta.index.iter().enumerate().find(|(_, idx)| {
                 idx.start == wal_ref.start && idx.len == wal_ref.len && idx.key == wal_ref.key
             })?;
-            if Self::is_source_tombstoned(&cached.source, &idx.key) {
-                continue;
+            match Self::completion_ledger().is_complete(
+                cached.source.segment_id(),
+                &cached.meta.index,
+                ordinal,
+            ) {
+                Ok(true) => continue,
+                Ok(false) => {}
+                Err(err) => {
+                    warn!(
+                        "Compactor: retaining manifest {} because completion ledger is unreadable for seg={}: {}",
+                        txn.id,
+                        cached.source.display_name(),
+                        err
+                    );
+                    return None;
+                }
             }
             if let Some(expected_hash) = wal_ref.cdc_meta_hash {
                 if Some(expected_hash) != idx.part_meta_summary.canonical_hash() {
@@ -1701,6 +1749,7 @@ impl Buffers {
             entries.push(CompactionEntry {
                 source: cached.source.clone(),
                 meta: cached.meta.clone(),
+                ordinal,
                 idx: idx.clone(),
                 wal_ref: wal_ref.clone(),
             });
@@ -1860,39 +1909,18 @@ impl Buffers {
         PathBuf::from(format!("{}/segment_buffer/done", Config::get_data_dir()))
     }
 
+    fn completion_ledger() -> SegmentCompletionLedger {
+        SegmentCompletionLedger::new(Self::tombstone_dir())
+    }
+
+    #[cfg(test)]
     fn tombstone_path_for_id(segment_id: &str, key: &PartitionKey) -> PathBuf {
-        let time = key.time.unwrap_or(0);
-        let safe = |s: &str| s.replace('/', "_");
-        let file = format!(
-            "{}.seg.{}.{}.{}.{}.{}.tombstone",
-            segment_id,
-            safe(&key.sink_ref),
-            safe(&key.namespace),
-            safe(&key.partition),
-            time,
-            safe(&key.schema_fingerprint)
-        );
-        Buffers::tombstone_dir().join(file)
+        Self::completion_ledger().legacy_tombstone_path(segment_id, key)
     }
 
-    fn partition_tombstone_path(seg_path: &PathBuf, key: &PartitionKey) -> PathBuf {
-        let id = seg_path
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or("unknown");
-        Self::tombstone_path_for_id(id, key)
-    }
-
+    #[cfg(test)]
     fn tombstone_path_for_source(source: &SegmentSource, key: &PartitionKey) -> PathBuf {
         Self::tombstone_path_for_id(source.segment_id(), key)
-    }
-
-    fn is_partition_tombstoned(seg_path: &PathBuf, key: &PartitionKey) -> bool {
-        Self::partition_tombstone_path(seg_path, key).exists()
-    }
-
-    fn is_source_tombstoned(source: &SegmentSource, key: &PartitionKey) -> bool {
-        Self::tombstone_path_for_source(source, key).exists()
     }
 
     fn remove_disk_segment_and_commit_marker(seg_path: &Path) -> io::Result<DiskSegmentCleanup> {
@@ -2078,14 +2106,21 @@ impl Buffers {
             if !commit.exists() {
                 continue;
             }
-            let remaining = cached
-                .meta
-                .index
-                .iter()
-                .filter(|idx| !Self::is_source_tombstoned(&cached.source, &idx.key))
-                .count();
-            if remaining == 0 {
-                Self::remove_fully_compacted_disk_segment(&seg_path, &cached.meta, &mut result);
+            match Self::completion_ledger()
+                .all_complete(cached.source.segment_id(), &cached.meta.index)
+            {
+                Ok(true) => {
+                    Self::remove_fully_compacted_disk_segment(&seg_path, &cached.meta, &mut result);
+                }
+                Ok(false) => {}
+                Err(err) => {
+                    result.errors = result.errors.saturating_add(1);
+                    warn!(
+                        "WAL sweep: retaining segment {} with unreadable completion ledger: {}",
+                        seg_path.to_string_lossy(),
+                        err
+                    );
+                }
             }
         }
         result
@@ -2110,14 +2145,12 @@ impl Buffers {
                 }
                 if let Some(id) = seg_path.file_stem().and_then(|s| s.to_str()) {
                     Self::segment_cache_remove(id);
-                }
-                for part in meta.index.iter() {
-                    let tp = Self::partition_tombstone_path(seg_path, &part.key);
-                    if tp.exists() {
-                        if let Err(e) = fs::remove_file(&tp) {
-                            error!("Failed to remove tombstone {:?}: {}", tp, e);
-                            sweep.errors = sweep.errors.saturating_add(1);
-                        }
+                    if let Err(e) = Self::completion_ledger().remove_segment(id, &meta.index) {
+                        error!(
+                            "Failed to remove completion state for segment {}: {}",
+                            id, e
+                        );
+                        sweep.errors = sweep.errors.saturating_add(1);
                     }
                 }
             }
@@ -2154,14 +2187,23 @@ impl Buffers {
                 }
                 let segf = SegmentFile { path: p.clone() };
                 if let Ok(m) = segf.read_metadata() {
-                    let mut remaining = 0usize;
-                    for idx in m.index.iter() {
-                        if !Self::is_partition_tombstoned(&p, &idx.key) {
-                            remaining += 1;
+                    let segment_id = p
+                        .file_stem()
+                        .and_then(|value| value.to_str())
+                        .unwrap_or("unknown");
+                    match Self::completion_ledger().all_complete(segment_id, &m.index) {
+                        Ok(true) => {
+                            Self::remove_fully_compacted_disk_segment(&p, &m, &mut result);
                         }
-                    }
-                    if remaining == 0 {
-                        Self::remove_fully_compacted_disk_segment(&p, &m, &mut result);
+                        Ok(false) => {}
+                        Err(err) => {
+                            result.errors = result.errors.saturating_add(1);
+                            warn!(
+                                "WAL sweep: retaining segment {} with unreadable completion ledger: {}",
+                                p.to_string_lossy(),
+                                err
+                            );
+                        }
                     }
                 }
             }
@@ -2169,7 +2211,7 @@ impl Buffers {
         result
     }
 
-    /// Pressure-only full sweep: delete only commit-marked segments whose partitions are fully tombstoned.
+    /// Pressure-only full sweep: delete only commit-marked segments whose indexed slices are complete.
     pub fn sweep_pressure_safe() -> WalSweepResult {
         Self::sweep_segment_cleanup()
     }
@@ -2964,34 +3006,43 @@ impl Buffers {
     }
 
     fn tombstone_grouped_work(work: &CompactionWork) {
-        let _ = fs::create_dir_all(Self::tombstone_dir());
+        let ledger = Self::completion_ledger();
+        let mut grouped: HashMap<String, (SegmentSource, SegmentFileMetadata, Vec<usize>)> =
+            HashMap::new();
         for entry in work.entries.iter() {
-            let tpath = Self::tombstone_path_for_source(&entry.source, &entry.idx.key);
-            match fs::write(&tpath, b"") {
-                Ok(()) => metrics_hot::add_compaction_tombstone_write(1),
-                Err(err) => error!("Failed to write tombstone {:?}: {}", tpath, err),
+            let group = grouped
+                .entry(entry.source.segment_id().to_string())
+                .or_insert_with(|| (entry.source.clone(), entry.meta.clone(), Vec::new()));
+            if !group.2.contains(&entry.ordinal) {
+                group.2.push(entry.ordinal);
             }
         }
-        for entry in work.entries.iter() {
-            let all_tombstoned = entry
-                .meta
-                .index
-                .iter()
-                .all(|part| Self::is_source_tombstoned(&entry.source, &part.key));
-            if all_tombstoned {
-                match &entry.source {
+
+        let updates = grouped
+            .iter()
+            .map(
+                |(segment_id, (_, meta, ordinals))| SegmentCompletionUpdate {
+                    segment_id,
+                    index: &meta.index,
+                    ordinals,
+                },
+            )
+            .collect::<Vec<_>>();
+        if let Err(err) = ledger.mark_complete_batch(&updates) {
+            error!("Failed to persist segment completion ledger: {}", err);
+        }
+
+        for (segment_id, (source, meta, _)) in grouped {
+            match ledger.all_complete(&segment_id, &meta.index) {
+                Ok(true) => match &source {
                     SegmentSource::Disk(seg_path) => {
                         let mut sweep = WalSweepResult::default();
-                        Self::remove_fully_compacted_disk_segment(
-                            seg_path,
-                            &entry.meta,
-                            &mut sweep,
-                        );
+                        Self::remove_fully_compacted_disk_segment(seg_path, &meta, &mut sweep);
                     }
                     SegmentSource::S3 { key, bucket, .. } => {
                         let key = key.clone();
                         let bucket = bucket.clone();
-                        let segment_id = entry.source.segment_id().to_string();
+                        let segment_index = meta.index.clone();
                         tokio::spawn(async move {
                             let client = crate::helpers::s3::get_s3_client().await;
                             let commit_key = format!("{}.commit", key);
@@ -3008,8 +3059,24 @@ impl Buffers {
                                 .send()
                                 .await;
                             Buffers::segment_cache_remove(&segment_id);
+                            if let Err(err) = Buffers::completion_ledger()
+                                .remove_segment(&segment_id, &segment_index)
+                            {
+                                error!(
+                                    "Failed to remove completion state for S3 segment {}: {}",
+                                    segment_id, err
+                                );
+                            }
                         });
                     }
+                },
+                Ok(false) => {}
+                Err(err) => {
+                    error!(
+                        "Refusing to delete segment {} with unreadable completion ledger: {}",
+                        source.display_name(),
+                        err
+                    );
                 }
             }
         }
@@ -3965,7 +4032,8 @@ mod tests_wal_commit {
             .index
             .iter()
             .cloned()
-            .map(|idx| {
+            .enumerate()
+            .map(|(ordinal, idx)| {
                 let wal_ref = WalPartRef {
                     segment_id: segment_id.to_string(),
                     source: SegmentSourceDescriptor::Disk {
@@ -3979,6 +4047,7 @@ mod tests_wal_commit {
                 CompactionEntry {
                     source: source.clone(),
                     meta: meta.clone(),
+                    ordinal,
                     idx,
                     wal_ref,
                 }
@@ -4425,16 +4494,29 @@ mod tests_wal_commit {
         );
         assert_eq!(backlog.meta.index.len(), 2);
         let tombstones = backlog.tombstone_paths();
+        let ledger = Buffers::completion_ledger();
+        let bitmap_path = ledger.bitmap_path("multi-sink-segment");
 
         Buffers::tombstone_grouped_work(&backlog.work_for_sink("data_sinks.ds_datalake"));
 
         assert!(backlog.segment_path.exists());
         assert!(commit_exists(&backlog.segment_path));
+        assert!(bitmap_path.exists());
         assert_eq!(
             tombstones.iter().filter(|path| path.exists()).count(),
             1,
             "one durable slice must remain before segment deletion"
         );
+        ledger.forget_segment("multi-sink-segment");
+        assert!(
+            backlog.entries.iter().any(|entry| ledger
+                .is_complete("multi-sink-segment", &backlog.meta.index, entry.ordinal)
+                .unwrap()),
+            "partial completion bits must survive a cache reset"
+        );
+        assert!(!ledger
+            .all_complete("multi-sink-segment", &backlog.meta.index)
+            .unwrap());
 
         Buffers::tombstone_grouped_work(&backlog.work_for_sink("deadletter_sinks.ds_deadletters"));
 
@@ -4443,6 +4525,38 @@ mod tests_wal_commit {
         assert!(
             tombstones.iter().all(|path| !path.exists()),
             "segment cleanup removes tombstones only after every indexed slice is durable"
+        );
+        assert!(
+            !bitmap_path.exists(),
+            "segment cleanup removes the completion bitmap after deletion"
+        );
+        reset_in_memory_segments();
+    }
+
+    #[test]
+    #[serial]
+    fn corrupted_completion_bitmap_fails_safe_and_retains_segment() {
+        let (base, _guard) = setup_data_dir();
+        reset_in_memory_segments();
+        let backlog =
+            synthetic_disk_backlog(&base, "corrupt-completion", &["data_sinks.ds_datalake"]);
+        let ledger = Buffers::completion_ledger();
+        fs::create_dir_all(Buffers::tombstone_dir()).unwrap();
+        fs::write(ledger.bitmap_path("corrupt-completion"), b"SCBL\x01").unwrap();
+
+        Buffers::tombstone_grouped_work(&backlog.work_for_sink("data_sinks.ds_datalake"));
+
+        assert!(backlog.segment_path.exists());
+        assert!(commit_exists(&backlog.segment_path));
+        assert!(
+            ledger
+                .all_complete("corrupt-completion", &backlog.meta.index)
+                .is_err(),
+            "truncated completion state must not be interpreted as complete"
+        );
+        assert!(
+            backlog.tombstone_paths().iter().all(|path| !path.exists()),
+            "a corrupt bitmap must not be overwritten through rollback tombstones"
         );
         reset_in_memory_segments();
     }
@@ -4655,6 +4769,7 @@ mod compaction_semantics_tests {
                 offsets: HashMap::new(),
                 index: vec![idx.clone()],
             },
+            ordinal: 0,
             idx,
             wal_ref,
         }
