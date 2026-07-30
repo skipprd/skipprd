@@ -47,14 +47,18 @@ use std::task::{Context as TaskContext, Poll as TaskPoll};
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use rand::Rng;
-use serde_derive::Deserialize;
+use serde_derive::{Deserialize, Serialize};
 use skippr_runtime_sdk::plugins::source_contract::{
     ensure_source_contract_for_policy, namespace_source_contract, validate_write_policy_for_sink,
     SinkWritePolicySupport, SourceNamespaceContract, WritePolicy,
 };
-use skippr_runtime_sdk::plugins::{DataSink, SinkPreflightOutcome, SinkWriteContext};
+use skippr_runtime_sdk::plugins::{
+    DataSink, SinkCallResult, SinkPreflightOutcome, SinkPreflightResult, SinkWriteContext,
+};
 use skippr_runtime_sdk::protocol::{
-    RuntimeBinding, RuntimeExecutionContext, RuntimeSchemaState, SchemaDelta,
+    CatalogIntent, CatalogIntentIdentity, CatalogIntentKind, RuntimeBinding,
+    RuntimeExecutionContext, RuntimeSchemaState, SchemaDelta, SinkWriteStats,
+    CATALOG_INTENT_VERSION,
 };
 use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -126,9 +130,6 @@ static GLUE_CP_SEM: Lazy<Arc<Semaphore>> = Lazy::new(|| {
 });
 static ATHENA_WG_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
 static NAMESPACE_LOCKS: Lazy<DashMap<String, Arc<Mutex<()>>>> = Lazy::new(|| DashMap::new());
-static PARTITION_TASKS_IN_FLIGHT: Lazy<std::sync::atomic::AtomicUsize> =
-    Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
-static PARTITIONS_NOTIFY: Lazy<tokio::sync::Notify> = Lazy::new(tokio::sync::Notify::new);
 
 fn get_namespace_lock(namespace: &str) -> Arc<Mutex<()>> {
     NAMESPACE_LOCKS
@@ -207,6 +208,31 @@ pub struct DataSinkAthenaPluginConfig {
     #[serde(default)]
     pub glue_database_name: String,
     pub athena_results_s3_bucket: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct GlueColumnIntent {
+    name: String,
+    r#type: String,
+    comment: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct GluePartitionCatalogIntentV1 {
+    version: u32,
+    region: Option<String>,
+    catalog_id: Option<String>,
+    database: String,
+    table: String,
+    partition_values: Vec<String>,
+    location: String,
+    storage_columns: Vec<GlueColumnIntent>,
+    partition_columns: Vec<GlueColumnIntent>,
+    input_format: String,
+    output_format: String,
+    serde_library: String,
+    schema_namespace: String,
+    schema_version: u64,
 }
 
 #[derive(Clone)]
@@ -414,6 +440,7 @@ pub struct InnerSyncApplied {
     pub bytes: u64,
     pub etag: Option<String>,
     pub checksum: Option<String>,
+    pub catalog_intents: Vec<CatalogIntent>,
 }
 
 pub struct DataSinkAthenaPlugin {
@@ -578,8 +605,18 @@ impl DataSink for DataSinkAthenaPlugin {
         &self,
         ctx: SinkWriteContext<'_>,
     ) -> Result<SinkPreflightOutcome, std::io::Error> {
+        Ok(self.preflight_result(ctx).await?.outcome)
+    }
+
+    async fn preflight_result(
+        &self,
+        ctx: SinkWriteContext<'_>,
+    ) -> Result<SinkPreflightResult, std::io::Error> {
         if !ctx.is_grouped() {
-            return Ok(SinkPreflightOutcome::Ready);
+            return Ok(SinkPreflightResult {
+                outcome: SinkPreflightOutcome::Ready,
+                catalog_intents: Vec::new(),
+            });
         }
         ctx.validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
             .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err.to_string()))?;
@@ -602,13 +639,34 @@ impl DataSink for DataSinkAthenaPlugin {
                     ctx.compaction_id
                 )));
             }
-            self.schedule_glue_partition_from_s3_key(&namespace, &existing.final_s3_key)
-                .await;
-            return Ok(SinkPreflightOutcome::AlreadyApplied {
-                authority: format!("s3://{}/{}", self.config.s3_bucket, receipt_key),
+            let catalog_intents =
+                match partition_values_from_object_key(&namespace, &existing.final_s3_key) {
+                    Some((full_key, partition_values)) => {
+                        let metadata = self.namespace_metadata(&namespace).await?;
+                        self.partition_catalog_intent(
+                            &namespace,
+                            partition_values,
+                            &full_key,
+                            &metadata,
+                            ctx.source_contract,
+                        )
+                        .await?
+                        .into_iter()
+                        .collect()
+                    }
+                    None => Vec::new(),
+                };
+            return Ok(SinkPreflightResult {
+                outcome: SinkPreflightOutcome::AlreadyApplied {
+                    authority: format!("s3://{}/{}", self.config.s3_bucket, receipt_key),
+                },
+                catalog_intents,
             });
         }
-        Ok(SinkPreflightOutcome::Ready)
+        Ok(SinkPreflightResult {
+            outcome: SinkPreflightOutcome::Ready,
+            catalog_intents: Vec::new(),
+        })
     }
 
     async fn sync(
@@ -756,6 +814,25 @@ impl DataSink for DataSinkAthenaPlugin {
         if self.should_use_legacy_grouped_chunks(&ctx).await? {
             return self.sync_grouped_legacy_chunks(&mut reader, ctx).await;
         }
+        self.sync_grouped_single_object(reader, ctx)
+            .await
+            .map(|result| result.outcome)
+    }
+
+    async fn sync_grouped_call_result(
+        &self,
+        mut reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
+        ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
+    ) -> Result<SinkCallResult, std::io::Error> {
+        ctx.to_sink_write_context()
+            .validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
+            .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err.to_string()))?;
+        if self.should_use_legacy_grouped_chunks(&ctx).await? {
+            return self
+                .sync_grouped_legacy_chunks(&mut reader, ctx)
+                .await
+                .map(SinkCallResult::outcome);
+        }
         self.sync_grouped_single_object(reader, ctx).await
     }
 
@@ -863,7 +940,7 @@ impl DataSinkAthenaPlugin {
         &self,
         reader: skippr_runtime_sdk::plugins::GroupedBatchReader,
         ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
-    ) -> Result<SinkWriteOutcome, std::io::Error> {
+    ) -> Result<SinkCallResult, std::io::Error> {
         let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
         let resolved_contract = ctx
             .source_contract
@@ -886,9 +963,33 @@ impl DataSinkAthenaPlugin {
         );
         if let Some(existing) = self.read_grouped_receipt(&receipt_key).await? {
             if existing.matches_manifest(&manifest) {
-                self.schedule_glue_partition_from_s3_key(&namespace, &existing.final_s3_key)
-                    .await;
-                return Ok(SinkWriteOutcome::AlreadyApplied);
+                let catalog_intents =
+                    match partition_values_from_object_key(&namespace, &existing.final_s3_key) {
+                        Some((full_key, partition_values)) => {
+                            let metadata = self.namespace_metadata(&namespace).await?;
+                            self.partition_catalog_intent(
+                                &namespace,
+                                partition_values,
+                                &full_key,
+                                &metadata,
+                                ctx.source_contract,
+                            )
+                            .await?
+                            .into_iter()
+                            .collect()
+                        }
+                        None => Vec::new(),
+                    };
+                return Ok(SinkCallResult {
+                    outcome: SinkWriteOutcome::AlreadyApplied,
+                    stats: SinkWriteStats {
+                        rows: Some(existing.rows),
+                        bytes: Some(existing.bytes),
+                        objects: Some(1),
+                        ..SinkWriteStats::default()
+                    },
+                    catalog_intents,
+                });
             }
             return Err(io::Error::other(format!(
                 "grouped receipt mismatch for compaction {}",
@@ -910,6 +1011,7 @@ impl DataSinkAthenaPlugin {
                 None,
             )
             .await?;
+        let mut result = SinkCallResult::outcome(outcome.clone());
         if matches!(&outcome, SinkWriteOutcome::Applied) {
             if let Some(applied) = applied {
                 self.write_grouped_receipt_from_upload(
@@ -919,9 +1021,16 @@ impl DataSinkAthenaPlugin {
                     stream_progress.transport_chunk_count(),
                 )
                 .await?;
+                result.stats = SinkWriteStats {
+                    rows: Some(applied.rows),
+                    bytes: Some(applied.bytes),
+                    objects: Some(1),
+                    ..SinkWriteStats::default()
+                };
+                result.catalog_intents = applied.catalog_intents;
             }
         }
-        Ok(outcome)
+        Ok(result)
     }
 
     async fn should_use_legacy_grouped_chunks(
@@ -1103,6 +1212,101 @@ impl DataSinkAthenaPlugin {
                 guard.version, namespace
             ))
         })
+    }
+
+    async fn partition_catalog_intent(
+        &self,
+        namespace: &str,
+        partition_values: Vec<String>,
+        full_key: &str,
+        metadata: &OutputMetadata,
+        source_contract: Option<&SourceNamespaceContract>,
+    ) -> io::Result<Option<CatalogIntent>> {
+        if partition_values.is_empty() {
+            return Ok(None);
+        }
+        let partition_columns = build_glue_partition_keys(
+            &self.context,
+            self.binding,
+            namespace,
+            source_contract,
+            metadata,
+            None,
+        );
+        if partition_columns.len() != partition_values.len() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Athena catalog intent for '{}' has {} values but {} partition columns",
+                    namespace,
+                    partition_values.len(),
+                    partition_columns.len()
+                ),
+            ));
+        }
+        let storage_columns =
+            SkipprHive::storage_columns_excluding_partition_keys(metadata, &partition_columns)
+                .map_err(|_| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("failed to derive Glue storage columns for '{namespace}'"),
+                    )
+                })?;
+        let schema_version = self
+            .schema_state
+            .read()
+            .await
+            .namespace_versions
+            .get(namespace)
+            .copied()
+            .unwrap_or(0);
+        let column_intent = |column: &Column| GlueColumnIntent {
+            name: column.name().to_string(),
+            r#type: column.r#type().unwrap_or("string").to_string(),
+            comment: column.comment().map(str::to_string),
+        };
+        let location = format!(
+            "s3://{}/{}/",
+            self.config.s3_bucket,
+            full_key.trim_matches('/')
+        );
+        let payload = GluePartitionCatalogIntentV1 {
+            version: 1,
+            region: std::env::var("AWS_REGION")
+                .ok()
+                .or_else(|| std::env::var("AWS_DEFAULT_REGION").ok()),
+            catalog_id: std::env::var("AWS_GLUE_CATALOG_ID").ok(),
+            database: self.config.glue_database_name.clone(),
+            table: namespace.to_string(),
+            partition_values: partition_values.clone(),
+            location,
+            storage_columns: storage_columns.iter().map(column_intent).collect(),
+            partition_columns: partition_columns.iter().map(column_intent).collect(),
+            input_format: "org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat"
+                .to_string(),
+            output_format: "org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat"
+                .to_string(),
+            serde_library: "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe"
+                .to_string(),
+            schema_namespace: namespace.to_string(),
+            schema_version,
+        };
+        let key = serde_json::to_string(&partition_values)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
+        Ok(Some(CatalogIntent {
+            version: CATALOG_INTENT_VERSION,
+            identity: CatalogIntentIdentity {
+                sink_ref: match self.binding {
+                    RuntimeBinding::Primary => "primary".to_string(),
+                    RuntimeBinding::Deadletter => "deadletter".to_string(),
+                },
+                namespace: namespace.to_string(),
+                kind: CatalogIntentKind::UpsertPartition,
+                key,
+            },
+            payload_json: serde_json::to_string(&payload)
+                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?,
+        }))
     }
 
     async fn delete_s3_prefix(&self, bucket: &str, prefix: &str) -> Result<(), io::Error> {
@@ -1378,20 +1582,25 @@ impl DataSinkAthenaPlugin {
         let (object_stem, final_key) = athena_object_key(&full_key, &filename, object_stem);
         let idempotency_manifest_key =
             sidecar_manifest_object_key(&self.config.s3_prefix, &namespace, &object_stem);
+        let catalog_intents = match partition_metadata.as_ref() {
+            Some(metadata) => self
+                .partition_catalog_intent(
+                    &namespace,
+                    partition_values.clone(),
+                    &full_key,
+                    metadata,
+                    source_contract,
+                )
+                .await?
+                .into_iter()
+                .collect(),
+            None => Vec::new(),
+        };
         if let Some(manifest) = idempotency_manifest {
             if self
                 .manifest_matches(&idempotency_manifest_key, manifest)
                 .await?
             {
-                if let Some(ref pm) = partition_metadata {
-                    self.schedule_glue_partition(
-                        namespace.clone(),
-                        partition_values.clone(),
-                        full_key.clone(),
-                        pm.clone(),
-                        source_contract.cloned(),
-                    );
-                }
                 return Ok((SinkWriteOutcome::AlreadyApplied, None));
             }
         }
@@ -1546,15 +1755,6 @@ impl DataSinkAthenaPlugin {
             });
         }
 
-        if let Some(partition_metadata) = partition_metadata {
-            self.schedule_glue_partition(
-                namespace.clone(),
-                partition_values,
-                full_key,
-                partition_metadata,
-                source_contract.cloned(),
-            );
-        }
         if let Some(manifest) = idempotency_manifest {
             self.write_manifest(&idempotency_manifest_key, manifest)
                 .await?;
@@ -1567,100 +1767,9 @@ impl DataSinkAthenaPlugin {
                 bytes: uploaded_bytes,
                 etag: receipt.etag,
                 checksum: receipt.checksum,
+                catalog_intents,
             }),
         ))
-    }
-
-    fn schedule_glue_partition(
-        &self,
-        namespace: String,
-        partition_values: Vec<String>,
-        full_key: String,
-        partition_metadata: OutputMetadata,
-        source_contract: Option<SourceNamespaceContract>,
-    ) {
-        if partition_values.is_empty() {
-            return;
-        }
-        let context = self.context.clone();
-        let binding = self.binding;
-        let config = self.config.clone();
-        PARTITION_TASKS_IN_FLIGHT.fetch_add(1, Ordering::Relaxed);
-        info!(
-            "glue_partition_scheduled ns={} key={} values={:?} in_flight={}",
-            namespace,
-            full_key,
-            partition_values,
-            PARTITION_TASKS_IN_FLIGHT.load(Ordering::Relaxed)
-        );
-        tokio::spawn(async move {
-            let result = AwsAthena::glue_create_partition(
-                &context,
-                binding,
-                &config,
-                &namespace,
-                partition_values,
-                &full_key,
-                &partition_metadata,
-                source_contract.as_ref(),
-            )
-            .await;
-            match result {
-                Ok(_) => {}
-                Err(e) => {
-                    warn!("Glue partition creation failed for '{}': {}", full_key, e);
-                }
-            }
-            PARTITION_TASKS_IN_FLIGHT.fetch_sub(1, Ordering::Relaxed);
-            PARTITIONS_NOTIFY.notify_waiters();
-        });
-    }
-
-    async fn schedule_glue_partition_from_s3_key(&self, namespace: &str, final_s3_key: &str) {
-        let Some((full_key, partition_values)) =
-            partition_values_from_object_key(namespace, final_s3_key)
-        else {
-            return;
-        };
-        let pm = match self.namespace_metadata(namespace).await {
-            Ok(pm) => pm,
-            Err(err) => {
-                warn!(
-                    "AlreadyApplied: skip Glue partition ensure for '{}': {}",
-                    final_s3_key, err
-                );
-                return;
-            }
-        };
-        self.schedule_glue_partition(namespace.to_string(), partition_values, full_key, pm, None);
-    }
-
-    /// Best-effort drain of background Glue partition tasks (plugin teardown / finalize).
-    pub async fn drain_partition_tasks(timeout: TokioDuration) {
-        let deadline = tokio::time::Instant::now() + timeout;
-        loop {
-            if PARTITION_TASKS_IN_FLIGHT.load(Ordering::Relaxed) == 0 {
-                return;
-            }
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
-                warn!(
-                    "Timed out draining Glue partition tasks; {} still in flight",
-                    PARTITION_TASKS_IN_FLIGHT.load(Ordering::Relaxed)
-                );
-                return;
-            }
-            tokio::select! {
-                _ = PARTITIONS_NOTIFY.notified() => {}
-                _ = tokio_sleep(remaining) => {
-                    warn!(
-                        "Timed out draining Glue partition tasks; {} still in flight",
-                        PARTITION_TASKS_IN_FLIGHT.load(Ordering::Relaxed)
-                    );
-                    return;
-                }
-            }
-        }
     }
 
     async fn manifest_matches(
@@ -3550,6 +3659,7 @@ mod contract_schema_tests {
             bytes: 456,
             etag: Some("\"multipart-etag-2\"".to_string()),
             checksum: None,
+            catalog_intents: Vec::new(),
         };
 
         let receipt = grouped_receipt_from_applied(
