@@ -662,10 +662,7 @@ fn caps_from_env(
     );
     let runtime_session_cap = min_env_caps(
         caps.sink_sessions,
-        &[
-            "RUNTIME_SINK_SESSION_TARGET",
-            "RUNTIME_SINK_SESSION_BUDGET",
-        ],
+        &["RUNTIME_SINK_SESSION_TARGET", "RUNTIME_SINK_SESSION_BUDGET"],
         false,
     );
     caps.sink_sessions = caps
