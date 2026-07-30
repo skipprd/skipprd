@@ -2832,6 +2832,45 @@ impl RuntimeDataSinkPlugin {
         config: RuntimeSinkConfig,
         process_budget: Arc<RuntimeSinkProcessBudget>,
     ) -> io::Result<Self> {
+        Self::new_with_process_budget_and_data_dir(
+            resolved,
+            pipeline_name,
+            binding,
+            config,
+            process_budget,
+            None,
+        )
+        .await
+    }
+
+    #[doc(hidden)]
+    pub async fn new_with_data_dir_for_test(
+        resolved: ResolvedRuntimePlugin,
+        pipeline_name: String,
+        binding: RuntimeBinding,
+        config: RuntimeSinkConfig,
+        data_dir: String,
+    ) -> io::Result<Self> {
+        let process_budget = RuntimeSinkProcessBudget::for_pipeline(&pipeline_name, 1);
+        Self::new_with_process_budget_and_data_dir(
+            resolved,
+            pipeline_name,
+            binding,
+            config,
+            process_budget,
+            Some(data_dir),
+        )
+        .await
+    }
+
+    async fn new_with_process_budget_and_data_dir(
+        resolved: ResolvedRuntimePlugin,
+        pipeline_name: String,
+        binding: RuntimeBinding,
+        config: RuntimeSinkConfig,
+        process_budget: Arc<RuntimeSinkProcessBudget>,
+        data_dir: Option<String>,
+    ) -> io::Result<Self> {
         let capability = resolved
             .manifest
             .sink_capability
@@ -2845,8 +2884,12 @@ impl RuntimeDataSinkPlugin {
                     resolved.manifest.name
                 ))
             })?;
+        let mut context = runtime_execution_context(&pipeline_name, RuntimeExecutionMode::Sync);
+        if let Some(data_dir) = data_dir {
+            context.data_dir = data_dir;
+        }
         let install_request = RuntimeSinkInstallRequest {
-            context: runtime_execution_context(&pipeline_name, RuntimeExecutionMode::Sync),
+            context,
             binding,
             config,
         };

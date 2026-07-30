@@ -609,7 +609,6 @@ async fn prepare_already_applied_sends_zero_payload_bytes() {
 #[serial]
 async fn authoritative_preflight_persists_catalog_intent_without_payload() {
     let temp = tempdir().unwrap();
-    let _data_dir = RuntimeEnvGuard::set("DATA_DIR", temp.path().to_str().unwrap());
     let marker_path = temp.path().join("already-applied-intent-state.json");
     let manifest_path = write_sink_manifest(
         temp.path(),
@@ -621,11 +620,12 @@ async fn authoritative_preflight_persists_catalog_intent_without_payload() {
         &helper_binary(),
         Some(&marker_path),
     );
-    let sink = RuntimeDataSinkPlugin::new(
+    let sink = RuntimeDataSinkPlugin::new_with_data_dir_for_test(
         ResolvedRuntimePlugin::load(&manifest_path).unwrap(),
         "runtime_host_already_applied_intent".to_string(),
         RuntimeBinding::Primary,
         runtime_file_sink_config(),
+        temp.path().to_string_lossy().into_owned(),
     )
     .await
     .unwrap();
@@ -642,7 +642,7 @@ async fn authoritative_preflight_persists_catalog_intent_without_payload() {
         serde_json::from_slice(&std::fs::read(marker_path).unwrap()).unwrap();
     assert_eq!(state["run_count"], 0);
     assert_eq!(state["payload_bytes"], 0);
-    let outbox = skipprd::catalog_outbox::CatalogOutbox::open(Config::get_data_dir()).unwrap();
+    let outbox = skipprd::catalog_outbox::CatalogOutbox::open(temp.path()).unwrap();
     let pending = outbox.scan_pending(10).unwrap();
     assert_eq!(pending.len(), 1);
     assert_eq!(pending[0].intent.identity.namespace, "events");
@@ -652,7 +652,6 @@ async fn authoritative_preflight_persists_catalog_intent_without_payload() {
 #[serial]
 async fn preflight_receipt_replay_repairs_failed_outbox_persist_without_payload() {
     let temp = tempdir().unwrap();
-    let _data_dir = RuntimeEnvGuard::set("DATA_DIR", temp.path().to_str().unwrap());
     let marker_path = temp.path().join("repair-outbox-state.json");
     let manifest_path = write_sink_manifest(
         temp.path(),
@@ -664,16 +663,16 @@ async fn preflight_receipt_replay_repairs_failed_outbox_persist_without_payload(
         &helper_binary(),
         Some(&marker_path),
     );
-    let sink = RuntimeDataSinkPlugin::new(
+    let sink = RuntimeDataSinkPlugin::new_with_data_dir_for_test(
         ResolvedRuntimePlugin::load(&manifest_path).unwrap(),
         "runtime_host_repair_outbox".to_string(),
         RuntimeBinding::Primary,
         runtime_file_sink_config(),
+        temp.path().to_string_lossy().into_owned(),
     )
     .await
     .unwrap();
-    let pending_dir = std::path::Path::new(&Config::get_data_dir())
-        .join("segment_buffer/catalog_outbox/v1/pending");
+    let pending_dir = temp.path().join("segment_buffer/catalog_outbox/v1/pending");
     std::fs::remove_dir_all(&pending_dir).unwrap();
     std::fs::write(&pending_dir, b"force persist failure").unwrap();
 
@@ -702,7 +701,7 @@ async fn preflight_receipt_replay_repairs_failed_outbox_persist_without_payload(
     let state: serde_json::Value =
         serde_json::from_slice(&std::fs::read(marker_path).unwrap()).unwrap();
     assert_eq!(state["payload_bytes"], 0);
-    let outbox = skipprd::catalog_outbox::CatalogOutbox::open(Config::get_data_dir()).unwrap();
+    let outbox = skipprd::catalog_outbox::CatalogOutbox::open(temp.path()).unwrap();
     assert_eq!(outbox.scan_pending(10).unwrap().len(), 1);
 }
 
@@ -1003,7 +1002,7 @@ async fn schema_install_waits_for_active_multiplexed_applies() {
         ),
         async {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            sink.install_schema_state(u64::MAX, &namespaces).await
+            sink.install_schema_state(1_000_000_001, &namespaces).await
         },
     );
     apply.unwrap();
@@ -1042,7 +1041,7 @@ async fn unrelated_schema_install_proceeds_during_multiplexed_apply() {
         ),
         async {
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            sink.install_schema_state(u64::MAX - 1, &namespaces).await
+            sink.install_schema_state(1_000_000_000, &namespaces).await
         },
     );
     apply.unwrap();
