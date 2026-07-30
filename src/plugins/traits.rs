@@ -452,20 +452,6 @@ impl GroupedBatchReader {
         &self.grouping_key
     }
 
-    /// Consume the grouped reader as one bounded batch stream.
-    ///
-    /// This preserves a batch already read ahead by `next_chunk` and otherwise
-    /// delegates directly to the source stream. It never collects subsequent
-    /// grouped chunks, allowing object sinks to encode one logical object for
-    /// the whole compaction envelope.
-    pub fn into_stream(self) -> SendableRecordBatchStream {
-        Box::pin(GroupedReaderRecordBatchStream {
-            schema: self.schema,
-            pending: self.pending,
-            stream: self.stream,
-        })
-    }
-
     pub async fn next_chunk(&mut self) -> io::Result<Option<RecordBatchChunk>> {
         if self.finished {
             return Ok(None);
