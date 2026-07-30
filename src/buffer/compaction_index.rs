@@ -1234,6 +1234,58 @@ mod tests {
     }
 
     #[test]
+    fn reclaimable_slice_count_tracks_depth_within_one_ready_group() {
+        let mut index = CompactionIndex::default();
+        index.register_segment(
+            "seg",
+            vec![
+                slice(
+                    "seg",
+                    "sink.a",
+                    "ns",
+                    "v1",
+                    CompactionKind::Append,
+                    0,
+                    100,
+                    1,
+                ),
+                slice(
+                    "seg",
+                    "sink.a",
+                    "ns",
+                    "v1",
+                    CompactionKind::Append,
+                    1,
+                    100,
+                    1,
+                ),
+                slice(
+                    "seg",
+                    "sink.a",
+                    "ns",
+                    "v1",
+                    CompactionKind::Append,
+                    2,
+                    100,
+                    1,
+                ),
+            ],
+            100,
+            100,
+            1_000,
+        );
+
+        let planned = plan(&mut index, 1, false);
+        assert_eq!(planned.groups.len(), 1);
+        assert_eq!(planned.groups[0].slices.len(), 2);
+        assert_eq!(index.ready_queue_depth(), 1);
+        assert_eq!(
+            index.reclaimable_slice_count(false, 1_000, 300, usize::MAX),
+            1
+        );
+    }
+
+    #[test]
     fn size_and_age_eligibility_are_incremental() {
         let mut index = CompactionIndex::default();
         index.register_segment(

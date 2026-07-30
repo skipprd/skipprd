@@ -1848,6 +1848,7 @@ impl Buffers {
         let now_secs = Self::now_secs();
         let target_bytes = Self::compaction_group_target_bytes();
         let max_parts = Self::compaction_group_max_parts();
+        let sent_stale_secs = Self::sent_manifest_stale_secs();
         let per_sink_limit = per_sink_limit.max(1);
         let mut out = Vec::with_capacity(limit);
 
@@ -1856,7 +1857,7 @@ impl Buffers {
             limit,
             per_sink_limit,
             now_secs,
-            Self::sent_manifest_stale_secs(),
+            sent_stale_secs,
             active_by_lane,
             blocked_lanes,
         );
@@ -1890,9 +1891,13 @@ impl Buffers {
             }
         }
         if !out.is_empty() {
-            metrics_hot::set_compaction_planner_ready_work_count(
-                compaction_index().ready_queue_depth(),
+            let ready_work = compaction_index().reclaimable_slice_count(
+                force,
+                now_secs,
+                sent_stale_secs,
+                usize::MAX,
             );
+            metrics_hot::set_compaction_planner_ready_work_count(ready_work);
             return out;
         }
 
@@ -1932,9 +1937,13 @@ impl Buffers {
                 compaction_index().release_refs(&refs, now_secs);
             }
         }
-        metrics_hot::set_compaction_planner_ready_work_count(
-            compaction_index().ready_queue_depth(),
+        let ready_work = compaction_index().reclaimable_slice_count(
+            force,
+            now_secs,
+            sent_stale_secs,
+            usize::MAX,
         );
+        metrics_hot::set_compaction_planner_ready_work_count(ready_work);
         out
     }
 
