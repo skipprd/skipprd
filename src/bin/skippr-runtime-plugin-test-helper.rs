@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::io;
 use std::io::Write;
 use std::path::PathBuf;
@@ -16,6 +17,7 @@ use parquet::arrow::ArrowWriter;
 use serde_json::json;
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
+use tokio::sync::{mpsc, Mutex};
 
 use skipprd::buffer::compaction_transaction::SinkWriteSemantics;
 use skipprd::plugins::cdc;
@@ -24,9 +26,9 @@ use skipprd::runtime_plugins::protocol::{
     CommitReceipt, CommitReceiptAuthority, HandshakeResponse, HostDataFrame, HostFrame,
     PluginDataFrame, PluginFrame, PrepareAck, PrepareSinkResult, RuntimeCheckpointUpdate,
     RuntimePluginKind, RuntimeRequestAck, RuntimeSchemaInstallRequest, RuntimeSchemaRefreshRequest,
-    RuntimeSchemaStateInstallRequest, RuntimeSessionHello, RuntimeSinkInstallRequest,
-    RuntimeSourceSinkWrite, SinkAck, SinkWriteStats, SourceEvent, RUNTIME_PROTOCOL_VERSION,
-    SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
+    RuntimeSchemaStateInstallRequest, RuntimeSessionHello, RuntimeSinkError,
+    RuntimeSinkInstallRequest, RuntimeSourceSinkWrite, SinkAck, SinkWriteStats, SourceEvent,
+    RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
     SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use skipprd::runtime_plugins::sdk::{decode_record_batch_stream, encode_record_batch_stream};
@@ -111,13 +113,24 @@ async fn run() -> io::Result<()> {
 
     match kind {
         RuntimePluginKind::DataSink => {
-            run_sink_loop(
-                &cli,
-                &mut control_reader,
-                &mut control_writer,
-                &mut data_reader,
-            )
-            .await
+            if cli.scenario.starts_with("multiplex_") {
+                run_multiplex_sink_loop(
+                    &cli,
+                    handshake.sink_session_capacity,
+                    control_reader,
+                    control_writer,
+                    data_reader,
+                )
+                .await
+            } else {
+                run_sink_loop(
+                    &cli,
+                    &mut control_reader,
+                    &mut control_writer,
+                    &mut data_reader,
+                )
+                .await
+            }
         }
         RuntimePluginKind::SchemaSink => {
             run_schema_loop(&cli, &mut control_reader, &mut control_writer).await
@@ -164,6 +177,339 @@ fn parse_kind(value: &str) -> io::Result<RuntimePluginKind> {
             "unsupported runtime plugin kind '{}'",
             value
         ))),
+    }
+}
+
+#[derive(Default)]
+struct MultiplexHelperState {
+    active: usize,
+    max_active: usize,
+    run_count: usize,
+    request_ids: Vec<u64>,
+    data_request_ids: Vec<u64>,
+    data_frame_request_ids: Vec<u64>,
+    schema_install_active_counts: Vec<usize>,
+}
+
+fn write_multiplex_state(
+    marker_path: Option<&PathBuf>,
+    state: &MultiplexHelperState,
+) -> io::Result<()> {
+    let Some(marker_path) = marker_path else {
+        return Ok(());
+    };
+    if let Some(parent) = marker_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    std::fs::write(
+        marker_path,
+        serde_json::to_vec_pretty(&json!({
+            "active": state.active,
+            "max_active": state.max_active,
+            "run_count": state.run_count,
+            "request_ids": state.request_ids,
+            "data_request_ids": state.data_request_ids,
+            "data_frame_request_ids": state.data_frame_request_ids,
+            "schema_install_active_counts": state.schema_install_active_counts,
+        }))
+        .map_err(io::Error::other)?,
+    )
+}
+
+async fn run_multiplex_sink_loop(
+    cli: &TestHelperCli,
+    session_capacity: usize,
+    mut control_reader: OwnedReadHalf,
+    control_writer: OwnedWriteHalf,
+    mut data_reader: OwnedReadHalf,
+) -> io::Result<()> {
+    let writer = Arc::new(Mutex::new(control_writer));
+    let marker_path = cli.marker_path.clone();
+    let scenario = cli.scenario.clone();
+    let state = Arc::new(Mutex::new(MultiplexHelperState::default()));
+    let routes = Arc::new(std::sync::Mutex::new(HashMap::<
+        u64,
+        mpsc::Sender<HostDataFrame>,
+    >::new()));
+    let data_routes = Arc::clone(&routes);
+    let data_state = Arc::clone(&state);
+    let data_marker_path = marker_path.clone();
+    let data_scenario = scenario.clone();
+    let mut data_task = tokio::spawn(async move {
+        loop {
+            let frame = read_frame_or_eof::<_, HostDataFrame>(&mut data_reader)
+                .await?
+                .ok_or_else(|| io::Error::other("multiplex helper data channel closed"))?;
+            let request_id = match &frame {
+                HostDataFrame::SinkChunk(chunk) => chunk.request_id,
+                HostDataFrame::FinishSink(finish) => finish.request_id,
+            };
+            {
+                let mut state = data_state.lock().await;
+                state.data_frame_request_ids.push(request_id);
+                write_multiplex_state(data_marker_path.as_ref(), &state)?;
+                if data_scenario == "multiplex_disconnect_all" {
+                    let mut request_ids = state.data_frame_request_ids.clone();
+                    request_ids.sort_unstable();
+                    request_ids.dedup();
+                    if request_ids.len() >= 2 {
+                        std::process::exit(1);
+                    }
+                }
+            }
+            let sender = data_routes
+                .lock()
+                .expect("multiplex helper routes poisoned")
+                .get(&request_id)
+                .cloned()
+                .ok_or_else(|| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("multiplex helper got data for unknown request {request_id}"),
+                    )
+                })?;
+            sender.send(frame).await.map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("multiplex helper route closed for request {request_id}"),
+                )
+            })?;
+        }
+    });
+    let permits = Arc::new(tokio::sync::Semaphore::new(session_capacity.clamp(1, 64)));
+    let mut sessions = tokio::task::JoinSet::new();
+
+    loop {
+        let frame = tokio::select! {
+            frame = read_frame_or_eof::<_, HostFrame>(&mut control_reader) => {
+                match frame? {
+                    Some(frame) => frame,
+                    None => {
+                        data_task.abort();
+                        sessions.shutdown().await;
+                        return Ok(());
+                    }
+                }
+            }
+            result = &mut data_task => {
+                sessions.shutdown().await;
+                return match result {
+                    Ok(Ok(())) => Err(io::Error::other("multiplex helper data task exited")),
+                    Ok(Err(err)) => Err(err),
+                    Err(err) => Err(io::Error::other(err.to_string())),
+                };
+            }
+            completed = sessions.join_next(), if !sessions.is_empty() => {
+                if let Some(Err(err)) = completed {
+                    data_task.abort();
+                    sessions.shutdown().await;
+                    return Err(io::Error::other(err.to_string()));
+                }
+                continue;
+            }
+        };
+        match frame {
+            HostFrame::InstallSink(_) => {
+                let mut guard = writer.lock().await;
+                write_frame(&mut *guard, &PluginFrame::Installed).await?;
+            }
+            HostFrame::InstallSchemaState(_) | HostFrame::InstallSchemaDelta(_) => {
+                {
+                    let mut state = state.lock().await;
+                    let active = state.active;
+                    state.schema_install_active_counts.push(active);
+                    write_multiplex_state(marker_path.as_ref(), &state)?;
+                }
+                let mut guard = writer.lock().await;
+                write_frame(&mut *guard, &PluginFrame::Installed).await?;
+            }
+            HostFrame::PrepareSink(prepare) => {
+                let request_id = prepare.request_id;
+                if scenario == "multiplex_bad_request_id" {
+                    let mut guard = writer.lock().await;
+                    write_frame(
+                        &mut *guard,
+                        &PluginFrame::PrepareAck(PrepareAck {
+                            request_id: request_id.saturating_add(10_000),
+                            result: PrepareSinkResult::Ready,
+                        }),
+                    )
+                    .await?;
+                    continue;
+                }
+                let permit = Arc::clone(&permits)
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| io::Error::other("multiplex helper permits closed"))?;
+                let (sender, receiver) = mpsc::channel(8);
+                let mut route_guard = routes.lock().expect("multiplex helper routes poisoned");
+                if route_guard.contains_key(&request_id) {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("duplicate multiplex helper request {request_id}"),
+                    ));
+                }
+                route_guard.insert(request_id, sender);
+                drop(route_guard);
+                {
+                    let mut state = state.lock().await;
+                    state.active += 1;
+                    state.max_active = state.max_active.max(state.active);
+                    state.request_ids.push(request_id);
+                    write_multiplex_state(marker_path.as_ref(), &state)?;
+                }
+                {
+                    let mut guard = writer.lock().await;
+                    write_frame(
+                        &mut *guard,
+                        &PluginFrame::PrepareAck(PrepareAck {
+                            request_id,
+                            result: PrepareSinkResult::Ready,
+                        }),
+                    )
+                    .await?;
+                }
+                let writer = Arc::clone(&writer);
+                let routes = Arc::clone(&routes);
+                let state = Arc::clone(&state);
+                let marker_path = marker_path.clone();
+                let scenario = scenario.clone();
+                sessions.spawn(async move {
+                    let payload = read_multiplex_helper_payload(receiver, request_id).await;
+                    routes
+                        .lock()
+                        .expect("multiplex helper routes poisoned")
+                        .remove(&request_id);
+                    let payload = match payload {
+                        Ok(payload) => payload,
+                        Err(err) => {
+                            let mut guard = writer.lock().await;
+                            let _ = write_frame(
+                                &mut *guard,
+                                &PluginFrame::SinkError(RuntimeSinkError {
+                                    request_id,
+                                    message: err.to_string(),
+                                }),
+                            )
+                            .await;
+                            return;
+                        }
+                    };
+                    if scenario == "multiplex_disconnect_after_payload_once" {
+                        let crash_marker = marker_path
+                            .as_ref()
+                            .map(|path| path.with_extension("crash"));
+                        if should_crash_once(crash_marker.as_ref()).unwrap_or(false) {
+                            std::process::exit(1);
+                        }
+                    }
+                    if scenario == "multiplex_delay" || scenario == "multiplex_schema_fence" {
+                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                    }
+                    {
+                        let mut state = state.lock().await;
+                        state.active = state.active.saturating_sub(1);
+                        state.run_count += 1;
+                        state.data_request_ids.push(request_id);
+                        let _ = write_multiplex_state(marker_path.as_ref(), &state);
+                    }
+                    let response = if scenario == "multiplex_one_failure"
+                        && prepare.request.filename.contains("fail")
+                    {
+                        PluginFrame::SinkError(RuntimeSinkError {
+                            request_id,
+                            message: "simulated session failure".to_string(),
+                        })
+                    } else {
+                        let mut receipt = CommitReceipt::from_envelope(
+                            &prepare.envelope,
+                            CommitReceiptAuthority::SinkWrite,
+                        );
+                        if scenario == "multiplex_receipt_mismatch" {
+                            receipt.idempotency_key.push_str("-wrong");
+                        }
+                        PluginFrame::SinkAck(SinkAck {
+                            request_id,
+                            outcome: SinkWriteOutcome::Applied,
+                            receipt,
+                            stats: SinkWriteStats {
+                                rows: Some(payload.rows),
+                                bytes: Some(payload.byte_count),
+                                ..SinkWriteStats::default()
+                            },
+                            catalog_intents: Vec::new(),
+                        })
+                    };
+                    let mut guard = writer.lock().await;
+                    let _ = write_frame(&mut *guard, &response).await;
+                    drop(permit);
+                });
+            }
+            HostFrame::Shutdown => {
+                data_task.abort();
+                sessions.shutdown().await;
+                return Ok(());
+            }
+            other => {
+                return Err(io::Error::other(format!(
+                    "unexpected multiplex helper frame: {other:?}"
+                )));
+            }
+        }
+    }
+}
+
+async fn read_multiplex_helper_payload(
+    mut receiver: mpsc::Receiver<HostDataFrame>,
+    request_id: u64,
+) -> io::Result<HelperSinkPayload> {
+    let mut bytes = Vec::new();
+    let mut rows = 0u64;
+    let mut expected_index = 0u32;
+    loop {
+        match receiver.recv().await {
+            Some(HostDataFrame::SinkChunk(chunk)) if chunk.chunk_index == expected_index => {
+                if chunk.request_id != request_id {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "multiplex helper chunk request mismatch",
+                    ));
+                }
+                chunk.validate_bound().map_err(io::Error::other)?;
+                rows = rows.saturating_add(chunk.rows);
+                bytes.extend_from_slice(&chunk.arrow_stream_bytes);
+                expected_index = expected_index.saturating_add(1);
+            }
+            Some(HostDataFrame::FinishSink(finish)) => {
+                if finish.request_id != request_id
+                    || finish.chunks != expected_index
+                    || finish.rows != rows
+                    || finish.bytes != bytes.len() as u64
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "multiplex helper FinishSink mismatch",
+                    ));
+                }
+                return Ok(HelperSinkPayload {
+                    byte_count: bytes.len() as u64,
+                    bytes,
+                    rows,
+                });
+            }
+            Some(other) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("unexpected multiplex helper data frame: {other:?}"),
+                ));
+            }
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "multiplex helper data route closed",
+                ));
+            }
+        }
     }
 }
 
@@ -231,6 +577,7 @@ async fn run_sink_loop(
                     write_frame(
                         control_writer,
                         &PluginFrame::SchemaStateRefreshRequired(RuntimeSchemaRefreshRequest {
+                            request_id: request.request_id,
                             required_version: request.required_schema_version,
                             installed_version: state
                                 .schema_state
@@ -398,6 +745,7 @@ async fn run_schema_loop(
                     write_frame(
                         control_writer,
                         &PluginFrame::SchemaStateRefreshRequired(RuntimeSchemaRefreshRequest {
+                            request_id: request.request_id,
                             required_version: request.required_schema_version,
                             installed_version: state
                                 .schema_state

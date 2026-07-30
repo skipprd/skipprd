@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::atomic::Ordering;
@@ -15,6 +16,7 @@ use serde_json::json;
 use serial_test::serial;
 use sha2::{Digest, Sha256};
 use skipprd::discover::OutputMetadata;
+use skipprd::helpers::configuration::Config;
 use skipprd::plugins::{DataSink, SchemaSink};
 use skipprd::runtime_plugins::host::{
     ResolvedRuntimePlugin, RuntimeDataSinkPlugin, RuntimeSchemaSinkPlugin,
@@ -258,6 +260,32 @@ struct RuntimeSinkPoolTargetGuard {
     previous: usize,
 }
 
+struct RuntimeEnvGuard {
+    key: &'static str,
+    previous: Option<String>,
+}
+
+impl RuntimeEnvGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let previous = std::env::var(key).ok();
+        Config::setenv(key, value);
+        Config::reset_envcache();
+        Self { key, previous }
+    }
+}
+
+impl Drop for RuntimeEnvGuard {
+    fn drop(&mut self) {
+        if let Some(value) = self.previous.as_deref() {
+            Config::setenv(self.key, value);
+        } else {
+            std::env::remove_var(self.key);
+            Config::set_evncache(self.key, "");
+        }
+        Config::reset_envcache();
+    }
+}
+
 impl RuntimeSinkPoolTargetGuard {
     fn set(target: usize) -> Self {
         skipprd::ingest::tuner::apply_env_caps();
@@ -312,6 +340,50 @@ fn sample_stream() -> SendableRecordBatchStream {
     })
 }
 
+struct DelayedBatchStream {
+    schema: Arc<Schema>,
+    delay: Pin<Box<tokio::time::Sleep>>,
+    batch: Option<RecordBatch>,
+}
+
+impl Stream for DelayedBatchStream {
+    type Item = Result<RecordBatch, DataFusionError>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.get_mut();
+        if this.delay.as_mut().poll(cx).is_pending() {
+            return Poll::Pending;
+        }
+        Poll::Ready(this.batch.take().map(Ok))
+    }
+}
+
+impl RecordBatchStream for DelayedBatchStream {
+    fn schema(&self) -> Arc<Schema> {
+        Arc::clone(&self.schema)
+    }
+}
+
+fn delayed_sample_stream(delay: std::time::Duration) -> SendableRecordBatchStream {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int64, false),
+        Field::new("name", DataType::Utf8, false),
+    ]));
+    let batch = RecordBatch::try_new(
+        Arc::clone(&schema),
+        vec![
+            Arc::new(Int64Array::from(vec![1])) as _,
+            Arc::new(StringArray::from(vec!["alice"])) as _,
+        ],
+    )
+    .unwrap();
+    Box::pin(DelayedBatchStream {
+        schema,
+        delay: Box::pin(tokio::time::sleep(delay)),
+        batch: Some(batch),
+    })
+}
+
 struct PanicOnPollStream {
     schema: Arc<Schema>,
 }
@@ -334,6 +406,32 @@ fn panic_on_poll_stream() -> SendableRecordBatchStream {
     Box::pin(PanicOnPollStream {
         schema: Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)])),
     })
+}
+
+async fn multiplex_test_sink(
+    dir: &Path,
+    scenario: &str,
+    marker_path: &Path,
+    pipeline_name: &str,
+) -> RuntimeDataSinkPlugin {
+    let manifest_path = write_sink_manifest(
+        dir,
+        &format!("{scenario}-runtime-sink"),
+        "File",
+        scenario,
+        "File",
+        Some(&helper_sha256()),
+        &helper_binary(),
+        Some(marker_path),
+    );
+    RuntimeDataSinkPlugin::new(
+        ResolvedRuntimePlugin::load(&manifest_path).unwrap(),
+        pipeline_name.to_string(),
+        RuntimeBinding::Primary,
+        runtime_file_sink_config(),
+    )
+    .await
+    .unwrap()
 }
 
 #[tokio::test]
@@ -487,6 +585,256 @@ async fn prepare_already_applied_sends_zero_payload_bytes() {
     assert_eq!(state["run_count"], 0);
     assert_eq!(state["payload_bytes"], 0);
     assert_eq!(state["compaction_ids"][0], "receipt-1");
+}
+
+#[tokio::test]
+#[serial]
+async fn two_sink_sessions_interleave_on_one_runtime_child() {
+    let _pool_size = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "1");
+    let _sessions = RuntimeEnvGuard::set("RUNTIME_SINK_SESSIONS_PER_CHILD", "2");
+    let _budget = RuntimeEnvGuard::set("RUNTIME_SINK_SESSION_BUDGET", "2");
+    let _chunks = RuntimeEnvGuard::set("RUNTIME_SINK_PAYLOAD_CHUNK_BYTES", "64");
+    let temp = tempdir().unwrap();
+    let marker_path = temp.path().join("multiplex-interleave.json");
+    let sink = multiplex_test_sink(
+        temp.path(),
+        "multiplex_delay",
+        &marker_path,
+        "runtime_host_multiplex_interleave",
+    )
+    .await;
+
+    let delay = std::time::Duration::from_millis(25);
+    let (first, second) = tokio::join!(
+        sink.sync(
+            delayed_sample_stream(delay),
+            "interleave-a".to_string(),
+            None
+        ),
+        sink.sync(
+            delayed_sample_stream(delay),
+            "interleave-b".to_string(),
+            None
+        ),
+    );
+    first.unwrap();
+    second.unwrap();
+
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(marker_path).unwrap()).unwrap();
+    assert_eq!(state["max_active"], 2);
+    let frames = json_u64_array(&state, "data_frame_request_ids");
+    let first_id = frames[0];
+    let other_at = frames
+        .iter()
+        .position(|request_id| *request_id != first_id)
+        .expect("both requests should reach the shared data connection");
+    assert!(
+        frames[other_at + 1..]
+            .iter()
+            .any(|request_id| *request_id == first_id),
+        "sink chunks should interleave across request ids: {frames:?}"
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn per_child_session_capacity_bounds_in_flight_applies() {
+    let _pool_size = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "1");
+    let _sessions = RuntimeEnvGuard::set("RUNTIME_SINK_SESSIONS_PER_CHILD", "2");
+    let _budget = RuntimeEnvGuard::set("RUNTIME_SINK_SESSION_BUDGET", "2");
+    let temp = tempdir().unwrap();
+    let marker_path = temp.path().join("multiplex-capacity.json");
+    let sink = multiplex_test_sink(
+        temp.path(),
+        "multiplex_delay",
+        &marker_path,
+        "runtime_host_multiplex_capacity",
+    )
+    .await;
+
+    let (first, second, third) = tokio::join!(
+        sink.sync(sample_stream(), "capacity-a".to_string(), None),
+        sink.sync(sample_stream(), "capacity-b".to_string(), None),
+        sink.sync(sample_stream(), "capacity-c".to_string(), None),
+    );
+    first.unwrap();
+    second.unwrap();
+    third.unwrap();
+
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(marker_path).unwrap()).unwrap();
+    assert_eq!(state["max_active"], 2);
+    assert_eq!(state["run_count"], 3);
+}
+
+#[tokio::test]
+#[serial]
+async fn one_multiplexed_session_failure_does_not_corrupt_another_ack() {
+    let _pool_size = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "1");
+    let _sessions = RuntimeEnvGuard::set("RUNTIME_SINK_SESSIONS_PER_CHILD", "2");
+    let _budget = RuntimeEnvGuard::set("RUNTIME_SINK_SESSION_BUDGET", "2");
+    let temp = tempdir().unwrap();
+    let marker_path = temp.path().join("multiplex-one-failure.json");
+    let sink = multiplex_test_sink(
+        temp.path(),
+        "multiplex_one_failure",
+        &marker_path,
+        "runtime_host_multiplex_one_failure",
+    )
+    .await;
+
+    let delay = std::time::Duration::from_millis(20);
+    let (failed, applied) = tokio::join!(
+        sink.sync(
+            delayed_sample_stream(delay),
+            "multiplex-fail".to_string(),
+            None
+        ),
+        sink.sync(
+            delayed_sample_stream(delay),
+            "multiplex-ok".to_string(),
+            None
+        ),
+    );
+    assert!(failed
+        .unwrap_err()
+        .to_string()
+        .contains("simulated session failure"));
+    applied.unwrap();
+}
+
+#[tokio::test]
+#[serial]
+async fn runtime_connection_death_fails_all_pending_sessions() {
+    let _pool_size = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "1");
+    let _sessions = RuntimeEnvGuard::set("RUNTIME_SINK_SESSIONS_PER_CHILD", "2");
+    let _budget = RuntimeEnvGuard::set("RUNTIME_SINK_SESSION_BUDGET", "2");
+    let _chunks = RuntimeEnvGuard::set("RUNTIME_SINK_PAYLOAD_CHUNK_BYTES", "64");
+    let temp = tempdir().unwrap();
+    let marker_path = temp.path().join("multiplex-death.json");
+    let sink = multiplex_test_sink(
+        temp.path(),
+        "multiplex_disconnect_all",
+        &marker_path,
+        "runtime_host_multiplex_death",
+    )
+    .await;
+
+    let delay = std::time::Duration::from_millis(20);
+    let (first, second) = tokio::join!(
+        sink.sync(delayed_sample_stream(delay), "death-a".to_string(), None),
+        sink.sync(delayed_sample_stream(delay), "death-b".to_string(), None),
+    );
+    assert!(first.is_err());
+    assert!(second.is_err());
+}
+
+#[tokio::test]
+#[serial]
+async fn schema_install_waits_for_active_multiplexed_applies() {
+    let _pool_size = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "1");
+    let _sessions = RuntimeEnvGuard::set("RUNTIME_SINK_SESSIONS_PER_CHILD", "2");
+    let _budget = RuntimeEnvGuard::set("RUNTIME_SINK_SESSION_BUDGET", "2");
+    let temp = tempdir().unwrap();
+    let marker_path = temp.path().join("multiplex-schema-fence.json");
+    let sink = multiplex_test_sink(
+        temp.path(),
+        "multiplex_schema_fence",
+        &marker_path,
+        "runtime_host_multiplex_schema_fence",
+    )
+    .await;
+    let namespaces = BTreeMap::from([("people".to_string(), sample_output_metadata())]);
+
+    let (apply, install) = tokio::join!(
+        sink.sync(sample_stream(), "schema-fence".to_string(), None),
+        async {
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            sink.install_schema_state(100_007, &namespaces).await
+        },
+    );
+    apply.unwrap();
+    install.unwrap();
+
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(marker_path).unwrap()).unwrap();
+    let installs = json_u64_array(&state, "schema_install_active_counts");
+    assert!(installs.len() >= 2);
+    assert_eq!(*installs.last().unwrap(), 0);
+}
+
+#[tokio::test]
+#[serial]
+async fn post_payload_disconnect_is_not_replayed_inside_same_call() {
+    let _pool_size = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "1");
+    let _sessions = RuntimeEnvGuard::set("RUNTIME_SINK_SESSIONS_PER_CHILD", "2");
+    let _budget = RuntimeEnvGuard::set("RUNTIME_SINK_SESSION_BUDGET", "2");
+    let temp = tempdir().unwrap();
+    let marker_path = temp.path().join("multiplex-post-payload.json");
+    let sink = multiplex_test_sink(
+        temp.path(),
+        "multiplex_disconnect_after_payload_once",
+        &marker_path,
+        "runtime_host_no_post_payload_retry",
+    )
+    .await;
+
+    let err = sink
+        .sync(sample_stream(), "post-payload-c=stable".to_string(), None)
+        .await
+        .unwrap_err();
+    assert!(
+        err.kind() == std::io::ErrorKind::UnexpectedEof
+            || err.kind() == std::io::ErrorKind::BrokenPipe
+            || err.to_string().contains("connection")
+    );
+}
+
+#[tokio::test]
+#[serial]
+async fn receipt_mismatch_is_rejected_for_its_request() {
+    let _pool_size = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "1");
+    let temp = tempdir().unwrap();
+    let marker_path = temp.path().join("multiplex-receipt-mismatch.json");
+    let sink = multiplex_test_sink(
+        temp.path(),
+        "multiplex_receipt_mismatch",
+        &marker_path,
+        "runtime_host_receipt_mismatch",
+    )
+    .await;
+
+    let err = sink
+        .sync(sample_stream(), "receipt-mismatch".to_string(), None)
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("commit receipt does not match"));
+}
+
+#[tokio::test]
+#[serial]
+async fn unknown_response_request_id_is_a_protocol_error() {
+    let _pool_size = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "1");
+    let temp = tempdir().unwrap();
+    let marker_path = temp.path().join("multiplex-request-mismatch.json");
+    let sink = multiplex_test_sink(
+        temp.path(),
+        "multiplex_bad_request_id",
+        &marker_path,
+        "runtime_host_request_mismatch",
+    )
+    .await;
+
+    let err = sink
+        .sync(
+            panic_on_poll_stream(),
+            "request-id-mismatch".to_string(),
+            None,
+        )
+        .await
+        .unwrap_err();
+    assert!(err.to_string().contains("unknown request"));
 }
 
 #[tokio::test]

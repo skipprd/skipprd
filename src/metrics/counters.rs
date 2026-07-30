@@ -124,6 +124,7 @@ pub static RUNTIME_SINK_POOL_ACQUIRES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| Atom
 pub static RUNTIME_SINK_POOL_ACQUIRE_WAIT_NS_TOTAL: Lazy<AtomicU64> =
     Lazy::new(|| AtomicU64::new(0));
 pub static RUNTIME_SINK_POOL_WAITER_COUNT: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
+pub static RUNTIME_SINK_ACTIVE_SESSION_COUNT: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
 pub static RUNTIME_SINK_IPC_BYTES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static RUNTIME_SINK_IPC_CHUNKS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static RUNTIME_SCHEMA_STATE_INSTALLS_SENT_TOTAL: Lazy<AtomicU64> =
@@ -167,6 +168,7 @@ pub struct FlushMetricsSnapshot {
     pub runtime_sink_pool_acquires_total: u64,
     pub runtime_sink_pool_acquire_wait_ns_total: u64,
     pub runtime_sink_pool_waiter_count: usize,
+    pub runtime_sink_active_session_count: usize,
     pub runtime_sink_ipc_bytes_total: u64,
     pub runtime_sink_ipc_chunks_total: u64,
     pub runtime_schema_state_installs_sent_total: u64,
@@ -227,6 +229,8 @@ pub fn flush_metrics_snapshot() -> FlushMetricsSnapshot {
         runtime_sink_pool_acquire_wait_ns_total: RUNTIME_SINK_POOL_ACQUIRE_WAIT_NS_TOTAL
             .load(Ordering::Relaxed),
         runtime_sink_pool_waiter_count: RUNTIME_SINK_POOL_WAITER_COUNT.load(Ordering::Relaxed),
+        runtime_sink_active_session_count: RUNTIME_SINK_ACTIVE_SESSION_COUNT
+            .load(Ordering::Relaxed),
         runtime_sink_ipc_bytes_total: RUNTIME_SINK_IPC_BYTES_TOTAL.load(Ordering::Relaxed),
         runtime_sink_ipc_chunks_total: RUNTIME_SINK_IPC_CHUNKS_TOTAL.load(Ordering::Relaxed),
         runtime_schema_state_installs_sent_total: RUNTIME_SCHEMA_STATE_INSTALLS_SENT_TOTAL
@@ -359,6 +363,20 @@ pub fn dec_runtime_sink_pool_waiters() {
 pub fn record_runtime_sink_pool_acquire_wait(duration: Duration) {
     RUNTIME_SINK_POOL_ACQUIRES_TOTAL.fetch_add(1, Ordering::Relaxed);
     RUNTIME_SINK_POOL_ACQUIRE_WAIT_NS_TOTAL.fetch_add(duration_ns(duration), Ordering::Relaxed);
+}
+
+#[inline]
+pub fn inc_runtime_sink_active_sessions() {
+    RUNTIME_SINK_ACTIVE_SESSION_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn dec_runtime_sink_active_sessions() {
+    let _ = RUNTIME_SINK_ACTIVE_SESSION_COUNT.fetch_update(
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+        |value| Some(value.saturating_sub(1)),
+    );
 }
 
 #[inline]
@@ -586,6 +604,7 @@ pub fn reset_flush_metrics() {
     RUNTIME_SINK_POOL_ACQUIRES_TOTAL.store(0, Ordering::Relaxed);
     RUNTIME_SINK_POOL_ACQUIRE_WAIT_NS_TOTAL.store(0, Ordering::Relaxed);
     RUNTIME_SINK_POOL_WAITER_COUNT.store(0, Ordering::Relaxed);
+    RUNTIME_SINK_ACTIVE_SESSION_COUNT.store(0, Ordering::Relaxed);
     RUNTIME_SINK_IPC_BYTES_TOTAL.store(0, Ordering::Relaxed);
     RUNTIME_SINK_IPC_CHUNKS_TOTAL.store(0, Ordering::Relaxed);
     RUNTIME_SCHEMA_STATE_INSTALLS_SENT_TOTAL.store(0, Ordering::Relaxed);

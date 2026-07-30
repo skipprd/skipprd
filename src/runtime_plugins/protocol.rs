@@ -315,6 +315,7 @@ pub struct RuntimeSchemaStateInstallRequest {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct RuntimeSchemaRefreshRequest {
+    pub request_id: u64,
     pub required_version: u64,
     pub installed_version: u64,
 }
@@ -323,6 +324,9 @@ pub struct RuntimeSchemaRefreshRequest {
 pub struct HandshakeRequest {
     pub pipeline_name: String,
     pub protocol_version: u32,
+    /// Maximum concurrent sink sessions the host will route through this child.
+    /// Non-sink runtimes receive one.
+    pub sink_session_capacity: usize,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -600,6 +604,12 @@ pub struct PrepareAck {
     pub result: PrepareSinkResult,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RuntimeSinkError {
+    pub request_id: u64,
+    pub message: String,
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub enum RuntimeSinkPayloadMode {
     #[default]
@@ -673,6 +683,7 @@ pub enum PluginFrame {
     OffsetRequest(RuntimeOffsetRpcRequest),
     PrepareAck(PrepareAck),
     SinkAck(SinkAck),
+    SinkError(RuntimeSinkError),
     SchemaAck(RuntimeRequestAck),
     SchemaStateRefreshRequired(RuntimeSchemaRefreshRequest),
     Error(String),

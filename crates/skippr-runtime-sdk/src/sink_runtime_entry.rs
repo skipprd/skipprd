@@ -1,24 +1,30 @@
+use std::collections::HashMap;
 use std::future::Future;
 use std::io;
+use std::sync::{Arc, Mutex as StdMutex};
 
 use skippr_core::helpers::logging::init_logging;
 use skippr_core::plugins::{
     DataSink, HasSchemaSinkSpec, HasSinkSpec, SchemaSink, SchemaSyncRequest, SinkPreflightOutcome,
     SinkWriteOutcome,
 };
+#[cfg(test)]
 use tokio::io::AsyncRead;
-use tokio::net::tcp::OwnedWriteHalf;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::TcpStream;
+use tokio::sync::mpsc;
 
+#[cfg(test)]
+use crate::protocol::FinishSink;
 use crate::protocol::{
-    CommitReceipt, CommitReceiptAuthority, FinishSink, HandshakeResponse, HostDataFrame, HostFrame,
+    CommitReceipt, CommitReceiptAuthority, HandshakeResponse, HostDataFrame, HostFrame,
     PluginFrame, PrepareAck, PrepareSink, PrepareSinkResult, RuntimeBinding, RuntimePluginKind,
     RuntimeRequestAck, RuntimeSchemaInstallRequest, RuntimeSchemaRefreshRequest,
     RuntimeSchemaState, RuntimeSchemaStateInstallRequest, RuntimeSessionHello,
-    RuntimeSinkCapabilityDescriptor, RuntimeSinkInstallRequest, RuntimeSinkPayloadMode,
-    SchemaDelta, SchemaRunRequest, SinkAck, SinkChunk, SinkRunRequest, SinkWriteStats,
-    RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
-    SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
+    RuntimeSinkCapabilityDescriptor, RuntimeSinkError, RuntimeSinkInstallRequest,
+    RuntimeSinkPayloadMode, SchemaDelta, SchemaRunRequest, SinkAck, SinkChunk, SinkRunRequest,
+    SinkWriteStats, RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV,
+    SKIPPR_RUNTIME_DATA_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use crate::sdk::{decode_record_batch_stream, record_batches_to_stream};
 use crate::sink_idempotency::ObjectWriteManifest;
@@ -93,17 +99,142 @@ async fn connect_runtime_channel(addr_env: &str) -> io::Result<TcpStream> {
 
 async fn write_schema_refresh_required(
     writer: &ControlWriter,
+    request_id: u64,
     required_schema_version: u64,
     installed_schema_version: u64,
 ) -> io::Result<()> {
     writer
         .write(&PluginFrame::SchemaStateRefreshRequired(
             RuntimeSchemaRefreshRequest {
+                request_id,
                 required_version: required_schema_version,
                 installed_version: installed_schema_version,
             },
         ))
         .await
+}
+
+#[derive(Clone, Default)]
+struct SinkDataRouter {
+    routes: Arc<StdMutex<HashMap<u64, mpsc::Sender<HostDataFrame>>>>,
+}
+
+impl SinkDataRouter {
+    fn register(&self, request_id: u64) -> io::Result<mpsc::Receiver<HostDataFrame>> {
+        let (tx, rx) = mpsc::channel(8);
+        let mut routes = self
+            .routes
+            .lock()
+            .expect("runtime sink data routes poisoned");
+        if routes.contains_key(&request_id) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("duplicate runtime sink request id {request_id}"),
+            ));
+        }
+        routes.insert(request_id, tx);
+        Ok(rx)
+    }
+
+    fn unregister(&self, request_id: u64) {
+        self.routes
+            .lock()
+            .expect("runtime sink data routes poisoned")
+            .remove(&request_id);
+    }
+}
+
+async fn run_sink_data_demux(mut reader: OwnedReadHalf, router: SinkDataRouter) -> io::Result<()> {
+    loop {
+        let frame = read_frame_or_eof::<_, HostDataFrame>(&mut reader)
+            .await
+            .map_err(|err| with_io_context(err, "runtime sink data frame read failed"))?
+            .ok_or_else(|| io::Error::other("runtime host closed sink data channel"))?;
+        let request_id = match &frame {
+            HostDataFrame::SinkChunk(chunk) => chunk.request_id,
+            HostDataFrame::FinishSink(finish) => finish.request_id,
+        };
+        let sender = router
+            .routes
+            .lock()
+            .expect("runtime sink data routes poisoned")
+            .get(&request_id)
+            .cloned()
+            .ok_or_else(|| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("sink data frame for unknown request {request_id}"),
+                )
+            })?;
+        sender.send(frame).await.map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("sink data frame for completed request {request_id}"),
+            )
+        })?;
+    }
+}
+
+async fn read_sink_payload_channel(
+    receiver: &mut mpsc::Receiver<HostDataFrame>,
+    request_id: u64,
+) -> io::Result<CollectedSinkPayload> {
+    let mut chunks = Vec::new();
+    let mut rows = 0u64;
+    let mut bytes = 0u64;
+    loop {
+        let frame = receiver.recv().await.ok_or_else(|| {
+            io::Error::other(format!(
+                "runtime host closed sink data channel before FinishSink for request {request_id}"
+            ))
+        })?;
+        match frame {
+            HostDataFrame::SinkChunk(chunk) if chunk.chunk_index == chunks.len() as u32 => {
+                debug_assert_eq!(chunk.request_id, request_id);
+                chunk.validate_bound().map_err(io::Error::other)?;
+                rows = rows.saturating_add(chunk.rows);
+                bytes = bytes.saturating_add(chunk.arrow_stream_bytes.len() as u64);
+                chunks.push(chunk);
+            }
+            HostDataFrame::SinkChunk(chunk) => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "sink chunk mismatch for request {}: got chunk {}, expected chunk {}",
+                        request_id,
+                        chunk.chunk_index,
+                        chunks.len()
+                    ),
+                ));
+            }
+            HostDataFrame::FinishSink(finish) => {
+                debug_assert_eq!(finish.request_id, request_id);
+                if finish.chunks != chunks.len() as u32
+                    || finish.rows != rows
+                    || finish.bytes != bytes
+                {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!(
+                            "FinishSink totals mismatch for request {}: chunks {}/{}, rows {}/{}, bytes {}/{}",
+                            request_id,
+                            chunks.len(),
+                            finish.chunks,
+                            rows,
+                            finish.rows,
+                            bytes,
+                            finish.bytes
+                        ),
+                    ));
+                }
+                return Ok(CollectedSinkPayload {
+                    chunks,
+                    rows,
+                    bytes,
+                });
+            }
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -113,6 +244,7 @@ struct CollectedSinkPayload {
     bytes: u64,
 }
 
+#[cfg(test)]
 async fn read_sink_payload<R>(reader: &mut R, request_id: u64) -> io::Result<CollectedSinkPayload>
 where
     R: AsyncRead + Unpin,
@@ -198,7 +330,7 @@ pub async fn run_runtime_data_sink_plugin<P, F, Fut>(
     mut build: F,
 ) -> io::Result<()>
 where
-    P: DataSink + HasSinkSpec + Send + Sync,
+    P: DataSink + HasSinkSpec + Send + Sync + 'static,
     F: FnMut(RuntimeSinkInstallRequest) -> Fut,
     Fut: Future<Output = io::Result<P>>,
 {
@@ -213,7 +345,7 @@ where
         .await
         .map_err(|err| with_io_context(err, "runtime sink data channel connect failed"))?;
     let (mut control_reader, control_writer_raw) = control_stream.into_split();
-    let (mut data_reader, _data_writer) = data_stream.into_split();
+    let (data_reader, _data_writer) = data_stream.into_split();
     let control_writer = ControlWriter::new(control_writer_raw);
 
     let Some(handshake_frame) = read_frame_or_eof::<_, HostFrame>(&mut control_reader)
@@ -271,19 +403,48 @@ where
         .await
         .map_err(|err| with_io_context(err, "runtime sink handshake ack write failed"))?;
 
-    let mut primary_plugin: Option<P> = None;
-    let mut deadletter_plugin: Option<P> = None;
+    let session_capacity = handshake.sink_session_capacity.clamp(1, 64);
+    let session_permits = Arc::new(tokio::sync::Semaphore::new(session_capacity));
+    let apply_fence = Arc::new(tokio::sync::RwLock::new(()));
+    let data_router = SinkDataRouter::default();
+    let mut data_demux = tokio::spawn(run_sink_data_demux(data_reader, data_router.clone()));
+    let mut sessions = tokio::task::JoinSet::new();
+    let mut primary_plugin: Option<Arc<P>> = None;
+    let mut deadletter_plugin: Option<Arc<P>> = None;
     let mut schema_state: Option<RuntimeSchemaState> = None;
 
     loop {
-        let Some(frame) = read_frame_or_eof::<_, HostFrame>(&mut control_reader)
-            .await
-            .map_err(|err| with_io_context(err, "runtime sink control frame read failed"))?
-        else {
-            return Ok(());
+        let frame = tokio::select! {
+            frame = read_frame_or_eof::<_, HostFrame>(&mut control_reader) => {
+                match frame.map_err(|err| with_io_context(err, "runtime sink control frame read failed"))? {
+                    Some(frame) => frame,
+                    None => {
+                        data_demux.abort();
+                        sessions.shutdown().await;
+                        return Ok(());
+                    }
+                }
+            }
+            data_result = &mut data_demux => {
+                sessions.shutdown().await;
+                return match data_result {
+                    Ok(Ok(())) => Err(io::Error::other("runtime sink data demux exited unexpectedly")),
+                    Ok(Err(err)) => Err(err),
+                    Err(err) => Err(io::Error::other(format!("runtime sink data demux task failed: {err}"))),
+                };
+            }
+            completed = sessions.join_next(), if !sessions.is_empty() => {
+                if let Some(Err(err)) = completed {
+                    data_demux.abort();
+                    sessions.shutdown().await;
+                    return Err(io::Error::other(format!("runtime sink session task failed: {err}")));
+                }
+                continue;
+            }
         };
         match frame {
             HostFrame::InstallSink(request) => {
+                let _fence = apply_fence.write().await;
                 install_sink(
                     expect_plugin_name,
                     request,
@@ -300,6 +461,7 @@ where
                     .map_err(|err| with_io_context(err, "runtime sink install ack write failed"))?;
             }
             HostFrame::InstallSchemaState(request) => {
+                let _fence = apply_fence.write().await;
                 apply_schema_state_to_sinks(
                     &request,
                     &mut primary_plugin,
@@ -316,6 +478,7 @@ where
                     })?;
             }
             HostFrame::InstallSchemaDelta(delta) => {
+                let _fence = apply_fence.write().await;
                 apply_schema_delta_to_sinks(
                     &delta,
                     &mut primary_plugin,
@@ -332,11 +495,29 @@ where
                     })?;
             }
             HostFrame::PrepareSink(prepare) => {
-                let request = &prepare.request;
-                if schema_refresh_needed(&schema_state, request.required_schema_version) {
+                let request_id = prepare.request_id;
+                if request_id != prepare.request.request_id {
+                    control_writer
+                        .write(&PluginFrame::SinkError(RuntimeSinkError {
+                            request_id,
+                            message: format!(
+                                "PrepareSink request id mismatch: frame={} request={}",
+                                request_id, prepare.request.request_id
+                            ),
+                        }))
+                        .await?;
+                    continue;
+                }
+                let permit = Arc::clone(&session_permits)
+                    .acquire_owned()
+                    .await
+                    .map_err(|_| io::Error::other("runtime sink session limiter closed"))?;
+                let apply_guard = Arc::clone(&apply_fence).read_owned().await;
+                if schema_refresh_needed(&schema_state, prepare.request.required_schema_version) {
                     write_schema_refresh_required(
                         &control_writer,
-                        request.required_schema_version,
+                        request_id,
+                        prepare.request.required_schema_version,
                         installed_schema_version(&schema_state),
                     )
                     .await
@@ -345,120 +526,60 @@ where
                             err,
                             format!(
                                 "runtime sink request {} schema refresh write failed",
-                                request.request_id
+                                request_id
                             ),
                         )
                     })?;
+                    drop(apply_guard);
+                    drop(permit);
                     continue;
                 }
-                let ledger_manifest =
-                    match prepare_sink_request(&prepare, &primary_plugin, &deadletter_plugin).await
-                    {
-                        Ok(PreparedSink::AlreadyApplied(receipt)) => {
-                            control_writer
-                                .write(&PluginFrame::PrepareAck(PrepareAck {
-                                    request_id: request.request_id,
-                                    result: PrepareSinkResult::AlreadyApplied(receipt),
-                                }))
-                                .await?;
-                            continue;
-                        }
-                        Ok(PreparedSink::Ready { ledger_manifest }) => {
-                            control_writer
-                                .write(&PluginFrame::PrepareAck(PrepareAck {
-                                    request_id: request.request_id,
-                                    result: PrepareSinkResult::Ready,
-                                }))
-                                .await?;
-                            ledger_manifest
-                        }
-                        Err(err) => {
-                            control_writer
-                                .write(&PluginFrame::PrepareAck(PrepareAck {
-                                    request_id: request.request_id,
-                                    result: PrepareSinkResult::Rejected {
-                                        reason: err.to_string(),
-                                    },
-                                }))
-                                .await?;
-                            continue;
-                        }
-                    };
-                let payload = read_sink_payload(&mut data_reader, request.request_id).await?;
-                let outcome_result = match request.payload_mode {
-                    RuntimeSinkPayloadMode::FullStream => {
-                        let arrow_stream_bytes = payload
-                            .chunks
-                            .iter()
-                            .flat_map(|chunk| chunk.arrow_stream_bytes.iter().copied())
-                            .collect();
-                        run_sink_request(
-                            request.clone(),
-                            arrow_stream_bytes,
-                            &primary_plugin,
-                            &deadletter_plugin,
-                        )
-                        .await
-                    }
-                    RuntimeSinkPayloadMode::GroupedChunks => {
-                        run_grouped_sink_request(
-                            request.clone(),
-                            &payload.chunks,
-                            &primary_plugin,
-                            &deadletter_plugin,
-                        )
-                        .await
-                    }
-                };
-                let outcome = match outcome_result {
-                    Ok(outcome) => outcome,
+                let data_receiver = match data_router.register(request_id) {
+                    Ok(receiver) => receiver,
                     Err(err) => {
-                        let message = format!(
-                            "{}: runtime sink request {} failed: {}",
-                            bin_name, request.request_id, err
-                        );
-                        let _ = control_writer
-                            .write(&PluginFrame::Error(message.clone()))
-                            .await;
-                        return Err(io::Error::other(message));
+                        control_writer
+                            .write(&PluginFrame::SinkError(RuntimeSinkError {
+                                request_id,
+                                message: err.to_string(),
+                            }))
+                            .await?;
+                        continue;
                     }
                 };
-                if let Some(manifest) = ledger_manifest.as_ref() {
-                    if matches!(
-                        outcome,
-                        SinkWriteOutcome::Applied | SinkWriteOutcome::AlreadyApplied
-                    ) {
-                        write_local_idempotency_manifest(manifest)?;
+                let writer = control_writer.clone();
+                let router = data_router.clone();
+                let primary = primary_plugin.clone();
+                let deadletter = deadletter_plugin.clone();
+                sessions.spawn(async move {
+                    let result = run_multiplexed_sink_session(
+                        prepare,
+                        primary,
+                        deadletter,
+                        data_receiver,
+                        writer.clone(),
+                        apply_guard,
+                        permit,
+                    )
+                    .await;
+                    router.unregister(request_id);
+                    if let Err(err) = result {
+                        let _ = writer
+                            .write(&PluginFrame::SinkError(RuntimeSinkError {
+                                request_id,
+                                message: format!(
+                                    "{}: runtime sink request {} failed: {}",
+                                    bin_name, request_id, err
+                                ),
+                            }))
+                            .await;
                     }
-                }
-                control_writer
-                    .write(&PluginFrame::SinkAck(SinkAck {
-                        request_id: request.request_id,
-                        outcome,
-                        receipt: CommitReceipt::from_envelope(
-                            &prepare.envelope,
-                            CommitReceiptAuthority::SinkWrite,
-                        ),
-                        stats: SinkWriteStats {
-                            rows: Some(payload.rows),
-                            bytes: Some(payload.bytes),
-                            ..SinkWriteStats::default()
-                        },
-                        // Glue outbox migration owns production of catalog intents.
-                        catalog_intents: Vec::new(),
-                    }))
-                    .await
-                    .map_err(|err| {
-                        with_io_context(
-                            err,
-                            format!(
-                                "runtime sink request {} ack write failed",
-                                request.request_id
-                            ),
-                        )
-                    })?;
+                });
             }
-            HostFrame::Shutdown => return Ok(()),
+            HostFrame::Shutdown => {
+                data_demux.abort();
+                sessions.shutdown().await;
+                return Ok(());
+            }
             other => {
                 control_writer
                     .write(&PluginFrame::Error(format!(
@@ -472,11 +593,118 @@ where
     }
 }
 
+async fn run_multiplexed_sink_session<P>(
+    prepare: PrepareSink,
+    primary_plugin: Option<Arc<P>>,
+    deadletter_plugin: Option<Arc<P>>,
+    mut data_receiver: mpsc::Receiver<HostDataFrame>,
+    control_writer: ControlWriter,
+    _apply_guard: tokio::sync::OwnedRwLockReadGuard<()>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+) -> io::Result<()>
+where
+    P: DataSink + HasSinkSpec + Send + Sync,
+{
+    let request = &prepare.request;
+    let ledger_manifest =
+        match prepare_sink_request(&prepare, &primary_plugin, &deadletter_plugin).await {
+            Ok(PreparedSink::AlreadyApplied(receipt)) => {
+                control_writer
+                    .write(&PluginFrame::PrepareAck(PrepareAck {
+                        request_id: request.request_id,
+                        result: PrepareSinkResult::AlreadyApplied(receipt),
+                    }))
+                    .await?;
+                return Ok(());
+            }
+            Ok(PreparedSink::Ready { ledger_manifest }) => {
+                control_writer
+                    .write(&PluginFrame::PrepareAck(PrepareAck {
+                        request_id: request.request_id,
+                        result: PrepareSinkResult::Ready,
+                    }))
+                    .await?;
+                ledger_manifest
+            }
+            Err(err) => {
+                control_writer
+                    .write(&PluginFrame::PrepareAck(PrepareAck {
+                        request_id: request.request_id,
+                        result: PrepareSinkResult::Rejected {
+                            reason: err.to_string(),
+                        },
+                    }))
+                    .await?;
+                return Ok(());
+            }
+        };
+    let payload = read_sink_payload_channel(&mut data_receiver, request.request_id).await?;
+    let outcome = match request.payload_mode {
+        RuntimeSinkPayloadMode::FullStream => {
+            let arrow_stream_bytes = payload
+                .chunks
+                .iter()
+                .flat_map(|chunk| chunk.arrow_stream_bytes.iter().copied())
+                .collect();
+            run_sink_request(
+                request.clone(),
+                arrow_stream_bytes,
+                &primary_plugin,
+                &deadletter_plugin,
+            )
+            .await?
+        }
+        RuntimeSinkPayloadMode::GroupedChunks => {
+            run_grouped_sink_request(
+                request.clone(),
+                &payload.chunks,
+                &primary_plugin,
+                &deadletter_plugin,
+            )
+            .await?
+        }
+    };
+    if let Some(manifest) = ledger_manifest.as_ref() {
+        if matches!(
+            outcome,
+            SinkWriteOutcome::Applied | SinkWriteOutcome::AlreadyApplied
+        ) {
+            write_local_idempotency_manifest(manifest)?;
+        }
+    }
+    control_writer
+        .write(&PluginFrame::SinkAck(SinkAck {
+            request_id: request.request_id,
+            outcome,
+            receipt: CommitReceipt::from_envelope(
+                &prepare.envelope,
+                CommitReceiptAuthority::SinkWrite,
+            ),
+            stats: SinkWriteStats {
+                rows: Some(payload.rows),
+                bytes: Some(payload.bytes),
+                ..SinkWriteStats::default()
+            },
+            // Glue outbox migration owns production of catalog intents.
+            catalog_intents: Vec::new(),
+        }))
+        .await
+        .map_err(|err| {
+            with_io_context(
+                err,
+                format!(
+                    "runtime sink request {} ack write failed",
+                    request.request_id
+                ),
+            )
+        })
+}
+
 async fn install_sink<P, F, Fut>(
     expect_plugin_name: &'static str,
     request: RuntimeSinkInstallRequest,
-    primary_plugin: &mut Option<P>,
-    deadletter_plugin: &mut Option<P>,
+    primary_plugin: &mut Option<Arc<P>>,
+    deadletter_plugin: &mut Option<Arc<P>>,
     schema_state: Option<&RuntimeSchemaState>,
     build: &mut F,
 ) -> io::Result<()>
@@ -501,14 +729,14 @@ where
             .install_schema_state(schema_state.version, &schema_state.namespaces)
             .await?;
     }
-    *plugin_slot = Some(plugin);
+    *plugin_slot = Some(Arc::new(plugin));
     Ok(())
 }
 
 async fn apply_schema_state_to_sinks<P>(
     request: &RuntimeSchemaStateInstallRequest,
-    primary_plugin: &mut Option<P>,
-    deadletter_plugin: &mut Option<P>,
+    primary_plugin: &mut Option<Arc<P>>,
+    deadletter_plugin: &mut Option<Arc<P>>,
     schema_state: &mut Option<RuntimeSchemaState>,
 ) -> io::Result<()>
 where
@@ -536,8 +764,8 @@ where
 
 async fn apply_schema_delta_to_sinks<P>(
     delta: &SchemaDelta,
-    primary_plugin: &mut Option<P>,
-    deadletter_plugin: &mut Option<P>,
+    primary_plugin: &mut Option<Arc<P>>,
+    deadletter_plugin: &mut Option<Arc<P>>,
     schema_state: &mut Option<RuntimeSchemaState>,
 ) -> io::Result<()>
 where
@@ -593,8 +821,8 @@ fn sink_write_context(request: &SinkRunRequest) -> skippr_core::plugins::SinkWri
 
 async fn prepare_sink_request<P>(
     prepare: &PrepareSink,
-    primary_plugin: &Option<P>,
-    deadletter_plugin: &Option<P>,
+    primary_plugin: &Option<Arc<P>>,
+    deadletter_plugin: &Option<Arc<P>>,
 ) -> io::Result<PreparedSink>
 where
     P: DataSink + HasSinkSpec + Send + Sync,
@@ -693,8 +921,8 @@ where
 async fn run_sink_request<P>(
     request: SinkRunRequest,
     arrow_stream_bytes: Vec<u8>,
-    primary_plugin: &Option<P>,
-    deadletter_plugin: &Option<P>,
+    primary_plugin: &Option<Arc<P>>,
+    deadletter_plugin: &Option<Arc<P>>,
 ) -> io::Result<SinkWriteOutcome>
 where
     P: DataSink + HasSinkSpec + Send + Sync,
@@ -745,8 +973,8 @@ where
 async fn run_grouped_sink_request<P>(
     request: SinkRunRequest,
     chunks: &[SinkChunk],
-    primary_plugin: &Option<P>,
-    deadletter_plugin: &Option<P>,
+    primary_plugin: &Option<Arc<P>>,
+    deadletter_plugin: &Option<Arc<P>>,
 ) -> io::Result<SinkWriteOutcome>
 where
     P: DataSink + HasSinkSpec + Send + Sync,
@@ -986,6 +1214,7 @@ where
                 if schema_refresh_needed(&schema_state, request.required_schema_version) {
                     write_schema_refresh_required(
                         &control_writer,
+                        request.request_id,
                         request.required_schema_version,
                         installed_schema_version(&schema_state),
                     )
@@ -1274,7 +1503,7 @@ mod tests {
             request,
         };
 
-        let result = prepare_sink_request(&prepare, &Some(TestSink), &None)
+        let result = prepare_sink_request(&prepare, &Some(Arc::new(TestSink)), &None)
             .await
             .unwrap();
         assert!(matches!(result, PreparedSink::Ready { .. }));

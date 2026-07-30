@@ -529,6 +529,8 @@ impl Metrics {
             "exit_code": exit_code
         });
         data["metrics"]["flush_budget"] = flush_budget_metrics;
+        data["metrics"]["runtime_sink_active_session_count"] =
+            json!(flush_metrics.runtime_sink_active_session_count);
 
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
         let key = format!(

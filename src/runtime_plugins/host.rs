@@ -1,8 +1,8 @@
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Instant;
 
@@ -11,9 +11,10 @@ use async_trait::async_trait;
 use futures::StreamExt;
 use once_cell::sync::Lazy;
 use serde::de::DeserializeOwned;
+use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::process::{Child, Command};
-use tokio::sync::Mutex;
+use tokio::sync::{mpsc, oneshot, Mutex, Notify};
 use tokio::task::JoinSet;
 use tokio::time::{timeout, Duration};
 use tracing::{debug, info, warn};
@@ -46,9 +47,9 @@ use crate::runtime_plugins::protocol::{
     RuntimeCheckpointUpdate, RuntimeExecutionContext, RuntimeExecutionMode, RuntimeIngestAck,
     RuntimeOffsetMaterializationHint, RuntimeOutputLayout, RuntimeRequestAck, RuntimeSchemaConfig,
     RuntimeSchemaInstallRequest, RuntimeSchemaState, RuntimeSchemaStateInstallRequest,
-    RuntimeSessionHello, RuntimeSinkConfig, RuntimeSinkInstallRequest, RuntimeSinkPayloadMode,
-    RuntimeSourceConfig, RuntimeSourceIngestWindow, SchemaRunRequest, SinkAck, SinkChunk,
-    SinkRunRequest, SourceEvent, SourceStartRequest, COMMIT_RECEIPT_VERSION,
+    RuntimeSessionHello, RuntimeSinkConfig, RuntimeSinkError, RuntimeSinkInstallRequest,
+    RuntimeSinkPayloadMode, RuntimeSourceConfig, RuntimeSourceIngestWindow, SchemaRunRequest,
+    SinkAck, SinkChunk, SinkRunRequest, SourceEvent, SourceStartRequest, COMMIT_RECEIPT_VERSION,
     MAX_RUNTIME_SINK_CHUNK_BYTES, RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV,
     SKIPPR_RUNTIME_DATA_ADDR_ENV, SKIPPR_RUNTIME_OFFSET_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
@@ -109,10 +110,33 @@ impl ResolvedRuntimePlugin {
     }
 }
 
+struct RuntimePluginChild(Child);
+
+impl std::ops::Deref for RuntimePluginChild {
+    type Target = Child;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl std::ops::DerefMut for RuntimePluginChild {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl Drop for RuntimePluginChild {
+    fn drop(&mut self) {
+        unregister_runtime_plugin_child(self.0.id());
+    }
+}
+
 struct RuntimeChildConnection {
     resolved: ResolvedRuntimePlugin,
     pipeline_name: String,
-    child: Child,
+    sink_session_capacity: usize,
+    child: RuntimePluginChild,
     control: TcpStream,
     data: TcpStream,
     installed_schema_version: Option<u64>,
@@ -263,6 +287,7 @@ impl RuntimeChildConnection {
         pipeline_name: String,
         offset_addr: Option<String>,
         session_token: Option<String>,
+        sink_session_capacity: usize,
     ) -> io::Result<Self> {
         let executable =
             resolve_plugin_executable(&resolved.manifest_path, &resolved.manifest).await?;
@@ -321,7 +346,8 @@ impl RuntimeChildConnection {
         let mut connection = Self {
             resolved,
             pipeline_name,
-            child,
+            sink_session_capacity: sink_session_capacity.max(1),
+            child: RuntimePluginChild(child),
             control,
             data,
             installed_schema_version: None,
@@ -343,6 +369,7 @@ impl RuntimeChildConnection {
             self.pipeline_name.clone(),
             None,
             None,
+            self.sink_session_capacity,
         )
         .await?;
         *self = replacement;
@@ -353,6 +380,7 @@ impl RuntimeChildConnection {
         let request = HostFrame::Handshake(HandshakeRequest {
             pipeline_name: self.pipeline_name.clone(),
             protocol_version: RUNTIME_PROTOCOL_VERSION,
+            sink_session_capacity: self.sink_session_capacity,
         });
         write_frame(&mut self.control, &request).await?;
         let frame: PluginFrame = read_frame(&mut self.control).await?;
@@ -394,22 +422,6 @@ impl RuntimeChildConnection {
 
     async fn recv(&mut self) -> io::Result<PluginFrame> {
         read_frame(&mut self.control).await
-    }
-
-    async fn send_data(&mut self, frame: &HostDataFrame) -> io::Result<()> {
-        let payload_bytes = match frame {
-            HostDataFrame::SinkChunk(chunk) => chunk.arrow_stream_bytes.len() as u64,
-            HostDataFrame::FinishSink(_) => 0,
-        };
-        write_frame(&mut self.data, frame).await?;
-        crate::metrics::counters::record_runtime_sink_ipc(payload_bytes, 1);
-        Ok(())
-    }
-}
-
-impl Drop for RuntimeChildConnection {
-    fn drop(&mut self) {
-        unregister_runtime_plugin_child(self.child.id());
     }
 }
 
@@ -973,6 +985,7 @@ pub async fn sync_runtime_input_plugin(
         pipeline_name,
         Some(_offset_service.env_value()),
         Some(session_token),
+        1,
     )
     .await?;
     let start_request = build_source_start_request_for_pipeline(
@@ -1543,6 +1556,26 @@ fn runtime_sink_process_target() -> usize {
         .clamp(1, 16)
 }
 
+fn runtime_sink_session_capacity() -> usize {
+    let process_target = runtime_sink_process_target();
+    let requested = Config::getenv("RUNTIME_SINK_SESSIONS_PER_CHILD", "2")
+        .parse::<usize>()
+        .ok()
+        .filter(|value| *value > 0)
+        .unwrap_or(2)
+        .min(16);
+    let total_budget = Config::getenv(
+        "RUNTIME_SINK_SESSION_BUDGET",
+        &process_target.saturating_mul(2).to_string(),
+    )
+    .parse::<usize>()
+    .ok()
+    .filter(|value| *value > 0)
+    .unwrap_or_else(|| process_target.saturating_mul(2))
+    .min(256);
+    requested.min((total_budget / process_target).max(1))
+}
+
 #[derive(Debug)]
 struct RuntimeSinkBudgetBinding {
     binding: RuntimeBinding,
@@ -1835,9 +1868,417 @@ impl Drop for RuntimeSinkProcessPermit {
     }
 }
 
+#[derive(Clone, Debug)]
+struct RuntimeSinkConnectionFailure {
+    kind: ErrorKind,
+    message: String,
+}
+
+impl RuntimeSinkConnectionFailure {
+    fn into_io(self) -> io::Error {
+        io::Error::new(self.kind, self.message)
+    }
+}
+
+struct RuntimeSinkConnectionShared {
+    child_pid: Option<u32>,
+    alive: AtomicBool,
+    failure: std::sync::Mutex<Option<RuntimeSinkConnectionFailure>>,
+    pending: std::sync::Mutex<HashMap<u64, mpsc::Sender<PluginFrame>>>,
+    admin_waiter: std::sync::Mutex<
+        Option<oneshot::Sender<Result<PluginFrame, RuntimeSinkConnectionFailure>>>,
+    >,
+}
+
+impl RuntimeSinkConnectionShared {
+    fn failure(&self) -> Option<RuntimeSinkConnectionFailure> {
+        self.failure
+            .lock()
+            .expect("runtime sink connection failure poisoned")
+            .clone()
+    }
+
+    fn fail(&self, kind: ErrorKind, message: impl Into<String>) {
+        if !self.alive.swap(false, Ordering::AcqRel) {
+            return;
+        }
+        let failure = RuntimeSinkConnectionFailure {
+            kind,
+            message: message.into(),
+        };
+        *self
+            .failure
+            .lock()
+            .expect("runtime sink connection failure poisoned") = Some(failure.clone());
+        self.pending
+            .lock()
+            .expect("runtime sink pending sessions poisoned")
+            .clear();
+        if let Some(waiter) = self
+            .admin_waiter
+            .lock()
+            .expect("runtime sink admin waiter poisoned")
+            .take()
+        {
+            let _ = waiter.send(Err(failure));
+        }
+        if let Some(child_pid) = self.child_pid {
+            terminate_runtime_plugin_child_pid(child_pid);
+            unregister_runtime_plugin_child(Some(child_pid));
+        }
+    }
+}
+
+struct RuntimeSinkMultiplexConnection {
+    _child: Mutex<RuntimePluginChild>,
+    control_writer: Mutex<OwnedWriteHalf>,
+    data_writer: Mutex<OwnedWriteHalf>,
+    shared: Arc<RuntimeSinkConnectionShared>,
+    control_reader_task: tokio::task::JoinHandle<()>,
+}
+
+impl RuntimeSinkMultiplexConnection {
+    fn start(connection: RuntimeChildConnection) -> Arc<Self> {
+        let RuntimeChildConnection {
+            child,
+            control,
+            data,
+            ..
+        } = connection;
+        let child_pid = child.id();
+        let (control_reader, control_writer) = control.into_split();
+        let (_data_reader, data_writer) = data.into_split();
+        let shared = Arc::new(RuntimeSinkConnectionShared {
+            child_pid,
+            alive: AtomicBool::new(true),
+            failure: std::sync::Mutex::new(None),
+            pending: std::sync::Mutex::new(HashMap::new()),
+            admin_waiter: std::sync::Mutex::new(None),
+        });
+        let reader_shared = Arc::clone(&shared);
+        let control_reader_task = tokio::spawn(async move {
+            run_runtime_sink_control_demux(control_reader, reader_shared).await;
+        });
+        Arc::new(Self {
+            _child: Mutex::new(child),
+            control_writer: Mutex::new(control_writer),
+            data_writer: Mutex::new(data_writer),
+            shared,
+            control_reader_task,
+        })
+    }
+
+    fn is_alive(&self) -> bool {
+        self.shared.alive.load(Ordering::Acquire)
+    }
+
+    fn failure(&self) -> io::Error {
+        self.shared
+            .failure()
+            .unwrap_or(RuntimeSinkConnectionFailure {
+                kind: ErrorKind::BrokenPipe,
+                message: "runtime sink connection is closed".to_string(),
+            })
+            .into_io()
+    }
+
+    fn register_session(self: &Arc<Self>, request_id: u64) -> io::Result<RuntimeSinkSession> {
+        if !self.is_alive() {
+            return Err(self.failure());
+        }
+        let (sender, receiver) = mpsc::channel(2);
+        let mut pending = self
+            .shared
+            .pending
+            .lock()
+            .expect("runtime sink pending sessions poisoned");
+        if !self.is_alive() {
+            return Err(self.failure());
+        }
+        if pending.contains_key(&request_id) {
+            return Err(io::Error::new(
+                ErrorKind::InvalidInput,
+                format!("duplicate runtime sink request id {request_id}"),
+            ));
+        }
+        pending.insert(request_id, sender);
+        Ok(RuntimeSinkSession {
+            request_id,
+            receiver,
+            connection: Arc::clone(self),
+        })
+    }
+
+    async fn send_control(&self, frame: &HostFrame) -> io::Result<()> {
+        if !self.is_alive() {
+            return Err(self.failure());
+        }
+        let result = {
+            let mut writer = self.control_writer.lock().await;
+            write_frame(&mut *writer, frame).await
+        };
+        if let Err(err) = &result {
+            self.shared.fail(
+                err.kind(),
+                format!("runtime sink control write failed: {err}"),
+            );
+        }
+        result
+    }
+
+    async fn send_data(&self, frame: &HostDataFrame) -> io::Result<()> {
+        if !self.is_alive() {
+            return Err(self.failure());
+        }
+        let payload_bytes = match frame {
+            HostDataFrame::SinkChunk(chunk) => chunk.arrow_stream_bytes.len() as u64,
+            HostDataFrame::FinishSink(_) => 0,
+        };
+        let result = {
+            let mut writer = self.data_writer.lock().await;
+            write_frame(&mut *writer, frame).await
+        };
+        if let Err(err) = &result {
+            self.shared
+                .fail(err.kind(), format!("runtime sink data write failed: {err}"));
+        } else {
+            crate::metrics::counters::record_runtime_sink_ipc(payload_bytes, 1);
+        }
+        result
+    }
+
+    async fn send_admin(&self, frame: &HostFrame) -> io::Result<PluginFrame> {
+        if !self.is_alive() {
+            return Err(self.failure());
+        }
+        let (sender, receiver) = oneshot::channel();
+        {
+            let mut waiter = self
+                .shared
+                .admin_waiter
+                .lock()
+                .expect("runtime sink admin waiter poisoned");
+            if waiter.is_some() {
+                return Err(io::Error::other(
+                    "concurrent runtime sink administrative request",
+                ));
+            }
+            *waiter = Some(sender);
+        }
+        self.send_control(frame).await?;
+        receiver
+            .await
+            .map_err(|_| self.failure())?
+            .map_err(RuntimeSinkConnectionFailure::into_io)
+    }
+}
+
+impl Drop for RuntimeSinkMultiplexConnection {
+    fn drop(&mut self) {
+        self.control_reader_task.abort();
+        self.shared.fail(
+            ErrorKind::BrokenPipe,
+            "runtime sink connection dropped before session completion",
+        );
+    }
+}
+
+async fn run_runtime_sink_control_demux(
+    mut reader: OwnedReadHalf,
+    shared: Arc<RuntimeSinkConnectionShared>,
+) {
+    loop {
+        let frame = match read_frame::<_, PluginFrame>(&mut reader).await {
+            Ok(frame) => frame,
+            Err(err) => {
+                shared.fail(
+                    err.kind(),
+                    format!("runtime sink control connection failed: {err}"),
+                );
+                return;
+            }
+        };
+        let request_id = match &frame {
+            PluginFrame::PrepareAck(ack) => Some(ack.request_id),
+            PluginFrame::SinkAck(ack) => Some(ack.request_id),
+            PluginFrame::SinkError(err) => Some(err.request_id),
+            PluginFrame::SchemaStateRefreshRequired(refresh) => Some(refresh.request_id),
+            _ => None,
+        };
+        if let Some(request_id) = request_id {
+            let sender = shared
+                .pending
+                .lock()
+                .expect("runtime sink pending sessions poisoned")
+                .get(&request_id)
+                .cloned();
+            let Some(sender) = sender else {
+                shared.fail(
+                    ErrorKind::InvalidData,
+                    format!("runtime sink response for unknown request {request_id}"),
+                );
+                return;
+            };
+            if sender.try_send(frame).is_err() {
+                shared.fail(
+                    ErrorKind::InvalidData,
+                    format!("runtime sink response queue overflow for request {request_id}"),
+                );
+                return;
+            }
+            continue;
+        }
+        match frame {
+            PluginFrame::Installed => {
+                let waiter = shared
+                    .admin_waiter
+                    .lock()
+                    .expect("runtime sink admin waiter poisoned")
+                    .take();
+                let Some(waiter) = waiter else {
+                    shared.fail(
+                        ErrorKind::InvalidData,
+                        "stale runtime sink install acknowledgement",
+                    );
+                    return;
+                };
+                let _ = waiter.send(Ok(PluginFrame::Installed));
+            }
+            PluginFrame::Error(message) => {
+                shared.fail(ErrorKind::Other, format!("runtime sink error: {message}"));
+                return;
+            }
+            other => {
+                shared.fail(
+                    ErrorKind::InvalidData,
+                    format!("unexpected runtime sink control frame: {other:?}"),
+                );
+                return;
+            }
+        }
+    }
+}
+
+struct RuntimeSinkSession {
+    request_id: u64,
+    receiver: mpsc::Receiver<PluginFrame>,
+    connection: Arc<RuntimeSinkMultiplexConnection>,
+}
+
+impl RuntimeSinkSession {
+    async fn recv(&mut self) -> io::Result<PluginFrame> {
+        if !self.connection.is_alive() {
+            return Err(self.connection.failure());
+        }
+        let frame = self
+            .receiver
+            .recv()
+            .await
+            .ok_or_else(|| self.connection.failure())?;
+        if !self.connection.is_alive() {
+            return Err(self.connection.failure());
+        }
+        Ok(frame)
+    }
+}
+
+impl Drop for RuntimeSinkSession {
+    fn drop(&mut self) {
+        self.connection
+            .shared
+            .pending
+            .lock()
+            .expect("runtime sink pending sessions poisoned")
+            .remove(&self.request_id);
+    }
+}
+
 struct RuntimeSinkWorker {
-    connection: Mutex<RuntimeChildConnection>,
+    id: usize,
+    connection: Mutex<Arc<RuntimeSinkMultiplexConnection>>,
+    restart_lock: Mutex<()>,
+    installed_schema_version: AtomicU64,
+    has_installed_schema: AtomicBool,
     _process_permit: RuntimeSinkProcessPermit,
+}
+
+impl RuntimeSinkWorker {
+    fn installed_schema_version(&self) -> Option<u64> {
+        self.has_installed_schema
+            .load(Ordering::Acquire)
+            .then(|| self.installed_schema_version.load(Ordering::Acquire))
+    }
+
+    fn set_installed_schema_version(&self, version: u64) {
+        self.installed_schema_version
+            .store(version, Ordering::Release);
+        self.has_installed_schema.store(true, Ordering::Release);
+    }
+
+    async fn connection(&self) -> Arc<RuntimeSinkMultiplexConnection> {
+        self.connection.lock().await.clone()
+    }
+}
+
+struct RuntimeSinkSlotState {
+    available: VecDeque<Arc<RuntimeSinkWorker>>,
+    free_by_worker: HashMap<usize, usize>,
+}
+
+struct RuntimeSinkSlotQueue {
+    capacity_per_worker: usize,
+    state: std::sync::Mutex<RuntimeSinkSlotState>,
+    notify: Notify,
+}
+
+impl RuntimeSinkSlotQueue {
+    fn new(capacity_per_worker: usize) -> Arc<Self> {
+        Arc::new(Self {
+            capacity_per_worker,
+            state: std::sync::Mutex::new(RuntimeSinkSlotState {
+                available: VecDeque::new(),
+                free_by_worker: HashMap::new(),
+            }),
+            notify: Notify::new(),
+        })
+    }
+
+    fn add_worker(&self, worker: Arc<RuntimeSinkWorker>) {
+        let mut state = self.state.lock().expect("runtime sink slot queue poisoned");
+        state
+            .free_by_worker
+            .insert(worker.id, self.capacity_per_worker);
+        state.available.push_back(worker);
+        self.notify.notify_waiters();
+    }
+
+    fn try_acquire(&self) -> Option<Arc<RuntimeSinkWorker>> {
+        let mut state = self.state.lock().expect("runtime sink slot queue poisoned");
+        let worker = state.available.pop_front()?;
+        let free = state
+            .free_by_worker
+            .get_mut(&worker.id)
+            .expect("runtime sink worker missing from slot queue");
+        *free = free.saturating_sub(1);
+        if *free > 0 {
+            state.available.push_back(Arc::clone(&worker));
+        }
+        Some(worker)
+    }
+
+    fn release(&self, worker: Arc<RuntimeSinkWorker>) {
+        let mut state = self.state.lock().expect("runtime sink slot queue poisoned");
+        let free = state
+            .free_by_worker
+            .get_mut(&worker.id)
+            .expect("runtime sink worker missing from slot queue");
+        let was_full = *free == 0;
+        *free = (*free + 1).min(self.capacity_per_worker);
+        if was_full {
+            state.available.push_back(worker);
+        }
+        self.notify.notify_one();
+    }
 }
 
 struct RuntimeSinkConnectionPool {
@@ -1846,17 +2287,25 @@ struct RuntimeSinkConnectionPool {
     pipeline_name: String,
     budget_registration: RuntimeSinkBudgetRegistration,
     workers: tokio::sync::Mutex<Vec<Arc<RuntimeSinkWorker>>>,
-    semaphore: Arc<tokio::sync::Semaphore>,
-    next_worker: AtomicUsize,
+    slots: Arc<RuntimeSinkSlotQueue>,
+    next_worker_id: AtomicUsize,
     worker_count: AtomicUsize,
     schema_publish_lock: tokio::sync::Mutex<()>,
+    schema_apply_fence: Arc<tokio::sync::RwLock<()>>,
     has_published_schema_state: AtomicBool,
     published_schema_version: std::sync::atomic::AtomicU64,
 }
 
 struct RuntimeSinkWorkerLease {
-    _permit: tokio::sync::OwnedSemaphorePermit,
+    slots: Arc<RuntimeSinkSlotQueue>,
     worker: Arc<RuntimeSinkWorker>,
+}
+
+impl Drop for RuntimeSinkWorkerLease {
+    fn drop(&mut self) {
+        crate::metrics::counters::dec_runtime_sink_active_sessions();
+        self.slots.release(Arc::clone(&self.worker));
+    }
 }
 
 struct RuntimeSinkPoolWaitMetrics {
@@ -1879,6 +2328,63 @@ impl Drop for RuntimeSinkPoolWaitMetrics {
     }
 }
 
+async fn spawn_installed_runtime_sink_connection(
+    resolved: &ResolvedRuntimePlugin,
+    pipeline_name: &str,
+    install_request: &RuntimeSinkInstallRequest,
+    session_capacity: usize,
+) -> io::Result<(Arc<RuntimeSinkMultiplexConnection>, u64)> {
+    let mut last_error = None;
+    for attempt in 0..2 {
+        let mut connection = RuntimeChildConnection::spawn(
+            resolved.clone(),
+            pipeline_name.to_string(),
+            None,
+            None,
+            session_capacity,
+        )
+        .await?;
+        let install_result = async {
+            connection
+                .send(&HostFrame::InstallSink(install_request.clone()))
+                .await?;
+            expect_install_ack(&mut connection, "sink").await?;
+            let schema_state = current_runtime_schema_state();
+            connection
+                .send(&HostFrame::InstallSchemaState(
+                    RuntimeSchemaStateInstallRequest {
+                        schema_state: RuntimeSchemaState {
+                            version: schema_state.version,
+                            namespaces: schema_state.namespaces.clone(),
+                        },
+                    },
+                ))
+                .await?;
+            expect_install_ack(&mut connection, "schema state").await?;
+            connection.installed_schema_version = Some(schema_state.version);
+            Ok::<u64, io::Error>(schema_state.version)
+        }
+        .await;
+        match install_result {
+            Ok(version) => {
+                return Ok((RuntimeSinkMultiplexConnection::start(connection), version));
+            }
+            Err(err)
+                if attempt == 0
+                    && (connection.has_exited()? || should_retry_runtime_connection(&err)) =>
+            {
+                warn!(
+                    "runtime sink startup install failed, restarting child: {}",
+                    err
+                );
+                last_error = Some(err);
+            }
+            Err(err) => return Err(err),
+        }
+    }
+    Err(last_error.unwrap_or_else(|| io::Error::other("runtime sink startup install failed")))
+}
+
 impl RuntimeSinkConnectionPool {
     async fn new(
         resolved: ResolvedRuntimePlugin,
@@ -1888,23 +2394,36 @@ impl RuntimeSinkConnectionPool {
     ) -> io::Result<Self> {
         let budget_registration = process_budget.register(install_request.binding);
         let process_permit = budget_registration.acquire_initial()?;
-        let connection =
-            RuntimeChildConnection::spawn(resolved.clone(), pipeline_name.clone(), None, None)
-                .await?;
-        let workers = vec![Arc::new(RuntimeSinkWorker {
+        let session_capacity = runtime_sink_session_capacity();
+        let (connection, schema_version) = spawn_installed_runtime_sink_connection(
+            &resolved,
+            &pipeline_name,
+            &install_request,
+            session_capacity,
+        )
+        .await?;
+        let slots = RuntimeSinkSlotQueue::new(session_capacity);
+        let first_worker = Arc::new(RuntimeSinkWorker {
+            id: 0,
             connection: Mutex::new(connection),
+            restart_lock: Mutex::new(()),
+            installed_schema_version: AtomicU64::new(schema_version),
+            has_installed_schema: AtomicBool::new(true),
             _process_permit: process_permit,
-        })];
+        });
+        slots.add_worker(Arc::clone(&first_worker));
+        let workers = vec![first_worker];
         Ok(Self {
             install_request,
             resolved,
             pipeline_name,
             workers: tokio::sync::Mutex::new(workers),
             budget_registration,
-            semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
-            next_worker: AtomicUsize::new(0),
+            slots,
+            next_worker_id: AtomicUsize::new(1),
             worker_count: AtomicUsize::new(1),
             schema_publish_lock: tokio::sync::Mutex::new(()),
+            schema_apply_fence: Arc::new(tokio::sync::RwLock::new(())),
             has_published_schema_state: AtomicBool::new(false),
             published_schema_version: std::sync::atomic::AtomicU64::new(0),
         })
@@ -1912,41 +2431,27 @@ impl RuntimeSinkConnectionPool {
 
     /// Grow toward this binding's fair share of the global process target.
     ///
-    /// Safe cross-pool shrink and worker multiplexing remain deferred to the next runtime commit.
-    /// Every sequential v17 worker spawn still owns one global permit.
     async fn maybe_grow_to_target(&self) -> io::Result<()> {
         let mut workers = self.workers.lock().await;
         while let Some(process_permit) = self.budget_registration.try_acquire_additional() {
-            let mut connection = RuntimeChildConnection::spawn(
-                self.resolved.clone(),
-                self.pipeline_name.clone(),
-                None,
-                None,
+            let (connection, schema_version) = spawn_installed_runtime_sink_connection(
+                &self.resolved,
+                &self.pipeline_name,
+                &self.install_request,
+                self.slots.capacity_per_worker,
             )
             .await?;
-            connection
-                .send(&HostFrame::InstallSink(self.install_request.clone()))
-                .await?;
-            expect_install_ack(&mut connection, "sink").await?;
-            let schema_state = current_runtime_schema_state();
-            connection
-                .send(&HostFrame::InstallSchemaState(
-                    RuntimeSchemaStateInstallRequest {
-                        schema_state: crate::runtime_plugins::protocol::RuntimeSchemaState {
-                            version: schema_state.version,
-                            namespaces: schema_state.namespaces.clone(),
-                        },
-                    },
-                ))
-                .await?;
-            expect_install_ack(&mut connection, "schema state").await?;
-            connection.installed_schema_version = Some(schema_state.version);
-            workers.push(Arc::new(RuntimeSinkWorker {
+            let worker = Arc::new(RuntimeSinkWorker {
+                id: self.next_worker_id.fetch_add(1, Ordering::Relaxed),
                 connection: Mutex::new(connection),
+                restart_lock: Mutex::new(()),
+                installed_schema_version: AtomicU64::new(schema_version),
+                has_installed_schema: AtomicBool::new(true),
                 _process_permit: process_permit,
-            }));
+            });
+            self.slots.add_worker(Arc::clone(&worker));
+            workers.push(worker);
             self.worker_count.store(workers.len(), Ordering::Release);
-            self.semaphore.add_permits(1);
             info!(
                 "tune: runtime_sink_pool grew binding={:?} workers={} global_active={} global_target={}",
                 self.budget_registration.binding(),
@@ -1961,18 +2466,16 @@ impl RuntimeSinkConnectionPool {
     async fn acquire(&self) -> io::Result<RuntimeSinkWorkerLease> {
         let _wait_metrics = RuntimeSinkPoolWaitMetrics::new();
         self.maybe_grow_to_target().await?;
-        let permit = Arc::clone(&self.semaphore)
-            .acquire_owned()
-            .await
-            .map_err(|_| io::Error::other("runtime sink worker pool closed"))?;
-        let worker = {
-            let workers = self.workers.lock().await;
-            let len = workers.len().max(1);
-            let idx = self.next_worker.fetch_add(1, Ordering::Relaxed) % len;
-            Arc::clone(&workers[idx])
+        let worker = loop {
+            let notified = self.slots.notify.notified();
+            if let Some(worker) = self.slots.try_acquire() {
+                break worker;
+            }
+            notified.await;
         };
+        crate::metrics::counters::inc_runtime_sink_active_sessions();
         Ok(RuntimeSinkWorkerLease {
-            _permit: permit,
+            slots: Arc::clone(&self.slots),
             worker,
         })
     }
@@ -2002,8 +2505,7 @@ impl RuntimeSinkConnectionPool {
         };
         let mut minimum_version: Option<u64> = None;
         for worker in workers {
-            let guard = worker.connection.lock().await;
-            let Some(installed_version) = guard.installed_schema_version else {
+            let Some(installed_version) = worker.installed_schema_version() else {
                 return;
             };
             minimum_version = Some(
@@ -2085,98 +2587,100 @@ impl RuntimeDataSinkPlugin {
             capability,
             pool,
         };
-        for worker in {
-            let workers = plugin.pool.workers.lock().await;
-            workers.iter().cloned().collect::<Vec<_>>()
-        } {
-            let mut guard = worker.connection.lock().await;
-            match plugin.install_runtime_state(&mut guard).await {
-                Ok(()) => {}
-                Err(err) if guard.has_exited()? || should_retry_runtime_connection(&err) => {
-                    warn!(
-                        "runtime sink startup install failed, restarting child: {}",
-                        err
-                    );
-                    plugin.restart_and_reinstall(&mut guard).await?;
-                }
-                Err(err) => return Err(err),
-            }
-        }
         plugin.pool.refresh_published_schema_version().await;
         Ok(plugin)
     }
 
-    async fn install_runtime_state(
+    async fn restart_worker_inner(
         &self,
-        connection: &mut RuntimeChildConnection,
-    ) -> io::Result<()> {
-        self.install_sink_binding(connection).await?;
-        self.install_latest_schema_state(connection).await
-    }
-
-    async fn restart_and_reinstall(
-        &self,
-        connection: &mut RuntimeChildConnection,
-    ) -> io::Result<()> {
-        connection.restart().await?;
-        self.install_runtime_state(connection).await
-    }
-
-    async fn ensure_connection_ready(
-        &self,
-        connection: &mut RuntimeChildConnection,
-    ) -> io::Result<()> {
-        if connection.has_exited()? {
-            self.restart_and_reinstall(connection).await?;
+        worker: &Arc<RuntimeSinkWorker>,
+    ) -> io::Result<Arc<RuntimeSinkMultiplexConnection>> {
+        let _restart_guard = worker.restart_lock.lock().await;
+        let current = worker.connection().await;
+        if current.is_alive() {
+            return Ok(current);
         }
-        Ok(())
+        let (replacement, schema_version) = spawn_installed_runtime_sink_connection(
+            self.pool.resolved(),
+            self.pool.pipeline_name(),
+            self.pool.install_request(),
+            self.pool.slots.capacity_per_worker,
+        )
+        .await?;
+        worker.set_installed_schema_version(schema_version);
+        *worker.connection.lock().await = Arc::clone(&replacement);
+        Ok(replacement)
     }
 
-    async fn install_sink_binding(
+    async fn restart_worker(
         &self,
-        connection: &mut RuntimeChildConnection,
-    ) -> io::Result<()> {
-        connection
-            .send(&HostFrame::InstallSink(self.install_request.clone()))
-            .await?;
-        expect_install_ack(connection, "sink").await
+        worker: &Arc<RuntimeSinkWorker>,
+    ) -> io::Result<Arc<RuntimeSinkMultiplexConnection>> {
+        let _publish_guard = self.pool.schema_publish_lock.lock().await;
+        let _apply_guard = Arc::clone(&self.pool.schema_apply_fence)
+            .write_owned()
+            .await;
+        self.restart_worker_inner(worker).await
+    }
+
+    async fn ensure_worker_connection(
+        &self,
+        worker: &Arc<RuntimeSinkWorker>,
+    ) -> io::Result<Arc<RuntimeSinkMultiplexConnection>> {
+        let connection = worker.connection().await;
+        if connection.is_alive() {
+            Ok(connection)
+        } else {
+            self.restart_worker(worker).await
+        }
     }
 
     async fn send_schema_state_install(
         &self,
-        connection: &mut RuntimeChildConnection,
+        worker: &Arc<RuntimeSinkWorker>,
+        connection: &Arc<RuntimeSinkMultiplexConnection>,
         schema_version: u64,
         namespaces: &BTreeMap<String, OutputMetadata>,
     ) -> io::Result<()> {
-        if connection
-            .installed_schema_version
+        if worker
+            .installed_schema_version()
             .is_some_and(|installed| installed >= schema_version)
         {
             crate::metrics::counters::add_runtime_schema_state_publication_skipped(1);
             return Ok(());
         }
-        connection
-            .send(&HostFrame::InstallSchemaState(
+        let frame = timeout(
+            runtime_sink_schema_timeout(),
+            connection.send_admin(&HostFrame::InstallSchemaState(
                 RuntimeSchemaStateInstallRequest {
-                    schema_state: crate::runtime_plugins::protocol::RuntimeSchemaState {
+                    schema_state: RuntimeSchemaState {
                         version: schema_version,
                         namespaces: namespaces.clone(),
                     },
                 },
-            ))
-            .await?;
-        expect_install_ack(connection, "schema state").await?;
-        connection.installed_schema_version = Some(schema_version);
-        Ok(())
-    }
-
-    async fn install_latest_schema_state(
-        &self,
-        connection: &mut RuntimeChildConnection,
-    ) -> io::Result<()> {
-        let schema_state = current_runtime_schema_state();
-        self.send_schema_state_install(connection, schema_state.version, &schema_state.namespaces)
-            .await
+            )),
+        )
+        .await
+        .map_err(|_| {
+            connection.shared.fail(
+                ErrorKind::TimedOut,
+                "runtime sink schema state install timed out",
+            );
+            io::Error::new(
+                ErrorKind::TimedOut,
+                "runtime sink schema state install timed out",
+            )
+        })??;
+        match frame {
+            PluginFrame::Installed => {
+                worker.set_installed_schema_version(schema_version);
+                Ok(())
+            }
+            other => Err(io::Error::new(
+                ErrorKind::InvalidData,
+                format!("unexpected runtime sink schema install response: {other:?}"),
+            )),
+        }
     }
 
     async fn ensure_latest_schema_state(&self) -> io::Result<u64> {
@@ -2192,7 +2696,7 @@ impl RuntimeDataSinkPlugin {
     }
 
     async fn send_sink_payload(
-        connection: &mut RuntimeChildConnection,
+        connection: &RuntimeSinkMultiplexConnection,
         request_id: u64,
         arrow_stream_bytes: &[u8],
         rows: u64,
@@ -2212,6 +2716,7 @@ impl RuntimeDataSinkPlugin {
                 .send_data(&HostDataFrame::SinkChunk(sink_chunk))
                 .await?;
             chunks = chunks.saturating_add(1);
+            tokio::task::yield_now().await;
         }
         connection
             .send_data(&HostDataFrame::FinishSink(FinishSink {
@@ -2240,13 +2745,17 @@ impl RuntimeDataSinkPlugin {
         };
         loop {
             let lease = self.pool.acquire().await?;
-            let mut guard = lease.worker.connection.lock().await;
-            self.ensure_connection_ready(&mut guard).await?;
-
+            let worker = Arc::clone(&lease.worker);
+            let connection = self.ensure_worker_connection(&worker).await?;
+            let apply_guard = Arc::clone(&self.pool.schema_apply_fence).read_owned().await;
+            let mut session = connection.register_session(request.request_id)?;
             let request_timeout = runtime_sink_request_timeout();
-            let recv_result = match timeout(request_timeout, async {
-                guard.send(&HostFrame::PrepareSink(prepare.clone())).await?;
-                let prepare_response = guard.recv().await?;
+            let mut payload_started = false;
+            let response = timeout(request_timeout, async {
+                connection
+                    .send_control(&HostFrame::PrepareSink(prepare.clone()))
+                    .await?;
+                let prepare_response = session.recv().await?;
                 match prepare_response {
                     PluginFrame::PrepareAck(PrepareAck {
                         request_id,
@@ -2263,8 +2772,9 @@ impl RuntimeDataSinkPlugin {
                             encoded_rows = Some(encoded.rows);
                             encoded_bytes = Some(encoded.bytes);
                         }
+                        payload_started = true;
                         Self::send_sink_payload(
-                            &mut guard,
+                            &connection,
                             request.request_id,
                             encoded_bytes
                                 .as_deref()
@@ -2272,99 +2782,121 @@ impl RuntimeDataSinkPlugin {
                             encoded_rows.expect("runtime sink row count encoded"),
                         )
                         .await?;
-                        guard.recv().await
+                        session.recv().await
                     }
                     other => Ok(other),
                 }
             })
-            .await
-            {
-                Ok(result) => result,
+            .await;
+            drop(session);
+            drop(apply_guard);
+            drop(lease);
+
+            let frame = match response {
+                Ok(Ok(frame)) => frame,
+                Ok(Err(err)) => {
+                    let retry = !payload_started && !retried;
+                    let _ = self.restart_worker(&worker).await;
+                    if retry {
+                        retried = true;
+                        continue;
+                    }
+                    return Err(err);
+                }
                 Err(_) => {
-                    warn!(
-                        "runtime sink request timed out request_id={} compaction_id={} timeout_secs={}",
-                        request.request_id,
-                        request.compaction_id,
-                        request_timeout.as_secs()
-                    );
-                    self.restart_and_reinstall(&mut guard).await?;
-                    return Err(io::Error::new(
+                    let err = io::Error::new(
                         ErrorKind::TimedOut,
                         format!(
                             "runtime sink request {} timed out after {}s",
                             request.request_id,
                             request_timeout.as_secs()
                         ),
-                    ));
-                }
-            };
-            let recv_result = match recv_result {
-                Ok(frame) => Ok(frame),
-                Err(err) => {
-                    self.restart_and_reinstall(&mut guard).await?;
-                    Err(err)
-                }
-            };
-
-            match recv_result {
-                Ok(PluginFrame::PrepareAck(PrepareAck {
-                    request_id,
-                    result: PrepareSinkResult::AlreadyApplied(receipt),
-                })) if request_id == request.request_id => {
-                    validate_commit_receipt(&receipt, &prepare.envelope)?;
-                    return Ok(SinkWriteOutcome::AlreadyApplied);
-                }
-                Ok(PluginFrame::PrepareAck(PrepareAck {
-                    request_id,
-                    result: PrepareSinkResult::Rejected { reason },
-                })) if request_id == request.request_id => {
-                    return Err(io::Error::other(format!(
-                        "runtime sink prepare rejected: {reason}"
-                    )));
-                }
-                Ok(PluginFrame::SinkAck(ack)) if ack.request_id == request.request_id => {
-                    validate_sink_ack(&ack, &prepare.envelope)?;
-                    if let Some(rows) = ack.stats.rows {
-                        crate::metrics::counters::add_parquet_rows(rows);
-                    }
-                    return Ok(ack.outcome);
-                }
-                Ok(PluginFrame::Error(err)) => return Err(io::Error::other(err)),
-                Ok(PluginFrame::SchemaStateRefreshRequired(_refresh)) => {
-                    if schema_refreshes >= 3 {
-                        return Err(io::Error::other(
-                            "runtime sink repeatedly requested schema refresh",
-                        ));
-                    }
-                    guard.installed_schema_version = None;
-                    self.install_latest_schema_state(&mut guard).await?;
-                    schema_refreshes += 1;
-                    continue;
-                }
-                Ok(other) => {
-                    let err =
-                        io::Error::other(format!("unexpected runtime sink frame: {:?}", other));
-                    if !retried && should_retry_runtime_connection(&err) {
-                        warn!(
-                            "runtime sink request got stale frame, restarting child: {}",
-                            err
-                        );
-                        self.restart_and_reinstall(&mut guard).await?;
+                    );
+                    warn!(
+                        "runtime sink request timed out request_id={} compaction_id={} timeout_secs={}",
+                        request.request_id,
+                        request.compaction_id,
+                        request_timeout.as_secs()
+                    );
+                    connection.shared.fail(err.kind(), err.to_string());
+                    let retry = !payload_started && !retried;
+                    let _ = self.restart_worker(&worker).await;
+                    if retry {
                         retried = true;
                         continue;
                     }
                     return Err(err);
                 }
-                Err(err)
-                    if !retried
-                        && (guard.has_exited()? || should_retry_runtime_connection(&err)) =>
+            };
+
+            match frame {
+                PluginFrame::PrepareAck(PrepareAck {
+                    request_id,
+                    result: PrepareSinkResult::AlreadyApplied(receipt),
+                }) if request_id == request.request_id => {
+                    validate_commit_receipt(&receipt, &prepare.envelope)?;
+                    return Ok(SinkWriteOutcome::AlreadyApplied);
+                }
+                PluginFrame::PrepareAck(PrepareAck {
+                    request_id,
+                    result: PrepareSinkResult::Rejected { reason },
+                }) if request_id == request.request_id => {
+                    return Err(io::Error::other(format!(
+                        "runtime sink prepare rejected: {reason}"
+                    )));
+                }
+                PluginFrame::SinkAck(ack) if ack.request_id == request.request_id => {
+                    if let Err(err) = validate_sink_ack(&ack, &prepare.envelope) {
+                        connection.shared.fail(err.kind(), err.to_string());
+                        let _ = self.restart_worker(&worker).await;
+                        return Err(err);
+                    }
+                    if let Some(rows) = ack.stats.rows {
+                        crate::metrics::counters::add_parquet_rows(rows);
+                    }
+                    return Ok(ack.outcome);
+                }
+                PluginFrame::SinkError(RuntimeSinkError {
+                    request_id,
+                    message,
+                }) if request_id == request.request_id => {
+                    return Err(io::Error::other(message));
+                }
+                PluginFrame::SchemaStateRefreshRequired(refresh)
+                    if refresh.request_id == request.request_id && !payload_started =>
                 {
-                    warn!("runtime sink request failed, restarting child: {}", err);
-                    self.restart_and_reinstall(&mut guard).await?;
-                    retried = true;
+                    if schema_refreshes >= 3 {
+                        return Err(io::Error::other(
+                            "runtime sink repeatedly requested schema refresh",
+                        ));
+                    }
+                    worker.has_installed_schema.store(false, Ordering::Release);
+                    let schema_state = current_runtime_schema_state();
+                    self.install_schema_state_with_retry(
+                        schema_state.version,
+                        &schema_state.namespaces,
+                    )
+                    .await?;
+                    schema_refreshes += 1;
                     continue;
                 }
-                Err(err) => return Err(err),
+                other => {
+                    let err = io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!(
+                            "unexpected runtime sink response for request {}: {:?}",
+                            request.request_id, other
+                        ),
+                    );
+                    connection.shared.fail(err.kind(), err.to_string());
+                    let retry = !payload_started && !retried;
+                    let _ = self.restart_worker(&worker).await;
+                    if retry {
+                        retried = true;
+                        continue;
+                    }
+                    return Err(err);
+                }
             }
         }
     }
@@ -2384,15 +2916,30 @@ impl RuntimeDataSinkPlugin {
             return Ok(());
         }
         self.pool.maybe_grow_to_target().await?;
+        let _apply_guard = Arc::clone(&self.pool.schema_apply_fence)
+            .write_owned()
+            .await;
         let workers = {
             let workers = self.pool.workers.lock().await;
             workers.iter().cloned().collect::<Vec<_>>()
         };
         for worker in workers {
-            let mut guard = worker.connection.lock().await;
-            self.ensure_connection_ready(&mut guard).await?;
-            self.send_schema_state_install(&mut guard, schema_version, namespaces)
-                .await?;
+            let mut connection = worker.connection().await;
+            if !connection.is_alive() {
+                connection = self.restart_worker_inner(&worker).await?;
+            }
+            if let Err(err) = self
+                .send_schema_state_install(&worker, &connection, schema_version, namespaces)
+                .await
+            {
+                warn!(
+                    "runtime sink schema state install failed, restarting child: {}",
+                    err
+                );
+                connection = self.restart_worker_inner(&worker).await?;
+                self.send_schema_state_install(&worker, &connection, schema_version, namespaces)
+                    .await?;
+            }
         }
         self.pool.mark_schema_version_published(schema_version);
         Ok(())
@@ -2414,13 +2961,17 @@ impl RuntimeDataSinkPlugin {
         let mut retried = false;
         loop {
             let lease = self.pool.acquire().await?;
-            let mut guard = lease.worker.connection.lock().await;
-            self.ensure_connection_ready(&mut guard).await?;
+            let worker = Arc::clone(&lease.worker);
+            let connection = self.ensure_worker_connection(&worker).await?;
+            let apply_guard = Arc::clone(&self.pool.schema_apply_fence).read_owned().await;
+            let mut session = connection.register_session(request_id)?;
             let request_timeout = runtime_sink_request_timeout();
             let mut payload_started = false;
-            let recv_result = match timeout(request_timeout, async {
-                guard.send(&HostFrame::PrepareSink(prepare.clone())).await?;
-                let prepare_response = guard.recv().await?;
+            let response = timeout(request_timeout, async {
+                connection
+                    .send_control(&HostFrame::PrepareSink(prepare.clone()))
+                    .await?;
+                let prepare_response = session.recv().await?;
                 if !matches!(
                     prepare_response,
                     PluginFrame::PrepareAck(PrepareAck {
@@ -2430,7 +2981,6 @@ impl RuntimeDataSinkPlugin {
                 ) {
                     return Ok::<_, io::Error>(prepare_response);
                 }
-                payload_started = true;
                 let mut sent_chunks = 0u32;
                 let mut total_rows = 0u64;
                 let mut total_bytes = 0u64;
@@ -2447,10 +2997,12 @@ impl RuntimeDataSinkPlugin {
                     total_rows = total_rows.saturating_add(sink_chunk.rows);
                     total_bytes =
                         total_bytes.saturating_add(sink_chunk.arrow_stream_bytes.len() as u64);
-                    guard
+                    payload_started = true;
+                    connection
                         .send_data(&HostDataFrame::SinkChunk(sink_chunk))
                         .await?;
                     sent_chunks = sent_chunks.saturating_add(1);
+                    tokio::task::yield_now().await;
                 }
                 if sent_chunks == 0 {
                     let sink_chunk = SinkChunk {
@@ -2462,12 +3014,13 @@ impl RuntimeDataSinkPlugin {
                     };
                     sink_chunk.validate_bound().map_err(io::Error::other)?;
                     total_bytes = sink_chunk.arrow_stream_bytes.len() as u64;
-                    guard
+                    payload_started = true;
+                    connection
                         .send_data(&HostDataFrame::SinkChunk(sink_chunk))
                         .await?;
                     sent_chunks = 1;
                 }
-                guard
+                connection
                     .send_data(&HostDataFrame::FinishSink(FinishSink {
                         request_id,
                         chunks: sent_chunks,
@@ -2475,38 +3028,45 @@ impl RuntimeDataSinkPlugin {
                         bytes: total_bytes,
                     }))
                     .await?;
-                guard.recv().await
+                session.recv().await
             })
-            .await
-            {
-                Ok(result) => result,
+            .await;
+            drop(session);
+            drop(apply_guard);
+            drop(lease);
+            let frame = match response {
+                Ok(Ok(frame)) => frame,
+                Ok(Err(err)) => {
+                    let retry = !payload_started && !retried;
+                    let _ = self.restart_worker(&worker).await;
+                    if retry {
+                        retried = true;
+                        continue;
+                    }
+                    return Err(err);
+                }
                 Err(_) => {
-                    warn!(
-                        "runtime grouped sink request timed out request_id={} compaction_id={} timeout_secs={}",
-                        request_id,
-                        compaction_id,
-                        request_timeout.as_secs()
-                    );
-                    self.restart_and_reinstall(&mut guard).await?;
-                    return Err(io::Error::new(
+                    let err = io::Error::new(
                         ErrorKind::TimedOut,
                         format!(
                             "runtime grouped sink request {} timed out after {}s",
                             request_id,
                             request_timeout.as_secs()
                         ),
-                    ));
-                }
-            };
-            let frame = match recv_result {
-                Ok(frame) => frame,
-                Err(err) if !payload_started && !retried => {
-                    self.restart_and_reinstall(&mut guard).await?;
-                    retried = true;
-                    continue;
-                }
-                Err(err) => {
-                    self.restart_and_reinstall(&mut guard).await?;
+                    );
+                    warn!(
+                        "runtime grouped sink request timed out request_id={} compaction_id={} timeout_secs={}",
+                        request_id,
+                        compaction_id,
+                        request_timeout.as_secs()
+                    );
+                    connection.shared.fail(err.kind(), err.to_string());
+                    let retry = !payload_started && !retried;
+                    let _ = self.restart_worker(&worker).await;
+                    if retry {
+                        retried = true;
+                        continue;
+                    }
                     return Err(err);
                 }
             };
@@ -2526,38 +3086,57 @@ impl RuntimeDataSinkPlugin {
                         "runtime grouped sink prepare rejected: {reason}"
                     )));
                 }
-                PluginFrame::SchemaStateRefreshRequired(_) if !payload_started => {
+                PluginFrame::SchemaStateRefreshRequired(refresh)
+                    if refresh.request_id == request_id && !payload_started =>
+                {
                     if schema_refreshes >= 3 {
                         return Err(io::Error::other(
                             "runtime grouped sink repeatedly requested schema refresh",
                         ));
                     }
-                    guard.installed_schema_version = None;
-                    self.install_latest_schema_state(&mut guard).await?;
+                    worker.has_installed_schema.store(false, Ordering::Release);
+                    let schema_state = current_runtime_schema_state();
+                    self.install_schema_state_with_retry(
+                        schema_state.version,
+                        &schema_state.namespaces,
+                    )
+                    .await?;
                     schema_refreshes += 1;
                     continue;
                 }
                 PluginFrame::SinkAck(ack) if ack.request_id == request_id => {
-                    validate_sink_ack(&ack, &prepare.envelope)?;
+                    if let Err(err) = validate_sink_ack(&ack, &prepare.envelope) {
+                        connection.shared.fail(err.kind(), err.to_string());
+                        let _ = self.restart_worker(&worker).await;
+                        return Err(err);
+                    }
                     if let Some(rows) = ack.stats.rows {
                         crate::metrics::counters::add_parquet_rows(rows);
                     }
                     return Ok(ack.outcome);
                 }
-                PluginFrame::Error(message) => return Err(io::Error::other(message)),
-                other if !payload_started && !retried => {
-                    warn!(
-                        "runtime grouped sink prepare got stale frame, restarting child: {:?}",
-                        other
-                    );
-                    self.restart_and_reinstall(&mut guard).await?;
-                    retried = true;
+                PluginFrame::SinkError(RuntimeSinkError {
+                    request_id: error_request_id,
+                    message,
+                }) if error_request_id == request_id => {
+                    return Err(io::Error::other(message));
                 }
                 other => {
-                    return Err(io::Error::other(format!(
-                        "unexpected runtime grouped sink response for request {}: {:?}",
-                        request_id, other
-                    )));
+                    let err = io::Error::new(
+                        ErrorKind::InvalidData,
+                        format!(
+                            "unexpected runtime grouped sink response for request {}: {:?}",
+                            request_id, other
+                        ),
+                    );
+                    connection.shared.fail(err.kind(), err.to_string());
+                    let retry = !payload_started && !retried;
+                    let _ = self.restart_worker(&worker).await;
+                    if retry {
+                        retried = true;
+                        continue;
+                    }
+                    return Err(err);
                 }
             }
         }
@@ -2730,7 +3309,8 @@ impl RuntimeSchemaSinkPlugin {
             binding,
             config,
         };
-        let connection = RuntimeChildConnection::spawn(resolved, pipeline_name, None, None).await?;
+        let connection =
+            RuntimeChildConnection::spawn(resolved, pipeline_name, None, None, 1).await?;
         let plugin = Self {
             install_request,
             connection: Mutex::new(connection),
