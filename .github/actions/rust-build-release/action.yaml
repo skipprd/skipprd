@@ -50,11 +50,11 @@ runs:
           exit 1
         fi
         token="$(
+          env -u AWS_PROFILE \
           AWS_ACCESS_KEY_ID="${access_key}" \
           AWS_SECRET_ACCESS_KEY="${secret_key}" \
           AWS_SESSION_TOKEN="${CODEARTIFACT_AWS_SESSION_TOKEN:-}" \
           AWS_SECURITY_TOKEN= \
-          AWS_PROFILE= \
           AWS_ENDPOINT_URL= \
           AWS_DEFAULT_REGION=us-east-1 \
           AWS_REGION=us-east-1 \

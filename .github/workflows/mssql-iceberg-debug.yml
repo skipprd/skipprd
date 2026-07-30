@@ -70,11 +70,11 @@ jobs:
             exit 1
           fi
           token="$(
+            env -u AWS_PROFILE \
             AWS_ACCESS_KEY_ID="${access_key}" \
             AWS_SECRET_ACCESS_KEY="${secret_key}" \
             AWS_SESSION_TOKEN="${CODEARTIFACT_AWS_SESSION_TOKEN:-}" \
             AWS_SECURITY_TOKEN= \
-            AWS_PROFILE= \
             AWS_ENDPOINT_URL= \
             AWS_DEFAULT_REGION=us-east-1 \
             AWS_REGION=us-east-1 \
@@ -153,11 +153,11 @@ jobs:
             exit 1
           fi
           token="$(
+            env -u AWS_PROFILE \
             AWS_ACCESS_KEY_ID="${access_key}" \
             AWS_SECRET_ACCESS_KEY="${secret_key}" \
             AWS_SESSION_TOKEN="${CODEARTIFACT_AWS_SESSION_TOKEN:-}" \
             AWS_SECURITY_TOKEN= \
-            AWS_PROFILE= \
             AWS_ENDPOINT_URL= \
             AWS_DEFAULT_REGION=us-east-1 \
             AWS_REGION=us-east-1 \
@@ -270,11 +270,11 @@ jobs:
             exit 1
           fi
           token="$(
+            env -u AWS_PROFILE \
             AWS_ACCESS_KEY_ID="${access_key}" \
             AWS_SECRET_ACCESS_KEY="${secret_key}" \
             AWS_SESSION_TOKEN="${CODEARTIFACT_AWS_SESSION_TOKEN:-}" \
             AWS_SECURITY_TOKEN= \
-            AWS_PROFILE= \
             AWS_ENDPOINT_URL= \
             AWS_DEFAULT_REGION=us-east-1 \
             AWS_REGION=us-east-1 \
@@ -310,7 +310,8 @@ jobs:
           echo "AWS_DEFAULT_REGION=auto" >> $env:GITHUB_ENV
           echo "AWS_REGION=auto" >> $env:GITHUB_ENV
           echo "AWS_ENDPOINT_URL=https://$env:R2_ACCOUNT_ID.r2.cloudflarestorage.com" >> $env:GITHUB_ENV
-          echo "AWS_PROFILE=" >> $env:GITHUB_ENV
+          echo "AWS_CONFIG_FILE=NUL" >> $env:GITHUB_ENV
+          echo "AWS_SHARED_CREDENTIALS_FILE=NUL" >> $env:GITHUB_ENV
 
       - name: Install protoc
         shell: pwsh
