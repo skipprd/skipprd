@@ -554,7 +554,8 @@ impl CatalogCoordinator {
         intent: &DecodedIntent,
     ) -> Result<(), GlueApiError> {
         let cache_key = format!(
-            "{}\0{}\0{}\0{}\0{}",
+            "{}\0{}\0{}\0{}\0{}\0{}",
+            target.region.as_deref().unwrap_or_default(),
             target.catalog_id.as_deref().unwrap_or_default(),
             target.database,
             target.table,
@@ -589,7 +590,8 @@ impl CatalogCoordinator {
             ));
         }
         let namespace_prefix = format!(
-            "{}\0{}\0{}\0{}\0",
+            "{}\0{}\0{}\0{}\0{}\0",
+            target.region.as_deref().unwrap_or_default(),
             target.catalog_id.as_deref().unwrap_or_default(),
             target.database,
             target.table,
