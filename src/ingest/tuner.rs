@@ -399,7 +399,7 @@ pub fn compute_flush_budget(
             BudgetReason::HighRunQueue,
         );
     }
-    if signals.cpu_active_tasks >= caps.num_cpus {
+    if signals.run_queue.is_none() && signals.cpu_active_tasks >= caps.num_cpus {
         return finish_decision(
             current,
             multiplicative_backoff(current),
@@ -1254,6 +1254,28 @@ mod tuning_tests {
         let next = compute_flush_budget(current(), caps(), signals);
         assert_eq!(next.scheduler_jobs, 4);
         assert_eq!(next.reason, BudgetReason::HighRunQueue);
+    }
+
+    #[test]
+    fn high_task_count_with_healthy_run_queue_does_not_back_off() {
+        let before = current();
+        let mut signals = healthy_drain();
+        signals.cpu_active_tasks = 128;
+        signals.run_queue = Some(8.0);
+        let next = compute_flush_budget(before, caps(), signals);
+        assert_eq!(next.reason, BudgetReason::HealthyDrain);
+        assert!(next.scheduler_jobs > before.scheduler_jobs);
+        assert!(next.sink_sessions > before.sink_sessions);
+    }
+
+    #[test]
+    fn high_task_count_without_run_queue_uses_conservative_backoff() {
+        let mut signals = healthy_drain();
+        signals.cpu_active_tasks = 64;
+        signals.run_queue = None;
+        let next = compute_flush_budget(current(), caps(), signals);
+        assert_eq!(next.scheduler_jobs, 4);
+        assert_eq!(next.reason, BudgetReason::CpuSaturated);
     }
 
     #[test]
