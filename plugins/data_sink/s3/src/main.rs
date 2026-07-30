@@ -9,8 +9,7 @@ use skippr_runtime_sdk::sink_runtime_entry::{
 #[derive(Debug, Parser)]
 struct S3SinkRuntimePluginCli {}
 
-#[tokio::main]
-async fn main() {
+skippr_runtime_sdk::runtime_main!(async {
     let _cli = S3SinkRuntimePluginCli::parse();
     if let Err(err) = run_runtime_data_sink_plugin(
         "S3",
@@ -33,4 +32,4 @@ async fn main() {
         eprintln!("skippr-plugin-data-sink-s3: {}", err);
         std::process::exit(1);
     }
-}
+});

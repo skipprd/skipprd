@@ -3,13 +3,12 @@ use skippr_runtime_sdk::append_source_runtime::run_append_data_source_main;
 use skippr_runtime_sdk::plugins::cdc;
 use skippr_runtime_sdk::plugins::DataSource;
 
-#[tokio::main]
-async fn main() {
+skippr_runtime_sdk::runtime_main!(async {
     if let Err(err) = run().await {
         eprintln!("skippr-plugin-data-source-motherduck: {}", err);
         std::process::exit(1);
     }
-}
+});
 
 async fn run() -> std::io::Result<()> {
     run_append_data_source_main(

@@ -9,8 +9,7 @@ use skippr_runtime_sdk::sink_runtime_entry::{
 #[derive(Debug, Parser)]
 struct SftpSinkRuntimePluginCli {}
 
-#[tokio::main]
-async fn main() {
+skippr_runtime_sdk::runtime_main!(async {
     let _cli = SftpSinkRuntimePluginCli::parse();
     if let Err(err) = run_runtime_data_sink_plugin(
         "Sftp",
@@ -33,4 +32,4 @@ async fn main() {
         eprintln!("skippr-plugin-data-sink-sftp: {}", err);
         std::process::exit(1);
     }
-}
+});

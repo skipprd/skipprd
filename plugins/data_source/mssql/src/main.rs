@@ -2,16 +2,13 @@ use skippr_plugin_data_source_mssql::*;
 use skippr_runtime_sdk::append_source_runtime::run_append_data_source_main;
 use skippr_runtime_sdk::plugins::cdc;
 use skippr_runtime_sdk::plugins::DataSource;
-use skippr_runtime_sdk::runtime_main::run_runtime_main;
 
-fn main() {
-    run_runtime_main("mssql-source-main", async {
-        if let Err(err) = run().await {
-            eprintln!("skippr-plugin-data-source-mssql: {}", err);
-            std::process::exit(1);
-        }
-    });
-}
+skippr_runtime_sdk::runtime_main!("mssql-source-main", async {
+    if let Err(err) = run().await {
+        eprintln!("skippr-plugin-data-source-mssql: {}", err);
+        std::process::exit(1);
+    }
+});
 
 async fn run() -> std::io::Result<()> {
     run_append_data_source_main(

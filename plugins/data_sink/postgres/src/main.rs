@@ -47,8 +47,12 @@ impl DataSink for PostgresSinkRuntimePlugin {
                 chunk.chunk_index == 0 && chunk.final_chunk,
                 chunk_cdc.as_ref(),
             );
-            self.sync(chunk.into_stream(schema.clone()), chunk_ctx.filename, chunk_ctx.cdc_ctx)
-                .await?;
+            self.sync(
+                chunk.into_stream(schema.clone()),
+                chunk_ctx.filename,
+                chunk_ctx.cdc_ctx,
+            )
+            .await?;
         }
         Ok(skippr_runtime_sdk::plugins::SinkWriteOutcome::Applied)
     }
@@ -58,8 +62,7 @@ impl DataSink for PostgresSinkRuntimePlugin {
     }
 }
 
-#[tokio::main]
-async fn main() {
+skippr_runtime_sdk::runtime_main!(async {
     let _cli = PostgresSinkRuntimePluginCli::parse();
     if let Err(err) = run_runtime_data_sink_plugin(
         "Postgres",
@@ -84,4 +87,4 @@ async fn main() {
         eprintln!("skippr-plugin-data-sink-postgres: {}", err);
         std::process::exit(1);
     }
-}
+});

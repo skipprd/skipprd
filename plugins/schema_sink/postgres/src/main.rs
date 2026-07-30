@@ -32,8 +32,7 @@ impl SchemaSink for PostgresSchemaRuntimePlugin {
     }
 }
 
-#[tokio::main]
-async fn main() {
+skippr_runtime_sdk::runtime_main!(async {
     let _cli = PostgresSchemaRuntimePluginCli::parse();
     if let Err(err) = run_runtime_schema_sink_plugin(
         "Postgres",
@@ -56,4 +55,4 @@ async fn main() {
         eprintln!("skippr-plugin-schema-sink-postgres: {}", err);
         std::process::exit(1);
     }
-}
+});

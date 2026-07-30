@@ -9,8 +9,7 @@ use skippr_runtime_sdk::sink_runtime_entry::{
 #[derive(Debug, Parser)]
 struct Cli {}
 
-#[tokio::main]
-async fn main() {
+skippr_runtime_sdk::runtime_main!(async {
     let _cli = Cli::parse();
     if let Err(err) = run_runtime_schema_sink_plugin(
         "Redshift",
@@ -31,4 +30,4 @@ async fn main() {
         eprintln!("skippr-plugin-schema-sink-redshift: {}", err);
         std::process::exit(1);
     }
-}
+});

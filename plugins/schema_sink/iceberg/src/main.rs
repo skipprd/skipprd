@@ -29,8 +29,7 @@ impl skippr_runtime_sdk::plugins::SchemaSink for IcebergSchemaSync {
 #[derive(Debug, Parser)]
 struct IcebergSchemaRuntimePluginCli {}
 
-#[tokio::main]
-async fn main() {
+skippr_runtime_sdk::runtime_main!(async {
     let _cli = IcebergSchemaRuntimePluginCli::parse();
     if let Err(err) = run_runtime_schema_sink_plugin(
         "Iceberg",
@@ -54,4 +53,4 @@ async fn main() {
         eprintln!("skippr-plugin-schema-sink-iceberg: {}", err);
         std::process::exit(1);
     }
-}
+});

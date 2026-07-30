@@ -189,8 +189,7 @@ impl DataSink for FileSinkRuntimePlugin {
     }
 }
 
-#[tokio::main]
-async fn main() {
+skippr_runtime_sdk::runtime_main!(async {
     let _cli = FileRuntimePluginCli::parse();
     if let Err(err) = run_runtime_data_sink_plugin(
         "File",
@@ -213,7 +212,7 @@ async fn main() {
         eprintln!("skippr-plugin-data-sink-file: {}", err);
         std::process::exit(1);
     }
-}
+});
 
 async fn sync_file_sink(
     config: &DataSinkFilePluginConfig,

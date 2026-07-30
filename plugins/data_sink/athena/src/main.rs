@@ -9,8 +9,7 @@ use skippr_runtime_sdk::sink_runtime_entry::{
 #[derive(Debug, Parser)]
 struct Cli {}
 
-#[tokio::main]
-async fn main() {
+skippr_runtime_sdk::runtime_main!(async {
     let _cli = Cli::parse();
     if let Err(err) = run_runtime_data_sink_plugin(
         "Athena",
@@ -35,4 +34,4 @@ async fn main() {
         eprintln!("skippr-plugin-data-sink-athena: {}", err);
         std::process::exit(1);
     }
-}
+});

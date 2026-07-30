@@ -9,8 +9,7 @@ use skippr_runtime_sdk::sink_runtime_entry::{
 #[derive(Debug, Parser)]
 struct GcsSinkRuntimePluginCli {}
 
-#[tokio::main]
-async fn main() {
+skippr_runtime_sdk::runtime_main!(async {
     let _cli = GcsSinkRuntimePluginCli::parse();
     if let Err(err) = run_runtime_data_sink_plugin(
         "Gcs",
@@ -33,4 +32,4 @@ async fn main() {
         eprintln!("skippr-plugin-data-sink-gcs: {}", err);
         std::process::exit(1);
     }
-}
+});
