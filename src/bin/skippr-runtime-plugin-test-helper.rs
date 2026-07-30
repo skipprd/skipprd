@@ -1,4 +1,5 @@
 use std::io;
+use std::io::Write;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -187,6 +188,7 @@ async fn run_sink_loop(
                 {
                     return Ok(());
                 }
+                record_schema_state_install(cli, request.schema_state.version)?;
                 state.schema_state = Some(request);
                 write_sink_state_snapshot(cli, &state)?;
                 write_frame(control_writer, &PluginFrame::Installed).await?;
@@ -299,6 +301,7 @@ async fn run_schema_loop(
                 {
                     return Ok(());
                 }
+                record_schema_state_install(cli, request.schema_state.version)?;
                 state.schema_state = Some(request);
                 write_schema_state_snapshot(cli, &state)?;
                 write_frame(control_writer, &PluginFrame::Installed).await?;
@@ -604,7 +607,10 @@ async fn write_sink_request_to_output(
 fn write_sink_state_snapshot(cli: &TestHelperCli, state: &SinkHelperState) -> io::Result<()> {
     if matches!(
         cli.scenario.as_str(),
-        "crash_once" | "disconnect_once" | "disconnect_on_schema_install_once"
+        "crash_once"
+            | "disconnect_once"
+            | "disconnect_on_schema_install_once"
+            | "record_schema_installs"
     ) {
         return Ok(());
     }
@@ -632,7 +638,10 @@ fn write_sink_state_snapshot(cli: &TestHelperCli, state: &SinkHelperState) -> io
 fn write_schema_state_snapshot(cli: &TestHelperCli, state: &SchemaHelperState) -> io::Result<()> {
     if matches!(
         cli.scenario.as_str(),
-        "crash_once" | "disconnect_once" | "disconnect_on_schema_install_once"
+        "crash_once"
+            | "disconnect_once"
+            | "disconnect_on_schema_install_once"
+            | "record_schema_installs"
     ) {
         return Ok(());
     }
@@ -654,6 +663,24 @@ fn write_schema_state_snapshot(cli: &TestHelperCli, state: &SchemaHelperState) -
         }))
         .map_err(|err| io::Error::other(err.to_string()))?,
     )?;
+    Ok(())
+}
+
+fn record_schema_state_install(cli: &TestHelperCli, schema_version: u64) -> io::Result<()> {
+    if cli.scenario != "record_schema_installs" {
+        return Ok(());
+    }
+    let Some(marker_path) = cli.marker_path.as_ref() else {
+        return Ok(());
+    };
+    if let Some(parent) = marker_path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    let mut file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(marker_path)?;
+    writeln!(file, "{schema_version}")?;
     Ok(())
 }
 

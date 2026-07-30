@@ -106,8 +106,8 @@ pub static RUNTIME_SINK_IPC_BYTES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU6
 pub static RUNTIME_SINK_IPC_CHUNKS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static RUNTIME_SCHEMA_STATE_INSTALLS_SENT_TOTAL: Lazy<AtomicU64> =
     Lazy::new(|| AtomicU64::new(0));
-/// Current protocol has no install no-op. This nearest-boundary counter records source schema
-/// publications suppressed by configuration until protocol v17 adds per-worker install skipping.
+/// Schema-state frames suppressed because the target worker already has an equal or newer version,
+/// plus source schema publications disabled by configuration.
 pub static RUNTIME_SCHEMA_STATE_PUBLICATIONS_SKIPPED_TOTAL: Lazy<AtomicU64> =
     Lazy::new(|| AtomicU64::new(0));
 pub static SINK_APPLY_CALLS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));

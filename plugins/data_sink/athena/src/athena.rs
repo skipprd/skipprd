@@ -255,8 +255,20 @@ skippr_runtime_sdk::declare_sink_spec!(
 
 #[derive(Debug, Default)]
 struct InstalledAthenaSchemaState {
+    installed: bool,
     version: u64,
     namespaces: BTreeMap<String, OutputMetadata>,
+}
+
+impl InstalledAthenaSchemaState {
+    fn install(&mut self, schema_version: u64, namespaces: &BTreeMap<String, OutputMetadata>) {
+        if self.installed && schema_version <= self.version {
+            return;
+        }
+        self.installed = true;
+        self.version = schema_version;
+        self.namespaces = namespaces.clone();
+    }
 }
 
 fn is_deadletter_athena_target(binding: RuntimeBinding, namespace: &str) -> bool {
@@ -495,11 +507,7 @@ impl DataSink for DataSinkAthenaPlugin {
         namespaces: &BTreeMap<String, OutputMetadata>,
     ) -> Result<(), std::io::Error> {
         let mut guard = self.schema_state.write().await;
-        if schema_version < guard.version {
-            return Ok(());
-        }
-        guard.version = schema_version;
-        guard.namespaces = namespaces.clone();
+        guard.install(schema_version, namespaces);
         Ok(())
     }
 }
@@ -3454,6 +3462,25 @@ mod contract_schema_tests {
         let schema = Arc::new(Schema::new(vec![Field::new("date", DataType::Utf8, false)]));
         let dates = StringArray::from(vec![date]);
         RecordBatch::try_new(schema, vec![Arc::new(dates)]).unwrap()
+    }
+
+    #[test]
+    fn equal_or_older_schema_state_install_is_a_noop() {
+        let mut state = InstalledAthenaSchemaState::default();
+        let initial = BTreeMap::from([("events".to_string(), deadletter_output_metadata())]);
+        let replacement = BTreeMap::from([("users".to_string(), deadletter_output_metadata())]);
+
+        state.install(0, &initial);
+        state.install(0, &replacement);
+        assert_eq!(state.version, 0);
+        assert!(state.namespaces.contains_key("events"));
+        assert!(!state.namespaces.contains_key("users"));
+
+        state.install(2, &replacement);
+        state.install(1, &initial);
+        assert_eq!(state.version, 2);
+        assert!(state.namespaces.contains_key("users"));
+        assert!(!state.namespaces.contains_key("events"));
     }
 
     fn wat_append_partition_contract() -> SourceNamespaceContract {

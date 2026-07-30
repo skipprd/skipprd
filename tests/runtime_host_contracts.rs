@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 
@@ -11,6 +12,7 @@ use datafusion::error::DataFusionError;
 use datafusion::physical_plan::{RecordBatchStream, SendableRecordBatchStream};
 use futures::Stream;
 use serde_json::json;
+use serial_test::serial;
 use sha2::{Digest, Sha256};
 use skipprd::discover::OutputMetadata;
 use skipprd::plugins::{DataSink, SchemaSink};
@@ -245,6 +247,31 @@ fn json_string_array(value: &serde_json::Value, key: &str) -> Vec<String> {
         .collect()
 }
 
+fn schema_install_count(path: &Path) -> usize {
+    std::fs::read_to_string(path)
+        .unwrap_or_default()
+        .lines()
+        .count()
+}
+
+struct RuntimeSinkPoolTargetGuard {
+    previous: usize,
+}
+
+impl RuntimeSinkPoolTargetGuard {
+    fn set(target: usize) -> Self {
+        let previous =
+            skipprd::metrics::counters::RUNTIME_SINK_POOL_TARGET.swap(target, Ordering::SeqCst);
+        Self { previous }
+    }
+}
+
+impl Drop for RuntimeSinkPoolTargetGuard {
+    fn drop(&mut self) {
+        skipprd::metrics::counters::RUNTIME_SINK_POOL_TARGET.store(self.previous, Ordering::SeqCst);
+    }
+}
+
 struct SingleBatchStream {
     schema: Arc<Schema>,
     batch: Option<RecordBatch>,
@@ -282,6 +309,86 @@ fn sample_stream() -> SendableRecordBatchStream {
         schema,
         batch: Some(batch),
     })
+}
+
+#[tokio::test]
+#[serial]
+async fn runtime_sink_does_not_reinstall_unchanged_schema_between_writes() {
+    let _pool_target = RuntimeSinkPoolTargetGuard::set(1);
+    let temp = tempdir().unwrap();
+    let marker_path = temp.path().join("schema-installs.log");
+    let manifest_path = write_sink_manifest(
+        temp.path(),
+        "schema-publish-once-runtime-sink",
+        "File",
+        "record_schema_installs",
+        "File",
+        Some(&helper_sha256()),
+        &helper_binary(),
+        Some(&marker_path),
+    );
+    let sink = RuntimeDataSinkPlugin::new(
+        ResolvedRuntimePlugin::load(&manifest_path).unwrap(),
+        "runtime_host_schema_publish_once".to_string(),
+        RuntimeBinding::Primary,
+        runtime_file_sink_config(),
+    )
+    .await
+    .unwrap();
+    let startup_installs = schema_install_count(&marker_path);
+    assert_eq!(startup_installs, 1);
+
+    sink.sync(sample_stream(), "unchanged-schema-1".to_string(), None)
+        .await
+        .unwrap();
+    sink.sync(sample_stream(), "unchanged-schema-2".to_string(), None)
+        .await
+        .unwrap();
+
+    assert_eq!(schema_install_count(&marker_path), startup_installs);
+}
+
+#[tokio::test]
+#[serial]
+async fn runtime_sink_pool_growth_installs_latest_schema_once_on_new_worker() {
+    let _pool_target = RuntimeSinkPoolTargetGuard::set(1);
+    let temp = tempdir().unwrap();
+    let marker_path = temp.path().join("schema-installs.log");
+    let manifest_path = write_sink_manifest(
+        temp.path(),
+        "schema-pool-growth-runtime-sink",
+        "File",
+        "record_schema_installs",
+        "File",
+        Some(&helper_sha256()),
+        &helper_binary(),
+        Some(&marker_path),
+    );
+    let sink = RuntimeDataSinkPlugin::new(
+        ResolvedRuntimePlugin::load(&manifest_path).unwrap(),
+        "runtime_host_schema_pool_growth".to_string(),
+        RuntimeBinding::Primary,
+        runtime_file_sink_config(),
+    )
+    .await
+    .unwrap();
+    let startup_installs = schema_install_count(&marker_path);
+    assert_eq!(startup_installs, 1);
+    skipprd::metrics::counters::RUNTIME_SINK_POOL_TARGET.store(2, Ordering::SeqCst);
+
+    sink.sync(sample_stream(), "pool-growth-1".to_string(), None)
+        .await
+        .unwrap();
+    assert_eq!(
+        schema_install_count(&marker_path),
+        startup_installs + 1,
+        "only the new worker should receive the latest snapshot"
+    );
+
+    sink.sync(sample_stream(), "pool-growth-2".to_string(), None)
+        .await
+        .unwrap();
+    assert_eq!(schema_install_count(&marker_path), startup_installs + 1);
 }
 
 #[tokio::test]

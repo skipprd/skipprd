@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fs;
 use std::fs::File;
@@ -40,8 +40,14 @@ const DEFAULT_CONFIG: &'static str = "NULL_VALUE";
 
 pub static DATA_DIR_INIT_ONCE: OnceCell<()> = OnceCell::new();
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SchemaPublicationRequest {
+    namespace: String,
+    version: u64,
+}
+
 type SchemaSyncWorkerState = (
-    UnboundedSender<String>,
+    UnboundedSender<SchemaPublicationRequest>,
     Option<std::thread::JoinHandle<()>>,
     StdReceiver<()>,
 );
@@ -50,6 +56,10 @@ static SCHEMA_SYNC_WORKER: Lazy<std::sync::Mutex<Option<SchemaSyncWorkerState>>>
 static BLOCKING_PRIMARY_SCHEMA_PLUGIN: Lazy<
     std::sync::Mutex<Option<Arc<dyn crate::plugins::SchemaSink + Send + Sync>>>,
 > = Lazy::new(|| std::sync::Mutex::new(None));
+static PRIMARY_SCHEMA_PLUGIN_INIT: Lazy<tokio::sync::Mutex<()>> =
+    Lazy::new(|| tokio::sync::Mutex::new(()));
+static SCHEMA_COORDINATOR: Lazy<crate::schema_coordinator::SchemaCoordinator> =
+    Lazy::new(crate::schema_coordinator::SchemaCoordinator::new);
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct Skippr {
@@ -2366,7 +2376,10 @@ impl Config {
         if evolved {
             let tx = Config::ensure_schema_sync_worker();
             for ns in pipeline_metadata.metadata.keys() {
-                let _ = tx.send(ns.clone());
+                let _ = tx.send(SchemaPublicationRequest {
+                    namespace: ns.clone(),
+                    version: Config::schema_publication_version(ns),
+                });
             }
         }
     }
@@ -2560,14 +2573,17 @@ impl Config {
     }
 
     fn drain_available_schema_sync_requests(
-        rx: &mut UnboundedReceiver<String>,
-        dirty: &mut HashSet<String>,
+        rx: &mut UnboundedReceiver<SchemaPublicationRequest>,
+        dirty: &mut HashMap<String, u64>,
     ) -> bool {
         let mut closed = false;
         loop {
             match rx.try_recv() {
-                Ok(ns) => {
-                    dirty.insert(ns);
+                Ok(request) => {
+                    dirty
+                        .entry(request.namespace)
+                        .and_modify(|version| *version = (*version).max(request.version))
+                        .or_insert(request.version);
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
@@ -2579,13 +2595,15 @@ impl Config {
         closed
     }
 
-    fn ensure_schema_sync_worker() -> UnboundedSender<String> {
+    fn ensure_schema_sync_worker() -> UnboundedSender<SchemaPublicationRequest> {
         let mut guard = SCHEMA_SYNC_WORKER.lock().unwrap();
         if let Some((tx, _, _)) = guard.as_ref() {
             return tx.clone();
         }
-        let (tx, mut rx): (UnboundedSender<String>, UnboundedReceiver<String>) =
-            unbounded_channel();
+        let (tx, mut rx): (
+            UnboundedSender<SchemaPublicationRequest>,
+            UnboundedReceiver<SchemaPublicationRequest>,
+        ) = unbounded_channel();
 
         let (done_tx, done_rx) = std::sync::mpsc::channel();
         let handle = std::thread::spawn(move || {
@@ -2594,15 +2612,14 @@ impl Config {
                 .build()
                 .unwrap();
             rt.block_on(async move {
-                let mut primary_plugin: Option<Box<dyn crate::plugins::SchemaSink + Send + Sync>> = None;
                 let mut deadletter_plugin: Option<Box<dyn crate::plugins::SchemaSink + Send + Sync>> = None;
-                let mut dirty: HashSet<String> = HashSet::new();
+                let mut dirty: HashMap<String, u64> = HashMap::new();
 
                 loop {
                     if dirty.is_empty() {
                         match rx.recv().await {
-                            Some(ns) => {
-                                dirty.insert(ns);
+                            Some(request) => {
+                                dirty.insert(request.namespace, request.version);
                             }
                             None => break,
                         }
@@ -2613,8 +2630,8 @@ impl Config {
                     }
                     let channel_closed =
                         Config::drain_available_schema_sync_requests(&mut rx, &mut dirty);
-                    let mut namespaces: Vec<String> = dirty.drain().collect();
-                    namespaces.sort();
+                    let mut namespaces: Vec<(String, u64)> = dirty.drain().collect();
+                    namespaces.sort_by(|left, right| left.0.cmp(&right.0));
                     if namespaces.len() > 1 {
                         info!(
                             "Schema sync: coalesced {} namespace update requests",
@@ -2627,7 +2644,9 @@ impl Config {
                             .unwrap_or(120),
                     );
                     let flatten = Config::get_transform_flatten_events();
-                    for ns in namespaces {
+                    for (ns, requested_version) in namespaces {
+                    let schema_version =
+                        requested_version.max(Config::schema_publication_version(&ns));
                     let md_snapshot = { METADATA.load().metadata.clone() };
                     let out_meta = if let Some(schema) = md_snapshot.get(&ns) {
                         Some(if flatten {
@@ -2646,88 +2665,15 @@ impl Config {
                         let is_deadletter_ns = ns == deadletter_namespace;
 
                         if !is_deadletter_ns {
-                            if primary_plugin.is_none() {
-                                let schema_plugin_name = Config::get_pipeline_schema_plugin_name();
-                                if schema_plugin_name.is_empty() {
-                                    debug!("Schema sync: no schema sink configured for primary output");
-                                } else {
-                                    let runtime_version =
-                                        match Config::get_pipeline_schema_plugin_version() {
-                                            Ok(runtime_version) => runtime_version,
-                                            Err(err) => {
-                                                warn!(
-                                                    "Schema sync: failed to resolve runtime schema plugin version: {}",
-                                                    err
-                                                );
-                                                None
-                                            }
-                                        };
-                                    let runtime_config = Config::get_pipeline_output_plugin_config()
-                                        .ok()
-                                        .and_then(|cfg| crate::runtime_plugins::protocol::RuntimeSchemaConfig::try_from(cfg).ok());
-                                    if let Some(runtime_config) = runtime_config {
-                                        match crate::runtime_plugins::discovery::resolve_runtime_plugin(
-                                            crate::runtime_plugins::protocol::RuntimePluginKind::SchemaSink,
-                                            &schema_plugin_name,
-                                            runtime_version.as_deref(),
-                                        )
-                                        .await
-                                        {
-                                            Ok(resolved) => {
-                                                match crate::runtime_plugins::host::RuntimeSchemaSinkPlugin::new(
-                                                    resolved,
-                                                    Config::get_pipeline_name(),
-                                                    crate::runtime_plugins::protocol::RuntimeBinding::Primary,
-                                                    runtime_config,
-                                                )
-                                                .await
-                                                {
-                                                    Ok(plugin) => {
-                                                        primary_plugin = Some(Box::new(plugin));
-                                                    }
-                                                    Err(err) => {
-                                                        warn!("Schema sync: failed to initialize runtime schema plugin: {}", err);
-                                                    }
-                                                }
-                                            }
-                                            Err(err) => {
-                                                warn!("Schema sync: failed to resolve runtime schema manifest: {}", err);
-                                            }
-                                        }
-                                    } else {
-                                        warn!("Schema sync: runtime schema plugin configured but the primary sink does not expose a runtime schema config");
-                                    }
-                                }
-                            }
-                            if let Some(ref plugin) = primary_plugin {
-                                info!("Schema sync: updating schema for namespace {}", ns);
-                                let source_contract = crate::METADATA
-                                    .load()
-                                    .source_contract_for_namespace(&ns);
-                                let schema_request = crate::plugins::SchemaSyncRequest {
-                                    namespace: &ns,
-                                    compaction_id: "",
-                                    source_contract: source_contract.as_ref(),
-                                };
-                                match tokio::time::timeout(
-                                    sync_timeout,
-                                    plugin.sync_schema_request(schema_request, &out_meta),
-                                )
-                                .await
-                                {
-                                    Ok(Ok(_)) => {
-                                        info!("Schema sync: synced output schema for namespace {}", ns);
-                                    }
-                                    Ok(Err(e)) => {
-                                        warn!("Schema sync: failed for namespace {}: {}", ns, e);
-                                    }
-                                    Err(_) => {
-                                        warn!(
-                                            "Schema sync: timed out for namespace {} after {:?}; skipping",
-                                            ns, sync_timeout
-                                        );
-                                    }
-                                }
+                            if let Err(err) = Config::coordinate_primary_schema_sync(
+                                &ns,
+                                schema_version,
+                                &out_meta,
+                                sync_timeout,
+                            )
+                            .await
+                            {
+                                warn!("Schema sync: failed for namespace {}: {}", ns, err);
                             }
                         }
 
@@ -2874,11 +2820,33 @@ impl Config {
 
     pub fn sync_output_schema_namespace(namespace: &str) {
         let tx = Config::ensure_schema_sync_worker();
-        let _ = tx.send(namespace.to_string());
+        let _ = tx.send(SchemaPublicationRequest {
+            namespace: namespace.to_string(),
+            version: Config::schema_publication_version(namespace),
+        });
+    }
+
+    fn schema_publication_version(namespace: &str) -> u64 {
+        let namespace_version = crate::ingest_work::namespace_schema_version(namespace)
+            .max(crate::runtime_plugins::schema_state::runtime_schema_namespace_version(namespace));
+        if namespace_version == 0 {
+            crate::runtime_plugins::schema_state::current_pipeline_schema_version().max(1)
+        } else {
+            namespace_version
+        }
     }
 
     async fn blocking_primary_schema_plugin(
     ) -> Result<Arc<dyn crate::plugins::SchemaSink + Send + Sync>, String> {
+        if let Some(plugin) = BLOCKING_PRIMARY_SCHEMA_PLUGIN
+            .lock()
+            .unwrap()
+            .as_ref()
+            .cloned()
+        {
+            return Ok(plugin);
+        }
+        let _init_guard = PRIMARY_SCHEMA_PLUGIN_INIT.lock().await;
         if let Some(plugin) = BLOCKING_PRIMARY_SCHEMA_PLUGIN
             .lock()
             .unwrap()
@@ -2945,6 +2913,59 @@ impl Config {
         Ok(plugin)
     }
 
+    async fn coordinate_primary_schema_sync(
+        namespace: &str,
+        schema_version: u64,
+        out_meta: &OutputMetadata,
+        sync_timeout: std::time::Duration,
+    ) -> Result<(), String> {
+        SCHEMA_COORDINATOR
+            .coordinate(namespace, schema_version, || async {
+                let schema_plugin_name = Config::get_pipeline_schema_plugin_name();
+                if schema_plugin_name.is_empty() {
+                    debug!("Schema sync: no schema sink configured for primary output");
+                    return Ok(());
+                }
+
+                let plugin = Self::blocking_primary_schema_plugin().await?;
+                let source_contract = crate::METADATA
+                    .load()
+                    .source_contract_for_namespace(namespace);
+                let schema_request = crate::plugins::SchemaSyncRequest {
+                    namespace,
+                    compaction_id: "",
+                    source_contract: source_contract.as_ref(),
+                };
+                info!(
+                    "Schema sync: updating namespace {} version {}",
+                    namespace, schema_version
+                );
+                match tokio::time::timeout(
+                    sync_timeout,
+                    plugin.sync_schema_request(schema_request, out_meta),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => {
+                        info!(
+                            "Schema sync: synced namespace {} version {}",
+                            namespace, schema_version
+                        );
+                        Ok(())
+                    }
+                    Ok(Err(err)) => Err(format!(
+                        "Schema sync: failed for namespace {}: {}",
+                        namespace, err
+                    )),
+                    Err(_) => Err(format!(
+                        "Schema sync: timed out for namespace {} after {:?}",
+                        namespace, sync_timeout
+                    )),
+                }
+            })
+            .await
+    }
+
     pub async fn sync_output_schema_namespace_blocking(namespace: &str) -> Result<(), String> {
         let ns = namespace.trim();
         if ns.is_empty() {
@@ -2972,37 +2993,13 @@ impl Config {
                 .ok_or_else(|| format!("Schema sync: namespace {} missing from metadata", ns))?
         };
 
-        let plugin = Self::blocking_primary_schema_plugin().await?;
-
         let sync_timeout = std::time::Duration::from_secs(
             Config::getenv("SCHEMA_SYNC_TIMEOUT_SECONDS", "120")
                 .parse::<u64>()
                 .unwrap_or(120),
         );
-        let source_contract = crate::METADATA.load().source_contract_for_namespace(ns);
-        let schema_request = crate::plugins::SchemaSyncRequest {
-            namespace: ns,
-            compaction_id: "",
-            source_contract: source_contract.as_ref(),
-        };
-
-        info!("Schema sync: blocking update for namespace {}", ns);
-        match tokio::time::timeout(
-            sync_timeout,
-            plugin.sync_schema_request(schema_request, &out_meta),
-        )
-        .await
-        {
-            Ok(Ok(_)) => {
-                info!("Schema sync: blocking sync complete for namespace {}", ns);
-                Ok(())
-            }
-            Ok(Err(e)) => Err(format!("Schema sync: failed for namespace {}: {}", ns, e)),
-            Err(_) => Err(format!(
-                "Schema sync: timed out for namespace {} after {:?}",
-                ns, sync_timeout
-            )),
-        }
+        let schema_version = Config::schema_publication_version(ns);
+        Self::coordinate_primary_schema_sync(ns, schema_version, &out_meta, sync_timeout).await
     }
 
     pub async fn init() {
@@ -3177,8 +3174,6 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
-
     use serde_json::json;
     use serial_test::serial;
 
@@ -3187,32 +3182,52 @@ mod tests {
     #[test]
     fn schema_sync_request_drain_coalesces_duplicate_namespaces() {
         let (tx, mut rx) = unbounded_channel();
-        tx.send("events".to_string()).unwrap();
-        tx.send("events".to_string()).unwrap();
-        tx.send("users".to_string()).unwrap();
+        tx.send(SchemaPublicationRequest {
+            namespace: "events".to_string(),
+            version: 1,
+        })
+        .unwrap();
+        tx.send(SchemaPublicationRequest {
+            namespace: "events".to_string(),
+            version: 2,
+        })
+        .unwrap();
+        tx.send(SchemaPublicationRequest {
+            namespace: "users".to_string(),
+            version: 1,
+        })
+        .unwrap();
 
-        let mut dirty = HashSet::new();
+        let mut dirty = HashMap::new();
         let closed = Config::drain_available_schema_sync_requests(&mut rx, &mut dirty);
 
         assert!(!closed);
         assert_eq!(dirty.len(), 2);
-        assert!(dirty.contains("events"));
-        assert!(dirty.contains("users"));
+        assert_eq!(dirty.get("events"), Some(&2));
+        assert_eq!(dirty.get("users"), Some(&1));
     }
 
     #[test]
     fn schema_sync_request_drain_flushes_when_sender_closes() {
         let (tx, mut rx) = unbounded_channel();
-        tx.send("events".to_string()).unwrap();
-        tx.send("events".to_string()).unwrap();
+        tx.send(SchemaPublicationRequest {
+            namespace: "events".to_string(),
+            version: 1,
+        })
+        .unwrap();
+        tx.send(SchemaPublicationRequest {
+            namespace: "events".to_string(),
+            version: 1,
+        })
+        .unwrap();
         drop(tx);
 
-        let mut dirty = HashSet::new();
+        let mut dirty = HashMap::new();
         let closed = Config::drain_available_schema_sync_requests(&mut rx, &mut dirty);
 
         assert!(closed);
         assert_eq!(dirty.len(), 1);
-        assert!(dirty.contains("events"));
+        assert_eq!(dirty.get("events"), Some(&1));
     }
 
     #[test]

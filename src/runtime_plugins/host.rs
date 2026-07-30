@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io::{self, ErrorKind};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Weak};
 use std::time::Instant;
 
@@ -107,6 +107,7 @@ struct RuntimeChildConnection {
     child: Child,
     control: TcpStream,
     data: TcpStream,
+    installed_schema_version: Option<u64>,
 }
 
 static RUNTIME_PLUGIN_CHILD_PIDS: Lazy<std::sync::Mutex<BTreeSet<u32>>> =
@@ -269,6 +270,7 @@ impl RuntimeChildConnection {
             child,
             control,
             data,
+            installed_schema_version: None,
         };
         if let Err(err) = connection.handshake().await {
             let _ = connection.child.kill().await;
@@ -1771,6 +1773,10 @@ struct RuntimeSinkConnectionPool {
     workers: tokio::sync::Mutex<Vec<Arc<RuntimeSinkWorker>>>,
     semaphore: Arc<tokio::sync::Semaphore>,
     next_worker: AtomicUsize,
+    worker_count: AtomicUsize,
+    schema_publish_lock: tokio::sync::Mutex<()>,
+    has_published_schema_state: AtomicBool,
+    published_schema_version: std::sync::atomic::AtomicU64,
 }
 
 struct RuntimeSinkWorkerLease {
@@ -1822,6 +1828,10 @@ impl RuntimeSinkConnectionPool {
             budget_registration,
             semaphore: Arc::new(tokio::sync::Semaphore::new(1)),
             next_worker: AtomicUsize::new(0),
+            worker_count: AtomicUsize::new(pool_size),
+            schema_publish_lock: tokio::sync::Mutex::new(()),
+            has_published_schema_state: AtomicBool::new(false),
+            published_schema_version: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -1855,10 +1865,12 @@ impl RuntimeSinkConnectionPool {
                 ))
                 .await?;
             expect_install_ack(&mut connection, "schema state").await?;
+            connection.installed_schema_version = Some(schema_state.version);
             workers.push(Arc::new(RuntimeSinkWorker {
                 connection: Mutex::new(connection),
                 _process_permit: process_permit,
             }));
+            self.worker_count.store(workers.len(), Ordering::Release);
             self.semaphore.add_permits(1);
             info!(
                 "tune: runtime_sink_pool grew binding={:?} workers={} global_active={} global_target={}",
@@ -1888,6 +1900,46 @@ impl RuntimeSinkConnectionPool {
             _permit: permit,
             worker,
         })
+    }
+
+    fn has_published_schema_version(&self, schema_version: u64) -> bool {
+        self.has_published_schema_state.load(Ordering::Acquire)
+            && self.published_schema_version.load(Ordering::Acquire) >= schema_version
+    }
+
+    fn mark_schema_version_published(&self, schema_version: u64) {
+        self.published_schema_version
+            .fetch_max(schema_version, Ordering::AcqRel);
+        self.has_published_schema_state
+            .store(true, Ordering::Release);
+    }
+
+    fn record_schema_publication_skipped(&self) {
+        crate::metrics::counters::add_runtime_schema_state_publication_skipped(
+            self.worker_count.load(Ordering::Acquire).max(1) as u64,
+        );
+    }
+
+    async fn refresh_published_schema_version(&self) {
+        let workers = {
+            let workers = self.workers.lock().await;
+            workers.iter().cloned().collect::<Vec<_>>()
+        };
+        let mut minimum_version: Option<u64> = None;
+        for worker in workers {
+            let guard = worker.lock().await;
+            let Some(installed_version) = guard.installed_schema_version else {
+                return;
+            };
+            minimum_version = Some(
+                minimum_version
+                    .map(|minimum| minimum.min(installed_version))
+                    .unwrap_or(installed_version),
+            );
+        }
+        if let Some(minimum_version) = minimum_version {
+            self.mark_schema_version_published(minimum_version);
+        }
     }
 
     fn install_request(&self) -> &RuntimeSinkInstallRequest {
@@ -1975,6 +2027,7 @@ impl RuntimeDataSinkPlugin {
                 Err(err) => return Err(err),
             }
         }
+        plugin.pool.refresh_published_schema_version().await;
         Ok(plugin)
     }
 
@@ -2020,6 +2073,13 @@ impl RuntimeDataSinkPlugin {
         schema_version: u64,
         namespaces: &BTreeMap<String, OutputMetadata>,
     ) -> io::Result<()> {
+        if connection
+            .installed_schema_version
+            .is_some_and(|installed| installed >= schema_version)
+        {
+            crate::metrics::counters::add_runtime_schema_state_publication_skipped(1);
+            return Ok(());
+        }
         connection
             .send(&HostFrame::InstallSchemaState(
                 RuntimeSchemaStateInstallRequest {
@@ -2030,7 +2090,9 @@ impl RuntimeDataSinkPlugin {
                 },
             ))
             .await?;
-        expect_install_ack(connection, "schema state").await
+        expect_install_ack(connection, "schema state").await?;
+        connection.installed_schema_version = Some(schema_version);
+        Ok(())
     }
 
     async fn install_latest_schema_state(
@@ -2040,6 +2102,18 @@ impl RuntimeDataSinkPlugin {
         let schema_state = current_runtime_schema_state();
         self.send_schema_state_install(connection, schema_state.version, &schema_state.namespaces)
             .await
+    }
+
+    async fn ensure_latest_schema_state(&self) -> io::Result<u64> {
+        let required_version = current_pipeline_schema_version();
+        if self.pool.has_published_schema_version(required_version) {
+            self.pool.record_schema_publication_skipped();
+            return Ok(required_version);
+        }
+        let schema_state = current_runtime_schema_state();
+        self.install_schema_state_with_retry(schema_state.version, &schema_state.namespaces)
+            .await?;
+        Ok(schema_state.version)
     }
 
     async fn send_sink_payload(
@@ -2155,6 +2229,7 @@ impl RuntimeDataSinkPlugin {
                             "runtime sink repeatedly requested schema refresh",
                         ));
                     }
+                    guard.installed_schema_version = None;
                     self.install_latest_schema_state(&mut guard).await?;
                     schema_refreshes += 1;
                     continue;
@@ -2192,14 +2267,27 @@ impl RuntimeDataSinkPlugin {
         schema_version: u64,
         namespaces: &BTreeMap<String, OutputMetadata>,
     ) -> io::Result<()> {
+        if self.pool.has_published_schema_version(schema_version) {
+            self.pool.record_schema_publication_skipped();
+            return Ok(());
+        }
+        let _publish_guard = self.pool.schema_publish_lock.lock().await;
+        if self.pool.has_published_schema_version(schema_version) {
+            self.pool.record_schema_publication_skipped();
+            return Ok(());
+        }
         self.pool.maybe_grow_to_target().await?;
-        let workers = self.pool.workers.lock().await;
-        for worker in workers.iter() {
+        let workers = {
+            let workers = self.pool.workers.lock().await;
+            workers.iter().cloned().collect::<Vec<_>>()
+        };
+        for worker in workers {
             let mut guard = worker.connection.lock().await;
             self.ensure_connection_ready(&mut guard).await?;
             self.send_schema_state_install(&mut guard, schema_version, namespaces)
                 .await?;
         }
+        self.pool.mark_schema_version_published(schema_version);
         Ok(())
     }
 
@@ -2353,11 +2441,8 @@ impl DataSink for RuntimeDataSinkPlugin {
                 apply_derived_runtime_schema(namespace, &schema);
             }
         }
-        let schema_state = current_runtime_schema_state();
-        self.install_schema_state_with_retry(schema_state.version, &schema_state.namespaces)
-            .await?;
+        let schema_version = self.ensure_latest_schema_state().await?;
         let encoded_stream = encode_record_batch_stream_with_stats(stream).await?;
-        let schema_state = current_runtime_schema_state();
         let namespace = query_value_from_runtime_filename(&ctx.filename, "namespace");
         let source_contract = ctx.source_contract.cloned().or_else(|| {
             namespace
@@ -2384,7 +2469,7 @@ impl DataSink for RuntimeDataSinkPlugin {
             write_semantics: ctx.write_semantics,
             schema_fingerprint: ctx.schema_fingerprint.clone(),
             binding: self.install_request.binding,
-            required_schema_version: schema_state.version,
+            required_schema_version: schema_version,
             filename: ctx.filename,
             cdc_ctx: ctx.cdc_ctx.cloned(),
             source_contract,
@@ -2405,11 +2490,7 @@ impl DataSink for RuntimeDataSinkPlugin {
                 apply_derived_runtime_schema(namespace, &schema);
             }
         }
-        let schema_state = current_runtime_schema_state();
-        self.install_schema_state_with_retry(schema_state.version, &schema_state.namespaces)
-            .await?;
-
-        let schema_state = current_runtime_schema_state();
+        let schema_version = self.ensure_latest_schema_state().await?;
         let namespace = query_value_from_runtime_filename(&ctx.filename, "namespace");
         let source_contract = ctx.source_contract.cloned().or_else(|| {
             namespace
@@ -2436,7 +2517,7 @@ impl DataSink for RuntimeDataSinkPlugin {
             write_semantics: ctx.write_semantics,
             schema_fingerprint: ctx.schema_fingerprint.clone(),
             binding: self.install_request.binding,
-            required_schema_version: schema_state.version,
+            required_schema_version: schema_version,
             filename: ctx.filename,
             cdc_ctx: ctx.cdc_ctx.cloned(),
             source_contract,
@@ -2454,6 +2535,10 @@ impl DataSink for RuntimeDataSinkPlugin {
         schema_version: u64,
         namespaces: &BTreeMap<String, OutputMetadata>,
     ) -> Result<(), io::Error> {
+        if self.pool.has_published_schema_version(schema_version) {
+            self.pool.record_schema_publication_skipped();
+            return Ok(());
+        }
         apply_runtime_source_schema_state(RuntimeSchemaState {
             version: schema_version,
             namespaces: namespaces.clone(),
@@ -2544,6 +2629,13 @@ impl RuntimeSchemaSinkPlugin {
         schema_version: u64,
         namespaces: &BTreeMap<String, OutputMetadata>,
     ) -> io::Result<()> {
+        if connection
+            .installed_schema_version
+            .is_some_and(|installed| installed >= schema_version)
+        {
+            crate::metrics::counters::add_runtime_schema_state_publication_skipped(1);
+            return Ok(());
+        }
         connection
             .send(&HostFrame::InstallSchemaState(
                 RuntimeSchemaStateInstallRequest {
@@ -2554,7 +2646,9 @@ impl RuntimeSchemaSinkPlugin {
                 },
             ))
             .await?;
-        expect_install_ack(connection, "schema state").await
+        expect_install_ack(connection, "schema state").await?;
+        connection.installed_schema_version = Some(schema_version);
+        Ok(())
     }
 
     async fn install_latest_schema_state(
@@ -2592,6 +2686,7 @@ impl RuntimeSchemaSinkPlugin {
                             "runtime schema sink repeatedly requested schema refresh",
                         ));
                     }
+                    guard.installed_schema_version = None;
                     self.install_latest_schema_state(&mut guard).await?;
                     schema_refreshes += 1;
                     continue;

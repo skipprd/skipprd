@@ -18,6 +18,8 @@ static RUNTIME_SOURCE_SCHEMA_STATE: Lazy<ArcSwap<RuntimeSchemaState>> = Lazy::ne
     }))
 });
 static RUNTIME_SOURCE_SCHEMA_STATE_UPDATE_LOCK: Lazy<Mutex<()>> = Lazy::new(|| Mutex::new(()));
+static RUNTIME_SOURCE_SCHEMA_NAMESPACE_VERSIONS: Lazy<Mutex<BTreeMap<String, u64>>> =
+    Lazy::new(|| Mutex::new(BTreeMap::new()));
 
 pub fn current_pipeline_schema_version() -> u64 {
     PIPELINE_SCHEMA_VERSION.load(Ordering::Acquire)
@@ -35,6 +37,10 @@ pub fn clear_runtime_source_schema_state() {
         version: 0,
         namespaces: BTreeMap::new(),
     }));
+    RUNTIME_SOURCE_SCHEMA_NAMESPACE_VERSIONS
+        .lock()
+        .expect("runtime source schema namespace versions lock poisoned")
+        .clear();
 }
 
 fn metadata_schema_state_namespaces() -> BTreeMap<String, OutputMetadata> {
@@ -78,6 +84,7 @@ pub fn apply_runtime_source_schema_state(schema_state: RuntimeSchemaState) -> Ve
         effective_namespaces.insert(namespace.clone(), output.clone());
     }
     let mut changed_namespaces = Vec::new();
+    let update_version = schema_state.version;
     for (namespace, output) in schema_state.namespaces {
         let namespace = storage_namespace(&namespace);
         if effective_namespaces
@@ -88,15 +95,28 @@ pub fn apply_runtime_source_schema_state(schema_state: RuntimeSchemaState) -> Ve
         }
         effective_namespaces.insert(namespace.clone(), output.clone());
         namespaces.insert(namespace.clone(), output);
+        RUNTIME_SOURCE_SCHEMA_NAMESPACE_VERSIONS
+            .lock()
+            .expect("runtime source schema namespace versions lock poisoned")
+            .insert(namespace.clone(), update_version);
         changed_namespaces.push(namespace);
     }
-    let version = current.version.max(schema_state.version);
+    let version = current.version.max(update_version);
     RUNTIME_SOURCE_SCHEMA_STATE.store(Arc::new(RuntimeSchemaState {
         version,
         namespaces,
     }));
     let _ = PIPELINE_SCHEMA_VERSION.fetch_max(version, Ordering::AcqRel);
     changed_namespaces
+}
+
+pub fn runtime_schema_namespace_version(namespace: &str) -> u64 {
+    RUNTIME_SOURCE_SCHEMA_NAMESPACE_VERSIONS
+        .lock()
+        .expect("runtime source schema namespace versions lock poisoned")
+        .get(namespace)
+        .copied()
+        .unwrap_or(0)
 }
 
 pub fn current_runtime_schema_state() -> RuntimeSchemaState {

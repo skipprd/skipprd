@@ -29,6 +29,7 @@ pub mod lineage;
 pub mod metrics;
 pub mod plugins;
 pub mod runtime_plugins;
+mod schema_coordinator;
 pub mod serdes;
 pub mod sink_apply_identity;
 pub mod sqlrt;

@@ -118,8 +118,20 @@ pub enum IcebergQueryEngineConfig {
 
 #[derive(Default)]
 struct InstalledIcebergSchemaState {
+    installed: bool,
     version: u64,
     namespaces: BTreeMap<String, OutputMetadata>,
+}
+
+impl InstalledIcebergSchemaState {
+    fn install(&mut self, schema_version: u64, namespaces: &BTreeMap<String, OutputMetadata>) {
+        if self.installed && schema_version <= self.version {
+            return;
+        }
+        self.installed = true;
+        self.version = schema_version;
+        self.namespaces = namespaces.clone();
+    }
 }
 
 pub struct DataSinkIcebergPlugin {
@@ -283,11 +295,7 @@ impl DataSink for DataSinkIcebergPlugin {
         namespaces: &BTreeMap<String, OutputMetadata>,
     ) -> Result<(), io::Error> {
         let mut guard = self.schema_state.write().await;
-        if schema_version < guard.version {
-            return Ok(());
-        }
-        guard.version = schema_version;
-        guard.namespaces = namespaces.clone();
+        guard.install(schema_version, namespaces);
         Ok(())
     }
 }
@@ -1958,6 +1966,31 @@ mod tests {
 
     fn output_metadata(value: serde_json::Value) -> OutputMetadata {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn equal_or_older_schema_state_install_is_a_noop() {
+        let metadata = output_metadata(json!({
+            "out_field_name": "",
+            "determined_type": "record",
+            "determined_type_values": "",
+            "fields": {}
+        }));
+        let initial = BTreeMap::from([("events".to_string(), metadata.clone())]);
+        let replacement = BTreeMap::from([("users".to_string(), metadata)]);
+        let mut state = InstalledIcebergSchemaState::default();
+
+        state.install(0, &initial);
+        state.install(0, &replacement);
+        assert_eq!(state.version, 0);
+        assert!(state.namespaces.contains_key("events"));
+        assert!(!state.namespaces.contains_key("users"));
+
+        state.install(2, &replacement);
+        state.install(1, &initial);
+        assert_eq!(state.version, 2);
+        assert!(state.namespaces.contains_key("users"));
+        assert!(!state.namespaces.contains_key("events"));
     }
 
     #[test]
