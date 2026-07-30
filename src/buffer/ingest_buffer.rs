@@ -109,7 +109,6 @@ impl SegmentSource {
         }
     }
 
-    #[allow(dead_code)]
     fn is_s3(&self) -> bool {
         matches!(self, SegmentSource::S3 { .. })
     }
@@ -2086,17 +2085,6 @@ impl Buffers {
         Some(CompactionWork { txn, entries })
     }
 
-    fn compaction_file_len(
-        source: &SegmentSource,
-        meta: &SegmentFileMetadata,
-        s3_resolved: Option<&Arc<Vec<u8>>>,
-    ) -> io::Result<u64> {
-        match (s3_resolved, source) {
-            (Some(data), SegmentSource::S3 { .. }) => Ok(data.len() as u64),
-            _ => source.logical_byte_len(meta),
-        }
-    }
-
     fn is_truncated_stream_error(err: &str) -> bool {
         err.contains("failed to fill whole buffer") || err.contains("UnexpectedEof")
     }
@@ -3370,7 +3358,7 @@ impl Buffers {
         };
         let timeout = Self::grouped_compaction_timeout();
         let job_started = std::time::Instant::now();
-        let mut progress = GroupedCompactionTracker::begin(
+        let progress = GroupedCompactionTracker::begin(
             work.txn.id.clone(),
             work.txn.namespace.clone(),
             work.txn.sink_ref.clone(),
@@ -4042,11 +4030,6 @@ async fn wal_recover_s3(offsets_db: Arc<Offsets>) -> io::Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
-fn list_wal_files() -> io::Result<Vec<PathBuf>> {
-    Ok(Vec::new())
-}
-
 #[derive(Debug, Clone, Serialize)]
 struct WalIndexMetric {
     namespace: String,
@@ -4625,47 +4608,6 @@ mod tests_wal_commit {
         );
         let line = offsets_db.get_line(&offset_key).unwrap();
         assert_eq!(u64::from(line), 42);
-    }
-
-    #[test]
-    #[serial]
-    fn test_s3_compaction_file_len_uses_resolved_object_bytes() {
-        let (base, _guard) = setup_data_dir();
-        let segf = SegmentFile::new(&base, "s3-len").unwrap();
-        let key = PartitionKey {
-            sink_ref: "data_outputs.test".to_string(),
-            namespace: "ns".to_string(),
-            partition: "".to_string(),
-            time: Some(0),
-            schema_fingerprint: "schema".to_string(),
-        };
-        let mut batches: StdHashMap<PartitionKey, Vec<RecordBatch>> = StdHashMap::new();
-        batches.insert(key, vec![make_batch()]);
-        let parts_meta: StdHashMap<PartitionKey, (u64, SystemTime)> = batches
-            .keys()
-            .cloned()
-            .map(|k| (k, (0, SystemTime::now())))
-            .collect();
-        let offsets: StdHashMap<crate::helpers::offsets::OffsetKey, u64> = StdHashMap::new();
-        let empty_blobs: StdHashMap<PartitionKey, Vec<u8>> = StdHashMap::new();
-        let (meta, _rows, _sha) = segf
-            .write_snapshot(&offsets, &batches, &parts_meta, &empty_blobs)
-            .unwrap();
-        let bytes = Arc::new(fs::read(&segf.path).unwrap());
-        let source = SegmentSource::S3 {
-            key: "segments/s3-len.seg".to_string(),
-            bucket: "test-bucket".to_string(),
-            body: None,
-        };
-
-        assert!(
-            bytes.len() as u64 > meta.total_bytes,
-            "segment object length includes headers and footer in addition to Arrow payload bytes"
-        );
-        assert_eq!(
-            Buffers::compaction_file_len(&source, &meta, Some(&bytes)).unwrap(),
-            bytes.len() as u64
-        );
     }
 
     #[test]

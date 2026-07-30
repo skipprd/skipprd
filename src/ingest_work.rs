@@ -1312,7 +1312,6 @@ impl Drop for Ingest {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum DataDirCapacityDecision {
-    Continue,
     EnterPause,
     Resume,
     /// Current pipeline WAL is drained but disk is still above the low watermark.
@@ -1419,16 +1418,6 @@ impl Ingest {
         avail_bytes >= min_free_bytes && used_pct <= low_watermark as f64
     }
 
-    #[allow(dead_code)]
-    fn data_dir_below_high_watermark(
-        used_pct: f64,
-        high_watermark: u8,
-        min_free_bytes: u64,
-        avail_bytes: u64,
-    ) -> bool {
-        avail_bytes >= min_free_bytes && used_pct < high_watermark as f64
-    }
-
     fn evaluate_exhausted_pause_escape(
         avail_bytes: u64,
         total_bytes: u64,
@@ -1512,37 +1501,6 @@ impl Ingest {
         )
     }
 
-    #[allow(dead_code)]
-    fn data_dir_capacity_fatal_message(
-        avail_bytes: u64,
-        total_bytes: u64,
-        used_pct: f64,
-        min_free_bytes: u64,
-        high_watermark: u8,
-        below_min_free: bool,
-        above_high_watermark: bool,
-    ) -> String {
-        let mut reasons = Vec::new();
-        if below_min_free {
-            reasons.push(format!(
-                "free space {} is below minimum {}",
-                Helpers::human_readable_size(avail_bytes),
-                Helpers::human_readable_size(min_free_bytes)
-            ));
-        }
-        if above_high_watermark {
-            reasons.push(format!(
-                "usage {:.1}% is above high watermark {}%",
-                used_pct, high_watermark
-            ));
-        }
-        format!(
-            "DATA_DIR capacity exhausted ({}, total {}). This pipeline has no reclaimable committed WAL to compact. Free disk or clean another pipeline before retrying.",
-            reasons.join("; "),
-            Helpers::human_readable_size(total_bytes)
-        )
-    }
-
     fn throughput_metrics(&self) -> ThroughputMetrics {
         ThroughputMetrics {
             bytes_per_second: self.get_current_throughput(),
@@ -1571,7 +1529,6 @@ impl Ingest {
 
             let min_free_bytes = Self::min_free_bytes();
             let below_min_free = avail_bytes < min_free_bytes;
-            let above_high_watermark = used_pct >= high_watermark as f64;
             let should_block =
                 Self::data_dir_should_block(avail_bytes, used_pct, high_watermark, min_free_bytes);
 
@@ -1610,7 +1567,6 @@ impl Ingest {
                             record_data_dir_capacity_error(message);
                             return false;
                         }
-                        DataDirCapacityDecision::Continue => return true,
                     }
                 } else {
                     paused = true;
@@ -1697,7 +1653,6 @@ impl Ingest {
                         record_data_dir_capacity_error(message);
                         return false;
                     }
-                    DataDirCapacityDecision::Continue => return true,
                 }
             }
 
@@ -2643,7 +2598,6 @@ impl Ingest {
         }
         let mut dl_records: Vec<DeadletterRecord> = Vec::new();
         let mut dl_offsets: HashMap<OffsetKey, u64> = HashMap::new();
-        let mut batch_line: u64;
 
         let format = match Config::get_pipeline_input_plugin_config() {
             Ok(plugin) => plugin.input_format(),
@@ -2760,7 +2714,6 @@ impl Ingest {
             };
             ingest_profile::add_unwrap_ns(flatten_started.elapsed().as_nanos() as u64);
 
-            batch_line = 0;
             let mut cdc_row_idx: usize = 0;
 
             let mut metadata_snapshot = METADATA.load().clone();
@@ -2822,20 +2775,18 @@ impl Ingest {
                         line,
                         value: mut record,
                     } => {
-                        batch_line = line;
                         cdc_row_idx += 1;
 
                         if record.is_null()
                             || (record.is_object() && record.as_object().unwrap().is_empty())
                             || (record.is_array() && record.as_array().unwrap().is_empty())
                         {
-                            let line_str =
-                                match ingest_batch.data.lines().nth(batch_line as usize - 1) {
-                                    Some(line) => line,
-                                    None => "",
-                                };
+                            let line_str = match ingest_batch.data.lines().nth(line as usize - 1) {
+                                Some(line) => line,
+                                None => "",
+                            };
 
-                            let empty_offset_pos = ingest_batch.offset_pos_for_line(batch_line);
+                            let empty_offset_pos = ingest_batch.offset_pos_for_line(line);
                             dl_records.push(DeadletterRecord {
                                 namespace: Config::get_pipeline_name(),
                                 record: line_str.to_string(),
@@ -2859,7 +2810,7 @@ impl Ingest {
                             continue;
                         }
 
-                        let offset_pos = ingest_batch.offset_pos_for_line(batch_line);
+                        let offset_pos = ingest_batch.offset_pos_for_line(line);
 
                         if should_ingest_at_offset(
                             offset_snapshot.as_ref(),
@@ -2870,7 +2821,7 @@ impl Ingest {
                             i += 1;
 
                             let partition_started = Instant::now();
-                            let mut namespace_scratch: Option<String> = None;
+                            let namespace_scratch;
                             let skpr_partition_owned;
                             let skpr_namespace: &str = if fixed_batch_namespace
                                 || transform_snap.skip_namespace_field_parse
@@ -2878,7 +2829,7 @@ impl Ingest {
                                 &batch_namespace_override
                             } else {
                                 namespace_scratch =
-                                    Some(storage_namespace(&PARSE_NAMESPACE_CACHE.with(|cache| {
+                                    storage_namespace(&PARSE_NAMESPACE_CACHE.with(|cache| {
                                         let mut namespace_cache = cache.write().unwrap();
                                         Helpers::parse_namespace_field_with_fields(
                                             &record,
@@ -2886,8 +2837,8 @@ impl Ingest {
                                             &mut namespace_cache,
                                             &transform_snap.namespace_fields,
                                         )
-                                    })));
-                                namespace_scratch.as_deref().unwrap()
+                                    }));
+                                &namespace_scratch
                             };
 
                             let skpr_partition: &str = if transform_snap.skip_partition_parse {
