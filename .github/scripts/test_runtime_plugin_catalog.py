@@ -95,7 +95,7 @@ skipprd = { path = "../.." }
         self.write_workspace_file(
             workspace,
             "src/runtime_plugins/protocol.rs",
-            "pub const RUNTIME_PROTOCOL_VERSION: u32 = 16;\n",
+            "pub const RUNTIME_PROTOCOL_VERSION: u32 = 17;\n",
         )
 
     def test_runtime_sdk_build_fingerprint_is_workspace_location_independent(self) -> None:
@@ -184,7 +184,7 @@ skipprd = { path = "../.." }
             self.write_workspace_file(
                 workspace,
                 "src/runtime_plugins/protocol.rs",
-                "pub const RUNTIME_PROTOCOL_VERSION: u32 = 16;\n"
+                "pub const RUNTIME_PROTOCOL_VERSION: u32 = 17;\n"
                 "pub struct ChangedFrame;\n",
             )
 

@@ -52,7 +52,7 @@ use skippr_runtime_sdk::plugins::source_contract::{
     ensure_source_contract_for_policy, namespace_source_contract, validate_write_policy_for_sink,
     SinkWritePolicySupport, SourceNamespaceContract, WritePolicy,
 };
-use skippr_runtime_sdk::plugins::{DataSink, SinkWriteContext};
+use skippr_runtime_sdk::plugins::{DataSink, SinkPreflightOutcome, SinkWriteContext};
 use skippr_runtime_sdk::protocol::{RuntimeBinding, RuntimeExecutionContext};
 use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -592,6 +592,43 @@ fn deadletter_output_metadata() -> OutputMetadata {
 
 #[async_trait]
 impl DataSink for DataSinkAthenaPlugin {
+    async fn preflight(
+        &self,
+        ctx: SinkWriteContext<'_>,
+    ) -> Result<SinkPreflightOutcome, std::io::Error> {
+        if !ctx.is_grouped() {
+            return Ok(SinkPreflightOutcome::Ready);
+        }
+        ctx.validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
+            .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err.to_string()))?;
+        let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
+        let manifest = ObjectWriteManifest::from_context(
+            ctx.compaction_id.clone(),
+            ctx.idempotency_key,
+            ctx.schema_fingerprint,
+            &ctx.wal_refs,
+        );
+        let receipt_key = ObjectWriteManifest::grouped_receipt_object_key(
+            &self.config.s3_prefix,
+            &namespace,
+            &ctx.compaction_id,
+        );
+        if let Some(existing) = self.read_grouped_receipt(&receipt_key).await? {
+            if !existing.matches_manifest(&manifest) {
+                return Err(io::Error::other(format!(
+                    "grouped receipt mismatch for compaction {}",
+                    ctx.compaction_id
+                )));
+            }
+            self.schedule_glue_partition_from_s3_key(&namespace, &existing.final_s3_key)
+                .await;
+            return Ok(SinkPreflightOutcome::AlreadyApplied {
+                authority: format!("s3://{}/{}", self.config.s3_bucket, receipt_key),
+            });
+        }
+        Ok(SinkPreflightOutcome::Ready)
+    }
+
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,

@@ -50,7 +50,7 @@ class RuntimePluginReleasePlanTests(unittest.TestCase):
         manifests = {
             plugin["manifest_filename"]: {
                 "version": plugin["package_version"],
-                "protocol_version": 16,
+                "protocol_version": 17,
                 "sdk_build_fingerprint": sdk_build_fingerprint,
                 "build_checksum": plugin["checksum"],
                 "artifacts": {},
@@ -65,7 +65,7 @@ class RuntimePluginReleasePlanTests(unittest.TestCase):
         plan = runtime_plugin_release_plan.plan_runtime_plugin_release(
             self.catalog("current-sdk"),
             [],
-            16,
+            17,
             index,
             manifests,
         )
@@ -81,7 +81,7 @@ class RuntimePluginReleasePlanTests(unittest.TestCase):
         plan = runtime_plugin_release_plan.plan_runtime_plugin_release(
             self.catalog("current-sdk"),
             [],
-            16,
+            17,
             index,
             manifests,
         )
@@ -108,7 +108,7 @@ class RuntimePluginReleasePlanTests(unittest.TestCase):
         plan = runtime_plugin_release_plan.plan_runtime_plugin_release(
             self.catalog("current-sdk"),
             [],
-            16,
+            17,
             index,
             manifests,
         )
@@ -135,7 +135,7 @@ class RuntimePluginReleasePlanTests(unittest.TestCase):
         plan = runtime_plugin_release_plan.plan_runtime_plugin_release(
             self.catalog("current-sdk"),
             [],
-            16,
+            17,
             index,
             manifests,
         )

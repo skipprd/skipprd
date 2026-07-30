@@ -13,7 +13,7 @@ use skippr_object_writer::{
     ObjectWriterConfig,
 };
 use skippr_runtime_sdk::plugins::DataSink;
-use skippr_runtime_sdk::plugins::{SinkWriteContext, SinkWriteOutcome};
+use skippr_runtime_sdk::plugins::{SinkPreflightOutcome, SinkWriteContext, SinkWriteOutcome};
 use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
 use skippr_runtime_sdk::sink_compat::BufferChunker;
 use skippr_runtime_sdk::sink_idempotency::{
@@ -56,6 +56,38 @@ skippr_runtime_sdk::declare_sink_spec!(
 
 #[async_trait]
 impl DataSink for DataSinkGcsPlugin {
+    async fn preflight(
+        &self,
+        ctx: SinkWriteContext<'_>,
+    ) -> Result<SinkPreflightOutcome, std::io::Error> {
+        if !ctx.is_grouped() {
+            return Ok(SinkPreflightOutcome::Ready);
+        }
+        ctx.validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))?;
+        let object_stem = skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
+            &ctx.idempotency_key,
+            "",
+        )?;
+        let final_key = self.object_key_for_filename(&ctx.filename, &object_stem);
+        let manifest_path = ObjectPath::from(manifest_object_name(&final_key));
+        let expected_manifest = ObjectWriteManifest::from_context(
+            ctx.compaction_id,
+            ctx.idempotency_key,
+            ctx.schema_fingerprint,
+            &ctx.wal_refs,
+        );
+        if self
+            .manifest_matches(&manifest_path, &expected_manifest)
+            .await?
+        {
+            return Ok(SinkPreflightOutcome::AlreadyApplied {
+                authority: format!("gs://{}/{}", self.config.bucket, manifest_path),
+            });
+        }
+        Ok(SinkPreflightOutcome::Ready)
+    }
+
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,

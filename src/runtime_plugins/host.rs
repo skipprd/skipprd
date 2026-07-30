@@ -41,15 +41,16 @@ use crate::runtime_plugins::artifact::resolve_plugin_executable;
 use crate::runtime_plugins::manifest::RuntimePluginManifest;
 use crate::runtime_plugins::offset_service::OffsetServiceEndpoint;
 use crate::runtime_plugins::protocol::{
-    HandshakeRequest, HostDataFrame, HostFrame, PluginDataFrame, PluginFrame, RuntimeBinding,
+    CommitReceipt, FinishSink, HandshakeRequest, HostDataFrame, HostFrame, PluginDataFrame,
+    PluginFrame, PrepareAck, PrepareSink, PrepareSinkResult, RuntimeBinding,
     RuntimeCheckpointUpdate, RuntimeExecutionContext, RuntimeExecutionMode, RuntimeIngestAck,
     RuntimeOffsetMaterializationHint, RuntimeOutputLayout, RuntimeRequestAck, RuntimeSchemaConfig,
     RuntimeSchemaInstallRequest, RuntimeSchemaState, RuntimeSchemaStateInstallRequest,
-    RuntimeSessionHello, RuntimeSinkConfig, RuntimeSinkInstallRequest, RuntimeSinkPayload,
-    RuntimeSinkPayloadChunk, RuntimeSinkPayloadMode, RuntimeSinkWriteResult, RuntimeSourceConfig,
-    RuntimeSourceIngestWindow, SchemaRunRequest, SinkRunRequest, SourceEvent, SourceStartRequest,
-    RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
-    SKIPPR_RUNTIME_OFFSET_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
+    RuntimeSessionHello, RuntimeSinkConfig, RuntimeSinkInstallRequest, RuntimeSinkPayloadMode,
+    RuntimeSourceConfig, RuntimeSourceIngestWindow, SchemaRunRequest, SinkAck, SinkChunk,
+    SinkRunRequest, SourceEvent, SourceStartRequest, COMMIT_RECEIPT_VERSION,
+    MAX_RUNTIME_SINK_CHUNK_BYTES, RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV,
+    SKIPPR_RUNTIME_DATA_ADDR_ENV, SKIPPR_RUNTIME_OFFSET_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use crate::runtime_plugins::schema_state::{
     apply_runtime_source_schema_state, bump_pipeline_schema_version,
@@ -60,6 +61,7 @@ use crate::runtime_plugins::sdk::{
     encode_record_batch_stream_with_stats, encode_record_batches,
 };
 use crate::runtime_plugins::wire::{read_frame, write_frame, MAX_RUNTIME_FRAME_BYTES};
+use crate::sink_apply_identity::SinkApplyEnvelopeV2;
 
 #[derive(Clone, Debug)]
 pub struct ResolvedRuntimePlugin {
@@ -71,6 +73,12 @@ impl ResolvedRuntimePlugin {
     pub fn load(manifest_path: impl AsRef<Path>) -> io::Result<Self> {
         let manifest_path = manifest_path.as_ref().to_path_buf();
         let manifest = RuntimePluginManifest::load_from_path(&manifest_path)?;
+        if manifest.protocol_version != RUNTIME_PROTOCOL_VERSION {
+            return Err(io::Error::other(format!(
+                "runtime plugin manifest '{}' uses protocol {}, but host requires protocol {}",
+                manifest.name, manifest.protocol_version, RUNTIME_PROTOCOL_VERSION
+            )));
+        }
         if manifest.kind == crate::runtime_plugins::protocol::RuntimePluginKind::DataSink {
             let capability = manifest.sink_capability.as_ref().ok_or_else(|| {
                 io::Error::other(format!(
@@ -89,7 +97,7 @@ impl ResolvedRuntimePlugin {
             }
             if !capability.supports_bounded_grouped_stream {
                 return Err(io::Error::other(format!(
-                    "runtime sink manifest '{}' does not advertise bounded grouped streaming; grouped compaction requires a protocol-16 bounded grouped sink",
+                    "runtime sink manifest '{}' does not advertise bounded grouped streaming; grouped compaction requires a protocol-17 bounded grouped sink",
                     manifest.name
                 )));
             }
@@ -186,6 +194,52 @@ fn runtime_schema_compaction_fingerprint(metadata: &OutputMetadata) -> String {
     let bytes =
         serde_json::to_vec(metadata).unwrap_or_else(|_| metadata.lineage_id().as_bytes().to_vec());
     format!("{:x}", md5::compute(bytes))
+}
+
+fn sink_apply_envelope(request: &SinkRunRequest) -> SinkApplyEnvelopeV2 {
+    SinkApplyEnvelopeV2::new(
+        request.compaction_id.clone(),
+        request.idempotency_key.clone(),
+        &request.wal_refs,
+        request.cdc_ctx.is_some(),
+        request
+            .source_contract
+            .as_ref()
+            .map(|contract| contract.write_policy)
+            .unwrap_or_default(),
+        request.write_semantics,
+        (!request.schema_fingerprint.is_empty()).then(|| request.schema_fingerprint.clone()),
+        Some(request.required_schema_version),
+        request.source_contract.clone(),
+    )
+}
+
+fn validate_commit_receipt(
+    receipt: &CommitReceipt,
+    envelope: &SinkApplyEnvelopeV2,
+) -> io::Result<()> {
+    if receipt.version != COMMIT_RECEIPT_VERSION
+        || receipt.compaction_id != envelope.compaction_id
+        || receipt.idempotency_key != envelope.idempotency_key
+        || receipt.wal_refs_fingerprint != envelope.wal_refs_fingerprint
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "runtime sink commit receipt does not match prepared apply envelope",
+        ));
+    }
+    Ok(())
+}
+
+fn validate_sink_ack(ack: &SinkAck, envelope: &SinkApplyEnvelopeV2) -> io::Result<()> {
+    validate_commit_receipt(&ack.receipt, envelope)?;
+    if !ack.catalog_intents.is_empty() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "runtime sink returned catalog intents before Glue outbox migration",
+        ));
+    }
+    Ok(())
 }
 
 impl RuntimeChildConnection {
@@ -329,7 +383,10 @@ impl RuntimeChildConnection {
 
     async fn send(&mut self, frame: &HostFrame) -> io::Result<()> {
         write_frame(&mut self.control, frame).await?;
-        if matches!(frame, HostFrame::InstallSchemaState(_)) {
+        if matches!(
+            frame,
+            HostFrame::InstallSchemaState(_) | HostFrame::InstallSchemaDelta(_)
+        ) {
             crate::metrics::counters::add_runtime_schema_state_install_sent(1);
         }
         Ok(())
@@ -341,8 +398,8 @@ impl RuntimeChildConnection {
 
     async fn send_data(&mut self, frame: &HostDataFrame) -> io::Result<()> {
         let payload_bytes = match frame {
-            HostDataFrame::SinkPayload(payload) => payload.arrow_stream_bytes.len() as u64,
-            HostDataFrame::SinkPayloadChunk(payload) => payload.arrow_stream_bytes.len() as u64,
+            HostDataFrame::SinkChunk(chunk) => chunk.arrow_stream_bytes.len() as u64,
+            HostDataFrame::FinishSink(_) => 0,
         };
         write_frame(&mut self.data, frame).await?;
         crate::metrics::counters::record_runtime_sink_ipc(payload_bytes, 1);
@@ -991,6 +1048,25 @@ pub async fn sync_runtime_input_plugin(
                             );
                         }
                     }
+                    PluginFrame::SourceEvent(SourceEvent::SchemaDelta(delta)) => {
+                        let namespace_count = delta.namespaces.len();
+                        let changed_namespaces =
+                            apply_runtime_source_schema_state(RuntimeSchemaState {
+                                version: delta.version,
+                                namespaces: delta
+                                    .namespaces
+                                    .into_iter()
+                                    .map(|(namespace, entry)| (namespace, entry.metadata))
+                                    .collect(),
+                            });
+                        if namespace_count > 0 {
+                            info!(
+                                "Runtime source schema delta: {} namespaces received, {} changed",
+                                namespace_count,
+                                changed_namespaces.len()
+                            );
+                        }
+                    }
                     PluginFrame::SourceEvent(SourceEvent::Completed) => {
                         control_completed = true;
                         drain_runtime_source_ingest(&mut pending_source_tasks, ingest.clone())
@@ -1454,6 +1530,7 @@ fn runtime_sink_payload_chunk_bytes() -> usize {
     .ok()
     .filter(|value| *value > 0)
     .unwrap_or(64 * 1024 * 1024)
+    .min(MAX_RUNTIME_SINK_CHUNK_BYTES)
     .min(MAX_RUNTIME_FRAME_BYTES.saturating_sub(64 * 1024))
 }
 
@@ -1837,8 +1914,8 @@ impl RuntimeSinkConnectionPool {
 
     /// Grow toward this binding's fair share of the global process target.
     ///
-    /// Safe cross-pool shrink and worker multiplexing remain deferred to protocol v17. Protocol
-    /// v16 still stops grow-only multiplication: every spawn first owns one global permit.
+    /// Safe cross-pool shrink and worker multiplexing remain deferred to the next runtime commit.
+    /// Every sequential v17 worker spawn still owns one global permit.
     async fn maybe_grow_to_target(&self) -> io::Result<()> {
         let mut workers = self.workers.lock().await;
         while let Some(process_permit) = self.budget_registration.try_acquire_additional() {
@@ -2120,39 +2197,49 @@ impl RuntimeDataSinkPlugin {
         connection: &mut RuntimeChildConnection,
         request_id: u64,
         arrow_stream_bytes: &[u8],
+        rows: u64,
     ) -> io::Result<()> {
         let chunk_size = runtime_sink_payload_chunk_bytes();
-        if arrow_stream_bytes.len().saturating_add(1024) <= chunk_size {
-            return connection
-                .send_data(&HostDataFrame::SinkPayload(RuntimeSinkPayload {
-                    request_id,
-                    arrow_stream_bytes: arrow_stream_bytes.to_vec(),
-                }))
-                .await;
-        }
+        let mut chunks = 0u32;
         for (chunk_index, chunk) in arrow_stream_bytes.chunks(chunk_size).enumerate() {
+            let sink_chunk = SinkChunk {
+                request_id,
+                chunk_index: chunk_index as u32,
+                row_offset: 0,
+                rows: if chunk_index == 0 { rows } else { 0 },
+                arrow_stream_bytes: chunk.to_vec(),
+            };
+            sink_chunk.validate_bound().map_err(io::Error::other)?;
             connection
-                .send_data(&HostDataFrame::SinkPayloadChunk(RuntimeSinkPayloadChunk {
-                    request_id,
-                    chunk_index: chunk_index as u32,
-                    row_offset: 0,
-                    rows: 0,
-                    final_chunk: (chunk_index + 1) * chunk_size >= arrow_stream_bytes.len(),
-                    arrow_stream_bytes: chunk.to_vec(),
-                }))
+                .send_data(&HostDataFrame::SinkChunk(sink_chunk))
                 .await?;
+            chunks = chunks.saturating_add(1);
         }
-        Ok(())
+        connection
+            .send_data(&HostDataFrame::FinishSink(FinishSink {
+                request_id,
+                chunks,
+                rows,
+                bytes: arrow_stream_bytes.len() as u64,
+            }))
+            .await
     }
 
     async fn send_sink_request(
         &self,
         request: SinkRunRequest,
-        arrow_stream_bytes: Vec<u8>,
-        row_count: u64,
+        stream: datafusion::execution::SendableRecordBatchStream,
     ) -> io::Result<SinkWriteOutcome> {
         let mut retried = false;
         let mut schema_refreshes = 0usize;
+        let mut stream = Some(stream);
+        let mut encoded_bytes: Option<Vec<u8>> = None;
+        let mut encoded_rows: Option<u64> = None;
+        let prepare = PrepareSink {
+            request_id: request.request_id,
+            envelope: sink_apply_envelope(&request),
+            request: request.clone(),
+        };
         loop {
             let lease = self.pool.acquire().await?;
             let mut guard = lease.worker.connection.lock().await;
@@ -2160,10 +2247,37 @@ impl RuntimeDataSinkPlugin {
 
             let request_timeout = runtime_sink_request_timeout();
             let recv_result = match timeout(request_timeout, async {
-                guard.send(&HostFrame::RunSink(request.clone())).await?;
-                Self::send_sink_payload(&mut guard, request.request_id, &arrow_stream_bytes)
-                    .await?;
-                guard.recv().await
+                guard.send(&HostFrame::PrepareSink(prepare.clone())).await?;
+                let prepare_response = guard.recv().await?;
+                match prepare_response {
+                    PluginFrame::PrepareAck(PrepareAck {
+                        request_id,
+                        result: PrepareSinkResult::Ready,
+                    }) if request_id == request.request_id => {
+                        if encoded_bytes.is_none() {
+                            let source_stream = stream.take().ok_or_else(|| {
+                                io::Error::other(
+                                    "runtime sink stream was consumed before payload encoding",
+                                )
+                            })?;
+                            let encoded =
+                                encode_record_batch_stream_with_stats(source_stream).await?;
+                            encoded_rows = Some(encoded.rows);
+                            encoded_bytes = Some(encoded.bytes);
+                        }
+                        Self::send_sink_payload(
+                            &mut guard,
+                            request.request_id,
+                            encoded_bytes
+                                .as_deref()
+                                .expect("runtime sink payload encoded"),
+                            encoded_rows.expect("runtime sink row count encoded"),
+                        )
+                        .await?;
+                        guard.recv().await
+                    }
+                    other => Ok(other),
+                }
             })
             .await
             {
@@ -2195,32 +2309,27 @@ impl RuntimeDataSinkPlugin {
             };
 
             match recv_result {
-                Ok(PluginFrame::SinkAck(RuntimeRequestAck { request_id }))
-                    if request_id == request.request_id =>
-                {
-                    crate::metrics::counters::add_parquet_rows(row_count);
-                    return Ok(SinkWriteOutcome::Applied);
+                Ok(PluginFrame::PrepareAck(PrepareAck {
+                    request_id,
+                    result: PrepareSinkResult::AlreadyApplied(receipt),
+                })) if request_id == request.request_id => {
+                    validate_commit_receipt(&receipt, &prepare.envelope)?;
+                    return Ok(SinkWriteOutcome::AlreadyApplied);
                 }
-                Ok(PluginFrame::SinkWriteAck(ack)) if ack.request_id == request.request_id => {
-                    match ack.result {
-                        RuntimeSinkWriteResult::Applied => {
-                            crate::metrics::counters::add_parquet_rows(row_count);
-                            return Ok(SinkWriteOutcome::Applied);
-                        }
-                        RuntimeSinkWriteResult::AlreadyApplied => {
-                            crate::metrics::counters::add_parquet_rows(row_count);
-                            return Ok(SinkWriteOutcome::AlreadyApplied);
-                        }
-                        RuntimeSinkWriteResult::RejectedNonIdempotent => {
-                            return Err(io::Error::other(
-                                "runtime sink rejected non-idempotent write",
-                            ));
-                        }
-                        RuntimeSinkWriteResult::RetryableFailure { message }
-                        | RuntimeSinkWriteResult::FatalFailure { message } => {
-                            return Err(io::Error::other(message));
-                        }
+                Ok(PluginFrame::PrepareAck(PrepareAck {
+                    request_id,
+                    result: PrepareSinkResult::Rejected { reason },
+                })) if request_id == request.request_id => {
+                    return Err(io::Error::other(format!(
+                        "runtime sink prepare rejected: {reason}"
+                    )));
+                }
+                Ok(PluginFrame::SinkAck(ack)) if ack.request_id == request.request_id => {
+                    validate_sink_ack(&ack, &prepare.envelope)?;
+                    if let Some(rows) = ack.stats.rows {
+                        crate::metrics::counters::add_parquet_rows(rows);
                     }
+                    return Ok(ack.outcome);
                 }
                 Ok(PluginFrame::Error(err)) => return Err(io::Error::other(err)),
                 Ok(PluginFrame::SchemaStateRefreshRequired(_refresh)) => {
@@ -2296,103 +2405,163 @@ impl RuntimeDataSinkPlugin {
         request: SinkRunRequest,
         mut reader: crate::plugins::GroupedBatchReader,
     ) -> io::Result<SinkWriteOutcome> {
-        let lease = self.pool.acquire().await?;
-        let mut guard = lease.worker.connection.lock().await;
-        self.ensure_connection_ready(&mut guard).await?;
-        let request_timeout = runtime_sink_request_timeout();
         let request_id = request.request_id;
         let compaction_id = request.compaction_id.clone();
-        let recv_result = match timeout(request_timeout, async {
-            guard.send(&HostFrame::RunSink(request.clone())).await?;
-            let mut sent_chunks = 0u32;
-            let mut total_rows = 0u64;
-            while let Some(chunk) = reader.next_chunk().await? {
-                total_rows = total_rows.saturating_add(chunk.rows);
-                let final_chunk = chunk.final_chunk;
-                let arrow_stream_bytes = encode_record_batches(&chunk.batches)?;
-                guard
-                    .send_data(&HostDataFrame::SinkPayloadChunk(RuntimeSinkPayloadChunk {
+        let prepare = PrepareSink {
+            request_id,
+            envelope: sink_apply_envelope(&request),
+            request,
+        };
+        let mut schema_refreshes = 0usize;
+        let mut retried = false;
+        loop {
+            let lease = self.pool.acquire().await?;
+            let mut guard = lease.worker.connection.lock().await;
+            self.ensure_connection_ready(&mut guard).await?;
+            let request_timeout = runtime_sink_request_timeout();
+            let mut payload_started = false;
+            let recv_result = match timeout(request_timeout, async {
+                guard.send(&HostFrame::PrepareSink(prepare.clone())).await?;
+                let prepare_response = guard.recv().await?;
+                if !matches!(
+                    prepare_response,
+                    PluginFrame::PrepareAck(PrepareAck {
+                        request_id: ack_id,
+                        result: PrepareSinkResult::Ready,
+                    }) if ack_id == request_id
+                ) {
+                    return Ok::<_, io::Error>(prepare_response);
+                }
+                payload_started = true;
+                let mut sent_chunks = 0u32;
+                let mut total_rows = 0u64;
+                let mut total_bytes = 0u64;
+                while let Some(chunk) = reader.next_chunk().await? {
+                    let arrow_stream_bytes = encode_record_batches(&chunk.batches)?;
+                    let sink_chunk = SinkChunk {
                         request_id,
                         chunk_index: sent_chunks,
                         row_offset: chunk.row_offset,
                         rows: chunk.rows,
-                        final_chunk,
                         arrow_stream_bytes,
-                    }))
-                    .await?;
-                sent_chunks = sent_chunks.saturating_add(1);
-            }
-            if sent_chunks == 0 {
-                guard
-                    .send_data(&HostDataFrame::SinkPayloadChunk(RuntimeSinkPayloadChunk {
+                    };
+                    sink_chunk.validate_bound().map_err(io::Error::other)?;
+                    total_rows = total_rows.saturating_add(sink_chunk.rows);
+                    total_bytes =
+                        total_bytes.saturating_add(sink_chunk.arrow_stream_bytes.len() as u64);
+                    guard
+                        .send_data(&HostDataFrame::SinkChunk(sink_chunk))
+                        .await?;
+                    sent_chunks = sent_chunks.saturating_add(1);
+                }
+                if sent_chunks == 0 {
+                    let sink_chunk = SinkChunk {
                         request_id,
                         chunk_index: 0,
                         row_offset: 0,
                         rows: 0,
-                        final_chunk: true,
                         arrow_stream_bytes: encode_record_batches(&[])?,
+                    };
+                    sink_chunk.validate_bound().map_err(io::Error::other)?;
+                    total_bytes = sink_chunk.arrow_stream_bytes.len() as u64;
+                    guard
+                        .send_data(&HostDataFrame::SinkChunk(sink_chunk))
+                        .await?;
+                    sent_chunks = 1;
+                }
+                guard
+                    .send_data(&HostDataFrame::FinishSink(FinishSink {
+                        request_id,
+                        chunks: sent_chunks,
+                        rows: total_rows,
+                        bytes: total_bytes,
                     }))
                     .await?;
-            }
-            let frame = guard.recv().await?;
-            Ok::<_, io::Error>((frame, total_rows))
-        })
-        .await
-        {
-            Ok(result) => result,
-            Err(_) => {
-                warn!(
-                    "runtime grouped sink request timed out request_id={} compaction_id={} timeout_secs={}",
-                    request_id,
-                    compaction_id,
-                    request_timeout.as_secs()
-                );
-                self.restart_and_reinstall(&mut guard).await?;
-                return Err(io::Error::new(
-                    ErrorKind::TimedOut,
-                    format!(
-                        "runtime grouped sink request {} timed out after {}s",
+                guard.recv().await
+            })
+            .await
+            {
+                Ok(result) => result,
+                Err(_) => {
+                    warn!(
+                        "runtime grouped sink request timed out request_id={} compaction_id={} timeout_secs={}",
                         request_id,
+                        compaction_id,
                         request_timeout.as_secs()
-                    ),
-                ));
-            }
-        };
-
-        let (frame, total_rows) = match recv_result {
-            Ok(value) => value,
-            Err(err) => {
-                self.restart_and_reinstall(&mut guard).await?;
-                return Err(err);
-            }
-        };
-
-        match frame {
-            PluginFrame::SinkAck(RuntimeRequestAck { request_id: ack_id }) if ack_id == request_id => {
-                crate::metrics::counters::add_parquet_rows(total_rows);
-                Ok(SinkWriteOutcome::Applied)
-            }
-            PluginFrame::SinkWriteAck(ack) if ack.request_id == request_id => match ack.result {
-                RuntimeSinkWriteResult::Applied => {
-                    crate::metrics::counters::add_parquet_rows(total_rows);
-                    Ok(SinkWriteOutcome::Applied)
+                    );
+                    self.restart_and_reinstall(&mut guard).await?;
+                    return Err(io::Error::new(
+                        ErrorKind::TimedOut,
+                        format!(
+                            "runtime grouped sink request {} timed out after {}s",
+                            request_id,
+                            request_timeout.as_secs()
+                        ),
+                    ));
                 }
-                RuntimeSinkWriteResult::AlreadyApplied => Ok(SinkWriteOutcome::AlreadyApplied),
-                RuntimeSinkWriteResult::RejectedNonIdempotent => Err(io::Error::other(
-                    "runtime grouped sink rejected non-idempotent replay",
-                )),
-                RuntimeSinkWriteResult::RetryableFailure { message }
-                | RuntimeSinkWriteResult::FatalFailure { message } => Err(io::Error::other(message)),
-            },
-            PluginFrame::SchemaStateRefreshRequired(refresh) => Err(io::Error::other(format!(
-                "runtime grouped sink requested schema refresh after streaming payload started: required={} installed={}",
-                refresh.required_version, refresh.installed_version
-            ))),
-            PluginFrame::Error(message) => Err(io::Error::other(message)),
-            other => Err(io::Error::other(format!(
-                "unexpected runtime grouped sink response for request {}: {:?}",
-                request_id, other
-            ))),
+            };
+            let frame = match recv_result {
+                Ok(frame) => frame,
+                Err(err) if !payload_started && !retried => {
+                    self.restart_and_reinstall(&mut guard).await?;
+                    retried = true;
+                    continue;
+                }
+                Err(err) => {
+                    self.restart_and_reinstall(&mut guard).await?;
+                    return Err(err);
+                }
+            };
+            match frame {
+                PluginFrame::PrepareAck(PrepareAck {
+                    request_id: ack_id,
+                    result: PrepareSinkResult::AlreadyApplied(receipt),
+                }) if ack_id == request_id => {
+                    validate_commit_receipt(&receipt, &prepare.envelope)?;
+                    return Ok(SinkWriteOutcome::AlreadyApplied);
+                }
+                PluginFrame::PrepareAck(PrepareAck {
+                    request_id: ack_id,
+                    result: PrepareSinkResult::Rejected { reason },
+                }) if ack_id == request_id => {
+                    return Err(io::Error::other(format!(
+                        "runtime grouped sink prepare rejected: {reason}"
+                    )));
+                }
+                PluginFrame::SchemaStateRefreshRequired(_) if !payload_started => {
+                    if schema_refreshes >= 3 {
+                        return Err(io::Error::other(
+                            "runtime grouped sink repeatedly requested schema refresh",
+                        ));
+                    }
+                    guard.installed_schema_version = None;
+                    self.install_latest_schema_state(&mut guard).await?;
+                    schema_refreshes += 1;
+                    continue;
+                }
+                PluginFrame::SinkAck(ack) if ack.request_id == request_id => {
+                    validate_sink_ack(&ack, &prepare.envelope)?;
+                    if let Some(rows) = ack.stats.rows {
+                        crate::metrics::counters::add_parquet_rows(rows);
+                    }
+                    return Ok(ack.outcome);
+                }
+                PluginFrame::Error(message) => return Err(io::Error::other(message)),
+                other if !payload_started && !retried => {
+                    warn!(
+                        "runtime grouped sink prepare got stale frame, restarting child: {:?}",
+                        other
+                    );
+                    self.restart_and_reinstall(&mut guard).await?;
+                    retried = true;
+                }
+                other => {
+                    return Err(io::Error::other(format!(
+                        "unexpected runtime grouped sink response for request {}: {:?}",
+                        request_id, other
+                    )));
+                }
+            }
         }
     }
 }
@@ -2442,7 +2611,6 @@ impl DataSink for RuntimeDataSinkPlugin {
             }
         }
         let schema_version = self.ensure_latest_schema_state().await?;
-        let encoded_stream = encode_record_batch_stream_with_stats(stream).await?;
         let namespace = query_value_from_runtime_filename(&ctx.filename, "namespace");
         let source_contract = ctx.source_contract.cloned().or_else(|| {
             namespace
@@ -2475,8 +2643,7 @@ impl DataSink for RuntimeDataSinkPlugin {
             source_contract,
             payload_mode: RuntimeSinkPayloadMode::FullStream,
         };
-        self.send_sink_request(request, encoded_stream.bytes, encoded_stream.rows)
-            .await
+        self.send_sink_request(request, stream).await
     }
 
     async fn sync_grouped(
@@ -2813,7 +2980,8 @@ mod tests {
 
     use super::{
         handle_runtime_offset_request, reset_runtime_sink_process_budgets_for_test,
-        BufferedRuntimeFrameReader, RuntimeSinkProcessBudget, MAX_RUNTIME_FRAME_BYTES,
+        BufferedRuntimeFrameReader, RuntimeChildConnection, RuntimeSinkProcessBudget,
+        MAX_RUNTIME_FRAME_BYTES,
     };
     use crate::helpers::configuration::Config;
     use crate::helpers::offsets::{
@@ -2822,9 +2990,11 @@ mod tests {
     };
     use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
     use crate::runtime_plugins::protocol::RuntimeBinding;
+    use crate::runtime_plugins::wire::write_frame;
     use serde::{Deserialize, Serialize};
     use serial_test::serial;
     use tempfile::TempDir;
+    use tokio::net::{TcpListener, TcpStream};
 
     static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
 
@@ -2908,6 +3078,27 @@ mod tests {
 
         let err = reader.take_frame::<TestFrame>().unwrap_err();
         assert!(err.to_string().contains("exceeds limit"));
+    }
+
+    #[tokio::test]
+    async fn runtime_channel_rejects_protocol_v16_before_handshake() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move {
+            RuntimeChildConnection::accept_runtime_channel(&listener, "v17-token").await
+        });
+        let mut child = TcpStream::connect(addr).await.unwrap();
+        write_frame(
+            &mut child,
+            &crate::runtime_plugins::protocol::RuntimeSessionHello {
+                protocol_version: 16,
+                token: "v17-token".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let err = accept.await.unwrap().unwrap_err();
+        assert!(err.to_string().contains("host=17 child=16"));
     }
 
     #[test]

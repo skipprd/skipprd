@@ -19,11 +19,13 @@ use tokio::net::TcpStream;
 
 use skipprd::buffer::compaction_transaction::SinkWriteSemantics;
 use skipprd::plugins::cdc;
+use skipprd::plugins::SinkWriteOutcome;
 use skipprd::runtime_plugins::protocol::{
-    HandshakeResponse, HostDataFrame, HostFrame, PluginDataFrame, PluginFrame,
-    RuntimeCheckpointUpdate, RuntimePluginKind, RuntimeRequestAck, RuntimeSchemaInstallRequest,
-    RuntimeSchemaRefreshRequest, RuntimeSchemaStateInstallRequest, RuntimeSessionHello,
-    RuntimeSinkInstallRequest, RuntimeSourceSinkWrite, SourceEvent, RUNTIME_PROTOCOL_VERSION,
+    CommitReceipt, CommitReceiptAuthority, HandshakeResponse, HostDataFrame, HostFrame,
+    PluginDataFrame, PluginFrame, PrepareAck, PrepareSinkResult, RuntimeCheckpointUpdate,
+    RuntimePluginKind, RuntimeRequestAck, RuntimeSchemaInstallRequest, RuntimeSchemaRefreshRequest,
+    RuntimeSchemaStateInstallRequest, RuntimeSessionHello, RuntimeSinkInstallRequest,
+    RuntimeSourceSinkWrite, SinkAck, SinkWriteStats, SourceEvent, RUNTIME_PROTOCOL_VERSION,
     SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
     SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
@@ -193,7 +195,21 @@ async fn run_sink_loop(
                 write_sink_state_snapshot(cli, &state)?;
                 write_frame(control_writer, &PluginFrame::Installed).await?;
             }
-            HostFrame::RunSink(request) => {
+            HostFrame::InstallSchemaDelta(delta) => {
+                if let Some(schema_state) = state.schema_state.as_mut() {
+                    schema_state.schema_state.version = delta.version;
+                    for (namespace, entry) in delta.namespaces {
+                        schema_state
+                            .schema_state
+                            .namespaces
+                            .insert(namespace, entry.metadata);
+                    }
+                }
+                write_sink_state_snapshot(cli, &state)?;
+                write_frame(control_writer, &PluginFrame::Installed).await?;
+            }
+            HostFrame::PrepareSink(prepare) => {
+                let request = &prepare.request;
                 if cli.scenario == "crash_once" && should_crash_once(cli.marker_path.as_ref())? {
                     std::process::exit(1);
                 }
@@ -201,12 +217,17 @@ async fn run_sink_loop(
                 {
                     return Ok(());
                 }
+                if cli.scenario == "stale_prepare_once"
+                    && should_crash_once(cli.marker_path.as_ref())?
+                {
+                    write_frame(control_writer, &PluginFrame::Installed).await?;
+                    continue;
+                }
                 state.request_ids.push(request.request_id);
                 state.compaction_ids.push(request.compaction_id.clone());
                 if cli.scenario == "refresh_once" && !state.refresh_requested_once {
                     state.refresh_requested_once = true;
                     write_sink_state_snapshot(cli, &state)?;
-                    let _ = read_sink_payload(data_reader, request.request_id).await?;
                     write_frame(
                         control_writer,
                         &PluginFrame::SchemaStateRefreshRequired(RuntimeSchemaRefreshRequest {
@@ -221,7 +242,49 @@ async fn run_sink_loop(
                     .await?;
                     continue;
                 }
-                let arrow_stream_bytes = read_sink_payload(data_reader, request.request_id).await?;
+                if cli.scenario == "reject_prepare" {
+                    write_sink_state_snapshot(cli, &state)?;
+                    write_frame(
+                        control_writer,
+                        &PluginFrame::PrepareAck(PrepareAck {
+                            request_id: request.request_id,
+                            result: PrepareSinkResult::Rejected {
+                                reason: "simulated prepare rejection".to_string(),
+                            },
+                        }),
+                    )
+                    .await?;
+                    continue;
+                }
+                if cli.scenario == "already_applied" {
+                    write_frame(
+                        control_writer,
+                        &PluginFrame::PrepareAck(PrepareAck {
+                            request_id: request.request_id,
+                            result: PrepareSinkResult::AlreadyApplied(
+                                CommitReceipt::from_envelope(
+                                    &prepare.envelope,
+                                    CommitReceiptAuthority::AuthoritativePreflight {
+                                        authority: "test-helper".to_string(),
+                                    },
+                                ),
+                            ),
+                        }),
+                    )
+                    .await?;
+                    write_sink_state_snapshot(cli, &state)?;
+                    continue;
+                }
+                write_frame(
+                    control_writer,
+                    &PluginFrame::PrepareAck(PrepareAck {
+                        request_id: request.request_id,
+                        result: PrepareSinkResult::Ready,
+                    }),
+                )
+                .await?;
+                let payload = read_sink_payload(data_reader, request.request_id).await?;
+                let arrow_stream_bytes = payload.bytes;
                 if matches!(sink_scenario(cli), SinkScenario::WriteOutputParquet) {
                     let context = state
                         .install_request
@@ -231,11 +294,23 @@ async fn run_sink_loop(
                     write_sink_request_to_output(arrow_stream_bytes, context).await?;
                 }
                 state.run_count += 1;
+                state.payload_bytes = state.payload_bytes.saturating_add(payload.byte_count);
                 write_sink_state_snapshot(cli, &state)?;
                 write_frame(
                     control_writer,
-                    &PluginFrame::SinkAck(RuntimeRequestAck {
+                    &PluginFrame::SinkAck(SinkAck {
                         request_id: request.request_id,
+                        outcome: SinkWriteOutcome::Applied,
+                        receipt: CommitReceipt::from_envelope(
+                            &prepare.envelope,
+                            CommitReceiptAuthority::SinkWrite,
+                        ),
+                        stats: SinkWriteStats {
+                            rows: Some(payload.rows),
+                            bytes: Some(payload.byte_count),
+                            ..SinkWriteStats::default()
+                        },
+                        catalog_intents: Vec::new(),
                     }),
                 )
                 .await?;
@@ -264,6 +339,7 @@ struct SinkHelperState {
     run_count: usize,
     request_ids: Vec<u64>,
     compaction_ids: Vec<String>,
+    payload_bytes: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -521,54 +597,56 @@ fn people_arrow_stream() -> SendableRecordBatchStream {
     })
 }
 
-async fn read_sink_payload(reader: &mut OwnedReadHalf, request_id: u64) -> io::Result<Vec<u8>> {
-    match read_frame_or_eof::<_, HostDataFrame>(reader).await? {
-        Some(HostDataFrame::SinkPayload(payload)) if payload.request_id == request_id => {
-            Ok(payload.arrow_stream_bytes)
-        }
-        Some(HostDataFrame::SinkPayloadChunk(payload)) if payload.request_id == request_id => {
-            if payload.chunk_index != 0 {
+struct HelperSinkPayload {
+    bytes: Vec<u8>,
+    rows: u64,
+    byte_count: u64,
+}
+
+async fn read_sink_payload(
+    reader: &mut OwnedReadHalf,
+    request_id: u64,
+) -> io::Result<HelperSinkPayload> {
+    let mut bytes = Vec::new();
+    let mut rows = 0u64;
+    let mut expected_index = 0u32;
+    loop {
+        match read_frame_or_eof::<_, HostDataFrame>(reader).await? {
+            Some(HostDataFrame::SinkChunk(chunk))
+                if chunk.request_id == request_id && chunk.chunk_index == expected_index =>
+            {
+                chunk.validate_bound().map_err(io::Error::other)?;
+                rows = rows.saturating_add(chunk.rows);
+                bytes.extend_from_slice(&chunk.arrow_stream_bytes);
+                expected_index = expected_index.saturating_add(1);
+            }
+            Some(HostDataFrame::FinishSink(finish)) if finish.request_id == request_id => {
+                if finish.chunks != expected_index
+                    || finish.rows != rows
+                    || finish.bytes != bytes.len() as u64
+                {
+                    return Err(io::Error::other(
+                        "runtime helper received mismatched FinishSink totals",
+                    ));
+                }
+                return Ok(HelperSinkPayload {
+                    byte_count: bytes.len() as u64,
+                    bytes,
+                    rows,
+                });
+            }
+            Some(other) => {
                 return Err(io::Error::other(format!(
-                    "sink payload chunk request {} started at index {}",
-                    request_id, payload.chunk_index
+                    "unexpected sink payload frame: {:?}",
+                    other
                 )));
             }
-            let mut bytes = payload.arrow_stream_bytes;
-            let mut expected_index = 1;
-            if payload.final_chunk {
-                return Ok(bytes);
-            }
-            loop {
-                match read_frame_or_eof::<_, HostDataFrame>(reader).await? {
-                    Some(HostDataFrame::SinkPayloadChunk(payload))
-                        if payload.request_id == request_id
-                            && payload.chunk_index == expected_index =>
-                    {
-                        bytes.extend_from_slice(&payload.arrow_stream_bytes);
-                        expected_index = expected_index.saturating_add(1);
-                        if payload.final_chunk {
-                            return Ok(bytes);
-                        }
-                    }
-                    Some(other) => {
-                        return Err(io::Error::other(format!(
-                            "unexpected sink payload frame while reading chunks: {:?}",
-                            other
-                        )));
-                    }
-                    None => return Err(io::Error::other("runtime host closed sink data channel")),
-                }
+            None => {
+                return Err(io::Error::other(
+                    "runtime host closed sink data channel before FinishSink",
+                ));
             }
         }
-        Some(HostDataFrame::SinkPayload(payload)) => Err(io::Error::other(format!(
-            "sink payload request id mismatch: expected {} got {}",
-            request_id, payload.request_id
-        ))),
-        Some(HostDataFrame::SinkPayloadChunk(payload)) => Err(io::Error::other(format!(
-            "sink payload chunk request id mismatch: expected {} got {}",
-            request_id, payload.request_id
-        ))),
-        None => Err(io::Error::other("runtime host closed sink data channel")),
     }
 }
 
@@ -629,6 +707,7 @@ fn write_sink_state_snapshot(cli: &TestHelperCli, state: &SinkHelperState) -> io
             "run_count": state.run_count,
             "request_ids": state.request_ids,
             "compaction_ids": state.compaction_ids,
+            "payload_bytes": state.payload_bytes,
         }))
         .map_err(|err| io::Error::other(err.to_string()))?,
     )?;

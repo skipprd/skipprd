@@ -3,25 +3,29 @@ use std::io;
 
 use skippr_core::helpers::logging::init_logging;
 use skippr_core::plugins::{
-    DataSink, HasSchemaSinkSpec, HasSinkSpec, SchemaSink, SchemaSyncRequest, SinkWriteOutcome,
+    DataSink, HasSchemaSinkSpec, HasSinkSpec, SchemaSink, SchemaSyncRequest, SinkPreflightOutcome,
+    SinkWriteOutcome,
 };
-use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
+use tokio::io::AsyncRead;
+use tokio::net::tcp::OwnedWriteHalf;
 use tokio::net::TcpStream;
 
 use crate::protocol::{
-    HandshakeResponse, HostDataFrame, HostFrame, PluginFrame, RuntimeBinding, RuntimePluginKind,
+    CommitReceipt, CommitReceiptAuthority, FinishSink, HandshakeResponse, HostDataFrame, HostFrame,
+    PluginFrame, PrepareAck, PrepareSink, PrepareSinkResult, RuntimeBinding, RuntimePluginKind,
     RuntimeRequestAck, RuntimeSchemaInstallRequest, RuntimeSchemaRefreshRequest,
     RuntimeSchemaState, RuntimeSchemaStateInstallRequest, RuntimeSessionHello,
-    RuntimeSinkCapabilityDescriptor, RuntimeSinkInstallRequest, RuntimeSinkPayloadChunk,
-    RuntimeSinkPayloadMode, RuntimeSinkWriteAck, RuntimeSinkWriteResult, SchemaRunRequest,
-    SinkRunRequest, RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV,
-    SKIPPR_RUNTIME_DATA_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
+    RuntimeSinkCapabilityDescriptor, RuntimeSinkInstallRequest, RuntimeSinkPayloadMode,
+    SchemaDelta, SchemaRunRequest, SinkAck, SinkChunk, SinkRunRequest, SinkWriteStats,
+    RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
+    SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use crate::sdk::{decode_record_batch_stream, record_batches_to_stream};
 use crate::sink_idempotency::ObjectWriteManifest;
 use crate::wire::{read_frame_or_eof, write_frame};
 use futures::StreamExt;
-use skippr_core::plugins::{GroupedBatchReader, GroupedBatchReaderConfig, GroupedSinkWriteContext};
+use skippr_core::plugins::{GroupedBatchReader, GroupedBatchReaderConfig};
+use skippr_core::sink_apply_identity::SINK_APPLY_ENVELOPE_V2;
 
 pub fn buffer_name_for_runtime_binding(binding: RuntimeBinding) -> String {
     match binding {
@@ -102,126 +106,86 @@ async fn write_schema_refresh_required(
         .await
 }
 
-async fn read_sink_payload(reader: &mut OwnedReadHalf, request_id: u64) -> io::Result<Vec<u8>> {
-    let frame = read_frame_or_eof::<_, HostDataFrame>(reader)
-        .await
-        .map_err(|err| {
-            with_io_context(
-                err,
-                format!("runtime sink request {request_id} payload read failed"),
-            )
-        })?;
-    match frame {
-        Some(HostDataFrame::SinkPayload(payload)) if payload.request_id == request_id => {
-            Ok(payload.arrow_stream_bytes)
-        }
-        Some(HostDataFrame::SinkPayloadChunk(payload)) if payload.request_id == request_id => {
-            let mut chunks = payload.arrow_stream_bytes;
-            let mut expected_index = payload.chunk_index + 1;
-            if payload.chunk_index != 0 {
+#[derive(Debug)]
+struct CollectedSinkPayload {
+    chunks: Vec<SinkChunk>,
+    rows: u64,
+    bytes: u64,
+}
+
+async fn read_sink_payload<R>(reader: &mut R, request_id: u64) -> io::Result<CollectedSinkPayload>
+where
+    R: AsyncRead + Unpin,
+{
+    let mut chunks = Vec::new();
+    let mut rows = 0u64;
+    let mut bytes = 0u64;
+    loop {
+        let frame = read_frame_or_eof::<_, HostDataFrame>(reader)
+            .await
+            .map_err(|err| {
+                with_io_context(
+                    err,
+                    format!("runtime sink request {request_id} payload read failed"),
+                )
+            })?
+            .ok_or_else(|| {
+                io::Error::other(format!(
+                    "runtime host closed sink data channel before FinishSink for request {request_id}"
+                ))
+            })?;
+        match frame {
+            HostDataFrame::SinkChunk(chunk)
+                if chunk.request_id == request_id && chunk.chunk_index == chunks.len() as u32 =>
+            {
+                chunk.validate_bound().map_err(io::Error::other)?;
+                rows = rows.saturating_add(chunk.rows);
+                bytes = bytes.saturating_add(chunk.arrow_stream_bytes.len() as u64);
+                chunks.push(chunk);
+            }
+            HostDataFrame::SinkChunk(chunk) => {
                 return Err(io::Error::other(format!(
-                    "sink payload chunk request {} started at index {}",
-                    request_id, payload.chunk_index
+                    "sink chunk mismatch for request {}: got request {} chunk {}, expected chunk {}",
+                    request_id,
+                    chunk.request_id,
+                    chunk.chunk_index,
+                    chunks.len()
                 )));
             }
-            if payload.final_chunk {
-                return Ok(chunks);
-            }
-            loop {
-                let frame = read_frame_or_eof::<_, HostDataFrame>(reader)
-                    .await
-                    .map_err(|err| {
-                        with_io_context(
-                            err,
-                            format!("runtime sink request {request_id} payload chunk read failed"),
-                        )
-                    })?;
-                match frame {
-                    Some(HostDataFrame::SinkPayloadChunk(payload))
-                        if payload.request_id == request_id
-                            && payload.chunk_index == expected_index =>
-                    {
-                        chunks.extend_from_slice(&payload.arrow_stream_bytes);
-                        expected_index = expected_index.saturating_add(1);
-                        if payload.final_chunk {
-                            return Ok(chunks);
-                        }
-                    }
-                    Some(HostDataFrame::SinkPayloadChunk(payload)) => {
-                        return Err(io::Error::other(format!(
-                            "sink payload chunk mismatch for request {}: got request {} chunk {}, expected chunk {}",
-                            request_id, payload.request_id, payload.chunk_index, expected_index
-                        )));
-                    }
-                    Some(HostDataFrame::SinkPayload(payload)) => {
-                        return Err(io::Error::other(format!(
-                            "unexpected full sink payload for request {} while reading chunks for request {}",
-                            payload.request_id, request_id
-                        )));
-                    }
-                    None => {
-                        return Err(io::Error::other(format!(
-                            "runtime host closed sink data channel before final chunk for request {request_id}"
-                        )));
-                    }
+            HostDataFrame::FinishSink(FinishSink {
+                request_id: finish_request_id,
+                chunks: expected_chunks,
+                rows: expected_rows,
+                bytes: expected_bytes,
+            }) if finish_request_id == request_id => {
+                if expected_chunks != chunks.len() as u32
+                    || expected_rows != rows
+                    || expected_bytes != bytes
+                {
+                    return Err(io::Error::other(format!(
+                        "FinishSink totals mismatch for request {}: chunks {}/{}, rows {}/{}, bytes {}/{}",
+                        request_id,
+                        chunks.len(),
+                        expected_chunks,
+                        rows,
+                        expected_rows,
+                        bytes,
+                        expected_bytes
+                    )));
                 }
+                return Ok(CollectedSinkPayload {
+                    chunks,
+                    rows,
+                    bytes,
+                });
+            }
+            HostDataFrame::FinishSink(finish) => {
+                return Err(io::Error::other(format!(
+                    "FinishSink request id mismatch: expected {} got {}",
+                    request_id, finish.request_id
+                )));
             }
         }
-        Some(HostDataFrame::SinkPayload(payload)) => Err(io::Error::other(format!(
-            "sink payload request id mismatch: expected {} got {}",
-            request_id, payload.request_id
-        ))),
-        Some(HostDataFrame::SinkPayloadChunk(payload)) => Err(io::Error::other(format!(
-            "sink payload chunk request id mismatch: expected {} got {}",
-            request_id, payload.request_id
-        ))),
-        None => Err(io::Error::other(format!(
-            "runtime host closed sink data channel before request {request_id} payload"
-        ))),
-    }
-}
-
-async fn read_next_sink_payload_chunk(
-    reader: &mut OwnedReadHalf,
-    request_id: u64,
-    expected_index: u32,
-) -> io::Result<RuntimeSinkPayloadChunk> {
-    let frame = read_frame_or_eof::<_, HostDataFrame>(reader)
-        .await
-        .map_err(|err| {
-            with_io_context(
-                err,
-                format!("runtime sink request {request_id} payload chunk read failed"),
-            )
-        })?;
-    match frame {
-        Some(HostDataFrame::SinkPayloadChunk(payload))
-            if payload.request_id == request_id && payload.chunk_index == expected_index =>
-        {
-            Ok(payload)
-        }
-        Some(HostDataFrame::SinkPayloadChunk(payload)) => Err(io::Error::other(format!(
-            "sink payload chunk mismatch for request {}: got request {} chunk {}, expected chunk {}",
-            request_id, payload.request_id, payload.chunk_index, expected_index
-        ))),
-        Some(HostDataFrame::SinkPayload(payload)) => Err(io::Error::other(format!(
-            "unexpected full sink payload for grouped request {} while reading chunk {} from request {}",
-            request_id, expected_index, payload.request_id
-        ))),
-        None => Err(io::Error::other(format!(
-            "runtime host closed sink data channel before grouped request {request_id} chunk {expected_index}"
-        ))),
-    }
-}
-
-async fn drain_grouped_sink_payload(reader: &mut OwnedReadHalf, request_id: u64) -> io::Result<()> {
-    let mut expected_index = 0u32;
-    loop {
-        let payload = read_next_sink_payload_chunk(reader, request_id, expected_index).await?;
-        if payload.final_chunk {
-            return Ok(());
-        }
-        expected_index = expected_index.saturating_add(1);
     }
 }
 
@@ -351,19 +315,25 @@ where
                         with_io_context(err, "runtime sink schema state ack write failed")
                     })?;
             }
-            HostFrame::RunSink(request) => {
+            HostFrame::InstallSchemaDelta(delta) => {
+                apply_schema_delta_to_sinks(
+                    &delta,
+                    &mut primary_plugin,
+                    &mut deadletter_plugin,
+                    &mut schema_state,
+                )
+                .await
+                .map_err(|err| with_io_context(err, "runtime sink schema delta install failed"))?;
+                control_writer
+                    .write(&PluginFrame::Installed)
+                    .await
+                    .map_err(|err| {
+                        with_io_context(err, "runtime sink schema delta ack write failed")
+                    })?;
+            }
+            HostFrame::PrepareSink(prepare) => {
+                let request = &prepare.request;
                 if schema_refresh_needed(&schema_state, request.required_schema_version) {
-                    // The host already sent the payload for this request on the data channel.
-                    // Drain it before asking for a schema refresh so retries stay aligned.
-                    match request.payload_mode {
-                        RuntimeSinkPayloadMode::FullStream => {
-                            let _ = read_sink_payload(&mut data_reader, request.request_id).await?;
-                        }
-                        RuntimeSinkPayloadMode::GroupedChunks => {
-                            drain_grouped_sink_payload(&mut data_reader, request.request_id)
-                                .await?;
-                        }
-                    }
                     write_schema_refresh_required(
                         &control_writer,
                         request.required_schema_version,
@@ -381,10 +351,47 @@ where
                     })?;
                     continue;
                 }
+                let ledger_manifest =
+                    match prepare_sink_request(&prepare, &primary_plugin, &deadletter_plugin).await
+                    {
+                        Ok(PreparedSink::AlreadyApplied(receipt)) => {
+                            control_writer
+                                .write(&PluginFrame::PrepareAck(PrepareAck {
+                                    request_id: request.request_id,
+                                    result: PrepareSinkResult::AlreadyApplied(receipt),
+                                }))
+                                .await?;
+                            continue;
+                        }
+                        Ok(PreparedSink::Ready { ledger_manifest }) => {
+                            control_writer
+                                .write(&PluginFrame::PrepareAck(PrepareAck {
+                                    request_id: request.request_id,
+                                    result: PrepareSinkResult::Ready,
+                                }))
+                                .await?;
+                            ledger_manifest
+                        }
+                        Err(err) => {
+                            control_writer
+                                .write(&PluginFrame::PrepareAck(PrepareAck {
+                                    request_id: request.request_id,
+                                    result: PrepareSinkResult::Rejected {
+                                        reason: err.to_string(),
+                                    },
+                                }))
+                                .await?;
+                            continue;
+                        }
+                    };
+                let payload = read_sink_payload(&mut data_reader, request.request_id).await?;
                 let outcome_result = match request.payload_mode {
                     RuntimeSinkPayloadMode::FullStream => {
-                        let arrow_stream_bytes =
-                            read_sink_payload(&mut data_reader, request.request_id).await?;
+                        let arrow_stream_bytes = payload
+                            .chunks
+                            .iter()
+                            .flat_map(|chunk| chunk.arrow_stream_bytes.iter().copied())
+                            .collect();
                         run_sink_request(
                             request.clone(),
                             arrow_stream_bytes,
@@ -396,7 +403,7 @@ where
                     RuntimeSinkPayloadMode::GroupedChunks => {
                         run_grouped_sink_request(
                             request.clone(),
-                            &mut data_reader,
+                            &payload.chunks,
                             &primary_plugin,
                             &deadletter_plugin,
                         )
@@ -416,15 +423,29 @@ where
                         return Err(io::Error::other(message));
                     }
                 };
+                if let Some(manifest) = ledger_manifest.as_ref() {
+                    if matches!(
+                        outcome,
+                        SinkWriteOutcome::Applied | SinkWriteOutcome::AlreadyApplied
+                    ) {
+                        write_local_idempotency_manifest(manifest)?;
+                    }
+                }
                 control_writer
-                    .write(&PluginFrame::SinkWriteAck(RuntimeSinkWriteAck {
+                    .write(&PluginFrame::SinkAck(SinkAck {
                         request_id: request.request_id,
-                        result: match outcome {
-                            SinkWriteOutcome::Applied => RuntimeSinkWriteResult::Applied,
-                            SinkWriteOutcome::AlreadyApplied => {
-                                RuntimeSinkWriteResult::AlreadyApplied
-                            }
+                        outcome,
+                        receipt: CommitReceipt::from_envelope(
+                            &prepare.envelope,
+                            CommitReceiptAuthority::SinkWrite,
+                        ),
+                        stats: SinkWriteStats {
+                            rows: Some(payload.rows),
+                            bytes: Some(payload.bytes),
+                            ..SinkWriteStats::default()
                         },
+                        // Glue outbox migration owns production of catalog intents.
+                        catalog_intents: Vec::new(),
                     }))
                     .await
                     .map_err(|err| {
@@ -513,6 +534,162 @@ where
     Ok(())
 }
 
+async fn apply_schema_delta_to_sinks<P>(
+    delta: &SchemaDelta,
+    primary_plugin: &mut Option<P>,
+    deadletter_plugin: &mut Option<P>,
+    schema_state: &mut Option<RuntimeSchemaState>,
+) -> io::Result<()>
+where
+    P: DataSink + Send + Sync,
+{
+    let state = schema_state.as_mut().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "runtime sink received SchemaDelta before initial SchemaState",
+        )
+    })?;
+    if delta.version <= state.version {
+        return Ok(());
+    }
+    for (namespace, entry) in &delta.namespaces {
+        state
+            .namespaces
+            .insert(namespace.clone(), entry.metadata.clone());
+    }
+    state.version = delta.version;
+    if let Some(plugin) = primary_plugin.as_ref() {
+        plugin
+            .install_schema_state(state.version, &state.namespaces)
+            .await?;
+    }
+    if let Some(plugin) = deadletter_plugin.as_ref() {
+        plugin
+            .install_schema_state(state.version, &state.namespaces)
+            .await?;
+    }
+    Ok(())
+}
+
+enum PreparedSink {
+    Ready {
+        ledger_manifest: Option<ObjectWriteManifest>,
+    },
+    AlreadyApplied(CommitReceipt),
+}
+
+fn sink_write_context(request: &SinkRunRequest) -> skippr_core::plugins::SinkWriteContext<'_> {
+    skippr_core::plugins::SinkWriteContext {
+        filename: request.filename.clone(),
+        compaction_id: request.compaction_id.clone(),
+        idempotency_key: request.idempotency_key.clone(),
+        wal_refs: request.wal_refs.clone(),
+        write_semantics: request.write_semantics,
+        schema_fingerprint: request.schema_fingerprint.clone(),
+        cdc_ctx: request.cdc_ctx.as_ref(),
+        source_contract: request.source_contract.as_ref(),
+    }
+}
+
+async fn prepare_sink_request<P>(
+    prepare: &PrepareSink,
+    primary_plugin: &Option<P>,
+    deadletter_plugin: &Option<P>,
+) -> io::Result<PreparedSink>
+where
+    P: DataSink + HasSinkSpec + Send + Sync,
+{
+    let request = &prepare.request;
+    if prepare.request_id != request.request_id {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "PrepareSink request id mismatch: frame={} request={}",
+                prepare.request_id, request.request_id
+            ),
+        ));
+    }
+    if prepare.envelope.version != SINK_APPLY_ENVELOPE_V2 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!(
+                "unsupported sink apply envelope version {}",
+                prepare.envelope.version
+            ),
+        ));
+    }
+    let expected_envelope = skippr_core::sink_apply_identity::SinkApplyEnvelopeV2::new(
+        request.compaction_id.clone(),
+        request.idempotency_key.clone(),
+        &request.wal_refs,
+        request.cdc_ctx.is_some(),
+        request
+            .source_contract
+            .as_ref()
+            .map(|contract| contract.write_policy)
+            .unwrap_or_default(),
+        request.write_semantics,
+        (!request.schema_fingerprint.is_empty()).then(|| request.schema_fingerprint.clone()),
+        Some(request.required_schema_version),
+        request.source_contract.clone(),
+    );
+    if prepare.envelope != expected_envelope {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "PrepareSink envelope does not match SinkRunRequest",
+        ));
+    }
+    let plugin = match request.binding {
+        RuntimeBinding::Primary => primary_plugin,
+        RuntimeBinding::Deadletter => deadletter_plugin,
+    }
+    .as_ref()
+    .ok_or_else(|| io::Error::other("runtime sink binding was not installed"))?;
+    let ctx = sink_write_context(request);
+    ctx.validate_grouped::<<P::Spec as skippr_core::plugins::SinkSpec>::WriteSupport>()
+        .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
+    let replay_safe =
+        <<P::Spec as skippr_core::plugins::SinkSpec>::WriteSupport as skippr_core::plugins::SinkWriteSupport>::CAN_RETURN_ALREADY_APPLIED;
+    let ledger_manifest = if ctx.is_grouped() && replay_safe {
+        Some(ObjectWriteManifest::from_context(
+            ctx.compaction_id.clone(),
+            ctx.idempotency_key.clone(),
+            ctx.schema_fingerprint.clone(),
+            &ctx.wal_refs,
+        ))
+    } else {
+        None
+    };
+    // Probe local state during Prepare so a mismatch is detected before payload
+    // consumption. A matching entry is only a cache hint; the sink preflight
+    // remains the authority for AlreadyApplied.
+    if let Some(manifest) = ledger_manifest.as_ref() {
+        let _cache_matches = local_idempotency_manifest_matches(manifest)?;
+    }
+    match plugin.preflight(ctx).await? {
+        SinkPreflightOutcome::Ready => Ok(PreparedSink::Ready { ledger_manifest }),
+        SinkPreflightOutcome::AlreadyApplied { authority } => {
+            if !replay_safe {
+                return Err(io::Error::other(
+                    "runtime sink preflight returned AlreadyApplied without replay-safe capability",
+                ));
+            }
+            if authority.trim().is_empty() {
+                return Err(io::Error::other(
+                    "runtime sink preflight returned an empty receipt authority",
+                ));
+            }
+            if let Some(manifest) = ledger_manifest.as_ref() {
+                write_local_idempotency_manifest(manifest)?;
+            }
+            Ok(PreparedSink::AlreadyApplied(CommitReceipt::from_envelope(
+                &prepare.envelope,
+                CommitReceiptAuthority::AuthoritativePreflight { authority },
+            )))
+        }
+    }
+}
+
 async fn run_sink_request<P>(
     request: SinkRunRequest,
     arrow_stream_bytes: Vec<u8>,
@@ -556,41 +733,18 @@ where
     let is_grouped = ctx.is_grouped();
     let replay_safe =
         <<P::Spec as skippr_core::plugins::SinkSpec>::WriteSupport as skippr_core::plugins::SinkWriteSupport>::CAN_RETURN_ALREADY_APPLIED;
-    let ledger_manifest = if is_grouped && replay_safe {
-        Some(ObjectWriteManifest::from_context(
-            ctx.compaction_id.clone(),
-            ctx.idempotency_key.clone(),
-            ctx.schema_fingerprint.clone(),
-            &ctx.wal_refs,
-        ))
-    } else {
-        None
-    };
-    if let Some(manifest) = ledger_manifest.as_ref() {
-        if local_idempotency_manifest_matches(manifest)? {
-            return Ok(SinkWriteOutcome::AlreadyApplied);
-        }
-    }
     let outcome = plugin.sync_with_context_result(stream, ctx).await?;
     if is_grouped && outcome == SinkWriteOutcome::AlreadyApplied && !replay_safe {
         return Err(io::Error::other(
             "runtime sink returned AlreadyApplied without declaring idempotent replay support",
         ));
     }
-    if let Some(manifest) = ledger_manifest.as_ref() {
-        if matches!(
-            outcome,
-            SinkWriteOutcome::Applied | SinkWriteOutcome::AlreadyApplied
-        ) {
-            write_local_idempotency_manifest(manifest)?;
-        }
-    }
     Ok(outcome)
 }
 
 async fn run_grouped_sink_request<P>(
     request: SinkRunRequest,
-    data_reader: &mut OwnedReadHalf,
+    chunks: &[SinkChunk],
     primary_plugin: &Option<P>,
     deadletter_plugin: &Option<P>,
 ) -> io::Result<SinkWriteOutcome>
@@ -605,7 +759,6 @@ where
         .as_ref()
         .ok_or_else(|| io::Error::other("runtime sink binding was not installed"))?;
     let SinkRunRequest {
-        request_id,
         filename,
         compaction_id,
         idempotency_key,
@@ -632,39 +785,17 @@ where
         .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
     let replay_safe =
         <<P::Spec as skippr_core::plugins::SinkSpec>::WriteSupport as skippr_core::plugins::SinkWriteSupport>::CAN_RETURN_ALREADY_APPLIED;
-    let ledger_manifest = if replay_safe {
-        Some(ObjectWriteManifest::from_context(
-            grouped_ctx.compaction_id.clone(),
-            grouped_ctx.idempotency_key.clone(),
-            grouped_ctx.schema_fingerprint.clone(),
-            grouped_ctx.wal_refs.as_slice(),
-        ))
-    } else {
-        None
-    };
-    if let Some(manifest) = ledger_manifest.as_ref() {
-        if local_idempotency_manifest_matches(manifest)? {
-            drain_grouped_sink_payload(data_reader, request_id).await?;
-            return Ok(SinkWriteOutcome::AlreadyApplied);
-        }
-    }
 
     let mut all_batches = Vec::new();
     let mut schema = None;
-    let mut expected_index = 0u32;
-    loop {
-        let payload = read_next_sink_payload_chunk(data_reader, request_id, expected_index).await?;
-        let mut stream = decode_record_batch_stream(payload.arrow_stream_bytes)?;
+    for chunk in chunks {
+        let mut stream = decode_record_batch_stream(chunk.arrow_stream_bytes.clone())?;
         if schema.is_none() {
             schema = Some(stream.schema());
         }
         while let Some(batch) = stream.next().await {
             all_batches.push(batch?);
         }
-        if payload.final_chunk {
-            break;
-        }
-        expected_index = expected_index.saturating_add(1);
     }
 
     let schema = schema.ok_or_else(|| {
@@ -686,9 +817,6 @@ where
         ));
     }
 
-    if let Some(manifest) = ledger_manifest.as_ref() {
-        write_local_idempotency_manifest(manifest)?;
-    }
     Ok(outcome)
 }
 
@@ -729,11 +857,7 @@ fn local_idempotency_manifest_matches(manifest: &ObjectWriteManifest) -> io::Res
     if existing.matches_manifest(manifest) {
         return Ok(true);
     }
-    Err(io::Error::other(format!(
-        "idempotency ledger mismatch for key {} at {}",
-        manifest.idempotency_key,
-        path.to_string_lossy()
-    )))
+    Ok(false)
 }
 
 fn write_local_idempotency_manifest(manifest: &ObjectWriteManifest) -> io::Result<()> {
@@ -848,6 +972,16 @@ where
                 .await?;
                 control_writer.write(&PluginFrame::Installed).await?;
             }
+            HostFrame::InstallSchemaDelta(delta) => {
+                apply_schema_delta_to_schema_sinks(
+                    &delta,
+                    &mut primary_plugin,
+                    &mut deadletter_plugin,
+                    &mut schema_state,
+                )
+                .await?;
+                control_writer.write(&PluginFrame::Installed).await?;
+            }
             HostFrame::RunSchema(request) => {
                 if schema_refresh_needed(&schema_state, request.required_schema_version) {
                     write_schema_refresh_required(
@@ -946,6 +1080,43 @@ where
     Ok(())
 }
 
+async fn apply_schema_delta_to_schema_sinks<P>(
+    delta: &SchemaDelta,
+    primary_plugin: &mut Option<P>,
+    deadletter_plugin: &mut Option<P>,
+    schema_state: &mut Option<RuntimeSchemaState>,
+) -> io::Result<()>
+where
+    P: SchemaSink + HasSchemaSinkSpec + Send + Sync,
+{
+    let state = schema_state.as_mut().ok_or_else(|| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "runtime schema sink received SchemaDelta before initial SchemaState",
+        )
+    })?;
+    if delta.version <= state.version {
+        return Ok(());
+    }
+    for (namespace, entry) in &delta.namespaces {
+        state
+            .namespaces
+            .insert(namespace.clone(), entry.metadata.clone());
+    }
+    state.version = delta.version;
+    if let Some(plugin) = primary_plugin.as_ref() {
+        plugin
+            .install_schema_state(state.version, &state.namespaces)
+            .await?;
+    }
+    if let Some(plugin) = deadletter_plugin.as_ref() {
+        plugin
+            .install_schema_state(state.version, &state.namespaces)
+            .await?;
+    }
+    Ok(())
+}
+
 async fn run_schema_request<P>(
     request: SchemaRunRequest,
     schema_state: &Option<RuntimeSchemaState>,
@@ -981,4 +1152,137 @@ where
             metadata,
         )
         .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::wire::write_frame;
+    use skippr_core::plugins::cdc::{sink_capabilities, SinkCapability};
+    use skippr_core::plugins::{
+        DeterministicObjectOverwrite, GroupedBatchReader, HasSinkSpec, SinkSpec,
+    };
+    use std::sync::{Mutex as StdMutex, OnceLock};
+
+    struct TestSink;
+    struct TestSinkSpec;
+
+    impl SinkSpec for TestSinkSpec {
+        const NAME: &'static str = "Test";
+        const CAPABILITY: SinkCapability = sink_capabilities::FILE;
+        type WriteSupport = DeterministicObjectOverwrite;
+    }
+
+    impl HasSinkSpec for TestSink {
+        type Spec = TestSinkSpec;
+    }
+
+    #[async_trait::async_trait]
+    impl DataSink for TestSink {
+        async fn sync(
+            &self,
+            _stream: datafusion::execution::SendableRecordBatchStream,
+            _filename: String,
+            _cdc_ctx: Option<&skippr_core::plugins::cdc::SyncContext>,
+        ) -> io::Result<()> {
+            Ok(())
+        }
+
+        async fn sync_grouped(
+            &self,
+            _reader: GroupedBatchReader,
+            _ctx: skippr_core::plugins::GroupedSinkWriteContext<'_>,
+        ) -> io::Result<SinkWriteOutcome> {
+            Ok(SinkWriteOutcome::Applied)
+        }
+
+        fn capability(&self) -> &'static SinkCapability {
+            &sink_capabilities::FILE
+        }
+    }
+
+    #[tokio::test]
+    async fn ready_payload_requires_explicit_finish_sink() {
+        let (mut writer, mut reader) = tokio::io::duplex(4096);
+        write_frame(
+            &mut writer,
+            &HostDataFrame::SinkChunk(SinkChunk {
+                request_id: 7,
+                chunk_index: 0,
+                row_offset: 0,
+                rows: 1,
+                arrow_stream_bytes: vec![1, 2, 3],
+            }),
+        )
+        .await
+        .unwrap();
+        drop(writer);
+
+        let err = read_sink_payload(&mut reader, 7).await.unwrap_err();
+        assert!(err.to_string().contains("before FinishSink"));
+    }
+
+    #[tokio::test]
+    async fn matching_local_ledger_is_cache_not_already_applied_authority() {
+        static ENV_LOCK: OnceLock<StdMutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK.get_or_init(|| StdMutex::new(())).lock().unwrap();
+        let temp = tempfile::tempdir().unwrap();
+        let old_data_dir = std::env::var("DATA_DIR").ok();
+        std::env::set_var("DATA_DIR", temp.path());
+        let wal_refs = vec![crate::protocol::RuntimeWalPartRef {
+            segment_id: "seg-1".into(),
+            source: "local".into(),
+            start: 0,
+            len: 10,
+            sink_ref: "primary".into(),
+            namespace: "events".into(),
+            partition: "day=2026-07-30".into(),
+            time: None,
+            schema_fingerprint: "schema".into(),
+            cdc_meta_hash: None,
+        }];
+        let request = SinkRunRequest {
+            request_id: 9,
+            compaction_id: "c9".into(),
+            idempotency_key: "k9".into(),
+            wal_refs: wal_refs.clone(),
+            write_semantics:
+                skippr_core::buffer::compaction_transaction::SinkWriteSemantics::IdempotentAtLeastOnce,
+            schema_fingerprint: "schema".into(),
+            binding: RuntimeBinding::Primary,
+            required_schema_version: 3,
+            filename: "namespace=events".into(),
+            cdc_ctx: None,
+            source_contract: None,
+            payload_mode: RuntimeSinkPayloadMode::GroupedChunks,
+        };
+        let manifest = ObjectWriteManifest::from_context("c9", "k9", "schema", &request.wal_refs);
+        write_local_idempotency_manifest(&manifest).unwrap();
+        let prepare = PrepareSink {
+            request_id: 9,
+            envelope: skippr_core::sink_apply_identity::SinkApplyEnvelopeV2::new(
+                "c9",
+                "k9",
+                &wal_refs,
+                false,
+                Default::default(),
+                request.write_semantics,
+                Some("schema".into()),
+                Some(3),
+                None,
+            ),
+            request,
+        };
+
+        let result = prepare_sink_request(&prepare, &Some(TestSink), &None)
+            .await
+            .unwrap();
+        assert!(matches!(result, PreparedSink::Ready { .. }));
+
+        if let Some(old_data_dir) = old_data_dir {
+            std::env::set_var("DATA_DIR", old_data_dir);
+        } else {
+            std::env::remove_var("DATA_DIR");
+        }
+    }
 }

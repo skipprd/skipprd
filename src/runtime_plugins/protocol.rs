@@ -13,13 +13,18 @@ use crate::plugins::cdc::{
     SourceCapability, SourceCheckpointStyle, SourceGuaranteeTier, SourceOrderModel, SyncContext,
 };
 use crate::plugins::source_contract::{SinkWritePolicySupport, SourceNamespaceContract};
+use crate::plugins::SinkWriteOutcome;
+use crate::sink_apply_identity::SinkApplyEnvelopeV2;
 use serde::{Deserialize, Serialize};
 
 // This is the in-process runtime plugin IPC contract. It is deliberately
 // separate from the skippr/React adapter's CLI subprocess JSON summaries.
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 16;
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 17;
+pub const COMMIT_RECEIPT_VERSION: u32 = 1;
+pub const CATALOG_INTENT_VERSION: u32 = 1;
+pub const MAX_RUNTIME_SINK_CHUNK_BYTES: usize = 128 * 1024 * 1024;
 pub const SKIPPR_RUNTIME_CONTROL_ADDR_ENV: &str = "SKIPPR_RUNTIME_CONTROL_ADDR";
 pub const SKIPPR_RUNTIME_DATA_ADDR_ENV: &str = "SKIPPR_RUNTIME_DATA_ADDR";
 pub const SKIPPR_RUNTIME_OFFSET_ADDR_ENV: &str = "SKIPPR_RUNTIME_OFFSET_ADDR";
@@ -277,6 +282,18 @@ pub struct RuntimeSchemaState {
     pub namespaces: BTreeMap<String, OutputMetadata>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SchemaNamespaceDelta {
+    pub version: u64,
+    pub metadata: OutputMetadata,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct SchemaDelta {
+    pub version: u64,
+    pub namespaces: BTreeMap<String, SchemaNamespaceDelta>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct RuntimeSinkInstallRequest {
     pub context: RuntimeExecutionContext,
@@ -460,18 +477,73 @@ pub struct RuntimeRequestAck {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub enum RuntimeSinkWriteResult {
-    Applied,
-    AlreadyApplied,
-    RejectedNonIdempotent,
-    RetryableFailure { message: String },
-    FatalFailure { message: String },
+pub enum CommitReceiptAuthority {
+    SinkWrite,
+    AuthoritativePreflight { authority: String },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-pub struct RuntimeSinkWriteAck {
+pub struct CommitReceipt {
+    pub version: u32,
+    pub compaction_id: String,
+    pub idempotency_key: String,
+    pub wal_refs_fingerprint: String,
+    pub authority: CommitReceiptAuthority,
+}
+
+impl CommitReceipt {
+    pub fn from_envelope(
+        envelope: &SinkApplyEnvelopeV2,
+        authority: CommitReceiptAuthority,
+    ) -> Self {
+        Self {
+            version: COMMIT_RECEIPT_VERSION,
+            compaction_id: envelope.compaction_id.clone(),
+            idempotency_key: envelope.idempotency_key.clone(),
+            wal_refs_fingerprint: envelope.wal_refs_fingerprint.clone(),
+            authority,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SinkWriteStats {
+    pub rows: Option<u64>,
+    pub bytes: Option<u64>,
+    pub objects: Option<u64>,
+    pub encode_duration_ms: Option<u64>,
+    pub upload_duration_ms: Option<u64>,
+    pub commit_duration_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub enum CatalogIntentKind {
+    UpsertNamespace,
+    UpsertPartition,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct CatalogIntentIdentity {
+    pub sink_ref: String,
+    pub namespace: String,
+    pub kind: CatalogIntentKind,
+    pub key: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct CatalogIntent {
+    pub version: u32,
+    pub identity: CatalogIntentIdentity,
+    pub payload_json: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SinkAck {
     pub request_id: u64,
-    pub result: RuntimeSinkWriteResult,
+    pub outcome: SinkWriteOutcome,
+    pub receipt: CommitReceipt,
+    pub stats: SinkWriteStats,
+    pub catalog_intents: Vec<CatalogIntent>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -483,6 +555,7 @@ pub struct RuntimeIngestAck {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum SourceEvent {
     SchemaStateUpdate(RuntimeSchemaState),
+    SchemaDelta(SchemaDelta),
     ContractsUpdate(Vec<SourceNamespaceContract>),
     Completed,
 }
@@ -507,6 +580,26 @@ pub struct SinkRunRequest {
     pub payload_mode: RuntimeSinkPayloadMode,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PrepareSink {
+    pub request_id: u64,
+    pub envelope: SinkApplyEnvelopeV2,
+    pub request: SinkRunRequest,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum PrepareSinkResult {
+    Ready,
+    AlreadyApplied(CommitReceipt),
+    Rejected { reason: String },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PrepareAck {
+    pub request_id: u64,
+    pub result: PrepareSinkResult,
+}
+
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 pub enum RuntimeSinkPayloadMode {
     #[default]
@@ -514,20 +607,36 @@ pub enum RuntimeSinkPayloadMode {
     GroupedChunks,
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RuntimeSinkPayload {
-    pub request_id: u64,
-    pub arrow_stream_bytes: Vec<u8>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-pub struct RuntimeSinkPayloadChunk {
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SinkChunk {
     pub request_id: u64,
     pub chunk_index: u32,
     pub row_offset: u64,
     pub rows: u64,
-    pub final_chunk: bool,
     pub arrow_stream_bytes: Vec<u8>,
+}
+
+impl SinkChunk {
+    pub fn validate_bound(&self) -> Result<(), String> {
+        if self.arrow_stream_bytes.len() > MAX_RUNTIME_SINK_CHUNK_BYTES {
+            return Err(format!(
+                "sink chunk {} for request {} is {} bytes; maximum is {}",
+                self.chunk_index,
+                self.request_id,
+                self.arrow_stream_bytes.len(),
+                MAX_RUNTIME_SINK_CHUNK_BYTES
+            ));
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct FinishSink {
+    pub request_id: u64,
+    pub chunks: u32,
+    pub rows: u64,
+    pub bytes: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -547,8 +656,9 @@ pub enum HostFrame {
     InstallSink(RuntimeSinkInstallRequest),
     InstallSchema(RuntimeSchemaInstallRequest),
     InstallSchemaState(RuntimeSchemaStateInstallRequest),
+    InstallSchemaDelta(SchemaDelta),
     RunSource(SourceStartRequest),
-    RunSink(SinkRunRequest),
+    PrepareSink(PrepareSink),
     RunSchema(SchemaRunRequest),
     IngestAck(RuntimeIngestAck),
     OffsetResponse(RuntimeOffsetRpcResponse),
@@ -561,8 +671,8 @@ pub enum PluginFrame {
     Installed,
     SourceEvent(SourceEvent),
     OffsetRequest(RuntimeOffsetRpcRequest),
-    SinkAck(RuntimeRequestAck),
-    SinkWriteAck(RuntimeSinkWriteAck),
+    PrepareAck(PrepareAck),
+    SinkAck(SinkAck),
     SchemaAck(RuntimeRequestAck),
     SchemaStateRefreshRequired(RuntimeSchemaRefreshRequest),
     Error(String),
@@ -570,8 +680,8 @@ pub enum PluginFrame {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub enum HostDataFrame {
-    SinkPayload(RuntimeSinkPayload),
-    SinkPayloadChunk(RuntimeSinkPayloadChunk),
+    SinkChunk(SinkChunk),
+    FinishSink(FinishSink),
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -598,27 +708,8 @@ pub enum PluginDataFrame {
 mod tests {
     use super::*;
 
-    #[derive(Debug, Deserialize, Serialize)]
-    struct SourceStartRequestV7 {
-        context: RuntimeExecutionContext,
-        config: RuntimeSourceConfig,
-    }
-
-    #[derive(Debug, Deserialize, Serialize)]
-    enum HostFrameV7 {
-        Handshake(HandshakeRequest),
-        InstallSink(RuntimeSinkInstallRequest),
-        InstallSchema(RuntimeSchemaInstallRequest),
-        InstallSchemaState(RuntimeSchemaStateInstallRequest),
-        RunSource(SourceStartRequestV7),
-        RunSink(SinkRunRequest),
-        RunSchema(SchemaRunRequest),
-        OffsetResponse(RuntimeOffsetRpcResponse),
-        Shutdown,
-    }
-
     #[test]
-    fn source_start_once_is_backward_read_compatible() {
+    fn source_start_roundtrips_at_v17() {
         let frame = HostFrame::RunSource(SourceStartRequest {
             context: RuntimeExecutionContext {
                 pipeline_name: "pipeline".to_string(),
@@ -636,13 +727,14 @@ mod tests {
         });
 
         let bytes = bincode::serialize(&frame).unwrap();
-        let decoded: HostFrameV7 = bincode::deserialize(&bytes).unwrap();
+        let decoded: HostFrame = bincode::deserialize(&bytes).unwrap();
 
-        let HostFrameV7::RunSource(decoded) = decoded else {
+        let HostFrame::RunSource(decoded) = decoded else {
             panic!("expected RunSource frame");
         };
         assert_eq!(decoded.context.pipeline_name, "pipeline");
         assert_eq!(decoded.context.execution_mode, RuntimeExecutionMode::Sync);
+        assert!(decoded.once);
     }
 
     #[test]
@@ -745,28 +837,39 @@ mod tests {
     }
 
     #[test]
-    fn sink_payload_chunk_roundtrips() {
-        let frame = HostDataFrame::SinkPayloadChunk(RuntimeSinkPayloadChunk {
+    fn sink_chunk_and_finish_roundtrip() {
+        let frame = HostDataFrame::SinkChunk(SinkChunk {
             request_id: 7,
             chunk_index: 1,
             row_offset: 10,
             rows: 5,
-            final_chunk: false,
             arrow_stream_bytes: vec![1, 2, 3],
         });
         let bytes = bincode::serialize(&frame).unwrap();
         let decoded: HostDataFrame = bincode::deserialize(&bytes).unwrap();
         match decoded {
-            HostDataFrame::SinkPayloadChunk(chunk) => {
+            HostDataFrame::SinkChunk(chunk) => {
                 assert_eq!(chunk.request_id, 7);
                 assert_eq!(chunk.chunk_index, 1);
                 assert_eq!(chunk.row_offset, 10);
                 assert_eq!(chunk.rows, 5);
-                assert!(!chunk.final_chunk);
                 assert_eq!(chunk.arrow_stream_bytes, vec![1, 2, 3]);
             }
-            HostDataFrame::SinkPayload(_) => panic!("expected chunk"),
+            HostDataFrame::FinishSink(_) => panic!("expected chunk"),
         }
+
+        let finish = HostDataFrame::FinishSink(FinishSink {
+            request_id: 7,
+            chunks: 2,
+            rows: 5,
+            bytes: 3,
+        });
+        let decoded: HostDataFrame =
+            bincode::deserialize(&bincode::serialize(&finish).unwrap()).unwrap();
+        assert!(matches!(
+            decoded,
+            HostDataFrame::FinishSink(FinishSink { chunks: 2, .. })
+        ));
     }
 
     #[test]
@@ -849,6 +952,92 @@ mod tests {
             }
             other => panic!("unexpected frame: {:?}", other),
         }
+    }
+
+    #[test]
+    fn sink_ack_stats_roundtrip_without_fake_unknowns() {
+        let receipt = CommitReceipt {
+            version: COMMIT_RECEIPT_VERSION,
+            compaction_id: "c1".into(),
+            idempotency_key: "k1".into(),
+            wal_refs_fingerprint: "refs".into(),
+            authority: CommitReceiptAuthority::SinkWrite,
+        };
+        let frame = PluginFrame::SinkAck(SinkAck {
+            request_id: 11,
+            outcome: SinkWriteOutcome::Applied,
+            receipt: receipt.clone(),
+            stats: SinkWriteStats {
+                rows: Some(42),
+                bytes: Some(1024),
+                objects: None,
+                encode_duration_ms: None,
+                upload_duration_ms: Some(9),
+                commit_duration_ms: None,
+            },
+            catalog_intents: Vec::new(),
+        });
+        let decoded: PluginFrame =
+            bincode::deserialize(&bincode::serialize(&frame).unwrap()).unwrap();
+        let PluginFrame::SinkAck(decoded) = decoded else {
+            panic!("expected SinkAck");
+        };
+        assert_eq!(decoded.receipt, receipt);
+        assert_eq!(decoded.stats.rows, Some(42));
+        assert_eq!(decoded.stats.objects, None);
+        assert_eq!(decoded.stats.commit_duration_ms, None);
+    }
+
+    #[test]
+    fn catalog_intent_identity_is_serializable_and_deduplicable() {
+        use std::collections::BTreeSet;
+
+        let intent = CatalogIntent {
+            version: CATALOG_INTENT_VERSION,
+            identity: CatalogIntentIdentity {
+                sink_ref: "primary".into(),
+                namespace: "events".into(),
+                kind: CatalogIntentKind::UpsertPartition,
+                key: "day=2026-07-30".into(),
+            },
+            payload_json: r#"{"location":"s3://bucket/events/day=2026-07-30"}"#.into(),
+        };
+        let decoded: CatalogIntent =
+            bincode::deserialize(&bincode::serialize(&intent).unwrap()).unwrap();
+        assert_eq!(decoded, intent);
+        assert_eq!(
+            BTreeSet::from([intent.clone(), decoded])
+                .into_iter()
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn schema_delta_roundtrips_changed_namespace_versions() {
+        let delta = SchemaDelta {
+            version: 9,
+            namespaces: BTreeMap::from([(
+                "events".into(),
+                SchemaNamespaceDelta {
+                    version: 9,
+                    metadata: OutputMetadata::new(),
+                },
+            )]),
+        };
+        let frame = HostFrame::InstallSchemaDelta(delta.clone());
+        let decoded: HostFrame =
+            bincode::deserialize(&bincode::serialize(&frame).unwrap()).unwrap();
+        let HostFrame::InstallSchemaDelta(decoded) = decoded else {
+            panic!("expected SchemaDelta");
+        };
+        assert_eq!(decoded, delta);
+        assert_eq!(decoded.namespaces["events"].version, 9);
+    }
+
+    #[test]
+    fn protocol_version_is_hard_cut_to_v17() {
+        assert_eq!(RUNTIME_PROTOCOL_VERSION, 17);
     }
 
     #[test]

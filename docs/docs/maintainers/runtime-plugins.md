@@ -171,8 +171,9 @@ total number of runtime data-sink child processes in the host, not a per-sink po
 
 The host reserves at least one worker for every configured sink binding and divides remaining
 workers fairly between primary and deadletter. If the configured total is below the binding count,
-the host clamps it to that count and logs the clamp. Protocol v16 pools do not shrink after growth;
-idle reaping and child multiplexing are deferred to protocol v17.
+the host clamps it to that count and logs the clamp. Protocol v17 pools remain sequential and do
+not shrink after growth; idle reaping and child multiplexing are delivered in the follow-up runtime
+commit.
 
 ## Shared helper code
 

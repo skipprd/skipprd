@@ -13,7 +13,7 @@ use skippr_object_writer::{
     ObjectWriteReceipt, ObjectWriteRequest, ObjectWriteSession, ObjectWriterConfig, PartMetadata,
 };
 use skippr_runtime_sdk::plugins::DataSink;
-use skippr_runtime_sdk::plugins::{SinkWriteContext, SinkWriteOutcome};
+use skippr_runtime_sdk::plugins::{SinkPreflightOutcome, SinkWriteContext, SinkWriteOutcome};
 use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
 use skippr_runtime_sdk::sink_compat::BufferChunker;
 use skippr_runtime_sdk::sink_idempotency::{
@@ -184,6 +184,39 @@ skippr_runtime_sdk::declare_sink_spec!(
 
 #[async_trait]
 impl DataSink for DataSinkS3Plugin {
+    async fn preflight(
+        &self,
+        ctx: SinkWriteContext<'_>,
+    ) -> Result<SinkPreflightOutcome, std::io::Error> {
+        if !ctx.is_grouped() {
+            return Ok(SinkPreflightOutcome::Ready);
+        }
+        ctx.validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))?;
+        let object_stem = skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
+            &ctx.idempotency_key,
+            "",
+        )?;
+        let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
+        let manifest_key =
+            sidecar_manifest_object_key(&self.config.s3_prefix, &namespace, &object_stem);
+        let expected_manifest = ObjectWriteManifest::from_context(
+            ctx.compaction_id,
+            ctx.idempotency_key,
+            ctx.schema_fingerprint,
+            &ctx.wal_refs,
+        );
+        if self
+            .manifest_matches(&manifest_key, &expected_manifest)
+            .await?
+        {
+            return Ok(SinkPreflightOutcome::AlreadyApplied {
+                authority: format!("s3://{}/{}", self.config.s3_bucket, manifest_key),
+            });
+        }
+        Ok(SinkPreflightOutcome::Ready)
+    }
+
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,

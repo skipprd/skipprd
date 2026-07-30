@@ -63,7 +63,9 @@ use skippr_runtime_sdk::plugins::source_contract::{
     ensure_source_contract_for_policy, namespace_source_contract, validate_write_policy_for_sink,
     FieldPath, SinkWritePolicySupport, SourceNamespaceContract, WritePolicy,
 };
-use skippr_runtime_sdk::plugins::{DataSink, SchemaSink, SinkWriteContext, SinkWriteOutcome};
+use skippr_runtime_sdk::plugins::{
+    DataSink, SchemaSink, SinkPreflightOutcome, SinkWriteContext, SinkWriteOutcome,
+};
 use skippr_runtime_sdk::protocol::{RuntimeBinding, RuntimeExecutionContext};
 use skippr_runtime_sdk::sink_compat::BufferChunker;
 use skippr_runtime_sdk::sink_idempotency::{manifest_object_name, ObjectWriteManifest};
@@ -351,6 +353,31 @@ skippr_runtime_sdk::declare_sink_spec!(
 
 #[async_trait]
 impl DataSink for DataSinkIcebergPlugin {
+    async fn preflight(
+        &self,
+        ctx: SinkWriteContext<'_>,
+    ) -> Result<SinkPreflightOutcome, io::Error> {
+        if !ctx.is_grouped() {
+            return Ok(SinkPreflightOutcome::Ready);
+        }
+        ctx.validate_grouped::<skippr_runtime_sdk::plugins::TransactionalTableCommit>()
+            .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
+        let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
+        let manifest = ObjectWriteManifest::from_context(
+            ctx.compaction_id,
+            ctx.idempotency_key.clone(),
+            ctx.schema_fingerprint,
+            &ctx.wal_refs,
+        );
+        let (bucket, key) = self.idempotency_manifest_location(&namespace, &ctx.idempotency_key)?;
+        if self.manifest_matches(&bucket, &key, &manifest).await? {
+            return Ok(SinkPreflightOutcome::AlreadyApplied {
+                authority: format!("s3://{bucket}/{key}"),
+            });
+        }
+        Ok(SinkPreflightOutcome::Ready)
+    }
+
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,

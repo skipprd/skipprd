@@ -14,13 +14,13 @@ pub use source_contract::{
 pub use source_sync::{OffsetValidationEntry, SourcePayloadTask, SourceSyncContext};
 pub use traits::{
     AtLeastOnceMessageDelivery, ConfiguredSink, DataSink, DataSource, DeterministicObjectOverwrite,
-    FinalStateIdempotentApply, GroupedBatchReader, GroupedBatchReaderConfig,
-    GroupedSinkContract, GroupedSinkWriteContext, GroupedWalKind, GroupedWalPartitionKey,
-    GroupedWalRefs, HasSchemaSinkSpec, HasSinkSpec, NonRetryableDebugOutput, RecordBatchChunk,
-    SchemaSink, SchemaSinkSpec, SchemaSource, SchemaSyncRequest, SftpAtLeastOnce, SftpAtomicRename,
-    SinkSpec, SinkWriteContext, SinkWriteOutcome, SinkWriteRejection, SinkWriteSemantics,
-    SinkWriteSupport, SourceCdcContract, SourceCdcMode, SourceExecutionContract,
-    SourceOnceContract, TransactionalTableCommit,
+    FinalStateIdempotentApply, GroupedBatchReader, GroupedBatchReaderConfig, GroupedSinkContract,
+    GroupedSinkWriteContext, GroupedWalKind, GroupedWalPartitionKey, GroupedWalRefs,
+    HasSchemaSinkSpec, HasSinkSpec, NonRetryableDebugOutput, RecordBatchChunk, SchemaSink,
+    SchemaSinkSpec, SchemaSource, SchemaSyncRequest, SftpAtLeastOnce, SftpAtomicRename,
+    SinkPreflightOutcome, SinkSpec, SinkWriteContext, SinkWriteOutcome, SinkWriteRejection,
+    SinkWriteSemantics, SinkWriteSupport, SourceCdcContract, SourceCdcMode,
+    SourceExecutionContract, SourceOnceContract, TransactionalTableCommit,
 };
 
 /// No-op output plugin used by `discover` mode to run the input pipeline

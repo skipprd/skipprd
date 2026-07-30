@@ -661,10 +661,16 @@ impl SinkWriteContext<'_> {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum SinkWriteOutcome {
     Applied,
     AlreadyApplied,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum SinkPreflightOutcome {
+    Ready,
+    AlreadyApplied { authority: String },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1193,6 +1199,17 @@ mod tests {
 /// entry, not on this trait.
 #[async_trait]
 pub trait DataSink: Send + Sync {
+    /// Validate a sink apply before the runtime reads or encodes its payload.
+    ///
+    /// `AlreadyApplied` must come from an authoritative destination receipt or
+    /// manifest. Runtime-local state is only a cache and cannot satisfy this contract.
+    async fn preflight(
+        &self,
+        _ctx: SinkWriteContext<'_>,
+    ) -> Result<SinkPreflightOutcome, std::io::Error> {
+        Ok(SinkPreflightOutcome::Ready)
+    }
+
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,

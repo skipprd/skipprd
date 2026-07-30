@@ -113,8 +113,8 @@ fn runtime_sink_and_schema_plugins_use_sdk_entrypoints() {
             Regex::new(r"\bSKIPPR_RUNTIME_DATA_ADDR_ENV\b").unwrap(),
         ),
         (
-            "HostFrame::RunSink",
-            Regex::new(r"\bHostFrame::RunSink\b").unwrap(),
+            "HostFrame::PrepareSink",
+            Regex::new(r"\bHostFrame::PrepareSink\b").unwrap(),
         ),
         (
             "HostFrame::RunSchema",

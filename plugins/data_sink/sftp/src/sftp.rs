@@ -8,7 +8,7 @@ use skippr_object_writer::{
     ObjectWriteReceipt, ObjectWriteRequest, ObjectWriteSession, ObjectWriterConfig, PartMetadata,
 };
 use skippr_runtime_sdk::plugins::DataSink;
-use skippr_runtime_sdk::plugins::{SinkWriteContext, SinkWriteOutcome};
+use skippr_runtime_sdk::plugins::{SinkPreflightOutcome, SinkWriteContext, SinkWriteOutcome};
 use skippr_runtime_sdk::sink_idempotency::{
     legacy_chunk_idempotency_key, manifest_object_name, persisted_object_write_matches,
     GroupedWriteReceipt, ObjectWriteManifest,
@@ -229,6 +229,50 @@ skippr_runtime_sdk::declare_sink_spec!(
 
 #[async_trait]
 impl DataSink for DataSinkSftpPlugin {
+    async fn preflight(
+        &self,
+        ctx: SinkWriteContext<'_>,
+    ) -> Result<SinkPreflightOutcome, std::io::Error> {
+        if !ctx.is_grouped() {
+            return Ok(SinkPreflightOutcome::Ready);
+        }
+        ctx.validate_grouped::<skippr_runtime_sdk::plugins::SftpAtomicRename>()
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Unsupported, err))?;
+        let object_stem = skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
+            &ctx.idempotency_key,
+            "",
+        )?;
+        let remote_file_path = self.remote_file_path(&object_stem);
+        let remote_manifest_path = format!(
+            "{}/{}",
+            self.config.remote_path.trim_end_matches('/'),
+            manifest_object_name(
+                remote_file_path
+                    .rsplit_once('/')
+                    .map(|(_, name)| name)
+                    .unwrap_or("output.parquet")
+            )
+        );
+        let expected_manifest = ObjectWriteManifest::from_context(
+            ctx.compaction_id,
+            ctx.idempotency_key,
+            ctx.schema_fingerprint,
+            &ctx.wal_refs,
+        );
+        if self
+            .remote_manifest_matches(&remote_manifest_path, &expected_manifest)
+            .await?
+        {
+            return Ok(SinkPreflightOutcome::AlreadyApplied {
+                authority: format!(
+                    "sftp://{}@{}{}",
+                    self.config.username, self.config.host, remote_manifest_path
+                ),
+            });
+        }
+        Ok(SinkPreflightOutcome::Ready)
+    }
+
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,

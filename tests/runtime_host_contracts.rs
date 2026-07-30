@@ -311,6 +311,30 @@ fn sample_stream() -> SendableRecordBatchStream {
     })
 }
 
+struct PanicOnPollStream {
+    schema: Arc<Schema>,
+}
+
+impl Stream for PanicOnPollStream {
+    type Item = Result<RecordBatch, DataFusionError>;
+
+    fn poll_next(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        panic!("sink payload stream was consumed before PrepareAck::Ready")
+    }
+}
+
+impl RecordBatchStream for PanicOnPollStream {
+    fn schema(&self) -> Arc<Schema> {
+        self.schema.clone()
+    }
+}
+
+fn panic_on_poll_stream() -> SendableRecordBatchStream {
+    Box::pin(PanicOnPollStream {
+        schema: Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, false)])),
+    })
+}
+
 #[tokio::test]
 #[serial]
 async fn runtime_sink_does_not_reinstall_unchanged_schema_between_writes() {
@@ -424,6 +448,119 @@ async fn runtime_sink_restarts_after_child_crash() {
         marker_path.exists(),
         "helper should have crashed once before restart"
     );
+}
+
+#[tokio::test]
+async fn prepare_already_applied_sends_zero_payload_bytes() {
+    let temp = tempdir().unwrap();
+    let marker_path = temp.path().join("already-applied-state.json");
+    let manifest_path = write_sink_manifest(
+        temp.path(),
+        "already-applied-runtime-sink",
+        "File",
+        "already_applied",
+        "File",
+        Some(&helper_sha256()),
+        &helper_binary(),
+        Some(&marker_path),
+    );
+    let sink = RuntimeDataSinkPlugin::new(
+        ResolvedRuntimePlugin::load(&manifest_path).unwrap(),
+        "runtime_host_already_applied".to_string(),
+        RuntimeBinding::Primary,
+        runtime_file_sink_config(),
+    )
+    .await
+    .unwrap();
+
+    sink.sync(
+        panic_on_poll_stream(),
+        "already-applied-c=receipt-1".to_string(),
+        None,
+    )
+    .await
+    .unwrap();
+
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(marker_path).unwrap()).unwrap();
+    assert_eq!(state["run_count"], 0);
+    assert_eq!(state["payload_bytes"], 0);
+    assert_eq!(state["compaction_ids"][0], "receipt-1");
+}
+
+#[tokio::test]
+async fn prepare_rejection_leaves_payload_retryable() {
+    let temp = tempdir().unwrap();
+    let marker_path = temp.path().join("rejected-state.json");
+    let manifest_path = write_sink_manifest(
+        temp.path(),
+        "rejected-runtime-sink",
+        "File",
+        "reject_prepare",
+        "File",
+        Some(&helper_sha256()),
+        &helper_binary(),
+        Some(&marker_path),
+    );
+    let sink = RuntimeDataSinkPlugin::new(
+        ResolvedRuntimePlugin::load(&manifest_path).unwrap(),
+        "runtime_host_rejected".to_string(),
+        RuntimeBinding::Primary,
+        runtime_file_sink_config(),
+    )
+    .await
+    .unwrap();
+
+    for attempt in 0..2 {
+        let err = sink
+            .sync(
+                panic_on_poll_stream(),
+                format!("rejected-c=retry-{attempt}"),
+                None,
+            )
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("prepare rejected"));
+    }
+
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(marker_path).unwrap()).unwrap();
+    assert_eq!(state["run_count"], 0);
+    assert_eq!(state["payload_bytes"], 0);
+    assert_eq!(state["request_ids"].as_array().unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn stale_prepare_frame_restarts_before_payload_consumption() {
+    let temp = tempdir().unwrap();
+    let marker_path = temp.path().join("stale-prepare-once.marker");
+    let manifest_path = write_sink_manifest(
+        temp.path(),
+        "stale-prepare-runtime-sink",
+        "File",
+        "stale_prepare_once",
+        "File",
+        Some(&helper_sha256()),
+        &helper_binary(),
+        Some(&marker_path),
+    );
+    let sink = RuntimeDataSinkPlugin::new(
+        ResolvedRuntimePlugin::load(&manifest_path).unwrap(),
+        "runtime_host_stale_prepare".to_string(),
+        RuntimeBinding::Primary,
+        runtime_file_sink_config(),
+    )
+    .await
+    .unwrap();
+
+    sink.sync(sample_stream(), "stale-prepare".to_string(), None)
+        .await
+        .unwrap();
+
+    let state: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(marker_path).unwrap()).unwrap();
+    assert_eq!(state["run_count"], 1);
+    assert!(state["payload_bytes"].as_u64().unwrap() > 0);
 }
 
 #[tokio::test]
@@ -595,6 +732,34 @@ async fn runtime_manifest_rejects_capability_drift() {
     );
 }
 
+#[test]
+fn runtime_manifest_rejects_v16_before_spawn() {
+    let temp = tempdir().unwrap();
+    let manifest_path = write_sink_manifest(
+        temp.path(),
+        "protocol-v16-runtime-sink",
+        "File",
+        "normal",
+        "File",
+        Some(&helper_sha256()),
+        &helper_binary(),
+        None,
+    );
+    let mut manifest: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+    manifest["protocol_version"] = json!(16);
+    std::fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&manifest).unwrap(),
+    )
+    .unwrap();
+
+    let err = ResolvedRuntimePlugin::load(&manifest_path).unwrap_err();
+    assert!(err
+        .to_string()
+        .contains("uses protocol 16, but host requires protocol 17"));
+}
+
 #[tokio::test]
 async fn runtime_manifest_rejects_bad_checksum() {
     let temp = tempdir().unwrap();
@@ -710,6 +875,7 @@ async fn runtime_sink_installs_context_and_schema_state() {
 }
 
 #[tokio::test]
+#[serial]
 async fn runtime_sink_refreshes_schema_state_on_demand() {
     let temp = tempdir().unwrap();
     let marker_path = temp.path().join("refresh-state.json");
@@ -749,6 +915,7 @@ async fn runtime_sink_refreshes_schema_state_on_demand() {
 }
 
 #[tokio::test]
+#[serial]
 async fn runtime_sink_reuses_compaction_id_across_replays() {
     let temp = tempdir().unwrap();
     let marker_path = temp.path().join("sink-compaction-ids.json");

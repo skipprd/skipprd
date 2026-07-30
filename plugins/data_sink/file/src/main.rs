@@ -19,7 +19,7 @@ use skippr_object_writer::{
 };
 use skippr_runtime_sdk::plugins::cdc;
 use skippr_runtime_sdk::plugins::DataSink;
-use skippr_runtime_sdk::plugins::{SinkWriteContext, SinkWriteOutcome};
+use skippr_runtime_sdk::plugins::{SinkPreflightOutcome, SinkWriteContext, SinkWriteOutcome};
 use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
 use skippr_runtime_sdk::sink_compat::BufferChunker;
 use skippr_runtime_sdk::sink_idempotency::{
@@ -54,6 +54,43 @@ skippr_runtime_sdk::declare_sink_spec!(
 
 #[async_trait]
 impl DataSink for FileSinkRuntimePlugin {
+    async fn preflight(
+        &self,
+        ctx: SinkWriteContext<'_>,
+    ) -> Result<SinkPreflightOutcome, io::Error> {
+        if !ctx.is_grouped() {
+            return Ok(SinkPreflightOutcome::Ready);
+        }
+        ctx.validate_grouped::<skippr_runtime_sdk::plugins::DeterministicObjectOverwrite>()
+            .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
+        let object_stem = skippr_runtime_sdk::sink_idempotency::deterministic_object_name(
+            &ctx.idempotency_key,
+            "",
+        )?;
+        let output_file = output_file_path(&self.data_dir, &ctx.filename, &object_stem)?;
+        let manifest_file = output_file.with_file_name(manifest_object_name(
+            output_file
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("output.parquet"),
+        ));
+        let expected_manifest = ObjectWriteManifest::from_context(
+            ctx.compaction_id,
+            ctx.idempotency_key,
+            ctx.schema_fingerprint,
+            &ctx.wal_refs,
+        );
+        if manifest_file.exists()
+            && ObjectWriteManifest::from_json_bytes(&fs::read(&manifest_file)?)?
+                .matches_manifest(&expected_manifest)
+        {
+            return Ok(SinkPreflightOutcome::AlreadyApplied {
+                authority: manifest_file.to_string_lossy().into_owned(),
+            });
+        }
+        Ok(SinkPreflightOutcome::Ready)
+    }
+
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,
