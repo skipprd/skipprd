@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 use once_cell::sync::Lazy;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::time::Duration;
 
 // Lock-free, process-wide counters used across hot paths
 pub static MESSAGES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
@@ -72,6 +73,238 @@ pub static ACTIVE_THREADS: Lazy<std::sync::atomic::AtomicUsize> =
     Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
 pub static QUEUE_LENGTH: Lazy<std::sync::atomic::AtomicUsize> =
     Lazy::new(|| std::sync::atomic::AtomicUsize::new(0));
+
+// Flush-pipeline telemetry. Timings are cumulative nanoseconds so hot paths only perform
+// relaxed atomic operations; rates and averages are derived by the metrics consumer.
+pub static COMPACTION_PLANNER_CYCLES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static COMPACTION_PLANNER_DURATION_NS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static COMPACTION_PLANNER_SEGMENTS_EXAMINED_TOTAL: Lazy<AtomicU64> =
+    Lazy::new(|| AtomicU64::new(0));
+pub static COMPACTION_PLANNER_SLICES_EXAMINED_TOTAL: Lazy<AtomicU64> =
+    Lazy::new(|| AtomicU64::new(0));
+pub static CDC_METADATA_SEGMENT_SCANS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CDC_METADATA_SEGMENT_BYTES_EXAMINED_TOTAL: Lazy<AtomicU64> =
+    Lazy::new(|| AtomicU64::new(0));
+pub static COMPACTION_MANIFEST_DIRECTORY_SCANS_TOTAL: Lazy<AtomicU64> =
+    Lazy::new(|| AtomicU64::new(0));
+pub static COMPACTION_MANIFEST_ENTRIES_EXAMINED_TOTAL: Lazy<AtomicU64> =
+    Lazy::new(|| AtomicU64::new(0));
+/// No persistent ready queue exists yet; this is the most recent planner output size.
+pub static COMPACTION_PLANNER_READY_WORK_COUNT: Lazy<AtomicUsize> =
+    Lazy::new(|| AtomicUsize::new(0));
+pub static COMPACTION_INFLIGHT_SLICE_COUNT: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
+pub static WAL_SNAPSHOT_READY_COUNT: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
+pub static GROUPED_STREAM_EAGER_BUILDS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static GROUPED_STREAM_STREAMING_BUILDS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static GROUPED_STREAM_BUILD_DURATION_NS_TOTAL: Lazy<AtomicU64> =
+    Lazy::new(|| AtomicU64::new(0));
+pub static RUNTIME_SINK_POOL_ACQUIRES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static RUNTIME_SINK_POOL_ACQUIRE_WAIT_NS_TOTAL: Lazy<AtomicU64> =
+    Lazy::new(|| AtomicU64::new(0));
+pub static RUNTIME_SINK_POOL_WAITER_COUNT: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
+pub static RUNTIME_SINK_IPC_BYTES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static RUNTIME_SINK_IPC_CHUNKS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static RUNTIME_SCHEMA_STATE_INSTALLS_SENT_TOTAL: Lazy<AtomicU64> =
+    Lazy::new(|| AtomicU64::new(0));
+/// Current protocol has no install no-op. This nearest-boundary counter records source schema
+/// publications suppressed by configuration until protocol v17 adds per-worker install skipping.
+pub static RUNTIME_SCHEMA_STATE_PUBLICATIONS_SKIPPED_TOTAL: Lazy<AtomicU64> =
+    Lazy::new(|| AtomicU64::new(0));
+pub static SINK_APPLY_CALLS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static SINK_APPLY_DURATION_NS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+/// The current completion ledger is the durable compaction manifest.
+pub static COMPACTION_COMPLETION_LEDGER_WRITES_TOTAL: Lazy<AtomicU64> =
+    Lazy::new(|| AtomicU64::new(0));
+pub static COMPACTION_TOMBSTONE_WRITES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static WAL_SEGMENT_CLOSURES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static WAL_SEGMENT_CLOSURE_LATENCY_NS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct FlushMetricsSnapshot {
+    pub compaction_planner_cycles_total: u64,
+    pub compaction_planner_duration_ns_total: u64,
+    pub compaction_planner_segments_examined_total: u64,
+    pub compaction_planner_slices_examined_total: u64,
+    pub cdc_metadata_segment_scans_total: u64,
+    pub cdc_metadata_segment_bytes_examined_total: u64,
+    pub compaction_manifest_directory_scans_total: u64,
+    pub compaction_manifest_entries_examined_total: u64,
+    pub compaction_planner_ready_work_count: usize,
+    pub compaction_inflight_slice_count: usize,
+    pub wal_snapshot_ready_count: usize,
+    pub grouped_stream_eager_builds_total: u64,
+    pub grouped_stream_streaming_builds_total: u64,
+    pub grouped_stream_build_duration_ns_total: u64,
+    pub runtime_sink_pool_acquires_total: u64,
+    pub runtime_sink_pool_acquire_wait_ns_total: u64,
+    pub runtime_sink_pool_waiter_count: usize,
+    pub runtime_sink_ipc_bytes_total: u64,
+    pub runtime_sink_ipc_chunks_total: u64,
+    pub runtime_schema_state_installs_sent_total: u64,
+    pub runtime_schema_state_publications_skipped_total: u64,
+    pub sink_apply_calls_total: u64,
+    pub sink_apply_duration_ns_total: u64,
+    pub compaction_completion_ledger_writes_total: u64,
+    pub compaction_tombstone_writes_total: u64,
+    pub wal_segment_closures_total: u64,
+    pub wal_segment_closure_latency_ns_total: u64,
+}
+
+#[inline]
+fn duration_ns(duration: Duration) -> u64 {
+    duration.as_nanos().min(u128::from(u64::MAX)) as u64
+}
+
+pub fn flush_metrics_snapshot() -> FlushMetricsSnapshot {
+    FlushMetricsSnapshot {
+        compaction_planner_cycles_total: COMPACTION_PLANNER_CYCLES_TOTAL.load(Ordering::Relaxed),
+        compaction_planner_duration_ns_total: COMPACTION_PLANNER_DURATION_NS_TOTAL
+            .load(Ordering::Relaxed),
+        compaction_planner_segments_examined_total: COMPACTION_PLANNER_SEGMENTS_EXAMINED_TOTAL
+            .load(Ordering::Relaxed),
+        compaction_planner_slices_examined_total: COMPACTION_PLANNER_SLICES_EXAMINED_TOTAL
+            .load(Ordering::Relaxed),
+        cdc_metadata_segment_scans_total: CDC_METADATA_SEGMENT_SCANS_TOTAL.load(Ordering::Relaxed),
+        cdc_metadata_segment_bytes_examined_total: CDC_METADATA_SEGMENT_BYTES_EXAMINED_TOTAL
+            .load(Ordering::Relaxed),
+        compaction_manifest_directory_scans_total: COMPACTION_MANIFEST_DIRECTORY_SCANS_TOTAL
+            .load(Ordering::Relaxed),
+        compaction_manifest_entries_examined_total: COMPACTION_MANIFEST_ENTRIES_EXAMINED_TOTAL
+            .load(Ordering::Relaxed),
+        compaction_planner_ready_work_count: COMPACTION_PLANNER_READY_WORK_COUNT
+            .load(Ordering::Relaxed),
+        compaction_inflight_slice_count: COMPACTION_INFLIGHT_SLICE_COUNT.load(Ordering::Relaxed),
+        wal_snapshot_ready_count: WAL_SNAPSHOT_READY_COUNT.load(Ordering::Relaxed),
+        grouped_stream_eager_builds_total: GROUPED_STREAM_EAGER_BUILDS_TOTAL
+            .load(Ordering::Relaxed),
+        grouped_stream_streaming_builds_total: GROUPED_STREAM_STREAMING_BUILDS_TOTAL
+            .load(Ordering::Relaxed),
+        grouped_stream_build_duration_ns_total: GROUPED_STREAM_BUILD_DURATION_NS_TOTAL
+            .load(Ordering::Relaxed),
+        runtime_sink_pool_acquires_total: RUNTIME_SINK_POOL_ACQUIRES_TOTAL.load(Ordering::Relaxed),
+        runtime_sink_pool_acquire_wait_ns_total: RUNTIME_SINK_POOL_ACQUIRE_WAIT_NS_TOTAL
+            .load(Ordering::Relaxed),
+        runtime_sink_pool_waiter_count: RUNTIME_SINK_POOL_WAITER_COUNT.load(Ordering::Relaxed),
+        runtime_sink_ipc_bytes_total: RUNTIME_SINK_IPC_BYTES_TOTAL.load(Ordering::Relaxed),
+        runtime_sink_ipc_chunks_total: RUNTIME_SINK_IPC_CHUNKS_TOTAL.load(Ordering::Relaxed),
+        runtime_schema_state_installs_sent_total: RUNTIME_SCHEMA_STATE_INSTALLS_SENT_TOTAL
+            .load(Ordering::Relaxed),
+        runtime_schema_state_publications_skipped_total:
+            RUNTIME_SCHEMA_STATE_PUBLICATIONS_SKIPPED_TOTAL.load(Ordering::Relaxed),
+        sink_apply_calls_total: SINK_APPLY_CALLS_TOTAL.load(Ordering::Relaxed),
+        sink_apply_duration_ns_total: SINK_APPLY_DURATION_NS_TOTAL.load(Ordering::Relaxed),
+        compaction_completion_ledger_writes_total: COMPACTION_COMPLETION_LEDGER_WRITES_TOTAL
+            .load(Ordering::Relaxed),
+        compaction_tombstone_writes_total: COMPACTION_TOMBSTONE_WRITES_TOTAL
+            .load(Ordering::Relaxed),
+        wal_segment_closures_total: WAL_SEGMENT_CLOSURES_TOTAL.load(Ordering::Relaxed),
+        wal_segment_closure_latency_ns_total: WAL_SEGMENT_CLOSURE_LATENCY_NS_TOTAL
+            .load(Ordering::Relaxed),
+    }
+}
+
+#[inline]
+pub fn record_compaction_planner_cycle(duration: Duration, segments: u64, slices: u64) {
+    COMPACTION_PLANNER_CYCLES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    COMPACTION_PLANNER_DURATION_NS_TOTAL.fetch_add(duration_ns(duration), Ordering::Relaxed);
+    COMPACTION_PLANNER_SEGMENTS_EXAMINED_TOTAL.fetch_add(segments, Ordering::Relaxed);
+    COMPACTION_PLANNER_SLICES_EXAMINED_TOTAL.fetch_add(slices, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn record_cdc_metadata_segment_scan(bytes_examined: u64) {
+    CDC_METADATA_SEGMENT_SCANS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    CDC_METADATA_SEGMENT_BYTES_EXAMINED_TOTAL.fetch_add(bytes_examined, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn record_compaction_manifest_directory_scan(entries_examined: u64) {
+    COMPACTION_MANIFEST_DIRECTORY_SCANS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    COMPACTION_MANIFEST_ENTRIES_EXAMINED_TOTAL.fetch_add(entries_examined, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn set_compaction_planner_ready_work_count(count: usize) {
+    COMPACTION_PLANNER_READY_WORK_COUNT.store(count, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn set_compaction_inflight_slice_count(count: usize) {
+    COMPACTION_INFLIGHT_SLICE_COUNT.store(count, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn set_wal_snapshot_ready_count(count: usize) {
+    WAL_SNAPSHOT_READY_COUNT.store(count, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn record_grouped_stream_build(duration: Duration, eager: bool) {
+    if eager {
+        GROUPED_STREAM_EAGER_BUILDS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    } else {
+        GROUPED_STREAM_STREAMING_BUILDS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    }
+    GROUPED_STREAM_BUILD_DURATION_NS_TOTAL.fetch_add(duration_ns(duration), Ordering::Relaxed);
+}
+
+#[inline]
+pub fn inc_runtime_sink_pool_waiters() {
+    RUNTIME_SINK_POOL_WAITER_COUNT.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn dec_runtime_sink_pool_waiters() {
+    let _ = RUNTIME_SINK_POOL_WAITER_COUNT.fetch_update(
+        Ordering::Relaxed,
+        Ordering::Relaxed,
+        |value| Some(value.saturating_sub(1)),
+    );
+}
+
+#[inline]
+pub fn record_runtime_sink_pool_acquire_wait(duration: Duration) {
+    RUNTIME_SINK_POOL_ACQUIRES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    RUNTIME_SINK_POOL_ACQUIRE_WAIT_NS_TOTAL.fetch_add(duration_ns(duration), Ordering::Relaxed);
+}
+
+#[inline]
+pub fn record_runtime_sink_ipc(bytes: u64, chunks: u64) {
+    RUNTIME_SINK_IPC_BYTES_TOTAL.fetch_add(bytes, Ordering::Relaxed);
+    RUNTIME_SINK_IPC_CHUNKS_TOTAL.fetch_add(chunks, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn add_runtime_schema_state_install_sent(n: u64) {
+    RUNTIME_SCHEMA_STATE_INSTALLS_SENT_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn add_runtime_schema_state_publication_skipped(n: u64) {
+    RUNTIME_SCHEMA_STATE_PUBLICATIONS_SKIPPED_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn record_sink_apply(duration: Duration) {
+    SINK_APPLY_CALLS_TOTAL.fetch_add(1, Ordering::Relaxed);
+    SINK_APPLY_DURATION_NS_TOTAL.fetch_add(duration_ns(duration), Ordering::Relaxed);
+}
+
+#[inline]
+pub fn add_compaction_completion_ledger_write(n: u64) {
+    COMPACTION_COMPLETION_LEDGER_WRITES_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn add_compaction_tombstone_write(n: u64) {
+    COMPACTION_TOMBSTONE_WRITES_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn record_wal_segment_closure(duration: Duration) {
+    WAL_SEGMENT_CLOSURES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    WAL_SEGMENT_CLOSURE_LATENCY_NS_TOTAL.fetch_add(duration_ns(duration), Ordering::Relaxed);
+}
 
 #[inline]
 pub fn add_messages(n: u64) {
@@ -232,3 +465,62 @@ pub fn set_glue_retry_ema_x100(v: u64) {
 }
 
 // (removed unused LLM/semantic add helpers)
+
+#[cfg(test)]
+pub fn reset_flush_metrics() {
+    COMPACTION_PLANNER_CYCLES_TOTAL.store(0, Ordering::Relaxed);
+    COMPACTION_PLANNER_DURATION_NS_TOTAL.store(0, Ordering::Relaxed);
+    COMPACTION_PLANNER_SEGMENTS_EXAMINED_TOTAL.store(0, Ordering::Relaxed);
+    COMPACTION_PLANNER_SLICES_EXAMINED_TOTAL.store(0, Ordering::Relaxed);
+    CDC_METADATA_SEGMENT_SCANS_TOTAL.store(0, Ordering::Relaxed);
+    CDC_METADATA_SEGMENT_BYTES_EXAMINED_TOTAL.store(0, Ordering::Relaxed);
+    COMPACTION_MANIFEST_DIRECTORY_SCANS_TOTAL.store(0, Ordering::Relaxed);
+    COMPACTION_MANIFEST_ENTRIES_EXAMINED_TOTAL.store(0, Ordering::Relaxed);
+    COMPACTION_PLANNER_READY_WORK_COUNT.store(0, Ordering::Relaxed);
+    COMPACTION_INFLIGHT_SLICE_COUNT.store(0, Ordering::Relaxed);
+    WAL_SNAPSHOT_READY_COUNT.store(0, Ordering::Relaxed);
+    GROUPED_STREAM_EAGER_BUILDS_TOTAL.store(0, Ordering::Relaxed);
+    GROUPED_STREAM_STREAMING_BUILDS_TOTAL.store(0, Ordering::Relaxed);
+    GROUPED_STREAM_BUILD_DURATION_NS_TOTAL.store(0, Ordering::Relaxed);
+    RUNTIME_SINK_POOL_ACQUIRES_TOTAL.store(0, Ordering::Relaxed);
+    RUNTIME_SINK_POOL_ACQUIRE_WAIT_NS_TOTAL.store(0, Ordering::Relaxed);
+    RUNTIME_SINK_POOL_WAITER_COUNT.store(0, Ordering::Relaxed);
+    RUNTIME_SINK_IPC_BYTES_TOTAL.store(0, Ordering::Relaxed);
+    RUNTIME_SINK_IPC_CHUNKS_TOTAL.store(0, Ordering::Relaxed);
+    RUNTIME_SCHEMA_STATE_INSTALLS_SENT_TOTAL.store(0, Ordering::Relaxed);
+    RUNTIME_SCHEMA_STATE_PUBLICATIONS_SKIPPED_TOTAL.store(0, Ordering::Relaxed);
+    SINK_APPLY_CALLS_TOTAL.store(0, Ordering::Relaxed);
+    SINK_APPLY_DURATION_NS_TOTAL.store(0, Ordering::Relaxed);
+    COMPACTION_COMPLETION_LEDGER_WRITES_TOTAL.store(0, Ordering::Relaxed);
+    COMPACTION_TOMBSTONE_WRITES_TOTAL.store(0, Ordering::Relaxed);
+    WAL_SEGMENT_CLOSURES_TOTAL.store(0, Ordering::Relaxed);
+    WAL_SEGMENT_CLOSURE_LATENCY_NS_TOTAL.store(0, Ordering::Relaxed);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    #[serial_test::serial]
+    fn flush_metrics_can_be_reset_and_snapshotted() {
+        reset_flush_metrics();
+
+        record_compaction_planner_cycle(Duration::from_micros(2), 3, 11);
+        record_grouped_stream_build(Duration::from_micros(5), true);
+        record_runtime_sink_ipc(4096, 2);
+
+        let snapshot = flush_metrics_snapshot();
+        assert_eq!(snapshot.compaction_planner_cycles_total, 1);
+        assert_eq!(snapshot.compaction_planner_duration_ns_total, 2_000);
+        assert_eq!(snapshot.compaction_planner_segments_examined_total, 3);
+        assert_eq!(snapshot.compaction_planner_slices_examined_total, 11);
+        assert_eq!(snapshot.grouped_stream_eager_builds_total, 1);
+        assert_eq!(snapshot.grouped_stream_build_duration_ns_total, 5_000);
+        assert_eq!(snapshot.runtime_sink_ipc_bytes_total, 4096);
+        assert_eq!(snapshot.runtime_sink_ipc_chunks_total, 2);
+
+        reset_flush_metrics();
+        assert_eq!(flush_metrics_snapshot(), FlushMetricsSnapshot::default());
+    }
+}

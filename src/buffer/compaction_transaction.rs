@@ -301,7 +301,9 @@ pub fn persist_manifest(txn: &CompactionTransaction) -> io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     let bytes = serde_json::to_vec_pretty(txn).map_err(io::Error::other)?;
     fs::write(&tmp, bytes)?;
-    fs::rename(tmp, path)
+    fs::rename(tmp, path)?;
+    crate::metrics::counters::add_compaction_completion_ledger_write(1);
+    Ok(())
 }
 
 pub fn remove_manifest(id: &str) -> io::Result<()> {
@@ -352,7 +354,19 @@ fn load_manifest_file(path: &Path) -> Option<CompactionTransaction> {
     }
 }
 
+#[derive(Default)]
+struct ManifestDirectoryScanMetrics {
+    entries_examined: u64,
+}
+
+impl Drop for ManifestDirectoryScanMetrics {
+    fn drop(&mut self) {
+        crate::metrics::counters::record_compaction_manifest_directory_scan(self.entries_examined);
+    }
+}
+
 pub fn load_pending_manifests() -> io::Result<Vec<CompactionTransaction>> {
+    let mut scan_metrics = ManifestDirectoryScanMetrics::default();
     let dir = manifest_dir();
     if !dir.exists() {
         return Ok(Vec::new());
@@ -365,6 +379,7 @@ pub fn load_pending_manifests() -> io::Result<Vec<CompactionTransaction>> {
         .unwrap_or(300);
     let mut out = Vec::new();
     for entry in fs::read_dir(dir)? {
+        scan_metrics.entries_examined = scan_metrics.entries_examined.saturating_add(1);
         let entry = entry?;
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("json") {

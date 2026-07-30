@@ -71,6 +71,14 @@ fn data_dir_disk_usage() -> Option<(u64, f64)> {
     None
 }
 
+fn average_duration_ms(total_ns: u64, count: u64) -> f64 {
+    if count == 0 {
+        0.0
+    } else {
+        total_ns as f64 / count as f64 / 1_000_000.0
+    }
+}
+
 const VERSION: Option<&str> = option_env!("CARGO_PKG_VERSION");
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -285,24 +293,6 @@ impl Metrics {
 
         let tenant = Config::get_tenant();
 
-        let wal_write_bytes_total = LAST_WAL_WRITE_BYTES_TOTAL.load(Ordering::SeqCst);
-        let wal_write_bytes_current = metrics.wal_write_bytes_total - wal_write_bytes_total;
-        LAST_WAL_WRITE_BYTES_TOTAL.store(metrics.wal_write_bytes_total, Ordering::SeqCst);
-
-        let wal_write_rows_total = LAST_WAL_WRITE_ROWS_TOTAL.load(Ordering::SeqCst);
-        let wal_write_rows_current = metrics.wal_write_rows_total - wal_write_rows_total;
-        LAST_WAL_WRITE_ROWS_TOTAL.store(metrics.wal_write_rows_total, Ordering::SeqCst);
-
-        let wal_compacted_bytes_total = LAST_WAL_COMPACTED_BYTES_TOTAL.load(Ordering::SeqCst);
-        let wal_compacted_bytes_current =
-            metrics.wal_compacted_bytes_total - wal_compacted_bytes_total;
-        LAST_WAL_COMPACTED_BYTES_TOTAL.store(metrics.wal_compacted_bytes_total, Ordering::SeqCst);
-
-        let wal_compacted_files_total = LAST_WAL_COMPACTED_FILES_TOTAL.load(Ordering::SeqCst);
-        let wal_compacted_files_current =
-            metrics.wal_compacted_files_total - wal_compacted_files_total;
-        LAST_WAL_COMPACTED_FILES_TOTAL.store(metrics.wal_compacted_files_total, Ordering::SeqCst);
-
         // Merge counters (atomics) into snapshot before computing deltas
         use crate::metrics::counters;
         let messages_total_counter = counters::MESSAGES_TOTAL.load(Ordering::Relaxed);
@@ -337,6 +327,32 @@ impl Metrics {
         metrics_snapshot.parquet_persisted_bytes_total += parquet_persisted_bytes_total_counter;
         metrics_snapshot.parquet_persisted_rows_total += parquet_persisted_rows_total_counter;
         metrics_snapshot.parquet_persisted_objects_total += parquet_persisted_objects_total_counter;
+
+        let wal_write_bytes_total = LAST_WAL_WRITE_BYTES_TOTAL.load(Ordering::SeqCst);
+        let wal_write_bytes_current = metrics_snapshot
+            .wal_write_bytes_total
+            .saturating_sub(wal_write_bytes_total);
+        LAST_WAL_WRITE_BYTES_TOTAL.store(metrics_snapshot.wal_write_bytes_total, Ordering::SeqCst);
+
+        let wal_write_rows_total = LAST_WAL_WRITE_ROWS_TOTAL.load(Ordering::SeqCst);
+        let wal_write_rows_current = metrics_snapshot
+            .wal_write_rows_total
+            .saturating_sub(wal_write_rows_total);
+        LAST_WAL_WRITE_ROWS_TOTAL.store(metrics_snapshot.wal_write_rows_total, Ordering::SeqCst);
+
+        let wal_compacted_bytes_total = LAST_WAL_COMPACTED_BYTES_TOTAL.load(Ordering::SeqCst);
+        let wal_compacted_bytes_current = metrics_snapshot
+            .wal_compacted_bytes_total
+            .saturating_sub(wal_compacted_bytes_total);
+        LAST_WAL_COMPACTED_BYTES_TOTAL
+            .store(metrics_snapshot.wal_compacted_bytes_total, Ordering::SeqCst);
+
+        let wal_compacted_files_total = LAST_WAL_COMPACTED_FILES_TOTAL.load(Ordering::SeqCst);
+        let wal_compacted_files_current = metrics_snapshot
+            .wal_compacted_files_total
+            .saturating_sub(wal_compacted_files_total);
+        LAST_WAL_COMPACTED_FILES_TOTAL
+            .store(metrics_snapshot.wal_compacted_files_total, Ordering::SeqCst);
 
         // Now compute parquet deltas from merged snapshot
         let parquet_persisted_bytes_total =
@@ -397,6 +413,7 @@ impl Metrics {
 
         let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
         let wait_times: HashMap<String, Duration> = total_times.iter().cloned().collect();
+        let flush_metrics = counters::flush_metrics_snapshot();
 
         let data = json!({
             "metrics": {
@@ -431,6 +448,39 @@ impl Metrics {
                 "parquet_persisted_rows_current": parquet_persisted_rows_current,
                 "parquet_persisted_objects_total": metrics_snapshot.parquet_persisted_objects_total,
                 "parquet_persisted_objects_current": parquet_persisted_objects_current,
+                // Flush stage and resource telemetry
+                "compaction_planner_cycles_total": flush_metrics.compaction_planner_cycles_total,
+                "compaction_planner_duration_ns_total": flush_metrics.compaction_planner_duration_ns_total,
+                "compaction_planner_segments_examined_total": flush_metrics.compaction_planner_segments_examined_total,
+                "compaction_planner_slices_examined_total": flush_metrics.compaction_planner_slices_examined_total,
+                "cdc_metadata_segment_scans_total": flush_metrics.cdc_metadata_segment_scans_total,
+                "cdc_metadata_segment_bytes_examined_total": flush_metrics.cdc_metadata_segment_bytes_examined_total,
+                "compaction_manifest_directory_scans_total": flush_metrics.compaction_manifest_directory_scans_total,
+                "compaction_manifest_entries_examined_total": flush_metrics.compaction_manifest_entries_examined_total,
+                "compaction_planner_ready_work_count": flush_metrics.compaction_planner_ready_work_count,
+                "compaction_inflight_slice_count": flush_metrics.compaction_inflight_slice_count,
+                "wal_snapshot_ready_count": flush_metrics.wal_snapshot_ready_count,
+                "wal_writer_pending_count": crate::buffer::wal_writer::pending_count(),
+                "wal_writer_pending_bytes": crate::buffer::wal_writer::pending_bytes(),
+                "wal_writer_queue_capacity": crate::buffer::wal_writer::queue_capacity(),
+                "wal_compactions_in_flight": counters::WAL_COMPACTIONS_IN_FLIGHT.load(Ordering::Relaxed),
+                "sink_work_in_flight_count": crate::buffer::compaction_progress::sink_work_in_flight_count(),
+                "grouped_stream_eager_builds_total": flush_metrics.grouped_stream_eager_builds_total,
+                "grouped_stream_streaming_builds_total": flush_metrics.grouped_stream_streaming_builds_total,
+                "grouped_stream_build_duration_ns_total": flush_metrics.grouped_stream_build_duration_ns_total,
+                "runtime_sink_pool_acquires_total": flush_metrics.runtime_sink_pool_acquires_total,
+                "runtime_sink_pool_acquire_wait_ns_total": flush_metrics.runtime_sink_pool_acquire_wait_ns_total,
+                "runtime_sink_pool_waiter_count": flush_metrics.runtime_sink_pool_waiter_count,
+                "runtime_sink_ipc_bytes_total": flush_metrics.runtime_sink_ipc_bytes_total,
+                "runtime_sink_ipc_chunks_total": flush_metrics.runtime_sink_ipc_chunks_total,
+                "runtime_schema_state_installs_sent_total": flush_metrics.runtime_schema_state_installs_sent_total,
+                "runtime_schema_state_publications_skipped_total": flush_metrics.runtime_schema_state_publications_skipped_total,
+                "sink_apply_calls_total": flush_metrics.sink_apply_calls_total,
+                "sink_apply_duration_ns_total": flush_metrics.sink_apply_duration_ns_total,
+                "compaction_completion_ledger_writes_total": flush_metrics.compaction_completion_ledger_writes_total,
+                "compaction_tombstone_writes_total": flush_metrics.compaction_tombstone_writes_total,
+                "wal_segment_closures_total": flush_metrics.wal_segment_closures_total,
+                "wal_segment_closure_latency_ns_total": flush_metrics.wal_segment_closure_latency_ns_total,
                 // Upload telemetry
                 "uploads_total": crate::metrics::counters::UPLOADS_TOTAL.load(Ordering::SeqCst),
                 "uploads_in_flight": crate::metrics::counters::UPLOADS_IN_FLIGHT.load(Ordering::SeqCst),
@@ -645,6 +695,55 @@ impl Metrics {
                             Helpers::human_readable_size(crate::buffer::wal_writer::coalesce_avg_bytes()),
                             crate::buffer::wal_writer::persist_avg_ms(),
                             crate::buffer::wal_writer::ack_avg_ms(),
+                        );
+                        let flush = crate::metrics::counters::flush_metrics_snapshot();
+                        let grouped_builds = flush
+                            .grouped_stream_eager_builds_total
+                            .saturating_add(flush.grouped_stream_streaming_builds_total);
+                        info!(
+                            "Flush stages: planner={} avg={:.2}ms segments={} slices={} cdc_scans={} cdc_bytes={} manifest_scans={} ready={} inflight_slices={} wal_snapshots={} grouped=eager:{}/streaming:{} avg={:.2}ms pool_waiters={} pool_wait_avg={:.2}ms ipc={}/{}chunks schema_installs={} schema_publications_skipped={} sink_applies={} sink_avg={:.2}ms ledger_writes={} tombstones={} closures={} closure_avg={:.2}ms",
+                            flush.compaction_planner_cycles_total,
+                            average_duration_ms(
+                                flush.compaction_planner_duration_ns_total,
+                                flush.compaction_planner_cycles_total,
+                            ),
+                            flush.compaction_planner_segments_examined_total,
+                            flush.compaction_planner_slices_examined_total,
+                            flush.cdc_metadata_segment_scans_total,
+                            Helpers::human_readable_size(
+                                flush.cdc_metadata_segment_bytes_examined_total,
+                            ),
+                            flush.compaction_manifest_directory_scans_total,
+                            flush.compaction_planner_ready_work_count,
+                            flush.compaction_inflight_slice_count,
+                            flush.wal_snapshot_ready_count,
+                            flush.grouped_stream_eager_builds_total,
+                            flush.grouped_stream_streaming_builds_total,
+                            average_duration_ms(
+                                flush.grouped_stream_build_duration_ns_total,
+                                grouped_builds,
+                            ),
+                            flush.runtime_sink_pool_waiter_count,
+                            average_duration_ms(
+                                flush.runtime_sink_pool_acquire_wait_ns_total,
+                                flush.runtime_sink_pool_acquires_total,
+                            ),
+                            Helpers::human_readable_size(flush.runtime_sink_ipc_bytes_total),
+                            flush.runtime_sink_ipc_chunks_total,
+                            flush.runtime_schema_state_installs_sent_total,
+                            flush.runtime_schema_state_publications_skipped_total,
+                            flush.sink_apply_calls_total,
+                            average_duration_ms(
+                                flush.sink_apply_duration_ns_total,
+                                flush.sink_apply_calls_total,
+                            ),
+                            flush.compaction_completion_ledger_writes_total,
+                            flush.compaction_tombstone_writes_total,
+                            flush.wal_segment_closures_total,
+                            average_duration_ms(
+                                flush.wal_segment_closure_latency_ns_total,
+                                flush.wal_segment_closures_total,
+                            ),
                         );
                         if wal_inflight > 0 {
                             info!(

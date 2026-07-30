@@ -259,6 +259,58 @@ fn observe_grouped_compaction_test_event(event: GroupedCompactionTestEvent) {
     let _ = GROUPED_COMPACTION_TEST_OBSERVER.try_with(|observer| observer(event));
 }
 
+struct CompactionPlannerMetricGuard {
+    started: std::time::Instant,
+    segments_examined: u64,
+    slices_examined: u64,
+}
+
+impl CompactionPlannerMetricGuard {
+    fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            segments_examined: 0,
+            slices_examined: 0,
+        }
+    }
+}
+
+impl Drop for CompactionPlannerMetricGuard {
+    fn drop(&mut self) {
+        metrics_hot::record_compaction_planner_cycle(
+            self.started.elapsed(),
+            self.segments_examined,
+            self.slices_examined,
+        );
+    }
+}
+
+struct GroupedStreamBuildMetricGuard {
+    started: std::time::Instant,
+    eager: bool,
+}
+
+impl GroupedStreamBuildMetricGuard {
+    fn new(eager: bool) -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            eager,
+        }
+    }
+}
+
+impl Drop for GroupedStreamBuildMetricGuard {
+    fn drop(&mut self) {
+        metrics_hot::record_grouped_stream_build(self.started.elapsed(), self.eager);
+    }
+}
+
+#[inline]
+fn record_wal_write_metrics(rows: u64, bytes: u64) {
+    metrics_hot::add_wal_write_bytes(bytes);
+    metrics_hot::add_wal_write_rows(rows);
+}
+
 fn linux_vm_rss_kb() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -666,6 +718,7 @@ impl Buffers {
                 }
                 if let Ok(mut q) = SEGMENT_SNAPSHOTS.lock() {
                     q.push_back(Arc::new(std::sync::Mutex::new(snapshot)));
+                    metrics_hot::set_wal_snapshot_ready_count(q.len());
                 }
                 seg = SEGMENT_LIVE.lock().unwrap();
             }
@@ -684,7 +737,6 @@ impl Buffers {
         offsets_db: Arc<Offsets>,
         _shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     ) -> Result<(), ArrowError> {
-        let bytes: u64 = 0;
         let mut rows: u64 = 0;
         let mut uploaded_bytes: u64 = 0;
         let (snapshot_rows, snapshot_bytes) =
@@ -698,8 +750,7 @@ impl Buffers {
         rows += live_rows;
         uploaded_bytes += live_bytes;
 
-        metrics_hot::add_wal_write_bytes(bytes);
-        metrics_hot::add_wal_write_rows(rows);
+        record_wal_write_metrics(rows, uploaded_bytes);
 
         WAL_BYTES_TOTAL.fetch_add(uploaded_bytes, std::sync::atomic::Ordering::Relaxed);
 
@@ -831,6 +882,7 @@ impl Buffers {
             ));
         }
 
+        metrics_hot::record_wal_segment_closure(snapshot.created_at.elapsed().unwrap_or_default());
         Ok(Some(write_result))
     }
 
@@ -841,7 +893,9 @@ impl Buffers {
         loop {
             let next_snapshot_opt = {
                 let mut q = SEGMENT_SNAPSHOTS.lock().unwrap();
-                q.pop_front()
+                let next = q.pop_front();
+                metrics_hot::set_wal_snapshot_ready_count(q.len());
+                next
             };
             let Some(snap_arc) = next_snapshot_opt else {
                 break;
@@ -860,6 +914,7 @@ impl Buffers {
                 Err(e) => {
                     let mut q = SEGMENT_SNAPSHOTS.lock().unwrap();
                     q.push_front(snap_arc);
+                    metrics_hot::set_wal_snapshot_ready_count(q.len());
                     return Err(e);
                 }
             }
@@ -1404,35 +1459,54 @@ impl Buffers {
         source: &SegmentSource,
         key: &PartitionKey,
     ) -> io::Result<Option<crate::plugins::cdc::WalPartMeta>> {
-        let blobs_result: io::Result<std::collections::HashMap<PartitionKey, Vec<u8>>> =
-            match source {
-                SegmentSource::Disk(seg_path) => match std::fs::File::open(seg_path) {
-                    Ok(mut f) => SegmentFile::read_part_meta_blobs_from_reader(&mut f),
-                    Err(e) => Err(e),
-                },
-                SegmentSource::S3 {
-                    body: Some(data), ..
-                } => {
-                    let mut cursor = io::Cursor::new(data.as_ref());
-                    SegmentFile::read_part_meta_blobs_from_reader(&mut cursor)
+        let (blobs_result, bytes_examined): (
+            io::Result<std::collections::HashMap<PartitionKey, Vec<u8>>>,
+            u64,
+        ) = match source {
+            SegmentSource::Disk(seg_path) => match std::fs::File::open(seg_path) {
+                Ok(mut file) => {
+                    let bytes = file.metadata().map(|meta| meta.len()).unwrap_or(0);
+                    (
+                        SegmentFile::read_part_meta_blobs_from_reader(&mut file),
+                        bytes,
+                    )
                 }
-                SegmentSource::S3 {
-                    body: None,
-                    bucket,
-                    key,
-                } => {
-                    let rt = tokio::runtime::Handle::current();
-                    let data = tokio::task::block_in_place(|| {
-                        rt.block_on(s3_wal_body_cache::get_or_fetch(
-                            bucket,
-                            key,
-                            source.segment_id(),
-                        ))
-                    })?;
-                    let mut cursor = io::Cursor::new(data.as_ref());
-                    SegmentFile::read_part_meta_blobs_from_reader(&mut cursor)
+                Err(err) => (Err(err), 0),
+            },
+            SegmentSource::S3 {
+                body: Some(data), ..
+            } => {
+                let mut cursor = io::Cursor::new(data.as_ref());
+                (
+                    SegmentFile::read_part_meta_blobs_from_reader(&mut cursor),
+                    data.len() as u64,
+                )
+            }
+            SegmentSource::S3 {
+                body: None,
+                bucket,
+                key,
+            } => {
+                let rt = tokio::runtime::Handle::current();
+                match tokio::task::block_in_place(|| {
+                    rt.block_on(s3_wal_body_cache::get_or_fetch(
+                        bucket,
+                        key,
+                        source.segment_id(),
+                    ))
+                }) {
+                    Ok(data) => {
+                        let mut cursor = io::Cursor::new(data.as_ref());
+                        (
+                            SegmentFile::read_part_meta_blobs_from_reader(&mut cursor),
+                            data.len() as u64,
+                        )
+                    }
+                    Err(err) => (Err(err), 0),
                 }
-            };
+            }
+        };
+        metrics_hot::record_cdc_metadata_segment_scan(bytes_examined);
         let blobs = blobs_result?;
         let Some(blob) = blobs.get(key).filter(|blob| !blob.is_empty()) else {
             return Ok(None);
@@ -1497,6 +1571,7 @@ impl Buffers {
         force: bool,
         output: &dyn DataSink,
     ) -> Vec<CompactionWork> {
+        let mut planner_metrics = CompactionPlannerMetricGuard::new();
         let now_secs = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
@@ -1512,6 +1587,7 @@ impl Buffers {
             Ok(pending) => {
                 for txn in pending {
                     if out.len() >= limit {
+                        metrics_hot::set_compaction_planner_ready_work_count(out.len());
                         return out;
                     }
                     if let Some(work) = Self::work_from_manifest(txn, output) {
@@ -1532,12 +1608,15 @@ impl Buffers {
             ),
         }
         if !out.is_empty() {
+            metrics_hot::set_compaction_planner_ready_work_count(out.len());
             return out;
         }
 
         for entry in SEGMENT_CACHE.iter() {
+            planner_metrics.segments_examined = planner_metrics.segments_examined.saturating_add(1);
             let cached = entry.value();
             for idx in cached.meta.index.iter() {
+                planner_metrics.slices_examined = planner_metrics.slices_examined.saturating_add(1);
                 if Self::is_source_tombstoned(&cached.source, &idx.key) {
                     continue;
                 }
@@ -1600,6 +1679,7 @@ impl Buffers {
                         *count += 1;
                         out.push(work);
                         if out.len() >= limit {
+                            metrics_hot::set_compaction_planner_ready_work_count(out.len());
                             return out;
                         }
                     }
@@ -1625,6 +1705,7 @@ impl Buffers {
                 out.push(work);
             }
         }
+        metrics_hot::set_compaction_planner_ready_work_count(out.len());
         out
     }
 
@@ -2515,6 +2596,8 @@ impl Buffers {
         Arc<AtomicU64>,
         bool,
     )> {
+        let eager = Self::should_build_grouped_stream_eager(work);
+        let _build_metrics = GroupedStreamBuildMetricGuard::new(eager);
         let mut cdc_rows = Vec::new();
         let mut saw_cdc = false;
         let mut saw_append = false;
@@ -2551,7 +2634,7 @@ impl Buffers {
         let expected_cdc_rows = cdc_ctx.as_ref().map(|ctx| ctx.part_meta.row_count);
         let total_entries = work.entries.len();
 
-        if Self::should_build_grouped_stream_eager(work) {
+        if eager {
             let (stream, seen_rows) =
                 Self::build_eager_grouped_stream(work, expected_cdc_rows).await?;
             // Prefer Arrow row count for append; CDC meta matches Arrow after validation.
@@ -2861,10 +2944,12 @@ impl Buffers {
                 for key in inserted {
                     COMPACTION_IN_FLIGHT.remove(&key);
                 }
+                metrics_hot::set_compaction_inflight_slice_count(COMPACTION_IN_FLIGHT.len());
                 return false;
             }
             inserted.push(key);
         }
+        metrics_hot::set_compaction_inflight_slice_count(COMPACTION_IN_FLIGHT.len());
         true
     }
 
@@ -2876,14 +2961,16 @@ impl Buffers {
                 entry.idx.len,
             ));
         }
+        metrics_hot::set_compaction_inflight_slice_count(COMPACTION_IN_FLIGHT.len());
     }
 
     fn tombstone_grouped_work(work: &CompactionWork) {
         let _ = fs::create_dir_all(Self::tombstone_dir());
         for entry in work.entries.iter() {
             let tpath = Self::tombstone_path_for_source(&entry.source, &entry.idx.key);
-            if let Err(err) = fs::write(&tpath, b"") {
-                error!("Failed to write tombstone {:?}: {}", tpath, err);
+            match fs::write(&tpath, b"") {
+                Ok(()) => metrics_hot::add_compaction_tombstone_write(1),
+                Err(err) => error!("Failed to write tombstone {:?}: {}", tpath, err),
             }
         }
         for entry in work.entries.iter() {
@@ -3066,10 +3153,11 @@ impl Buffers {
             work.txn.target_filename,
         );
         let upload_started = std::time::Instant::now();
-        if let Err(err) = shared_output
+        let sink_result = shared_output
             .sync_grouped(grouped_reader, grouped_ctx)
-            .await
-        {
+            .await;
+        metrics_hot::record_sink_apply(upload_started.elapsed());
+        if let Err(err) = sink_result {
             let err_str = err.to_string();
             Self::quarantine_truncated_entries(&work.entries, "grouped_sync", &err_str);
             let failure_key = format!("{}:{}", work.txn.sink_ref, work.txn.id);
@@ -4599,6 +4687,24 @@ mod compaction_semantics_tests {
         let patched = Buffers::patch_manifest_semantics(txn, &output).expect("patched");
         assert_eq!(patched.semantics, SinkWriteSemantics::IdempotentAtLeastOnce);
     }
+
+    #[test]
+    #[serial_test::serial]
+    fn wal_write_metrics_record_persisted_bytes() {
+        let bytes_before = metrics_hot::WAL_WRITE_BYTES_TOTAL.load(AtomicOrdering::Relaxed);
+        let rows_before = metrics_hot::WAL_WRITE_ROWS_TOTAL.load(AtomicOrdering::Relaxed);
+
+        record_wal_write_metrics(7, 4096);
+
+        assert_eq!(
+            metrics_hot::WAL_WRITE_BYTES_TOTAL.load(AtomicOrdering::Relaxed),
+            bytes_before + 4096
+        );
+        assert_eq!(
+            metrics_hot::WAL_WRITE_ROWS_TOTAL.load(AtomicOrdering::Relaxed),
+            rows_before + 7
+        );
+    }
 }
 
 /// Force-flush all segments to WAL files regardless of thresholds.
@@ -4609,7 +4715,6 @@ pub async fn flush_all_segments(offsets_db: Arc<Offsets>) -> Result<(), ArrowErr
 /// Force-flush all segments without going through the WAL writer command queue.
 /// Used by the writer itself and as a fallback before the writer has started.
 pub(crate) async fn flush_all_segments_direct(offsets_db: Arc<Offsets>) -> Result<(), ArrowError> {
-    let bytes: u64 = 0;
     let mut rows: u64 = 0;
     let mut uploaded_bytes: u64 = 0;
     let (snapshot_rows, snapshot_bytes) =
@@ -4621,8 +4726,7 @@ pub(crate) async fn flush_all_segments_direct(offsets_db: Arc<Offsets>) -> Resul
     rows += live_rows;
     uploaded_bytes += live_bytes;
 
-    metrics_hot::add_wal_write_bytes(bytes);
-    metrics_hot::add_wal_write_rows(rows);
+    record_wal_write_metrics(rows, uploaded_bytes);
     WAL_BYTES_TOTAL.fetch_add(uploaded_bytes, std::sync::atomic::Ordering::Relaxed);
 
     Ok(())

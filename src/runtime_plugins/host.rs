@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::time::Instant;
 
 use arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField, SchemaRef};
 use async_trait::async_trait;
@@ -325,7 +326,11 @@ impl RuntimeChildConnection {
     }
 
     async fn send(&mut self, frame: &HostFrame) -> io::Result<()> {
-        write_frame(&mut self.control, frame).await
+        write_frame(&mut self.control, frame).await?;
+        if matches!(frame, HostFrame::InstallSchemaState(_)) {
+            crate::metrics::counters::add_runtime_schema_state_install_sent(1);
+        }
+        Ok(())
     }
 
     async fn recv(&mut self) -> io::Result<PluginFrame> {
@@ -333,7 +338,13 @@ impl RuntimeChildConnection {
     }
 
     async fn send_data(&mut self, frame: &HostDataFrame) -> io::Result<()> {
-        write_frame(&mut self.data, frame).await
+        let payload_bytes = match frame {
+            HostDataFrame::SinkPayload(payload) => payload.arrow_stream_bytes.len() as u64,
+            HostDataFrame::SinkPayloadChunk(payload) => payload.arrow_stream_bytes.len() as u64,
+        };
+        write_frame(&mut self.data, frame).await?;
+        crate::metrics::counters::record_runtime_sink_ipc(payload_bytes, 1);
+        Ok(())
     }
 }
 
@@ -969,6 +980,9 @@ pub async fn sync_runtime_input_plugin(
                                 Config::sync_output_schema_namespace(&namespace);
                             }
                         } else if !changed_namespaces.is_empty() {
+                            crate::metrics::counters::add_runtime_schema_state_publication_skipped(
+                                1,
+                            );
                             debug!(
                                 "Runtime source schema state publication skipped for {} namespaces",
                                 changed_namespaces.len()
@@ -1466,6 +1480,26 @@ struct RuntimeSinkWorkerLease {
     worker: Arc<Mutex<RuntimeChildConnection>>,
 }
 
+struct RuntimeSinkPoolWaitMetrics {
+    started: Instant,
+}
+
+impl RuntimeSinkPoolWaitMetrics {
+    fn new() -> Self {
+        crate::metrics::counters::inc_runtime_sink_pool_waiters();
+        Self {
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Drop for RuntimeSinkPoolWaitMetrics {
+    fn drop(&mut self) {
+        crate::metrics::counters::dec_runtime_sink_pool_waiters();
+        crate::metrics::counters::record_runtime_sink_pool_acquire_wait(self.started.elapsed());
+    }
+}
+
 impl RuntimeSinkConnectionPool {
     async fn new(
         resolved: ResolvedRuntimePlugin,
@@ -1531,6 +1565,7 @@ impl RuntimeSinkConnectionPool {
     }
 
     async fn acquire(&self) -> io::Result<RuntimeSinkWorkerLease> {
+        let _wait_metrics = RuntimeSinkPoolWaitMetrics::new();
         self.maybe_grow_to_target().await?;
         let permit = Arc::clone(&self.semaphore)
             .acquire_owned()
@@ -1732,7 +1767,8 @@ impl RuntimeDataSinkPlugin {
             let request_timeout = runtime_sink_request_timeout();
             let recv_result = match timeout(request_timeout, async {
                 guard.send(&HostFrame::RunSink(request.clone())).await?;
-                Self::send_sink_payload(&mut guard, request.request_id, &arrow_stream_bytes).await?;
+                Self::send_sink_payload(&mut guard, request.request_id, &arrow_stream_bytes)
+                    .await?;
                 guard.recv().await
             })
             .await
