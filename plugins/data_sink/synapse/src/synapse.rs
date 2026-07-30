@@ -25,8 +25,35 @@ impl super::cdc_apply::CdcApplyBackend for SynapseCdcBackend {
 
     fn ddl_add_order_token_column(fq_table: &str) -> String {
         format!(
-            "ALTER TABLE {fq_table} ADD \"_skippr_order_token\" {}",
+            "ALTER TABLE {fq_table} ADD [_skippr_order_token] {}",
             Self::ORDER_TOKEN_TYPE,
+        )
+    }
+
+    fn ddl_create_tombstone_table(
+        fq_tombstone_table: &str,
+        business_key_cols: &[(String, String)],
+    ) -> String {
+        let mut column_defs = business_key_cols
+            .iter()
+            .map(|(name, target_type)| {
+                format!("[{}] {target_type} NOT NULL", name.replace(']', "]]"))
+            })
+            .collect::<Vec<_>>();
+        column_defs.push(format!(
+            "[_skippr_order_token] {} NOT NULL",
+            Self::ORDER_TOKEN_TYPE
+        ));
+        let primary_key = business_key_cols
+            .iter()
+            .map(|(name, _)| format!("[{}]", name.replace(']', "]]")))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!(
+            "IF OBJECT_ID(N'{fq_tombstone_table}', N'U') IS NULL \
+             CREATE TABLE {fq_tombstone_table} ({}, \
+             PRIMARY KEY NONCLUSTERED ({primary_key}) NOT ENFORCED)",
+            column_defs.join(", ")
         )
     }
 }
@@ -143,8 +170,12 @@ impl DataSink for DataSinkSynapsePlugin {
                 chunk.chunk_index == 0 && chunk.final_chunk,
                 chunk_cdc.as_ref(),
             );
-            self.sync(chunk.into_stream(schema.clone()), chunk_ctx.filename, chunk_ctx.cdc_ctx)
-                .await?;
+            self.sync(
+                chunk.into_stream(schema.clone()),
+                chunk_ctx.filename,
+                chunk_ctx.cdc_ctx,
+            )
+            .await?;
         }
         Ok(skippr_runtime_sdk::plugins::SinkWriteOutcome::Applied)
     }
@@ -184,16 +215,6 @@ impl DataSinkSynapsePlugin {
         }
     }
 
-    fn arrow_value_to_sql_synapse(col: &dyn datafusion::arrow::array::Array, row: usize) -> String {
-        let val = arrow::util::display::array_value_to_string(col, row)
-            .unwrap_or_else(|_| "NULL".to_string());
-        if val == "NULL" || val.is_empty() {
-            "NULL".to_string()
-        } else {
-            format!("N'{}'", val.replace('\'', "''"))
-        }
-    }
-
     async fn sync_cdc(
         &self,
         mut stream: SendableRecordBatchStream,
@@ -201,11 +222,11 @@ impl DataSinkSynapsePlugin {
         ctx: &skippr_runtime_sdk::plugins::cdc::SyncContext,
     ) -> Result<(), std::io::Error> {
         use super::cdc_apply::{
-            ddl_add_order_token_column, ddl_create_tombstone_table, delete_if_newer_sql,
-            tombstone_table_name, upsert_if_newer_sql,
+            append_record_batch_to_cdc_apply, ddl_add_order_token_column,
+            ddl_create_tombstone_table, warehouse_bulk_cdc_sql, CdcApplyBatch, CdcApplyColumn,
+            CdcWarehouseDialect,
         };
         use skippr_runtime_sdk::metrics::counters;
-        use skippr_runtime_sdk::plugins::cdc::MutationKind;
 
         let contract = match ctx.contract.as_ref() {
             Some(c) if !c.business_key_columns.is_empty() => c,
@@ -227,7 +248,14 @@ impl DataSinkSynapsePlugin {
         let schema = self.config.schema.as_deref().unwrap_or("dbo");
         let arrow_schema = stream.schema();
 
-        let fq_table = format!("\"{}\".\"{}\"", schema, table_name);
+        let quoted_schema = format!("[{}]", schema.replace(']', "]]"));
+        let quoted_table = format!("[{}]", table_name.replace(']', "]]"));
+        let fq_table = format!("{quoted_schema}.{quoted_table}");
+        let tombstone_table = format!(
+            "{}.[_skippr_tombstones_{}]",
+            quoted_schema,
+            table_name.replace(']', "]]")
+        );
 
         let tib_config = TibConfig::from_ado_string(&self.config.connection_string)
             .map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -246,13 +274,16 @@ impl DataSinkSynapsePlugin {
                 .iter()
                 .map(|f| {
                     let synapse_type = Self::arrow_to_synapse_type(f.data_type());
-                    format!("\"{}\" {}", f.name(), synapse_type)
+                    format!("[{}] {}", f.name().replace(']', "]]"), synapse_type)
                 })
                 .collect();
             let create_base = format!(
                 "IF NOT EXISTS (SELECT 1 FROM INFORMATION_SCHEMA.TABLES WHERE TABLE_SCHEMA = '{}' AND TABLE_NAME = '{}') \
                  CREATE TABLE {} ({})",
-                schema, table_name, fq_table, col_defs.join(", ")
+                schema.replace('\'', "''"),
+                table_name.replace('\'', "''"),
+                fq_table,
+                col_defs.join(", ")
             );
             if let Err(e) = client.execute(create_base.as_str(), &[]).await {
                 let msg = e.to_string();
@@ -273,7 +304,6 @@ impl DataSinkSynapsePlugin {
                 }
             }
 
-            let tombstone_tbl = tombstone_table_name(&fq_table);
             let bk_type_pairs: Vec<(String, String)> = contract
                 .business_key_columns
                 .iter()
@@ -288,7 +318,7 @@ impl DataSinkSynapsePlugin {
                 })
                 .collect();
             let tombstone_ddl =
-                ddl_create_tombstone_table::<SynapseCdcBackend>(&tombstone_tbl, &bk_type_pairs);
+                ddl_create_tombstone_table::<SynapseCdcBackend>(&tombstone_table, &bk_type_pairs);
             if let Err(e) = client.execute(tombstone_ddl.as_str(), &[]).await {
                 let msg = e.to_string();
                 if !msg.contains("already exists") && !msg.contains("already an object") {
@@ -301,35 +331,19 @@ impl DataSinkSynapsePlugin {
             info!(target: "synapse", "CDC DDL applied for {}", fq_table);
         }
 
-        let tombstone_table = tombstone_table_name(&fq_table);
-
-        let bk_names_quoted: Vec<String> = contract
-            .business_key_columns
-            .iter()
-            .map(|bk| format!("\"{}\"", bk))
-            .collect();
-
-        let bk_types: Vec<String> = contract
-            .business_key_columns
-            .iter()
-            .map(|bk| {
-                arrow_schema
-                    .fields()
-                    .iter()
-                    .find(|f| f.name() == bk)
-                    .map(|f| Self::arrow_to_synapse_type(f.data_type()))
-                    .unwrap_or_else(|| "NVARCHAR(4000)".to_string())
-            })
-            .collect();
-
-        let col_names_quoted: Vec<String> = arrow_schema
-            .fields()
-            .iter()
-            .map(|f| format!("\"{}\"", f.name()))
-            .collect();
-
         let mut row_offset = 0usize;
-        let mut total_rows = 0usize;
+        let mut apply_batch = CdcApplyBatch {
+            columns: arrow_schema
+                .fields()
+                .iter()
+                .map(|field| CdcApplyColumn {
+                    name: field.name().clone(),
+                    target_type: Self::arrow_to_synapse_type(field.data_type()),
+                })
+                .collect(),
+            business_key_columns: contract.business_key_columns.clone(),
+            rows: Vec::new(),
+        };
 
         while let Some(batch_result) = stream.next().await {
             let batch = batch_result.map_err(|e| std::io::Error::other(e.to_string()))?;
@@ -337,91 +351,44 @@ impl DataSinkSynapsePlugin {
             if num_rows == 0 {
                 continue;
             }
-
-            for row in 0..num_rows {
-                let meta_idx = row_offset + row;
-                let row_meta = ctx.part_meta.rows.get(meta_idx).ok_or_else(|| {
-                    std::io::Error::other(format!(
-                        "CDC row metadata missing at index {} (have {})",
-                        meta_idx,
-                        ctx.part_meta.rows.len()
-                    ))
-                })?;
-
-                let order_token_hex: String = row_meta
-                    .order_token
-                    .iter()
-                    .map(|b| format!("{:02x}", b))
-                    .collect();
-
-                match row_meta.mutation {
-                    MutationKind::Snapshot | MutationKind::Insert | MutationKind::Update => {
-                        let mut all_names = col_names_quoted.clone();
-                        all_names.push("\"_skippr_order_token\"".to_string());
-
-                        let mut all_values: Vec<String> = (0..batch.num_columns())
-                            .map(|col| {
-                                Self::arrow_value_to_sql_synapse(batch.column(col).as_ref(), row)
-                            })
-                            .collect();
-                        all_values.push(format!("CONVERT(VARBINARY(MAX), 0x{})", order_token_hex));
-
-                        let sql = upsert_if_newer_sql::<SynapseCdcBackend>(
-                            &fq_table,
-                            &tombstone_table,
-                            &all_names,
-                            &all_values,
-                            &bk_names_quoted,
-                            &order_token_hex,
-                        );
-
-                        client.execute(sql.as_str(), &[]).await.map_err(|e| {
-                            error!("CDC upsert failed for {}: {}", fq_table, e);
-                            counters::dec_uploads_in_flight();
-                            std::io::Error::other(e.to_string())
-                        })?;
-                    }
-                    MutationKind::Delete => {
-                        let bk_values: Vec<String> = contract
-                            .business_key_columns
-                            .iter()
-                            .map(|bk| {
-                                let col_idx = arrow_schema
-                                    .fields()
-                                    .iter()
-                                    .position(|f| f.name() == bk)
-                                    .unwrap_or(0);
-                                Self::arrow_value_to_sql_synapse(
-                                    batch.column(col_idx).as_ref(),
-                                    row,
-                                )
-                            })
-                            .collect();
-
-                        let sql = delete_if_newer_sql::<SynapseCdcBackend>(
-                            &fq_table,
-                            &tombstone_table,
-                            &bk_names_quoted,
-                            &bk_values,
-                            &bk_types,
-                            &order_token_hex,
-                        );
-
-                        client.execute(sql.as_str(), &[]).await.map_err(|e| {
-                            error!("CDC delete failed for {}: {}", fq_table, e);
-                            counters::dec_uploads_in_flight();
-                            std::io::Error::other(e.to_string())
-                        })?;
-                    }
-                }
-            }
-
+            append_record_batch_to_cdc_apply(
+                &mut apply_batch,
+                &batch,
+                &ctx.part_meta.rows,
+                row_offset,
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
             row_offset += num_rows;
-            total_rows += num_rows;
-            counters::add_parquet_rows(num_rows as u64);
+        }
+
+        let total_rows = apply_batch.rows.len();
+        if total_rows > 0 {
+            let sql = warehouse_bulk_cdc_sql(
+                CdcWarehouseDialect::Synapse,
+                &fq_table,
+                &tombstone_table,
+                &apply_batch,
+            )
+            .map_err(|error| std::io::Error::other(error.to_string()))?;
+            client
+                .execute(
+                    sql.transactional_script(CdcWarehouseDialect::Synapse)
+                        .as_str(),
+                    &[],
+                )
+                .await
+                .map_err(|error| {
+                    error!("Synapse bulk CDC apply failed for {}: {}", fq_table, error);
+                    counters::dec_uploads_in_flight();
+                    std::io::Error::other(error.to_string())
+                })?;
+            counters::add_parquet_rows(total_rows as u64);
             info!(
-                "CDC applied {} rows to [{}].[{}] (total: {})",
-                num_rows, schema, table_name, total_rows
+                target: "synapse",
+                "CDC bulk-staged and atomically applied {} rows to [{}].[{}]",
+                total_rows,
+                schema,
+                table_name
             );
         }
 
@@ -432,5 +399,30 @@ impl DataSinkSynapsePlugin {
             total_rows, schema, table_name
         );
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn synapse_bulk_cdc_sql_keeps_temp_ddl_outside_target_transaction() {
+        let batch = crate::cdc_apply::warehouse_sql_test_batch();
+        let sql = crate::cdc_apply::warehouse_bulk_cdc_sql(
+            crate::cdc_apply::CdcWarehouseDialect::Synapse,
+            "[dbo].[users]",
+            "[dbo].[_skippr_tombstones_users]",
+            &batch,
+        )
+        .unwrap();
+        let script = sql.transactional_script(crate::cdc_apply::CdcWarehouseDialect::Synapse);
+        let create_position = script.find("CREATE TABLE [#").unwrap();
+        let transaction_position = script.find("BEGIN TRANSACTION").unwrap();
+
+        assert!(create_position < transaction_position);
+        assert!(script.contains("WITH (DISTRIBUTION = ROUND_ROBIN, HEAP)"));
+        assert!(script.contains("CONVERT(VARBINARY(MAX), 0x"));
+        assert_eq!(script.matches("MERGE INTO").count(), 4);
+        assert!(script.contains("ROLLBACK TRANSACTION"));
+        assert!(script.matches("DROP TABLE IF EXISTS").count() >= 4);
     }
 }
