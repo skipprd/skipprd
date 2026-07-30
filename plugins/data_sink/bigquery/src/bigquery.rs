@@ -14,6 +14,8 @@ use skippr_runtime_sdk::sink_compat::BufferChunker;
 static ENSURED_DATASETS: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 static ENSURED_TABLES: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
+const BIGQUERY_CDC_LOAD_JOB_BLOCKER: &str =
+    "the connector currently exposes query jobs only and has no CDC-enriched load-job path";
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSinkBigqueryPluginConfig {
@@ -720,11 +722,16 @@ impl DataSinkBigqueryPlugin {
     ) -> Result<(), std::io::Error> {
         use super::cdc_apply::{
             append_record_batch_to_cdc_apply, ddl_add_order_token_column,
-            ddl_create_tombstone_table, warehouse_bulk_cdc_sql, CdcApplyBatch, CdcApplyColumn,
-            CdcWarehouseDialect,
+            ddl_create_tombstone_table, guarded_warehouse_cdc_row_sql, warehouse_bulk_cdc_sql,
+            CdcApplyBatch, CdcApplyColumn, CdcWarehouseDialect,
         };
         use skippr_runtime_sdk::metrics::counters;
 
+        tracing::debug!(
+            target: "bigquery",
+            blocker = BIGQUERY_CDC_LOAD_JOB_BLOCKER,
+            "using bounded query staging with guarded overflow"
+        );
         let contract = match ctx.contract.as_ref() {
             Some(c) if !c.business_key_columns.is_empty() => c,
             _ => {
@@ -835,23 +842,50 @@ impl DataSinkBigqueryPlugin {
 
         let total_rows = apply_batch.rows.len();
         if total_rows > 0 {
-            let sql = warehouse_bulk_cdc_sql(
+            match warehouse_bulk_cdc_sql(
                 CdcWarehouseDialect::BigQuery,
                 &fq_table,
                 &tombstone_table,
                 &apply_batch,
-            )
-            .map_err(|error| std::io::Error::other(error.to_string()))?;
-            self.execute_sql(&sql.transactional_script(CdcWarehouseDialect::BigQuery))
-                .await
-                .map_err(|error| {
+            ) {
+                Ok(sql) => {
+                    self.execute_sql(&sql.transactional_script(CdcWarehouseDialect::BigQuery))
+                        .await
+                        .map_err(|error| {
+                            counters::dec_uploads_in_flight();
+                            std::io::Error::other(format!("BigQuery bulk CDC apply: {error}"))
+                        })?;
+                }
+                Err(error) if error.is_warehouse_stage_limit() => {
+                    warn!(
+                        target: "bigquery",
+                        "CDC chunk exceeds bounded staging envelope; using guarded row apply: {}",
+                        error
+                    );
+                    for row in &apply_batch.rows {
+                        let statement = guarded_warehouse_cdc_row_sql::<BigqueryCdcBackend>(
+                            CdcWarehouseDialect::BigQuery,
+                            &fq_table,
+                            &tombstone_table,
+                            &apply_batch,
+                            row,
+                        )
+                        .map_err(|error| std::io::Error::other(error.to_string()))?;
+                        self.execute_sql(&statement).await.map_err(|error| {
+                            counters::dec_uploads_in_flight();
+                            std::io::Error::other(format!("BigQuery guarded CDC apply: {error}"))
+                        })?;
+                    }
+                }
+                Err(error) => {
                     counters::dec_uploads_in_flight();
-                    std::io::Error::other(format!("BigQuery bulk CDC apply: {error}"))
-                })?;
+                    return Err(std::io::Error::other(error.to_string()));
+                }
+            }
             counters::add_parquet_rows(total_rows as u64);
             info!(
                 target: "bigquery",
-                "CDC bulk-staged and atomically applied {} rows to {}",
+                "CDC safely applied {} rows to {}",
                 total_rows,
                 table_name
             );
@@ -977,5 +1011,61 @@ mod tests {
         assert_eq!(script.matches("MERGE INTO").count(), 4);
         assert!(script.contains("DROP TABLE IF EXISTS"));
         assert!(script.ends_with("COMMIT TRANSACTION;"));
+    }
+
+    #[test]
+    fn bigquery_splits_loads_and_falls_back_above_encoded_limit() {
+        assert!(crate::cdc_apply::CdcWarehouseDialect::BigQuery
+            .validate_stage_row_count(10_000)
+            .is_ok());
+        assert!(crate::cdc_apply::CdcWarehouseDialect::BigQuery
+            .validate_stage_row_count(10_001)
+            .unwrap_err()
+            .is_warehouse_stage_limit());
+        assert!(crate::cdc_apply::CdcWarehouseDialect::BigQuery
+            .validate_stage_row_count(100_000)
+            .unwrap_err()
+            .is_warehouse_stage_limit());
+        let split_batch = crate::cdc_apply::warehouse_sql_test_batch_with_rows(501, 8);
+        let split = crate::cdc_apply::warehouse_bulk_cdc_sql(
+            crate::cdc_apply::CdcWarehouseDialect::BigQuery,
+            "`project.dataset.users`",
+            "`project.dataset._skippr_tombstones_users`",
+            &split_batch,
+        )
+        .unwrap();
+        assert_eq!(
+            split
+                .setup_statements
+                .iter()
+                .filter(|statement| statement.starts_with("INSERT INTO"))
+                .count(),
+            2
+        );
+        assert!(
+            split
+                .transactional_script(crate::cdc_apply::CdcWarehouseDialect::BigQuery)
+                .len()
+                <= 900 * 1024
+        );
+
+        let oversized = crate::cdc_apply::warehouse_sql_test_batch_with_rows(2, 200 * 1024);
+        let error = crate::cdc_apply::warehouse_bulk_cdc_sql(
+            crate::cdc_apply::CdcWarehouseDialect::BigQuery,
+            "`project.dataset.users`",
+            "`project.dataset._skippr_tombstones_users`",
+            &oversized,
+        )
+        .unwrap_err();
+        assert!(error.is_warehouse_stage_limit());
+        let guarded = crate::cdc_apply::guarded_warehouse_cdc_sql::<super::BigqueryCdcBackend>(
+            crate::cdc_apply::CdcWarehouseDialect::BigQuery,
+            "`project.dataset.users`",
+            "`project.dataset._skippr_tombstones_users`",
+            &oversized,
+        )
+        .unwrap();
+        assert_eq!(guarded.len(), 2);
+        assert!(super::BIGQUERY_CDC_LOAD_JOB_BLOCKER.contains("query jobs only"));
     }
 }

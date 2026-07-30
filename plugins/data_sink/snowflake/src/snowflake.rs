@@ -33,6 +33,8 @@ static TABLE_DDL_GUARDS: Lazy<DashMap<String, Arc<tokio::sync::OnceCell<()>>>> =
     Lazy::new(DashMap::new);
 static ENSURED_TABLES: Lazy<DashMap<String, Vec<(String, String)>>> = Lazy::new(DashMap::new);
 static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
+const SNOWFLAKE_CDC_FILE_STAGE_BLOCKER: &str = "the current PUT/COPY path serializes target-only \
+    Parquet and does not load CDC metadata into a transaction-local staging table";
 
 #[derive(Debug, Deserialize, Clone)]
 pub struct DataSinkSnowflakePluginConfig {
@@ -2368,13 +2370,18 @@ impl DataSinkSnowflakePlugin {
     ) -> Result<(), std::io::Error> {
         use super::cdc_apply::{
             append_record_batch_to_cdc_apply, ddl_add_order_token_column,
-            ddl_create_tombstone_table, delete_if_newer_sql, tombstone_table_name,
-            upsert_if_newer_sql, warehouse_bulk_cdc_sql, CdcApplyBatch, CdcApplyColumn,
-            CdcWarehouseDialect,
+            ddl_create_tombstone_table, delete_if_newer_sql, guarded_warehouse_cdc_row_sql,
+            tombstone_table_name, upsert_if_newer_sql, warehouse_bulk_cdc_sql, CdcApplyBatch,
+            CdcApplyColumn, CdcWarehouseDialect,
         };
         use skippr_runtime_sdk::metrics::counters;
         use skippr_runtime_sdk::plugins::cdc::MutationKind;
 
+        tracing::debug!(
+            target: "snowflake",
+            blocker = SNOWFLAKE_CDC_FILE_STAGE_BLOCKER,
+            "using bounded SQL staging with guarded overflow"
+        );
         let contract = match ctx.contract.as_ref() {
             Some(c) if !c.business_key_columns.is_empty() => c,
             _ => {
@@ -2521,23 +2528,54 @@ impl DataSinkSnowflakePlugin {
 
             total_rows = apply_batch.rows.len();
             if total_rows > 0 {
-                let sql = warehouse_bulk_cdc_sql(
+                match warehouse_bulk_cdc_sql(
                     CdcWarehouseDialect::Snowflake,
                     &fq_table,
                     &tombstone_table,
                     &apply_batch,
-                )
-                .map_err(|error| std::io::Error::other(error.to_string()))?;
-                self.execute_sql_script(&sql.transactional_script(CdcWarehouseDialect::Snowflake))
-                    .await
-                    .map_err(|error| {
+                ) {
+                    Ok(sql) => {
+                        self.execute_sql_script(
+                            &sql.transactional_script(CdcWarehouseDialect::Snowflake),
+                        )
+                        .await
+                        .map_err(|error| {
+                            counters::dec_uploads_in_flight();
+                            std::io::Error::other(format!("Snowflake bulk CDC apply: {error}"))
+                        })?;
+                    }
+                    Err(error) if error.is_warehouse_stage_limit() => {
+                        warn!(
+                            target: "snowflake",
+                            "CDC chunk exceeds the retryable 1 MiB SQL envelope; using guarded row apply: {}",
+                            error
+                        );
+                        for row in &apply_batch.rows {
+                            let statement = guarded_warehouse_cdc_row_sql::<SnowflakeCdcBackend>(
+                                CdcWarehouseDialect::Snowflake,
+                                &fq_table,
+                                &tombstone_table,
+                                &apply_batch,
+                                row,
+                            )
+                            .map_err(|error| std::io::Error::other(error.to_string()))?;
+                            self.execute_sql_script(&statement).await.map_err(|error| {
+                                counters::dec_uploads_in_flight();
+                                std::io::Error::other(format!(
+                                    "Snowflake guarded CDC apply: {error}"
+                                ))
+                            })?;
+                        }
+                    }
+                    Err(error) => {
                         counters::dec_uploads_in_flight();
-                        std::io::Error::other(format!("Snowflake bulk CDC apply: {error}"))
-                    })?;
+                        return Err(std::io::Error::other(error.to_string()));
+                    }
+                }
                 counters::add_parquet_rows(total_rows as u64);
                 info!(
                     target: "snowflake",
-                    "CDC bulk-staged and atomically applied {} rows to {}",
+                    "CDC safely applied {} rows to {}",
                     total_rows,
                     table_name
                 );
@@ -3045,5 +3083,61 @@ mod tests {
         assert_eq!(script.matches("MERGE INTO").count(), 4);
         assert!(script.contains("DROP TABLE IF EXISTS"));
         assert!(script.contains("'O''Brien'"));
+    }
+
+    #[test]
+    fn snowflake_bounds_retryable_sql_and_preserves_guarded_overflow() {
+        assert!(crate::cdc_apply::CdcWarehouseDialect::Snowflake
+            .validate_stage_row_count(10_000)
+            .is_ok());
+        assert!(crate::cdc_apply::CdcWarehouseDialect::Snowflake
+            .validate_stage_row_count(10_001)
+            .unwrap_err()
+            .is_warehouse_stage_limit());
+        assert!(crate::cdc_apply::CdcWarehouseDialect::Snowflake
+            .validate_stage_row_count(100_000)
+            .unwrap_err()
+            .is_warehouse_stage_limit());
+        let split_batch = crate::cdc_apply::warehouse_sql_test_batch_with_rows(501, 8);
+        let split = crate::cdc_apply::warehouse_bulk_cdc_sql(
+            crate::cdc_apply::CdcWarehouseDialect::Snowflake,
+            "\"DB\".\"PUBLIC\".\"USERS\"",
+            "\"DB\".\"PUBLIC\".\"_skippr_tombstones_USERS\"",
+            &split_batch,
+        )
+        .unwrap();
+        assert_eq!(
+            split
+                .setup_statements
+                .iter()
+                .filter(|statement| statement.starts_with("INSERT INTO"))
+                .count(),
+            2
+        );
+        assert!(
+            split
+                .transactional_script(crate::cdc_apply::CdcWarehouseDialect::Snowflake)
+                .len()
+                <= 900 * 1024
+        );
+
+        let oversized = crate::cdc_apply::warehouse_sql_test_batch_with_rows(2, 200 * 1024);
+        let error = crate::cdc_apply::warehouse_bulk_cdc_sql(
+            crate::cdc_apply::CdcWarehouseDialect::Snowflake,
+            "\"DB\".\"PUBLIC\".\"USERS\"",
+            "\"DB\".\"PUBLIC\".\"_skippr_tombstones_USERS\"",
+            &oversized,
+        )
+        .unwrap_err();
+        assert!(error.is_warehouse_stage_limit());
+        let guarded = crate::cdc_apply::guarded_warehouse_cdc_sql::<super::SnowflakeCdcBackend>(
+            crate::cdc_apply::CdcWarehouseDialect::Snowflake,
+            "\"DB\".\"PUBLIC\".\"USERS\"",
+            "\"DB\".\"PUBLIC\".\"_skippr_tombstones_USERS\"",
+            &oversized,
+        )
+        .unwrap();
+        assert_eq!(guarded.len(), 2);
+        assert!(super::SNOWFLAKE_CDC_FILE_STAGE_BLOCKER.contains("target-only"));
     }
 }
