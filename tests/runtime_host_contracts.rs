@@ -797,6 +797,15 @@ async fn runtime_sink_pool_shrinks_only_fully_idle_workers() {
     assert_eq!(sink.worker_count_for_test(), 3);
 
     skipprd::metrics::counters::RUNTIME_SINK_POOL_TARGET.store(2, Ordering::SeqCst);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while sink.worker_count_for_test() != 1 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("idle maintenance should retire excess workers after backoff");
+    assert_eq!(sink.worker_count_for_test(), 1);
+
     sink.sync(sample_stream(), "shrink-after-backoff".to_string(), None)
         .await
         .unwrap();

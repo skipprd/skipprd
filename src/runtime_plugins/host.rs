@@ -2406,6 +2406,7 @@ struct RuntimeSinkConnectionPool {
     schema_apply_fence: Arc<tokio::sync::RwLock<()>>,
     has_published_schema_state: AtomicBool,
     published_schema_version: std::sync::atomic::AtomicU64,
+    maintenance_abort: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
 }
 
 struct RuntimeSinkWorkerLease {
@@ -2504,7 +2505,7 @@ impl RuntimeSinkConnectionPool {
         install_request: RuntimeSinkInstallRequest,
         process_budget: Arc<RuntimeSinkProcessBudget>,
         adapter_session_limit: usize,
-    ) -> io::Result<Self> {
+    ) -> io::Result<Arc<Self>> {
         let session_capacity = runtime_sink_session_capacity(adapter_session_limit);
         let budget_registration =
             process_budget.register(install_request.binding, session_capacity);
@@ -2527,7 +2528,7 @@ impl RuntimeSinkConnectionPool {
         });
         slots.add_worker(Arc::clone(&first_worker));
         let workers = vec![first_worker];
-        Ok(Self {
+        let pool = Arc::new(Self {
             install_request,
             resolved,
             pipeline_name,
@@ -2540,7 +2541,30 @@ impl RuntimeSinkConnectionPool {
             schema_apply_fence: Arc::new(tokio::sync::RwLock::new(())),
             has_published_schema_state: AtomicBool::new(false),
             published_schema_version: std::sync::atomic::AtomicU64::new(0),
-        })
+            maintenance_abort: std::sync::Mutex::new(None),
+        });
+        pool.start_idle_maintenance();
+        Ok(pool)
+    }
+
+    fn start_idle_maintenance(self: &Arc<Self>) {
+        let weak = Arc::downgrade(self);
+        let task = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let Some(pool) = weak.upgrade() else {
+                    return;
+                };
+                pool.maybe_shrink_idle().await;
+            }
+        });
+        *self
+            .maintenance_abort
+            .lock()
+            .expect("runtime sink maintenance task poisoned") = Some(task.abort_handle());
     }
 
     /// Spawn at most one child, and only after every existing child is full.
@@ -2682,10 +2706,23 @@ impl RuntimeSinkConnectionPool {
     }
 }
 
+impl Drop for RuntimeSinkConnectionPool {
+    fn drop(&mut self) {
+        if let Some(abort) = self
+            .maintenance_abort
+            .lock()
+            .expect("runtime sink maintenance task poisoned")
+            .take()
+        {
+            abort.abort();
+        }
+    }
+}
+
 pub struct RuntimeDataSinkPlugin {
     install_request: RuntimeSinkInstallRequest,
     capability: &'static cdc::SinkCapability,
-    pool: RuntimeSinkConnectionPool,
+    pool: Arc<RuntimeSinkConnectionPool>,
 }
 
 impl RuntimeDataSinkPlugin {
