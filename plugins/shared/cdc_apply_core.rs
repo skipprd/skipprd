@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 /// Replay-safe CDC apply logic for SQL-based exact-once sinks.
 ///
 /// Sinks own their backend definitions by implementing `CdcApplyBackend`.
@@ -32,7 +34,7 @@ pub trait CdcApplyBackend {
     ) -> String {
         let mut col_defs: Vec<String> = business_key_cols
             .iter()
-            .map(|(name, ty)| format!("\"{}\" {} NOT NULL", name, ty))
+            .map(|(name, ty)| format!("\"{}\" {} NOT NULL", name.replace('"', "\"\""), ty))
             .collect();
         col_defs.push(format!(
             "\"_skippr_order_token\" {} NOT NULL",
@@ -41,7 +43,7 @@ pub trait CdcApplyBackend {
 
         let pk_cols: Vec<String> = business_key_cols
             .iter()
-            .map(|(name, _)| format!("\"{}\"", name))
+            .map(|(name, _)| format!("\"{}\"", name.replace('"', "\"\"")))
             .collect();
 
         format!(
@@ -267,7 +269,7 @@ pub fn delete_if_newer_sql<B: CdcApplyBackend>(
 ///
 /// Values are kept out of backend SQL syntax so adapters can use native bulk
 /// loading without interpolating one SQL statement per row.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub enum CdcApplyValue {
     Null,
     Boolean(bool),
@@ -275,26 +277,27 @@ pub enum CdcApplyValue {
     Unsigned(u64),
     Float(String),
     Text(String),
+    Binary(Vec<u8>),
     Date(String),
     Timestamp(String),
 }
 
 /// Target-column metadata required by a CDC reference adapter.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CdcApplyColumn {
     pub name: String,
     pub target_type: String,
 }
 
 /// Apply-level mutation after collapsing snapshot/insert/update to upsert.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum CdcApplyMutation {
     Upsert,
     Delete,
 }
 
 /// Per-row metadata aligned with the row values in a `CdcApplyBatch`.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CdcApplyRowMetadata {
     pub mutation: CdcApplyMutation,
     pub event_id: Vec<u8>,
@@ -304,14 +307,14 @@ pub struct CdcApplyRowMetadata {
     pub source_ordinal: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CdcApplyRow {
     pub metadata: CdcApplyRowMetadata,
     pub values: Vec<CdcApplyValue>,
 }
 
 /// A bounded, grouped CDC chunk ready for a sink reference adapter.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CdcApplyBatch {
     pub columns: Vec<CdcApplyColumn>,
     pub business_key_columns: Vec<String>,
@@ -322,6 +325,7 @@ pub struct CdcApplyBatch {
 pub enum CdcApplyBatchError {
     NoColumns,
     NoBusinessKeyColumns,
+    NoRows,
     EmptyTargetType {
         column: String,
     },
@@ -342,6 +346,10 @@ pub enum CdcApplyBatchError {
     DuplicateSourceOrdinal {
         ordinal: u64,
     },
+    MissingRowMetadata {
+        row: usize,
+        available: usize,
+    },
 }
 
 impl std::fmt::Display for CdcApplyBatchError {
@@ -351,6 +359,7 @@ impl std::fmt::Display for CdcApplyBatchError {
             Self::NoBusinessKeyColumns => {
                 write!(f, "CDC apply batch has no business key columns")
             }
+            Self::NoRows => write!(f, "CDC apply batch has no rows"),
             Self::EmptyTargetType { column } => {
                 write!(f, "CDC target column {column:?} has no target type")
             }
@@ -371,6 +380,10 @@ impl std::fmt::Display for CdcApplyBatchError {
             Self::DuplicateSourceOrdinal { ordinal } => {
                 write!(f, "CDC source ordinal {ordinal} is duplicated")
             }
+            Self::MissingRowMetadata { row, available } => write!(
+                f,
+                "CDC row metadata missing at index {row} (have {available})"
+            ),
         }
     }
 }
@@ -428,6 +441,708 @@ impl CdcApplyBatch {
 
         Ok(())
     }
+}
+
+/// Append an Arrow record batch and its aligned WAL metadata to the typed CDC
+/// apply IR. Backends retain control of target names and target SQL types while
+/// sharing one lossless scalar conversion and metadata-alignment check.
+pub fn append_record_batch_to_cdc_apply(
+    apply_batch: &mut CdcApplyBatch,
+    record_batch: &datafusion::arrow::record_batch::RecordBatch,
+    row_metadata: &[skippr_runtime_sdk::plugins::cdc::WalRowMeta],
+    source_offset: usize,
+) -> Result<(), CdcApplyBatchError> {
+    use skippr_runtime_sdk::plugins::cdc::MutationKind;
+
+    for row in 0..record_batch.num_rows() {
+        let metadata_index = source_offset + row;
+        let row_metadata =
+            row_metadata
+                .get(metadata_index)
+                .ok_or(CdcApplyBatchError::MissingRowMetadata {
+                    row: metadata_index,
+                    available: row_metadata.len(),
+                })?;
+        let mutation = match row_metadata.mutation {
+            MutationKind::Snapshot | MutationKind::Insert | MutationKind::Update => {
+                CdcApplyMutation::Upsert
+            }
+            MutationKind::Delete => CdcApplyMutation::Delete,
+        };
+        let values = record_batch
+            .columns()
+            .iter()
+            .map(|column| arrow_value_to_cdc_apply(column.as_ref(), row))
+            .collect();
+        apply_batch.rows.push(CdcApplyRow {
+            metadata: CdcApplyRowMetadata {
+                mutation,
+                event_id: row_metadata.event_id.clone(),
+                order_token: row_metadata.order_token.clone(),
+                source_ordinal: metadata_index as u64,
+            },
+            values,
+        });
+    }
+
+    Ok(())
+}
+
+fn arrow_value_to_cdc_apply(
+    array: &dyn datafusion::arrow::array::Array,
+    row: usize,
+) -> CdcApplyValue {
+    use datafusion::arrow::array::*;
+    use datafusion::arrow::datatypes::DataType;
+
+    if array.is_null(row) {
+        return CdcApplyValue::Null;
+    }
+
+    match array.data_type() {
+        DataType::Boolean => CdcApplyValue::Boolean(
+            array
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .expect("boolean Arrow array")
+                .value(row),
+        ),
+        DataType::Int8 => CdcApplyValue::Signed(
+            array
+                .as_any()
+                .downcast_ref::<Int8Array>()
+                .expect("int8 Arrow array")
+                .value(row) as i64,
+        ),
+        DataType::Int16 => CdcApplyValue::Signed(
+            array
+                .as_any()
+                .downcast_ref::<Int16Array>()
+                .expect("int16 Arrow array")
+                .value(row) as i64,
+        ),
+        DataType::Int32 => CdcApplyValue::Signed(
+            array
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .expect("int32 Arrow array")
+                .value(row) as i64,
+        ),
+        DataType::Int64 => CdcApplyValue::Signed(
+            array
+                .as_any()
+                .downcast_ref::<Int64Array>()
+                .expect("int64 Arrow array")
+                .value(row),
+        ),
+        DataType::UInt8 => CdcApplyValue::Unsigned(
+            array
+                .as_any()
+                .downcast_ref::<UInt8Array>()
+                .expect("uint8 Arrow array")
+                .value(row) as u64,
+        ),
+        DataType::UInt16 => CdcApplyValue::Unsigned(
+            array
+                .as_any()
+                .downcast_ref::<UInt16Array>()
+                .expect("uint16 Arrow array")
+                .value(row) as u64,
+        ),
+        DataType::UInt32 => CdcApplyValue::Unsigned(
+            array
+                .as_any()
+                .downcast_ref::<UInt32Array>()
+                .expect("uint32 Arrow array")
+                .value(row) as u64,
+        ),
+        DataType::UInt64 => CdcApplyValue::Unsigned(
+            array
+                .as_any()
+                .downcast_ref::<UInt64Array>()
+                .expect("uint64 Arrow array")
+                .value(row),
+        ),
+        DataType::Float16
+        | DataType::Float32
+        | DataType::Float64
+        | DataType::Decimal128(_, _)
+        | DataType::Decimal256(_, _) => CdcApplyValue::Float(
+            datafusion::arrow::util::display::array_value_to_string(array, row).unwrap_or_default(),
+        ),
+        DataType::Utf8 => CdcApplyValue::Text(
+            array
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("utf8 Arrow array")
+                .value(row)
+                .to_string(),
+        ),
+        DataType::LargeUtf8 => CdcApplyValue::Text(
+            array
+                .as_any()
+                .downcast_ref::<LargeStringArray>()
+                .expect("large utf8 Arrow array")
+                .value(row)
+                .to_string(),
+        ),
+        DataType::Binary => CdcApplyValue::Binary(
+            array
+                .as_any()
+                .downcast_ref::<BinaryArray>()
+                .expect("binary Arrow array")
+                .value(row)
+                .to_vec(),
+        ),
+        DataType::LargeBinary => CdcApplyValue::Binary(
+            array
+                .as_any()
+                .downcast_ref::<LargeBinaryArray>()
+                .expect("large binary Arrow array")
+                .value(row)
+                .to_vec(),
+        ),
+        DataType::Date32 | DataType::Date64 => CdcApplyValue::Date(
+            datafusion::arrow::util::display::array_value_to_string(array, row).unwrap_or_default(),
+        ),
+        DataType::Timestamp(_, _) => CdcApplyValue::Timestamp(
+            datafusion::arrow::util::display::array_value_to_string(array, row).unwrap_or_default(),
+        ),
+        _ => CdcApplyValue::Text(
+            datafusion::arrow::util::display::array_value_to_string(array, row).unwrap_or_default(),
+        ),
+    }
+}
+
+/// SQL warehouse families whose exact-final-state adapters can atomically
+/// update both the target and tombstone tables.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CdcWarehouseDialect {
+    Snowflake,
+    BigQuery,
+    Redshift,
+    Synapse,
+    MotherDuck,
+}
+
+/// Set-based SQL for one bounded typed CDC batch. Setup statements create and
+/// bulk-fill connection-local staging tables. Apply statements must execute in
+/// one backend transaction. Cleanup is explicit on success; temporary-table
+/// scope provides failure cleanup.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WarehouseBulkCdcSql {
+    pub stage_table: String,
+    pub winners_table: String,
+    pub idempotency_key: String,
+    pub setup_statements: Vec<String>,
+    pub apply_statements: Vec<String>,
+    pub cleanup_statements: Vec<String>,
+}
+
+impl WarehouseBulkCdcSql {
+    /// Statements for APIs, such as Redshift BatchExecuteStatement, that wrap
+    /// the supplied statement list in one transaction.
+    pub fn atomic_statements(&self) -> Vec<String> {
+        self.setup_statements
+            .iter()
+            .chain(self.apply_statements.iter())
+            .chain(self.cleanup_statements.iter())
+            .cloned()
+            .collect()
+    }
+
+    /// One multi-statement request for connection-oriented warehouse APIs.
+    pub fn transactional_script(&self, dialect: CdcWarehouseDialect) -> String {
+        let setup = join_sql_statements(&self.setup_statements);
+        let apply = join_sql_statements(&self.apply_statements);
+        let cleanup = join_sql_statements(&self.cleanup_statements);
+
+        match dialect {
+            CdcWarehouseDialect::Snowflake => {
+                format!("{setup}\nBEGIN TRANSACTION;\n{apply}\nCOMMIT;\n{cleanup}")
+            }
+            CdcWarehouseDialect::BigQuery => {
+                format!("BEGIN TRANSACTION;\n{setup}\n{apply}\n{cleanup}\nCOMMIT TRANSACTION;")
+            }
+            CdcWarehouseDialect::Synapse => format!(
+                "SET XACT_ABORT ON;\n\
+                 BEGIN TRY\n\
+                 {setup}\n\
+                 BEGIN TRANSACTION;\n\
+                 {apply}\n\
+                 COMMIT TRANSACTION;\n\
+                 {cleanup}\n\
+                 END TRY\n\
+                 BEGIN CATCH\n\
+                 IF @@TRANCOUNT > 0 ROLLBACK TRANSACTION;\n\
+                 {cleanup}\n\
+                 THROW;\n\
+                 END CATCH;"
+            ),
+            CdcWarehouseDialect::Redshift | CdcWarehouseDialect::MotherDuck => {
+                format!("BEGIN TRANSACTION;\n{setup}\n{apply}\n{cleanup}\nCOMMIT;")
+            }
+        }
+    }
+}
+
+/// Build bounded native staging SQL and four set-based MERGEs:
+/// target upserts, target deletes, tombstone advances, and stale-tombstone
+/// cleanup. The winner relation collapses duplicate keys by descending order
+/// token and ascending source ordinal, matching sequential equal-token
+/// behavior deterministically.
+pub fn warehouse_bulk_cdc_sql(
+    dialect: CdcWarehouseDialect,
+    fq_table: &str,
+    fq_tombstone_table: &str,
+    batch: &CdcApplyBatch,
+) -> Result<WarehouseBulkCdcSql, CdcApplyBatchError> {
+    use std::hash::{Hash, Hasher};
+
+    batch.validate()?;
+    if batch.rows.is_empty() {
+        return Err(CdcApplyBatchError::NoRows);
+    }
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    dialect.hash(&mut hasher);
+    fq_table.hash(&mut hasher);
+    fq_tombstone_table.hash(&mut hasher);
+    batch.hash(&mut hasher);
+    let batch_hash = format!("{:016x}", hasher.finish());
+    let suffix = &batch_hash[..12];
+    let stage_name = dialect.temp_table_name(&format!("_skippr_cdc_stage_{suffix}"));
+    let winners_name = dialect.temp_table_name(&format!("_skippr_cdc_winners_{suffix}"));
+
+    let ordinal = dialect.quote_identifier("_skippr_cdc_ordinal");
+    let mutation = dialect.quote_identifier("_skippr_cdc_mutation");
+    let stage_token = dialect.quote_identifier("_skippr_cdc_order_token");
+    let target_token = dialect.quote_identifier("_skippr_order_token");
+    let rank = dialect.quote_identifier("_skippr_cdc_rank");
+    let target_columns = batch
+        .columns
+        .iter()
+        .map(|column| dialect.quote_identifier(&column.name))
+        .collect::<Vec<_>>();
+    let business_keys = batch
+        .business_key_columns
+        .iter()
+        .map(|column| dialect.quote_identifier(column))
+        .collect::<Vec<_>>();
+
+    let stage_column_defs = [
+        format!("{ordinal} {} NOT NULL", dialect.ordinal_type()),
+        format!("{mutation} {} NOT NULL", dialect.mutation_type()),
+        format!("{stage_token} {} NOT NULL", dialect.order_token_type()),
+    ]
+    .into_iter()
+    .chain(
+        batch
+            .columns
+            .iter()
+            .zip(target_columns.iter())
+            .map(|(column, quoted_name)| format!("{quoted_name} {}", column.target_type)),
+    )
+    .collect::<Vec<_>>()
+    .join(", ");
+    let create_stage = dialect.create_temp_table(&stage_name, &stage_column_defs);
+
+    let load_columns = [ordinal.clone(), mutation.clone(), stage_token.clone()]
+        .into_iter()
+        .chain(target_columns.iter().cloned())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let load_rows = batch
+        .rows
+        .iter()
+        .map(|row| {
+            let mut values = vec![
+                row.metadata.source_ordinal.to_string(),
+                match row.metadata.mutation {
+                    CdcApplyMutation::Upsert => "0".to_string(),
+                    CdcApplyMutation::Delete => "1".to_string(),
+                },
+                dialect.binary_literal(&encode_hex_bytes(&row.metadata.order_token)),
+            ];
+            values.extend(
+                row.values
+                    .iter()
+                    .zip(batch.columns.iter())
+                    .map(|(value, column)| dialect.value_literal(value, &column.target_type)),
+            );
+            format!("({})", values.join(", "))
+        })
+        .collect::<Vec<_>>();
+    let load_chunk_size = if dialect == CdcWarehouseDialect::Synapse {
+        1_000
+    } else {
+        load_rows.len()
+    };
+    let load_stage = load_rows
+        .chunks(load_chunk_size)
+        .map(|rows| {
+            format!(
+                "INSERT INTO {stage_name} ({load_columns}) VALUES\n{};",
+                rows.join(",\n")
+            )
+        })
+        .collect::<Vec<_>>();
+
+    let winner_projection = target_columns
+        .iter()
+        .map(|column| format!("ranked.{column}"))
+        .chain([
+            format!("ranked.{ordinal}"),
+            format!("ranked.{mutation}"),
+            format!("ranked.{stage_token}"),
+        ])
+        .collect::<Vec<_>>()
+        .join(", ");
+    let partition_by = business_keys
+        .iter()
+        .map(|column| format!("stage.{column}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let winner_select = format!(
+        "SELECT {winner_projection}\n\
+         FROM (\n\
+           SELECT stage.*,\n\
+             ROW_NUMBER() OVER (\n\
+               PARTITION BY {partition_by}\n\
+               ORDER BY stage.{stage_token} DESC, stage.{ordinal} ASC\n\
+             ) AS {rank}\n\
+           FROM {stage_name} AS stage\n\
+         ) AS ranked\n\
+         WHERE ranked.{rank} = 1"
+    );
+    let create_winners = dialect.create_temp_table_as(&winners_name, &winner_select);
+
+    let target_to_source = key_match_aliases("target", "source", &business_keys);
+    let tombstone_to_winner = key_match_aliases("tombstone", "winner", &business_keys);
+    let target_update_assignments = target_columns
+        .iter()
+        .filter(|column| !business_keys.contains(column))
+        .map(|column| format!("{column} = source.{column}"))
+        .chain(std::iter::once(format!(
+            "{target_token} = source.{stage_token}"
+        )))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let target_insert_columns = target_columns
+        .iter()
+        .cloned()
+        .chain(std::iter::once(target_token.clone()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let target_insert_values = target_columns
+        .iter()
+        .map(|column| format!("source.{column}"))
+        .chain(std::iter::once(format!("source.{stage_token}")))
+        .collect::<Vec<_>>()
+        .join(", ");
+
+    let upsert_source = format!(
+        "SELECT winner.*\n\
+         FROM {winners_name} AS winner\n\
+         WHERE winner.{mutation} = 0\n\
+         AND NOT EXISTS (\n\
+           SELECT 1 FROM {fq_tombstone_table} AS tombstone\n\
+           WHERE {tombstone_to_winner}\n\
+           AND tombstone.{target_token} >= winner.{stage_token}\n\
+         )"
+    );
+    let apply_upserts = format!(
+        "MERGE INTO {fq_table} AS target\n\
+         USING ({upsert_source}) AS source\n\
+         ON {target_to_source}\n\
+         WHEN MATCHED AND (\n\
+           target.{target_token} IS NULL\n\
+           OR target.{target_token} < source.{stage_token}\n\
+         ) THEN UPDATE SET {target_update_assignments}\n\
+         WHEN NOT MATCHED THEN INSERT ({target_insert_columns})\n\
+         VALUES ({target_insert_values});"
+    );
+
+    let delete_source = format!("SELECT * FROM {winners_name} WHERE {mutation} = 1");
+    let apply_deletes = format!(
+        "MERGE INTO {fq_table} AS target\n\
+         USING ({delete_source}) AS source\n\
+         ON {target_to_source}\n\
+         WHEN MATCHED AND (\n\
+           target.{target_token} IS NULL\n\
+           OR target.{target_token} < source.{stage_token}\n\
+         ) THEN DELETE;"
+    );
+
+    let tombstone_to_source = key_match_aliases("tombstone", "source", &business_keys);
+    let tombstone_columns = business_keys
+        .iter()
+        .cloned()
+        .chain(std::iter::once(target_token.clone()))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let tombstone_values = business_keys
+        .iter()
+        .map(|column| format!("source.{column}"))
+        .chain(std::iter::once(format!("source.{stage_token}")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let apply_tombstones = format!(
+        "MERGE INTO {fq_tombstone_table} AS tombstone\n\
+         USING ({delete_source}) AS source\n\
+         ON {tombstone_to_source}\n\
+         WHEN MATCHED AND tombstone.{target_token} < source.{stage_token}\n\
+           THEN UPDATE SET {target_token} = source.{stage_token}\n\
+         WHEN NOT MATCHED THEN INSERT ({tombstone_columns})\n\
+           VALUES ({tombstone_values});"
+    );
+
+    let upsert_winners = format!("SELECT * FROM {winners_name} WHERE {mutation} = 0");
+    let clear_stale_tombstones = format!(
+        "MERGE INTO {fq_tombstone_table} AS tombstone\n\
+         USING ({upsert_winners}) AS source\n\
+         ON {tombstone_to_source}\n\
+         WHEN MATCHED AND tombstone.{target_token} < source.{stage_token}\n\
+           THEN DELETE;"
+    );
+
+    let apply_statements = if dialect == CdcWarehouseDialect::Redshift {
+        let winner_to_target = key_match_aliases("target", "winner", &business_keys);
+        let redshift_update_assignments = target_columns
+            .iter()
+            .filter(|column| !business_keys.contains(column))
+            .map(|column| format!("{column} = winner.{column}"))
+            .chain(std::iter::once(format!(
+                "{target_token} = winner.{stage_token}"
+            )))
+            .collect::<Vec<_>>()
+            .join(", ");
+        let update_upserts = format!(
+            "UPDATE {fq_table} AS target\n\
+             SET {redshift_update_assignments}\n\
+             FROM {winners_name} AS winner\n\
+             WHERE winner.{mutation} = 0\n\
+             AND {winner_to_target}\n\
+             AND (\n\
+               target.{target_token} IS NULL\n\
+               OR target.{target_token} < winner.{stage_token}\n\
+             )\n\
+             AND NOT EXISTS (\n\
+               SELECT 1 FROM {fq_tombstone_table} AS tombstone\n\
+               WHERE {tombstone_to_winner}\n\
+               AND tombstone.{target_token} >= winner.{stage_token}\n\
+             );"
+        );
+        let insert_upserts = format!(
+            "INSERT INTO {fq_table} ({target_insert_columns})\n\
+             SELECT {target_insert_values}\n\
+             FROM {winners_name} AS source\n\
+             WHERE source.{mutation} = 0\n\
+             AND NOT EXISTS (\n\
+               SELECT 1 FROM {fq_table} AS target\n\
+               WHERE {target_to_source}\n\
+             )\n\
+             AND NOT EXISTS (\n\
+               SELECT 1 FROM {fq_tombstone_table} AS tombstone\n\
+               WHERE {tombstone_to_source}\n\
+               AND tombstone.{target_token} >= source.{stage_token}\n\
+             );"
+        );
+        let delete_targets = format!(
+            "DELETE FROM {fq_table} AS target\n\
+             USING {winners_name} AS winner\n\
+             WHERE winner.{mutation} = 1\n\
+             AND {winner_to_target}\n\
+             AND (\n\
+               target.{target_token} IS NULL\n\
+               OR target.{target_token} < winner.{stage_token}\n\
+             );"
+        );
+        let update_tombstones = format!(
+            "UPDATE {fq_tombstone_table} AS tombstone\n\
+             SET {target_token} = winner.{stage_token}\n\
+             FROM {winners_name} AS winner\n\
+             WHERE winner.{mutation} = 1\n\
+             AND {tombstone_to_winner}\n\
+             AND tombstone.{target_token} < winner.{stage_token};"
+        );
+        let insert_tombstones = format!(
+            "INSERT INTO {fq_tombstone_table} ({tombstone_columns})\n\
+             SELECT {tombstone_values}\n\
+             FROM {winners_name} AS source\n\
+             WHERE source.{mutation} = 1\n\
+             AND NOT EXISTS (\n\
+               SELECT 1 FROM {fq_tombstone_table} AS tombstone\n\
+               WHERE {tombstone_to_source}\n\
+             );"
+        );
+        let clear_tombstones = format!(
+            "DELETE FROM {fq_tombstone_table} AS tombstone\n\
+             USING {winners_name} AS winner\n\
+             WHERE winner.{mutation} = 0\n\
+             AND {tombstone_to_winner}\n\
+             AND tombstone.{target_token} < winner.{stage_token};"
+        );
+        vec![
+            update_upserts,
+            insert_upserts,
+            delete_targets,
+            update_tombstones,
+            insert_tombstones,
+            clear_tombstones,
+        ]
+    } else {
+        vec![
+            apply_upserts,
+            apply_deletes,
+            apply_tombstones,
+            clear_stale_tombstones,
+        ]
+    };
+
+    Ok(WarehouseBulkCdcSql {
+        stage_table: stage_name.clone(),
+        winners_table: winners_name.clone(),
+        idempotency_key: format!("skippr-cdc-{batch_hash}"),
+        setup_statements: std::iter::once(create_stage)
+            .chain(load_stage)
+            .chain(std::iter::once(create_winners))
+            .collect(),
+        apply_statements,
+        cleanup_statements: vec![
+            format!("DROP TABLE IF EXISTS {winners_name};"),
+            format!("DROP TABLE IF EXISTS {stage_name};"),
+        ],
+    })
+}
+
+impl std::hash::Hash for CdcWarehouseDialect {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        std::hash::Hash::hash(&(*self as u8), state);
+    }
+}
+
+impl CdcWarehouseDialect {
+    fn quote_identifier(self, identifier: &str) -> String {
+        match self {
+            Self::BigQuery => format!("`{}`", identifier.replace('`', "\\`")),
+            Self::Synapse => format!("[{}]", identifier.replace(']', "]]")),
+            _ => format!("\"{}\"", identifier.replace('"', "\"\"")),
+        }
+    }
+
+    fn temp_table_name(self, identifier: &str) -> String {
+        match self {
+            Self::Synapse => self.quote_identifier(&format!("#{identifier}")),
+            _ => self.quote_identifier(identifier),
+        }
+    }
+
+    fn create_temp_table(self, table: &str, column_defs: &str) -> String {
+        match self {
+            Self::Snowflake => {
+                format!("CREATE TEMPORARY TABLE {table} ({column_defs});")
+            }
+            Self::BigQuery | Self::Redshift | Self::MotherDuck => {
+                format!("CREATE TEMP TABLE {table} ({column_defs});")
+            }
+            Self::Synapse => format!(
+                "CREATE TABLE {table} ({column_defs}) \
+                 WITH (DISTRIBUTION = ROUND_ROBIN, HEAP);"
+            ),
+        }
+    }
+
+    fn create_temp_table_as(self, table: &str, select: &str) -> String {
+        match self {
+            Self::Snowflake => format!("CREATE TEMPORARY TABLE {table} AS\n{select};"),
+            Self::BigQuery | Self::Redshift | Self::MotherDuck => {
+                format!("CREATE TEMP TABLE {table} AS\n{select};")
+            }
+            Self::Synapse => format!(
+                "CREATE TABLE {table}\n\
+                 WITH (DISTRIBUTION = ROUND_ROBIN, HEAP)\n\
+                 AS {select};"
+            ),
+        }
+    }
+
+    fn ordinal_type(self) -> &'static str {
+        match self {
+            Self::BigQuery => "INT64",
+            _ => "BIGINT",
+        }
+    }
+
+    fn mutation_type(self) -> &'static str {
+        match self {
+            Self::BigQuery => "INT64",
+            _ => "SMALLINT",
+        }
+    }
+
+    fn order_token_type(self) -> &'static str {
+        match self {
+            Self::Snowflake => "BINARY",
+            Self::BigQuery => "BYTES",
+            Self::Redshift => "VARBYTE",
+            Self::Synapse => "VARBINARY(MAX)",
+            Self::MotherDuck => "BLOB",
+        }
+    }
+
+    fn binary_literal(self, hex: &str) -> String {
+        match self {
+            Self::Snowflake => format!("HEX_DECODE_BINARY('{hex}')"),
+            Self::BigQuery | Self::Redshift => format!("FROM_HEX('{hex}')"),
+            Self::Synapse => format!("CONVERT(VARBINARY(MAX), 0x{hex})"),
+            Self::MotherDuck => format!("'\\x{hex}'::BLOB"),
+        }
+    }
+
+    fn value_literal(self, value: &CdcApplyValue, target_type: &str) -> String {
+        match value {
+            CdcApplyValue::Null => "NULL".to_string(),
+            CdcApplyValue::Boolean(value) if self == Self::Synapse => {
+                if *value { "1" } else { "0" }.to_string()
+            }
+            CdcApplyValue::Boolean(value) => if *value { "TRUE" } else { "FALSE" }.to_string(),
+            CdcApplyValue::Signed(value) => value.to_string(),
+            CdcApplyValue::Unsigned(value) => value.to_string(),
+            CdcApplyValue::Float(value) => value.clone(),
+            CdcApplyValue::Text(value) => sql_string_literal(value),
+            CdcApplyValue::Binary(value) => self.binary_literal(&encode_hex_bytes(value)),
+            CdcApplyValue::Date(value) | CdcApplyValue::Timestamp(value) => {
+                format!("CAST({} AS {target_type})", sql_string_literal(value))
+            }
+        }
+    }
+}
+
+fn join_sql_statements(statements: &[String]) -> String {
+    statements.join("\n")
+}
+
+fn key_match_aliases(left: &str, right: &str, business_keys: &[String]) -> String {
+    business_keys
+        .iter()
+        .map(|column| format!("{left}.{column} = {right}.{column}"))
+        .collect::<Vec<_>>()
+        .join(" AND ")
+}
+
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn encode_hex_bytes(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        let _ = write!(encoded, "{byte:02x}");
+    }
+    encoded
 }
 
 #[allow(dead_code)]
@@ -541,11 +1256,105 @@ fn qualified_matches(names: &[String], values: &[String], qualifier: Option<&str
 }
 
 #[cfg(test)]
+pub fn warehouse_sql_test_batch() -> CdcApplyBatch {
+    CdcApplyBatch {
+        columns: vec![
+            CdcApplyColumn {
+                name: "tenant_id".to_string(),
+                target_type: "BIGINT".to_string(),
+            },
+            CdcApplyColumn {
+                name: "id".to_string(),
+                target_type: "BIGINT".to_string(),
+            },
+            CdcApplyColumn {
+                name: "value".to_string(),
+                target_type: "VARCHAR".to_string(),
+            },
+        ],
+        business_key_columns: vec!["tenant_id".to_string(), "id".to_string()],
+        rows: vec![
+            CdcApplyRow {
+                metadata: CdcApplyRowMetadata {
+                    mutation: CdcApplyMutation::Upsert,
+                    event_id: b"upsert".to_vec(),
+                    order_token: vec![1],
+                    source_ordinal: 0,
+                },
+                values: vec![
+                    CdcApplyValue::Signed(7),
+                    CdcApplyValue::Signed(42),
+                    CdcApplyValue::Text("O'Brien".to_string()),
+                ],
+            },
+            CdcApplyRow {
+                metadata: CdcApplyRowMetadata {
+                    mutation: CdcApplyMutation::Delete,
+                    event_id: b"delete".to_vec(),
+                    order_token: vec![2],
+                    source_ordinal: 1,
+                },
+                values: vec![
+                    CdcApplyValue::Signed(7),
+                    CdcApplyValue::Signed(42),
+                    CdcApplyValue::Null,
+                ],
+            },
+        ],
+    }
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
-        tombstone_table_name, CdcApplyBatch, CdcApplyBatchError, CdcApplyColumn, CdcApplyMutation,
-        CdcApplyRow, CdcApplyRowMetadata, CdcApplyValue,
+        tombstone_table_name, warehouse_bulk_cdc_sql, CdcApplyBatch, CdcApplyBatchError,
+        CdcApplyColumn, CdcApplyMutation, CdcApplyRow, CdcApplyRowMetadata, CdcApplyValue,
+        CdcWarehouseDialect,
     };
+
+    fn contract_row(
+        mutation: CdcApplyMutation,
+        ordinal: u64,
+        token: u8,
+        tenant_id: i64,
+        id: i64,
+        value: &str,
+    ) -> CdcApplyRow {
+        CdcApplyRow {
+            metadata: CdcApplyRowMetadata {
+                mutation,
+                event_id: format!("event-{ordinal}").into_bytes(),
+                order_token: vec![token],
+                source_ordinal: ordinal,
+            },
+            values: vec![
+                CdcApplyValue::Signed(tenant_id),
+                CdcApplyValue::Signed(id),
+                CdcApplyValue::Text(value.to_string()),
+            ],
+        }
+    }
+
+    fn contract_batch(rows: Vec<CdcApplyRow>) -> CdcApplyBatch {
+        CdcApplyBatch {
+            columns: vec![
+                CdcApplyColumn {
+                    name: "tenant_id".to_string(),
+                    target_type: "BIGINT".to_string(),
+                },
+                CdcApplyColumn {
+                    name: "id".to_string(),
+                    target_type: "BIGINT".to_string(),
+                },
+                CdcApplyColumn {
+                    name: "value".to_string(),
+                    target_type: "VARCHAR".to_string(),
+                },
+            ],
+            business_key_columns: vec!["tenant_id".to_string(), "id".to_string()],
+            rows,
+        }
+    }
 
     #[test]
     fn tombstone_table_name_with_schema() {
@@ -618,5 +1427,113 @@ mod tests {
                 actual: 0,
             })
         );
+    }
+
+    #[test]
+    fn golden_contract_covers_mixed_replay_stale_composite_and_equal_tokens() {
+        use std::collections::BTreeMap;
+
+        let batch = contract_batch(vec![
+            contract_row(CdcApplyMutation::Upsert, 0, 1, 10, 1, "first"),
+            contract_row(CdcApplyMutation::Upsert, 1, 1, 10, 1, "equal replay"),
+            contract_row(CdcApplyMutation::Upsert, 2, 0, 10, 1, "stale"),
+            contract_row(CdcApplyMutation::Delete, 3, 3, 10, 1, ""),
+            contract_row(CdcApplyMutation::Upsert, 4, 2, 10, 1, "late zombie"),
+            contract_row(CdcApplyMutation::Upsert, 5, 4, 10, 1, "resurrected"),
+            contract_row(CdcApplyMutation::Upsert, 6, 2, 20, 1, "other tenant"),
+        ]);
+
+        let mut winners: BTreeMap<(i64, i64), &CdcApplyRow> = BTreeMap::new();
+        for row in &batch.rows {
+            let key = match (&row.values[0], &row.values[1]) {
+                (CdcApplyValue::Signed(tenant), CdcApplyValue::Signed(id)) => (*tenant, *id),
+                _ => unreachable!(),
+            };
+            let replace = winners.get(&key).map_or(true, |winner| {
+                row.metadata.order_token > winner.metadata.order_token
+                    || (row.metadata.order_token == winner.metadata.order_token
+                        && row.metadata.source_ordinal < winner.metadata.source_ordinal)
+            });
+            if replace {
+                winners.insert(key, row);
+            }
+        }
+
+        let primary = winners.get(&(10, 1)).unwrap();
+        assert_eq!(primary.metadata.order_token, vec![4]);
+        assert_eq!(primary.metadata.mutation, CdcApplyMutation::Upsert);
+        assert_eq!(
+            primary.values[2],
+            CdcApplyValue::Text("resurrected".to_string())
+        );
+        assert_eq!(winners.get(&(20, 1)).unwrap().metadata.order_token, vec![2]);
+
+        let equal_only = contract_batch(vec![
+            contract_row(CdcApplyMutation::Delete, 8, 7, 30, 1, ""),
+            contract_row(CdcApplyMutation::Upsert, 9, 7, 30, 1, "later ordinal"),
+        ]);
+        let first = equal_only
+            .rows
+            .iter()
+            .min_by(|left, right| {
+                right
+                    .metadata
+                    .order_token
+                    .cmp(&left.metadata.order_token)
+                    .then_with(|| {
+                        left.metadata
+                            .source_ordinal
+                            .cmp(&right.metadata.source_ordinal)
+                    })
+            })
+            .unwrap();
+        assert_eq!(first.metadata.mutation, CdcApplyMutation::Delete);
+    }
+
+    #[test]
+    fn warehouse_sql_contract_has_one_winner_relation_and_atomic_cleanup() {
+        let batch = contract_batch(vec![
+            contract_row(CdcApplyMutation::Upsert, 0, 1, 10, 1, "first"),
+            contract_row(CdcApplyMutation::Delete, 1, 2, 10, 1, ""),
+        ]);
+
+        for dialect in [
+            CdcWarehouseDialect::Snowflake,
+            CdcWarehouseDialect::BigQuery,
+            CdcWarehouseDialect::Redshift,
+            CdcWarehouseDialect::Synapse,
+            CdcWarehouseDialect::MotherDuck,
+        ] {
+            let sql = warehouse_bulk_cdc_sql(dialect, "target", "tombstones", &batch).unwrap();
+            let setup = sql.setup_statements.join("\n");
+            let apply = sql.apply_statements.join("\n");
+            let cleanup = sql.cleanup_statements.join("\n");
+            assert!(setup.contains("ROW_NUMBER() OVER"));
+            assert!(setup.contains("_skippr_cdc_order_token"));
+            assert!(setup.contains("_skippr_cdc_ordinal"));
+            assert!(setup.contains("tenant_id"));
+            assert!(setup.contains("id"));
+            if dialect == CdcWarehouseDialect::Redshift {
+                assert_eq!(apply.matches("MERGE INTO").count(), 0);
+                assert!(apply.contains("UPDATE target AS target"));
+                assert!(apply.contains("DELETE FROM tombstones AS tombstone"));
+            } else {
+                assert_eq!(apply.matches("MERGE INTO").count(), 4);
+            }
+            assert!(apply.contains("tombstone"));
+            assert!(apply.contains(">="));
+            assert_eq!(cleanup.matches("DROP TABLE IF EXISTS").count(), 2);
+        }
+
+        let synapse = warehouse_bulk_cdc_sql(
+            CdcWarehouseDialect::Synapse,
+            "[dbo].[target]",
+            "[dbo].[tombstones]",
+            &batch,
+        )
+        .unwrap()
+        .transactional_script(CdcWarehouseDialect::Synapse);
+        assert!(synapse.contains("ROLLBACK TRANSACTION"));
+        assert!(synapse.contains("BEGIN CATCH"));
     }
 }

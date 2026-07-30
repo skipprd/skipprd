@@ -502,6 +502,13 @@ impl DataSinkPostgresPlugin {
             | CdcApplyValue::Timestamp(value) => {
                 format!("'{}'", value.replace('\'', "''"))
             }
+            CdcApplyValue::Binary(value) => {
+                let encoded = value
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<String>();
+                format!("decode('{encoded}', 'hex')")
+            }
         }
     }
 

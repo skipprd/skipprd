@@ -373,6 +373,7 @@ fn cdc_value_text(value: &CdcApplyValue) -> String {
         | CdcApplyValue::Text(value)
         | CdcApplyValue::Date(value)
         | CdcApplyValue::Timestamp(value) => value.clone(),
+        CdcApplyValue::Binary(value) => format!("\\x{}", encode_hex(value)),
     }
 }
 
