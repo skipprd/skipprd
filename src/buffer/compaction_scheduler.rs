@@ -4,6 +4,10 @@ use futures::stream::StreamExt;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::pin::Pin;
+use std::time::{Duration, Instant};
+
+const BUDGET_RETUNE_INTERVAL: Duration = Duration::from_secs(10);
+const BUDGET_RETUNE_WAVES: usize = 4;
 
 pub(crate) enum CompactorCommand {
     Wake,
@@ -97,6 +101,10 @@ where
     E: FnMut(W) -> Pin<Box<dyn Future<Output = bool> + Send>>,
 {
     let concurrency = concurrency.max(1);
+    let cycle_started = Instant::now();
+    let max_completions_before_retune = concurrency.saturating_mul(BUDGET_RETUNE_WAVES).max(1);
+    let mut completions = 0usize;
+    let mut retune_requested = false;
     let mut made_progress = false;
     let mut active_by_lane = HashMap::<CompactionLaneKey, usize>::new();
     let mut blocked_lanes = HashSet::<CompactionLaneKey>::new();
@@ -113,7 +121,7 @@ where
             .as_deref()
             .map(CompactionCycleControl::stopping)
             .unwrap_or(false);
-        if !stopping {
+        if !stopping && !retune_requested {
             loop {
                 let slots = concurrency.saturating_sub(in_flight.len());
                 if slots == 0 {
@@ -188,6 +196,15 @@ where
             // Retry at most once per lane per cycle. Other namespaces and sinks
             // remain eligible, so one failure cannot stop useful work.
             blocked_lanes.insert(lane);
+        }
+        completions = completions.saturating_add(1);
+        if completions >= max_completions_before_retune
+            || cycle_started.elapsed() >= BUDGET_RETUNE_INTERVAL
+        {
+            // Return to the compactor loop after draining work already in flight.
+            // The next cycle samples a fresh FlushBudget generation, so a
+            // continuously non-empty ready queue cannot pin startup concurrency.
+            retune_requested = true;
         }
     }
 

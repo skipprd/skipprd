@@ -450,6 +450,41 @@ mod work_conserving_scheduler_tests {
 
     #[tokio::test]
     #[serial_test::serial]
+    async fn scheduler_yields_periodically_to_refresh_the_flush_budget() {
+        metrics_hot::reset_flush_metrics();
+        let ids = [
+            "retune-0", "retune-1", "retune-2", "retune-3", "retune-4", "retune-5", "retune-6",
+            "retune-7", "retune-8", "retune-9",
+        ];
+        let queue = Arc::new(Mutex::new(
+            (0..10)
+                .map(|id| TestWork {
+                    id: ids[id],
+                    lane: lane(&format!("sink.{id}"), "ns"),
+                    delay: TokioDuration::from_millis(1),
+                    compacted: true,
+                })
+                .collect::<VecDeque<_>>(),
+        ));
+        let planner_queue = queue.clone();
+        let state = Arc::new(TestExecutionState::default());
+
+        drive_work_conserving(
+            1,
+            true,
+            move |slots, _, _, blocked| plan_test_work(&planner_queue, slots, blocked),
+            test_executor(state.clone()),
+            None,
+        )
+        .await;
+
+        assert_eq!(state.completed.lock().unwrap().len(), 4);
+        assert_eq!(queue.lock().unwrap().len(), 6);
+        assert_eq!(state.reservations.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
     async fn failed_lane_releases_and_unrelated_work_continues() {
         metrics_hot::reset_flush_metrics();
         let failed_lane = lane("sink.failed", "ns");
