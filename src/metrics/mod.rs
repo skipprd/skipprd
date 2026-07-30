@@ -460,6 +460,14 @@ impl Metrics {
                 "compaction_planner_ready_work_count": flush_metrics.compaction_planner_ready_work_count,
                 "compaction_inflight_slice_count": flush_metrics.compaction_inflight_slice_count,
                 "wal_snapshot_ready_count": flush_metrics.wal_snapshot_ready_count,
+                "compaction_active_jobs": flush_metrics.compaction_active_jobs,
+                "compaction_active_by_sink": counters::compaction_active_by_sink_snapshot(),
+                "compaction_decode_permit_acquires_total": flush_metrics.compaction_decode_permit_acquires_total,
+                "compaction_decode_permit_wait_ns_total": flush_metrics.compaction_decode_permit_wait_ns_total,
+                "compaction_sink_permit_acquires_total": flush_metrics.compaction_sink_permit_acquires_total,
+                "compaction_sink_permit_wait_ns_total": flush_metrics.compaction_sink_permit_wait_ns_total,
+                "compaction_scheduler_top_ups_total": flush_metrics.compaction_scheduler_top_ups_total,
+                "compaction_idle_slots_with_ready_work_total": flush_metrics.compaction_idle_slots_with_ready_work_total,
                 "wal_writer_pending_count": crate::buffer::wal_writer::pending_count(),
                 "wal_writer_pending_bytes": crate::buffer::wal_writer::pending_bytes(),
                 "wal_writer_queue_capacity": crate::buffer::wal_writer::queue_capacity(),
@@ -700,8 +708,10 @@ impl Metrics {
                         let grouped_builds = flush
                             .grouped_stream_eager_builds_total
                             .saturating_add(flush.grouped_stream_streaming_builds_total);
+                        let active_by_sink =
+                            crate::metrics::counters::compaction_active_by_sink_snapshot();
                         info!(
-                            "Flush stages: planner={} avg={:.2}ms segments={} slices={} cdc_scans={} cdc_bytes={} manifest_scans={} ready={} inflight_slices={} wal_snapshots={} grouped=eager:{}/streaming:{} avg={:.2}ms pool_waiters={} pool_wait_avg={:.2}ms ipc={}/{}chunks schema_installs={} schema_publications_skipped={} sink_applies={} sink_avg={:.2}ms ledger_writes={} tombstones={} closures={} closure_avg={:.2}ms",
+                            "Flush stages: planner={} avg={:.2}ms segments={} slices={} cdc_scans={} cdc_bytes={} manifest_scans={} ready={} inflight_slices={} active_jobs={} active_by_sink={:?} topups={} idle_ready_slots={} decode_wait_avg={:.2}ms sink_permit_wait_avg={:.2}ms wal_snapshots={} grouped=eager:{}/streaming:{} avg={:.2}ms pool_waiters={} pool_wait_avg={:.2}ms ipc={}/{}chunks schema_installs={} schema_publications_skipped={} sink_applies={} sink_avg={:.2}ms ledger_writes={} tombstones={} closures={} closure_avg={:.2}ms",
                             flush.compaction_planner_cycles_total,
                             average_duration_ms(
                                 flush.compaction_planner_duration_ns_total,
@@ -716,6 +726,18 @@ impl Metrics {
                             flush.compaction_manifest_directory_scans_total,
                             flush.compaction_planner_ready_work_count,
                             flush.compaction_inflight_slice_count,
+                            flush.compaction_active_jobs,
+                            active_by_sink,
+                            flush.compaction_scheduler_top_ups_total,
+                            flush.compaction_idle_slots_with_ready_work_total,
+                            average_duration_ms(
+                                flush.compaction_decode_permit_wait_ns_total,
+                                flush.compaction_decode_permit_acquires_total,
+                            ),
+                            average_duration_ms(
+                                flush.compaction_sink_permit_wait_ns_total,
+                                flush.compaction_sink_permit_acquires_total,
+                            ),
                             flush.wal_snapshot_ready_count,
                             flush.grouped_stream_eager_builds_total,
                             flush.grouped_stream_streaming_builds_total,

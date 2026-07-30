@@ -1,10 +1,13 @@
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
+use std::sync::Arc;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
-use crate::buffer::compaction_transaction::CompactionTransaction;
+use crate::buffer::compaction_transaction::{CompactionTransaction, SinkWriteSemantics};
 use crate::plugins::source_contract::WritePolicy;
 
 static ACTIVE_SINK_CONFLICT_KEYS: Lazy<DashMap<String, ()>> = Lazy::new(DashMap::new);
+static EXACT_ONCE_COMMIT_LANES: Lazy<DashMap<String, Arc<Semaphore>>> = Lazy::new(DashMap::new);
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct SinkConflictKey {
@@ -46,6 +49,22 @@ pub fn try_acquire_sink_conflict(txn: &CompactionTransaction) -> Option<SinkConf
     })
 }
 
+/// Serialize only the final-state commit lane for exact-once writes. Callers
+/// acquire this after WAL decode/build so read and encoding work stays parallel.
+pub async fn acquire_exact_once_commit_lane(
+    txn: &CompactionTransaction,
+) -> Option<OwnedSemaphorePermit> {
+    if txn.semantics != SinkWriteSemantics::ExactOnce {
+        return None;
+    }
+    let key = format!("{}:{}", txn.sink_ref, txn.namespace);
+    let lane = EXACT_ONCE_COMMIT_LANES
+        .entry(key)
+        .or_insert_with(|| Arc::new(Semaphore::new(1)))
+        .clone();
+    lane.acquire_owned().await.ok()
+}
+
 pub struct SinkConflictGuard {
     key: Option<String>,
 }
@@ -61,7 +80,8 @@ impl Drop for SinkConflictGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::compaction_transaction::{CompactionTransaction, SinkWriteSemantics};
+    use crate::buffer::compaction_transaction::CompactionTransaction;
+    use std::time::Duration;
 
     #[test]
     fn append_compactions_get_distinct_parallel_keys() {
@@ -97,5 +117,46 @@ mod tests {
         let conflict = sink_conflict_key(&txn);
         assert!(!conflict.parallel_safe);
         assert!(conflict.key.contains("replace_table"));
+    }
+
+    #[tokio::test]
+    async fn exact_once_commit_lane_serializes_namespace_only() {
+        let txn_a = CompactionTransaction::new(
+            "sink.exact-lane-test".to_string(),
+            "ns-a".to_string(),
+            "schema".to_string(),
+            WritePolicy::Append,
+            SinkWriteSemantics::ExactOnce,
+            Vec::new(),
+            "a".to_string(),
+        );
+        let txn_same_namespace = txn_a.clone();
+        let mut txn_other_namespace = txn_a.clone();
+        txn_other_namespace.namespace = "ns-b".to_string();
+
+        let first = acquire_exact_once_commit_lane(&txn_a).await.unwrap();
+        let same_waiter = acquire_exact_once_commit_lane(&txn_same_namespace);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), same_waiter)
+                .await
+                .is_err(),
+            "same exact-once namespace must wait for the active commit"
+        );
+        let other = tokio::time::timeout(
+            Duration::from_millis(10),
+            acquire_exact_once_commit_lane(&txn_other_namespace),
+        )
+        .await
+        .expect("another namespace should proceed")
+        .expect("exact-once lane");
+        drop(other);
+        drop(first);
+        let _released_lane = tokio::time::timeout(
+            Duration::from_millis(100),
+            acquire_exact_once_commit_lane(&txn_same_namespace),
+        )
+        .await
+        .expect("same namespace should proceed after release")
+        .expect("exact-once lane");
     }
 }

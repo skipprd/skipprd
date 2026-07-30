@@ -4,7 +4,7 @@ enum PersistenceState {
     Persisted,
 }
 use crate::buffer::compaction_index::{
-    CompactionGroupKey, CompactionIndex, CompactionKind, IndexedCompactionSlice,
+    CompactionGroupKey, CompactionIndex, CompactionKind, CompactionLaneKey, IndexedCompactionSlice,
     PlannedCompactionGroup,
 };
 use crate::buffer::compaction_progress::{
@@ -17,6 +17,7 @@ use crate::buffer::compaction_transaction::{
     SegmentSourceDescriptor, SinkRetrySemantics, SinkWriteSemantics, WalPartRef,
 };
 use crate::buffer::completion_ledger::{SegmentCompletionLedger, SegmentCompletionUpdate};
+use crate::buffer::flush_execution_budget::FlushExecutionBudget;
 use crate::buffer::s3_wal_body_cache;
 #[cfg(test)]
 use crate::buffer::segment_file::SegmentPartMetaSummary;
@@ -250,6 +251,600 @@ struct CompactionEntry {
 struct CompactionWork {
     txn: CompactionTransaction,
     entries: Vec<CompactionEntry>,
+}
+
+trait SchedulableCompactionWork {
+    fn lane(&self) -> CompactionLaneKey;
+}
+
+impl SchedulableCompactionWork for CompactionWork {
+    fn lane(&self) -> CompactionLaneKey {
+        CompactionLaneKey {
+            sink_ref: self.txn.sink_ref.clone(),
+            namespace: self.txn.namespace.clone(),
+        }
+    }
+}
+
+struct CompactionPlanBatch<W> {
+    works: Vec<W>,
+    ready_work_remaining: bool,
+}
+
+struct CompactionCycleControl<'a> {
+    rx: &'a mut tokio::sync::mpsc::UnboundedReceiver<CompactorCommand>,
+    drain_reply: &'a mut Option<tokio::sync::oneshot::Sender<bool>>,
+    stop_requested: &'a mut bool,
+}
+
+impl CompactionCycleControl<'_> {
+    fn handle_command(&mut self, command: Option<CompactorCommand>) {
+        match command {
+            Some(CompactorCommand::Wake) => {}
+            Some(CompactorCommand::DrainAndStop(reply)) => {
+                if self.drain_reply.is_none() {
+                    *self.drain_reply = Some(reply);
+                } else {
+                    let _ = reply.send(false);
+                }
+            }
+            None => *self.stop_requested = true,
+        }
+    }
+
+    fn drain_pending_commands(&mut self) {
+        loop {
+            match self.rx.try_recv() {
+                Ok(command) => self.handle_command(Some(command)),
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    self.handle_command(None);
+                    break;
+                }
+            }
+        }
+    }
+
+    fn force(&self, initial_force: bool) -> bool {
+        initial_force || self.drain_reply.is_some()
+    }
+
+    fn stopping(&self) -> bool {
+        *self.stop_requested
+    }
+}
+
+struct ScheduledCompactionMetricGuard {
+    sink_ref: String,
+}
+
+impl ScheduledCompactionMetricGuard {
+    fn new(sink_ref: String) -> Self {
+        metrics_hot::inc_compaction_active_job(&sink_ref);
+        Self { sink_ref }
+    }
+}
+
+impl Drop for ScheduledCompactionMetricGuard {
+    fn drop(&mut self) {
+        metrics_hot::dec_compaction_active_job(&self.sink_ref);
+    }
+}
+
+struct CompactionReservationGuard {
+    txn_id: String,
+    refs: Vec<WalPartRef>,
+    armed: bool,
+}
+
+impl CompactionReservationGuard {
+    fn new(work: &CompactionWork) -> Self {
+        Self {
+            txn_id: work.txn.id.clone(),
+            refs: work.txn.refs.clone(),
+            armed: true,
+        }
+    }
+
+    fn handoff(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CompactionReservationGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let mut index = compaction_index();
+        index.release_refs(&self.refs, Buffers::now_secs());
+        index.release_manifest(&self.txn_id);
+        metrics_hot::set_compaction_planner_ready_work_count(index.ready_queue_depth());
+    }
+}
+
+async fn drive_work_conserving<W, P, E>(
+    concurrency: usize,
+    initial_force: bool,
+    mut planner: P,
+    mut execute: E,
+    mut control: Option<&mut CompactionCycleControl<'_>>,
+) -> bool
+where
+    W: SchedulableCompactionWork + Send + 'static,
+    P: FnMut(
+        usize,
+        bool,
+        &HashMap<CompactionLaneKey, usize>,
+        &HashSet<CompactionLaneKey>,
+    ) -> CompactionPlanBatch<W>,
+    E: FnMut(W) -> Pin<Box<dyn Future<Output = bool> + Send>>,
+{
+    let concurrency = concurrency.max(1);
+    let mut made_progress = false;
+    let mut active_by_lane = HashMap::<CompactionLaneKey, usize>::new();
+    let mut blocked_lanes = HashSet::<CompactionLaneKey>::new();
+    let mut in_flight: futures::stream::FuturesUnordered<
+        Pin<Box<dyn Future<Output = (CompactionLaneKey, bool)> + Send>>,
+    > = futures::stream::FuturesUnordered::new();
+
+    if let Some(control) = control.as_deref_mut() {
+        control.drain_pending_commands();
+    }
+
+    loop {
+        let stopping = control
+            .as_deref()
+            .map(CompactionCycleControl::stopping)
+            .unwrap_or(false);
+        if !stopping {
+            loop {
+                let slots = concurrency.saturating_sub(in_flight.len());
+                if slots == 0 {
+                    break;
+                }
+                let force = control
+                    .as_deref()
+                    .map(|control| control.force(initial_force))
+                    .unwrap_or(initial_force);
+                let batch = planner(slots, force, &active_by_lane, &blocked_lanes);
+                if batch.works.is_empty() {
+                    if batch.ready_work_remaining {
+                        metrics_hot::add_compaction_idle_slots_with_ready_work(slots);
+                    }
+                    break;
+                }
+                debug_assert!(batch.works.len() <= slots);
+                metrics_hot::add_compaction_scheduler_top_up();
+                for work in batch.works {
+                    let lane = work.lane();
+                    *active_by_lane.entry(lane.clone()).or_default() += 1;
+                    let metric_guard = ScheduledCompactionMetricGuard::new(lane.sink_ref.clone());
+                    let future = execute(work);
+                    in_flight.push(Box::pin(async move {
+                        let _metric_guard = metric_guard;
+                        (lane, future.await)
+                    }));
+                }
+            }
+        }
+
+        if in_flight.is_empty() {
+            break;
+        }
+
+        let completed = if control
+            .as_deref()
+            .map(CompactionCycleControl::stopping)
+            .unwrap_or(false)
+        {
+            Some(in_flight.next().await)
+        } else if let Some(control) = control.as_deref_mut() {
+            tokio::select! {
+                result = in_flight.next() => Some(result),
+                command = control.rx.recv() => {
+                    control.handle_command(command);
+                    None
+                }
+            }
+        } else {
+            Some(in_flight.next().await)
+        };
+
+        let Some(completed) = completed else {
+            continue;
+        };
+        let Some((lane, compacted)) = completed else {
+            break;
+        };
+        let remove_lane = if let Some(active) = active_by_lane.get_mut(&lane) {
+            *active = active.saturating_sub(1);
+            *active == 0
+        } else {
+            false
+        };
+        if remove_lane {
+            active_by_lane.remove(&lane);
+        }
+        if compacted {
+            made_progress = true;
+        } else {
+            // Retry at most once per lane per cycle. Other namespaces and sinks
+            // remain eligible, so one failure cannot stop useful work.
+            blocked_lanes.insert(lane);
+        }
+    }
+
+    made_progress
+}
+
+#[cfg(test)]
+mod work_conserving_scheduler_tests {
+    use super::*;
+    use std::collections::VecDeque;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    struct TestWork {
+        id: &'static str,
+        lane: CompactionLaneKey,
+        delay: TokioDuration,
+        compacted: bool,
+    }
+
+    impl SchedulableCompactionWork for TestWork {
+        fn lane(&self) -> CompactionLaneKey {
+            self.lane.clone()
+        }
+    }
+
+    #[derive(Default)]
+    struct TestExecutionState {
+        started: Mutex<Vec<&'static str>>,
+        completed: Mutex<Vec<&'static str>>,
+        active: AtomicUsize,
+        max_active: AtomicUsize,
+        reservations: AtomicUsize,
+    }
+
+    struct TestReservationGuard(Arc<TestExecutionState>);
+
+    impl Drop for TestReservationGuard {
+        fn drop(&mut self) {
+            self.0.reservations.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    struct TestActiveGuard(Arc<TestExecutionState>);
+
+    impl Drop for TestActiveGuard {
+        fn drop(&mut self) {
+            self.0.active.fetch_sub(1, Ordering::SeqCst);
+        }
+    }
+
+    fn lane(sink_ref: &str, namespace: &str) -> CompactionLaneKey {
+        CompactionLaneKey {
+            sink_ref: sink_ref.to_string(),
+            namespace: namespace.to_string(),
+        }
+    }
+
+    fn plan_test_work(
+        queue: &Arc<Mutex<VecDeque<TestWork>>>,
+        slots: usize,
+        blocked: &HashSet<CompactionLaneKey>,
+    ) -> CompactionPlanBatch<TestWork> {
+        let mut queue = queue.lock().unwrap();
+        let mut works = Vec::with_capacity(slots);
+        let mut deferred = VecDeque::new();
+        while works.len() < slots {
+            let Some(work) = queue.pop_front() else {
+                break;
+            };
+            if blocked.contains(&work.lane) {
+                deferred.push_back(work);
+            } else {
+                works.push(work);
+            }
+        }
+        deferred.append(&mut queue);
+        *queue = deferred;
+        CompactionPlanBatch {
+            works,
+            ready_work_remaining: !queue.is_empty(),
+        }
+    }
+
+    fn test_executor(
+        state: Arc<TestExecutionState>,
+    ) -> impl FnMut(TestWork) -> Pin<Box<dyn Future<Output = bool> + Send>> {
+        move |work| {
+            state.reservations.fetch_add(1, Ordering::SeqCst);
+            let reservation = TestReservationGuard(state.clone());
+            let state = state.clone();
+            Box::pin(async move {
+                let _reservation = reservation;
+                state.started.lock().unwrap().push(work.id);
+                let active = state.active.fetch_add(1, Ordering::SeqCst) + 1;
+                state.max_active.fetch_max(active, Ordering::SeqCst);
+                let _active = TestActiveGuard(state.clone());
+                tokio_sleep(work.delay).await;
+                state.completed.lock().unwrap().push(work.id);
+                work.compacted
+            })
+        }
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn straggler_does_not_leave_an_executable_slot_idle() {
+        metrics_hot::reset_flush_metrics();
+        let queue = Arc::new(Mutex::new(VecDeque::from([
+            TestWork {
+                id: "straggler",
+                lane: lane("sink.a", "slow"),
+                delay: TokioDuration::from_millis(80),
+                compacted: true,
+            },
+            TestWork {
+                id: "short-1",
+                lane: lane("sink.b", "one"),
+                delay: TokioDuration::from_millis(10),
+                compacted: true,
+            },
+            TestWork {
+                id: "short-2",
+                lane: lane("sink.c", "two"),
+                delay: TokioDuration::from_millis(10),
+                compacted: true,
+            },
+        ])));
+        let planner_queue = queue.clone();
+        let state = Arc::new(TestExecutionState::default());
+
+        let made_progress = drive_work_conserving(
+            2,
+            false,
+            move |slots, _, _, blocked| plan_test_work(&planner_queue, slots, blocked),
+            test_executor(state.clone()),
+            None,
+        )
+        .await;
+
+        let completed = state.completed.lock().unwrap();
+        let short_2 = completed.iter().position(|id| *id == "short-2").unwrap();
+        let straggler = completed.iter().position(|id| *id == "straggler").unwrap();
+        assert!(made_progress);
+        assert!(short_2 < straggler);
+        assert_eq!(state.max_active.load(Ordering::SeqCst), 2);
+        assert_eq!(state.reservations.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn scheduler_continuously_tops_up_after_completions() {
+        metrics_hot::reset_flush_metrics();
+        let queue = Arc::new(Mutex::new(
+            (0..6)
+                .map(|id| TestWork {
+                    id: ["a", "b", "c", "d", "e", "f"][id],
+                    lane: lane(&format!("sink.{id}"), "ns"),
+                    delay: TokioDuration::from_millis(5),
+                    compacted: true,
+                })
+                .collect::<VecDeque<_>>(),
+        ));
+        let planner_queue = queue.clone();
+        let state = Arc::new(TestExecutionState::default());
+
+        drive_work_conserving(
+            2,
+            false,
+            move |slots, _, _, blocked| plan_test_work(&planner_queue, slots, blocked),
+            test_executor(state.clone()),
+            None,
+        )
+        .await;
+
+        assert_eq!(state.completed.lock().unwrap().len(), 6);
+        assert!(metrics_hot::COMPACTION_SCHEDULER_TOP_UPS_TOTAL.load(Ordering::Relaxed) >= 3);
+        assert_eq!(
+            metrics_hot::COMPACTION_ACTIVE_JOBS.load(Ordering::Relaxed),
+            0
+        );
+        assert!(metrics_hot::compaction_active_by_sink_snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn failed_lane_releases_and_unrelated_work_continues() {
+        metrics_hot::reset_flush_metrics();
+        let failed_lane = lane("sink.failed", "ns");
+        let queue = Arc::new(Mutex::new(VecDeque::from([
+            TestWork {
+                id: "fails",
+                lane: failed_lane.clone(),
+                delay: TokioDuration::from_millis(5),
+                compacted: false,
+            },
+            TestWork {
+                id: "slow-success",
+                lane: lane("sink.ok", "slow"),
+                delay: TokioDuration::from_millis(40),
+                compacted: true,
+            },
+            TestWork {
+                id: "same-failed-lane",
+                lane: failed_lane,
+                delay: TokioDuration::from_millis(1),
+                compacted: true,
+            },
+            TestWork {
+                id: "unrelated",
+                lane: lane("sink.other", "ready"),
+                delay: TokioDuration::from_millis(5),
+                compacted: true,
+            },
+        ])));
+        let planner_queue = queue.clone();
+        let state = Arc::new(TestExecutionState::default());
+
+        let made_progress = drive_work_conserving(
+            2,
+            false,
+            move |slots, _, _, blocked| plan_test_work(&planner_queue, slots, blocked),
+            test_executor(state.clone()),
+            None,
+        )
+        .await;
+
+        let started = state.started.lock().unwrap();
+        assert!(made_progress);
+        assert!(started.contains(&"unrelated"));
+        assert!(!started.contains(&"same-failed-lane"));
+        assert_eq!(state.reservations.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn cancellation_drains_active_jobs_without_leaking_reservations() {
+        metrics_hot::reset_flush_metrics();
+        let queue = Arc::new(Mutex::new(VecDeque::from([
+            TestWork {
+                id: "active-a",
+                lane: lane("sink.a", "ns"),
+                delay: TokioDuration::from_millis(30),
+                compacted: true,
+            },
+            TestWork {
+                id: "active-b",
+                lane: lane("sink.b", "ns"),
+                delay: TokioDuration::from_millis(30),
+                compacted: true,
+            },
+            TestWork {
+                id: "not-reserved",
+                lane: lane("sink.c", "ns"),
+                delay: TokioDuration::from_millis(1),
+                compacted: true,
+            },
+        ])));
+        let planner_queue = queue.clone();
+        let state = Arc::new(TestExecutionState::default());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        tokio::spawn(async move {
+            tokio_sleep(TokioDuration::from_millis(5)).await;
+            drop(tx);
+        });
+        let mut drain_reply = None;
+        let mut stop_requested = false;
+        let mut control = CompactionCycleControl {
+            rx: &mut rx,
+            drain_reply: &mut drain_reply,
+            stop_requested: &mut stop_requested,
+        };
+
+        drive_work_conserving(
+            2,
+            false,
+            move |slots, _, _, blocked| plan_test_work(&planner_queue, slots, blocked),
+            test_executor(state.clone()),
+            Some(&mut control),
+        )
+        .await;
+        drop(control);
+
+        assert!(stop_requested);
+        assert_eq!(state.started.lock().unwrap().len(), 2);
+        assert_eq!(state.completed.lock().unwrap().len(), 2);
+        assert_eq!(state.reservations.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            metrics_hot::COMPACTION_ACTIVE_JOBS.load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn drain_waits_active_jobs_and_leaves_no_reservations() {
+        metrics_hot::reset_flush_metrics();
+        let queue = Arc::new(Mutex::new(VecDeque::from([
+            TestWork {
+                id: "active-a",
+                lane: lane("sink.a", "ns"),
+                delay: TokioDuration::from_millis(20),
+                compacted: true,
+            },
+            TestWork {
+                id: "active-b",
+                lane: lane("sink.b", "ns"),
+                delay: TokioDuration::from_millis(20),
+                compacted: true,
+            },
+            TestWork {
+                id: "drain-top-up",
+                lane: lane("sink.c", "ns"),
+                delay: TokioDuration::from_millis(1),
+                compacted: true,
+            },
+        ])));
+        let planner_queue = queue.clone();
+        let state = Arc::new(TestExecutionState::default());
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let tx_for_drain = tx.clone();
+        tokio::spawn(async move {
+            tokio_sleep(TokioDuration::from_millis(5)).await;
+            let (reply, _done) = tokio::sync::oneshot::channel();
+            tx_for_drain
+                .send(CompactorCommand::DrainAndStop(reply))
+                .unwrap();
+        });
+        let mut drain_reply = None;
+        let mut stop_requested = false;
+        let mut control = CompactionCycleControl {
+            rx: &mut rx,
+            drain_reply: &mut drain_reply,
+            stop_requested: &mut stop_requested,
+        };
+
+        drive_work_conserving(
+            2,
+            false,
+            move |slots, _, _, blocked| plan_test_work(&planner_queue, slots, blocked),
+            test_executor(state.clone()),
+            Some(&mut control),
+        )
+        .await;
+        drop(control);
+        drop(tx);
+
+        assert!(drain_reply.is_some());
+        assert!(!stop_requested);
+        assert_eq!(state.completed.lock().unwrap().len(), 3);
+        assert_eq!(state.reservations.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            metrics_hot::COMPACTION_ACTIVE_JOBS.load(Ordering::Relaxed),
+            0
+        );
+    }
+
+    #[test]
+    fn ingest_safe_cap_is_a_ceiling_except_when_forced() {
+        assert_eq!(Buffers::apply_ingest_safe_cap(8, false, 1, 0, 2), 2);
+        assert_eq!(Buffers::apply_ingest_safe_cap(8, false, 0, 1, 2), 2);
+        assert_eq!(Buffers::apply_ingest_safe_cap(8, false, 0, 0, 2), 8);
+        assert_eq!(Buffers::apply_ingest_safe_cap(8, true, 1, 1, 2), 8);
+    }
+
+    #[test]
+    fn paused_no_work_keeps_periodic_backoff() {
+        assert_eq!(
+            Buffers::compactor_idle_backoff(true),
+            Buffers::compactor_idle_backoff(false)
+        );
+        assert!(Buffers::compactor_idle_backoff(true) >= TokioDuration::from_millis(100));
+    }
 }
 
 #[cfg(test)]
@@ -1179,14 +1774,31 @@ impl Buffers {
     ) {
         let mut drain_reply: Option<tokio::sync::oneshot::Sender<bool>> = None;
         let mut consecutive_failures: u32 = 0;
+        let mut stop_requested = false;
         loop {
             let ingest_paused = crate::data_dir_ingest_paused();
             if ingest_paused {
                 crate::ingest::tuner::paused_tick(num_cpus::get());
             }
             let force = drain_reply.is_some();
-            let did_work =
-                Self::run_compaction_cycle(force, shared_output.clone(), offsets_db.clone()).await;
+            let did_work = {
+                let mut control = CompactionCycleControl {
+                    rx: &mut rx,
+                    drain_reply: &mut drain_reply,
+                    stop_requested: &mut stop_requested,
+                };
+                Self::run_compaction_cycle(
+                    force,
+                    shared_output.clone(),
+                    offsets_db.clone(),
+                    Some(&mut control),
+                )
+                .await
+            };
+            if stop_requested {
+                break;
+            }
+            let force = drain_reply.is_some();
             if force && !did_work {
                 if let Some(reply) = drain_reply.take() {
                     let _ = reply.send(COMPACT_FAILURES.is_empty());
@@ -1207,15 +1819,7 @@ impl Buffers {
                 tokio_sleep(TokioDuration::from_millis(backoff_ms)).await;
             }
 
-            if did_work || ingest_paused || force {
-                while let Ok(cmd) = rx.try_recv() {
-                    match cmd {
-                        CompactorCommand::Wake => {}
-                        CompactorCommand::DrainAndStop(reply) => {
-                            drain_reply = Some(reply);
-                        }
-                    }
-                }
+            if did_work {
                 continue;
             }
 
@@ -1229,7 +1833,7 @@ impl Buffers {
                         None => break,
                     }
                 }
-                _ = tokio_sleep(TokioDuration::from_millis(100)) => {}
+                _ = tokio_sleep(Self::compactor_idle_backoff(ingest_paused)) => {}
             }
         }
         COMPACTOR_STARTED.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -1239,16 +1843,15 @@ impl Buffers {
         force: bool,
         shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
         _offsets_db: Arc<Offsets>,
+        mut control: Option<&mut CompactionCycleControl<'_>>,
     ) -> bool {
-        use futures::stream::StreamExt;
-        let mut made_progress = false;
         let ingest_paused = crate::data_dir_ingest_paused();
         let force = force || ingest_paused;
         let num_cpus = num_cpus::get().max(2);
         let (_, max_wal) = crate::ingest::tuner::tuning_maxima(num_cpus);
         let mut concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
             .load(std::sync::atomic::Ordering::Relaxed)
-            .clamp(1, max_wal) as usize;
+            .clamp(1, max_wal);
         if force {
             concurrency = concurrency.max(num_cpus).min(max_wal);
         } else {
@@ -1273,80 +1876,148 @@ impl Buffers {
                             concurrency, ceiling, active_ingest, queued_ingest
                         );
                     }
-                    concurrency = ceiling;
+                    concurrency = Self::apply_ingest_safe_cap(
+                        concurrency,
+                        force,
+                        active_ingest,
+                        queued_ingest,
+                        ceiling,
+                    );
                 }
             }
         }
 
         let _output_capability = shared_output.capability();
-        loop {
-            let currently_in_flight = crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
-                .load(std::sync::atomic::Ordering::Relaxed);
-            let available = concurrency.saturating_sub(currently_in_flight);
-            if available == 0 {
-                break;
-            }
-            let works = Self::next_compaction_transactions(
-                available,
-                force,
-                shared_output.as_ref().as_ref(),
-            );
-            if works.is_empty() {
-                break;
-            }
-            let mut cycle_progress = false;
-            let mut in_flight: futures::stream::FuturesUnordered<
-                Pin<Box<dyn Future<Output = bool> + Send>>,
-            > = futures::stream::FuturesUnordered::new();
-            for work in works {
-                let out = shared_output.clone();
-                let sink_ref = work.txn.sink_ref.clone();
-                let namespace = work.txn.namespace.clone();
-                let compaction_id = work.txn.id.clone();
-                let target = work.txn.target_filename.clone();
-                let wal_parts = work.entries.len();
-                let timeout = Self::grouped_compaction_timeout();
-                in_flight.push(Box::pin(async move {
-                    match tokio::time::timeout(timeout, Self::compact_grouped_work(work, out)).await {
-                        Ok(Ok(compacted)) => compacted,
-                        Ok(Err(err)) => {
-                            error!(
-                                "Compactor: grouped compaction failed sink_ref={} namespace={} compaction_id={} target={} err={}",
-                                sink_ref, namespace, compaction_id, target, err
-                            );
-                            false
-                        }
-                        Err(_) => {
-                            let active = format_in_flight_grouped_compactions();
-                            error!(
-                                "Compactor: grouped compaction timed out sink_ref={} namespace={} compaction_id={} target={} wal_parts={} timeout_secs={} active_grouped=[{}]",
-                                sink_ref,
-                                namespace,
-                                compaction_id,
-                                target,
-                                wal_parts,
-                                timeout.as_secs(),
-                                active,
-                            );
-                            COMPACT_FAILURES.insert(format!("{}:{}", sink_ref, compaction_id), 1);
-                            crate::metrics::counters::add_wal_compaction_transaction_failed(1);
-                            false
-                        }
-                    }
-                }));
-            }
-            while let Some(compacted) = in_flight.next().await {
-                cycle_progress |= compacted;
-            }
-            if !cycle_progress {
-                break;
-            }
-            made_progress = true;
+        let currently_in_flight = crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
+            .load(std::sync::atomic::Ordering::Relaxed);
+        let executable_slots = concurrency.saturating_sub(currently_in_flight);
+        if executable_slots == 0 {
+            return false;
         }
+
+        let sink_limit = crate::metrics::counters::RUNTIME_SINK_POOL_TARGET
+            .load(std::sync::atomic::Ordering::Relaxed)
+            .clamp(1, concurrency);
+        let budget = Arc::new(FlushExecutionBudget::new(concurrency, sink_limit));
+        debug!(
+            "Compactor: execution budget decode={} sink={} scheduler_slots={}",
+            budget.decode_limit(),
+            budget.sink_limit(),
+            executable_slots,
+        );
+
+        let planner_output = shared_output.clone();
+        let executor_output = shared_output.clone();
+        let executor_budget = budget.clone();
+        let made_progress = drive_work_conserving(
+            executable_slots,
+            force,
+            move |slots, plan_force, active_by_lane, blocked_lanes| {
+                let works = Self::next_compaction_transactions(
+                    slots,
+                    plan_force,
+                    planner_output.as_ref().as_ref(),
+                    active_by_lane,
+                    blocked_lanes,
+                );
+                CompactionPlanBatch {
+                    works,
+                    ready_work_remaining: Self::has_ready_compaction_work(plan_force),
+                }
+            },
+            move |work| {
+                Self::compaction_job_future(work, executor_output.clone(), executor_budget.clone())
+            },
+            control.as_deref_mut(),
+        )
+        .await;
+
+        let sweep_force = control
+            .as_deref()
+            .map(|control| control.force(force))
+            .unwrap_or(force);
         if made_progress && !is_s3_wal() {
-            Self::maybe_sweep_segment_cleanup(force);
+            Self::maybe_sweep_segment_cleanup(sweep_force);
         }
         made_progress
+    }
+
+    fn apply_ingest_safe_cap(
+        concurrency: usize,
+        force: bool,
+        active_ingest: usize,
+        queued_ingest: usize,
+        ceiling: usize,
+    ) -> usize {
+        if force || (active_ingest == 0 && queued_ingest == 0) {
+            concurrency
+        } else {
+            concurrency.min(ceiling.max(1))
+        }
+    }
+
+    fn compactor_idle_backoff(_ingest_paused: bool) -> TokioDuration {
+        TokioDuration::from_millis(100)
+    }
+
+    fn compaction_job_future(
+        work: CompactionWork,
+        shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        budget: Arc<FlushExecutionBudget>,
+    ) -> Pin<Box<dyn Future<Output = bool> + Send>> {
+        let mut reservation = CompactionReservationGuard::new(&work);
+        Box::pin(async move {
+            let sink_ref = work.txn.sink_ref.clone();
+            let namespace = work.txn.namespace.clone();
+            let compaction_id = work.txn.id.clone();
+            let target = work.txn.target_filename.clone();
+            let wal_parts = work.entries.len();
+            let timeout = Self::grouped_compaction_timeout();
+            // From the first poll onward compact_grouped_work owns release through
+            // its WorkGuard. Before that, this future owns the planner reservation.
+            reservation.handoff();
+            match tokio::time::timeout(
+                timeout,
+                Self::compact_grouped_work(work, shared_output, budget),
+            )
+            .await
+            {
+                Ok(Ok(compacted)) => compacted,
+                Ok(Err(err)) => {
+                    error!(
+                        "Compactor: grouped compaction failed sink_ref={} namespace={} compaction_id={} target={} err={}",
+                        sink_ref, namespace, compaction_id, target, err
+                    );
+                    false
+                }
+                Err(_) => {
+                    let active = format_in_flight_grouped_compactions();
+                    error!(
+                        "Compactor: grouped compaction timed out sink_ref={} namespace={} compaction_id={} target={} wal_parts={} timeout_secs={} active_grouped=[{}]",
+                        sink_ref,
+                        namespace,
+                        compaction_id,
+                        target,
+                        wal_parts,
+                        timeout.as_secs(),
+                        active,
+                    );
+                    COMPACT_FAILURES.insert(format!("{}:{}", sink_ref, compaction_id), 1);
+                    crate::metrics::counters::add_wal_compaction_transaction_failed(1);
+                    false
+                }
+            }
+        })
+    }
+
+    fn has_ready_compaction_work(force: bool) -> bool {
+        Self::ensure_manifest_index_loaded();
+        compaction_index().reclaimable_slice_count(
+            force,
+            Self::now_secs(),
+            Self::sent_manifest_stale_secs(),
+            1,
+        ) > 0
     }
 
     fn grouped_compaction_timeout() -> TokioDuration {
@@ -1581,6 +2252,8 @@ impl Buffers {
         limit: usize,
         force: bool,
         output: &dyn DataSink,
+        active_by_lane: &HashMap<CompactionLaneKey, usize>,
+        blocked_lanes: &HashSet<CompactionLaneKey>,
     ) -> Vec<CompactionWork> {
         let mut planner_metrics = CompactionPlannerMetricGuard::new();
         let now_secs = Self::now_secs();
@@ -1595,6 +2268,8 @@ impl Buffers {
             per_sink_limit,
             now_secs,
             Self::sent_manifest_stale_secs(),
+            active_by_lane,
+            blocked_lanes,
         );
         for reserved in pending {
             let txn = reserved.txn;
@@ -1641,7 +2316,8 @@ impl Buffers {
             target_bytes,
             max_parts,
             per_sink_limit,
-            HashMap::new(),
+            active_by_lane.clone(),
+            blocked_lanes.clone(),
         );
         planner_metrics.segments_examined = planner_metrics
             .segments_examined
@@ -3138,6 +3814,7 @@ impl Buffers {
     async fn compact_grouped_work(
         work: CompactionWork,
         shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
+        budget: Arc<FlushExecutionBudget>,
     ) -> io::Result<bool> {
         if work.entries.is_empty() || !Self::mark_work_in_flight(&work) {
             return Ok(false);
@@ -3187,6 +3864,7 @@ impl Buffers {
         );
 
         Self::persist_compaction_manifest(&work.txn)?;
+        let _decode_permit = budget.acquire_decode().await?;
         let stream_started = std::time::Instant::now();
         let (batch_stream, cdc_ctx, rows, row_counter, rows_known_at_build) =
             match Self::build_grouped_stream(&work).await {
@@ -3267,6 +3945,9 @@ impl Buffers {
             grouped_ctx.grouping_key.clone(),
             crate::plugins::GroupedBatchReaderConfig::default(),
         );
+        let _commit_lane =
+            crate::buffer::sink_conflict::acquire_exact_once_commit_lane(&work.txn).await;
+        let sink_permit = budget.acquire_sink().await?;
         let sent_txn = work.txn.clone().mark_sent();
         Self::persist_compaction_manifest(&sent_txn)?;
         info!(
@@ -3281,6 +3962,7 @@ impl Buffers {
         let sink_result = shared_output
             .sync_grouped(grouped_reader, grouped_ctx)
             .await;
+        drop(sink_permit);
         metrics_hot::record_sink_apply(upload_started.elapsed());
         if let Err(err) = sink_result {
             let err_str = err.to_string();
@@ -4501,13 +5183,26 @@ mod tests_wal_commit {
 
         SegmentFile::reset_full_part_meta_scan_count();
         let sink = SyntheticGroupedSink { failure: None };
-        let works = Buffers::next_compaction_transactions(PARTS, true, &sink);
+        let works = Buffers::next_compaction_transactions(
+            PARTS,
+            true,
+            &sink,
+            &HashMap::new(),
+            &HashSet::new(),
+        );
         assert_eq!(
             works.iter().map(|work| work.entries.len()).sum::<usize>(),
             PARTS
         );
         assert_eq!(SegmentFile::full_part_meta_scan_count(), 0);
-        assert!(Buffers::next_compaction_transactions(PARTS, true, &sink).is_empty());
+        assert!(Buffers::next_compaction_transactions(
+            PARTS,
+            true,
+            &sink,
+            &HashMap::new(),
+            &HashSet::new(),
+        )
+        .is_empty());
         let planner = crate::metrics::counters::flush_metrics_snapshot();
         assert_eq!(planner.compaction_planner_cycles_total, 2);
         assert_eq!(planner.compaction_planner_segments_examined_total, 1);
@@ -4568,8 +5263,7 @@ mod tests_wal_commit {
         let ledger = Buffers::completion_ledger();
         let bitmap_path = ledger.bitmap_path("multi-sink-segment");
 
-        Buffers::tombstone_grouped_work(&backlog.work_for_sink("data_sinks.ds_datalake"))
-            .unwrap();
+        Buffers::tombstone_grouped_work(&backlog.work_for_sink("data_sinks.ds_datalake")).unwrap();
 
         assert!(backlog.segment_path.exists());
         assert!(commit_exists(&backlog.segment_path));
@@ -4590,10 +5284,8 @@ mod tests_wal_commit {
             .all_complete("multi-sink-segment", &backlog.meta.index)
             .unwrap());
 
-        Buffers::tombstone_grouped_work(
-            &backlog.work_for_sink("deadletter_sinks.ds_deadletters"),
-        )
-        .unwrap();
+        Buffers::tombstone_grouped_work(&backlog.work_for_sink("deadletter_sinks.ds_deadletters"))
+            .unwrap();
 
         assert!(!backlog.segment_path.exists());
         assert!(!commit_exists(&backlog.segment_path));
@@ -4687,6 +5379,7 @@ mod tests_wal_commit {
         });
         let sink: Arc<Box<dyn DataSink + Send + Sync>> =
             Arc::new(Box::new(SyntheticGroupedSink { failure: None }));
+        let budget = Arc::new(FlushExecutionBudget::new(1, 1));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -4695,7 +5388,7 @@ mod tests_wal_commit {
         let compacted = runtime
             .block_on(
                 GROUPED_COMPACTION_TEST_OBSERVER
-                    .scope(observer, Buffers::compact_grouped_work(work, sink)),
+                    .scope(observer, Buffers::compact_grouped_work(work, sink, budget)),
             )
             .unwrap();
 
@@ -4732,6 +5425,7 @@ mod tests_wal_commit {
         let sink: Arc<Box<dyn DataSink + Send + Sync>> = Arc::new(Box::new(SyntheticGroupedSink {
             failure: Some("synthetic sink failure"),
         }));
+        let budget = Arc::new(FlushExecutionBudget::new(1, 1));
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -4740,7 +5434,7 @@ mod tests_wal_commit {
         let error = runtime
             .block_on(
                 GROUPED_COMPACTION_TEST_OBSERVER
-                    .scope(observer, Buffers::compact_grouped_work(work, sink)),
+                    .scope(observer, Buffers::compact_grouped_work(work, sink, budget)),
             )
             .unwrap_err();
 

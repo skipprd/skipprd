@@ -2,6 +2,7 @@ pub mod compaction_index;
 pub mod compaction_progress;
 pub mod compaction_transaction;
 pub mod completion_ledger;
+pub mod flush_execution_budget;
 pub mod ingest_buffer;
 pub mod sink_conflict;
 pub mod s3_wal_body_cache;

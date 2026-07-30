@@ -73,10 +73,10 @@ struct SegmentKey {
     source_id: String,
 }
 
-#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
-struct CompactionLaneKey {
-    sink_ref: String,
-    namespace: String,
+#[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub(crate) struct CompactionLaneKey {
+    pub(crate) sink_ref: String,
+    pub(crate) namespace: String,
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -307,16 +307,23 @@ impl ManifestIndex {
         per_sink_limit: usize,
         now_secs: u64,
         sent_stale_secs: u64,
+        active_by_lane: &HashMap<CompactionLaneKey, usize>,
+        blocked_lanes: &HashSet<CompactionLaneKey>,
     ) -> Vec<ReservedManifest> {
         let mut out = Vec::with_capacity(limit);
-        let mut scheduled_by_sink = HashMap::<String, usize>::new();
+        let mut scheduled_by_sink = active_counts_by_sink(active_by_lane);
         while out.len() < limit {
             let candidate = self
                 .records
                 .iter()
                 .filter(|(_, record)| {
+                    let lane = CompactionLaneKey {
+                        sink_ref: record.txn.sink_ref.clone(),
+                        namespace: record.txn.namespace.clone(),
+                    };
                     !record.reserved
                         && manifest_is_ready(&record.txn, now_secs, sent_stale_secs)
+                        && !blocked_lanes.contains(&lane)
                         && scheduled_by_sink
                             .get(&record.txn.sink_ref)
                             .copied()
@@ -402,6 +409,16 @@ impl ManifestIndex {
             }
         }
     }
+}
+
+fn active_counts_by_sink(
+    active_by_lane: &HashMap<CompactionLaneKey, usize>,
+) -> HashMap<String, usize> {
+    let mut by_sink = HashMap::new();
+    for (lane, active) in active_by_lane {
+        *by_sink.entry(lane.sink_ref.clone()).or_default() += *active;
+    }
+    by_sink
 }
 
 fn manifest_is_ready(txn: &CompactionTransaction, now_secs: u64, sent_stale_secs: u64) -> bool {
@@ -643,9 +660,17 @@ impl CompactionIndex {
         per_sink_limit: usize,
         now_secs: u64,
         sent_stale_secs: u64,
+        active_by_lane: &HashMap<CompactionLaneKey, usize>,
+        blocked_lanes: &HashSet<CompactionLaneKey>,
     ) -> Vec<ReservedManifest> {
-        self.manifests
-            .reserve_ready(limit, per_sink_limit, now_secs, sent_stale_secs)
+        self.manifests.reserve_ready(
+            limit,
+            per_sink_limit,
+            now_secs,
+            sent_stale_secs,
+            active_by_lane,
+            blocked_lanes,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -659,7 +684,8 @@ impl CompactionIndex {
         target_bytes: u64,
         max_parts: usize,
         per_sink_limit: usize,
-        mut scheduled_by_sink: HashMap<String, usize>,
+        active_by_lane: HashMap<CompactionLaneKey, usize>,
+        blocked_lanes: HashSet<CompactionLaneKey>,
     ) -> CompactionPlan {
         self.configure_thresholds(byte_threshold, time_threshold_secs, now_secs);
         self.requeue_deferred_if_target_changed(target_bytes, now_secs);
@@ -672,12 +698,14 @@ impl CompactionIndex {
 
         let mut plan = CompactionPlan::default();
         let mut examined_segments = HashSet::<SegmentKey>::new();
+        let mut scheduled_by_sink = active_counts_by_sink(&active_by_lane);
         while plan.groups.len() < limit {
             let lane_candidate = self
                 .lanes
                 .iter()
                 .filter(|(lane, state)| {
                     !state.queue.is_empty()
+                        && !blocked_lanes.contains(*lane)
                         && scheduled_by_sink.get(&lane.sink_ref).copied().unwrap_or(0)
                             < per_sink_limit
                 })
@@ -1164,6 +1192,7 @@ mod tests {
             2,
             limit.max(1),
             HashMap::new(),
+            HashSet::new(),
         )
     }
 
@@ -1282,10 +1311,32 @@ mod tests {
             100,
             1_000,
         );
-        let forced = index.plan_ready(1, true, 1_000, 100, 100, 250, 1, 1, HashMap::new());
+        let forced = index.plan_ready(
+            1,
+            true,
+            1_000,
+            100,
+            100,
+            250,
+            1,
+            1,
+            HashMap::new(),
+            HashSet::new(),
+        );
         assert_eq!(forced.groups[0].slices.len(), 1);
         assert!(index
-            .plan_ready(1, false, 1_000, 100, 100, 250, 1, 1, HashMap::new(),)
+            .plan_ready(
+                1,
+                false,
+                1_000,
+                100,
+                100,
+                250,
+                1,
+                1,
+                HashMap::new(),
+                HashSet::new(),
+            )
             .groups
             .is_empty());
     }
@@ -1308,7 +1359,18 @@ mod tests {
             })
             .collect();
         index.register_segment("seg", slices, 1, 100, 1_000);
-        let planned = index.plan_ready(8, false, 1_000, 100, 100, 250, 2, 1, HashMap::new());
+        let planned = index.plan_ready(
+            8,
+            false,
+            1_000,
+            100,
+            100,
+            250,
+            2,
+            1,
+            HashMap::new(),
+            HashSet::new(),
+        );
         assert_eq!(planned.groups.len(), 1);
         assert_eq!(planned.groups[0].slices.len(), 2);
         assert!(
@@ -1320,6 +1382,55 @@ mod tests {
                 <= 250
         );
         assert_eq!(index.ready_queue_depth(), 1);
+    }
+
+    #[test]
+    fn per_sink_cap_includes_already_active_namespaces() {
+        let mut index = CompactionIndex::default();
+        index.register_segment(
+            "seg-a",
+            vec![slice(
+                "seg-a",
+                "sink.a",
+                "ready-ns",
+                "v1",
+                CompactionKind::Append,
+                0,
+                100,
+                1,
+            )],
+            1,
+            100,
+            1_000,
+        );
+        index.register_segment(
+            "seg-b",
+            vec![slice(
+                "seg-b",
+                "sink.b",
+                "other",
+                "v1",
+                CompactionKind::Append,
+                0,
+                100,
+                1,
+            )],
+            1,
+            100,
+            1_000,
+        );
+        let active = HashMap::from([(
+            CompactionLaneKey {
+                sink_ref: "sink.a".to_string(),
+                namespace: "running-ns".to_string(),
+            },
+            1,
+        )]);
+
+        let planned = index.plan_ready(2, false, 1_000, 1, 100, 250, 1, 1, active, HashSet::new());
+
+        assert_eq!(planned.groups.len(), 1);
+        assert_eq!(planned.groups[0].key.sink_ref, "sink.b");
     }
 
     #[test]
@@ -1347,7 +1458,12 @@ mod tests {
         index.install_manifests(vec![txn.clone()]);
         index.register_segment("seg", vec![indexed], 1, 100, 1_000);
         assert!(plan(&mut index, 1, false).groups.is_empty());
-        assert_eq!(index.reserve_ready_manifests(1, 1, 1_000, 300).len(), 1);
+        assert_eq!(
+            index
+                .reserve_ready_manifests(1, 1, 1_000, 300, &HashMap::new(), &HashSet::new())
+                .len(),
+            1
+        );
         index.remove_manifest(&txn.id, 1_000);
         assert_eq!(plan(&mut index, 1, false).groups.len(), 1);
     }
@@ -1379,9 +1495,12 @@ mod tests {
         index.install_manifests(vec![txn]);
         index.register_segment("seg", vec![indexed], 1, 100, 1_000);
 
-        assert!(index.reserve_ready_manifests(1, 1, 1_100, 300).is_empty());
+        assert!(index
+            .reserve_ready_manifests(1, 1, 1_100, 300, &HashMap::new(), &HashSet::new())
+            .is_empty());
         assert!(plan(&mut index, 1, true).groups.is_empty());
-        let retry = index.reserve_ready_manifests(1, 1, 1_200, 300);
+        let retry =
+            index.reserve_ready_manifests(1, 1, 1_200, 300, &HashMap::new(), &HashSet::new());
         assert_eq!(retry.len(), 1);
         assert!(retry[0].retried_stale);
         assert_eq!(retry[0].stale_age_secs, 300);
@@ -1414,7 +1533,18 @@ mod tests {
         }
         let mut served = Vec::new();
         for _ in 0..3 {
-            let planned = index.plan_ready(1, false, 1_000, 1, 100, 250, 2, 2, HashMap::new());
+            let planned = index.plan_ready(
+                1,
+                false,
+                1_000,
+                1,
+                100,
+                250,
+                2,
+                2,
+                HashMap::new(),
+                HashSet::new(),
+            );
             let group = &planned.groups[0];
             served.push((group.key.sink_ref.clone(), group.key.namespace.clone()));
         }
@@ -1529,7 +1659,18 @@ mod tests {
                 .collect();
             index.register_segment(&format!("seg-{segment}"), slices, 1, 100, 1_000);
         }
-        let planned = index.plan_ready(1, false, 1_000, 1, 100, 1_024, 128, 1, HashMap::new());
+        let planned = index.plan_ready(
+            1,
+            false,
+            1_000,
+            1,
+            100,
+            1_024,
+            128,
+            1,
+            HashMap::new(),
+            HashSet::new(),
+        );
         assert_eq!(planned.groups.len(), 1);
         assert_eq!(planned.groups[0].slices.len(), 128);
         assert!(planned.slices_examined <= 129);

@@ -1732,8 +1732,9 @@ impl Ingest {
                 return true;
             }
 
-            crate::ingest::tuner::paused_tick(num_cpus::get());
-            Buffers::wake_compactor();
+            // The compactor service owns pause tuning and polls while paused.
+            // Entering pause already wakes it, so repeated wakes here only
+            // create command-queue storms without improving liveness.
             std::thread::sleep(Duration::from_secs(1));
         }
     }

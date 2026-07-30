@@ -1,5 +1,8 @@
 #![allow(dead_code)]
+use dashmap::mapref::entry::Entry;
+use dashmap::DashMap;
 use once_cell::sync::Lazy;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -94,6 +97,17 @@ pub static COMPACTION_PLANNER_READY_WORK_COUNT: Lazy<AtomicUsize> =
     Lazy::new(|| AtomicUsize::new(0));
 pub static COMPACTION_INFLIGHT_SLICE_COUNT: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
 pub static WAL_SNAPSHOT_READY_COUNT: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
+pub static COMPACTION_ACTIVE_JOBS: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
+pub static COMPACTION_DECODE_PERMIT_ACQUIRES_TOTAL: Lazy<AtomicU64> =
+    Lazy::new(|| AtomicU64::new(0));
+pub static COMPACTION_DECODE_PERMIT_WAIT_NS_TOTAL: Lazy<AtomicU64> =
+    Lazy::new(|| AtomicU64::new(0));
+pub static COMPACTION_SINK_PERMIT_ACQUIRES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static COMPACTION_SINK_PERMIT_WAIT_NS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static COMPACTION_SCHEDULER_TOP_UPS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static COMPACTION_IDLE_SLOTS_WITH_READY_WORK_TOTAL: Lazy<AtomicU64> =
+    Lazy::new(|| AtomicU64::new(0));
+static COMPACTION_ACTIVE_BY_SINK: Lazy<DashMap<String, usize>> = Lazy::new(DashMap::new);
 pub static GROUPED_STREAM_EAGER_BUILDS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static GROUPED_STREAM_STREAMING_BUILDS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static GROUPED_STREAM_BUILD_DURATION_NS_TOTAL: Lazy<AtomicU64> =
@@ -132,6 +146,13 @@ pub struct FlushMetricsSnapshot {
     pub compaction_planner_ready_work_count: usize,
     pub compaction_inflight_slice_count: usize,
     pub wal_snapshot_ready_count: usize,
+    pub compaction_active_jobs: usize,
+    pub compaction_decode_permit_acquires_total: u64,
+    pub compaction_decode_permit_wait_ns_total: u64,
+    pub compaction_sink_permit_acquires_total: u64,
+    pub compaction_sink_permit_wait_ns_total: u64,
+    pub compaction_scheduler_top_ups_total: u64,
+    pub compaction_idle_slots_with_ready_work_total: u64,
     pub grouped_stream_eager_builds_total: u64,
     pub grouped_stream_streaming_builds_total: u64,
     pub grouped_stream_build_duration_ns_total: u64,
@@ -175,6 +196,19 @@ pub fn flush_metrics_snapshot() -> FlushMetricsSnapshot {
             .load(Ordering::Relaxed),
         compaction_inflight_slice_count: COMPACTION_INFLIGHT_SLICE_COUNT.load(Ordering::Relaxed),
         wal_snapshot_ready_count: WAL_SNAPSHOT_READY_COUNT.load(Ordering::Relaxed),
+        compaction_active_jobs: COMPACTION_ACTIVE_JOBS.load(Ordering::Relaxed),
+        compaction_decode_permit_acquires_total: COMPACTION_DECODE_PERMIT_ACQUIRES_TOTAL
+            .load(Ordering::Relaxed),
+        compaction_decode_permit_wait_ns_total: COMPACTION_DECODE_PERMIT_WAIT_NS_TOTAL
+            .load(Ordering::Relaxed),
+        compaction_sink_permit_acquires_total: COMPACTION_SINK_PERMIT_ACQUIRES_TOTAL
+            .load(Ordering::Relaxed),
+        compaction_sink_permit_wait_ns_total: COMPACTION_SINK_PERMIT_WAIT_NS_TOTAL
+            .load(Ordering::Relaxed),
+        compaction_scheduler_top_ups_total: COMPACTION_SCHEDULER_TOP_UPS_TOTAL
+            .load(Ordering::Relaxed),
+        compaction_idle_slots_with_ready_work_total: COMPACTION_IDLE_SLOTS_WITH_READY_WORK_TOTAL
+            .load(Ordering::Relaxed),
         grouped_stream_eager_builds_total: GROUPED_STREAM_EAGER_BUILDS_TOTAL
             .load(Ordering::Relaxed),
         grouped_stream_streaming_builds_total: GROUPED_STREAM_STREAMING_BUILDS_TOTAL
@@ -236,6 +270,57 @@ pub fn set_compaction_inflight_slice_count(count: usize) {
 #[inline]
 pub fn set_wal_snapshot_ready_count(count: usize) {
     WAL_SNAPSHOT_READY_COUNT.store(count, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn inc_compaction_active_job(sink_ref: &str) {
+    COMPACTION_ACTIVE_JOBS.fetch_add(1, Ordering::Relaxed);
+    *COMPACTION_ACTIVE_BY_SINK
+        .entry(sink_ref.to_string())
+        .or_default() += 1;
+}
+
+#[inline]
+pub fn dec_compaction_active_job(sink_ref: &str) {
+    let _ = COMPACTION_ACTIVE_JOBS.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        Some(value.saturating_sub(1))
+    });
+    if let Entry::Occupied(mut entry) = COMPACTION_ACTIVE_BY_SINK.entry(sink_ref.to_string()) {
+        if *entry.get() <= 1 {
+            entry.remove();
+        } else {
+            *entry.get_mut() -= 1;
+        }
+    }
+}
+
+pub fn compaction_active_by_sink_snapshot() -> HashMap<String, usize> {
+    COMPACTION_ACTIVE_BY_SINK
+        .iter()
+        .map(|entry| (entry.key().clone(), *entry.value()))
+        .collect()
+}
+
+#[inline]
+pub fn record_compaction_decode_permit_wait(duration: Duration) {
+    COMPACTION_DECODE_PERMIT_ACQUIRES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    COMPACTION_DECODE_PERMIT_WAIT_NS_TOTAL.fetch_add(duration_ns(duration), Ordering::Relaxed);
+}
+
+#[inline]
+pub fn record_compaction_sink_permit_wait(duration: Duration) {
+    COMPACTION_SINK_PERMIT_ACQUIRES_TOTAL.fetch_add(1, Ordering::Relaxed);
+    COMPACTION_SINK_PERMIT_WAIT_NS_TOTAL.fetch_add(duration_ns(duration), Ordering::Relaxed);
+}
+
+#[inline]
+pub fn add_compaction_scheduler_top_up() {
+    COMPACTION_SCHEDULER_TOP_UPS_TOTAL.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn add_compaction_idle_slots_with_ready_work(slots: usize) {
+    COMPACTION_IDLE_SLOTS_WITH_READY_WORK_TOTAL.fetch_add(slots as u64, Ordering::Relaxed);
 }
 
 #[inline]
@@ -479,6 +564,14 @@ pub fn reset_flush_metrics() {
     COMPACTION_PLANNER_READY_WORK_COUNT.store(0, Ordering::Relaxed);
     COMPACTION_INFLIGHT_SLICE_COUNT.store(0, Ordering::Relaxed);
     WAL_SNAPSHOT_READY_COUNT.store(0, Ordering::Relaxed);
+    COMPACTION_ACTIVE_JOBS.store(0, Ordering::Relaxed);
+    COMPACTION_ACTIVE_BY_SINK.clear();
+    COMPACTION_DECODE_PERMIT_ACQUIRES_TOTAL.store(0, Ordering::Relaxed);
+    COMPACTION_DECODE_PERMIT_WAIT_NS_TOTAL.store(0, Ordering::Relaxed);
+    COMPACTION_SINK_PERMIT_ACQUIRES_TOTAL.store(0, Ordering::Relaxed);
+    COMPACTION_SINK_PERMIT_WAIT_NS_TOTAL.store(0, Ordering::Relaxed);
+    COMPACTION_SCHEDULER_TOP_UPS_TOTAL.store(0, Ordering::Relaxed);
+    COMPACTION_IDLE_SLOTS_WITH_READY_WORK_TOTAL.store(0, Ordering::Relaxed);
     GROUPED_STREAM_EAGER_BUILDS_TOTAL.store(0, Ordering::Relaxed);
     GROUPED_STREAM_STREAMING_BUILDS_TOTAL.store(0, Ordering::Relaxed);
     GROUPED_STREAM_BUILD_DURATION_NS_TOTAL.store(0, Ordering::Relaxed);
