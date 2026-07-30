@@ -30,5 +30,6 @@ pub mod metrics;
 pub mod plugins;
 pub mod runtime_plugins;
 pub mod serdes;
+pub mod sink_apply_identity;
 pub mod sqlrt;
 pub mod table_formats;

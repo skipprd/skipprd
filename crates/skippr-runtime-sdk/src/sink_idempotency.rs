@@ -5,6 +5,11 @@ use async_trait::async_trait;
 use serde_derive::{Deserialize, Serialize};
 
 use crate::protocol::RuntimeWalPartRef;
+use skippr_core::sink_apply_identity::{canonical_wal_refs_fingerprint, SINK_APPLY_ENVELOPE_V2};
+
+fn is_false(value: &bool) -> bool {
+    !*value
+}
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct ObjectWriteManifest {
@@ -13,6 +18,12 @@ pub struct ObjectWriteManifest {
     pub schema_fingerprint: String,
     pub wal_refs_fingerprint: String,
     pub wal_ref_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wal_refs_fingerprint_v2: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_cdc_metadata: bool,
 }
 
 impl ObjectWriteManifest {
@@ -22,12 +33,21 @@ impl ObjectWriteManifest {
         schema_fingerprint: impl Into<String>,
         wal_refs: &[RuntimeWalPartRef],
     ) -> Self {
+        let compaction_id = compaction_id.into();
+        let idempotency_key = idempotency_key.into();
+        let schema_fingerprint = schema_fingerprint.into();
+        let has_cdc_metadata = wal_refs
+            .iter()
+            .any(|wal_ref| wal_ref.cdc_meta_hash.is_some());
         Self {
-            compaction_id: compaction_id.into(),
-            idempotency_key: idempotency_key.into(),
-            schema_fingerprint: schema_fingerprint.into(),
+            compaction_id,
+            idempotency_key,
+            schema_fingerprint,
             wal_refs_fingerprint: wal_refs_fingerprint(wal_refs),
             wal_ref_count: wal_refs.len(),
+            identity_version: Some(SINK_APPLY_ENVELOPE_V2),
+            wal_refs_fingerprint_v2: Some(canonical_wal_refs_fingerprint(wal_refs)),
+            has_cdc_metadata,
         }
     }
 
@@ -49,8 +69,47 @@ impl ObjectWriteManifest {
         self.compaction_id == compaction_id
             && self.idempotency_key == idempotency_key
             && self.schema_fingerprint == schema_fingerprint
-            && self.wal_refs_fingerprint == wal_refs_fingerprint(wal_refs)
             && self.wal_ref_count == wal_refs.len()
+            && match self.identity_version {
+                Some(SINK_APPLY_ENVELOPE_V2) => {
+                    self.wal_refs_fingerprint_v2
+                        .as_ref()
+                        .is_some_and(|fingerprint| {
+                            fingerprint == &canonical_wal_refs_fingerprint(wal_refs)
+                        })
+                }
+                None => self.wal_refs_fingerprint == wal_refs_fingerprint(wal_refs),
+                Some(_) => false,
+            }
+    }
+
+    pub fn matches_manifest(&self, expected: &Self) -> bool {
+        if !self.legacy_fields_match(expected) {
+            return false;
+        }
+        match (self.identity_version, expected.identity_version) {
+            (Some(SINK_APPLY_ENVELOPE_V2), Some(SINK_APPLY_ENVELOPE_V2)) => {
+                match (
+                    self.wal_refs_fingerprint_v2.as_ref(),
+                    expected.wal_refs_fingerprint_v2.as_ref(),
+                ) {
+                    (Some(actual), Some(wanted)) => actual == wanted,
+                    _ => false,
+                }
+            }
+            (None, Some(SINK_APPLY_ENVELOPE_V2))
+            | (Some(SINK_APPLY_ENVELOPE_V2), None)
+            | (None, None) => !self.has_cdc_metadata && !expected.has_cdc_metadata,
+            _ => false,
+        }
+    }
+
+    fn legacy_fields_match(&self, expected: &Self) -> bool {
+        self.compaction_id == expected.compaction_id
+            && self.idempotency_key == expected.idempotency_key
+            && self.schema_fingerprint == expected.schema_fingerprint
+            && self.wal_refs_fingerprint == expected.wal_refs_fingerprint
+            && self.wal_ref_count == expected.wal_ref_count
     }
 
     pub fn to_json_bytes(&self) -> io::Result<Vec<u8>> {
@@ -71,6 +130,12 @@ pub struct GroupedWriteReceipt {
     pub schema_fingerprint: String,
     pub wal_refs_fingerprint: String,
     pub wal_ref_count: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub identity_version: Option<u32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wal_refs_fingerprint_v2: Option<String>,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub has_cdc_metadata: bool,
     pub final_s3_key: String,
     pub etag: String,
     #[serde(default)]
@@ -106,6 +171,9 @@ impl GroupedWriteReceipt {
             schema_fingerprint: manifest.schema_fingerprint.clone(),
             wal_refs_fingerprint: manifest.wal_refs_fingerprint.clone(),
             wal_ref_count: manifest.wal_ref_count,
+            identity_version: manifest.identity_version,
+            wal_refs_fingerprint_v2: manifest.wal_refs_fingerprint_v2.clone(),
+            has_cdc_metadata: manifest.has_cdc_metadata,
             final_s3_key: final_s3_key.into(),
             etag: etag.into(),
             checksum,
@@ -117,11 +185,27 @@ impl GroupedWriteReceipt {
     }
 
     pub fn matches_manifest(&self, manifest: &ObjectWriteManifest) -> bool {
-        manifest.compaction_id == self.compaction_id
+        let legacy_fields_match = manifest.compaction_id == self.compaction_id
             && manifest.idempotency_key == self.idempotency_key
             && manifest.schema_fingerprint == self.schema_fingerprint
             && manifest.wal_refs_fingerprint == self.wal_refs_fingerprint
-            && manifest.wal_ref_count == self.wal_ref_count
+            && manifest.wal_ref_count == self.wal_ref_count;
+        if !legacy_fields_match {
+            return false;
+        }
+        match (self.identity_version, manifest.identity_version) {
+            (Some(SINK_APPLY_ENVELOPE_V2), Some(SINK_APPLY_ENVELOPE_V2)) => {
+                match (
+                    self.wal_refs_fingerprint_v2.as_ref(),
+                    manifest.wal_refs_fingerprint_v2.as_ref(),
+                ) {
+                    (Some(actual), Some(wanted)) => actual == wanted,
+                    _ => false,
+                }
+            }
+            (None, Some(SINK_APPLY_ENVELOPE_V2)) => !manifest.has_cdc_metadata,
+            _ => false,
+        }
     }
 
     pub fn to_json_bytes(&self) -> io::Result<Vec<u8>> {
@@ -182,7 +266,12 @@ pub fn sidecar_manifest_object_key(
     parts.join("/")
 }
 
+/// Legacy v1 fingerprint retained for persisted sidecars and SDK compatibility.
 pub fn wal_refs_fingerprint(wal_refs: &[RuntimeWalPartRef]) -> String {
+    legacy_wal_refs_fingerprint(wal_refs)
+}
+
+fn legacy_wal_refs_fingerprint(wal_refs: &[RuntimeWalPartRef]) -> String {
     let mut identities = wal_refs
         .iter()
         .map(|wal_ref| {
@@ -270,10 +359,83 @@ mod tests {
     }
 
     #[test]
+    fn legacy_non_cdc_fingerprint_is_unchanged() {
+        assert_eq!(
+            wal_refs_fingerprint(&[wal_ref("a", 1)]),
+            [
+                "a",
+                "s3://bucket/a",
+                "1",
+                "10",
+                "sink.main",
+                "ns",
+                "p=1",
+                "Some(1)",
+                "schema"
+            ]
+            .join("\0")
+        );
+    }
+
+    #[test]
     fn object_manifest_rejects_schema_mismatch() {
         let refs = vec![wal_ref("a", 1)];
         let manifest = ObjectWriteManifest::from_context("c1", "k1", "schema-a", &refs);
         assert!(!manifest.matches_context("c1", "k1", "schema-b", &refs));
+    }
+
+    #[test]
+    fn object_manifest_rejects_cdc_hash_mismatch() {
+        let refs = vec![RuntimeWalPartRef {
+            cdc_meta_hash: Some([1; 32]),
+            ..wal_ref("a", 1)
+        }];
+        let changed = vec![RuntimeWalPartRef {
+            cdc_meta_hash: Some([2; 32]),
+            ..wal_ref("a", 1)
+        }];
+        let manifest = ObjectWriteManifest::from_context("c1", "k1", "schema", &refs);
+        assert!(!manifest.matches_context("c1", "k1", "schema", &changed));
+    }
+
+    #[test]
+    fn legacy_non_cdc_receipt_matches_v2_manifest() {
+        let refs = vec![wal_ref("a", 1)];
+        let manifest = ObjectWriteManifest::from_context("c1", "k1", "schema", &refs);
+        let json = serde_json::json!({
+            "version": 2,
+            "compaction_id": "c1",
+            "idempotency_key": "k1",
+            "schema_fingerprint": "schema",
+            "wal_refs_fingerprint": manifest.wal_refs_fingerprint,
+            "wal_ref_count": 1,
+            "final_s3_key": "root/ns/c1.parquet",
+            "etag": "etag",
+            "rows": 1,
+            "bytes": 10,
+            "transport_chunk_count": 1,
+            "completed_at_unix_secs": 1
+        });
+        let receipt = GroupedWriteReceipt::from_json_bytes(&serde_json::to_vec(&json).unwrap())
+            .expect("legacy receipt");
+        assert!(receipt.matches_manifest(&manifest));
+    }
+
+    #[test]
+    fn legacy_object_manifest_deserializes_and_matches_v2_manifest() {
+        let refs = vec![wal_ref("a", 1)];
+        let expected = ObjectWriteManifest::from_context("c1", "k1", "schema", &refs);
+        let json = serde_json::json!({
+            "compaction_id": "c1",
+            "idempotency_key": "k1",
+            "schema_fingerprint": "schema",
+            "wal_refs_fingerprint": expected.wal_refs_fingerprint,
+            "wal_ref_count": 1
+        });
+        let legacy = ObjectWriteManifest::from_json_bytes(&serde_json::to_vec(&json).unwrap())
+            .expect("legacy manifest");
+        assert_eq!(legacy.identity_version, None);
+        assert!(legacy.matches_manifest(&expected));
     }
 
     #[test]

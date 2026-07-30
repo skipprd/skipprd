@@ -2,8 +2,12 @@ use crate::buffer::segment_file::PartitionKey;
 use crate::helpers::configuration::Config;
 use crate::plugins::source_contract::WritePolicy;
 use crate::runtime_plugins::protocol::RuntimeWalPartRef;
+use crate::sink_apply_identity::{
+    canonical_sorted_wal_ref_identity_bytes, wal_ref_identity_bytes, WalRefIdentity,
+};
 use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::borrow::Cow;
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -113,25 +117,7 @@ pub struct WalPartRef {
 
 impl WalPartRef {
     pub fn identity_bytes(&self) -> Vec<u8> {
-        let mut out = Vec::new();
-        out.extend_from_slice(self.segment_id.as_bytes());
-        out.push(0);
-        out.extend_from_slice(self.source.stable_id().as_bytes());
-        out.push(0);
-        out.extend_from_slice(&self.start.to_le_bytes());
-        out.extend_from_slice(&self.len.to_le_bytes());
-        out.extend_from_slice(self.key.sink_ref.as_bytes());
-        out.push(0);
-        out.extend_from_slice(self.key.namespace.as_bytes());
-        out.push(0);
-        out.extend_from_slice(self.key.partition.as_bytes());
-        out.push(0);
-        out.extend_from_slice(&self.key.time.unwrap_or(0).to_le_bytes());
-        out.extend_from_slice(self.key.schema_fingerprint.as_bytes());
-        if let Some(hash) = self.cdc_meta_hash {
-            out.extend_from_slice(&hash);
-        }
-        out
+        wal_ref_identity_bytes(self)
     }
 
     pub fn to_runtime_ref(&self) -> RuntimeWalPartRef {
@@ -147,6 +133,48 @@ impl WalPartRef {
             schema_fingerprint: self.key.schema_fingerprint.clone(),
             cdc_meta_hash: self.cdc_meta_hash,
         }
+    }
+}
+
+impl WalRefIdentity for WalPartRef {
+    fn segment_id(&self) -> &str {
+        &self.segment_id
+    }
+
+    fn source(&self) -> Cow<'_, str> {
+        Cow::Owned(self.source.stable_id())
+    }
+
+    fn start(&self) -> u64 {
+        self.start
+    }
+
+    fn len(&self) -> u64 {
+        self.len
+    }
+
+    fn sink_ref(&self) -> &str {
+        &self.key.sink_ref
+    }
+
+    fn namespace(&self) -> &str {
+        &self.key.namespace
+    }
+
+    fn partition(&self) -> &str {
+        &self.key.partition
+    }
+
+    fn time(&self) -> Option<i64> {
+        self.key.time
+    }
+
+    fn schema_fingerprint(&self) -> &str {
+        &self.key.schema_fingerprint
+    }
+
+    fn cdc_meta_hash(&self) -> Option<&[u8; 32]> {
+        self.cdc_meta_hash.as_ref()
     }
 }
 
@@ -248,12 +276,7 @@ pub fn deterministic_compaction_id(
     hasher.update(schema_fingerprint.as_bytes());
     hasher.update([0]);
     hasher.update(format!("{write_policy:?}").as_bytes());
-    let mut identities = refs
-        .iter()
-        .map(WalPartRef::identity_bytes)
-        .collect::<Vec<_>>();
-    identities.sort();
-    for identity in identities {
+    for identity in canonical_sorted_wal_ref_identity_bytes(refs) {
         hasher.update(identity);
         hasher.update([0xff]);
     }
@@ -405,9 +428,15 @@ mod tests {
     fn deterministic_id_is_independent_of_ref_order() {
         let refs_a = vec![ref_for("b", 2), ref_for("a", 1)];
         let refs_b = vec![ref_for("a", 1), ref_for("b", 2)];
+        let id =
+            deterministic_compaction_id("sink.main", "ns", "schema", WritePolicy::Append, &refs_a);
         assert_eq!(
-            deterministic_compaction_id("sink.main", "ns", "schema", WritePolicy::Append, &refs_a),
+            id,
             deterministic_compaction_id("sink.main", "ns", "schema", WritePolicy::Append, &refs_b)
+        );
+        assert_eq!(
+            id,
+            "6fb2bcdd0952a17b0260bbed6eac9cd75e5ef09d8dbfd5c0894a2a7bee09ec39"
         );
     }
 

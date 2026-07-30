@@ -127,7 +127,7 @@ impl DataSink for FileSinkRuntimePlugin {
         );
         if manifest_file.exists() {
             let bytes = fs::read(&manifest_file)?;
-            if ObjectWriteManifest::from_json_bytes(&bytes)? == expected_manifest {
+            if ObjectWriteManifest::from_json_bytes(&bytes)?.matches_manifest(&expected_manifest) {
                 return Ok(SinkWriteOutcome::AlreadyApplied);
             }
         }

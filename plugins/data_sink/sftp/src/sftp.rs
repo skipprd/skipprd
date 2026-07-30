@@ -273,7 +273,7 @@ impl DataSinkSftpPlugin {
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes)?;
         let manifest = ObjectWriteManifest::from_json_bytes(&bytes)?;
-        Ok(manifest == *expected)
+        Ok(manifest.matches_manifest(expected))
     }
 
     async fn write_remote_manifest(

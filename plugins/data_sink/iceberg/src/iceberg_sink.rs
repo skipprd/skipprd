@@ -1040,7 +1040,7 @@ impl DataSinkIcebergPlugin {
             .map_err(|err| io::Error::other(err.to_string()))?
             .into_bytes();
         let manifest = ObjectWriteManifest::from_json_bytes(&bytes)?;
-        Ok(manifest == *expected)
+        Ok(manifest.matches_manifest(expected))
     }
 
     async fn write_manifest(

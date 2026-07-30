@@ -726,7 +726,7 @@ fn local_idempotency_manifest_matches(manifest: &ObjectWriteManifest) -> io::Res
     }
     let bytes = std::fs::read(&path)?;
     let existing = ObjectWriteManifest::from_json_bytes(&bytes)?;
-    if existing == *manifest {
+    if existing.matches_manifest(manifest) {
         return Ok(true);
     }
     Err(io::Error::other(format!(

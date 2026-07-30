@@ -290,6 +290,6 @@ impl DataSinkAzureBlobPlugin {
             .await
             .map_err(|err| io::Error::other(err.to_string()))?;
         let manifest = ObjectWriteManifest::from_json_bytes(&bytes)?;
-        Ok(manifest == *expected)
+        Ok(manifest.matches_manifest(expected))
     }
 }
