@@ -830,12 +830,8 @@ mod work_conserving_scheduler_tests {
     }
 
     #[test]
-    fn paused_no_work_keeps_periodic_backoff() {
-        assert_eq!(
-            Buffers::compactor_idle_backoff(true),
-            Buffers::compactor_idle_backoff(false)
-        );
-        assert!(Buffers::compactor_idle_backoff(true) >= TokioDuration::from_millis(100));
+    fn no_work_keeps_periodic_backoff() {
+        assert!(Buffers::compactor_idle_backoff() >= TokioDuration::from_millis(100));
     }
 }
 
@@ -1766,7 +1762,6 @@ impl Buffers {
         let mut consecutive_failures: u32 = 0;
         let mut stop_requested = false;
         loop {
-            let ingest_paused = crate::data_dir_ingest_paused();
             let force = drain_reply.is_some();
             let did_work = {
                 let mut control = CompactionCycleControl {
@@ -1820,7 +1815,7 @@ impl Buffers {
                         None => break,
                     }
                 }
-                _ = tokio_sleep(Self::compactor_idle_backoff(ingest_paused)) => {}
+                _ = tokio_sleep(Self::compactor_idle_backoff()) => {}
             }
         }
         COMPACTOR_STARTED.store(false, std::sync::atomic::Ordering::Relaxed);
@@ -1911,7 +1906,7 @@ impl Buffers {
         made_progress
     }
 
-    fn compactor_idle_backoff(_ingest_paused: bool) -> TokioDuration {
+    fn compactor_idle_backoff() -> TokioDuration {
         TokioDuration::from_millis(100)
     }
 
@@ -2325,18 +2320,6 @@ impl Buffers {
         .ok()
         .filter(|value| *value > 0)
         .unwrap_or(DEFAULT_COMPACTION_GROUP_MAX_PARTS)
-    }
-
-    fn compaction_per_sink_limit() -> usize {
-        let max = crate::helpers::configuration::Config::getenv("WAL_COMPACTIONS_PER_SINK_MAX", "")
-            .parse::<usize>()
-            .ok()
-            .filter(|value| *value > 0)
-            .unwrap_or(32)
-            .clamp(1, 32);
-        crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .clamp(1, max)
     }
 
     fn work_from_planned_group(
@@ -5098,8 +5081,6 @@ mod tests_wal_commit {
         let (base, _guard) = setup_data_dir();
         reset_in_memory_segments();
         crate::metrics::counters::reset_flush_metrics();
-        let old_per_sink = crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET
-            .swap(PARTS, AtomicOrdering::Relaxed);
 
         let segf = SegmentFile::new(&base, "indexed-cdc").unwrap();
         let mut batches = StdHashMap::new();
@@ -5170,8 +5151,6 @@ mod tests_wal_commit {
         );
         assert_eq!(planner.compaction_planner_ready_work_count, 0);
 
-        crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET
-            .store(old_per_sink, AtomicOrdering::Relaxed);
         reset_in_memory_segments();
     }
 
