@@ -12543,6 +12543,7 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_json",
+ "skippr-object-writer",
  "skippr-runtime-sdk",
  "tokio",
  "tracing",

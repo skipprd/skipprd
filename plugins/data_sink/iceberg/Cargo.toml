@@ -12,6 +12,7 @@ async-trait.workspace = true
 clap.workspace = true
 tokio.workspace = true
 skippr-runtime-sdk.workspace = true
+skippr-object-writer = { path = "../../../crates/skippr-object-writer" }
 arrow.workspace = true
 bytes.workspace = true
 datafusion.workspace = true
