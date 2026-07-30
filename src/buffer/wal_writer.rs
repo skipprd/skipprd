@@ -471,6 +471,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fail_request_makes_late_unit_completions_harmless() {
+        let request_id = 9_000_005;
+        let rx = register_request_ack(request_id, 3);
+        fail_request(request_id, "yielded before remaining units scheduled");
+        // Sibling units that already ran, or complete after the shared fail, must not panic
+        // or resurrect the request.
+        complete_request_without_wal(request_id);
+        complete_request_unit(request_id, &Ok(()));
+        fail_request(request_id, "duplicate fail");
+        assert_eq!(
+            rx.await.unwrap(),
+            Err("yielded before remaining units scheduled".to_string())
+        );
+    }
+
+    #[tokio::test]
     async fn empty_request_ack_completes_immediately() {
         let rx = register_request_ack(9_000_004, 0);
         assert_eq!(rx.await.unwrap(), Ok(()));

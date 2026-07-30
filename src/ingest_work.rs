@@ -2238,6 +2238,14 @@ impl Ingest {
     ) -> ThroughputMetrics {
         if crate::data_dir_capacity_exceeded() {
             info!("Waiting for remaining ingest tasks after DATA_DIR capacity exhaustion");
+            for task in ingest_batches.tasks.iter() {
+                if task.submit_id != 0 {
+                    crate::buffer::wal_writer::fail_request(
+                        task.submit_id,
+                        "DATA_DIR capacity exhausted before ingest tasks could be scheduled",
+                    );
+                }
+            }
             self.wait_for_completion();
             return self.throughput_metrics();
         }
@@ -2352,6 +2360,15 @@ impl Ingest {
             for datas in ingest_batches.tasks.iter() {
                 if !Self::wait_for_data_dir_capacity() {
                     info!("Stopping ingest after DATA_DIR capacity exhaustion");
+                    // Units already registered with the WAL writer must resolve. YieldPipeline
+                    // does not set DATA_DIR_CAPACITY_EXCEEDED, so without an explicit fail the
+                    // source would wait forever for unqueued sibling tasks sharing submit_id.
+                    if datas.submit_id != 0 {
+                        crate::buffer::wal_writer::fail_request(
+                            datas.submit_id,
+                            "DATA_DIR capacity pressure yielded or exhausted before all ingest tasks were scheduled",
+                        );
+                    }
                     self.wait_for_completion();
                     return self.throughput_metrics();
                 }
@@ -3354,6 +3371,15 @@ impl Ingest {
                     "Schema sync barrier failed for namespace {}; deferring batch without committing offsets: {}",
                     namespace, err
                 );
+                if submit_id != 0 {
+                    crate::buffer::wal_writer::fail_request(
+                        submit_id,
+                        format!(
+                            "schema sync barrier failed for namespace {}: {}",
+                            namespace, err
+                        ),
+                    );
+                }
                 return;
             }
         }
