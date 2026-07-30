@@ -1185,6 +1185,30 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn partition_type_mismatch_is_terminal() {
+        let temp = tempfile::tempdir().unwrap();
+        let executor = Arc::new(MockGlueExecutor::default());
+        executor.state.lock().unwrap().layout = Some(Ok(GlueTableLayout {
+            partition_columns: vec![column("day", "bigint")],
+            storage_columns: vec![column("id", "bigint")],
+        }));
+        let coordinator = coordinator(&temp, Arc::clone(&executor), CatalogOperationBudget::new(1));
+        coordinator
+            .persist(&[intent("2026-07-30", "s3://bucket/day=30/", 1)])
+            .unwrap();
+
+        coordinator.drain_once().await.unwrap();
+
+        let pending = coordinator.outbox.scan_pending(1).unwrap().remove(0);
+        assert!(pending.terminal);
+        assert!(pending
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("table layout mismatch"));
+    }
+
+    #[tokio::test]
     async fn schema_version_change_revalidates_and_replaces_layout_cache() {
         let temp = tempfile::tempdir().unwrap();
         let executor = Arc::new(MockGlueExecutor::default());
