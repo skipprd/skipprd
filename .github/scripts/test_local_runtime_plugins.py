@@ -100,6 +100,7 @@ data_sinks:
                 {
                     "package_name": "skippr-plugin-data-source-mssql",
                     "package_version": "0.1.2",
+                    "sdk_build_fingerprint": "sdk123",
                     "checksum": "mssql-checksum",
                     "binary_name": "skippr-plugin-data-source-mssql",
                     "manifest_filename": "mssql-source.json",
@@ -115,6 +116,7 @@ data_sinks:
                 {
                     "package_name": "skippr-plugin-data-sink-snowflake",
                     "package_version": "0.1.2",
+                    "sdk_build_fingerprint": "sdk123",
                     "checksum": "snowflake-checksum",
                     "binary_name": "skippr-plugin-data-sink-snowflake",
                     "manifest_filename": "snowflake-sink.json",
@@ -134,6 +136,7 @@ data_sinks:
                 {
                     "package_name": "skippr-plugin-data-sink-athena",
                     "package_version": "0.1.2",
+                    "sdk_build_fingerprint": "sdk123",
                     "checksum": "athena-checksum",
                     "binary_name": "skippr-plugin-data-sink-athena",
                     "manifest_filename": "athena-sink.json",

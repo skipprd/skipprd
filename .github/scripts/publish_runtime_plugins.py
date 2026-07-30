@@ -12,8 +12,11 @@ import urllib.request
 from pathlib import Path
 
 from runtime_plugin_catalog import (
+    catalog_sdk_build_fingerprint,
     load_workspace_plugin_catalog,
     manifest_payload_for_catalog_entry,
+    validate_manifest_index_sdk_build_fingerprint,
+    validate_manifest_sdk_build_fingerprint,
     versioned_artifact_relative_path,
     versioned_manifest_relative_path,
     workspace_runtime_protocol_version,
@@ -127,11 +130,21 @@ def published_artifacts_match_build_environment(
 
 
 def published_manifest_matches_catalog(
-    published: dict, plugin: dict, publish_targets: list, protocol_version: int
+    published: dict,
+    published_index: dict,
+    published_index_entry: dict,
+    plugin: dict,
+    publish_targets: list,
+    protocol_version: int,
 ) -> bool:
+    sdk_build_fingerprint = plugin["sdk_build_fingerprint"]
     return (
         published.get("version") == plugin["package_version"]
         and published.get("protocol_version") == protocol_version
+        and published.get("sdk_build_fingerprint") == sdk_build_fingerprint
+        and published_index.get("sdk_build_fingerprint") == sdk_build_fingerprint
+        and published_index_entry.get("sdk_build_fingerprint")
+        == sdk_build_fingerprint
         and published.get("build_checksum") == plugin["checksum"]
         and published_artifacts_match_build_environment(published, publish_targets)
     )
@@ -174,13 +187,22 @@ def main() -> None:
     published_index_url = args.published_index_url.strip() or latest_manifest_index_url(
         public_base_url, args.bucket, args.subdir
     )
-    _published_index, published_manifests = load_latest_published_manifests(published_index_url)
+    published_index, published_manifests = load_latest_published_manifests(
+        published_index_url
+    )
+    published_index_entries = {
+        entry.get("manifest_filename"): entry
+        for entry in published_index.get("manifests", [])
+        if isinstance(entry, dict) and entry.get("manifest_filename")
+    }
 
     latest_entries = []
     for entry in catalog_entries:
         published_manifest = published_manifests.get(entry["manifest_filename"])
         can_reuse_published = published_manifest_matches_catalog(
             published_manifest or {},
+            published_index,
+            published_index_entries.get(entry["manifest_filename"], {}),
             entry,
             publish_targets,
             protocol_version,
@@ -255,6 +277,10 @@ def main() -> None:
         # build_checksum tracks source provenance for semver clobber decisions.
         manifest_payload["build_checksum"] = entry["checksum"]
         manifest_payload["protocol_version"] = protocol_version
+        manifest_payload["sdk_build_fingerprint"] = entry["sdk_build_fingerprint"]
+        validate_manifest_sdk_build_fingerprint(
+            manifest_payload, entry, entry["manifest_filename"]
+        )
 
         with output_manifest_path.open("w", encoding="utf-8") as handle:
             json.dump(manifest_payload, handle, indent=2)
@@ -266,6 +292,7 @@ def main() -> None:
                 "plugin_name": entry["plugin_name"],
                 "kind": entry["manifest_kind"],
                 "manifest_filename": entry["manifest_filename"],
+                "sdk_build_fingerprint": entry["sdk_build_fingerprint"],
                 "manifest_url": public_url(
                     public_base_url,
                     args.bucket,
@@ -278,15 +305,14 @@ def main() -> None:
     latest_dir = output_dir / "latest"
     latest_dir.mkdir(parents=True, exist_ok=True)
     latest_index_path = latest_dir / "manifest-index.json"
+    latest_index = {
+        "bundle_version": "latest",
+        "sdk_build_fingerprint": catalog_sdk_build_fingerprint(catalog_entries),
+        "manifests": latest_entries,
+    }
+    validate_manifest_index_sdk_build_fingerprint(latest_index, catalog_entries)
     with latest_index_path.open("w", encoding="utf-8") as handle:
-        json.dump(
-            {
-                "bundle_version": "latest",
-                "manifests": latest_entries,
-            },
-            handle,
-            indent=2,
-        )
+        json.dump(latest_index, handle, indent=2)
         handle.write("\n")
 
 

@@ -75,6 +75,7 @@ class PublishRuntimePluginsTests(unittest.TestCase):
         published = {
             "version": "0.1.1",
             "protocol_version": 10,
+            "sdk_build_fingerprint": "sdk123",
             "build_checksum": "abc123",
             "artifacts": {
                 "x86_64-unknown-linux-gnu": {
@@ -84,17 +85,30 @@ class PublishRuntimePluginsTests(unittest.TestCase):
         }
         plugin = {
             "package_version": "0.1.1",
+            "sdk_build_fingerprint": "sdk123",
             "checksum": "abc123",
         }
+        published_index = {"sdk_build_fingerprint": "sdk123"}
+        published_index_entry = {"sdk_build_fingerprint": "sdk123"}
         self.assertTrue(
             publish_runtime_plugins.published_manifest_matches_catalog(
-                published, plugin, [target], 9
+                published,
+                published_index,
+                published_index_entry,
+                plugin,
+                [target],
+                10,
             )
         )
         plugin["checksum"] = "def456"
         self.assertFalse(
             publish_runtime_plugins.published_manifest_matches_catalog(
-                published, plugin, [target], 9
+                published,
+                published_index,
+                published_index_entry,
+                plugin,
+                [target],
+                10,
             )
         )
 
@@ -108,6 +122,7 @@ class PublishRuntimePluginsTests(unittest.TestCase):
         published = {
             "version": "0.1.1",
             "protocol_version": 8,
+            "sdk_build_fingerprint": "sdk123",
             "build_checksum": "abc123",
             "artifacts": {
                 "x86_64-unknown-linux-gnu": {
@@ -117,12 +132,18 @@ class PublishRuntimePluginsTests(unittest.TestCase):
         }
         plugin = {
             "package_version": "0.1.1",
+            "sdk_build_fingerprint": "sdk123",
             "checksum": "abc123",
         }
 
         self.assertFalse(
             publish_runtime_plugins.published_manifest_matches_catalog(
-                published, plugin, [target], 9
+                published,
+                {"sdk_build_fingerprint": "sdk123"},
+                {"sdk_build_fingerprint": "sdk123"},
+                plugin,
+                [target],
+                9,
             )
         )
 
@@ -136,6 +157,7 @@ class PublishRuntimePluginsTests(unittest.TestCase):
         published = {
             "version": "0.1.1",
             "protocol_version": 10,
+            "sdk_build_fingerprint": "sdk123",
             "build_checksum": "abc123",
             "artifacts": {
                 "x86_64-unknown-linux-gnu": {
@@ -145,12 +167,42 @@ class PublishRuntimePluginsTests(unittest.TestCase):
         }
         plugin = {
             "package_version": "0.1.1",
+            "sdk_build_fingerprint": "sdk123",
             "checksum": "abc123",
         }
 
         self.assertFalse(
             publish_runtime_plugins.published_manifest_matches_catalog(
-                published, plugin, [target], 9
+                published,
+                {"sdk_build_fingerprint": "sdk123"},
+                {"sdk_build_fingerprint": "sdk123"},
+                plugin,
+                [target],
+                10,
+            )
+        )
+
+    def test_published_manifest_requires_matching_sdk_build_metadata(self) -> None:
+        plugin = {
+            "package_version": "0.1.1",
+            "sdk_build_fingerprint": "current-sdk",
+            "checksum": "abc123",
+        }
+        published = {
+            "version": "0.1.1",
+            "protocol_version": 10,
+            "build_checksum": "abc123",
+            "artifacts": {},
+        }
+
+        self.assertFalse(
+            publish_runtime_plugins.published_manifest_matches_catalog(
+                published,
+                {},
+                {},
+                plugin,
+                [],
+                10,
             )
         )
 

@@ -21,6 +21,180 @@ class RuntimePluginCatalogTests(unittest.TestCase):
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(contents, encoding="utf-8")
 
+    def write_runtime_sdk_workspace(self, workspace: Path) -> None:
+        self.write_workspace_file(
+            workspace,
+            "Cargo.toml",
+            """[package]
+name = "skipprd"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+members = ["crates/skippr-core", "crates/skippr-runtime-sdk"]
+
+[workspace.dependencies]
+skippr-core = { path = "crates/skippr-core" }
+""",
+        )
+        self.write_workspace_file(workspace, "Cargo.lock", "version = 4\n")
+        self.write_workspace_file(
+            workspace,
+            "rust-toolchain.toml",
+            '[toolchain]\nchannel = "stable"\n',
+        )
+        self.write_workspace_file(
+            workspace,
+            ".cargo/config.toml",
+            "[build]\nincremental = false\n",
+        )
+        self.write_workspace_file(
+            workspace,
+            "crates/skippr-runtime-sdk/Cargo.toml",
+            """[package]
+name = "skippr-runtime-sdk"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+skippr-core.workspace = true
+""",
+        )
+        self.write_workspace_file(
+            workspace,
+            "crates/skippr-runtime-sdk/src/lib.rs",
+            "pub use skippr_core::runtime_plugins;\n",
+        )
+        self.write_workspace_file(
+            workspace,
+            "crates/skippr-core/Cargo.toml",
+            """[package]
+name = "skippr-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+skipprd = { path = "../.." }
+""",
+        )
+        self.write_workspace_file(
+            workspace,
+            "crates/skippr-core/src/lib.rs",
+            "pub use skipprd::*;\n",
+        )
+        self.write_workspace_file(
+            workspace,
+            "src/lib.rs",
+            "pub mod runtime_plugins;\n",
+        )
+        self.write_workspace_file(
+            workspace,
+            "src/runtime_plugins/mod.rs",
+            "pub mod protocol;\n",
+        )
+        self.write_workspace_file(
+            workspace,
+            "src/runtime_plugins/protocol.rs",
+            "pub const RUNTIME_PROTOCOL_VERSION: u32 = 16;\n",
+        )
+
+    def test_runtime_sdk_build_fingerprint_is_workspace_location_independent(self) -> None:
+        with tempfile.TemporaryDirectory() as first_dir, tempfile.TemporaryDirectory() as second_dir:
+            first_workspace = Path(first_dir)
+            second_workspace = Path(second_dir)
+            self.write_runtime_sdk_workspace(first_workspace)
+            self.write_runtime_sdk_workspace(second_workspace)
+            self.write_workspace_file(
+                second_workspace,
+                "docs/untracked-note.md",
+                "unrelated workspace dirtiness\n",
+            )
+            (
+                second_workspace
+                / "crates"
+                / "skippr-runtime-sdk"
+                / "src"
+                / "lib.rs"
+            ).touch()
+
+            first = runtime_plugin_catalog.workspace_runtime_sdk_build_fingerprint(
+                first_workspace
+            )
+            second = runtime_plugin_catalog.workspace_runtime_sdk_build_fingerprint(
+                second_workspace
+            )
+
+            self.assertEqual(first, second)
+            self.assertEqual(len(first), 64)
+
+    def test_runtime_sdk_build_fingerprint_changes_with_sdk_source(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            self.write_runtime_sdk_workspace(workspace)
+            initial = runtime_plugin_catalog.workspace_runtime_sdk_build_fingerprint(
+                workspace
+            )
+
+            self.write_workspace_file(
+                workspace,
+                "crates/skippr-runtime-sdk/src/lib.rs",
+                "pub fn changed_sdk_runtime() {}\n",
+            )
+
+            self.assertNotEqual(
+                initial,
+                runtime_plugin_catalog.workspace_runtime_sdk_build_fingerprint(
+                    workspace
+                ),
+            )
+
+    def test_runtime_sdk_build_fingerprint_changes_with_transitive_core_source(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            self.write_runtime_sdk_workspace(workspace)
+            initial = runtime_plugin_catalog.workspace_runtime_sdk_build_fingerprint(
+                workspace
+            )
+
+            self.write_workspace_file(
+                workspace,
+                "crates/skippr-core/src/lib.rs",
+                "pub fn changed_core_contract() {}\n",
+            )
+
+            self.assertNotEqual(
+                initial,
+                runtime_plugin_catalog.workspace_runtime_sdk_build_fingerprint(
+                    workspace
+                ),
+            )
+
+    def test_runtime_sdk_build_fingerprint_changes_with_host_protocol_source(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            workspace = Path(tmp_dir)
+            self.write_runtime_sdk_workspace(workspace)
+            initial = runtime_plugin_catalog.workspace_runtime_sdk_build_fingerprint(
+                workspace
+            )
+
+            self.write_workspace_file(
+                workspace,
+                "src/runtime_plugins/protocol.rs",
+                "pub const RUNTIME_PROTOCOL_VERSION: u32 = 16;\n"
+                "pub struct ChangedFrame;\n",
+            )
+
+            self.assertNotEqual(
+                initial,
+                runtime_plugin_catalog.workspace_runtime_sdk_build_fingerprint(
+                    workspace
+                ),
+            )
+
     def test_package_build_checksum_changes_when_shared_code_changes(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
@@ -262,6 +436,7 @@ class RuntimePluginCatalogTests(unittest.TestCase):
             "manifest_kind": "DataSource",
             "plugin_name": "S3",
             "package_version": "0.1.2",
+            "sdk_build_fingerprint": "sdk123",
             "config_schema_version": 1,
             "args": [],
             "supports_schema": False,
@@ -290,9 +465,55 @@ class RuntimePluginCatalogTests(unittest.TestCase):
         self.assertEqual(manifest["plugin_name"], "S3")
         self.assertEqual(manifest["version"], "0.1.2")
         self.assertEqual(manifest["protocol_version"], 3)
+        self.assertEqual(manifest["sdk_build_fingerprint"], "sdk123")
         self.assertEqual(manifest["build_checksum"], "abc123")
         self.assertIn("source_capability", manifest)
         self.assertNotIn("sink_capability", manifest)
+
+    def test_sdk_build_fingerprint_validation_rejects_stale_manifest_and_index(
+        self,
+    ) -> None:
+        catalog_entry = {
+            "manifest_filename": "s3-source.json",
+            "sdk_build_fingerprint": "current-sdk",
+        }
+        with self.assertRaises(SystemExit):
+            runtime_plugin_catalog.validate_manifest_sdk_build_fingerprint(
+                {"sdk_build_fingerprint": "stale-sdk"},
+                catalog_entry,
+                "s3-source.json",
+            )
+        with self.assertRaises(SystemExit):
+            runtime_plugin_catalog.validate_manifest_index_sdk_build_fingerprint(
+                {
+                    "sdk_build_fingerprint": "current-sdk",
+                    "manifests": [
+                        {
+                            "manifest_filename": "s3-source.json",
+                            "sdk_build_fingerprint": "stale-sdk",
+                        }
+                    ],
+                },
+                [catalog_entry],
+            )
+
+        runtime_plugin_catalog.validate_manifest_sdk_build_fingerprint(
+            {"sdk_build_fingerprint": "current-sdk"},
+            catalog_entry,
+            "s3-source.json",
+        )
+        runtime_plugin_catalog.validate_manifest_index_sdk_build_fingerprint(
+            {
+                "sdk_build_fingerprint": "current-sdk",
+                "manifests": [
+                    {
+                        "manifest_filename": "s3-source.json",
+                        "sdk_build_fingerprint": "current-sdk",
+                    }
+                ],
+            },
+            [catalog_entry],
+        )
 
     def test_workspace_runtime_protocol_version_uses_current_runtime_plugin_location(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

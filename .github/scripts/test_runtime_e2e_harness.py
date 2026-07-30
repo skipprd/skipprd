@@ -668,6 +668,7 @@ schema_sinks:
                 payload={
                     "version": "0.1.1",
                     "protocol_version": 2,
+                    "sdk_build_fingerprint": "current-sdk",
                     "build_checksum": "stale-checksum",
                     "artifacts": {},
                 },
@@ -681,6 +682,7 @@ schema_sinks:
             catalog_by_manifest={
                 "athena-sink.json": {
                     "package_version": "0.1.1",
+                        "sdk_build_fingerprint": "current-sdk",
                     "checksum": "fresh-checksum",
                 }
             },
@@ -689,6 +691,38 @@ schema_sinks:
             target=target,
             download_dir=Path("/tmp"),
         )
+
+    def test_verify_runtime_release_artifacts_rejects_sdk_build_drift(self) -> None:
+        target = runtime_e2e_harness.published_target_for_architecture_name("linux_x86")
+        manifests = {
+            "athena-sink.json": runtime_e2e_harness.DownloadedRuntimeManifest(
+                path=Path("/tmp/athena-sink.json"),
+                payload={
+                    "version": "0.1.1",
+                    "protocol_version": 2,
+                    "sdk_build_fingerprint": "stale-sdk",
+                    "artifacts": {},
+                },
+            )
+        }
+
+        with self.assertRaises(runtime_e2e_harness.HarnessError):
+            runtime_e2e_harness.verify_runtime_release_artifacts(
+                manifests,
+                source_manifests=set(),
+                full_download_manifests=set(),
+                catalog_by_manifest={
+                    "athena-sink.json": {
+                        "package_version": "0.1.1",
+                        "sdk_build_fingerprint": "current-sdk",
+                        "checksum": "checksum",
+                    }
+                },
+                expected_versions_by_manifest=None,
+                expected_protocol_version=2,
+                target=target,
+                download_dir=Path("/tmp"),
+            )
 
     def test_public_release_base_url_prefers_install_site(self) -> None:
         self.assertEqual(

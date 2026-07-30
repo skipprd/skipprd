@@ -94,11 +94,21 @@ def published_artifacts_with_stale_build_environment(
 
 
 def published_manifest_matches_catalog(
-    published: dict, plugin: dict, publish_targets: list, protocol_version: int
+    published: dict,
+    published_index: dict,
+    published_index_entry: dict,
+    plugin: dict,
+    publish_targets: list,
+    protocol_version: int,
 ) -> bool:
+    sdk_build_fingerprint = plugin["sdk_build_fingerprint"]
     return (
         published.get("version") == plugin["package_version"]
         and published.get("protocol_version") == protocol_version
+        and published.get("sdk_build_fingerprint") == sdk_build_fingerprint
+        and published_index.get("sdk_build_fingerprint") == sdk_build_fingerprint
+        and published_index_entry.get("sdk_build_fingerprint")
+        == sdk_build_fingerprint
         and published.get("build_checksum") == plugin["checksum"]
         and not published_artifacts_with_stale_build_environment(
             published, publish_targets
@@ -106,22 +116,45 @@ def published_manifest_matches_catalog(
     )
 
 
-def main() -> int:
-    parser = argparse.ArgumentParser(
-        description="Plan which runtime plugin packages should be rebuilt for a release"
+def stale_sdk_build_metadata_reason(
+    published: dict,
+    published_index: dict,
+    published_index_entry: dict,
+    plugin: dict,
+) -> str | None:
+    expected = plugin["sdk_build_fingerprint"]
+    stale_locations = [
+        location
+        for location, actual in (
+            ("published manifest", published.get("sdk_build_fingerprint")),
+            ("manifest index", published_index.get("sdk_build_fingerprint")),
+            (
+                "manifest index entry",
+                published_index_entry.get("sdk_build_fingerprint"),
+            ),
+        )
+        if actual != expected
+    ]
+    if not stale_locations:
+        return None
+    return (
+        "runtime SDK build fingerprint changed or is missing in "
+        + ", ".join(stale_locations)
     )
-    parser.add_argument("--workspace", required=True)
-    parser.add_argument("--published-index-url", default=DEFAULT_PUBLISHED_INDEX_URL)
-    args = parser.parse_args()
 
-    workspace = Path(args.workspace).resolve()
-    catalog = load_workspace_plugin_catalog(workspace)
-    publish_targets = published_runtime_plugin_targets(workspace)
-    protocol_version = workspace_runtime_protocol_version(workspace)
-    _published_index, published_manifests = load_latest_published_manifests(
-        args.published_index_url
-    )
 
+def plan_runtime_plugin_release(
+    catalog: list[dict],
+    publish_targets: list,
+    protocol_version: int,
+    published_index: dict,
+    published_manifests: dict[str, dict],
+) -> dict:
+    published_index_entries = {
+        entry.get("manifest_filename"): entry
+        for entry in published_index.get("manifests", [])
+        if isinstance(entry, dict) and entry.get("manifest_filename")
+    }
     selected = []
     decision_reasons = {}
     for plugin in catalog:
@@ -150,6 +183,17 @@ def main() -> int:
             )
             continue
 
+        sdk_build_reason = stale_sdk_build_metadata_reason(
+            published,
+            published_index,
+            published_index_entries.get(plugin["manifest_filename"], {}),
+            plugin,
+        )
+        if sdk_build_reason is not None:
+            selected.append(plugin["package_name"])
+            decision_reasons[plugin["package_name"]] = sdk_build_reason
+            continue
+
         if published_checksum != plugin["checksum"]:
             selected.append(plugin["package_name"])
             decision_reasons[plugin["package_name"]] = (
@@ -174,24 +218,46 @@ def main() -> int:
     elif not selected:
         reason = (
             "all runtime plugins already published at matching version, protocol, "
-            "build checksum, and build environment"
+            "SDK build fingerprint, build checksum, and build environment"
         )
     else:
         reason = (
             "build runtime plugins whose published version, protocol, "
-            "build checksum, or build environment is stale"
+            "SDK build fingerprint, build checksum, or build environment is stale"
         )
 
-    json.dump(
-        {
-            "build_all": build_all,
-            "packages": selected,
-            "reason": reason,
-            "package_reasons": decision_reasons,
-        },
-        sys.stdout,
-        indent=2,
+    return {
+        "build_all": build_all,
+        "packages": selected,
+        "reason": reason,
+        "package_reasons": decision_reasons,
+    }
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser(
+        description="Plan which runtime plugin packages should be rebuilt for a release"
     )
+    parser.add_argument("--workspace", required=True)
+    parser.add_argument("--published-index-url", default=DEFAULT_PUBLISHED_INDEX_URL)
+    args = parser.parse_args()
+
+    workspace = Path(args.workspace).resolve()
+    catalog = load_workspace_plugin_catalog(workspace)
+    publish_targets = published_runtime_plugin_targets(workspace)
+    protocol_version = workspace_runtime_protocol_version(workspace)
+    published_index, published_manifests = load_latest_published_manifests(
+        args.published_index_url
+    )
+    plan = plan_runtime_plugin_release(
+        catalog,
+        publish_targets,
+        protocol_version,
+        published_index,
+        published_manifests,
+    )
+
+    json.dump(plan, sys.stdout, indent=2)
     sys.stdout.write("\n")
     return 0
 

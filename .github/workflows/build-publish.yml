@@ -1049,6 +1049,8 @@ jobs:
           sys.path.insert(0, str((workspace / ".github" / "scripts").resolve()))
           from runtime_plugin_catalog import (
               load_workspace_plugin_catalog,
+              validate_manifest_index_sdk_build_fingerprint,
+              validate_manifest_sdk_build_fingerprint,
               versioned_manifest_relative_path,
               workspace_runtime_protocol_version,
           )
@@ -1068,6 +1070,9 @@ jobs:
 
           expected_protocol_version = workspace_runtime_protocol_version(workspace)
           mismatches = []
+          catalog_by_manifest = {
+              entry["manifest_filename"]: entry for entry in catalog_entries
+          }
           for path in manifest_paths:
               payload = json.loads(path.read_text(encoding="utf-8"))
               actual = payload.get("protocol_version")
@@ -1075,6 +1080,9 @@ jobs:
                   mismatches.append(
                       f"{path.name}: expected protocol_version {expected_protocol_version}, got {actual}"
                   )
+              validate_manifest_sdk_build_fingerprint(
+                  payload, catalog_by_manifest[path.name], path.name
+              )
 
           if mismatches:
               raise SystemExit(
@@ -1098,6 +1106,9 @@ jobs:
                   "latest manifest index does not match the workspace catalog:\n"
                   f"expected={expected_filenames}\nactual={indexed_filenames}"
               )
+          validate_manifest_index_sdk_build_fingerprint(
+              latest_index, catalog_entries
+          )
           PY
 
       - name: Configure Cloudflare R2 credentials for runtime plugin upload

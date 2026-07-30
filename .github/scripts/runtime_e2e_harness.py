@@ -21,8 +21,10 @@ from pathlib import Path
 from typing import Callable
 
 from runtime_plugin_catalog import (
+    catalog_sdk_build_fingerprint,
     load_workspace_plugin_catalog,
     manifest_payload_for_catalog_entry,
+    validate_manifest_index_sdk_build_fingerprint,
     versioned_manifest_relative_path,
     workspace_runtime_protocol_version,
 )
@@ -1283,6 +1285,15 @@ def verify_runtime_release_artifacts(
                 f"manifest {manifest_filename} declares protocol version {actual_protocol!r}, "
                 f"expected {expected_protocol_version!r}"
             )
+        if expected_version == expected_metadata["package_version"]:
+            expected_sdk_build = expected_metadata["sdk_build_fingerprint"]
+            actual_sdk_build = downloaded.payload.get("sdk_build_fingerprint")
+            if actual_sdk_build != expected_sdk_build:
+                raise HarnessError(
+                    f"manifest {manifest_filename} declares SDK build fingerprint "
+                    f"{actual_sdk_build or '<missing>'!r}, expected "
+                    f"{expected_sdk_build!r}"
+                )
         artifact = resolve_target_artifact(downloaded.payload.get("artifacts", {}), target)
         if not artifact:
             if manifest_filename in source_manifests or manifest_filename in full_download_manifests:
@@ -1444,12 +1455,14 @@ def stage_local_runtime_release(
                 "plugin_name": manifest_payload["plugin_name"],
                 "kind": manifest_payload["kind"],
                 "manifest_filename": manifest_filename,
+                "sdk_build_fingerprint": metadata["sdk_build_fingerprint"],
                 "manifest_url": output_manifest_path.as_uri(),
             }
         )
 
     manifest_index = {
         "bundle_version": "local",
+        "sdk_build_fingerprint": catalog_sdk_build_fingerprint(catalog_entries),
         "manifests": manifest_index_entries,
     }
     latest_index_path = output_dir / "latest" / "manifest-index.json"
@@ -1907,6 +1920,12 @@ def run_runtime_plugin_acceptance(
     target = published_target_for_architecture_name(architecture_name)
     full_download_manifests = set(runtime_full_download_manifests(mode))
     latest_index = fetch_json_url(latest_index_url)
+    try:
+        validate_manifest_index_sdk_build_fingerprint(
+            latest_index, catalog_entries
+        )
+    except SystemExit as err:
+        raise HarnessError(f"latest runtime plugin manifest index is stale: {err}") from err
     latest_entries_by_manifest = {
         entry["manifest_filename"]: entry
         for entry in latest_index.get("manifests", [])

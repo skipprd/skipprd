@@ -42,6 +42,17 @@ RUNTIME_PROTOCOL_VERSION_CANDIDATES = (
     Path("crates/skippr-runtime-sdk/src/protocol.rs"),
     Path("crates/skippr-core/src/runtime_plugins/protocol.rs"),
 )
+RUNTIME_SDK_MANIFEST = Path("crates/skippr-runtime-sdk/Cargo.toml")
+RUNTIME_SDK_FINGERPRINT_SCHEME = "skippr-runtime-sdk-build-v1"
+RUNTIME_SDK_GLOBAL_BUILD_INPUTS = (
+    Path("Cargo.toml"),
+    Path("Cargo.lock"),
+    Path(".cargo/config"),
+    Path(".cargo/config.toml"),
+    Path("rust-toolchain"),
+    Path("rust-toolchain.toml"),
+)
+CARGO_BUILD_DEPENDENCY_TABLES = ("dependencies", "build-dependencies")
 SHARED_PLUGIN_DIR = Path("plugins/shared")
 RUNTIME_PLUGIN_BUILD_INPUTS = (
     Path("Cargo.lock"),
@@ -171,6 +182,161 @@ def combined_checksum(entries: list[tuple[str, str]]) -> str:
         digest.update(value.encode("utf-8"))
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def cargo_build_dependency_specs(document: dict) -> list[tuple[str, object]]:
+    dependencies: list[tuple[str, object]] = []
+    for table_name in CARGO_BUILD_DEPENDENCY_TABLES:
+        table = document.get(table_name, {})
+        if isinstance(table, dict):
+            dependencies.extend(table.items())
+
+    target_tables = document.get("target", {})
+    if isinstance(target_tables, dict):
+        for target_table in target_tables.values():
+            if not isinstance(target_table, dict):
+                continue
+            for table_name in CARGO_BUILD_DEPENDENCY_TABLES:
+                table = target_table.get(table_name, {})
+                if isinstance(table, dict):
+                    dependencies.extend(table.items())
+    return dependencies
+
+
+def local_dependency_manifest_paths(
+    manifest_path: Path,
+    document: dict,
+    *,
+    workspace: Path,
+    workspace_document: dict,
+) -> list[Path]:
+    workspace_dependencies = workspace_document.get("workspace", {}).get(
+        "dependencies", {}
+    )
+    if not isinstance(workspace_dependencies, dict):
+        workspace_dependencies = {}
+
+    manifests = []
+    for dependency_name, raw_spec in cargo_build_dependency_specs(document):
+        if not isinstance(raw_spec, dict):
+            continue
+
+        dependency_spec = raw_spec
+        dependency_base = manifest_path.parent
+        if raw_spec.get("workspace") is True:
+            workspace_spec = workspace_dependencies.get(dependency_name)
+            if not isinstance(workspace_spec, dict):
+                continue
+            dependency_spec = workspace_spec
+            dependency_base = workspace
+
+        if dependency_spec.get("optional") is True:
+            continue
+        dependency_path = dependency_spec.get("path")
+        if not isinstance(dependency_path, str) or not dependency_path.strip():
+            continue
+
+        dependency_dir = (dependency_base / dependency_path).resolve()
+        dependency_manifest = (
+            dependency_dir
+            if dependency_dir.name == "Cargo.toml"
+            else dependency_dir / "Cargo.toml"
+        )
+        if not dependency_manifest.is_file():
+            raise SystemExit(
+                "runtime SDK local dependency is missing Cargo.toml: "
+                f"{dependency_manifest}"
+            )
+        try:
+            dependency_manifest.relative_to(workspace)
+        except ValueError as err:
+            raise SystemExit(
+                "runtime SDK local dependency must remain inside the workspace: "
+                f"{dependency_manifest}"
+            ) from err
+        manifests.append(dependency_manifest)
+    return sorted(set(manifests))
+
+
+def cargo_package_build_input_paths(manifest_path: Path) -> list[Path]:
+    package_dir = manifest_path.parent
+    document = load_toml_document(manifest_path)
+    inputs = [manifest_path]
+
+    source_dir = package_dir / "src"
+    if source_dir.is_dir():
+        inputs.append(source_dir)
+
+    lib_section = document.get("lib", {})
+    if isinstance(lib_section, dict):
+        lib_path = lib_section.get("path")
+        if isinstance(lib_path, str) and lib_path.strip():
+            resolved_lib_path = (package_dir / lib_path).resolve()
+            if resolved_lib_path.exists() and (
+                not source_dir.is_dir()
+                or not resolved_lib_path.is_relative_to(source_dir)
+            ):
+                inputs.append(resolved_lib_path)
+
+    package_section = document.get("package", {})
+    if isinstance(package_section, dict):
+        build_path = package_section.get("build", "build.rs")
+        if isinstance(build_path, str) and build_path.strip():
+            resolved_build_path = (package_dir / build_path).resolve()
+            if resolved_build_path.is_file():
+                inputs.append(resolved_build_path)
+
+    return sorted(set(inputs))
+
+
+def runtime_sdk_build_input_paths(workspace: Path) -> list[Path]:
+    workspace = workspace.resolve()
+    workspace_manifest = workspace / "Cargo.toml"
+    sdk_manifest = workspace / RUNTIME_SDK_MANIFEST
+    if not workspace_manifest.is_file():
+        raise SystemExit(f"workspace is missing Cargo.toml: {workspace_manifest}")
+    if not sdk_manifest.is_file():
+        raise SystemExit(f"workspace is missing runtime SDK manifest: {sdk_manifest}")
+
+    workspace_document = load_toml_document(workspace_manifest)
+    inputs = [
+        workspace / relative_path
+        for relative_path in RUNTIME_SDK_GLOBAL_BUILD_INPUTS
+        if (workspace / relative_path).exists()
+    ]
+    pending = [sdk_manifest.resolve()]
+    visited: set[Path] = set()
+
+    while pending:
+        manifest_path = pending.pop()
+        if manifest_path in visited:
+            continue
+        visited.add(manifest_path)
+        document = load_toml_document(manifest_path)
+        inputs.extend(cargo_package_build_input_paths(manifest_path))
+        pending.extend(
+            local_dependency_manifest_paths(
+                manifest_path,
+                document,
+                workspace=workspace,
+                workspace_document=workspace_document,
+            )
+        )
+
+    return sorted(set(path.resolve() for path in inputs))
+
+
+def workspace_runtime_sdk_build_fingerprint(workspace: Path) -> str:
+    workspace = workspace.resolve()
+    entries = [("fingerprint_scheme", RUNTIME_SDK_FINGERPRINT_SCHEME)]
+    for path in runtime_sdk_build_input_paths(workspace):
+        entries.append(
+            (
+                path.relative_to(workspace).as_posix(),
+                path_checksum(path),
+            )
+        )
+    return combined_checksum(entries)
 
 
 def package_build_checksum(
@@ -436,6 +602,7 @@ def manifest_payload_for_catalog_entry(
         "plugin_name": entry["plugin_name"],
         "version": entry["package_version"],
         "protocol_version": protocol_version,
+        "sdk_build_fingerprint": entry["sdk_build_fingerprint"],
         "config_schema_version": entry["config_schema_version"],
         "artifacts": artifacts,
         "args": list(entry["args"]),
@@ -452,9 +619,68 @@ def manifest_payload_for_catalog_entry(
     return manifest
 
 
+def catalog_sdk_build_fingerprint(catalog_entries: list[dict]) -> str:
+    fingerprints = {
+        entry.get("sdk_build_fingerprint")
+        for entry in catalog_entries
+        if entry.get("sdk_build_fingerprint")
+    }
+    if len(fingerprints) != 1 or any(
+        not entry.get("sdk_build_fingerprint") for entry in catalog_entries
+    ):
+        raise SystemExit(
+            "runtime plugin catalog must contain one shared SDK build fingerprint"
+        )
+    return next(iter(fingerprints))
+
+
+def validate_manifest_sdk_build_fingerprint(
+    manifest: dict, catalog_entry: dict, manifest_filename: str
+) -> None:
+    expected = catalog_entry["sdk_build_fingerprint"]
+    actual = manifest.get("sdk_build_fingerprint")
+    if actual != expected:
+        raise SystemExit(
+            f"{manifest_filename}: expected sdk_build_fingerprint {expected}, got "
+            f"{actual or '<missing>'}"
+        )
+
+
+def validate_manifest_index_sdk_build_fingerprint(
+    manifest_index: dict, catalog_entries: list[dict]
+) -> None:
+    expected = catalog_sdk_build_fingerprint(catalog_entries)
+    actual = manifest_index.get("sdk_build_fingerprint")
+    if actual != expected:
+        raise SystemExit(
+            "manifest index: expected sdk_build_fingerprint "
+            f"{expected}, got {actual or '<missing>'}"
+        )
+
+    indexed_entries = {
+        entry.get("manifest_filename"): entry
+        for entry in manifest_index.get("manifests", [])
+        if isinstance(entry, dict) and entry.get("manifest_filename")
+    }
+    for catalog_entry in catalog_entries:
+        manifest_filename = catalog_entry["manifest_filename"]
+        index_entry = indexed_entries.get(manifest_filename)
+        if index_entry is None:
+            raise SystemExit(
+                f"manifest index is missing runtime plugin {manifest_filename}"
+            )
+        actual = index_entry.get("sdk_build_fingerprint")
+        if actual != expected:
+            raise SystemExit(
+                f"manifest index entry {manifest_filename}: expected "
+                f"sdk_build_fingerprint {expected}, got {actual or '<missing>'}"
+            )
+
+
 def load_workspace_plugin_catalog(workspace: Path) -> list[dict]:
     packages = load_plugin_packages(workspace)
     packages_by_name = {package["name"]: package for package in packages}
+    sdk_build_fingerprint = workspace_runtime_sdk_build_fingerprint(workspace)
     catalog = []
 
     for package in packages:
@@ -483,6 +709,7 @@ def load_workspace_plugin_catalog(workspace: Path) -> list[dict]:
                 "package_name": package["name"],
                 "package_dir": relative_dir,
                 "package_version": package["version"],
+                "sdk_build_fingerprint": sdk_build_fingerprint,
                 "checksum": package_build_checksum(
                     manifest_path.parent,
                     workspace,

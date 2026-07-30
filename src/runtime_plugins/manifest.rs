@@ -31,6 +31,8 @@ pub struct RuntimePluginManifest {
     pub version: String,
     #[serde(default = "default_protocol_version")]
     pub protocol_version: u32,
+    #[serde(default)]
+    pub sdk_build_fingerprint: Option<String>,
     #[serde(default = "default_config_schema_version")]
     pub config_schema_version: u32,
     #[serde(default)]
@@ -192,6 +194,7 @@ mod tests {
             plugin_name: "Athena".to_string(),
             version: "0.1.1".to_string(),
             protocol_version: RUNTIME_PROTOCOL_VERSION,
+            sdk_build_fingerprint: None,
             config_schema_version: 1,
             install_root: None,
             executable: Some("skippr-plugin-data-sink-athena".to_string()),
@@ -221,5 +224,19 @@ mod tests {
             .artifact_for_current_target()
             .expect("legacy darwin alias should resolve on macOS arm64");
         assert_eq!(artifact.executable, "skippr-plugin-data-sink-athena");
+    }
+
+    #[test]
+    fn legacy_manifest_without_sdk_build_fingerprint_remains_readable() {
+        let manifest: RuntimePluginManifest = serde_json::from_value(serde_json::json!({
+            "name": "athena-runtime-sink",
+            "kind": "DataSink",
+            "plugin_name": "Athena",
+            "version": "0.1.9",
+            "protocol_version": RUNTIME_PROTOCOL_VERSION
+        }))
+        .expect("legacy runtime plugin manifest should deserialize");
+
+        assert_eq!(manifest.sdk_build_fingerprint, None);
     }
 }
