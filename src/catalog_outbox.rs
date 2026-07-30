@@ -18,6 +18,12 @@ pub struct CatalogOutboxPersistSummary {
     pub updated: usize,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ConditionalMutationResult {
+    Applied,
+    Stale,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct PendingCatalogIntent {
     pub id: String,
@@ -128,32 +134,71 @@ impl CatalogOutbox {
         Ok(pending)
     }
 
-    pub fn mark_delivered(&self, id: &str) -> io::Result<()> {
+    pub fn scan_eligible_pending(
+        &self,
+        now_ms: u64,
+        limit: usize,
+    ) -> io::Result<Vec<PendingCatalogIntent>> {
+        let mut pending = Vec::with_capacity(limit.min(1_024));
+        for entry in fs::read_dir(&self.pending_dir)? {
+            let path = entry?.path();
+            if path.extension().is_none_or(|ext| ext != "json") {
+                continue;
+            }
+            let entry = read_entry(&path)?;
+            if pending.len() < limit && !entry.terminal && entry.next_attempt_at_ms <= now_ms {
+                pending.push(entry);
+            }
+        }
+        Ok(pending)
+    }
+
+    pub fn mark_delivered_if(
+        &self,
+        expected: &PendingCatalogIntent,
+    ) -> io::Result<ConditionalMutationResult> {
         let _guard = self
             .mutation_lock
             .lock()
             .expect("catalog outbox mutation lock poisoned");
-        let path = self.entry_path(id);
-        match fs::remove_file(&path) {
-            Ok(()) => sync_directory(&self.pending_dir),
-            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(err),
+        let path = self.entry_path(&expected.id);
+        let current = match read_entry(&path) {
+            Ok(current) => current,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Ok(ConditionalMutationResult::Stale)
+            }
+            Err(err) => return Err(err),
+        };
+        if current != *expected {
+            return Ok(ConditionalMutationResult::Stale);
         }
+        fs::remove_file(&path)?;
+        sync_directory(&self.pending_dir)?;
+        Ok(ConditionalMutationResult::Applied)
     }
 
-    pub fn record_failure(
+    pub fn record_failure_if(
         &self,
-        id: &str,
+        expected: &PendingCatalogIntent,
         error: impl Into<String>,
         retry_after: Option<Duration>,
         terminal: bool,
-    ) -> io::Result<()> {
+    ) -> io::Result<ConditionalMutationResult> {
         let _guard = self
             .mutation_lock
             .lock()
             .expect("catalog outbox mutation lock poisoned");
-        let path = self.entry_path(id);
-        let mut entry = read_entry(&path)?;
+        let path = self.entry_path(&expected.id);
+        let mut entry = match read_entry(&path) {
+            Ok(entry) => entry,
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {
+                return Ok(ConditionalMutationResult::Stale)
+            }
+            Err(err) => return Err(err),
+        };
+        if entry != *expected {
+            return Ok(ConditionalMutationResult::Stale);
+        }
         entry.attempts = entry.attempts.saturating_add(1);
         entry.updated_at_ms = now_ms();
         entry.next_attempt_at_ms = retry_after
@@ -161,7 +206,8 @@ impl CatalogOutbox {
             .unwrap_or(0);
         entry.last_error = Some(error.into());
         entry.terminal = terminal;
-        write_entry_atomic(&path, &entry)
+        write_entry_atomic(&path, &entry)?;
+        Ok(ConditionalMutationResult::Applied)
     }
 
     fn entry_path(&self, id: &str) -> PathBuf {
@@ -223,6 +269,7 @@ fn read_entry(path: &Path) -> io::Result<PendingCatalogIntent> {
     if envelope.version != CATALOG_OUTBOX_FORMAT_VERSION
         || checksum(&envelope.entry)? != envelope.checksum_sha256
         || stable_intent_id(&envelope.entry.intent.identity)? != envelope.entry.id
+        || path.file_stem().and_then(|stem| stem.to_str()) != Some(envelope.entry.id.as_str())
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -275,17 +322,21 @@ mod tests {
     use super::*;
     use crate::runtime_plugins::protocol::{CatalogIntentKind, CATALOG_INTENT_VERSION};
 
-    fn intent(location: &str) -> CatalogIntent {
+    fn intent_for(key: &str, location: &str) -> CatalogIntent {
         CatalogIntent {
             version: CATALOG_INTENT_VERSION,
             identity: CatalogIntentIdentity {
                 sink_ref: "primary".into(),
                 namespace: "events".into(),
                 kind: CatalogIntentKind::UpsertPartition,
-                key: "day=2026-07-30".into(),
+                key: key.into(),
             },
             payload_json: serde_json::json!({ "location": location }).to_string(),
         }
+    }
+
+    fn intent(location: &str) -> CatalogIntent {
+        intent_for("day=2026-07-30", location)
     }
 
     #[test]
@@ -305,9 +356,9 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let outbox = CatalogOutbox::open(temp.path()).unwrap();
         outbox.persist(&[intent("s3://a")]).unwrap();
-        let id = outbox.scan_pending(1).unwrap()[0].id.clone();
+        let pending = outbox.scan_pending(1).unwrap()[0].clone();
         outbox
-            .record_failure(&id, "throttled", Some(Duration::from_secs(1)), false)
+            .record_failure_if(&pending, "throttled", Some(Duration::from_secs(1)), false)
             .unwrap();
         let recovered = CatalogOutbox::open(temp.path())
             .unwrap()
@@ -325,5 +376,91 @@ mod tests {
         fs::write(outbox.pending_dir().join("corrupt.json"), b"not-json").unwrap();
         let err = CatalogOutbox::open(temp.path()).unwrap_err();
         assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn stale_delivery_does_not_delete_changed_location() {
+        let temp = tempfile::tempdir().unwrap();
+        let outbox = CatalogOutbox::open(temp.path()).unwrap();
+        outbox.persist(&[intent("s3://a")]).unwrap();
+        let scanned = outbox.scan_pending(1).unwrap().remove(0);
+        outbox.persist(&[intent("s3://b")]).unwrap();
+
+        assert_eq!(
+            outbox.mark_delivered_if(&scanned).unwrap(),
+            ConditionalMutationResult::Stale
+        );
+        let current = outbox.scan_pending(1).unwrap().remove(0);
+        assert!(current.intent.payload_json.contains("s3://b"));
+    }
+
+    #[test]
+    fn stale_failure_does_not_mutate_changed_location() {
+        let temp = tempfile::tempdir().unwrap();
+        let outbox = CatalogOutbox::open(temp.path()).unwrap();
+        outbox.persist(&[intent("s3://a")]).unwrap();
+        let scanned = outbox.scan_pending(1).unwrap().remove(0);
+        outbox.persist(&[intent("s3://b")]).unwrap();
+
+        assert_eq!(
+            outbox
+                .record_failure_if(&scanned, "stale failure", None, true)
+                .unwrap(),
+            ConditionalMutationResult::Stale
+        );
+        let current = outbox.scan_pending(1).unwrap().remove(0);
+        assert!(current.intent.payload_json.contains("s3://b"));
+        assert_eq!(current.attempts, 0);
+        assert_eq!(current.last_error, None);
+        assert!(!current.terminal);
+    }
+
+    #[test]
+    fn eligible_scan_skips_terminal_and_future_entries_without_spending_limit() {
+        let temp = tempfile::tempdir().unwrap();
+        let outbox = CatalogOutbox::open(temp.path()).unwrap();
+        let intents = (0..5)
+            .map(|index| intent_for(&format!("day={index}"), &format!("s3://{index}")))
+            .collect::<Vec<_>>();
+        outbox.persist(&intents).unwrap();
+        let mut entries = outbox.scan_pending(10).unwrap();
+        entries.sort_by(|left, right| left.intent.identity.key.cmp(&right.intent.identity.key));
+        for entry in entries.iter().take(2) {
+            outbox
+                .record_failure_if(entry, "terminal", None, true)
+                .unwrap();
+        }
+        outbox
+            .record_failure_if(
+                &entries[2],
+                "future",
+                Some(Duration::from_secs(3_600)),
+                false,
+            )
+            .unwrap();
+
+        let eligible = outbox.scan_eligible_pending(now_ms(), 2).unwrap();
+        assert_eq!(eligible.len(), 2);
+        assert!(eligible
+            .iter()
+            .all(|entry| { matches!(entry.intent.identity.key.as_str(), "day=3" | "day=4") }));
+    }
+
+    #[test]
+    fn copied_envelope_under_wrong_filename_fails_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let outbox = CatalogOutbox::open(temp.path()).unwrap();
+        outbox.persist(&[intent("s3://a")]).unwrap();
+        let original = fs::read_dir(outbox.pending_dir())
+            .unwrap()
+            .next()
+            .unwrap()
+            .unwrap()
+            .path();
+        fs::copy(original, outbox.pending_dir().join("wrong-id.json")).unwrap();
+
+        let err = outbox.scan_eligible_pending(now_ms(), 1).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("identity validation"));
     }
 }

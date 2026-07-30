@@ -13,7 +13,7 @@ use rand::Rng;
 use serde::Deserialize;
 use tokio::sync::{Notify, Semaphore};
 
-use crate::catalog_outbox::{CatalogOutbox, PendingCatalogIntent};
+use crate::catalog_outbox::{CatalogOutbox, ConditionalMutationResult, PendingCatalogIntent};
 use crate::runtime_plugins::protocol::{CatalogIntent, CatalogIntentKind};
 
 const GLUE_BATCH_CREATE_LIMIT: usize = 100;
@@ -120,30 +120,25 @@ impl CatalogCoordinator {
     async fn drain_once(&self) -> io::Result<()> {
         let now = now_ms();
         let mut decoded = Vec::new();
-        for pending in self.outbox.scan_pending(RECOVERY_SCAN_LIMIT)? {
-            if pending.terminal || pending.next_attempt_at_ms > now {
-                continue;
-            }
+        for pending in self
+            .outbox
+            .scan_eligible_pending(now, RECOVERY_SCAN_LIMIT)?
+        {
             if pending.intent.identity.kind != CatalogIntentKind::UpsertPartition {
-                self.outbox.record_failure(
-                    &pending.id,
-                    "unsupported catalog intent kind",
-                    None,
-                    true,
-                )?;
-                crate::metrics::counters::add_catalog_terminal_failure(1);
+                self.record_terminal_invalid(&pending, "unsupported catalog intent kind")?;
                 continue;
             }
             let payload: GluePartitionCatalogIntentV1 =
-                serde_json::from_str(&pending.intent.payload_json).map_err(|err| {
-                    io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        format!(
-                            "invalid durable Glue partition intent '{}': {err}",
-                            pending.id
-                        ),
-                    )
-                })?;
+                match serde_json::from_str(&pending.intent.payload_json) {
+                    Ok(payload) => payload,
+                    Err(err) => {
+                        self.record_terminal_invalid(
+                            &pending,
+                            format!("invalid durable Glue partition intent payload: {err}"),
+                        )?;
+                        continue;
+                    }
+                };
             if payload.version != 1
                 || payload.database.trim().is_empty()
                 || payload.table.trim().is_empty()
@@ -151,13 +146,7 @@ impl CatalogCoordinator {
                 || payload.schema_namespace != pending.intent.identity.namespace
                 || payload.schema_version == 0
             {
-                self.outbox.record_failure(
-                    &pending.id,
-                    "terminal invalid Glue partition intent",
-                    None,
-                    true,
-                )?;
-                crate::metrics::counters::add_catalog_terminal_failure(1);
+                self.record_terminal_invalid(&pending, "terminal invalid Glue partition intent")?;
                 continue;
             }
             decoded.push(DecodedIntent { pending, payload });
@@ -233,7 +222,7 @@ impl CatalogCoordinator {
                         .and_then(|descriptor| descriptor.location())
                         .unwrap_or_default();
                     if current == intent.payload.location {
-                        self.outbox.mark_delivered(&intent.pending.id)?;
+                        self.outbox.mark_delivered_if(&intent.pending)?;
                     } else {
                         self.update_partition(
                             &client,
@@ -275,7 +264,7 @@ impl CatalogCoordinator {
             match create.send().await {
                 Ok(output) if output.errors().is_empty() => {
                     for intent in batch {
-                        self.outbox.mark_delivered(&intent.pending.id)?;
+                        self.outbox.mark_delivered_if(&intent.pending)?;
                     }
                     crate::metrics::counters::add_catalog_successful_batch(1);
                 }
@@ -384,8 +373,11 @@ impl CatalogCoordinator {
         }
         match update.send().await {
             Ok(_) => {
-                self.outbox.mark_delivered(&intent.pending.id)?;
-                crate::metrics::counters::add_catalog_location_update(1);
+                if self.outbox.mark_delivered_if(&intent.pending)?
+                    == ConditionalMutationResult::Applied
+                {
+                    crate::metrics::counters::add_catalog_location_update(1);
+                }
             }
             Err(err) => self.record_aws_failure(&intent.pending, err.to_string())?,
         }
@@ -395,11 +387,28 @@ impl CatalogCoordinator {
     fn record_aws_failure(&self, pending: &PendingCatalogIntent, error: String) -> io::Result<()> {
         let transient = is_transient(&error);
         let delay = transient.then(|| retry_delay(pending.attempts));
-        self.outbox
-            .record_failure(&pending.id, &error, delay, !transient)?;
-        if transient {
-            crate::metrics::counters::add_catalog_retry(1);
-        } else {
+        if self
+            .outbox
+            .record_failure_if(pending, &error, delay, !transient)?
+            == ConditionalMutationResult::Applied
+        {
+            if transient {
+                crate::metrics::counters::add_catalog_retry(1);
+            } else {
+                crate::metrics::counters::add_catalog_terminal_failure(1);
+            }
+        }
+        Ok(())
+    }
+
+    fn record_terminal_invalid(
+        &self,
+        pending: &PendingCatalogIntent,
+        error: impl Into<String>,
+    ) -> io::Result<()> {
+        if self.outbox.record_failure_if(pending, error, None, true)?
+            == ConditionalMutationResult::Applied
+        {
             crate::metrics::counters::add_catalog_terminal_failure(1);
         }
         Ok(())
@@ -525,6 +534,7 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime_plugins::protocol::{CatalogIntentIdentity, CATALOG_INTENT_VERSION};
 
     #[test]
     fn glue_batch_limit_and_backoff_are_bounded() {
@@ -534,5 +544,40 @@ mod tests {
         assert!(is_transient("AlreadyExistsException"));
         assert!(is_transient("EntityNotFoundException"));
         assert!(!is_transient("InvalidInputException"));
+    }
+
+    #[tokio::test]
+    async fn malformed_payload_is_marked_terminal_instead_of_bubbling() {
+        let temp = tempfile::tempdir().unwrap();
+        let coordinator = CatalogCoordinator {
+            outbox: Arc::new(CatalogOutbox::open(temp.path()).unwrap()),
+            notify: Notify::new(),
+            table_layout_cache: tokio::sync::RwLock::new(HashMap::new()),
+            worker_abort: std::sync::Mutex::new(None),
+        };
+        coordinator
+            .persist(&[CatalogIntent {
+                version: CATALOG_INTENT_VERSION,
+                identity: CatalogIntentIdentity {
+                    sink_ref: "primary".into(),
+                    namespace: "events".into(),
+                    kind: CatalogIntentKind::UpsertPartition,
+                    key: "[\"2026-07-30\"]".into(),
+                },
+                payload_json: "not-json".into(),
+            }])
+            .unwrap();
+
+        coordinator.drain_once().await.unwrap();
+
+        let pending = coordinator.outbox.scan_pending(10).unwrap();
+        assert_eq!(pending.len(), 1);
+        assert!(pending[0].terminal);
+        assert_eq!(pending[0].attempts, 1);
+        assert!(pending[0]
+            .last_error
+            .as_deref()
+            .unwrap()
+            .contains("invalid durable Glue partition intent payload"));
     }
 }
