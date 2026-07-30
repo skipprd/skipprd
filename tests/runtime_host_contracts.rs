@@ -1031,7 +1031,7 @@ async fn unrelated_schema_install_proceeds_during_multiplexed_apply() {
         "runtime_host_multiplex_unrelated_schema",
     )
     .await;
-    let namespaces = BTreeMap::from([("people".to_string(), sample_output_metadata())]);
+    let namespaces = BTreeMap::from([("accounts".to_string(), sample_output_metadata())]);
 
     let (apply, install) = tokio::join!(
         sink.sync(
