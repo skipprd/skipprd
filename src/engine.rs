@@ -1148,6 +1148,9 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
             finalising_started.elapsed()
         );
     }
+    info!("Finalising: draining schema sync worker");
+    Config::drain_schema_sync_worker();
+    info!("Finalising: schema sync worker drained");
     let catalog_drain_timeout = Duration::from_secs(
         Config::getenv("CATALOG_OUTBOX_DRAIN_TIMEOUT_SECONDS", "30")
             .parse::<u64>()
@@ -1164,9 +1167,6 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
         error!("{message}");
         finalization_error = Some(message);
     }
-    info!("Finalising: draining schema sync worker");
-    Config::drain_schema_sync_worker();
-    info!("Finalising: schema sync worker drained");
 
     if reporter.enabled() {
         reporter.complete("Finalising");
