@@ -350,6 +350,12 @@ pub enum CdcApplyBatchError {
         row: usize,
         available: usize,
     },
+    WarehouseStageLimit {
+        dialect: &'static str,
+        resource: &'static str,
+        actual: usize,
+        limit: usize,
+    },
 }
 
 impl std::fmt::Display for CdcApplyBatchError {
@@ -383,6 +389,15 @@ impl std::fmt::Display for CdcApplyBatchError {
             Self::MissingRowMetadata { row, available } => write!(
                 f,
                 "CDC row metadata missing at index {row} (have {available})"
+            ),
+            Self::WarehouseStageLimit {
+                dialect,
+                resource,
+                actual,
+                limit,
+            } => write!(
+                f,
+                "{dialect} CDC staging {resource} is {actual}; limit is {limit}"
             ),
         }
     }
@@ -440,6 +455,12 @@ impl CdcApplyBatch {
         }
 
         Ok(())
+    }
+}
+
+impl CdcApplyBatchError {
+    pub fn is_warehouse_stage_limit(&self) -> bool {
+        matches!(self, Self::WarehouseStageLimit { .. })
     }
 }
 
@@ -625,6 +646,15 @@ pub enum CdcWarehouseDialect {
     MotherDuck,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct WarehouseCdcLimits {
+    pub max_rows: usize,
+    pub max_load_rows: usize,
+    pub max_statement_bytes: usize,
+    pub max_total_encoded_bytes: usize,
+    pub max_statements: usize,
+}
+
 /// Set-based SQL for one bounded typed CDC batch. Setup statements create and
 /// bulk-fill connection-local staging tables. Apply statements must execute in
 /// one backend transaction. Cleanup is explicit on success; temporary-table
@@ -686,7 +716,7 @@ impl WarehouseBulkCdcSql {
     }
 }
 
-/// Build bounded native staging SQL and four set-based MERGEs:
+/// Build explicitly bounded staging SQL and four set-based MERGEs:
 /// target upserts, target deletes, tombstone advances, and stale-tombstone
 /// cleanup. The winner relation collapses duplicate keys by descending order
 /// token and ascending source ordinal, matching sequential equal-token
@@ -703,6 +733,8 @@ pub fn warehouse_bulk_cdc_sql(
     if batch.rows.is_empty() {
         return Err(CdcApplyBatchError::NoRows);
     }
+    let limits = dialect.staging_limits();
+    dialect.validate_stage_row_count(batch.rows.len())?;
 
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     dialect.hash(&mut hasher);
@@ -752,41 +784,64 @@ pub fn warehouse_bulk_cdc_sql(
         .chain(target_columns.iter().cloned())
         .collect::<Vec<_>>()
         .join(", ");
-    let load_rows = batch
-        .rows
-        .iter()
-        .map(|row| {
-            let mut values = vec![
-                row.metadata.source_ordinal.to_string(),
-                match row.metadata.mutation {
-                    CdcApplyMutation::Upsert => "0".to_string(),
-                    CdcApplyMutation::Delete => "1".to_string(),
-                },
-                dialect.binary_literal(&encode_hex_bytes(&row.metadata.order_token)),
-            ];
-            values.extend(
-                row.values
-                    .iter()
-                    .zip(batch.columns.iter())
-                    .map(|(value, column)| dialect.value_literal(value, &column.target_type)),
-            );
-            format!("({})", values.join(", "))
-        })
-        .collect::<Vec<_>>();
-    let load_chunk_size = if dialect == CdcWarehouseDialect::Synapse {
-        1_000
-    } else {
-        load_rows.len()
-    };
-    let load_stage = load_rows
-        .chunks(load_chunk_size)
-        .map(|rows| {
-            format!(
-                "INSERT INTO {stage_name} ({load_columns}) VALUES\n{};",
-                rows.join(",\n")
-            )
-        })
-        .collect::<Vec<_>>();
+    let load_prefix = format!("INSERT INTO {stage_name} ({load_columns}) VALUES\n");
+    let mut load_rows = Vec::with_capacity(batch.rows.len());
+    let mut encoded_row_bytes = 0usize;
+    for row in &batch.rows {
+        let mut values = vec![
+            row.metadata.source_ordinal.to_string(),
+            match row.metadata.mutation {
+                CdcApplyMutation::Upsert => "0".to_string(),
+                CdcApplyMutation::Delete => "1".to_string(),
+            },
+            dialect.binary_literal(&encode_hex_bytes(&row.metadata.order_token)),
+        ];
+        values.extend(
+            row.values
+                .iter()
+                .zip(batch.columns.iter())
+                .map(|(value, column)| dialect.value_literal(value, &column.target_type)),
+        );
+        let encoded_row = format!("({})", values.join(", "));
+        let statement_bytes = encoded_row.len() + load_prefix.len() + 1;
+        if statement_bytes > limits.max_statement_bytes {
+            return Err(dialect.stage_limit_error(
+                "single encoded row bytes",
+                statement_bytes,
+                limits.max_statement_bytes,
+            ));
+        }
+        encoded_row_bytes = encoded_row_bytes
+            .saturating_add(encoded_row.len() + usize::from(!load_rows.is_empty()) * 2);
+        if encoded_row_bytes > limits.max_total_encoded_bytes {
+            return Err(dialect.stage_limit_error(
+                "encoded stage rows bytes",
+                encoded_row_bytes,
+                limits.max_total_encoded_bytes,
+            ));
+        }
+        load_rows.push(encoded_row);
+    }
+    let mut load_stage = Vec::new();
+    let mut chunk = Vec::new();
+    let mut chunk_bytes = load_prefix.len() + 1;
+    for row in load_rows {
+        let separator_bytes = usize::from(!chunk.is_empty()) * 2;
+        let row_bytes = row.len() + separator_bytes;
+        if !chunk.is_empty()
+            && (chunk.len() >= limits.max_load_rows
+                || chunk_bytes + row_bytes > limits.max_statement_bytes)
+        {
+            load_stage.push(format!("{load_prefix}{};", chunk.join(",\n")));
+            chunk.clear();
+            chunk_bytes = load_prefix.len() + 1;
+        }
+        chunk_bytes += row.len() + usize::from(!chunk.is_empty()) * 2;
+        chunk.push(row);
+    }
+    if !chunk.is_empty() {
+        load_stage.push(format!("{load_prefix}{};", chunk.join(",\n")));
+    }
 
     let winner_projection = target_columns
         .iter()
@@ -1000,7 +1055,7 @@ pub fn warehouse_bulk_cdc_sql(
         ]
     };
 
-    Ok(WarehouseBulkCdcSql {
+    let sql = WarehouseBulkCdcSql {
         stage_table: stage_name.clone(),
         winners_table: winners_name.clone(),
         idempotency_key: format!("skippr-cdc-{batch_hash}"),
@@ -1013,7 +1068,151 @@ pub fn warehouse_bulk_cdc_sql(
             format!("DROP TABLE IF EXISTS {winners_name};"),
             format!("DROP TABLE IF EXISTS {stage_name};"),
         ],
-    })
+    };
+    if let Some(oversized) = sql
+        .atomic_statements()
+        .into_iter()
+        .map(|statement| statement.len())
+        .find(|bytes| *bytes > limits.max_statement_bytes)
+    {
+        return Err(dialect.stage_limit_error(
+            "statement bytes",
+            oversized,
+            limits.max_statement_bytes,
+        ));
+    }
+    let statement_count = sql.atomic_statements().len();
+    if statement_count > limits.max_statements {
+        return Err(dialect.stage_limit_error(
+            "statement count",
+            statement_count,
+            limits.max_statements,
+        ));
+    }
+    let encoded_bytes = match dialect {
+        CdcWarehouseDialect::Redshift => sql
+            .atomic_statements()
+            .iter()
+            .map(|statement| statement.len())
+            .sum(),
+        _ => sql.transactional_script(dialect).len(),
+    };
+    if encoded_bytes > limits.max_total_encoded_bytes {
+        return Err(dialect.stage_limit_error(
+            "total encoded bytes",
+            encoded_bytes,
+            limits.max_total_encoded_bytes,
+        ));
+    }
+
+    Ok(sql)
+}
+
+/// Rebuild the pre-bulk guarded path from the typed IR. Each row remains an
+/// independent replay-safe transaction, so adapters can fall back when a
+/// bounded chunk exceeds a backend request or statement envelope.
+pub fn guarded_warehouse_cdc_sql<B: CdcApplyBackend>(
+    dialect: CdcWarehouseDialect,
+    fq_table: &str,
+    fq_tombstone_table: &str,
+    batch: &CdcApplyBatch,
+) -> Result<Vec<String>, CdcApplyBatchError> {
+    batch.validate()?;
+
+    let target_columns = batch
+        .columns
+        .iter()
+        .map(|column| dialect.quote_identifier(&column.name))
+        .collect::<Vec<_>>();
+    let business_key_columns = batch
+        .business_key_columns
+        .iter()
+        .map(|column| dialect.quote_identifier(column))
+        .collect::<Vec<_>>();
+    let business_key_indexes = batch
+        .business_key_columns
+        .iter()
+        .map(|business_key| {
+            batch
+                .columns
+                .iter()
+                .position(|column| column.name == *business_key)
+                .expect("validated business key column")
+        })
+        .collect::<Vec<_>>();
+    let business_key_types = business_key_indexes
+        .iter()
+        .map(|index| batch.columns[*index].target_type.clone())
+        .collect::<Vec<_>>();
+    let target_order_token = dialect.quote_identifier("_skippr_order_token");
+
+    Ok(batch
+        .rows
+        .iter()
+        .map(|row| {
+            let order_token_hex = encode_hex_bytes(&row.metadata.order_token);
+            match row.metadata.mutation {
+                CdcApplyMutation::Upsert => {
+                    let mut names = target_columns.clone();
+                    names.push(target_order_token.clone());
+                    let mut values = row
+                        .values
+                        .iter()
+                        .zip(batch.columns.iter())
+                        .map(|(value, column)| dialect.value_literal(value, &column.target_type))
+                        .collect::<Vec<_>>();
+                    values.push(B::binary_literal(&order_token_hex));
+                    B::upsert_if_newer_sql(
+                        fq_table,
+                        fq_tombstone_table,
+                        &names,
+                        &values,
+                        &business_key_columns,
+                        &order_token_hex,
+                    )
+                }
+                CdcApplyMutation::Delete => {
+                    let values = business_key_indexes
+                        .iter()
+                        .map(|index| {
+                            dialect.value_literal(
+                                &row.values[*index],
+                                &batch.columns[*index].target_type,
+                            )
+                        })
+                        .collect::<Vec<_>>();
+                    B::delete_if_newer_sql(
+                        fq_table,
+                        fq_tombstone_table,
+                        &business_key_columns,
+                        &values,
+                        &business_key_types,
+                        &order_token_hex,
+                    )
+                }
+            }
+        })
+        .collect())
+}
+
+pub fn guarded_warehouse_cdc_row_sql<B: CdcApplyBackend>(
+    dialect: CdcWarehouseDialect,
+    fq_table: &str,
+    fq_tombstone_table: &str,
+    batch: &CdcApplyBatch,
+    row: &CdcApplyRow,
+) -> Result<String, CdcApplyBatchError> {
+    let single_row_batch = CdcApplyBatch {
+        columns: batch.columns.clone(),
+        business_key_columns: batch.business_key_columns.clone(),
+        rows: vec![row.clone()],
+    };
+    Ok(
+        guarded_warehouse_cdc_sql::<B>(dialect, fq_table, fq_tombstone_table, &single_row_batch)?
+            .into_iter()
+            .next()
+            .expect("single-row guarded batch produces one statement"),
+    )
 }
 
 impl std::hash::Hash for CdcWarehouseDialect {
@@ -1023,6 +1222,90 @@ impl std::hash::Hash for CdcWarehouseDialect {
 }
 
 impl CdcWarehouseDialect {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Snowflake => "Snowflake",
+            Self::BigQuery => "BigQuery",
+            Self::Redshift => "Redshift",
+            Self::Synapse => "Synapse",
+            Self::MotherDuck => "MotherDuck",
+        }
+    }
+
+    pub fn staging_limits(self) -> WarehouseCdcLimits {
+        match self {
+            // Snowflake recommends keeping the complete multi-statement SQL
+            // API request below 1 MiB so query text remains retryable.
+            Self::Snowflake => WarehouseCdcLimits {
+                max_rows: 10_000,
+                max_load_rows: 500,
+                max_statement_bytes: 128 * 1024,
+                max_total_encoded_bytes: 900 * 1024,
+                max_statements: 64,
+            },
+            // BigQuery caps the unresolved text of the complete script at
+            // 1 MiB, including comments and whitespace.
+            Self::BigQuery => WarehouseCdcLimits {
+                max_rows: 10_000,
+                max_load_rows: 500,
+                max_statement_bytes: 128 * 1024,
+                max_total_encoded_bytes: 900 * 1024,
+                max_statements: 64,
+            },
+            // Redshift Data API caps each SQL statement at 100 KiB and
+            // BatchExecuteStatement at 40 statements.
+            Self::Redshift => WarehouseCdcLimits {
+                max_rows: 15_000,
+                max_load_rows: 500,
+                max_statement_bytes: 90 * 1024,
+                max_total_encoded_bytes: 30 * 90 * 1024,
+                max_statements: 40,
+            },
+            // Dedicated Synapse accepts at most 1,000 VALUES rows per INSERT
+            // and a 256 MiB TDS batch at the default packet size. Stay well
+            // below the byte ceiling while still admitting narrow 100k chunks.
+            Self::Synapse => WarehouseCdcLimits {
+                max_rows: 100_000,
+                max_load_rows: 1_000,
+                max_statement_bytes: 1024 * 1024,
+                max_total_encoded_bytes: 64 * 1024 * 1024,
+                max_statements: 128,
+            },
+            // The current MotherDuck HTTP connector exposes no appender or
+            // documented request-size contract, so use a deliberately small
+            // defensive envelope and fall back outside it.
+            Self::MotherDuck => WarehouseCdcLimits {
+                max_rows: 1_000,
+                max_load_rows: 250,
+                max_statement_bytes: 128 * 1024,
+                max_total_encoded_bytes: 512 * 1024,
+                max_statements: 16,
+            },
+        }
+    }
+
+    pub fn validate_stage_row_count(self, row_count: usize) -> Result<(), CdcApplyBatchError> {
+        let limit = self.staging_limits().max_rows;
+        if row_count > limit {
+            return Err(self.stage_limit_error("row count", row_count, limit));
+        }
+        Ok(())
+    }
+
+    fn stage_limit_error(
+        self,
+        resource: &'static str,
+        actual: usize,
+        limit: usize,
+    ) -> CdcApplyBatchError {
+        CdcApplyBatchError::WarehouseStageLimit {
+            dialect: self.name(),
+            resource,
+            actual,
+            limit,
+        }
+    }
+
     fn quote_identifier(self, identifier: &str) -> String {
         match self {
             Self::BigQuery => format!("`{}`", identifier.replace('`', "\\`")),
@@ -1305,12 +1588,49 @@ pub fn warehouse_sql_test_batch() -> CdcApplyBatch {
 }
 
 #[cfg(test)]
+pub fn warehouse_sql_test_batch_with_rows(row_count: usize, value_bytes: usize) -> CdcApplyBatch {
+    let mut batch = warehouse_sql_test_batch();
+    let value = "x".repeat(value_bytes);
+    batch.rows = (0..row_count)
+        .map(|ordinal| CdcApplyRow {
+            metadata: CdcApplyRowMetadata {
+                mutation: if ordinal % 7 == 0 {
+                    CdcApplyMutation::Delete
+                } else {
+                    CdcApplyMutation::Upsert
+                },
+                event_id: format!("event-{ordinal}").into_bytes(),
+                order_token: (ordinal as u64).to_be_bytes().to_vec(),
+                source_ordinal: ordinal as u64,
+            },
+            values: vec![
+                CdcApplyValue::Signed(7),
+                CdcApplyValue::Signed(ordinal as i64),
+                CdcApplyValue::Text(value.clone()),
+            ],
+        })
+        .collect();
+    batch
+}
+
+#[cfg(test)]
 mod tests {
     use super::{
-        tombstone_table_name, warehouse_bulk_cdc_sql, CdcApplyBatch, CdcApplyBatchError,
+        guarded_warehouse_cdc_sql, tombstone_table_name, warehouse_bulk_cdc_sql,
+        warehouse_sql_test_batch_with_rows, CdcApplyBackend, CdcApplyBatch, CdcApplyBatchError,
         CdcApplyColumn, CdcApplyMutation, CdcApplyRow, CdcApplyRowMetadata, CdcApplyValue,
         CdcWarehouseDialect,
     };
+
+    struct TestBackend;
+
+    impl CdcApplyBackend for TestBackend {
+        const ORDER_TOKEN_TYPE: &'static str = "BINARY";
+
+        fn binary_literal(hex: &str) -> String {
+            format!("X'{hex}'")
+        }
+    }
 
     fn contract_row(
         mutation: CdcApplyMutation,
@@ -1535,5 +1855,74 @@ mod tests {
         .transactional_script(CdcWarehouseDialect::Synapse);
         assert!(synapse.contains("ROLLBACK TRANSACTION"));
         assert!(synapse.contains("BEGIN CATCH"));
+    }
+
+    #[test]
+    fn warehouse_limits_are_explicit_per_dialect() {
+        let snowflake = CdcWarehouseDialect::Snowflake.staging_limits();
+        assert_eq!(snowflake.max_total_encoded_bytes, 900 * 1024);
+        assert_eq!(snowflake.max_load_rows, 500);
+
+        let bigquery = CdcWarehouseDialect::BigQuery.staging_limits();
+        assert_eq!(bigquery.max_total_encoded_bytes, 900 * 1024);
+        assert_eq!(bigquery.max_load_rows, 500);
+
+        let redshift = CdcWarehouseDialect::Redshift.staging_limits();
+        assert_eq!(redshift.max_statement_bytes, 90 * 1024);
+        assert_eq!(redshift.max_statements, 40);
+
+        let synapse = CdcWarehouseDialect::Synapse.staging_limits();
+        assert_eq!(synapse.max_rows, 100_000);
+        assert_eq!(synapse.max_load_rows, 1_000);
+
+        let motherduck = CdcWarehouseDialect::MotherDuck.staging_limits();
+        assert_eq!(motherduck.max_rows, 1_000);
+        assert_eq!(motherduck.max_total_encoded_bytes, 512 * 1024);
+    }
+
+    #[test]
+    fn load_rows_split_at_dialect_statement_boundary() {
+        let batch = warehouse_sql_test_batch_with_rows(501, 8);
+        let sql = warehouse_bulk_cdc_sql(
+            CdcWarehouseDialect::BigQuery,
+            "`p.d.t`",
+            "`p.d.tombstones`",
+            &batch,
+        )
+        .unwrap();
+        assert_eq!(
+            sql.setup_statements
+                .iter()
+                .filter(|statement| statement.starts_with("INSERT INTO"))
+                .count(),
+            2
+        );
+        assert!(sql.setup_statements.iter().all(|statement| statement.len()
+            <= CdcWarehouseDialect::BigQuery
+                .staging_limits()
+                .max_statement_bytes));
+    }
+
+    #[test]
+    fn oversized_stage_fails_closed_to_guarded_sql() {
+        let batch = warehouse_sql_test_batch_with_rows(2, 200 * 1024);
+        let error = warehouse_bulk_cdc_sql(
+            CdcWarehouseDialect::MotherDuck,
+            "\"target\"",
+            "\"tombstones\"",
+            &batch,
+        )
+        .unwrap_err();
+        assert!(error.is_warehouse_stage_limit());
+
+        let guarded = guarded_warehouse_cdc_sql::<TestBackend>(
+            CdcWarehouseDialect::MotherDuck,
+            "\"target\"",
+            "\"tombstones\"",
+            &batch,
+        )
+        .unwrap();
+        assert_eq!(guarded.len(), batch.rows.len());
+        assert!(guarded.iter().all(|statement| statement.contains("BEGIN;")));
     }
 }
