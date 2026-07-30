@@ -5,15 +5,53 @@
 
 use crate::buffer::s3_wal_memory_budget;
 use crate::helpers::s3::get_object_bytes_for_bucket;
-use dashmap::DashSet;
+use dashmap::mapref::entry::Entry;
+use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-/// Segment IDs currently being compacted — bodies for these keys are never evicted.
-pub static S3_BODY_CACHE_PINS: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
+/// Ref-counted segment IDs currently being compacted. Bodies for these keys
+/// are never evicted until the last active compaction releases its guard.
+static S3_BODY_CACHE_PINS: Lazy<DashMap<String, usize>> = Lazy::new(DashMap::new);
+
+pub struct S3BodyPin {
+    segment_ids: Vec<String>,
+}
+
+impl Drop for S3BodyPin {
+    fn drop(&mut self) {
+        for segment_id in self.segment_ids.drain(..) {
+            match S3_BODY_CACHE_PINS.entry(segment_id) {
+                Entry::Occupied(mut entry) if *entry.get() > 1 => {
+                    *entry.get_mut() -= 1;
+                }
+                Entry::Occupied(entry) => {
+                    entry.remove();
+                }
+                Entry::Vacant(_) => {}
+            }
+        }
+    }
+}
+
+pub fn pin_segments<I>(segment_ids: I) -> S3BodyPin
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut segment_ids = segment_ids.into_iter().collect::<Vec<_>>();
+    segment_ids.sort_unstable();
+    segment_ids.dedup();
+    for segment_id in &segment_ids {
+        S3_BODY_CACHE_PINS
+            .entry(segment_id.clone())
+            .and_modify(|count| *count += 1)
+            .or_insert(1);
+    }
+    S3BodyPin { segment_ids }
+}
 
 const MIN_CACHE_ENTRIES: usize = 8;
 const MAX_CACHE_ENTRIES: usize = 256;
@@ -71,7 +109,7 @@ impl Inner {
     }
 
     /// Evict one unpinned LRU entry. Returns false if nothing evictable.
-    fn evict_one(&mut self, pins: &DashSet<String>) -> bool {
+    fn evict_one(&mut self, pins: &DashMap<String, usize>) -> bool {
         let n = self.order.len();
         if n == 0 {
             return false;
@@ -80,7 +118,7 @@ impl Inner {
             let Some(id) = self.order.front().cloned() else {
                 return false;
             };
-            if pins.contains(&id) {
+            if pins.contains_key(&id) {
                 self.order.rotate_left(1);
                 continue;
             }
@@ -93,7 +131,7 @@ impl Inner {
         false
     }
 
-    fn enforce_limits(&mut self, pins: &DashSet<String>) {
+    fn enforce_limits(&mut self, pins: &DashMap<String, usize>) {
         loop {
             let over_bytes = self.bytes > self.max_bytes;
             let over_entries = self.map.len() > self.max_entries;
@@ -106,7 +144,7 @@ impl Inner {
         }
     }
 
-    fn put(&mut self, id: String, data: Arc<Vec<u8>>, pins: &DashSet<String>) {
+    fn put(&mut self, id: String, data: Arc<Vec<u8>>, pins: &DashMap<String, usize>) {
         let sz = data.len();
         if let Some(old) = self.map.insert(id.clone(), data) {
             self.bytes = self.bytes.saturating_sub(old.len());
@@ -151,6 +189,7 @@ pub fn clear_for_tests() {
     let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     *g = Inner::new_autotuned();
     refresh_gauges(&g);
+    S3_BODY_CACHE_PINS.clear();
 }
 
 /// Fetch object bytes and merge into LRU under autotuned caps. Caller must pin `segment_id`
@@ -202,10 +241,10 @@ mod tests {
             max_bytes: 100,
             max_entries: 10,
         };
-        let pins = DashSet::new();
+        let pins = DashMap::new();
         inner.put("a".into(), Arc::new(vec![0u8; 40]), &pins);
         inner.put("b".into(), Arc::new(vec![0u8; 40]), &pins);
-        pins.insert("a".into());
+        pins.insert("a".into(), 1);
         inner.max_bytes = 50;
         inner.enforce_limits(&pins);
         assert!(inner.map.contains_key("a"));
@@ -213,6 +252,17 @@ mod tests {
         pins.remove("a");
         inner.enforce_limits(&pins);
         assert!(inner.bytes <= 50);
+    }
+
+    #[test]
+    fn pin_guard_is_ref_counted() {
+        let first = pin_segments(["shared".to_string()]);
+        let second = pin_segments(["shared".to_string(), "shared".to_string()]);
+        assert_eq!(*S3_BODY_CACHE_PINS.get("shared").unwrap(), 2);
+        drop(first);
+        assert_eq!(*S3_BODY_CACHE_PINS.get("shared").unwrap(), 1);
+        drop(second);
+        assert!(!S3_BODY_CACHE_PINS.contains_key("shared"));
     }
 
     #[test]

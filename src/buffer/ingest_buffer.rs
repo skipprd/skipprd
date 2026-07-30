@@ -13,6 +13,8 @@ use crate::buffer::compaction_transaction::{
     SegmentSourceDescriptor, SinkRetrySemantics, SinkWriteSemantics, WalPartRef,
 };
 use crate::buffer::s3_wal_body_cache;
+#[cfg(test)]
+use crate::buffer::segment_file::SegmentPartMetaSummary;
 use crate::buffer::segment_file::{
     PartitionKey, SegmentFile, SegmentFileMetadata, SegmentPartitionIndexEntry,
 };
@@ -229,7 +231,6 @@ struct CompactionEntry {
     meta: SegmentFileMetadata,
     idx: SegmentPartitionIndexEntry,
     wal_ref: WalPartRef,
-    cdc_meta: Option<crate::plugins::cdc::WalPartMeta>,
 }
 
 struct CompactionWork {
@@ -1455,78 +1456,6 @@ impl Buffers {
         }
     }
 
-    fn source_cdc_meta(
-        source: &SegmentSource,
-        key: &PartitionKey,
-    ) -> io::Result<Option<crate::plugins::cdc::WalPartMeta>> {
-        let (blobs_result, bytes_examined): (
-            io::Result<std::collections::HashMap<PartitionKey, Vec<u8>>>,
-            u64,
-        ) = match source {
-            SegmentSource::Disk(seg_path) => match std::fs::File::open(seg_path) {
-                Ok(mut file) => {
-                    let bytes = file.metadata().map(|meta| meta.len()).unwrap_or(0);
-                    (
-                        SegmentFile::read_part_meta_blobs_from_reader(&mut file),
-                        bytes,
-                    )
-                }
-                Err(err) => (Err(err), 0),
-            },
-            SegmentSource::S3 {
-                body: Some(data), ..
-            } => {
-                let mut cursor = io::Cursor::new(data.as_ref());
-                (
-                    SegmentFile::read_part_meta_blobs_from_reader(&mut cursor),
-                    data.len() as u64,
-                )
-            }
-            SegmentSource::S3 {
-                body: None,
-                bucket,
-                key,
-            } => {
-                let rt = tokio::runtime::Handle::current();
-                match tokio::task::block_in_place(|| {
-                    rt.block_on(s3_wal_body_cache::get_or_fetch(
-                        bucket,
-                        key,
-                        source.segment_id(),
-                    ))
-                }) {
-                    Ok(data) => {
-                        let mut cursor = io::Cursor::new(data.as_ref());
-                        (
-                            SegmentFile::read_part_meta_blobs_from_reader(&mut cursor),
-                            data.len() as u64,
-                        )
-                    }
-                    Err(err) => (Err(err), 0),
-                }
-            }
-        };
-        metrics_hot::record_cdc_metadata_segment_scan(bytes_examined);
-        let blobs = blobs_result?;
-        let Some(blob) = blobs.get(key).filter(|blob| !blob.is_empty()) else {
-            return Ok(None);
-        };
-        let meta = bincode::deserialize::<crate::plugins::cdc::WalPartMeta>(blob)
-            .map_err(|err| io::Error::other(err.to_string()))?;
-        meta.validate()
-            .map_err(|err| io::Error::other(err.to_string()))?;
-        Ok(Some(meta))
-    }
-
-    fn cdc_meta_hash(meta: &Option<crate::plugins::cdc::WalPartMeta>) -> Option<[u8; 32]> {
-        let meta = meta.as_ref()?;
-        let bytes = bincode::serialize(meta).ok()?;
-        let digest = Sha256::digest(bytes);
-        let mut out = [0u8; 32];
-        out.copy_from_slice(&digest);
-        Some(out)
-    }
-
     fn schema_fingerprint_for_meta(meta: &SegmentFileMetadata) -> String {
         let mut hasher = Sha256::new();
         for idx in meta.index.iter() {
@@ -1538,12 +1467,12 @@ impl Buffers {
         hex::encode(hasher.finalize())
     }
 
-    fn grouping_key(
-        idx: &SegmentPartitionIndexEntry,
-        cdc_meta: &Option<crate::plugins::cdc::WalPartMeta>,
-        schema_fingerprint: &str,
-    ) -> String {
-        let kind = if cdc_meta.is_some() { "cdc" } else { "append" };
+    fn grouping_key(idx: &SegmentPartitionIndexEntry, schema_fingerprint: &str) -> String {
+        let kind = if idx.part_meta_summary.is_cdc() {
+            "cdc"
+        } else {
+            "append"
+        };
         format!(
             "{}\n{}\n{}\n{}\n{}\n{}",
             idx.key.sink_ref,
@@ -1627,34 +1556,21 @@ impl Buffers {
                 if !Self::should_compact(idx.bytes, idx.updated_at_secs, now_secs, force) {
                     continue;
                 }
-                let cdc_meta = match Self::source_cdc_meta(&cached.source, &idx.key) {
-                    Ok(meta) => meta,
-                    Err(err) => {
-                        warn!(
-                            "Compactor: skipping grouped candidate seg={} key={:?}; cdc metadata read failed: {}",
-                            cached.source.display_name(),
-                            idx.key,
-                            err
-                        );
-                        continue;
-                    }
-                };
                 let schema_fingerprint = Self::schema_fingerprint_for_group(idx, &cached.meta);
-                let key = Self::grouping_key(idx, &cdc_meta, &schema_fingerprint);
+                let key = Self::grouping_key(idx, &schema_fingerprint);
                 let wal_ref = WalPartRef {
                     segment_id: cached.source.segment_id().to_string(),
                     source: Self::source_descriptor(&cached.source),
                     start: idx.start,
                     len: idx.len,
                     key: idx.key.clone(),
-                    cdc_meta_hash: Self::cdc_meta_hash(&cdc_meta),
+                    cdc_meta_hash: idx.part_meta_summary.canonical_hash(),
                 };
                 let entry = CompactionEntry {
                     source: cached.source.clone(),
                     meta: cached.meta.clone(),
                     idx: idx.clone(),
                     wal_ref,
-                    cdc_meta,
                 };
                 let group = groups.entry(key).or_insert_with(|| (Vec::new(), 0));
                 if group.0.len() >= max_parts || group.1.saturating_add(idx.bytes) > target_bytes {
@@ -1772,15 +1688,21 @@ impl Buffers {
             if Self::is_source_tombstoned(&cached.source, &idx.key) {
                 continue;
             }
-            let cdc_meta = Self::source_cdc_meta(&cached.source, &idx.key)
-                .ok()
-                .flatten();
+            if let Some(expected_hash) = wal_ref.cdc_meta_hash {
+                if Some(expected_hash) != idx.part_meta_summary.canonical_hash() {
+                    warn!(
+                        "Compactor: manifest resume skipped metadata hash mismatch segment_id={} slice_ordinal={}",
+                        wal_ref.segment_id,
+                        idx.slice_ordinal
+                    );
+                    return None;
+                }
+            }
             entries.push(CompactionEntry {
                 source: cached.source.clone(),
                 meta: cached.meta.clone(),
                 idx: idx.clone(),
                 wal_ref: wal_ref.clone(),
-                cdc_meta,
             });
         }
         if entries.is_empty() {
@@ -2514,6 +2436,18 @@ impl Buffers {
             })
             .await
             .map_err(|err| io::Error::other(err.to_string()))??;
+            if let Some(expected) = entry.idx.part_meta_summary.row_count() {
+                let actual = entry_batches
+                    .iter()
+                    .map(|batch| batch.num_rows() as u64)
+                    .sum::<u64>();
+                if actual != expected {
+                    return Err(io::Error::other(format!(
+                        "CDC WAL slice ordinal {} metadata expected {} rows but Arrow stream produced {} rows",
+                        entry.idx.slice_ordinal, expected, actual
+                    )));
+                }
+            }
             batches.extend(entry_batches);
         }
 
@@ -2587,6 +2521,56 @@ impl Buffers {
         }
     }
 
+    fn read_entry_part_meta(
+        entry: &CompactionEntry,
+        s3_resolved: Option<Arc<Vec<u8>>>,
+    ) -> io::Result<Option<crate::plugins::cdc::WalPartMeta>> {
+        match (&s3_resolved, &entry.source) {
+            (Some(data), SegmentSource::S3 { .. }) => {
+                SegmentFile::read_part_meta_from_bytes(data.as_ref(), &entry.idx)
+            }
+            (None, SegmentSource::Disk(seg_path)) => {
+                let mut file = OpenOptions::new().read(true).open(seg_path)?;
+                SegmentFile::read_part_meta_from_reader(&mut file, &entry.idx)
+            }
+            _ => Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "grouped compaction metadata source/body mismatch",
+            )),
+        }
+    }
+
+    async fn load_entry_cdc_meta(
+        entry: &CompactionEntry,
+    ) -> io::Result<crate::plugins::cdc::WalPartMeta> {
+        if !entry.idx.part_meta_summary.is_cdc() {
+            return Err(io::Error::other(format!(
+                "WAL slice ordinal {} is not CDC",
+                entry.idx.slice_ordinal
+            )));
+        }
+        let s3_body = Self::resolve_entry_s3_body(entry).await?;
+        let entry_for_blocking = entry.clone();
+        let meta = tokio::task::spawn_blocking(move || {
+            Self::read_entry_part_meta(&entry_for_blocking, s3_body)
+        })
+        .await
+        .map_err(|err| io::Error::other(err.to_string()))??
+        .ok_or_else(|| {
+            io::Error::other(format!(
+                "CDC WAL slice ordinal {} has no metadata sidecar",
+                entry.idx.slice_ordinal
+            ))
+        })?;
+        if meta.kind != crate::plugins::cdc::WalPartKind::Cdc {
+            return Err(io::Error::other(format!(
+                "WAL slice ordinal {} metadata kind changed after indexing",
+                entry.idx.slice_ordinal
+            )));
+        }
+        Ok(meta)
+    }
+
     async fn build_grouped_stream(
         work: &CompactionWork,
     ) -> io::Result<(
@@ -2604,10 +2588,8 @@ impl Buffers {
         let mut total_rows = 0u64;
 
         for entry in work.entries.iter() {
-            if let Some(meta) = &entry.cdc_meta {
+            if entry.idx.part_meta_summary.is_cdc() {
                 saw_cdc = true;
-                total_rows = total_rows.saturating_add(meta.row_count);
-                cdc_rows.extend(meta.rows.clone());
             } else {
                 saw_append = true;
             }
@@ -2621,6 +2603,11 @@ impl Buffers {
         }
 
         let cdc_ctx = if saw_cdc {
+            for entry in work.entries.iter() {
+                let meta = Self::load_entry_cdc_meta(entry).await?;
+                total_rows = total_rows.saturating_add(meta.row_count);
+                cdc_rows.extend(meta.rows);
+            }
             let part_meta = crate::plugins::cdc::WalPartMeta::cdc(cdc_rows, total_rows)
                 .map_err(|err| io::Error::other(err.to_string()))?;
             let contract = crate::plugins::cdc::get_namespace_cdc_contract(&work.txn.namespace);
@@ -2673,6 +2660,18 @@ impl Buffers {
                     .await
                     .map_err(|err| DataFusionError::External(Box::new(io::Error::other(err))))?
                     .map_err(|err| DataFusionError::External(Box::new(err)))?;
+                    if let Some(expected) = entry.idx.part_meta_summary.row_count() {
+                        let actual = batches
+                            .iter()
+                            .map(|batch| batch.num_rows() as u64)
+                            .sum::<u64>();
+                        if actual != expected {
+                            return Err(DataFusionError::Internal(format!(
+                                "CDC WAL slice ordinal {} metadata expected {} rows but Arrow stream produced {} rows",
+                                entry.idx.slice_ordinal, expected, actual
+                            )));
+                        }
+                    }
                     Ok((entry_index, batches))
                 })
                 .buffered(GROUPED_STREAM_PREFETCH_PARTS);
@@ -3060,6 +3059,12 @@ impl Buffers {
         crate::metrics::counters::add_wal_compaction_transaction_started(1);
         crate::metrics::counters::inc_wal_compactions_in_flight();
         let _guard = WorkGuard(&work);
+        let _s3_body_pin = s3_wal_body_cache::pin_segments(
+            work.entries
+                .iter()
+                .filter(|entry| entry.source.is_s3())
+                .map(|entry| entry.source.segment_id().to_string()),
+        );
 
         persist_manifest(&work.txn)?;
         let stream_started = std::time::Instant::now();
@@ -3868,6 +3873,10 @@ mod tests_wal_commit {
             },
             bytes: 1024,
             updated_at_secs: 0,
+            slice_ordinal: 0,
+            part_meta_start: 0,
+            part_meta_len: 0,
+            part_meta_summary: SegmentPartMetaSummary::Append,
             start,
             len: 1024,
         }
@@ -3972,7 +3981,6 @@ mod tests_wal_commit {
                     meta: meta.clone(),
                     idx,
                     wal_ref,
-                    cdc_meta: None,
                 }
             })
             .collect();
@@ -4038,12 +4046,10 @@ mod tests_wal_commit {
 
         let key_a = Buffers::grouping_key(
             &target_a,
-            &None,
             &Buffers::schema_fingerprint_for_group(&target_a, &meta_a),
         );
         let key_b = Buffers::grouping_key(
             &target_b,
-            &None,
             &Buffers::schema_fingerprint_for_group(&target_b, &meta_b),
         );
 
@@ -4066,12 +4072,10 @@ mod tests_wal_commit {
         let meta = test_meta(vec![part_a.clone(), part_b.clone()]);
         let key_a = Buffers::grouping_key(
             &part_a,
-            &None,
             &Buffers::schema_fingerprint_for_group(&part_a, &meta),
         );
         let key_b = Buffers::grouping_key(
             &part_b,
-            &None,
             &Buffers::schema_fingerprint_for_group(&part_b, &meta),
         );
         assert_ne!(key_a, key_b);
@@ -4315,6 +4319,67 @@ mod tests_wal_commit {
             Buffers::compaction_file_len(&source, &meta, Some(&bytes)).unwrap(),
             bytes.len() as u64
         );
+    }
+
+    #[test]
+    #[serial]
+    fn scheduler_uses_indexed_cdc_summaries_without_full_segment_scans() {
+        use crate::plugins::cdc::{MutationKind, WalPartMeta, WalRowMeta};
+
+        const PARTS: usize = 8;
+        let (base, _guard) = setup_data_dir();
+        reset_in_memory_segments();
+        let old_per_sink = crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET
+            .swap(PARTS, AtomicOrdering::Relaxed);
+
+        let segf = SegmentFile::new(&base, "indexed-cdc").unwrap();
+        let mut batches = StdHashMap::new();
+        let mut parts_meta = StdHashMap::new();
+        let mut part_meta_blobs = StdHashMap::new();
+        for ordinal in 0..PARTS {
+            let key = PartitionKey {
+                sink_ref: "data_sinks.ds_datalake".to_string(),
+                namespace: "indexed_cdc".to_string(),
+                partition: format!("slice-{ordinal}"),
+                time: Some(1_700_000_000),
+                schema_fingerprint: "schema-v1".to_string(),
+            };
+            batches.insert(key.clone(), vec![make_batch()]);
+            parts_meta.insert(key.clone(), (1024, SystemTime::UNIX_EPOCH));
+            let rows = (0..3)
+                .map(|row| WalRowMeta {
+                    mutation: MutationKind::Insert,
+                    event_id: vec![ordinal as u8, row],
+                    order_token: vec![ordinal as u8, row],
+                })
+                .collect();
+            let meta = WalPartMeta::cdc(rows, 3).unwrap();
+            part_meta_blobs.insert(key, bincode::serialize(&meta).unwrap());
+        }
+        let offsets = StdHashMap::new();
+        let (meta, _rows, sha) = segf
+            .write_snapshot(&offsets, &batches, &parts_meta, &part_meta_blobs)
+            .unwrap();
+        Buffers::write_seg_commit(&segf.path, &sha, meta.num_partitions, meta.total_bytes).unwrap();
+        assert_eq!(meta.index.len(), PARTS);
+        assert!(meta
+            .index
+            .iter()
+            .all(|index| index.part_meta_summary.is_cdc()));
+        Buffers::segment_cache_register(SegmentSource::Disk(segf.path.clone()), meta);
+
+        SegmentFile::reset_full_part_meta_scan_count();
+        let sink = SyntheticGroupedSink { failure: None };
+        let works = Buffers::next_compaction_transactions(PARTS, true, &sink);
+        assert_eq!(
+            works.iter().map(|work| work.entries.len()).sum::<usize>(),
+            PARTS
+        );
+        assert_eq!(SegmentFile::full_part_meta_scan_count(), 0);
+
+        crate::metrics::counters::WAL_COMPACTIONS_PER_SINK_TARGET
+            .store(old_per_sink, AtomicOrdering::Relaxed);
+        reset_in_memory_segments();
     }
 
     #[test]
@@ -4564,6 +4629,10 @@ mod compaction_semantics_tests {
             key: key.clone(),
             bytes: 100,
             updated_at_secs: 0,
+            slice_ordinal: 0,
+            part_meta_start: 0,
+            part_meta_len: 0,
+            part_meta_summary: SegmentPartMetaSummary::Append,
             start: 0,
             len: 100,
         };
@@ -4588,7 +4657,6 @@ mod compaction_semantics_tests {
             },
             idx,
             wal_ref,
-            cdc_meta: None,
         }
     }
 

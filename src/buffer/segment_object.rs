@@ -1,5 +1,6 @@
 use crate::buffer::segment_file::{
-    PartitionKey, SegmentFile, SegmentFileMetadata, SegmentPartitionIndexEntry,
+    summarize_part_meta_blob, PartitionKey, SegmentFile, SegmentFileMetadata,
+    SegmentPartitionIndexEntry,
 };
 use crate::metrics::counters as metrics_counters;
 use arrow::array::RecordBatch;
@@ -285,11 +286,16 @@ impl SegmentObject {
             writer.write_bytes(&p_bytes.to_le_bytes())?;
             writer.write_bytes(&updated_secs.to_le_bytes())?;
 
-            let meta_blob = part_meta_blobs.get(key).cloned().unwrap_or_default();
+            let meta_blob = part_meta_blobs
+                .get(key)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let part_meta_summary = summarize_part_meta_blob(meta_blob)?;
             let meta_len = meta_blob.len() as u64;
             writer.write_bytes(&meta_len.to_le_bytes())?;
+            let part_meta_start = writer.total_written;
             if meta_len > 0 {
-                writer.write_bytes(&meta_blob)?;
+                writer.write_bytes(meta_blob)?;
             }
 
             let mut data_buf: Vec<u8> = Vec::new();
@@ -323,6 +329,10 @@ impl SegmentObject {
                 key: key.clone(),
                 bytes: p_bytes,
                 updated_at_secs: updated_secs,
+                slice_ordinal: parts_count - 1,
+                part_meta_start,
+                part_meta_len: meta_len,
+                part_meta_summary,
                 start,
                 len: data_len,
             });

@@ -1,13 +1,18 @@
 use crate::helpers::offsets::OffsetKey;
+use crate::metrics::counters as metrics_counters;
+use crate::plugins::cdc::{WalPartKind, WalPartMeta};
 use arrow::array::RecordBatch;
 use arrow::ipc::writer::{IpcWriteOptions, StreamWriter};
 use bincode;
 use serde_derive::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 #[cfg(test)]
 use std::fs::File;
 use std::fs::OpenOptions;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
+#[cfg(test)]
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::SystemTime;
 use std::{fs, io};
 
@@ -28,11 +33,47 @@ const FOOT: &[u8; 4] = b"FOOT";
 const VERSION: u32 = 3;
 const COMMIT_HEADER_VERSION: u32 = 1;
 
+/// Compact, in-memory-only summary of a WAL PART metadata sidecar.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum SegmentPartMetaSummary {
+    Append,
+    Cdc {
+        row_count: u64,
+        canonical_hash: [u8; 32],
+    },
+}
+
+impl SegmentPartMetaSummary {
+    pub fn is_cdc(&self) -> bool {
+        matches!(self, Self::Cdc { .. })
+    }
+
+    pub fn row_count(&self) -> Option<u64> {
+        match self {
+            Self::Append => None,
+            Self::Cdc { row_count, .. } => Some(*row_count),
+        }
+    }
+
+    pub fn canonical_hash(&self) -> Option<[u8; 32]> {
+        match self {
+            Self::Append => None,
+            Self::Cdc { canonical_hash, .. } => Some(*canonical_hash),
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SegmentPartitionIndexEntry {
     pub key: PartitionKey,
     pub bytes: u64,
     pub updated_at_secs: u64,
+    /// Stable position of this PART in the segment byte stream.
+    pub slice_ordinal: u32,
+    /// Direct byte range of the serialized `WalPartMeta` sidecar.
+    pub part_meta_start: u64,
+    pub part_meta_len: u64,
+    pub part_meta_summary: SegmentPartMetaSummary,
     pub start: u64,
     pub len: u64,
 }
@@ -48,6 +89,44 @@ pub struct SegmentFileMetadata {
 
 pub struct SegmentFile {
     pub path: PathBuf,
+}
+
+#[cfg(test)]
+static FULL_PART_META_SCANS: AtomicUsize = AtomicUsize::new(0);
+
+fn invalid_data(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
+}
+
+fn parse_part_meta_blob(blob: &[u8]) -> io::Result<(WalPartMeta, SegmentPartMetaSummary)> {
+    let meta = bincode::deserialize::<WalPartMeta>(blob)
+        .map_err(|err| invalid_data(format!("invalid WAL PART metadata: {err}")))?;
+    meta.validate()
+        .map_err(|err| invalid_data(format!("invalid WAL PART metadata: {err}")))?;
+    let summary = match meta.kind {
+        WalPartKind::Append => SegmentPartMetaSummary::Append,
+        WalPartKind::Cdc => {
+            // Preserve the established hash: deserialize, validate, then hash the
+            // canonical bincode representation rather than arbitrary input bytes.
+            let canonical = bincode::serialize(&meta)
+                .map_err(|err| invalid_data(format!("serialize WAL PART metadata: {err}")))?;
+            let digest = Sha256::digest(canonical);
+            let mut canonical_hash = [0u8; 32];
+            canonical_hash.copy_from_slice(&digest);
+            SegmentPartMetaSummary::Cdc {
+                row_count: meta.row_count,
+                canonical_hash,
+            }
+        }
+    };
+    Ok((meta, summary))
+}
+
+pub(crate) fn summarize_part_meta_blob(blob: &[u8]) -> io::Result<SegmentPartMetaSummary> {
+    if blob.is_empty() {
+        return Ok(SegmentPartMetaSummary::Append);
+    }
+    parse_part_meta_blob(blob).map(|(_, summary)| summary)
 }
 
 impl SegmentFile {
@@ -89,22 +168,20 @@ impl SegmentFile {
     pub fn read_metadata_from_reader<R: Read + Seek>(
         reader: &mut R,
     ) -> io::Result<SegmentFileMetadata> {
+        let file_len = reader.seek(io::SeekFrom::End(0))?;
+        reader.seek(io::SeekFrom::Start(0))?;
         let mut magic = [0u8; 4];
         reader.read_exact(&mut magic)?;
         if &magic != MAGIC {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Compactor: bad segment magic",
-            ));
+            return Err(invalid_data("Compactor: bad segment magic"));
         }
         let mut ver = [0u8; 4];
         reader.read_exact(&mut ver)?;
         let version = u32::from_le_bytes(ver);
         if version != VERSION {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Compactor: read refused version={}", version),
-            ));
+            return Err(invalid_data(format!(
+                "Compactor: read refused version={version}"
+            )));
         }
         let mut created = [0u8; 8];
         reader.read_exact(&mut created)?;
@@ -112,10 +189,13 @@ impl SegmentFile {
         let mut off_len_buf = [0u8; 8];
         reader.read_exact(&mut off_len_buf)?;
         let offsets_len = u64::from_le_bytes(off_len_buf);
-        let mut offsets_blob = vec![0u8; offsets_len as usize];
+        let offsets_len_usize = usize::try_from(offsets_len)
+            .map_err(|_| invalid_data("WAL offsets blob is too large"))?;
+        let mut offsets_blob = vec![0u8; offsets_len_usize];
         reader.read_exact(&mut offsets_blob)?;
         let offsets: std::collections::HashMap<OffsetKey, u64> =
-            bincode::deserialize(&offsets_blob).unwrap_or_default();
+            bincode::deserialize(&offsets_blob)
+                .map_err(|err| invalid_data(format!("invalid WAL offsets metadata: {err}")))?;
 
         let mut index: Vec<SegmentPartitionIndexEntry> = Vec::new();
         let mut total_bytes: u64 = 0;
@@ -137,9 +217,12 @@ impl SegmentFile {
             let mut key_len_buf = [0u8; 8];
             reader.read_exact(&mut key_len_buf)?;
             let key_len = u64::from_le_bytes(key_len_buf);
-            let mut key_blob = vec![0u8; key_len as usize];
+            let key_len_usize = usize::try_from(key_len)
+                .map_err(|_| invalid_data("WAL partition key is too large"))?;
+            let mut key_blob = vec![0u8; key_len_usize];
             reader.read_exact(&mut key_blob)?;
-            let key: PartitionKey = bincode::deserialize(&key_blob).unwrap();
+            let key: PartitionKey = bincode::deserialize(&key_blob)
+                .map_err(|err| invalid_data(format!("invalid WAL partition key: {err}")))?;
             let mut bytes_buf = [0u8; 8];
             reader.read_exact(&mut bytes_buf)?;
             let part_bytes = u64::from_le_bytes(bytes_buf);
@@ -147,27 +230,56 @@ impl SegmentFile {
             reader.read_exact(&mut upd_buf)?;
             let upd_secs = u64::from_le_bytes(upd_buf);
 
-            // Skip part_meta_blob sidecar
             let mut meta_len_buf = [0u8; 8];
             reader.read_exact(&mut meta_len_buf)?;
             let meta_len = u64::from_le_bytes(meta_len_buf);
+            let part_meta_start = reader.stream_position()?;
+            let part_meta_summary = if meta_len == 0 {
+                SegmentPartMetaSummary::Append
+            } else {
+                let meta_len_usize = usize::try_from(meta_len)
+                    .map_err(|_| invalid_data("WAL PART metadata is too large"))?;
+                let mut meta_blob = vec![0u8; meta_len_usize];
+                reader.read_exact(&mut meta_blob)?;
+                summarize_part_meta_blob(&meta_blob)?
+            };
             if meta_len > 0 {
-                reader.seek(io::SeekFrom::Current(meta_len as i64))?;
+                let expected_position = part_meta_start
+                    .checked_add(meta_len)
+                    .ok_or_else(|| invalid_data("WAL PART metadata range overflow"))?;
+                if reader.stream_position()? != expected_position {
+                    return Err(invalid_data("WAL PART metadata length mismatch"));
+                }
             }
 
             let mut len_buf = [0u8; 8];
             reader.read_exact(&mut len_buf)?;
             let data_len = u64::from_le_bytes(len_buf);
             let start = reader.stream_position()?;
+            if start.saturating_add(data_len) > file_len {
+                return Err(invalid_data(format!(
+                    "Compactor: partition length beyond segment end start={start} len={data_len} file_len={file_len}"
+                )));
+            }
             total_bytes = total_bytes.saturating_add(data_len);
+            let slice_ordinal = u32::try_from(index.len())
+                .map_err(|_| invalid_data("WAL segment contains too many partitions"))?;
             index.push(SegmentPartitionIndexEntry {
                 key,
                 bytes: part_bytes,
                 updated_at_secs: upd_secs,
+                slice_ordinal,
+                part_meta_start,
+                part_meta_len: meta_len,
+                part_meta_summary,
                 start,
                 len: data_len,
             });
             reader.seek(io::SeekFrom::Current(data_len as i64))?;
+        }
+
+        if index.iter().any(|entry| entry.part_meta_len > 0) {
+            metrics_counters::record_cdc_metadata_segment_scan(file_len);
         }
 
         Ok(SegmentFileMetadata {
@@ -254,12 +366,18 @@ impl SegmentFile {
             file.write_all(&p_bytes.to_le_bytes())?;
             file.write_all(&updated_secs.to_le_bytes())?;
 
-            // write part_meta_blob sidecar
-            let meta_blob = part_meta_blobs.get(key).cloned().unwrap_or_default();
+            // Write and index the metadata sidecar without retaining row metadata
+            // in the scheduling index.
+            let meta_blob = part_meta_blobs
+                .get(key)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            let part_meta_summary = summarize_part_meta_blob(meta_blob)?;
             let meta_len = meta_blob.len() as u64;
             file.write_all(&meta_len.to_le_bytes())?;
+            let part_meta_start = file.stream_position()?;
             if meta_len > 0 {
-                file.write_all(&meta_blob)?;
+                file.write_all(meta_blob)?;
             }
 
             let data_len_pos = file.stream_position()?;
@@ -296,6 +414,10 @@ impl SegmentFile {
                 key: key.clone(),
                 bytes: p_bytes,
                 updated_at_secs: updated_secs,
+                slice_ordinal: parts_count - 1,
+                part_meta_start,
+                part_meta_len: meta_len,
+                part_meta_summary,
                 start,
                 len,
             });
@@ -338,10 +460,64 @@ impl SegmentFile {
         Ok((meta, total_rows, sha_bytes))
     }
 
-    /// Read per-partition CDC metadata blobs from a segment.
+    /// Read one selected PART metadata sidecar directly from its indexed range.
+    pub fn read_part_meta_from_reader<R: Read + Seek>(
+        reader: &mut R,
+        index: &SegmentPartitionIndexEntry,
+    ) -> io::Result<Option<WalPartMeta>> {
+        if index.part_meta_len == 0 {
+            if index.part_meta_summary != SegmentPartMetaSummary::Append {
+                return Err(invalid_data(
+                    "CDC WAL PART metadata summary has an empty sidecar",
+                ));
+            }
+            return Ok(None);
+        }
+
+        let meta_len = usize::try_from(index.part_meta_len)
+            .map_err(|_| invalid_data("WAL PART metadata is too large"))?;
+        reader.seek(io::SeekFrom::Start(index.part_meta_start))?;
+        let mut blob = vec![0u8; meta_len];
+        reader.read_exact(&mut blob)?;
+        let (meta, summary) = parse_part_meta_blob(&blob)?;
+        if summary != index.part_meta_summary {
+            return Err(invalid_data(format!(
+                "WAL PART metadata summary mismatch at slice ordinal {}",
+                index.slice_ordinal
+            )));
+        }
+        Ok(Some(meta))
+    }
+
+    pub fn read_part_meta_from_bytes(
+        bytes: &[u8],
+        index: &SegmentPartitionIndexEntry,
+    ) -> io::Result<Option<WalPartMeta>> {
+        let end = index
+            .part_meta_start
+            .checked_add(index.part_meta_len)
+            .ok_or_else(|| invalid_data("WAL PART metadata range overflow"))?;
+        if end > bytes.len() as u64 {
+            return Err(invalid_data(format!(
+                "WAL PART metadata range beyond segment end start={} len={} file_len={}",
+                index.part_meta_start,
+                index.part_meta_len,
+                bytes.len()
+            )));
+        }
+        Self::read_part_meta_from_reader(&mut io::Cursor::new(bytes), index)
+    }
+
+    /// Read every per-partition CDC metadata blob from a segment.
+    ///
+    /// Scheduling must use `SegmentPartitionIndexEntry::part_meta_summary`;
+    /// this compatibility helper intentionally performs a full-segment scan.
     pub fn read_part_meta_blobs_from_reader<R: Read + Seek>(
         reader: &mut R,
     ) -> io::Result<std::collections::HashMap<PartitionKey, Vec<u8>>> {
+        #[cfg(test)]
+        FULL_PART_META_SCANS.fetch_add(1, Ordering::Relaxed);
+
         let mut result: std::collections::HashMap<PartitionKey, Vec<u8>> =
             std::collections::HashMap::new();
 
@@ -407,108 +583,19 @@ impl SegmentFile {
         Ok(result)
     }
 
+    #[cfg(test)]
+    pub(crate) fn reset_full_part_meta_scan_count() {
+        FULL_PART_META_SCANS.store(0, Ordering::Relaxed);
+    }
+
+    #[cfg(test)]
+    pub(crate) fn full_part_meta_scan_count() -> usize {
+        FULL_PART_META_SCANS.load(Ordering::Relaxed)
+    }
+
     pub fn read_metadata(&self) -> io::Result<SegmentFileMetadata> {
         let mut file = OpenOptions::new().read(true).open(&self.path)?;
-        let mut magic = [0u8; 4];
-        file.read_exact(&mut magic)?;
-        if &magic != MAGIC {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "Compactor: bad segment magic",
-            ));
-        }
-        let mut ver = [0u8; 4];
-        file.read_exact(&mut ver)?;
-        let version = u32::from_le_bytes(ver);
-        if version != VERSION {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "Compactor: read refused seg={} version={}",
-                    self.path.to_string_lossy(),
-                    version
-                ),
-            ));
-        }
-        let mut created = [0u8; 8];
-        file.read_exact(&mut created)?;
-        let created_at_secs = u64::from_le_bytes(created);
-        let mut off_len_buf = [0u8; 8];
-        file.read_exact(&mut off_len_buf)?;
-        let offsets_len = u64::from_le_bytes(off_len_buf);
-        let mut offsets_blob = vec![0u8; offsets_len as usize];
-        file.read_exact(&mut offsets_blob)?;
-        let offsets: std::collections::HashMap<OffsetKey, u64> =
-            bincode::deserialize(&offsets_blob).unwrap_or_default();
-
-        let mut index: Vec<SegmentPartitionIndexEntry> = Vec::new();
-        let mut total_bytes: u64 = 0;
-        loop {
-            let mut tag = [0u8; 4];
-            match file.read_exact(&mut tag) {
-                Ok(()) => {}
-                Err(e) => {
-                    if e.kind() == io::ErrorKind::UnexpectedEof {
-                        break;
-                    } else {
-                        return Err(e);
-                    }
-                }
-            }
-            if &tag != PART {
-                break;
-            }
-            let mut key_len_buf = [0u8; 8];
-            file.read_exact(&mut key_len_buf)?;
-            let key_len = u64::from_le_bytes(key_len_buf);
-            let mut key_blob = vec![0u8; key_len as usize];
-            file.read_exact(&mut key_blob)?;
-            let key: PartitionKey = bincode::deserialize(&key_blob).unwrap();
-            let mut bytes_buf = [0u8; 8];
-            file.read_exact(&mut bytes_buf)?;
-            let part_bytes = u64::from_le_bytes(bytes_buf);
-            let mut upd_buf = [0u8; 8];
-            file.read_exact(&mut upd_buf)?;
-            let upd_secs = u64::from_le_bytes(upd_buf);
-
-            // Skip part_meta_blob sidecar
-            let mut meta_len_buf = [0u8; 8];
-            file.read_exact(&mut meta_len_buf)?;
-            let meta_len = u64::from_le_bytes(meta_len_buf);
-            if meta_len > 0 {
-                file.seek(io::SeekFrom::Current(meta_len as i64))?;
-            }
-
-            let mut len_buf = [0u8; 8];
-            file.read_exact(&mut len_buf)?;
-            let data_len = u64::from_le_bytes(len_buf);
-            let start = file.stream_position()?;
-            let file_len = file.metadata()?.len();
-            if start.saturating_add(data_len) > file_len {
-                return Err(io::Error::new(io::ErrorKind::InvalidData, format!(
-                    "Compactor: partition length beyond file end for {} start={} len={} file_len={}",
-                    self.path.to_string_lossy(), start, data_len, file_len
-                )));
-            }
-            total_bytes = total_bytes.saturating_add(data_len);
-            index.push(SegmentPartitionIndexEntry {
-                key,
-                bytes: part_bytes,
-                updated_at_secs: upd_secs,
-                start,
-                len: data_len,
-            });
-            // Seek over the Arrow stream to the next PART header
-            file.seek(io::SeekFrom::Current(data_len as i64))?;
-        }
-
-        Ok(SegmentFileMetadata {
-            created_at_secs,
-            total_bytes,
-            num_partitions: index.len() as u32,
-            offsets,
-            index,
-        })
+        Self::read_metadata_from_reader(&mut file)
     }
 }
 
@@ -559,6 +646,19 @@ mod tests_wal_writer {
             .unwrap();
         let parts_count = meta.num_partitions;
         assert_eq!(parts_count, 1);
+        let append_index = &meta.index[0];
+        assert_eq!(append_index.slice_ordinal, 0);
+        assert_eq!(append_index.part_meta_len, 0);
+        assert_eq!(
+            append_index.part_meta_summary,
+            SegmentPartMetaSummary::Append
+        );
+        let mut append_file = File::open(&seg.path).unwrap();
+        assert!(
+            SegmentFile::read_part_meta_from_reader(&mut append_file, append_index)
+                .unwrap()
+                .is_none()
+        );
 
         // Read footer and verify
         let mut f = File::open(&seg.path).unwrap();
@@ -644,10 +744,40 @@ mod tests_wal_writer {
             .write_snapshot(&offsets, &batches, &parts_meta, &part_meta_blobs)
             .unwrap();
         assert_eq!(meta.num_partitions, 1);
+        let index = &meta.index[0];
+        assert_eq!(index.slice_ordinal, 0);
+        assert_eq!(index.part_meta_len, meta_blob.len() as u64);
+        let expected_hash = {
+            let digest = Sha256::digest(&meta_blob);
+            let mut hash = [0u8; 32];
+            hash.copy_from_slice(&digest);
+            hash
+        };
+        assert_eq!(
+            index.part_meta_summary,
+            SegmentPartMetaSummary::Cdc {
+                row_count: 3,
+                canonical_hash: expected_hash,
+            }
+        );
 
         let read_meta = seg.read_metadata().unwrap();
         assert_eq!(read_meta.num_partitions, 1);
         assert_eq!(read_meta.index.len(), 1);
+        assert_eq!(read_meta.index[0].part_meta_start, index.part_meta_start);
+        assert_eq!(
+            read_meta.index[0].part_meta_summary,
+            index.part_meta_summary
+        );
+
+        let mut direct_file = File::open(&seg.path).unwrap();
+        let direct = SegmentFile::read_part_meta_from_reader(&mut direct_file, &read_meta.index[0])
+            .unwrap()
+            .unwrap();
+        assert_eq!(direct.kind, WalPartKind::Cdc);
+        assert_eq!(direct.row_count, 3);
+        assert_eq!(direct.rows[0].event_id, vec![1]);
+        assert_eq!(direct.rows[2].event_id, vec![3]);
 
         let mut f = File::open(&seg.path).unwrap();
         let blobs = SegmentFile::read_part_meta_blobs_from_reader(&mut f).unwrap();
