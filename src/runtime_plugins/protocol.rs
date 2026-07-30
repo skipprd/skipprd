@@ -602,8 +602,13 @@ pub struct PrepareSink {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum PrepareSinkResult {
     Ready,
-    AlreadyApplied(CommitReceipt),
-    Rejected { reason: String },
+    AlreadyApplied {
+        receipt: CommitReceipt,
+        catalog_intents: Vec<CatalogIntent>,
+    },
+    Rejected {
+        reason: String,
+    },
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

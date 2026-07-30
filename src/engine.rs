@@ -1148,6 +1148,22 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
             finalising_started.elapsed()
         );
     }
+    let catalog_drain_timeout = Duration::from_secs(
+        Config::getenv("CATALOG_OUTBOX_DRAIN_TIMEOUT_SECONDS", "30")
+            .parse::<u64>()
+            .unwrap_or(30),
+    );
+    info!(
+        "Finalising: draining durable catalog outbox for up to {:?}",
+        catalog_drain_timeout
+    );
+    if let Err(err) =
+        crate::catalog_coordinator::drain_catalog_outboxes(catalog_drain_timeout).await
+    {
+        let message = format!("Finalising: durable catalog outbox drain failed: {err}");
+        error!("{message}");
+        finalization_error = Some(message);
+    }
     info!("Finalising: draining schema sync worker");
     Config::drain_schema_sync_worker();
     info!("Finalising: schema sync worker drained");

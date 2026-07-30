@@ -11,7 +11,7 @@ use arrow_schema::SchemaRef;
 use skippr_core::helpers::logging::init_logging;
 use skippr_core::plugins::{
     DataSink, HasSchemaSinkSpec, HasSinkSpec, RecordBatchChunk, SchemaSink, SchemaSyncRequest,
-    SinkPreflightOutcome, SinkWriteOutcome,
+    SinkCallResult, SinkPreflightOutcome, SinkWriteOutcome,
 };
 #[cfg(test)]
 use tokio::io::AsyncRead;
@@ -28,8 +28,8 @@ use crate::protocol::{
     RuntimeSchemaState, RuntimeSchemaStateInstallRequest, RuntimeSessionHello,
     RuntimeSinkCapabilityDescriptor, RuntimeSinkError, RuntimeSinkInstallRequest,
     RuntimeSinkPayloadMode, SchemaDelta, SchemaRunRequest, SinkAck, SinkChunk, SinkRunRequest,
-    SinkWriteStats, RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV,
-    SKIPPR_RUNTIME_DATA_ADDR_ENV, SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
+    RUNTIME_PROTOCOL_VERSION, SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
+    SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
 use crate::sdk::decode_record_batch_stream;
 use crate::sink_idempotency::ObjectWriteManifest;
@@ -925,11 +925,17 @@ where
     let request = &prepare.request;
     let ledger_manifest =
         match prepare_sink_request(&prepare, &primary_plugin, &deadletter_plugin).await {
-            Ok(PreparedSink::AlreadyApplied(receipt)) => {
+            Ok(PreparedSink::AlreadyApplied {
+                receipt,
+                catalog_intents,
+            }) => {
                 control_writer
                     .write(&PluginFrame::PrepareAck(PrepareAck {
                         request_id: request.request_id,
-                        result: PrepareSinkResult::AlreadyApplied(receipt),
+                        result: PrepareSinkResult::AlreadyApplied {
+                            receipt,
+                            catalog_intents,
+                        },
                     }))
                     .await?;
                 return Ok(());
@@ -955,7 +961,7 @@ where
                 return Ok(());
             }
         };
-    let (outcome, payload_rows, payload_bytes) = match request.payload_mode {
+    let (mut call_result, payload_rows, payload_bytes) = match request.payload_mode {
         RuntimeSinkPayloadMode::FullStream => {
             // FullStream is one Arrow IPC stream split only for transport. Its
             // framing is reassembled before decode; compaction uses the bounded
@@ -966,29 +972,29 @@ where
                 .iter()
                 .flat_map(|chunk| chunk.arrow_stream_bytes.iter().copied())
                 .collect();
-            let outcome = run_sink_request(
+            let result = run_sink_request(
                 request.clone(),
                 arrow_stream_bytes,
                 &primary_plugin,
                 &deadletter_plugin,
             )
             .await?;
-            (outcome, payload.rows, payload.bytes)
+            (result, payload.rows, payload.bytes)
         }
         RuntimeSinkPayloadMode::GroupedChunks => {
-            let (outcome, progress) = run_grouped_sink_request(
+            let (result, progress) = run_grouped_sink_request(
                 request.clone(),
                 data_receiver,
                 &primary_plugin,
                 &deadletter_plugin,
             )
             .await?;
-            (outcome, progress.rows, progress.bytes)
+            (result, progress.rows, progress.bytes)
         }
     };
     if let Some(manifest) = ledger_manifest.as_ref() {
         if matches!(
-            outcome,
+            call_result.outcome,
             SinkWriteOutcome::Applied | SinkWriteOutcome::AlreadyApplied
         ) {
             write_local_idempotency_manifest(manifest)?;
@@ -997,18 +1003,21 @@ where
     control_writer
         .write(&PluginFrame::SinkAck(SinkAck {
             request_id: request.request_id,
-            outcome,
+            outcome: call_result.outcome.clone(),
             receipt: CommitReceipt::from_envelope(
                 &prepare.envelope,
                 CommitReceiptAuthority::SinkWrite,
             ),
-            stats: SinkWriteStats {
-                rows: Some(payload_rows),
-                bytes: Some(payload_bytes),
-                ..SinkWriteStats::default()
+            stats: {
+                if call_result.stats.rows.is_none() {
+                    call_result.stats.rows = Some(payload_rows);
+                }
+                if call_result.stats.bytes.is_none() {
+                    call_result.stats.bytes = Some(payload_bytes);
+                }
+                call_result.stats
             },
-            // Glue outbox migration owns production of catalog intents.
-            catalog_intents: Vec::new(),
+            catalog_intents: call_result.catalog_intents,
         }))
         .await
         .map_err(|err| {
@@ -1139,7 +1148,10 @@ enum PreparedSink {
     Ready {
         ledger_manifest: Option<ObjectWriteManifest>,
     },
-    AlreadyApplied(CommitReceipt),
+    AlreadyApplied {
+        receipt: CommitReceipt,
+        catalog_intents: Vec<crate::protocol::CatalogIntent>,
+    },
 }
 
 fn sink_write_context(request: &SinkRunRequest) -> skippr_core::plugins::SinkWriteContext<'_> {
@@ -1230,7 +1242,8 @@ where
     if let Some(manifest) = ledger_manifest.as_ref() {
         let _cache_matches = local_idempotency_manifest_matches(manifest)?;
     }
-    match plugin.preflight(ctx).await? {
+    let preflight = plugin.preflight_result(ctx).await?;
+    match preflight.outcome {
         SinkPreflightOutcome::Ready => Ok(PreparedSink::Ready { ledger_manifest }),
         SinkPreflightOutcome::AlreadyApplied { authority } => {
             if !replay_safe {
@@ -1246,10 +1259,13 @@ where
             if let Some(manifest) = ledger_manifest.as_ref() {
                 write_local_idempotency_manifest(manifest)?;
             }
-            Ok(PreparedSink::AlreadyApplied(CommitReceipt::from_envelope(
-                &prepare.envelope,
-                CommitReceiptAuthority::AuthoritativePreflight { authority },
-            )))
+            Ok(PreparedSink::AlreadyApplied {
+                receipt: CommitReceipt::from_envelope(
+                    &prepare.envelope,
+                    CommitReceiptAuthority::AuthoritativePreflight { authority },
+                ),
+                catalog_intents: preflight.catalog_intents,
+            })
         }
     }
 }
@@ -1259,7 +1275,7 @@ async fn run_sink_request<P>(
     arrow_stream_bytes: Vec<u8>,
     primary_plugin: &Option<Arc<P>>,
     deadletter_plugin: &Option<Arc<P>>,
-) -> io::Result<SinkWriteOutcome>
+) -> io::Result<SinkCallResult>
 where
     P: DataSink + HasSinkSpec + Send + Sync,
 {
@@ -1297,13 +1313,13 @@ where
     let is_grouped = ctx.is_grouped();
     let replay_safe =
         <<P::Spec as skippr_core::plugins::SinkSpec>::WriteSupport as skippr_core::plugins::SinkWriteSupport>::CAN_RETURN_ALREADY_APPLIED;
-    let outcome = plugin.sync_with_context_result(stream, ctx).await?;
-    if is_grouped && outcome == SinkWriteOutcome::AlreadyApplied && !replay_safe {
+    let result = plugin.sync_with_context_call_result(stream, ctx).await?;
+    if is_grouped && result.outcome == SinkWriteOutcome::AlreadyApplied && !replay_safe {
         return Err(io::Error::other(
             "runtime sink returned AlreadyApplied without declaring idempotent replay support",
         ));
     }
-    Ok(outcome)
+    Ok(result)
 }
 
 async fn run_grouped_sink_request<P>(
@@ -1311,7 +1327,7 @@ async fn run_grouped_sink_request<P>(
     receiver: mpsc::Receiver<HostDataFrame>,
     primary_plugin: &Option<Arc<P>>,
     deadletter_plugin: &Option<Arc<P>>,
-) -> io::Result<(SinkWriteOutcome, RuntimeGroupedPayloadProgress)>
+) -> io::Result<(SinkCallResult, RuntimeGroupedPayloadProgress)>
 where
     P: DataSink + HasSinkSpec + Send + Sync,
 {
@@ -1358,7 +1374,7 @@ where
         grouped_ctx.grouping_key.clone(),
         chunk_stream,
     );
-    let outcome = plugin.sync_grouped(reader, grouped_ctx).await?;
+    let result = plugin.sync_grouped_call_result(reader, grouped_ctx).await?;
     let progress = *progress
         .lock()
         .expect("runtime grouped sink progress poisoned");
@@ -1371,13 +1387,13 @@ where
             ),
         ));
     }
-    if outcome == SinkWriteOutcome::AlreadyApplied && !replay_safe {
+    if result.outcome == SinkWriteOutcome::AlreadyApplied && !replay_safe {
         return Err(io::Error::other(
             "runtime sink returned AlreadyApplied without declaring idempotent replay support",
         ));
     }
 
-    Ok((outcome, progress))
+    Ok((result, progress))
 }
 
 fn local_idempotency_manifest_path(
@@ -1933,7 +1949,7 @@ mod tests {
         });
         sender.send(finish).await.unwrap();
         let (outcome, progress) = run.await.unwrap().unwrap();
-        assert_eq!(outcome, SinkWriteOutcome::Applied);
+        assert_eq!(outcome.outcome, SinkWriteOutcome::Applied);
         assert_eq!(
             progress,
             RuntimeGroupedPayloadProgress {

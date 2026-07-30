@@ -647,14 +647,15 @@ async fn run_sink_loop(
                         control_writer,
                         &PluginFrame::PrepareAck(PrepareAck {
                             request_id: request.request_id,
-                            result: PrepareSinkResult::AlreadyApplied(
-                                CommitReceipt::from_envelope(
+                            result: PrepareSinkResult::AlreadyApplied {
+                                receipt: CommitReceipt::from_envelope(
                                     &prepare.envelope,
                                     CommitReceiptAuthority::AuthoritativePreflight {
                                         authority: "test-helper".to_string(),
                                     },
                                 ),
-                            ),
+                                catalog_intents: Vec::new(),
+                            },
                         }),
                     )
                     .await?;

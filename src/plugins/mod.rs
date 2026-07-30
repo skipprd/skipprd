@@ -18,9 +18,9 @@ pub use traits::{
     GroupedSinkWriteContext, GroupedWalKind, GroupedWalPartitionKey, GroupedWalRefs,
     HasSchemaSinkSpec, HasSinkSpec, NonRetryableDebugOutput, RecordBatchChunk, SchemaSink,
     SchemaSinkSpec, SchemaSource, SchemaSyncRequest, SftpAtLeastOnce, SftpAtomicRename,
-    SinkPreflightOutcome, SinkSpec, SinkWriteContext, SinkWriteOutcome, SinkWriteRejection,
-    SinkWriteSemantics, SinkWriteSupport, SourceCdcContract, SourceCdcMode,
-    SourceExecutionContract, SourceOnceContract, TransactionalTableCommit,
+    SinkCallResult, SinkPreflightOutcome, SinkPreflightResult, SinkSpec, SinkWriteContext,
+    SinkWriteOutcome, SinkWriteRejection, SinkWriteSemantics, SinkWriteSupport, SourceCdcContract,
+    SourceCdcMode, SourceExecutionContract, SourceOnceContract, TransactionalTableCommit,
 };
 
 /// No-op output plugin used by `discover` mode to run the input pipeline

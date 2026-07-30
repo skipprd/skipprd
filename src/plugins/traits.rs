@@ -22,7 +22,9 @@ use crate::discover::OutputMetadata;
 use crate::plugins::cdc::{SinkCapability, SourceCapability, SyncContext};
 use crate::plugins::source_contract::SourceNamespaceContract;
 use crate::plugins::source_sync::SourceSyncContext;
-use crate::runtime_plugins::protocol::{RuntimeSchemaState, SchemaDelta};
+use crate::runtime_plugins::protocol::{
+    CatalogIntent, RuntimeSchemaState, SchemaDelta, SinkWriteStats,
+};
 
 #[derive(Clone, Copy, Debug)]
 pub enum SourceCdcContract {
@@ -745,6 +747,29 @@ pub enum SinkPreflightOutcome {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SinkPreflightResult {
+    pub outcome: SinkPreflightOutcome,
+    pub catalog_intents: Vec<CatalogIntent>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SinkCallResult {
+    pub outcome: SinkWriteOutcome,
+    pub stats: SinkWriteStats,
+    pub catalog_intents: Vec<CatalogIntent>,
+}
+
+impl SinkCallResult {
+    pub fn outcome(outcome: SinkWriteOutcome) -> Self {
+        Self {
+            outcome,
+            stats: SinkWriteStats::default(),
+            catalog_intents: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum SinkWriteRejection {
     MissingIdempotencyKey,
     MissingWalRefs,
@@ -1281,6 +1306,16 @@ pub trait DataSink: Send + Sync {
         Ok(SinkPreflightOutcome::Ready)
     }
 
+    async fn preflight_result(
+        &self,
+        ctx: SinkWriteContext<'_>,
+    ) -> Result<SinkPreflightResult, std::io::Error> {
+        Ok(SinkPreflightResult {
+            outcome: self.preflight(ctx).await?,
+            catalog_intents: Vec::new(),
+        })
+    }
+
     async fn sync(
         &self,
         stream: SendableRecordBatchStream,
@@ -1315,11 +1350,31 @@ pub trait DataSink: Send + Sync {
         Ok(SinkWriteOutcome::Applied)
     }
 
+    async fn sync_with_context_call_result(
+        &self,
+        stream: SendableRecordBatchStream,
+        ctx: SinkWriteContext<'_>,
+    ) -> Result<SinkCallResult, std::io::Error> {
+        Ok(SinkCallResult::outcome(
+            self.sync_with_context_result(stream, ctx).await?,
+        ))
+    }
+
     async fn sync_grouped(
         &self,
         reader: GroupedBatchReader,
         ctx: GroupedSinkWriteContext<'_>,
     ) -> Result<SinkWriteOutcome, std::io::Error>;
+
+    async fn sync_grouped_call_result(
+        &self,
+        reader: GroupedBatchReader,
+        ctx: GroupedSinkWriteContext<'_>,
+    ) -> Result<SinkCallResult, std::io::Error> {
+        Ok(SinkCallResult::outcome(
+            self.sync_grouped(reader, ctx).await?,
+        ))
+    }
 
     /// Return the compile-time capability descriptor for this sink.
     fn capability(&self) -> &'static SinkCapability;

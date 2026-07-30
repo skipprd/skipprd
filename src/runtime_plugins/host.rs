@@ -26,6 +26,7 @@ use {
 };
 
 use crate::buffer::ingest_buffer::{flush_all_segments, IngestBufferBatch};
+use crate::catalog_coordinator::CatalogCoordinator;
 use crate::discover::{OutputMetadata, SkipprDataType};
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetTypes, Offsets};
@@ -264,10 +265,14 @@ fn validate_commit_receipt(
 
 fn validate_sink_ack(ack: &SinkAck, envelope: &SinkApplyEnvelopeV2) -> io::Result<()> {
     validate_commit_receipt(&ack.receipt, envelope)?;
-    if !ack.catalog_intents.is_empty() {
+    if ack.catalog_intents.iter().any(|intent| {
+        intent.version != crate::runtime_plugins::protocol::CATALOG_INTENT_VERSION
+            || intent.identity.namespace.trim().is_empty()
+            || intent.identity.key.trim().is_empty()
+    }) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
-            "runtime sink returned catalog intents before Glue outbox migration",
+            "runtime sink returned an invalid catalog intent",
         ));
     }
     Ok(())
@@ -2795,6 +2800,7 @@ pub struct RuntimeDataSinkPlugin {
     install_request: RuntimeSinkInstallRequest,
     capability: &'static cdc::SinkCapability,
     pool: Arc<RuntimeSinkConnectionPool>,
+    catalog_coordinator: Arc<CatalogCoordinator>,
 }
 
 impl RuntimeDataSinkPlugin {
@@ -2852,13 +2858,23 @@ impl RuntimeDataSinkPlugin {
             capability.max_sessions_per_child,
         )
         .await?;
+        let catalog_coordinator =
+            CatalogCoordinator::for_pipeline_data_dir(&install_request.context.data_dir)?;
         let plugin = Self {
             install_request,
             capability,
             pool,
+            catalog_coordinator,
         };
         plugin.pool.refresh_published_schema_version().await;
         Ok(plugin)
+    }
+
+    fn persist_catalog_intents(
+        &self,
+        intents: &[crate::runtime_plugins::protocol::CatalogIntent],
+    ) -> io::Result<()> {
+        self.catalog_coordinator.persist(intents)
     }
 
     async fn restart_worker_inner(
@@ -3136,9 +3152,14 @@ impl RuntimeDataSinkPlugin {
             match frame {
                 PluginFrame::PrepareAck(PrepareAck {
                     request_id,
-                    result: PrepareSinkResult::AlreadyApplied(receipt),
+                    result:
+                        PrepareSinkResult::AlreadyApplied {
+                            receipt,
+                            catalog_intents,
+                        },
                 }) if request_id == request.request_id => {
                     validate_commit_receipt(&receipt, &prepare.envelope)?;
+                    self.persist_catalog_intents(&catalog_intents)?;
                     return Ok(SinkWriteOutcome::AlreadyApplied);
                 }
                 PluginFrame::PrepareAck(PrepareAck {
@@ -3155,6 +3176,7 @@ impl RuntimeDataSinkPlugin {
                         let _ = self.restart_worker(&worker).await;
                         return Err(err);
                     }
+                    self.persist_catalog_intents(&ack.catalog_intents)?;
                     if let Some(rows) = ack.stats.rows {
                         crate::metrics::counters::add_parquet_rows(rows);
                     }
@@ -3395,9 +3417,14 @@ impl RuntimeDataSinkPlugin {
             match frame {
                 PluginFrame::PrepareAck(PrepareAck {
                     request_id: ack_id,
-                    result: PrepareSinkResult::AlreadyApplied(receipt),
+                    result:
+                        PrepareSinkResult::AlreadyApplied {
+                            receipt,
+                            catalog_intents,
+                        },
                 }) if ack_id == request_id => {
                     validate_commit_receipt(&receipt, &prepare.envelope)?;
+                    self.persist_catalog_intents(&catalog_intents)?;
                     return Ok(SinkWriteOutcome::AlreadyApplied);
                 }
                 PluginFrame::PrepareAck(PrepareAck {
@@ -3435,6 +3462,7 @@ impl RuntimeDataSinkPlugin {
                         let _ = self.restart_worker(&worker).await;
                         return Err(err);
                     }
+                    self.persist_catalog_intents(&ack.catalog_intents)?;
                     if let Some(rows) = ack.stats.rows {
                         crate::metrics::counters::add_parquet_rows(rows);
                     }

@@ -73,6 +73,13 @@ pub static S3_WAL_RETRY_EMA_X100: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(
 // Glue/Athena control-plane retry telemetry (plugin-local when using runtime sinks)
 pub static GLUE_RETRIES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static GLUE_RETRY_EMA_X100: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CATALOG_OUTBOX_PENDING: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
+pub static CATALOG_OUTBOX_OLDEST_AGE_SECS: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CATALOG_OUTBOX_RETRIES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CATALOG_OUTBOX_TERMINAL_FAILURES: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CATALOG_OUTBOX_SUCCESSFUL_BATCHES: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CATALOG_OUTBOX_LOCATION_UPDATES: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static DATA_DURABLE_CATALOG_PENDING: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 
 // Upload telemetry
 pub static UPLOADS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
@@ -569,6 +576,45 @@ pub fn set_s3_wal_retry_ema_x100(v: u64) {
 #[inline]
 pub fn add_glue_retry(n: u64) {
     GLUE_RETRIES_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn add_catalog_retry(n: u64) {
+    CATALOG_OUTBOX_RETRIES_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn add_catalog_terminal_failure(n: u64) {
+    CATALOG_OUTBOX_TERMINAL_FAILURES.fetch_add(n, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn add_catalog_successful_batch(n: u64) {
+    CATALOG_OUTBOX_SUCCESSFUL_BATCHES.fetch_add(n, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn add_catalog_location_update(n: u64) {
+    CATALOG_OUTBOX_LOCATION_UPDATES.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn refresh_catalog_outbox_metrics(
+    outbox: &crate::catalog_outbox::CatalogOutbox,
+) -> std::io::Result<()> {
+    let pending = outbox.scan_pending(usize::MAX)?;
+    CATALOG_OUTBOX_PENDING.store(pending.len(), Ordering::Relaxed);
+    DATA_DURABLE_CATALOG_PENDING.store(pending.len() as u64, Ordering::Relaxed);
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis() as u64;
+    let oldest_age = pending
+        .iter()
+        .map(|entry| now_ms.saturating_sub(entry.created_at_ms) / 1_000)
+        .max()
+        .unwrap_or(0);
+    CATALOG_OUTBOX_OLDEST_AGE_SECS.store(oldest_age, Ordering::Relaxed);
+    Ok(())
 }
 
 #[inline]
