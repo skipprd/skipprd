@@ -64,7 +64,6 @@ const TIME_PARTITION_GRANULARITIES: [&str; 5] = ["year", "month", "day", "hour",
 const ATHENA_MULTIPART_PART_SIZE: usize = 16 * 1024 * 1024;
 const ATHENA_BATCH_CHANNEL_CAPACITY: usize = 1;
 const ATHENA_BYTE_CHANNEL_CAPACITY: usize = 1;
-const ATHENA_MAX_IN_FLIGHT_PARTS: usize = 2;
 const ATHENA_MULTIPART_BEGIN_TIMEOUT_SECS: u64 = 120;
 const ATHENA_MULTIPART_PART_TIMEOUT_SECS: u64 = 300;
 const ATHENA_MULTIPART_COMPLETE_TIMEOUT_SECS: u64 = 600;
@@ -82,11 +81,15 @@ fn athena_object_key(
 }
 
 fn athena_object_writer_config() -> ObjectWriterConfig {
+    let max_in_flight_parts =
+        skippr_runtime_sdk::metrics::counters::MULTIPART_PART_CONCURRENCY_TARGET
+            .load(Ordering::Relaxed)
+            .clamp(1, 8);
     ObjectWriterConfig {
         part_size: ATHENA_MULTIPART_PART_SIZE,
         batch_channel_capacity: ATHENA_BATCH_CHANNEL_CAPACITY,
         byte_channel_capacity: ATHENA_BYTE_CHANNEL_CAPACITY,
-        max_in_flight_parts: ATHENA_MAX_IN_FLIGHT_PARTS,
+        max_in_flight_parts,
     }
 }
 
@@ -132,49 +135,18 @@ fn get_namespace_lock(namespace: &str) -> Arc<Mutex<()>> {
         .clone()
 }
 
-/// Optional env override without `std::env::var` (banned in runtime sink plugins).
-fn optional_env_usize(name: &str) -> Option<usize> {
-    let value = std::env::var_os(name)?.into_string().ok()?;
-    let n = value.parse::<usize>().ok()?;
-    (n > 0).then_some(n)
-}
-
-fn glue_cp_max() -> usize {
-    optional_env_usize("ATHENA_GLUE_CP_MAX")
-        .unwrap_or(16)
-        .clamp(1, 32)
-}
-
-fn glue_cp_env_override() -> Option<usize> {
-    optional_env_usize("ATHENA_GLUE_CONTROL_PLANE_CONCURRENCY")
-}
-
-/// Seed Glue CP target from env or CPU; returns the target value.
+/// Seed this runtime process from the same measured flush-budget model.
 fn seed_athena_glue_cp_target() -> usize {
-    let max = glue_cp_max();
-    if let Some(n) = glue_cp_env_override() {
-        let clamped = n.clamp(1, max);
-        metrics_counters::ATHENA_GLUE_CP_TARGET.store(clamped, Ordering::Relaxed);
-        info!("tune: athena_glue_cp set by env={}", clamped);
-        return clamped;
-    }
-    let num_cpus = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(2)
-        .max(2);
-    let seeded = (num_cpus / 8).clamp(2, max);
-    metrics_counters::ATHENA_GLUE_CP_TARGET.store(seeded, Ordering::Relaxed);
-    info!(
-        "tune: athena_glue_cp seeded from cpu count={} -> {}",
-        num_cpus, seeded
-    );
-    seeded
+    skippr_runtime_sdk::ingest::tuner::apply_env_caps();
+    skippr_runtime_sdk::ingest::tuner::current_flush_budget()
+        .catalog_operations
+        .max(1)
 }
 
 fn resize_glue_cp_sem_to_target() {
     let target = metrics_counters::ATHENA_GLUE_CP_TARGET
         .load(Ordering::Relaxed)
-        .clamp(1, glue_cp_max());
+        .clamp(1, 32);
     // Approximate current capacity: available + 1 if someone holds (same pattern as upload_sem).
     let available = GLUE_CP_SEM.available_permits();
     if target > available {
@@ -206,47 +178,19 @@ async fn acquire_glue_cp_permit() -> tokio::sync::OwnedSemaphorePermit {
 
 fn note_glue_transient_retry() {
     metrics_counters::add_glue_retry(1);
-    static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let total = metrics_counters::GLUE_RETRIES_TOTAL.load(Ordering::Relaxed);
-    let last = LAST.swap(total, Ordering::SeqCst);
-    let delta = total.saturating_sub(last);
-    let prev = metrics_counters::GLUE_RETRY_EMA_X100.load(Ordering::Relaxed);
-    let ema = ((prev.saturating_mul(80))
-        .saturating_add(delta.saturating_mul(100).saturating_mul(20)))
-        / 100;
-    metrics_counters::set_glue_retry_ema_x100(ema);
-    if ema > 200 {
-        let cur = metrics_counters::ATHENA_GLUE_CP_TARGET.load(Ordering::Relaxed);
-        let next = cur.saturating_sub(1).max(2);
-        if next != cur {
-            metrics_counters::ATHENA_GLUE_CP_TARGET.store(next, Ordering::Relaxed);
-            info!(
-                "tune: athena_glue_cp {} -> {} (glue_retry_ema_x100={})",
-                cur, next, ema
-            );
-        }
-    }
+    skippr_runtime_sdk::ingest::tuner::update_flush_budget(
+        skippr_runtime_sdk::ingest::tuner::FlushMode::Drain,
+        true,
+        None,
+    );
 }
 
 fn maybe_restore_glue_cp_target() {
-    let ema = metrics_counters::GLUE_RETRY_EMA_X100.load(Ordering::Relaxed);
-    if ema >= 50 {
-        return;
-    }
-    // Env override is sticky: do not climb away from the operator-chosen value.
-    if glue_cp_env_override().is_some() {
-        return;
-    }
-    let max = glue_cp_max();
-    let cur = metrics_counters::ATHENA_GLUE_CP_TARGET.load(Ordering::Relaxed);
-    let next = cur.saturating_add(1).min(max);
-    if next != cur {
-        metrics_counters::ATHENA_GLUE_CP_TARGET.store(next, Ordering::Relaxed);
-        debug!(
-            "tune: athena_glue_cp {} -> {} (glue_retry_ema_x100={})",
-            cur, next, ema
-        );
-    }
+    skippr_runtime_sdk::ingest::tuner::update_flush_budget(
+        skippr_runtime_sdk::ingest::tuner::FlushMode::Drain,
+        true,
+        None,
+    );
 }
 
 #[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
@@ -3541,10 +3485,13 @@ mod contract_schema_tests {
     fn athena_shared_writer_has_explicit_part_and_memory_bounds() {
         let config = athena_object_writer_config();
         assert_eq!(config.part_size, 16 * 1024 * 1024);
-        assert_eq!(config.max_in_flight_parts, 2);
+        assert!((1..=8).contains(&config.max_in_flight_parts));
         assert_eq!(config.batch_channel_capacity, 1);
         assert_eq!(config.byte_channel_capacity, 1);
-        assert_eq!(config.transport_memory_bound_bytes(), 64 * 1024 * 1024);
+        assert_eq!(
+            config.transport_memory_bound_bytes(),
+            config.part_size * (config.max_in_flight_parts + 2)
+        );
     }
 
     #[test]

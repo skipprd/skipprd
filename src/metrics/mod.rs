@@ -414,8 +414,20 @@ impl Metrics {
         let total_times: Vec<(String, Duration)> = TimedRwLock::<()>::get_total_wait_times();
         let wait_times: HashMap<String, Duration> = total_times.iter().cloned().collect();
         let flush_metrics = counters::flush_metrics_snapshot();
+        let flush_budget = crate::ingest::tuner::current_flush_budget();
+        let flush_budget_metrics = json!({
+            "generation": flush_budget.generation,
+            "reason": flush_budget.reason.as_str(),
+            "scheduler_jobs": flush_budget.scheduler_jobs,
+            "decode_jobs": flush_budget.decode_jobs,
+            "sink_sessions": flush_budget.sink_sessions,
+            "upload_sessions": flush_budget.upload_sessions,
+            "multipart_parts": flush_budget.multipart_parts,
+            "catalog_operations": flush_budget.catalog_operations,
+            "ingest_reserved_cores": flush_budget.ingest_reserved_cores,
+        });
 
-        let data = json!({
+        let mut data = json!({
             "metrics": {
                 "ingested_total": metrics_snapshot.messages_total,
                 "fixed_total": metrics_snapshot.ingeted_slow_total,
@@ -516,6 +528,7 @@ impl Metrics {
             "version": VERSION.unwrap_or("unknown"),
             "exit_code": exit_code
         });
+        data["metrics"]["flush_budget"] = flush_budget_metrics;
 
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
         let key = format!(

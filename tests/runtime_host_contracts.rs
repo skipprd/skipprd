@@ -260,6 +260,7 @@ struct RuntimeSinkPoolTargetGuard {
 
 impl RuntimeSinkPoolTargetGuard {
     fn set(target: usize) -> Self {
+        skipprd::ingest::tuner::apply_env_caps();
         let previous =
             skipprd::metrics::counters::RUNTIME_SINK_POOL_TARGET.swap(target, Ordering::SeqCst);
         Self { previous }

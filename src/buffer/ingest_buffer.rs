@@ -830,14 +830,6 @@ mod work_conserving_scheduler_tests {
     }
 
     #[test]
-    fn ingest_safe_cap_is_a_ceiling_except_when_forced() {
-        assert_eq!(Buffers::apply_ingest_safe_cap(8, false, 1, 0, 2), 2);
-        assert_eq!(Buffers::apply_ingest_safe_cap(8, false, 0, 1, 2), 2);
-        assert_eq!(Buffers::apply_ingest_safe_cap(8, false, 0, 0, 2), 8);
-        assert_eq!(Buffers::apply_ingest_safe_cap(8, true, 1, 1, 2), 8);
-    }
-
-    #[test]
     fn paused_no_work_keeps_periodic_backoff() {
         assert_eq!(
             Buffers::compactor_idle_backoff(true),
@@ -1651,7 +1643,6 @@ impl Buffers {
         if tx.send(CompactorCommand::DrainAndStop(done_tx)).is_err() {
             return false;
         }
-        let num_cpus = num_cpus::get();
         let drain_started = std::time::Instant::now();
         let mut last_progress_log = std::time::Instant::now();
         let drain_progress = CompactorDrainProgress::new();
@@ -1669,7 +1660,6 @@ impl Buffers {
                     let reclaimable_wal = Self::has_reclaimable_wal();
                     let has_backlog =
                         wal_in_flight > 0 || uploads_in_flight > 0 || reclaimable_wal;
-                    crate::ingest::tuner::drain_tick(num_cpus, has_backlog);
                     if last_progress_log.elapsed() >= std::time::Duration::from_secs(5) {
                         let interval = last_progress_log.elapsed();
                         let remaining_sample = Self::reclaimable_wal_partition_count(10_000);
@@ -1777,9 +1767,6 @@ impl Buffers {
         let mut stop_requested = false;
         loop {
             let ingest_paused = crate::data_dir_ingest_paused();
-            if ingest_paused {
-                crate::ingest::tuner::paused_tick(num_cpus::get());
-            }
             let force = drain_reply.is_some();
             let did_work = {
                 let mut control = CompactionCycleControl {
@@ -1846,46 +1833,28 @@ impl Buffers {
         mut control: Option<&mut CompactionCycleControl<'_>>,
     ) -> bool {
         let ingest_paused = crate::data_dir_ingest_paused();
+        let drain_requested = force;
         let force = force || ingest_paused;
-        let num_cpus = num_cpus::get().max(2);
-        let (_, max_wal) = crate::ingest::tuner::tuning_maxima(num_cpus);
-        let mut concurrency = crate::metrics::counters::WAL_COMPACTION_CONCURRENCY_TARGET
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .clamp(1, max_wal);
-        if force {
-            concurrency = concurrency.max(num_cpus).min(max_wal);
+        let mode = if ingest_paused {
+            crate::ingest::tuner::FlushMode::Paused
+        } else if drain_requested {
+            crate::ingest::tuner::FlushMode::Drain
         } else {
-            let active_ingest =
-                crate::metrics::counters::ACTIVE_THREADS.load(std::sync::atomic::Ordering::Relaxed);
-            let queued_ingest =
-                crate::metrics::counters::QUEUE_LENGTH.load(std::sync::atomic::Ordering::Relaxed);
-            let ingest_busy = active_ingest > 0 || queued_ingest > 0;
-            if ingest_busy {
-                // Ceiling (not floor): preserve ingest capacity while work is in flight.
-                // Pause/force/drain paths above still ramp concurrency aggressively.
-                let ceiling = Config::getenv("WAL_COMPACTION_INGEST_SAFE_CAP", "2")
-                    .parse::<usize>()
-                    .ok()
-                    .filter(|v| *v > 0)
-                    .unwrap_or(2)
-                    .clamp(1, max_wal);
-                if concurrency > ceiling {
-                    if Config::debug_enabled() || Config::log_wal_enabled() {
-                        debug!(
-                            "Compactor: ingest busy; capping concurrency {} -> {} (active_threads={} queued_tasks={})",
-                            concurrency, ceiling, active_ingest, queued_ingest
-                        );
-                    }
-                    concurrency = Self::apply_ingest_safe_cap(
-                        concurrency,
-                        force,
-                        active_ingest,
-                        queued_ingest,
-                        ceiling,
-                    );
-                }
-            }
-        }
+            crate::ingest::tuner::FlushMode::Ingest
+        };
+        let measured_backlog = force
+            || crate::metrics::counters::COMPACTION_PLANNER_READY_WORK_COUNT
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0
+            || crate::metrics::counters::WAL_SNAPSHOT_READY_COUNT
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0
+            || crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0;
+        let snapshot = crate::ingest::tuner::update_flush_budget(mode, measured_backlog, None);
+        let budget = Arc::new(FlushExecutionBudget::from_snapshot(snapshot));
+        let concurrency = budget.scheduler_limit();
 
         let _output_capability = shared_output.capability();
         let currently_in_flight = crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
@@ -1895,18 +1864,17 @@ impl Buffers {
             return false;
         }
 
-        let sink_limit = crate::metrics::counters::RUNTIME_SINK_POOL_TARGET
-            .load(std::sync::atomic::Ordering::Relaxed)
-            .clamp(1, concurrency);
-        let budget = Arc::new(FlushExecutionBudget::new(concurrency, sink_limit));
         debug!(
-            "Compactor: execution budget decode={} sink={} scheduler_slots={}",
+            "Compactor: execution budget generation={} scheduler={} decode={} sink={} executable_slots={}",
+            budget.generation(),
+            budget.scheduler_limit(),
             budget.decode_limit(),
             budget.sink_limit(),
             executable_slots,
         );
 
         let planner_output = shared_output.clone();
+        let planner_sink_limit = budget.sink_limit();
         let executor_output = shared_output.clone();
         let executor_budget = budget.clone();
         let made_progress = drive_work_conserving(
@@ -1919,6 +1887,7 @@ impl Buffers {
                     planner_output.as_ref().as_ref(),
                     active_by_lane,
                     blocked_lanes,
+                    planner_sink_limit,
                 );
                 CompactionPlanBatch {
                     works,
@@ -1940,20 +1909,6 @@ impl Buffers {
             Self::maybe_sweep_segment_cleanup(sweep_force);
         }
         made_progress
-    }
-
-    fn apply_ingest_safe_cap(
-        concurrency: usize,
-        force: bool,
-        active_ingest: usize,
-        queued_ingest: usize,
-        ceiling: usize,
-    ) -> usize {
-        if force || (active_ingest == 0 && queued_ingest == 0) {
-            concurrency
-        } else {
-            concurrency.min(ceiling.max(1))
-        }
     }
 
     fn compactor_idle_backoff(_ingest_paused: bool) -> TokioDuration {
@@ -2254,12 +2209,13 @@ impl Buffers {
         output: &dyn DataSink,
         active_by_lane: &HashMap<CompactionLaneKey, usize>,
         blocked_lanes: &HashSet<CompactionLaneKey>,
+        per_sink_limit: usize,
     ) -> Vec<CompactionWork> {
         let mut planner_metrics = CompactionPlannerMetricGuard::new();
         let now_secs = Self::now_secs();
         let target_bytes = Self::compaction_group_target_bytes();
         let max_parts = Self::compaction_group_max_parts();
-        let per_sink_limit = Self::compaction_per_sink_limit();
+        let per_sink_limit = per_sink_limit.max(1);
         let mut out = Vec::with_capacity(limit);
 
         Self::ensure_manifest_index_loaded();
@@ -5189,6 +5145,7 @@ mod tests_wal_commit {
             &sink,
             &HashMap::new(),
             &HashSet::new(),
+            PARTS,
         );
         assert_eq!(
             works.iter().map(|work| work.entries.len()).sum::<usize>(),
@@ -5201,6 +5158,7 @@ mod tests_wal_commit {
             &sink,
             &HashMap::new(),
             &HashSet::new(),
+            PARTS,
         )
         .is_empty());
         let planner = crate::metrics::counters::flush_metrics_snapshot();

@@ -40,6 +40,9 @@ pub static QUARANTINED_PARTITIONS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU6
 // Dynamic tuning targets (self-tuned by ingest; read by components)
 pub static UPLOAD_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
     Lazy::new(|| std::sync::atomic::AtomicUsize::new(16));
+/// Recommended number of multipart parts in flight inside one object write.
+pub static MULTIPART_PART_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
+    Lazy::new(|| std::sync::atomic::AtomicUsize::new(2));
 pub static WAL_COMPACTION_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
     Lazy::new(|| std::sync::atomic::AtomicUsize::new(16));
 pub static S3_DOWNLOAD_CONCURRENCY_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
@@ -54,6 +57,11 @@ pub static RUNTIME_SINK_POOL_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
 /// Athena Glue control-plane concurrency (auto-tuned in plugin; env ATHENA_GLUE_CONTROL_PLANE_CONCURRENCY overrides).
 pub static ATHENA_GLUE_CP_TARGET: Lazy<std::sync::atomic::AtomicUsize> =
     Lazy::new(|| std::sync::atomic::AtomicUsize::new(2));
+/// Compatibility metrics for the authoritative `FlushBudgetSnapshot`.
+pub static FLUSH_BUDGET_GENERATION: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
+pub static FLUSH_BUDGET_REASON_CODE: Lazy<AtomicUsize> = Lazy::new(|| AtomicUsize::new(0));
+pub static FLUSH_BUDGET_INGEST_RESERVED_CORES: Lazy<AtomicUsize> =
+    Lazy::new(|| AtomicUsize::new(1));
 
 // WAL S3 error telemetry
 pub static S3_WAL_RETRIES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));

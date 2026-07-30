@@ -1535,11 +1535,9 @@ fn runtime_sink_payload_chunk_bytes() -> usize {
 }
 
 fn runtime_sink_process_target() -> usize {
-    if let Ok(v) = Config::getenv("RUNTIME_SINK_CONNECTION_POOL_SIZE", "").parse::<usize>() {
-        if v > 0 {
-            return v.min(16);
-        }
-    }
+    // Compatibility mirror of the authoritative FlushBudgetSnapshot. Environment
+    // aliases are applied as hard caps by the tuner before this target is published.
+    crate::ingest::tuner::apply_env_caps();
     crate::metrics::counters::RUNTIME_SINK_POOL_TARGET
         .load(Ordering::Relaxed)
         .clamp(1, 16)

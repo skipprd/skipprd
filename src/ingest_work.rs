@@ -1319,7 +1319,9 @@ pub(crate) enum DataDirCapacityDecision {
     /// Stop this pipeline's ingest so the multi-pipeline sync loop can advance and
     /// force-compact other pipelines. Does not poison process-global RUNNING.
     YieldPipeline,
-    Fatal { message: String },
+    Fatal {
+        message: String,
+    },
 }
 
 impl Ingest {
@@ -2515,11 +2517,21 @@ impl Ingest {
             {
                 let active = self.active_count.load(Ordering::Acquire);
                 let queued = self.queue_length.load(Ordering::Acquire);
-                let capacity = self.num_cpus;
-                let pressure = (queued as f64) / ((self.max_queue_length as f64).max(1.0));
-
-                // Delegate periodic tuning to tuner
-                crate::ingest::tuner::tick(active, capacity, queued, pressure);
+                let has_flush_backlog =
+                    crate::metrics::counters::COMPACTION_PLANNER_READY_WORK_COUNT
+                        .load(Ordering::Relaxed)
+                        > 0
+                        || crate::metrics::counters::WAL_SNAPSHOT_READY_COUNT
+                            .load(Ordering::Relaxed)
+                            > 0
+                        || crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
+                            .load(Ordering::Relaxed)
+                            > 0;
+                crate::ingest::tuner::update_flush_budget(
+                    crate::ingest::tuner::FlushMode::Ingest,
+                    has_flush_backlog,
+                    Some((active, queued)),
+                );
             }
 
             // Get current metrics for logging
