@@ -1213,7 +1213,7 @@ pub fn update_flush_budget(
     state.last_tuned = Some(now);
     let limits_changed = !same_limits(previous, next);
     let reason_changed = previous.reason != next.reason;
-    if limits_changed || reason_changed {
+    if limits_changed {
         state.current = next;
         publish_compatibility_mirrors(
             next,
@@ -1222,59 +1222,70 @@ pub fn update_flush_budget(
             source_bytes_per_sec,
             wal_write_bytes_per_sec,
         );
-        if limits_changed {
-            info!(
-                "flush_budget generation={} reason={} pressure={} mode={:?} scheduler={}->{} decode={}->{} sink_sessions={}->{} upload_sessions={}->{} multipart_parts={}->{} catalog={}->{} ingest_reserved_cores={} quiet_streak={} cooldown={} backlog_grace={} active_ingest={} queued_ingest={} ready={} cpu_active_tasks={} run_queue={:?} rss_bytes={:?} total_memory_bytes={:?} available_memory_bytes={:?} decode_wait_ms={:?} sink_wait_ms={:?} upload_latency_ms={:?} sink_commit_ms={:?} wal_pending={} wal_ack_ms={:?} source_bps={} wal_write_bps={} s3_retries={} s3_retry_ema_x100={} glue_retries={} glue_retry_ema_x100={}",
-                next.generation,
-                next.reason.as_str(),
-                pressure.as_str(),
-                mode,
-                previous.scheduler_jobs,
-                next.scheduler_jobs,
-                previous.decode_jobs,
-                next.decode_jobs,
-                previous.sink_sessions,
-                next.sink_sessions,
-                previous.upload_sessions,
-                next.upload_sessions,
-                previous.multipart_parts,
-                next.multipart_parts,
-                previous.catalog_operations,
-                next.catalog_operations,
-                next.ingest_reserved_cores,
-                state.policy.quiet_streak,
-                state.policy.growth_cooldown_remaining,
-                state.policy.backlog_grace_remaining,
-                signals.active_ingest,
-                signals.queued_ingest,
-                signals.scheduler_ready_depth,
-                signals.cpu_active_tasks,
-                signals.run_queue,
-                signals.process_rss_bytes,
-                signals.total_memory_bytes,
-                signals.available_memory_bytes,
-                signals.decode_permit_wait_ms,
-                signals.sink_permit_wait_ms,
-                signals.upload_latency_ms,
-                signals.sink_commit_ms,
-                signals.wal_writer_pending,
-                signals.wal_ack_avg_ms,
-                source_bytes_per_sec,
-                wal_write_bytes_per_sec,
-                signals.s3_retries,
-                signals.s3_retry_ema_x100,
-                signals.glue_retries,
-                signals.glue_retry_ema_x100,
-            );
-        }
-    } else {
-        publish_compatibility_mirrors(
-            state.current,
-            state.policy,
-            pressure,
+        info!(
+            "flush_budget generation={} reason={} pressure={} mode={:?} scheduler={}->{} decode={}->{} sink_sessions={}->{} upload_sessions={}->{} multipart_parts={}->{} catalog={}->{} ingest_reserved_cores={} quiet_streak={} cooldown={} backlog_grace={} active_ingest={} queued_ingest={} ready={} cpu_active_tasks={} run_queue={:?} rss_bytes={:?} total_memory_bytes={:?} available_memory_bytes={:?} decode_wait_ms={:?} sink_wait_ms={:?} upload_latency_ms={:?} sink_commit_ms={:?} wal_pending={} wal_ack_ms={:?} source_bps={} wal_write_bps={} s3_retries={} s3_retry_ema_x100={} glue_retries={} glue_retry_ema_x100={}",
+            next.generation,
+            next.reason.as_str(),
+            pressure.as_str(),
+            mode,
+            previous.scheduler_jobs,
+            next.scheduler_jobs,
+            previous.decode_jobs,
+            next.decode_jobs,
+            previous.sink_sessions,
+            next.sink_sessions,
+            previous.upload_sessions,
+            next.upload_sessions,
+            previous.multipart_parts,
+            next.multipart_parts,
+            previous.catalog_operations,
+            next.catalog_operations,
+            next.ingest_reserved_cores,
+            state.policy.quiet_streak,
+            state.policy.growth_cooldown_remaining,
+            state.policy.backlog_grace_remaining,
+            signals.active_ingest,
+            signals.queued_ingest,
+            signals.scheduler_ready_depth,
+            signals.cpu_active_tasks,
+            signals.run_queue,
+            signals.process_rss_bytes,
+            signals.total_memory_bytes,
+            signals.available_memory_bytes,
+            signals.decode_permit_wait_ms,
+            signals.sink_permit_wait_ms,
+            signals.upload_latency_ms,
+            signals.sink_commit_ms,
+            signals.wal_writer_pending,
+            signals.wal_ack_avg_ms,
             source_bytes_per_sec,
             wal_write_bytes_per_sec,
+            signals.s3_retries,
+            signals.s3_retry_ema_x100,
+            signals.glue_retries,
+            signals.glue_retry_ema_x100,
         );
+    } else {
+        if reason_changed {
+            state.current = next;
+            crate::metrics::counters::FLUSH_BUDGET_REASON_CODE
+                .store(next.reason.code(), Ordering::Relaxed);
+            crate::metrics::counters::FLUSH_BUDGET_GENERATION
+                .store(next.generation as usize, Ordering::Relaxed);
+        }
+        // Publish hysteresis telemetry without clobbering concurrency targets that
+        // tests or operators may have overridden via the compatibility mirrors.
+        use crate::metrics::counters;
+        counters::FLUSH_BUDGET_PRESSURE_CLASS.store(pressure.code(), Ordering::Relaxed);
+        counters::FLUSH_BUDGET_QUIET_STREAK
+            .store(state.policy.quiet_streak as usize, Ordering::Relaxed);
+        counters::FLUSH_BUDGET_GROWTH_COOLDOWN
+            .store(state.policy.growth_cooldown_remaining as usize, Ordering::Relaxed);
+        counters::FLUSH_BUDGET_BACKLOG_GRACE
+            .store(state.policy.backlog_grace_remaining as usize, Ordering::Relaxed);
+        counters::FLUSH_BUDGET_SOURCE_BYTES_PER_SEC.store(source_bytes_per_sec, Ordering::Relaxed);
+        counters::FLUSH_BUDGET_WAL_WRITE_BYTES_PER_SEC
+            .store(wal_write_bytes_per_sec, Ordering::Relaxed);
     }
     state.current
 }

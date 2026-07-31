@@ -425,7 +425,8 @@ async fn run_multiplex_sink_loop(
                         tokio::time::sleep(std::time::Duration::from_millis(400)).await;
                     }
                     if scenario == "multiplex_process_hold" {
-                        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                        // Hold long enough for multi-worker growth under CI load.
+                        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                     }
                     {
                         let mut state = state.lock().await;

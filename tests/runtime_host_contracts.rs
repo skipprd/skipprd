@@ -301,6 +301,8 @@ impl Drop for RuntimeEnvGuard {
 
 impl RuntimeSinkPoolTargetGuard {
     fn set(target: usize) -> Self {
+        // Apply env caps after callers install RUNTIME_SINK_* overrides whenever
+        // possible; this still seeds once, then restores the explicit test target.
         skipprd::ingest::tuner::apply_env_caps();
         let previous =
             skipprd::metrics::counters::RUNTIME_SINK_POOL_TARGET.swap(target, Ordering::SeqCst);
@@ -799,10 +801,10 @@ async fn per_child_session_capacity_bounds_in_flight_applies() {
 #[tokio::test]
 #[serial]
 async fn session_target_uses_ceiling_process_count_without_eager_growth() {
-    let _target = RuntimeSinkPoolTargetGuard::set(5);
     let _process_cap = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "16");
     let _sessions = RuntimeEnvGuard::set("RUNTIME_SINK_SESSIONS_PER_CHILD", "2");
     let _budget = RuntimeEnvGuard::set("RUNTIME_SINK_SESSION_BUDGET", "5");
+    let _target = RuntimeSinkPoolTargetGuard::set(5);
     let temp = tempdir().unwrap();
     let marker_path = temp.path().join("multiplex-process-demand.json");
     let sink = multiplex_test_sink(
@@ -827,17 +829,21 @@ async fn session_target_uses_ceiling_process_count_without_eager_growth() {
     four.unwrap();
     five.unwrap();
 
-    assert_eq!(sink.worker_count_for_test(), 3);
+    assert_eq!(
+        sink.worker_count_for_test(),
+        3,
+        "ceil(session_target=5 / sessions_per_child=2) workers expected"
+    );
     assert_eq!(multiplex_process_count(&marker_path), 3);
 }
 
 #[tokio::test]
 #[serial]
 async fn adapter_capability_limits_effective_per_child_sessions() {
-    let _target = RuntimeSinkPoolTargetGuard::set(8);
     let _process_cap = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "16");
     let _sessions = RuntimeEnvGuard::set("RUNTIME_SINK_SESSIONS_PER_CHILD", "8");
     let _budget = RuntimeEnvGuard::set("RUNTIME_SINK_SESSION_BUDGET", "8");
+    let _target = RuntimeSinkPoolTargetGuard::set(8);
     let temp = tempdir().unwrap();
     let file_marker = temp.path().join("file-capacity.json");
     let file_sink = multiplex_test_sink(
@@ -874,10 +880,10 @@ async fn adapter_capability_limits_effective_per_child_sessions() {
 #[tokio::test]
 #[serial]
 async fn runtime_sink_pool_shrinks_only_fully_idle_workers() {
-    let _target = RuntimeSinkPoolTargetGuard::set(6);
     let _process_cap = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "16");
     let _sessions = RuntimeEnvGuard::set("RUNTIME_SINK_SESSIONS_PER_CHILD", "2");
     let _budget = RuntimeEnvGuard::set("RUNTIME_SINK_SESSION_BUDGET", "6");
+    let _target = RuntimeSinkPoolTargetGuard::set(6);
     let temp = tempdir().unwrap();
     let marker_path = temp.path().join("multiplex-process-shrink.json");
     let sink = multiplex_test_sink(
@@ -902,7 +908,11 @@ async fn runtime_sink_pool_shrinks_only_fully_idle_workers() {
     four.unwrap();
     five.unwrap();
     six.unwrap();
-    assert_eq!(sink.worker_count_for_test(), 3);
+    assert_eq!(
+        sink.worker_count_for_test(),
+        3,
+        "ceil(session_target=6 / sessions_per_child=2) workers expected before shrink"
+    );
 
     skipprd::metrics::counters::RUNTIME_SINK_POOL_TARGET.store(2, Ordering::SeqCst);
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
