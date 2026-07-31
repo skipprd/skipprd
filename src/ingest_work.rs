@@ -945,6 +945,7 @@ fn cleaned_partition_allowed_values(raw: &str) -> HashSet<String> {
 #[cfg(test)]
 mod partition_allowed_values_tests {
     use super::cleaned_partition_allowed_values;
+    use crate::helpers::configuration::Config;
 
     #[test]
     fn empty_partition_allowed_values_remain_unrestricted() {
@@ -954,12 +955,19 @@ mod partition_allowed_values_tests {
 
     #[test]
     fn partition_allowed_values_are_cleaned_and_filtered() {
+        // Numeric tokens become `item_<n>` only when flatten_events is off. Pin that mode so
+        // parallel tests that enable TRANSFORM_FLATTEN_EVENTS cannot empty "123" after digit trim.
+        Config::reset_envcache();
+        Config::set_evncache("TRANSFORM_FLATTEN_EVENTS", "no");
+
         let allowed = cleaned_partition_allowed_values("Foo Bar, 123, , baz");
 
         assert!(allowed.contains("foo_bar"));
         assert!(allowed.contains("item_123"));
         assert!(allowed.contains("baz"));
         assert_eq!(allowed.len(), 3);
+
+        Config::reset_envcache();
     }
 }
 
