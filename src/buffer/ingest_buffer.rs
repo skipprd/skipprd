@@ -656,6 +656,64 @@ mod work_conserving_scheduler_tests {
         );
     }
 
+    #[tokio::test]
+    #[serial_test::serial]
+    async fn quiet_budget_runs_multiple_jobs_while_reduced_slots_preempt_admission() {
+        metrics_hot::reset_flush_metrics();
+        let queue = Arc::new(Mutex::new(
+            (0..6)
+                .map(|id| TestWork {
+                    id: ["q0", "q1", "q2", "q3", "q4", "q5"][id],
+                    lane: lane(&format!("sink.{id}"), "ns"),
+                    delay: TokioDuration::from_millis(15),
+                    compacted: true,
+                })
+                .collect::<VecDeque<_>>(),
+        ));
+        let planner_queue = queue.clone();
+        let state = Arc::new(TestExecutionState::default());
+
+        // Quiet ingest headroom: multiple grouped jobs run concurrently.
+        drive_work_conserving(
+            3,
+            false,
+            move |slots, _, _, blocked| plan_test_work(&planner_queue, slots, blocked),
+            test_executor(state.clone()),
+            None,
+        )
+        .await;
+        assert_eq!(state.completed.lock().unwrap().len(), 6);
+        assert_eq!(state.max_active.load(Ordering::SeqCst), 3);
+
+        metrics_hot::reset_flush_metrics();
+        let remaining = Arc::new(Mutex::new(
+            (0..4)
+                .map(|id| TestWork {
+                    id: ["p0", "p1", "p2", "p3"][id],
+                    lane: lane(&format!("preempt.{id}"), "ns"),
+                    delay: TokioDuration::from_millis(20),
+                    compacted: true,
+                })
+                .collect::<VecDeque<_>>(),
+        ));
+        let planner_remaining = remaining.clone();
+        let preempted = Arc::new(TestExecutionState::default());
+
+        // Ingest pressure shrinks the immutable cycle budget to the ingest-safe
+        // cap; only that many jobs are admitted before the cycle retunes.
+        drive_work_conserving(
+            1,
+            true,
+            move |slots, _, _, blocked| plan_test_work(&planner_remaining, slots, blocked),
+            test_executor(preempted.clone()),
+            None,
+        )
+        .await;
+        assert_eq!(preempted.max_active.load(Ordering::SeqCst), 1);
+        assert_eq!(preempted.completed.lock().unwrap().len(), 4);
+        assert!(remaining.lock().unwrap().is_empty());
+    }
+
     #[test]
     fn no_work_keeps_periodic_backoff() {
         assert!(Buffers::compactor_idle_backoff() >= TokioDuration::from_millis(100));
@@ -1488,6 +1546,12 @@ impl Buffers {
         let measured_backlog = force
             || ready_work > 0
             || crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0
+            || crate::metrics::counters::COMPACTION_ACTIVE_JOBS
+                .load(std::sync::atomic::Ordering::Relaxed)
+                > 0
+            || crate::metrics::counters::COMPACTION_INFLIGHT_SLICE_COUNT
                 .load(std::sync::atomic::Ordering::Relaxed)
                 > 0;
         let snapshot = crate::ingest::tuner::update_flush_budget(mode, measured_backlog, None);

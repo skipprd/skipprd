@@ -425,6 +425,16 @@ impl Metrics {
             "multipart_parts": flush_budget.multipart_parts,
             "catalog_operations": flush_budget.catalog_operations,
             "ingest_reserved_cores": flush_budget.ingest_reserved_cores,
+            "pressure_class": match counters::FLUSH_BUDGET_PRESSURE_CLASS.load(Ordering::Relaxed) {
+                0 => "quiet",
+                2 => "pressured",
+                _ => "neutral",
+            },
+            "quiet_streak": counters::FLUSH_BUDGET_QUIET_STREAK.load(Ordering::Relaxed),
+            "growth_cooldown": counters::FLUSH_BUDGET_GROWTH_COOLDOWN.load(Ordering::Relaxed),
+            "backlog_grace": counters::FLUSH_BUDGET_BACKLOG_GRACE.load(Ordering::Relaxed),
+            "source_bytes_per_sec": counters::FLUSH_BUDGET_SOURCE_BYTES_PER_SEC.load(Ordering::Relaxed),
+            "wal_write_bytes_per_sec": counters::FLUSH_BUDGET_WAL_WRITE_BYTES_PER_SEC.load(Ordering::Relaxed),
         });
 
         let mut data = json!({

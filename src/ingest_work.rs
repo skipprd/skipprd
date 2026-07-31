@@ -2486,6 +2486,12 @@ impl Ingest {
                         > 0
                         || crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
                             .load(Ordering::Relaxed)
+                            > 0
+                        || crate::metrics::counters::COMPACTION_ACTIVE_JOBS
+                            .load(Ordering::Relaxed)
+                            > 0
+                        || crate::metrics::counters::COMPACTION_INFLIGHT_SLICE_COUNT
+                            .load(Ordering::Relaxed)
                             > 0;
                 crate::ingest::tuner::update_flush_budget(
                     crate::ingest::tuner::FlushMode::Ingest,
