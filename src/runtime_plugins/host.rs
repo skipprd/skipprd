@@ -2044,6 +2044,8 @@ struct RuntimeSinkMultiplexConnection {
     _child: Mutex<RuntimePluginChild>,
     control_writer: Mutex<OwnedWriteHalf>,
     data_writer: Mutex<OwnedWriteHalf>,
+    /// Serializes admin RPCs so unrelated schema installs wait instead of racing Prepare/ack.
+    admin_gate: Mutex<()>,
     shared: Arc<RuntimeSinkConnectionShared>,
     control_reader_task: tokio::task::JoinHandle<()>,
 }
@@ -2074,6 +2076,7 @@ impl RuntimeSinkMultiplexConnection {
             _child: Mutex::new(child),
             control_writer: Mutex::new(control_writer),
             data_writer: Mutex::new(data_writer),
+            admin_gate: Mutex::new(()),
             shared,
             control_reader_task,
         })
@@ -2159,6 +2162,12 @@ impl RuntimeSinkMultiplexConnection {
     }
 
     async fn send_admin(&self, frame: &HostFrame) -> io::Result<PluginFrame> {
+        if !self.is_alive() {
+            return Err(self.failure());
+        }
+        // One in-flight admin RPC per child. Queue instead of failing so schema
+        // installs for unrelated namespaces can proceed between apply admin calls.
+        let _admin_guard = self.admin_gate.lock().await;
         if !self.is_alive() {
             return Err(self.failure());
         }

@@ -784,7 +784,15 @@ async fn per_child_session_capacity_bounds_in_flight_applies() {
 
     let state: serde_json::Value =
         serde_json::from_slice(&std::fs::read(marker_path).unwrap()).unwrap();
-    assert_eq!(state["max_active"], 2);
+    let max_active = state["max_active"].as_u64().unwrap_or(0);
+    assert!(
+        max_active <= 2,
+        "per-child session capacity must not exceed 2, saw {max_active}"
+    );
+    assert!(
+        max_active >= 2,
+        "expected two overlapping sessions under delay, saw max_active={max_active}"
+    );
     assert_eq!(state["run_count"], 3);
 }
 
@@ -1040,7 +1048,8 @@ async fn unrelated_schema_install_proceeds_during_multiplexed_apply() {
             None,
         ),
         async {
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            // Wait until the apply has entered its delayed payload phase so admin is free.
+            tokio::time::sleep(std::time::Duration::from_millis(80)).await;
             sink.install_schema_state(1_000_000_000, &namespaces).await
         },
     );

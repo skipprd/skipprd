@@ -421,7 +421,8 @@ async fn run_multiplex_sink_loop(
                         }
                     }
                     if scenario == "multiplex_delay" || scenario == "multiplex_schema_fence" {
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                        // Long enough for CI current-thread scheduling to overlap sessions.
+                        tokio::time::sleep(std::time::Duration::from_millis(400)).await;
                     }
                     if scenario == "multiplex_process_hold" {
                         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
