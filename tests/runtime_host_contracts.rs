@@ -798,7 +798,7 @@ async fn per_child_session_capacity_bounds_in_flight_applies() {
     assert_eq!(state["run_count"], 3);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn session_target_uses_ceiling_process_count_without_eager_growth() {
     let _process_cap = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "16");
@@ -816,12 +816,22 @@ async fn session_target_uses_ceiling_process_count_without_eager_growth() {
     .await;
     assert_eq!(sink.worker_count_for_test(), 1);
 
-    let (one, two, three, four, five) = tokio::join!(
+    let sample_peak = async {
+        let mut peak = 1usize;
+        for _ in 0..200 {
+            peak = peak.max(sink.worker_count_for_test());
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        peak
+    };
+
+    let (one, two, three, four, five, peak_workers) = tokio::join!(
         sink.sync(sample_stream(), "demand-1".to_string(), None),
         sink.sync(sample_stream(), "demand-2".to_string(), None),
         sink.sync(sample_stream(), "demand-3".to_string(), None),
         sink.sync(sample_stream(), "demand-4".to_string(), None),
         sink.sync(sample_stream(), "demand-5".to_string(), None),
+        sample_peak,
     );
     one.unwrap();
     two.unwrap();
@@ -829,9 +839,9 @@ async fn session_target_uses_ceiling_process_count_without_eager_growth() {
     four.unwrap();
     five.unwrap();
 
+    let peak_workers = peak_workers.max(sink.worker_count_for_test());
     assert_eq!(
-        sink.worker_count_for_test(),
-        3,
+        peak_workers, 3,
         "ceil(session_target=5 / sessions_per_child=2) workers expected"
     );
     assert_eq!(multiplex_process_count(&marker_path), 3);
@@ -877,7 +887,7 @@ async fn adapter_capability_limits_effective_per_child_sessions() {
     assert_eq!(postgres_sink.session_capacity_for_test(), 1);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[serial]
 async fn runtime_sink_pool_shrinks_only_fully_idle_workers() {
     let _process_cap = RuntimeEnvGuard::set("RUNTIME_SINK_CONNECTION_POOL_SIZE", "16");
@@ -894,13 +904,23 @@ async fn runtime_sink_pool_shrinks_only_fully_idle_workers() {
     )
     .await;
 
-    let (one, two, three, four, five, six) = tokio::join!(
+    let sample_peak = async {
+        let mut peak = 1usize;
+        for _ in 0..200 {
+            peak = peak.max(sink.worker_count_for_test());
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        peak
+    };
+
+    let (one, two, three, four, five, six, peak_workers) = tokio::join!(
         sink.sync(sample_stream(), "shrink-1".to_string(), None),
         sink.sync(sample_stream(), "shrink-2".to_string(), None),
         sink.sync(sample_stream(), "shrink-3".to_string(), None),
         sink.sync(sample_stream(), "shrink-4".to_string(), None),
         sink.sync(sample_stream(), "shrink-5".to_string(), None),
         sink.sync(sample_stream(), "shrink-6".to_string(), None),
+        sample_peak,
     );
     one.unwrap();
     two.unwrap();
@@ -908,9 +928,9 @@ async fn runtime_sink_pool_shrinks_only_fully_idle_workers() {
     four.unwrap();
     five.unwrap();
     six.unwrap();
+    let peak_workers = peak_workers.max(sink.worker_count_for_test());
     assert_eq!(
-        sink.worker_count_for_test(),
-        3,
+        peak_workers, 3,
         "ceil(session_target=6 / sessions_per_child=2) workers expected before shrink"
     );
 
