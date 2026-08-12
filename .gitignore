@@ -60,3 +60,4 @@ crates/skipprd-react-suite-data-engineer/snowflake_key.pub
 !.cargo/config.toml
 plugins/data_source/site_quality/worker/node_modules
 plugins/data_source/google_serp_ranks/worker/node_modules
+.skippr
