@@ -3694,6 +3694,7 @@ mod contract_schema_tests {
             identity_version: Some(2),
             wal_refs_fingerprint_v2: Some("canonical-wal-fingerprint".to_string()),
             has_cdc_metadata: true,
+            wal_segment_ids: Vec::new(),
         };
         let applied = InnerSyncApplied {
             final_key: "root/users/region=eu/compaction-0001.parquet".to_string(),

@@ -27,6 +27,7 @@ pub mod progress;
 pub mod s3;
 pub mod sync_reporter;
 pub mod timed_rwlock;
+pub mod wal_storage;
 
 // let CLEAN_FIELD_CACHE = Arc::new(Mutex::new(HashMap<String, bool> = HashMap::new()));
 

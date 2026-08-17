@@ -1,0 +1,16 @@
+[package]
+name = "skippr-lease"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Clock-free pipeline lease domain types, guard, and in-memory test store"
+
+[dependencies]
+async-trait.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync", "macros", "rt", "time"] }
+uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt", "sync", "time"] }

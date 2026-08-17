@@ -225,6 +225,20 @@ fn output_metadata_data_type(metadata: &OutputMetadata) -> Result<DataType, Arro
     }
 }
 
+/// WAL / Iceberg compaction identity for a schema: first 8 bytes of SHA-256, hex.
+///
+/// Segment descriptors store this value, not [`stable_schema_fingerprint`].
+pub fn wal_schema_fingerprint(schema: &Schema) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    for field in schema.fields().iter() {
+        hasher.update(field.name().as_bytes());
+        hasher.update(format!("{:?}", field.data_type()).as_bytes());
+        hasher.update(&[if field.is_nullable() { 1 } else { 0 }]);
+    }
+    hex::encode(&hasher.finalize()[..8])
+}
+
 #[allow(dead_code)]
 pub fn stable_schema_fingerprint(schema: &Schema) -> String {
     // Create a deterministic, minimal representation: sorted fields by name with canonicalized datatypes
@@ -508,6 +522,14 @@ mod tests {
     #[allow(unused_imports)]
     use arrow::datatypes::{DataType, Field};
     use std::collections::HashMap;
+
+    #[test]
+    fn wal_schema_fingerprint_is_16_hex_chars() {
+        let schema = Schema::new(vec![Field::new("id", DataType::Utf8, true)]);
+        let fp = wal_schema_fingerprint(&schema);
+        assert_eq!(fp.len(), 16);
+        assert!(fp.chars().all(|ch| ch.is_ascii_hexdigit()));
+    }
 
     #[test]
     fn test_skippr_type_to_arrow_matrix() {

@@ -43,7 +43,7 @@ On shutdown or crash recovery, the host replays from committed WAL state.
 skipprd query --sql "SELECT * FROM my_pipeline LIMIT 10"
 ```
 
-Runs SQL against the destination tables via Athena. Also supports pipeline management commands (`ENABLE PIPELINE`, `DROP PIPELINE`, `RESET PIPELINE`, etc.) and live streaming from the WAL (`STREAM ... FROM ...`).
+Runs SQL against destination tables. On clustered Iceberg pipelines this is Skippr SQL over the Datalake (Iceberg tables plus live WAL). Athena remains available for warehouse destinations. Also supports pipeline management commands (`ENABLE PIPELINE`, `DROP PIPELINE`, `RESET PIPELINE`, etc.) and live streaming from the WAL (`STREAM ... FROM ...`).
 
 ## Key components
 
@@ -53,6 +53,7 @@ Every ingested record is first written to the WAL before downstream compaction a
 
 - **Local disk WAL** (`WAL_STORAGE=disk`) — segments written under `DATA_DIR`
 - **S3 WAL** (`WAL_STORAGE=s3`) — segments written to `SKIPPR_S3_BUCKET`
+- **Clustered disk WAL** (`WAL_STORAGE=clustered`) — local segments plus one synchronous replica, lease and offsets in DynamoDB (self-hosted) or Cloud **tables**. Iceberg is the cold query path for Iceberg sinks; live WAL is unioned in-process with that Iceberg snapshot over Arrow Flight SQL 58.3 and Ballista 53 ([Datalake](datalake.md), [maintainer spec](../maintainers/hla-flight-sql-ballista.md)).
 
 ### Compactor
 

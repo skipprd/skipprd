@@ -35,6 +35,117 @@ pub static PARQUET_PERSISTED_OBJECTS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| Atomi
 pub static LATEST_TIMESTAMP: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 pub static QUARANTINED_PARTITIONS_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
 
+pub static CLUSTER_READY: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CLUSTER_PRIMARY: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CLUSTER_QUORUM_LOST_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CLUSTER_FENCE_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CLUSTER_LEASE_ACQUIRE_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CLUSTER_LEASE_RENEW_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CLUSTER_LEASE_LOST_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CLUSTER_MEMBERSHIP_DIAL_FAIL_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CLUSTER_CATCHUP_BYTES_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CLUSTER_SNAPSHOT_INSTALL_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CLUSTER_FLIGHT_REQUEST_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CLUSTER_FLIGHT_FAIL_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CLUSTER_ICEBERG_CAS_CONFLICT_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CLUSTER_SUSPECT_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CLUSTER_COMMITTED_INDEX: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CLUSTER_APPLIED_INDEX: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CLUSTER_PUBLISHED_INDEX: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CLUSTER_REPLICA_LAG: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CLUSTER_QUORUM_NACK_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CLUSTER_QUORUM_TIMEOUT_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CLUSTER_DIVERGENCE_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+pub static CLUSTER_PURGE_TOTAL: Lazy<AtomicU64> = Lazy::new(|| AtomicU64::new(0));
+
+pub fn set_cluster_ready(ready: u64) {
+    CLUSTER_READY.store(ready, Ordering::Relaxed);
+}
+
+pub fn set_cluster_primary(primary: u64) {
+    CLUSTER_PRIMARY.store(primary, Ordering::Relaxed);
+}
+
+pub fn add_cluster_quorum_lost(n: u64) {
+    CLUSTER_QUORUM_LOST_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_cluster_fence(n: u64) {
+    CLUSTER_FENCE_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_cluster_membership_dial_fail(n: u64) {
+    CLUSTER_MEMBERSHIP_DIAL_FAIL_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_cluster_suspect(n: u64) {
+    CLUSTER_SUSPECT_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_cluster_catchup_bytes(n: u64) {
+    CLUSTER_CATCHUP_BYTES_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_cluster_snapshot_install(n: u64) {
+    CLUSTER_SNAPSHOT_INSTALL_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_cluster_flight_request(n: u64) {
+    CLUSTER_FLIGHT_REQUEST_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_cluster_flight_fail(n: u64) {
+    CLUSTER_FLIGHT_FAIL_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_cluster_iceberg_cas_conflict(n: u64) {
+    CLUSTER_ICEBERG_CAS_CONFLICT_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_cluster_lease_acquire(n: u64) {
+    CLUSTER_LEASE_ACQUIRE_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_cluster_lease_renew(n: u64) {
+    CLUSTER_LEASE_RENEW_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn set_cluster_committed_index(index: u64) {
+    CLUSTER_COMMITTED_INDEX.store(index, Ordering::Relaxed);
+}
+
+pub fn set_cluster_applied_index(index: u64) {
+    CLUSTER_APPLIED_INDEX.store(index, Ordering::Relaxed);
+}
+
+pub fn set_cluster_published_index(index: u64) {
+    CLUSTER_PUBLISHED_INDEX.store(index, Ordering::Relaxed);
+}
+
+pub fn set_cluster_replica_lag(lag: u64) {
+    CLUSTER_REPLICA_LAG.store(lag, Ordering::Relaxed);
+}
+
+pub fn add_cluster_quorum_nack(n: u64) {
+    CLUSTER_QUORUM_NACK_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_cluster_quorum_timeout(n: u64) {
+    CLUSTER_QUORUM_TIMEOUT_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_cluster_divergence(n: u64) {
+    CLUSTER_DIVERGENCE_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_cluster_purge(n: u64) {
+    CLUSTER_PURGE_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
+pub fn add_cluster_lease_lost(n: u64) {
+    CLUSTER_LEASE_LOST_TOTAL.fetch_add(n, Ordering::Relaxed);
+}
+
 // (removed unused LLM/semantic counters)
 
 // Dynamic tuning targets (self-tuned by ingest; read by components)

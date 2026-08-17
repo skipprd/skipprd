@@ -295,6 +295,7 @@ impl Metrics {
 
         // Merge counters (atomics) into snapshot before computing deltas
         use crate::metrics::counters;
+        counters::add_cluster_iceberg_cas_conflict(skippr_iceberg_catalog::take_cas_conflicts());
         let messages_total_counter = counters::MESSAGES_TOTAL.load(Ordering::Relaxed);
         let deadletters_total_counter = counters::DEADLETTERS_TOTAL.load(Ordering::Relaxed);
         let ingested_slow_total_counter = counters::INGESTED_SLOW_TOTAL.load(Ordering::Relaxed);
@@ -541,6 +542,49 @@ impl Metrics {
         data["metrics"]["flush_budget"] = flush_budget_metrics;
         data["metrics"]["runtime_sink_active_session_count"] =
             json!(flush_metrics.runtime_sink_active_session_count);
+        data["metrics"]["cluster_ready"] = json!(counters::CLUSTER_READY.load(Ordering::Relaxed));
+        data["metrics"]["cluster_primary"] =
+            json!(counters::CLUSTER_PRIMARY.load(Ordering::Relaxed));
+        data["metrics"]["cluster_quorum_lost_total"] =
+            json!(counters::CLUSTER_QUORUM_LOST_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["cluster_fence_total"] =
+            json!(counters::CLUSTER_FENCE_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["cluster_lease_acquire_total"] =
+            json!(counters::CLUSTER_LEASE_ACQUIRE_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["cluster_lease_renew_total"] =
+            json!(counters::CLUSTER_LEASE_RENEW_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["cluster_lease_lost_total"] =
+            json!(counters::CLUSTER_LEASE_LOST_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["cluster_catchup_bytes_total"] =
+            json!(counters::CLUSTER_CATCHUP_BYTES_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["cluster_snapshot_install_total"] =
+            json!(counters::CLUSTER_SNAPSHOT_INSTALL_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["cluster_flight_request_total"] =
+            json!(counters::CLUSTER_FLIGHT_REQUEST_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["cluster_flight_fail_total"] =
+            json!(counters::CLUSTER_FLIGHT_FAIL_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["cluster_iceberg_cas_conflict_total"] =
+            json!(counters::CLUSTER_ICEBERG_CAS_CONFLICT_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["cluster_membership_dial_fail_total"] =
+            json!(counters::CLUSTER_MEMBERSHIP_DIAL_FAIL_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["cluster_suspect_total"] =
+            json!(counters::CLUSTER_SUSPECT_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["cluster_committed_index"] =
+            json!(counters::CLUSTER_COMMITTED_INDEX.load(Ordering::Relaxed));
+        data["metrics"]["cluster_applied_index"] =
+            json!(counters::CLUSTER_APPLIED_INDEX.load(Ordering::Relaxed));
+        data["metrics"]["cluster_published_index"] =
+            json!(counters::CLUSTER_PUBLISHED_INDEX.load(Ordering::Relaxed));
+        data["metrics"]["cluster_replica_lag"] =
+            json!(counters::CLUSTER_REPLICA_LAG.load(Ordering::Relaxed));
+        data["metrics"]["cluster_quorum_nack_total"] =
+            json!(counters::CLUSTER_QUORUM_NACK_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["cluster_quorum_timeout_total"] =
+            json!(counters::CLUSTER_QUORUM_TIMEOUT_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["cluster_divergence_total"] =
+            json!(counters::CLUSTER_DIVERGENCE_TOTAL.load(Ordering::Relaxed));
+        data["metrics"]["cluster_purge_total"] =
+            json!(counters::CLUSTER_PURGE_TOTAL.load(Ordering::Relaxed));
 
         let timestamp = chrono::Utc::now().format("%Y%m%d_%H%M%S").to_string();
         let key = format!(

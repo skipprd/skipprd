@@ -8,7 +8,9 @@ This repository is a Cargo workspace with a single host binary and many separate
 |---|---|
 | `src/` | Host-side Skippr application code. CLI entrypoints, ingest orchestration, WAL handling, runtime plugin discovery/hosting, and schema state live here. |
 | `crates/skippr-core/` | Shared core logic used by the host and plugin crates. |
-| `crates/skippr-runtime-sdk/` | Runtime plugin SDK, shared TCP protocol/wire helpers, and host bridge code for source/sink/schema plugins. |
+| `crates/skippr-query-ballista/` | `FlightSqlExec` physical node and SkipprPhysicalCodec for Ballista 53. |
+| `src/cluster/` | Clustered WAL replica, lease scheduler, gossip, promotion, WAL head picker. |
+| `src/query_flight/` | Arrow Flight SQL 58.3 on `flight_addr`, live WAL selector, in-process Ballista. |
 | `plugins/data_source/*/` | Runtime source plugin crates. Each crate owns its connector implementation and Cargo metadata. |
 | `plugins/data_sink/*/` | Runtime sink plugin crates. Each crate owns its connector implementation and Cargo metadata. |
 | `plugins/schema_sink/*/` | Runtime schema sink plugin crates. |
@@ -37,6 +39,14 @@ The plugin catalog is Cargo-driven:
 - generated manifests and binaries are published under versioned paths on `install.skippr.io`
 
 There are no committed runtime manifest templates, and there is no aggregate `skippr-plugin-runtime-link` crate anymore.
+
+## Multi-node HLA
+
+Normative clustered-query design:
+
+- [hla-distributed-query-iceberg-catalog.md](hla-distributed-query-iceberg-catalog.md) — architecture index
+- [hla-flight-sql-ballista.md](hla-flight-sql-ballista.md) — Arrow Flight SQL 58.3 and Ballista 53 (locked, not shipped)
+- [hla-implementation-wbs.md](hla-implementation-wbs.md) — work units including WU-7.3 / WU-7.5
 
 ## Useful guard rails
 

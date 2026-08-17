@@ -1,0 +1,193 @@
+syntax = "proto3";
+package skippr.cluster.v1;
+
+message PipelineKey {
+  string tenant = 1;
+  string workspace = 2;
+  string pipeline = 3;
+}
+
+message MutationEnvelope {
+  uint32 protocol_version = 1;
+  PipelineKey pipeline = 2;
+  uint64 epoch = 3;
+  uint64 commit_index = 4;
+  bytes previous_hash = 5;
+  bytes payload_sha256 = 6;
+
+  oneof body {
+    CommitSegment commit_segment = 10;
+    PutCompaction put_compaction = 11;
+    CompleteSlices complete_slices = 12;
+    ReclaimSegment reclaim_segment = 13;
+  }
+}
+
+message LogRecord {
+  oneof kind {
+    MutationEnvelope prepared = 1;
+    CommittedMarker committed = 2;
+  }
+}
+
+message CommittedMarker {
+  uint64 commit_index = 1;
+  bytes entry_hash = 2;
+}
+
+message SegmentDescriptor {
+  string segment_id = 1;
+  uint64 payload_len = 2;
+  bytes payload_sha256 = 3;
+  uint32 num_partitions = 4;
+  uint64 total_bytes = 5;
+  uint64 created_at_secs = 6;
+  repeated string schema_fingerprints = 7;
+}
+
+message CommittedOffset {
+  string namespace = 1;
+  string partition = 2;
+  uint64 filesize = 3;
+  uint64 position = 4;
+  uint64 closed = 5;
+}
+
+message CommittedCheckpoint {
+  string logical_key = 1;
+  bytes envelope = 2;
+}
+
+message CommitSegment {
+  SegmentDescriptor segment = 1;
+  repeated CommittedOffset offsets = 2;
+  repeated CommittedCheckpoint checkpoints = 3;
+}
+
+message PutCompaction {
+  bytes transaction_json = 1;
+}
+
+message CompletedOrdinals {
+  string segment_id = 1;
+  repeated uint32 ordinals = 2;
+}
+
+message CompleteSlices {
+  string compaction_id = 1;
+  repeated CompletedOrdinals entries = 2;
+}
+
+message ReclaimSegment {
+  string segment_id = 1;
+}
+
+message ClientHello {
+  string cluster_hash = 1;
+  string node_id = 2;
+  uint32 protocol_min = 3;
+  uint32 protocol_max = 4;
+  reserved 5, 6, 7;
+}
+
+message ServerHello {
+  string cluster_hash = 1;
+  string node_id = 2;
+  uint32 protocol = 3;
+}
+
+message ReplicaStatus {
+  uint64 epoch_seen = 1;
+  uint64 base_index = 2;
+  uint64 committed_index = 3;
+  uint64 applied_index = 4;
+  bytes head_hash = 5;
+  bool ready = 6;
+  PipelineKey pipeline = 7;
+}
+
+message ReplicateRequest {
+  MutationEnvelope envelope = 1;
+  uint64 payload_len = 2;
+  bytes payload_sha256 = 3;
+  bytes entry_hash = 4;
+}
+
+message ReplicaAck {
+  uint64 commit_index = 1;
+  bytes entry_hash = 2;
+  bool already_applied = 3;
+}
+
+enum ReplicaNackCode {
+  REPLICA_NACK_CODE_UNSPECIFIED = 0;
+  REPLICA_NACK_CODE_STALE_EPOCH = 1;
+  REPLICA_NACK_CODE_NOT_ASSIGNED = 2;
+  REPLICA_NACK_CODE_NOT_CAUGHT_UP = 3;
+  REPLICA_NACK_CODE_DIVERGED = 4;
+  REPLICA_NACK_CODE_DISK_FULL = 5;
+  REPLICA_NACK_CODE_PAYLOAD_HASH_MISMATCH = 6;
+  REPLICA_NACK_CODE_UNKNOWN_PIPELINE = 7;
+  REPLICA_NACK_CODE_INVALID_PRIMARY_ENDPOINT = 8;
+  REPLICA_NACK_CODE_NO_SNAPSHOT = 9;
+  REPLICA_NACK_CODE_EMPTY_SNAPSHOT = 10;
+  REPLICA_NACK_CODE_SNAPSHOT_HASH_MISMATCH = 11;
+  REPLICA_NACK_CODE_SNAPSHOT_UNAVAILABLE = 12;
+}
+
+message ReplicaNack {
+  ReplicaNackCode code = 1;
+  uint64 head_index = 2;
+}
+
+message AssignReplica {
+  PipelineKey pipeline = 1;
+  uint64 epoch = 2;
+  string primary_node = 3;
+  string primary_endpoint = 4;
+}
+
+message FetchEntriesRequest {
+  PipelineKey pipeline = 1;
+  uint64 from_index = 2;
+  uint64 to_index = 3;
+}
+
+message FetchEntriesResponse {
+  repeated MutationEnvelope entries = 1;
+  repeated bytes payloads = 2;
+}
+
+message InstallSnapshotHeader {
+  PipelineKey pipeline = 1;
+  uint64 base_index = 2;
+  bytes base_hash = 3;
+  uint64 payload_bytes = 4;
+  bytes snapshot_sha256 = 5;
+}
+
+message DropReplica {
+  PipelineKey pipeline = 1;
+}
+
+message FetchSnapshotRequest {
+  PipelineKey pipeline = 1;
+}
+
+message ControlFrame {
+  oneof msg {
+    ClientHello hello = 1;
+    ServerHello hello_ok = 2;
+    ReplicaStatus status_ok = 3;
+    ReplicateRequest replicate = 4;
+    ReplicaAck ack = 5;
+    ReplicaNack nack = 6;
+    AssignReplica assign = 7;
+    FetchEntriesRequest fetch = 8;
+    FetchEntriesResponse fetch_ok = 9;
+    InstallSnapshotHeader install = 10;
+    DropReplica drop = 11;
+    ReplicaStatus status = 12;
+    FetchSnapshotRequest fetch_snapshot = 13;
+  }
+}

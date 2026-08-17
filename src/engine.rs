@@ -241,21 +241,25 @@ fn sync_status_telemetry(
 }
 
 async fn cleanup_discover_ingest_artifacts() {
-    if Config::get_wal_storage().eq_ignore_ascii_case("s3") {
-        let prefix = Config::get_wal_s3_prefix();
-        match crate::helpers::s3::delete_prefix(&prefix).await {
-            Ok(deleted) if deleted > 0 => {
-                info!(
-                    "Discover cleanup: removed {} leaked S3 WAL objects under {}",
-                    deleted, prefix
-                );
+    match Config::get_wal_storage() {
+        crate::helpers::wal_storage::WalStorage::S3 => {
+            let prefix = Config::get_wal_s3_prefix();
+            match crate::helpers::s3::delete_prefix(&prefix).await {
+                Ok(deleted) if deleted > 0 => {
+                    info!(
+                        "Discover cleanup: removed {} leaked S3 WAL objects under {}",
+                        deleted, prefix
+                    );
+                }
+                Ok(_) => {}
+                Err(err) => warn!(
+                    "Discover cleanup: failed to remove S3 WAL prefix {}: {}",
+                    prefix, err
+                ),
             }
-            Ok(_) => {}
-            Err(err) => warn!(
-                "Discover cleanup: failed to remove S3 WAL prefix {}: {}",
-                prefix, err
-            ),
         }
+        crate::helpers::wal_storage::WalStorage::Disk
+        | crate::helpers::wal_storage::WalStorage::Clustered => {}
     }
 
     // Do not `remove_dir_all(DATA_DIR)`: for `SKIPPRD_EL_STORAGE_MODE=local`, pipeline metadata
@@ -734,6 +738,16 @@ pub async fn run_discover(output_mode: &str) -> io::Result<()> {
     Ok(())
 }
 
+pub async fn run_sync_pipeline(
+    pipeline: &str,
+    output_mode: &str,
+    source_once: bool,
+) -> io::Result<()> {
+    PIPELINE_NAME.write().clear();
+    PIPELINE_NAME.write().push_str(pipeline);
+    run_sync(output_mode, source_once).await
+}
+
 pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
     let pipeline_name = Config::get_pipeline_name();
     Config::validate_current_pipeline_registry_refs().map_err(io::Error::other)?;
@@ -853,6 +867,13 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
     };
 
     let offsets_db = Arc::new(offsets_db);
+
+    if matches!(
+        Config::get_wal_storage(),
+        crate::helpers::wal_storage::WalStorage::Disk
+    ) {
+        crate::buffer::wal_store::ensure_disk_durable_store(offsets_db.clone())?;
+    }
 
     let _offsets_clone = offsets_db.clone();
 

@@ -170,6 +170,37 @@ pub fn runtime_schema_output_metadata(namespace: &str) -> Option<OutputMetadata>
         .cloned()
 }
 
+pub fn install_from_pipeline_metadata(metadata: &crate::discover::PipelineMetadata) -> u64 {
+    crate::METADATA.store(Arc::new(metadata.clone()));
+    for namespace in metadata.metadata.keys() {
+        if namespace.is_empty() || namespace.starts_with("_dl_") {
+            continue;
+        }
+        let _ = crate::ingest_work::Ingest::prepare_arrow_schema_with_metadata(
+            namespace,
+            &metadata.metadata,
+            metadata.flattened,
+        );
+    }
+    let namespaces = metadata_schema_state_namespaces();
+    let namespace_versions = namespaces
+        .keys()
+        .map(|namespace| {
+            (
+                namespace.clone(),
+                crate::ingest_work::namespace_schema_version(namespace).max(1),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let version = namespace_versions.values().copied().max().unwrap_or(1);
+    apply_runtime_source_schema_state(RuntimeSchemaState {
+        version,
+        namespaces,
+        namespace_versions,
+    });
+    version
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::{BTreeMap, HashMap};
@@ -266,6 +297,30 @@ mod tests {
             });
 
             assert_eq!(changed, vec!["users".to_string()]);
+        });
+    }
+
+    #[test]
+    #[serial]
+    fn install_from_pipeline_metadata_publishes_runtime_schema_state() {
+        with_metadata_test_lock(|| {
+            let namespace_metadata = root_record_with_field("id", SkipprDataType::String);
+            let mut pipeline_metadata = PipelineMetadata::new();
+            pipeline_metadata.metadata =
+                HashMap::from([("events".to_string(), namespace_metadata)]);
+            pipeline_metadata.flattened = false;
+            pipeline_metadata.metadata_version = 4;
+            clear_runtime_source_schema_state();
+            PIPELINE_SCHEMA_VERSION.store(0, Ordering::Release);
+            let version = install_from_pipeline_metadata(&pipeline_metadata);
+            assert_eq!(
+                version,
+                crate::ingest_work::namespace_schema_version("events").max(1)
+            );
+            assert!(current_runtime_schema_state()
+                .namespaces
+                .contains_key("events"));
+            assert!(crate::ARROW_SCHEMA.get("events").is_some());
         });
     }
 }

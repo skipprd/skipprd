@@ -1,6 +1,6 @@
 # Iceberg Output
 
-Writes compacted batches to Apache Iceberg tables using a configured catalog (Glue, REST, Unity, or Polaris).
+Writes compacted batches to Apache Iceberg tables using a configured catalog (Skippr, Glue, REST, Unity, or Polaris).
 
 Pair with the [Iceberg schema sink](../schema_sinks/iceberg.md) when catalog DDL should run through `schema_sinks` instead of inline on every write.
 
@@ -17,6 +17,18 @@ data_sinks:
         region: us-east-1
       table_namespace: bronze
       format: parquet
+```
+
+### Skippr catalog
+
+Skippr-managed Iceberg catalog. Use this for clustered query (Iceberg ∪ live WAL). Create a DynamoDB table for catalog pointers and pass its name here. This MUST NOT be the offset/lease table (`SKIPPR_OFFSET_DYNAMODB_TABLE`).
+
+```yaml
+catalog:
+  type: skippr
+  table: my-iceberg-catalog
+  warehouse: s3://my-iceberg-warehouse/
+  region: us-east-1
 ```
 
 ### Glue catalog

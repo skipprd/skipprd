@@ -43,7 +43,7 @@ Both `skippr` and `skipprd` read the same engine sections. `skippr` also reads p
 | **Buffering & WAL** | | | |
 | `BUFFER_THRESHOLD_BYTES` | `10485760` | [Buffering](buffering.md) | Buffer flush threshold (bytes) |
 | `BUFFER_THRESHOLD_SECONDS` | `60` | [Buffering](buffering.md) | Buffer flush threshold (seconds) |
-| `WAL_STORAGE` | `disk` | [Buffering](buffering.md) | WAL backend: `disk` or `s3` |
+| `WAL_STORAGE` | `disk` | [Buffering](buffering.md) | WAL backend: `disk`, `s3`, or `clustered` |
 | `WAL_BYTES_PER_FILE` | auto | [Buffering](buffering.md) | Optional WAL segment size override |
 | `WAL_MAX_DELAY_SECONDS` | `60` | [Buffering](buffering.md) | Coarse max WAL segment age before flush |
 | **Skippr state** | | | |

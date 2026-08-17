@@ -4,10 +4,14 @@
 
 pub mod doc_parser;
 pub mod docs;
+pub mod flight_sql_table;
+pub mod iceberg_table;
 pub mod metadata;
 pub mod operators;
 pub mod parser;
 pub mod query;
 pub mod registry;
+pub mod stream_plan;
 pub mod tables;
 pub mod tui;
+pub mod wal_table;

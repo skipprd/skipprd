@@ -19,13 +19,13 @@ Exactly-once output therefore depends on two things working together:
 
 ## WAL
 
-Every ingested record is written to the WAL before downstream compaction and destination writes. WAL segments can be stored on local disk (`WAL_STORAGE=disk`) or S3 (`WAL_STORAGE=s3`).
+Every ingested record is written to the WAL before downstream compaction and destination writes. WAL segments can be stored on local disk (`WAL_STORAGE=disk`), S3 (`WAL_STORAGE=s3`), or a clustered disk WAL with synchronous peer replication (`WAL_STORAGE=clustered`).
 
 If Skippr crashes, recovery starts from committed WAL state, not from in-memory progress.
 
 ## Offsets database
 
-The durable offsets database is stored on local disk at `DATA_DIR`, but it is owned by the host process only.
+The durable offsets database is stored on local disk at `DATA_DIR` for `disk` mode. `s3` and `clustered` modes can materialize the same 24-byte offset layout in DynamoDB. In all cases the host process owns the store.
 
 Its role is to materialize the latest source positions that are already represented by committed WAL state. In other words:
 

@@ -25,6 +25,8 @@ pub struct ObjectWriteManifest {
     pub wal_refs_fingerprint_v2: Option<String>,
     #[serde(default, skip_serializing_if = "is_false")]
     pub has_cdc_metadata: bool,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub wal_segment_ids: Vec<String>,
 }
 
 impl ObjectWriteManifest {
@@ -40,6 +42,13 @@ impl ObjectWriteManifest {
         let has_cdc_metadata = wal_refs
             .iter()
             .any(|wal_ref| wal_ref.cdc_meta_hash.is_some());
+        let mut wal_segment_ids: Vec<String> = wal_refs
+            .iter()
+            .map(|wal_ref| wal_ref.segment_id.clone())
+            .filter(|id| !id.is_empty())
+            .collect();
+        wal_segment_ids.sort();
+        wal_segment_ids.dedup();
         Self {
             compaction_id,
             idempotency_key,
@@ -49,6 +58,7 @@ impl ObjectWriteManifest {
             identity_version: Some(SINK_APPLY_ENVELOPE_V2),
             wal_refs_fingerprint_v2: Some(canonical_wal_refs_fingerprint(wal_refs)),
             has_cdc_metadata,
+            wal_segment_ids,
         }
     }
 

@@ -3,6 +3,7 @@ pub mod compaction_progress;
 pub(crate) mod compaction_scheduler;
 pub mod compaction_transaction;
 pub mod completion_ledger;
+pub mod durable;
 pub mod flush_execution_budget;
 pub mod ingest_buffer;
 pub mod s3_wal_body_cache;

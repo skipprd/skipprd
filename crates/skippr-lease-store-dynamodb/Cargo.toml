@@ -1,0 +1,17 @@
+[package]
+name = "skippr-lease-store-dynamodb"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Async DynamoDB lease and membership client for clustered skipprd"
+
+[dependencies]
+async-trait.workspace = true
+aws-config = "1.5.1"
+aws-sdk-dynamodb = "1.32.0"
+chrono = "0.4.44"
+skippr-lease = { path = "../skippr-lease" }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }

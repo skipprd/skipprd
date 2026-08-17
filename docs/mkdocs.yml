@@ -140,6 +140,7 @@ nav:
   - SQL Reference: sql/reference.md
   - Architecture:
       - How Skippr Works: concepts/how-it-works.md
+      - Datalake: concepts/datalake.md
       - Exactly-Once Delivery: concepts/exactly-once.md
       - Schema Discovery & Evolution: concepts/schema.md
       - Source Landing Semantics: concepts/source-landing-semantics.md

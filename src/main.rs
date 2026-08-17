@@ -3,6 +3,8 @@ use std::time::{Duration, Instant, SystemTime};
 use std::{fs, process};
 
 use skipprd::cli::{Cli, Mode};
+use skipprd::cluster::validation::{validate_clustered_cli, CliModeKind};
+use skipprd::helpers::wal_storage::WalStorage;
 
 extern crate clap;
 extern crate core;
@@ -93,6 +95,25 @@ async fn run_discover_or_exit(output_mode: &str) {
     }
 }
 
+fn reject_invalid_wal_storage() -> WalStorage {
+    match Config::parse_wal_storage() {
+        Ok(storage) => storage,
+        Err(err) => {
+            error!("{err}");
+            eprintln!("{err}");
+            process::exit(1);
+        }
+    }
+}
+
+fn reject_invalid_clustered_mode(storage: WalStorage, mode: CliModeKind) {
+    if let Err(err) = validate_clustered_cli(storage, mode) {
+        error!("{err}");
+        eprintln!("{err}");
+        process::exit(1);
+    }
+}
+
 fn main() {
     let stack_size = std::env::var("SKIPPR_MAIN_THREAD_STACK_BYTES")
         .ok()
@@ -131,7 +152,7 @@ async fn async_main() {
         Config::setenv("SKIPPR_CONFIG_FILE", &config.to_string_lossy());
     }
     if let Some(wal_storage) = &cli.wal_storage {
-        Config::set_wal_storage(wal_storage);
+        Config::set_wal_storage(wal_storage.as_str());
     }
     if let Some(bucket) = &cli.wal_s3_bucket {
         Config::set_wal_s3_bucket(bucket);
@@ -146,9 +167,18 @@ async fn async_main() {
     // Initialize logging if --log is provided; default level is 'info', '--log debug' enables debug
     init_logging(cli.log.clone());
 
-    match cli.mode {
+    match cli.mode.clone() {
         Mode::Sync(options) => {
             Config::build_config();
+            let storage = reject_invalid_wal_storage();
+            reject_invalid_clustered_mode(storage, CliModeKind::Sync { once: options.once });
+            if storage == WalStorage::Clustered {
+                if let Err(err) = skipprd::cluster::scheduler::run_clustered_from_config().await {
+                    error!("clustered sync failed: {err}");
+                    process::exit(1);
+                }
+                return;
+            }
 
             Metrics::init_send_loop();
 
@@ -215,6 +245,8 @@ async fn async_main() {
         }
         Mode::Discover(options) => {
             Config::build_config();
+            let storage = reject_invalid_wal_storage();
+            reject_invalid_clustered_mode(storage, CliModeKind::Discover);
 
             let output_mode = options.output.clone();
 
@@ -232,6 +264,18 @@ async fn async_main() {
         }
         Mode::Query(options) => {
             Config::build_config();
+            let storage = reject_invalid_wal_storage();
+            reject_invalid_clustered_mode(storage, CliModeKind::Query);
+            if storage == WalStorage::Clustered {
+                if let Err(err) =
+                    skipprd::cluster::scheduler::run_clustered_query(options.sql.clone()).await
+                {
+                    error!("clustered query failed: {err}");
+                    eprintln!("clustered query failed: {err}");
+                    process::exit(1);
+                }
+                return;
+            }
             if let Some(sql) = options.sql {
                 let now = Instant::now();
                 query_with_options(
@@ -282,8 +326,8 @@ async fn async_main() {
         }
         Mode::Schema(options) => {
             Config::build_config();
-            // println!("Command schema");
-            // Config::init().await;
+            let storage = reject_invalid_wal_storage();
+            reject_invalid_clustered_mode(storage, CliModeKind::Schema);
             skipprd::engine::run_schema(&options.pipeline).await;
         }
         Mode::SqlHelp(options) => {
@@ -408,6 +452,8 @@ async fn async_main() {
         }
         Mode::Benchmark(options) => {
             Config::build_config();
+            let storage = reject_invalid_wal_storage();
+            reject_invalid_clustered_mode(storage, CliModeKind::Benchmark);
             // Setup default pipeline name for benchmarking
             PIPELINE_NAME.write().clear();
             PIPELINE_NAME.write().push_str("benchmark");

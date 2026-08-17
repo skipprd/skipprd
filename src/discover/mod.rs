@@ -2863,7 +2863,13 @@ mod tests {
 
         let mut _fields: Box<HashMap<String, Metadata>> = Box::new(HashMap::new()); // Removed mut since it's not needed
 
-        AnalyseSchema::infer_json_schema(&_foo, &mut record_line, Some(1), &mut _fields, None);
+        AnalyseSchema::infer_json_schema(
+            &_foo,
+            &mut record_line,
+            Some(1),
+            &mut _fields,
+            Some("default"),
+        );
 
         AnalyseSchema::determine_field_types(
             &mut _fields.get_mut("default").unwrap().fields,
@@ -3045,7 +3051,13 @@ mod tests {
 
         let mut _fields: Box<HashMap<String, Metadata>> = Box::new(HashMap::new()); // Removed mut since it's not needed
 
-        AnalyseSchema::infer_json_schema(&_foo, &mut record_line, Some(1), &mut _fields, None);
+        AnalyseSchema::infer_json_schema(
+            &_foo,
+            &mut record_line,
+            Some(1),
+            &mut _fields,
+            Some("default"),
+        );
 
         AnalyseSchema::determine_field_types(
             &mut _fields.get_mut("default").unwrap().fields,
@@ -3265,7 +3277,13 @@ mod tests {
 
         let mut _fields: Box<HashMap<String, Metadata>> = Box::new(HashMap::new()); // Removed mut since it's not needed
 
-        AnalyseSchema::infer_json_schema(&_foo, &mut record_line, Some(1), &mut _fields, None);
+        AnalyseSchema::infer_json_schema(
+            &_foo,
+            &mut record_line,
+            Some(1),
+            &mut _fields,
+            Some("default"),
+        );
 
         AnalyseSchema::determine_field_types(
             &mut _fields.get_mut("default").unwrap().fields,

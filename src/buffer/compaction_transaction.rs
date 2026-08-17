@@ -18,6 +18,7 @@ use tracing::warn;
 pub enum SegmentSourceDescriptor {
     Disk { path: PathBuf },
     S3 { bucket: String, key: String },
+    Wal { uri: String },
 }
 
 impl SegmentSourceDescriptor {
@@ -25,6 +26,7 @@ impl SegmentSourceDescriptor {
         match self {
             Self::Disk { path } => path.to_string_lossy().to_string(),
             Self::S3 { bucket, key } => format!("s3://{bucket}/{key}"),
+            Self::Wal { uri } => uri.clone(),
         }
     }
 }
@@ -251,6 +253,12 @@ impl CompactionTransaction {
         self.updated_at_secs = now_secs();
         self
     }
+
+    pub fn mark_tombstoned(mut self) -> Self {
+        self.state = CompactionTransactionState::Tombstoned;
+        self.updated_at_secs = now_secs();
+        self
+    }
 }
 
 fn now_secs() -> u64 {
@@ -284,10 +292,7 @@ pub fn deterministic_compaction_id(
 }
 
 pub fn manifest_dir() -> PathBuf {
-    PathBuf::from(format!(
-        "{}/segment_buffer/compactions",
-        Config::get_data_dir()
-    ))
+    crate::buffer::wal_store::ingest_compaction_dir()
 }
 
 pub fn manifest_path_for(dir: &Path, id: &str) -> PathBuf {

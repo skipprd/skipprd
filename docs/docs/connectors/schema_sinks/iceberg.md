@@ -33,7 +33,7 @@ schema_sinks:
 
 | Field | Description |
 | --- | --- |
-| `catalog` | Iceberg catalog definition (`glue`, `rest`, `unity`, or `polaris`) — same shape as the [Iceberg data sink](../outputs/iceberg.md) |
+| `catalog` | Iceberg catalog definition (`skippr`, `glue`, `rest`, `unity`, or `polaris`) — same shape as the [Iceberg data sink](../outputs/iceberg.md) |
 | `table_namespace` | Optional namespace prefix for table names |
 | `table_prefix` | Optional table name prefix |
 | `table_location_prefix` | Optional storage location override |

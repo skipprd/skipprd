@@ -32,10 +32,13 @@ The Write-Ahead Log provides durability and crash recovery. Every record passes 
 |---|---|
 | **Environment variable** | `WAL_STORAGE` |
 | **Default** | `disk` |
-| **Values** | `disk`, `s3` |
+| **Values** | `disk`, `s3`, `clustered` |
 
-- `disk` — WAL segments are stored in `DATA_DIR`. Fast, but requires the same disk on restart.
+- `disk` — WAL segments are stored in `DATA_DIR`. Fast, but requires the same disk on restart. Single-node; no lease or peer quorum.
 - `s3` — WAL segments are stored in `SKIPPR_WAL_S3_BUCKET` when set, otherwise `SKIPPR_S3_BUCKET`. No local disk dependency. Enables fully stateless compute. See [DynamoDB offset store](offset-store-dynamodb.md) for Lambda resume with `SKIPPR_OFFSET_STORE=dynamodb`.
+- `clustered` — local disk WAL plus synchronous peer replication (two durable copies), a clock-free DynamoDB lease, and DynamoDB offsets/checkpoints. Reuses `SKIPPR_OFFSET_DYNAMODB_TABLE`. Requires a release binary built with `--features offset-store-dynamodb`. `sync --once` and `discover` are rejected; `sync` runs the long-lived scheduler; `query` is query-only and never takes an ingest lease. Automatic failover with continued writes needs three live processes.
+
+Unknown `WAL_STORAGE` values fail startup. There is no YAML `skippr.wal_storage` field.
 
 ### SKIPPR_WAL_S3_BUCKET
 
