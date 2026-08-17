@@ -478,7 +478,14 @@ impl CatalogCoordinator {
         let mut valid = Vec::with_capacity(intents.len());
         for intent in intents {
             match self.ensure_table_layout(&target, &intent).await {
-                Ok(()) => valid.push(intent),
+                Ok(layout) => {
+                    let mut intent = intent;
+                    // Glue BatchCreatePartition must match the live table SD. Schema
+                    // evolution can leave an intent's storage columns behind or ahead of
+                    // the table; using the table layout still registers the Hive partition.
+                    intent.payload.storage_columns = layout.storage_columns;
+                    valid.push(intent);
+                }
                 Err(error) => self.record_glue_failure(&intent.pending, &error).await?,
             }
         }
@@ -576,7 +583,7 @@ impl CatalogCoordinator {
         &self,
         target: &GlueTarget,
         intent: &DecodedIntent,
-    ) -> Result<(), GlueApiError> {
+    ) -> Result<GlueTableLayout, GlueApiError> {
         let cache_key = format!(
             "{}\0{}\0{}\0{}\0{}\0{}",
             target.region.as_deref().unwrap_or_default(),
@@ -586,32 +593,45 @@ impl CatalogCoordinator {
             intent.payload.schema_namespace,
             intent.payload.schema_version
         );
-        if self
-            .table_layout_cache
-            .read()
-            .await
-            .contains_key(&cache_key)
-        {
-            return Ok(());
+        if let Some(cached) = self.table_layout_cache.read().await.get(&cache_key) {
+            return Ok(cached.clone());
         }
         let actual = {
             let _permit = self.catalog_budget.acquire().await;
             self.executor.table_layout(target).await?
         };
-        let expected = GlueTableLayout {
-            partition_columns: intent.payload.partition_columns.clone(),
-            storage_columns: intent.payload.storage_columns.clone(),
-        };
-        if !same_column_layout(&actual.partition_columns, &expected.partition_columns)
-            || !same_column_layout(&actual.storage_columns, &expected.storage_columns)
-        {
+        if !same_column_layout(&actual.partition_columns, &intent.payload.partition_columns) {
+            // Athena/Glue schema sync may still be creating or healing the Hive table
+            // (unpartitioned leftover, missing table, type suffix collapse). Retry until
+            // partition keys converge so ingest can publish partitions without MSCK.
+            tracing::warn!(
+                database = %target.database,
+                table = %target.table,
+                schema_namespace = %intent.payload.schema_namespace,
+                schema_version = intent.payload.schema_version,
+                actual_partition_columns = ?actual.partition_columns,
+                expected_partition_columns = ?intent.payload.partition_columns,
+                "Glue table partition layout is not ready for catalog intent; retrying"
+            );
             return Err(GlueApiError::new(
-                GlueApiErrorKind::Terminal,
+                GlueApiErrorKind::Transient,
                 format!(
-                    "Glue table layout mismatch for '{}.{}': actual={actual:?} expected={expected:?}",
-                    target.database, target.table
+                    "Glue table partition layout mismatch for '{}.{}': actual={:?} expected={:?}",
+                    target.database,
+                    target.table,
+                    actual.partition_columns,
+                    intent.payload.partition_columns
                 ),
             ));
+        }
+        if !same_column_layout(&actual.storage_columns, &intent.payload.storage_columns) {
+            tracing::info!(
+                database = %target.database,
+                table = %target.table,
+                schema_namespace = %intent.payload.schema_namespace,
+                schema_version = intent.payload.schema_version,
+                "Glue table storage columns differ from catalog intent; using live table layout"
+            );
         }
         let namespace_prefix = format!(
             "{}\0{}\0{}\0{}\0{}\0",
@@ -623,8 +643,8 @@ impl CatalogCoordinator {
         );
         let mut cache = self.table_layout_cache.write().await;
         cache.retain(|key, _| !key.starts_with(&namespace_prefix));
-        cache.insert(cache_key, actual);
-        Ok(())
+        cache.insert(cache_key, actual.clone());
+        Ok(actual)
     }
 
     async fn update_partition(
@@ -693,6 +713,13 @@ impl CatalogCoordinator {
             .await?
             == ConditionalMutationResult::Applied
         {
+            log_catalog_intent_failure(
+                pending,
+                &format!("{:?}", error.kind),
+                &error.message,
+                !transient,
+                delay,
+            );
             if transient {
                 crate::metrics::counters::add_catalog_retry(1);
             } else {
@@ -707,11 +734,13 @@ impl CatalogCoordinator {
         pending: &PendingCatalogIntent,
         error: impl Into<String>,
     ) -> io::Result<()> {
+        let error = error.into();
         if self
-            .record_failure_durable(pending, error.into(), None, true)
+            .record_failure_durable(pending, error.clone(), None, true)
             .await?
             == ConditionalMutationResult::Applied
         {
+            log_catalog_intent_failure(pending, "TerminalInvalid", &error, true, None);
             crate::metrics::counters::add_catalog_terminal_failure(1);
         }
         Ok(())
@@ -821,6 +850,52 @@ fn same_column_layout(left: &[GlueColumnIntent], right: &[GlueColumnIntent]) -> 
         .eq(right.iter().map(|column| (&column.name, &column.r#type)))
 }
 
+fn format_columns(columns: &[GlueColumnIntent]) -> String {
+    columns
+        .iter()
+        .map(|column| format!("{}:{}", column.name, column.r#type))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn log_catalog_intent_failure(
+    pending: &PendingCatalogIntent,
+    error_kind: &str,
+    error: &str,
+    terminal: bool,
+    retry_after: Option<Duration>,
+) {
+    let payload = serde_json::from_str::<GluePartitionCatalogIntentV1>(&pending.intent.payload_json)
+        .ok();
+    tracing::warn!(
+        sink_ref = %pending.intent.identity.sink_ref,
+        namespace = %pending.intent.identity.namespace,
+        kind = ?pending.intent.identity.kind,
+        partition_key = %pending.intent.identity.key,
+        intent_id = %pending.id,
+        attempts = pending.attempts.saturating_add(1),
+        terminal,
+        error_kind,
+        error,
+        retry_after_ms = retry_after.map(|delay| delay.as_millis() as u64),
+        schema_namespace = payload.as_ref().map(|payload| payload.schema_namespace.as_str()),
+        schema_version = payload.as_ref().map(|payload| payload.schema_version),
+        database = payload.as_ref().map(|payload| payload.database.as_str()),
+        table = payload.as_ref().map(|payload| payload.table.as_str()),
+        partition_values = payload
+            .as_ref()
+            .map(|payload| payload.partition_values.join("/")),
+        location = payload.as_ref().map(|payload| payload.location.as_str()),
+        partition_columns = payload
+            .as_ref()
+            .map(|payload| format_columns(&payload.partition_columns)),
+        storage_columns = payload
+            .as_ref()
+            .map(|payload| format_columns(&payload.storage_columns)),
+        "catalog outbox intent failed"
+    );
+}
+
 fn classify_glue_error(error: String) -> GlueApiError {
     let kind = if error.to_ascii_lowercase().contains("entitynotfound") {
         GlueApiErrorKind::NotFound
@@ -879,6 +954,7 @@ mod tests {
         get_results: HashMap<Vec<String>, VecDeque<Result<Option<String>, GlueApiError>>>,
         batch_results: VecDeque<Result<Vec<GlueBatchCreateOutcome>, GlueApiError>>,
         batch_sizes: Vec<usize>,
+        created: Vec<GluePartitionSpec>,
         update_results: VecDeque<Result<(), GlueApiError>>,
         updates: Vec<GluePartitionSpec>,
     }
@@ -941,6 +1017,7 @@ mod tests {
         ) -> Result<Vec<GlueBatchCreateOutcome>, GlueApiError> {
             let mut state = self.state.lock().unwrap();
             state.batch_sizes.push(partitions.len());
+            state.created.extend(partitions.iter().cloned());
             state
                 .batch_results
                 .pop_front()
@@ -1216,7 +1293,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn full_layout_mismatch_is_terminal() {
+    async fn storage_column_mismatch_uses_live_table_layout_and_creates() {
         let temp = tempfile::tempdir().unwrap();
         let executor = Arc::new(MockGlueExecutor::default());
         executor.state.lock().unwrap().layout = Some(Ok(expected_layout("string")));
@@ -1227,17 +1304,14 @@ mod tests {
 
         coordinator.drain_once().await.unwrap();
 
-        let pending = coordinator.outbox.scan_pending(1).unwrap().remove(0);
-        assert!(pending.terminal);
-        assert!(pending
-            .last_error
-            .as_deref()
-            .unwrap()
-            .contains("table layout mismatch"));
+        assert!(coordinator.outbox.scan_pending(1).unwrap().is_empty());
+        let created = executor.state.lock().unwrap().created.clone();
+        assert_eq!(created.len(), 1);
+        assert_eq!(created[0].storage_columns, vec![column("id", "string")]);
     }
 
     #[tokio::test]
-    async fn partition_type_mismatch_is_terminal() {
+    async fn partition_type_mismatch_is_retryable() {
         let temp = tempfile::tempdir().unwrap();
         let executor = Arc::new(MockGlueExecutor::default());
         executor.state.lock().unwrap().layout = Some(Ok(GlueTableLayout {
@@ -1252,12 +1326,14 @@ mod tests {
         coordinator.drain_once().await.unwrap();
 
         let pending = coordinator.outbox.scan_pending(1).unwrap().remove(0);
-        assert!(pending.terminal);
+        assert!(!pending.terminal);
+        assert!(pending.next_attempt_at_ms > now_ms());
         assert!(pending
             .last_error
             .as_deref()
             .unwrap()
-            .contains("table layout mismatch"));
+            .contains("partition layout mismatch"));
+        assert!(executor.state.lock().unwrap().created.is_empty());
     }
 
     #[tokio::test]
