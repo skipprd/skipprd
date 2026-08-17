@@ -606,7 +606,10 @@ impl Config {
         walk(value, String::new())
     }
 
-    fn parse_registry_ref(reference: &str, expected_prefix: &str) -> Result<String, String> {
+    pub(crate) fn parse_registry_ref(
+        reference: &str,
+        expected_prefix: &str,
+    ) -> Result<String, String> {
         let parts: Vec<&str> = reference.split('.').collect();
         if parts.len() != 2 || parts[0] != expected_prefix || parts[1].is_empty() {
             return Err(format!(
@@ -1029,19 +1032,61 @@ impl Config {
         }
     }
 
-    // WAL storage selection: "disk" (default) or "s3"
-    pub fn get_wal_storage() -> String {
+    /// Raw `WAL_STORAGE` string before parse. Empty means unset (default disk).
+    pub fn wal_storage_raw() -> String {
         if Config::get_envcache("WAL_STORAGE") != "" {
             return Config::get_envcache("WAL_STORAGE");
-        } else {
-            let val = Config::getenv("WAL_STORAGE", "disk");
-            Config::set_evncache("WAL_STORAGE", &val);
-            val
+        }
+        let val = Config::getenv("WAL_STORAGE", "disk");
+        Config::set_evncache("WAL_STORAGE", &val);
+        val
+    }
+
+    pub fn parse_wal_storage(
+    ) -> Result<crate::helpers::wal_storage::WalStorage, crate::helpers::wal_storage::ConfigError>
+    {
+        Config::wal_storage_raw().parse()
+    }
+
+    /// Parsed WAL backend. Unknown values exit at startup.
+    pub fn get_wal_storage() -> crate::helpers::wal_storage::WalStorage {
+        match Self::parse_wal_storage() {
+            Ok(storage) => storage,
+            Err(err) => {
+                eprintln!("[skippr] config failed: {err}");
+                std::process::exit(1);
+            }
         }
     }
 
     pub fn set_wal_storage(value: &str) {
         Config::setenv("WAL_STORAGE", value);
+        Config::set_evncache("WAL_STORAGE", value);
+    }
+
+    /// `Some` when `SKIPPR_OFFSET_STORE` or `skippr.offset_store` is explicitly set.
+    pub fn configured_offset_store() -> Result<
+        Option<crate::helpers::wal_storage::OffsetStoreKind>,
+        crate::helpers::wal_storage::ConfigError,
+    > {
+        if Config::get_envcache("SKIPPR_OFFSET_STORE") != "" {
+            return Config::get_envcache("SKIPPR_OFFSET_STORE")
+                .parse()
+                .map(Some);
+        }
+        let from_env = std::env::var("SKIPPR_OFFSET_STORE").unwrap_or_default();
+        if !from_env.is_empty() {
+            return from_env.parse().map(Some);
+        }
+        let config = Config::get();
+        if let Some(skippr) = config.skippr.as_ref() {
+            if let Some(store) = skippr.offset_store.as_ref() {
+                if !store.is_empty() {
+                    return store.parse().map(Some);
+                }
+            }
+        }
+        Ok(None)
     }
 
     /// S3 bucket for WAL segments. Prefer `SKIPPR_WAL_S3_BUCKET` / skippr.wal_s3_bucket, then datalake bucket.
@@ -1071,29 +1116,6 @@ impl Config {
     pub fn set_wal_s3_bucket(value: &str) {
         Config::setenv("SKIPPR_WAL_S3_BUCKET", value);
         Config::set_evncache("SKIPPR_WAL_S3_BUCKET", value);
-    }
-
-    /// `sled` (default) or `dynamodb`.
-    pub fn get_offset_store() -> String {
-        if Config::get_envcache("SKIPPR_OFFSET_STORE") != "" {
-            return Config::get_envcache("SKIPPR_OFFSET_STORE");
-        }
-        let from_env = Config::getenv("SKIPPR_OFFSET_STORE", "");
-        if !from_env.is_empty() {
-            Config::set_evncache("SKIPPR_OFFSET_STORE", &from_env);
-            return from_env;
-        }
-        let config = Config::get();
-        if let Some(skippr) = config.skippr.as_ref() {
-            if let Some(store) = skippr.offset_store.as_ref() {
-                if !store.is_empty() {
-                    Config::set_evncache("SKIPPR_OFFSET_STORE", store);
-                    return store.clone();
-                }
-            }
-        }
-        Config::set_evncache("SKIPPR_OFFSET_STORE", "sled");
-        "sled".to_string()
     }
 
     pub fn set_offset_store(value: &str) {
@@ -2285,15 +2307,10 @@ impl Config {
         let tenant = Self::get_tenant();
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
-
-        let key = format!(
-            "{}/{}/{}/metadata/metadata.json",
-            tenant, workspace, pipeline
-        );
+        let key = Self::pipeline_metadata_object_path(&tenant, &workspace, &pipeline);
         info!("get_metadata: pipeline='{}' key='{}'", pipeline, key);
 
-        let storage = crate::adapters::storage::get_storage();
-        match storage.get_json_opt(&key).await {
+        match Self::load_pipeline_metadata_json(&key).await {
             Ok(Some(json_value)) => match serde_json::from_value::<PipelineMetadata>(json_value) {
                 Ok(mut pipeline_metadata) => {
                     let num_entries = pipeline_metadata.metadata.len();
@@ -2322,16 +2339,45 @@ impl Config {
         }
     }
 
+    pub fn pipeline_metadata_object_key(key: &skippr_lease::PipelineKey) -> String {
+        Self::pipeline_metadata_object_path(key.tenant(), key.workspace(), key.pipeline())
+    }
+
+    fn pipeline_metadata_object_path(tenant: &str, workspace: &str, pipeline: &str) -> String {
+        format!("{tenant}/{workspace}/{pipeline}/metadata/metadata.json")
+    }
+
+    pub async fn load_pipeline_metadata(
+        key: &skippr_lease::PipelineKey,
+    ) -> Result<Option<crate::discover::PipelineMetadata>, String> {
+        let object_key = Self::pipeline_metadata_object_key(key);
+        info!("load_pipeline_metadata: key='{}'", object_key);
+        match Self::load_pipeline_metadata_json(&object_key).await {
+            Ok(None) => Ok(None),
+            Ok(Some(json_value)) => serde_json::from_value(json_value)
+                .map(Some)
+                .map_err(|err| format!("failed to parse pipeline metadata {object_key}: {err}")),
+            Err(err) => Err(format!(
+                "failed to fetch pipeline metadata {object_key}: {err}"
+            )),
+        }
+    }
+
+    async fn load_pipeline_metadata_json(
+        object_key: &str,
+    ) -> Result<Option<serde_json::Value>, String> {
+        let storage = crate::adapters::storage::get_storage();
+        storage
+            .get_json_opt(object_key)
+            .await
+            .map_err(|err| err.to_string())
+    }
+
     pub async fn delete_metadata() {
         let tenant = Self::get_tenant();
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
-
-        let key = format!(
-            "{}/{}/{}/metadata/metadata.json",
-            tenant, workspace, pipeline
-        );
-
+        let key = Self::pipeline_metadata_object_path(&tenant, &workspace, &pipeline);
         let storage = crate::adapters::storage::get_storage();
         match storage.delete_object(&key).await {
             Ok(_) => info!("Deleted pipeline metadata: {}", key),
@@ -2354,10 +2400,7 @@ impl Config {
         let workspace = Self::get_workspace_name();
         let pipeline = Self::get_pipeline_name();
 
-        let key = format!(
-            "{}/{}/{}/metadata/metadata.json",
-            tenant, workspace, pipeline
-        );
+        let key = Self::pipeline_metadata_object_path(&tenant, &workspace, &pipeline);
         let json_value = match serde_json::to_value(pipeline_metadata) {
             Ok(v) => v,
             Err(e) => {
@@ -3895,6 +3938,44 @@ schema_sinks:
 
         *APP_CONFIG.write() = original_config;
         *PIPELINE_NAME.write() = original_pipeline_name;
+        ENV_CACHE.write().clear();
+    }
+
+    #[test]
+    #[serial]
+    fn wal_storage_cli_overrides_env() {
+        ENV_CACHE.write().clear();
+        let original = std::env::var("WAL_STORAGE").ok();
+        std::env::set_var("WAL_STORAGE", "disk");
+        Config::set_wal_storage("s3");
+        assert_eq!(
+            Config::parse_wal_storage().unwrap(),
+            crate::helpers::wal_storage::WalStorage::S3
+        );
+        match original {
+            Some(value) => std::env::set_var("WAL_STORAGE", value),
+            None => std::env::remove_var("WAL_STORAGE"),
+        }
+        ENV_CACHE.write().clear();
+    }
+
+    #[test]
+    #[serial]
+    fn unknown_wal_storage_is_rejected() {
+        ENV_CACHE.write().clear();
+        let original = std::env::var("WAL_STORAGE").ok();
+        std::env::set_var("WAL_STORAGE", "memory");
+        Config::set_evncache("WAL_STORAGE", "memory");
+        assert!(matches!(
+            Config::parse_wal_storage(),
+            Err(crate::helpers::wal_storage::ConfigError::InvalidWalStorage(
+                _
+            ))
+        ));
+        match original {
+            Some(value) => std::env::set_var("WAL_STORAGE", value),
+            None => std::env::remove_var("WAL_STORAGE"),
+        }
         ENV_CACHE.write().clear();
     }
 }

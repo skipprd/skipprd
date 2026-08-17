@@ -1,0 +1,21 @@
+[package]
+name = "skippr-iceberg-catalog-dynamodb"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Iceberg Catalog implementation backed by DynamoDB pointers"
+
+[dependencies]
+async-trait.workspace = true
+aws-config = "1.5.1"
+aws-sdk-dynamodb = "1.32.0"
+chrono = "0.4.44"
+iceberg = "0.9.1"
+iceberg-storage-opendal = "0.9.1"
+serde_json.workspace = true
+sha2.workspace = true
+skippr-iceberg-catalog = { path = "../skippr-iceberg-catalog" }
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "macros"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }

@@ -1757,7 +1757,10 @@ impl Ingest {
     fn autotuned_ingest_admission_budget_bytes(num_ingest_threads: usize) -> usize {
         let hint = crate::buffer::s3_wal_memory_budget::memory_hint_bytes()
             .unwrap_or(crate::buffer::s3_wal_memory_budget::FALLBACK_MEMORY_HINT_BYTES);
-        let wal_s3 = Config::get_wal_storage().eq_ignore_ascii_case("s3");
+        let wal_s3 = matches!(
+            Config::get_wal_storage(),
+            crate::helpers::wal_storage::WalStorage::S3
+        );
         Self::compute_admission_budget_bytes(hint, wal_s3, num_ingest_threads)
     }
 
@@ -2487,8 +2490,7 @@ impl Ingest {
                         || crate::metrics::counters::WAL_COMPACTIONS_IN_FLIGHT
                             .load(Ordering::Relaxed)
                             > 0
-                        || crate::metrics::counters::COMPACTION_ACTIVE_JOBS
-                            .load(Ordering::Relaxed)
+                        || crate::metrics::counters::COMPACTION_ACTIVE_JOBS.load(Ordering::Relaxed)
                             > 0
                         || crate::metrics::counters::COMPACTION_INFLIGHT_SLICE_COUNT
                             .load(Ordering::Relaxed)
@@ -2652,7 +2654,19 @@ impl Ingest {
                 .clone()
                 .unwrap_or_else(|| pipeline_name_cached.clone());
 
-            let offset_snapshot = offset_db_clone.snapshot_value(&ingest_batch.offset_key);
+            let offset_snapshot = match offset_db_clone.snapshot_value(&ingest_batch.offset_key) {
+                Ok(snap) => snap,
+                Err(err) => {
+                    error!(
+                        "Offset store read failed for {}:{}: {err}",
+                        ingest_batch.offset_key.namespace, ingest_batch.offset_key.partition
+                    );
+                    if submit_id != 0 {
+                        crate::buffer::wal_writer::fail_request(submit_id, err.to_string());
+                    }
+                    return;
+                }
+            };
             let is_cdc_batch = ingest_batch.cdc_rows().is_some();
             let track_position = is_cdc_batch || ingest_batch.offset_pos.is_some();
 

@@ -628,13 +628,17 @@ pub fn submit_payload_batch_groups(
 }
 
 /// Returns true when a Closed partition was already ingested and should be skipped.
+///
+/// Offset-service I/O and missing results fail closed: skip ingest rather than
+/// treat the partition as never seen.
 pub fn partition_already_closed(ctx: &dyn SourceSyncContext, key: &OffsetKey) -> bool {
-    !validate_offset_key(ctx, key, OffsetTypes::Closed, 1).unwrap_or(true)
+    !validate_offset_key(ctx, key, OffsetTypes::Closed, 1).unwrap_or(false)
 }
 
 /// Validate a single offset key through the batched offset service.
 ///
 /// For Closed offsets this returns whether the partition should still be processed.
+/// `None` means the offset service did not answer; callers must fail closed.
 pub fn validate_offset_key(
     ctx: &dyn SourceSyncContext,
     key: &OffsetKey,
@@ -763,5 +767,63 @@ mod tests {
             error: None,
         });
         client.drain().unwrap();
+    }
+
+    struct ClosedCheckCtx {
+        batch: Result<Vec<bool>, io::ErrorKind>,
+    }
+
+    impl SourceSyncContext for ClosedCheckCtx {
+        fn submit_payload_tasks(
+            &self,
+            _tasks: Vec<SourcePayloadTask>,
+        ) -> Result<ThroughputMetrics, io::Error> {
+            Err(io::Error::other("unused"))
+        }
+
+        fn validate_offset_batch(
+            &self,
+            _entries: &[OffsetValidationEntry],
+        ) -> Result<Vec<bool>, io::Error> {
+            self.batch
+                .clone()
+                .map_err(|kind| io::Error::new(kind, "offset store down"))
+        }
+
+        fn relay_offset_hints(
+            &self,
+            _hints: Vec<RuntimeOffsetMaterializationHint>,
+        ) -> Result<(), io::Error> {
+            Ok(())
+        }
+
+        fn store_checkpoint(
+            &self,
+            _key: &str,
+            _envelope: &CheckpointEnvelope,
+        ) -> Result<(), String> {
+            Ok(())
+        }
+
+        fn load_checkpoint_envelope(&self, _key: &str) -> Option<CheckpointEnvelope> {
+            None
+        }
+    }
+
+    #[test]
+    fn closed_check_fails_closed_on_offset_service_error() {
+        let key = OffsetKey::new("ns", "part");
+        let missing = ClosedCheckCtx {
+            batch: Ok(vec![true]),
+        };
+        assert!(!partition_already_closed(&missing, &key));
+        let closed = ClosedCheckCtx {
+            batch: Ok(vec![false]),
+        };
+        assert!(partition_already_closed(&closed, &key));
+        let down = ClosedCheckCtx {
+            batch: Err(io::ErrorKind::Other),
+        };
+        assert!(partition_already_closed(&down, &key));
     }
 }

@@ -8,6 +8,12 @@ Skipprd treats each source partition as an **immutable whole object** (S3 key, l
 - After a WAL segment for a partition is committed, ingest marks the offset **`Closed=1`** and sets **`Position`** to the highest line/LSN seen in that flush.
 - Re-running a pipeline against the same immutable object should be a no-op at the source and ingest gate.
 
+## Clustered mode (`WAL_STORAGE=clustered`)
+
+Clustered ingest publishes `Closed=1` / `Position` to **DynamoDB only**, after WAL quorum (`publish_wal_commit`). It does not write offsets into sled or call `mark_offsets_durable_in_wal`. A new primary must not treat an empty local sled database as “nothing closed.” Disk mode (`WAL_STORAGE=disk`) still uses sled via `mark_offsets_durable_in_wal`.
+
+`CommitSegment` still carries offset tuples. Those tuples are the DynamoDB publication payload and snapshot/reconcile input, not a second ingest-gate store.
+
 ## When `Position` matters
 
 `Position` is for **resume within a growing or CDC stream**, not for typical immutable file/API batches:

@@ -62,16 +62,50 @@ pub trait StorageAdapter: Send + Sync {
 
 static STORAGE: OnceCell<Arc<dyn StorageAdapter>> = OnceCell::new();
 
+/// Clustered WAL is per-node; extract/load objects (`metadata.json`) are cluster
+/// SoT, same as S3. Local clustered processes on one host share a sibling dir.
+pub(crate) fn clustered_local_storage_root(data_dir: &str) -> String {
+    std::path::Path::new(data_dir)
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .map(|parent| parent.join("el-storage").to_string_lossy().into_owned())
+        .unwrap_or_else(|| data_dir.to_string())
+}
+
 pub fn get_storage() -> Arc<dyn StorageAdapter> {
     STORAGE
         .get_or_init(|| {
             let mode = crate::helpers::configuration::Config::get_storage_mode();
             if mode == "local" {
-                let data_dir = crate::helpers::configuration::Config::get_data_dir();
-                Arc::new(LocalDiskStorageAdapter::new(&data_dir))
+                let data_dir = crate::helpers::configuration::Config::get_pipeline_data_dir();
+                let root = if crate::helpers::configuration::Config::wal_storage_raw()
+                    .eq_ignore_ascii_case("clustered")
+                {
+                    clustered_local_storage_root(&data_dir)
+                } else {
+                    crate::helpers::configuration::Config::get_data_dir()
+                };
+                Arc::new(LocalDiskStorageAdapter::new(&root))
             } else {
                 Arc::new(S3StorageAdapter)
             }
         })
         .clone()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clustered_local_storage_root;
+
+    #[test]
+    fn clustered_local_storage_is_shared_sibling_of_node_data_dir() {
+        assert_eq!(
+            clustered_local_storage_root("/tmp/skippr-hla-e2e/node1"),
+            "/tmp/skippr-hla-e2e/el-storage"
+        );
+        assert_eq!(
+            clustered_local_storage_root("/tmp/skippr-hla-e2e/node2"),
+            clustered_local_storage_root("/tmp/skippr-hla-e2e/query")
+        );
+    }
 }

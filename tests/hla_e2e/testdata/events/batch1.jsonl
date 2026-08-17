@@ -1,0 +1,5 @@
+{"id":"evt-1","event_type":"signup","amount":10}
+{"id":"evt-2","event_type":"purchase","amount":25}
+{"id":"evt-3","event_type":"purchase","amount":40}
+{"id":"evt-4","event_type":"refund","amount":5}
+{"id":"evt-5","event_type":"signup","amount":0}

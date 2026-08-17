@@ -573,6 +573,40 @@ impl CompactionIndex {
         }
     }
 
+    pub(crate) fn drop_segments_not_in(&mut self, live: &HashSet<String>) {
+        let stale: HashSet<String> = self
+            .segments
+            .keys()
+            .map(|key| key.segment_id.clone())
+            .filter(|id| !live.contains(id))
+            .collect();
+        for id in stale {
+            self.remove_segment(&id);
+        }
+    }
+
+    pub(crate) fn complete_ordinals(&mut self, segment_id: &str, ordinals: &[u32]) -> usize {
+        let wanted: HashSet<u32> = ordinals.iter().copied().collect();
+        if wanted.is_empty() {
+            return 0;
+        }
+        let ids: Vec<CompactionSliceId> = self
+            .slices
+            .values()
+            .filter(|record| {
+                record.slice.id.segment_id == segment_id
+                    && wanted.contains(&record.slice.index_entry.slice_ordinal)
+            })
+            .map(|record| record.slice.id.clone())
+            .collect();
+        ids.iter().filter(|id| self.remove_slice(id)).count()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn live_compaction_ids(&self) -> Vec<String> {
+        self.manifests.records.keys().cloned().collect()
+    }
+
     pub(crate) fn complete_refs(&mut self, refs: &[WalPartRef]) -> usize {
         refs.iter()
             .filter(|wal_ref| self.remove_slice(&CompactionSliceId::from_wal_ref(wal_ref)))
@@ -1727,5 +1761,80 @@ mod tests {
         assert_eq!(planned.groups[0].slices.len(), 128);
         assert!(planned.slices_examined <= 129);
         assert!(planned.segments_examined <= 2);
+    }
+
+    #[test]
+    fn drop_segments_not_in_live_set_removes_slices() {
+        let mut index = CompactionIndex::default();
+        index.register_segment(
+            "keep",
+            vec![slice(
+                "keep",
+                "sink.a",
+                "ns",
+                "v1",
+                CompactionKind::Append,
+                0,
+                100,
+                1,
+            )],
+            1_000,
+            100,
+            1,
+        );
+        index.register_segment(
+            "gone",
+            vec![slice(
+                "gone",
+                "sink.a",
+                "ns",
+                "v1",
+                CompactionKind::Append,
+                0,
+                100,
+                1,
+            )],
+            1_000,
+            100,
+            1,
+        );
+        assert_eq!(index.indexed_slice_count(), 2);
+        index.drop_segments_not_in(&HashSet::from(["keep".to_string()]));
+        assert_eq!(index.indexed_slice_count(), 1);
+    }
+
+    #[test]
+    fn complete_ordinals_removes_matching_slices() {
+        let mut index = CompactionIndex::default();
+        index.register_segment(
+            "seg",
+            vec![
+                slice(
+                    "seg",
+                    "sink.a",
+                    "ns",
+                    "v1",
+                    CompactionKind::Append,
+                    0,
+                    100,
+                    1,
+                ),
+                slice(
+                    "seg",
+                    "sink.a",
+                    "ns",
+                    "v1",
+                    CompactionKind::Append,
+                    1,
+                    100,
+                    1,
+                ),
+            ],
+            1_000,
+            100,
+            1,
+        );
+        assert_eq!(index.complete_ordinals("seg", &[0]), 1);
+        assert_eq!(index.indexed_slice_count(), 1);
     }
 }

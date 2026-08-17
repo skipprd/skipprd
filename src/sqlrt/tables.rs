@@ -1,18 +1,28 @@
+use crate::cluster::identity::{ClusterIdentity, TenantScope};
+use crate::cluster::peer::ReplicaRegistry;
 use crate::helpers::configuration::Config;
 use aws_credential_types::provider::ProvideCredentials;
 use datafusion::arrow::datatypes::DataType as ArrowDataType;
+use datafusion::arrow::datatypes::SchemaRef;
 use datafusion::arrow::record_batch::RecordBatch;
+use datafusion::catalog::Session;
 use datafusion::datasource::file_format::parquet::ParquetFormat;
 use datafusion::datasource::listing::{
     ListingOptions, ListingTable, ListingTableConfig, ListingTableUrl,
 };
 use datafusion::datasource::view::ViewTable;
 use datafusion::datasource::MemTable;
+use datafusion::datasource::{TableProvider, TableType};
 use datafusion::error::DataFusionError;
 use datafusion::logical_expr::{col, Expr};
+use datafusion::physical_plan::limit::GlobalLimitExec;
+use datafusion::physical_plan::union::UnionExec;
+use datafusion::physical_plan::ExecutionPlan;
 use datafusion::prelude::SessionContext;
 use object_store::aws::AmazonS3Builder;
 use object_store::ObjectStore;
+use std::any::Any;
+use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, info, warn};
@@ -240,6 +250,30 @@ pub async fn register_namespace_view(
     }
     // Initialize config (tenant/workspace/bucket), but do NOT touch global pipeline state
     Config::init().await;
+    match crate::cluster::PipelineConfigView::for_name(&Config::get(), pipeline) {
+        Ok(view) if view.iceberg => {
+            return register_iceberg_union_view(
+                ctx,
+                pipeline,
+                namespace,
+                &view,
+                &namespace_union_opts(),
+            )
+            .await;
+        }
+        Ok(_) => {}
+        Err(err)
+            if matches!(
+                Config::get_wal_storage(),
+                crate::helpers::wal_storage::WalStorage::Clustered
+            ) =>
+        {
+            return Err(DataFusionError::Plan(format!(
+                "clustered Iceberg pipeline '{pipeline}' cannot fall back to Parquet listing: {err}"
+            )));
+        }
+        Err(_) => {}
+    }
     info!(
         "Registering namespace view for pipeline '{}', namespace '{}'",
         pipeline, namespace
@@ -570,9 +604,756 @@ pub async fn register_dbt_models(ctx: &SessionContext) -> Result<(), DataFusionE
     Ok(())
 }
 
+pub struct ClusteredSelectOpts {
+    pub identity: ClusterIdentity,
+    pub scope: TenantScope,
+    pub local_flight: SocketAddr,
+    pub registry: Option<Arc<ReplicaRegistry>>,
+    pub iceberg_only: bool,
+}
+
+pub(crate) fn process_clustered_select_opts(
+    scope: TenantScope,
+) -> Result<ClusteredSelectOpts, DataFusionError> {
+    let bind = crate::cluster::identity::process_query_bind().ok_or_else(|| {
+        DataFusionError::Execution("clustered query bind is not installed".into())
+    })?;
+    Ok(ClusteredSelectOpts {
+        identity: bind.identity,
+        scope,
+        local_flight: bind.flight,
+        registry: crate::cluster::peer::process_registry(),
+        iceberg_only: false,
+    })
+}
+
+fn fallback_ingest_scope() -> TenantScope {
+    TenantScope::new(Config::get_tenant(), Config::get_workspace_name()).unwrap_or_else(|_| {
+        TenantScope {
+            tenant: Config::get_tenant(),
+            workspace: Config::get_workspace_name(),
+        }
+    })
+}
+
+fn namespace_union_opts() -> ClusteredSelectOpts {
+    process_clustered_select_opts(fallback_ingest_scope()).unwrap_or_else(|_| ClusteredSelectOpts {
+        identity: ClusterIdentity::new(
+            skippr_lease::ClusterId::new("local").expect("static cluster id"),
+            skippr_lease::NodeId::from_uuid(uuid::Uuid::nil()),
+        ),
+        scope: fallback_ingest_scope(),
+        local_flight: "127.0.0.1:0".parse().unwrap(),
+        registry: crate::cluster::peer::process_registry(),
+        iceberg_only: false,
+    })
+}
+
+pub async fn plan_clustered_select(
+    sql: &str,
+    opts: &ClusteredSelectOpts,
+) -> Result<datafusion::dataframe::DataFrame, DataFusionError> {
+    Config::init().await;
+    let cfg = Config::get();
+    let ctx = if opts.iceberg_only {
+        SessionContext::new()
+    } else {
+        crate::query_flight::ballista::query_context()?
+    };
+    for name in cfg.pipelines.keys() {
+        let view = crate::cluster::PipelineConfigView::for_name(&cfg, name)
+            .map_err(|err| DataFusionError::Plan(err.to_string()))?;
+        if !view.iceberg {
+            continue;
+        }
+        if !opts.scope.matches_pipeline(&view.key) {
+            continue;
+        }
+        let namespaces = match list_iceberg_source_namespaces(&view).await {
+            Ok(namespaces) => namespaces,
+            Err(err) => {
+                warn!(
+                    pipeline = %name,
+                    error = %err,
+                    "skipping Iceberg pipeline with no catalog tables"
+                );
+                continue;
+            }
+        };
+        if namespaces.is_empty() {
+            continue;
+        }
+        for namespace in namespaces {
+            let _ = ctx.deregister_table(&namespace);
+            register_iceberg_union_view(&ctx, name, &namespace, &view, opts).await?;
+        }
+    }
+    ctx.sql(sql).await
+}
+
+pub async fn execute_clustered_select(
+    sql: &str,
+    opts: &ClusteredSelectOpts,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    plan_clustered_select(sql, opts).await?.collect().await
+}
+
+pub async fn schema_for_clustered_select(
+    sql: &str,
+    opts: &ClusteredSelectOpts,
+) -> Result<SchemaRef, DataFusionError> {
+    let df = plan_clustered_select(sql, opts).await?;
+    Ok(df.schema().inner().clone())
+}
+
+pub async fn plan_iceberg_scan(
+    namespace: &str,
+    scope: &TenantScope,
+) -> Result<datafusion::dataframe::DataFrame, DataFusionError> {
+    Config::init().await;
+    let cfg = Config::get();
+    let ctx = datafusion::prelude::SessionContext::new();
+    let mut found = false;
+    for name in cfg.pipelines.keys() {
+        let view = crate::cluster::PipelineConfigView::for_name(&cfg, name)
+            .map_err(|err| DataFusionError::Plan(err.to_string()))?;
+        if !view.iceberg {
+            continue;
+        }
+        if !scope.matches_pipeline(&view.key) {
+            continue;
+        }
+        match load_iceberg_scan_provider(&view, namespace).await {
+            Ok(loaded) => {
+                let _ = ctx.deregister_table(namespace);
+                ctx.register_table(namespace, loaded.provider)
+                    .map_err(|err| DataFusionError::Execution(err.to_string()))?;
+                found = true;
+                break;
+            }
+            Err(_) => continue,
+        }
+    }
+    if !found {
+        return Err(DataFusionError::Plan(format!(
+            "no Iceberg snapshot for namespace '{namespace}'"
+        )));
+    }
+    ctx.sql(&format!("SELECT * FROM {namespace}")).await
+}
+
+pub async fn execute_iceberg_scan(
+    namespace: &str,
+    scope: &TenantScope,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    plan_iceberg_scan(namespace, scope).await?.collect().await
+}
+
+pub async fn iceberg_schema_for_namespace(namespace: &str) -> Result<SchemaRef, DataFusionError> {
+    Config::init().await;
+    let cfg = Config::get();
+    for name in cfg.pipelines.keys() {
+        let view = crate::cluster::PipelineConfigView::for_name(&cfg, name)
+            .map_err(|err| DataFusionError::Plan(err.to_string()))?;
+        if !view.iceberg {
+            continue;
+        }
+        if let Ok(loaded) = load_iceberg_scan_provider(&view, namespace).await {
+            return Ok(datafusion::datasource::TableProvider::schema(
+                loaded.provider.as_ref(),
+            ));
+        }
+    }
+    Err(DataFusionError::Plan(format!(
+        "no Iceberg schema for namespace '{namespace}'"
+    )))
+}
+
+pub async fn list_configured_iceberg_tables(scope: &TenantScope) -> Vec<(String, SchemaRef)> {
+    Config::init().await;
+    let cfg = Config::get();
+    let mut out = Vec::new();
+    for name in cfg.pipelines.keys() {
+        let Ok(view) = crate::cluster::PipelineConfigView::for_name(&cfg, name) else {
+            continue;
+        };
+        if !view.iceberg || !scope.matches_pipeline(&view.key) {
+            continue;
+        }
+        let Ok(namespaces) = list_iceberg_source_namespaces(&view).await else {
+            continue;
+        };
+        for namespace in namespaces {
+            let schema = iceberg_schema_for_namespace(&namespace)
+                .await
+                .unwrap_or_else(|_| Arc::new(datafusion::arrow::datatypes::Schema::empty()));
+            out.push((namespace, schema));
+        }
+    }
+    out
+}
+
+#[allow(dead_code)]
+struct IcebergSinkCatalog {
+    catalog_cfg: skippr_iceberg_catalog::IcebergCatalogConfig,
+    catalog_ns: String,
+    table_prefix: Option<String>,
+}
+
+fn iceberg_sink_catalog(
+    view: &crate::cluster::PipelineConfigView,
+) -> Result<IcebergSinkCatalog, DataFusionError> {
+    let cfg = Config::get();
+    let sink_ref = view.sink_ref.as_ref().ok_or_else(|| {
+        DataFusionError::Plan(format!(
+            "Iceberg pipeline '{}' has no data_sink",
+            view.key.pipeline()
+        ))
+    })?;
+    let sink_name =
+        Config::parse_registry_ref(sink_ref, "data_sinks").map_err(DataFusionError::Plan)?;
+    let entry = cfg
+        .data_sinks
+        .as_ref()
+        .and_then(|sinks| sinks.get(&sink_name))
+        .ok_or_else(|| DataFusionError::Plan(format!("data_sinks.{sink_name} is not defined")))?;
+    let catalog_val = entry.config.config.get("catalog").cloned().ok_or_else(|| {
+        DataFusionError::Plan("Iceberg sink is missing catalog configuration".into())
+    })?;
+    let catalog_cfg: skippr_iceberg_catalog::IcebergCatalogConfig =
+        serde_json::from_value(catalog_val)
+            .map_err(|err| DataFusionError::Plan(err.to_string()))?;
+    let catalog_ns = entry
+        .config
+        .config
+        .get("table_namespace")
+        .and_then(|v| v.as_str())
+        .unwrap_or("default")
+        .to_string();
+    let table_prefix = entry
+        .config
+        .config
+        .get("table_prefix")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    Ok(IcebergSinkCatalog {
+        catalog_cfg,
+        catalog_ns,
+        table_prefix,
+    })
+}
+
+#[cfg_attr(
+    not(any(
+        feature = "offset-store-dynamodb",
+        feature = "offset-store-cloud-tables"
+    )),
+    allow(dead_code)
+)]
+pub(crate) fn catalog_table_to_namespace(name: &str, prefix: Option<&str>) -> Option<String> {
+    match prefix {
+        Some(prefix) => name.strip_prefix(&format!("{prefix}_")).map(str::to_string),
+        None => Some(name.to_string()),
+    }
+}
+
+async fn list_iceberg_source_namespaces(
+    view: &crate::cluster::PipelineConfigView,
+) -> Result<Vec<String>, DataFusionError> {
+    let sink = iceberg_sink_catalog(view)?;
+    #[cfg(any(
+        feature = "offset-store-dynamodb",
+        feature = "offset-store-cloud-tables"
+    ))]
+    {
+        match &sink.catalog_cfg {
+            skippr_iceberg_catalog::IcebergCatalogConfig::Skippr { .. } => {
+                let catalog = crate::cluster::backend::open_skippr_catalog(&sink.catalog_cfg)
+                    .await
+                    .map_err(|err| DataFusionError::Plan(err))?;
+                let ns = iceberg::NamespaceIdent::from_strs([&sink.catalog_ns])
+                    .map_err(|err| DataFusionError::External(Box::new(err)))?;
+                let tables = iceberg::Catalog::list_tables(catalog.as_ref(), &ns)
+                    .await
+                    .map_err(|err| DataFusionError::External(Box::new(err)))?;
+                let prefix = sink.table_prefix.as_deref();
+                Ok(tables
+                    .into_iter()
+                    .filter_map(|ident| catalog_table_to_namespace(ident.name(), prefix))
+                    .collect())
+            }
+            other => Err(DataFusionError::Plan(format!(
+                "Iceberg pipeline '{}' cannot list catalog tables via adapter '{}'",
+                view.key.pipeline(),
+                other.adapter_name()
+            ))),
+        }
+    }
+    #[cfg(not(any(
+        feature = "offset-store-dynamodb",
+        feature = "offset-store-cloud-tables"
+    )))]
+    {
+        let _ = sink;
+        Err(DataFusionError::Plan(format!(
+            "Iceberg pipeline '{}' requires offset-store-dynamodb or offset-store-cloud-tables to list catalog tables",
+            view.key.pipeline()
+        )))
+    }
+}
+
+struct LoadedIcebergScan {
+    provider: Arc<dyn TableProvider>,
+    compacted_segment_ids: Vec<String>,
+}
+
+async fn register_iceberg_union_view(
+    ctx: &SessionContext,
+    _pipeline: &str,
+    namespace: &str,
+    view: &crate::cluster::PipelineConfigView,
+    opts: &ClusteredSelectOpts,
+) -> Result<(), DataFusionError> {
+    let (loaded, skip_wal) = match load_iceberg_scan_provider(view, namespace).await {
+        Ok(loaded) => (loaded, opts.iceberg_only),
+        Err(err) if !opts.iceberg_only => match load_iceberg_from_peer(namespace, opts).await {
+            Ok(loaded) => (loaded, opts.iceberg_only),
+            Err(_) => return Err(err),
+        },
+        Err(err) => return Err(err),
+    };
+    let schema = datafusion::datasource::TableProvider::schema(loaded.provider.as_ref());
+    let wal_provider: Option<Arc<dyn datafusion::datasource::TableProvider>> = if skip_wal {
+        None
+    } else {
+        wal_child_provider(
+            view,
+            namespace,
+            schema.clone(),
+            &loaded.compacted_segment_ids,
+            opts,
+        )
+        .await?
+    };
+    let table: Arc<dyn TableProvider> = match wal_provider {
+        Some(wal) => Arc::new(IcebergWalUnionProvider {
+            iceberg: loaded.provider,
+            wal,
+            schema,
+        }),
+        None => loaded.provider,
+    };
+    let _ = ctx.deregister_table(namespace);
+    ctx.register_table(namespace, table)
+        .map_err(|err| DataFusionError::Execution(err.to_string()))?;
+    Ok(())
+}
+
+async fn wal_child_provider(
+    view: &crate::cluster::PipelineConfigView,
+    namespace: &str,
+    schema: SchemaRef,
+    exclude_segment_ids: &[String],
+    opts: &ClusteredSelectOpts,
+) -> Result<Option<Arc<dyn TableProvider>>, DataFusionError> {
+    let ads = match crate::cluster::gossip::gossip_directory() {
+        Some(gossip) => gossip.known_ads().await,
+        None => Vec::new(),
+    };
+    let paths =
+        crate::cluster::wal_head::local_wal_paths(&view.key, opts.registry.as_deref()).await;
+    if crate::cluster::identity::process_query_bind().is_none() {
+        let Some(paths) = paths else {
+            return Ok(None);
+        };
+        return Ok(Some(Arc::new(
+            crate::sqlrt::wal_table::WalTableProvider::live_unpinned(
+                schema,
+                view.key.clone(),
+                namespace.to_string(),
+                exclude_segment_ids.to_vec(),
+                paths,
+            ),
+        )));
+    }
+    let local_committed = if paths.is_some() {
+        crate::cluster::wal_head::local_committed_for(&view.key, opts.registry.as_deref()).await
+    } else {
+        None
+    };
+    let pipeline = view.key.clone();
+    let identity = opts.identity.clone();
+    let pick = crate::cluster::wal_head::pick_wal_endpoint(
+        &pipeline,
+        opts.local_flight,
+        opts.identity.node,
+        local_committed,
+        &ads,
+        |replica| {
+            let identity = identity.clone();
+            let pipeline = pipeline.clone();
+            async move {
+                crate::cluster::wal_head::confirm_replica_head(replica, &pipeline, &identity).await
+            }
+        },
+    )
+    .await;
+    match pick {
+        Some(endpoint) => Ok(Some(Arc::new(
+            crate::sqlrt::flight_sql_table::FlightSqlTableProvider::live_wal(
+                endpoint.to_string(),
+                &view.key,
+                namespace,
+                exclude_segment_ids,
+                schema,
+                opts.scope.basic_authorization(),
+            ),
+        ))),
+        None => Ok(None),
+    }
+}
+
+async fn load_iceberg_from_peer(
+    namespace: &str,
+    opts: &ClusteredSelectOpts,
+) -> Result<LoadedIcebergScan, DataFusionError> {
+    let ads = match crate::cluster::gossip::gossip_directory() {
+        Some(gossip) => gossip.known_ads().await,
+        None => Vec::new(),
+    };
+    let mut flights: Vec<SocketAddr> = ads
+        .into_iter()
+        .filter(|ad| ad.ready && ad.node_id != opts.identity.node && ad.flight != opts.local_flight)
+        .map(|ad| ad.flight)
+        .collect();
+    flights.sort_by_key(|addr| addr.to_string());
+    let sql = crate::query_flight::sql::iceberg_scan_sql(namespace);
+    let mut last_err = None;
+    for flight in flights {
+        match skippr_query_ballista::fetch_statement_schema_with_auth(
+            &flight.to_string(),
+            &sql,
+            &opts.scope.basic_authorization(),
+        )
+        .await
+        {
+            Ok(schema) => {
+                let compacted = schema
+                    .metadata()
+                    .get("skippr.wal-segment-ids")
+                    .map(|value| {
+                        crate::sqlrt::iceberg_table::segment_ids_from_snapshot_properties([
+                            value.clone()
+                        ])
+                    })
+                    .unwrap_or_default();
+                let provider = crate::sqlrt::flight_sql_table::FlightSqlTableProvider::iceberg_scan(
+                    flight.to_string(),
+                    namespace,
+                    schema,
+                    opts.scope.basic_authorization(),
+                );
+                return Ok(LoadedIcebergScan {
+                    provider: Arc::new(provider),
+                    compacted_segment_ids: compacted,
+                });
+            }
+            Err(err) => last_err = Some(err.to_string()),
+        }
+    }
+    Err(DataFusionError::Plan(last_err.unwrap_or_else(|| {
+        format!("no Iceberg snapshot for namespace '{namespace}'")
+    })))
+}
+
+pub(crate) struct IcebergWalUnionProvider {
+    pub(crate) iceberg: Arc<dyn TableProvider>,
+    pub(crate) wal: Arc<dyn TableProvider>,
+    pub(crate) schema: SchemaRef,
+}
+
+impl std::fmt::Debug for IcebergWalUnionProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IcebergWalUnionProvider").finish()
+    }
+}
+
+#[async_trait::async_trait]
+impl TableProvider for IcebergWalUnionProvider {
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
+    }
+
+    fn table_type(&self) -> TableType {
+        TableType::View
+    }
+
+    async fn scan(
+        &self,
+        state: &dyn Session,
+        projection: Option<&Vec<usize>>,
+        filters: &[Expr],
+        limit: Option<usize>,
+    ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+        let schema = crate::sqlrt::wal_table::projected_schema(&self.schema, projection)?;
+        // COUNT(*) projects no columns but still needs rows. Scan children
+        // unprojected, then drop columns so the physical schema matches.
+        let child_projection = if schema.fields().is_empty() {
+            None
+        } else {
+            projection
+        };
+        let iceberg_plan = self
+            .iceberg
+            .scan(state, child_projection, filters, None)
+            .await?;
+        let wal_plan = self
+            .wal
+            .scan(state, child_projection, filters, None)
+            .await?;
+        let union = UnionExec::try_new(vec![iceberg_plan, wal_plan])?;
+        let union = crate::sqlrt::wal_table::align_exec_to_schema(union, schema)?;
+        if let Some(limit) = limit {
+            Ok(Arc::new(GlobalLimitExec::new(union, 0, Some(limit))))
+        } else {
+            Ok(union)
+        }
+    }
+}
+
+async fn load_iceberg_scan_provider(
+    view: &crate::cluster::PipelineConfigView,
+    namespace: &str,
+) -> Result<LoadedIcebergScan, DataFusionError> {
+    let sink = iceberg_sink_catalog(view)?;
+    let table_name = match sink.table_prefix.as_deref() {
+        Some(prefix) => format!("{prefix}_{namespace}"),
+        None => namespace.to_string(),
+    };
+    let ident = iceberg::TableIdent::from_strs([sink.catalog_ns.as_str(), table_name.as_str()])
+        .map_err(|err| DataFusionError::External(Box::new(err)))?;
+    #[cfg(any(
+        feature = "offset-store-dynamodb",
+        feature = "offset-store-cloud-tables"
+    ))]
+    {
+        match &sink.catalog_cfg {
+            skippr_iceberg_catalog::IcebergCatalogConfig::Skippr { .. } => {
+                let catalog = crate::cluster::backend::open_skippr_catalog(&sink.catalog_cfg)
+                    .await
+                    .map_err(|err| DataFusionError::Plan(err))?;
+                let (table, snapshot_id) =
+                    crate::sqlrt::iceberg_table::load_pinned_iceberg_table(catalog, &ident).await?;
+                let compacted_segment_ids =
+                    crate::sqlrt::iceberg_table::compacted_wal_segment_ids(&table);
+                let catalog_json = serde_json::to_string(&sink.catalog_cfg)
+                    .map_err(|err| DataFusionError::Plan(err.to_string()))?;
+                let provider =
+                    crate::sqlrt::iceberg_table::IcebergScanTableProvider::new_with_catalog(
+                        table,
+                        snapshot_id,
+                        catalog_json,
+                        sink.catalog_ns.clone(),
+                        table_name,
+                    )?;
+                return Ok(LoadedIcebergScan {
+                    provider: Arc::new(provider),
+                    compacted_segment_ids,
+                });
+            }
+            other => {
+                return Err(DataFusionError::Plan(format!(
+                    "Iceberg pipeline '{}' cannot use Parquet listing; catalog adapter '{}' is not available for namespace '{namespace}' UNION live WAL",
+                    view.key.pipeline(),
+                    other.adapter_name()
+                )));
+            }
+        }
+    }
+    #[cfg(not(any(
+        feature = "offset-store-dynamodb",
+        feature = "offset-store-cloud-tables"
+    )))]
+    {
+        let _ = ident;
+        Err(DataFusionError::Plan(format!(
+            "Iceberg pipeline '{}' cannot use Parquet listing; Iceberg catalog scan is required for namespace '{namespace}' UNION live WAL",
+            view.key.pipeline()
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::find_common_s3_prefix;
+    use super::*;
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::physical_plan::empty::EmptyExec;
+
+    #[derive(Debug)]
+    struct ScanProvider {
+        schema: SchemaRef,
+    }
+
+    #[async_trait::async_trait]
+    impl TableProvider for ScanProvider {
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+
+        fn schema(&self) -> SchemaRef {
+            self.schema.clone()
+        }
+
+        fn table_type(&self) -> TableType {
+            TableType::Base
+        }
+
+        async fn scan(
+            &self,
+            _state: &dyn Session,
+            projection: Option<&Vec<usize>>,
+            _filters: &[Expr],
+            _limit: Option<usize>,
+        ) -> datafusion::error::Result<Arc<dyn ExecutionPlan>> {
+            let schema = crate::sqlrt::wal_table::projected_schema(&self.schema, projection)?;
+            Ok(Arc::new(EmptyExec::new(schema)))
+        }
+    }
+
+    #[test]
+    fn catalog_table_to_namespace_keeps_only_matching_prefix() {
+        assert_eq!(
+            catalog_table_to_namespace("hla_hla_events", Some("hla")).as_deref(),
+            Some("hla_events")
+        );
+        assert_eq!(
+            catalog_table_to_namespace("hla-b_hla_events_b", Some("hla-b")).as_deref(),
+            Some("hla_events_b")
+        );
+        assert_eq!(
+            catalog_table_to_namespace("hla_hla_events", Some("hla-b")),
+            None
+        );
+        assert_eq!(
+            catalog_table_to_namespace("hla-b_hla_events_b", Some("hla")),
+            None
+        );
+        assert_eq!(
+            catalog_table_to_namespace("hla_events", None).as_deref(),
+            Some("hla_events")
+        );
+    }
+
+    #[tokio::test]
+    async fn count_star_union_physical_schema_is_empty() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, true),
+            Field::new("a", DataType::Utf8, true),
+            Field::new("b", DataType::Utf8, true),
+            Field::new("c", DataType::Utf8, true),
+            Field::new("d", DataType::Utf8, true),
+        ]));
+        let child = Arc::new(ScanProvider {
+            schema: schema.clone(),
+        });
+        let provider = IcebergWalUnionProvider {
+            iceberg: child.clone(),
+            wal: child,
+            schema,
+        };
+        let ctx = SessionContext::new();
+        let union = provider.scan(&ctx.state(), None, &[], None).await.unwrap();
+        assert_eq!(
+            union.name(),
+            "UnionExec",
+            "UNION must be the table scan root so aggregate/join sit above it"
+        );
+        ctx.register_table("hla_events", Arc::new(provider))
+            .unwrap();
+        let batches = ctx
+            .sql("SELECT count(*) FROM hla_events")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let count = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(count, 0);
+    }
+
+    #[tokio::test]
+    async fn union_with_flight_sql_wal_child_is_union_of_leaves() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
+        let iceberg = Arc::new(ScanProvider {
+            schema: schema.clone(),
+        });
+        let wal = Arc::new(crate::sqlrt::flight_sql_table::FlightSqlTableProvider::new(
+            "127.0.0.1:9".into(),
+            "SELECT * FROM live_wal_scan('t','w','p','ns')".into(),
+            schema.clone(),
+        ));
+        let provider = IcebergWalUnionProvider {
+            iceberg,
+            wal,
+            schema,
+        };
+        let ctx = SessionContext::new();
+        let plan = provider.scan(&ctx.state(), None, &[], None).await.unwrap();
+        assert_eq!(plan.name(), "UnionExec");
+        let children = plan.children();
+        assert_eq!(children.len(), 2);
+        assert!(
+            children.iter().any(|child| child.name() == "FlightSqlExec"),
+            "UNION must include FlightSqlExec WAL leaf, got {:?}",
+            children.iter().map(|c| c.name()).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn peer_iceberg_fallback_keeps_wal_picker() {
+        let src = include_str!("tables.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(prod.contains("load_iceberg_from_peer"));
+        assert!(!prod.contains("Ok(loaded) => (loaded, true)"));
+    }
+
+    #[test]
+    fn iceberg_only_is_allowed_without_local_wal() {
+        let src = include_str!("tables.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(prod.contains("iceberg_only: bool"));
+        assert!(prod.contains("FlightSqlTableProvider::live_wal"));
+        assert!(!prod.contains("WalPick"));
+        assert!(prod.contains("None => Ok(None)"));
+        assert!(!prod.contains("has no local WAL copy"));
+        assert!(!prod.contains("ClusteredWalPin"));
+        assert!(!prod.contains("wal_endpoint: Option<SocketAddr>"));
+        assert!(prod.contains("clustered query bind is not installed"));
+    }
+
+    #[test]
+    fn clustered_select_opts_fail_closed_without_bind() {
+        crate::cluster::identity::clear_process_query_bind();
+        let err = match process_clustered_select_opts(
+            crate::cluster::identity::TenantScope::new("t", "w").unwrap(),
+        ) {
+            Err(err) => err,
+            Ok(_) => panic!("expected clustered query bind to be missing"),
+        };
+        assert!(err
+            .to_string()
+            .contains("clustered query bind is not installed"));
+    }
 
     #[test]
     fn test_common_prefix_same_dir() {

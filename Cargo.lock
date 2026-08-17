@@ -381,6 +381,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrow-flight"
+version = "58.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "28abfe8bf9f124e5fc83b334af4fa58f8d0323ad25312ccb2d1da50178415704"
+dependencies = [
+ "arrow-arith",
+ "arrow-array",
+ "arrow-buffer",
+ "arrow-cast",
+ "arrow-data",
+ "arrow-ipc",
+ "arrow-ord",
+ "arrow-row",
+ "arrow-schema",
+ "arrow-select",
+ "arrow-string",
+ "base64 0.22.1",
+ "bytes",
+ "futures",
+ "once_cell",
+ "paste",
+ "prost 0.14.4",
+ "prost-types 0.14.4",
+ "tonic",
+ "tonic-prost",
+]
+
+[[package]]
 name = "arrow-ipc"
 version = "58.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1454,7 +1482,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "edca88bc138befd0323b20752846e6587272d3b03b0343c8ea28a6f819e6e71f"
 dependencies = [
  "async-trait",
- "axum-core",
+ "axum-core 0.4.5",
  "axum-macros",
  "bytes",
  "futures-util",
@@ -1464,13 +1492,46 @@ dependencies = [
  "hyper 1.10.1",
  "hyper-util",
  "itoa",
- "matchit",
+ "matchit 0.7.3",
  "memchr",
  "mime",
  "percent-encoding",
  "pin-project-lite",
  "rustversion",
  "serde",
+ "serde_json",
+ "serde_path_to_error",
+ "serde_urlencoded",
+ "sync_wrapper",
+ "tokio",
+ "tower",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
+name = "axum"
+version = "0.8.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
+dependencies = [
+ "axum-core 0.5.6",
+ "bytes",
+ "form_urlencoded",
+ "futures-util",
+ "http 1.4.1",
+ "http-body 1.0.1",
+ "http-body-util",
+ "hyper 1.10.1",
+ "hyper-util",
+ "itoa",
+ "matchit 0.8.4",
+ "memchr",
+ "mime",
+ "percent-encoding",
+ "pin-project-lite",
+ "serde_core",
  "serde_json",
  "serde_path_to_error",
  "serde_urlencoded",
@@ -1504,6 +1565,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "axum-core"
+version = "0.5.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08c78f31d7b1291f7ee735c1c6780ccde7785daae9a9206026862dab7d8792d1"
+dependencies = [
+ "bytes",
+ "futures-core",
+ "http 1.4.1",
+ "http-body 1.0.1",
+ "http-body-util",
+ "mime",
+ "pin-project-lite",
+ "sync_wrapper",
+ "tower-layer",
+ "tower-service",
+ "tracing",
+]
+
+[[package]]
 name = "axum-macros"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1523,6 +1603,126 @@ dependencies = [
  "fastrand 2.4.1",
  "gloo-timers",
  "tokio",
+]
+
+[[package]]
+name = "ballista"
+version = "53.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "35a651c6cca5ef37d0add06087bfcfd65b7d670f024849073aa50e8aae519fbb"
+dependencies = [
+ "async-trait",
+ "ballista-core",
+ "ballista-executor",
+ "ballista-scheduler",
+ "datafusion",
+ "log",
+ "tokio",
+ "url",
+]
+
+[[package]]
+name = "ballista-core"
+version = "53.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "140cbfc86a7ee22a1d7ce2beadbf546bb2f84382c667e9fc087ac89695c9d73d"
+dependencies = [
+ "arrow-flight",
+ "async-trait",
+ "aws-config",
+ "aws-credential-types",
+ "chrono",
+ "clap",
+ "datafusion",
+ "datafusion-proto",
+ "datafusion-proto-common",
+ "futures",
+ "itertools 0.14.0",
+ "log",
+ "md-5 0.11.0",
+ "object_store",
+ "parking_lot 0.12.5",
+ "prost 0.14.4",
+ "prost-types 0.14.4",
+ "rand 0.10.1",
+ "rustc_version",
+ "serde",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-build",
+ "tonic-prost",
+ "tonic-prost-build",
+ "url",
+ "uuid 1.23.2",
+]
+
+[[package]]
+name = "ballista-executor"
+version = "53.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "81cd251d7dc9169cdc821a8ba4fbe793fb5aaca01847ef5d3d8c0aea378a459e"
+dependencies = [
+ "arrow",
+ "arrow-flight",
+ "async-trait",
+ "ballista-core",
+ "bytesize",
+ "clap",
+ "dashmap 6.2.1",
+ "datafusion",
+ "datafusion-proto",
+ "futures",
+ "libc",
+ "log",
+ "memory-stats",
+ "mimalloc",
+ "parking_lot 0.12.5",
+ "serde",
+ "sysinfo",
+ "tempfile",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tonic",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "uuid 1.23.2",
+]
+
+[[package]]
+name = "ballista-scheduler"
+version = "53.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c4e4921eda69899d12d868e9337ce989f4f11f81ca296d1484c422a0491d9b4e"
+dependencies = [
+ "arrow-flight",
+ "async-trait",
+ "axum 0.8.9",
+ "ballista-core",
+ "clap",
+ "dashmap 6.2.1",
+ "datafusion",
+ "datafusion-proto",
+ "datafusion-substrait",
+ "futures",
+ "http 1.4.1",
+ "insta",
+ "log",
+ "object_store",
+ "parking_lot 0.12.5",
+ "prost 0.14.4",
+ "prost-types 0.14.4",
+ "rand 0.10.1",
+ "serde",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tracing",
+ "tracing-appender",
+ "tracing-subscriber",
+ "uuid 1.23.2",
 ]
 
 [[package]]
@@ -1994,6 +2194,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "bytesize"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7354288c522e7e980fafd2075d63d1285794c3a6a16cdd492f189ea406e5f18b"
+
+[[package]]
 name = "bzip2"
 version = "0.4.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2119,6 +2325,24 @@ dependencies = [
  "cfg-if 1.0.4",
  "cpufeatures 0.3.0",
  "rand_core 0.10.1",
+]
+
+[[package]]
+name = "chitchat"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eec87036b3e4d69e1cbdf3c7e7b9243612d3e5ea120a5099cd72f62354681ab6"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bytes",
+ "itertools 0.12.1",
+ "rand 0.8.6",
+ "serde",
+ "tokio",
+ "tokio-stream",
+ "tracing",
+ "zstd 0.13.3",
 ]
 
 [[package]]
@@ -2343,6 +2567,17 @@ dependencies = [
  "once_cell",
  "unicode-width 0.2.2",
  "windows-sys 0.59.0",
+]
+
+[[package]]
+name = "console"
+version = "0.16.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4fe5f465a4f6fee88fad41b85d990f84c835335e85b5d9e6e63e0d06d28cba7c"
+dependencies = [
+ "encode_unicode",
+ "libc",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3425,7 +3660,7 @@ dependencies = [
  "itertools 0.14.0",
  "parking_lot 0.12.5",
  "paste",
- "petgraph",
+ "petgraph 0.8.3",
  "recursive",
  "tokio",
 ]
@@ -3537,7 +3772,7 @@ dependencies = [
  "datafusion-physical-plan",
  "datafusion-proto-common",
  "object_store",
- "prost",
+ "prost 0.14.4",
  "rand 0.9.4",
 ]
 
@@ -3549,7 +3784,7 @@ checksum = "16e614c7c53a9c304c6a850b821010bb492e57300311835f1180613f9d2c63d9"
 dependencies = [
  "arrow",
  "datafusion-common",
- "prost",
+ "prost 0.14.4",
 ]
 
 [[package]]
@@ -3600,6 +3835,26 @@ dependencies = [
  "recursive",
  "regex",
  "sqlparser",
+]
+
+[[package]]
+name = "datafusion-substrait"
+version = "53.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "98494539a5468979cc42d86c7bc5f0f8cb71ee5c742694c26fc34efdd29dd2e5"
+dependencies = [
+ "async-recursion",
+ "async-trait",
+ "chrono",
+ "datafusion",
+ "half 2.7.1",
+ "itertools 0.14.0",
+ "object_store",
+ "pbjson-types",
+ "prost 0.14.4",
+ "substrait",
+ "tokio",
+ "url",
 ]
 
 [[package]]
@@ -3868,7 +4123,7 @@ version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "658bce805d770f407bc62102fca7c2c64ceef2fbcb2b8bd19d2765ce093980de"
 dependencies = [
- "console",
+ "console 0.15.11",
  "fuzzy-matcher",
  "shell-words",
  "tempfile",
@@ -4790,9 +5045,9 @@ dependencies = [
  "hyper-util",
  "log",
  "pin-project",
- "prost",
- "prost-build",
- "prost-types",
+ "prost 0.14.4",
+ "prost-build 0.14.4",
+ "prost-types 0.14.4",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
@@ -6325,6 +6580,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "insta"
+version = "1.48.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "86f0f8fee8c926415c58d6ae43a08523a26faccb2323f5e6b644fe7dd4ef6b82"
+dependencies = [
+ "console 0.16.4",
+ "once_cell",
+ "similar",
+ "tempfile",
+]
+
+[[package]]
 name = "instant"
 version = "0.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6755,9 +7022,9 @@ dependencies = [
  "object_store",
  "permutation",
  "pin-project",
- "prost",
- "prost-build",
- "prost-types",
+ "prost 0.14.4",
+ "prost-build 0.14.4",
+ "prost-types 0.14.4",
  "rand 0.9.4",
  "rayon",
  "roaring",
@@ -6830,7 +7097,7 @@ dependencies = [
  "num_cpus",
  "object_store",
  "pin-project",
- "prost",
+ "prost 0.14.4",
  "rand 0.9.4",
  "roaring",
  "serde_json",
@@ -6870,8 +7137,8 @@ dependencies = [
  "lance-geo",
  "log",
  "pin-project",
- "prost",
- "prost-build",
+ "prost 0.14.4",
+ "prost-build 0.14.4",
  "tokio",
  "tracing",
 ]
@@ -6923,8 +7190,8 @@ dependencies = [
  "log",
  "lz4",
  "num-traits",
- "prost",
- "prost-build",
+ "prost 0.14.4",
+ "prost-build 0.14.4",
  "rand 0.9.4",
  "strum 0.26.3",
  "tokio",
@@ -6959,9 +7226,9 @@ dependencies = [
  "log",
  "num-traits",
  "object_store",
- "prost",
- "prost-build",
- "prost-types",
+ "prost 0.14.4",
+ "prost-build 0.14.4",
+ "prost-types 0.14.4",
  "tokio",
  "tracing",
 ]
@@ -7034,9 +7301,9 @@ dependencies = [
  "ndarray",
  "num-traits",
  "object_store",
- "prost",
- "prost-build",
- "prost-types",
+ "prost 0.14.4",
+ "prost-build 0.14.4",
+ "prost-types 0.14.4",
  "rand 0.9.4",
  "rand_distr",
  "rangemap",
@@ -7087,7 +7354,7 @@ dependencies = [
  "opendal 0.56.0",
  "path_abs",
  "pin-project",
- "prost",
+ "prost 0.14.4",
  "rand 0.9.4",
  "serde",
  "tempfile",
@@ -7192,9 +7459,9 @@ dependencies = [
  "lance-io",
  "log",
  "object_store",
- "prost",
- "prost-build",
- "prost-types",
+ "prost 0.14.4",
+ "prost-build 0.14.4",
+ "prost-types 0.14.4",
  "rand 0.9.4",
  "rangemap",
  "roaring",
@@ -7457,6 +7724,15 @@ name = "libm"
 version = "0.2.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
+
+[[package]]
+name = "libmimalloc-sys"
+version = "0.1.49"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6a45a52f43e1c16f667ccfe4dd8c85b7f7c204fd5e3bf46c5b0db9a5c3c0b8e9"
+dependencies = [
+ "cc",
+]
 
 [[package]]
 name = "libredox"
@@ -7756,6 +8032,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0e7465ac9959cc2b1404e8e2367b43684a6d13790fe23056cc8c6c5a6b7bcb94"
 
 [[package]]
+name = "matchit"
+version = "0.8.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
+
+[[package]]
 name = "matrixmultiply"
 version = "0.3.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7835,6 +8117,15 @@ checksum = "c73f5c649995a115e1a0220b35e4df0a1294500477f97a91d0660fb5abeb574a"
 dependencies = [
  "libc",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "mimalloc"
+version = "0.1.52"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2d4139bb28d14ad1facf21d5eb8825051b326e172d216b39f6d31df53cc97862"
+dependencies = [
+ "libmimalloc-sys",
 ]
 
 [[package]]
@@ -9079,6 +9370,43 @@ dependencies = [
 ]
 
 [[package]]
+name = "pbjson"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "898bac3fa00d0ba57a4e8289837e965baa2dee8c3749f3b11d45a64b4223d9c3"
+dependencies = [
+ "base64 0.22.1",
+ "serde",
+]
+
+[[package]]
+name = "pbjson-build"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af22d08a625a2213a78dbb0ffa253318c5c79ce3133d32d296655a7bdfb02095"
+dependencies = [
+ "heck 0.5.0",
+ "itertools 0.14.0",
+ "prost 0.14.4",
+ "prost-types 0.14.4",
+]
+
+[[package]]
+name = "pbjson-types"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e748e28374f10a330ee3bb9f29b828c0ac79831a32bab65015ad9b661ead526"
+dependencies = [
+ "bytes",
+ "chrono",
+ "pbjson",
+ "pbjson-build",
+ "prost 0.14.4",
+ "prost-build 0.14.4",
+ "serde",
+]
+
+[[package]]
 name = "pbkdf2"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9142,6 +9470,16 @@ name = "permutation"
 version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "df202b0b0f5b8e389955afd5f27b007b00fb948162953f1db9c70d2c7e3157d7"
+
+[[package]]
+name = "petgraph"
+version = "0.7.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3672b37090dbd86368a4145bc067582552b29c27377cad4e0a306c97f9bd7772"
+dependencies = [
+ "fixedbitset",
+ "indexmap 2.14.0",
+]
 
 [[package]]
 name = "petgraph"
@@ -9680,12 +10018,42 @@ dependencies = [
 
 [[package]]
 name = "prost"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2796faa41db3ec313a31f7624d9286acf277b52de526150b7e69f3debf891ee5"
+dependencies = [
+ "bytes",
+ "prost-derive 0.13.5",
+]
+
+[[package]]
+name = "prost"
 version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "528ac67416ff8646872a3c02cad9cc4ee5dc9f9540c9b10771855c95cb2e5ae1"
 dependencies = [
  "bytes",
- "prost-derive",
+ "prost-derive 0.14.4",
+]
+
+[[package]]
+name = "prost-build"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
+dependencies = [
+ "heck 0.5.0",
+ "itertools 0.14.0",
+ "log",
+ "multimap",
+ "once_cell",
+ "petgraph 0.7.1",
+ "prettyplease",
+ "prost 0.13.5",
+ "prost-types 0.13.5",
+ "regex",
+ "syn 2.0.117",
+ "tempfile",
 ]
 
 [[package]]
@@ -9698,15 +10066,28 @@ dependencies = [
  "itertools 0.14.0",
  "log",
  "multimap",
- "petgraph",
+ "petgraph 0.8.3",
  "prettyplease",
- "prost",
- "prost-types",
+ "prost 0.14.4",
+ "prost-types 0.14.4",
  "pulldown-cmark",
  "pulldown-cmark-to-cmark",
  "regex",
  "syn 2.0.117",
  "tempfile",
+]
+
+[[package]]
+name = "prost-derive"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
+dependencies = [
+ "anyhow",
+ "itertools 0.14.0",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -9724,11 +10105,20 @@ dependencies = [
 
 [[package]]
 name = "prost-types"
+version = "0.13.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52c2c1bf36ddb1a1c396b3601a3cec27c2462e45f07c386894ec3ccf5332bd16"
+dependencies = [
+ "prost 0.13.5",
+]
+
+[[package]]
+name = "prost-types"
 version = "0.14.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f94967dc7688f3054c7fac87473ffae4cc4c3904800e2d9f5b857246d8963b0a"
 dependencies = [
- "prost",
+ "prost 0.14.4",
 ]
 
 [[package]]
@@ -10217,11 +10607,9 @@ dependencies = [
 [[package]]
 name = "react"
 version = "1.5.0"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "c26a089f7c253676abd014d9278677459bc5a74c549f85dc2e1236d4514b4450"
 dependencies = [
  "async-trait",
- "axum",
+ "axum 0.7.9",
  "bytes",
  "chrono",
  "dashmap 5.5.3",
@@ -10256,8 +10644,6 @@ dependencies = [
 [[package]]
 name = "react-core"
 version = "1.5.0"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "53a369a0dc2aa51e54fec40df11e31ac96fc6be71db77ce1bf8f998fcdb570be"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10278,8 +10664,6 @@ dependencies = [
 [[package]]
 name = "react-http-protocol"
 version = "1.5.0"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "06b3249ede47f0bb56c906a1a1f2025b1449a96e7f9ada0d3db1cbb4f43aa741"
 dependencies = [
  "serde",
  "serde_json",
@@ -10475,8 +10859,6 @@ dependencies = [
 [[package]]
 name = "react-module-provider-vector-lance"
 version = "1.5.0"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "049cc56758fbccbc57ab90114c8a0eed5a5c3237c80f7a61c8e475290beefca8"
 dependencies = [
  "arrow",
  "arrow-buffer",
@@ -10491,8 +10873,6 @@ dependencies = [
 [[package]]
 name = "react-module-storage-local"
 version = "1.5.0"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "1c95c1465ab9164166aae4f1791e44feed1f70b06f1820dc61d2b4b4271f1d30"
 dependencies = [
  "async-trait",
  "react-core",
@@ -10504,8 +10884,6 @@ dependencies = [
 [[package]]
 name = "react-module-storage-memory"
 version = "1.5.0"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "e592c3ac1423794eeeb853eb0414e15a7a2d983191eb1ab0f098afd8f7031ca7"
 dependencies = [
  "async-trait",
  "react-core",
@@ -10515,8 +10893,6 @@ dependencies = [
 [[package]]
 name = "react-module-storage-s3"
 version = "1.5.0"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "5418e7445269b3790a2ee1329c20910a21c4f8dbccde9662aa3ce7e407bfcd3a"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -10557,8 +10933,6 @@ dependencies = [
 [[package]]
 name = "react-suite-debugger"
 version = "1.5.0"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "b013b7ecb90b7e3ad399b7d6d900bfd0f360749fbfd9499ee799a25a0e073cc8"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10571,8 +10945,6 @@ dependencies = [
 [[package]]
 name = "react-transport"
 version = "1.5.0"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "78dded01b7c892894ae6384849405ccacdac8fd55ed7894a45d7e9b2866f3ca0"
 dependencies = [
  "async-trait",
  "chrono",
@@ -10594,8 +10966,6 @@ dependencies = [
 [[package]]
 name = "react-view"
 version = "1.5.0"
-source = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"
-checksum = "444e300c49c12e8282997eff0b4054220dbeb7297e6c893e7adca8fae00e606b"
 dependencies = [
  "chrono",
  "react-core",
@@ -10761,6 +11131,16 @@ name = "regex-syntax"
 version = "0.8.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc897dd8d9e8bd1ed8cdad82b5966c3e0ecae09fb1907d58efaa013543185d0a"
+
+[[package]]
+name = "regress"
+version = "0.10.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2057b2325e68a893284d1538021ab90279adac1139957ca2a74426c6f118fb48"
+dependencies = [
+ "hashbrown 0.16.1",
+ "memchr",
+]
 
 [[package]]
 name = "rend"
@@ -11579,6 +11959,18 @@ dependencies = [
 
 [[package]]
 name = "schemars"
+version = "0.8.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3fbf2ae1b8bc8e02df939598064d22402220cd5bbcca1c76f7d6a310974d5615"
+dependencies = [
+ "dyn-clone",
+ "schemars_derive 0.8.22",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "schemars"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4cd191f9397d57d581cddd31014772520aa448f65ef991055d7f61582c65165f"
@@ -11612,6 +12004,18 @@ dependencies = [
  "quote",
  "serde_derive_internals 0.25.0",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "schemars_derive"
+version = "0.8.22"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "32e265784ad618884abaea0600a9adf15393368d840e0222d101a072f3f7534d"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde_derive_internals 0.29.1",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -11755,6 +12159,10 @@ name = "semver"
 version = "1.0.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
+dependencies = [
+ "serde",
+ "serde_core",
+]
 
 [[package]]
 name = "seq-macro"
@@ -11917,6 +12325,18 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "bf41e0cfaf7226dca15e8197172c295a782857fcb97fad1808a166870dee75a3"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "serde_tokenstream"
+version = "0.2.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7c49585c52c01f13c5c2ebb333f14f6885d76daa768d8a037d28017ec538c69"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -12194,6 +12614,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e3a9fe34e3e7a50316060351f37187a3f546bce95496156754b601a5fa71b76e"
 
 [[package]]
+name = "similar"
+version = "2.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbbb5d9659141646ae647b42fe094daf6c6192d1620870b449d9557f748b2daa"
+
+[[package]]
 name = "simple_asn1"
 version = "0.6.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12226,7 +12652,7 @@ dependencies = [
  "aws-sdk-dynamodb",
  "chrono",
  "clap",
- "console",
+ "console 0.15.11",
  "dialoguer",
  "react",
  "react-core",
@@ -12250,7 +12676,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "clap",
- "console",
+ "console 0.15.11",
  "dialoguer",
  "dirs-next",
  "dotenvy",
@@ -12304,6 +12730,61 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippr-iceberg-catalog"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "skippr-iceberg-catalog-dynamodb"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "aws-config",
+ "aws-sdk-dynamodb",
+ "chrono",
+ "iceberg",
+ "iceberg-storage-opendal",
+ "serde_json",
+ "sha2 0.10.9",
+ "skippr-iceberg-catalog",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid 1.23.2",
+]
+
+[[package]]
+name = "skippr-lease"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "sha2 0.10.9",
+ "thiserror 1.0.69",
+ "tokio",
+ "uuid 1.23.2",
+]
+
+[[package]]
+name = "skippr-lease-store-dynamodb"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "aws-config",
+ "aws-sdk-dynamodb",
+ "chrono",
+ "skippr-lease",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid 1.23.2",
+]
+
+[[package]]
 name = "skippr-object-writer"
 version = "0.1.0"
 dependencies = [
@@ -12330,13 +12811,14 @@ dependencies = [
  "base64 0.22.1",
  "chrono",
  "once_cell",
+ "sha2 0.10.9",
  "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "skippr-plugin-data-sink-amqp"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "arrow",
  "async-trait",
@@ -12357,7 +12839,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-athena"
-version = "0.1.9"
+version = "0.1.10"
 dependencies = [
  "arrow",
  "async-trait",
@@ -12386,7 +12868,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-azure-blob"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "arrow",
  "async-trait",
@@ -12408,7 +12890,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-bigquery"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "arrow",
  "async-trait",
@@ -12433,7 +12915,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-clickhouse"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "arrow",
  "async-trait",
@@ -12457,7 +12939,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-databricks"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "arrow",
  "async-trait",
@@ -12482,7 +12964,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-file"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "arrow",
  "async-trait",
@@ -12503,7 +12985,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-gcs"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "arrow",
  "async-trait",
@@ -12525,7 +13007,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-iceberg"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "arrow",
  "async-trait",
@@ -12543,15 +13025,18 @@ dependencies = [
  "serde",
  "serde_derive",
  "serde_json",
+ "skippr-iceberg-catalog",
+ "skippr-iceberg-catalog-dynamodb",
  "skippr-object-writer",
  "skippr-runtime-sdk",
+ "skippr-store-cloud-tables",
  "tokio",
  "tracing",
 ]
 
 [[package]]
 name = "skippr-plugin-data-sink-motherduck"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "arrow",
  "async-trait",
@@ -12574,7 +13059,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-postgres"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "arrow",
  "async-trait",
@@ -12598,7 +13083,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-redshift"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "arrow",
  "async-trait",
@@ -12623,7 +13108,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-s3"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "arrow",
  "async-trait",
@@ -12646,7 +13131,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-sftp"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "arrow",
  "async-trait",
@@ -12668,7 +13153,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-snowflake"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "aes",
  "arrow",
@@ -12704,7 +13189,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-stdout"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "arrow",
  "async-trait",
@@ -12720,7 +13205,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-synapse"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "arrow",
  "async-trait",
@@ -12743,7 +13228,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-adroll-ads"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -12759,7 +13244,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-ai-citations"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -12777,7 +13262,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-amqp"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "clap",
@@ -12794,7 +13279,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-apple-app-store-serp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -12813,7 +13298,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-apple-search-ads"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -12829,7 +13314,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-bing-webmaster-tools"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -12846,7 +13331,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-clickhouse"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "clap",
@@ -12861,7 +13346,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-content-quality"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -12881,7 +13366,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-dataforseo-backlinks"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -12899,7 +13384,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-dataforseo-seo-opportunities"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "chrono",
@@ -12915,7 +13400,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-delta-lake"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "arrow",
  "async-trait",
@@ -12932,7 +13417,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-dynamodb"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -12955,7 +13440,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-eventbridge"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -12972,14 +13457,13 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-file"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "clap",
  "datafusion",
  "flate2",
  "futures",
- "glob",
  "serde",
  "serde_derive",
  "skippr-runtime-sdk",
@@ -12991,7 +13475,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-google-ads"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -13008,7 +13492,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-google-analytics"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -13024,7 +13508,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-google-pagespeed"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -13042,7 +13526,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-google-search-console"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -13059,7 +13543,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-google-serp-ranks"
-version = "0.1.6"
+version = "0.1.7"
 dependencies = [
  "async-trait",
  "chrono",
@@ -13079,7 +13563,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-http-client"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "clap",
@@ -13095,10 +13579,10 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-http-server"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
- "axum",
+ "axum 0.7.9",
  "clap",
  "datafusion",
  "serde",
@@ -13110,7 +13594,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-hubspot-crm"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -13127,7 +13611,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-kafka"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "clap",
@@ -13144,7 +13628,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-kinesis"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -13161,7 +13645,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-linkedin-ads"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -13177,7 +13661,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-meta-ads"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -13196,7 +13680,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-meta-instagram-ads"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -13212,7 +13696,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-mongodb"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -13231,7 +13715,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-motherduck"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "clap",
@@ -13247,7 +13731,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-mqtt"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "clap",
@@ -13263,7 +13747,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-mssql"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "chrono",
@@ -13281,7 +13765,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-mysql"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "clap",
@@ -13298,7 +13782,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-pcap"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "clap",
@@ -13311,7 +13795,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-postgres"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "clap",
@@ -13327,7 +13811,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-redshift"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -13345,7 +13829,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-revolut-business"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -13364,7 +13848,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-s3"
-version = "0.1.4"
+version = "0.1.5"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -13384,7 +13868,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-seo-crawl"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -13406,7 +13890,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-sftp"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "clap",
@@ -13422,7 +13906,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-shopify-admin"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -13438,7 +13922,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-site-quality"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "chrono",
@@ -13460,7 +13944,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-site-security"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "arrow",
  "async-trait",
@@ -13482,7 +13966,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-sns"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -13499,7 +13983,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-socket"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "clap",
@@ -13513,7 +13997,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-sqs"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -13530,7 +14014,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-statsd"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "clap",
@@ -13545,7 +14029,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-stdin"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "clap",
@@ -13559,7 +14043,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-stripe"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -13575,7 +14059,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-sumup"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -13592,7 +14076,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-upfoundry-backlinks"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "arrow",
  "async-trait",
@@ -13613,7 +14097,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-upfoundry-link-graph-compact"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "arrow",
  "arrow-array",
@@ -13633,7 +14117,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-upfoundry-link-graph-ingest"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "arrow",
  "async-trait",
@@ -13659,7 +14143,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-upfoundry-link-graph-wat-index"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "arrow",
  "arrow-schema",
@@ -13684,7 +14168,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-websocket"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "clap",
@@ -13702,7 +14186,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-x-ads"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -13722,7 +14206,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-source-xero-accounting"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "async-trait",
  "chrono",
@@ -13740,7 +14224,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-schema-sink-bigquery"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "clap",
  "skippr-plugin-data-sink-bigquery",
@@ -13750,7 +14234,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-schema-sink-clickhouse"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "clap",
  "skippr-plugin-data-sink-clickhouse",
@@ -13760,7 +14244,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-schema-sink-glue"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "clap",
@@ -13771,7 +14255,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-schema-sink-iceberg"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "async-trait",
  "clap",
@@ -13782,7 +14266,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-schema-sink-motherduck"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "clap",
  "skippr-plugin-data-sink-motherduck",
@@ -13792,7 +14276,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-schema-sink-postgres"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "async-trait",
  "clap",
@@ -13803,7 +14287,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-schema-sink-redshift"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "clap",
  "skippr-plugin-data-sink-redshift",
@@ -13813,7 +14297,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-schema-sink-snowflake"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "clap",
  "skippr-plugin-data-sink-snowflake",
@@ -13823,7 +14307,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-shared-api-source"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "base64 0.22.1",
  "chrono",
@@ -13838,7 +14322,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-shared-backlinks"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "hex",
  "serde_json",
@@ -13847,7 +14331,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-shared-link-graph"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "regex",
  "scraper",
@@ -13855,6 +14339,24 @@ dependencies = [
  "serde_json",
  "sha2 0.10.9",
  "url",
+]
+
+[[package]]
+name = "skippr-query-ballista"
+version = "0.1.0"
+dependencies = [
+ "arrow-flight",
+ "async-trait",
+ "base64 0.22.1",
+ "bytes",
+ "datafusion",
+ "datafusion-proto",
+ "futures",
+ "prost 0.14.4",
+ "rustls 0.23.40",
+ "thiserror 1.0.69",
+ "tokio",
+ "tonic",
 ]
 
 [[package]]
@@ -13878,6 +14380,38 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippr-store-cloud-tables"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64 0.22.1",
+ "chrono",
+ "iceberg",
+ "iceberg-storage-opendal",
+ "once_cell",
+ "serde_json",
+ "sha2 0.10.9",
+ "skippr-iceberg-catalog",
+ "skippr-lease",
+ "skippr-tables-client",
+ "thiserror 1.0.69",
+ "tokio",
+ "tracing",
+ "uuid 1.23.2",
+]
+
+[[package]]
+name = "skippr-tables-client"
+version = "0.1.0"
+dependencies = [
+ "reqwest 0.12.28",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+ "url",
+]
+
+[[package]]
 name = "skipprd"
 version = "0.1.0"
 dependencies = [
@@ -13886,6 +14420,7 @@ dependencies = [
  "array-init",
  "arrow",
  "arrow-buffer",
+ "arrow-flight",
  "arrow-schema",
  "assert_cmd",
  "async-trait",
@@ -13895,11 +14430,16 @@ dependencies = [
  "aws-sdk-glue",
  "aws-sdk-s3",
  "aws-types",
+ "ballista",
+ "ballista-core",
+ "ballista-executor",
+ "ballista-scheduler",
  "base64 0.22.1",
  "bincode",
  "byteorder",
  "bytes",
  "cc",
+ "chitchat",
  "chrono",
  "chrono-tz",
  "clap",
@@ -13909,12 +14449,15 @@ dependencies = [
  "ctrlc",
  "dashmap 5.5.3",
  "datafusion",
+ "datafusion-proto",
  "dotenvy",
  "envy",
  "flate2",
  "futures",
  "glob",
  "hex",
+ "hmac 0.12.1",
+ "iceberg",
  "icu",
  "ini",
  "itertools 0.14.0",
@@ -13933,12 +14476,16 @@ dependencies = [
  "phf 0.11.3",
  "predicates",
  "proptest",
+ "prost 0.13.5",
+ "prost-build 0.13.5",
  "quick-xml 0.39.4",
  "rand 0.8.6",
  "ratatui",
  "rayon",
  "regex",
  "reqwest 0.12.28",
+ "rustls 0.23.40",
+ "rustls-pemfile 2.2.0",
  "schemars 0.7.6",
  "serde",
  "serde-transcode",
@@ -13953,16 +14500,26 @@ dependencies = [
  "shellexpand",
  "signal-hook",
  "simd-json",
+ "skippr-iceberg-catalog",
+ "skippr-iceberg-catalog-dynamodb",
+ "skippr-lease",
+ "skippr-lease-store-dynamodb",
  "skippr-offset-store-dynamodb",
+ "skippr-query-ballista",
  "skippr-runtime-sdk",
+ "skippr-store-cloud-tables",
+ "skippr-tables-client",
  "sled",
  "tar",
  "tempfile",
  "thiserror 1.0.69",
  "threadpool",
  "tokio",
+ "tokio-rustls 0.26.4",
+ "tokio-stream",
  "tokio-util",
  "toml",
+ "tonic",
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
@@ -14375,6 +14932,31 @@ checksum = "2c56e8662b206b9892d7a5a3f2ecdbcb455d3d6b259111373b7e08b8055158a8"
 dependencies = [
  "libc",
  "winapi",
+]
+
+[[package]]
+name = "substrait"
+version = "0.62.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62fc4b483a129b9772ccb9c3f7945a472112fdd9140da87f8a4e7f1d44e045d0"
+dependencies = [
+ "heck 0.5.0",
+ "pbjson",
+ "pbjson-build",
+ "pbjson-types",
+ "prettyplease",
+ "prost 0.14.4",
+ "prost-build 0.14.4",
+ "prost-types 0.14.4",
+ "regress",
+ "schemars 0.8.22",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "syn 2.0.117",
+ "typify",
+ "walkdir",
 ]
 
 [[package]]
@@ -14964,9 +15546,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ac2a5518c70fa84342385732db33fb3f44bc4cc748936eb5833d2df34d6445ef"
 dependencies = [
  "async-trait",
+ "axum 0.8.9",
  "base64 0.22.1",
  "bytes",
  "flate2",
+ "h2 0.4.14",
  "http 1.4.1",
  "http-body 1.0.1",
  "http-body-util",
@@ -14976,6 +15560,7 @@ dependencies = [
  "percent-encoding",
  "pin-project",
  "rustls-native-certs 0.8.4",
+ "socket2 0.6.4",
  "sync_wrapper",
  "tokio",
  "tokio-rustls 0.26.4",
@@ -15006,7 +15591,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "50849f68853be452acf590cde0b146665b8d507b3b8af17261df47e02c209ea0"
 dependencies = [
  "bytes",
- "prost",
+ "prost 0.14.4",
  "tonic",
 ]
 
@@ -15018,8 +15603,8 @@ checksum = "654e5643eff75d7f8c99197ce1440ed19a3474eada74c12bbac488b2cafdae27"
 dependencies = [
  "prettyplease",
  "proc-macro2",
- "prost-build",
- "prost-types",
+ "prost-build 0.14.4",
+ "prost-types 0.14.4",
  "quote",
  "syn 2.0.117",
  "tempfile",
@@ -15305,6 +15890,53 @@ name = "typewit"
 version = "1.14.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8c1ae7cc0fdb8b842d65d127cb981574b0d2b249b74d1c7a2986863dc134f71"
+
+[[package]]
+name = "typify"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6d5bcc6f62eb1fa8aa4098f39b29f93dcb914e17158b76c50360911257aa629"
+dependencies = [
+ "typify-impl",
+ "typify-macro",
+]
+
+[[package]]
+name = "typify-impl"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a1eb359f7ffa4f9ebe947fa11a1b2da054564502968db5f317b7e37693cb2240"
+dependencies = [
+ "heck 0.5.0",
+ "log",
+ "proc-macro2",
+ "quote",
+ "regress",
+ "schemars 0.8.22",
+ "semver",
+ "serde",
+ "serde_json",
+ "syn 2.0.117",
+ "thiserror 2.0.18",
+ "unicode-ident",
+]
+
+[[package]]
+name = "typify-macro"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "911c32f3c8514b048c1b228361bebb5e6d73aeec01696e8cc0e82e2ffef8ab7a"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "schemars 0.8.22",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_tokenstream",
+ "syn 2.0.117",
+ "typify-impl",
+]
 
 [[package]]
 name = "unarray"

@@ -69,4 +69,4 @@ A run is operationally green if all are true:
 
 ## Operational notes
 
-Skippr runs as stateless compute: no clustering, no scaling groups, no orchestration layer. Even local disk is optional when using `WAL_STORAGE=s3`. The single binary reads from the source, writes to the destination, and exits. Run it from a scheduler (cron, Airflow, Step Functions) or as a one-shot task.
+Skippr runs as stateless compute in `disk` and `s3` modes: no clustering knobs, no peer list. `WAL_STORAGE=clustered` starts replica RPC, Arrow Flight SQL, an in-process Ballista scheduler+executor (gossip-elected cluster), and authenticated Chitchat on ephemeral UDP ports and uses DynamoDB (OSS) or Cloud tables for leases, membership, and fenced offsets. v1 requires a trusted private network; Cloud clustered mode also requires TLS PEMs. Even local disk is optional when using `WAL_STORAGE=s3`.

@@ -1,0 +1,14 @@
+[package]
+name = "skippr-iceberg-catalog"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Shared Iceberg catalog configuration for skipprd and Iceberg plugins"
+
+[dependencies]
+sha2.workspace = true
+serde = { workspace = true, features = ["derive"] }
+serde_derive.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

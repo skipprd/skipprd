@@ -1752,7 +1752,7 @@ async fn show_catalog(
     Ok(())
 }
 
-fn print_batches_plain(batch: &RecordBatch) {
+pub(crate) fn print_batches_plain(batch: &RecordBatch) {
     let schema = batch.schema();
     let headers: Vec<String> = schema
         .fields()

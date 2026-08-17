@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import os
 import re
 import subprocess
 import sys
@@ -54,8 +55,18 @@ EDGE_KINDS = "normal,build,dev"
 HOST_WIDEST_FEATURES = ["stats_integration"]
 
 
+def cargo_cmd() -> list[str]:
+    override = os.environ.get("CARGO")
+    if override:
+        return override.split()
+    wrapper = REPO_ROOT / "scripts" / "cargo-with-local-react.sh"
+    if wrapper.is_file():
+        return [str(wrapper)]
+    return ["cargo"]
+
+
 def collect_leaked_host_packages(*, widest_features: bool) -> set[str]:
-    command = ["cargo", "tree", "-p", "skipprd", "-e", EDGE_KINDS, "--prefix", "none"]
+    command = cargo_cmd() + ["tree", "-p", "skipprd", "-e", EDGE_KINDS, "--prefix", "none"]
     if widest_features and HOST_WIDEST_FEATURES:
         command.extend(["--features", ",".join(HOST_WIDEST_FEATURES)])
     result = subprocess.run(

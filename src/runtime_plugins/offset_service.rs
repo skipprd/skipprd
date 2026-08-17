@@ -16,19 +16,29 @@ use crate::runtime_plugins::wire::{read_frame, write_frame};
 static OFFSET_SERVICE_RT: Lazy<Runtime> =
     Lazy::new(|| Runtime::new().expect("offset service runtime"));
 
+fn should_process(
+    result: Result<Option<bool>, crate::helpers::offsets::OffsetsError>,
+    offset_type: OffsetTypes,
+) -> bool {
+    match result {
+        Err(_) => false,
+        Ok(None) => true,
+        Ok(Some(allow)) => match offset_type {
+            OffsetTypes::Closed => !allow,
+            OffsetTypes::Filesize | OffsetTypes::Position => allow,
+        },
+    }
+}
+
 fn validate_entries(offsets: &Offsets, entries: &[RuntimeOffsetValidationEntry]) -> Vec<bool> {
     entries
         .iter()
-        .map(
-            |entry| match offsets.validate(&entry.key, entry.offset_type, entry.offset_value) {
-                None => true,
-                Some(allow) => match entry.offset_type {
-                    // `Offsets::validate` returns true when a Closed partition is already ingested.
-                    OffsetTypes::Closed => !allow,
-                    OffsetTypes::Filesize | OffsetTypes::Position => allow,
-                },
-            },
-        )
+        .map(|entry| {
+            should_process(
+                offsets.validate(&entry.key, entry.offset_type, entry.offset_value),
+                entry.offset_type,
+            )
+        })
         .collect()
 }
 
@@ -162,5 +172,15 @@ mod tests {
             offset_value: 1,
         }];
         assert_eq!(validate_entries(&offsets, &closed), vec![false]);
+    }
+
+    #[test]
+    fn store_error_does_not_process() {
+        let err = crate::helpers::offsets::OffsetsError::Store("dynamo down".into());
+        assert!(!should_process(Err(err), OffsetTypes::Closed));
+        assert!(!should_process(
+            Err(crate::helpers::offsets::OffsetsError::Store("x".into())),
+            OffsetTypes::Position
+        ));
     }
 }

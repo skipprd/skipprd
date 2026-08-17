@@ -121,7 +121,7 @@ runs:
         PY
 
         cargo build --release \
-          -p skipprd --bin skipprd --features offset-store-dynamodb \
+          -p skipprd --bin skipprd --features offset-store-dynamodb,offset-store-cloud-tables \
           -p skippr-cli --bin skippr \
           -p skippr-admin --bin skippr-admin
         if [ -s "${plugin_packages_file}" ]; then

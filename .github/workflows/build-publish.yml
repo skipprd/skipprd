@@ -281,6 +281,15 @@ jobs:
         shell: bash
         run: |
           cargo test -p skipprd -- --nocapture --test-threads=1
+          cargo test -p skippr-lease -- --nocapture
+          cargo test -p skipprd cluster:: -- --nocapture --test-threads=1
+          cargo test -p skipprd buffer::durable:: -- --nocapture --test-threads=1
+          cargo test -p skippr-query-ballista -- --nocapture --test-threads=1
+          cargo test -p skipprd query_flight:: -- --nocapture --test-threads=1
+          cargo test -p skipprd sqlrt::wal_table:: -- --nocapture --test-threads=1
+          cargo test -p skipprd --test hla_cluster -- --nocapture
+          cargo check -p skipprd --features offset-store-dynamodb
+          cargo check --all-features
       - name: Run postgres plugin tests
         shell: bash
         run: |

@@ -1,0 +1,20 @@
+[package]
+name = "skippr-query-ballista"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "FlightSqlExec physical node and SkipprPhysicalCodec for Ballista 53"
+
+[dependencies]
+base64.workspace = true
+arrow-flight = { workspace = true }
+async-trait.workspace = true
+bytes.workspace = true
+datafusion.workspace = true
+datafusion-proto = "53.1.0"
+futures.workspace = true
+prost = "0.14"
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net"] }
+tonic = { version = "0.14.1", default-features = false, features = ["transport", "codegen", "tls-ring"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }

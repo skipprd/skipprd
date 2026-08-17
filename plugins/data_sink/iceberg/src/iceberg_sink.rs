@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll as TaskPoll};
@@ -27,10 +28,12 @@ use iceberg::spec::{
 };
 use iceberg::transaction::{ApplyTransactionAction, Transaction};
 use iceberg::{Catalog, CatalogBuilder, NamespaceIdent, TableCreation, TableIdent};
-use iceberg_catalog_glue::{GlueCatalog, GlueCatalogBuilder, GLUE_CATALOG_PROP_CATALOG_ID};
+use iceberg_catalog_glue::{GlueCatalogBuilder, GLUE_CATALOG_PROP_CATALOG_ID};
 use iceberg_catalog_glue::{AWS_REGION_NAME, GLUE_CATALOG_PROP_WAREHOUSE};
 use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 use serde_derive::{Deserialize, Serialize};
+pub use skippr_iceberg_catalog::IcebergCatalogConfig;
+use skippr_iceberg_catalog_dynamodb::DynamoDbCatalog;
 use skippr_object_writer::{
     CompletionMetadata, MultipartUpload, ObjectPartReceipt, ObjectWriteBackend, ObjectWriteError,
     ObjectWriteRequest, ObjectWriteSession, ObjectWriterConfig, PartMetadata,
@@ -45,6 +48,7 @@ const ICEBERG_CDC_STATE_SHARDS: u8 = 64;
 const ICEBERG_MAX_ENVELOPE_KEYS: usize = 1_000_000;
 const ICEBERG_GROUPED_PENDING_VERSION: u32 = 2;
 const SNAPSHOT_COMPACTION_ID: &str = "skippr.compaction-id";
+const SNAPSHOT_WAL_SEGMENT_IDS: &str = "skippr.wal-segment-ids";
 const SNAPSHOT_IDEMPOTENCY_KEY: &str = "skippr.idempotency-key";
 const SNAPSHOT_SCHEMA_FINGERPRINT: &str = "skippr.schema-fingerprint";
 const SNAPSHOT_WAL_FINGERPRINT: &str = "skippr.wal-refs-fingerprint-v2";
@@ -95,38 +99,6 @@ impl TryFrom<DataSinkPluginConfig> for DataSinkIcebergPluginConfig {
     fn try_from(entry: DataSinkPluginConfig) -> Result<Self, Self::Error> {
         entry.decode_for_plugin("Iceberg")
     }
-}
-
-#[derive(Debug, Deserialize, Clone)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum IcebergCatalogConfig {
-    Glue {
-        warehouse: String,
-        #[serde(default)]
-        database: Option<String>,
-        #[serde(default)]
-        catalog_id: Option<String>,
-        #[serde(default)]
-        region: Option<String>,
-    },
-    Rest {
-        uri: String,
-        warehouse: String,
-    },
-    Unity {
-        uri: String,
-        warehouse: String,
-        #[serde(default)]
-        token: Option<String>,
-    },
-    Polaris {
-        uri: String,
-        warehouse: String,
-        #[serde(default)]
-        client_id: Option<String>,
-        #[serde(default)]
-        client_secret: Option<String>,
-    },
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -212,7 +184,7 @@ pub struct DataSinkIcebergPlugin {
     config: DataSinkIcebergPluginConfig,
     s3_client: S3Client,
     schema_state: RwLock<InstalledIcebergSchemaState>,
-    catalog_cache: RwLock<Option<Arc<GlueCatalog>>>,
+    catalog_cache: RwLock<Option<Arc<dyn Catalog>>>,
     table_cache: RwLock<HashMap<String, CachedIcebergTable>>,
     table_lanes: Mutex<HashMap<String, Arc<Mutex<()>>>>,
 }
@@ -239,6 +211,8 @@ struct IcebergGroupedPending {
     version: u32,
     manifest: ObjectWriteManifest,
     namespace: String,
+    /// Producing process clock. Kept on the receipt for replay identity; apply
+    /// uses currently installed namespace metadata from `metadata.json`.
     schema_version: u64,
     transport_chunk_count: u32,
     rows: u64,
@@ -408,10 +382,11 @@ impl DataSink for DataSinkIcebergPlugin {
             ctx.schema_fingerprint,
             &ctx.wal_refs,
         );
-        let (bucket, key) = self.idempotency_manifest_location(&namespace, &ctx.idempotency_key)?;
+        let location = self.idempotency_manifest_location(&namespace, &ctx.idempotency_key)?;
+        let (bucket, key) = location.parts();
         if self.manifest_matches(&bucket, &key, &manifest).await? {
             return Ok(SinkPreflightOutcome::AlreadyApplied {
-                authority: format!("s3://{bucket}/{key}"),
+                authority: location.iceberg_uri(),
             });
         }
         Ok(SinkPreflightOutcome::Ready)
@@ -511,7 +486,8 @@ impl DataSink for DataSinkIcebergPlugin {
             ctx.schema_fingerprint.clone(),
             &ctx.wal_refs,
         );
-        let (bucket, key) = self.idempotency_manifest_location(&namespace, &ctx.idempotency_key)?;
+        let location = self.idempotency_manifest_location(&namespace, &ctx.idempotency_key)?;
+        let (bucket, key) = location.parts();
         if self.manifest_matches(&bucket, &key, &manifest).await? {
             return Ok(SinkWriteOutcome::AlreadyApplied);
         }
@@ -535,8 +511,8 @@ impl DataSink for DataSinkIcebergPlugin {
             ctx.schema_fingerprint.clone(),
             &ctx.wal_refs.clone_vec(),
         );
-        let (manifest_bucket, manifest_key) =
-            self.idempotency_manifest_location(&namespace, &ctx.idempotency_key)?;
+        let location = self.idempotency_manifest_location(&namespace, &ctx.idempotency_key)?;
+        let (manifest_bucket, manifest_key) = location.parts();
         if let Some(existing) = self.read_manifest(&manifest_bucket, &manifest_key).await? {
             if existing.matches_manifest(&manifest) {
                 return Ok(SinkWriteOutcome::AlreadyApplied);
@@ -692,8 +668,10 @@ impl SchemaSink for DataSinkIcebergPlugin {
         namespace: &str,
         metadata: &OutputMetadata,
     ) -> Result<(), io::Error> {
-        let catalog = self.glue_catalog().await?;
-        let table = self.ensure_table(&catalog, namespace, metadata).await?;
+        let catalog = self.catalog().await?;
+        let table = self
+            .ensure_table(catalog.as_ref(), namespace, metadata)
+            .await?;
         let schema_version = self
             .schema_state
             .read()
@@ -777,8 +755,10 @@ impl DataSinkIcebergPlugin {
                 return Ok(cached.table);
             }
         }
-        let catalog = self.glue_catalog().await?;
-        let table = self.ensure_table(&catalog, namespace, metadata).await?;
+        let catalog = self.catalog().await?;
+        let table = self
+            .ensure_table(catalog.as_ref(), namespace, metadata)
+            .await?;
         self.table_cache.write().await.insert(
             namespace.to_string(),
             CachedIcebergTable {
@@ -795,7 +775,7 @@ impl DataSinkIcebergPlugin {
         schema_version: u64,
         metadata: &OutputMetadata,
     ) -> Result<iceberg::table::Table, io::Error> {
-        let catalog = self.glue_catalog().await?;
+        let catalog = self.catalog().await?;
         let table_ident = self.table_ident(namespace)?;
         if catalog
             .table_exists(&table_ident)
@@ -807,7 +787,9 @@ impl DataSinkIcebergPlugin {
                 .await
                 .map_err(|err| io::Error::other(err.to_string()))?;
         }
-        let table = self.ensure_table(&catalog, namespace, metadata).await?;
+        let table = self
+            .ensure_table(catalog.as_ref(), namespace, metadata)
+            .await?;
         self.table_cache.write().await.insert(
             namespace.to_string(),
             CachedIcebergTable {
@@ -825,7 +807,8 @@ impl DataSinkIcebergPlugin {
     ) -> io::Result<bool> {
         for identity in [&ctx.idempotency_key, &ctx.compaction_id] {
             let chunk_identity = format!("{identity}-chunk-00000000");
-            let (bucket, key) = self.idempotency_manifest_location(namespace, &chunk_identity)?;
+            let location = self.idempotency_manifest_location(namespace, &chunk_identity)?;
+            let (bucket, key) = location.parts();
             if self.s3_object_exists(&bucket, &key).await? {
                 return Ok(true);
             }
@@ -833,7 +816,7 @@ impl DataSinkIcebergPlugin {
         let table_location = self.table_location(namespace).ok_or_else(|| {
             io::Error::other("Iceberg sink requires table_location_prefix for legacy replay")
         })?;
-        let (bucket, table_prefix) = parse_s3_uri(&table_location)?;
+        let (bucket, table_prefix) = parse_object_location(&table_location)?.parts();
         for key in legacy_grouped_object_keys(&table_prefix, &ctx.idempotency_key) {
             if self.s3_object_exists(&bucket, &key).await? {
                 return Ok(true);
@@ -843,6 +826,13 @@ impl DataSinkIcebergPlugin {
     }
 
     async fn s3_object_exists(&self, bucket: &str, key: &str) -> io::Result<bool> {
+        self.object_exists(bucket, key).await
+    }
+
+    async fn object_exists(&self, bucket: &str, key: &str) -> io::Result<bool> {
+        if bucket.is_empty() {
+            return Ok(tokio::fs::try_exists(key).await.unwrap_or(false));
+        }
         match self
             .s3_client
             .head_object()
@@ -862,6 +852,60 @@ impl DataSinkIcebergPlugin {
             }
             Err(err) => Err(io::Error::other(err.to_string())),
         }
+    }
+
+    async fn get_object_bytes(&self, bucket: &str, key: &str) -> io::Result<Option<bytes::Bytes>> {
+        if bucket.is_empty() {
+            return match tokio::fs::read(key).await {
+                Ok(bytes) => Ok(Some(bytes.into())),
+                Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(err) => Err(err),
+            };
+        }
+        let response = match self
+            .s3_client
+            .get_object()
+            .bucket(bucket)
+            .key(key)
+            .send()
+            .await
+        {
+            Ok(response) => response,
+            Err(err) if is_s3_get_object_not_found_error(&err) => return Ok(None),
+            Err(err) => return Err(io::Error::other(err.to_string())),
+        };
+        Ok(Some(
+            response
+                .body
+                .collect()
+                .await
+                .map_err(|err| io::Error::other(err.to_string()))?
+                .into_bytes(),
+        ))
+    }
+
+    async fn put_object_bytes(
+        &self,
+        bucket: &str,
+        key: &str,
+        body: bytes::Bytes,
+    ) -> io::Result<()> {
+        if bucket.is_empty() {
+            if let Some(parent) = PathBuf::from(key).parent() {
+                tokio::fs::create_dir_all(parent).await?;
+            }
+            tokio::fs::write(key, body).await?;
+            return Ok(());
+        }
+        self.s3_client
+            .put_object()
+            .bucket(bucket)
+            .key(key)
+            .body(ByteStream::from(body))
+            .send()
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))?;
+        Ok(())
     }
 
     async fn sync_grouped_legacy_chunks(
@@ -898,24 +942,9 @@ impl DataSinkIcebergPlugin {
         bucket: &str,
         key: &str,
     ) -> io::Result<Option<IcebergGroupedPending>> {
-        let response = match self
-            .s3_client
-            .get_object()
-            .bucket(bucket)
-            .key(key)
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(err) if is_s3_get_object_not_found_error(&err) => return Ok(None),
-            Err(err) => return Err(io::Error::other(err.to_string())),
+        let Some(bytes) = self.get_object_bytes(bucket, key).await? else {
+            return Ok(None);
         };
-        let bytes = response
-            .body
-            .collect()
-            .await
-            .map_err(|err| io::Error::other(err.to_string()))?
-            .into_bytes();
         serde_json::from_slice(&bytes)
             .map(Some)
             .map_err(|err| io::Error::other(err.to_string()))
@@ -928,15 +957,7 @@ impl DataSinkIcebergPlugin {
         pending: &IcebergGroupedPending,
     ) -> io::Result<()> {
         let bytes = serde_json::to_vec(pending).map_err(|err| io::Error::other(err.to_string()))?;
-        self.s3_client
-            .put_object()
-            .bucket(bucket)
-            .key(key)
-            .body(ByteStream::from(bytes))
-            .send()
-            .await
-            .map_err(|err| io::Error::other(err.to_string()))?;
-        Ok(())
+        self.put_object_bytes(bucket, key, bytes.into()).await
     }
 
     async fn apply_grouped_pending(
@@ -945,12 +966,6 @@ impl DataSinkIcebergPlugin {
         pending: &IcebergGroupedPending,
     ) -> Result<bool, io::Error> {
         let (installed_version, metadata) = self.namespace_schema_state(namespace).await?;
-        if installed_version < pending.schema_version {
-            return Err(io::Error::other(format!(
-                "Iceberg grouped apply requires schema state v{} but only v{} is installed",
-                pending.schema_version, installed_version
-            )));
-        }
         let table = self
             .table_for_write(namespace, installed_version, &metadata)
             .await?;
@@ -971,10 +986,10 @@ impl DataSinkIcebergPlugin {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let catalog = self.glue_catalog().await?;
+        let catalog = self.catalog().await?;
         let committed = self
             .commit_grouped_append_with_retries(
-                &catalog,
+                catalog.as_ref(),
                 table.identifier().clone(),
                 commit_files,
                 &pending.manifest,
@@ -1247,19 +1262,32 @@ impl DataSinkIcebergPlugin {
             .collect::<Vec<_>>();
         let (bucket, object_key, file_uri) =
             self.grouped_file_location(&namespace, content, &identity)?;
-        let backend = Arc::new(S3ObjectWriteBackend {
-            client: self.s3_client.clone(),
-            bucket,
-        });
-        let receipt = ObjectWriteSession::new(
-            backend,
-            ObjectWriteRequest::new(object_key),
-            ObjectWriterConfig::default(),
-        )
-        .map_err(|err| io::Error::other(err.to_string()))?
-        .write_parquet(schema, writer_properties, futures::stream::iter(prepared))
-        .await
-        .map_err(|err| io::Error::other(err.to_string()))?;
+        let request = ObjectWriteRequest::new(object_key);
+        let writer_config = ObjectWriterConfig::default();
+        let receipt = if bucket.is_empty() {
+            ObjectWriteSession::new(
+                Arc::new(skippr_object_writer::backends::AtomicFileBackend::new()),
+                request,
+                writer_config,
+            )
+            .map_err(|err| io::Error::other(err.to_string()))?
+            .write_parquet(schema, writer_properties, futures::stream::iter(prepared))
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))?
+        } else {
+            ObjectWriteSession::new(
+                Arc::new(S3ObjectWriteBackend {
+                    client: self.s3_client.clone(),
+                    bucket,
+                }),
+                request,
+                writer_config,
+            )
+            .map_err(|err| io::Error::other(err.to_string()))?
+            .write_parquet(schema, writer_properties, futures::stream::iter(prepared))
+            .await
+            .map_err(|err| io::Error::other(err.to_string()))?
+        };
         Ok(PendingIcebergFile {
             content,
             file_uri,
@@ -1278,19 +1306,17 @@ impl DataSinkIcebergPlugin {
         let table_location = self.table_location(namespace).ok_or_else(|| {
             io::Error::other("Iceberg sink requires table_location_prefix for data file writes")
         })?;
-        let (bucket, table_prefix) = parse_s3_uri(&table_location)?;
+        let root = parse_object_location(&table_location)?;
         let content_dir = match content {
             PendingFileContent::Data => "data",
             PendingFileContent::EqualityDeletes => "delete",
         };
-        let object_key = skippr_object_writer::deterministic_object_key(
-            &format!("{}/{content_dir}", table_prefix.trim_matches('/')),
-            identity,
-            "parquet",
-        )
-        .map_err(|err| io::Error::other(err.to_string()))?;
-        let file_uri = to_iceberg_s3_uri(&format!("s3://{bucket}/{object_key}"));
-        Ok((bucket, object_key, file_uri))
+        let object_name =
+            skippr_object_writer::deterministic_object_key(content_dir, identity, "parquet")
+                .map_err(|err| io::Error::other(err.to_string()))?;
+        let file = root.join(&object_name);
+        let (bucket, object_key) = file.parts();
+        Ok((bucket, object_key, file.iceberg_uri()))
     }
 
     async fn prepare_grouped_cdc_batches(
@@ -1359,7 +1385,15 @@ impl DataSinkIcebergPlugin {
         shard: u8,
     ) -> Result<Option<LoadedCdcStateShard>, io::Error> {
         let state_uri = self.cdc_state_shard_uri(namespace, shard)?;
-        let (bucket, key) = parse_s3_uri(&state_uri)?;
+        let (bucket, key) = parse_object_location(&state_uri)?.parts();
+        if bucket.is_empty() {
+            let Some(bytes) = self.get_object_bytes(&bucket, &key).await? else {
+                return Ok(None);
+            };
+            let values =
+                serde_json::from_slice(&bytes).map_err(|err| io::Error::other(err.to_string()))?;
+            return Ok(Some(LoadedCdcStateShard { values, etag: None }));
+        }
         let response = match self
             .s3_client
             .get_object()
@@ -1413,7 +1447,7 @@ impl DataSinkIcebergPlugin {
                 ))
             })?;
             let state_uri = self.cdc_state_shard_uri(namespace, shard)?;
-            let (bucket, key) = parse_s3_uri(&state_uri)?;
+            let (bucket, key) = parse_object_location(&state_uri)?.parts();
             let mut persisted = false;
             for attempt in 1..=3 {
                 if attempt > 1 {
@@ -1450,6 +1484,11 @@ impl DataSinkIcebergPlugin {
                 }
                 let bytes = serde_json::to_vec(&loaded.values)
                     .map_err(|err| io::Error::other(err.to_string()))?;
+                if bucket.is_empty() {
+                    self.put_object_bytes(&bucket, &key, bytes.into()).await?;
+                    persisted = true;
+                    break;
+                }
                 let request = self
                     .s3_client
                     .put_object()
@@ -1513,8 +1552,10 @@ impl DataSinkIcebergPlugin {
     ) -> Result<(), io::Error> {
         let namespace = BufferChunker::decode_file_namespace(&filename);
         let metadata = self.namespace_metadata(&namespace).await?;
-        let catalog = self.glue_catalog().await?;
-        let table = self.ensure_table(&catalog, &namespace, &metadata).await?;
+        let catalog = self.catalog().await?;
+        let table = self
+            .ensure_table(catalog.as_ref(), &namespace, &metadata)
+            .await?;
 
         let exact_once_cdc = cdc_ctx
             .and_then(|ctx| ctx.contract.as_ref())
@@ -1633,7 +1674,7 @@ impl DataSinkIcebergPlugin {
         }
 
         let committed = self
-            .commit_append_with_retries(&catalog, table.identifier().clone(), commit_files)
+            .commit_append_with_retries(catalog.as_ref(), table.identifier().clone(), commit_files)
             .await?;
         if !state_updates.is_empty() {
             self.persist_cdc_state(&namespace, state_updates).await?;
@@ -1655,11 +1696,9 @@ impl DataSinkIcebergPlugin {
         policy: WritePolicy,
         object_stem: Option<&str>,
     ) -> Result<(), io::Error> {
-        use iceberg::Catalog;
-
         let namespace = BufferChunker::decode_file_namespace(&filename);
         let metadata = self.namespace_metadata(&namespace).await?;
-        let catalog = self.glue_catalog().await?;
+        let catalog = self.catalog().await?;
 
         if policy == WritePolicy::ReplaceTable {
             let table_ident = self.table_ident(&namespace)?;
@@ -1677,13 +1716,16 @@ impl DataSinkIcebergPlugin {
                     table_ident
                 );
             }
-            self.ensure_table(&catalog, &namespace, &metadata).await?;
+            self.ensure_table(catalog.as_ref(), &namespace, &metadata)
+                .await?;
             return self
                 .native_append(stream, filename, None, object_stem)
                 .await;
         }
 
-        let table = self.ensure_table(&catalog, &namespace, &metadata).await?;
+        let table = self
+            .ensure_table(catalog.as_ref(), &namespace, &metadata)
+            .await?;
         let batches = collect_record_batches(stream).await?;
         if batches.is_empty() {
             return Err(io::Error::new(
@@ -1791,7 +1833,7 @@ impl DataSinkIcebergPlugin {
         }
 
         let committed = self
-            .commit_append_with_retries(&catalog, table.identifier().clone(), commit_files)
+            .commit_append_with_retries(catalog.as_ref(), table.identifier().clone(), commit_files)
             .await?;
         info!(
             "Committed Iceberg {:?} namespace={} table={} rows={}",
@@ -1831,7 +1873,7 @@ impl DataSinkIcebergPlugin {
 
     async fn commit_append_with_retries(
         &self,
-        catalog: &GlueCatalog,
+        catalog: &dyn Catalog,
         table_ident: TableIdent,
         commit_files: Vec<iceberg::spec::DataFile>,
     ) -> Result<iceberg::table::Table, io::Error> {
@@ -1849,7 +1891,7 @@ impl DataSinkIcebergPlugin {
 
     async fn commit_grouped_append_with_retries(
         &self,
-        catalog: &GlueCatalog,
+        catalog: &dyn Catalog,
         table_ident: TableIdent,
         commit_files: Vec<iceberg::spec::DataFile>,
         manifest: &ObjectWriteManifest,
@@ -1872,7 +1914,7 @@ impl DataSinkIcebergPlugin {
 
     async fn commit_grouped_data_append_with_retries(
         &self,
-        catalog: &GlueCatalog,
+        catalog: &dyn Catalog,
         table_ident: TableIdent,
         data_files: Vec<iceberg::spec::DataFile>,
         manifest: &ObjectWriteManifest,
@@ -1932,7 +1974,7 @@ impl DataSinkIcebergPlugin {
 
     async fn commit_grouped_equality_delta_with_retries(
         &self,
-        catalog: &GlueCatalog,
+        catalog: &dyn Catalog,
         table_ident: TableIdent,
         data_files: Vec<iceberg::spec::DataFile>,
         delete_files: Vec<iceberg::spec::DataFile>,
@@ -1997,7 +2039,7 @@ impl DataSinkIcebergPlugin {
 
     async fn commit_data_append_with_retries(
         &self,
-        catalog: &GlueCatalog,
+        catalog: &dyn Catalog,
         table_ident: TableIdent,
         data_files: Vec<iceberg::spec::DataFile>,
     ) -> Result<iceberg::table::Table, io::Error> {
@@ -2044,7 +2086,7 @@ impl DataSinkIcebergPlugin {
 
     async fn commit_equality_delta_with_retries(
         &self,
-        catalog: &GlueCatalog,
+        catalog: &dyn Catalog,
         table_ident: TableIdent,
         data_files: Vec<iceberg::spec::DataFile>,
         delete_files: Vec<iceberg::spec::DataFile>,
@@ -2204,35 +2246,12 @@ impl DataSinkIcebergPlugin {
 
     async fn load_cdc_state(&self, namespace: &str) -> Result<HashMap<String, String>, io::Error> {
         let state_uri = self.cdc_state_uri(namespace)?;
-        let (bucket, key) = parse_s3_uri(&state_uri)?;
-        match self
-            .s3_client
-            .get_object()
-            .bucket(bucket)
-            .key(key)
-            .send()
-            .await
-        {
-            Ok(output) => {
-                let bytes = output
-                    .body
-                    .collect()
-                    .await
-                    .map_err(|err| io::Error::other(err.to_string()))?
-                    .into_bytes();
+        let (bucket, key) = parse_object_location(&state_uri)?.parts();
+        match self.get_object_bytes(&bucket, &key).await? {
+            Some(bytes) => {
                 serde_json::from_slice(&bytes).map_err(|err| io::Error::other(err.to_string()))
             }
-            Err(err) => {
-                if is_s3_get_object_not_found_error(&err) {
-                    Ok(HashMap::new())
-                } else {
-                    let err_text = err.to_string();
-                    Err(io::Error::other(format!(
-                        "failed to load Iceberg CDC state from {}: {}",
-                        state_uri, err_text
-                    )))
-                }
-            }
+            None => Ok(HashMap::new()),
         }
     }
 
@@ -2255,16 +2274,9 @@ impl DataSinkIcebergPlugin {
             }
         }
         let state_uri = self.cdc_state_uri(namespace)?;
-        let (bucket, key) = parse_s3_uri(&state_uri)?;
+        let (bucket, key) = parse_object_location(&state_uri)?.parts();
         let bytes = serde_json::to_vec(&state).map_err(|err| io::Error::other(err.to_string()))?;
-        self.s3_client
-            .put_object()
-            .bucket(bucket)
-            .key(key)
-            .body(ByteStream::from(bytes))
-            .send()
-            .await
-            .map_err(|err| io::Error::other(err.to_string()))?;
+        self.put_object_bytes(&bucket, &key, bytes.into()).await?;
         Ok(())
     }
 
@@ -2289,7 +2301,7 @@ impl DataSinkIcebergPlugin {
         let table_location = self.table_location(namespace).ok_or_else(|| {
             io::Error::other("Iceberg sink requires table_location_prefix for data file writes")
         })?;
-        let (bucket, table_prefix) = parse_s3_uri(&table_location)?;
+        let (bucket, table_prefix) = parse_object_location(&table_location)?.parts();
         let digest = object_stem
             .map(str::to_string)
             .unwrap_or_else(|| hex::encode(md5::compute(filename).0));
@@ -2299,39 +2311,30 @@ impl DataSinkIcebergPlugin {
             content_dir,
             digest
         );
-        self.s3_client
-            .put_object()
-            .bucket(&bucket)
-            .key(&key)
-            .body(ByteStream::from(bytes))
-            .send()
-            .await
-            .map_err(|err| {
-                io::Error::other(format!("Failed to upload Iceberg data file: {err}"))
-            })?;
-        Ok(to_iceberg_s3_uri(&format!("s3://{}/{}", bucket, key)))
+        self.put_object_bytes(&bucket, &key, bytes).await?;
+        let file = if bucket.is_empty() {
+            ObjectLocation::File {
+                path: PathBuf::from(&key),
+            }
+        } else {
+            ObjectLocation::S3 { bucket, key }
+        };
+        Ok(file.iceberg_uri())
     }
 
     fn idempotency_manifest_location(
         &self,
         namespace: &str,
         idempotency_key: &str,
-    ) -> Result<(String, String), io::Error> {
+    ) -> Result<ObjectLocation, io::Error> {
         let table_location = self.table_location(namespace).ok_or_else(|| {
             io::Error::other(
                 "Iceberg sink requires table_location_prefix for idempotency manifests",
             )
         })?;
-        let (bucket, table_prefix) = parse_s3_uri(&table_location)?;
         let object_name = manifest_object_name(&format!("{idempotency_key}.json"));
-        Ok((
-            bucket,
-            format!(
-                "{}/metadata/skippr-idempotency/{}",
-                table_prefix.trim_matches('/'),
-                object_name
-            ),
-        ))
+        Ok(parse_object_location(&table_location)?
+            .join(&format!("metadata/skippr-idempotency/{object_name}")))
     }
 
     async fn read_manifest(
@@ -2339,29 +2342,9 @@ impl DataSinkIcebergPlugin {
         bucket: &str,
         key: &str,
     ) -> io::Result<Option<ObjectWriteManifest>> {
-        let response = match self
-            .s3_client
-            .get_object()
-            .bucket(bucket)
-            .key(key)
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(err) if is_s3_get_object_not_found_error(&err) => return Ok(None),
-            Err(err) => {
-                return Err(io::Error::other(format!(
-                    "Failed to read Iceberg idempotency manifest s3://{}/{}: {}",
-                    bucket, key, err
-                )))
-            }
+        let Some(bytes) = self.get_object_bytes(bucket, key).await? else {
+            return Ok(None);
         };
-        let bytes = response
-            .body
-            .collect()
-            .await
-            .map_err(|err| io::Error::other(err.to_string()))?
-            .into_bytes();
         ObjectWriteManifest::from_json_bytes(&bytes).map(Some)
     }
 
@@ -2371,33 +2354,10 @@ impl DataSinkIcebergPlugin {
         key: &str,
         expected: &ObjectWriteManifest,
     ) -> io::Result<bool> {
-        let response = match self
-            .s3_client
-            .get_object()
-            .bucket(bucket)
-            .key(key)
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(err) => {
-                if is_s3_get_object_not_found_error(&err) {
-                    return Ok(false);
-                }
-                return Err(io::Error::other(format!(
-                    "Failed to read Iceberg idempotency manifest s3://{}/{}: {}",
-                    bucket, key, err
-                )));
-            }
-        };
-        let bytes = response
-            .body
-            .collect()
-            .await
-            .map_err(|err| io::Error::other(err.to_string()))?
-            .into_bytes();
-        let manifest = ObjectWriteManifest::from_json_bytes(&bytes)?;
-        Ok(manifest.matches_manifest(expected))
+        match self.read_manifest(bucket, key).await? {
+            Some(manifest) => Ok(manifest.matches_manifest(expected)),
+            None => Ok(false),
+        }
     }
 
     async fn write_manifest(
@@ -2406,20 +2366,8 @@ impl DataSinkIcebergPlugin {
         key: &str,
         manifest: &ObjectWriteManifest,
     ) -> io::Result<()> {
-        self.s3_client
-            .put_object()
-            .bucket(bucket)
-            .key(key)
-            .body(ByteStream::from(manifest.to_json_bytes()?))
-            .send()
+        self.put_object_bytes(bucket, key, manifest.to_json_bytes()?.into())
             .await
-            .map_err(|err| {
-                io::Error::other(format!(
-                    "Failed to write Iceberg idempotency manifest s3://{}/{}: {}",
-                    bucket, key, err
-                ))
-            })?;
-        Ok(())
     }
 
     async fn plan_cdc_commit(
@@ -2468,46 +2416,74 @@ impl DataSinkIcebergPlugin {
         })
     }
 
-    async fn glue_catalog(&self) -> Result<Arc<GlueCatalog>, io::Error> {
+    async fn catalog(&self) -> Result<Arc<dyn Catalog>, io::Error> {
         if let Some(catalog) = self.catalog_cache.read().await.clone() {
             return Ok(catalog);
         }
-        let IcebergCatalogConfig::Glue {
-            warehouse,
-            catalog_id,
-            region,
-            ..
-        } = &self.config.catalog
-        else {
-            return Err(io::Error::other(format!(
-                "Iceberg catalog adapter '{}' is configured but not implemented yet",
-                self.config.catalog.adapter_name()
-            )));
+        let catalog: Arc<dyn Catalog> = match &self.config.catalog {
+            IcebergCatalogConfig::Glue {
+                warehouse,
+                catalog_id,
+                region,
+                ..
+            } => {
+                let mut props = HashMap::from([(
+                    GLUE_CATALOG_PROP_WAREHOUSE.to_string(),
+                    to_iceberg_s3_uri(warehouse),
+                )]);
+                if let Some(catalog_id) = catalog_id {
+                    props.insert(GLUE_CATALOG_PROP_CATALOG_ID.to_string(), catalog_id.clone());
+                }
+                if let Some(region) = region {
+                    props.insert(AWS_REGION_NAME.to_string(), region.clone());
+                }
+                Arc::new(
+                    GlueCatalogBuilder::default()
+                        .load("glue", props)
+                        .await
+                        .map_err(|err| io::Error::other(err.to_string()))?,
+                )
+            }
+            IcebergCatalogConfig::Skippr { warehouse, .. } => {
+                let catalog: Arc<dyn Catalog> = if std::env::var("SKIPPR_OFFSET_STORE")
+                    .unwrap_or_default()
+                    .eq_ignore_ascii_case("cloud-tables")
+                {
+                    let catalog =
+                        skippr_store_cloud_tables::CloudTablesCatalog::new(&self.config.catalog)
+                            .await
+                            .map_err(|err| io::Error::other(err.to_string()))?
+                            .with_file_io(skippr_store_cloud_tables::file_io_for_warehouse(
+                                warehouse,
+                            ));
+                    Arc::new(catalog)
+                } else {
+                    let catalog = DynamoDbCatalog::new(&self.config.catalog)
+                        .await
+                        .map_err(|err| io::Error::other(err.to_string()))?
+                        .with_file_io(skippr_iceberg_catalog_dynamodb::file_io_for_warehouse(
+                            warehouse,
+                        ));
+                    Arc::new(catalog)
+                };
+                catalog
+            }
+            IcebergCatalogConfig::Rest { .. }
+            | IcebergCatalogConfig::Unity { .. }
+            | IcebergCatalogConfig::Polaris { .. } => {
+                return Err(io::Error::other(format!(
+                    "Iceberg catalog adapter '{}' is configured but not implemented yet",
+                    self.config.catalog.adapter_name()
+                )));
+            }
         };
-
-        let mut props = HashMap::from([(
-            GLUE_CATALOG_PROP_WAREHOUSE.to_string(),
-            to_iceberg_s3_uri(warehouse),
-        )]);
-        if let Some(catalog_id) = catalog_id {
-            props.insert(GLUE_CATALOG_PROP_CATALOG_ID.to_string(), catalog_id.clone());
-        }
-        if let Some(region) = region {
-            props.insert(AWS_REGION_NAME.to_string(), region.clone());
-        }
-        let catalog = Arc::new(
-            GlueCatalogBuilder::default()
-                .load("glue", props)
-                .await
-                .map_err(|err| io::Error::other(err.to_string()))?,
-        );
         let mut cache = self.catalog_cache.write().await;
         Ok(cache.get_or_insert_with(|| catalog.clone()).clone())
     }
 
     async fn ensure_table(
         &self,
-        catalog: &GlueCatalog,
+        catalog: &dyn Catalog,
         namespace: &str,
         metadata: &OutputMetadata,
     ) -> Result<iceberg::table::Table, io::Error> {
@@ -2611,7 +2587,8 @@ impl DataSinkIcebergPlugin {
             IcebergCatalogConfig::Glue { database, .. } => database
                 .clone()
                 .ok_or_else(|| io::Error::other("Iceberg Glue catalog requires database or table_namespace")),
-            IcebergCatalogConfig::Rest { .. }
+            IcebergCatalogConfig::Skippr { .. }
+            | IcebergCatalogConfig::Rest { .. }
             | IcebergCatalogConfig::Unity { .. }
             | IcebergCatalogConfig::Polaris { .. } => Err(io::Error::other(format!(
                 "Iceberg catalog adapter '{}' requires table_namespace until its catalog-specific namespace discovery is implemented",
@@ -2622,7 +2599,7 @@ impl DataSinkIcebergPlugin {
 
     async fn ensure_catalog_namespace(
         &self,
-        catalog: &GlueCatalog,
+        catalog: &dyn Catalog,
         namespace_ident: &NamespaceIdent,
     ) -> Result<(), io::Error> {
         for attempt in 1..=3 {
@@ -3007,6 +2984,10 @@ fn grouped_snapshot_properties(manifest: &ObjectWriteManifest) -> HashMap<String
             SNAPSHOT_WAL_REF_COUNT.to_string(),
             manifest.wal_ref_count.to_string(),
         ),
+        (
+            SNAPSHOT_WAL_SEGMENT_IDS.to_string(),
+            manifest.wal_segment_ids.join(","),
+        ),
     ])
 }
 
@@ -3041,17 +3022,6 @@ fn iceberg_table_suffix(namespace: &str) -> String {
         "table".to_string()
     } else {
         trimmed
-    }
-}
-
-impl IcebergCatalogConfig {
-    pub fn adapter_name(&self) -> &'static str {
-        match self {
-            IcebergCatalogConfig::Glue { .. } => "glue",
-            IcebergCatalogConfig::Rest { .. } => "rest",
-            IcebergCatalogConfig::Unity { .. } => "unity",
-            IcebergCatalogConfig::Polaris { .. } => "polaris",
-        }
     }
 }
 
@@ -3481,7 +3451,7 @@ fn append_cdc_encoded_fields(
             field_id,
             name,
             Type::Primitive(PrimitiveType::String),
-            true,
+            false,
         )));
     }
 }
@@ -3645,6 +3615,61 @@ fn to_iceberg_s3_uri(uri: &str) -> String {
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum ObjectLocation {
+    S3 { bucket: String, key: String },
+    File { path: PathBuf },
+}
+
+impl ObjectLocation {
+    fn parts(&self) -> (String, String) {
+        match self {
+            Self::S3 { bucket, key } => (bucket.clone(), key.clone()),
+            Self::File { path } => (String::new(), path.to_string_lossy().into_owned()),
+        }
+    }
+
+    fn iceberg_uri(&self) -> String {
+        match self {
+            Self::S3 { bucket, key } => to_iceberg_s3_uri(&format!("s3://{}/{key}", bucket)),
+            Self::File { path } => format!("file://{}", path.display()),
+        }
+    }
+
+    fn join(&self, relative: &str) -> Self {
+        let relative = relative.trim_start_matches('/');
+        match self {
+            Self::S3 { bucket, key } => Self::S3 {
+                bucket: bucket.clone(),
+                key: format!("{}/{relative}", key.trim_end_matches('/')),
+            },
+            Self::File { path } => Self::File {
+                path: path.join(relative),
+            },
+        }
+    }
+}
+
+fn parse_object_location(uri: &str) -> Result<ObjectLocation, io::Error> {
+    let uri = uri.trim();
+    if let Some(rest) = uri.strip_prefix("file://") {
+        let path = PathBuf::from(rest);
+        if !path.is_absolute() {
+            return Err(io::Error::other(format!(
+                "file:// Iceberg location must be absolute, got '{uri}'"
+            )));
+        }
+        return Ok(ObjectLocation::File { path });
+    }
+    if uri.starts_with('/') {
+        return Ok(ObjectLocation::File {
+            path: PathBuf::from(uri),
+        });
+    }
+    let (bucket, key) = parse_s3_uri(uri)?;
+    Ok(ObjectLocation::S3 { bucket, key })
+}
+
 fn parse_s3_uri(uri: &str) -> Result<(String, String), io::Error> {
     let without_scheme = uri
         .strip_prefix("s3://")
@@ -3665,6 +3690,33 @@ mod tests {
 
     fn output_metadata(value: serde_json::Value) -> OutputMetadata {
         serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn object_location_parses_file_and_s3_and_joins() {
+        let file = parse_object_location("file:///tmp/warehouse/events").unwrap();
+        assert_eq!(file.iceberg_uri(), "file:///tmp/warehouse/events");
+        let nested = file.join("data/roll.parquet");
+        let (bucket, key) = nested.parts();
+        assert!(bucket.is_empty());
+        assert_eq!(key, "/tmp/warehouse/events/data/roll.parquet");
+        assert_eq!(
+            nested.iceberg_uri(),
+            "file:///tmp/warehouse/events/data/roll.parquet"
+        );
+
+        let s3 = parse_object_location("s3://lake/prefix/events").unwrap();
+        let (bucket, key) = s3.parts();
+        assert_eq!(bucket, "lake");
+        assert_eq!(key, "prefix/events");
+        let joined = s3.join("metadata/skippr-idempotency/key.json");
+        let (bucket, key) = joined.parts();
+        assert_eq!(bucket, "lake");
+        assert_eq!(key, "prefix/events/metadata/skippr-idempotency/key.json");
+        assert_eq!(
+            joined.iceberg_uri(),
+            "s3a://lake/prefix/events/metadata/skippr-idempotency/key.json"
+        );
     }
 
     #[test]
@@ -3752,6 +3804,21 @@ mod tests {
             field.field_type.as_ref(),
             Type::Primitive(PrimitiveType::Long)
         ));
+    }
+
+    #[test]
+    fn cdc_control_columns_are_optional() {
+        let mut fields = Vec::new();
+        let mut seen = HashMap::new();
+        append_cdc_encoded_fields("events", &mut fields, &mut seen);
+        assert_eq!(fields.len(), 2);
+        for field in &fields {
+            assert!(
+                !field.required,
+                "{} must be optional so append-mode parquet can omit CDC values",
+                field.name
+            );
+        }
     }
 
     #[test]
@@ -3976,6 +4043,7 @@ mod tests {
             identity_version: Some(2),
             wal_refs_fingerprint_v2: Some("canonical-wal-fingerprint".to_string()),
             has_cdc_metadata: true,
+            wal_segment_ids: vec!["seg-a".into(), "seg-b".into()],
         }
     }
 
@@ -4139,6 +4207,27 @@ mod tests {
     }
 
     #[test]
+    fn sent_pending_schema_version_is_not_an_apply_gate() {
+        let pending = IcebergGroupedPending {
+            version: ICEBERG_GROUPED_PENDING_VERSION,
+            manifest: grouped_manifest("7"),
+            namespace: "orders".to_string(),
+            schema_version: 99,
+            transport_chunk_count: 1,
+            rows: 1,
+            files: Vec::new(),
+            state_delta: BTreeMap::new(),
+        };
+        validate_grouped_pending(&pending, "orders", &grouped_manifest("7"), "7").unwrap();
+        let apply_src = include_str!("iceberg_sink.rs");
+        let banned = format!("{} < pending.schema_version", "installed_version");
+        assert!(
+            !apply_src.contains(&banned),
+            "Sent apply must not compare process-local schema clocks"
+        );
+    }
+
+    #[test]
     fn grouped_pending_round_trip_preserves_crash_recovery_delta() {
         let pending = IcebergGroupedPending {
             version: ICEBERG_GROUPED_PENDING_VERSION,
@@ -4228,6 +4317,10 @@ mod tests {
         assert_eq!(
             first.get(SNAPSHOT_WAL_FINGERPRINT).map(String::as_str),
             Some("canonical-wal-fingerprint")
+        );
+        assert_eq!(
+            first.get(SNAPSHOT_WAL_SEGMENT_IDS).map(String::as_str),
+            Some("seg-a,seg-b")
         );
     }
 

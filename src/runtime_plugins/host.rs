@@ -453,11 +453,10 @@ fn handle_runtime_offset_request(
             key,
             offset_type,
             offset_value,
-        } => Ok(RuntimeOffsetValue::Validate(offsets.validate(
-            &key,
-            offset_type,
-            offset_value,
-        ))),
+        } => offsets
+            .validate(&key, offset_type, offset_value)
+            .map(RuntimeOffsetValue::Validate)
+            .map_err(|err| err.to_string()),
         RuntimeOffsetOperation::LoadCheckpointEnvelope { key } => Ok(
             RuntimeOffsetValue::LoadCheckpointEnvelope(offsets.load_checkpoint_envelope(&key)),
         ),

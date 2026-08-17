@@ -471,10 +471,7 @@ fn ingest_pressured(signals: FlushBudgetSignals, caps: FlushBudgetCaps) -> bool 
         || wal_writer_pressured(signals)
 }
 
-fn classify_pressure(
-    signals: FlushBudgetSignals,
-    caps: FlushBudgetCaps,
-) -> IngestPressureClass {
+fn classify_pressure(signals: FlushBudgetSignals, caps: FlushBudgetCaps) -> IngestPressureClass {
     if ingest_pressured(signals, caps) {
         IngestPressureClass::Pressured
     } else if memory_healthy(signals) && load_healthy(signals, caps) && retries_healthy(signals) {
@@ -603,12 +600,7 @@ pub fn compute_flush_budget(
     // Environment / machine caps first (without treating quiet ingest as busy).
     let env_capped = cap_snapshot(current, caps, false);
     if !same_limits(current, env_capped) {
-        return finish_with_policy(
-            current,
-            env_capped,
-            BudgetReason::EnvironmentCaps,
-            policy,
-        );
+        return finish_with_policy(current, env_capped, BudgetReason::EnvironmentCaps, policy);
     }
 
     if pressured {
@@ -951,7 +943,8 @@ fn publish_compatibility_mirrors(
     counters::FLUSH_BUDGET_BACKLOG_GRACE
         .store(policy.backlog_grace_remaining as usize, Ordering::Relaxed);
     counters::FLUSH_BUDGET_SOURCE_BYTES_PER_SEC.store(source_bytes_per_sec, Ordering::Relaxed);
-    counters::FLUSH_BUDGET_WAL_WRITE_BYTES_PER_SEC.store(wal_write_bytes_per_sec, Ordering::Relaxed);
+    counters::FLUSH_BUDGET_WAL_WRITE_BYTES_PER_SEC
+        .store(wal_write_bytes_per_sec, Ordering::Relaxed);
 }
 
 fn memory_signals() -> (Option<u64>, Option<u64>, Option<u64>) {
@@ -1279,10 +1272,14 @@ pub fn update_flush_budget(
         counters::FLUSH_BUDGET_PRESSURE_CLASS.store(pressure.code(), Ordering::Relaxed);
         counters::FLUSH_BUDGET_QUIET_STREAK
             .store(state.policy.quiet_streak as usize, Ordering::Relaxed);
-        counters::FLUSH_BUDGET_GROWTH_COOLDOWN
-            .store(state.policy.growth_cooldown_remaining as usize, Ordering::Relaxed);
-        counters::FLUSH_BUDGET_BACKLOG_GRACE
-            .store(state.policy.backlog_grace_remaining as usize, Ordering::Relaxed);
+        counters::FLUSH_BUDGET_GROWTH_COOLDOWN.store(
+            state.policy.growth_cooldown_remaining as usize,
+            Ordering::Relaxed,
+        );
+        counters::FLUSH_BUDGET_BACKLOG_GRACE.store(
+            state.policy.backlog_grace_remaining as usize,
+            Ordering::Relaxed,
+        );
         counters::FLUSH_BUDGET_SOURCE_BYTES_PER_SEC.store(source_bytes_per_sec, Ordering::Relaxed);
         counters::FLUSH_BUDGET_WAL_WRITE_BYTES_PER_SEC
             .store(wal_write_bytes_per_sec, Ordering::Relaxed);
@@ -1734,7 +1731,10 @@ mod tuning_tests {
         };
         let (idled, _) = compute_flush_budget(held, caps(), empty, policy);
         assert_eq!(idled.reason, BudgetReason::Idle);
-        assert_eq!(idled.scheduler_jobs, held.scheduler_jobs.saturating_sub(1).max(1));
+        assert_eq!(
+            idled.scheduler_jobs,
+            held.scheduler_jobs.saturating_sub(1).max(1)
+        );
         let _ = BACKLOG_GRACE_SAMPLES;
     }
 
@@ -1742,8 +1742,7 @@ mod tuning_tests {
     fn cooldown_prevents_rapid_re_ramp_after_ingest_spike() {
         let policy = FlushBudgetPolicyState::primed_for_growth();
         let mut current = current();
-        let (grown, policy) =
-            compute_flush_budget(current, caps(), quiet_ingest(), policy);
+        let (grown, policy) = compute_flush_budget(current, caps(), quiet_ingest(), policy);
         assert_eq!(grown.reason, BudgetReason::OpportunisticHeadroom);
         current = grown;
 
@@ -1766,8 +1765,7 @@ mod tuning_tests {
 
         let quiet = quiet_ingest();
         for _ in 0..GROWTH_COOLDOWN_SAMPLES {
-            let (next, next_policy) =
-                compute_flush_budget(current, caps(), quiet, policy);
+            let (next, next_policy) = compute_flush_budget(current, caps(), quiet, policy);
             assert!(
                 next.scheduler_jobs <= current.scheduler_jobs,
                 "cooldown must not grow"
@@ -1779,8 +1777,7 @@ mod tuning_tests {
 
         // Rebuild quiet streak after pressure reset it.
         for _ in 0..QUIET_SAMPLES_BEFORE_GROWTH {
-            let (next, next_policy) =
-                compute_flush_budget(current, caps(), quiet, policy);
+            let (next, next_policy) = compute_flush_budget(current, caps(), quiet, policy);
             current = next;
             policy = next_policy;
         }
@@ -1819,8 +1816,7 @@ mod tuning_tests {
         let quiet = quiet_ingest();
 
         for _ in 0..QUIET_SAMPLES_BEFORE_GROWTH {
-            let (next, next_policy) =
-                compute_flush_budget(current, caps(), quiet, policy);
+            let (next, next_policy) = compute_flush_budget(current, caps(), quiet, policy);
             current = next;
             policy = next_policy;
         }
@@ -1838,15 +1834,13 @@ mod tuning_tests {
         current = backed;
 
         for _ in 0..GROWTH_COOLDOWN_SAMPLES {
-            let (next, next_policy) =
-                compute_flush_budget(current, caps(), quiet, policy);
+            let (next, next_policy) = compute_flush_budget(current, caps(), quiet, policy);
             assert_eq!(next.scheduler_jobs, current.scheduler_jobs);
             current = next;
             policy = next_policy;
         }
         for _ in 0..QUIET_SAMPLES_BEFORE_GROWTH {
-            let (next, next_policy) =
-                compute_flush_budget(current, caps(), quiet, policy);
+            let (next, next_policy) = compute_flush_budget(current, caps(), quiet, policy);
             current = next;
             policy = next_policy;
         }
