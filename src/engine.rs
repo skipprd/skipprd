@@ -1160,12 +1160,13 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
         "Finalising: draining durable catalog outbox for up to {:?}",
         catalog_drain_timeout
     );
-    if let Err(err) =
-        crate::catalog_coordinator::drain_catalog_outboxes(catalog_drain_timeout).await
-    {
-        let message = format!("Finalising: durable catalog outbox drain failed: {err}");
-        error!("{message}");
-        finalization_error = Some(message);
+    match crate::catalog_coordinator::drain_catalog_outboxes(catalog_drain_timeout).await {
+        Ok(()) => info!("Finalising: durable catalog outbox drain finished"),
+        Err(err) => {
+            let message = format!("Finalising: durable catalog outbox drain failed: {err}");
+            error!("{message}");
+            finalization_error = Some(message);
+        }
     }
 
     if reporter.enabled() {

@@ -115,7 +115,12 @@ impl OutboxIndex {
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct CatalogOutboxMetadataSnapshot {
+    /// Non-terminal entries still waiting to be delivered (due + deferred).
     pub pending_count: usize,
+    /// Non-terminal entries whose `next_attempt_at_ms` is due now.
+    pub due_count: usize,
+    /// Non-terminal entries waiting on retry backoff.
+    pub deferred_count: usize,
     pub terminal_count: usize,
     pub oldest_created_at_ms: Option<u64>,
 }
@@ -254,8 +259,13 @@ impl CatalogOutbox {
             .mutation_lock
             .lock()
             .expect("catalog outbox mutation lock poisoned");
+        let now = now_ms();
+        let due_count = index.due.range(..=(now, String::from(char::MAX))).count();
+        let deferred_count = index.due.len().saturating_sub(due_count);
         CatalogOutboxMetadataSnapshot {
-            pending_count: index.entries.len(),
+            pending_count: index.due.len(),
+            due_count,
+            deferred_count,
             terminal_count: index.terminal_count,
             oldest_created_at_ms: index.oldest_created_at_ms,
         }
@@ -637,7 +647,9 @@ mod tests {
             .iter()
             .all(|entry| { matches!(entry.intent.identity.key.as_str(), "day=3" | "day=4") }));
         let snapshot = outbox.metadata_snapshot();
-        assert_eq!(snapshot.pending_count, 5);
+        assert_eq!(snapshot.pending_count, 3);
+        assert_eq!(snapshot.due_count, 2);
+        assert_eq!(snapshot.deferred_count, 1);
         assert_eq!(snapshot.terminal_count, 2);
         assert!(snapshot.oldest_created_at_ms.is_some());
     }
