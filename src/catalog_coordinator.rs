@@ -375,15 +375,19 @@ impl CatalogCoordinator {
     pub async fn drain_until_idle(&self, timeout: Duration) -> io::Result<()> {
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
-            if self.outbox.metadata_snapshot().pending_count == 0 {
+            let snapshot = self.outbox.metadata_snapshot();
+            if snapshot.due_count == 0 {
                 return Ok(());
             }
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
-                return Err(io::Error::new(
-                    io::ErrorKind::TimedOut,
-                    "catalog outbox drain timed out with pending intents",
-                ));
+                tracing::warn!(
+                    due_count = snapshot.due_count,
+                    deferred_count = snapshot.deferred_count,
+                    terminal_count = snapshot.terminal_count,
+                    "catalog outbox drain reached deadline with leftover due work; leaving as retryable cursor"
+                );
+                return Ok(());
             }
             self.drain_once().await?;
             tokio::time::sleep(remaining.min(Duration::from_millis(100))).await;
@@ -1361,5 +1365,103 @@ mod tests {
         }
         persist.await.unwrap();
         assert_eq!(coordinator.outbox.metadata_snapshot().pending_count, 1);
+    }
+
+    #[tokio::test]
+    async fn drain_until_idle_treats_terminal_leftovers_as_idle() {
+        let temp = tempfile::tempdir().unwrap();
+        let executor = Arc::new(MockGlueExecutor::default());
+        let coordinator = coordinator(&temp, Arc::clone(&executor), CatalogOperationBudget::new(1));
+        coordinator
+            .persist(&[intent("2026-07-30", "s3://bucket/day=30/", 1)])
+            .unwrap();
+        let pending = coordinator.outbox.scan_pending(1).unwrap().remove(0);
+        coordinator
+            .outbox
+            .record_failure_if(&pending, "layout mismatch", None, true)
+            .unwrap();
+
+        coordinator.drain_until_idle(Duration::ZERO).await.unwrap();
+
+        let snapshot = coordinator.outbox.metadata_snapshot();
+        assert_eq!(snapshot.due_count, 0);
+        assert_eq!(snapshot.deferred_count, 0);
+        assert_eq!(snapshot.terminal_count, 1);
+        assert_eq!(coordinator.outbox.scan_pending(1).unwrap().len(), 1);
+        assert!(executor.state.lock().unwrap().batch_sizes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn drain_until_idle_treats_deferred_backoff_as_idle() {
+        let temp = tempfile::tempdir().unwrap();
+        let executor = Arc::new(MockGlueExecutor::default());
+        let coordinator = coordinator(&temp, Arc::clone(&executor), CatalogOperationBudget::new(1));
+        coordinator
+            .persist(&[intent("2026-07-30", "s3://bucket/day=30/", 1)])
+            .unwrap();
+        let pending = coordinator.outbox.scan_pending(1).unwrap().remove(0);
+        coordinator
+            .outbox
+            .record_failure_if(
+                &pending,
+                "throttled",
+                Some(Duration::from_secs(3_600)),
+                false,
+            )
+            .unwrap();
+
+        coordinator.drain_until_idle(Duration::ZERO).await.unwrap();
+
+        let snapshot = coordinator.outbox.metadata_snapshot();
+        assert_eq!(snapshot.due_count, 0);
+        assert_eq!(snapshot.deferred_count, 1);
+        assert_eq!(snapshot.terminal_count, 0);
+        assert_eq!(coordinator.outbox.scan_pending(1).unwrap().len(), 1);
+        assert!(executor.state.lock().unwrap().batch_sizes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn drain_until_idle_timeout_leaves_due_work_and_returns_ok() {
+        let temp = tempfile::tempdir().unwrap();
+        let executor = Arc::new(MockGlueExecutor::default());
+        let coordinator = coordinator(&temp, Arc::clone(&executor), CatalogOperationBudget::new(1));
+        coordinator
+            .persist(&[
+                intent("2026-07-30", "s3://bucket/day=30/", 1),
+                intent("2026-07-31", "s3://bucket/day=31/", 1),
+            ])
+            .unwrap();
+
+        coordinator.drain_until_idle(Duration::ZERO).await.unwrap();
+
+        let snapshot = coordinator.outbox.metadata_snapshot();
+        assert_eq!(snapshot.due_count, 2);
+        assert_eq!(snapshot.pending_count, 2);
+        assert_eq!(coordinator.outbox.scan_pending(10).unwrap().len(), 2);
+        assert!(executor.state.lock().unwrap().batch_sizes.is_empty());
+    }
+
+    #[tokio::test]
+    async fn drain_until_idle_delivers_due_work_before_deadline() {
+        let temp = tempfile::tempdir().unwrap();
+        let executor = Arc::new(MockGlueExecutor::default());
+        let coordinator = coordinator(&temp, Arc::clone(&executor), CatalogOperationBudget::new(2));
+        coordinator
+            .persist(&[
+                intent("2026-07-30", "s3://bucket/day=30/", 1),
+                intent("2026-07-31", "s3://bucket/day=31/", 1),
+            ])
+            .unwrap();
+
+        coordinator
+            .drain_until_idle(Duration::from_secs(5))
+            .await
+            .unwrap();
+
+        assert!(coordinator.outbox.scan_pending(1).unwrap().is_empty());
+        assert_eq!(executor.state.lock().unwrap().batch_sizes, vec![2]);
+        let snapshot = coordinator.outbox.metadata_snapshot();
+        assert_eq!(snapshot.due_count, 0);
+        assert_eq!(snapshot.pending_count, 0);
     }
 }
