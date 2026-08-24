@@ -1089,13 +1089,21 @@ fn build_suggestions(
             .copied(),
         );
     }
-    let udfs = [
+    let udfs_base = [
         "lateness",
         "new_session",
         "zscore",
         "is_outlier_z",
         "to_timestamp_millis",
     ];
+    let udfs: Vec<&str> = udfs_base
+        .into_iter()
+        .chain(
+            crate::sqlrt::udfs::observability_udf_names()
+                .iter()
+                .copied(),
+        )
+        .collect();
     for k in kw.iter() {
         if !has_prefix || k.starts_with(&prefix.to_lowercase()) {
             out.push(k.to_string());

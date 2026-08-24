@@ -312,6 +312,12 @@ impl TablesClient {
         Ok(items_from_response(&payload))
     }
 
+    pub async fn scan(&self, table_name: &str) -> Result<Vec<Value>, TablesClientError> {
+        let body = json!({ "tableName": table_name });
+        let payload = self.invoke("CloudTables.Scan", body).await?;
+        Ok(items_from_response(&payload))
+    }
+
     pub async fn transact_write(&self, transact_items: Value) -> Result<(), TablesClientError> {
         let body = json!({ "transactItems": transact_items });
         self.invoke("CloudTables.TransactWriteItems", body).await?;

@@ -268,7 +268,9 @@ Legacy `disk` layout remains `{DATA_DIR}/segment_buffer/...` via `PipelinePaths:
 - OffsetPublished: all offset/checkpoint rows reconciled.
 - IngestAcked: source-facing success returned.
 
-The primary fsyncs Prepared before sending. The replica verifies payload, appends/fsyncs Prepared and Committed, applies, then Acks. The primary records Committed, applies, publishes offsets, then Acks ingest.
+The primary fsyncs Prepared before sending. Prepared/Committed/STATE/segment/commit-marker durability I/O is Direct I/O (`O_DIRECT` on Linux, `F_NOCACHE` on macOS) plus `fdatasync`. Recovery and compaction read those files the same way, so commit/ACK/sink never trust the kernel page cache. `fsync`/`fdatasync` failure poisons that file handle (no retry on the same fd) and fails the persist: clustered fences ingest; disk does not ACK the source. Cloud skipprd guests (XFS) must succeed at Direct I/O — clustered WAL volumes do not fall back to the page cache. SQL live WAL is a separate buffered `File::open` path and may be served from the page cache; it is not a durability vote.
+
+The replica verifies payload, appends/fsyncs Prepared and Committed, applies, then Acks. The primary records Committed, applies, publishes offsets, then Acks ingest.
 
 A prepared record with unknown outcome is retained. Recovery queries peer Status/hash; matching remote commit finalizes it locally. If no peer proves the Prepared hash, keep the record, return `QuorumLost`, and do not activate ingest (`abort_pending_prepared` is not used for this case). Orphan segment bytes alone are never promoted to committed state.
 

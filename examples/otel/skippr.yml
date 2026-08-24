@@ -1,0 +1,92 @@
+skippr:
+  workspace: otel
+  tenant: acme
+
+pipelines:
+  otel-traces:
+    data_source: data_sources.otlp_traces
+    data_sink: data_sinks.lake
+    transform:
+      batch_time_fields: start_time_unix_nano
+      batch_time_unit: hour
+      batch_partition_fields: hour,service_name,tenant_id
+      inject_fields:
+        tenant_id: acme
+  otel-logs:
+    data_source: data_sources.otlp_logs
+    data_sink: data_sinks.lake
+    transform:
+      batch_time_fields: time_unix_nano
+      batch_time_unit: hour
+      batch_partition_fields: hour,service_name,tenant_id
+      inject_fields:
+        tenant_id: acme
+  otel-metrics:
+    data_source: data_sources.otlp_metrics
+    data_sink: data_sinks.lake
+    transform:
+      batch_time_fields: time_unix_nano
+      batch_time_unit: hour
+      batch_partition_fields: hour,service_name,tenant_id
+      inject_fields:
+        tenant_id: acme
+  # Derived 1m/5m grains are materialized by skippr query / CloudQuery (see cookbook.sql).
+  # They are not extra OTLP listeners.
+  otel-metrics-1m:
+    data_source: data_sources.otlp_metrics
+    data_sink: data_sinks.lake
+    transform:
+      batch_time_fields: time_unix_nano
+      batch_time_unit: hour
+      batch_partition_fields: hour,service_name,tenant_id
+      inject_fields:
+        tenant_id: acme
+        rollup_grain: 1m
+  otel-metrics-5m:
+    data_source: data_sources.otlp_metrics
+    data_sink: data_sinks.lake
+    transform:
+      batch_time_fields: time_unix_nano
+      batch_time_unit: hour
+      batch_partition_fields: hour,service_name,tenant_id
+      inject_fields:
+        tenant_id: acme
+        rollup_grain: 5m
+
+data_sources:
+  otlp_traces:
+    Otlp:
+      listen_address_grpc: "0.0.0.0:4317"
+      listen_address_http: "0.0.0.0:4318"
+      signals: [traces]
+  otlp_logs:
+    Otlp:
+      listen_address_grpc: "0.0.0.0:4319"
+      listen_address_http: "0.0.0.0:4320"
+      signals: [logs]
+  otlp_metrics:
+    Otlp:
+      listen_address_grpc: "0.0.0.0:4321"
+      listen_address_http: "0.0.0.0:4322"
+      signals: [metrics]
+
+data_sinks:
+  lake:
+    Iceberg:
+      table_namespace: otel
+      catalog:
+        type: skippr
+        table: otel-iceberg-catalog
+        warehouse: s3://example-otel-warehouse/
+        region: us-east-1
+    schema_sink: schema_sinks.iceberg_catalog
+
+schema_sinks:
+  iceberg_catalog:
+    Iceberg:
+      table_namespace: otel
+      catalog:
+        type: skippr
+        table: otel-iceberg-catalog
+        warehouse: s3://example-otel-warehouse/
+        region: us-east-1

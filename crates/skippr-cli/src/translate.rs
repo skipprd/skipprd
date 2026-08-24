@@ -1906,6 +1906,28 @@ pub fn to_internal(
                     }
                     serde_json::Value::Object(m)
                 }
+                SourceConfig::Otlp {
+                    listen_address_grpc,
+                    listen_address_http,
+                    signals,
+                    auth_token,
+                } => {
+                    let mut m = serde_json::Map::new();
+                    m.insert("kind".into(), "otlp".into());
+                    if let Some(v) = listen_address_grpc {
+                        m.insert("listen_address_grpc".into(), v.clone().into());
+                    }
+                    if let Some(v) = listen_address_http {
+                        m.insert("listen_address_http".into(), v.clone().into());
+                    }
+                    if let Some(v) = signals {
+                        m.insert("signals".into(), serde_json::json!(v));
+                    }
+                    if let Some(v) = auth_token {
+                        m.insert("auth_token".into(), v.clone().into());
+                    }
+                    serde_json::Value::Object(m)
+                }
                 SourceConfig::Socket {
                     mode,
                     address,
@@ -2831,6 +2853,30 @@ mod tests {
         assert_eq!(input["window_in_days"], 1);
         assert_eq!(input["access_token"], "${GA4_ACCESS_TOKEN}");
         assert_eq!(input["streams"][0], "google_analytics.events_daily");
+    }
+
+    #[test]
+    fn translate_otlp_source() {
+        let cfg = make_cfg(
+            WarehouseConfig::Athena {
+                workgroup: None,
+                region: Some("us-east-1".into()),
+                result_s3: None,
+                schema: Some("otel".into()),
+            },
+            SourceConfig::Otlp {
+                listen_address_grpc: Some("0.0.0.0:4317".into()),
+                listen_address_http: Some("0.0.0.0:4318".into()),
+                signals: Some(vec!["traces".into()]),
+                auth_token: Some("secret".into()),
+            },
+        );
+        let input = el_input(&cfg);
+        assert_eq!(input["kind"], "otlp");
+        assert_eq!(input["listen_address_grpc"], "0.0.0.0:4317");
+        assert_eq!(input["listen_address_http"], "0.0.0.0:4318");
+        assert_eq!(input["signals"][0], "traces");
+        assert_eq!(input["auth_token"], "secret");
     }
 
     #[test]

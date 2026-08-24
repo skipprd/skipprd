@@ -1,0 +1,39 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch: {}
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+
+exporters:
+  otlphttp/traces:
+    endpoint: http://127.0.0.1:4318
+    traces_endpoint: http://127.0.0.1:4318/v1/traces
+  otlphttp/logs:
+    endpoint: http://127.0.0.1:4320
+    logs_endpoint: http://127.0.0.1:4320/v1/logs
+  otlphttp/metrics:
+    endpoint: http://127.0.0.1:4322
+    metrics_endpoint: http://127.0.0.1:4322/v1/metrics
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/traces]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/logs]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/metrics]

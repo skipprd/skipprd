@@ -2581,6 +2581,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "const-hex"
+version = "1.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "33e2a781ebdf4467d1428dc4593067825fb646f6871475098d8577421af73558"
+dependencies = [
+ "cfg-if 1.0.4",
+ "cpufeatures 0.2.17",
+ "proptest",
+ "serde_core",
+]
+
+[[package]]
 name = "const-oid"
 version = "0.9.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -9147,6 +9159,51 @@ dependencies = [
 ]
 
 [[package]]
+name = "opentelemetry"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b84bcd6ae87133e903af7ef497404dda70c60d0ea14895fc8a5e6722754fc2a0"
+dependencies = [
+ "futures-core",
+ "futures-sink",
+ "js-sys",
+ "pin-project-lite",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "opentelemetry-proto"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a7175df06de5eaee9909d4805a3d07e28bb752c34cab57fa9cff549da596b30f"
+dependencies = [
+ "base64 0.22.1",
+ "const-hex",
+ "opentelemetry",
+ "opentelemetry_sdk",
+ "prost 0.14.4",
+ "serde",
+ "serde_json",
+ "tonic",
+ "tonic-prost",
+]
+
+[[package]]
+name = "opentelemetry_sdk"
+version = "0.31.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e14ae4f5991976fd48df6d843de219ca6d31b01daaab2dad5af2badeded372bd"
+dependencies = [
+ "futures-channel",
+ "futures-executor",
+ "futures-util",
+ "opentelemetry",
+ "percent-encoding",
+ "rand 0.9.4",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "option-ext"
 version = "0.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -13007,7 +13064,7 @@ dependencies = [
 
 [[package]]
 name = "skippr-plugin-data-sink-iceberg"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "arrow",
  "async-trait",
@@ -13777,6 +13834,33 @@ dependencies = [
  "serde_json",
  "skippr-runtime-sdk",
  "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "skippr-plugin-data-source-otlp"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "axum 0.7.9",
+ "bytes",
+ "clap",
+ "datafusion",
+ "futures",
+ "hex",
+ "http 1.4.1",
+ "http-body-util",
+ "opentelemetry-proto",
+ "prost 0.14.4",
+ "prost-types 0.14.4",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "skippr-runtime-sdk",
+ "tokio",
+ "tonic",
+ "tower",
  "tracing",
 ]
 

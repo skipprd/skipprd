@@ -4,12 +4,14 @@ import argparse
 import copy
 import hashlib
 import json
+import os
 import shutil
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
+from typing import Optional
 
 from runtime_plugin_catalog import (
     catalog_sdk_build_fingerprint,
@@ -61,6 +63,39 @@ def rewrite_public_url(url: str, public_base_url: str, subdir: str) -> str:
 
 def latest_manifest_index_url(public_base_url: str, bucket: str, subdir: str) -> str:
     return public_url(public_base_url, bucket, subdir, "latest", "manifest-index.json")
+
+
+def release_bundle_version(raw: Optional[str] = None) -> Optional[str]:
+    value = (raw if raw is not None else os.environ.get("SKIPPRD_RELEASE_VERSION") or os.environ.get("GITHUB_REF_NAME") or "").strip()
+    if value.startswith("v") and value[1:2].isdigit():
+        value = value[1:]
+    if not value or value == "latest":
+        return None
+    parts = value.split(".")
+    if len(parts) == 3 and all(part.isdigit() for part in parts):
+        return value
+    return None
+
+
+def write_manifest_index(
+    output_dir: Path,
+    bundle_version: str,
+    catalog_entries: list,
+    manifests: list,
+) -> Path:
+    dest = output_dir / bundle_version
+    dest.mkdir(parents=True, exist_ok=True)
+    path = dest / "manifest-index.json"
+    index = {
+        "bundle_version": bundle_version,
+        "sdk_build_fingerprint": catalog_sdk_build_fingerprint(catalog_entries),
+        "manifests": manifests,
+    }
+    validate_manifest_index_sdk_build_fingerprint(index, catalog_entries)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(index, handle, indent=2)
+        handle.write("\n")
+    return path
 
 
 def fresh_metadata_url(url: str) -> str:
@@ -176,6 +211,7 @@ def main() -> None:
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--public-base-url", default="")
     parser.add_argument("--published-index-url", default="")
+    parser.add_argument("--bundle-version", default="")
     args = parser.parse_args()
 
     workspace = Path(args.workspace).resolve()
@@ -314,6 +350,9 @@ def main() -> None:
     with latest_index_path.open("w", encoding="utf-8") as handle:
         json.dump(latest_index, handle, indent=2)
         handle.write("\n")
+    versioned = release_bundle_version(args.bundle_version or None)
+    if versioned:
+        write_manifest_index(output_dir, versioned, catalog_entries, latest_entries)
 
 
 if __name__ == "__main__":

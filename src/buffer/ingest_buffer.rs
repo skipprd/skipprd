@@ -16,6 +16,7 @@ use crate::buffer::compaction_transaction::{
     SegmentSourceDescriptor, SinkRetrySemantics, SinkWriteSemantics, WalPartRef,
 };
 use crate::buffer::completion_ledger::{SegmentCompletionLedger, SegmentCompletionUpdate};
+use crate::buffer::direct_io::DirectIoFile;
 use crate::buffer::flush_execution_budget::FlushExecutionBudget;
 use crate::buffer::s3_wal_body_cache;
 #[cfg(test)]
@@ -106,8 +107,7 @@ impl SegmentSource {
     fn logical_byte_len(&self, meta: &SegmentFileMetadata) -> io::Result<u64> {
         match self {
             SegmentSource::Disk(p) | SegmentSource::Wal { path: p, .. } => {
-                let file = OpenOptions::new().read(true).open(p)?;
-                Ok(file.metadata()?.len())
+                Ok(std::fs::metadata(p)?.len())
             }
             SegmentSource::S3 {
                 body: Some(data), ..
@@ -1160,6 +1160,8 @@ impl Buffers {
         {
             Ok(result) => result,
             Err(err) => {
+                // fsync/EIO fail-closed: do not ACK. Clustered keeps Prepared
+                // unknown (or fences); disk never publishes Closed.
                 error!(
                     "Segment write failed ({}): id={} err={}",
                     context, snapshot_id, err
@@ -2484,13 +2486,7 @@ impl Buffers {
             total_bytes,
             sha256,
         );
-        let mut commit_file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .truncate(true)
-            .open(&commit_path)?;
-        commit_file.write_all(&buf)?;
-        commit_file.sync_all()?;
+        DirectIoFile::write_path_sync(&commit_path, &buf)?;
         if let Some(parent) = commit_path.parent() {
             Self::fsync_dir(&parent.to_path_buf())?;
         }
@@ -2507,7 +2503,7 @@ impl Buffers {
         [u8; 32], /*sha*/
     )> {
         let commit_path = seg_path.with_extension("seg.commit");
-        let mut f = File::open(&commit_path)?;
+        let mut f = DirectIoFile::open(&commit_path)?;
         let mut buf = [0u8; 60];
         f.read_exact(&mut buf)?;
         if &buf[0..4] != b"SEGC" {
@@ -2702,7 +2698,7 @@ impl Buffers {
                     continue;
                 }
                 let segf = SegmentFile { path: p.clone() };
-                if let Ok(m) = segf.read_metadata() {
+                if let Ok(m) = segf.read_metadata_durable() {
                     let segment_id = p
                         .file_stem()
                         .and_then(|value| value.to_str())
@@ -2771,7 +2767,7 @@ impl Buffers {
                     continue;
                 }
                 let seg = SegmentFile { path: path.clone() };
-                match seg.read_metadata() {
+                match seg.read_metadata_durable() {
                     Ok(meta) => {
                         let refs = Self::index_committed_segment(path, meta);
                         result.indexed_refs = result.indexed_refs.saturating_add(refs);
@@ -2877,7 +2873,7 @@ impl Buffers {
         entry: &CompactionEntry,
         seg_path: &Path,
     ) -> io::Result<Vec<RecordBatch>> {
-        let mut file = OpenOptions::new().read(true).open(seg_path)?;
+        let mut file = DirectIoFile::open(seg_path)?;
         file.seek(io::SeekFrom::Start(entry.idx.start))?;
         let reader = io::BufReader::new(file);
         use std::io::Read as IoRead;
@@ -3087,7 +3083,7 @@ impl Buffers {
                 SegmentFile::read_part_meta_from_bytes(data.as_ref(), &entry.idx)
             }
             (None, SegmentSource::Disk(seg_path) | SegmentSource::Wal { path: seg_path, .. }) => {
-                let mut file = OpenOptions::new().read(true).open(seg_path)?;
+                let mut file = DirectIoFile::open(seg_path)?;
                 SegmentFile::read_part_meta_from_reader(&mut file, &entry.idx)
             }
             _ => Err(io::Error::new(
@@ -3884,7 +3880,7 @@ impl Buffers {
                 };
                 let path = store.paths().segment(&id);
                 let index = crate::buffer::segment_file::SegmentFile { path }
-                    .read_metadata()
+                    .read_metadata_durable()
                     .map(|meta| meta.index)
                     .unwrap_or_default();
                 if ledger.all_complete(&segment_id, &index).unwrap_or(false) {
@@ -4121,7 +4117,7 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
             let seg = SegmentFile {
                 path: file_path.clone(),
             };
-            match seg.read_metadata() {
+            match seg.read_metadata_durable() {
                 Ok(meta) => {
                     let n = indexed_count.fetch_add(1, AtomicOrdering::Relaxed) + 1;
                     if n % progress_every == 0 || n == seg_files_count {

@@ -955,6 +955,16 @@ pub enum SourceConfig {
         #[serde(default)]
         auth_token: Option<String>,
     },
+    Otlp {
+        #[serde(default)]
+        listen_address_grpc: Option<String>,
+        #[serde(default)]
+        listen_address_http: Option<String>,
+        #[serde(default)]
+        signals: Option<Vec<String>>,
+        #[serde(default)]
+        auth_token: Option<String>,
+    },
     Socket {
         #[serde(default)]
         mode: Option<String>,
@@ -1072,6 +1082,7 @@ impl SkipprProjectConfig {
             }
             Some(SourceConfig::HttpClient { .. }) => Some("http_client"),
             Some(SourceConfig::HttpServer { .. }) => Some("http_server"),
+            Some(SourceConfig::Otlp { .. }) => Some("otlp"),
             Some(SourceConfig::Socket { .. }) => Some("socket"),
             Some(SourceConfig::Statsd { .. }) => Some("statsd"),
             Some(SourceConfig::Stdin { .. }) => Some("stdin"),

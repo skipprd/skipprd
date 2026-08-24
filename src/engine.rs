@@ -502,8 +502,7 @@ pub async fn run_schema(pipeline: &str) {
     // let mut options = ConfigOptions::default();
     // options.catalog.information_schema = true;
 
-    let session_config = SessionConfig::new();
-    let ctx = SessionContext::new_with_config(session_config);
+    let ctx = crate::sqlrt::session::build_query_context(SessionConfig::new());
 
     PIPELINE_NAME.write().clear();
     PIPELINE_NAME.write().push_str(&pipeline);
@@ -738,6 +737,31 @@ pub async fn run_discover(output_mode: &str) -> io::Result<()> {
     Ok(())
 }
 
+fn otlp_signals_from_pipeline_config() -> Vec<String> {
+    let Ok(entry) = Config::get_pipeline_input_plugin_config() else {
+        return Vec::new();
+    };
+    let signals = entry
+        .config
+        .get("signals")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let parsed: Vec<String> = signals
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    if parsed.is_empty() {
+        vec![
+            "traces".to_string(),
+            "logs".to_string(),
+            "metrics".to_string(),
+        ]
+    } else {
+        parsed
+    }
+}
+
 pub async fn run_sync_pipeline(
     pipeline: &str,
     output_mode: &str,
@@ -822,17 +846,36 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
             pipeline_metadata
         }
         Err(false) => {
-            info!(
-                "No existing Skippr metadata for pipeline '{}'; running discover first",
-                pipeline_name
-            );
-            run_discover(output_mode).await?;
-            Config::get_metadata().await.map_err(|_| {
-                io::Error::other(format!(
-                    "discover completed but metadata is still missing for pipeline '{}'",
+            let source_plugin =
+                crate::cluster::PipelineConfigView::for_name(&Config::get(), &pipeline_name)
+                    .map(|view| view.source_plugin)
+                    .unwrap_or_default();
+            let signals = otlp_signals_from_pipeline_config();
+            let signal_refs: Vec<&str> = signals.iter().map(String::as_str).collect();
+            if let Some(seeded) = crate::sqlrt::schema_seed::seed_otel_pipeline_metadata(
+                &PipelineMetadata::new(),
+                &source_plugin,
+                &signal_refs,
+            ) {
+                info!(
+                    "Seeded OTel OutputMetadata for pipeline '{}'",
                     pipeline_name
-                ))
-            })?
+                );
+                Config::set_metadata(&seeded, false).await;
+                seeded
+            } else {
+                info!(
+                    "No existing Skippr metadata for pipeline '{}'; running discover first",
+                    pipeline_name
+                );
+                run_discover(output_mode).await?;
+                Config::get_metadata().await.map_err(|_| {
+                    io::Error::other(format!(
+                        "discover completed but metadata is still missing for pipeline '{}'",
+                        pipeline_name
+                    ))
+                })?
+            }
         }
         Err(true) => PipelineMetadata::new(),
     };

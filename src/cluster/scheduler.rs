@@ -115,8 +115,9 @@ pub async fn run_clustered(config: ClusterConfig) -> Result<(), DurableError> {
     );
     metrics::set_cluster_ready(0);
     let cfg = Config::get();
-    for name in cfg.pipelines.keys() {
-        let view = PipelineConfigView::for_name(&cfg, name)
+    let keys = crate::cluster::pipeline_registry::scheduled_pipeline_keys().await?;
+    for key in &keys {
+        let view = PipelineConfigView::for_registry(&cfg, key)
             .map_err(|err| DurableError::ProtocolMismatch(err.to_string()))?;
         view.validate_clustered_sink()
             .map_err(|err| DurableError::ProtocolMismatch(err.to_string()))?;
@@ -287,11 +288,20 @@ async fn run_primary_loop(
         ) {
             break;
         }
-        let cfg = Config::get();
-        let mut names: Vec<String> = cfg.pipelines.keys().cloned().collect();
-        names.sort();
+        let keys = match crate::cluster::pipeline_registry::scheduled_pipeline_keys().await {
+            Ok(keys) => keys,
+            Err(err) => {
+                tracing::error!(error = %err, "pipeline registry unavailable; fail closed");
+                tokio::select! {
+                    _ = sleeper.sleep_until(clock.monotonic_now().saturating_add(Duration::from_secs(1))) => {}
+                    rumor = suspect_rx.recv() => { let _ = rumor; }
+                }
+                continue;
+            }
+        };
         let mut ran = false;
-        for name in names {
+        for key in keys {
+            let name = key.pipeline().to_string();
             if matches!(
                 *stop.subscribe().borrow(),
                 PipelineLifecycle::Draining | PipelineLifecycle::Fenced
@@ -309,7 +319,7 @@ async fn run_primary_loop(
                 clock.clone(),
                 sleeper.clone(),
                 leases.clone(),
-                &name,
+                &key,
             )
             .await
             {
@@ -365,11 +375,12 @@ async fn try_promote_and_ingest(
     clock: Arc<dyn skippr_lease::Clock>,
     sleeper: Arc<dyn skippr_lease::Sleeper>,
     leases: Arc<dyn PipelineLeaseStore>,
-    name: &str,
+    key: &skippr_lease::PipelineKey,
 ) -> Result<PrimaryRun, DurableError> {
     let cfg = Config::get();
-    let view = PipelineConfigView::for_name(&cfg, name)
+    let view = PipelineConfigView::for_registry(&cfg, key)
         .map_err(|err| DurableError::ProtocolMismatch(err.to_string()))?;
+    let name = key.pipeline();
     let paths = PipelinePaths::new(&config.data_root, &view.key)
         .map_err(|err| DurableError::Io(err.to_string()))?;
     gossip.add_seeds(membership.cold_gossip_seeds().await).await;

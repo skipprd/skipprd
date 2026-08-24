@@ -58,7 +58,7 @@ pub fn live_wal_namespaces(
             .map_err(|err| PromoteError::Other(err.to_string()))?;
         let path = paths.segment(&id);
         let seg = crate::buffer::segment_file::SegmentFile { path };
-        let meta = seg.read_metadata().map_err(|err| {
+        let meta = seg.read_metadata_durable().map_err(|err| {
             PromoteError::Other(format!(
                 "live WAL decode failed for {}: {err}",
                 descriptor.segment_id

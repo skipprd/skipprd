@@ -865,8 +865,8 @@ fn log_catalog_intent_failure(
     terminal: bool,
     retry_after: Option<Duration>,
 ) {
-    let payload = serde_json::from_str::<GluePartitionCatalogIntentV1>(&pending.intent.payload_json)
-        .ok();
+    let payload =
+        serde_json::from_str::<GluePartitionCatalogIntentV1>(&pending.intent.payload_json).ok();
     tracing::warn!(
         sink_ref = %pending.intent.identity.sink_ref,
         namespace = %pending.intent.identity.namespace,

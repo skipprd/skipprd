@@ -215,6 +215,9 @@ pub async fn start(advertised_ip: IpAddr) -> Result<(), DurableError> {
         .with_config(config.clone())
         .with_default_features()
         .build();
+    let ctx = SessionContext::new_with_state(state);
+    crate::sqlrt::udfs::register_observability_udfs(&ctx);
+    let state = ctx.state();
 
     let logical = state.config().ballista_logical_extension_codec();
     let physical = state.config().ballista_physical_extension_codec();
@@ -582,5 +585,20 @@ mod tests {
         assert!(should_reconnect(local, dead, false));
         assert!(!should_reconnect(local, local, true));
         assert!(should_reconnect(local, local, false));
+    }
+
+    #[test]
+    fn observability_udfs_register_before_ballista_registry() {
+        let src = include_str!("ballista.rs");
+        let register = src
+            .find("register_observability_udfs")
+            .expect("register_observability_udfs");
+        let registry = src
+            .find("BallistaFunctionRegistry::from")
+            .expect("BallistaFunctionRegistry::from");
+        assert!(
+            register < registry,
+            "UDFs must be registered before BallistaFunctionRegistry::from(&state)"
+        );
     }
 }

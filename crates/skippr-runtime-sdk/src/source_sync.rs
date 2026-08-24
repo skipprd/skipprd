@@ -627,6 +627,24 @@ pub fn submit_payload_batch_groups(
     ctx.submit_payload_tasks_and_wait(tasks)
 }
 
+/// Submit already-normalized Arrow IPC partition batches and wait until WAL-durable.
+pub fn submit_arrow_ipc_batches(
+    ctx: &dyn SourceSyncContext,
+    batches: Vec<RuntimeIngestPartitionBatch>,
+) -> Result<ThroughputMetrics, io::Error> {
+    if batches.is_empty() {
+        return Ok(ThroughputMetrics {
+            bytes_per_second: 0,
+            active_cores: 0,
+            queue_length: 0,
+            optimal_chunk_size: 0,
+        });
+    }
+    let submission = ctx.submit_arrow_ipc_batches_accepted(batches)?;
+    ctx.wait_payload_acks(std::slice::from_ref(&submission))?;
+    Ok(submission.metrics)
+}
+
 /// Returns true when a Closed partition was already ingested and should be skipped.
 ///
 /// Offset-service I/O and missing results fail closed: skip ingest rather than
@@ -825,5 +843,30 @@ mod tests {
             batch: Err(io::ErrorKind::Other),
         };
         assert!(partition_already_closed(&down, &key));
+    }
+
+    #[test]
+    fn submit_arrow_ipc_batches_empty_is_ok() {
+        let ctx = ClosedCheckCtx { batch: Ok(vec![]) };
+        let metrics = submit_arrow_ipc_batches(&ctx, vec![]).unwrap();
+        assert_eq!(metrics.bytes_per_second, 0);
+    }
+
+    #[test]
+    fn submit_arrow_ipc_batches_requires_runtime_context() {
+        let ctx = ClosedCheckCtx { batch: Ok(vec![]) };
+        let batch = RuntimeIngestPartitionBatch {
+            sink_ref: "spans".into(),
+            namespace: "spans".into(),
+            partition: "0".into(),
+            time: None,
+            schema_fingerprint: String::new(),
+            offsets: vec![],
+            arrow_stream_bytes: vec![1, 2, 3],
+            cdc_rows: None,
+            checkpoint_update: None,
+        };
+        let err = submit_arrow_ipc_batches(&ctx, vec![batch]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::Unsupported);
     }
 }

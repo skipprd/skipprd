@@ -1,24 +1,26 @@
-# HLA: Observability on Skippr (OTel Lakehouse + Console)
+# HLA: Observability on Skippr (OTel Lakehouse + SQL/UDFs)
 
-**Status:** design / product spitball  
-**Depends on (assumed in prod):** multi-node HA ingest, per-pipeline leases, sync WAL replication, Iceberg on R2, DynamoDB catalog. Live query today is in-process Iceberg∪WAL UNION; Ballista + Arrow Flight SQL remain deferred — locked contract [`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md).  
+**Status:** design / implementation in progress  
+**Implementation:** [`hla-observability-implementation-wbs.md`](./hla-observability-implementation-wbs.md)  
+**Depends on (shipped in skipprd):** multi-node HA ingest, per-pipeline leases, sync WAL replication, Iceberg catalog, Iceberg∪WAL UNION (`IcebergWalUnionProvider`), Arrow Flight SQL, in-process Ballista — [`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md).  
+**Product front:** CloudQuery Execute of the same SQL/UDFs (Cloud later). skipprd has **no** `skippr observe`, no o11y HTTP API, no console, and no alarm evaluator.  
 **Non-goals:** building another consensus/WAL stack; replacing customer paging products; platform-wide legal-hold/compliance product; shipping a full Datadog clone on day one
 
 ---
 
 ## 0. Verdict
 
-With HA Skippr already in production, observability is primarily a **data model + API + UDF + console** problem on top of the existing ingest/query plane — not new distributed systems work.
+With HA Skippr already in production, observability is primarily a **data model + UDF** problem on top of the existing ingest/query plane — not new distributed systems work. skipprd supplies OTLP ingest into Iceberg and generic SQL/UDFs. Charts, alarms, and consoles are CloudQuery Execute of those UDFs.
 
-**In scope for a full-fat *backend* + console:**
+**In scope for skipprd:**
 
 | Layer | Approach |
 | --- | --- |
 | Signals | OpenTelemetry metrics, logs, traces → Skippr pipelines → Iceberg |
 | Hot path | Live WAL / Flight (already HA) |
 | Historical | Iceberg / Parquet on object store |
-| Signal UX shapes | SQL + **UDFs** + thin glue/proxy APIs (waterfall, tail, rate/step, etc.) |
-| Alerting | Skippr owns **alarm state over time**; customers fan out to PagerDuty/etc. (CloudWatch-shaped) |
+| Signal UX shapes | SQL + **UDFs** (`otel_trace`, `otel_waterfall`, `otel_logs_tail`, `otel_rate`, …) |
+| Alerting | Cloud schedules CloudQuery Execute of the cookbook SQL; skipprd does not store alarm state |
 | Correlation | OTel identity model + SQL/API joins (trace ↔ span ↔ log ↔ metric) |
 | AuthZ / tenancy | Existing platform ABAC |
 | Compliance | Tenant/user-space responsibility |
@@ -41,17 +43,13 @@ Skippr ingest (HA, leased pipelines) ──► WAL (hot) ──► Iceberg (cold
         │                              + observability UDFs
         │                                           │
         │                                           ▼
-        │                              Observability API (glue/proxy)
+        │                              skippr query / Flight / CloudQuery
+        │                              + observability UDFs
         │                                           │
-        ├──────── alarm evaluator ──► alarm_state tables / API
-        │                                           │
-        └───────────────────────────────────────────┴──► Console UI
-                                                         │
-                                                         ▼
-                                              Customer pager (webhook)
+        └───────────────────────────────────────────┴──► Cloud UI / alarms (later)
 ```
 
-Console is mandatory for a sellable product; it is not where durability or multi-node correctness lives.
+Cloud UI is the sellable console; it is not where durability or multi-node correctness lives. skipprd does not ship a console.
 
 ---
 
@@ -59,7 +57,7 @@ Console is mandatory for a sellable product; it is not where durability or multi
 
 - Per-pipeline exclusive leases; failover with fence + TTL + WAL/compaction catch-up.  
 - Sync-replicated disk WAL (+ compaction hard-state) and/or S3 WAL as configured.  
-- Query: lakehouse (Iceberg) ∪ live WAL (in-process UNION today; Ballista/Flight SQL deferred per [`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md)).  
+- Query: lakehouse (Iceberg) ∪ live WAL via `IcebergWalUnionProvider`; clustered query is Arrow Flight SQL + in-process Ballista ([`hla-flight-sql-ballista.md`](./hla-flight-sql-ballista.md)).  
 - Schema and Iceberg metadata on shared object store + catalog.  
 - Platform already provides multi-tenant AuthZ (ABAC policy engine).
 
