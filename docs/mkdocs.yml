@@ -47,6 +47,7 @@ nav:
       - discover: cli/discover.md
       - sync: cli/sync.md
       - query: cli/query.md
+      - Observability UDFs: query/observability-udfs.md
       - schema: cli/schema.md
       - sql-help: cli/sql-help.md
       - benchmark: cli/benchmark.md
@@ -83,6 +84,7 @@ nav:
               - Apple Search Ads: connectors/inputs/apple_search_ads.md
               - HTTP Client: connectors/inputs/http_client.md
               - HTTP Server: connectors/inputs/http_server.md
+              - OTLP: connectors/inputs/otlp.md
           - SaaS & APIs:
               - Google Ads: connectors/inputs/google_ads.md
               - Meta Ads: connectors/inputs/meta_ads.md
@@ -148,6 +150,9 @@ nav:
       - Deadletters: concepts/deadletters.md
   - Maintainers:
       - Repository Map: maintainers/repository-map.md
+      - Observability HLA: maintainers/hla-observability-otel-console.md
+      - Observability WBS: maintainers/hla-observability-implementation-wbs.md
+      - Observability soak: maintainers/observability-soak.md
       - Local Development: maintainers/local-development.md
       - Runtime Plugins: maintainers/runtime-plugins.md
       - Runtime Plugin Contract: maintainers/runtime-plugin-contract.md

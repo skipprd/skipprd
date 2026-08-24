@@ -164,7 +164,7 @@ fn copy_legacy_segments(
         )?;
         let seg = SegmentFile::new(&clustered.segs, id)?;
         let meta = seg
-            .read_metadata()
+            .read_metadata_durable()
             .map_err(|err| DurableError::Io(err.to_string()))?;
         let payload = fs::read(&dest)?;
         let mut hasher = Sha256::new();

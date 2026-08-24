@@ -61,7 +61,7 @@ impl DurableApplicator {
                     let id = SegmentId::new(&entry.segment_id)
                         .map_err(|err| DurableError::Io(err.to_string()))?;
                     let seg = SegmentFile::new(&self.paths.segs, id.as_str())?;
-                    let meta = match seg.read_metadata() {
+                    let meta = match seg.read_metadata_durable() {
                         Ok(meta) => meta,
                         Err(err)
                             if matches!(mode, ApplyMode::CatchUp)
@@ -99,7 +99,7 @@ impl DurableApplicator {
                     SegmentId::new(segment_id).map_err(|err| DurableError::Io(err.to_string()))?;
                 let path = self.paths.segment(&id);
                 let index = SegmentFile { path: path.clone() }
-                    .read_metadata()
+                    .read_metadata_durable()
                     .map(|meta| meta.index)
                     .unwrap_or_default();
                 let _ = fs::remove_file(&path);

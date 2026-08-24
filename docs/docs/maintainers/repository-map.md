@@ -45,8 +45,10 @@ There are no committed runtime manifest templates, and there is no aggregate `sk
 Normative clustered-query design:
 
 - [hla-distributed-query-iceberg-catalog.md](hla-distributed-query-iceberg-catalog.md) — architecture index
-- [hla-flight-sql-ballista.md](hla-flight-sql-ballista.md) — Arrow Flight SQL 58.3 and Ballista 53 (locked, not shipped)
+- [hla-flight-sql-ballista.md](hla-flight-sql-ballista.md) — Arrow Flight SQL 58.3 and Ballista 53 (shipped in tree)
 - [hla-implementation-wbs.md](hla-implementation-wbs.md) — work units including WU-7.3 / WU-7.5
+- [hla-observability-otel-console.md](hla-observability-otel-console.md) — OTel lakehouse + SQL/UDFs
+- [hla-observability-implementation-wbs.md](hla-observability-implementation-wbs.md) — observability work units
 
 ## Useful guard rails
 

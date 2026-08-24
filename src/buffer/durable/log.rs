@@ -1,4 +1,5 @@
-use std::fs::{self, File, OpenOptions};
+use crate::buffer::direct_io::DirectIoFile;
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
 
@@ -261,7 +262,7 @@ fn replay_log(path: &Path) -> Result<Replayed, DurableError> {
             committed_envelopes: committed,
         });
     }
-    let bytes = fs::read(path)?;
+    let bytes = DirectIoFile::read_path(path)?;
     let mut offset = 0usize;
     while offset + 4 <= bytes.len() {
         let len = u32::from_le_bytes(bytes[offset..offset + 4].try_into().unwrap()) as usize;
@@ -325,7 +326,7 @@ fn rewrite_committed_log(path: &Path, envelopes: &[MutationEnvelope]) -> Result<
     if tmp.exists() {
         fs::rename(&tmp, path)?;
     } else {
-        fs::write(path, [])?;
+        DirectIoFile::write_path_sync(path, &[])?;
     }
     if let Some(parent) = path.parent() {
         fsync_dir(parent)?;
@@ -357,11 +358,11 @@ fn write_framed(path: &Path, payload: &[u8]) -> Result<(), DurableError> {
     let mut hasher = Sha256::new();
     hasher.update(payload);
     let checksum: [u8; 32] = hasher.finalize().into();
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
+    let mut file = DirectIoFile::open_append(path)?;
     file.write_all(&(payload.len() as u32).to_le_bytes())?;
     file.write_all(payload)?;
     file.write_all(&checksum)?;
-    file.sync_all()?;
+    file.sync_data()?;
     if let Some(parent) = path.parent() {
         fsync_dir(parent)?;
     }
@@ -372,7 +373,7 @@ fn read_state(path: &Path) -> Result<Option<DurableState>, DurableError> {
     if !path.exists() {
         return Ok(None);
     }
-    let bytes = fs::read(path)?;
+    let bytes = DirectIoFile::read_path(path)?;
     if bytes.len() != 8 * 3 + 32 {
         return Err(DurableError::Io("corrupt STATE file".into()));
     }
@@ -400,11 +401,7 @@ fn write_state_atomic(dir: &Path, path: &Path, state: &DurableState) -> Result<(
 
 fn atomic_write(dir: &Path, path: &Path, bytes: &[u8]) -> Result<(), DurableError> {
     let tmp = path.with_extension("tmp");
-    {
-        let mut file = File::create(&tmp)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-    }
+    DirectIoFile::write_path_sync(&tmp, bytes)?;
     fs::rename(&tmp, path)?;
     fsync_dir(dir)?;
     Ok(())
@@ -427,6 +424,7 @@ mod tests {
     use super::*;
     use crate::buffer::durable::mutation::DurableMutation;
     use skippr_lease::{LeaseEpoch, PipelineKey, PipelinePaths};
+    use std::fs::OpenOptions;
 
     #[test]
     fn prepared_then_committed_advances_head_and_replays() {

@@ -853,6 +853,16 @@ pub mod source_capabilities {
         event_id_semantics: EventIdSemantics::UserSupplied,
     };
 
+    pub const OTLP: SourceCapability = SourceCapability {
+        name: "Otlp",
+        guarantee_tier: SourceGuaranteeTier::UserSuppliedIdentityOnly,
+        checkpoint_style: SourceCheckpointStyle::None,
+        bootstrap_style: SourceBootstrapStyle::StreamOnly,
+        order_model: SourceOrderModel::UnsupportedForFinalState,
+        supports_deletes: false,
+        event_id_semantics: EventIdSemantics::UserSupplied,
+    };
+
     pub const WEBSOCKET: SourceCapability = SourceCapability {
         name: "Websocket",
         guarantee_tier: SourceGuaranteeTier::UserSuppliedIdentityOnly,
@@ -927,6 +937,7 @@ pub mod source_capabilities {
             "Amqp" => Some(&AMQP),
             "Mqtt" => Some(&MQTT),
             "HttpServer" => Some(&HTTP_SERVER),
+            "Otlp" => Some(&OTLP),
             "Websocket" => Some(&WEBSOCKET),
             "Socket" => Some(&SOCKET),
             "Stdin" => Some(&STDIN),
@@ -1260,6 +1271,7 @@ mod tests {
             "Amqp",
             "Mqtt",
             "HttpServer",
+            "Otlp",
             "Websocket",
             "Socket",
             "Stdin",

@@ -52,6 +52,28 @@ impl PipelineConfigView {
         })
     }
 
+    pub fn for_registry(config: &Config, key: &PipelineKey) -> Result<Self, ConfigError> {
+        if config.pipelines.contains_key(key.pipeline()) {
+            let mut view = Self::for_name(config, key.pipeline())?;
+            view.key = key.clone();
+            return Ok(view);
+        }
+        Self::synthetic_iceberg(key)
+    }
+
+    fn synthetic_iceberg(key: &PipelineKey) -> Result<Self, ConfigError> {
+        Ok(Self {
+            key: key.clone(),
+            data_root: PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".into())),
+            source_plugin: String::new(),
+            sink_plugin: "Iceberg".into(),
+            schema_plugin: None,
+            sink_ref: None,
+            iceberg: true,
+            flatten_events: false,
+        })
+    }
+
     pub fn key(&self) -> &PipelineKey {
         &self.key
     }
@@ -188,6 +210,17 @@ mod tests {
             iceberg: true,
             flatten_events: false,
         };
+        assert!(view.validate_clustered_sink().is_ok());
+    }
+
+    #[test]
+    fn registry_without_yaml_is_synthetic_iceberg() {
+        let config = Config::new();
+        let key = PipelineKey::new("system", "platform", "otel-logs").unwrap();
+        let view = PipelineConfigView::for_registry(&config, &key).unwrap();
+        assert_eq!(view.key.pipeline(), "otel-logs");
+        assert!(view.iceberg);
+        assert_eq!(view.sink_plugin, "Iceberg");
         assert!(view.validate_clustered_sink().is_ok());
     }
 }

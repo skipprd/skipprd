@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::fs::File;
 
 use skippr_lease::{PipelineKey, SegmentId};
 
@@ -53,7 +54,11 @@ pub fn select_live_ordinals(
             continue;
         };
         let path = log.paths().segment(&seg_id);
-        let Ok(meta) = (SegmentFile { path }).read_metadata() else {
+        let mut file = match File::open(&path) {
+            Ok(file) => file,
+            Err(_) => continue,
+        };
+        let Ok(meta) = SegmentFile::read_metadata_from_reader(&mut file) else {
             continue;
         };
         for ordinal in 0..meta.index.len() as u32 {
@@ -160,7 +165,7 @@ mod tests {
         let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
         write_segment(&paths, "live-seg", &["evt-0", "evt-1"]);
         let seg = crate::buffer::segment_file::SegmentFile::new(&paths.segs, "live-seg").unwrap();
-        let meta = seg.read_metadata().unwrap();
+        let meta = seg.read_metadata_durable().unwrap();
         assert!(meta.index.len() >= 2);
         let ledger = SegmentCompletionLedger::new(paths.completions.clone());
         ledger
@@ -190,7 +195,7 @@ mod tests {
         let paths = skippr_lease::PipelinePaths::new(dir.path(), &key).unwrap();
         write_segment(&paths, "live-seg", &["evt-23"]);
         let seg = crate::buffer::segment_file::SegmentFile::new(&paths.segs, "live-seg").unwrap();
-        let meta = seg.read_metadata().unwrap();
+        let meta = seg.read_metadata_durable().unwrap();
         let ledger = SegmentCompletionLedger::new(paths.completions.clone());
         let ordinals: Vec<usize> = (0..meta.index.len()).collect();
         ledger

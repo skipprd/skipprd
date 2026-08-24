@@ -1,9 +1,10 @@
+use crate::buffer::direct_io::DirectIoFile;
 use crate::buffer::segment_file::{PartitionKey, SegmentPartitionIndexEntry};
 use crate::metrics::counters as metrics_counters;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use sha2::{Digest, Sha256};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -342,7 +343,7 @@ impl SegmentCompletionLedger {
     ) -> io::Result<CompletionBitmap> {
         fs::create_dir_all(&self.done_dir)?;
         let bitmap_path = self.bitmap_path(segment_id);
-        let (mut bitmap, mut changed) = match fs::read(&bitmap_path) {
+        let (mut bitmap, mut changed) = match DirectIoFile::read_path(&bitmap_path) {
             Ok(bytes) => (decode_bitmap(&bytes, index.len())?, false),
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
                 (CompletionBitmap::empty(index.len()), true)
@@ -396,13 +397,7 @@ fn cached_result(state: &CachedState, expected_bits: usize) -> io::Result<Arc<Co
 }
 
 fn write_and_sync_legacy_tombstone(path: &Path) -> io::Result<()> {
-    let mut file = OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(path)?;
-    file.write_all(&[])?;
-    file.sync_all()
+    DirectIoFile::write_path_sync(path, &[])
 }
 
 fn encode_bitmap(bitmap: &CompletionBitmap) -> io::Result<Vec<u8>> {
@@ -506,8 +501,6 @@ fn persist_bitmap(path: &Path, bitmap: &CompletionBitmap) -> io::Result<()> {
         .file_name()
         .and_then(|name| name.to_str())
         .unwrap_or("completion-bitmap");
-    let mut temp_file = None;
-    let mut temp_path = None;
     for _ in 0..16 {
         let sequence = TEMP_SEQUENCE.fetch_add(1, Ordering::Relaxed);
         let candidate = parent.join(format!(
@@ -515,41 +508,28 @@ fn persist_bitmap(path: &Path, bitmap: &CompletionBitmap) -> io::Result<()> {
             std::process::id(),
             sequence
         ));
-        match OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&candidate)
-        {
-            Ok(file) => {
-                temp_file = Some(file);
-                temp_path = Some(candidate);
-                break;
+        match DirectIoFile::create_new(&candidate) {
+            Ok(mut file) => {
+                let result = (|| {
+                    file.write_all(&bytes)?;
+                    file.sync_data()?;
+                    drop(file);
+                    fs::rename(&candidate, path)?;
+                    fsync_dir(parent)
+                })();
+                if result.is_err() {
+                    let _ = fs::remove_file(&candidate);
+                }
+                return result;
             }
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error),
         }
     }
-    let mut temp = temp_file.ok_or_else(|| {
-        io::Error::new(
-            io::ErrorKind::AlreadyExists,
-            "could not allocate a completion bitmap temp file",
-        )
-    })?;
-    let temp_path = temp_path.ok_or_else(|| {
-        io::Error::other("completion bitmap temp path missing for allocated file")
-    })?;
-
-    let result = (|| {
-        temp.write_all(&bytes)?;
-        temp.sync_all()?;
-        drop(temp);
-        fs::rename(&temp_path, path)?;
-        fsync_dir(parent)
-    })();
-    if result.is_err() {
-        let _ = fs::remove_file(&temp_path);
-    }
-    result
+    Err(io::Error::new(
+        io::ErrorKind::AlreadyExists,
+        "could not allocate a completion bitmap temp file",
+    ))
 }
 
 #[cfg(not(windows))]

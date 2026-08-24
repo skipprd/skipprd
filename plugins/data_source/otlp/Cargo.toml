@@ -1,0 +1,47 @@
+[package]
+name = "skippr-plugin-data-source-otlp"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "skippr-plugin-data-source-otlp"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+clap.workspace = true
+tokio.workspace = true
+skippr-runtime-sdk.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_derive = "1.0.105"
+tracing = "0.1"
+bytes.workspace = true
+axum = "0.7"
+http = "1"
+tower = { version = "0.5", features = ["util"] }
+tonic = { version = "0.14.1", default-features = false, features = ["transport", "codegen"] }
+prost = "0.14"
+prost-types = "0.14"
+opentelemetry-proto = { version = "0.31", default-features = false, features = ["gen-tonic", "logs", "metrics", "trace", "with-serde"] }
+arrow.workspace = true
+datafusion.workspace = true
+hex.workspace = true
+futures.workspace = true
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+
+[package.metadata.skippr-plugin]
+kind = "DataSource"
+plugin_name = "Otlp"
+
+[package.metadata.skippr-plugin.source_capability]
+name = "Otlp"
+guarantee_tier = "UserSuppliedIdentityOnly"
+checkpoint_style = "None"
+bootstrap_style = "StreamOnly"
+order_model = "UnsupportedForFinalState"
+supports_deletes = false
+event_id_semantics = "UserSupplied"

@@ -204,7 +204,7 @@ async fn build_wal_df(
     pipeline: &str,
     namespace: &str,
 ) -> Result<Option<datafusion::prelude::DataFrame>, DataFusionError> {
-    let reader = crate::buffer::wal_store::WalReaderFactory::for_pipeline_async(pipeline).await;
+    let reader = crate::sqlrt::wal_reader::WalReaderFactory::for_pipeline_async(pipeline).await;
     let wal_batches: Vec<RecordBatch> = reader
         .load_committed_batches(namespace, 64)
         .unwrap_or_default();

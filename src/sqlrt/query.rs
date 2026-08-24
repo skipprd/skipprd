@@ -1,5 +1,5 @@
 use std::fs::OpenOptions;
-use std::io::BufReader;
+use std::io::{BufReader, Read, Seek};
 use std::{fs, process};
 // removed unused Write import
 use crate::discover::{Metadata, PipelineMetadata, SkipprDataType};
@@ -12,6 +12,7 @@ use crate::sqlrt::operators::drop_column::alter_column_drop;
 use crate::sqlrt::operators::drop_table::drop_table;
 use crate::sqlrt::operators::dump_schema::dump_schema;
 use crate::sqlrt::parser::{PipelineToggle, SParser, Statement};
+use crate::sqlrt::session::collect_user_sql;
 use crate::METADATA;
 use arrow::array::{Array, ArrayRef, Int32Array, StringArray};
 use arrow_schema::DataType;
@@ -45,7 +46,6 @@ use datafusion::sql::sqlparser::ast::{
 };
 use datafusion::sql::sqlparser::dialect::GenericDialect;
 use datafusion::sql::sqlparser::parser::Parser as StdSqlParser;
-use std::io::{Read, Seek};
 use std::sync::mpsc;
 // removed unused HashSet
 // removed unused ProvideCredentials
@@ -80,8 +80,7 @@ impl Default for QueryExecutionOptions {
 
 // Build a SessionContext and pre-register all pipelines/namespaces so two-part names resolve
 pub async fn new_context_all_namespaces() -> SessionContext {
-    let session_config = SessionConfig::new();
-    let ctx = SessionContext::new_with_config(session_config);
+    let ctx = crate::sqlrt::session::build_query_context(SessionConfig::new());
     let pipelines = crate::sqlrt::registry::list_pipelines().await;
     for pipeline in pipelines {
         let mut namespaces = crate::sqlrt::registry::list_namespaces(&pipeline).await;
@@ -479,15 +478,14 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
             let mut current_sql = initial_stream_sql.clone();
             loop {
                 if let Some((pipeline_name, run_sql)) = build_plan(&current_sql) {
-                    let session_config = SessionConfig::new();
-                    let ctx = SessionContext::new_with_config(session_config);
+                    let ctx = crate::sqlrt::session::build_query_context(SessionConfig::new());
                     // Set pipeline context BEFORE any config that might create dirs
                     PIPELINE_NAME.write().clear();
                     PIPELINE_NAME.write().push_str(&pipeline_name);
                     Config::init().await;
                     register_catalog(&ctx).await;
                     // Unified WAL reader (local disk or S3 based on manifest/env)
-                    let reader = crate::buffer::wal_store::WalReaderFactory::for_pipeline_async(
+                    let reader = crate::sqlrt::wal_reader::WalReaderFactory::for_pipeline_async(
                         &pipeline_name,
                     )
                     .await;
@@ -1057,11 +1055,7 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
         _ => {
             // Fall back to DataFusion for standard SQL (e.g., SELECT ...)
             // Build a context and register available pipeline table from current data dir
-            let session_config = SessionConfig::new();
-
-            let ctx = SessionContext::new_with_config(session_config);
-
-            // UDFs omitted in this build
+            let ctx = crate::sqlrt::session::build_query_context(SessionConfig::new());
 
             // Register catalog tables after pipeline context is established below
 
@@ -1418,7 +1412,7 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
             let plain = query_options.plain;
             if plain {
                 match ctx.sql(&rewritten_sql).await {
-                    Ok(df) => match df.collect().await {
+                    Ok(df) => match collect_user_sql(df).await {
                         Ok(res) => {
                             for batch in &res {
                                 let schema = batch.schema();
@@ -1508,8 +1502,8 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                             }
                         }
                         if let Some(pipeline_name) = table_opt {
-                            let session_config = SessionConfig::new();
-                            let ctx = SessionContext::new_with_config(session_config);
+                            let ctx =
+                                crate::sqlrt::session::build_query_context(SessionConfig::new());
                             register_catalog(&ctx).await;
                             PIPELINE_NAME.write().clear();
                             PIPELINE_NAME.write().push_str(&pipeline_name);
@@ -1528,28 +1522,32 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                                         {
                                             continue;
                                         }
-                                        let seg = SegmentFile { path: path.clone() };
-                                        if let Ok(meta) = seg.read_metadata() {
-                                            for idx in meta.index.iter() {
-                                                if idx.key.namespace != pipeline_name {
-                                                    continue;
-                                                }
-                                                if let Ok(mut file) = std::fs::OpenOptions::new()
-                                                    .read(true)
-                                                    .open(&path)
-                                                {
-                                                    if file
-                                                        .seek(std::io::SeekFrom::Start(idx.start))
-                                                        .is_ok()
+                                        if let Ok(mut meta_file) = std::fs::File::open(&path) {
+                                            if let Ok(meta) = SegmentFile::read_metadata_from_reader(
+                                                &mut meta_file,
+                                            ) {
+                                                for idx in meta.index.iter() {
+                                                    if idx.key.namespace != pipeline_name {
+                                                        continue;
+                                                    }
+                                                    if let Ok(mut file) = std::fs::File::open(&path)
                                                     {
-                                                        let reader = std::io::BufReader::new(file);
-                                                        let mut take = reader.take(idx.len);
-                                                        if let Ok(sr) =
-                                                            StreamReader::try_new(&mut take, None)
+                                                        if file
+                                                            .seek(std::io::SeekFrom::Start(
+                                                                idx.start,
+                                                            ))
+                                                            .is_ok()
                                                         {
-                                                            for it in sr {
-                                                                if let Ok(b) = it {
-                                                                    wal_batches.push(b);
+                                                            let reader =
+                                                                std::io::BufReader::new(file);
+                                                            let mut take = reader.take(idx.len);
+                                                            if let Ok(sr) = StreamReader::try_new(
+                                                                &mut take, None,
+                                                            ) {
+                                                                for it in sr {
+                                                                    if let Ok(b) = it {
+                                                                        wal_batches.push(b);
+                                                                    }
                                                                 }
                                                             }
                                                         }
@@ -1587,7 +1585,7 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                     } else {
                         // SELECT: run against prepared context (S3/union already registered earlier)
                         if let Ok(df) = ctx_clone.sql(&current).await {
-                            match df.collect().await {
+                            match collect_user_sql(df).await {
                                 Ok(b) => {
                                     let rows: usize = b.iter().map(|rb| rb.num_rows()).sum();
                                     println!("SELECT collected: batches={} rows={}", b.len(), rows);

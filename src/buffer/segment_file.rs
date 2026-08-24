@@ -1,3 +1,4 @@
+use crate::buffer::direct_io::DirectIoFile;
 use crate::helpers::offsets::OffsetKey;
 use crate::metrics::counters as metrics_counters;
 use crate::plugins::cdc::{WalPartKind, WalPartMeta};
@@ -8,8 +9,7 @@ use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 #[cfg(test)]
 use std::fs::File;
-use std::fs::OpenOptions;
-use std::io::{Read, Seek, Write};
+use std::io::{Cursor, Read, Seek, Write};
 use std::path::{Path, PathBuf};
 #[cfg(test)]
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -319,13 +319,7 @@ impl SegmentFile {
         u64,      /*rows*/
         [u8; 32], /*sha256*/
     )> {
-        let mut file = OpenOptions::new()
-            .create(true)
-            .write(true)
-            .read(true)
-            .truncate(true)
-            .open(&self.path)?;
-        file.seek(io::SeekFrom::Start(0))?;
+        let mut file = Cursor::new(Vec::new());
 
         file.write_all(MAGIC)?;
         file.write_all(&VERSION.to_le_bytes())?;
@@ -424,31 +418,16 @@ impl SegmentFile {
         }
 
         let end_before_footer = file.stream_position()?;
-        let mut f2 = OpenOptions::new().read(true).open(&self.path)?;
-        use sha2::Digest;
-        let mut hasher = sha2::Sha256::new();
-        let mut buf = vec![0u8; 1 << 20];
-        let mut remaining = end_before_footer as i64;
-        loop {
-            if remaining <= 0 {
-                break;
-            }
-            let to_read = std::cmp::min(remaining as usize, buf.len());
-            let n = f2.read(&mut buf[..to_read])?;
-            if n == 0 {
-                break;
-            }
-            hasher.update(&buf[..n]);
-            remaining -= n as i64;
-        }
-        let digest = hasher.finalize();
+        let digest = Sha256::digest(&file.get_ref()[..end_before_footer as usize]);
         let mut sha_bytes: [u8; 32] = [0u8; 32];
-        sha_bytes.copy_from_slice(&digest[..]);
+        sha_bytes.copy_from_slice(&digest);
 
         file.write_all(FOOT)?;
         file.write_all(&parts_count.to_le_bytes())?;
         file.write_all(&sha_bytes)?;
-        file.sync_all()?;
+        let mut durable = DirectIoFile::create(&self.path)?;
+        durable.write_all(file.get_ref())?;
+        durable.sync_data()?;
 
         let meta = SegmentFileMetadata {
             created_at_secs,
@@ -593,8 +572,8 @@ impl SegmentFile {
         FULL_PART_META_SCANS.load(Ordering::Relaxed)
     }
 
-    pub fn read_metadata(&self) -> io::Result<SegmentFileMetadata> {
-        let mut file = OpenOptions::new().read(true).open(&self.path)?;
+    pub fn read_metadata_durable(&self) -> io::Result<SegmentFileMetadata> {
+        let mut file = DirectIoFile::open(&self.path)?;
         Self::read_metadata_from_reader(&mut file)
     }
 }
@@ -761,7 +740,7 @@ mod tests_wal_writer {
             }
         );
 
-        let read_meta = seg.read_metadata().unwrap();
+        let read_meta = seg.read_metadata_durable().unwrap();
         assert_eq!(read_meta.num_partitions, 1);
         assert_eq!(read_meta.index.len(), 1);
         assert_eq!(read_meta.index[0].part_meta_start, index.part_meta_start);

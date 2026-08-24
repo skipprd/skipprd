@@ -14,6 +14,7 @@ pub mod identity;
 pub mod lifecycle;
 pub mod membership;
 pub mod peer;
+pub mod pipeline_registry;
 pub mod pipeline_view;
 pub mod placement;
 pub mod promote;

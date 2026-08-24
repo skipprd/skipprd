@@ -175,8 +175,11 @@ fn read_ordinal_batches(
     if !path.exists() {
         return Ok(Vec::new());
     }
-    let seg = SegmentFile { path: path.clone() };
-    let Ok(meta) = seg.read_metadata() else {
+    let mut file = match fs::File::open(&path) {
+        Ok(file) => file,
+        Err(_) => return Ok(Vec::new()),
+    };
+    let Ok(meta) = SegmentFile::read_metadata_from_reader(&mut file) else {
         return Ok(Vec::new());
     };
     let Some(idx) = meta.index.get(ordinal as usize) else {
@@ -185,10 +188,6 @@ fn read_ordinal_batches(
     if idx.key.namespace != namespace {
         return Ok(Vec::new());
     }
-    let mut file = match fs::File::open(&path) {
-        Ok(file) => file,
-        Err(_) => return Ok(Vec::new()),
-    };
     if file.seek(std::io::SeekFrom::Start(idx.start)).is_err() {
         return Ok(Vec::new());
     }

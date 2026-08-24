@@ -1,0 +1,29 @@
+{
+  "resourceMetrics": [
+    {
+      "resource": {
+        "attributes": [
+          { "key": "service.name", "value": { "stringValue": "checkout" } }
+        ]
+      },
+      "scopeMetrics": [
+        {
+          "metrics": [
+            {
+              "name": "requests",
+              "unit": "1",
+              "sum": {
+                "aggregationTemporality": 2,
+                "isMonotonic": true,
+                "dataPoints": [
+                  { "timeUnixNano": "1000000000", "asDouble": 1 },
+                  { "timeUnixNano": "2000000000", "asDouble": 2 }
+                ]
+              }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

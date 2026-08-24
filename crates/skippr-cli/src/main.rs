@@ -1428,6 +1428,17 @@ enum SourceKind {
         #[arg(long)]
         auth_token: Option<String>,
     },
+    /// OpenTelemetry OTLP source (gRPC :4317, HTTP :4318).
+    Otlp {
+        #[arg(long)]
+        listen_address_grpc: Option<String>,
+        #[arg(long)]
+        listen_address_http: Option<String>,
+        #[arg(long, value_delimiter = ',')]
+        signals: Option<Vec<String>>,
+        #[arg(long)]
+        auth_token: Option<String>,
+    },
     /// Socket source (TCP/UDP/Unix).
     Socket {
         #[arg(long)]
@@ -2113,6 +2124,7 @@ const DATA_SOURCE_RUNTIME_PLUGIN_KEYS: &[&str] = &[
     "Kafka",
     "HttpClient",
     "HttpServer",
+    "Otlp",
     "Websocket",
     "Kinesis",
     "Sqs",
@@ -4288,6 +4300,20 @@ fn source_plugin_and_config(kind: SourceKind) -> (&'static str, serde_json::Valu
                 ("auth_token", str_json(auth_token)),
             ]),
         ),
+        SourceKind::Otlp {
+            listen_address_grpc,
+            listen_address_http,
+            signals,
+            auth_token,
+        } => (
+            "Otlp",
+            json_object(vec![
+                ("listen_address_grpc", str_json(listen_address_grpc)),
+                ("listen_address_http", str_json(listen_address_http)),
+                ("signals", signals.map(|values| serde_json::json!(values))),
+                ("auth_token", str_json(auth_token)),
+            ]),
+        ),
         SourceKind::Socket {
             mode,
             address,
@@ -6160,6 +6186,17 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
             path,
             auth_token,
         },
+        SourceKind::Otlp {
+            listen_address_grpc,
+            listen_address_http,
+            signals,
+            auth_token,
+        } => SourceConfig::Otlp {
+            listen_address_grpc,
+            listen_address_http,
+            signals,
+            auth_token,
+        },
         SourceKind::Socket {
             mode,
             address,
@@ -6213,6 +6250,7 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         SourceConfig::DataForSeoSeoOpportunities { .. } => "dataforseo_seo_opportunities",
         SourceConfig::HttpClient { .. } => "http_client",
         SourceConfig::HttpServer { .. } => "http_server",
+        SourceConfig::Otlp { .. } => "otlp",
         SourceConfig::Socket { .. } => "socket",
         SourceConfig::Statsd { .. } => "statsd",
         SourceConfig::Stdin { .. } => "stdin",
@@ -10040,6 +10078,25 @@ mod tests {
         assert!(contents.contains("vector_sources: {}"));
         assert!(!contents.contains("tenant:"));
         assert!(!contents.contains("react:"));
+    }
+
+    #[test]
+    fn connect_source_help_includes_otlp() {
+        let help = include_str!("main.rs");
+        assert!(
+            help.contains("OpenTelemetry OTLP source"),
+            "connect source otlp must be documented"
+        );
+        assert!(help.contains("listen_address_grpc"));
+        let (name, cfg) = source_plugin_and_config(SourceKind::Otlp {
+            listen_address_grpc: Some("0.0.0.0:4317".into()),
+            listen_address_http: Some("0.0.0.0:4318".into()),
+            signals: Some(vec!["traces".into()]),
+            auth_token: None,
+        });
+        assert_eq!(name, "Otlp");
+        assert_eq!(cfg["listen_address_grpc"], "0.0.0.0:4317");
+        assert_eq!(cfg["signals"][0], "traces");
     }
 
     #[tokio::test]

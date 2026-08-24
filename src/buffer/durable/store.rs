@@ -338,7 +338,7 @@ impl PipelineDurableStore {
         let seg_file = SegmentFile {
             path: self.paths.segment(&id),
         };
-        let meta = seg_file.read_metadata()?;
+        let meta = seg_file.read_metadata_durable()?;
         if !log.has_format_marker() {
             log.write_format_marker()?;
         }

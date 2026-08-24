@@ -75,7 +75,7 @@ The staged release is then validated before upload:
 - every manifest must carry the workspace runtime protocol version
 - `latest/manifest-index.json` must match the current workspace catalog
 
-Only after that validation does CI upload the staged runtime plugin tree to the releases bucket.
+Only after that validation does CI upload the staged runtime plugin tree to the releases bucket. Tag builds also write `{semver}/manifest-index.json` next to `latest/` so Cloud Rescue bake can pin `skipprd_version` without using `/latest/`.
 
 ## 5. Run the runtime acceptance jobs
 

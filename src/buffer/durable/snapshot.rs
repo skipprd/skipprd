@@ -10,6 +10,7 @@ use skippr_lease::{CommitIndex, DurableError, PipelineKey, PipelinePaths, GENESI
 use super::log::MutationLog;
 use super::mutation::{CommittedCheckpoint, CommittedOffset, DurableMutation, SegmentDescriptor};
 use crate::buffer::compaction_transaction::{CompactionTransaction, CompactionTransactionState};
+use crate::buffer::direct_io::DirectIoFile;
 
 const PACK_MAGIC: &[u8; 12] = b"SKIPPRSNAP1\n";
 
@@ -77,7 +78,7 @@ pub fn read_snapshot(paths: &PipelinePaths) -> Result<Option<StateSnapshot>, Dur
     if !path.exists() {
         return Ok(None);
     }
-    let bytes = fs::read(&path)?;
+    let bytes = DirectIoFile::read_path(&path)?;
     if bytes.starts_with(PACK_MAGIC) {
         return Ok(Some(meta_from_pack(&bytes)?));
     }
@@ -240,21 +241,21 @@ pub fn write_live_snapshot_pack(
     let json = serde_json::to_vec(snapshot).map_err(|err| DurableError::Io(err.to_string()))?;
     let staging = paths.snapshots.join("current.tmp");
     {
-        let mut file = File::create(&staging)?;
+        let mut file = DirectIoFile::create(&staging)?;
         file.write_all(PACK_MAGIC)?;
         file.write_all(&(json.len() as u32).to_le_bytes())?;
         file.write_all(&json)?;
         let files = collect_live_files(paths)?;
         file.write_all(&(files.len() as u32).to_le_bytes())?;
         for (rel, abs) in files {
-            let bytes = fs::read(&abs)?;
+            let bytes = DirectIoFile::read_path(&abs)?;
             let rel_bytes = rel.as_bytes();
             file.write_all(&(rel_bytes.len() as u16).to_le_bytes())?;
             file.write_all(rel_bytes)?;
             file.write_all(&(bytes.len() as u64).to_le_bytes())?;
             file.write_all(&bytes)?;
         }
-        file.sync_all()?;
+        file.sync_data()?;
     }
     let dest = paths.snapshot_current();
     fs::rename(&staging, &dest)?;
@@ -401,11 +402,7 @@ fn unpack_pack(bytes: &[u8], staging_root: &Path) -> Result<StateSnapshot, Durab
         if let Some(parent) = dest.parent() {
             fs::create_dir_all(parent)?;
         }
-        fs::write(&dest, data)?;
-        #[cfg(not(windows))]
-        {
-            File::open(&dest)?.sync_all()?;
-        }
+        DirectIoFile::write_path_sync(&dest, data)?;
     }
     write_installed_state(staging_root, &snapshot)?;
     Ok(snapshot)
@@ -421,11 +418,13 @@ fn write_installed_state(root: &Path, snapshot: &StateSnapshot) -> Result<(), Du
     bytes.extend_from_slice(&snapshot.base_hash);
     let state_path = durable.join("STATE");
     let tmp = state_path.with_extension("tmp");
-    fs::write(&tmp, &bytes)?;
-    File::open(&tmp)?.sync_all()?;
+    DirectIoFile::write_path_sync(&tmp, &bytes)?;
     fs::rename(&tmp, &state_path)?;
-    fs::write(durable.join("mutation.log"), [])?;
-    File::open(&durable)?.sync_all().ok();
+    DirectIoFile::write_path_sync(&durable.join("mutation.log"), &[])?;
+    #[cfg(not(windows))]
+    {
+        File::open(&durable)?.sync_all()?;
+    }
     let marker = durable.join("CLUSTER_FORMAT_V1");
     if !marker.exists() {
         fs::write(&marker, super::mutation::CLUSTER_FORMAT_V1.as_bytes())?;

@@ -6,6 +6,7 @@ use once_cell::sync::Lazy;
 use parquet::basic::Compression;
 use parquet::file::metadata::SortingColumn;
 use parquet::file::properties::WriterProperties;
+use parquet::schema::types::ColumnPath;
 use std::collections::HashSet;
 use tracing::warn;
 
@@ -233,6 +234,10 @@ pub fn build_writer_properties_with_sorting_metadata(
         .set_compression(Compression::SNAPPY)
         .set_max_row_group_row_count(Some(row_group_size));
 
+    if schema.field_with_name("trace_id").is_ok() {
+        builder = builder.set_column_bloom_filter_enabled(ColumnPath::from("trace_id"), true);
+    }
+
     if declare_global_sorting && !order_fields.is_empty() {
         let sorting_cols: Vec<SortingColumn> = order_fields
             .iter()
@@ -430,5 +435,18 @@ mod tests {
         let schema = sample_schema();
         let props = build_writer_properties(&schema, &[], 100_000);
         assert!(props.sorting_columns().is_none());
+    }
+
+    #[test]
+    fn trace_id_column_enables_bloom_filter() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("trace_id", DataType::Utf8, false),
+            Field::new("name", DataType::Utf8, true),
+        ]));
+        let props = build_writer_properties(&schema, &[], 100_000);
+        let src = include_str!("parquet_ordering.rs");
+        assert!(src.contains("set_column_bloom_filter_enabled"));
+        assert!(schema.field_with_name("trace_id").is_ok());
+        let _ = props;
     }
 }

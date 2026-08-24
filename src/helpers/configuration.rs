@@ -3978,4 +3978,39 @@ schema_sinks:
         }
         ENV_CACHE.write().clear();
     }
+
+    fn parse_skippr_yml_like_skipprd(yaml: &str) -> Result<Config, String> {
+        let config: serde_value::Value = serde_yaml::from_str(yaml)
+            .map_err(|err| format!("Failed to parse YAML config: {err}"))?;
+        let string_val = serde_json::to_string(&config)
+            .map_err(|err| format!("Failed to normalize config: {err}"))?;
+        serde_json::from_str(&string_val)
+            .map_err(|err| format!("Invalid Skippr configuration: {err}"))
+    }
+
+    #[test]
+    fn rust_line_continuation_stripped_yaml_is_rejected() {
+        // Live WAL dump from gen 42 host-0: Rust `"\n\"` stripped every YAML indent.
+        let yaml = "skippr:\nworkspace: platform\ntenant: system\n\npipelines:\notel-traces:\ndata_source: data_sources.otlp_traces\ndata_sink: data_sinks.lake\n";
+        let err = parse_skippr_yml_like_skipprd(yaml).expect_err("stripped YAML must not parse");
+        assert!(
+            err.contains("null") && err.contains("map"),
+            "expected null-map Config error, got {err}"
+        );
+    }
+
+    #[test]
+    fn platform_otel_cookbook_schema_sink_sibling_yaml_parses() {
+        let yaml = include_str!("../../examples/otel/skippr.yml");
+        let config = parse_skippr_yml_like_skipprd(yaml).expect("cookbook skippr.yml must parse");
+        let lake = config
+            .data_sinks
+            .as_ref()
+            .and_then(|sinks| sinks.get("lake"))
+            .expect("data_sinks.lake");
+        assert_eq!(
+            lake.schema_sink.as_deref(),
+            Some("schema_sinks.iceberg_catalog")
+        );
+    }
 }
