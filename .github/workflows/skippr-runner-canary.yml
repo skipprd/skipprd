@@ -1,0 +1,16 @@
+name: Skippr Cloud runner canary
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  canary:
+    name: github-hosted canary
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Prove GitHub Actions accepts this workflow on master
+        run: echo "workflow registered"
