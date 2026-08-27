@@ -250,19 +250,16 @@ skippr run --log info
 
 ### Your config file
 
-After `init` and `connect`, `skippr.yml` is still the single project config. It has engine sections for ingestion and product sections for modeling:
+After `init` and `connect`, `skippr.yml` is still the single project config. Query and model compile `data_sinks` in memory:
 
 ```yaml
 skippr:
   workspace: mssql-migration
-  default_warehouse: primary
 
 pipelines:
   mssql-migration:
     data_source: data_sources.source
     data_sink: data_sinks.warehouse
-    model:
-      warehouse: primary
 
 data_sources:
   source:
@@ -276,14 +273,6 @@ data_sinks:
       schema: RAW
       warehouse: COMPUTE_WH
       role: ACCOUNTADMIN
-
-warehouses:
-  primary:
-    kind: snowflake
-    database: ANALYTICS
-    schema: RAW
-    warehouse: COMPUTE_WH
-    role: ACCOUNTADMIN
 ```
 
 `skippr` compiles this file into its internal data-engineering runtime config when you run modeling commands; you do not author a separate React/data-engineer config.
