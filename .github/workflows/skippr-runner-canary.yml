@@ -8,9 +8,9 @@ permissions:
 
 jobs:
   canary:
-    name: github-hosted canary
-    runs-on: ubuntu-latest
+    name: depot canary
+    runs-on: depot-ubuntu-22.04-16
     timeout-minutes: 5
     steps:
-      - name: Prove GitHub Actions accepts this workflow on master
+      - name: Prove GitHub Actions still starts jobs in this repo
         run: echo "workflow registered"
