@@ -2,11 +2,13 @@
 
 Ingest data from the source, buffer through the WAL, compact into Parquet, and upload to the destination.
 
+The product command is `skippr sync`. It invokes the skipprd runtime against the same `skippr.yml`.
+
 ## Usage
 
 ```bash
 skippr sync --pipeline <name> [--once] [--output <mode>] [--log [LEVEL]]
-skipprd --config skippr.yml sync --pipeline <name> [--once] [--output <mode>] [--log [LEVEL]]
+skippr --config skippr.yml sync --pipeline <name> [--once] [--output <mode>] [--log [LEVEL]]
 ```
 
 ## Flags
@@ -39,29 +41,3 @@ skippr --config skippr.yml sync --pipeline events --log
 ```bash
 skippr sync --pipeline el_mssql --once --output json
 ```
-
-This runs a single pass and emits JSON events to stdout:
-
-```json
-{"event":"sync_start","pipeline":"el_mssql","timestamp":"2026-03-18T12:00:00Z"}
-{"event":"namespace_discovered","namespace":"mssql.MyDB.dbo.customers","field_count":12,"timestamp":"..."}
-{"event":"sync_complete","pipeline":"el_mssql","namespaces_synced":5,"total_rows":15000,"elapsed_ms":4200,"timestamp":"..."}
-```
-
-## Key log events
-
-| Log pattern | Meaning |
-|---|---|
-| `Syncing pipeline: <name>` | Run started |
-| `Starting stream pipeline (...)` | Ingest worker active |
-| `Uploaded ...parquet to S3 (rows=..., bytes=...)` | Data written to destination |
-| `Finalising: compactor drained and stopped` | Clean shutdown |
-| `Compactor: summary uploaded_rows=X expected_msgs=Y` | Integrity check (expect X == Y) |
-| `Pipeline sync complete` | Run finished successfully |
-
-## Exit codes
-
-| Code | Meaning |
-|---|---|
-| 0 | Clean completion |
-| Non-zero | Compactor drain failed or runtime error — treat the run as untrusted |

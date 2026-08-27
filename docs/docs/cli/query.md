@@ -1,13 +1,14 @@
 # query
 
-Run SQL against configured data, manage pipelines and schemas.
+Run engine SQL against configured data, manage pipelines and schemas, and
+stream from the WAL.
 
-`skippr query` is the product-facing command. `skipprd query` remains available for engine-only SQL, pipeline management, schema management, and WAL streaming.
+Use `skipprd query` for the local runtime. `skippr query` is a different
+command: warehouse SQL through the modeling stack, not engine pipeline SQL.
 
 ## Usage
 
 ```bash
-skippr query --sql "<SQL>" [--watch <seconds>] [--plain] [--log [LEVEL]]
 skipprd --config skippr.yml query --sql "<SQL>" [--watch <seconds>] [--plain] [--log [LEVEL]]
 ```
 
@@ -25,31 +26,31 @@ skipprd --config skippr.yml query --sql "<SQL>" [--watch <seconds>] [--plain] [-
 Query a table:
 
 ```bash
-skippr query --sql "SELECT COUNT(*) FROM bikehire"
+skipprd query --sql "SELECT COUNT(*) FROM bikehire"
 ```
 
 Live watch:
 
 ```bash
-skippr query --sql "SELECT COUNT(*) FROM bikehire" --watch 5
+skipprd query --sql "SELECT COUNT(*) FROM bikehire" --watch 5
 ```
 
 Pipeline management:
 
 ```bash
-skippr query --sql "ENABLE PIPELINE bikehire"
-skippr query --sql "DISABLE PIPELINE bikehire"
-skippr query --sql "RESET PIPELINE bikehire"
-skippr query --sql "DROP PIPELINE bikehire"
+skipprd query --sql "ENABLE PIPELINE bikehire"
+skipprd query --sql "DISABLE PIPELINE bikehire"
+skipprd query --sql "RESET PIPELINE bikehire"
+skipprd query --sql "DROP PIPELINE bikehire"
 ```
 
 Schema management:
 
 ```bash
-skippr query --sql "SCHEMA DUMP bikehire TO 'schema.json'"
-skippr query --sql "LOAD SCHEMA 'schema.json' INTO bikehire"
-skippr query --sql "ALTER SCHEMA bikehire DROP COLUMN old_field"
-skippr query --sql "ALTER SCHEMA bikehire ALTER COLUMN price TYPE DECIMAL(10,2)"
+skipprd query --sql "SCHEMA DUMP bikehire TO 'schema.json'"
+skipprd query --sql "LOAD SCHEMA 'schema.json' INTO bikehire"
+skipprd query --sql "ALTER SCHEMA bikehire DROP COLUMN old_field"
+skipprd query --sql "ALTER SCHEMA bikehire ALTER COLUMN price TYPE DECIMAL(10,2)"
 ```
 
 Stream from the WAL:

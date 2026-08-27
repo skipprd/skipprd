@@ -12,19 +12,32 @@ Catalog DDL can be driven by a paired [Glue schema sink](../schema_sinks/glue.md
 
 ## Configuration
 
-```bash
-DATA_OUTPUT_S3_BUCKET=my-output-bucket
-DATA_OUTPUT_S3_PREFIX=warehouse/events
-SCHEMA_OUTPUT_GLUE_DATABASE_NAME=my_database
+```yaml
+data_sinks:
+  warehouse:
+    Athena:
+      s3_bucket: my-output-bucket
+      s3_prefix: warehouse/events
+      glue_database_name: my_database
+      athena_workgroup_name: primary
+      athena_results_s3_bucket: my-athena-results
+      region: us-east-1
+      catalog: AwsDataCatalog
 ```
 
-| Variable | Default | Description |
+`s3_bucket`, `s3_prefix`, `glue_database_name`, `athena_workgroup_name`, and `athena_results_s3_bucket` are ingest fields. `region`, `catalog`, `max_concurrency`, and `discovery_cache_ttl_secs` are optional query/model keys; ingest ignores them.
+
+`athena_results_s3_bucket` is a **bucket name**, not an `s3://` URI.
+
+Environment equivalents:
+
+| Variable | YAML field | Description |
 |---|---|---|
-| `DATA_OUTPUT_S3_BUCKET` | *(required)* | S3 bucket for Parquet output |
-| `DATA_OUTPUT_S3_PREFIX` | | Key prefix for output objects |
-| `SCHEMA_OUTPUT_GLUE_DATABASE_NAME` | *(required)* | Glue database name |
-| `DATA_OUTPUT_ATHENA_WORKGROUP_NAME` | | Athena workgroup for queries |
-| `DATA_OUTPUT_ATHENA_RESULTS_S3_BUCKET` | | S3 bucket for Athena query results |
+| `DATA_OUTPUT_S3_BUCKET` | `s3_bucket` | S3 bucket for Parquet output |
+| `DATA_OUTPUT_S3_PREFIX` | `s3_prefix` | Key prefix for output objects |
+| `SCHEMA_OUTPUT_GLUE_DATABASE_NAME` | `glue_database_name` | Glue database name |
+| `DATA_OUTPUT_ATHENA_WORKGROUP_NAME` | `athena_workgroup_name` | Athena workgroup for queries |
+| `DATA_OUTPUT_ATHENA_RESULTS_S3_BUCKET` | `athena_results_s3_bucket` | S3 bucket for Athena query results |
 
 ## S3 layout
 

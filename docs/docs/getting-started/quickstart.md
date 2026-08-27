@@ -18,15 +18,12 @@ Create a project file in your working directory:
 skippr:
   workspace: quickstart
   skippr_s3_bucket: your-state-bucket
-  default_warehouse: primary
 
 pipelines:
   bikehire:
     data_source: data_sources.sample
     data_sink: data_sinks.athena
     schema_sink: schema_sinks.glue
-    model:
-      warehouse: primary
 
 data_sources:
   sample:
@@ -47,13 +44,6 @@ schema_sinks:
   glue:
     Glue:
       glue_database_name: skippr_quickstart
-
-warehouses:
-  primary:
-    kind: athena
-    workgroup: primary
-    schema: skippr_quickstart
-    result_s3: s3://your-athena-results/
 ```
 
 Set AWS credentials through the normal AWS environment or instance role:
@@ -79,7 +69,7 @@ You'll see output showing discovered namespaces and fields. The schema is persis
 Enable the pipeline, then run sync to ingest data:
 
 ```bash
-skippr query --sql "ENABLE PIPELINE bikehire"
+skipprd query --sql "ENABLE PIPELINE bikehire"
 skippr sync --pipeline bikehire --log
 ```
 
@@ -92,7 +82,7 @@ Sync reads from the source, buffers through the WAL, compacts into Parquet, uplo
 ## 5. Query the data
 
 ```bash
-skippr query --sql "SELECT COUNT(*) FROM bikehire"
+skipprd query --sql "SELECT COUNT(*) FROM bikehire"
 ```
 
 Your data is now in Athena. You can also query directly from the AWS Athena console.

@@ -62,7 +62,11 @@ data_sinks:
       schema: "PUBLIC"
       role: "LOADER_ROLE"
       stage: "@SKIPPR_STAGE"
+      max_concurrency: 4
+      discovery_cache_ttl_secs: 300
 ```
+
+`max_concurrency` and `discovery_cache_ttl_secs` are optional query/model keys; ingest ignores them.
 
 ## Configuration variables
 

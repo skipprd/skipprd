@@ -132,15 +132,12 @@ Skippr is configured primarily via `skippr.yml`. Environment variables remain us
 ```yaml
 skippr:
   workspace: dev
-  default_warehouse: primary
 
 pipelines:
   bikehire:
     data_source: data_sources.source
     data_sink: data_sinks.landing
     schema_sink: schema_sinks.glue
-    model:
-      warehouse: primary
 
 data_sources:
   source:
@@ -161,16 +158,9 @@ schema_sinks:
   glue:
     Glue:
       glue_database_name: skippr_quickstart
-
-warehouses:
-  primary:
-    kind: athena
-    workgroup: primary
-    schema: skippr_quickstart
-    result_s3: s3://your-athena-results/
 ```
 
-`data_sinks` are ingest/write targets. `warehouses` are query/model/catalog providers used by the product CLI.
+`data_sinks` are ingest/write targets. `skippr model` and `skippr query` use the same sink object. There is no `warehouses:` section.
 
 See [the docs](docs/docs/configuration/skippr-yml.md) for the full config reference.
 

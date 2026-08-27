@@ -23,7 +23,7 @@ schema_sinks:
       glue_database_name: bronze_events
 ```
 
-`data_sinks` write landed data. `schema_sinks` manage destination catalog DDL where that is separate from the data sink. Query and modeling use [`warehouses`](warehouses.md).
+`data_sinks` write landed data. `schema_sinks` manage destination catalog DDL where that is separate from the data sink. Query and modeling compile the same `data_sinks` plugin object.
 
 Optional `version:` on a sink or schema block pins that connector to a specific release.
 

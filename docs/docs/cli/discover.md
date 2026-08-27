@@ -2,11 +2,13 @@
 
 Connect to the data source, sample records, and infer the pipeline schema. Unlike `sync`, discover never writes to the output destination -- it only discovers schemas and persists metadata.
 
+The product command is `skippr discover`. It invokes the skipprd runtime against the same `skippr.yml`.
+
 ## Usage
 
 ```bash
 skippr discover --pipeline <name> [--output <mode>] [--log [LEVEL]]
-skipprd --config skippr.yml discover --pipeline <name> [--output <mode>] [--log [LEVEL]]
+skippr --config skippr.yml discover --pipeline <name> [--output <mode>] [--log [LEVEL]]
 ```
 
 ## Flags
@@ -39,34 +41,3 @@ skippr --config skippr.yml discover --pipeline events --log
 ```bash
 skippr discover --pipeline el_mssql --output json
 ```
-
-This emits JSON events to stdout:
-
-```json
-{"event":"discover_start","pipeline":"el_mssql","timestamp":"2026-03-18T12:00:00Z"}
-{"event":"namespace_discovered","namespace":"mssql.MyDB.dbo.customers","fields":[{"name":"id","type":"Long"},{"name":"email","type":"String"}],"timestamp":"..."}
-{"event":"namespace_discovered","namespace":"mssql.MyDB.dbo.orders","fields":[{"name":"order_id","type":"Long"},{"name":"total","type":"Double"}],"timestamp":"..."}
-{"event":"discover_complete","pipeline":"el_mssql","namespaces_discovered":2,"elapsed_ms":12000,"timestamp":"..."}
-```
-
-The `fields` array uses `SkipprDataType` names (`String`, `Long`, `Double`, `Boolean`, `Date`, `Timestamp`, etc.) representing the inferred source types.
-
-## Reading discovered schemas
-
-After `discover` completes, use [`SHOW PIPELINE`](../sql/reference.md#show-pipeline) to retrieve the full discovered schema including field names and inferred types:
-
-```bash
-skippr query --sql "SHOW PIPELINE el_mssql" --plain
-```
-
-## Key log events
-
-- `Discovered new namespace: <name>` -- a new event type/schema was found
-- `Discovered new field: <field>` -- a new field was added to the schema
-- `Updated pipeline metadata` -- schema persisted
-
-## Notes
-
-- Discovery must be run before the first `sync` to establish the pipeline schema.
-- Re-running discover updates the schema if the source data has changed.
-- Discovery does not ingest or move data -- it only reads a sample and infers types.

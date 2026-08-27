@@ -28,7 +28,10 @@ data_sinks:
       staging_s3_prefix: skippr-staging/
       iam_role_arn: "arn:aws:iam::123456789012:role/RedshiftCopyRole"
       table: events
+      schema: public
 ```
+
+`schema` is an optional query/model key; ingest uses `table` for writes.
 
 ## Configuration variables
 

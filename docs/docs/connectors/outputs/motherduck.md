@@ -18,7 +18,10 @@ data_sinks:
       motherduck_token: "ey..."
       database: "my_database"
       table: events
+      schema: main
 ```
+
+`schema` is an optional query/model key; ingest uses `table` for writes.
 
 ## Configuration variables
 
