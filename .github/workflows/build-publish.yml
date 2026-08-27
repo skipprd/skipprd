@@ -40,7 +40,9 @@ env:
 jobs:
   resolve_pipeline_mode:
     name: resolve pipeline mode
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     outputs:
       fast_release: ${{ steps.mode.outputs.fast_release }}
     steps:
@@ -75,7 +77,9 @@ jobs:
       - resolve_pipeline_mode
       - cleanup
     if: ${{ always() && needs.resolve_pipeline_mode.result == 'success' && (needs.cleanup.result == 'success' || needs.cleanup.result == 'skipped') }}
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     outputs:
       runtime_plugin_packages_json: ${{ steps.plan.outputs.runtime_plugin_packages_json }}
     steps:
@@ -111,7 +115,9 @@ jobs:
     needs:
       - resolve_pipeline_mode
     if: ${{ needs.resolve_pipeline_mode.outputs.fast_release != 'true' }}
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     container:
       image: python:3.8-alpine
     steps:
@@ -136,7 +142,9 @@ jobs:
       - resolve_pipeline_mode
       - cleanup
     if: ${{ needs.resolve_pipeline_mode.outputs.fast_release != 'true' }}
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     container:
       image: node:14
     env:
@@ -153,6 +161,7 @@ jobs:
         run: node _files/purge-dynamodb.js
 
   # macOS release build runs after Linux tests, e2e, and primary release publish.
+  # Disabled for now: GitHub-hosted macOS. Linux Skippr Cloud runners only.
   macos_arm64:
     name: cargo build (macos arm64)
     needs:
@@ -160,7 +169,8 @@ jobs:
       - plan_runtime_plugin_release
       - linux_x86
       - publish_github_release
-    if: ${{ !failure() && !cancelled() && needs.resolve_pipeline_mode.outputs.fast_release != 'true' && needs.plan_runtime_plugin_release.result == 'success' && needs.linux_x86.result == 'success' && (needs.publish_github_release.result == 'success' || needs.publish_github_release.result == 'skipped') }}
+    if: false
+    # if: ${{ !failure() && !cancelled() && needs.resolve_pipeline_mode.outputs.fast_release != 'true' && needs.plan_runtime_plugin_release.result == 'success' && needs.linux_x86.result == 'success' && (needs.publish_github_release.result == 'success' || needs.publish_github_release.result == 'skipped') }}
     runs-on: macos-14
     env:
       CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
@@ -204,7 +214,8 @@ jobs:
       - mssql_iceberg_debug_linux_test
     if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && (needs.resolve_pipeline_mode.outputs.fast_release == 'true' || (github.event_name == 'workflow_dispatch' && inputs.snowflake_e2e_only == true) || (needs.linux_test_suite.result == 'success' && needs.data_engineer_test_suite.result == 'success' && needs.skippr_cli_test_suite.result == 'success' && needs.skippr_admin_test_suite.result == 'success' && needs.postgres_iceberg_types_cdc_test.result == 'success' && needs.iceberg_equality_commit_e2e_test.result == 'success' && needs.mysql_iceberg_types_cdc_test.result == 'success' && needs.dynamodb_iceberg_types_cdc_test.result == 'success' && needs.mssql_iceberg_debug_linux_test.result == 'success')) }}
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     env:
       CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
       CODEARTIFACT_AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
@@ -238,7 +249,8 @@ jobs:
       - resolve_pipeline_mode
       - plan_runtime_plugin_release
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     env:
       CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
       CODEARTIFACT_AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
@@ -315,7 +327,8 @@ jobs:
       - resolve_pipeline_mode
       - plan_runtime_plugin_release
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     env:
       CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
       CODEARTIFACT_AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
@@ -356,7 +369,8 @@ jobs:
       - resolve_pipeline_mode
       - data_engineer_test_suite
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     env:
       CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
       CODEARTIFACT_AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
@@ -393,7 +407,8 @@ jobs:
       - resolve_pipeline_mode
       - data_engineer_test_suite
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     env:
       CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
       CODEARTIFACT_AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
@@ -423,7 +438,7 @@ jobs:
           cargo build -p skippr-admin
           cargo test -p skippr-admin -- --nocapture
 
-  # Disabled: compile-only macOS checks are non-gating; Linux carries test coverage.
+  # Disabled: GitHub-hosted macOS. Linux Skippr Cloud runners only.
   macos_arm64_test_compile:
     if: false
     name: cargo test --no-run (macos arm64)
@@ -527,7 +542,7 @@ jobs:
         run: |
           cargo test -p skippr-plugin-data-sink-postgres --no-run
 
-  # Windows release build runs in parallel with macOS after Linux validation and publish.
+  # Disabled for now: Depot Windows. Linux Skippr Cloud runners only.
   windows_x86:
     name: cargo build (windows x86)
     needs:
@@ -535,7 +550,8 @@ jobs:
       - plan_runtime_plugin_release
       - linux_x86
       - publish_github_release
-    if: ${{ !failure() && !cancelled() && needs.resolve_pipeline_mode.outputs.fast_release != 'true' && needs.plan_runtime_plugin_release.result == 'success' && needs.linux_x86.result == 'success' && (needs.publish_github_release.result == 'success' || needs.publish_github_release.result == 'skipped') }}
+    if: false
+    # if: ${{ !failure() && !cancelled() && needs.resolve_pipeline_mode.outputs.fast_release != 'true' && needs.plan_runtime_plugin_release.result == 'success' && needs.linux_x86.result == 'success' && (needs.publish_github_release.result == 'success' || needs.publish_github_release.result == 'skipped') }}
     runs-on: depot-windows-2022-16
     env:
       CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
@@ -833,7 +849,7 @@ jobs:
           path: runtime-plugin-binaries-windows_x86
           retention-days: 30
 
-  # Disabled: Windows tests are slow and non-gating; Windows build runs after release publish.
+  # Disabled: Depot Windows. Linux Skippr Cloud runners only.
   windows_x86_test_compile:
     if: false
     name: cargo test --no-run (windows x86)
@@ -1021,7 +1037,9 @@ jobs:
       - plan_runtime_plugin_release
       - linux_x86
     if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && needs.linux_x86.result == 'success' }}
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     steps:
       - uses: actions/checkout@v4
         with:
@@ -1154,7 +1172,8 @@ jobs:
       - publish_runtime_plugins
     name: smoke test published runtime plugins (linux x86)
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     env:
       CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
       CODEARTIFACT_AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
@@ -1200,7 +1219,8 @@ jobs:
       - publish_runtime_plugins
     name: Bike Hire (linux x86)
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     steps:
       - uses: actions/checkout@v4
 
@@ -1227,7 +1247,8 @@ jobs:
       - publish_runtime_plugins
     name: Chaos Mode (linux x86)
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     steps:
       - uses: actions/checkout@v4
 
@@ -1254,7 +1275,8 @@ jobs:
       - publish_runtime_plugins
     name: Deadletter Output Routing Test
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     steps:
       - uses: actions/checkout@v4
 
@@ -1280,7 +1302,9 @@ jobs:
       - linux_test_suite
       - data_engineer_test_suite
     name: Postgres to Iceberg Glue Athena e2e
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     environment: Skippr
     services:
       postgres:
@@ -1439,7 +1463,9 @@ jobs:
       - linux_test_suite
       - data_engineer_test_suite
     name: Iceberg equality-commit e2e (CDC delete, ReplacePartition, MergeByKey)
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     environment: Skippr
     services:
       postgres:
@@ -1529,7 +1555,9 @@ jobs:
       - linux_test_suite
       - data_engineer_test_suite
     name: MySQL to Iceberg Glue Athena e2e
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     environment: Skippr
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -1680,7 +1708,9 @@ jobs:
       - linux_test_suite
       - data_engineer_test_suite
     name: DynamoDB to Iceberg Glue Athena e2e
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     environment: Skippr
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -1790,7 +1820,9 @@ jobs:
       - linux_test_suite
       - data_engineer_test_suite
     name: MSSQL to Iceberg debug (linux)
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     environment: Skippr
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -1889,7 +1921,7 @@ jobs:
             --prepare-aws-state \
             --skip-dynamodb-purge
 
-  # Disabled: Windows tests are slow and non-gating; Windows build runs after release publish.
+  # Disabled: Depot Windows. Linux Skippr Cloud runners only.
   mssql_iceberg_debug_windows_test:
     if: false
     needs:
@@ -2082,7 +2114,9 @@ jobs:
       - deadletters_test
       - published_runtime_plugins_smoke_test
       - linux_x86
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     steps:
       - name: Check out code
         uses: actions/checkout@v4
@@ -2124,7 +2158,9 @@ jobs:
       - linux_x86
       - skippr_cli_test_suite
       - data_engineer_test_suite
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     steps:
       - name: Check out code
         uses: actions/checkout@v4
@@ -2173,7 +2209,9 @@ jobs:
       - publish_skippr
       - skippr_admin_test_suite
       - linux_x86
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     steps:
       - name: Check out code
         uses: actions/checkout@v4
@@ -2235,13 +2273,17 @@ jobs:
           printf '%s' "$TAG" > "$LATEST_POINTER"
           aws s3 cp "$LATEST_POINTER" "s3://${BUCKET}/releases/${LATEST_POINTER}" --cache-control "no-cache, no-store, must-revalidate"
 
+  # Disabled for now: depends on macos_arm64. Linux Skippr Cloud runners only.
   publish_mac_release:
     name: Publish macOS Release Assets
-    if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && needs.macos_arm64.result == 'success' }}
+    if: false
+    # if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && needs.macos_arm64.result == 'success' }}
     needs:
-      - macos_arm64
+      # - macos_arm64
       - publish_github_release
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     steps:
       - uses: actions/checkout@v4
         with:
@@ -2347,13 +2389,17 @@ jobs:
             --repo skipprd/skipprd \
             --clobber
 
+  # Disabled for now: depends on windows_x86. Linux Skippr Cloud runners only.
   publish_windows_release:
     name: Publish Windows Release Assets
-    if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && needs.windows_x86.result == 'success' }}
+    if: false
+    # if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && needs.windows_x86.result == 'success' }}
     needs:
-      - windows_x86
+      # - windows_x86
       - publish_github_release
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     steps:
       - uses: actions/checkout@v4
         with:
@@ -2467,7 +2513,8 @@ jobs:
       - publish_skippr
       - publish_runtime_plugins
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     environment: Skippr
     env:
       SKIPPR_API_KEY: ${{ secrets.SKIPPR_API_KEY }}

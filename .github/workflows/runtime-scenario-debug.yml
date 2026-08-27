@@ -33,7 +33,9 @@ env:
 jobs:
   runtime_scenario:
     name: ${{ inputs.scenario }} (linux x86)
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     steps:
       - uses: actions/checkout@v4
         with:

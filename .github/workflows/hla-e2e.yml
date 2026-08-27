@@ -24,7 +24,8 @@ jobs:
   hla_e2e:
     name: three-process DynamoDB Local HLA
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     env:
       CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
       CODEARTIFACT_AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}

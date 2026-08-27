@@ -8,9 +8,9 @@ on:
         type: boolean
         default: true
       run_windows:
-        description: Run the Windows MSSQL to Iceberg debug job
+        description: Run the Windows MSSQL to Iceberg debug job (disabled; Linux Skippr Cloud runners only)
         type: boolean
-        default: true
+        default: false
       run_runtime_scenario:
         description: Run a targeted published-runtime scenario on Linux
         type: boolean
@@ -44,7 +44,9 @@ jobs:
   runtime_scenario_linux:
     name: ${{ inputs.runtime_scenario }} debug (linux x86)
     if: ${{ inputs.run_runtime_scenario }}
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     environment: Skippr
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -127,7 +129,9 @@ jobs:
   linux:
     name: MSSQL to Iceberg debug (linux)
     if: ${{ inputs.run_linux }}
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     environment: Skippr
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -230,9 +234,11 @@ jobs:
             --prepare-aws-state \
             --skip-dynamodb-purge
 
+  # Disabled for now: Depot Windows. Linux Skippr Cloud runners only.
   windows:
     name: MSSQL to Iceberg debug (windows)
-    if: ${{ inputs.run_windows }}
+    if: false
+    # if: ${{ inputs.run_windows }}
     runs-on: depot-windows-2025-16
     environment: Skippr
     env:
