@@ -25,6 +25,9 @@ pub fn to_internal(
             region,
             result_s3,
             schema,
+            catalog,
+            max_concurrency,
+            discovery_cache_ttl_secs,
         }) => {
             let mut m = serde_json::Map::new();
             m.insert("kind".into(), "athena".into());
@@ -39,6 +42,15 @@ pub fn to_internal(
             }
             if let Some(v) = schema {
                 m.insert("schema".into(), v.clone().into());
+            }
+            if let Some(v) = catalog {
+                m.insert("catalog".into(), v.clone().into());
+            }
+            if let Some(v) = max_concurrency {
+                m.insert("max_concurrency".into(), serde_json::json!(v));
+            }
+            if let Some(v) = discovery_cache_ttl_secs {
+                m.insert("discovery_cache_ttl_secs".into(), serde_json::json!(v));
             }
             serde_json::Value::Object(m)
         }
@@ -57,6 +69,8 @@ pub fn to_internal(
             schema,
             warehouse,
             role,
+            max_concurrency,
+            discovery_cache_ttl_secs,
         }) => {
             let mut m = serde_json::Map::new();
             m.insert("kind".into(), "snowflake".into());
@@ -105,12 +119,20 @@ pub fn to_internal(
             if let Some(v) = role {
                 m.insert("role".into(), v.clone().into());
             }
+            if let Some(v) = max_concurrency {
+                m.insert("max_concurrency".into(), serde_json::json!(v));
+            }
+            if let Some(v) = discovery_cache_ttl_secs {
+                m.insert("discovery_cache_ttl_secs".into(), serde_json::json!(v));
+            }
             serde_json::Value::Object(m)
         }
         Some(WarehouseConfig::Bigquery {
             project,
             dataset,
             location,
+            max_concurrency,
+            discovery_cache_ttl_secs,
         }) => {
             let mut m = serde_json::Map::new();
             m.insert("kind".into(), "bigquery".into());
@@ -123,16 +145,45 @@ pub fn to_internal(
             if let Some(v) = location {
                 m.insert("location".into(), v.clone().into());
             }
+            if let Some(v) = max_concurrency {
+                m.insert("max_concurrency".into(), serde_json::json!(v));
+            }
+            if let Some(v) = discovery_cache_ttl_secs {
+                m.insert("discovery_cache_ttl_secs".into(), serde_json::json!(v));
+            }
             serde_json::Value::Object(m)
         }
-        Some(WarehouseConfig::Postgres { database, schema }) => {
+        Some(WarehouseConfig::Postgres {
+            host,
+            port,
+            user,
+            password,
+            database,
+            schema,
+            sslmode,
+        }) => {
             let mut m = serde_json::Map::new();
             m.insert("kind".into(), "postgres".into());
+            if let Some(v) = host {
+                m.insert("host".into(), v.clone().into());
+            }
+            if let Some(v) = port {
+                m.insert("port".into(), serde_json::json!(v));
+            }
+            if let Some(v) = user {
+                m.insert("user".into(), v.clone().into());
+            }
+            if let Some(v) = password {
+                m.insert("password".into(), v.clone().into());
+            }
             if let Some(v) = database {
                 m.insert("database".into(), v.clone().into());
             }
             if let Some(v) = schema {
                 m.insert("schema".into(), v.clone().into());
+            }
+            if let Some(v) = sslmode {
+                m.insert("sslmode".into(), v.clone().into());
             }
             serde_json::Value::Object(m)
         }
@@ -2254,6 +2305,8 @@ mod tests {
                 schema: Some("RAW".into()),
                 warehouse: Some("COMPUTE_WH".into()),
                 role: Some("ACCOUNTADMIN".into()),
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             }),
             source: Some(SourceConfig::Mssql {
                 connection_string: Some("${MSSQL_CONNECTION_STRING}".into()),
@@ -2309,6 +2362,8 @@ mod tests {
                 schema: Some("RAW".into()),
                 warehouse: Some("COMPUTE_WH".into()),
                 role: Some("ACCOUNTADMIN".into()),
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             }),
             source: Some(SourceConfig::Mssql {
                 connection_string: Some("${MSSQL_CONNECTION_STRING}".into()),
@@ -2352,7 +2407,12 @@ mod tests {
             project: "pg_project".into(),
             warehouse: Some(WarehouseConfig::Postgres {
                 database: Some("analytics".into()),
+                host: None,
+                port: None,
+                user: None,
+                password: None,
                 schema: Some("public".into()),
+                sslmode: None,
             }),
             source: Some(SourceConfig::Mssql {
                 connection_string: Some("${MSSQL_CONNECTION_STRING}".into()),
@@ -2394,6 +2454,8 @@ mod tests {
                 schema: None,
                 warehouse: None,
                 role: None,
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             }),
             source: None,
             dbt: None,
@@ -2444,6 +2506,8 @@ mod tests {
                 schema: None,
                 warehouse: None,
                 role: None,
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             },
             SourceConfig::Mysql {
                 connection_string: Some("mysql://root@localhost".into()),
@@ -2474,6 +2538,8 @@ mod tests {
                 schema: None,
                 warehouse: None,
                 role: None,
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             },
             SourceConfig::PostgresSource {
                 host: Some("db.example.com".into()),
@@ -2510,6 +2576,8 @@ mod tests {
                 schema: None,
                 warehouse: None,
                 role: None,
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             },
             SourceConfig::Kafka {
                 brokers: Some("localhost:9092".into()),
@@ -2549,6 +2617,8 @@ mod tests {
                 schema: None,
                 warehouse: None,
                 role: None,
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             },
             SourceConfig::DeltaLake {
                 table_uri: Some("s3://bucket/table".into()),
@@ -2686,6 +2756,8 @@ mod tests {
                 schema: Some("RAW".into()),
                 warehouse: Some("COMPUTE_WH".into()),
                 role: Some("ACCOUNTADMIN".into()),
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             },
             SourceConfig::Mssql {
                 connection_string: None,
@@ -2722,6 +2794,8 @@ mod tests {
                 schema: None,
                 warehouse: None,
                 role: None,
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             }),
             source: Some(SourceConfig::S3 {
                 s3_bucket: Some("b".into()),
@@ -2748,6 +2822,9 @@ mod tests {
                 region: Some("us-east-1".into()),
                 result_s3: None,
                 schema: Some("seo".into()),
+                catalog: None,
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             },
             SourceConfig::GoogleSearchConsole {
                 site_url: Some("https://example.com/".into()),
@@ -2789,6 +2866,9 @@ mod tests {
                 region: Some("us-east-1".into()),
                 result_s3: None,
                 schema: Some("seo".into()),
+                catalog: None,
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             },
             SourceConfig::BingWebmasterTools {
                 site_url: Some("https://example.com/".into()),
@@ -2823,6 +2903,9 @@ mod tests {
                 region: Some("us-east-1".into()),
                 result_s3: None,
                 schema: Some("analytics".into()),
+                catalog: None,
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             },
             SourceConfig::GoogleAnalytics {
                 property_id: Some("123456789".into()),
@@ -2863,6 +2946,9 @@ mod tests {
                 region: Some("us-east-1".into()),
                 result_s3: None,
                 schema: Some("otel".into()),
+                catalog: None,
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             },
             SourceConfig::Otlp {
                 listen_address_grpc: Some("0.0.0.0:4317".into()),
@@ -2887,6 +2973,9 @@ mod tests {
                 region: Some("us-east-1".into()),
                 result_s3: None,
                 schema: Some("web".into()),
+                catalog: None,
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             },
             SourceConfig::GooglePageSpeed {
                 site: Some("https://example.com".into()),
@@ -2922,6 +3011,9 @@ mod tests {
                 region: Some("us-east-1".into()),
                 result_s3: None,
                 schema: Some("seo".into()),
+                catalog: None,
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             },
             SourceConfig::GoogleSerpRanks {
                 targets: Some(vec![crate::public_config::GoogleSerpTargetConfig {
@@ -2959,6 +3051,9 @@ mod tests {
                 region: Some("us-east-1".into()),
                 result_s3: None,
                 schema: Some("seo".into()),
+                catalog: None,
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             },
             SourceConfig::AppleAppStoreSerp {
                 targets: Some(vec![crate::public_config::AppleAppStoreTargetConfig {
@@ -2993,6 +3088,9 @@ mod tests {
                 region: Some("us-east-1".into()),
                 result_s3: None,
                 schema: Some("marketing".into()),
+                catalog: None,
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             },
             SourceConfig::AiCitations {
                 site: Some("https://example.com".into()),
@@ -3025,6 +3123,9 @@ mod tests {
                 region: Some("us-east-1".into()),
                 result_s3: None,
                 schema: Some("web".into()),
+                catalog: None,
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             },
             SourceConfig::SiteQuality {
                 devices: Some(vec![SiteQualityDeviceConfig {
@@ -3070,6 +3171,9 @@ mod tests {
                 region: Some("us-east-1".into()),
                 result_s3: None,
                 schema: Some("marketing".into()),
+                catalog: None,
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             },
             SourceConfig::AppleSearchAds {
                 org_id: Some("12345".into()),
@@ -3106,6 +3210,9 @@ mod tests {
                 region: Some("us-east-1".into()),
                 result_s3: None,
                 schema: Some("marketing".into()),
+                catalog: None,
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             },
             SourceConfig::DataForSeoBacklinks {
                 login: Some("${DATAFORSEO_LOGIN}".into()),
@@ -3133,6 +3240,9 @@ mod tests {
                 region: Some("us-east-1".into()),
                 result_s3: None,
                 schema: Some("marketing".into()),
+                catalog: None,
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             },
             SourceConfig::DataForSeoSeoOpportunities {
                 login: Some("${DATAFORSEO_API_USER}".into()),
@@ -3160,6 +3270,9 @@ mod tests {
                 region: Some("us-east-1".into()),
                 result_s3: None,
                 schema: Some("marketing".into()),
+                catalog: None,
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             },
             SourceConfig::MetaInstagramAds {
                 ad_account_id: Some("123456789".into()),
@@ -3204,6 +3317,8 @@ mod tests {
                 schema: None,
                 warehouse: None,
                 role: None,
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             },
             SourceConfig::HttpClient {
                 url: Some("https://api.example.com/data".into()),

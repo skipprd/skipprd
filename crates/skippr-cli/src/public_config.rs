@@ -1,11 +1,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::path::Path;
 
-/// Internal product CLI projection used while compiling canonical `skippr.yml`.
+/// In-memory compile projection used while mapping engine `skippr.yml` into React `providers:`.
 ///
-/// Product users author `skippr.yml`; this type is a compatibility bridge for
-/// command helpers that have not yet been moved fully onto the engine-shaped YAML.
+/// Product users author skipprd plugin YAML. This type is not a skippr.yml dialect.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TrackedPromptEntry {
     pub id: String,
@@ -101,6 +99,12 @@ pub enum WarehouseConfig {
         result_s3: Option<String>,
         #[serde(default)]
         schema: Option<String>,
+        #[serde(default)]
+        catalog: Option<String>,
+        #[serde(default)]
+        max_concurrency: Option<usize>,
+        #[serde(default)]
+        discovery_cache_ttl_secs: Option<u64>,
     },
     Snowflake {
         #[serde(default)]
@@ -131,6 +135,10 @@ pub enum WarehouseConfig {
         warehouse: Option<String>,
         #[serde(default)]
         role: Option<String>,
+        #[serde(default)]
+        max_concurrency: Option<usize>,
+        #[serde(default)]
+        discovery_cache_ttl_secs: Option<u64>,
     },
     Bigquery {
         #[serde(default)]
@@ -139,12 +147,26 @@ pub enum WarehouseConfig {
         dataset: Option<String>,
         #[serde(default)]
         location: Option<String>,
+        #[serde(default)]
+        max_concurrency: Option<usize>,
+        #[serde(default)]
+        discovery_cache_ttl_secs: Option<u64>,
     },
     Postgres {
+        #[serde(default)]
+        host: Option<String>,
+        #[serde(default)]
+        port: Option<u16>,
+        #[serde(default)]
+        user: Option<String>,
+        #[serde(default)]
+        password: Option<String>,
         #[serde(default)]
         database: Option<String>,
         #[serde(default)]
         schema: Option<String>,
+        #[serde(default)]
+        sslmode: Option<String>,
     },
     Databricks {
         #[serde(default)]
@@ -1006,20 +1028,6 @@ pub enum SchemaSinkConfig {
 }
 
 impl SkipprProjectConfig {
-    pub fn load_from(path: &Path) -> Result<Self, String> {
-        let bytes =
-            std::fs::read(path).map_err(|e| format!("failed to read {}: {}", path.display(), e))?;
-        serde_yaml::from_slice::<Self>(&bytes)
-            .map_err(|e| format!("failed to parse {}: {}", path.display(), e))
-    }
-
-    pub fn save_to(&self, path: &Path) -> Result<(), String> {
-        let yaml =
-            serde_yaml::to_string(self).map_err(|e| format!("failed to serialize config: {e}"))?;
-        std::fs::write(path, yaml.as_bytes())
-            .map_err(|e| format!("failed to write {}: {e}", path.display()))
-    }
-
     pub fn warehouse_kind_str(&self) -> Option<&'static str> {
         match &self.warehouse {
             Some(WarehouseConfig::Athena { .. }) => Some("athena"),
