@@ -40,6 +40,11 @@ pub(crate) enum WarehouseFile {
     Postgres {
         database: Option<String>,
         schema: Option<String>,
+        host: Option<String>,
+        port: Option<u16>,
+        user: Option<String>,
+        password: Option<String>,
+        sslmode: Option<String>,
     },
     Mssql {
         database: Option<String>,
@@ -171,7 +176,15 @@ fn resolve_warehouse(w: WarehouseFile) -> WarehouseResolved {
                 "discovery_cache_ttl_secs": discovery_cache_ttl_secs,
             }),
         },
-        WarehouseFile::Postgres { database, schema } => WarehouseResolved {
+        WarehouseFile::Postgres {
+            database,
+            schema,
+            host,
+            port,
+            user,
+            password,
+            sslmode,
+        } => WarehouseResolved {
             kind: WarehouseKind::Postgres,
             container: resolve_env_ref(&database.unwrap_or_default()),
             namespace: resolve_env_ref(
@@ -179,7 +192,13 @@ fn resolve_warehouse(w: WarehouseFile) -> WarehouseResolved {
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or_else(|| "public".to_string()),
             ),
-            extras: serde_json::json!({}),
+            extras: serde_json::json!({
+                "host": resolve_opt_env_ref(host),
+                "port": port,
+                "user": resolve_opt_env_ref(user),
+                "password": resolve_opt_env_ref(password),
+                "sslmode": resolve_opt_env_ref(sslmode),
+            }),
         },
         WarehouseFile::Mssql {
             database,

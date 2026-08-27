@@ -504,28 +504,47 @@ impl SkipprCliProvider {
             }
             WarehouseKind::Postgres => {
                 env.insert("DATA_OUTPUT_PLUGIN_NAME".into(), "Postgres".into());
-                if let Some(v) = std::env::var("POSTGRES_HOST")
-                    .ok()
-                    .filter(|v| !v.trim().is_empty())
-                {
+                let extra_str = |key: &str| {
+                    self.warehouse
+                        .extras
+                        .get(key)
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .map(|v| resolve_env_ref(v))
+                };
+                let extra_port = self.warehouse.extras.get("port").and_then(|v| {
+                    v.as_u64()
+                        .map(|n| n.to_string())
+                        .or_else(|| v.as_str().map(|s| s.trim().to_string()))
+                        .filter(|s| !s.is_empty())
+                });
+                if let Some(v) = extra_str("host").or_else(|| {
+                    std::env::var("POSTGRES_HOST")
+                        .ok()
+                        .filter(|v| !v.trim().is_empty())
+                }) {
                     env.insert("POSTGRES_HOST".into(), v);
                 }
-                if let Some(v) = std::env::var("POSTGRES_PORT")
-                    .ok()
-                    .filter(|v| !v.trim().is_empty())
-                {
+                if let Some(v) = extra_port.or_else(|| {
+                    std::env::var("POSTGRES_PORT")
+                        .ok()
+                        .filter(|v| !v.trim().is_empty())
+                }) {
                     env.insert("POSTGRES_PORT".into(), v);
                 }
-                if let Some(v) = std::env::var("POSTGRES_USER")
-                    .ok()
-                    .filter(|v| !v.trim().is_empty())
-                {
+                if let Some(v) = extra_str("user").or_else(|| {
+                    std::env::var("POSTGRES_USER")
+                        .ok()
+                        .filter(|v| !v.trim().is_empty())
+                }) {
                     env.insert("POSTGRES_USER".into(), v);
                 }
-                if let Some(v) = std::env::var("POSTGRES_PASSWORD")
-                    .ok()
-                    .filter(|v| !v.trim().is_empty())
-                {
+                if let Some(v) = extra_str("password").or_else(|| {
+                    std::env::var("POSTGRES_PASSWORD")
+                        .ok()
+                        .filter(|v| !v.trim().is_empty())
+                }) {
                     env.insert("POSTGRES_PASSWORD".into(), v);
                 }
                 if let Some(v) = std::env::var("POSTGRES_DATABASE")
@@ -550,10 +569,11 @@ impl SkipprCliProvider {
                         resolve_env_ref(&self.warehouse.namespace),
                     );
                 }
-                if let Some(v) = std::env::var("POSTGRES_SSLMODE")
-                    .ok()
-                    .filter(|v| !v.trim().is_empty())
-                {
+                if let Some(v) = extra_str("sslmode").or_else(|| {
+                    std::env::var("POSTGRES_SSLMODE")
+                        .ok()
+                        .filter(|v| !v.trim().is_empty())
+                }) {
                     env.insert("POSTGRES_SSLMODE".into(), v);
                 }
             }
@@ -1195,18 +1215,36 @@ impl SkipprCliProvider {
             }
             WarehouseKind::Postgres => {
                 let mut cfg = serde_json::Map::new();
-                if let Some(v) = getenv("POSTGRES_HOST") {
+                let extra_str = |key: &str| {
+                    self.warehouse
+                        .extras
+                        .get(key)
+                        .and_then(|v| v.as_str())
+                        .map(str::trim)
+                        .filter(|v| !v.is_empty())
+                        .map(|v| resolve_env_ref(v))
+                };
+                if let Some(v) = extra_str("host").or_else(|| getenv("POSTGRES_HOST")) {
                     cfg.insert("host".into(), serde_json::Value::String(v));
                 }
-                if let Some(v) = getenv("POSTGRES_PORT") {
-                    if let Ok(port) = v.parse::<u16>() {
-                        cfg.insert("port".into(), serde_json::Value::Number(port.into()));
-                    }
+                if let Some(v) = self
+                    .warehouse
+                    .extras
+                    .get("port")
+                    .and_then(|value| {
+                        value
+                            .as_u64()
+                            .and_then(|n| u16::try_from(n).ok())
+                            .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
+                    })
+                    .or_else(|| getenv("POSTGRES_PORT").and_then(|v| v.parse::<u16>().ok()))
+                {
+                    cfg.insert("port".into(), serde_json::Value::Number(v.into()));
                 }
-                if let Some(v) = getenv("POSTGRES_USER") {
+                if let Some(v) = extra_str("user").or_else(|| getenv("POSTGRES_USER")) {
                     cfg.insert("user".into(), serde_json::Value::String(v));
                 }
-                if let Some(v) = getenv("POSTGRES_PASSWORD") {
+                if let Some(v) = extra_str("password").or_else(|| getenv("POSTGRES_PASSWORD")) {
                     cfg.insert("password".into(), serde_json::Value::String(v));
                 }
                 if let Some(v) = getenv("POSTGRES_DATABASE") {
@@ -1225,7 +1263,7 @@ impl SkipprCliProvider {
                         serde_json::Value::String(resolve_env_ref(&self.warehouse.namespace)),
                     );
                 }
-                if let Some(v) = getenv("POSTGRES_SSLMODE") {
+                if let Some(v) = extra_str("sslmode").or_else(|| getenv("POSTGRES_SSLMODE")) {
                     cfg.insert("sslmode".into(), serde_json::Value::String(v));
                 }
                 serde_json::Value::Object(cfg)
