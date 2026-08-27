@@ -67,11 +67,6 @@ pub struct Skippr {
     pub tenant: Option<String>,
     pub skippr_s3_bucket: Option<String>,
     pub skipprd_el_storage_mode: Option<String>,
-    /// Default warehouse key used by product CLI/modeling commands.
-    ///
-    /// The engine does not use this directly; it is accepted here so `skipprd`
-    /// and `skippr` can read the same canonical `skippr.yml`.
-    pub default_warehouse: Option<String>,
     /// Dedicated S3 bucket for WAL segments (falls back to skippr_s3_bucket).
     pub wal_s3_bucket: Option<String>,
     /// Offset store backend: `sled` (default) or `dynamodb`.
@@ -111,12 +106,12 @@ pub struct SemanticLayerSettings {
     pub llm_debounce_ms: Option<u64>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
-pub struct PipelineModelConfig {
-    /// Warehouse key under top-level `warehouses:` for query/model/catalog work.
-    pub warehouse: Option<String>,
-    /// dbt project directory used by product CLI modeling commands.
-    pub dbt_project: Option<String>,
+/// Product CLI dbt naming. Ignored by the engine runtime.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct ProductDbtConfig {
+    pub target_schema: Option<String>,
+    pub silver_suffix: Option<String>,
+    pub gold_suffix: Option<String>,
 }
 
 pub type DataSourcePluginConfig = PluginConfigEntry;
@@ -173,8 +168,6 @@ pub struct Pipeline {
     pub deadletter_sink: Option<String>,
     pub stats: Option<Stats>,
     pub semantic_layer: Option<SemanticLayerSettings>,
-    /// Product CLI modeling config. Ignored by the engine runtime.
-    pub model: Option<PipelineModelConfig>,
     /// CDC configuration. When present, the pipeline runs in CDC mode and
     /// validates source/sink compatibility at startup.
     pub cdc: Option<CdcPipelineConfig>,
@@ -227,17 +220,10 @@ pub struct Config {
     pub deadletter_sinks: Option<HashMap<String, DataSinkEntry>>,
     #[serde(alias = "schema_outputs")]
     pub schema_sinks: Option<HashMap<String, SchemaSinkConfig>>,
-    /// Query/model/catalog warehouse providers used by the product CLI.
-    ///
-    /// Kept as generic JSON so the lightweight engine accepts the canonical
-    /// product config without depending on warehouse provider crates.
-    pub warehouses: Option<HashMap<String, Value>>,
-    /// Product CLI dbt settings. Ignored by the engine runtime.
-    pub dbt: Option<Value>,
+    /// Product CLI dbt naming. Ignored by the engine runtime.
+    pub dbt: Option<ProductDbtConfig>,
     /// Product CLI vector source settings. Ignored by the engine runtime.
     pub vector_sources: Option<HashMap<String, Value>>,
-    /// Product CLI LLM settings. Ignored by the engine runtime.
-    pub llm: Option<Value>,
 }
 
 pub static APP_CONFIG: Lazy<Arc<TimedRwLock<Option<Config>>>> =
@@ -362,7 +348,6 @@ impl Config {
                 tenant: None,
                 skippr_s3_bucket: None,
                 skipprd_el_storage_mode: None,
-                default_warehouse: None,
                 wal_s3_bucket: None,
                 offset_store: None,
                 offset_dynamodb_table: None,
@@ -372,10 +357,8 @@ impl Config {
             data_sinks: None,
             deadletter_sinks: None,
             schema_sinks: None,
-            warehouses: None,
             dbt: None,
             vector_sources: None,
-            llm: None,
         }
     }
 
@@ -1259,7 +1242,6 @@ impl Config {
                     deadletter_sink: None,
                     stats: None,
                     semantic_layer: None,
-                    model: None,
                     cdc: None,
                 }
             }
@@ -3523,7 +3505,6 @@ data_sinks:
             tenant: None,
             skippr_s3_bucket: None,
             skipprd_el_storage_mode: Some("local".to_string()),
-            default_warehouse: None,
             wal_s3_bucket: None,
             offset_store: None,
             offset_dynamodb_table: None,
@@ -3560,7 +3541,6 @@ data_sinks:
             deadletter_sink: None,
             stats: None,
             semantic_layer: None,
-            model: None,
             cdc: None,
         };
         let config = Config {
@@ -3569,7 +3549,6 @@ data_sinks:
                 tenant: None,
                 skippr_s3_bucket: None,
                 skipprd_el_storage_mode: None,
-                default_warehouse: None,
                 wal_s3_bucket: None,
                 offset_store: None,
                 offset_dynamodb_table: None,
@@ -3579,10 +3558,8 @@ data_sinks:
             data_sinks: None,
             deadletter_sinks: Some(HashMap::new()),
             schema_sinks: None,
-            warehouses: None,
             dbt: None,
             vector_sources: None,
-            llm: None,
         };
 
         assert!(
@@ -3612,7 +3589,6 @@ data_sinks:
             deadletter_sink: Some("deadletter_sinks.missing".to_string()),
             stats: None,
             semantic_layer: None,
-            model: None,
             cdc: None,
         };
         let config = Config {
@@ -3621,7 +3597,6 @@ data_sinks:
                 tenant: None,
                 skippr_s3_bucket: None,
                 skipprd_el_storage_mode: None,
-                default_warehouse: None,
                 wal_s3_bucket: None,
                 offset_store: None,
                 offset_dynamodb_table: None,
@@ -3631,10 +3606,8 @@ data_sinks:
             data_sinks: None,
             deadletter_sinks: Some(HashMap::new()),
             schema_sinks: None,
-            warehouses: None,
             dbt: None,
             vector_sources: None,
-            llm: None,
         };
 
         assert!(Config::resolve_deadletter_plugin_config_for(&config, &pipeline).is_err());
