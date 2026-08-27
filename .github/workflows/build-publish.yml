@@ -29,7 +29,9 @@ jobs:
     name: plan runtime plugin release
     needs:
       - cleanup
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     outputs:
       runtime_plugin_packages_json: ${{ steps.plan.outputs.runtime_plugin_packages_json }}
     steps:
@@ -59,7 +61,9 @@ jobs:
           PY
 
   cleanup:
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     container:
       image: python:3.8-alpine
     steps:
@@ -82,7 +86,9 @@ jobs:
   purge_dynamodb:
     needs:
       - cleanup
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     container:
       image: node:14
     env:
@@ -147,7 +153,8 @@ jobs:
       - mssql_iceberg_debug_linux_test
       - mssql_iceberg_debug_windows_test
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
@@ -173,7 +180,8 @@ jobs:
     needs:
       - plan_runtime_plugin_release
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
@@ -216,7 +224,8 @@ jobs:
     needs:
       - plan_runtime_plugin_release
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
@@ -249,7 +258,8 @@ jobs:
     needs:
       - data_engineer_test_suite
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
@@ -278,7 +288,8 @@ jobs:
     needs:
       - data_engineer_test_suite
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
@@ -837,7 +848,9 @@ jobs:
       - linux_x86
       - macos_arm64
       - windows_x86
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     steps:
       - uses: actions/checkout@v4
         with:
@@ -957,7 +970,8 @@ jobs:
       - publish_runtime_plugins
     name: smoke test published runtime plugins (linux x86)
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
@@ -995,7 +1009,8 @@ jobs:
       - publish_runtime_plugins
     name: Bike Hire (linux x86)
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     steps:
       - uses: actions/checkout@v4
 
@@ -1020,7 +1035,8 @@ jobs:
       - publish_runtime_plugins
     name: Chaos Mode (linux x86)
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     steps:
       - uses: actions/checkout@v4
 
@@ -1045,7 +1061,8 @@ jobs:
       - publish_runtime_plugins
     name: S3 WAL (linux x86)
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     steps:
       - uses: actions/checkout@v4
 
@@ -1070,7 +1087,8 @@ jobs:
       - publish_runtime_plugins
     name: Deadletter Output Routing Test
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     steps:
       - uses: actions/checkout@v4
 
@@ -1094,7 +1112,9 @@ jobs:
       - linux_test_suite
       - data_engineer_test_suite
     name: Postgres to Iceberg Glue Athena e2e
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     environment: Skippr
     services:
       postgres:
@@ -1236,7 +1256,9 @@ jobs:
       - linux_test_suite
       - data_engineer_test_suite
     name: MySQL to Iceberg Glue Athena e2e
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     environment: Skippr
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -1358,7 +1380,9 @@ jobs:
       - linux_test_suite
       - data_engineer_test_suite
     name: DynamoDB to Iceberg Glue Athena e2e
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     environment: Skippr
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -1451,7 +1475,9 @@ jobs:
       - linux_test_suite
       - data_engineer_test_suite
     name: MSSQL to Iceberg debug (linux)
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     environment: Skippr
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
@@ -1734,7 +1760,9 @@ jobs:
       - linux_x86
       - macos_arm64
       - windows_x86
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     steps:
       - name: Check out code
         uses: actions/checkout@v4
@@ -1775,7 +1803,9 @@ jobs:
       - windows_x86
       - skippr_cli_test_suite
       - data_engineer_test_suite
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     steps:
       - name: Check out code
         uses: actions/checkout@v4
@@ -1816,7 +1846,9 @@ jobs:
       - linux_x86
       - macos_arm64
       - windows_x86
-    runs-on: depot-ubuntu-22.04-16
+    runs-on:
+      - self-hosted
+      - skippr-linux-x64-16
     steps:
       - name: Check out code
         uses: actions/checkout@v4
@@ -1889,7 +1921,8 @@ jobs:
       - publish_skippr
       - publish_runtime_plugins
     runs-on:
-      - depot-ubuntu-22.04-16
+      - self-hosted
+      - skippr-linux-x64-16
     environment: Skippr
     env:
       SKIPPR_API_KEY: ${{ secrets.SKIPPR_API_KEY }}
