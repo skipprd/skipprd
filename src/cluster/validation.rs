@@ -12,6 +12,7 @@ use std::path::PathBuf;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum CliModeKind {
     Discover,
+    Metadata,
     Sync { once: bool },
     Query,
     Schema,
@@ -23,6 +24,7 @@ impl CliModeKind {
     pub fn from_mode(mode: &Mode) -> Self {
         match mode {
             Mode::Discover(_) => Self::Discover,
+            Mode::Metadata { .. } => Self::Metadata,
             Mode::Sync(opts) => Self::Sync { once: opts.once },
             Mode::Query(_) => Self::Query,
             Mode::Schema(_) => Self::Schema,
@@ -34,6 +36,7 @@ impl CliModeKind {
     pub fn as_label(self) -> &'static str {
         match self {
             Self::Discover => "discover",
+            Self::Metadata => "metadata",
             Self::Sync { once: true } => "sync --once",
             Self::Sync { once: false } => "sync",
             Self::Query => "query",
@@ -77,6 +80,7 @@ pub fn validate_wal_storage_for_mode(
         WalStorage::Clustered => match mode {
             CliModeKind::Sync { once: true } => Err(ConfigError::ClusteredOnceRejected),
             CliModeKind::Discover => Err(ConfigError::ClusteredModeRejected("discover".into())),
+            CliModeKind::Metadata => Err(ConfigError::ClusteredModeRejected("metadata".into())),
             CliModeKind::Benchmark => Err(ConfigError::ClusteredModeRejected("benchmark".into())),
             CliModeKind::Schema => Err(ConfigError::ClusteredModeRejected("schema".into())),
             CliModeKind::Sync { once: false } | CliModeKind::Query | CliModeKind::SqlHelp => Ok(()),

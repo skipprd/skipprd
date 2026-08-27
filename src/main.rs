@@ -262,6 +262,23 @@ async fn async_main() {
                 error!("No pipeline name provided, you must provide a pipeline name to discover schemas");
             }
         }
+        Mode::Metadata { action } => {
+            Config::build_config();
+            let storage = reject_invalid_wal_storage();
+            reject_invalid_clustered_mode(storage, CliModeKind::Metadata);
+            let pipeline = skipprd::cli::metadata::pipeline_for_action(&action);
+            PIPELINE_NAME.write().clear();
+            PIPELINE_NAME.write().push_str(pipeline);
+            Config::init().await;
+            match &action {
+                skipprd::cli::metadata::MetadataAction::Show(_) => {
+                    skipprd::cli::metadata::run_metadata_show().await;
+                }
+                skipprd::cli::metadata::MetadataAction::Apply(args) => {
+                    skipprd::cli::metadata::run_metadata_apply(args).await;
+                }
+            }
+        }
         Mode::Query(options) => {
             Config::build_config();
             let storage = reject_invalid_wal_storage();

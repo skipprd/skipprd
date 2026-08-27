@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 use crate::helpers::wal_storage::WalStorage;
 
+pub mod metadata;
+
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
@@ -36,6 +38,11 @@ pub enum Mode {
     Schema(SchemaOptions),
     SqlHelp(SqlHelpOptions),
     Benchmark(BenchmarkOptions),
+    /// Show or apply persisted pipeline metadata.
+    Metadata {
+        #[command(subcommand)]
+        action: metadata::MetadataAction,
+    },
 }
 
 #[derive(Parser, Clone, PartialEq)]
