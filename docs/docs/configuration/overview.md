@@ -5,11 +5,10 @@ Skippr is configured primarily with `skippr.yml`. Environment variables are stil
 Start with:
 
 - [skippr.yml](skippr-yml.md) for the canonical project shape
-- [Warehouses](warehouses.md) for query/model/catalog providers
 - [Input Source](input.md) for `data_sources`
 - [Output Destination](output.md) for ingest `data_sinks` and `schema_sinks`
 
-Both `skippr` and `skipprd` read the same engine sections. `skippr` also reads product sections such as `warehouses`, `dbt`, `vector_sources`, and `llm`.
+`skippr` is the product CLI. `skippr discover` / `skippr sync` run the skipprd runtime against the same file; `skippr model` / `skippr query` compile `data_sinks` in memory. There is no separate `warehouses:` dialect.
 
 ## Environment overrides
 

@@ -44,9 +44,9 @@ Environment variable equivalent: `SCHEMA_OUTPUT_GLUE_DATABASE_NAME`.
 2. Set `pipelines.<name>.schema_sink` to a registry entry using the `Glue` plugin.
 3. Use the same database name on both blocks unless you intentionally separate landing and catalog namespaces.
 
-## Query warehouse
+## Query and model
 
-Ingest uses `data_sinks` / `schema_sinks`. To query landed tables with `skippr query` or `skippr model`, configure a separate [`warehouses`](../../configuration/warehouses.md) block (for example `kind: athena` pointing at the same Glue catalog and schema).
+Ingest uses `data_sinks` / `schema_sinks`. `skippr query` and `skippr model` use the same `Athena:` sink (`glue_database_name`, `athena_workgroup_name`, `athena_results_s3_bucket`). There is no separate warehouse block.
 
 ## Related
 

@@ -5,7 +5,6 @@ Pipelines are configured under `pipelines:` in `skippr.yml`.
 ```yaml
 skippr:
   workspace: dev
-  default_warehouse: primary
 
 pipelines:
   events:
@@ -16,18 +15,17 @@ pipelines:
     transform:
       batch_time_fields: created_at
       batch_time_unit: day
-    model:
-      warehouse: primary
 ```
 
-The pipeline name (`events` above) is the key used by both binaries:
+The pipeline name (`events` above) is the key used by `skippr`:
 
 ```bash
+skippr discover --pipeline events
 skippr sync --pipeline events
-skipprd --config skippr.yml sync --pipeline events
+skippr model --pipeline events
 ```
 
-`model.warehouse` selects a key from top-level `warehouses:`. If omitted, `skippr.default_warehouse` is used.
+`data_sources.events` and `data_sinks.landing` are logical names. They are not reserved; use any keys that match your project.
 
 ## Environment overrides
 
@@ -39,23 +37,19 @@ The name of the pipeline. Used as part of the composite key for metadata, schema
 |---|---|
 | **Environment variable** | `PIPELINE_NAME` |
 | **Default** | `default` |
-| **Example** | `bikehire`, `user_events`, `clickstream` |
-
-Combined with `WORKSPACE_NAME` and `TENANT` to form the full pipeline path: `{tenant}/{workspace}/{pipeline}`.
 
 ## WORKSPACE_NAME
 
-A logical grouping for pipelines, typically representing an environment or domain.
+Workspace / domain name. Combined with tenant and pipeline for storage keys.
 
 | | |
 |---|---|
 | **Environment variable** | `WORKSPACE_NAME` |
 | **Default** | `default` |
-| **Example** | `dev`, `prod`, `marketing` |
 
 ## TENANT
 
-Tenant identifier for multi-tenant deployments.
+Tenant identifier. Comes from authenticated credentials for hosted runs; local runs may set it via environment.
 
 | | |
 |---|---|

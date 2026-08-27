@@ -61,7 +61,15 @@ Unity and Polaris use the same `uri` + `warehouse` shape with optional auth fiel
 | `table_location_prefix` | | Override base path for new tables |
 | `properties` | | Extra Iceberg table properties (map) |
 | `format` | `parquet` | File format for data files |
-| `query_engine` | | Optional Athena workgroup for post-write queries |
+| `query_engine` | | Optional Athena query engine for `skippr model` / `skippr query` |
+
+Iceberg stays Iceberg. Model and query use `query_engine` on this sink. Do not project Iceberg YAML into a separate `Athena:` block.
+
+```yaml
+query_engine:
+  type: athena
+  workgroup: primary
+```
 
 ## Supported write policies
 

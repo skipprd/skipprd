@@ -16,7 +16,7 @@ Some deployments only need the engine/runtime path. Install `skipprd` when you w
 curl -sL "https://raw.githubusercontent.com/skipprd/skipprd/main/install.sh" | SKIPPR_BINARY=skipprd sudo bash
 ```
 
-`skipprd` reads the same `skippr.yml` for shared engine commands such as `discover`, `sync`, and engine query/schema operations.
+`skipprd` reads the same `skippr.yml`. Product workflows stay on `skippr`; `skippr discover` and `skippr sync` invoke this runtime. Direct `skipprd` is for Lambda images, plugin tests, and engine SQL.
 
 ### Install a specific version
 

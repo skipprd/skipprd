@@ -30,7 +30,11 @@ data_sinks:
       dataset: "my_dataset"
       location: "US"
       credentials_path: "/path/to/service-account.json"
+      max_concurrency: 4
+      discovery_cache_ttl_secs: 300
 ```
+
+`max_concurrency` and `discovery_cache_ttl_secs` are optional query/model keys; ingest ignores them.
 
 ## Configuration variables
 

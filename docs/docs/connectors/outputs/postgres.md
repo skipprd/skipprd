@@ -51,4 +51,6 @@ data_sinks:
 | `POSTGRES_SSLMODE` | | Libpq-style SSL mode (e.g. `disable`, `require`, `prefer`) |
 | `host`, `port`, `user`, `password`, `database`, `schema`, `sslmode`, `format` | | YAML equivalents / overrides |
 
+`skippr query` and `skippr model` use the same `Postgres:` sink fields (`host`, `port`, `user`, `password`, `database`, `schema`). There is no separate warehouse block.
+
 Connection parameters can be split between environment variables and YAML as supported by your pipeline configuration.

@@ -1,19 +1,19 @@
 # Connectors
 
-Reference for configuring data sources, ingest sinks, schema sinks, and query warehouses in `skippr.yml`.
+Reference for configuring data sources, ingest sinks, and schema sinks in `skippr.yml`. Query, model, and dbt use the same `data_sinks` plugin object as ingest.
 
 | Role | YAML block | Overview |
 | --- | --- | --- |
 | Read / extract | `data_sources:` | Input connectors (table below) |
 | Write ingested data | `data_sinks:` | [Data sinks](#data-sinks) |
 | Catalog / DDL for ingest | `schema_sinks:` | [Schema sinks](#schema-sinks) |
-| Query, model, dbt | `warehouses:` | [Warehouse providers](#warehouse-providers) |
-
-`data_sinks` and `schema_sinks` configure **ingest**. `warehouses` configure **query and modeling** after data lands. A destination often needs both an ingest sink and a warehouse block.
+| Query, model, dbt | `data_sinks:` | The pipeline's `data_sink` (same plugin object) |
 
 Optional `version:` on a source, sink, or schema connector pins that connector to a specific release.
 
 ## Data sources
+
+### Databases
 
 | Plugin | Doc | `skippr connect` |
 | --- | --- | --- |
@@ -26,9 +26,19 @@ Optional `version:` on a source, sink, or schema connector pins that connector t
 | `Postgres` | [PostgreSQL](inputs/postgres.md) | — |
 | `Redshift` | [Redshift](inputs/redshift.md) | — |
 | `DeltaLake` | [Delta Lake](inputs/delta_lake.md) | — |
+
+### Object stores
+
+| Plugin | Doc | `skippr connect` |
+| --- | --- | --- |
 | `File` | [Local file](inputs/file.md) | — |
 | `S3` | [S3](inputs/s3.md) | — |
 | `Sftp` | [SFTP](inputs/sftp.md) | — |
+
+### Streaming
+
+| Plugin | Doc | `skippr connect` |
+| --- | --- | --- |
 | `Kafka` | [Kafka](inputs/kafka.md) | — |
 | `Sqs` | [SQS](inputs/sqs.md) | — |
 | `Kinesis` | [Kinesis](inputs/kinesis.md) | — |
@@ -37,12 +47,25 @@ Optional `version:` on a source, sink, or schema connector pins that connector t
 | `Eventbridge` | [EventBridge](inputs/eventbridge.md) | — |
 | `Mqtt` | [MQTT](inputs/mqtt.md) | — |
 | `Websocket` | [WebSocket](inputs/websocket.md) | — |
+
+### HTTP / Network
+
+| Plugin | Doc | `skippr connect` |
+| --- | --- | --- |
+| `HttpClient` | [HTTP client](inputs/http_client.md) | — |
+| `HttpServer` | [HTTP server](inputs/http_server.md) | — |
+| `Socket` | [Socket](inputs/socket.md) | — |
+| `Statsd` | [StatsD](inputs/statsd.md) | — |
+| `Pcap` | [PCAP](inputs/pcap.md) | — |
+
+### API / SaaS
+
+| Plugin | Doc | `skippr connect` |
+| --- | --- | --- |
 | `GoogleAnalytics` | [GA4](inputs/google_analytics.md) | `google-analytics` |
 | `GoogleSearchConsole` | [Search Console](inputs/google_search_console.md) | `google-search-console` |
 | `BingWebmasterTools` | [Bing Webmaster](inputs/bing_webmaster_tools.md) | `bing-webmaster-tools` |
 | `AppleSearchAds` | [Apple Search Ads](inputs/apple_search_ads.md) | — |
-| `HttpClient` | [HTTP client](inputs/http_client.md) | — |
-| `HttpServer` | [HTTP server](inputs/http_server.md) | — |
 | `GoogleAds` | [Google Ads](inputs/google_ads.md) | — |
 | `MetaAds` | [Meta Ads](inputs/meta_ads.md) | — |
 | `MetaInstagramAds` | [Meta Instagram Ads](inputs/meta_instagram_ads.md) | `meta-instagram-ads` |
@@ -55,10 +78,12 @@ Optional `version:` on a source, sink, or schema connector pins that connector t
 | `XeroAccounting` | [Xero Accounting](inputs/xero_accounting.md) | — |
 | `RevolutBusiness` | [Revolut Business](inputs/revolut_business.md) | — |
 | `SumUp` | [SumUp](inputs/sumup.md) | — |
-| `Socket` | [Socket](inputs/socket.md) | — |
-| `Statsd` | [StatsD](inputs/statsd.md) | — |
+
+### Other
+
+| Plugin | Doc | `skippr connect` |
+| --- | --- | --- |
 | `Stdin` | [Stdin](inputs/stdin.md) | — |
-| `Pcap` | [PCAP](inputs/pcap.md) | — |
 
 ## Data sinks
 
@@ -95,17 +120,4 @@ Optional `version:` on a source, sink, or schema connector pins that connector t
 | `Clickhouse` | — | `Clickhouse` |
 | `Motherduck` | — | `Motherduck` |
 
-## Warehouse providers
-
-| `kind` | Doc |
-| --- | --- |
-| `athena` | [Athena](warehouses/athena.md) |
-| `snowflake` | [Snowflake](warehouses/snowflake.md) |
-| `postgres` | [Postgres](warehouses/postgres.md) |
-| `bigquery` | [BigQuery](warehouses/bigquery.md) |
-| `databricks` | [Databricks](warehouses/databricks.md) |
-| `redshift` | [Redshift](warehouses/redshift.md) |
-| `clickhouse` | [ClickHouse](warehouses/clickhouse.md) |
-| `motherduck` | [MotherDuck](warehouses/motherduck.md) |
-| `synapse` | [Synapse](warehouses/synapse.md) |
-| `mssql` | [MSSQL](warehouses/mssql.md) |
+Query and modeling read the same `data_sinks` plugin fields. Iceberg query uses `query_engine` on the Iceberg sink, not a separate Athena block.

@@ -37,7 +37,6 @@ nav:
       - Pipeline & Workspace: configuration/pipeline.md
       - Input Source: configuration/input.md
       - Output Destination: configuration/output.md
-      - Warehouses: configuration/warehouses.md
       - Transforms: configuration/transforms.md
       - Buffering & WAL: configuration/buffering.md
       - DynamoDB offset store: configuration/offset-store-dynamodb.md
@@ -77,15 +76,18 @@ nav:
               - EventBridge: connectors/inputs/eventbridge.md
               - MQTT: connectors/inputs/mqtt.md
               - WebSocket: connectors/inputs/websocket.md
-          - HTTP:
+          - HTTP / Network:
+              - HTTP Client: connectors/inputs/http_client.md
+              - HTTP Server: connectors/inputs/http_server.md
+              - OTLP: connectors/inputs/otlp.md
+              - Socket (TCP/UDP/Unix): connectors/inputs/socket.md
+              - StatsD: connectors/inputs/statsd.md
+              - PCAP: connectors/inputs/pcap.md
+          - API / SaaS:
               - Google Analytics (GA4): connectors/inputs/google_analytics.md
               - Google Search Console: connectors/inputs/google_search_console.md
               - Bing Webmaster Tools: connectors/inputs/bing_webmaster_tools.md
               - Apple Search Ads: connectors/inputs/apple_search_ads.md
-              - HTTP Client: connectors/inputs/http_client.md
-              - HTTP Server: connectors/inputs/http_server.md
-              - OTLP: connectors/inputs/otlp.md
-          - SaaS & APIs:
               - Google Ads: connectors/inputs/google_ads.md
               - Meta Ads: connectors/inputs/meta_ads.md
               - Meta Instagram Ads: connectors/inputs/meta_instagram_ads.md
@@ -99,10 +101,7 @@ nav:
               - Revolut Business: connectors/inputs/revolut_business.md
               - SumUp: connectors/inputs/sumup.md
           - Other:
-              - Socket (TCP/UDP/Unix): connectors/inputs/socket.md
-              - StatsD: connectors/inputs/statsd.md
               - Stdin: connectors/inputs/stdin.md
-              - PCAP: connectors/inputs/pcap.md
       - Outputs:
           - Ingest Sinks:
               - Athena (S3 + Glue): connectors/outputs/athena.md
@@ -128,17 +127,6 @@ nav:
       - Schema Sinks:
           - Glue: connectors/schema_sinks/glue.md
           - Iceberg: connectors/schema_sinks/iceberg.md
-      - Warehouses:
-          - Athena: connectors/warehouses/athena.md
-          - Snowflake: connectors/warehouses/snowflake.md
-          - Postgres: connectors/warehouses/postgres.md
-          - BigQuery: connectors/warehouses/bigquery.md
-          - Databricks: connectors/warehouses/databricks.md
-          - Redshift: connectors/warehouses/redshift.md
-          - ClickHouse: connectors/warehouses/clickhouse.md
-          - MotherDuck: connectors/warehouses/motherduck.md
-          - Synapse: connectors/warehouses/synapse.md
-          - MSSQL: connectors/warehouses/mssql.md
   - SQL Reference: sql/reference.md
   - Architecture:
       - How Skippr Works: concepts/how-it-works.md

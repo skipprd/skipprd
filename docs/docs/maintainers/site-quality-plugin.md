@@ -111,5 +111,3 @@ skippr connect source site-quality \
 Per URL + device key: `site_quality:page:{canonical_url}:{device_profile}`.
 
 When `render_hash` matches the prior run, the worker skips Lighthouse and axe (`skip_heavy_when_unchanged`, default `true`) but still emits `page_lab_daily` for partition completeness.
-
-Public connector: [skippr-web Site Quality](https://github.com/skippr-io/skippr-web/blob/main/docs/connectors/sources/site-quality.md).

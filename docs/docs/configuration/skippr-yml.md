@@ -1,97 +1,65 @@
 # skippr.yml
 
-`skippr.yml` is the canonical Skippr project file. Both `skippr` and `skipprd` read this file for shared engine commands such as `discover` and `sync`.
+`skippr.yml` is the canonical Skippr project file. One file, one shape: skipprd plugin entries under `data_sources` and `data_sinks`. The public product CLI is `skippr`. `skippr discover` and `skippr sync` invoke the skipprd runtime against this file; `skippr model` and `skippr query` compile the same sinks into the modeling stack in memory.
 
-The root shape is the engine config:
+`source` and `warehouse` in the example below are **logical names**, not reserved words. They may be `mssql_prod`, `raw_snowflake`, `my_warehouse`, or any other key. Pipelines refer to them by section-qualified reference.
 
 ```yaml
 skippr:
-  workspace: dev
-  skippr_s3_bucket: my-skippr-state
-  default_warehouse: primary
+  workspace: mssql_migration
 
 pipelines:
-  my_pipeline:
+  mssql-migration:
     data_source: data_sources.source
-    data_sink: data_sinks.landing
-    schema_sink: schema_sinks.catalog
-    transform:
-      batch_time_fields: created_at
-      batch_time_unit: day
-    model:
-      warehouse: primary
+    data_sink: data_sinks.warehouse
 
 data_sources:
   source:
-    S3:
-      s3_bucket: raw-bucket
-      s3_prefix: events/
+    Mssql:
+      connection_string: ${MSSQL_CONNECTION_STRING}
 
 data_sinks:
-  landing:
-    Athena:
-      s3_bucket: warehouse-bucket
-      s3_prefix: bronze/events
-      glue_database_name: bronze_events
-      athena_workgroup_name: primary
-      athena_results_s3_bucket: athena-results
+  warehouse:
+    Snowflake:
+      account: ${SNOWFLAKE_ACCOUNT}
+      user: ${SNOWFLAKE_USER}
+      database: ANALYTICS
+      schema: RAW
+      warehouse: COMPUTE_WH
+      role: ACCOUNTADMIN
+      private_key_path: ${SNOWFLAKE_PRIVATE_KEY_PATH}
 
-schema_sinks:
-  catalog:
-    Glue:
-      glue_database_name: bronze_events
+schema_sinks: {}
 
-warehouses:
-  primary:
-    kind: athena
-    workgroup: primary
-    schema: bronze_events
-    result_s3: s3://athena-results/
+dbt:
+  target_schema: mssql_migration
+  silver_suffix: silver
+  gold_suffix: gold
 ```
+
+Athena ingest and query live on the **same** `Athena:` sink object using skipprd field names (`s3_bucket`, `s3_prefix`, `athena_workgroup_name`, `glue_database_name`, `athena_results_s3_bucket`) plus optional query-only keys (`region`, `catalog`, `max_concurrency`, `discovery_cache_ttl_secs`).
 
 ## Root sections
 
 | Section | Used by | Purpose |
 |---|---|---|
-| `skippr` | `skippr`, `skipprd` | Workspace, state bucket, WAL/offset options, default warehouse |
-| `pipelines` | `skippr`, `skipprd` | Pipeline graph: source, sink, schema sink, transforms, model settings |
-| `data_sources` | `skippr`, `skipprd` | Runtime source plugin configs |
-| `data_sinks` | `skippr`, `skipprd` | Runtime ingest/write sink plugin configs |
-| `deadletter_sinks` | `skippr`, `skipprd` | Optional deadletter write targets |
-| `schema_sinks` | `skippr`, `skipprd` | Runtime schema/catalog plugin configs |
-| `warehouses` | `skippr` | Query/model/catalog provider configs |
-| `dbt` | `skippr` | dbt defaults and runner settings |
-| `vector_sources` | `skippr` | File/stdin sources for vector ingestion |
-| `llm` | `skippr` | Model/provider defaults for data-engineering workflows |
+| `skippr` | `skippr` | Workspace, state bucket, WAL/offset options |
+| `pipelines` | `skippr` | Pipeline graph: source, sink, schema sink, transforms |
+| `data_sources` | `skippr discover` / `skippr sync` | Runtime source plugin configs |
+| `data_sinks` | `skippr` | Runtime ingest sinks; also the query/model destination |
+| `deadletter_sinks` | `skippr sync` | Optional deadletter write targets |
+| `schema_sinks` | `skippr sync` | Runtime schema/catalog plugin configs |
+| `dbt` | `skippr model` | dbt naming: `target_schema`, `silver_suffix`, `gold_suffix` |
+| `vector_sources` | `skippr vector` | File/stdin sources for vector ingestion |
 
-`skipprd` ignores product-only sections such as `warehouses`, `dbt`, `vector_sources`, and `llm` when running engine commands.
-
-## Data sinks vs warehouses
-
-`data_sinks` are ingest destinations. They write records, manage Parquet/object layout, and coordinate schema sinks.
-
-`warehouses` are query/model/catalog providers. They are used by `skippr query`, `skippr model`, `skippr dbt`, catalog discovery, and data-engineering workflows.
-
-A project often configures both for the same physical system. For example, an Athena data sink writes Parquet and Glue tables, while an Athena warehouse provider runs SQL and powers modeling.
+There is no `warehouses:` section. Query, model, and catalog use the pipeline's `data_sink`.
 
 ## Environment values
 
 Whole YAML scalar values can reference environment variables:
 
 ```yaml
-data_sources:
-  source:
-    Mssql:
-      connection_string: ${MSSQL_CONNECTION_STRING}
+connection_string: ${MSSQL_CONNECTION_STRING}
 ```
 
-Skippr loads `.env` and `.env.local` next to the config file before resolving `${VAR}` placeholders. Use this for secrets rather than committing credentials.
-
-## Config path
-
-By default, both binaries look for `skippr.yml` in the current directory. You can pass an explicit path:
-
-```bash
-skippr --config path/to/skippr.yml sync --pipeline my_pipeline
-skipprd --config path/to/skippr.yml sync --pipeline my_pipeline
-```
+Skippr loads `.env` then `.env.local` next to `skippr.yml` before resolving those references.
