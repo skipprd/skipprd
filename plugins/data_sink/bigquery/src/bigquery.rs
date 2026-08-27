@@ -24,6 +24,14 @@ pub struct DataSinkBigqueryPluginConfig {
     pub location: Option<String>,
     pub credentials_path: Option<String>,
     pub format: Option<String>,
+    /// Query/model only; ignored at ingest.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub max_concurrency: Option<usize>,
+    /// Query/model only; ignored at ingest.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub discovery_cache_ttl_secs: Option<u64>,
 }
 
 pub struct BigqueryCdcBackend;

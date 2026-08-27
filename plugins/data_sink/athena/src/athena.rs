@@ -215,6 +215,22 @@ pub struct DataSinkAthenaPluginConfig {
     #[serde(default)]
     pub glue_database_name: String,
     pub athena_results_s3_bucket: String,
+    /// Query/model only; ignored at ingest.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub region: Option<String>,
+    /// Query/model only; ignored at ingest.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub catalog: Option<String>,
+    /// Query/model only; ignored at ingest.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub max_concurrency: Option<usize>,
+    /// Query/model only; ignored at ingest.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub discovery_cache_ttl_secs: Option<u64>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]

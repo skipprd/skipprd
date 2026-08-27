@@ -34,6 +34,10 @@ pub struct DataSinkMotherduckPluginConfig {
     pub database: Option<String>,
     pub table: Option<String>,
     pub format: Option<String>,
+    /// Query/model only; ignored at ingest.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub schema: Option<String>,
 }
 
 impl TryFrom<DataSinkPluginConfig> for DataSinkMotherduckPluginConfig {

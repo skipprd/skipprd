@@ -61,6 +61,14 @@ pub struct DataSinkSnowflakePluginConfig {
     pub staging_azure_account_key: Option<String>,
     #[serde(default)]
     pub staging_gcs_service_account_key_path: Option<String>,
+    /// Query/model only; ignored at ingest.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub max_concurrency: Option<usize>,
+    /// Query/model only; ignored at ingest.
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub discovery_cache_ttl_secs: Option<u64>,
 }
 
 pub struct SnowflakeCdcBackend;
