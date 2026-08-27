@@ -12770,7 +12770,6 @@ dependencies = [
  "skippr-plugin-data-source-upfoundry-link-graph-compact",
  "skippr-plugin-data-source-upfoundry-link-graph-ingest",
  "skippr-runtime-sdk",
- "skipprd",
  "tar",
  "tempfile",
  "tokio",

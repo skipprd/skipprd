@@ -8,8 +8,6 @@ use chrono::{DateTime, Utc};
 use serde::Serialize;
 use serde_json::json;
 
-use crate::public_config::SkipprProjectConfig;
-
 const MAX_INVENTORY_FILES: usize = 80;
 const MAX_LOG_FILES: usize = 5;
 const MAX_EXCERPT_BYTES: u64 = 16 * 1024;
@@ -76,8 +74,8 @@ struct ConfigDiagnostics {
 #[derive(Debug, Serialize)]
 struct ConfigSummary {
     project_present: bool,
-    warehouse_kind: Option<&'static str>,
-    source_kind: Option<&'static str>,
+    warehouse_kind: Option<String>,
+    source_kind: Option<String>,
     dbt_configured: bool,
     schema_sink_configured: bool,
 }
@@ -110,7 +108,7 @@ struct LogExcerpt {
 }
 
 pub fn collect(
-    cfg: &SkipprProjectConfig,
+    engine_cfg: &serde_yaml::Value,
     config_path: &Path,
     thread_id: &str,
     feedback_id: &str,
@@ -165,7 +163,7 @@ pub fn collect(
                 .map(|p| normalizer.normalize_path(&p)),
             cwd: normalizer.normalize_path(&cwd),
         },
-        config: config_diagnostics(cfg, config_path, &normalizer),
+        config: config_diagnostics(engine_cfg, config_path, &normalizer),
         binaries: binary_diagnostics(&normalizer),
         local_artifacts: inventory,
         latest_logs,
@@ -182,17 +180,41 @@ pub fn collect(
     })
 }
 
+fn first_plugin_kind(section: Option<&serde_yaml::Value>) -> Option<String> {
+    let mapping = section?.as_mapping()?;
+    mapping.values().find_map(|entry| {
+        let entry = entry.as_mapping()?;
+        entry.keys().find_map(|key| {
+            let key = key.as_str()?.trim();
+            if key.is_empty() || key == "schema_sink" {
+                None
+            } else {
+                Some(key.to_ascii_lowercase())
+            }
+        })
+    })
+}
+
 fn config_diagnostics(
-    cfg: &SkipprProjectConfig,
+    engine_cfg: &serde_yaml::Value,
     config_path: &Path,
     normalizer: &PathNormalizer,
 ) -> ConfigDiagnostics {
+    let workspace = engine_cfg
+        .get("skippr")
+        .and_then(|skippr| skippr.get("workspace"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty());
     let summary = ConfigSummary {
-        project_present: !cfg.project.trim().is_empty(),
-        warehouse_kind: cfg.warehouse_kind_str(),
-        source_kind: cfg.source_kind_str(),
-        dbt_configured: cfg.dbt.is_some(),
-        schema_sink_configured: cfg.schema_sink.is_some(),
+        project_present: workspace.is_some(),
+        warehouse_kind: first_plugin_kind(engine_cfg.get("data_sinks")),
+        source_kind: first_plugin_kind(engine_cfg.get("data_sources")),
+        dbt_configured: engine_cfg.get("dbt").is_some(),
+        schema_sink_configured: engine_cfg
+            .get("schema_sinks")
+            .and_then(|value| value.as_mapping())
+            .is_some_and(|mapping| !mapping.is_empty()),
     };
 
     match fs::read_to_string(config_path) {
@@ -645,13 +667,16 @@ source:
         fs::write(
             &config,
             r#"
-project: demo
-warehouse:
-  kind: snowflake
-  password: topsecret
-source:
-  kind: mssql
-  connection_string: server=tcp:localhost;password=SkipprPass123!
+skippr:
+  workspace: demo
+data_sinks:
+  warehouse:
+    Snowflake:
+      password: topsecret
+data_sources:
+  source:
+    Mssql:
+      connection_string: server=tcp:localhost;password=SkipprPass123!
 "#,
         )
         .unwrap();
@@ -662,9 +687,10 @@ source:
             "failed with password=secret and email user@example.com",
         )
         .unwrap();
-        let cfg = SkipprProjectConfig::load_from(&config).unwrap();
+        let engine_cfg: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(&config).unwrap()).unwrap();
 
-        let value = collect(&cfg, &config, "thread-1", "feedback-1");
+        let value = collect(&engine_cfg, &config, "thread-1", "feedback-1");
         let serialized = serde_json::to_string(&value).unwrap();
 
         assert!(serialized.contains("redacted_yaml"));

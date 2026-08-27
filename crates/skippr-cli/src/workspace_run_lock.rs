@@ -17,14 +17,6 @@ pub fn is_heavy_command(command: &str) -> bool {
     HEAVY_COMMANDS.contains(&command.trim())
 }
 
-pub fn sync_api_command(once: bool) -> &'static str {
-    if once {
-        "sync-once"
-    } else {
-        "sync"
-    }
-}
-
 struct ActiveLock {
     client: ApiClient,
     workspace: String,
@@ -194,21 +186,6 @@ where
     };
     guard.release(status).await;
     result
-}
-
-/// Run `f` while holding the workspace heavy lock; releases on completion.
-pub async fn with_heavy_run_lock<T, F, Fut>(
-    workspace: &str,
-    command: &str,
-    pipeline: Option<&str>,
-    f: F,
-) -> T
-where
-    F: FnOnce() -> Fut,
-    Fut: Future<Output = T>,
-{
-    let client = crate::authenticated_api_client().await;
-    with_heavy_run_lock_client(client, workspace, command, pipeline, f).await
 }
 
 /// Best-effort release after an abnormal process exit (e.g. chaos SIGKILL before signal handler).

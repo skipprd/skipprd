@@ -480,7 +480,24 @@ pub(crate) async fn wire_providers(
         WarehouseKind::Postgres => {
             let dbname = nonempty(&providers.warehouse.container);
             let default_schema = nonempty(&providers.warehouse.namespace);
+            let extras = &providers.warehouse.extras;
+            let extra_str = |key: &str| {
+                extras
+                    .get(key)
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(ToOwned::to_owned)
+            };
             let pg = Arc::new(PostgresProvider::from_settings(PostgresSettings {
+                host: extra_str("host"),
+                port: extras.get("port").and_then(|v| {
+                    v.as_u64()
+                        .and_then(|n| u16::try_from(n).ok())
+                        .or_else(|| v.as_str().and_then(|s| s.trim().parse().ok()))
+                }),
+                user: extra_str("user"),
+                password: extra_str("password"),
                 dbname,
                 default_schema,
                 ..Default::default()

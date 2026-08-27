@@ -2,9 +2,10 @@ mod api_client;
 mod auth;
 mod chat_cmd;
 mod dbt_cmd;
+mod dotenv;
+mod env_refs;
 mod feedback_diagnostics;
 mod headless_prep;
-mod metadata_cmd;
 mod public_config;
 mod public_docs_search;
 mod react_host;
@@ -30,7 +31,7 @@ use serde::{Deserialize, Serialize};
 use sha2::Digest;
 
 use public_config::{
-    DbtConfig, S3Transform, SchemaSinkConfig, SkipprProjectConfig, SourceConfig, WarehouseConfig,
+    DbtConfig, SchemaSinkConfig, SkipprProjectConfig, SourceConfig, WarehouseConfig,
 };
 
 const SKIPPR_EULA_VERSION: &str = "skippr-eula-2026-04-29";
@@ -140,6 +141,29 @@ enum Cmd {
         target: ConnectTarget,
     },
 
+    /// Discover source schemas via the skipprd runtime.
+    Discover {
+        /// Pipeline from skippr.yml. Falls back to PIPELINE_NAME.
+        #[arg(long, short = 'p')]
+        pipeline: Option<String>,
+        /// Output mode: progress, json, or text.
+        #[arg(long, default_value = "progress")]
+        output: String,
+    },
+
+    /// Extract and load via the skipprd runtime.
+    Sync {
+        /// Pipeline from skippr.yml. Falls back to PIPELINE_NAME.
+        #[arg(long, short = 'p')]
+        pipeline: Option<String>,
+        /// Output mode: progress, json, or text.
+        #[arg(long, default_value = "progress")]
+        output: String,
+        /// Run a single sync pass and exit.
+        #[arg(long, default_value_t = false)]
+        once: bool,
+    },
+
     /// Check that all prerequisites are in place.
     Doctor {
         /// Output mode: json or text. Defaults to text for terminal use.
@@ -152,18 +176,6 @@ enum Cmd {
         #[command(subcommand)]
         action: ConfigAction,
     },
-
-    /// Discover schemas and persist pipeline metadata.
-    Discover(EngineDiscoverArgs),
-
-    /// Show or apply persisted pipeline metadata (schema fields per namespace).
-    Metadata {
-        #[command(subcommand)]
-        action: metadata_cmd::MetadataAction,
-    },
-
-    /// Extract and load data into the configured destination.
-    Sync(EngineSyncArgs),
 
     /// Run the data-engineer modeling workflow.
     Model(ModelArgs),
@@ -195,8 +207,9 @@ enum Cmd {
         action: LineageAction,
     },
 
-    /// Chat with the data-engineer agent (react threads): ask / plan / agent, list threads, docs search.
-    Chat {
+    /// Data-engineer agent (React). Not a Cloud API product namespace.
+    #[command(name = "agent", alias = "chat")]
+    Agent {
         #[command(subcommand)]
         action: chat_cmd::ChatAction,
     },
@@ -335,29 +348,6 @@ enum ConfigAction {
         #[arg(long, default_value = "json")]
         output: String,
     },
-}
-
-#[derive(Parser, Debug, Clone)]
-struct EngineDiscoverArgs {
-    /// The pipeline to use.
-    #[arg(short, long)]
-    pipeline: String,
-    /// Output mode: progress, json, or text.
-    #[arg(long, default_value = "progress")]
-    output: String,
-}
-
-#[derive(Parser, Debug, Clone)]
-struct EngineSyncArgs {
-    /// The pipeline to use.
-    #[arg(short, long)]
-    pipeline: PipelineName,
-    /// Output mode: progress, json, or text.
-    #[arg(long, default_value = "progress")]
-    output: String,
-    /// Run a single sync pass and exit.
-    #[arg(long, default_value_t = false)]
-    once: bool,
 }
 
 #[derive(Parser, Debug, Clone)]
@@ -548,13 +538,23 @@ enum WarehouseKind {
     /// AWS Athena (S3 + Glue) warehouse.
     Athena {
         #[arg(long)]
-        workgroup: Option<String>,
+        athena_workgroup_name: Option<String>,
+        #[arg(long)]
+        s3_bucket: Option<String>,
+        #[arg(long)]
+        s3_prefix: Option<String>,
+        #[arg(long)]
+        glue_database_name: Option<String>,
+        #[arg(long)]
+        athena_results_s3_bucket: Option<String>,
         #[arg(long)]
         region: Option<String>,
         #[arg(long)]
-        result_s3: Option<String>,
+        catalog: Option<String>,
         #[arg(long)]
-        schema: Option<String>,
+        max_concurrency: Option<usize>,
+        #[arg(long)]
+        discovery_cache_ttl_secs: Option<u64>,
     },
     /// Snowflake warehouse.
     Snowflake {
@@ -599,9 +599,19 @@ enum WarehouseKind {
     /// PostgreSQL warehouse.
     Postgres {
         #[arg(long)]
+        host: Option<String>,
+        #[arg(long)]
+        port: Option<u16>,
+        #[arg(long)]
+        user: Option<String>,
+        #[arg(long)]
+        password: Option<String>,
+        #[arg(long)]
         database: Option<String>,
         #[arg(long)]
         schema: Option<String>,
+        #[arg(long)]
+        sslmode: Option<String>,
     },
     /// Databricks (Unity Catalog) warehouse.
     Databricks {
@@ -679,9 +689,9 @@ enum SourceKind {
     /// S3 bucket source.
     S3 {
         #[arg(long)]
-        bucket: Option<String>,
+        s3_bucket: Option<String>,
         #[arg(long)]
-        prefix: Option<String>,
+        s3_prefix: Option<String>,
         /// Field(s) used to namespace incoming events (e.g. event_type).
         #[arg(long)]
         namespace_fields: Option<String>,
@@ -1695,17 +1705,7 @@ pub(crate) fn config_path(explicit: &Option<PathBuf>) -> PathBuf {
 /// - **`.env.local`** (optional) — [`dotenvy::from_path_override`]: overrides every variable **named in that file**
 ///   (typical gitignored local overrides).
 pub(crate) fn load_dotenv_for_skippr_config_yaml_path(config_yaml_path: &Path) {
-    skipprd::helpers::dotenv::load_dotenv_for_config_yaml_path(config_yaml_path);
-}
-
-fn load_config(explicit: &Option<PathBuf>) -> Result<SkipprProjectConfig, String> {
-    let path = config_path(explicit);
-    load_dotenv_for_skippr_config_yaml_path(&path);
-    SkipprProjectConfig::load_from(&path)
-}
-
-fn save_config(cfg: &SkipprProjectConfig, explicit: &Option<PathBuf>) -> Result<(), String> {
-    cfg.save_to(&config_path(explicit))
+    crate::dotenv::load_dotenv_for_config_yaml_path(config_yaml_path);
 }
 
 pub(crate) fn load_engine_config(explicit: &Option<PathBuf>) -> Result<serde_yaml::Value, String> {
@@ -1721,7 +1721,7 @@ fn load_resolved_engine_config(explicit: &Option<PathBuf>) -> Result<serde_yaml:
     let value = load_engine_config(explicit)?;
     let mut json_value = serde_json::to_value(value)
         .map_err(|e| format!("failed to normalize {}: {}", path.display(), e))?;
-    skipprd::helpers::configuration::Config::resolve_env_refs_in_json_value(&mut json_value)?;
+    crate::env_refs::resolve_env_refs_in_json_value(&mut json_value)?;
     serde_yaml::to_value(json_value)
         .map_err(|e| format!("failed to convert resolved {}: {}", path.display(), e))
 }
@@ -2044,7 +2044,7 @@ fn warn_and_normalize_legacy_cli_config(value: &mut serde_yaml::Value) -> Result
     }
     if value.get("providers").is_some() {
         return Err(
-            "skippr.yml no longer supports top-level providers:. Remove providers:; configure query/model/catalog destinations under top-level warehouses: and ingest write targets under data_sinks:."
+            "skippr.yml no longer supports top-level providers:. Remove providers:; configure ingest, query, and model destinations under data_sinks:."
                 .to_string(),
         );
     }
@@ -2077,13 +2077,86 @@ fn load_cli_raw_config_for_save(explicit: &Option<PathBuf>) -> Result<serde_yaml
     Ok(value)
 }
 
+fn skipprd_binary() -> PathBuf {
+    if let Some(path) = std::env::var_os("SKIPPRD_BIN") {
+        return PathBuf::from(path);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        let sibling = exe.with_file_name(if cfg!(windows) {
+            "skipprd.exe"
+        } else {
+            "skipprd"
+        });
+        if sibling.exists() {
+            return sibling;
+        }
+    }
+    PathBuf::from("skipprd")
+}
+
+pub(crate) fn skipprd_forward_argv(
+    cli_config: &Option<PathBuf>,
+    log: &Option<String>,
+    command: &str,
+    pipeline: Option<&str>,
+    output: Option<&str>,
+    once: bool,
+) -> Vec<String> {
+    let mut argv = Vec::new();
+    if let Some(config) = cli_config {
+        argv.push("--config".to_string());
+        argv.push(config.display().to_string());
+    }
+    if let Some(log) = log {
+        argv.push("--log".to_string());
+        argv.push(log.clone());
+    }
+    argv.push(command.to_string());
+    if let Some(pipeline) = pipeline.filter(|value| !value.is_empty()) {
+        argv.push("--pipeline".to_string());
+        argv.push(pipeline.to_string());
+    }
+    if let Some(output) = output.filter(|value| !value.is_empty()) {
+        argv.push("--output".to_string());
+        argv.push(output.to_string());
+    }
+    if once {
+        argv.push("--once".to_string());
+    }
+    argv
+}
+
+fn invoke_skipprd(
+    cli_config: &Option<PathBuf>,
+    log: &Option<String>,
+    command: &str,
+    pipeline: Option<&str>,
+    output: Option<&str>,
+    once: bool,
+) -> ! {
+    let argv = skipprd_forward_argv(cli_config, log, command, pipeline, output, once);
+    let binary = skipprd_binary();
+    let status = Command::new(&binary).args(&argv).status();
+    match status {
+        Ok(status) => std::process::exit(status.code().unwrap_or(1)),
+        Err(err) => {
+            eprintln!(
+                "error: failed to run {} ({command}): {err}",
+                binary.display()
+            );
+            eprintln!("Install skipprd on PATH, or set SKIPPRD_BIN to the skipprd binary.");
+            std::process::exit(1);
+        }
+    }
+}
+
 fn set_public_cli_el_storage_default() {
     if std::env::var("SKIPPRD_EL_STORAGE_MODE")
         .ok()
         .filter(|value| !value.trim().is_empty())
         .is_none()
     {
-        skipprd::helpers::configuration::Config::setenv("SKIPPRD_EL_STORAGE_MODE", "local");
+        std::env::set_var("SKIPPRD_EL_STORAGE_MODE", "local");
     }
 }
 
@@ -2196,61 +2269,6 @@ fn pipeline_data_sink_name(
         .strip_prefix("data_sinks.")
         .unwrap_or(data_sink_ref)
         .to_string())
-}
-
-fn pipeline_model_mapping<'a>(
-    engine_cfg: &'a serde_yaml::Value,
-    pipeline: &str,
-) -> Result<Option<&'a serde_yaml::Mapping>, String> {
-    let pipeline_cfg = pipeline_config(engine_cfg, pipeline)?;
-    pipeline_cfg
-        .get("model")
-        .map(|value| {
-            value
-                .as_mapping()
-                .ok_or_else(|| format!("pipelines.{pipeline}.model must be a mapping"))
-        })
-        .transpose()
-}
-
-fn pipeline_warehouse_name(
-    engine_cfg: &serde_yaml::Value,
-    pipeline: &str,
-) -> Result<Option<String>, String> {
-    if let Some(model) = pipeline_model_mapping(engine_cfg, pipeline)? {
-        if let Some(name) = yaml_str(model, "warehouse") {
-            return Ok(Some(
-                name.strip_prefix("warehouses.")
-                    .unwrap_or(&name)
-                    .to_string(),
-            ));
-        }
-    }
-    if let Some(default) = yaml_string_at(engine_cfg, &["skippr", "default_warehouse"]) {
-        return Ok(Some(
-            default
-                .strip_prefix("warehouses.")
-                .unwrap_or(default)
-                .to_string(),
-        ));
-    }
-    let warehouses = engine_cfg
-        .get("warehouses")
-        .and_then(|value| value.as_mapping());
-    let Some(warehouses) = warehouses else {
-        return Ok(None);
-    };
-    if warehouses.get(yaml_key("primary")).is_some() {
-        return Ok(Some("primary".to_string()));
-    }
-    if warehouses.len() == 1 {
-        return Ok(warehouses
-            .keys()
-            .filter_map(|key| key.as_str())
-            .next()
-            .map(str::to_string));
-    }
-    Ok(None)
 }
 
 fn pipeline_data_source_name(
@@ -2428,6 +2446,14 @@ fn yaml_u64(map: &serde_yaml::Mapping, key: &str) -> Option<u64> {
             })
             .or_else(|| value.as_str().and_then(|s| s.trim().parse().ok()))
     })
+}
+
+fn yaml_usize(map: &serde_yaml::Mapping, key: &str) -> Option<usize> {
+    yaml_u64(map, key).and_then(|n| usize::try_from(n).ok())
+}
+
+fn yaml_u16(map: &serde_yaml::Mapping, key: &str) -> Option<u16> {
+    yaml_u64(map, key).and_then(|n| u16::try_from(n).ok())
 }
 
 fn yaml_google_serp_targets(
@@ -2825,49 +2851,51 @@ fn warehouse_config_from_data_sink(
             )
         })?;
     let schema_sink = schema_sink_config_for_data_sink(engine_cfg, data_sink_name)?;
+    let glue_schema = match &schema_sink {
+        Some(SchemaSinkConfig::Glue { glue_database_name }) => Some(glue_database_name.clone()),
+        None => None,
+    };
     let warehouse = match plugin.to_ascii_lowercase().as_str() {
-        "athena" => {
-            let schema_from_sink = match &schema_sink {
-                Some(SchemaSinkConfig::Glue { glue_database_name }) => {
-                    Some(glue_database_name.clone())
-                }
-                None => None,
-            };
-            WarehouseConfig::Athena {
-                workgroup: yaml_str(plugin_cfg, "workgroup")
-                    .or_else(|| yaml_str(plugin_cfg, "athena_workgroup_name")),
-                region: yaml_str(plugin_cfg, "region"),
-                result_s3: yaml_str(plugin_cfg, "result_s3").or_else(|| {
-                    result_s3_from_athena_results_bucket(yaml_str(
-                        plugin_cfg,
-                        "athena_results_s3_bucket",
-                    ))
-                }),
-                schema: yaml_str(plugin_cfg, "schema").or(schema_from_sink),
-            }
-        }
+        "athena" => WarehouseConfig::Athena {
+            workgroup: yaml_str(plugin_cfg, "athena_workgroup_name"),
+            region: yaml_str(plugin_cfg, "region"),
+            result_s3: result_s3_from_athena_results_bucket(yaml_str(
+                plugin_cfg,
+                "athena_results_s3_bucket",
+            )),
+            schema: yaml_str(plugin_cfg, "glue_database_name").or(glue_schema),
+            catalog: yaml_str(plugin_cfg, "catalog"),
+            max_concurrency: yaml_usize(plugin_cfg, "max_concurrency"),
+            discovery_cache_ttl_secs: yaml_u64(plugin_cfg, "discovery_cache_ttl_secs"),
+        },
         "iceberg" => {
+            let query_engine = plugin_cfg
+                .get(yaml_key("query_engine"))
+                .and_then(|value| value.as_mapping())
+                .ok_or_else(|| {
+                    format!(
+                        "data_sinks.{data_sink_name}.Iceberg.query_engine is required for `skippr model`"
+                    )
+                })?;
+            let engine_type = yaml_str(query_engine, "type").unwrap_or_default();
+            if engine_type.to_ascii_lowercase() != "athena" {
+                return Err(format!(
+                    "data_sinks.{data_sink_name}.Iceberg.query_engine.type must be athena"
+                ));
+            }
             let catalog = plugin_cfg
                 .get(yaml_key("catalog"))
                 .and_then(|value| value.as_mapping());
-            let schema_from_sink = match &schema_sink {
-                Some(SchemaSinkConfig::Glue { glue_database_name }) => {
-                    Some(glue_database_name.clone())
-                }
-                None => None,
-            };
             WarehouseConfig::Athena {
-                workgroup: catalog
-                    .and_then(|m| yaml_str(m, "workgroup"))
-                    .or_else(|| yaml_str(plugin_cfg, "workgroup")),
-                region: catalog
-                    .and_then(|m| yaml_str(m, "region"))
-                    .or_else(|| yaml_str(plugin_cfg, "region")),
-                result_s3: yaml_str(plugin_cfg, "athena_results_s3")
-                    .or_else(|| yaml_str(plugin_cfg, "result_s3")),
+                workgroup: yaml_str(query_engine, "workgroup"),
+                region: catalog.and_then(|m| yaml_str(m, "region")),
+                result_s3: None,
                 schema: catalog
                     .and_then(|m| yaml_str(m, "database"))
-                    .or(schema_from_sink),
+                    .or(glue_schema),
+                catalog: None,
+                max_concurrency: None,
+                discovery_cache_ttl_secs: None,
             }
         }
         "snowflake" => WarehouseConfig::Snowflake {
@@ -2888,15 +2916,24 @@ fn warehouse_config_from_data_sink(
             schema: yaml_str(plugin_cfg, "schema"),
             warehouse: yaml_str(plugin_cfg, "warehouse"),
             role: yaml_str(plugin_cfg, "role"),
+            max_concurrency: yaml_usize(plugin_cfg, "max_concurrency"),
+            discovery_cache_ttl_secs: yaml_u64(plugin_cfg, "discovery_cache_ttl_secs"),
         },
         "bigquery" => WarehouseConfig::Bigquery {
             project: yaml_str(plugin_cfg, "project"),
             dataset: yaml_str(plugin_cfg, "dataset"),
             location: yaml_str(plugin_cfg, "location"),
+            max_concurrency: yaml_usize(plugin_cfg, "max_concurrency"),
+            discovery_cache_ttl_secs: yaml_u64(plugin_cfg, "discovery_cache_ttl_secs"),
         },
         "postgres" => WarehouseConfig::Postgres {
+            host: yaml_str(plugin_cfg, "host"),
+            port: yaml_u16(plugin_cfg, "port"),
+            user: yaml_str(plugin_cfg, "user"),
+            password: yaml_str(plugin_cfg, "password"),
             database: yaml_str(plugin_cfg, "database"),
             schema: yaml_str(plugin_cfg, "schema"),
+            sslmode: yaml_str(plugin_cfg, "sslmode"),
         },
         "databricks" => WarehouseConfig::Databricks {
             workspace_url: yaml_str(plugin_cfg, "workspace_url"),
@@ -2940,29 +2977,19 @@ fn warehouse_config_from_data_sink(
     Ok((warehouse, schema_sink))
 }
 
-fn warehouse_config_from_warehouse(
-    engine_cfg: &serde_yaml::Value,
-    warehouse_name: &str,
-) -> Result<WarehouseConfig, String> {
-    let warehouses = engine_cfg
-        .get("warehouses")
-        .and_then(|warehouses| warehouses.as_mapping())
-        .ok_or_else(|| "skippr.yml does not define warehouses".to_string())?;
-    let value = warehouses.get(yaml_key(warehouse_name)).ok_or_else(|| {
-        let known = warehouses
-            .keys()
-            .filter_map(|key| key.as_str())
-            .collect::<Vec<_>>()
-            .join(", ");
-        format!(
-            "skippr.yml does not define warehouse '{}'. Known warehouses: {}",
-            warehouse_name,
-            if known.is_empty() { "<none>" } else { &known }
-        )
-    })?;
-    serde_yaml::from_value::<WarehouseConfig>(value.clone()).map_err(|e| {
-        format!("warehouses.{warehouse_name} must be a supported warehouse provider config: {e}")
-    })
+fn dbt_config_from_engine(value: &serde_yaml::Value, pipeline: &str) -> DbtConfig {
+    let mapping = value.get("dbt").and_then(|dbt| dbt.as_mapping());
+    DbtConfig {
+        target_schema: mapping
+            .and_then(|dbt| yaml_str(dbt, "target_schema"))
+            .or_else(|| Some(dbt_schema_name(pipeline))),
+        silver_suffix: mapping
+            .and_then(|dbt| yaml_str(dbt, "silver_suffix"))
+            .or_else(|| Some("silver".to_string())),
+        gold_suffix: mapping
+            .and_then(|dbt| yaml_str(dbt, "gold_suffix"))
+            .or_else(|| Some("gold".to_string())),
+    }
 }
 
 fn dbt_schema_name(project: &str) -> String {
@@ -2994,11 +3021,7 @@ pub(crate) fn react_config_from_pipeline_config(
         Some(schema_sink) => Some(schema_sink),
         None => schema_sink_config_for_data_sink(value, &data_sink_name)?,
     };
-    let warehouse = if let Some(warehouse_name) = pipeline_warehouse_name(value, pipeline)? {
-        warehouse_config_from_warehouse(value, &warehouse_name)?
-    } else {
-        warehouse_config_from_data_sink(value, &data_sink_name)?.0
-    };
+    let warehouse = warehouse_config_from_data_sink(value, &data_sink_name)?.0;
     let source = pipeline_data_source_name(value, pipeline)?
         .as_deref()
         .map(|source_name| source_config_from_data_source(value, source_name))
@@ -3007,11 +3030,7 @@ pub(crate) fn react_config_from_pipeline_config(
         project: pipeline.to_string(),
         warehouse: Some(warehouse),
         source,
-        dbt: Some(DbtConfig {
-            target_schema: Some(dbt_schema_name(pipeline)),
-            silver_suffix: Some("silver".to_string()),
-            gold_suffix: Some("gold".to_string()),
-        }),
+        dbt: Some(dbt_config_from_engine(value, pipeline)),
         schema_sink,
         ..Default::default()
     };
@@ -3049,31 +3068,6 @@ fn set_plugin_section(
     section_mapping_mut(value, section).insert(yaml_key(name), yaml_plugin_entry(plugin, config));
 }
 
-fn set_default_warehouse(value: &mut serde_yaml::Value, warehouse: &str) {
-    let skippr = section_mapping_mut(value, "skippr");
-    skippr.insert(yaml_key("default_warehouse"), yaml_key(warehouse));
-}
-
-fn set_warehouse_section(
-    value: &mut serde_yaml::Value,
-    name: &str,
-    kind: &str,
-    config: serde_json::Value,
-) {
-    let mut map = match config {
-        serde_json::Value::Object(map) => map,
-        _ => serde_json::Map::new(),
-    };
-    map.insert(
-        "kind".to_string(),
-        serde_json::Value::String(kind.to_ascii_lowercase()),
-    );
-    section_mapping_mut(value, "warehouses").insert(
-        yaml_key(name),
-        serde_yaml::to_value(serde_json::Value::Object(map)).expect("warehouse config is yaml"),
-    );
-}
-
 fn set_primary_pipeline_refs(
     value: &mut serde_yaml::Value,
     source: Option<&str>,
@@ -3100,12 +3094,6 @@ fn set_primary_pipeline_refs(
             yaml_key("data_sink"),
             yaml_key(&format!("data_sinks.{sink}")),
         );
-        let model = pipeline
-            .entry(yaml_key("model"))
-            .or_insert_with(|| serde_yaml::Value::Mapping(serde_yaml::Mapping::new()))
-            .as_mapping_mut()
-            .expect("pipeline.model is mapping");
-        model.insert(yaml_key("warehouse"), yaml_key("primary"));
     }
 }
 
@@ -3139,6 +3127,10 @@ fn u32_json(value: Option<u32>) -> Option<serde_json::Value> {
 
 fn bool_json(value: Option<bool>) -> Option<serde_json::Value> {
     value.map(serde_json::Value::Bool)
+}
+
+fn usize_json(value: Option<usize>) -> Option<serde_json::Value> {
+    value.map(|value| serde_json::Value::Number((value as u64).into()))
 }
 
 fn u64_json(value: Option<u64>) -> Option<serde_json::Value> {
@@ -3190,17 +3182,33 @@ fn map_json(value: Option<Vec<(String, String)>>) -> Option<serde_json::Value> {
 fn warehouse_plugin_and_config(kind: WarehouseKind) -> (&'static str, serde_json::Value) {
     match kind {
         WarehouseKind::Athena {
-            workgroup,
+            athena_workgroup_name,
+            s3_bucket,
+            s3_prefix,
+            glue_database_name,
+            athena_results_s3_bucket,
             region,
-            result_s3,
-            schema,
+            catalog,
+            max_concurrency,
+            discovery_cache_ttl_secs,
         } => (
             "Athena",
             json_object(vec![
-                ("workgroup", str_json(workgroup)),
+                ("athena_workgroup_name", str_json(athena_workgroup_name)),
+                ("s3_bucket", str_json(s3_bucket)),
+                ("s3_prefix", str_json(s3_prefix)),
+                ("glue_database_name", str_json(glue_database_name)),
+                (
+                    "athena_results_s3_bucket",
+                    str_json(athena_results_s3_bucket),
+                ),
                 ("region", str_json(region)),
-                ("result_s3", str_json(result_s3)),
-                ("schema", str_json(schema)),
+                ("catalog", str_json(catalog)),
+                ("max_concurrency", usize_json(max_concurrency)),
+                (
+                    "discovery_cache_ttl_secs",
+                    u64_json(discovery_cache_ttl_secs),
+                ),
             ]),
         ),
         WarehouseKind::Snowflake {
@@ -3258,11 +3266,24 @@ fn warehouse_plugin_and_config(kind: WarehouseKind) -> (&'static str, serde_json
                 ("location", str_json(location)),
             ]),
         ),
-        WarehouseKind::Postgres { database, schema } => (
+        WarehouseKind::Postgres {
+            host,
+            port,
+            user,
+            password,
+            database,
+            schema,
+            sslmode,
+        } => (
             "Postgres",
             json_object(vec![
+                ("host", str_json(host)),
+                ("port", u16_json(port)),
+                ("user", str_json(user)),
+                ("password", str_json(password)),
                 ("database", str_json(database)),
                 ("schema", str_json(schema)),
+                ("sslmode", str_json(sslmode)),
             ]),
         ),
         WarehouseKind::Databricks {
@@ -3357,14 +3378,14 @@ fn source_plugin_and_config(kind: SourceKind) -> (&'static str, serde_json::Valu
             ]),
         ),
         SourceKind::S3 {
-            bucket,
-            prefix,
+            s3_bucket,
+            s3_prefix,
             namespace_fields,
         } => (
             "S3",
             json_object(vec![
-                ("bucket", str_json(bucket)),
-                ("prefix", str_json(prefix)),
+                ("s3_bucket", str_json(s3_bucket)),
+                ("s3_prefix", str_json(s3_prefix)),
                 ("namespace_fields", str_json(namespace_fields)),
             ]),
         ),
@@ -4397,15 +4418,6 @@ async fn load_reset_server_credentials() -> Result<api_client::CredentialsRespon
         .map_err(|e| format!("Failed to fetch server credentials: {e}"))
 }
 
-async fn load_cli_server_credentials() -> Result<api_client::CredentialsResponse, String> {
-    load_reset_server_credentials().await.map_err(|err| {
-        err.replace(
-            "Authentication required to reset cloud project data",
-            "Authentication required to run this command",
-        )
-    })
-}
-
 fn authenticated_storage_bucket_and_credentials(
     srv_creds: &api_client::CredentialsResponse,
 ) -> Result<(String, react_core::resolved_config::S3Credentials), String> {
@@ -4472,19 +4484,15 @@ async fn cmd_init(name: &str, explicit_config: &Option<PathBuf>, output: &str) {
     let raw = format!(
         r#"skippr:
   workspace: {name}
-  default_warehouse: primary
 
 pipelines:
   {name}:
     data_source: data_sources.source
     data_sink: data_sinks.warehouse
-    model:
-      warehouse: primary
 
 data_sources: {{}}
 data_sinks: {{}}
 schema_sinks: {{}}
-warehouses: {{}}
 vector_sources: {{}}
 "#
     );
@@ -4753,7 +4761,7 @@ fn confirm_pipeline_reset(target: &PipelineResetTarget) -> Result<(), String> {
 
 async fn delete_pipeline_reset_target_with_storage(
     target: &PipelineResetTarget,
-    skipprd_storage: Option<&Arc<dyn skipprd::adapters::storage::StorageAdapter>>,
+    skipprd_storage: Option<&Arc<dyn react_core::storage::StorageAdapter>>,
     model_storage: &Arc<dyn react_core::storage::StorageAdapter>,
 ) -> Result<PipelineResetReport, String> {
     let mut report = PipelineResetReport::default();
@@ -4769,7 +4777,7 @@ async fn delete_pipeline_reset_target_with_storage(
 
     if let (Some(_bucket), Some(storage)) = (&target.skipprd_bucket, skipprd_storage) {
         report.deleted_skipprd_remote =
-            delete_skipprd_storage_prefix(storage, &target.skipprd_prefix).await?;
+            delete_storage_prefix(storage, &target.skipprd_prefix).await?;
     }
     report.deleted_model_remote =
         delete_storage_prefix(model_storage, &target.model_prefix).await?;
@@ -4822,11 +4830,7 @@ async fn cmd_reset(explicit_config: &Option<PathBuf>, args: ResetArgs) {
     };
     let model_storage = react_s3_storage_from_credentials(&target.model_bucket, &s3_creds).await;
     let skipprd_storage = match target.skipprd_bucket.as_deref() {
-        Some(bucket) => {
-            skipprd::helpers::configuration::Config::setenv("SKIPPR_S3_BUCKET", bucket);
-            Some(Arc::new(skipprd::adapters::storage::S3StorageAdapter)
-                as Arc<dyn skipprd::adapters::storage::StorageAdapter>)
-        }
+        Some(bucket) => Some(react_s3_storage_from_credentials(bucket, &s3_creds).await),
         None => None,
     };
 
@@ -4886,95 +4890,82 @@ fn emit_connect_result(
     }
 }
 
-fn cmd_connect_warehouse(kind: WarehouseKind, explicit_config: &Option<PathBuf>, output: &str) {
+fn cmd_connect_warehouse(mut kind: WarehouseKind, explicit_config: &Option<PathBuf>, output: &str) {
+    prompt_warehouse_kind(&mut kind);
     match load_cli_raw_config_for_save(explicit_config) {
         Ok(mut cfg) => {
             let (plugin, config) = warehouse_plugin_and_config(kind);
-            set_plugin_section(&mut cfg, "data_sinks", "warehouse", plugin, config.clone());
-            set_warehouse_section(&mut cfg, "primary", plugin, config);
-            set_default_warehouse(&mut cfg, "primary");
+            set_plugin_section(&mut cfg, "data_sinks", "warehouse", plugin, config);
             set_primary_pipeline_refs(&mut cfg, None, Some("warehouse"));
             if let Err(e) = save_engine_config(explicit_config, &cfg) {
                 eprintln!("error: {}", e);
                 std::process::exit(1);
             }
             if is_json_output(output) {
-                emit_connect_result(output, explicit_config, plugin, "warehouses.primary");
+                emit_connect_result(output, explicit_config, plugin, "data_sinks.warehouse");
             } else {
-                println!("Configured warehouse 'primary' ({plugin}) and data sink 'warehouse' in skippr.yml");
+                println!("Configured data sink 'warehouse' ({plugin}) in skippr.yml");
             }
-            return;
         }
-        Err(e) if config_path(explicit_config).exists() => {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
-        }
-        Err(_) => {}
-    }
-
-    let mut cfg = match load_config(explicit_config) {
-        Ok(c) => c,
         Err(e) => {
             eprintln!("error: {}", e);
-            eprintln!("Run 'skippr init <project>' first.");
+            if !config_path(explicit_config).exists() {
+                eprintln!("Run 'skippr init <project>' first.");
+            }
             std::process::exit(1);
         }
-    };
+    }
+}
 
-    let wh = match kind {
+fn prompt_warehouse_kind(kind: &mut WarehouseKind) {
+    match kind {
         WarehouseKind::Athena {
-            workgroup,
+            athena_workgroup_name,
+            s3_bucket,
+            s3_prefix,
+            glue_database_name,
+            athena_results_s3_bucket,
             region,
-            result_s3,
-            schema,
+            ..
         } => {
-            let workgroup = workgroup.or_else(|| prompt("Athena workgroup (optional)"));
-            let region = region.or_else(|| prompt("AWS region"));
-            let result_s3 = result_s3
-                .or_else(|| prompt("S3 result location (optional, e.g. s3://bucket/path)"));
-            let schema = schema.or_else(|| prompt("Default database/schema (optional)"));
-            WarehouseConfig::Athena {
-                workgroup,
-                region,
-                result_s3,
-                schema,
+            if s3_bucket.is_none() {
+                *s3_bucket = prompt("Athena S3 bucket (s3_bucket)");
+            }
+            if s3_prefix.is_none() {
+                *s3_prefix = prompt("Athena S3 prefix (s3_prefix)");
+            }
+            if athena_workgroup_name.is_none() {
+                *athena_workgroup_name = prompt("Athena workgroup (athena_workgroup_name)");
+            }
+            if athena_results_s3_bucket.is_none() {
+                *athena_results_s3_bucket =
+                    prompt("Athena results S3 bucket (athena_results_s3_bucket)");
+            }
+            if glue_database_name.is_none() {
+                *glue_database_name = prompt("Glue database name (optional)");
+            }
+            if region.is_none() {
+                *region = prompt("AWS region (optional)");
             }
         }
         WarehouseKind::Snowflake {
-            account,
-            user,
-            password,
-            private_key_path,
-            stage,
-            staging_uri,
-            staging_storage_integration,
-            staging_azure_sas_token,
-            staging_azure_account_key,
-            staging_gcs_service_account_key_path,
             database,
             schema,
             warehouse,
             role,
+            ..
         } => {
-            let database = database.or_else(|| prompt("Snowflake database"));
-            let schema = schema.or_else(|| prompt("Snowflake schema"));
-            let warehouse = warehouse.or_else(|| prompt("Snowflake compute warehouse"));
-            let role = role.or_else(|| prompt("Snowflake role"));
-            WarehouseConfig::Snowflake {
-                account,
-                user,
-                password,
-                private_key_path,
-                stage,
-                staging_uri,
-                staging_storage_integration,
-                staging_azure_sas_token,
-                staging_azure_account_key,
-                staging_gcs_service_account_key_path,
-                database,
-                schema,
-                warehouse,
-                role,
+            if database.is_none() {
+                *database = prompt("Snowflake database");
+            }
+            if schema.is_none() {
+                *schema = prompt("Snowflake schema");
+            }
+            if warehouse.is_none() {
+                *warehouse = prompt("Snowflake compute warehouse");
+            }
+            if role.is_none() {
+                *role = prompt("Snowflake role");
             }
         }
         WarehouseKind::Bigquery {
@@ -4982,105 +4973,46 @@ fn cmd_connect_warehouse(kind: WarehouseKind, explicit_config: &Option<PathBuf>,
             dataset,
             location,
         } => {
-            let project = project.or_else(|| prompt("BigQuery GCP project"));
-            let dataset = dataset.or_else(|| prompt("BigQuery dataset"));
-            let location = location.or_else(|| prompt("BigQuery location (e.g. US)"));
-            WarehouseConfig::Bigquery {
-                project,
-                dataset,
-                location,
+            if project.is_none() {
+                *project = prompt("BigQuery GCP project");
+            }
+            if dataset.is_none() {
+                *dataset = prompt("BigQuery dataset");
+            }
+            if location.is_none() {
+                *location = prompt("BigQuery location (e.g. US)");
             }
         }
-        WarehouseKind::Postgres { database, schema } => {
-            let database = database.or_else(|| prompt("PostgreSQL database"));
-            let schema = postgres_schema_or_default(
-                schema.or_else(|| prompt("PostgreSQL schema (default: public)")),
-            );
-            WarehouseConfig::Postgres { database, schema }
+        WarehouseKind::Postgres {
+            host,
+            user,
+            database,
+            schema,
+            ..
+        } => {
+            if host.is_none() {
+                *host = prompt("PostgreSQL host");
+            }
+            if user.is_none() {
+                *user = prompt("PostgreSQL user");
+            }
+            if database.is_none() {
+                *database = prompt("PostgreSQL database");
+            }
+            if schema.is_none() {
+                *schema = postgres_schema_or_default(prompt(
+                    "PostgreSQL schema (default: public)",
+                ));
+            }
         }
-        WarehouseKind::Databricks {
-            workspace_url,
-            token,
-            warehouse_id,
-            catalog,
-            schema,
-        } => WarehouseConfig::Databricks {
-            workspace_url,
-            token,
-            warehouse_id,
-            catalog,
-            schema,
-        },
-        WarehouseKind::Synapse {
-            connection_string,
-            schema,
-        } => WarehouseConfig::Synapse {
-            connection_string,
-            schema,
-        },
-        WarehouseKind::Redshift {
-            database,
-            cluster_identifier,
-            workgroup_name,
-            db_user,
-            schema,
-            region,
-            staging_s3_bucket,
-            staging_s3_prefix,
-            iam_role_arn,
-        } => WarehouseConfig::Redshift {
-            database,
-            cluster_identifier,
-            workgroup_name,
-            db_user,
-            schema,
-            region,
-            staging_s3_bucket,
-            staging_s3_prefix,
-            iam_role_arn,
-        },
-        WarehouseKind::Clickhouse {
-            url,
-            database,
-            user,
-            password,
-        } => WarehouseConfig::Clickhouse {
-            url,
-            database,
-            user,
-            password,
-        },
-        WarehouseKind::Motherduck {
-            motherduck_token,
-            database,
-            schema,
-        } => WarehouseConfig::Motherduck {
-            motherduck_token,
-            database,
-            schema,
-        },
-    };
-
-    let kind_label = wh.kind_str();
-    cfg.warehouse = Some(wh);
-
-    if cfg.dbt.is_none() {
-        cfg.dbt = Some(DbtConfig::default());
-    }
-
-    if let Err(e) = save_config(&cfg, explicit_config) {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
-    }
-
-    if is_json_output(output) {
-        emit_connect_result(output, explicit_config, kind_label, "warehouse");
-    } else {
-        println!("Warehouse ({}) configured.", kind_label);
+        WarehouseKind::Databricks { .. }
+        | WarehouseKind::Synapse { .. }
+        | WarehouseKind::Redshift { .. }
+        | WarehouseKind::Clickhouse { .. }
+        | WarehouseKind::Motherduck { .. } => {}
     }
 }
 
-// ---------------------------------------------------------------------------
 // connect source
 // ---------------------------------------------------------------------------
 
@@ -5394,6 +5326,20 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
         }
     }
 
+    if let SourceKind::S3 {
+        ref mut s3_bucket,
+        ref mut s3_prefix,
+        ..
+    } = &mut kind
+    {
+        if s3_bucket.is_none() {
+            *s3_bucket = prompt("S3 bucket (s3_bucket)");
+        }
+        if s3_prefix.is_none() {
+            *s3_prefix = prompt("S3 prefix (s3_prefix)");
+        }
+    }
+
     match load_cli_raw_config_for_save(explicit_config) {
         Ok(mut cfg) => {
             let (plugin, config) = source_plugin_and_config(kind);
@@ -5408,864 +5354,14 @@ fn cmd_connect_source(mut kind: SourceKind, explicit_config: &Option<PathBuf>, o
             } else {
                 println!("Configured data source 'source' ({plugin}) in skippr.yml");
             }
-            return;
         }
-        Err(e) if config_path(explicit_config).exists() => {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
-        }
-        Err(_) => {}
-    }
-
-    let mut cfg = match load_config(explicit_config) {
-        Ok(c) => c,
         Err(e) => {
             eprintln!("error: {}", e);
-            eprintln!("Run 'skippr init <project>' first.");
+            if !config_path(explicit_config).exists() {
+                eprintln!("Run 'skippr init <project>' first.");
+            }
             std::process::exit(1);
         }
-    };
-
-    let src = match kind {
-        SourceKind::Mssql {
-            connection_string,
-            tables,
-        } => {
-            let connection_string = connection_string.or_else(|| {
-                prompt("MSSQL connection string (or ${MSSQL_CONNECTION_STRING} to read from env)")
-            });
-            SourceConfig::Mssql {
-                connection_string,
-                tables,
-            }
-        }
-        SourceKind::S3 {
-            bucket,
-            prefix,
-            namespace_fields,
-        } => {
-            let bucket = bucket.or_else(|| prompt("S3 bucket"));
-            let prefix = prefix.or_else(|| prompt("S3 prefix"));
-            let namespace_fields =
-                namespace_fields.or_else(|| prompt("Namespace fields (optional, e.g. event_type)"));
-            let transform = namespace_fields.map(|nf| S3Transform {
-                namespace_fields: Some(nf),
-            });
-            SourceConfig::S3 {
-                s3_bucket: bucket,
-                s3_prefix: prefix,
-                transform,
-            }
-        }
-        SourceKind::Mysql {
-            connection_string,
-            tables,
-        } => SourceConfig::Mysql {
-            connection_string,
-            tables,
-        },
-        SourceKind::PostgresSource {
-            host,
-            port,
-            user,
-            password,
-            database,
-            connection_string,
-            tables,
-            query,
-        } => SourceConfig::PostgresSource {
-            host,
-            port,
-            user,
-            password,
-            database,
-            connection_string,
-            tables,
-            query,
-        },
-        SourceKind::RedshiftSource {
-            cluster_identifier,
-            workgroup_name,
-            database,
-            db_user,
-            tables,
-            region,
-        } => SourceConfig::RedshiftSource {
-            cluster_identifier,
-            workgroup_name,
-            database,
-            db_user,
-            tables,
-            region,
-        },
-        SourceKind::Mongodb {
-            connection_string,
-            database,
-            collection,
-            filter,
-        } => SourceConfig::Mongodb {
-            connection_string,
-            database,
-            collection,
-            filter,
-        },
-        SourceKind::Dynamodb {
-            table_name,
-            region,
-            endpoint_url,
-        } => SourceConfig::Dynamodb {
-            table_name,
-            region,
-            endpoint_url,
-        },
-        SourceKind::ClickhouseSource {
-            url,
-            database,
-            user,
-            password,
-            tables,
-            query,
-        } => SourceConfig::ClickhouseSource {
-            url,
-            database,
-            user,
-            password,
-            tables,
-            query,
-        },
-        SourceKind::MotherduckSource {
-            motherduck_token,
-            database,
-            tables,
-            query,
-        } => SourceConfig::MotherduckSource {
-            motherduck_token,
-            database,
-            tables,
-            query,
-        },
-        SourceKind::Sftp {
-            host,
-            port,
-            username,
-            password,
-            private_key_path,
-            remote_path,
-        } => SourceConfig::Sftp {
-            host,
-            port,
-            username,
-            password,
-            private_key_path,
-            remote_path,
-        },
-        SourceKind::File { path } => SourceConfig::File { path },
-        SourceKind::DeltaLake {
-            table_uri,
-            storage_options,
-            version,
-            filter,
-        } => SourceConfig::DeltaLake {
-            table_uri,
-            storage_options: pairs_to_hash_map(storage_options),
-            version,
-            filter,
-        },
-        SourceKind::Kafka {
-            brokers,
-            topic,
-            group_id,
-            auto_offset_reset,
-            security_protocol,
-            sasl_mechanism,
-            sasl_username,
-            sasl_password,
-            mode,
-        } => SourceConfig::Kafka {
-            brokers,
-            topic,
-            group_id,
-            auto_offset_reset,
-            security_protocol,
-            sasl_mechanism,
-            sasl_username,
-            sasl_password,
-            mode,
-        },
-        SourceKind::Sqs {
-            queue_url,
-            region,
-            endpoint_url,
-            mode,
-        } => SourceConfig::Sqs {
-            queue_url,
-            region,
-            endpoint_url,
-            mode,
-        },
-        SourceKind::Kinesis {
-            stream_name,
-            region,
-            endpoint_url,
-            mode,
-        } => SourceConfig::Kinesis {
-            stream_name,
-            region,
-            endpoint_url,
-            mode,
-        },
-        SourceKind::Amqp {
-            connection_string,
-            queue,
-            exchange,
-            routing_key,
-            prefetch_count,
-            mode,
-        } => SourceConfig::Amqp {
-            connection_string,
-            queue,
-            exchange,
-            routing_key,
-            prefetch_count,
-            mode,
-        },
-        SourceKind::Sns {
-            topic_arn,
-            sqs_queue_url,
-            region,
-            endpoint_url,
-        } => SourceConfig::Sns {
-            topic_arn,
-            sqs_queue_url,
-            region,
-            endpoint_url,
-        },
-        SourceKind::Eventbridge {
-            event_bus_name,
-            sqs_queue_url,
-            region,
-            endpoint_url,
-        } => SourceConfig::Eventbridge {
-            event_bus_name,
-            sqs_queue_url,
-            region,
-            endpoint_url,
-        },
-        SourceKind::Mqtt {
-            broker_url,
-            port,
-            topic,
-            client_id,
-            qos,
-            username,
-            password,
-            mode,
-        } => SourceConfig::Mqtt {
-            broker_url,
-            port,
-            topic,
-            client_id,
-            qos,
-            username,
-            password,
-            mode,
-        },
-        SourceKind::Websocket { url, headers, mode } => SourceConfig::Websocket {
-            url,
-            headers: pairs_to_hash_map(headers),
-            mode,
-        },
-        SourceKind::GoogleAnalytics {
-            property_id,
-            start_date,
-            end_date,
-            lookback_days,
-            stream_profile,
-            keep_empty_rows,
-            processing_lag_days,
-            window_in_days,
-            access_token,
-            oauth_token_url,
-            oauth_client_id,
-            oauth_client_secret,
-            oauth_refresh_token,
-            service_account_json_path,
-            streams,
-        } => SourceConfig::GoogleAnalytics {
-            property_id,
-            start_date,
-            end_date,
-            lookback_days,
-            stream_profile,
-            keep_empty_rows,
-            processing_lag_days,
-            window_in_days,
-            access_token,
-            oauth_token_url,
-            oauth_client_id,
-            oauth_client_secret,
-            oauth_refresh_token,
-            service_account_json_path,
-            streams,
-        },
-        SourceKind::GoogleSearchConsole {
-            site_url,
-            start_date,
-            end_date,
-            lookback_days,
-            stream_profile,
-            processing_lag_days,
-            window_in_days,
-            access_token,
-            oauth_token_url,
-            oauth_client_id,
-            oauth_client_secret,
-            oauth_refresh_token,
-            service_account_json_path,
-            streams,
-            search_type,
-            data_state,
-            row_limit,
-            url_inspection_enabled,
-            url_list,
-        } => SourceConfig::GoogleSearchConsole {
-            site_url,
-            start_date,
-            end_date,
-            lookback_days,
-            stream_profile,
-            processing_lag_days,
-            window_in_days,
-            access_token,
-            oauth_token_url,
-            oauth_client_id,
-            oauth_client_secret,
-            oauth_refresh_token,
-            service_account_json_path,
-            streams,
-            search_type,
-            data_state,
-            row_limit,
-            url_inspection_enabled,
-            url_list,
-        },
-        SourceKind::BingWebmasterTools {
-            site_url,
-            start_date,
-            end_date,
-            lookback_days,
-            stream_profile,
-            processing_lag_days,
-            window_in_days,
-            api_key,
-            access_token,
-            oauth_token_url,
-            oauth_client_id,
-            oauth_client_secret,
-            oauth_refresh_token,
-            streams,
-        } => SourceConfig::BingWebmasterTools {
-            site_url,
-            api_key,
-            start_date,
-            end_date,
-            lookback_days,
-            stream_profile,
-            processing_lag_days,
-            window_in_days,
-            access_token,
-            oauth_token_url,
-            oauth_client_id,
-            oauth_client_secret,
-            oauth_refresh_token,
-            streams,
-        },
-        SourceKind::GooglePageSpeed {
-            site,
-            api_key,
-            url_mode,
-            url_list,
-            max_urls,
-            strategies,
-            categories,
-            locale,
-            max_requests_per_run,
-            requests_per_minute,
-            respect_robots,
-            top_audits_per_page,
-            max_concurrent_requests,
-        } => SourceConfig::GooglePageSpeed {
-            site,
-            api_key,
-            url_mode,
-            url_list,
-            max_urls,
-            strategies,
-            categories,
-            locale,
-            max_requests_per_run,
-            requests_per_minute,
-            respect_robots,
-            top_audits_per_page,
-            max_concurrent_requests,
-        },
-        SourceKind::SeoCrawl {
-            site,
-            max_urls,
-            max_depth,
-            crawl_rate_per_second,
-            respect_robots,
-            openai_enabled,
-            openai_model,
-            openai_analyze_blocks,
-            openai_max_blocks_per_page,
-            skip_unchanged_content,
-            user_agent,
-        } => SourceConfig::SeoCrawl {
-            site,
-            max_urls,
-            max_depth,
-            crawl_rate_per_second,
-            respect_robots,
-            openai_enabled,
-            openai_model,
-            openai_analyze_blocks,
-            openai_max_blocks_per_page,
-            skip_unchanged_content,
-            user_agent,
-        },
-        SourceKind::SiteQuality {
-            site,
-            url_mode,
-            url_list,
-            max_pages_per_run,
-            wait_until,
-            navigation_timeout_ms,
-            lighthouse_enabled,
-            lighthouse_categories,
-            axe_enabled,
-            axe_tags,
-            pages_per_minute,
-            worker_node_path,
-            playwright_executable_path,
-            respect_robots,
-            skip_heavy_when_unchanged,
-        } => SourceConfig::SiteQuality {
-            devices: None,
-            site,
-            url_mode,
-            url_list,
-            max_pages_per_run,
-            wait_until,
-            navigation_timeout_ms,
-            lighthouse_enabled,
-            lighthouse_categories,
-            axe_enabled,
-            axe_tags,
-            pages_per_minute,
-            worker_node_path,
-            playwright_executable_path,
-            respect_robots,
-            skip_heavy_when_unchanged,
-        },
-        SourceKind::SiteSecurity {
-            site,
-            url_mode,
-            url_list,
-            max_pages_per_run,
-            max_crawl_depth,
-            crawl_seed_urls,
-            wait_until,
-            navigation_timeout_ms,
-            pages_per_minute,
-            worker_node_path,
-            playwright_executable_path,
-            respect_robots,
-            max_third_party_scripts,
-        } => SourceConfig::SiteSecurity {
-            site,
-            url_mode,
-            url_list,
-            max_pages_per_run,
-            max_crawl_depth,
-            crawl_seed_urls,
-            wait_until,
-            navigation_timeout_ms,
-            pages_per_minute,
-            worker_node_path,
-            playwright_executable_path,
-            respect_robots,
-            max_third_party_scripts,
-        },
-        SourceKind::AiCitations {
-            site,
-            brand_names,
-            models,
-            requests_per_minute,
-            max_prompts_per_run,
-            skip_unchanged_responses,
-            openai_base_url,
-        } => SourceConfig::AiCitations {
-            site,
-            brand_names,
-            prompt_list: None,
-            models,
-            requests_per_minute,
-            max_prompts_per_run,
-            skip_unchanged_responses,
-            openai_base_url,
-        },
-        SourceKind::GoogleSerpRanks {
-            target_site,
-            target_aliases,
-            keywords,
-            country,
-            language,
-            device,
-            max_depth,
-            min_query_interval_ms,
-            max_queries_per_run,
-            stop_after_first_target_match,
-            capture_results,
-            force_refresh_today,
-            navigation_timeout_ms,
-            worker_node_path,
-            playwright_executable_path,
-            user_agent,
-        } => SourceConfig::GoogleSerpRanks {
-            targets: target_site.map(|site| {
-                vec![crate::public_config::GoogleSerpTargetConfig {
-                    site,
-                    aliases: target_aliases.unwrap_or_default(),
-                }]
-            }),
-            keywords,
-            country,
-            language,
-            device,
-            max_depth,
-            min_query_interval_ms,
-            max_queries_per_run,
-            stop_after_first_target_match,
-            capture_results,
-            force_refresh_today,
-            navigation_timeout_ms,
-            worker_node_path,
-            playwright_executable_path,
-            user_agent,
-        },
-        SourceKind::AppleAppStoreSerp {
-            app_id,
-            bundle_id,
-            target_aliases,
-            keywords,
-            storefronts,
-            entity,
-            max_depth,
-            min_query_interval_ms,
-            max_queries_per_run,
-            stop_after_first_target_match,
-            capture_results,
-            force_refresh_today,
-            user_agent,
-        } => SourceConfig::AppleAppStoreSerp {
-            targets: app_id.map(|id| {
-                vec![crate::public_config::AppleAppStoreTargetConfig {
-                    app_id: id,
-                    bundle_id,
-                    aliases: target_aliases.unwrap_or_default(),
-                }]
-            }),
-            keywords,
-            storefronts,
-            entity,
-            max_depth,
-            min_query_interval_ms,
-            max_queries_per_run,
-            stop_after_first_target_match,
-            capture_results,
-            force_refresh_today,
-            user_agent,
-        },
-        SourceKind::AppleSearchAds {
-            org_id,
-            client_id,
-            team_id,
-            key_id,
-            private_key_path,
-            private_key_pem,
-            start_date,
-            end_date,
-            lookback_days,
-            stream_profile,
-            processing_lag_days,
-            time_zone,
-            return_records_with_no_metrics,
-            access_token,
-            streams,
-            max_concurrent_requests,
-        } => SourceConfig::AppleSearchAds {
-            org_id,
-            client_id,
-            team_id,
-            key_id,
-            private_key_path,
-            private_key_pem,
-            start_date,
-            end_date,
-            lookback_days,
-            stream_profile,
-            processing_lag_days,
-            time_zone,
-            access_token,
-            streams,
-            return_records_with_no_metrics,
-            max_concurrent_requests,
-        },
-        SourceKind::MetaInstagramAds {
-            ad_account_id,
-            start_date,
-            end_date,
-            lookback_days,
-            stream_profile,
-            processing_lag_days,
-            api_version,
-            access_token,
-            oauth_token_url,
-            oauth_client_id,
-            oauth_client_secret,
-            oauth_refresh_token,
-            instagram_filter,
-            streams,
-        } => SourceConfig::MetaInstagramAds {
-            ad_account_id,
-            start_date,
-            end_date,
-            lookback_days,
-            stream_profile,
-            processing_lag_days,
-            api_version,
-            access_token,
-            oauth_token_url,
-            oauth_client_id,
-            oauth_client_secret,
-            oauth_refresh_token,
-            instagram_filter,
-            streams,
-        },
-        SourceKind::DataForSeoBacklinks {
-            login,
-            password,
-            site,
-            run_mode,
-            backlink_target,
-            limit,
-            max_pages,
-            request_interval_ms,
-        } => SourceConfig::DataForSeoBacklinks {
-            login,
-            password,
-            site,
-            run_mode,
-            backlink_target,
-            limit,
-            max_pages,
-            request_interval_ms,
-        },
-        SourceKind::UpfoundryBacklinks {
-            site,
-            entity_kind,
-            entity_domain,
-            primary_domain,
-            competitor_name,
-            ops_bucket,
-            ops_prefix,
-            selected_snapshot_id,
-            include_subdomains,
-        } => SourceConfig::UpfoundryBacklinks {
-            site,
-            entity_kind,
-            entity_domain,
-            primary_domain,
-            competitor_name,
-            ops_bucket,
-            ops_prefix,
-            selected_snapshot_id,
-            include_subdomains,
-        },
-        SourceKind::UpfoundryLinkGraphIngest {
-            ops_bucket,
-            ops_prefix,
-            frontier_domains,
-            cc_crawl_id,
-            max_urls_per_run,
-            max_links_per_page,
-            monthly_window,
-            cc_web_graph_uri,
-            cc_web_graph_max_rows,
-            live_crawl_enabled,
-            brightdata_proxy_escalation_enabled,
-            include_subdomains,
-        } => SourceConfig::UpfoundryLinkGraphIngest {
-            ops_bucket,
-            ops_prefix,
-            frontier_domains,
-            cc_crawl_id,
-            max_urls_per_run,
-            max_links_per_page,
-            monthly_window,
-            cc_web_graph_uri,
-            cc_web_graph_max_rows,
-            live_crawl_enabled,
-            brightdata_proxy_escalation_enabled,
-            include_subdomains,
-        },
-        SourceKind::UpfoundryLinkGraphCompact {
-            ops_bucket,
-            ops_prefix,
-            max_staging_partitions,
-            pagerank_damping,
-            pagerank_max_iterations,
-            spam_model_version,
-        } => SourceConfig::UpfoundryLinkGraphCompact {
-            ops_bucket,
-            ops_prefix,
-            max_staging_partitions,
-            pagerank_damping,
-            pagerank_max_iterations,
-            spam_model_version,
-        },
-        SourceKind::DataForSeoSeoOpportunities {
-            login,
-            password,
-            site,
-            location_code,
-            language_code,
-            device,
-            run_mode,
-            seed_keywords,
-            request_interval_ms,
-        } => SourceConfig::DataForSeoSeoOpportunities {
-            login,
-            password,
-            site,
-            location_code,
-            language_code,
-            device,
-            run_mode,
-            seed_keywords,
-            request_interval_ms,
-        },
-        SourceKind::HttpClient {
-            url,
-            method,
-            headers,
-            body,
-            auth_strategy,
-            auth_user,
-            auth_password,
-            auth_token,
-            scrape_interval_seconds,
-        } => SourceConfig::HttpClient {
-            url,
-            method,
-            headers: pairs_to_hash_map(headers),
-            body,
-            auth_strategy,
-            auth_user,
-            auth_password,
-            auth_token,
-            scrape_interval_seconds,
-        },
-        SourceKind::HttpServer {
-            listen_address,
-            path,
-            auth_token,
-        } => SourceConfig::HttpServer {
-            listen_address,
-            path,
-            auth_token,
-        },
-        SourceKind::Otlp {
-            listen_address_grpc,
-            listen_address_http,
-            signals,
-            auth_token,
-        } => SourceConfig::Otlp {
-            listen_address_grpc,
-            listen_address_http,
-            signals,
-            auth_token,
-        },
-        SourceKind::Socket {
-            mode,
-            address,
-            framing,
-        } => SourceConfig::Socket {
-            mode,
-            address,
-            framing,
-        },
-        SourceKind::Statsd { listen_address } => SourceConfig::Statsd { listen_address },
-        SourceKind::Stdin { mode } => SourceConfig::Stdin { mode },
-    };
-
-    let kind_label = match &src {
-        SourceConfig::Mssql { .. } => "mssql",
-        SourceConfig::S3 { .. } => "s3",
-        SourceConfig::Mysql { .. } => "mysql",
-        SourceConfig::PostgresSource { .. } => "postgres_source",
-        SourceConfig::RedshiftSource { .. } => "redshift_source",
-        SourceConfig::Mongodb { .. } => "mongodb",
-        SourceConfig::Dynamodb { .. } => "dynamodb",
-        SourceConfig::ClickhouseSource { .. } => "clickhouse_source",
-        SourceConfig::MotherduckSource { .. } => "motherduck_source",
-        SourceConfig::Sftp { .. } => "sftp",
-        SourceConfig::File { .. } => "file",
-        SourceConfig::DeltaLake { .. } => "delta_lake",
-        SourceConfig::Kafka { .. } => "kafka",
-        SourceConfig::Sqs { .. } => "sqs",
-        SourceConfig::Kinesis { .. } => "kinesis",
-        SourceConfig::Amqp { .. } => "amqp",
-        SourceConfig::Sns { .. } => "sns",
-        SourceConfig::Eventbridge { .. } => "eventbridge",
-        SourceConfig::Mqtt { .. } => "mqtt",
-        SourceConfig::Websocket { .. } => "websocket",
-        SourceConfig::GoogleAnalytics { .. } => "google_analytics",
-        SourceConfig::GoogleSearchConsole { .. } => "google_search_console",
-        SourceConfig::BingWebmasterTools { .. } => "bing_webmaster_tools",
-        SourceConfig::GooglePageSpeed { .. } => "google_pagespeed",
-        SourceConfig::AiCitations { .. } => "ai_citations",
-        SourceConfig::GoogleSerpRanks { .. } => "google_serp_ranks",
-        SourceConfig::AppleAppStoreSerp { .. } => "apple_app_store_serp",
-        SourceConfig::SiteQuality { .. } => "site_quality",
-        SourceConfig::SiteSecurity { .. } => "site_security",
-        SourceConfig::SeoCrawl { .. } => "seo_crawl",
-        SourceConfig::AppleSearchAds { .. } => "apple_search_ads",
-        SourceConfig::MetaInstagramAds { .. } => "meta_instagram_ads",
-        SourceConfig::DataForSeoBacklinks { .. } => "dataforseo_backlinks",
-        SourceConfig::UpfoundryBacklinks { .. } => "upfoundry_backlinks",
-        SourceConfig::UpfoundryLinkGraphIngest { .. } => "upfoundry_link_graph_ingest",
-        SourceConfig::UpfoundryLinkGraphCompact { .. } => "upfoundry_link_graph_compact",
-        SourceConfig::DataForSeoSeoOpportunities { .. } => "dataforseo_seo_opportunities",
-        SourceConfig::HttpClient { .. } => "http_client",
-        SourceConfig::HttpServer { .. } => "http_server",
-        SourceConfig::Otlp { .. } => "otlp",
-        SourceConfig::Socket { .. } => "socket",
-        SourceConfig::Statsd { .. } => "statsd",
-        SourceConfig::Stdin { .. } => "stdin",
-    };
-    cfg.source = Some(src);
-
-    if let Err(e) = save_config(&cfg, explicit_config) {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
-    }
-
-    if is_json_output(output) {
-        emit_connect_result(output, explicit_config, kind_label, "source");
-    } else {
-        println!("Source ({}) configured.", kind_label);
     }
 }
 
@@ -7283,75 +6379,6 @@ fn check_fail(msg: &str) {
 // engine commands
 // ---------------------------------------------------------------------------
 
-async fn prepare_engine_command(
-    log: Option<String>,
-    explicit_config: &Option<PathBuf>,
-    pipeline: &str,
-) {
-    let path = config_path(explicit_config);
-    if !path.exists() {
-        eprintln!("error: {} not found", path.display());
-        eprintln!("Run 'skippr init <project>' first.");
-        std::process::exit(1);
-    }
-
-    let engine_cfg = match load_cli_execution_config(explicit_config) {
-        Ok(cfg) => cfg,
-        Err(e) => {
-            eprintln!("error: {}", e);
-            std::process::exit(1);
-        }
-    };
-    if let Err(e) = validate_pipeline_exists(&engine_cfg, pipeline) {
-        eprintln!("error: {}", e);
-        std::process::exit(1);
-    }
-
-    let server_credentials = match load_cli_server_credentials().await {
-        Ok(credentials) => credentials,
-        Err(e) => {
-            eprintln!("[skippr] ERROR: {}", e);
-            eprintln!("[skippr]   Run 'skippr user login' to authenticate interactively,");
-            eprintln!("[skippr]   or set SKIPPR_API_KEY for CI/CD.");
-            std::process::exit(1);
-        }
-    };
-    let tenant = server_credentials.tenant_id.trim();
-    if tenant.is_empty() {
-        eprintln!("[skippr] ERROR: authenticated credentials did not include a tenant id.");
-        std::process::exit(1);
-    }
-    skipprd::helpers::configuration::Config::setenv("TENANT", tenant);
-    set_public_cli_el_storage_default();
-
-    std::env::set_var("SKIPPR_CONFIG_FILE", &path);
-    skipprd::helpers::logging::init_logging(log);
-    skipprd::helpers::configuration::Config::build_config();
-    skipprd::helpers::configuration::PIPELINE_NAME
-        .write()
-        .clear();
-    skipprd::helpers::configuration::PIPELINE_NAME
-        .write()
-        .push_str(pipeline);
-    let project_root = project_root_from_config_path(&path);
-    let workspace = yaml_string_at(&engine_cfg, &["skippr", "workspace"]).unwrap_or("default");
-    let pipeline_cfg = pipeline_config(&engine_cfg, pipeline).expect("pipeline validated above");
-    let data_dir = cli_pipeline_data_dir(&project_root, tenant, pipeline, workspace, pipeline_cfg);
-    if let Err(err) = std::fs::create_dir_all(&data_dir) {
-        eprintln!(
-            "[skippr] failed to create pipeline data directory '{}': {}",
-            data_dir.display(),
-            err
-        );
-        std::process::exit(1);
-    }
-    skipprd::helpers::configuration::Config::setenv("DATA_DIR", &data_dir.to_string_lossy());
-    skipprd::helpers::configuration::Config::setenv("SKIPPR_PIPELINE_DATA_ROOT", "true");
-    load_dotenv_for_skippr_config_yaml_path(&path);
-    skipprd::helpers::configuration::Config::init().await;
-    std::env::set_var("SKIPPR_CLOUD_WORKSPACE", workspace);
-}
-
 async fn cmd_thread_resolve(
     log: Option<String>,
     explicit_config: &Option<PathBuf>,
@@ -7405,75 +6432,6 @@ async fn cmd_thread_resolve(
         );
     }
     let _ = log;
-}
-
-async fn cmd_discover(
-    log: Option<String>,
-    explicit_config: &Option<PathBuf>,
-    args: EngineDiscoverArgs,
-) {
-    prepare_engine_command(log, explicit_config, &args.pipeline).await;
-    let workspace = std::env::var("SKIPPR_CLOUD_WORKSPACE").unwrap_or_else(|_| "default".into());
-    let failed = workspace_run_lock::with_heavy_run_lock(
-        &workspace,
-        "discover",
-        Some(&args.pipeline),
-        || async {
-            skipprd::engine::run_discover(&args.output)
-                .await
-                .err()
-                .map(|err| {
-                    eprintln!("[skippr] discover failed: {}", err);
-                })
-                .is_some()
-        },
-    )
-    .await;
-    if failed {
-        std::process::exit(1);
-    }
-}
-
-async fn cmd_metadata(
-    log: Option<String>,
-    explicit_config: &Option<PathBuf>,
-    action: metadata_cmd::MetadataAction,
-) {
-    match action {
-        metadata_cmd::MetadataAction::Show(args) => {
-            prepare_engine_command(log, explicit_config, &args.pipeline).await;
-            metadata_cmd::run_metadata_show(&args.output).await;
-        }
-        metadata_cmd::MetadataAction::Apply(args) => {
-            prepare_engine_command(log, explicit_config, &args.pipeline).await;
-            metadata_cmd::run_metadata_apply(&args).await;
-        }
-    }
-}
-
-async fn cmd_sync(log: Option<String>, explicit_config: &Option<PathBuf>, args: EngineSyncArgs) {
-    prepare_engine_command(log, explicit_config, &args.pipeline).await;
-    let workspace = std::env::var("SKIPPR_CLOUD_WORKSPACE").unwrap_or_else(|_| "default".into());
-    let command = workspace_run_lock::sync_api_command(args.once);
-    let failed = workspace_run_lock::with_heavy_run_lock(
-        &workspace,
-        command,
-        Some(&args.pipeline),
-        || async {
-            skipprd::metrics::Metrics::init_send_loop();
-            skipprd::engine::run_sync(&args.output, args.once)
-                .await
-                .err()
-                .map(|err| {
-                    eprintln!("[skippr] sync failed: {}", err);
-                })
-                .is_some()
-        },
-    )
-    .await;
-    if failed {
-        std::process::exit(1);
-    }
 }
 
 async fn cmd_ask(log: Option<String>, explicit_config: &Option<PathBuf>, args: AskArgs) {
@@ -7554,13 +6512,8 @@ async fn prepare_lineage_engine_environment(
     validate_pipeline_exists(&engine_cfg, pipeline)?;
     set_public_cli_el_storage_default();
     std::env::set_var("SKIPPR_CONFIG_FILE", &path);
-    skipprd::helpers::configuration::Config::setenv("TENANT", tenant);
-    skipprd::helpers::configuration::PIPELINE_NAME
-        .write()
-        .clear();
-    skipprd::helpers::configuration::PIPELINE_NAME
-        .write()
-        .push_str(pipeline);
+    std::env::set_var("TENANT", tenant);
+    std::env::set_var("PIPELINE_NAME", pipeline);
 
     let project_root = project_root_from_config_path(&path);
     let workspace = yaml_string_at(&engine_cfg, &["skippr", "workspace"]).unwrap_or("default");
@@ -7572,10 +6525,9 @@ async fn prepare_lineage_engine_environment(
             data_dir.display()
         )
     })?;
-    skipprd::helpers::configuration::Config::setenv("DATA_DIR", &data_dir.to_string_lossy());
-    skipprd::helpers::configuration::Config::setenv("SKIPPR_PIPELINE_DATA_ROOT", "true");
+    std::env::set_var("DATA_DIR", data_dir.to_string_lossy().as_ref());
+    std::env::set_var("SKIPPR_PIPELINE_DATA_ROOT", "true");
     load_dotenv_for_skippr_config_yaml_path(&path);
-    skipprd::helpers::configuration::Config::init().await;
     std::env::set_var("SKIPPR_CLOUD_WORKSPACE", workspace);
 
     let mut metadata_locations = Vec::new();
@@ -8873,7 +7825,7 @@ async fn cmd_feedback(
     include_diagnostics: bool,
     explicit_config: &Option<PathBuf>,
 ) {
-    let cfg = match load_config(explicit_config) {
+    let engine_cfg = match load_engine_config(explicit_config) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("error: {}", e);
@@ -8932,7 +7884,7 @@ async fn cmd_feedback(
     let Some(thread_id) = thread_id else {
         let diagnostics_id = uuid::Uuid::new_v4().to_string();
         let diagnostics = feedback_diagnostics::collect(
-            &cfg,
+            &engine_cfg,
             &config_path(explicit_config),
             "unavailable",
             &diagnostics_id,
@@ -8966,7 +7918,7 @@ async fn cmd_feedback(
         Ok(feedback) => {
             if include_diagnostics {
                 let diagnostics = feedback_diagnostics::collect(
-                    &cfg,
+                    &engine_cfg,
                     &config_path(explicit_config),
                     &feedback.thread_id,
                     &feedback.feedback_id,
@@ -9435,14 +8387,31 @@ async fn async_main() {
             ConnectTarget::Warehouse { kind } => cmd_connect_warehouse(kind, &cli.config, &output),
             ConnectTarget::Source { kind } => cmd_connect_source(kind, &cli.config, &output),
         },
+        Cmd::Discover { pipeline, output } => invoke_skipprd(
+            &cli.config,
+            &cli.log,
+            "discover",
+            pipeline.as_deref(),
+            Some(&output),
+            false,
+        ),
+        Cmd::Sync {
+            pipeline,
+            output,
+            once,
+        } => invoke_skipprd(
+            &cli.config,
+            &cli.log,
+            "sync",
+            pipeline.as_deref(),
+            Some(&output),
+            once,
+        ),
         Cmd::Doctor { output } => cmd_doctor(&cli.config, &output),
         Cmd::Config { action } => match action {
             ConfigAction::Schema { output } => cmd_config_schema(&output),
             ConfigAction::Show { output } => cmd_config_show(&cli.config, &output),
         },
-        Cmd::Discover(args) => cmd_discover(cli.log, &cli.config, args).await,
-        Cmd::Metadata { action } => cmd_metadata(cli.log, &cli.config, action).await,
-        Cmd::Sync(args) => cmd_sync(cli.log, &cli.config, args).await,
         Cmd::Model(args) => cmd_model(cli.log, &cli.config, args).await,
         Cmd::Test { action } => match action {
             test_cmd::TestSubcommand::List(args) => {
@@ -9476,7 +8445,7 @@ async fn async_main() {
         Cmd::Plan(args) => cmd_plan(cli.log, &cli.config, args).await,
         Cmd::Query(args) => cmd_query(cli.log, &cli.config, args).await,
         Cmd::Lineage { action } => cmd_lineage(cli.log, &cli.config, action).await,
-        Cmd::Chat { action } => chat_cmd::run_chat(cli.log, &cli.config, action).await,
+        Cmd::Agent { action } => chat_cmd::run_chat(cli.log, &cli.config, action).await,
         Cmd::Thread { action } => match action {
             ThreadAction::Resolve { pipeline, output } => {
                 cmd_thread_resolve(cli.log, &cli.config, pipeline, &output).await;
@@ -9606,7 +8575,8 @@ async fn cmd_user_login(output: &str) {
                         println!("  Next steps:");
                         println!("    skippr user account       — view balance");
                         println!("    skippr user buy-credits   — add funds");
-                        println!("    skippr discover/sync/model — start a pipeline");
+                        println!("    skippr discover/sync   — ingest data");
+                        println!("    skippr model            — start modeling");
                         println!();
                     }
                 }
@@ -10009,24 +8979,6 @@ async fn delete_storage_prefix(
     Ok(keys)
 }
 
-async fn delete_skipprd_storage_prefix(
-    storage: &std::sync::Arc<dyn skipprd::adapters::storage::StorageAdapter>,
-    prefix: &str,
-) -> Result<Vec<String>, String> {
-    let mut keys = storage
-        .list_prefix(prefix)
-        .await
-        .map_err(|e| format!("list_prefix('{prefix}'): {e}"))?;
-    keys.sort();
-    for key in &keys {
-        storage
-            .delete_object(key)
-            .await
-            .map_err(|e| format!("delete_object('{key}'): {e}"))?;
-    }
-    Ok(keys)
-}
-
 fn env_example_template() -> &'static str {
     "\
 # Copy this file to `.env` in the same folder as skippr.yml (or merge into an existing `.env`).
@@ -10073,11 +9025,12 @@ mod tests {
         assert!(config.exists());
         let contents = fs::read_to_string(&config).unwrap();
         assert!(contents.contains("test-project"));
-        assert!(contents.contains("default_warehouse: primary"));
-        assert!(contents.contains("warehouses: {}"));
+        assert!(contents.contains("data_sinks: {}"));
         assert!(contents.contains("vector_sources: {}"));
         assert!(!contents.contains("tenant:"));
         assert!(!contents.contains("react:"));
+        assert!(!contents.contains("warehouses:"));
+        assert!(!contents.contains("default_warehouse"));
     }
 
     #[test]
@@ -10097,6 +9050,95 @@ mod tests {
         assert_eq!(name, "Otlp");
         assert_eq!(cfg["listen_address_grpc"], "0.0.0.0:4317");
         assert_eq!(cfg["signals"][0], "traces");
+    }
+
+    #[tokio::test]
+    async fn connect_warehouse_snowflake_writes_skipprd_plugin_yaml_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("skippr.yml");
+        cmd_init("demo", &Some(config.clone()), "json").await;
+        cmd_connect_warehouse(
+            WarehouseKind::Snowflake {
+                account: Some("${SNOWFLAKE_ACCOUNT}".into()),
+                user: Some("${SNOWFLAKE_USER}".into()),
+                password: None,
+                private_key_path: Some("${SNOWFLAKE_PRIVATE_KEY_PATH}".into()),
+                stage: None,
+                staging_uri: None,
+                staging_storage_integration: None,
+                staging_azure_sas_token: None,
+                staging_azure_account_key: None,
+                staging_gcs_service_account_key_path: None,
+                database: Some("ANALYTICS".into()),
+                schema: Some("RAW".into()),
+                warehouse: Some("COMPUTE_WH".into()),
+                role: Some("ACCOUNTADMIN".into()),
+            },
+            &Some(config.clone()),
+            "json",
+        );
+        let contents = fs::read_to_string(&config).unwrap();
+        assert!(contents.contains("Snowflake:"));
+        assert!(contents.contains("data_sinks:"));
+        assert!(contents.contains("account:"));
+        assert!(contents.contains("data_sinks.warehouse") || contents.contains("data_sink: data_sinks.warehouse"));
+        assert!(!contents.contains("warehouses:"));
+        assert!(!contents.contains("default_warehouse"));
+        assert!(!contents.contains("kind: snowflake"));
+    }
+
+    #[tokio::test]
+    async fn connect_warehouse_athena_writes_skipprd_field_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("skippr.yml");
+        cmd_init("demo", &Some(config.clone()), "json").await;
+        cmd_connect_warehouse(
+            WarehouseKind::Athena {
+                athena_workgroup_name: Some("primary".into()),
+                s3_bucket: Some("datalake".into()),
+                s3_prefix: Some("bronze".into()),
+                glue_database_name: Some("bronze".into()),
+                athena_results_s3_bucket: Some("athena-results".into()),
+                region: Some("us-east-1".into()),
+                catalog: Some("AwsDataCatalog".into()),
+                max_concurrency: Some(8),
+                discovery_cache_ttl_secs: Some(120),
+            },
+            &Some(config.clone()),
+            "json",
+        );
+        let contents = fs::read_to_string(&config).unwrap();
+        assert!(contents.contains("Athena:"));
+        assert!(contents.contains("athena_workgroup_name: primary"));
+        assert!(contents.contains("s3_bucket: datalake"));
+        assert!(contents.contains("s3_prefix: bronze"));
+        assert!(contents.contains("glue_database_name: bronze"));
+        assert!(contents.contains("athena_results_s3_bucket: athena-results"));
+        assert!(!contents.contains("workgroup: primary"));
+        assert!(!contents.contains("result_s3:"));
+        assert!(!contents.contains("warehouses:"));
+    }
+
+    #[tokio::test]
+    async fn connect_source_s3_writes_skipprd_field_names() {
+        let dir = tempfile::tempdir().unwrap();
+        let config = dir.path().join("skippr.yml");
+        cmd_init("demo", &Some(config.clone()), "json").await;
+        cmd_connect_source(
+            SourceKind::S3 {
+                s3_bucket: Some("raw-bucket".into()),
+                s3_prefix: Some("events/".into()),
+                namespace_fields: None,
+            },
+            &Some(config.clone()),
+            "json",
+        );
+        let contents = fs::read_to_string(&config).unwrap();
+        assert!(contents.contains("S3:"));
+        assert!(contents.contains("s3_bucket: raw-bucket"));
+        assert!(contents.contains("s3_prefix: events/"));
+        assert!(!contents.contains("\n      bucket:"));
+        assert!(!contents.contains("\n      prefix:"));
     }
 
     #[tokio::test]
@@ -10180,60 +9222,6 @@ data_sinks:
             "expected unset env diagnostic, got: {:?}",
             missing
         );
-    }
-
-    #[test]
-    fn skipprd_config_accepts_product_cli_sections() {
-        let cfg: skipprd::helpers::configuration::Config = serde_yaml::from_str(
-            r#"
-skippr:
-  workspace: demo
-  default_warehouse: primary
-pipelines:
-  demo:
-    data_source: data_sources.source
-    data_sink: data_sinks.sink
-    model:
-      warehouse: primary
-data_sources:
-  source:
-    S3:
-      s3_bucket: raw
-data_sinks:
-  sink:
-    Athena: {}
-warehouses:
-  primary:
-    kind: athena
-    schema: modeled
-vector_sources:
-  docs:
-    root: docs
-    include: ["**/*.md"]
-dbt:
-  target: primary
-llm:
-  provider: openai_compat
-"#,
-        )
-        .expect("canonical skippr.yml should parse as skipprd::Config");
-
-        assert_eq!(
-            cfg.skippr
-                .as_ref()
-                .and_then(|skippr| skippr.default_warehouse.as_deref()),
-            Some("primary")
-        );
-        assert!(cfg
-            .warehouses
-            .as_ref()
-            .is_some_and(|items| items.contains_key("primary")));
-        assert!(cfg
-            .vector_sources
-            .as_ref()
-            .is_some_and(|items| items.contains_key("docs")));
-        assert!(cfg.dbt.is_some());
-        assert!(cfg.llm.is_some());
     }
 
     #[test]
@@ -10376,18 +9364,111 @@ data_sinks:
     }
 
     #[test]
-    fn react_config_prefers_top_level_warehouse_for_modeling() {
+    fn react_config_reads_top_level_dbt_naming() {
         let cfg: serde_yaml::Value = serde_yaml::from_str(
             r#"
 skippr:
   workspace: demo
-  default_warehouse: primary
+pipelines:
+  demo:
+    data_sink: data_sinks.warehouse
+data_sinks:
+  warehouse:
+    Snowflake:
+      account: ACCT
+      user: paul
+      database: ANALYTICS
+      schema: RAW
+      warehouse: COMPUTE_WH
+      role: ACCOUNTADMIN
+dbt:
+  target_schema: mssql_migration
+  silver_suffix: silver_layer
+  gold_suffix: gold_layer
+"#,
+        )
+        .expect("yaml");
+        let internal = react_config_from_pipeline_config(&cfg, "demo").expect("internal");
+        let naming = internal
+            .providers
+            .expect("providers")
+            .get("dbt")
+            .and_then(|dbt| dbt.get("naming"))
+            .cloned()
+            .expect("naming");
+        assert_eq!(naming.get("target_schema").and_then(|v| v.as_str()), Some("mssql_migration"));
+        assert_eq!(naming.get("silver_suffix").and_then(|v| v.as_str()), Some("silver_layer"));
+        assert_eq!(naming.get("gold_suffix").and_then(|v| v.as_str()), Some("gold_layer"));
+    }
+
+    #[test]
+    fn react_config_does_not_model_from_warehouses_only() {
+        let cfg: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+skippr:
+  workspace: demo
+pipelines:
+  demo:
+    data_sink: data_sinks.landing
+data_sinks: {}
+warehouses:
+  primary:
+    kind: athena
+    workgroup: model-workgroup
+"#,
+        )
+        .expect("yaml");
+        let err = react_config_from_pipeline_config(&cfg, "demo")
+            .expect_err("warehouses-only YAML cannot model");
+        assert!(
+            err.contains("data sink") || err.contains("data_sinks"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn react_config_models_iceberg_from_query_engine() {
+        let cfg: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+skippr:
+  workspace: demo
+pipelines:
+  demo:
+    data_sink: data_sinks.lake
+data_sinks:
+  lake:
+    Iceberg:
+      catalog:
+        type: glue
+        database: bronze
+      query_engine:
+        type: athena
+        workgroup: analytics
+"#,
+        )
+        .expect("yaml");
+        let internal = react_config_from_pipeline_config(&cfg, "demo").expect("iceberg query engine");
+        let wh = internal
+            .providers
+            .expect("providers")
+            .get("warehouse")
+            .cloned()
+            .expect("warehouse");
+        assert_eq!(wh.get("kind").and_then(|v| v.as_str()), Some("athena"));
+        assert_eq!(wh.get("workgroup").and_then(|v| v.as_str()), Some("analytics"));
+        assert_eq!(wh.get("schema").and_then(|v| v.as_str()), Some("bronze"));
+    }
+
+    #[test]
+    fn react_config_ignores_top_level_warehouses_for_modeling() {
+        let cfg: serde_yaml::Value = serde_yaml::from_str(
+            r#"
+skippr:
+  workspace: demo
 pipelines:
   demo:
     data_source: data_sources.source
     data_sink: data_sinks.landing
-    model:
-      warehouse: primary
 data_sources:
   source:
     S3:
@@ -10396,7 +9477,11 @@ data_sinks:
   landing:
     schema_sink: schema_sinks.glue
     Athena:
-      workgroup: ingest-workgroup
+      athena_workgroup_name: ingest-workgroup
+      athena_results_s3_bucket: query-results
+      s3_bucket: landing-bucket
+      s3_prefix: bronze
+      glue_database_name: bronze
 schema_sinks:
   glue:
     Glue:
@@ -10421,16 +9506,12 @@ warehouses:
         assert_eq!(wh.get("kind").and_then(|v| v.as_str()), Some("athena"));
         assert_eq!(
             wh.get("workgroup").and_then(|v| v.as_str()),
-            Some("model-workgroup")
+            Some("ingest-workgroup")
         );
-        assert_eq!(wh.get("schema").and_then(|v| v.as_str()), Some("modeled"));
-        assert_eq!(
-            providers
-                .get("el")
-                .and_then(|el| el.get("schema_sink"))
-                .and_then(|sink| sink.get("kind"))
-                .and_then(|kind| kind.as_str()),
-            Some("glue")
+        assert_eq!(wh.get("schema").and_then(|v| v.as_str()), Some("bronze"));
+        assert_ne!(
+            wh.get("workgroup").and_then(|v| v.as_str()),
+            Some("model-workgroup")
         );
     }
 
@@ -10645,10 +9726,9 @@ skippr:
   workspace: demo
   tenant: old-tenant
 dbt:
-  target: prod
-warehouses:
-  primary:
-    kind: athena
+  target_schema: demo
+  silver_suffix: silver
+  gold_suffix: gold
 "#,
         )
         .expect("yaml");
@@ -10656,7 +9736,7 @@ warehouses:
         warn_and_normalize_legacy_cli_config(&mut cfg).expect("normalize legacy keys");
 
         assert!(cfg.get("dbt").is_some());
-        assert!(cfg.get("warehouses").is_some());
+        assert!(cfg.get("warehouses").is_none());
         assert!(cfg
             .get("skippr")
             .and_then(|skippr| skippr.get("tenant"))
@@ -10814,13 +9894,85 @@ data_sources:
     }
 
     #[test]
-    fn sync_and_discover_require_pipeline() {
-        let sync_err = Cli::try_parse_from(["skippr", "sync"]).expect_err("missing pipeline");
-        assert!(sync_err.to_string().contains("--pipeline"));
+    fn skippr_discover_and_sync_delegate_to_skipprd() {
+        let discover = Cli::try_parse_from([
+            "skippr",
+            "--config",
+            "skippr.yml",
+            "--log",
+            "info",
+            "discover",
+            "--pipeline",
+            "demo",
+            "--output",
+            "json",
+        ])
+        .expect("skippr discover parses");
+        match discover.cmd {
+            Cmd::Discover { pipeline, output } => {
+                let argv = skipprd_forward_argv(
+                    &discover.config,
+                    &discover.log,
+                    "discover",
+                    pipeline.as_deref(),
+                    Some(&output),
+                    false,
+                );
+                assert_eq!(
+                    argv,
+                    vec![
+                        "--config",
+                        "skippr.yml",
+                        "--log",
+                        "info",
+                        "discover",
+                        "--pipeline",
+                        "demo",
+                        "--output",
+                        "json"
+                    ]
+                );
+            }
+            _ => panic!("expected discover"),
+        }
 
-        let discover_err =
-            Cli::try_parse_from(["skippr", "discover"]).expect_err("missing pipeline");
-        assert!(discover_err.to_string().contains("--pipeline"));
+        let sync = Cli::try_parse_from([
+            "skippr",
+            "--config",
+            "skippr.yml",
+            "sync",
+            "--pipeline",
+            "demo",
+            "--once",
+        ])
+        .expect("skippr sync parses");
+        match sync.cmd {
+            Cmd::Sync {
+                pipeline,
+                output,
+                once,
+            } => {
+                let argv = skipprd_forward_argv(
+                    &sync.config,
+                    &sync.log,
+                    "sync",
+                    pipeline.as_deref(),
+                    Some(&output),
+                    once,
+                );
+                assert!(argv.contains(&"--once".to_string()));
+                assert_eq!(argv[0], "--config");
+                assert_eq!(argv[2], "sync");
+            }
+            _ => panic!("expected sync"),
+        }
+
+        let err = Cli::try_parse_from(["skippr", "metadata"]).expect_err("metadata stays on skipprd");
+        let message = err.to_string();
+        assert!(
+            message.contains("unrecognized") || message.contains("unexpected"),
+            "{message}"
+        );
     }
 
     #[test]
@@ -10982,10 +10134,32 @@ data_sources:
         ])
         .expect("chat send without pipeline should parse");
         match cli.cmd {
-            Cmd::Chat {
+            Cmd::Agent {
                 action: chat_cmd::ChatAction::Send(args),
             } => {
                 assert!(args.pipeline.is_none());
+                assert_eq!(args.mode, chat_cmd::ChatModeCli::Ask);
+            }
+            other => panic!("unexpected command: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agent_send_is_the_canonical_chat_namespace() {
+        let cli = Cli::try_parse_from([
+            "skippr",
+            "agent",
+            "send",
+            "--mode",
+            "ask",
+            "--message",
+            "status?",
+        ])
+        .expect("skippr agent send should parse");
+        match cli.cmd {
+            Cmd::Agent {
+                action: chat_cmd::ChatAction::Send(args),
+            } => {
                 assert_eq!(args.mode, chat_cmd::ChatModeCli::Ask);
             }
             other => panic!("unexpected command: {other:?}"),
@@ -11152,9 +10326,9 @@ pipelines:
         fs::write(other_model.join("t.json"), "{}").unwrap();
 
         let skipprd_dir = tempfile::tempdir().unwrap();
-        let skipprd_storage = Arc::new(skipprd::adapters::storage::LocalDiskStorageAdapter::new(
-            &skipprd_dir.path().display().to_string(),
-        )) as Arc<dyn skipprd::adapters::storage::StorageAdapter>;
+        let skipprd_storage =
+            Arc::new(LocalFileStorageAdapter::new(skipprd_dir.path().to_path_buf()).unwrap())
+                as Arc<dyn StorageAdapter>;
         skipprd_storage
             .put_bytes(
                 "auth-tenant/analytics/orders/metadata/metadata.json",
