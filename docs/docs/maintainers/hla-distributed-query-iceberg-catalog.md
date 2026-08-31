@@ -57,6 +57,7 @@ Unknown `WAL_STORAGE` values fail startup. `clustered` requires a clustered offs
 | Replica RPC, Flight SQL, Ballista gRPC | **Always mTLS** (HLA mints a throwaway CA; SAN `skippr-cluster`) | Same PEMs; mesh only |
 | Gossip | Authenticated Chitchat (WU-5.1); `SKIPPR_CLUSTER_GOSSIP_KEY` required | Same; no tenant-string fallback |
 | Query tenant | Flight `Authorization: Basic {tenant}/{workspace}` on every RPC | Cloud **gateway** maps JWT `tenant_id` (D31) to that header; skipprd does not verify JWTs |
+| Cloud tables mesh auth | n/a (DynamoDB Local) | Host GuestCredentialBroker (`CLOUD_SYSTEM_BROKER_CONFIG`). MUST NOT `CLOUD_TABLES_ACCESS_TOKEN` / `CLOUD_ACCESS_TOKEN` |
 
 DynamoDB Local remains the OSS HLA harness. Cloud guests MUST NOT hairpin public `*.cloud.skippr.io` (D37).
 

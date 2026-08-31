@@ -1,8 +1,9 @@
 //! Async CloudTables JSON HTTP client.
 //!
-//! Guests use mesh loopback/CNI + workload JWT (D37). Public `*.cloud.skippr.io`
-//! hairpins fail closed. This crate does not depend on Cloud `tables-client`.
+//! Guests use mesh loopback/CNI + a host-broker-issued workload JWT (D37).
+//! Public `*.cloud.skippr.io` hairpins fail closed.
 
+use guest_broker::SystemBrokerClient;
 use reqwest::header::CONTENT_TYPE;
 use serde_json::{json, Value};
 use thiserror::Error;
@@ -45,10 +46,15 @@ impl TablesClientError {
 }
 
 #[derive(Clone, Debug)]
+enum MeshAuthority {
+    Broker(SystemBrokerClient),
+    #[cfg(test)]
+    TestToken(String),
+}
+
+#[derive(Clone, Debug)]
 pub struct CloudCredentials {
-    pub access_key_id: String,
-    pub secret_access_key: String,
-    pub session_token: Option<String>,
+    authority: MeshAuthority,
 }
 
 impl CloudCredentials {
@@ -58,25 +64,30 @@ impl CloudCredentials {
                 "clustered Cloud tables requires a mesh/loopback CLOUD_TABLES_ENDPOINT",
             ));
         }
-        let token = std::env::var("CLOUD_TABLES_ACCESS_TOKEN")
-            .ok()
-            .filter(|t| !t.trim().is_empty())
-            .or_else(|| {
-                std::env::var("CLOUD_ACCESS_TOKEN")
-                    .ok()
-                    .filter(|t| !t.trim().is_empty())
-            });
-        if token.is_none() {
+        if !mesh_auth_configured() {
             return Err(TablesClientError::msg(
-                "clustered Cloud tables requires CLOUD_TABLES_ENDPOINT plus a mesh JWT (CLOUD_TABLES_ACCESS_TOKEN or CLOUD_ACCESS_TOKEN)",
+                "clustered Cloud tables requires GuestCredentialBroker (CLOUD_SYSTEM_BROKER_CONFIG)",
             ));
         }
+        let broker = SystemBrokerClient::from_env().map_err(|error| {
+            TablesClientError::msg(format!("shared guest broker required: {error}"))
+        })?;
         Ok(Self {
-            access_key_id: String::new(),
-            secret_access_key: String::new(),
-            session_token: None,
+            authority: MeshAuthority::Broker(broker),
         })
     }
+
+    #[cfg(test)]
+    fn for_test_token(token: impl Into<String>) -> Self {
+        Self {
+            authority: MeshAuthority::TestToken(token.into()),
+        }
+    }
+}
+
+/// Guest mesh auth is a readable host broker config drive. Env JWTs are not authority.
+pub fn mesh_auth_configured() -> bool {
+    SystemBrokerClient::from_env().is_ok()
 }
 
 /// Fail closed on public Cloud hostnames (D37: no `*.cloud.skippr.io` hairpin).
@@ -96,6 +107,11 @@ pub fn parse_tables_endpoint(raw: &str) -> Result<String, TablesClientError> {
     if url.scheme() != "http" && url.scheme() != "https" {
         return Err(TablesClientError::msg(
             "CLOUD_TABLES_ENDPOINT must be http or https",
+        ));
+    }
+    if !is_mesh_endpoint(raw) {
+        return Err(TablesClientError::msg(
+            "CLOUD_TABLES_ENDPOINT must be mesh/loopback, not an arbitrary host",
         ));
     }
     Ok(raw.trim_end_matches('/').to_string())
@@ -188,7 +204,7 @@ impl TablesClient {
                 "Cloud tables client is mesh JWT only",
             ));
         }
-        let token = resolve_access_token(&self.credentials, &self.tenant_id, &self.http).await?;
+        let token = resolve_access_token(&self.credentials).await?;
         let request = request
             .header(GATEWAY_HOP_HEADER, "1")
             .header(TENANT_HEADER, &self.tenant_id)
@@ -367,33 +383,18 @@ async fn parse_response(
     })
 }
 
-async fn resolve_access_token(
-    _credentials: &CloudCredentials,
-    tenant_id: &str,
-    _http: &reqwest::Client,
-) -> Result<String, TablesClientError> {
-    if let Ok(token) = std::env::var("CLOUD_TABLES_ACCESS_TOKEN") {
-        if !token.trim().is_empty() {
-            return Ok(token);
+async fn resolve_access_token(credentials: &CloudCredentials) -> Result<String, TablesClientError> {
+    match &credentials.authority {
+        MeshAuthority::Broker(broker) => {
+            let broker = broker.clone();
+            tokio::task::spawn_blocking(move || broker.platform_workload_jwt())
+                .await
+                .map_err(|error| TablesClientError::msg(format!("broker task: {error}")))?
+                .map_err(|error| TablesClientError::msg(error.to_string()))
         }
+        #[cfg(test)]
+        MeshAuthority::TestToken(token) => Ok(token.clone()),
     }
-    let tenant_key = format!(
-        "CLOUD_ACCESS_TOKEN_{}",
-        tenant_id.trim().replace('-', "_").to_ascii_uppercase()
-    );
-    if let Ok(token) = std::env::var(&tenant_key) {
-        if !token.trim().is_empty() {
-            return Ok(token);
-        }
-    }
-    if let Ok(token) = std::env::var("CLOUD_ACCESS_TOKEN") {
-        if !token.trim().is_empty() {
-            return Ok(token);
-        }
-    }
-    Err(TablesClientError::msg(
-        "mesh Cloud tables requires CLOUD_TABLES_ACCESS_TOKEN or CLOUD_ACCESS_TOKEN",
-    ))
 }
 
 pub fn attr_s(item: &Value, name: &str) -> Option<String> {
@@ -431,13 +432,27 @@ pub fn bflag(value: bool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
+
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const SKIPPR_BROKER_DRIVE: &str = r#"{
+  "profile": "skippr",
+  "guest_id": "skippr-0",
+  "cluster_generation": 1,
+  "guest_incarnation": "inc-1",
+  "broker_endpoint": "http://127.0.0.1:8097",
+  "capability": "opaque"
+}
+"#;
 
     #[test]
     fn rejects_public_cloud_hostname() {
         assert!(parse_tables_endpoint("https://tables.cloud.skippr.io").is_err());
         assert!(parse_tables_endpoint("https://api.cloud.skippr.io").is_err());
+        assert!(parse_tables_endpoint("http://example.com").is_err());
         assert!(parse_tables_endpoint("http://127.0.0.1:8003").is_ok());
         assert!(parse_tables_endpoint("http://10.1.0.12:8003").is_ok());
     }
@@ -450,14 +465,61 @@ mod tests {
     }
 
     #[test]
-    fn mesh_token_constructs_and_missing_token_fails() {
+    fn mesh_authority_requires_the_shared_broker() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CLOUD_SYSTEM_BROKER_CONFIG");
+        std::env::remove_var("CLOUD_SYSTEM_BROKER_ENDPOINT");
+        std::env::set_var("CLOUD_TABLES_ACCESS_TOKEN", "guest-held-jwt");
+        std::env::set_var("CLOUD_ACCESS_TOKEN", "guest-held-jwt");
+        assert!(
+            CloudCredentials::from_env_for_endpoint("http://127.0.0.1:8003").is_err(),
+            "env JWTs must not mint clustered Cloud tables authority"
+        );
+        assert!(CloudCredentials::from_env_for_endpoint("https://tables.cloud.skippr.io").is_err());
+        assert!(
+            !mesh_auth_configured(),
+            "ACCESS_TOKEN env must not count as broker config"
+        );
         std::env::remove_var("CLOUD_TABLES_ACCESS_TOKEN");
         std::env::remove_var("CLOUD_ACCESS_TOKEN");
-        assert!(CloudCredentials::from_env_for_endpoint("http://127.0.0.1:8003").is_err());
-        std::env::set_var("CLOUD_TABLES_ACCESS_TOKEN", "mesh-jwt");
-        assert!(CloudCredentials::from_env_for_endpoint("http://127.0.0.1:8003").is_ok());
-        assert!(CloudCredentials::from_env_for_endpoint("https://tables.cloud.skippr.io").is_err());
-        std::env::remove_var("CLOUD_TABLES_ACCESS_TOKEN");
+    }
+
+    #[test]
+    fn mesh_auth_rejects_endpoint_env_alone() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CLOUD_SYSTEM_BROKER_CONFIG");
+        std::env::set_var("CLOUD_SYSTEM_BROKER_ENDPOINT", "http://127.0.0.1:8097");
+        assert!(
+            !mesh_auth_configured(),
+            "CLOUD_SYSTEM_BROKER_ENDPOINT must not authorize clustered tables"
+        );
+        std::env::remove_var("CLOUD_SYSTEM_BROKER_ENDPOINT");
+    }
+
+    #[test]
+    fn mesh_auth_rejects_empty_broker_json() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CLOUD_SYSTEM_BROKER_ENDPOINT");
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("broker.json"), "{}\n").unwrap();
+        std::env::set_var("CLOUD_SYSTEM_BROKER_CONFIG", tmp.path());
+        assert!(
+            !mesh_auth_configured(),
+            "empty broker.json must not count as a Skippr config drive"
+        );
+        std::env::remove_var("CLOUD_SYSTEM_BROKER_CONFIG");
+    }
+
+    #[test]
+    fn mesh_auth_follows_the_broker_config_drive() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CLOUD_SYSTEM_BROKER_ENDPOINT");
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("broker.json"), SKIPPR_BROKER_DRIVE).unwrap();
+        std::env::set_var("CLOUD_SYSTEM_BROKER_CONFIG", tmp.path());
+        assert!(mesh_auth_configured());
+        std::env::remove_var("CLOUD_SYSTEM_BROKER_CONFIG");
+        assert!(!mesh_auth_configured());
     }
 
     #[test]
@@ -488,14 +550,9 @@ mod tests {
             let _ = sock.write_all(resp.as_bytes()).await;
             req
         });
-        std::env::set_var("CLOUD_TABLES_ACCESS_TOKEN", "test-jwt");
         let client = TablesClient::new(
             format!("http://{addr}"),
-            CloudCredentials {
-                access_key_id: "AKIATEST".into(),
-                secret_access_key: String::new(),
-                session_token: None,
-            },
+            CloudCredentials::for_test_token("test-jwt"),
             "tenant-a".into(),
         )
         .unwrap();
