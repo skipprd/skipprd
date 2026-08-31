@@ -222,7 +222,7 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
             runtime_e2e_harness.iceberg_glue_table_name(
                 runtime_e2e_harness.DYNAMODB_TYPE_MATRIX_NAMESPACE
             ),
-            "skippr_dynamodb_skippr_iceberg_dynamodb_types_cdc",
+            "skippr_dynamodb_iceberg_types_cdc",
         )
         self.assertEqual(
             runtime_e2e_harness.iceberg_glue_table_name(

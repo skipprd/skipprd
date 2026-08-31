@@ -13,9 +13,6 @@ pipelines:
     cdc:
       default:
         business_key_columns: ["id"]
-      namespaces:
-        dynamodb.skippr_iceberg_dynamodb_types_cdc:
-          business_key_columns: ["id"]
 
 data_sources:
   dynamodb_types_cdc:

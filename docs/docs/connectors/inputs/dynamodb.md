@@ -12,7 +12,7 @@ Reads items from an Amazon DynamoDB table using a paginated `Scan`.
 2. Scans the target table with pagination until all items are read.
 3. Parallel scan segments are auto-tuned based on CPU count.
 4. Batches are ingested through the standard WAL pipeline.
-5. Namespace convention: `dynamodb.{table_name}`.
+5. Lake namespace is the pipeline name (same as S3). AWS table identity stays in offset keys only.
 
 ## Configuration
 
@@ -47,9 +47,9 @@ DynamoDB access uses the standard AWS credential chain (same as S3).
 
 ## Namespace convention
 
-```
-dynamodb.{table_name}
-```
+DynamoDB is one AWS table per pipeline. The lake table uses the **pipeline name**, the same default as S3. Offset and stream checkpoints stay keyed by the AWS table name (`dynamodb:` / `dynamodb-stream:`), so renaming the DynamoDB table in AWS does not change the warehouse table unless you also rename the pipeline.
+
+Optional `transform.namespace_fields` can still fan out records from field values. Use `cdc.default` for the business-key contract; do not key `cdc.namespaces` on the AWS table name.
 
 ## Type mapping
 
