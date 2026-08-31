@@ -4,7 +4,7 @@ use std::sync::{Arc, Weak};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
-use aws_sdk_glue::error::SdkError;
+use aws_sdk_glue::error::{ProvideErrorMetadata, SdkError};
 use aws_sdk_glue::operation::get_partition::GetPartitionError;
 use aws_sdk_glue::types::{Column, PartitionInput, SerDeInfo, StorageDescriptor};
 use aws_sdk_glue::Client as GlueClient;
@@ -12,7 +12,6 @@ use aws_types::region::Region;
 use futures::{stream, StreamExt};
 use once_cell::sync::Lazy;
 use rand::Rng;
-use serde::{Deserialize, Serialize};
 use tokio::sync::Notify;
 
 use crate::catalog_budget::{
@@ -20,37 +19,15 @@ use crate::catalog_budget::{
     CatalogOperationBudget,
 };
 use crate::catalog_outbox::{CatalogOutbox, ConditionalMutationResult, PendingCatalogIntent};
-use crate::runtime_plugins::protocol::{CatalogIntent, CatalogIntentKind};
+use crate::runtime_plugins::protocol::{
+    CatalogIntent, GlueColumnIntent, GluePartitionCatalogIntentV1,
+};
 
 const GLUE_BATCH_CREATE_LIMIT: usize = 100;
 const RECOVERY_SCAN_LIMIT: usize = 10_000;
 
 static CATALOG_COORDINATORS: Lazy<std::sync::Mutex<HashMap<String, Weak<CatalogCoordinator>>>> =
     Lazy::new(|| std::sync::Mutex::new(HashMap::new()));
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct GlueColumnIntent {
-    name: String,
-    r#type: String,
-    comment: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-struct GluePartitionCatalogIntentV1 {
-    version: u32,
-    region: Option<String>,
-    catalog_id: Option<String>,
-    database: String,
-    table: String,
-    partition_values: Vec<String>,
-    location: String,
-    storage_columns: Vec<GlueColumnIntent>,
-    partition_columns: Vec<GlueColumnIntent>,
-    input_format: String,
-    output_format: String,
-    serde_library: String,
-    schema_namespace: String,
-    schema_version: u64,
-}
 
 #[derive(Clone)]
 struct DecodedIntent {
@@ -169,20 +146,15 @@ impl GlueExecutor for AwsGlueExecutor {
         if let Some(catalog_id) = target.catalog_id.as_ref() {
             request = request.catalog_id(catalog_id);
         }
-        let output = request
-            .send()
-            .await
-            .map_err(|err| classify_glue_error(err.to_string()))?;
+        let output = request.send().await.map_err(classify_sdk_error)?;
         let table = output.table().ok_or_else(|| {
             GlueApiError::new(
                 GlueApiErrorKind::Transient,
                 "GetTable returned no table definition",
             )
         })?;
-        let to_column = |column: &Column| GlueColumnIntent {
-            name: column.name().to_string(),
-            r#type: column.r#type().unwrap_or("string").to_string(),
-            comment: column.comment().map(str::to_string),
+        let to_column = |column: &Column| {
+            GlueColumnIntent::from_glue_fields(column.name(), column.r#type(), column.comment())
         };
         Ok(GlueTableLayout {
             partition_columns: table
@@ -230,7 +202,7 @@ impl GlueExecutor for AwsGlueExecutor {
             {
                 Ok(None)
             }
-            Err(err) => Err(classify_glue_error(err.to_string())),
+            Err(err) => Err(classify_sdk_error(err)),
         }
     }
 
@@ -253,10 +225,7 @@ impl GlueExecutor for AwsGlueExecutor {
         if let Some(catalog_id) = target.catalog_id.as_ref() {
             request = request.catalog_id(catalog_id);
         }
-        let output = request
-            .send()
-            .await
-            .map_err(|err| classify_glue_error(err.to_string()))?;
+        let output = request.send().await.map_err(classify_sdk_error)?;
         let mut outcomes = vec![GlueBatchCreateOutcome::Created; partitions.len()];
         let indexes = partitions
             .iter()
@@ -273,18 +242,17 @@ impl GlueExecutor for AwsGlueExecutor {
                     ),
                 ));
             };
-            let code = error
-                .error_detail()
-                .and_then(|detail| detail.error_code())
-                .unwrap_or("UnknownGlueError");
+            let code = error.error_detail().and_then(|detail| detail.error_code());
             let message = error
                 .error_detail()
                 .and_then(|detail| detail.error_message())
-                .unwrap_or(code);
-            outcomes[index] = if code.contains("AlreadyExists") {
-                GlueBatchCreateOutcome::AlreadyExists
-            } else {
-                GlueBatchCreateOutcome::Failed(classify_glue_error(format!("{code}: {message}")))
+                .or(code)
+                .unwrap_or("UnknownGlueError");
+            outcomes[index] = match classify_glue_code(code, format!("{code:?}: {message}")) {
+                error if error.kind == GlueApiErrorKind::AlreadyExists => {
+                    GlueBatchCreateOutcome::AlreadyExists
+                }
+                error => GlueBatchCreateOutcome::Failed(error),
             };
         }
         Ok(outcomes)
@@ -308,11 +276,7 @@ impl GlueExecutor for AwsGlueExecutor {
         if let Some(catalog_id) = target.catalog_id.as_ref() {
             request = request.catalog_id(catalog_id);
         }
-        request
-            .send()
-            .await
-            .map(|_| ())
-            .map_err(|err| classify_glue_error(err.to_string()))
+        request.send().await.map(|_| ()).map_err(classify_sdk_error)
     }
 }
 
@@ -325,7 +289,6 @@ pub struct CatalogCoordinator {
     catalog_budget: Arc<CatalogOperationBudget>,
     refresh_budget: bool,
     notify: Notify,
-    table_layout_cache: tokio::sync::RwLock<HashMap<String, GlueTableLayout>>,
     worker_abort: std::sync::Mutex<Option<tokio::task::AbortHandle>>,
 }
 
@@ -346,7 +309,6 @@ impl CatalogCoordinator {
             catalog_budget: process_catalog_operation_budget(),
             refresh_budget: true,
             notify: Notify::new(),
-            table_layout_cache: tokio::sync::RwLock::new(HashMap::new()),
             worker_abort: std::sync::Mutex::new(None),
         });
         coordinator.start_worker();
@@ -404,34 +366,12 @@ impl CatalogCoordinator {
         .await
         .map_err(|err| io::Error::other(format!("catalog due-load task failed: {err}")))??;
         for pending in due {
-            if pending.intent.identity.kind != CatalogIntentKind::UpsertPartition {
-                self.record_terminal_invalid(&pending, "unsupported catalog intent kind")
-                    .await?;
-                continue;
-            }
-            let payload: GluePartitionCatalogIntentV1 =
-                match serde_json::from_str(&pending.intent.payload_json) {
-                    Ok(payload) => payload,
-                    Err(err) => {
-                        self.record_terminal_invalid(
-                            &pending,
-                            format!("invalid durable Glue partition intent payload: {err}"),
-                        )
-                        .await?;
-                        continue;
-                    }
-                };
-            if payload.version != 1
-                || payload.database.trim().is_empty()
-                || payload.table.trim().is_empty()
-                || payload.partition_values.len() != payload.partition_columns.len()
-                || payload.schema_namespace != pending.intent.identity.namespace
-                || payload.schema_version == 0
-            {
+            if !pending.intent.is_admissible() {
                 self.record_terminal_invalid(&pending, "terminal invalid Glue partition intent")
                     .await?;
                 continue;
             }
+            let payload = pending.intent.payload.clone();
             decoded.push(DecodedIntent { pending, payload });
         }
 
@@ -475,19 +415,49 @@ impl CatalogCoordinator {
             self.catalog_budget.target()
         }
         .max(1);
+        let live_layout = match self.load_table_layout(&target).await {
+            Ok(layout) => layout,
+            Err(error) => {
+                for intent in intents {
+                    self.record_glue_failure(&intent.pending, &error).await?;
+                }
+                return Ok(());
+            }
+        };
         let mut valid = Vec::with_capacity(intents.len());
         for intent in intents {
-            match self.ensure_table_layout(&target, &intent).await {
-                Ok(layout) => {
-                    let mut intent = intent;
-                    // Glue BatchCreatePartition must match the live table SD. Schema
-                    // evolution can leave an intent's storage columns behind or ahead of
-                    // the table; using the table layout still registers the Hive partition.
-                    intent.payload.storage_columns = layout.storage_columns;
-                    valid.push(intent);
-                }
-                Err(error) => self.record_glue_failure(&intent.pending, &error).await?,
+            if !same_column_layout(
+                &live_layout.partition_columns,
+                &intent.payload.partition_columns,
+            ) {
+                tracing::warn!(
+                    database = %target.database,
+                    table = %target.table,
+                    schema_namespace = %intent.payload.schema_namespace,
+                    schema_version = intent.payload.schema_version,
+                    actual_partition_columns = ?live_layout.partition_columns,
+                    expected_partition_columns = ?intent.payload.partition_columns,
+                    "Glue table partition layout is not ready for catalog intent; retrying"
+                );
+                self.record_glue_failure(
+                    &intent.pending,
+                    &GlueApiError::new(
+                        GlueApiErrorKind::Transient,
+                        format!(
+                            "Glue table partition layout mismatch for '{}.{}': actual={:?} expected={:?}",
+                            target.database,
+                            target.table,
+                            live_layout.partition_columns,
+                            intent.payload.partition_columns
+                        ),
+                    ),
+                )
+                .await?;
+                continue;
             }
+            let mut intent = intent;
+            intent.payload.storage_columns = live_layout.storage_columns.clone();
+            valid.push(intent);
         }
         let executor = Arc::clone(&self.executor);
         let budget = Arc::clone(&self.catalog_budget);
@@ -579,72 +549,12 @@ impl CatalogCoordinator {
         Ok(())
     }
 
-    async fn ensure_table_layout(
+    async fn load_table_layout(
         &self,
         target: &GlueTarget,
-        intent: &DecodedIntent,
     ) -> Result<GlueTableLayout, GlueApiError> {
-        let cache_key = format!(
-            "{}\0{}\0{}\0{}\0{}\0{}",
-            target.region.as_deref().unwrap_or_default(),
-            target.catalog_id.as_deref().unwrap_or_default(),
-            target.database,
-            target.table,
-            intent.payload.schema_namespace,
-            intent.payload.schema_version
-        );
-        if let Some(cached) = self.table_layout_cache.read().await.get(&cache_key) {
-            return Ok(cached.clone());
-        }
-        let actual = {
-            let _permit = self.catalog_budget.acquire().await;
-            self.executor.table_layout(target).await?
-        };
-        if !same_column_layout(&actual.partition_columns, &intent.payload.partition_columns) {
-            // Athena/Glue schema sync may still be creating or healing the Hive table
-            // (unpartitioned leftover, missing table, type suffix collapse). Retry until
-            // partition keys converge so ingest can publish partitions without MSCK.
-            tracing::warn!(
-                database = %target.database,
-                table = %target.table,
-                schema_namespace = %intent.payload.schema_namespace,
-                schema_version = intent.payload.schema_version,
-                actual_partition_columns = ?actual.partition_columns,
-                expected_partition_columns = ?intent.payload.partition_columns,
-                "Glue table partition layout is not ready for catalog intent; retrying"
-            );
-            return Err(GlueApiError::new(
-                GlueApiErrorKind::Transient,
-                format!(
-                    "Glue table partition layout mismatch for '{}.{}': actual={:?} expected={:?}",
-                    target.database,
-                    target.table,
-                    actual.partition_columns,
-                    intent.payload.partition_columns
-                ),
-            ));
-        }
-        if !same_column_layout(&actual.storage_columns, &intent.payload.storage_columns) {
-            tracing::info!(
-                database = %target.database,
-                table = %target.table,
-                schema_namespace = %intent.payload.schema_namespace,
-                schema_version = intent.payload.schema_version,
-                "Glue table storage columns differ from catalog intent; using live table layout"
-            );
-        }
-        let namespace_prefix = format!(
-            "{}\0{}\0{}\0{}\0{}\0",
-            target.region.as_deref().unwrap_or_default(),
-            target.catalog_id.as_deref().unwrap_or_default(),
-            target.database,
-            target.table,
-            intent.payload.schema_namespace
-        );
-        let mut cache = self.table_layout_cache.write().await;
-        cache.retain(|key, _| !key.starts_with(&namespace_prefix));
-        cache.insert(cache_key, actual.clone());
-        Ok(actual)
+        let _permit = self.catalog_budget.acquire().await;
+        self.executor.table_layout(target).await
     }
 
     async fn update_partition(
@@ -865,8 +775,7 @@ fn log_catalog_intent_failure(
     terminal: bool,
     retry_after: Option<Duration>,
 ) {
-    let payload =
-        serde_json::from_str::<GluePartitionCatalogIntentV1>(&pending.intent.payload_json).ok();
+    let payload = &pending.intent.payload;
     tracing::warn!(
         sink_ref = %pending.intent.identity.sink_ref,
         namespace = %pending.intent.identity.namespace,
@@ -878,49 +787,77 @@ fn log_catalog_intent_failure(
         error_kind,
         error,
         retry_after_ms = retry_after.map(|delay| delay.as_millis() as u64),
-        schema_namespace = payload.as_ref().map(|payload| payload.schema_namespace.as_str()),
-        schema_version = payload.as_ref().map(|payload| payload.schema_version),
-        database = payload.as_ref().map(|payload| payload.database.as_str()),
-        table = payload.as_ref().map(|payload| payload.table.as_str()),
-        partition_values = payload
-            .as_ref()
-            .map(|payload| payload.partition_values.join("/")),
-        location = payload.as_ref().map(|payload| payload.location.as_str()),
-        partition_columns = payload
-            .as_ref()
-            .map(|payload| format_columns(&payload.partition_columns)),
-        storage_columns = payload
-            .as_ref()
-            .map(|payload| format_columns(&payload.storage_columns)),
+        schema_namespace = payload.schema_namespace.as_str(),
+        schema_version = payload.schema_version.get(),
+        database = payload.database.as_str(),
+        table = payload.table.as_str(),
+        partition_values = payload.partition_values.join("/"),
+        location = payload.location.as_str(),
+        partition_columns = format_columns(&payload.partition_columns),
+        storage_columns = format_columns(&payload.storage_columns),
         "catalog outbox intent failed"
     );
 }
 
-fn classify_glue_error(error: String) -> GlueApiError {
-    let kind = if error.to_ascii_lowercase().contains("entitynotfound") {
-        GlueApiErrorKind::NotFound
-    } else if error.to_ascii_lowercase().contains("alreadyexist") {
-        GlueApiErrorKind::AlreadyExists
-    } else if is_transient(&error) {
-        GlueApiErrorKind::Transient
-    } else {
-        GlueApiErrorKind::Terminal
-    };
-    GlueApiError::new(kind, error)
+fn classify_sdk_error<E>(err: SdkError<E>) -> GlueApiError
+where
+    E: ProvideErrorMetadata + std::fmt::Display,
+{
+    let message = err.to_string();
+    let code = err
+        .code()
+        .or_else(|| err.as_service_error().and_then(|error| error.code()));
+    classify_glue_code(code, message)
 }
 
-fn is_transient(error: &str) -> bool {
+fn classify_glue_code(code: Option<&str>, message: String) -> GlueApiError {
+    let inferred = code
+        .filter(|code| *code != "UnknownGlueError")
+        .or_else(|| glue_exception_code(&message));
+    let kind = match inferred {
+        Some("EntityNotFoundException") => GlueApiErrorKind::NotFound,
+        Some("AlreadyExistsException") => GlueApiErrorKind::AlreadyExists,
+        Some("InvalidInputException")
+        | Some("ThrottlingException")
+        | Some("ThrottledException")
+        | Some("InternalServiceException")
+        | Some("OperationTimeoutException")
+        | Some("ConcurrentModificationException")
+        | Some("ResourceNumberLimitExceededException")
+        | Some("FederationSourceRetryableException")
+        | Some("ResourceNotReadyException") => GlueApiErrorKind::Transient,
+        _ if is_transient_transport(&message) => GlueApiErrorKind::Transient,
+        _ => GlueApiErrorKind::Terminal,
+    };
+    GlueApiError::new(kind, message)
+}
+
+fn glue_exception_code(message: &str) -> Option<&'static str> {
+    [
+        "EntityNotFoundException",
+        "AlreadyExistsException",
+        "InvalidInputException",
+        "ThrottlingException",
+        "ThrottledException",
+        "InternalServiceException",
+        "OperationTimeoutException",
+        "ConcurrentModificationException",
+        "ResourceNumberLimitExceededException",
+        "FederationSourceRetryableException",
+        "ResourceNotReadyException",
+    ]
+    .into_iter()
+    .find(|name| message.contains(name))
+}
+
+fn is_transient_transport(error: &str) -> bool {
     let error = error.to_ascii_lowercase();
     [
         "throttl",
         "timeout",
         "temporar",
         "service unavailable",
-        "internalservice",
-        "concurrentmodification",
         "connection",
-        "alreadyexist",
-        "entitynotfound",
     ]
     .iter()
     .any(|needle| error.contains(needle))
@@ -942,8 +879,11 @@ fn now_ms() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime_plugins::protocol::{CatalogIntentIdentity, CATALOG_INTENT_VERSION};
+    use crate::runtime_plugins::protocol::{
+        CatalogIntentIdentity, CatalogIntentKind, CATALOG_INTENT_VERSION,
+    };
     use std::collections::VecDeque;
+    use std::num::NonZeroU64;
     use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
     use std::sync::Mutex as StdMutex;
 
@@ -1036,11 +976,7 @@ mod tests {
     }
 
     fn column(name: &str, r#type: &str) -> GlueColumnIntent {
-        GlueColumnIntent {
-            name: name.to_string(),
-            r#type: r#type.to_string(),
-            comment: None,
-        }
+        GlueColumnIntent::from_glue_fields(name, Some(r#type), None)
     }
 
     fn expected_layout(storage_type: &str) -> GlueTableLayout {
@@ -1052,7 +988,7 @@ mod tests {
 
     fn intent(day: &str, location: &str, schema_version: u64) -> CatalogIntent {
         let payload = GluePartitionCatalogIntentV1 {
-            version: 1,
+            version: crate::runtime_plugins::protocol::GLUE_PARTITION_CATALOG_INTENT_VERSION,
             region: Some("eu-west-1".into()),
             catalog_id: Some("123456789012".into()),
             database: "analytics".into(),
@@ -1065,7 +1001,8 @@ mod tests {
             output_format: "parquet-output".into(),
             serde_library: "parquet-serde".into(),
             schema_namespace: "events".into(),
-            schema_version,
+            schema_version: NonZeroU64::new(schema_version)
+                .expect("test schema versions are published"),
         };
         CatalogIntent {
             version: CATALOG_INTENT_VERSION,
@@ -1075,7 +1012,7 @@ mod tests {
                 kind: CatalogIntentKind::UpsertPartition,
                 key: serde_json::to_string(&payload.partition_values).unwrap(),
             },
-            payload_json: serde_json::to_string(&payload).unwrap(),
+            payload,
         }
     }
 
@@ -1090,7 +1027,6 @@ mod tests {
             catalog_budget: budget,
             refresh_budget: false,
             notify: Notify::new(),
-            table_layout_cache: tokio::sync::RwLock::new(HashMap::new()),
             worker_abort: std::sync::Mutex::new(None),
         }
     }
@@ -1099,32 +1035,63 @@ mod tests {
     fn glue_batch_limit_and_backoff_are_bounded() {
         assert_eq!(GLUE_BATCH_CREATE_LIMIT, 100);
         assert!(retry_delay(30) <= Duration::from_secs(60));
-        assert!(is_transient("ThrottlingException"));
-        assert!(is_transient("AlreadyExistsException"));
-        assert!(is_transient("EntityNotFoundException"));
-        assert!(!is_transient("InvalidInputException"));
+        assert_eq!(
+            classify_glue_code(Some("ThrottlingException"), "ThrottlingException".into()).kind,
+            GlueApiErrorKind::Transient
+        );
+        assert_eq!(
+            classify_glue_code(
+                Some("AlreadyExistsException"),
+                "AlreadyExistsException".into()
+            )
+            .kind,
+            GlueApiErrorKind::AlreadyExists
+        );
+        assert_eq!(
+            classify_glue_code(
+                Some("EntityNotFoundException"),
+                "EntityNotFoundException".into()
+            )
+            .kind,
+            GlueApiErrorKind::NotFound
+        );
+        assert_eq!(
+            classify_glue_code(
+                Some("InvalidInputException"),
+                "InvalidInputException".into()
+            )
+            .kind,
+            GlueApiErrorKind::Transient
+        );
+        assert_eq!(
+            classify_glue_code(
+                None,
+                "UnknownGlueError: InvalidInputException: stale storage descriptor".into()
+            )
+            .kind,
+            GlueApiErrorKind::Transient
+        );
+        assert_eq!(
+            classify_glue_code(
+                Some("UnknownGlueError"),
+                "UnknownGlueError: InvalidInputException: stale storage descriptor".into()
+            )
+            .kind,
+            GlueApiErrorKind::Transient
+        );
     }
 
     #[tokio::test]
-    async fn malformed_payload_is_marked_terminal_instead_of_bubbling() {
+    async fn empty_database_is_marked_terminal_instead_of_bubbling() {
         let temp = tempfile::tempdir().unwrap();
         let coordinator = coordinator(
             &temp,
             Arc::new(MockGlueExecutor::default()),
             CatalogOperationBudget::new(1),
         );
-        coordinator
-            .persist(&[CatalogIntent {
-                version: CATALOG_INTENT_VERSION,
-                identity: CatalogIntentIdentity {
-                    sink_ref: "primary".into(),
-                    namespace: "events".into(),
-                    kind: CatalogIntentKind::UpsertPartition,
-                    key: "[\"2026-07-30\"]".into(),
-                },
-                payload_json: "not-json".into(),
-            }])
-            .unwrap();
+        let mut intent = intent("2026-07-30", "s3://bucket/day=30/", 1);
+        intent.payload.database.clear();
+        coordinator.persist(&[intent]).unwrap();
 
         coordinator.drain_once().await.unwrap();
 
@@ -1136,7 +1103,7 @@ mod tests {
             .last_error
             .as_deref()
             .unwrap()
-            .contains("invalid durable Glue partition intent payload"));
+            .contains("terminal invalid Glue partition intent"));
     }
 
     #[tokio::test]
@@ -1337,7 +1304,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn schema_version_change_revalidates_and_replaces_layout_cache() {
+    async fn schema_version_change_revalidates_live_layout_on_each_drain() {
         let temp = tempfile::tempdir().unwrap();
         let executor = Arc::new(MockGlueExecutor::default());
         executor.state.lock().unwrap().get_results.insert(
@@ -1360,9 +1327,55 @@ mod tests {
         coordinator.drain_once().await.unwrap();
 
         assert_eq!(executor.state.lock().unwrap().layout_calls, 2);
-        let cache = coordinator.table_layout_cache.read().await;
-        assert_eq!(cache.len(), 1);
-        assert!(cache.keys().next().unwrap().ends_with("\u{0}2"));
+    }
+
+    #[tokio::test]
+    async fn unpartitioned_layout_retries_then_creates_after_heal() {
+        let temp = tempfile::tempdir().unwrap();
+        let executor = Arc::new(MockGlueExecutor::default());
+        executor.state.lock().unwrap().layout = Some(Ok(GlueTableLayout {
+            partition_columns: vec![],
+            storage_columns: vec![column("id", "bigint")],
+        }));
+        let coordinator = coordinator(&temp, Arc::clone(&executor), CatalogOperationBudget::new(1));
+        coordinator
+            .persist(&[intent("2026-07-30", "s3://bucket/day=30/", 1)])
+            .unwrap();
+
+        coordinator.drain_once().await.unwrap();
+        let pending = coordinator.outbox.scan_pending(1).unwrap().remove(0);
+        assert!(!pending.terminal);
+        assert!(executor.state.lock().unwrap().created.is_empty());
+
+        executor.state.lock().unwrap().layout = Some(Ok(expected_layout("bigint")));
+        tokio::time::sleep(Duration::from_millis(350)).await;
+        coordinator.drain_once().await.unwrap();
+
+        assert!(coordinator.outbox.scan_pending(1).unwrap().is_empty());
+        assert_eq!(executor.state.lock().unwrap().created.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn live_storage_layout_is_refetched_on_every_drain() {
+        let temp = tempfile::tempdir().unwrap();
+        let executor = Arc::new(MockGlueExecutor::default());
+        executor.state.lock().unwrap().layout = Some(Ok(expected_layout("bigint")));
+        let coordinator = coordinator(&temp, Arc::clone(&executor), CatalogOperationBudget::new(1));
+        coordinator
+            .persist(&[intent("2026-07-30", "s3://bucket/day=30/", 1)])
+            .unwrap();
+        coordinator.drain_once().await.unwrap();
+
+        executor.state.lock().unwrap().layout = Some(Ok(expected_layout("string")));
+        coordinator
+            .persist(&[intent("2026-07-31", "s3://bucket/day=31/", 1)])
+            .unwrap();
+        coordinator.drain_once().await.unwrap();
+
+        let created = executor.state.lock().unwrap().created.clone();
+        assert_eq!(created.len(), 2);
+        assert_eq!(created[1].storage_columns, vec![column("id", "string")]);
+        assert_eq!(executor.state.lock().unwrap().layout_calls, 2);
     }
 
     #[tokio::test]
@@ -1454,7 +1467,7 @@ mod tests {
         let pending = coordinator.outbox.scan_pending(1).unwrap().remove(0);
         coordinator
             .outbox
-            .record_failure_if(&pending, "layout mismatch", None, true)
+            .record_failure_if(&pending, "synthetic terminal", None, true)
             .unwrap();
 
         coordinator.drain_until_idle(Duration::ZERO).await.unwrap();

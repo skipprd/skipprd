@@ -6,9 +6,9 @@ The primary output destination. Writes Snappy-compressed Parquet to S3 and manag
 
 1. Converts compacted WAL segments into Parquet with Snappy compression
 2. Uploads Parquet via S3 multipart upload
-3. Registers data in the AWS Glue Data Catalog (database, tables, partitions)
+3. Enqueues Hive partition registration on the durable catalog outbox (`BatchCreatePartition` / `UpdatePartition`)
 
-Catalog DDL can be driven by a paired [Glue schema sink](../schema_sinks/glue.md) or handled inline during ingest.
+Table DDL is driven by a paired [Glue schema sink](../schema_sinks/glue.md). Schema sync may rebuild an empty Glue table when partition keys do not match; ingest waits until live `GetTable` layout matches the catalog intent.
 
 ## Configuration
 
@@ -57,9 +57,9 @@ If Athena is used as a `deadletter_sink`, deadletters are written to the configu
 
 | Variable | Default | Description |
 |---|---|---|
-| `DATA_OUTPUT_MAX_ASYNC_UPLOADS` | `16` | Max concurrent multipart uploads |
-| `PARQUET_MULTIPART_PART_BYTES` | `67108864` (64 MB) | Part size for multipart upload |
-| `GLUE_MAX_CONCURRENCY` | `2` | Max concurrent Glue API calls |
+| `UPLOAD_CONCURRENCY` / `UPLOAD_CONCURRENCY_MAX` | auto-tuned (seed 16) | Concurrent multipart object uploads |
+| Athena multipart part size | 16 MiB | Fixed in the Athena sink |
+| `ATHENA_GLUE_CONTROL_PLANE_CONCURRENCY` / `ATHENA_GLUE_CP_MAX` | auto-tuned (seed 2) | Glue control-plane concurrency |
 
 ## Schema sink pairing
 
@@ -87,6 +87,6 @@ The IAM identity running Skippr needs:
 
 - `s3:PutObject`, `s3:CreateMultipartUpload`, `s3:UploadPart`, `s3:CompleteMultipartUpload`, `s3:AbortMultipartUpload` on the output bucket
 - `glue:CreateDatabase`, `glue:GetDatabase` for database management
-- `glue:CreateTable`, `glue:GetTable`, `glue:UpdateTable` for table management
-- `glue:CreatePartition`, `glue:BatchCreatePartition`, `glue:GetPartition` for partition management
+- `glue:GetTable`, `glue:GetPartition`, `glue:BatchCreatePartition`, `glue:UpdatePartition` for ingest-time Hive partition registration
+- `glue:GetPartitions`, `glue:DeleteTable`, `glue:CreateTable`, `glue:UpdateTable` for table management and empty-table partition-layout heal
 - `athena:CreateWorkGroup`, `athena:GetWorkGroup`, `athena:UpdateWorkGroup` if using Athena workgroups

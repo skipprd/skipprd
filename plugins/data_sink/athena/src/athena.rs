@@ -6,7 +6,7 @@ use aws_sdk_athena::types::{
 };
 use aws_sdk_athena::Client as AthenaClient;
 use aws_sdk_glue::types::{
-    Column, DatabaseInput, PartitionIndex, PartitionInput, SerDeInfo, StorageDescriptor, TableInput,
+    Column, DatabaseInput, PartitionIndex, SerDeInfo, StorageDescriptor, TableInput,
 };
 use aws_sdk_glue::Client as GlueClient;
 use aws_sdk_s3::error::{ProvideErrorMetadata, SdkError as S3SdkError};
@@ -40,6 +40,7 @@ use datafusion::physical_plan::SendableRecordBatchStream;
 use futures::StreamExt;
 use std::collections::{BTreeMap, HashMap};
 use std::io;
+use std::num::NonZeroU64;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context as TaskContext, Poll as TaskPoll};
@@ -47,7 +48,7 @@ use std::task::{Context as TaskContext, Poll as TaskPoll};
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use rand::Rng;
-use serde_derive::{Deserialize, Serialize};
+use serde_derive::Deserialize;
 use skippr_runtime_sdk::plugins::source_contract::{
     ensure_source_contract_for_policy, namespace_source_contract, validate_write_policy_for_sink,
     SinkWritePolicySupport, SourceNamespaceContract, WritePolicy,
@@ -56,9 +57,9 @@ use skippr_runtime_sdk::plugins::{
     DataSink, SinkCallResult, SinkPreflightOutcome, SinkPreflightResult, SinkWriteContext,
 };
 use skippr_runtime_sdk::protocol::{
-    CatalogIntent, CatalogIntentIdentity, CatalogIntentKind, RuntimeBinding,
-    RuntimeExecutionContext, RuntimeSchemaState, SchemaDelta, SinkWriteStats,
-    CATALOG_INTENT_VERSION,
+    CatalogIntent, CatalogIntentIdentity, CatalogIntentKind, GlueColumnIntent,
+    GluePartitionCatalogIntentV1, RuntimeBinding, RuntimeExecutionContext, RuntimeSchemaState,
+    SchemaDelta, SinkWriteStats, CATALOG_INTENT_VERSION, GLUE_PARTITION_CATALOG_INTENT_VERSION,
 };
 use skippr_runtime_sdk::sink_compat::partition_time::TimePartitioner;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -104,6 +105,27 @@ fn sum_optional(left: Option<u64>, right: Option<u64>) -> Option<u64> {
         (None, None) => None,
         (left, right) => Some(left.unwrap_or(0).saturating_add(right.unwrap_or(0))),
     }
+}
+
+fn published_catalog_schema_version(
+    namespace_versions: &BTreeMap<String, u64>,
+    namespace: &str,
+) -> Option<NonZeroU64> {
+    namespace_versions
+        .get(namespace)
+        .copied()
+        .and_then(NonZeroU64::new)
+}
+
+fn catalog_intent_schema_version(
+    namespace_versions: &BTreeMap<String, u64>,
+    namespace: &str,
+) -> io::Result<NonZeroU64> {
+    published_catalog_schema_version(namespace_versions, namespace).ok_or_else(|| {
+        io::Error::other(format!(
+            "Athena catalog intent for '{namespace}' requires an installed schema version"
+        ))
+    })
 }
 
 fn grouped_receipt_from_applied(
@@ -231,31 +253,6 @@ pub struct DataSinkAthenaPluginConfig {
     #[serde(default)]
     #[allow(dead_code)]
     pub discovery_cache_ttl_secs: Option<u64>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-struct GlueColumnIntent {
-    name: String,
-    r#type: String,
-    comment: Option<String>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
-struct GluePartitionCatalogIntentV1 {
-    version: u32,
-    region: Option<String>,
-    catalog_id: Option<String>,
-    database: String,
-    table: String,
-    partition_values: Vec<String>,
-    location: String,
-    storage_columns: Vec<GlueColumnIntent>,
-    partition_columns: Vec<GlueColumnIntent>,
-    input_format: String,
-    output_format: String,
-    serde_library: String,
-    schema_namespace: String,
-    schema_version: u64,
 }
 
 #[derive(Clone)]
@@ -1309,18 +1306,12 @@ impl DataSinkAthenaPlugin {
                         format!("failed to derive Glue storage columns for '{namespace}'"),
                     )
                 })?;
-        let schema_version = self
-            .schema_state
-            .read()
-            .await
-            .namespace_versions
-            .get(namespace)
-            .copied()
-            .unwrap_or(0);
-        let column_intent = |column: &Column| GlueColumnIntent {
-            name: column.name().to_string(),
-            r#type: column.r#type().unwrap_or("string").to_string(),
-            comment: column.comment().map(str::to_string),
+        let schema_version = catalog_intent_schema_version(
+            &self.schema_state.read().await.namespace_versions,
+            namespace,
+        )?;
+        let column_intent = |column: &Column| {
+            GlueColumnIntent::from_glue_fields(column.name(), column.r#type(), column.comment())
         };
         let location = format!(
             "s3://{}/{}/",
@@ -1328,7 +1319,7 @@ impl DataSinkAthenaPlugin {
             full_key.trim_matches('/')
         );
         let payload = GluePartitionCatalogIntentV1 {
-            version: 1,
+            version: GLUE_PARTITION_CATALOG_INTENT_VERSION,
             region: self.region.clone(),
             catalog_id: self.catalog_id.clone(),
             database: self.config.glue_database_name.clone(),
@@ -1348,7 +1339,7 @@ impl DataSinkAthenaPlugin {
         };
         let key = serde_json::to_string(&partition_values)
             .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?;
-        Ok(Some(CatalogIntent {
+        let intent = CatalogIntent {
             version: CATALOG_INTENT_VERSION,
             identity: CatalogIntentIdentity {
                 sink_ref: match self.binding {
@@ -1359,9 +1350,15 @@ impl DataSinkAthenaPlugin {
                 kind: CatalogIntentKind::UpsertPartition,
                 key,
             },
-            payload_json: serde_json::to_string(&payload)
-                .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))?,
-        }))
+            payload,
+        };
+        if !intent.is_admissible() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Athena catalog intent for '{namespace}' is not admissible"),
+            ));
+        }
+        Ok(Some(intent))
     }
 
     async fn delete_s3_prefix(&self, bucket: &str, prefix: &str) -> Result<(), io::Error> {
@@ -2910,288 +2907,6 @@ impl AwsAthena {
             }
         }
     }
-
-    pub async fn glue_create_partition(
-        context: &RuntimeExecutionContext,
-        binding: RuntimeBinding,
-        config: &DataSinkAthenaPluginConfig,
-        namespace: &str,
-        partition_values: Vec<String>,
-        key: &str,
-        metadata: &OutputMetadata,
-        source_contract: Option<&SourceNamespaceContract>,
-    ) -> Result<bool, String> {
-        let database = config.glue_database_name.clone();
-        let table_name = namespace.to_string();
-        let bucket = config.s3_bucket.clone();
-
-        let path = std::path::Path::new(&bucket)
-            .join(&key)
-            .to_str()
-            .unwrap()
-            .to_string();
-
-        let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
-            .load()
-            .await;
-
-        let glue_client = GlueClient::new(&aws_config);
-
-        // Gate by global semaphore and per-namespace mutex
-        let _cp_permit = acquire_glue_cp_permit().await;
-        let ns_lock = get_namespace_lock(namespace);
-        let _ns_guard = ns_lock.lock().await;
-
-        // Ensure table exists; if missing, create DB/table before proceeding.
-        let existing_partition_keys = match glue_client
-            .get_table()
-            .database_name(&database)
-            .name(&table_name)
-            .send()
-            .await
-        {
-            Ok(output) => {
-                let existing_partition_keys = output
-                    .table()
-                    .and_then(|table| table.partition_keys.clone())
-                    .unwrap_or_default();
-                if existing_partition_keys.len() != partition_values.len() {
-                    let partition_columns_override = source_contract
-                        .filter(|contract| matches!(contract.write_policy, WritePolicy::Append))
-                        .map(|_| partition_columns_from_key(key, partition_values.len()));
-                    if try_heal_glue_partition_layout(
-                        context,
-                        binding,
-                        config,
-                        namespace,
-                        metadata,
-                        source_contract,
-                        &existing_partition_keys,
-                        partition_columns_override.as_deref(),
-                    )
-                    .await?
-                    {
-                        match glue_client
-                            .get_table()
-                            .database_name(&database)
-                            .name(&table_name)
-                            .send()
-                            .await
-                        {
-                            Ok(output) => {
-                                let healed_keys = output
-                                    .table()
-                                    .and_then(|table| table.partition_keys.clone())
-                                    .unwrap_or_default();
-                                if healed_keys.len() != partition_values.len() {
-                                    let key_names = healed_keys
-                                        .iter()
-                                        .map(|column| column.name.clone())
-                                        .collect::<Vec<_>>();
-                                    return Err(format!(
-                                        "Glue partition mismatch for '{}.{}': table has {} partition keys {:?}, but Skippr generated {} partition values {:?} for key '{}'. Check the pipeline batch_partition_fields/time partition config or reset/recreate the external Glue table/schema sink state.",
-                                        database,
-                                        namespace,
-                                        healed_keys.len(),
-                                        key_names,
-                                        partition_values.len(),
-                                        partition_values,
-                                        key
-                                    ));
-                                }
-                                healed_keys
-                            }
-                            Err(err) => {
-                                return Err(format!(
-                                    "failed to read Glue table '{}.{}' after partition layout heal: {}",
-                                    database, table_name, err
-                                ));
-                            }
-                        }
-                    } else {
-                        let key_names = existing_partition_keys
-                            .iter()
-                            .map(|column| column.name.clone())
-                            .collect::<Vec<_>>();
-                        return Err(format!(
-                            "Glue partition mismatch for '{}.{}': table has {} partition keys {:?}, but Skippr generated {} partition values {:?} for key '{}'. Check the pipeline batch_partition_fields/time partition config or reset/recreate the external Glue table/schema sink state.",
-                            database,
-                            namespace,
-                            existing_partition_keys.len(),
-                            key_names,
-                            partition_values.len(),
-                            partition_values,
-                            key
-                        ));
-                    }
-                } else {
-                    existing_partition_keys
-                }
-            }
-            Err(SdkError::ServiceError(err))
-                if matches!(err.err(), GetTableError::EntityNotFoundException(_)) =>
-            {
-                info!(
-                    "Glue table '{}' not found in database '{}'; creating it before partition sync",
-                    namespace, database
-                );
-                if !matches!(AwsAthena::glue_get_database(config).await, Ok(true)) {
-                    AwsAthena::backoff_retry(
-                        || AwsAthena::glue_create_database(config),
-                        "create_database",
-                    )
-                    .await
-                    .map_err(|err| {
-                        format!("failed to create Glue database '{}': {}", database, err)
-                    })?;
-                }
-                let partition_columns_override = source_contract
-                    .filter(|contract| matches!(contract.write_policy, WritePolicy::Append))
-                    .map(|_| partition_columns_from_key(key, partition_values.len()));
-                AwsAthena::backoff_retry(
-                    || {
-                        AwsAthena::glue_create_table(
-                            context,
-                            binding,
-                            config,
-                            namespace,
-                            metadata,
-                            source_contract,
-                            partition_columns_override.as_deref(),
-                        )
-                    },
-                    "create_table",
-                )
-                .await
-                .map_err(|err| {
-                    format!(
-                        "failed to create Glue table '{}.{}': {}",
-                        database, namespace, err
-                    )
-                })?;
-                match glue_client
-                    .get_table()
-                    .database_name(&database)
-                    .name(&table_name)
-                    .send()
-                    .await
-                {
-                    Ok(output) => output
-                        .table()
-                        .and_then(|table| table.partition_keys.clone())
-                        .unwrap_or_default(),
-                    Err(err) => {
-                        return Err(format!(
-                            "failed to read Glue table '{}.{}' after create: {}",
-                            database, table_name, err
-                        ));
-                    }
-                }
-            }
-            Err(err) => {
-                return Err(format!(
-                    "failed to read Glue table '{}.{}' before partition sync: {}",
-                    database, table_name, err
-                ));
-            }
-        };
-
-        let columns = SkipprHive::storage_columns_excluding_partition_keys(
-            metadata,
-            &existing_partition_keys,
-        )
-        .unwrap();
-
-        let partition_conf = PartitionInput::builder()
-            .set_values(Some(partition_values.clone()))
-            .parameters("parquet.compression", "SNAPPY")
-            .storage_descriptor(
-                StorageDescriptor::builder()
-                    .set_columns(Some(columns)) // @todo
-                    .compressed(true)
-                    .input_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetInputFormat")
-                    .location(format!("s3://{}", path))
-                    .output_format("org.apache.hadoop.hive.ql.io.parquet.MapredParquetOutputFormat")
-                    .serde_info(
-                        SerDeInfo::builder()
-                            .name(format!("{}.{}", &database, table_name))
-                            .parameters("serialization.format", "1")
-                            .serialization_library(
-                                "org.apache.hadoop.hive.ql.io.parquet.serde.ParquetHiveSerDe",
-                            )
-                            .build(),
-                    )
-                    .stored_as_sub_directories(true)
-                    .build(),
-            )
-            .build();
-
-        match glue_client
-            .get_partition()
-            .database_name(&database)
-            .table_name(&table_name)
-            .set_partition_values(Some(partition_values.clone()))
-            .send()
-            .await
-        {
-            Ok(_) => {
-                AwsAthena::backoff_retry(
-                    || async {
-                        glue_client
-                            .update_partition()
-                            .database_name(database.clone())
-                            .table_name(&table_name)
-                            .partition_input(partition_conf.clone())
-                            .set_partition_value_list(Some(partition_values.clone()))
-                            .send()
-                            .await
-                            .map(|_| true)
-                            .map_err(|e| e.into_service_error().to_string())
-                    },
-                    "update_partition",
-                )
-                .await
-                .map(|_| ())?;
-                info!(
-                    "Glue partition updated: {}.{} values={:?} location=s3://{}/",
-                    database, table_name, partition_values, path
-                );
-            }
-            Err(_) => {
-                AwsAthena::backoff_retry(
-                    || async {
-                        match glue_client
-                            .create_partition()
-                            .database_name(&database)
-                            .table_name(&table_name)
-                            .partition_input(partition_conf.clone())
-                            .send()
-                            .await
-                        {
-                            Ok(_) => Ok(true),
-                            Err(e) => {
-                                let s = e.into_service_error().to_string();
-                                if s.contains("AlreadyExistsException") {
-                                    Ok(true)
-                                } else {
-                                    Err(s)
-                                }
-                            }
-                        }
-                    },
-                    "create_partition",
-                )
-                .await
-                .map(|_| ())?;
-                info!(
-                    "Glue partition created: {}.{} values={:?} location=s3://{}/",
-                    database, table_name, partition_values, path
-                );
-            }
-        }
-
-        Ok(true)
-    }
 }
 
 impl DataSinkAthenaPlugin {
@@ -3323,8 +3038,20 @@ fn glue_partition_column_names(columns: &[Column]) -> Vec<String> {
         .collect()
 }
 
+fn glue_partition_column_layout(columns: &[Column]) -> Vec<(String, String)> {
+    columns
+        .iter()
+        .map(|column| {
+            (
+                column.name().to_string(),
+                column.r#type().unwrap_or("string").to_string(),
+            )
+        })
+        .collect()
+}
+
 fn partition_layout_mismatch(existing: &[Column], expected: &[Column]) -> bool {
-    glue_partition_column_names(existing) != glue_partition_column_names(expected)
+    glue_partition_column_layout(existing) != glue_partition_column_layout(expected)
 }
 
 fn build_glue_partition_keys(
@@ -3483,26 +3210,6 @@ fn append_contract_glue_partition_keys(
     }
 }
 
-fn partition_columns_from_key(key: &str, expected_values: usize) -> Vec<Column> {
-    let mut names = key
-        .split('/')
-        .filter_map(|segment| segment.split_once('=').map(|(name, _)| name.to_string()))
-        .collect::<Vec<_>>();
-    if expected_values > 0 && names.len() > expected_values {
-        names = names.split_off(names.len() - expected_values);
-    }
-    names
-        .into_iter()
-        .map(|name| {
-            Column::builder()
-                .name(name)
-                .r#type("string")
-                .build()
-                .unwrap()
-        })
-        .collect()
-}
-
 fn contract_partition_key_values(
     contract: &SourceNamespaceContract,
     batch: &RecordBatch,
@@ -3590,6 +3297,30 @@ mod contract_schema_tests {
         let schema = Arc::new(Schema::new(vec![Field::new("date", DataType::Utf8, false)]));
         let dates = StringArray::from(vec![date]);
         RecordBatch::try_new(schema, vec![Arc::new(dates)]).unwrap()
+    }
+
+    #[test]
+    fn unpublished_schema_version_cannot_mint_catalog_intent() {
+        assert_eq!(
+            published_catalog_schema_version(&BTreeMap::new(), "events"),
+            None
+        );
+        assert_eq!(
+            published_catalog_schema_version(&BTreeMap::from([("events".into(), 0)]), "events"),
+            None
+        );
+        assert_eq!(
+            published_catalog_schema_version(&BTreeMap::from([("events".into(), 3)]), "events"),
+            NonZeroU64::new(3)
+        );
+        let err = catalog_intent_schema_version(&BTreeMap::from([("events".into(), 0)]), "events")
+            .unwrap_err();
+        assert!(err.to_string().contains("installed schema version"));
+        assert_eq!(
+            catalog_intent_schema_version(&BTreeMap::from([("events".into(), 3)]), "events",)
+                .unwrap(),
+            NonZeroU64::new(3).unwrap()
+        );
     }
 
     #[test]
@@ -3772,6 +3503,27 @@ mod contract_schema_tests {
         ];
         assert!(partition_layout_mismatch(&existing, &expected));
         assert!(!partition_layout_mismatch(&expected, &expected));
+        let same_names_wrong_types = vec![
+            Column::builder()
+                .name("year")
+                .r#type("string")
+                .build()
+                .unwrap(),
+            Column::builder()
+                .name("month")
+                .r#type("string")
+                .build()
+                .unwrap(),
+            Column::builder()
+                .name("day")
+                .r#type("string")
+                .build()
+                .unwrap(),
+        ];
+        assert!(partition_layout_mismatch(
+            &same_names_wrong_types,
+            &expected
+        ));
     }
 
     #[test]
@@ -3923,25 +3675,6 @@ mod contract_schema_tests {
         assert_eq!(
             partition_path,
             "p_crawl_id=cc_main_x/p_target_domain_hash_bucket=item_1"
-        );
-    }
-
-    #[test]
-    fn append_table_partition_columns_come_from_wal_key() {
-        let columns = partition_columns_from_key(
-            "link-graph-corpus/indexes/cc_wat_source_pages_by_target_domain_index/p_crawl_id=cc_main_x/p_target_domain_hash_bucket=item_1",
-            2,
-        );
-        let names = columns
-            .iter()
-            .map(|column| column.name().to_string())
-            .collect::<Vec<_>>();
-        assert_eq!(
-            names,
-            vec![
-                "p_crawl_id".to_string(),
-                "p_target_domain_hash_bucket".to_string(),
-            ]
         );
     }
 
