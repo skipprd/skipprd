@@ -5000,9 +5000,7 @@ fn prompt_warehouse_kind(kind: &mut WarehouseKind) {
                 *database = prompt("PostgreSQL database");
             }
             if schema.is_none() {
-                *schema = postgres_schema_or_default(prompt(
-                    "PostgreSQL schema (default: public)",
-                ));
+                *schema = postgres_schema_or_default(prompt("PostgreSQL schema (default: public)"));
             }
         }
         WarehouseKind::Databricks { .. }
@@ -9081,7 +9079,10 @@ mod tests {
         assert!(contents.contains("Snowflake:"));
         assert!(contents.contains("data_sinks:"));
         assert!(contents.contains("account:"));
-        assert!(contents.contains("data_sinks.warehouse") || contents.contains("data_sink: data_sinks.warehouse"));
+        assert!(
+            contents.contains("data_sinks.warehouse")
+                || contents.contains("data_sink: data_sinks.warehouse")
+        );
         assert!(!contents.contains("warehouses:"));
         assert!(!contents.contains("default_warehouse"));
         assert!(!contents.contains("kind: snowflake"));
@@ -9396,9 +9397,18 @@ dbt:
             .and_then(|dbt| dbt.get("naming"))
             .cloned()
             .expect("naming");
-        assert_eq!(naming.get("target_schema").and_then(|v| v.as_str()), Some("mssql_migration"));
-        assert_eq!(naming.get("silver_suffix").and_then(|v| v.as_str()), Some("silver_layer"));
-        assert_eq!(naming.get("gold_suffix").and_then(|v| v.as_str()), Some("gold_layer"));
+        assert_eq!(
+            naming.get("target_schema").and_then(|v| v.as_str()),
+            Some("mssql_migration")
+        );
+        assert_eq!(
+            naming.get("silver_suffix").and_then(|v| v.as_str()),
+            Some("silver_layer")
+        );
+        assert_eq!(
+            naming.get("gold_suffix").and_then(|v| v.as_str()),
+            Some("gold_layer")
+        );
     }
 
     #[test]
@@ -9447,7 +9457,8 @@ data_sinks:
 "#,
         )
         .expect("yaml");
-        let internal = react_config_from_pipeline_config(&cfg, "demo").expect("iceberg query engine");
+        let internal =
+            react_config_from_pipeline_config(&cfg, "demo").expect("iceberg query engine");
         let wh = internal
             .providers
             .expect("providers")
@@ -9455,7 +9466,10 @@ data_sinks:
             .cloned()
             .expect("warehouse");
         assert_eq!(wh.get("kind").and_then(|v| v.as_str()), Some("athena"));
-        assert_eq!(wh.get("workgroup").and_then(|v| v.as_str()), Some("analytics"));
+        assert_eq!(
+            wh.get("workgroup").and_then(|v| v.as_str()),
+            Some("analytics")
+        );
         assert_eq!(wh.get("schema").and_then(|v| v.as_str()), Some("bronze"));
     }
 
@@ -9967,7 +9981,8 @@ data_sources:
             _ => panic!("expected sync"),
         }
 
-        let err = Cli::try_parse_from(["skippr", "metadata"]).expect_err("metadata stays on skipprd");
+        let err =
+            Cli::try_parse_from(["skippr", "metadata"]).expect_err("metadata stays on skipprd");
         let message = err.to_string();
         assert!(
             message.contains("unrecognized") || message.contains("unexpected"),

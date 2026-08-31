@@ -476,10 +476,7 @@ mod tests {
     #[test]
     fn cloud_tables_accepts_broker_config_drive() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let dir = std::env::temp_dir().join(format!(
-            "skipprd-broker-ok-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("skipprd-broker-ok-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("broker.json"),
