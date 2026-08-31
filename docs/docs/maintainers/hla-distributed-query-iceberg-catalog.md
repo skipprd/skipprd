@@ -461,7 +461,7 @@ Iceberg is the only snapshot. WAL is a best-effort tail of that snapshot: it MAY
 
 `CompleteSlices` is applied into the ordinal ledger; the selector does not re-parse those mutations. Iceberg-named segment ids close the window after the lake pointer commit and before completion quorum.
 
-There are no query pins. `ReclaimSegment` deletes even if a scan is in flight; that scan skips the missing file. Readers MUST NOT nack reclaim.
+There are no query pins. `ReclaimSegment` un-owns by deleting `.seg.commit` first, then drops `.seg`, even if a scan is in flight; that scan skips the missing file. Readers MUST NOT nack reclaim.
 
 ### Query transport
 

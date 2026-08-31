@@ -725,7 +725,7 @@ mod tests {
                 segment_id: "live-seg".into(),
             },
         );
-        fs::remove_file(paths.segment(&id)).unwrap();
+        crate::buffer::segment_file::SegmentFile::reclaim_local_pair(&paths.segment(&id)).unwrap();
         let after_reclaim = clustered_compaction_sot(&paths, &log, &key).unwrap();
         assert!(after_reclaim.segments.is_empty());
         assert!(after_reclaim.compactions.is_empty());

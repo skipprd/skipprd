@@ -65,15 +65,11 @@ fn load_seg_dir_batches(
         if path.extension().and_then(|s| s.to_str()) != Some("seg") {
             continue;
         }
-        let commit = path.with_extension("seg.commit");
+        let commit = SegmentFile::commit_path_for_seg(&path);
         if !commit.exists() {
             continue;
         }
-        let mut meta_file = match fs::File::open(&path) {
-            Ok(file) => file,
-            Err(_) => continue,
-        };
-        let meta = match SegmentFile::read_metadata_from_reader(&mut meta_file) {
+        let meta = match SegmentFile::admit_owned_pair_path(&path) {
             Ok(m) => m,
             Err(_) => continue,
         };
@@ -176,11 +172,18 @@ impl WalReader for S3WalReader {
                 if !set.contains(&commit) {
                     continue;
                 }
+                let commit_bytes =
+                    match crate::helpers::s3::get_object_bytes_for_bucket(&bucket, &commit).await {
+                        Ok(bytes) => bytes,
+                        Err(_) => continue,
+                    };
                 match client.get_object().bucket(&bucket).key(&k).send().await {
                     Ok(resp) => match resp.body.collect().await {
                         Ok(agg) => {
                             let bytes = agg.into_bytes().to_vec();
-                            if let Ok(meta) = SegmentFile::read_metadata_from_bytes(&bytes) {
+                            if let Ok(meta) =
+                                SegmentFile::admit_owned_pair_bytes(&bytes, &commit_bytes)
+                            {
                                 for idx in meta.index.iter() {
                                     if idx.key.namespace != pipe {
                                         continue;

@@ -102,8 +102,8 @@ impl DurableApplicator {
                     .read_metadata_durable()
                     .map(|meta| meta.index)
                     .unwrap_or_default();
-                let _ = fs::remove_file(&path);
-                let _ = fs::remove_file(self.paths.segment_commit(&id));
+                SegmentFile::reclaim_local_pair(&path)
+                    .map_err(|err| DurableError::Io(err.to_string()))?;
                 let ledger = SegmentCompletionLedger::new(self.paths.completions.clone());
                 let _ = ledger.remove_segment(segment_id, &index);
                 Buffers::forget_reclaimed_segment(segment_id);
@@ -158,6 +158,33 @@ mod tests {
             },
         };
         applicator.apply(&envelope).unwrap();
+    }
+
+    #[test]
+    fn reclaim_does_not_succeed_if_body_drop_fails_after_unown() {
+        let dir = tempfile::tempdir().unwrap();
+        let key = PipelineKey::new("t", "w", "p").unwrap();
+        let paths = PipelinePaths::new(dir.path(), &key).unwrap();
+        fs::create_dir_all(&paths.segs).unwrap();
+        let id = SegmentId::new("stuck").unwrap();
+        let seg = paths.segment(&id);
+        fs::create_dir(&seg).unwrap();
+        fs::write(paths.segment_commit(&id), b"SEGC").unwrap();
+        let applicator = DurableApplicator::new(paths.clone());
+        let envelope = MutationEnvelope {
+            protocol_version: 1,
+            pipeline: key,
+            epoch: skippr_lease::LeaseEpoch::new(1),
+            index: skippr_lease::CommitIndex::new(1),
+            previous_hash: skippr_lease::GENESIS_HASH,
+            payload_sha256: [0u8; 32],
+            body: DurableMutation::ReclaimSegment {
+                segment_id: "stuck".into(),
+            },
+        };
+        assert!(applicator.apply(&envelope).is_err());
+        assert!(!paths.segment_commit(&id).exists());
+        assert!(seg.exists());
     }
 
     #[test]

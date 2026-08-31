@@ -385,7 +385,49 @@ impl SegmentObject {
             num_partitions: parts_count,
             offsets: offsets.clone(),
             index,
+            body_sha256: sha,
         };
         Ok((meta, total_rows, sha, bucket, seg_key))
+    }
+
+    /// Un-own then drop the S3 pair. Body is deleted only after the commit
+    /// DeleteObject returns; S3 DeleteObject is idempotent for a missing key.
+    pub fn reclaim_pair_keys(seg_key: &str) -> (String, String) {
+        (format!("{}.commit", seg_key), seg_key.to_string())
+    }
+
+    pub async fn reclaim_pair(
+        client: &aws_sdk_s3::Client,
+        bucket: &str,
+        seg_key: &str,
+    ) -> io::Result<()> {
+        let (commit_key, body_key) = Self::reclaim_pair_keys(seg_key);
+        client
+            .delete_object()
+            .bucket(bucket)
+            .key(&commit_key)
+            .send()
+            .await
+            .map_err(|e| io::Error::other(format!("s3 delete commit {commit_key}: {e}")))?;
+        client
+            .delete_object()
+            .bucket(bucket)
+            .key(&body_key)
+            .send()
+            .await
+            .map_err(|e| io::Error::other(format!("s3 delete body {body_key}: {e}")))?;
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SegmentObject;
+
+    #[test]
+    fn reclaim_pair_keys_unown_commit_before_body() {
+        let (commit, body) = SegmentObject::reclaim_pair_keys("p/id.seg");
+        assert_eq!(commit, "p/id.seg.commit");
+        assert_eq!(body, "p/id.seg");
     }
 }
