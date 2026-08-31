@@ -25,13 +25,33 @@ pub enum PipelineKind {
     Platform,
 }
 
+impl PipelineKind {
+    pub fn as_attr(self) -> &'static str {
+        match self {
+            Self::Tenant => "tenant",
+            Self::Platform => "platform",
+        }
+    }
+
+    pub fn parse_attr(value: &str) -> Result<Self, LeaseError> {
+        match value {
+            "tenant" => Ok(Self::Tenant),
+            "platform" => Ok(Self::Platform),
+            other => Err(LeaseError::ProtocolMismatch(format!(
+                "unknown pipeline kind {other}"
+            ))),
+        }
+    }
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PipelineRecord {
     pub key: PipelineKey,
     pub kind: PipelineKind,
     pub enabled: bool,
     pub generation: u64,
-    pub config: Option<String>,
+    pub source: Option<String>,
+    pub sink: Option<String>,
 }
 
 impl PipelineRecord {
@@ -42,17 +62,13 @@ impl PipelineRecord {
             kind: PipelineKind::Platform,
             enabled: true,
             generation: 1,
-            config: None,
+            source: None,
+            sink: None,
         })
     }
 
     pub fn pk(key: &PipelineKey) -> String {
-        format!(
-            "PIPE#{}#{}#{}",
-            key.tenant(),
-            key.workspace(),
-            key.pipeline()
-        )
+        key.pipe_pk()
     }
 }
 
@@ -106,7 +122,7 @@ impl CloudTablesPipelineRegistry {
             let item = json!({
                 "PK": s(PipelineRecord::pk(&record.key)),
                 "SK": s(META_SK),
-                "kind": s("platform"),
+                "kind": s(record.kind.as_attr()),
                 "tenant": s(record.key.tenant().to_string()),
                 "workspace": s(record.key.workspace().to_string()),
                 "name": s(record.key.pipeline().to_string()),
@@ -131,25 +147,44 @@ impl CloudTablesPipelineRegistry {
         if !pk.starts_with("PIPE#") {
             return Ok(None);
         }
-        let parts: Vec<&str> = pk.trim_start_matches("PIPE#").split('#').collect();
-        if parts.len() != 3 {
-            return Ok(None);
-        }
-        let key = PipelineKey::new(parts[0], parts[1], parts[2])
-            .map_err(|err| LeaseError::StoreUnavailable(err.to_string()))?;
-        let kind = match attr_s(item, "kind").as_deref() {
-            Some("platform") => PipelineKind::Platform,
-            _ => PipelineKind::Tenant,
+        let key = PipelineKey::parse_pipe_pk(&pk)
+            .map_err(|err| LeaseError::ProtocolMismatch(err.to_string()))?;
+        let kind = PipelineKind::parse_attr(
+            attr_s(item, "kind")
+                .ok_or_else(|| LeaseError::ProtocolMismatch("pipeline META missing kind".into()))?
+                .as_str(),
+        )?;
+        let enabled = match attr_s(item, "enabled").as_deref() {
+            Some("true") => true,
+            Some("false") => false,
+            Some(other) => {
+                return Err(LeaseError::ProtocolMismatch(format!(
+                    "pipeline META enabled must be true or false, not {other}"
+                )))
+            }
+            None => {
+                return Err(LeaseError::ProtocolMismatch(
+                    "pipeline META missing enabled".into(),
+                ))
+            }
         };
-        let enabled = attr_s(item, "enabled")
-            .map(|v| v != "false")
-            .unwrap_or(true);
+        let generation = attr_n(item, "generation").ok_or_else(|| {
+            LeaseError::ProtocolMismatch("pipeline META missing generation".into())
+        })?;
+        let source = attr_s(item, "source");
+        let sink = attr_s(item, "sink");
+        if kind == PipelineKind::Tenant && (source.is_none() || sink.is_none()) {
+            return Err(LeaseError::ProtocolMismatch(
+                "tenant pipeline META missing source or sink".into(),
+            ));
+        }
         Ok(Some(PipelineRecord {
             key,
             kind,
             enabled,
-            generation: attr_n(item, "generation").unwrap_or(1),
-            config: attr_s(item, "config"),
+            generation,
+            source,
+            sink,
         }))
     }
 }
@@ -187,14 +222,16 @@ mod tests {
             kind: PipelineKind::Tenant,
             enabled: true,
             generation: 1,
-            config: None,
+            source: Some("postgres://orders".into()),
+            sink: Some("iceberg://lake".into()),
         });
         registry.upsert(PipelineRecord {
             key: PipelineKey::new("globex", "default", "ingest").unwrap(),
             kind: PipelineKind::Tenant,
             enabled: true,
             generation: 1,
-            config: None,
+            source: Some("postgres://orders".into()),
+            sink: Some("iceberg://lake".into()),
         });
         registry.upsert(PipelineRecord::platform_otel(OTEL_LOGS).unwrap());
         let listed = registry.list().await.unwrap();
@@ -234,5 +271,37 @@ mod tests {
             }
         }
         assert!(Closed.list().await.is_err());
+    }
+
+    #[test]
+    fn decode_cloud_tenant_meta_and_rejects_unknown_kind() {
+        let key = PipelineKey::new("acme", "default", "orders").unwrap();
+        let item = json!({
+            "PK": s(key.pipe_pk()),
+            "SK": s("META"),
+            "kind": s("tenant"),
+            "name": s("orders"),
+            "workspace": s("default"),
+            "source": s("postgres://orders"),
+            "sink": s("iceberg://lake"),
+            "enabled": s("true"),
+            "generation": n(1),
+        });
+        let record = CloudTablesPipelineRegistry::decode(&item)
+            .unwrap()
+            .expect("tenant META");
+        assert_eq!(record.key, key);
+        assert_eq!(record.kind, PipelineKind::Tenant);
+        assert_eq!(record.source.as_deref(), Some("postgres://orders"));
+        assert_eq!(record.sink.as_deref(), Some("iceberg://lake"));
+
+        let bad_kind = json!({
+            "PK": s(key.pipe_pk()),
+            "SK": s("META"),
+            "kind": s("legacy"),
+            "enabled": s("true"),
+            "generation": n(1),
+        });
+        assert!(CloudTablesPipelineRegistry::decode(&bad_kind).is_err());
     }
 }
