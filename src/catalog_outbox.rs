@@ -9,7 +9,7 @@ use sha2::{Digest, Sha256};
 
 use crate::runtime_plugins::protocol::{CatalogIntent, CatalogIntentIdentity};
 
-pub const CATALOG_OUTBOX_FORMAT_VERSION: u32 = 1;
+pub const CATALOG_OUTBOX_FORMAT_VERSION: u32 = 2;
 const MAX_ENTRY_BYTES: u64 = 1024 * 1024;
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -143,7 +143,7 @@ impl CatalogOutbox {
             .as_ref()
             .join("segment_buffer")
             .join("catalog_outbox")
-            .join("v1")
+            .join(format!("v{CATALOG_OUTBOX_FORMAT_VERSION}"))
             .join("pending");
         fs::create_dir_all(&pending_dir)?;
         sync_directory(
@@ -522,7 +522,11 @@ fn sync_directory(path: &Path) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::runtime_plugins::protocol::{CatalogIntentKind, CATALOG_INTENT_VERSION};
+    use crate::runtime_plugins::protocol::{
+        CatalogIntentKind, GlueColumnIntent, GluePartitionCatalogIntentV1, CATALOG_INTENT_VERSION,
+        GLUE_PARTITION_CATALOG_INTENT_VERSION,
+    };
+    use std::num::NonZeroU64;
 
     fn intent_for(key: &str, location: &str) -> CatalogIntent {
         CatalogIntent {
@@ -533,7 +537,30 @@ mod tests {
                 kind: CatalogIntentKind::UpsertPartition,
                 key: key.into(),
             },
-            payload_json: serde_json::json!({ "location": location }).to_string(),
+            payload: GluePartitionCatalogIntentV1 {
+                version: GLUE_PARTITION_CATALOG_INTENT_VERSION,
+                region: None,
+                catalog_id: None,
+                database: "analytics".into(),
+                table: "events".into(),
+                partition_values: vec![key.into()],
+                location: location.into(),
+                storage_columns: vec![GlueColumnIntent::from_glue_fields(
+                    "id",
+                    Some("bigint"),
+                    None,
+                )],
+                partition_columns: vec![GlueColumnIntent::from_glue_fields(
+                    "day",
+                    Some("string"),
+                    None,
+                )],
+                input_format: "input".into(),
+                output_format: "output".into(),
+                serde_library: "serde".into(),
+                schema_namespace: "events".into(),
+                schema_version: NonZeroU64::new(1).unwrap(),
+            },
         }
     }
 
@@ -550,7 +577,20 @@ mod tests {
         assert_eq!(outbox.persist(&[intent("s3://b")]).unwrap().updated, 1);
         let pending = outbox.scan_pending(10).unwrap();
         assert_eq!(pending.len(), 1);
-        assert!(pending[0].intent.payload_json.contains("s3://b"));
+        assert_eq!(pending[0].intent.payload.location, "s3://b");
+    }
+
+    #[test]
+    fn format_v2_open_ignores_v1_pending_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let v1 = temp.path().join("segment_buffer/catalog_outbox/v1/pending");
+        fs::create_dir_all(&v1).unwrap();
+        fs::write(v1.join("stale.json"), b"not-json").unwrap();
+        let outbox = CatalogOutbox::open(temp.path()).unwrap();
+        assert!(outbox.scan_pending(10).unwrap().is_empty());
+        assert!(outbox
+            .pending_dir()
+            .ends_with("segment_buffer/catalog_outbox/v2/pending"));
     }
 
     #[test]
@@ -593,7 +633,7 @@ mod tests {
             ConditionalMutationResult::Stale
         );
         let current = outbox.scan_pending(1).unwrap().remove(0);
-        assert!(current.intent.payload_json.contains("s3://b"));
+        assert_eq!(current.intent.payload.location, "s3://b");
     }
 
     #[test]
@@ -611,7 +651,7 @@ mod tests {
             ConditionalMutationResult::Stale
         );
         let current = outbox.scan_pending(1).unwrap().remove(0);
-        assert!(current.intent.payload_json.contains("s3://b"));
+        assert_eq!(current.intent.payload.location, "s3://b");
         assert_eq!(current.attempts, 0);
         assert_eq!(current.last_error, None);
         assert!(!current.terminal);
