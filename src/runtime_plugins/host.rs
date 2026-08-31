@@ -263,19 +263,21 @@ fn validate_commit_receipt(
     Ok(())
 }
 
-fn validate_sink_ack(ack: &SinkAck, envelope: &SinkApplyEnvelopeV2) -> io::Result<()> {
-    validate_commit_receipt(&ack.receipt, envelope)?;
-    if ack.catalog_intents.iter().any(|intent| {
-        intent.version != crate::runtime_plugins::protocol::CATALOG_INTENT_VERSION
-            || intent.identity.namespace.trim().is_empty()
-            || intent.identity.key.trim().is_empty()
-    }) {
+fn validate_catalog_intents(
+    intents: &[crate::runtime_plugins::protocol::CatalogIntent],
+) -> io::Result<()> {
+    if intents.iter().any(|intent| !intent.is_admissible()) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             "runtime sink returned an invalid catalog intent",
         ));
     }
     Ok(())
+}
+
+fn validate_sink_ack(ack: &SinkAck, envelope: &SinkApplyEnvelopeV2) -> io::Result<()> {
+    validate_commit_receipt(&ack.receipt, envelope)?;
+    validate_catalog_intents(&ack.catalog_intents)
 }
 
 impl RuntimeChildConnection {
@@ -2925,6 +2927,7 @@ impl RuntimeDataSinkPlugin {
         &self,
         intents: &[crate::runtime_plugins::protocol::CatalogIntent],
     ) -> io::Result<()> {
+        validate_catalog_intents(intents)?;
         self.catalog_coordinator
             .persist_async(intents.to_vec())
             .await
@@ -3212,6 +3215,7 @@ impl RuntimeDataSinkPlugin {
                         },
                 }) if request_id == request.request_id => {
                     validate_commit_receipt(&receipt, &prepare.envelope)?;
+                    validate_catalog_intents(&catalog_intents)?;
                     self.persist_catalog_intents(&catalog_intents).await?;
                     return Ok(SinkWriteOutcome::AlreadyApplied);
                 }
@@ -3477,6 +3481,7 @@ impl RuntimeDataSinkPlugin {
                         },
                 }) if ack_id == request_id => {
                     validate_commit_receipt(&receipt, &prepare.envelope)?;
+                    validate_catalog_intents(&catalog_intents)?;
                     self.persist_catalog_intents(&catalog_intents).await?;
                     return Ok(SinkWriteOutcome::AlreadyApplied);
                 }

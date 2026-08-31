@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::num::NonZeroU64;
 
 use crate::buffer::compaction_transaction::{
     SinkGroupingSupport, SinkRetrySemantics, SinkWriteSemantics,
@@ -21,9 +22,10 @@ use serde::{Deserialize, Serialize};
 // separate from the skippr/React adapter's CLI subprocess JSON summaries.
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 17;
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 18;
 pub const COMMIT_RECEIPT_VERSION: u32 = 1;
-pub const CATALOG_INTENT_VERSION: u32 = 1;
+pub const CATALOG_INTENT_VERSION: u32 = 2;
+pub const GLUE_PARTITION_CATALOG_INTENT_VERSION: u32 = 1;
 pub const MAX_RUNTIME_SINK_CHUNK_BYTES: usize = 128 * 1024 * 1024;
 pub const SKIPPR_RUNTIME_CONTROL_ADDR_ENV: &str = "SKIPPR_RUNTIME_CONTROL_ADDR";
 pub const SKIPPR_RUNTIME_DATA_ADDR_ENV: &str = "SKIPPR_RUNTIME_DATA_ADDR";
@@ -529,7 +531,6 @@ pub struct SinkWriteStats {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash, Ord, PartialOrd)]
 pub enum CatalogIntentKind {
-    UpsertNamespace,
     UpsertPartition,
 }
 
@@ -545,7 +546,67 @@ pub struct CatalogIntentIdentity {
 pub struct CatalogIntent {
     pub version: u32,
     pub identity: CatalogIntentIdentity,
-    pub payload_json: String,
+    pub payload: GluePartitionCatalogIntentV1,
+}
+
+impl CatalogIntent {
+    pub fn is_admissible(&self) -> bool {
+        self.version == CATALOG_INTENT_VERSION
+            && !self.identity.namespace.trim().is_empty()
+            && !self.identity.key.trim().is_empty()
+            && self.payload.version == GLUE_PARTITION_CATALOG_INTENT_VERSION
+            && !self.payload.database.trim().is_empty()
+            && !self.payload.table.trim().is_empty()
+            && !self.payload.location.trim().is_empty()
+            && self.payload.schema_namespace == self.identity.namespace
+            && !self.payload.partition_values.is_empty()
+            && self.payload.partition_values.len() == self.payload.partition_columns.len()
+            && self
+                .payload
+                .partition_values
+                .iter()
+                .all(|value| !value.trim().is_empty())
+            && self
+                .payload
+                .partition_columns
+                .iter()
+                .all(|column| !column.name.trim().is_empty())
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct GlueColumnIntent {
+    pub name: String,
+    pub r#type: String,
+    pub comment: Option<String>,
+}
+
+impl GlueColumnIntent {
+    pub fn from_glue_fields(name: &str, r#type: Option<&str>, comment: Option<&str>) -> Self {
+        Self {
+            name: name.to_string(),
+            r#type: r#type.unwrap_or("string").to_string(),
+            comment: comment.map(str::to_string),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq, Hash, Ord, PartialOrd)]
+pub struct GluePartitionCatalogIntentV1 {
+    pub version: u32,
+    pub region: Option<String>,
+    pub catalog_id: Option<String>,
+    pub database: String,
+    pub table: String,
+    pub partition_values: Vec<String>,
+    pub location: String,
+    pub storage_columns: Vec<GlueColumnIntent>,
+    pub partition_columns: Vec<GlueColumnIntent>,
+    pub input_format: String,
+    pub output_format: String,
+    pub serde_library: String,
+    pub schema_namespace: String,
+    pub schema_version: NonZeroU64,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1017,6 +1078,7 @@ mod tests {
     #[test]
     fn catalog_intent_identity_is_serializable_and_deduplicable() {
         use std::collections::BTreeSet;
+        use std::num::NonZeroU64;
 
         let intent = CatalogIntent {
             version: CATALOG_INTENT_VERSION,
@@ -1026,7 +1088,30 @@ mod tests {
                 kind: CatalogIntentKind::UpsertPartition,
                 key: "day=2026-07-30".into(),
             },
-            payload_json: r#"{"location":"s3://bucket/events/day=2026-07-30"}"#.into(),
+            payload: GluePartitionCatalogIntentV1 {
+                version: GLUE_PARTITION_CATALOG_INTENT_VERSION,
+                region: None,
+                catalog_id: None,
+                database: "analytics".into(),
+                table: "events".into(),
+                partition_values: vec!["2026-07-30".into()],
+                location: "s3://bucket/events/day=2026-07-30/".into(),
+                storage_columns: vec![GlueColumnIntent::from_glue_fields(
+                    "id",
+                    Some("bigint"),
+                    None,
+                )],
+                partition_columns: vec![GlueColumnIntent::from_glue_fields(
+                    "day",
+                    Some("string"),
+                    None,
+                )],
+                input_format: "input".into(),
+                output_format: "output".into(),
+                serde_library: "serde".into(),
+                schema_namespace: "events".into(),
+                schema_version: NonZeroU64::new(1).unwrap(),
+            },
         };
         let decoded: CatalogIntent =
             bincode::deserialize(&bincode::serialize(&intent).unwrap()).unwrap();
@@ -1037,6 +1122,17 @@ mod tests {
                 .count(),
             1
         );
+        assert!(intent.is_admissible());
+        let mut empty_values = intent.clone();
+        empty_values.payload.partition_values.clear();
+        empty_values.payload.partition_columns.clear();
+        assert!(!empty_values.is_admissible());
+        let mut empty_location = intent.clone();
+        empty_location.payload.location.clear();
+        assert!(!empty_location.is_admissible());
+        let mut blank_value = intent;
+        blank_value.payload.partition_values = vec![String::new()];
+        assert!(!blank_value.is_admissible());
     }
 
     #[test]
@@ -1062,8 +1158,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_hard_cut_to_v17() {
-        assert_eq!(RUNTIME_PROTOCOL_VERSION, 17);
+    fn protocol_version_is_hard_cut_to_v18() {
+        assert_eq!(RUNTIME_PROTOCOL_VERSION, 18);
     }
 
     #[test]
