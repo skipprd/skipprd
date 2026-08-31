@@ -266,6 +266,7 @@ jobs:
       SCCACHE_S3_KEY_PREFIX: skipprd
       SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "false"
       SCCACHE_S3_USE_SSL: "true"
+      GITHUB_TOKEN: ${{ secrets.PERSONAL_GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -300,6 +301,9 @@ jobs:
           cargo test -p skipprd query_flight:: -- --nocapture --test-threads=1
           cargo test -p skipprd sqlrt::wal_table:: -- --nocapture --test-threads=1
           cargo test -p skipprd --test hla_cluster -- --nocapture
+          ./scripts/ensure-sibling-cloud.sh
+          cargo test -p skippr-tables-client -- --nocapture --test-threads=1
+          cargo test -p skipprd --features offset-store-cloud-tables --lib cluster::validation -- --nocapture --test-threads=1
           cargo check -p skipprd --features offset-store-dynamodb
           cargo check --all-features
       - name: Run postgres plugin tests

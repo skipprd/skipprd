@@ -104,7 +104,7 @@ pub enum ConfigError {
     ClusteredTableMissing,
     #[error("SKIPPR_OFFSET_STORE=cloud-tables requires CLOUD_TABLES_ENDPOINT (mesh/loopback, not *.cloud.skippr.io)")]
     CloudTablesEndpointMissing,
-    #[error("SKIPPR_OFFSET_STORE=cloud-tables requires CLOUD_TABLES_ENDPOINT plus CLOUD_TABLES_ACCESS_TOKEN or CLOUD_ACCESS_TOKEN")]
+    #[error("SKIPPR_OFFSET_STORE=cloud-tables requires GuestCredentialBroker (CLOUD_SYSTEM_BROKER_CONFIG)")]
     CloudTablesAuthMissing,
     #[error("WAL_STORAGE=clustered requires SKIPPR_CLUSTER_ID")]
     ClusterIdMissing,
