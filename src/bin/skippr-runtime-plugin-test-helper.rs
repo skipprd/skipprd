@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::io::Write;
+use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -24,11 +25,12 @@ use skipprd::plugins::cdc;
 use skipprd::plugins::SinkWriteOutcome;
 use skipprd::runtime_plugins::protocol::{
     CatalogIntent, CatalogIntentIdentity, CatalogIntentKind, CommitReceipt, CommitReceiptAuthority,
-    HandshakeResponse, HostDataFrame, HostFrame, PluginDataFrame, PluginFrame, PrepareAck,
-    PrepareSinkResult, RuntimeCheckpointUpdate, RuntimePluginKind, RuntimeRequestAck,
-    RuntimeSchemaInstallRequest, RuntimeSchemaRefreshRequest, RuntimeSchemaStateInstallRequest,
-    RuntimeSessionHello, RuntimeSinkError, RuntimeSinkInstallRequest, RuntimeSourceSinkWrite,
-    SinkAck, SinkWriteStats, SourceEvent, CATALOG_INTENT_VERSION, RUNTIME_PROTOCOL_VERSION,
+    GlueColumnIntent, GluePartitionCatalogIntentV1, HandshakeResponse, HostDataFrame, HostFrame,
+    PluginDataFrame, PluginFrame, PrepareAck, PrepareSinkResult, RuntimeCheckpointUpdate,
+    RuntimePluginKind, RuntimeRequestAck, RuntimeSchemaInstallRequest, RuntimeSchemaRefreshRequest,
+    RuntimeSchemaStateInstallRequest, RuntimeSessionHello, RuntimeSinkError,
+    RuntimeSinkInstallRequest, RuntimeSourceSinkWrite, SinkAck, SinkWriteStats, SourceEvent,
+    CATALOG_INTENT_VERSION, GLUE_PARTITION_CATALOG_INTENT_VERSION, RUNTIME_PROTOCOL_VERSION,
     SKIPPR_RUNTIME_CONTROL_ADDR_ENV, SKIPPR_RUNTIME_DATA_ADDR_ENV,
     SKIPPR_RUNTIME_SESSION_TOKEN_ENV,
 };
@@ -658,7 +660,30 @@ async fn run_sink_loop(
                                 kind: CatalogIntentKind::UpsertPartition,
                                 key: "[\"2026-07-30\"]".to_string(),
                             },
-                            payload_json: "{\"test\":\"durable-preflight\"}".to_string(),
+                            payload: GluePartitionCatalogIntentV1 {
+                                version: GLUE_PARTITION_CATALOG_INTENT_VERSION,
+                                region: None,
+                                catalog_id: None,
+                                database: "analytics".to_string(),
+                                table: "events".to_string(),
+                                partition_values: vec!["2026-07-30".to_string()],
+                                location: "s3://bucket/events/day=2026-07-30/".to_string(),
+                                storage_columns: vec![GlueColumnIntent::from_glue_fields(
+                                    "id",
+                                    Some("bigint"),
+                                    None,
+                                )],
+                                partition_columns: vec![GlueColumnIntent::from_glue_fields(
+                                    "day",
+                                    Some("string"),
+                                    None,
+                                )],
+                                input_format: "input".to_string(),
+                                output_format: "output".to_string(),
+                                serde_library: "serde".to_string(),
+                                schema_namespace: "events".to_string(),
+                                schema_version: NonZeroU64::new(1).unwrap(),
+                            },
                         })
                         .into_iter()
                         .collect();

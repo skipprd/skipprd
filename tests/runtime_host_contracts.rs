@@ -674,7 +674,7 @@ async fn preflight_receipt_replay_repairs_failed_outbox_persist_without_payload(
     )
     .await
     .unwrap();
-    let pending_dir = temp.path().join("segment_buffer/catalog_outbox/v1/pending");
+    let pending_dir = temp.path().join("segment_buffer/catalog_outbox/v2/pending");
     std::fs::remove_dir_all(&pending_dir).unwrap();
     std::fs::write(&pending_dir, b"force persist failure").unwrap();
 
