@@ -200,7 +200,6 @@ impl DataSourceDynamodbPlugin {
             return Ok(());
         }
 
-        let namespace = format!("dynamodb.{}", table_name);
         let total_segments = num_cpus::get().max(1) as i32;
         const DEFAULT_BATCH_ROWS: usize = 10_000;
         let batch_size = DEFAULT_BATCH_ROWS;
@@ -275,7 +274,7 @@ impl DataSourceDynamodbPlugin {
                             bytes,
                             offset_pos: None,
                             source_uri: format!("dynamodb://{}", table_name),
-                            namespace: Some(format!("dynamodb.{}", table_name)),
+                            namespace: None,
                             cdc_rows,
                         });
 
@@ -301,7 +300,7 @@ impl DataSourceDynamodbPlugin {
             }
         }
 
-        info!("DynamoDB input plugin sync complete for {}", namespace);
+        info!("DynamoDB input plugin sync complete for {}", table_name);
         Ok(())
     }
 
@@ -474,7 +473,6 @@ impl DataSourceDynamodbPlugin {
         ctx: Arc<dyn SourceSyncContext>,
         mode: SourceCdcMode,
     ) -> Result<(), std::io::Error> {
-        let namespace = format!("dynamodb.{}", table_name);
         let shard_offset_key = OffsetKey {
             namespace: format!("dynamodb-stream:{}:{}", table_name, shard_id),
             partition: "0".to_string(),
@@ -606,7 +604,7 @@ impl DataSourceDynamodbPlugin {
                         bytes,
                         offset_pos: None,
                         source_uri: format!("dynamodb-stream://{}/{}", table_name, shard_id),
-                        namespace: Some(namespace.clone()),
+                        namespace: None,
                         cdc_rows,
                     });
 
