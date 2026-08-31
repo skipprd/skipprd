@@ -230,7 +230,8 @@ DYNAMODB_TABLE = "Test-MetadataService-Stack-MetadataTable8CB34826-1OBKKG0QKVLJC
 DYNAMODB_ICEBERG_CDC_TABLE = "skippr_iceberg_dynamodb_types_cdc"
 POSTGRES_TYPE_MATRIX_NAMESPACE = "postgres.type_matrix_orders"
 MYSQL_TYPE_MATRIX_NAMESPACE = "type_matrix_orders"
-DYNAMODB_TYPE_MATRIX_NAMESPACE = f"dynamodb.{DYNAMODB_ICEBERG_CDC_TABLE}"
+# DynamoDB is one AWS table per pipeline, so the lake namespace is the pipeline name (like S3).
+DYNAMODB_TYPE_MATRIX_NAMESPACE = "dynamodb_iceberg_types_cdc"
 # MSSQL source sets IngestBatch.namespace to the bare table name (see mssql.rs), not mssql.db.schema.table.
 MSSQL_DEBUG_TABLE_NAMESPACES = (
     "customers",
