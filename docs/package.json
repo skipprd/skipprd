@@ -1,0 +1,7 @@
+{
+  "private": true,
+  "type": "module",
+  "scripts": { "dev": "vitepress dev", "build": "vitepress build" },
+  "devDependencies": { "vitepress": "^1.6" },
+  "dependencies": { "@skippr/vitepress-theme": "github:skipprd/vitepress-theme" }
+}
