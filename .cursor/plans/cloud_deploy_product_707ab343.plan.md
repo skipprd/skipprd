@@ -119,7 +119,7 @@ flowchart LR
 
 `skippr` becomes an AWS-style umbrella binary. Service name is the first subcommand. ELT moves under `elt` so Deploy/Sites can sit beside it without colliding.
 
-Today the product CLI (`crates/skippr-cli`, [docs/docs/cli/overview.md](skipprd/docs/docs/cli/overview.md)) is flat: `skippr sync`, `skippr model`, `skippr discover`, `skippr user`, …. That was fine when ELT was the only product. It is not fine once `skippr deploy` exists.
+Today the product CLI (`crates/sde`, [docs/docs/cli/overview.md](skipprd/docs/docs/cli/overview.md)) is flat: `skippr sync`, `skippr model`, `skippr discover`, `skippr user`, …. That was fine when ELT was the only product. It is not fine once `skippr deploy` exists.
 
 ### Target shape
 
@@ -142,7 +142,7 @@ Like `aws s3 ls` / `aws dynamodb query`: the binary is `skippr`, the product is 
 
 Same change deletes the old top-level ELT verbs. `skippr sync` MUST fail with a short “use `skippr elt sync`” error, then we can drop even that after docs settle — do **not** keep a silent alias that runs the old command. Update in the same change:
 
-- [crates/skippr-cli/src/main.rs](skipprd/crates/skippr-cli/src/main.rs) `Cmd` enum: wrap today’s variants under `Elt { #[command(subcommand)] action: EltCmd }`
+- [https://github.com/skipprd/sde](skipprd/https://github.com/skipprd/sde) `Cmd` enum: wrap today’s variants under `Elt { #[command(subcommand)] action: EltCmd }`
 - [docs/docs/cli/](skipprd/docs/docs/cli/) and public `/elt/` VitePress pages
 - E2E / AGENTS.md examples (`skippr doctor`, `discover`, `sync`, `model`)
 - react data-engineer suite strings (`skippr sync --pipeline … --once`)
