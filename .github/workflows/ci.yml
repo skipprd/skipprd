@@ -1,0 +1,23 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+jobs:
+  linux:
+    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
+    runs-on: [self-hosted, skippr-linux-x64-16]
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --workspace --lib
+      - run: |
+          cd docs
+          npm install
+          npx vitepress build
+  darwin:
+    if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
+    runs-on: [self-hosted, skippr-darwin-arm64-8]
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo test --workspace --lib
