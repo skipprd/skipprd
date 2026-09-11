@@ -8,45 +8,9 @@ inputs:
     required: true
   aws_secret_access_key:
     required: true
-  codeartifact_aws_access_key_id:
-    required: false
-    default: ""
-  codeartifact_aws_secret_access_key:
-    required: false
-    default: ""
 runs:
   using: "composite"
   steps:
-    - name: Configure CodeArtifact Cargo access
-      shell: bash
-      run: |
-        set -euo pipefail
-        if [ -n "${CARGO_REGISTRIES_REACT_CARGO_TOKEN:-}" ]; then
-          echo "CodeArtifact Cargo token already configured"
-          exit 0
-        fi
-
-        access_key_id="${{ inputs.codeartifact_aws_access_key_id }}"
-        secret_access_key="${{ inputs.codeartifact_aws_secret_access_key }}"
-        if [ -z "$access_key_id" ]; then
-          access_key_id="${{ inputs.aws_access_key_id }}"
-        fi
-        if [ -z "$secret_access_key" ]; then
-          secret_access_key="${{ inputs.aws_secret_access_key }}"
-        fi
-
-        token="$(AWS_ACCESS_KEY_ID="$access_key_id" \
-          AWS_SECRET_ACCESS_KEY="$secret_access_key" \
-          AWS_DEFAULT_REGION=us-east-1 \
-          aws codeartifact get-authorization-token \
-            --domain skippr \
-            --domain-owner 132355036174 \
-            --region us-east-1 \
-            --query authorizationToken \
-            --output text)"
-        echo "::add-mask::$token"
-        echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
-
     - name: Run Skippr Tests
       shell: bash
       run: |        

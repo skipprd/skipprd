@@ -7,7 +7,7 @@
 
 Harness: `python3 tests/hla_e2e/run.py` (DynamoDB Local with two tables — `skippr-hla-e2e-offsets` and `skippr-hla-e2e-catalog` — plus `file://` Iceberg warehouse and three `skipprd` processes with `KUBERNETES_NODE_NAME=hla-host-{1,2,3}`). Query path is Arrow Flight SQL 58.3 (`query_flight_ids`). Clustered TCP is always mTLS; hello is protocol **2** hashed from `SKIPPR_CLUSTER_ID`. Live `run.py` over Flight SQL is the remaining process gate.
 
-**This pass:** 2026-08-17 production close-out (cluster id, always mTLS, gossip HMAC required, Flight `TenantScope`, mesh JWT). Previous `run.py` pass is **stale** until re-run. Commands used `./scripts/cargo-with-local-react.sh` unless noted.
+**This pass:** 2026-08-17 production close-out (cluster id, always mTLS, gossip HMAC required, Flight `TenantScope`, mesh JWT). Previous `run.py` pass is **stale** until re-run. Commands used `cargo` unless noted.
 
 | Bucket | Ran | Outcome |
 |---|---|---|
@@ -15,7 +15,7 @@ Harness: `python3 tests/hla_e2e/run.py` (DynamoDB Local with two tables — `ski
 | Harness contract (`test_run.py`) | this pass | 14 tests (includes protocol-2 hello + cluster id) |
 | Dynamo CAS (`ddb_cas.py`) | contract in `test_run.py` | live `python3 tests/hla_e2e/ddb_cas.py` still required against DynamoDB Local |
 | WBS CI cargo tests / `check --all-features` | this pass | re-run after close-out |
-| Host-boundary Python script | prior pass | **pass** (`scripts/cargo-with-local-react.sh`; default host tree has no `aws-sdk-dynamodb`) |
+| Host-boundary Python script | prior pass | **pass** (`cargo`; default host tree has no `aws-sdk-dynamodb`) |
 | GitHub Actions HLA job | workflow in tree | `.github/workflows/hla-e2e.yml` exists. **Do not tick green** until an Actions run exists |
 | Product runtime e2e | not this pass | needs AWS / `SKIPPR_API_KEY` |
 | Preview three-host smoke | not this pass | `cloud/docs/internal/datalake-preview-smoke.md` |
@@ -245,10 +245,10 @@ Each item: ran the closest existing test if any. `[ ]` means the **process** sce
   - **Result:** pass, 2 tests (`provider_is_pinned_to_namespace_and_commit_cut`, `empty_wal_scan_honors_projection`). No live UNION race.
 
 - [x] `cargo check --all-features`
-  - **Result:** pass, ~17s (`./scripts/cargo-with-local-react.sh check --all-features`).
+  - **Result:** pass, ~17s (`cargo check --all-features`).
 
 - [x] `python3 .github/scripts/check_host_dependency_boundaries.py`
-  - **Result:** pass. Script invokes `scripts/cargo-with-local-react.sh` (or `$CARGO`). Default host tree excludes `aws-sdk-dynamodb`.
+  - **Result:** pass. Script invokes `cargo` (or `$CARGO`). Default host tree excludes `aws-sdk-dynamodb`.
 
 - [ ] Deterministic DynamoDB Local job for lease, membership, offset CAS, and Iceberg catalog OCC
   - **Harness:** `python3 tests/hla_e2e/ddb_cas.py` (offset table `skippr-hla-e2e-offsets`, catalog table `skippr-hla-e2e-catalog`; no skipprd ingest). Workflow step is wired before `run.py`.

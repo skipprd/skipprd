@@ -2,7 +2,7 @@
 
 Skippr is a data pipeline CLI and runtime for configuring sources, sinks, models, and vector ingestion from one `skippr.yml` file.
 
-The public product CLI is `skippr`. `skippr discover` and `skippr sync` invoke the skipprd runtime against the same file. `skipprd` remains the engine binary for Lambda images, plugin testing, and maintainer debugging.
+The engine binary is `skipprd`. Data Engineer is `sde`. Cloud is `skippr`. `skipprd discover` and `skipprd sync` invoke the skipprd runtime against the same file. `skipprd` remains the engine binary for Lambda images, plugin testing, and maintainer debugging.
 
 ## Start here
 

@@ -67,7 +67,7 @@ Full step-by-step guides (service account, OAuth refresh, bearer token) are on t
 ## CLI
 
 ```bash
-skippr connect source google-analytics \
+sde connect source google-analytics \
   --property-id 123456789 \
   --start-date 2024-01-01 \
   --stream-profile full \

@@ -85,7 +85,7 @@ Unit tests cover config validation, client fixture/skip behavior, extraction, ch
 ```bash
 cargo build -p skippr-plugin-data-source-ai-citations
 cargo test -p skippr-plugin-data-source-ai-citations
-cargo test -p skippr-cli translate_ai_citations_source
+cargo test -p sde translate_ai_citations_source
 ```
 
 Fixture-only sync (no live API):
@@ -96,8 +96,8 @@ export USE_LOCAL_PLUGIN_CODE=1
 manifest_dir="$(python3 .github/scripts/local_runtime_plugins.py \
   --config path/to/skippr.yml --pipeline brand_ai_visibility)"
 export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="$manifest_dir"
-skippr discover --pipeline brand_ai_visibility
-skippr sync --once --pipeline brand_ai_visibility
+skipprd discover --pipeline brand_ai_visibility
+skipprd sync --once --pipeline brand_ai_visibility
 ```
 
 ## Checkpointing

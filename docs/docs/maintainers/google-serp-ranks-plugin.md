@@ -68,7 +68,7 @@ When `SKIPPR_RUNTIME_EXECUTION_MODE=discover`:
 ```bash
 cargo build -p skippr-plugin-data-source-google-serp-ranks
 cargo test -p skippr-plugin-data-source-google-serp-ranks
-cargo test -p skippr-cli translate_google_serp_ranks_source
+cargo test -p sde translate_google_serp_ranks_source
 cd plugins/data_source/google_serp_ranks/worker && npm test
 ```
 
@@ -107,7 +107,7 @@ export SKIPPR_GOOGLE_SERP_RANKS_FIXTURE_DIR=plugins/data_source/google_serp_rank
 ## CLI
 
 ```bash
-skippr connect source google-serp-ranks \
+sde connect source google-serp-ranks \
   --target-site example.com \
   --keywords "best widgets,widget reviews" \
   --country uk \

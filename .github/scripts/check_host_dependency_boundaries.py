@@ -59,9 +59,6 @@ def cargo_cmd() -> list[str]:
     override = os.environ.get("CARGO")
     if override:
         return override.split()
-    wrapper = REPO_ROOT / "scripts" / "cargo-with-local-react.sh"
-    if wrapper.is_file():
-        return [str(wrapper)]
     return ["cargo"]
 
 

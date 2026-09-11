@@ -15,7 +15,7 @@ Optional `version:` on a source, sink, or schema connector pins that connector t
 
 ### Databases
 
-| Plugin | Doc | `skippr connect` |
+| Plugin | Doc | `sde connect` |
 | --- | --- | --- |
 | `Clickhouse` | [ClickHouse](inputs/clickhouse.md) | — |
 | `Dynamodb` | [DynamoDB](inputs/dynamodb.md) | — |
@@ -29,7 +29,7 @@ Optional `version:` on a source, sink, or schema connector pins that connector t
 
 ### Object stores
 
-| Plugin | Doc | `skippr connect` |
+| Plugin | Doc | `sde connect` |
 | --- | --- | --- |
 | `File` | [Local file](inputs/file.md) | — |
 | `S3` | [S3](inputs/s3.md) | — |
@@ -37,7 +37,7 @@ Optional `version:` on a source, sink, or schema connector pins that connector t
 
 ### Streaming
 
-| Plugin | Doc | `skippr connect` |
+| Plugin | Doc | `sde connect` |
 | --- | --- | --- |
 | `Kafka` | [Kafka](inputs/kafka.md) | — |
 | `Sqs` | [SQS](inputs/sqs.md) | — |
@@ -50,7 +50,7 @@ Optional `version:` on a source, sink, or schema connector pins that connector t
 
 ### HTTP / Network
 
-| Plugin | Doc | `skippr connect` |
+| Plugin | Doc | `sde connect` |
 | --- | --- | --- |
 | `HttpClient` | [HTTP client](inputs/http_client.md) | — |
 | `HttpServer` | [HTTP server](inputs/http_server.md) | — |
@@ -60,7 +60,7 @@ Optional `version:` on a source, sink, or schema connector pins that connector t
 
 ### API / SaaS
 
-| Plugin | Doc | `skippr connect` |
+| Plugin | Doc | `sde connect` |
 | --- | --- | --- |
 | `GoogleAnalytics` | [GA4](inputs/google_analytics.md) | `google-analytics` |
 | `GoogleSearchConsole` | [Search Console](inputs/google_search_console.md) | `google-search-console` |
@@ -81,7 +81,7 @@ Optional `version:` on a source, sink, or schema connector pins that connector t
 
 ### Other
 
-| Plugin | Doc | `skippr connect` |
+| Plugin | Doc | `sde connect` |
 | --- | --- | --- |
 | `Stdin` | [Stdin](inputs/stdin.md) | — |
 

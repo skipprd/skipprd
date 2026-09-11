@@ -8,7 +8,7 @@ Start with:
 - [Input Source](input.md) for `data_sources`
 - [Output Destination](output.md) for ingest `data_sinks` and `schema_sinks`
 
-`skippr` is the product CLI. `skippr discover` / `skippr sync` run the skipprd runtime against the same file; `skippr model` / `skippr query` compile `data_sinks` in memory. There is no separate `warehouses:` dialect.
+`skipprd discover` / `skipprd sync` run the engine against this file. `sde model` / `sde query` compile `data_sinks` in memory. There is no separate `warehouses:` dialect. The Cloud CLI `skippr` is not this product.
 
 ## Environment overrides
 

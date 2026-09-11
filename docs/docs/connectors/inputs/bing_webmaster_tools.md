@@ -30,7 +30,7 @@ data_sources:
 ## CLI
 
 ```bash
-skippr connect source bing-webmaster-tools \
+sde connect source bing-webmaster-tools \
   --site-url "https://example.com/" \
   --start-date 2026-03-01 \
   --api-key ${BING_WEBMASTER_TOOLS_API_KEY}

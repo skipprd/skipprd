@@ -1,27 +1,19 @@
 #!/bin/sh
 set -e
 
-# Public install CDN (Cloudflare Worker → R2 skippr-web-install). Not GitHub Releases.
+# Engine install. Cloud `skippr` is skippr-web/public/install.sh. Data Engineer is `sde`.
 RELEASES_BASE_URL="${SKIPPR_RELEASES_BASE_URL:-https://install.skippr.io/releases}"
 INSTALL_DIR="${SKIPPR_INSTALL_DIR:-/usr/local/bin}"
-BINARY="${SKIPPR_BINARY:-skippr}"
+BINARY="${SKIPPR_BINARY:-skipprd}"
 
 case "$BINARY" in
-  skippr)
-    RELEASE_SUBDIR="skippr"
-    LATEST_RELEASE_URL="${RELEASES_BASE_URL}/latest-skippr.txt"
-    ;;
   skipprd)
     RELEASE_SUBDIR="skipprd"
     LATEST_RELEASE_URL="${RELEASES_BASE_URL}/latest-skipprd.txt"
     ;;
-  skippr-admin)
-    RELEASE_SUBDIR="skippr-admin"
-    LATEST_RELEASE_URL="${RELEASES_BASE_URL}/latest-skippr-admin.txt"
-    ;;
   *)
     err() { printf 'Error: %s\n' "$1" >&2; exit 1; }
-    err "unsupported SKIPPR_BINARY=$BINARY (expected skippr, skipprd, or skippr-admin)"
+    err "unsupported SKIPPR_BINARY=$BINARY (expected skipprd)"
     ;;
 esac
 
@@ -143,13 +135,9 @@ main() {
 
     say ""
     say "  $BINARY $tag installed to $INSTALL_DIR/$BINARY"
+    say "  Engine: skipprd discover / skipprd sync"
+    say "  Data Engineer is sde: https://data-engineer.skippr.io"
     say ""
-    if [ "$BINARY" = "skippr" ]; then
-        say "  Get started:"
-        say "    skippr user login"
-        say "    skippr init my-project"
-        say ""
-    fi
 }
 
 main "$@"

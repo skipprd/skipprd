@@ -64,7 +64,7 @@ Happy / unhappy path matrix: `plugins/data_source/bing_webmaster_tools/docs/happ
 ## CLI
 
 ```bash
-skippr connect source bing-webmaster-tools \
+sde connect source bing-webmaster-tools \
   --site-url "https://example.com/" \
   --start-date 2026-03-01 \
   --stream-profile standard \
@@ -76,6 +76,6 @@ skippr connect source bing-webmaster-tools \
 - [x] `source_namespace_contracts()` + `replace_partition` on `date`
 - [x] Per-namespace checkpoints (`last_completed_date`)
 - [x] `skippr_plugin_name`: `bing_webmaster_tools` → `BingWebmasterTools`
-- [x] `translate_bing_webmaster_tools_source` test in `skippr-cli`
+- [x] `translate_bing_webmaster_tools_source` test in `sde`
 
 See [API / SaaS source plugins](api-saas-source-plugins.md) and [Google Search Console plugin](google-search-console-plugin.md) for shared patterns.

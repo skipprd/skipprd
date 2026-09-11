@@ -17,13 +17,13 @@ Retention is tenant-managed: `ENABLE` / `DISABLE PIPELINE` plus object-store or 
 
 ## Process topology
 
-OSS uses **three ingest processes** (one pipeline per signal). Query is on-demand (`skippr query` or CloudQuery). There is no observe process.
+OSS uses **three ingest processes** (one pipeline per signal). Query is on-demand (`sde query` or CloudQuery). There is no observe process.
 
 ```text
-DATA_DIR=/data/traces skippr sync --pipeline otel-traces
-DATA_DIR=/data/logs   skippr sync --pipeline otel-logs
-DATA_DIR=/data/metrics skippr sync --pipeline otel-metrics
-skippr query
+DATA_DIR=/data/traces skipprd sync --pipeline otel-traces
+DATA_DIR=/data/logs   skipprd sync --pipeline otel-logs
+DATA_DIR=/data/metrics skipprd sync --pipeline otel-metrics
+sde query
 ```
 
 Listen ports must not collide (see the example YAML).
@@ -41,7 +41,7 @@ data_sources:
 ```
 
 ```bash
-skippr connect source otlp \
+sde connect source otlp \
   --listen-address-grpc 0.0.0.0:4317 \
   --listen-address-http 0.0.0.0:4318 \
   --signals traces

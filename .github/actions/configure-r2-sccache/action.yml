@@ -1,7 +1,6 @@
 name: Configure R2 sccache credentials
 description: >
   Point sccache (and AWS CLI cache helpers) at Cloudflare R2 bucket skippr-web-rust-cache.
-  Call after CodeArtifact token fetch so R2 AWS_* credentials do not break aws codeartifact.
 
 inputs:
   account_id:

@@ -367,7 +367,7 @@ def build_skipprd() -> Path:
     log("building skipprd --features offset-store-dynamodb")
     subprocess.run(
         [
-            str(REPO_ROOT / "scripts" / "cargo-with-local-react.sh"),
+            "cargo",
             "build",
             "-p",
             "skipprd",

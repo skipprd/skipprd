@@ -9,7 +9,7 @@ A pipeline moves through three phases:
 ### 1. Discover
 
 ```bash
-skippr discover --pipeline my_pipeline --log
+skipprd discover --pipeline my_pipeline --log
 ```
 
 Connects to the configured data source, samples records, and infers the complete schema including nested fields. The schema is persisted as pipeline metadata in S3 (`SKIPPR_S3_BUCKET`).
@@ -23,7 +23,7 @@ Discovery detects:
 ### 2. Sync
 
 ```bash
-skippr sync --pipeline my_pipeline --log
+skipprd sync --pipeline my_pipeline --log
 ```
 
 The main ingestion loop:

@@ -1,15 +1,14 @@
-# Skippr
+# Skipprd
 
-Skippr is a Rust CLI and runtime for data ingestion, warehouse modeling, and data-engineering workflows configured from one `skippr.yml`.
+Skipprd is the self-hosted ELT engine. Configure a `skippr.yml`, then run
+`skipprd discover` and `skipprd sync`.
 
-The repository ships two useful binaries:
+This private tree is engine-only. Skippr Data Engineer is the **`sde`** CLI in
+`skipprd/sde`. Cloud `skippr` is a different binary.
 
-- `skippr` — the product CLI for project setup, connector configuration, shared engine commands, modeling, dbt helpers, vector ingestion, chat, and diagnostics.
-- `skipprd` — the lightweight engine/runtime binary for discovery, sync, engine query/schema operations, Lambda images, and runtime plugin testing.
+Public docs: [elt.skippr.io](https://elt.skippr.io) | SQL reference: [sql-docs.md](sql-docs.md) | Performance notes: [PERFORMANCE.md](PERFORMANCE.md) | AI agent guidance: [AGENTS.md](AGENTS.md)
 
-Both binaries read the same `skippr.yml` for shared engine commands such as `discover` and `sync`.
-
-Public docs: [docs/](docs/) | SQL reference: [sql-docs.md](sql-docs.md) | Performance notes: [PERFORMANCE.md](PERFORMANCE.md) | AI agent guidance: [AGENTS.md](AGENTS.md)
+The public source-available repo is [github.com/skipprd/skipprd](https://github.com/skipprd/skipprd) (PolyForm Shield 1.0.0).
 
 ## Repository structure
 
@@ -29,7 +28,7 @@ src/
   metrics/              Stats collection and reporting
   adapters/             Storage adapters (S3, local)
 tests/                  Integration tests
-docs/                   MkDocs public documentation site
+docs/                   Maintainer markdown (public site is elt.skippr.io)
 ci-e2e/                 E2E test orchestration scripts
 soda/                   Soda Core data quality checks for E2E tests
 test-data/              Sample data for tests
@@ -50,28 +49,19 @@ cargo fmt --all -- --check
 cargo clippy
 ```
 
-## CLI commands
-
-Run the product CLI during development:
-
-```bash
-cargo run -p skippr-cli --bin skippr -- <command> [flags]
-```
-
-Run the lightweight engine binary when you only need engine/runtime behavior:
+## Engine commands
 
 ```bash
 cargo run --bin skipprd -- <command> [flags]
 ```
 
-Both support `--config path/to/skippr.yml` for shared engine commands.
+`--config path/to/skippr.yml` selects the engine config.
 
 ### discover
 
 Connect to a source, sample data, infer schemas. Persists metadata to S3.
 
 ```bash
-cargo run -p skippr-cli --bin skippr -- discover --pipeline bikehire --log
 cargo run --bin skipprd -- --config skippr.yml discover --pipeline bikehire --log
 ```
 
@@ -82,7 +72,6 @@ Flags: `--pipeline/-p <name>`, `--verbose`
 Run the ingestion loop: read source → WAL → compact → Parquet → S3 + Glue.
 
 ```bash
-cargo run -p skippr-cli --bin skippr -- sync --pipeline bikehire --log
 cargo run --bin skipprd -- --config skippr.yml sync --pipeline bikehire --log
 ```
 

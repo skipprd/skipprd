@@ -26,34 +26,6 @@ runs:
         rustup toolchain install ${{ inputs.rust-version }}
         rustup default ${{ inputs.rust-version }}
         rustup component add rustfmt
-    - name: Configure CodeArtifact Cargo access
-      shell: bash
-      run: |
-        # Prefer dedicated AWS keys; job AWS_* may point at R2 for sccache.
-        access_key="${CODEARTIFACT_AWS_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}"
-        secret_key="${CODEARTIFACT_AWS_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
-        if [[ -z "${access_key}" || -z "${secret_key}" ]]; then
-          echo "::error::CodeArtifact credentials missing (CODEARTIFACT_AWS_* or AWS_*)."
-          exit 1
-        fi
-        token="$(
-          env -u AWS_PROFILE \
-          AWS_ACCESS_KEY_ID="${access_key}" \
-          AWS_SECRET_ACCESS_KEY="${secret_key}" \
-          AWS_SESSION_TOKEN="${CODEARTIFACT_AWS_SESSION_TOKEN:-}" \
-          AWS_SECURITY_TOKEN= \
-          AWS_ENDPOINT_URL= \
-          AWS_DEFAULT_REGION=us-east-1 \
-          AWS_REGION=us-east-1 \
-          aws codeartifact get-authorization-token \
-            --domain skippr \
-            --domain-owner 132355036174 \
-            --region us-east-1 \
-            --query authorizationToken \
-            --output text
-        )"
-        echo "::add-mask::$token"
-        echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
     - name: Install sccache
       if: env.SCCACHE_BUCKET != ''
       uses: mozilla-actions/sccache-action@v0.0.9

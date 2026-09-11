@@ -124,9 +124,7 @@ runs:
         PY
 
         cargo build --release \
-          -p skipprd --bin skipprd --features offset-store-dynamodb,offset-store-cloud-tables \
-          -p skippr-cli --bin skippr \
-          -p skippr-admin --bin skippr-admin
+          -p skipprd --bin skipprd --features offset-store-dynamodb,offset-store-cloud-tables
         if [ -s "${plugin_packages_file}" ]; then
           cargo_args=()
           while IFS= read -r package; do

@@ -17,11 +17,11 @@ See also [Runtime plugins](./runtime-plugins.md) and [Runtime Plugin Contract](.
 
 | Owned by source plugin | Owned by skipprd core |
 | --- | --- |
-| Auth, pagination, rate limits | Schema discovery (`skippr discover`) |
+| Auth, pagination, rate limits | Schema discovery (`skipprd discover`) |
 | Checkpoints (extraction progress) | WAL, compaction, offsets |
 | Faithful bronze JSON/records | `SourceNamespaceContract` persistence |
 | `SourceNamespaceContract` per namespace | Sink write policy enforcement |
-| Parent/child extraction when required | Business modeling (`skippr model`) |
+| Parent/child extraction when required | Business modeling (`sde model`) |
 
 ## End-to-end flow
 
@@ -119,7 +119,7 @@ Prefer `plugins/shared/api_source/` where applicable:
 
 ### Discover auto-sampling (required for report APIs)
 
-`skippr discover` must not pull full historical backfills or large bronze catalogs just to infer schemas. Sampling is **automatic** (not a `skippr.yml` knob):
+`skipprd discover` must not pull full historical backfills or large bronze catalogs just to infer schemas. Sampling is **automatic** (not a `skippr.yml` knob):
 
 - [ ] Read `SKIPPR_RUNTIME_EXECUTION_MODE` via `SKIPPR_RUNTIME_EXECUTION_MODE_ENV` (`discover` vs normal sync) — set by the host in [`append_source_runtime.rs`](https://github.com/skipprd/skipprd/blob/main/crates/skippr-runtime-sdk/src/append_source_runtime.rs)
 - [ ] In discover mode: narrow **date window** (e.g. last 3 days), **minimal stream profile**, `lookback_days = 0`, **no checkpoint load/advance**
@@ -137,11 +137,11 @@ Reference: `runtime_is_discover_mode()` and `streams_for_run(discover)` in `plug
 - [ ] Checkpoint serialize/deserialize + version check
 - [ ] Auth happy path + missing-credentials error path
 
-### CLI (`skippr connect source`)
+### CLI (`sde connect source`)
 
 Ship operator wiring whenever a source is user-facing (not internal-only). Without this, users must hand-edit `skippr.yml` and public docs drift.
 
-**`crates/skippr-cli`**
+**`sde` (`crates/sde` in skipprd/sde)**
 
 - [ ] `SourceKind::<Variant>` on the `connect source` subcommand (kebab-case CLI name, e.g. `google-analytics`)
 - [ ] `source_plugin_and_config()` — `plugin_name` must match `[package.metadata.skippr-plugin] plugin_name` exactly (e.g. `"GoogleAnalytics"`)
@@ -151,21 +151,21 @@ Ship operator wiring whenever a source is user-facing (not internal-only). Witho
 - [ ] `cmd_connect_source` — interactive prompts for required fields when flags omitted; prefer `${ENV_VAR}` defaults for secrets
 - [ ] `source_kind_str()` / legacy `kind_label` match arm for JSON connect output
 
-**`crates/skipprd-react-suite-data-engineer` (`skippr_impl.rs`)**
+**`react-suite-data-engineer` in skipprd/sde (`skippr_impl.rs`)**
 
 - [ ] `skippr_plugin_name()` — explicit `"snake_kind" => "PluginName"` when `capitalize_first` would be wrong (e.g. `google_analytics` → `GoogleAnalytics`, not `Google_analytics`)
 
 **Docs**
 
-- [ ] Public connector page (`skippr-web` and/or `skipprd` inputs doc) with `skippr connect source …` example and flag table
+- [ ] Public connector page (`skippr-web` and/or `skipprd` inputs doc) with `sde connect source …` example and flag table
 - [ ] `react/docs/docs/cli/connect.md` section for the new source
 
 **Verification**
 
 ```bash
-cargo test -p skippr-cli translate_google_analytics
-cargo test -p skippr-cli translate_meta_instagram_ads
-skippr connect source <kebab-name> --help
+cargo test -p sde translate_google_analytics
+cargo test -p sde translate_meta_instagram_ads
+sde connect source <kebab-name> --help
 ```
 
 Reference: `google-analytics` / `GoogleAnalytics` in `plugins/data_source/google_analytics/`, `meta-instagram-ads` / `MetaInstagramAds` in `plugins/data_source/meta_instagram_ads/`.
@@ -362,12 +362,12 @@ Most vendors return **HTTP 429** (or 503) under quota pressure.
 
 ### Local plugin builds vs published runtime binaries
 
-`cargo build -p skippr-cli` rebuilds the **host** only. Each `plugins/data_source/<name>/` crate is a **separate** subprocess loaded at runtime.
+`cargo build -p skipprd` rebuilds the **host** only. Each `plugins/data_source/<name>/` crate is a **separate** subprocess loaded at runtime.
 
 For IDE and local dev:
 
 ```bash
-cargo build -p skippr-plugin-data-source-<name> -p skippr-cli
+cargo build -p skippr-plugin-data-source-<name> -p skipprd
 python3 .github/scripts/local_runtime_plugins.py --config <skippr.yml> --pipeline <pipeline>
 # export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR=<printed path>
 ```
@@ -411,7 +411,7 @@ Pair with Athena or Iceberg sinks that declare `supports_replace_partition` in t
 
 ### Ship CLI, lineage, and plugin name mapping together
 
-A source plugin without `skippr connect`, `public_config`, `translate`, and `skippr_impl` / `lineage_builder` arms forces hand-edited YAML and produces lineage errors (“not supported by config translation”). Add these in the same PR as the plugin when the connector is user-facing.
+A source plugin without `sde connect`, `public_config`, `translate`, and `skippr_impl` / `lineage_builder` arms forces hand-edited YAML and produces lineage errors (“not supported by config translation”). Add these in the same PR as the plugin when the connector is user-facing.
 
 ### Optional-stream pattern for incompatible report grains
 
@@ -455,7 +455,7 @@ Use these for end-to-end examples only; new connectors should follow the generic
 
 ## Implementation notes (all connectors)
 
-- Bronze field names must survive to `skippr discover` unchanged
+- Bronze field names must survive to `skipprd discover` unchanged
 - No business modeling in sources (attribution, metrics definitions, etc.)
 - Sources do not define output schemas; discover after sample data exists
 - Mutable HTTP report APIs: prefer `replace_partition` + `refresh_window` over append
