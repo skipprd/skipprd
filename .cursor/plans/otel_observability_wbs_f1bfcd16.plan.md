@@ -770,7 +770,7 @@ Do not add `Mode::Observe`. Query path remains `skippr query` / Flight / CloudQu
 
 ## WU-A.16 `skippr connect source otlp`
 
-**Touch:** [crates/skippr-cli/src/main.rs](crates/skippr-cli/src/main.rs) `SourceKind::HttpServer` ~1423 and `source_plugin_and_config` ~4279; `SourceConfig` / `translate.rs` / `skippr_plugin_name` per [api-saas-source-plugins.md](docs/docs/maintainers/api-saas-source-plugins.md) CLI checklist (~140–171)
+**Touch:** [https://github.com/skipprd/sde](https://github.com/skipprd/sde) `SourceKind::HttpServer` ~1423 and `source_plugin_and_config` ~4279; `SourceConfig` / `translate.rs` / `skippr_plugin_name` per [api-saas-source-plugins.md](docs/docs/maintainers/api-saas-source-plugins.md) CLI checklist (~140–171)
 
 **Reference:** Copy the HttpServer/Statsd arms. `plugin_name` string `"Otlp"` must match Cargo metadata. JSON keys = `OtlpConfig` serde fields.
 
@@ -1185,7 +1185,7 @@ No skipprd console, `skippr observe`, alarm evaluator, OCC alarm store, or webho
 cargo test -p skippr-plugin-data-source-otlp
 cargo test -p skipprd sqlrt::udfs::
 cargo test -p skipprd --test otel_udfs
-cargo test -p skippr-cli -- otlp
+cargo test -p sde -- otlp
 python3 .github/scripts/check_host_dependency_boundaries.py
 ```
 
