@@ -2,11 +2,11 @@
 
 ## Implementation
 
-### Thread continuity (`skippr-cli` + IDE)
+### Thread continuity (`sde` + IDE)
 
 - `run_headless_detailed` now returns the thread id produced by the react headless runner, not only a pre-requested id.
 - `skippr chat send` passes the rendered user message as `headless_prompt`, enables `stream_jsonl` for `--output jsonl`, and sets `SKIPPR_HEADLESS_QUESTION` for the data-engineer suite entrypoints.
-- Workspace react dependencies use published `react-cargo` 1.4.0; use `./scripts/cargo-with-local-react.sh` for sibling `../react` during local development.
+- Workspace react dependencies use published `git/path react` 1.4.0; use `cargo` for sibling `../react` during local development.
 
 ### Ask routing (`skipprd-react-suite-data-engineer`)
 

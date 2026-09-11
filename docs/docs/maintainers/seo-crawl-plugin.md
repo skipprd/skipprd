@@ -36,7 +36,7 @@ data_sources:
       user_agent: "SkipprSeoCrawl/1.0"
 ```
 
-Public config (`skippr connect source seo-crawl`): `kind: seo_crawl` with the same fields (camelCase in JSON export).
+Public config (`sde connect source seo-crawl`): `kind: seo_crawl` with the same fields (camelCase in JSON export).
 
 ## Environment
 

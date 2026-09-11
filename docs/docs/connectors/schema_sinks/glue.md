@@ -46,7 +46,7 @@ Environment variable equivalent: `SCHEMA_OUTPUT_GLUE_DATABASE_NAME`.
 
 ## Query and model
 
-Ingest uses `data_sinks` / `schema_sinks`. `skippr query` and `skippr model` use the same `Athena:` sink (`glue_database_name`, `athena_workgroup_name`, `athena_results_s3_bucket`). There is no separate warehouse block.
+Ingest uses `data_sinks` / `schema_sinks`. `sde query` and `sde model` use the same `Athena:` sink (`glue_database_name`, `athena_workgroup_name`, `athena_results_s3_bucket`). There is no separate warehouse block.
 
 ## Related
 

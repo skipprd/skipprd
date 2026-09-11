@@ -34,7 +34,7 @@ data_sources:
 Pipe data into Skippr:
 
 ```bash
-cat data.json | skippr sync --pipeline my_pipeline
+cat data.json | skipprd sync --pipeline my_pipeline
 ```
 
 ## Configuration variables

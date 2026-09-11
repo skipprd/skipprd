@@ -5,7 +5,7 @@ Daily Instagram placement insights from the Meta Marketing API.
 ## Connect
 
 ```bash
-skippr connect source meta-instagram-ads \
+sde connect source meta-instagram-ads \
   --ad-account-id act_123456789 \
   --start-date 2024-01-01 \
   --access-token ${META_ADS_ACCESS_TOKEN}

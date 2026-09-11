@@ -1,6 +1,6 @@
 # Source landing semantics
 
-Some sources—especially API and SaaS connectors—declare **how each namespace’s data must land** in the warehouse. Skippr calls this a **namespace contract**. Contracts are separate from column types discovered by `skippr discover`.
+Some sources—especially API and SaaS connectors—declare **how each namespace’s data must land** in the warehouse. Skippr calls this a **namespace contract**. Contracts are separate from column types discovered by `skipprd discover`.
 
 ## Namespace contracts
 

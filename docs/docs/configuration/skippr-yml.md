@@ -1,6 +1,6 @@
 # skippr.yml
 
-`skippr.yml` is the canonical Skippr project file. One file, one shape: skipprd plugin entries under `data_sources` and `data_sinks`. The public product CLI is `skippr`. `skippr discover` and `skippr sync` invoke the skipprd runtime against this file; `skippr model` and `skippr query` compile the same sinks into the modeling stack in memory.
+`skippr.yml` is the canonical Skippr project file. One file, one shape: skipprd plugin entries under `data_sources` and `data_sinks`. The engine binary is `skipprd`. Data Engineer is `sde`. Cloud is `skippr`. `skipprd discover` and `skipprd sync` invoke the skipprd runtime against this file; `sde model` and `sde query` compile the same sinks into the modeling stack in memory.
 
 `source` and `warehouse` in the example below are **logical names**, not reserved words. They may be `mssql_prod`, `raw_snowflake`, `my_warehouse`, or any other key. Pipelines refer to them by section-qualified reference.
 
@@ -45,12 +45,12 @@ Athena ingest and query live on the **same** `Athena:` sink object using skipprd
 |---|---|---|
 | `skippr` | `skippr` | Workspace, state bucket, WAL/offset options |
 | `pipelines` | `skippr` | Pipeline graph: source, sink, schema sink, transforms |
-| `data_sources` | `skippr discover` / `skippr sync` | Runtime source plugin configs |
+| `data_sources` | `skipprd discover` / `skipprd sync` | Runtime source plugin configs |
 | `data_sinks` | `skippr` | Runtime ingest sinks; also the query/model destination |
-| `deadletter_sinks` | `skippr sync` | Optional deadletter write targets |
-| `schema_sinks` | `skippr sync` | Runtime schema/catalog plugin configs |
-| `dbt` | `skippr model` | dbt naming: `target_schema`, `silver_suffix`, `gold_suffix` |
-| `vector_sources` | `skippr vector` | File/stdin sources for vector ingestion |
+| `deadletter_sinks` | `skipprd sync` | Optional deadletter write targets |
+| `schema_sinks` | `skipprd sync` | Runtime schema/catalog plugin configs |
+| `dbt` | `sde model` | dbt naming: `target_schema`, `silver_suffix`, `gold_suffix` |
+| `vector_sources` | `sde vector` | File/stdin sources for vector ingestion |
 
 There is no `warehouses:` section. Query, model, and catalog use the pipeline's `data_sink`.
 

@@ -82,7 +82,7 @@ The worker script is resolved automatically (plugin crate `worker/`, skipprd rep
 ```bash
 cargo build -p skippr-plugin-data-source-site-quality
 cargo test -p skippr-plugin-data-source-site-quality
-cargo test -p skippr-cli translate_site_quality_source
+cargo test -p sde translate_site_quality_source
 ```
 
 Fixture-only sync (no live browser):
@@ -93,14 +93,14 @@ export USE_LOCAL_PLUGIN_CODE=1
 manifest_dir="$(python3 .github/scripts/local_runtime_plugins.py \
   --config path/to/skippr.yml --pipeline my_pipeline)"
 export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="$manifest_dir"
-skippr discover --pipeline my_pipeline
-skippr sync --once --pipeline my_pipeline
+skipprd discover --pipeline my_pipeline
+skipprd sync --once --pipeline my_pipeline
 ```
 
 ## CLI
 
 ```bash
-skippr connect source site-quality \
+sde connect source site-quality \
   --site https://example.com \
   --url-mode tld_sample \
   --max-pages-per-run 50

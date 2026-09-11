@@ -38,7 +38,7 @@ Fixture matrix:
 ## CLI
 
 ```bash
-skippr connect source apple-app-store-serp --app-id 123 --keywords "term" --storefronts us
+sde connect source apple-app-store-serp --app-id 123 --keywords "term" --storefronts us
 ```
 
 Pipeline name: `apple_app_store_serp`.

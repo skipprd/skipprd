@@ -70,7 +70,7 @@ data_sources:
 
 ## Discover
 
-`skippr discover` uses one seed keyword, `limit: 5` suggestions, SERP depth 10, primary location only, and no competitor sitemap fetches.
+`skipprd discover` uses one seed keyword, `limit: 5` suggestions, SERP depth 10, primary location only, and no competitor sitemap fetches.
 
 ## Fixtures
 
@@ -79,7 +79,7 @@ Set `SKIPPR_DATAFORSEO_SEO_OPPORTUNITIES_FIXTURE_DIR` to the crate `fixtures/` d
 ## CLI
 
 ```bash
-skippr connect source dataforseo-seo-opportunities \
+sde connect source dataforseo-seo-opportunities \
   --login "${DATAFORSEO_API_USER}" \
   --password "${DATAFORSEO_API_PASS}" \
   --site example.com \
@@ -100,5 +100,5 @@ For `competitors`, `streams`, `limits`, and `scoring`, edit engine `skippr.yml` 
 
 ```bash
 cargo test -p skippr-plugin-data-source-dataforseo-seo-opportunities
-cargo test -p skippr-cli translate_dataforseo_seo_opportunities_source
+cargo test -p sde translate_dataforseo_seo_opportunities_source
 ```

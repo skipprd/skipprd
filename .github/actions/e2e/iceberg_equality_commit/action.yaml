@@ -9,31 +9,9 @@ inputs:
     description: Harness mode (smoke or full)
     required: false
     default: full
-  release_aws_access_key_id:
-    description: AWS access key for CodeArtifact Cargo registry
-    required: true
-  release_aws_secret_access_key:
-    description: AWS secret key for CodeArtifact Cargo registry
-    required: true
 runs:
   using: composite
   steps:
-    - name: Configure CodeArtifact Cargo access
-      shell: bash
-      env:
-        AWS_ACCESS_KEY_ID: ${{ inputs.release_aws_access_key_id }}
-        AWS_SECRET_ACCESS_KEY: ${{ inputs.release_aws_secret_access_key }}
-        AWS_DEFAULT_REGION: us-east-1
-      run: |
-        token="$(aws codeartifact get-authorization-token \
-          --domain skippr \
-          --domain-owner 132355036174 \
-          --region us-east-1 \
-          --query authorizationToken \
-          --output text)"
-        echo "::add-mask::$token"
-        echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
-
     - name: Build skipprd and equality-commit runtime plugins
       shell: bash
       env:

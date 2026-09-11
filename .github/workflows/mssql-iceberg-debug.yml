@@ -58,38 +58,6 @@ jobs:
         with:
           submodules: true
 
-      - name: Configure CodeArtifact Cargo access
-        shell: bash
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-        run: |
-          set -euo pipefail
-          access_key="${CODEARTIFACT_AWS_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}"
-          secret_key="${CODEARTIFACT_AWS_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
-          if [[ -z "${access_key}" || -z "${secret_key}" ]]; then
-            echo "::error::CodeArtifact credentials missing (CODEARTIFACT_AWS_* or AWS_*)."
-            exit 1
-          fi
-          token="$(
-            env -u AWS_PROFILE \
-            AWS_ACCESS_KEY_ID="${access_key}" \
-            AWS_SECRET_ACCESS_KEY="${secret_key}" \
-            AWS_SESSION_TOKEN="${CODEARTIFACT_AWS_SESSION_TOKEN:-}" \
-            AWS_SECURITY_TOKEN= \
-            AWS_ENDPOINT_URL= \
-            AWS_DEFAULT_REGION=us-east-1 \
-            AWS_REGION=us-east-1 \
-            aws codeartifact get-authorization-token \
-              --domain skippr \
-              --domain-owner 132355036174 \
-              --region us-east-1 \
-              --query authorizationToken \
-              --output text
-          )"
-          echo "::add-mask::$token"
-          echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -142,38 +110,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-
-      - name: Configure CodeArtifact Cargo access
-        shell: bash
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-        run: |
-          set -euo pipefail
-          access_key="${CODEARTIFACT_AWS_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}"
-          secret_key="${CODEARTIFACT_AWS_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
-          if [[ -z "${access_key}" || -z "${secret_key}" ]]; then
-            echo "::error::CodeArtifact credentials missing (CODEARTIFACT_AWS_* or AWS_*)."
-            exit 1
-          fi
-          token="$(
-            env -u AWS_PROFILE \
-            AWS_ACCESS_KEY_ID="${access_key}" \
-            AWS_SECRET_ACCESS_KEY="${secret_key}" \
-            AWS_SESSION_TOKEN="${CODEARTIFACT_AWS_SESSION_TOKEN:-}" \
-            AWS_SECURITY_TOKEN= \
-            AWS_ENDPOINT_URL= \
-            AWS_DEFAULT_REGION=us-east-1 \
-            AWS_REGION=us-east-1 \
-            aws codeartifact get-authorization-token \
-              --domain skippr \
-              --domain-owner 132355036174 \
-              --region us-east-1 \
-              --query authorizationToken \
-              --output text
-          )"
-          echo "::add-mask::$token"
-          echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -244,8 +180,6 @@ jobs:
     env:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-      CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-      CODEARTIFACT_AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -262,37 +196,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-
-      - name: Configure CodeArtifact Cargo access
-        shell: bash
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-        run: |
-          access_key="${CODEARTIFACT_AWS_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}"
-          secret_key="${CODEARTIFACT_AWS_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
-          if [[ -z "${access_key}" || -z "${secret_key}" ]]; then
-            echo "::error::CodeArtifact credentials missing (CODEARTIFACT_AWS_* or AWS_*)."
-            exit 1
-          fi
-          token="$(
-            env -u AWS_PROFILE \
-            AWS_ACCESS_KEY_ID="${access_key}" \
-            AWS_SECRET_ACCESS_KEY="${secret_key}" \
-            AWS_SESSION_TOKEN="${CODEARTIFACT_AWS_SESSION_TOKEN:-}" \
-            AWS_SECURITY_TOKEN= \
-            AWS_ENDPOINT_URL= \
-            AWS_DEFAULT_REGION=us-east-1 \
-            AWS_REGION=us-east-1 \
-            aws codeartifact get-authorization-token \
-              --domain skippr \
-              --domain-owner 132355036174 \
-              --region us-east-1 \
-              --query authorizationToken \
-              --output text
-          )"
-          echo "::add-mask::$token"
-          echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable

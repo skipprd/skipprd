@@ -1,6 +1,6 @@
 # Observability SQL UDFs
 
-Generic traces, logs, and metrics helpers registered on every user-SQL `SessionContext` (`skippr query`, Flight SQL, Ballista). Charts, log explorers, waterfalls, and alarms are **CloudQuery Execute** of this SQL — there is no `skippr observe` command.
+Generic traces, logs, and metrics helpers registered on every user-SQL `SessionContext` (`sde query`, Flight SQL, Ballista). Charts, log explorers, waterfalls, and alarms are **CloudQuery Execute** of this SQL — there is no `skippr observe` command.
 
 Empty or null UDF results are **insufficient data** on the Cloud side. skipprd does not store alarm state.
 

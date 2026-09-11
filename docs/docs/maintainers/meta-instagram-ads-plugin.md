@@ -53,7 +53,7 @@ OAuth alternative: `oauth_token_url`, `oauth_client_id`, `oauth_client_secret`, 
 ```bash
 cargo build -p skippr-plugin-data-source-meta-instagram-ads
 cargo test -p skippr-plugin-data-source-meta-instagram-ads
-cargo test -p skippr-cli translate_meta_instagram_ads
+cargo test -p sde translate_meta_instagram_ads
 ```
 
 Fixture-only sync (no live Graph API):
@@ -64,8 +64,8 @@ export USE_LOCAL_PLUGIN_CODE=1
 manifest_dir="$(python3 .github/scripts/local_runtime_plugins.py \
   --config path/to/skippr.yml --pipeline my_pipeline)"
 export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="$manifest_dir"
-skippr discover --pipeline my_pipeline
-skippr sync --once --pipeline my_pipeline
+skipprd discover --pipeline my_pipeline
+skipprd sync --once --pipeline my_pipeline
 ```
 
 Live E2E requires a Marketing API token with `ads_read` and access to the configured ad account.
@@ -73,7 +73,7 @@ Live E2E requires a Marketing API token with `ads_read` and access to the config
 ## CLI
 
 ```bash
-skippr connect source meta-instagram-ads \
+sde connect source meta-instagram-ads \
   --ad-account-id 123456789 \
   --start-date 2024-01-01 \
   --access-token '${META_INSTAGRAM_ADS_ACCESS_TOKEN}'

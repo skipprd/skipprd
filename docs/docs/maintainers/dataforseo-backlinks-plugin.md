@@ -59,7 +59,7 @@ data_sources:
 
 ## Discover
 
-`skippr discover` uses `limit: 5`, `max_pages: 1`, the first primary entity only, and does not advance pagination checkpoints.
+`skipprd discover` uses `limit: 5`, `max_pages: 1`, the first primary entity only, and does not advance pagination checkpoints.
 
 ## Fixtures
 
@@ -68,7 +68,7 @@ Set `SKIPPR_DATAFORSEO_BACKLINKS_FIXTURE_DIR` to the crate `fixtures/` directory
 ## CLI
 
 ```bash
-skippr connect source dataforseo-backlinks \
+sde connect source dataforseo-backlinks \
   --login "${DATAFORSEO_API_USER}" \
   --password "${DATAFORSEO_API_PASS}" \
   --site example.com \

@@ -38,7 +38,7 @@ When set to `local`, metadata is read from and written to `{DATA_DIR}/metadata.j
 
 When set to `s3` (default), S3-based persistence is used.
 
-This internal development/testing setting only affects where skipprd EL state (metadata, stats) is persisted. It does not control `skippr model` dbt project storage, React thread logs, or vector storage.
+This internal development/testing setting only affects where skipprd EL state (metadata, stats) is persisted. It does not control `sde model` dbt project storage, React thread logs, or vector storage.
 
 Use `local` when running skipprd without an S3 bucket (e.g. in skippr-dbt orchestration on a developer machine).
 

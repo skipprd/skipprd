@@ -31,7 +31,7 @@ Public connector docs: [Google Search Console](https://docs.skippr.io/connectors
 ## CLI
 
 ```bash
-skippr connect source google-search-console \
+sde connect source google-search-console \
   --site-url "https://example.com/" \
   --start-date 2024-01-01 \
   --access-token ${GSC_ACCESS_TOKEN}

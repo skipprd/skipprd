@@ -249,7 +249,7 @@ message FlightSqlExecNode {
 
 ## Client SQL surface
 
-Product SQL stays `skippr query` / `skipprd query --sql`. Clustered mode:
+Product SQL stays `sde query` / `skipprd query --sql`. Clustered mode:
 
 - User writes `SELECT ... FROM <iceberg namespace>`.
 - The session registers UNION views per pipeline namespace (prefix-stripped catalog names).

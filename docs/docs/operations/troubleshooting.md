@@ -6,7 +6,7 @@
 
 **Cause:** `ENABLE PIPELINE` or `DISABLE PIPELINE` was called before the pipeline metadata exists.
 
-**Fix:** Run `skippr discover --pipeline <name>` first to create the metadata, then enable the pipeline.
+**Fix:** Run `skipprd discover --pipeline <name>` first to create the metadata, then enable the pipeline.
 
 ### `TABLE_NOT_FOUND`
 

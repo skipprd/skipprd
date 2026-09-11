@@ -1,22 +1,29 @@
 # CLI Overview
 
-The public product CLI is `skippr`. It reads one `skippr.yml`. Runtime ingest is implemented by the `skipprd` binary; `skippr discover` and `skippr sync` invoke it. You do not switch CLIs for the same product workflow.
+This repository is the **`skipprd`** engine. The Cloud CLI `skippr` is a different product. Data Engineer commands live in **`sde`**.
 
-## `skippr`
-
-- `skippr init`
-- `skippr connect source ...`
-- `skippr connect warehouse ...`
-- `skippr discover`
-- `skippr sync`
-- `skippr model`
-- `skippr query`
-- `skippr dbt`
-- `skippr test`
-- `skippr vector`
-- `skippr agent` (alias: `skippr chat`)
-- `skippr doctor`
+`sde discover` and `sde sync` invoke `skipprd` on PATH. Engine maintainers run `skipprd` directly.
 
 ## `skipprd`
 
-`skipprd` remains the runtime implementation for Lambda images, plugin testing, and maintainer debugging (`skipprd metadata`, engine SQL, schema dump). Public docs teach `skippr ...`.
+- `skipprd discover`
+- `skipprd sync`
+- `skipprd metadata`
+- engine SQL and schema dump for plugin testing
+
+## `sde`
+
+Install from [skipprd/sde](https://github.com/skipprd/sde). Docs: [data-engineer.skippr.io](https://data-engineer.skippr.io).
+
+- `sde init`
+- `sde connect source ...`
+- `sde connect warehouse ...`
+- `sde discover` (invokes `skipprd`)
+- `sde sync` (invokes `skipprd`)
+- `sde model`
+- `sde query`
+- `sde dbt`
+- `sde test`
+- `sde vector`
+- `sde agent` (alias: `sde chat`)
+- `sde doctor`

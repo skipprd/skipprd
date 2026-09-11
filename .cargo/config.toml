@@ -1,5 +1,2 @@
 [registry]
 global-credential-providers = ["cargo:token"]
-
-[registries.react-cargo]
-index = "sparse+https://skippr-132355036174.d.codeartifact.us-east-1.amazonaws.com/cargo/react-cargo/"

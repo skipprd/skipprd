@@ -27,12 +27,8 @@ env:
   # Public install CDN: Cloudflare R2 (Worker install.skippr.io → this bucket). Not AWS S3.
   RELEASES_BUCKET: skippr-web-install
   SKIPPRD_RELEASE_SUBDIR: skipprd
-  SKIPPR_RELEASE_SUBDIR: skippr
-  SKIPPR_ADMIN_RELEASE_SUBDIR: skippr-admin
   RUNTIME_PLUGIN_RELEASE_SUBDIR: runtime-plugins
   SKIPPRD_LATEST_POINTER: latest-skipprd.txt
-  SKIPPR_LATEST_POINTER: latest-skippr.txt
-  SKIPPR_ADMIN_LATEST_POINTER: latest-skippr-admin.txt
   # sccache / vcpkg binary cache on Cloudflare R2
   RUST_BUILD_CACHE_BUCKET: skippr-web-rust-cache
   RUST_BUILD_CACHE_REGION: auto
@@ -173,8 +169,6 @@ jobs:
     # if: ${{ !failure() && !cancelled() && needs.resolve_pipeline_mode.outputs.fast_release != 'true' && needs.plan_runtime_plugin_release.result == 'success' && needs.linux_x86.result == 'success' && (needs.publish_github_release.result == 'success' || needs.publish_github_release.result == 'skipped') }}
     runs-on: macos-14
     env:
-      CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-      CODEARTIFACT_AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -204,21 +198,16 @@ jobs:
       - resolve_pipeline_mode
       - plan_runtime_plugin_release
       - linux_test_suite
-      - data_engineer_test_suite
-      - skippr_cli_test_suite
-      - skippr_admin_test_suite
       - postgres_iceberg_types_cdc_test
       - iceberg_equality_commit_e2e_test
       - mysql_iceberg_types_cdc_test
       - dynamodb_iceberg_types_cdc_test
       - mssql_iceberg_debug_linux_test
-    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && (needs.resolve_pipeline_mode.outputs.fast_release == 'true' || (github.event_name == 'workflow_dispatch' && inputs.snowflake_e2e_only == true) || (needs.linux_test_suite.result == 'success' && needs.data_engineer_test_suite.result == 'success' && needs.skippr_cli_test_suite.result == 'success' && needs.skippr_admin_test_suite.result == 'success' && needs.postgres_iceberg_types_cdc_test.result == 'success' && needs.iceberg_equality_commit_e2e_test.result == 'success' && needs.mysql_iceberg_types_cdc_test.result == 'success' && needs.dynamodb_iceberg_types_cdc_test.result == 'success' && needs.mssql_iceberg_debug_linux_test.result == 'success')) }}
+    if: ${{ !failure() && !cancelled() && needs.plan_runtime_plugin_release.result == 'success' && (needs.resolve_pipeline_mode.outputs.fast_release == 'true' || (github.event_name == 'workflow_dispatch' && inputs.snowflake_e2e_only == true) || (needs.linux_test_suite.result == 'success' && needs.postgres_iceberg_types_cdc_test.result == 'success' && needs.iceberg_equality_commit_e2e_test.result == 'success' && needs.mysql_iceberg_types_cdc_test.result == 'success' && needs.dynamodb_iceberg_types_cdc_test.result == 'success' && needs.mssql_iceberg_debug_linux_test.result == 'success')) }}
     runs-on:
       - self-hosted
       - skippr-linux-x64-16
     env:
-      CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-      CODEARTIFACT_AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -252,8 +241,6 @@ jobs:
       - self-hosted
       - skippr-linux-x64-16
     env:
-      CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-      CODEARTIFACT_AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -324,125 +311,6 @@ jobs:
           cargo test -p skippr-plugin-data-source-meta-ads --lib -- --nocapture
           cargo test -p skippr-plugin-data-source-dynamodb --lib -- --nocapture
 
-  data_engineer_test_suite:
-    if: ${{ needs.resolve_pipeline_mode.outputs.fast_release != 'true' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
-    name: cargo test (data-engineer suite/providers)
-    needs:
-      - resolve_pipeline_mode
-      - plan_runtime_plugin_release
-    runs-on:
-      - self-hosted
-      - skippr-linux-x64-16
-    env:
-      CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-      CODEARTIFACT_AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-      AWS_REGION: auto
-      AWS_DEFAULT_REGION: auto
-      AWS_ENDPOINT_URL: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-      SCCACHE_BUCKET: skippr-web-rust-cache
-      SCCACHE_REGION: auto
-      SCCACHE_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-      SCCACHE_S3_KEY_PREFIX: skipprd-react
-      SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "false"
-      SCCACHE_S3_USE_SSL: "true"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - name: Prepare Rust builder
-        uses: ./.github/actions/setup-builder
-        with:
-          rust-version: stable
-      - name: Run data-engineer suite tests
-        shell: bash
-        run: |
-          cargo test -p react-suite-data-engineer control_state_thread_log_read_guardrails_are_enforced_in_rust_tests -- --nocapture
-          cargo test -p react-suite-data-engineer --test sql_cte -- --nocapture
-      - name: Run provider parity tests
-        shell: bash
-        run: |
-          cargo test -p react-module-provider-catalog --test catalog_provider_parity -- --nocapture
-
-  skippr_cli_test_suite:
-    if: ${{ needs.resolve_pipeline_mode.outputs.fast_release != 'true' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
-    name: cargo test (skippr cli)
-    needs:
-      - resolve_pipeline_mode
-      - data_engineer_test_suite
-    runs-on:
-      - self-hosted
-      - skippr-linux-x64-16
-    env:
-      CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-      CODEARTIFACT_AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-      AWS_REGION: auto
-      AWS_DEFAULT_REGION: auto
-      AWS_ENDPOINT_URL: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-      SCCACHE_BUCKET: skippr-web-rust-cache
-      SCCACHE_REGION: auto
-      SCCACHE_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-      SCCACHE_S3_KEY_PREFIX: skipprd-skippr
-      SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "false"
-      SCCACHE_S3_USE_SSL: "true"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - name: Prepare Rust builder
-        uses: ./.github/actions/setup-builder
-        with:
-          rust-version: stable
-      - name: Build and test skippr CLI
-        shell: bash
-        run: |
-          cargo build -p skippr-cli
-          cargo test -p skippr-cli -- --nocapture
-
-  skippr_admin_test_suite:
-    if: ${{ needs.resolve_pipeline_mode.outputs.fast_release != 'true' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
-    name: cargo test (skippr-admin)
-    needs:
-      - resolve_pipeline_mode
-      - data_engineer_test_suite
-    runs-on:
-      - self-hosted
-      - skippr-linux-x64-16
-    env:
-      CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-      CODEARTIFACT_AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
-      AWS_REGION: auto
-      AWS_DEFAULT_REGION: auto
-      AWS_ENDPOINT_URL: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-      SCCACHE_BUCKET: skippr-web-rust-cache
-      SCCACHE_REGION: auto
-      SCCACHE_ENDPOINT: https://${{ secrets.R2_ACCOUNT_ID }}.r2.cloudflarestorage.com
-      SCCACHE_S3_KEY_PREFIX: skipprd-admin
-      SCCACHE_S3_SERVER_SIDE_ENCRYPTION: "false"
-      SCCACHE_S3_USE_SSL: "true"
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true
-      - name: Prepare Rust builder
-        uses: ./.github/actions/setup-builder
-        with:
-          rust-version: stable
-      - name: Build and test skippr-admin
-        shell: bash
-        run: |
-          cargo build -p skippr-admin
-          cargo test -p skippr-admin -- --nocapture
-
-  # Disabled: GitHub-hosted macOS. Linux Skippr Cloud runners only.
   macos_arm64_test_compile:
     if: false
     name: cargo test --no-run (macos arm64)
@@ -450,8 +318,6 @@ jobs:
       - plan_runtime_plugin_release
     runs-on: macos-14
     env:
-      CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-      CODEARTIFACT_AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -483,33 +349,6 @@ jobs:
           rustup toolchain install stable
           rustup default stable
           rustup component add rustfmt
-      - name: Configure CodeArtifact Cargo access
-        shell: bash
-        run: |
-          access_key="${CODEARTIFACT_AWS_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}"
-          secret_key="${CODEARTIFACT_AWS_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
-          if [[ -z "${access_key}" || -z "${secret_key}" ]]; then
-            echo "::error::CodeArtifact credentials missing (CODEARTIFACT_AWS_* or AWS_*)."
-            exit 1
-          fi
-          token="$(
-            env -u AWS_PROFILE \
-            AWS_ACCESS_KEY_ID="${access_key}" \
-            AWS_SECRET_ACCESS_KEY="${secret_key}" \
-            AWS_SESSION_TOKEN="${CODEARTIFACT_AWS_SESSION_TOKEN:-}" \
-            AWS_SECURITY_TOKEN= \
-            AWS_ENDPOINT_URL= \
-            AWS_DEFAULT_REGION=us-east-1 \
-            AWS_REGION=us-east-1 \
-            aws codeartifact get-authorization-token \
-              --domain skippr \
-              --domain-owner 132355036174 \
-              --region us-east-1 \
-              --query authorizationToken \
-              --output text
-          )"
-          echo "::add-mask::$token"
-          echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
       - name: Install sccache
         if: env.SCCACHE_BUCKET != ''
         uses: mozilla-actions/sccache-action@v0.0.9
@@ -558,8 +397,6 @@ jobs:
     # if: ${{ !failure() && !cancelled() && needs.resolve_pipeline_mode.outputs.fast_release != 'true' && needs.plan_runtime_plugin_release.result == 'success' && needs.linux_x86.result == 'success' && (needs.publish_github_release.result == 'success' || needs.publish_github_release.result == 'skipped') }}
     runs-on: depot-windows-2022-16
     env:
-      CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-      CODEARTIFACT_AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -578,34 +415,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - name: Configure CodeArtifact Cargo access
-        shell: bash
-        run: |
-          access_key="${CODEARTIFACT_AWS_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}"
-          secret_key="${CODEARTIFACT_AWS_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
-          if [[ -z "${access_key}" || -z "${secret_key}" ]]; then
-            echo "::error::CodeArtifact credentials missing (CODEARTIFACT_AWS_* or AWS_*)."
-            exit 1
-          fi
-          token="$(
-            env -u AWS_PROFILE \
-            AWS_ACCESS_KEY_ID="${access_key}" \
-            AWS_SECRET_ACCESS_KEY="${secret_key}" \
-            AWS_SESSION_TOKEN="${CODEARTIFACT_AWS_SESSION_TOKEN:-}" \
-            AWS_SECURITY_TOKEN= \
-            AWS_ENDPOINT_URL= \
-            AWS_DEFAULT_REGION=us-east-1 \
-            AWS_REGION=us-east-1 \
-            aws codeartifact get-authorization-token \
-              --domain skippr \
-              --domain-owner 132355036174 \
-              --region us-east-1 \
-              --query authorizationToken \
-              --output text
-          )"
-          echo "::add-mask::$token"
-          echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
@@ -770,9 +579,7 @@ jobs:
           }
 
           cargo build --release `
-            -p skipprd --bin skipprd `
-            -p skippr-cli --bin skippr `
-            -p skippr-admin --bin skippr-admin
+            -p skipprd --bin skipprd
           if ($pluginPackages.Count -gt 0) {
             $buildArgs = @('build', '--release')
             foreach ($package in $pluginPackages) {
@@ -782,12 +589,8 @@ jobs:
           }
 
           New-Item -ItemType Directory -Force -Path skipprd-windows_x86
-          New-Item -ItemType Directory -Force -Path skippr-windows_x86
-          New-Item -ItemType Directory -Force -Path skippr-admin-windows_x86
           New-Item -ItemType Directory -Force -Path runtime-plugin-binaries-windows_x86
           Copy-Item target\release\skipprd.exe skipprd-windows_x86\skipprd.exe
-          Copy-Item target\release\skippr.exe skippr-windows_x86\skippr.exe
-          Copy-Item target\release\skippr-admin.exe skippr-admin-windows_x86\skippr-admin.exe
           foreach ($package in $pluginPackages) {
             $pluginBinary = "target\release\$package.exe"
             if (-not (Test-Path $pluginBinary)) {
@@ -796,8 +599,6 @@ jobs:
             Copy-Item $pluginBinary "runtime-plugin-binaries-windows_x86\$package.exe"
           }
           Get-ChildItem skipprd-windows_x86
-          Get-ChildItem skippr-windows_x86
-          Get-ChildItem skippr-admin-windows_x86
           Get-ChildItem runtime-plugin-binaries-windows_x86
 
       - name: Show sccache stats
@@ -815,35 +616,11 @@ jobs:
             Write-Error "Version was not plain semver"
             exit 1
           }
-          $skipprVersion = (.\target\release\skippr.exe --version 2>&1) -replace '^skippr\s+', ''
-          Write-Host "skippr version: $skipprVersion"
-          if ($env:GITHUB_REF -like 'refs/tags/*') {
-            if ($skipprVersion -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$') {
-              Write-Error "skippr version was not plain semver"
-              exit 1
-            }
-            if ($skipprVersion -ne $env:GITHUB_REF_NAME) {
-              Write-Error "skippr version '$skipprVersion' did not match release tag '$env:GITHUB_REF_NAME'"
-              exit 1
-            }
-          }
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
           name: skipprd-windows_x86
           path: skipprd-windows_x86
-          retention-days: 30
-      - name: Upload skippr Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: skippr-windows_x86
-          path: skippr-windows_x86
-          retention-days: 30
-      - name: Upload skippr-admin Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: skippr-admin-windows_x86
-          path: skippr-admin-windows_x86
           retention-days: 30
 
       - name: Upload Runtime Plugin Binaries Artifact
@@ -861,8 +638,6 @@ jobs:
       - plan_runtime_plugin_release
     runs-on: depot-windows-2022-16
     env:
-      CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-      CODEARTIFACT_AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -879,33 +654,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - name: Configure CodeArtifact Cargo access
-        shell: bash
-        run: |
-          access_key="${CODEARTIFACT_AWS_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}"
-          secret_key="${CODEARTIFACT_AWS_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
-          if [[ -z "${access_key}" || -z "${secret_key}" ]]; then
-            echo "::error::CodeArtifact credentials missing (CODEARTIFACT_AWS_* or AWS_*)."
-            exit 1
-          fi
-          token="$(
-            env -u AWS_PROFILE \
-            AWS_ACCESS_KEY_ID="${access_key}" \
-            AWS_SECRET_ACCESS_KEY="${secret_key}" \
-            AWS_SESSION_TOKEN="${CODEARTIFACT_AWS_SESSION_TOKEN:-}" \
-            AWS_SECURITY_TOKEN= \
-            AWS_ENDPOINT_URL= \
-            AWS_DEFAULT_REGION=us-east-1 \
-            AWS_REGION=us-east-1 \
-            aws codeartifact get-authorization-token \
-              --domain skippr \
-              --domain-owner 132355036174 \
-              --region us-east-1 \
-              --query authorizationToken \
-              --output text
-          )"
-          echo "::add-mask::$token"
-          echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
       - name: Install protoc
@@ -1179,8 +927,6 @@ jobs:
       - self-hosted
       - skippr-linux-x64-16
     env:
-      CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-      CODEARTIFACT_AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
       AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
@@ -1304,7 +1050,6 @@ jobs:
       - cleanup
       - purge_dynamodb
       - linux_test_suite
-      - data_engineer_test_suite
     name: Postgres to Iceberg Glue Athena e2e
     runs-on:
       - self-hosted
@@ -1387,38 +1132,6 @@ jobs:
             (4, false, 'late-insert', 40, 40000000000, 4.5, 5.5, 42.3400, DATE '2026-01-04', TIMESTAMP '2026-01-04 12:00:00', TIME '15:00:00', '{"op":"late_insert"}'::jsonb, 'present');
           SQL
 
-      - name: Configure CodeArtifact Cargo access
-        shell: bash
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-        run: |
-          access_key="${CODEARTIFACT_AWS_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}"
-          secret_key="${CODEARTIFACT_AWS_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
-          if [[ -z "${access_key}" || -z "${secret_key}" ]]; then
-            echo "::error::CodeArtifact credentials missing (CODEARTIFACT_AWS_* or AWS_*)."
-            exit 1
-          fi
-          token="$(
-            env -u AWS_PROFILE \
-            AWS_ACCESS_KEY_ID="${access_key}" \
-            AWS_SECRET_ACCESS_KEY="${secret_key}" \
-            AWS_SESSION_TOKEN="${CODEARTIFACT_AWS_SESSION_TOKEN:-}" \
-            AWS_SECURITY_TOKEN= \
-            AWS_ENDPOINT_URL= \
-            AWS_DEFAULT_REGION=us-east-1 \
-            AWS_REGION=us-east-1 \
-            aws codeartifact get-authorization-token \
-              --domain skippr \
-              --domain-owner 132355036174 \
-              --region us-east-1 \
-              --query authorizationToken \
-              --output text
-          )"
-          echo "::add-mask::$token"
-          echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
-
       - name: Build skipprd and runtime plugins
         shell: bash
         env:
@@ -1465,7 +1178,6 @@ jobs:
       - cleanup
       - purge_dynamodb
       - linux_test_suite
-      - data_engineer_test_suite
     name: Iceberg equality-commit e2e (CDC delete, ReplacePartition, MergeByKey)
     runs-on:
       - self-hosted
@@ -1546,9 +1258,6 @@ jobs:
           SQL
       - name: Run Iceberg equality-commit e2e
         uses: ./.github/actions/e2e/iceberg_equality_commit
-        with:
-          release_aws_access_key_id: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-          release_aws_secret_access_key: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
 
   mysql_iceberg_types_cdc_test:
     if: ${{ needs.resolve_pipeline_mode.outputs.fast_release != 'true' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
@@ -1557,7 +1266,6 @@ jobs:
       - cleanup
       - purge_dynamodb
       - linux_test_suite
-      - data_engineer_test_suite
     name: MySQL to Iceberg Glue Athena e2e
     runs-on:
       - self-hosted
@@ -1630,38 +1338,6 @@ jobs:
             (4, false, 'late-insert', 40, 40000000000, 4.5, 5.5, 42.3400, DATE '2026-01-04', TIMESTAMP '2026-01-04 12:00:00', TIME '15:00:00', JSON_OBJECT('op', 'late_insert'), 'present');
           SQL
 
-      - name: Configure CodeArtifact Cargo access
-        shell: bash
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-        run: |
-          access_key="${CODEARTIFACT_AWS_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}"
-          secret_key="${CODEARTIFACT_AWS_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
-          if [[ -z "${access_key}" || -z "${secret_key}" ]]; then
-            echo "::error::CodeArtifact credentials missing (CODEARTIFACT_AWS_* or AWS_*)."
-            exit 1
-          fi
-          token="$(
-            env -u AWS_PROFILE \
-            AWS_ACCESS_KEY_ID="${access_key}" \
-            AWS_SECRET_ACCESS_KEY="${secret_key}" \
-            AWS_SESSION_TOKEN="${CODEARTIFACT_AWS_SESSION_TOKEN:-}" \
-            AWS_SECURITY_TOKEN= \
-            AWS_ENDPOINT_URL= \
-            AWS_DEFAULT_REGION=us-east-1 \
-            AWS_REGION=us-east-1 \
-            aws codeartifact get-authorization-token \
-              --domain skippr \
-              --domain-owner 132355036174 \
-              --region us-east-1 \
-              --query authorizationToken \
-              --output text
-          )"
-          echo "::add-mask::$token"
-          echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
-
       - name: Build skipprd and runtime plugins
         shell: bash
         env:
@@ -1710,7 +1386,6 @@ jobs:
       - cleanup
       - purge_dynamodb
       - linux_test_suite
-      - data_engineer_test_suite
     name: DynamoDB to Iceberg Glue Athena e2e
     runs-on:
       - self-hosted
@@ -1725,38 +1400,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - name: Configure CodeArtifact Cargo access
-        shell: bash
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-        run: |
-          access_key="${CODEARTIFACT_AWS_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}"
-          secret_key="${CODEARTIFACT_AWS_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
-          if [[ -z "${access_key}" || -z "${secret_key}" ]]; then
-            echo "::error::CodeArtifact credentials missing (CODEARTIFACT_AWS_* or AWS_*)."
-            exit 1
-          fi
-          token="$(
-            env -u AWS_PROFILE \
-            AWS_ACCESS_KEY_ID="${access_key}" \
-            AWS_SECRET_ACCESS_KEY="${secret_key}" \
-            AWS_SESSION_TOKEN="${CODEARTIFACT_AWS_SESSION_TOKEN:-}" \
-            AWS_SECURITY_TOKEN= \
-            AWS_ENDPOINT_URL= \
-            AWS_DEFAULT_REGION=us-east-1 \
-            AWS_REGION=us-east-1 \
-            aws codeartifact get-authorization-token \
-              --domain skippr \
-              --domain-owner 132355036174 \
-              --region us-east-1 \
-              --query authorizationToken \
-              --output text
-          )"
-          echo "::add-mask::$token"
-          echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
-
       - name: Build skipprd and runtime plugins
         shell: bash
         env:
@@ -1822,7 +1465,6 @@ jobs:
       - cleanup
       - purge_dynamodb
       - linux_test_suite
-      - data_engineer_test_suite
     name: MSSQL to Iceberg debug (linux)
     runs-on:
       - self-hosted
@@ -1840,38 +1482,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           submodules: true
-      - name: Configure CodeArtifact Cargo access
-        shell: bash
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-        run: |
-          access_key="${CODEARTIFACT_AWS_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}"
-          secret_key="${CODEARTIFACT_AWS_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
-          if [[ -z "${access_key}" || -z "${secret_key}" ]]; then
-            echo "::error::CodeArtifact credentials missing (CODEARTIFACT_AWS_* or AWS_*)."
-            exit 1
-          fi
-          token="$(
-            env -u AWS_PROFILE \
-            AWS_ACCESS_KEY_ID="${access_key}" \
-            AWS_SECRET_ACCESS_KEY="${secret_key}" \
-            AWS_SESSION_TOKEN="${CODEARTIFACT_AWS_SESSION_TOKEN:-}" \
-            AWS_SECURITY_TOKEN= \
-            AWS_ENDPOINT_URL= \
-            AWS_DEFAULT_REGION=us-east-1 \
-            AWS_REGION=us-east-1 \
-            aws codeartifact get-authorization-token \
-              --domain skippr \
-              --domain-owner 132355036174 \
-              --region us-east-1 \
-              --query authorizationToken \
-              --output text
-          )"
-          echo "::add-mask::$token"
-          echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
-
       - name: Start and seed SQL Server
         shell: bash
         run: |
@@ -1932,7 +1542,6 @@ jobs:
       - cleanup
       - purge_dynamodb
       - linux_test_suite
-      - data_engineer_test_suite
     name: MSSQL to Iceberg debug (windows x86)
     runs-on: depot-windows-2022-16
     environment: Skippr
@@ -1945,8 +1554,6 @@ jobs:
       CARGO_INCREMENTAL: "0"
       RUSTFLAGS: "-C debuginfo=0"
       VCPKGRS_NO_ZLIB: "1"
-      CODEARTIFACT_AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-      CODEARTIFACT_AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
       R2_ACCOUNT_ID: ${{ secrets.R2_ACCOUNT_ID }}
       R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
       R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
@@ -1983,38 +1590,6 @@ jobs:
           echo "AWS_ENDPOINT_URL=https://$env:R2_ACCOUNT_ID.r2.cloudflarestorage.com" >> $env:GITHUB_ENV
           echo "AWS_CONFIG_FILE=NUL" >> $env:GITHUB_ENV
           echo "AWS_SHARED_CREDENTIALS_FILE=NUL" >> $env:GITHUB_ENV
-
-      - name: Configure CodeArtifact Cargo access
-        shell: bash
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.RELEASE_AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.RELEASE_AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
-        run: |
-          access_key="${CODEARTIFACT_AWS_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}"
-          secret_key="${CODEARTIFACT_AWS_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
-          if [[ -z "${access_key}" || -z "${secret_key}" ]]; then
-            echo "::error::CodeArtifact credentials missing (CODEARTIFACT_AWS_* or AWS_*)."
-            exit 1
-          fi
-          token="$(
-            env -u AWS_PROFILE \
-            AWS_ACCESS_KEY_ID="${access_key}" \
-            AWS_SECRET_ACCESS_KEY="${secret_key}" \
-            AWS_SESSION_TOKEN="${CODEARTIFACT_AWS_SESSION_TOKEN:-}" \
-            AWS_SECURITY_TOKEN= \
-            AWS_ENDPOINT_URL= \
-            AWS_DEFAULT_REGION=us-east-1 \
-            AWS_REGION=us-east-1 \
-            aws codeartifact get-authorization-token \
-              --domain skippr \
-              --domain-owner 132355036174 \
-              --region us-east-1 \
-              --query authorizationToken \
-              --output text
-          )"
-          echo "::add-mask::$token"
-          echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -2154,64 +1729,12 @@ jobs:
           printf '%s' "$TAG" > "$LATEST_POINTER"
           aws s3 cp "$LATEST_POINTER" "s3://${BUCKET}/releases/${LATEST_POINTER}" --cache-control "no-cache, no-store, must-revalidate"
 
-  publish_skippr:
-    name: Publish skippr Release
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && needs.linux_x86.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) && (needs.resolve_pipeline_mode.outputs.fast_release == 'true' || (needs.skippr_cli_test_suite.result == 'success' && needs.data_engineer_test_suite.result == 'success')) }}
-    needs:
-      - resolve_pipeline_mode
-      - linux_x86
-      - skippr_cli_test_suite
-      - data_engineer_test_suite
-    runs-on:
-      - self-hosted
-      - skippr-linux-x64-16
-    steps:
-      - name: Check out code
-        uses: actions/checkout@v4
-      - name: Download skippr artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: "skippr-*"
-      - name: Compress skippr release artifacts
-        run: |
-          set -euo pipefail
-          for dir in skippr-linux_x86; do
-            if [ -d "$dir" ]; then
-              tar -czvf "${dir}.tar.gz" "$dir/"
-            fi
-          done
-      - name: Configure Cloudflare R2 credentials for skippr release upload
-        uses: ./.github/actions/configure-r2-releases
-        with:
-          account_id: ${{ secrets.R2_ACCOUNT_ID }}
-          access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
-          secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      - name: Upload skippr binaries to install releases bucket
-        run: |
-          TAG="${{ github.ref_name }}"
-          BUCKET="${{ env.RELEASES_BUCKET }}"
-          RELEASE_SUBDIR="${{ env.SKIPPR_RELEASE_SUBDIR }}"
-          LATEST_POINTER="${{ env.SKIPPR_LATEST_POINTER }}"
-          for f in skippr-linux_x86.tar.gz; do
-            if [ -f "$f" ]; then
-              aws s3 cp "$f" "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/${f}"
-            fi
-          done
-          printf '%s' "$TAG" > "$LATEST_POINTER"
-          aws s3 cp "$LATEST_POINTER" "s3://${BUCKET}/releases/${LATEST_POINTER}" --cache-control "no-cache, no-store, must-revalidate"
-          # Root install scripts on the CDN (install.skippr.io/install.sh)
-          aws s3 cp install.sh "s3://${BUCKET}/install.sh" \
-            --content-type "text/x-shellscript; charset=utf-8" \
-            --cache-control "no-cache, no-store, must-revalidate"
-
   publish_github_release:
     name: Publish GitHub Release
-    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && needs.linux_x86.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) && (needs.resolve_pipeline_mode.outputs.fast_release == 'true' || needs.skippr_admin_test_suite.result == 'success') }}
+    if: ${{ always() && startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && needs.linux_x86.result == 'success' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     needs:
       - resolve_pipeline_mode
       - publish_skipprd
-      - publish_skippr
-      - skippr_admin_test_suite
       - linux_x86
     runs-on:
       - self-hosted
@@ -2227,9 +1750,7 @@ jobs:
         run: |
           set -euo pipefail
           for dir in \
-            skipprd-linux_x86 \
-            skippr-linux_x86 \
-            skippr-admin-linux_x86; do
+            skipprd-linux_x86; do
             if [ -d "$dir" ]; then
               tar -czvf "${dir}.tar.gz" "$dir/"
             fi
@@ -2251,31 +1772,9 @@ jobs:
               --notes-file CHANGELOG.txt
           fi
           gh release upload "$TAG" \
-            install.sh \
             skipprd-linux_x86.tar.gz \
-            skippr-linux_x86.tar.gz \
-            skippr-admin-linux_x86.tar.gz \
             --repo skipprd/skipprd \
             --clobber
-      - name: Configure Cloudflare R2 credentials for skippr-admin release upload
-        uses: ./.github/actions/configure-r2-releases
-        with:
-          account_id: ${{ secrets.R2_ACCOUNT_ID }}
-          access_key_id: ${{ secrets.R2_ACCESS_KEY_ID }}
-          secret_access_key: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      - name: Upload skippr-admin binaries to install releases bucket
-        run: |
-          TAG="${{ github.ref_name }}"
-          BUCKET="${{ env.RELEASES_BUCKET }}"
-          RELEASE_SUBDIR="${{ env.SKIPPR_ADMIN_RELEASE_SUBDIR }}"
-          LATEST_POINTER="${{ env.SKIPPR_ADMIN_LATEST_POINTER }}"
-          for f in skippr-admin-linux_x86.tar.gz; do
-            if [ -f "$f" ]; then
-              aws s3 cp "$f" "s3://${BUCKET}/releases/${RELEASE_SUBDIR}/${TAG}/${f}"
-            fi
-          done
-          printf '%s' "$TAG" > "$LATEST_POINTER"
-          aws s3 cp "$LATEST_POINTER" "s3://${BUCKET}/releases/${LATEST_POINTER}" --cache-control "no-cache, no-store, must-revalidate"
 
   # Disabled for now: depends on macos_arm64. Linux Skippr Cloud runners only.
   publish_mac_release:
@@ -2302,7 +1801,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for dir in skipprd-macos_arm64 skippr-macos_arm64 skippr-admin-macos_arm64; do
+          for dir in skipprd-macos_arm64; do
             if [ -d "$dir" ]; then
               tar -czvf "${dir}.tar.gz" "$dir/"
             fi
@@ -2338,16 +1837,6 @@ jobs:
               aws s3 cp "$f" "s3://${BUCKET}/releases/${{ env.SKIPPRD_RELEASE_SUBDIR }}/${TAG}/${f}"
             fi
           done
-          for f in skippr-macos_arm64.tar.gz; do
-            if [ -f "$f" ]; then
-              aws s3 cp "$f" "s3://${BUCKET}/releases/${{ env.SKIPPR_RELEASE_SUBDIR }}/${TAG}/${f}"
-            fi
-          done
-          for f in skippr-admin-macos_arm64.tar.gz; do
-            if [ -f "$f" ]; then
-              aws s3 cp "$f" "s3://${BUCKET}/releases/${{ env.SKIPPR_ADMIN_RELEASE_SUBDIR }}/${TAG}/${f}"
-            fi
-          done
 
       - name: Upload macOS runtime plugin artifacts and manifests
         shell: bash
@@ -2377,9 +1866,7 @@ jobs:
           TAG="${{ github.ref_name }}"
           assets=()
           for f in \
-            skipprd-macos_arm64.tar.gz \
-            skippr-macos_arm64.tar.gz \
-            skippr-admin-macos_arm64.tar.gz; do
+            skipprd-macos_arm64.tar.gz; do
             if [ -f "$f" ]; then
               assets+=("$f")
             fi
@@ -2418,7 +1905,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          for dir in skipprd-windows_x86 skippr-windows_x86 skippr-admin-windows_x86; do
+          for dir in skipprd-windows_x86; do
             if [ -d "$dir" ]; then
               tar -czvf "${dir}.tar.gz" "$dir/"
             fi
@@ -2454,16 +1941,6 @@ jobs:
               aws s3 cp "$f" "s3://${BUCKET}/releases/${{ env.SKIPPRD_RELEASE_SUBDIR }}/${TAG}/${f}"
             fi
           done
-          for f in skippr-windows_x86.tar.gz; do
-            if [ -f "$f" ]; then
-              aws s3 cp "$f" "s3://${BUCKET}/releases/${{ env.SKIPPR_RELEASE_SUBDIR }}/${TAG}/${f}"
-            fi
-          done
-          for f in skippr-admin-windows_x86.tar.gz; do
-            if [ -f "$f" ]; then
-              aws s3 cp "$f" "s3://${BUCKET}/releases/${{ env.SKIPPR_ADMIN_RELEASE_SUBDIR }}/${TAG}/${f}"
-            fi
-          done
 
       - name: Upload Windows runtime plugin artifacts and manifests
         shell: bash
@@ -2493,9 +1970,7 @@ jobs:
           TAG="${{ github.ref_name }}"
           assets=()
           for f in \
-            skipprd-windows_x86.tar.gz \
-            skippr-windows_x86.tar.gz \
-            skippr-admin-windows_x86.tar.gz; do
+            skipprd-windows_x86.tar.gz; do
             if [ -f "$f" ]; then
               assets+=("$f")
             fi
@@ -2510,11 +1985,10 @@ jobs:
             --clobber
 
   skipprd_release_download_test:
-    name: Installed skippr EL smoke test (linux x86)
+    name: Installed skipprd EL smoke test (linux x86)
     if: ${{ startsWith(github.ref, 'refs/tags/') && !startsWith(github.ref, 'refs/tags/test') && needs.resolve_pipeline_mode.outputs.fast_release != 'true' && (github.event_name != 'workflow_dispatch' || inputs.snowflake_e2e_only != true) }}
     needs:
       - resolve_pipeline_mode
-      - publish_skippr
       - publish_runtime_plugins
     runs-on:
       - self-hosted
@@ -2524,19 +1998,16 @@ jobs:
       SKIPPR_API_KEY: ${{ secrets.SKIPPR_API_KEY }}
     steps:
       - uses: actions/checkout@v4
-      - name: Install published skippr release
-        shell: bash
-        run: |
-          set -euo pipefail
-          curl -fsSL https://install.skippr.io/install.sh | sh
-          command -v skippr
-          skippr --version
-      - name: Test installed skippr EL path
+      - name: Download skipprd linux artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: skipprd-linux_x86
+      - name: Test installed skipprd EL path
         uses: ./.github/actions/e2e/runtime_scenario
         with:
           scenario: bike_hire
           architecture_name: linux_x86
-          skipprd_path: skippr
+          skipprd_path: ./skipprd-linux_x86/skipprd
           test_namespace: release_install
           aws_access_key_id: ${{ secrets.AWS_ACCESS_KEY_ID }}
           aws_secret_access_key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}

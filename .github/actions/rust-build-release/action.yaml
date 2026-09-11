@@ -40,33 +40,6 @@ runs:
         rustup toolchain install stable
         rustup default stable
         rustup component add rustfmt
-    - name: Configure CodeArtifact Cargo access
-      shell: bash
-      run: |
-        access_key="${CODEARTIFACT_AWS_ACCESS_KEY_ID:-${AWS_ACCESS_KEY_ID:-}}"
-        secret_key="${CODEARTIFACT_AWS_SECRET_ACCESS_KEY:-${AWS_SECRET_ACCESS_KEY:-}}"
-        if [[ -z "${access_key}" || -z "${secret_key}" ]]; then
-          echo "::error::CodeArtifact credentials missing (CODEARTIFACT_AWS_* or AWS_*)."
-          exit 1
-        fi
-        token="$(
-          env -u AWS_PROFILE \
-          AWS_ACCESS_KEY_ID="${access_key}" \
-          AWS_SECRET_ACCESS_KEY="${secret_key}" \
-          AWS_SESSION_TOKEN="${CODEARTIFACT_AWS_SESSION_TOKEN:-}" \
-          AWS_SECURITY_TOKEN= \
-          AWS_ENDPOINT_URL= \
-          AWS_DEFAULT_REGION=us-east-1 \
-          AWS_REGION=us-east-1 \
-          aws codeartifact get-authorization-token \
-            --domain skippr \
-            --domain-owner 132355036174 \
-            --region us-east-1 \
-            --query authorizationToken \
-            --output text
-        )"
-        echo "::add-mask::$token"
-        echo "CARGO_REGISTRIES_REACT_CARGO_TOKEN=$token" >> "$GITHUB_ENV"
     - name: Install sccache
       if: env.SCCACHE_BUCKET != ''
       uses: mozilla-actions/sccache-action@v0.0.9
@@ -121,9 +94,7 @@ runs:
         PY
 
         cargo build --release \
-          -p skipprd --bin skipprd --features offset-store-dynamodb,offset-store-cloud-tables \
-          -p skippr-cli --bin skippr \
-          -p skippr-admin --bin skippr-admin
+          -p skipprd --bin skipprd --features offset-store-dynamodb,offset-store-cloud-tables
         if [ -s "${plugin_packages_file}" ]; then
           cargo_args=()
           while IFS= read -r package; do
@@ -134,12 +105,8 @@ runs:
         fi
 
         mkdir -p skipprd-${{ inputs.architecture_name }}
-        mkdir -p skippr-${{ inputs.architecture_name }}
-        mkdir -p skippr-admin-${{ inputs.architecture_name }}
         mkdir -p runtime-plugin-binaries-${{ inputs.architecture_name }}
         cp target/release/skipprd skipprd-${{ inputs.architecture_name }}/skipprd
-        cp target/release/skippr skippr-${{ inputs.architecture_name }}/skippr
-        cp target/release/skippr-admin skippr-admin-${{ inputs.architecture_name }}/skippr-admin
         while IFS= read -r package; do
           [ -n "${package}" ] || continue
           plugin_bin="target/release/${package}"
@@ -151,8 +118,6 @@ runs:
         done < "${plugin_packages_file}"
         rm -f "${plugin_packages_file}"
         ls -la skipprd-${{ inputs.architecture_name }}
-        ls -la skippr-${{ inputs.architecture_name }}
-        ls -la skippr-admin-${{ inputs.architecture_name }}
         ls -la runtime-plugin-binaries-${{ inputs.architecture_name }}
     - name: Verify compiled version
       shell: bash
@@ -163,18 +128,6 @@ runs:
           echo "::error::Version was not plain semver"
           exit 1
         fi
-        SKIPPR_VERSION=$(target/release/skippr --version 2>&1 | awk '{print $2}')
-        echo "skippr version: $SKIPPR_VERSION"
-        if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
-          if ! [[ "$SKIPPR_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-            echo "::error::skippr version was not plain semver"
-            exit 1
-          fi
-          if [[ "$SKIPPR_VERSION" != "${GITHUB_REF_NAME}" ]]; then
-            echo "::error::skippr version '$SKIPPR_VERSION' did not match release tag '${GITHUB_REF_NAME}'"
-            exit 1
-          fi
-        fi
     - name: Show sccache stats
       if: env.SCCACHE_BUCKET != ''
       shell: bash
@@ -184,18 +137,6 @@ runs:
       with:
         name: skipprd-${{ inputs.architecture_name }}
         path: skipprd-${{ inputs.architecture_name }}
-        retention-days: 30
-    - name: Upload skippr Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: skippr-${{ inputs.architecture_name }}
-        path: skippr-${{ inputs.architecture_name }}
-        retention-days: 30
-    - name: Upload skippr-admin Artifact
-      uses: actions/upload-artifact@v4
-      with:
-        name: skippr-admin-${{ inputs.architecture_name }}
-        path: skippr-admin-${{ inputs.architecture_name }}
         retention-days: 30
     - name: Upload Runtime Plugin Binaries Artifact
       uses: actions/upload-artifact@v4

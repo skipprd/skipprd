@@ -13,51 +13,24 @@ CI also installs additional platform-specific dependencies on macOS and Windows 
 
 ## Fast feedback loop
 
-`skipprd` consumes generic React crates from the private CodeArtifact Cargo registry `skippr/react-cargo`.
+`skipprd` is the engine. Data Engineer (`sde`) and ReAct crates live in sibling
+repos (`sde`, `react`). This tree no longer depends on CodeArtifact `react-cargo`.
 
-### Local IDE / agent (no CodeArtifact token)
-
-When `skipprd` and `react` are sibling checkouts (for example `skippr/skipprd` and `skippr/react`), the Skippr IDE and Skippr Agent patch those crates from disk instead of downloading from `react-cargo`.
-
-One-time build (recommended — the IDE reuses `skipprd/target/debug/skippr` and avoids `cargo run` on every command):
+One-time engine build:
 
 ```bash
 cd skipprd
-./scripts/cargo-with-local-react.sh build -p skippr-cli
+cargo build --bin skipprd
 ```
 
 Optional overrides:
 
-- `SKIPPR_REACT_ROOT` — path to the `react` repo if it is not `../react`
 - `SKIPPRD_MANIFEST_PATH` — path to `skipprd/Cargo.toml` if the IDE cannot find skipprd in the workspace
-- `SKIPPR_USE_LOCAL_SKIPPRD=0` — use an installed `skippr` on PATH instead of building from source
-
-Any other cargo invocation can use the same wrapper:
 
 ```bash
-./scripts/cargo-with-local-react.sh check -p skippr-cli
-./scripts/cargo-with-local-react.sh test -p skippr-cli sql_prepare
+cargo check --bin skipprd
+cargo test --bin skipprd
 ```
-
-### CodeArtifact token (CI and release builds)
-
-`skipprd` and `react` use the private registry **`react-cargo`** on CodeArtifact (domain `skippr`, owner `132355036174`, `us-east-1`). Cargo expects **`CARGO_REGISTRIES_REACT_CARGO_TOKEN`** — same command as `react/.github/workflows/react-ci.yml` (“Login to CodeArtifact”) and `skipprd/.github/actions/setup-builder`.
-
-Before local builds that must resolve published React crate versions from the registry:
-
-```bash
-export AWS_PROFILE=skippr-prod   # or any profile with codeartifact:GetAuthorizationToken on domain skippr
-export CARGO_REGISTRIES_REACT_CARGO_TOKEN="$(
-  aws codeartifact get-authorization-token \
-    --domain skippr \
-    --domain-owner 132355036174 \
-    --region us-east-1 \
-    --query authorizationToken \
-    --output text
-)"
-```
-
-`AWS_PROFILE=circles-prod` is fine for Picnic Athena/S3 work but only works for CodeArtifact if that IAM user/role is allowed on account `132355036174`; otherwise keep using `skippr-prod` for `cargo build` or use `./scripts/cargo-with-local-react.sh` with a sibling `react` checkout (no token).
 
 Use these commands as the default local loop:
 

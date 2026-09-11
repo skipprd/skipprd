@@ -18,7 +18,7 @@ export DATA_DIR_MIN_FREE_BYTES=0
 export DATA_DIR_HIGH_WATERMARK_PCT=100
 export DATA_DIR_LOW_WATERMARK_PCT=100
 
-CARGO=(./scripts/cargo-with-local-react.sh)
+CARGO=(cargo)
 
 echo "==> Generating fixture ndjson (${FIXTURE}, rows=${ROWS})"
 "${CARGO[@]}" test -p skipprd --lib ingest::benchmark_harness::tests::generates_fixture_files -- --nocapture >/dev/null
@@ -164,7 +164,7 @@ with out.open("w") as fh:
 PY
   BENCHMARK_ROWS="$PROFILE_ROWS" flamegraph -o "$DATA_DIR/ingest-benchmark.svg" \
     --root \
-    -- "${ROOT}/scripts/cargo-with-local-react.sh" test -p skipprd --release --lib bench_wat_flat_exact -- --ignored --nocapture
+    -- cargo test -p skipprd --release --lib bench_wat_flat_exact -- --ignored --nocapture
   echo "Flamegraph written to $DATA_DIR/ingest-benchmark.svg"
 else
   echo "flamegraph not installed; skip SVG capture (brew install flamegraph)"

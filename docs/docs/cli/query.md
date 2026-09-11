@@ -3,7 +3,7 @@
 Run engine SQL against configured data, manage pipelines and schemas, and
 stream from the WAL.
 
-Use `skipprd query` for the local runtime. `skippr query` is a different
+Use `skipprd query` for the local runtime. `sde query` is a different
 command: warehouse SQL through the modeling stack, not engine pipeline SQL.
 
 ## Usage

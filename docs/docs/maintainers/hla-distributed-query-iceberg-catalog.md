@@ -27,12 +27,12 @@ The architecture preserves the current single-process ingest engine and runtime-
 `WAL_STORAGE` is a typed enum:
 
 ```text
-disk       local WAL via PipelineDurableStore (PipelinePaths::legacy_disk), sled offsets, no cluster services
-s3         existing S3 WAL behavior, no peer quorum or lease
+disk       local WAL via PipelineDurableStore (PipelinePaths::legacy_disk), sled offsets, pipeline writer lease, no cluster services
+s3         existing S3 WAL behavior, pipeline writer lease, no peer quorum
 clustered  local WAL via the same PipelineDurableStore + ClusteredWalStore, synchronous replica + DDB lease/offsets
 ```
 
-`DiskWalStore` does not exist. Disk and clustered share one local-disk writer. Disk still starts no replica, gossip, or lease services.
+`DiskWalStore` does not exist. Disk and clustered share one local-disk writer. Disk still starts no replica, gossip, or cluster membership services.
 
 `WAL_STORAGE=clustered` is the only cluster-mode switch. It reuses the existing `SKIPPR_OFFSET_DYNAMODB_TABLE` for offsets, leases, and membership. Product env (not impl knobs): `SKIPPR_CLUSTER_ID`, `SKIPPR_CLUSTER_GOSSIP_KEY`, cluster TLS PEM contents, and Flight session tenant/workspace. No lease, quorum, TTL, bind-address, or peer-list knobs. Iceberg `catalog.type: skippr` requires a separate customer-created `catalog.table`.
 

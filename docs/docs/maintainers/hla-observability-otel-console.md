@@ -43,7 +43,7 @@ Skippr ingest (HA, leased pipelines) ──► WAL (hot) ──► Iceberg (cold
         │                              + observability UDFs
         │                                           │
         │                                           ▼
-        │                              skippr query / Flight / CloudQuery
+        │                              sde query / Flight / CloudQuery
         │                              + observability UDFs
         │                                           │
         └───────────────────────────────────────────┴──► Cloud UI / alarms (later)

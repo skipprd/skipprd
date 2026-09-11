@@ -7,7 +7,7 @@
 
 This WBS is the implementation contract for Skipprd OTel ingest and generic SQL/UDFs. Charts, alarms, and consoles are **CloudQuery Execute** of those UDFs (Cloud later). There is **no** `skippr observe`, no skipprd HTTP o11y API, no skipprd console, and no skipprd alarm evaluator.
 
-skipprd stays JWT-ignorant. Fully functional on `skippr sync` + `skippr query` (and clustered Flight / CloudQuery).
+skipprd stays JWT-ignorant. Fully functional on `skipprd sync` + `sde query` (and clustered Flight / CloudQuery).
 
 ## Completion rules for every work unit
 
@@ -85,7 +85,7 @@ docs/docs/query/observability-udfs.md
 | A.10 | Attribute allowlist; promotion first | keep/drop keys |
 | A.11–A.14 | HTTP `/v1/traces\|logs\|metrics`, JSON content-type, gRPC, bearer, 16 MiB | 401/413/signal filter |
 | A.15 | Contracts + Arrow IPC emit (not IngestBatch JSON) | traces → three namespaces; logs-only no spans |
-| A.16 | `skippr connect source otlp` | `--help`; plugin name `Otlp` |
+| A.16 | `sde connect source otlp` | `--help`; plugin name `Otlp` |
 | A.17 | Example three-pipeline YAML | Config parse |
 | A.18 | Discover goldens from bronze/Arrow + `otel_columns.txt` | names match |
 | A.19 | Iceberg identity PartitionSpec on hour/service_name/tenant_id when those fields exist | create table has spec |
@@ -139,8 +139,8 @@ Cancelled. Cloud UI and Cloud-scheduled CloudQuery own consoles and alarms.
 ## Process topology (A.24)
 
 ```text
-DATA_DIR=/data/traces skippr sync --pipeline otel-traces
-DATA_DIR=/data/logs   skippr sync --pipeline otel-logs
-DATA_DIR=/data/metrics skippr sync --pipeline otel-metrics
-skippr query
+DATA_DIR=/data/traces skipprd sync --pipeline otel-traces
+DATA_DIR=/data/logs   skipprd sync --pipeline otel-logs
+DATA_DIR=/data/metrics skipprd sync --pipeline otel-metrics
+sde query
 ```

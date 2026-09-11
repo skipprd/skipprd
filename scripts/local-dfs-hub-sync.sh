@@ -79,7 +79,7 @@ MANIFEST_DIR="$(python3 "${ROOT}/.github/scripts/local_runtime_plugins.py" \
 export SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR="${MANIFEST_DIR}"
 
 echo "==> Build skipprd"
-"${ROOT}/scripts/cargo-with-local-react.sh" build -p skipprd
+cargo build -p skipprd
 
 echo "==> Run skipprd sync (fixture DFS hub)"
 "${ROOT}/target/debug/skipprd" --config "${CONFIG}" sync --pipeline "${PIPELINE}" --once 2>&1 | tee /tmp/local-dfs-hub-sync.log

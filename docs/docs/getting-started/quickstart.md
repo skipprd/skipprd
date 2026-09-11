@@ -59,7 +59,7 @@ export AWS_DEFAULT_REGION="us-east-1"
 Skippr connects to the source, samples records, and infers the full nested schema:
 
 ```bash
-skippr discover --pipeline bikehire --log
+skipprd discover --pipeline bikehire --log
 ```
 
 You'll see output showing discovered namespaces and fields. The schema is persisted to S3 as pipeline metadata.
@@ -70,7 +70,7 @@ Enable the pipeline, then run sync to ingest data:
 
 ```bash
 skipprd query --sql "ENABLE PIPELINE bikehire"
-skippr sync --pipeline bikehire --log
+skipprd sync --pipeline bikehire --log
 ```
 
 Sync reads from the source, buffers through the WAL, compacts into Parquet, uploads to S3, and registers Glue partitions. Watch the logs for:

@@ -17,22 +17,6 @@ members = [
     "crates/skippr-iceberg-catalog-dynamodb",
     "crates/skippr-query-ballista",
     "crates/skippr-runtime-sdk",
-    "crates/skippr-cli",
-    "crates/skippr-admin",
-    "crates/skipprd-dfs-hub-compat-tests",
-    "crates/skipprd-react-suite-data-engineer",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-postgres",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-bigquery",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-athena",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-dbt",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-catalog",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-snowflake",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-mssql",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-databricks",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-synapse",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-redshift",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-clickhouse",
-    "crates/skipprd-react-suite-data-engineer/src/modules/provider-motherduck",
     "plugins/data_source/*",
     "plugins/data_sink/*",
     "plugins/schema_sink/*",
@@ -77,13 +61,6 @@ thiserror = "1.0.58"
 skippr-core = { path = "crates/skippr-core" }
 skippr-object-writer = { path = "crates/skippr-object-writer" }
 skippr-runtime-sdk = { path = "crates/skippr-runtime-sdk" }
-react-core = { version = "1.5.0", registry = "react-cargo" }
-react = { version = "1.5.0", registry = "react-cargo" }
-react-module-storage-s3 = { version = "1.5.0", registry = "react-cargo" }
-react-module-storage-local = { version = "1.5.0", registry = "react-cargo" }
-react-module-storage-memory = { version = "1.5.0", registry = "react-cargo" }
-react-module-provider-vector-lance = { version = "1.5.0", registry = "react-cargo" }
-react-suite-debugger = { version = "1.5.0", registry = "react-cargo" }
 chrono-tz = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
 

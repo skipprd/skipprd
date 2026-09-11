@@ -1,6 +1,6 @@
 # GA4 bronze catalog and warehouse modeling
 
-Skippr’s GA4 source lands **daily fact grains** in bronze via the Data API `runReport`. Each namespace is one stable dimension set; rollups, pivots, and channel summaries belong in the warehouse (dbt, `skippr model`, or SQL).
+Skippr’s GA4 source lands **daily fact grains** in bronze via the Data API `runReport`. Each namespace is one stable dimension set; rollups, pivots, and channel summaries belong in the warehouse (dbt, `sde model`, or SQL).
 
 This is **not** the GA4 BigQuery export (event-level raw). Use a separate future source for event-level hoovering.
 
@@ -29,6 +29,6 @@ This is **not** the GA4 BigQuery export (event-level raw). Use a separate future
 | `processing_lag_days` | Skip syncing the trailing edge while GA4 is still incomplete |
 | `window_in_days` | Days per API `dateRanges` chunk; default **1** to limit sampling |
 
-**Recommended operations:** scheduled `skippr sync` with defaults; raise `lookback_days` for long attribution windows — not `window_in_days > 1`.
+**Recommended operations:** scheduled `skipprd sync` with defaults; raise `lookback_days` for long attribution windows — not `window_in_days > 1`.
 
 See [Google Analytics (GA4) input](../connectors/inputs/google_analytics.md) and [Source landing semantics](source-landing-semantics.md).

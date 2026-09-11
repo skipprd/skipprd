@@ -20,9 +20,9 @@ pipelines:
 The pipeline name (`events` above) is the key used by `skippr`:
 
 ```bash
-skippr discover --pipeline events
-skippr sync --pipeline events
-skippr model --pipeline events
+skipprd discover --pipeline events
+skipprd sync --pipeline events
+sde model --pipeline events
 ```
 
 `data_sources.events` and `data_sinks.landing` are logical names. They are not reserved; use any keys that match your project.
