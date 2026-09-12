@@ -1,6 +1,6 @@
 # skippr.yml
 
-`skippr.yml` is the canonical Skippr project file. One file, one shape: skipprd plugin entries under `data_sources` and `data_sinks`. The engine binary is `skipprd`. Data Engineer is `sde`. Cloud is `skippr`. `skipprd discover` and `skipprd sync` invoke the skipprd runtime against this file; `sde model` and `sde query` compile the same sinks into the modeling stack in memory.
+`skippr.yml` is the canonical Skipprd project file. One file, one shape: Skipprd plugin entries under `data_sources` and `data_sinks`. `skipprd discover`, `skipprd schema`, and `skipprd sync` run against this file.
 
 `source` and `warehouse` in the example below are **logical names**, not reserved words. They may be `mssql_prod`, `raw_snowflake`, `my_warehouse`, or any other key. Pipelines refer to them by section-qualified reference.
 
@@ -37,22 +37,20 @@ dbt:
   gold_suffix: gold
 ```
 
-Athena ingest and query live on the **same** `Athena:` sink object using skipprd field names (`s3_bucket`, `s3_prefix`, `athena_workgroup_name`, `glue_database_name`, `athena_results_s3_bucket`) plus optional query-only keys (`region`, `catalog`, `max_concurrency`, `discovery_cache_ttl_secs`).
+Athena ingest lives on the **same** `Athena:` sink object using Skipprd field names (`s3_bucket`, `s3_prefix`, `athena_workgroup_name`, `glue_database_name`, `athena_results_s3_bucket`).
 
 ## Root sections
 
 | Section | Used by | Purpose |
 |---|---|---|
-| `skippr` | `skippr` | Workspace, state bucket, WAL/offset options |
-| `pipelines` | `skippr` | Pipeline graph: source, sink, schema sink, transforms |
+| `skippr` | Skipprd | Workspace, state bucket, WAL/offset options |
+| `pipelines` | Skipprd | Pipeline graph: source, sink, schema sink, transforms |
 | `data_sources` | `skipprd discover` / `skipprd sync` | Runtime source plugin configs |
-| `data_sinks` | `skippr` | Runtime ingest sinks; also the query/model destination |
+| `data_sinks` | `skipprd sync` | Runtime ingest sinks |
 | `deadletter_sinks` | `skipprd sync` | Optional deadletter write targets |
 | `schema_sinks` | `skipprd sync` | Runtime schema/catalog plugin configs |
-| `dbt` | `sde model` | dbt naming: `target_schema`, `silver_suffix`, `gold_suffix` |
-| `vector_sources` | `sde vector` | File/stdin sources for vector ingestion |
 
-There is no `warehouses:` section. Query, model, and catalog use the pipeline's `data_sink`.
+There is no `warehouses:` section.
 
 ## Environment values
 
@@ -62,4 +60,4 @@ Whole YAML scalar values can reference environment variables:
 connection_string: ${MSSQL_CONNECTION_STRING}
 ```
 
-Skippr loads `.env` then `.env.local` next to `skippr.yml` before resolving those references.
+Skipprd loads `.env` then `.env.local` next to `skippr.yml` before resolving those references.

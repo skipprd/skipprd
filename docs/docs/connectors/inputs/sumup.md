@@ -38,3 +38,7 @@ pipelines:
     data_source: data_sources.sumup
     data_sink: data_sinks.landing
 ```
+
+## Authentication
+
+SumUp uses OAuth refresh (`SUMUP_CLIENT_ID`, `SUMUP_CLIENT_SECRET`, `SUMUP_REFRESH_TOKEN`). A short-lived `access_token` is optional for a single run.

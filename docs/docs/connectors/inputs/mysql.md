@@ -54,7 +54,7 @@ mysql.{database}.{schema}.{table}
 
 ## Type mapping
 
-| MySQL Type | Skippr Type |
+| MySQL Type | Skipprd Type |
 |---|---|
 | `varchar`, `text` | String |
 | `int`, `smallint`, `tinyint` | Integer |
@@ -67,3 +67,18 @@ mysql.{database}.{schema}.{table}
 ## Offset tracking
 
 Each table is tracked as a single offset unit. Once a table has been fully ingested, subsequent `--once` runs will skip it unless offsets are reset.
+
+## Authentication
+
+Use a MySQL connection string. Prefer an environment variable so credentials do not live in `skippr.yml`.
+
+```bash
+export MYSQL_CONNECTION_STRING="mysql://user:pass@host:3306/db"
+```
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| authentication or connection errors | Verify `MYSQL_CONNECTION_STRING`, host reachability, and the selected database name. |
+| missing tables | Check the `--tables` list or omit it to let Skipprd discover all readable tables. |

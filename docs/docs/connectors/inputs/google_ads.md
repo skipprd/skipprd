@@ -44,3 +44,14 @@ pipelines:
 ```
 
 See [Source landing semantics](../../concepts/source-landing-semantics.md) for mutable report re-sync behavior.
+
+## Authentication
+
+Use a Google Ads developer token plus OAuth refresh (or a short-lived `access_token`). Put secrets in the environment:
+
+- `GOOGLE_ADS_DEVELOPER_TOKEN`
+- `GOOGLE_ADS_CLIENT_ID`
+- `GOOGLE_ADS_CLIENT_SECRET`
+- `GOOGLE_ADS_REFRESH_TOKEN`
+
+The Google account must have access to the Ads customer (and manager account when `login_customer_id` is set).

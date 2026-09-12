@@ -38,3 +38,7 @@ pipelines:
     data_source: data_sources.linkedin_ads
     data_sink: data_sinks.landing
 ```
+
+## Authentication
+
+Provide a LinkedIn Marketing API bearer token (`LINKEDIN_ADS_ACCESS_TOKEN`) or OAuth refresh fields. The token must be able to read the Campaign Manager ad account.

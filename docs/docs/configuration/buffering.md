@@ -47,7 +47,7 @@ Unknown `WAL_STORAGE` values fail startup. There is no YAML `skippr.wal_storage`
 | **Environment variable** | `SKIPPR_WAL_S3_BUCKET` |
 | **Default** | `SKIPPR_S3_BUCKET` |
 
-Dedicated bucket for WAL segments only (recommended for Upfoundry). Keeps internal pipeline state separate from customer datalake objects.
+Dedicated bucket for WAL segments only. Keeps internal pipeline state separate from datalake objects.
 
 ### WAL_BYTES_PER_FILE
 

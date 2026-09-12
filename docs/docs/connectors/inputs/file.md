@@ -22,3 +22,14 @@ DATA_SOURCE_PATH=/path/to/input-directory
 ## Checkpointing
 
 The file input tracks progress by file path and line offset. On restart, already-ingested files and lines are skipped.
+
+## Authentication
+
+No connector-specific authentication is required.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| file not found | Verify the path and working directory, or switch to an absolute path. |
+| permission denied | Check file permissions for the user running `skipprd`. |

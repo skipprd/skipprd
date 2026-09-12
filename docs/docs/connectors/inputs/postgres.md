@@ -38,3 +38,46 @@ data_sources:
 | `query` | | Custom SQL query (overrides tables) |
 | `batch_size_rows` | `10000` | Rows per ingest batch |
 | `format` | `json` | Data format |
+
+## Authentication
+
+Configure `host`, `port`, `user`, `password`, and `database` directly in the source config, or use `connection_string` if you prefer a single DSN-style value.
+
+For security best practices, we strongly advise against storing the password or connection string in `skippr.yml`. Use environment variable interpolation instead: replace the `password` or `connection_string` value with your own `${ENV_VAR}` reference.
+
+The relevant part of `skippr.yml` looks like this:
+
+```yaml
+data_sources:
+  source:
+    Postgres:
+      password: "${POSTGRES_SOURCE_PASSWORD}"
+```
+
+Set the env var before running `skipprd`:
+
+macOS / Linux
+
+```bash
+export POSTGRES_SOURCE_PASSWORD="mypassword"
+```
+
+Windows PowerShell
+
+```powershell
+$env:POSTGRES_SOURCE_PASSWORD = "mypassword"
+```
+
+Windows Command Prompt
+
+```cmd
+set POSTGRES_SOURCE_PASSWORD=mypassword
+```
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `connection refused` | Check the configured host and port are correct and the server is running |
+| `password authentication failed` | Verify the configured username and password |
+| SSL errors | Check the connection string or SSL-related connection parameters for the target server |

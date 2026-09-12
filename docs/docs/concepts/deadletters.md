@@ -4,7 +4,7 @@ Records that fail validation or cannot be normalized are captured as deadletters
 
 ## How deadletters work
 
-- Deadletters still go through Skippr's normal WAL and compaction pipeline.
+- Deadletters still go through Skipprd's normal WAL and compaction pipeline.
 - A pipeline can optionally point at a dedicated deadletter sink from the top-level `deadletter_sinks` registry.
 - If `deadletter_sink` is unset for a pipeline, deadletter records are discarded after being counted and logged.
 - If `deadletter_sink` is set but the referenced sink is invalid, startup fails.
@@ -60,7 +60,7 @@ Deadletter tables are written as Parquet with these columns:
 | `error` | string | Human-readable failure message |
 | `failure_code` | string | Error classification |
 | `event_time` | bigint | Source event time when available |
-| `processed_time` | bigint | Time Skippr emitted the deadletter |
+| `processed_time` | bigint | Time Skipprd emitted the deadletter |
 | `source_uri` | string | Source file or object path |
 | `offset_key` | string | Source offset key |
 | `offset_pos` | bigint | Source offset position |

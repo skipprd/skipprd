@@ -1,6 +1,6 @@
 # GA4 bronze catalog and warehouse modeling
 
-Skippr’s GA4 source lands **daily fact grains** in bronze via the Data API `runReport`. Each namespace is one stable dimension set; rollups, pivots, and channel summaries belong in the warehouse (dbt, `sde model`, or SQL).
+Skipprd's GA4 source lands **daily fact grains** in bronze via the Data API `runReport`. Each namespace is one stable dimension set; rollups, pivots, and channel summaries belong in the warehouse (dbt or SQL).
 
 This is **not** the GA4 BigQuery export (event-level raw). Use a separate future source for event-level hoovering.
 

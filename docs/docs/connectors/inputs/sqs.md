@@ -56,3 +56,18 @@ sqs.{queue_name}
 ```
 
 The queue name is the final segment of the queue URL path.
+
+## Authentication
+
+Authentication uses the AWS default credential chain.
+
+- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+- IAM roles, instance profiles, or task roles
+- AWS SSO or shared config profiles
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| AccessDenied or queue errors | Verify the AWS credential chain, queue URL, region, and SQS permissions. |
+| no messages arriving | Check that producers are sending to the expected queue and that the queue is not empty. |

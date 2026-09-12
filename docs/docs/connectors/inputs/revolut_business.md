@@ -40,3 +40,7 @@ pipelines:
 ```
 
 Provide `access_token` or `refresh_token` (with `client_id` and signing key as required by your Revolut app configuration).
+
+## Authentication
+
+Revolut Business uses OAuth (`refresh_token` / `REVOLUT_REFRESH_TOKEN`) and a `client_id`. JWT client-assertion auth uses `private_key_pem` when your app requires it. Keep keys in the environment.

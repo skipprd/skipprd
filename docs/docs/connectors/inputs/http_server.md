@@ -28,3 +28,14 @@ data_sources:
 | `path` | `/` | URL path to listen on |
 | `auth_token` | | Optional Bearer token for authentication |
 | `format` | `json` | Data format |
+
+## Authentication
+
+Authentication is optional. If you set `auth_token`, Skipprd expects the incoming request to present that bearer token.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| requests receive 401 or 403 responses | Verify the bearer token handling and any proxy configuration in front of the listener. |
+| no requests arrive | Check the bind address, port, reverse proxy routing, and host firewall rules. |

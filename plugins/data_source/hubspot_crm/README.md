@@ -16,7 +16,7 @@ HubspotCrm:
     - service
   privacy:
     mode: profile
-    profile: upfoundry_safe
+    profile: passthrough
   oauth_token_url: "https://api.hubapi.com/oauth/v1/token"
   oauth_client_id: "${HUBSPOT_OAUTH_CLIENT_ID}"
   oauth_client_secret: "${HUBSPOT_OAUTH_CLIENT_SECRET}"
@@ -28,7 +28,7 @@ HubspotCrm:
 | `privacy.mode` | Behavior |
 |----------------|----------|
 | `passthrough` | Default; strips known PII keys only |
-| `profile` | Named profile (`upfoundry_safe`, `crm_revenue_only`) |
+| `profile` | Named profile (for example `crm_revenue_only`) |
 | `allowlist` | Only `keep_properties` emitted |
 
 This plugin has **no dependencies on other data-source plugins**.

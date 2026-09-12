@@ -21,7 +21,7 @@ XeroAccounting:
     - health
   privacy:
     mode: profile
-    profile: upfoundry_safe
+    profile: passthrough
     on_violation: drop
   min_query_interval_ms: 350
   oauth_token_url: "https://identity.xero.com/connect/token"
@@ -36,7 +36,7 @@ OAuth 2.0 refresh token against `https://identity.xero.com/connect/token`. Every
 
 ## Privacy
 
-Strict no-PII under `upfoundry_safe`: contact names, emails, phones, addresses, invoice references, line descriptions, and bank payee names are stripped before ingest. Contacts snapshot stores ID and status/type flags only. Raw source envelopes store a SHA-256 hash of the redacted canonical JSON.
+Strict no-PII when a strict privacy profile is enabled: contact names, emails, phones, addresses, invoice references, line descriptions, and bank payee names are stripped before ingest. Contacts snapshot stores ID and status/type flags only. Raw source envelopes store a SHA-256 hash of the redacted canonical JSON.
 
 ## Namespaces
 

@@ -4,9 +4,9 @@
 
 ### `Pipeline '<name>' not found`
 
-**Cause:** `ENABLE PIPELINE` or `DISABLE PIPELINE` was called before the pipeline metadata exists.
+**Cause:** Pipeline metadata does not exist yet.
 
-**Fix:** Run `skipprd discover --pipeline <name>` first to create the metadata, then enable the pipeline.
+**Fix:** Run `skipprd discover --pipeline <name>` first to create the metadata, then `skipprd sync`.
 
 ### `TABLE_NOT_FOUND`
 
@@ -37,7 +37,7 @@
 **Fix:**
 1. Check whether `quarantined_parts > 0` — if so, investigate the specific WAL segments or Parquet files for corruption
 2. If `uploaded_rows != expected_msgs`, validate the actual data in Athena against the source
-3. Consider running `RESET PIPELINE` and re-ingesting if the mismatch is confirmed
+3. Re-run `skipprd discover` and `skipprd sync --once` after confirming the destination counts against the source
 
 ### `Finalising: compactor drain/stop did not complete cleanly`
 
@@ -71,7 +71,7 @@
 
 ## Recovery after crash
 
-Skippr is designed to recover automatically:
+Skipprd is designed to recover automatically:
 
 1. The WAL preserves all ingested data
 2. The offsets database tracks what has been committed
@@ -81,10 +81,4 @@ No manual intervention is needed. Verify recovery by checking that `uploaded_row
 
 ## Resetting a pipeline
 
-To re-ingest from scratch:
-
-```bash
-skipprd query --sql "RESET PIPELINE my_pipeline"
-```
-
-This clears the offsets database and WAL for the pipeline. The next `sync` will start from the beginning of the source data.
+To re-ingest from scratch, use a new pipeline name in `skippr.yml` (and a new workspace if you need a clean metadata prefix), then run `skipprd discover` and `skipprd sync --once` again. That starts from the beginning of the source data without reusing the previous offsets and WAL.

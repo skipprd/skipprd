@@ -31,7 +31,7 @@ data_sources:
 
 ## Typical usage
 
-Pipe data into Skippr:
+Pipe data into Skipprd:
 
 ```bash
 cat data.json | skipprd sync --pipeline my_pipeline
@@ -49,3 +49,14 @@ cat data.json | skipprd sync --pipeline my_pipeline
 ```
 stdin
 ```
+
+## Authentication
+
+No connector-specific authentication is required.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| no records are ingested | Check that the upstream process is piping data into stdin and that `--mode` matches the input format. |
+| parse errors | Verify the piped payload is valid for the selected mode and that record boundaries are what you expect. |

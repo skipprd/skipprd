@@ -28,7 +28,7 @@ src/
   metrics/              Stats collection and reporting
   adapters/             Storage adapters (S3, local)
 tests/                  Integration tests
-docs/                   Maintainer markdown (public site is elt.skippr.io)
+docs/                   Public docs (VitePress → elt.skippr.io)
 ci-e2e/                 E2E test orchestration scripts
 soda/                   Soda Core data quality checks for E2E tests
 test-data/              Sample data for tests

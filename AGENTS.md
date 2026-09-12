@@ -16,6 +16,8 @@ Always favour compile errors over runtime convention
 
 This repository contains **skipprd** — the self-hosted ELT engine (`discover`, `sync`, `query`). Skippr Data Engineer (`sde`) lives in `skipprd/sde`. Cloud `skippr` lives in the private `cloud` repo.
 
+Public engineer docs: [elt.skippr.io](https://elt.skippr.io). Markdown is `docs/docs/`; VitePress config is `docs/.vitepress/`. Preview with `npm --prefix docs run dev`. Publish from a sibling `cloud` checkout: `HOST=elt DIST="$(pwd)/docs/.vitepress/dist" ./scripts/publish-product-docs.sh`.
+
 ## System dependencies (already installed in snapshot)
 
 - Rust 1.88.0 (via `rust-toolchain.toml`)

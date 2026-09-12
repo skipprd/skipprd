@@ -29,3 +29,14 @@ data_sources:
 | `address` | *(required)* | Bind address (host:port or socket path) |
 | `framing` | `newline` | Frame delimiter (`newline` or `bytes`) |
 | `format` | `json` | Data format |
+
+## Authentication
+
+No connector-specific authentication is required.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| address already in use | Choose a different port or stop the process currently bound to that address. |
+| no data arriving | Check the sender target address, protocol mode, and any host firewall rules. |

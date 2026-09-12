@@ -17,12 +17,12 @@ pipelines:
       batch_time_unit: day
 ```
 
-The pipeline name (`events` above) is the key used by `skippr`:
+The pipeline name (`events` above) is the key used by Skipprd:
 
 ```bash
 skipprd discover --pipeline events
+skipprd schema --pipeline events
 skipprd sync --pipeline events
-sde model --pipeline events
 ```
 
 `data_sources.events` and `data_sinks.landing` are logical names. They are not reserved; use any keys that match your project.

@@ -17,7 +17,7 @@ RevolutBusiness:
     - health
   privacy:
     mode: profile
-    profile: upfoundry_safe
+    profile: passthrough
     on_violation: drop
   min_query_interval_ms: 300
   api_base: "${REVOLUT_API_BASE}"
@@ -37,13 +37,13 @@ Revolut Business uses **certificate + client-assertion JWT** (not `client_secret
 - `access_token` — use directly when console-web has already exchanged tokens
 - `refresh_token` + `private_key_pem` + `issuer_domain` — refresh via `POST {api_base}/auth/token` with `client_assertion`
 
-`issuer_domain` must match the redirect URI domain registered in the Revolut developer portal (e.g. `api.upfoundry.co`). Falls back to `REVOLUT_ISSUER_DOMAIN` env.
+`issuer_domain` must match the redirect URI domain registered in the Revolut developer portal (for example `api.example.com`). Falls back to `REVOLUT_ISSUER_DOMAIN` env.
 
 `private_key_pem` is optional in fixture mode (`SKIPPR_REVOLUT_FIXTURE_DIR`).
 
 ## Privacy
 
-`upfoundry_safe` strips account `name`, transaction `reference` / `description`, `beneficiary`, `merchant`, and `card` data before ingest. Raw envelopes store a SHA-256 hash of the redacted canonical JSON only. The `/accounts/{id}/bank-details` endpoint is not called.
+A strict privacy profile strips account `name`, transaction `reference` / `description`, `beneficiary`, `merchant`, and `card` data before ingest. Raw envelopes store a SHA-256 hash of the redacted canonical JSON only. The `/accounts/{id}/bank-details` endpoint is not called.
 
 ## Namespaces
 

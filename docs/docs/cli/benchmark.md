@@ -1,4 +1,4 @@
-# skipprd benchmark
+# Skipprd benchmark
 
 Generate synthetic data and measure ingestion throughput.
 

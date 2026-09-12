@@ -4,7 +4,7 @@
 
 ### SKIPPR_S3_BUCKET
 
-The S3 bucket used by Skippr for all internal state: pipeline metadata, offsets, WAL segments (when `WAL_STORAGE=s3`), deadletters, config uploads, and query manifests.
+The S3 bucket used by Skipprd for all internal state: pipeline metadata, offsets, WAL segments (when `WAL_STORAGE=s3`), deadletters, config uploads, and query manifests.
 
 | | |
 |---|---|
@@ -25,7 +25,7 @@ deadletters/
 
 ### SKIPPRD_EL_STORAGE_MODE
 
-Controls where skipprd extract/load metadata and namespace stats are persisted.
+Controls where Skipprd extract/load metadata and namespace stats are persisted.
 
 | | |
 |---|---|
@@ -38,9 +38,9 @@ When set to `local`, metadata is read from and written to `{DATA_DIR}/metadata.j
 
 When set to `s3` (default), S3-based persistence is used.
 
-This internal development/testing setting only affects where skipprd EL state (metadata, stats) is persisted. It does not control `sde model` dbt project storage, React thread logs, or vector storage.
+This internal development/testing setting only affects where Skipprd EL state (metadata, stats) is persisted.
 
-Use `local` when running skipprd without an S3 bucket (e.g. in skippr-dbt orchestration on a developer machine).
+Use `local` when running Skipprd without an S3 bucket (for example dbt orchestration on a developer machine).
 
 ### DATA_DIR
 

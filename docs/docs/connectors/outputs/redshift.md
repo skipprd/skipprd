@@ -47,3 +47,18 @@ data_sinks:
 | `staging_s3_prefix` | `skippr-staging` | S3 prefix for staged files |
 | `iam_role_arn` | | IAM role for Redshift COPY |
 | `format` | `parquet` | Data format |
+
+## Authentication
+
+Authentication uses the AWS default credential chain.
+
+- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+- IAM roles, instance profiles, or task roles
+- AWS SSO or shared config profiles
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| COPY or staging errors | Verify the staging S3 bucket, IAM role ARN, region, and Redshift cluster or workgroup settings. |
+| permission denied | Check the Redshift database user, schema permissions, and the IAM role Redshift uses to read from S3. |

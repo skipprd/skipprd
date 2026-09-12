@@ -37,3 +37,7 @@ pipelines:
 ```
 
 Snapshot namespaces (companies, deals) and fact namespaces (events) use incremental checkpoints keyed on `occurred_at` or object update times.
+
+## Authentication
+
+Provide a private app or OAuth access token (`HUBSPOT_ACCESS_TOKEN`) with CRM read scopes, or OAuth refresh fields. Do not commit the token.

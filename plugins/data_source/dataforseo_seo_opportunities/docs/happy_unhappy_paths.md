@@ -25,7 +25,7 @@ Keyword expansion, MSV, KD, KGR, and composite opportunity scores. **SERP rank t
 
 ### Opt-in SERP tracking streams (not default)
 
-When `streams` includes `serp_results`, `serp_features`, `weak_spots`, `rank_tracking`, or `keyword_clusters`, the plugin may call DataForSEO SERP APIs. Up Foundry console uses **Bright Data** (`google_serp_ranks`) as the SERP rank source of truth instead.
+When `streams` includes `serp_results`, `serp_features`, `weak_spots`, `rank_tracking`, or `keyword_clusters`, the plugin may call DataForSEO SERP APIs. Prefer **Bright Data** (`google_serp_ranks`) as the SERP rank source of truth instead.
 
 ### Discover mode
 

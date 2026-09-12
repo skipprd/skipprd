@@ -34,3 +34,43 @@ data_sources:
 | `query` | | Custom SQL query (overrides tables) |
 | `batch_size_rows` | `10000` | Rows per ingest batch |
 | `format` | `json` | Data format |
+
+## Authentication
+
+Use the configured ClickHouse user and password, or rely on the default local user for development. For security best practices, we strongly advise against storing the password in `skippr.yml`. Use environment variable interpolation instead: replace the `password` value with your own `${ENV_VAR}` reference.
+
+The relevant part of `skippr.yml` looks like this:
+
+```yaml
+data_sources:
+  source:
+    Clickhouse:
+      password: "${CLICKHOUSE_PASSWORD}"
+```
+
+Set the env var before running `skipprd`:
+
+macOS / Linux
+
+```bash
+export CLICKHOUSE_PASSWORD="secret"
+```
+
+Windows PowerShell
+
+```powershell
+$env:CLICKHOUSE_PASSWORD = "secret"
+```
+
+Windows Command Prompt
+
+```cmd
+set CLICKHOUSE_PASSWORD=secret
+```
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| authentication failed | Verify the ClickHouse user, password, and database name. |
+| connection refused | Check the HTTP URL, port, and network access to the ClickHouse endpoint. |

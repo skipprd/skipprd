@@ -1,14 +1,12 @@
-# discover
+# Skipprd discover
 
 Connect to the data source, sample records, and infer the pipeline schema. Unlike `sync`, discover never writes to the output destination -- it only discovers schemas and persists metadata.
-
-The product command is `skipprd discover`. It invokes the skipprd runtime against the same `skippr.yml`.
 
 ## Usage
 
 ```bash
 skipprd discover --pipeline <name> [--output <mode>] [--log [LEVEL]]
-skippr --config skippr.yml discover --pipeline <name> [--output <mode>] [--log [LEVEL]]
+skipprd --config skippr.yml discover --pipeline <name> [--output <mode>] [--log [LEVEL]]
 ```
 
 ## Flags
@@ -33,7 +31,7 @@ Discover does **not** initialize or sync to any output plugin. It is purely a sc
 ## Example
 
 ```bash
-skippr --config skippr.yml discover --pipeline events --log
+skipprd --config skippr.yml discover --pipeline events --log
 ```
 
 ### Structured output for programmatic use

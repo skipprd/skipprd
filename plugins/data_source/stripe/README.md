@@ -22,7 +22,7 @@ Stripe:
     - promotions
   privacy:
     mode: profile
-    profile: upfoundry_safe
+    profile: passthrough
     on_violation: drop
   oauth_token_url: "https://connect.stripe.com/oauth/token"
   oauth_client_id: "${STRIPE_CONNECT_CLIENT_ID}"
@@ -32,7 +32,7 @@ Stripe:
 
 ## Privacy
 
-Customer PII (email, name, address, card details) is stripped under `upfoundry_safe`.
+Customer PII (email, name, address, card details) is stripped when a strict privacy profile is enabled.
 
 ## Tests
 

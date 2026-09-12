@@ -53,3 +53,18 @@ Kinesis access uses the standard AWS credential chain.
 ```
 kinesis.{stream_name}
 ```
+
+## Authentication
+
+Authentication uses the AWS default credential chain.
+
+- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+- IAM roles, instance profiles, or task roles
+- AWS SSO or shared config profiles
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| AccessDenied or stream errors | Verify the AWS credential chain, stream name, region, and Kinesis permissions. |
+| no records arriving | Check that producers are writing to the expected stream and shard activity is present. |

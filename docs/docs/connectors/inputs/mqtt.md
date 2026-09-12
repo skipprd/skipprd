@@ -35,3 +35,14 @@ data_sources:
 | `mode` | `stream` | `stream` or `batch` |
 | `idle_timeout_seconds` | `5` | Batch mode idle timeout |
 | `format` | `json` | Data format |
+
+## Authentication
+
+Authentication depends on the broker. Use `username` and `password` when the broker requires credentials, or omit them for local development.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| connection refused | Verify the broker URL, port, TLS requirements, and network access from the runner. |
+| no messages arriving | Check the topic name, QoS, and whether the broker ACLs allow subscriptions for this client. |

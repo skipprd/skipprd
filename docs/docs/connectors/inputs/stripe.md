@@ -38,3 +38,7 @@ pipelines:
 ```
 
 Namespaces include fact tables (charges, invoices, payouts) and snapshot tables (customers, products, prices). Use `stream_profile: minimal` for smoke tests.
+
+## Authentication
+
+Set `access_token` to a Stripe secret or restricted key (`STRIPE_SECRET_KEY`), or configure Connect OAuth refresh (`oauth_client_id`, `oauth_client_secret`, `oauth_refresh_token`). Keep keys in the environment, not in git.

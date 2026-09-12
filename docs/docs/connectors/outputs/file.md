@@ -15,3 +15,14 @@ DATA_OUTPUT_PATH=/path/to/output-directory
 ## Output format
 
 Files are written as Parquet with Snappy compression, matching the format used by the Athena output.
+
+## Authentication
+
+No connector-specific authentication is required.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| file cannot be created | Verify the parent directory exists and that the runner has write permission there. |
+| output is not where you expect | Use an absolute path and confirm the calling process is running in the expected working directory. |
