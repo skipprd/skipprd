@@ -75,3 +75,30 @@ namespace: "app.events" -> table: "app_events"
 ```
 
 Tables are fully qualified as `` `project.dataset.table` ``.
+
+## Authentication
+
+Authentication uses a GCP service account key file.
+
+| Variable | Description |
+|---|---|
+| `GOOGLE_APPLICATION_CREDENTIALS` | Path to a GCP service account JSON key file |
+
+### Setting up a service account
+
+1. In the GCP Console, go to **IAM & Admin > Service Accounts**.
+2. Create a service account with the **BigQuery Data Editor** and **BigQuery Job User** roles.
+3. Create a JSON key and download it.
+4. Set the environment variable:
+
+```bash
+export GOOGLE_APPLICATION_CREDENTIALS="/path/to/service-account.json"
+```
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `Could not automatically determine credentials` | Verify `GOOGLE_APPLICATION_CREDENTIALS` points to a valid JSON key file |
+| `Access Denied: Dataset` | Check the service account has the required roles on the project |
+| `Not found: Dataset` | The dataset will be created automatically; ensure the service account has `bigquery.datasets.create` |

@@ -4,12 +4,7 @@ Daily Instagram placement insights from the Meta Marketing API.
 
 ## Connect
 
-```bash
-sde connect source meta-instagram-ads \
-  --ad-account-id act_123456789 \
-  --start-date 2024-01-01 \
-  --access-token ${META_ADS_ACCESS_TOKEN}
-```
+Set `ad_account_id` and `access_token` (or OAuth refresh fields) in `skippr.yml`. Credentials belong in the environment, not in git.
 
 ## Configuration
 
@@ -46,3 +41,27 @@ pipelines:
     data_source: data_sources.meta_instagram
     data_sink: data_sinks.landing
 ```
+
+## Authentication
+
+Provide either:
+
+- **`access_token`** / `META_INSTAGRAM_ADS_ACCESS_TOKEN` — long-lived Marketing API token with `ads_read` (and related) permissions, or
+- **OAuth refresh** — `oauth_token_url`, `oauth_client_id`, `oauth_client_secret`, and `oauth_refresh_token` (defaults to Meta’s token endpoint when configured in `skippr.yml`).
+
+Required env vars (typical):
+
+- `META_AD_ACCOUNT_ID`
+- `META_INSTAGRAM_ADS_ACCESS_TOKEN`
+
+## Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| Token / 401 errors | Regenerate a long-lived token; confirm `ads_read` on the ad account |
+| Empty streams | Verify campaigns ran on Instagram; check `instagram_filter` |
+| Rate limits (429) | Plugin retries with backoff; reduce parallel jobs if needed |
+| Slow discover | Expected — discover only samples 3 days of `account_daily`; use `skipprd sync` for full history |
+| Stale metrics | Confirm `replace_partition`; increase `lookback_days` |
+
+Offline dev: set `SKIPPR_META_INSTAGRAM_ADS_FIXTURE_DIR` to JSON fixtures (`account_insights.json`, `campaign_insights.json`, etc.).

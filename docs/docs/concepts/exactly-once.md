@@ -1,6 +1,6 @@
 # Exactly-Once Delivery
 
-Skippr's exactly-once contract starts at the WAL and stays host-owned all the way through recovery.
+Skipprd's exactly-once contract starts at the WAL and stays host-owned all the way through recovery.
 
 ## Durable boundary
 
@@ -21,7 +21,7 @@ Exactly-once output therefore depends on two things working together:
 
 Every ingested record is written to the WAL before downstream compaction and destination writes. WAL segments can be stored on local disk (`WAL_STORAGE=disk`), S3 (`WAL_STORAGE=s3`), or a clustered disk WAL with synchronous peer replication (`WAL_STORAGE=clustered`).
 
-If Skippr crashes, recovery starts from committed WAL state, not from in-memory progress.
+If Skipprd crashes, recovery starts from committed WAL state, not from in-memory progress.
 
 ## Offsets database
 
@@ -39,11 +39,11 @@ This keeps the host as the only authority for durable ingest progress.
 
 After data is durable in the WAL, the host compacts that data and sends destination work to sink and schema plugins.
 
-Compaction can be retried after crashes or reconnects, so sink-side work must be replay-safe. Skippr uses stable `compaction_id` values so repeated work can be identified and handled idempotently where the destination supports it.
+Compaction can be retried after crashes or reconnects, so sink-side work must be replay-safe. Skipprd uses stable `compaction_id` values so repeated work can be identified and handled idempotently where the destination supports it.
 
 ## Crash recovery
 
-When Skippr restarts after a crash:
+When Skipprd restarts after a crash:
 
 1. The host scans committed WAL segments.
 2. The host re-materializes offset and checkpoint state from committed WAL progress.
@@ -58,4 +58,4 @@ On clean shutdown, the host drains in-flight WAL work before exit. If that drain
 
 ## Chaos mode
 
-Skippr includes a built-in chaos mode (`SKIPPR_CHAOS_MODE=yes`) that injects random SIGKILL signals during ingestion. This is used to validate the WAL-first recovery model under crash conditions.
+Skipprd includes a built-in chaos mode (`SKIPPR_CHAOS_MODE=yes`) that injects random SIGKILL signals during ingestion. This is used to validate the WAL-first recovery model under crash conditions.

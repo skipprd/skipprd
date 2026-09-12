@@ -5,7 +5,7 @@ Consumes AWS SNS messages via an SQS subscription.
 ## How it works
 
 1. SNS topic is subscribed to an SQS queue.
-2. Skippr polls the SQS queue and extracts the `Message` field from the SNS envelope.
+2. Skipprd polls the SQS queue and extracts the `Message` field from the SNS envelope.
 3. Messages are deleted after successful ingest.
 4. Namespace convention: `sns.{topic_name}`.
 
@@ -29,3 +29,18 @@ data_sources:
 | `region` | | AWS region |
 | `endpoint_url` | | Custom endpoint (e.g. LocalStack) |
 | `format` | `json` | Data format |
+
+## Authentication
+
+Authentication uses the AWS default credential chain.
+
+- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+- IAM roles, instance profiles, or task roles
+- AWS SSO or shared config profiles
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| no messages arriving | Verify the SNS topic is subscribed to the target SQS queue and that the queue policy allows delivery. |
+| AccessDenied | Check the AWS credential chain and access to the queue and topic resources. |

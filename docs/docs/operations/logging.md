@@ -54,7 +54,7 @@ These are expected when running with `SKIPPR_CHAOS_MODE=yes`:
 | `Compactor: integrity check mismatch ...` | Uploaded rows do not match expected or quarantined > 0 | Treat as correctness risk; validate output counts |
 | `quarantined_parts > 0` (in summary) | Partition(s) quarantined due to read/parse issues | Investigate WAL/parquet integrity |
 | `TABLE_NOT_FOUND ... awsdatacatalog.<db>.<table> ...` | Destination table missing/unavailable | Verify schema sync/catalog creation |
-| `Pipeline '<name>' not found` | Enable/toggle called before metadata exists | Run `discover` first, then `ENABLE PIPELINE` |
+| `Pipeline '<name>' not found` | Pipeline metadata missing | Run `discover` first, then `sync` |
 
 ## Fast trust checklist
 
@@ -69,4 +69,4 @@ A run is operationally green if all are true:
 
 ## Operational notes
 
-Skippr runs as stateless compute in `disk` and `s3` modes: no clustering knobs, no peer list. `WAL_STORAGE=clustered` starts replica RPC, Arrow Flight SQL, an in-process Ballista scheduler+executor (gossip-elected cluster), and authenticated Chitchat on ephemeral UDP ports and uses DynamoDB (OSS) or Cloud tables for leases, membership, and fenced offsets. v1 requires a trusted private network; Cloud clustered mode also requires TLS PEMs. Even local disk is optional when using `WAL_STORAGE=s3`.
+Skipprd runs as stateless compute in `disk` and `s3` modes: no clustering knobs, no peer list. `WAL_STORAGE=clustered` starts replica RPC, Arrow Flight SQL, an in-process Ballista scheduler+executor (gossip-elected cluster), and authenticated Chitchat on ephemeral UDP ports and uses DynamoDB (OSS) or Cloud tables for leases, membership, and fenced offsets. v1 requires a trusted private network; Cloud clustered mode also requires TLS PEMs. Even local disk is optional when using `WAL_STORAGE=s3`.

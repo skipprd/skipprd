@@ -1,4 +1,4 @@
-# skipprd schema
+# Skipprd schema
 
 Display the discovered schema for a pipeline.
 

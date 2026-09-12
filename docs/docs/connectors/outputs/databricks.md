@@ -57,3 +57,45 @@ data_sinks:
 | `schema` | `default` | Schema name (COPY mode) |
 | `table` | `data` | Target table name (COPY mode) |
 | `format` | `parquet` | Output format |
+
+## Authentication
+
+Configure `workspace_url`, `token`, and optional `warehouse_id` directly when you connect the warehouse or in `skippr.yml`.
+
+For security best practices, we strongly advise against storing the token in `skippr.yml`. Use environment variable interpolation instead: replace the `token` value with your own `${ENV_VAR}` reference.
+
+The relevant part of `skippr.yml` looks like this:
+
+```yaml
+data_sinks:
+  warehouse:
+    Databricks:
+      token: "${DATABRICKS_TOKEN}"
+```
+
+Set the env var before running `skipprd`:
+
+macOS / Linux
+
+```bash
+export DATABRICKS_TOKEN="dapi..."
+```
+
+Windows PowerShell
+
+```powershell
+$env:DATABRICKS_TOKEN = "dapi..."
+```
+
+Windows Command Prompt
+
+```cmd
+set DATABRICKS_TOKEN=dapi...
+```
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| authentication failed | Verify the workspace URL, token, and any SQL warehouse ID values. |
+| writes or COPY INTO fail | Check catalog and schema permissions, warehouse availability, and whether the token can use that SQL warehouse. |

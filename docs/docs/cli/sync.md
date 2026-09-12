@@ -1,14 +1,12 @@
-# sync
+# Skipprd sync
 
 Ingest data from the source, buffer through the WAL, compact into Parquet, and upload to the destination.
-
-The product command is `skipprd sync`. It invokes the skipprd runtime against the same `skippr.yml`.
 
 ## Usage
 
 ```bash
 skipprd sync --pipeline <name> [--once] [--output <mode>] [--log [LEVEL]]
-skippr --config skippr.yml sync --pipeline <name> [--once] [--output <mode>] [--log [LEVEL]]
+skipprd --config skippr.yml sync --pipeline <name> [--once] [--output <mode>] [--log [LEVEL]]
 ```
 
 ## Flags
@@ -33,7 +31,7 @@ skippr --config skippr.yml sync --pipeline <name> [--once] [--output <mode>] [--
 ## Example
 
 ```bash
-skippr --config skippr.yml sync --pipeline events --log
+skipprd --config skippr.yml sync --pipeline events --log
 ```
 
 ### Batch sync with structured output

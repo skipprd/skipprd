@@ -28,7 +28,7 @@ Supports nested field paths using dot notation.
 
 ## TRANSFORM_BATCH_TIME_FIELDS
 
-Timestamp field(s) used for time-based partitioning. Skippr uses the first field found in each record. Supports Unix timestamps in both seconds and milliseconds.
+Timestamp field(s) used for time-based partitioning. Skipprd uses the first field found in each record. Supports Unix timestamps in both seconds and milliseconds.
 
 | | |
 |---|---|
@@ -73,9 +73,9 @@ Columns used to sort rows within each Parquet file before writing. Sorting impro
 | **Default** | *(unset — no ordering)* |
 | **Example** | `customer_id,event_time` |
 
-Comma-separated list of output column names. For each namespace Skippr writes, only the fields that exist in that namespace's output schema are used; missing fields are silently ignored. If no configured fields match a given namespace, records are written unsorted.
+Comma-separated list of output column names. For each namespace Skipprd writes, only the fields that exist in that namespace's output schema are used; missing fields are silently ignored. If no configured fields match a given namespace, records are written unsorted.
 
-At the end of a run, Skippr logs a warning listing any configured order fields that never matched any namespace observed during the run.
+At the end of a run, Skipprd logs a warning listing any configured order fields that never matched any namespace observed during the run.
 
 ### How ordering helps
 
@@ -91,7 +91,7 @@ In practice, one or two fields is usually optimal. Long sort lists can reduce th
 
 ### Automatic row-group sizing
 
-When ordering is active, Skippr automatically tunes the Parquet row-group size based on:
+When ordering is active, Skipprd automatically tunes the Parquet row-group size based on:
 
 - **Average row width** in the current batch.
 - **Run lengths** of the leading sort column — high-cardinality columns produce shorter runs and smaller row groups; low-cardinality columns produce longer runs and larger row groups.

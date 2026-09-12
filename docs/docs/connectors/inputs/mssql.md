@@ -57,7 +57,7 @@ For example, the table `dbo.customers` in database `MyDB` produces the namespace
 
 ## Type mapping
 
-| MSSQL Type | Skippr Type |
+| MSSQL Type | Skipprd Type |
 |---|---|
 | `nvarchar`, `varchar`, `char`, `text`, `ntext` | String |
 | `int`, `smallint`, `tinyint` | Integer / Long |
@@ -70,3 +70,56 @@ For example, the table `dbo.customers` in database `MyDB` produces the namespace
 ## Offset tracking
 
 Each table is tracked as a single offset unit. Once a table has been fully ingested, subsequent `--once` runs will skip it unless offsets are reset.
+
+## Authentication
+
+| Variable | Description |
+|---|---|
+| `MSSQL_CONNECTION_STRING` | ADO.NET connection string for SQL Server |
+
+### Connection string format
+
+```bash
+export MSSQL_CONNECTION_STRING="server=tcp:127.0.0.1,1433;database=testdb;user id=sa;password=YourPass;TrustServerCertificate=true"
+```
+
+Common parameters:
+
+| Parameter | Description |
+|---|---|
+| `server` | Hostname and port (for example `tcp:myserver.database.windows.net,1433`) |
+| `database` | Database name |
+| `user id` | SQL Server login |
+| `password` | Login password |
+| `TrustServerCertificate` | Set to `true` for self-signed certs in dev or test |
+| `Encrypt` | Set to `true` for Azure SQL or production workloads |
+
+### Azure SQL
+
+For Azure SQL Database, use the fully qualified server name:
+
+```bash
+export MSSQL_CONNECTION_STRING="server=tcp:myserver.database.windows.net,1433;database=mydb;user id=myuser@myserver;password=MyPass;Encrypt=true;TrustServerCertificate=false"
+```
+
+### Local dev with Docker
+
+Spin up a local MSSQL instance for testing:
+
+```bash
+docker run -e 'ACCEPT_EULA=Y' -e 'SA_PASSWORD=YourStrong!Passw0rd' \
+  -p 1433:1433 --name mssql-dev \
+  -d mcr.microsoft.com/mssql/server:2022-latest
+```
+
+```bash
+export MSSQL_CONNECTION_STRING="server=tcp:127.0.0.1,1433;database=master;user id=sa;password=YourStrong!Passw0rd;TrustServerCertificate=true"
+```
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `Login failed for user` | Verify username and password in the connection string |
+| `Cannot open server` | Check the server hostname, port, and network access |
+| `SSL Provider: certificate verify failed` | Add `TrustServerCertificate=true` for self-signed certs, or install the server CA certificate |

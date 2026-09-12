@@ -93,7 +93,7 @@ By default, the plugin uploads Parquet files directly to the configured Snowflak
 3. `COPY INTO` loads the staged file into the target table.
 4. The staged file is removed after a successful load.
 
-This works out of the box with Snowflake stages backed by S3, Azure Blob Storage, or Google Cloud Storage — including the default user stage (`@~`) and named stages. No extra Skippr storage config is required for the normal internal-stage path.
+This works out of the box with Snowflake stages backed by S3, Azure Blob Storage, or Google Cloud Storage — including the default user stage (`@~`) and named stages. No extra Skipprd storage config is required for the normal internal-stage path.
 
 ### Optional: direct external object staging
 
@@ -113,9 +113,9 @@ Snowflake then reads from that URI during `COPY INTO`:
 
 ## Table naming
 
-Skippr namespaces are converted to Snowflake table names by replacing all dots with underscores and lowercasing:
+Skipprd namespaces are converted to Snowflake table names by replacing all dots with underscores and lowercasing:
 
-| Skippr Namespace | Snowflake Table |
+| Skipprd Namespace | Snowflake Table |
 |---|---|
 | `mssql.MyDB.dbo.customers` | `mssql_mydb_dbo_customers` |
 | `s3.events.click_stream` | `s3_events_click_stream` |
@@ -125,13 +125,13 @@ Skippr namespaces are converted to Snowflake table names by replacing all dots w
 Schema DDL runs proactively during pipeline initialisation via the shared schema sync worker (the same mechanism used by Athena):
 
 - `CREATE SCHEMA IF NOT EXISTS` ensures the target schema exists.
-- `CREATE TABLE IF NOT EXISTS` creates tables with columns mapped from the Skippr schema, including structured types (OBJECT, ARRAY, MAP).
+- `CREATE TABLE IF NOT EXISTS` creates tables with columns mapped from the Skipprd schema, including structured types (OBJECT, ARRAY, MAP).
 - Schema evolution: new columns are added via `ALTER TABLE ADD COLUMN IF NOT EXISTS`.
 - DDL operations are serialized per table and use schema-aware caching to avoid redundant DDL when the schema hasn't changed.
 
 ## Type mapping
 
-| Skippr Type | Snowflake Type |
+| Skipprd Type | Snowflake Type |
 |---|---|
 | String | `VARCHAR` |
 | Integer / Long | `NUMBER(38,0)` |
@@ -153,3 +153,13 @@ The Snowflake user needs:
 - `CREATE SCHEMA` on the target database (if the schema doesn't exist)
 - `CREATE TABLE` on the target schema
 - `INSERT`, `SELECT` on target tables
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `Failed to connect: 250001` | Check the `SNOWFLAKE_ACCOUNT` format — use the org-account form (e.g. `MYORG-MYACCOUNT`) or include the region (e.g. `xy12345.us-east-1`) |
+| `Incorrect username or password` | Verify `SNOWFLAKE_USER` and auth env vars |
+| `Insufficient privileges` | Ensure the role has the grants listed above |
+| `390197 — Multi-factor authentication is required` | Switch to key-pair auth — password auth cannot work when MFA is enforced |
+| `openssl: command not found` | Install OpenSSL — on Windows: `winget install OpenSSL`, then restart your terminal |

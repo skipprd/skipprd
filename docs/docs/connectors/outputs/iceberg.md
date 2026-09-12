@@ -1,6 +1,6 @@
 # Iceberg Output
 
-Writes compacted batches to Apache Iceberg tables using a configured catalog (Skippr, Glue, REST, Unity, or Polaris).
+Writes compacted batches to Apache Iceberg tables using a configured catalog (Skipprd, Glue, REST, Unity, or Polaris).
 
 Pair with the [Iceberg schema sink](../schema_sinks/iceberg.md) when catalog DDL should run through `schema_sinks` instead of inline on every write.
 
@@ -19,9 +19,9 @@ data_sinks:
       format: parquet
 ```
 
-### Skippr catalog
+### Skipprd catalog
 
-Skippr-managed Iceberg catalog. Use this for clustered query (Iceberg ∪ live WAL). Create a DynamoDB table for catalog pointers and pass its name here. This MUST NOT be the offset/lease table (`SKIPPR_OFFSET_DYNAMODB_TABLE`).
+Skipprd-managed Iceberg catalog. Use this for clustered query (Iceberg ∪ live WAL). Create a DynamoDB table for catalog pointers and pass its name here. This MUST NOT be the offset/lease table (`SKIPPR_OFFSET_DYNAMODB_TABLE`).
 
 ```yaml
 catalog:
@@ -61,7 +61,7 @@ Unity and Polaris use the same `uri` + `warehouse` shape with optional auth fiel
 | `table_location_prefix` | | Override base path for new tables |
 | `properties` | | Extra Iceberg table properties (map) |
 | `format` | `parquet` | File format for data files |
-| `query_engine` | | Optional Athena query engine for `sde model` / `sde query` |
+| `query_engine` | | Optional Athena query engine |
 
 Iceberg stays Iceberg. Model and query use `query_engine` on this sink. Do not project Iceberg YAML into a separate `Athena:` block.
 

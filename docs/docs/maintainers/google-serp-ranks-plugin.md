@@ -2,7 +2,7 @@
 
 Runtime source plugin: `plugins/data_source/google_serp_ranks/` (`GoogleSerpRanks` / `google_serp_ranks`).
 
-Low-volume Google organic rank tracking for configured target domains via the **Bright Data SERP API** (`POST https://api.brightdata.com/request`). Set `BRIGHTDATA_API_KEY` in the runtime environment (Up Foundry: Secrets Manager `upfoundry/brightdata`). Optional config: `brightdata_zone` (default `serp_api1`). `fetch_backend` in bronze is `brightdata`.
+Low-volume Google organic rank tracking for configured target domains via the **Bright Data SERP API** (`POST https://api.brightdata.com/request`). Set `BRIGHTDATA_API_KEY` in the runtime environment. Optional config: `brightdata_zone` (default `serp_api1`). `fetch_backend` in bronze is `brightdata`.
 
 This is **not** a general SERP harvester: keep query counts small and respect `min_query_interval_ms`. CAPTCHA or consent walls are recorded as `blocked` runs when the API returns them.
 

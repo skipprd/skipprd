@@ -38,3 +38,7 @@ pipelines:
     data_source: data_sources.meta_ads
     data_sink: data_sinks.landing
 ```
+
+## Authentication
+
+Provide a long-lived Marketing API token with ads read access (`META_ADS_ACCESS_TOKEN`) or OAuth refresh fields (`oauth_client_id`, `oauth_client_secret`, `oauth_refresh_token`). Do not commit tokens in git.

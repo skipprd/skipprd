@@ -83,10 +83,26 @@ When the source declares `replace_partition`, Athena deletes the contract partit
 
 ## AWS permissions required
 
-The IAM identity running Skippr needs:
+The IAM identity running Skipprd needs:
 
 - `s3:PutObject`, `s3:CreateMultipartUpload`, `s3:UploadPart`, `s3:CompleteMultipartUpload`, `s3:AbortMultipartUpload` on the output bucket
 - `glue:CreateDatabase`, `glue:GetDatabase` for database management
 - `glue:GetTable`, `glue:GetPartition`, `glue:BatchCreatePartition`, `glue:UpdatePartition` for ingest-time Hive partition registration
 - `glue:GetPartitions`, `glue:DeleteTable`, `glue:CreateTable`, `glue:UpdateTable` for table management and empty-table partition-layout heal
 - `athena:CreateWorkGroup`, `athena:GetWorkGroup`, `athena:UpdateWorkGroup` if using Athena workgroups
+
+## Authentication
+
+Authentication uses the AWS default credential chain.
+
+- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+- IAM roles, instance profiles, or task roles
+- AWS SSO or shared config profiles
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| query or Glue metadata errors | Verify the Glue database name, Athena workgroup settings, and the configured result S3 location. |
+| AccessDenied | Check the AWS credential chain and confirm access to S3, Glue, and Athena resources. |
+| stale GA4 metrics for past dates | Use a source with `replace_partition` and sufficient `lookback_days`; re-run `skipprd sync` |

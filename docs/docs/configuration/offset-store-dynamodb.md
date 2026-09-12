@@ -35,7 +35,7 @@ Environment variables (also available as `skippr.yml` under `skippr:` and as CLI
 
 ```yaml
 skippr:
-  wal_s3_bucket: upfoundry-prod-skipprd-wal
+  wal_s3_bucket: acme-skipprd-wal
   offset_store: dynamodb
   offset_dynamodb_table: console-skipprd-offsets-prod
 ```
@@ -44,7 +44,7 @@ CLI example:
 
 ```bash
 export WAL_STORAGE=s3
-export SKIPPR_WAL_S3_BUCKET=upfoundry-prod-skipprd-wal
+export SKIPPR_WAL_S3_BUCKET=acme-skipprd-wal
 export SKIPPR_OFFSET_STORE=dynamodb
 export SKIPPR_OFFSET_DYNAMODB_TABLE=console-skipprd-offsets-prod
 skipprd sync --once --pipeline google_analytics

@@ -40,3 +40,44 @@ data_sources:
 | `scrape_interval_seconds` | | Polling interval; omit for one-shot |
 | `scrape_timeout_seconds` | `5` | Request timeout |
 | `format` | `json` | Data format |
+
+## Authentication
+
+Authentication is optional and depends on the upstream endpoint. For security best practices, we strongly advise against storing authentication values in `skippr.yml`. Use environment variable interpolation instead: replace the relevant auth field with your own `${ENV_VAR}` reference.
+
+The relevant part of `skippr.yml` looks like this:
+
+```yaml
+data_sources:
+  source:
+    HttpClient:
+      auth_strategy: bearer
+      auth_token: "${HTTP_CLIENT_AUTH_TOKEN}"
+```
+
+Set the env var before running `skipprd`:
+
+macOS / Linux
+
+```bash
+export HTTP_CLIENT_AUTH_TOKEN="your-token"
+```
+
+Windows PowerShell
+
+```powershell
+$env:HTTP_CLIENT_AUTH_TOKEN = "your-token"
+```
+
+Windows Command Prompt
+
+```cmd
+set HTTP_CLIENT_AUTH_TOKEN=your-token
+```
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| 401 or 403 responses | Verify credentials, bearer tokens, and any required request headers. |
+| timeouts or empty responses | Check the endpoint URL, method, timeout settings, and whether the service is rate limiting requests. |

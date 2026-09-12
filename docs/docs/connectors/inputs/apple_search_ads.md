@@ -48,3 +48,28 @@ For short-lived smoke tests you can provide `access_token` instead of client cre
 | `apple_search_ads.keyword_daily` | full |
 | `apple_search_ads.search_term_daily` | full |
 
+## Authentication
+
+Skipprd exchanges an **ES256 JWT** (signed with your Apple API private key) for a short-lived access token at `https://appleid.apple.com/auth/oauth2/token` (`grant_type=client_credentials`, `scope=searchadsorg`).
+
+Required env vars (typical):
+
+- `APPLE_SEARCH_ADS_ORG_ID`
+- `APPLE_SEARCH_ADS_CLIENT_ID`
+- `APPLE_SEARCH_ADS_TEAM_ID`
+- `APPLE_SEARCH_ADS_KEY_ID`
+- `APPLE_SEARCH_ADS_PRIVATE_KEY_PATH`
+
+Optional: `APPLE_SEARCH_ADS_ACCESS_TOKEN` to skip JWT exchange in local debugging.
+
+## Troubleshooting
+
+| Symptom | Fix |
+| --- | --- |
+| Token / 401 errors | Verify `client_id`, `team_id`, `key_id`, and PEM path; regenerate key in Apple Search Ads UI |
+| Empty keyword stream | Confirm campaigns and ad groups exist; check `max_concurrent_requests` and API rate limits |
+| Search term errors | Ensure the plugin sends `ORTZ` (built-in for `search_term_daily`) |
+| Slow discover | Expected — discover only samples 3 days of `campaign_daily`; use `skipprd sync` for full history |
+| Stale metrics | Confirm `replace_partition`; increase `lookback_days` |
+
+Offline dev: set `SKIPPR_APPLE_SEARCH_ADS_FIXTURE_DIR` to JSON fixtures (`campaign_report.json`, `ad_group_report.json`, etc.).

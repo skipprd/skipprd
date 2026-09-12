@@ -33,3 +33,43 @@ data_sources:
 | `private_key_path` | | Path to SSH private key |
 | `remote_path` | *(required)* | Remote file path or glob |
 | `format` | `json` | Data format |
+
+## Authentication
+
+Use either a password or an SSH private key. Prefer private-key auth for long-lived pipelines. For security best practices, we strongly advise against storing the password in `skippr.yml`. Use environment variable interpolation instead: replace the `password` value with your own `${ENV_VAR}` reference.
+
+The relevant part of `skippr.yml` looks like this:
+
+```yaml
+data_sources:
+  source:
+    Sftp:
+      password: "${SFTP_PASSWORD}"
+```
+
+Set the env var before running `skipprd`:
+
+macOS / Linux
+
+```bash
+export SFTP_PASSWORD="secret"
+```
+
+Windows PowerShell
+
+```powershell
+$env:SFTP_PASSWORD = "secret"
+```
+
+Windows Command Prompt
+
+```cmd
+set SFTP_PASSWORD=secret
+```
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| authentication failed | Verify the username, password or private key path, and any host-based access controls. |
+| no files found | Check `remote_path` and confirm the SSH user can list and read that location. |

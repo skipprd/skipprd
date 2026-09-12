@@ -13,17 +13,16 @@ Sampling and PII redaction belong in the Collector. The plugin may apply an extr
 
 New Iceberg tables are identity-partitioned on `hour`, `service_name`, and `tenant_id`. Existing unpartitioned tables stay unpartitioned.
 
-Retention is tenant-managed: `ENABLE` / `DISABLE PIPELINE` plus object-store or Iceberg lifecycle. There is no Skippr TTL product.
+Retention is tenant-managed in the destination (object-store or Iceberg lifecycle). There is no Skipprd TTL product.
 
 ## Process topology
 
-OSS uses **three ingest processes** (one pipeline per signal). Query is on-demand (`sde query` or CloudQuery). There is no observe process.
+OSS uses **three ingest processes** (one pipeline per signal).
 
 ```text
 DATA_DIR=/data/traces skipprd sync --pipeline otel-traces
 DATA_DIR=/data/logs   skipprd sync --pipeline otel-logs
 DATA_DIR=/data/metrics skipprd sync --pipeline otel-metrics
-sde query
 ```
 
 Listen ports must not collide (see the example YAML).
@@ -38,13 +37,6 @@ data_sources:
       listen_address_http: "0.0.0.0:4318"
       signals: [traces]
       auth_token: "secret"
-```
-
-```bash
-sde connect source otlp \
-  --listen-address-grpc 0.0.0.0:4317 \
-  --listen-address-http 0.0.0.0:4318 \
-  --signals traces
 ```
 
 Full three-pipeline example: [`examples/otel/skippr.yml`](../../../examples/otel/skippr.yml). Collector exporters: [`examples/otel/collector.yaml`](../../../examples/otel/collector.yaml).
@@ -71,6 +63,5 @@ SQL catalog schema is the pipeline name (quote hyphens): `"otel-traces".spans`.
 
 ## Related
 
-- [Observability UDFs](../../query/observability-udfs.md)
 - [Iceberg output](../outputs/iceberg.md)
 - [HTTP Server](http_server.md)

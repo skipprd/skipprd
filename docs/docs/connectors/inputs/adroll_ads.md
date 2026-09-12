@@ -39,3 +39,7 @@ pipelines:
     data_source: data_sources.adroll
     data_sink: data_sinks.landing
 ```
+
+## Authentication
+
+Provide an AdRoll personal access token (`ADROLL_PAT`) or OAuth refresh fields. The token must be able to read the advertiser EID in `advertiser_id`.

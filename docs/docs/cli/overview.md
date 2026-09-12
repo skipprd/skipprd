@@ -1,29 +1,19 @@
-# CLI Overview
+# CLI
 
-This repository is the **`skipprd`** engine. The Cloud CLI `skippr` is a different product. Data Engineer commands live in **`sde`**.
+Skipprd is the engine binary. The public commands are `discover`, `schema`, and `sync`.
 
-`sde discover` and `sde sync` invoke `skipprd` on PATH. Engine maintainers run `skipprd` directly.
+## Commands
 
-## `skipprd`
+| Command | Job |
+|---|---|
+| [`discover`](discover.md) | Infer source schema. Does not write to the destination. |
+| [`schema`](schema.md) | Print the discovered schema. |
+| [`sync`](sync.md) | Ingest through the WAL into the configured sink. |
 
-- `skipprd discover`
-- `skipprd sync`
-- `skipprd metadata`
-- engine SQL and schema dump for plugin testing
+All commands read `skippr.yml` in the working directory, or `--config path/to/skippr.yml`.
 
-## `sde`
-
-Install from [skipprd/sde](https://github.com/skipprd/sde). Docs: [data-engineer.skippr.io](https://data-engineer.skippr.io).
-
-- `sde init`
-- `sde connect source ...`
-- `sde connect warehouse ...`
-- `sde discover` (invokes `skipprd`)
-- `sde sync` (invokes `skipprd`)
-- `sde model`
-- `sde query`
-- `sde dbt`
-- `sde test`
-- `sde vector`
-- `sde agent` (alias: `sde chat`)
-- `sde doctor`
+```bash
+skipprd discover --pipeline bikehire --log
+skipprd schema --pipeline bikehire
+skipprd sync --pipeline bikehire --once --log
+```

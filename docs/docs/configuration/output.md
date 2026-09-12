@@ -64,7 +64,7 @@ The output uses the standard AWS credential chain, same as the input. Both the o
 
 ## File output
 
-For local development, Skippr also supports writing Parquet to local disk:
+For local development, Skipprd also supports writing Parquet to local disk:
 
 | Variable | Default | Description |
 |---|---|---|

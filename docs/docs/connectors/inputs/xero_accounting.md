@@ -41,3 +41,7 @@ pipelines:
 ```
 
 Incremental sync uses `UpdatedDateUTC` checkpoints per stream.
+
+## Authentication
+
+Xero uses OAuth refresh: `oauth_client_id`, `oauth_client_secret`, and `oauth_refresh_token` (`XERO_CLIENT_ID`, `XERO_CLIENT_SECRET`, `XERO_REFRESH_TOKEN`). `tenant_id` is the organisation tenant. A short-lived `access_token` is optional for a single run.

@@ -31,3 +31,45 @@ data_sinks:
 | `database` | | MotherDuck database name |
 | `table` | (from namespace) | Target table name |
 | `format` | `json` | Data format |
+
+## Authentication
+
+Configure `motherduck_token` directly when you connect the warehouse or in `skippr.yml`.
+
+For security best practices, we strongly advise against storing the token in `skippr.yml`. Use environment variable interpolation instead: replace the `motherduck_token` value with your own `${ENV_VAR}` reference.
+
+The relevant part of `skippr.yml` looks like this:
+
+```yaml
+data_sinks:
+  warehouse:
+    Motherduck:
+      motherduck_token: "${MOTHERDUCK_TOKEN}"
+```
+
+Set the env var before running `skipprd`:
+
+macOS / Linux
+
+```bash
+export MOTHERDUCK_TOKEN="md:..."
+```
+
+Windows PowerShell
+
+```powershell
+$env:MOTHERDUCK_TOKEN = "md:..."
+```
+
+Windows Command Prompt
+
+```cmd
+set MOTHERDUCK_TOKEN=md:...
+```
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| authentication failed | Verify the configured MotherDuck token and confirm it still has access to the selected database. |
+| schema errors | Check the database and schema names and confirm the token can create or write objects there. |

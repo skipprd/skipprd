@@ -30,3 +30,47 @@ data_sources:
 | `query` | | Custom SQL query (overrides tables) |
 | `batch_size_rows` | `10000` | Rows per ingest batch |
 | `format` | `json` | Data format |
+
+## Authentication
+
+For security best practices, we strongly advise against storing the token in `skippr.yml`. Use environment variable interpolation instead: replace the `motherduck_token` value with your own `${ENV_VAR}` reference.
+
+The relevant part of `skippr.yml` looks like this:
+
+```yaml
+data_sources:
+  source:
+    Motherduck:
+      motherduck_token: "${MOTHERDUCK_TOKEN}"
+```
+
+Set the env var before running `skipprd`:
+
+macOS / Linux
+
+```bash
+export MOTHERDUCK_TOKEN="md:..."
+```
+
+Windows PowerShell
+
+```powershell
+$env:MOTHERDUCK_TOKEN = "md:..."
+```
+
+Windows Command Prompt
+
+```cmd
+set MOTHERDUCK_TOKEN=md:...
+```
+
+```bash
+export MOTHERDUCK_TOKEN="md:..."
+```
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| authentication failed | Verify `MOTHERDUCK_TOKEN` and confirm the token still has access to the selected database. |
+| tables not found | Check the database name and table list or query. |

@@ -34,3 +34,18 @@ data_sources:
 | `query` | | Custom SQL query |
 | `region` | | AWS region |
 | `format` | `json` | Data format |
+
+## Authentication
+
+Authentication uses the AWS default credential chain.
+
+- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+- IAM roles, instance profiles, or task roles
+- AWS SSO or shared config profiles
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| authentication or API errors | Verify the AWS credential chain, region, and cluster or workgroup identifiers. |
+| query returns no rows | Check the selected tables and confirm the database user can read them. |

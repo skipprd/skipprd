@@ -51,6 +51,35 @@ data_sinks:
 | `POSTGRES_SSLMODE` | | Libpq-style SSL mode (e.g. `disable`, `require`, `prefer`) |
 | `host`, `port`, `user`, `password`, `database`, `schema`, `sslmode`, `format` | | YAML equivalents / overrides |
 
-`sde query` and `sde model` use the same `Postgres:` sink fields (`host`, `port`, `user`, `password`, `database`, `schema`). There is no separate warehouse block.
-
 Connection parameters can be split between environment variables and YAML as supported by your pipeline configuration.
+
+## Authentication
+
+Authentication uses environment variables. Credentials are never stored in the config file.
+
+| Variable | Default | Description |
+|---|---|---|
+| `POSTGRES_HOST` | `localhost` | PostgreSQL host |
+| `POSTGRES_PORT` | `5432` | PostgreSQL port |
+| `POSTGRES_USER` | | Database user |
+| `POSTGRES_PASSWORD` | | Database password |
+| `POSTGRES_DATABASE` | | Database name (overrides config file) |
+| `POSTGRES_SCHEMA` | `public` | Target schema (overrides config file) |
+| `POSTGRES_SSLMODE` | | SSL mode (e.g. `disable`, `require`, `prefer`) |
+
+### Example
+
+```bash
+export POSTGRES_HOST="localhost"
+export POSTGRES_USER="myuser"
+export POSTGRES_PASSWORD="mypassword"
+```
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| `connection refused` | Check `POSTGRES_HOST` and `POSTGRES_PORT` are correct and the server is running |
+| `password authentication failed` | Verify `POSTGRES_USER` and `POSTGRES_PASSWORD` |
+| `database "..." does not exist` | Create the database first, or check the `database` field in config |
+| SSL errors | Set `POSTGRES_SSLMODE=disable` for local development |

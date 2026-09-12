@@ -53,7 +53,7 @@ Optional `transform.namespace_fields` can still fan out records from field value
 
 ## Type mapping
 
-| DynamoDB Attribute | Skippr Type |
+| DynamoDB Attribute | Skipprd Type |
 |---|---|
 | `S` (String) | String |
 | `N` (Number) | Number |
@@ -64,3 +64,18 @@ Optional `transform.namespace_fields` can still fan out records from field value
 | `B` (Binary) | Base64 String |
 | `SS` (String Set) | String Set |
 | `NS` (Number Set) | Number Set |
+
+## Authentication
+
+Authentication uses the AWS default credential chain.
+
+- `AWS_ACCESS_KEY_ID` and `AWS_SECRET_ACCESS_KEY`
+- IAM roles, instance profiles, or task roles
+- AWS SSO or shared config profiles
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| AccessDenied or UnrecognizedClient | Verify the AWS credential chain and that the caller has access to the table and region. |
+| no items returned | Check `table_name`, region, and any custom endpoint settings such as LocalStack. |

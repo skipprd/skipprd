@@ -37,6 +37,9 @@ _bak
 data
 docs/site
 docs/public-docs
+docs/node_modules
+docs/.vitepress/dist
+docs/.vitepress/cache
 logs
 .skippr/local-runtime-plugins/
 __pycache__/

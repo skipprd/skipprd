@@ -126,24 +126,17 @@ Do not combine `--runtime-plugin-version` with `--local-runtime-manifest-dir`; t
 
 ## Docs preview
 
-The docs config lives at `docs/mkdocs.yml` and the source markdown lives at `docs/docs/`.
-
-If MkDocs Material is not installed yet, create a small virtualenv and install it there:
+Markdown lives at `docs/docs/`. VitePress config is `docs/.vitepress/config.mjs`.
 
 ```bash
-python3 -m venv .venv-docs
-source .venv-docs/bin/activate
-python3 -m pip install mkdocs-material
+npm --prefix docs ci
+npm --prefix docs run dev
 ```
 
-Preview locally:
+Build the site that publishes to elt.skippr.io:
 
 ```bash
-mkdocs serve -f docs/mkdocs.yml
+npm --prefix docs run build
 ```
 
-Build the generated site:
-
-```bash
-mkdocs build -f docs/mkdocs.yml --strict
-```
+Maintainer-only notes under `docs/docs/maintainers/` are excluded from the public build.

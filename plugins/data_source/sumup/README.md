@@ -18,7 +18,7 @@ SumUp:
     - health
   privacy:
     mode: profile
-    profile: upfoundry_safe
+    profile: passthrough
     on_violation: drop
   oauth_token_url: "https://api.sumup.com/token"
   oauth_client_id: "${SUMUP_OAUTH_CLIENT_ID}"
@@ -28,7 +28,7 @@ SumUp:
 
 ## Privacy
 
-Customer and merchant PII (email, name, phone, address, cardholder, receipt, metadata, business_name) is stripped under `upfoundry_safe`. Raw source envelopes store only a SHA-256 hash of the redacted canonical JSON.
+Customer and merchant PII (email, name, phone, address, cardholder, receipt, metadata, business_name) is stripped when a strict privacy profile is enabled. Raw source envelopes store only a SHA-256 hash of the redacted canonical JSON.
 
 ## Tests
 

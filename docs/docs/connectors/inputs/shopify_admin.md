@@ -38,3 +38,7 @@ pipelines:
     data_source: data_sources.shopify
     data_sink: data_sinks.landing
 ```
+
+## Authentication
+
+Use a custom app Admin API access token (`SHOPIFY_ACCESS_TOKEN`). Optional `oauth_client_id` / `oauth_client_secret` apply when you mint tokens yourself. The token needs read access to orders and products for the selected streams.

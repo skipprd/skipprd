@@ -24,3 +24,14 @@ data_sources:
 |---|---|---|
 | `listen_address` | `0.0.0.0:8125` | UDP address to listen on |
 | `format` | `json` | Data format |
+
+## Authentication
+
+No connector-specific authentication is required.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| port already in use | Choose a different listen address or stop the process currently using that UDP port. |
+| metrics are missing | Check sender configuration, network reachability, and any host firewall rules blocking UDP traffic. |

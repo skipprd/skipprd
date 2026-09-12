@@ -28,3 +28,43 @@ data_sinks:
 | `routing_key` | `""` | Routing key |
 | `exchange_type` | `direct` | Exchange type (direct, fanout, topic, headers) |
 | `format` | `json` | Data format |
+
+## Authentication
+
+Authentication is provided through the AMQP connection URI. For security best practices, we strongly advise against storing the connection string in `skippr.yml`. Use environment variable interpolation instead: replace the `connection_string` value with your own `${ENV_VAR}` reference.
+
+The relevant part of `skippr.yml` looks like this:
+
+```yaml
+data_sinks:
+  warehouse:
+    Amqp:
+      connection_string: "${AMQP_CONNECTION_STRING}"
+```
+
+Set the env var before running `skipprd`:
+
+macOS / Linux
+
+```bash
+export AMQP_CONNECTION_STRING="amqp://guest:guest@localhost:5672"
+```
+
+Windows PowerShell
+
+```powershell
+$env:AMQP_CONNECTION_STRING = "amqp://guest:guest@localhost:5672"
+```
+
+Windows Command Prompt
+
+```cmd
+set AMQP_CONNECTION_STRING=amqp://guest:guest@localhost:5672
+```
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| authentication or connection failures | Verify the AMQP URI, broker hostname, port, and vhost permissions. |
+| messages are not routed | Check the exchange name, exchange type, routing key, and downstream bindings. |

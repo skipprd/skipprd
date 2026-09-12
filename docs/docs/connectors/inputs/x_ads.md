@@ -43,3 +43,7 @@ pipelines:
     data_source: data_sources.x_ads
     data_sink: data_sinks.landing
 ```
+
+## Authentication
+
+X Ads accepts OAuth 1.0a (`oauth_consumer_key`, `oauth_consumer_secret`, `oauth_token`, `oauth_token_secret`) or a bearer `access_token`. Store those values in the environment.

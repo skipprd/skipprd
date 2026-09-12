@@ -1,18 +1,24 @@
+---
+title: "Quick Start: S3 to Athena"
+description: Ingest JSON from S3 into Athena-queryable Parquet with Skipprd discover and Skipprd sync.
+---
+
 # Quick Start: S3 to Athena
 
-This guide walks through ingesting JSON data from S3 into Athena-queryable Parquet tables in under 5 minutes.
+Load public sample JSON from S3 into Parquet that Athena can query. The engine infers schema, writes through the WAL, and registers Glue tables.
 
-## 1. Install Skippr
+## Prerequisites
+
+- `skipprd` on `PATH` ([Install](install.md))
+- AWS credentials that can read the sample bucket and write your output bucket, plus Glue and Athena in the same region
 
 ```bash
-curl -sL "https://raw.githubusercontent.com/skipprd/skipprd/main/install.sh" | sudo bash
+export AWS_ACCESS_KEY_ID="your-key"
+export AWS_SECRET_ACCESS_KEY="your-secret"
+export AWS_DEFAULT_REGION="us-east-1"
 ```
 
-The install script places `skippr` on your machine. Runtime source, sink, and schema plugins are downloaded automatically the first time the pipeline needs them.
-
-## 2. Create `skippr.yml`
-
-Create a project file in your working directory:
+## skippr.yml
 
 ```yaml
 skippr:
@@ -46,65 +52,30 @@ schema_sinks:
       glue_database_name: skippr_quickstart
 ```
 
-Set AWS credentials through the normal AWS environment or instance role:
-
-```bash
-export AWS_ACCESS_KEY_ID="your-key"
-export AWS_SECRET_ACCESS_KEY="your-secret"
-export AWS_DEFAULT_REGION="us-east-1"
-```
-
-## 3. Discover the schema
-
-Skippr connects to the source, samples records, and infers the full nested schema:
+## Discover, schema, sync
 
 ```bash
 skipprd discover --pipeline bikehire --log
+skipprd schema --pipeline bikehire
+skipprd sync --pipeline bikehire --once --log
 ```
 
-You'll see output showing discovered namespaces and fields. The schema is persisted to S3 as pipeline metadata.
+After sync, query the Glue/Athena table in Athena.
 
-## 4. Enable and sync
+Sync logs to watch:
 
-Enable the pipeline, then run sync to ingest data:
+- `Resolving runtime ... plugin ... from published registry` — first-use plugin download
+- `Uploaded ...parquet to S3` — data landing
+- `Pipeline sync complete` — the pass finished
 
-```bash
-skipprd query --sql "ENABLE PIPELINE bikehire"
-skipprd sync --pipeline bikehire --log
-```
+## Troubleshooting
 
-Sync reads from the source, buffers through the WAL, compacts into Parquet, uploads to S3, and registers Glue partitions. Watch the logs for:
+- **Glue / Athena access denied** — the principal needs `glue:CreateTable` (and related) on `skippr_quickstart` plus S3 write on `your-output-bucket`.
+- **Empty table in Athena** — confirm `--once` completed without deadletters, then query in Athena.
+- **Wrong region** — `AWS_DEFAULT_REGION` must match the buckets and Glue catalog.
 
-- `Resolving runtime ... plugin ... from published registry` — plugin discovery and download on first use
-- `Uploaded ...parquet to S3 (rows=..., bytes=...)` — data landing
-- `Pipeline sync complete` — run finished successfully
+## Next
 
-## 5. Query the data
-
-```bash
-skipprd query --sql "SELECT COUNT(*) FROM bikehire"
-```
-
-Your data is now in Athena. You can also query directly from the AWS Athena console.
-
-## Engine-only equivalent
-
-The lightweight `skipprd` binary can run the same engine commands against the same `skippr.yml`:
-
-```bash
-skipprd --config skippr.yml discover --pipeline bikehire --log
-skipprd --config skippr.yml sync --pipeline bikehire --log
-```
-
-## What just happened?
-
-1. **discover** — connected to the S3 source, sampled JSON records, inferred the nested schema (types, field names, nesting), and saved it as pipeline metadata
-2. **sync** — ingested all records through the WAL, compacted them into Snappy-compressed Parquet, uploaded to `s3://your-output-bucket/data/bikehire/`, created a Glue database and table with the discovered schema, and registered Hive-style time partitions
-3. **query** — executed SQL against the Glue catalog via Athena
-
-## Next steps
-
-- [How Skippr Works](../concepts/how-it-works.md) — pipeline lifecycle, WAL, compaction
-- [skippr.yml Reference](../configuration/skippr-yml.md) — canonical project config
-- [CLI Reference](../cli/overview.md) — command flags and binary choices
-- [SQL Reference](../sql/reference.md) — all supported SQL statements
+- [Pipeline flow](how-it-works.md)
+- [Athena sink](/connectors/outputs/athena)
+- [S3 source](/connectors/inputs/s3)

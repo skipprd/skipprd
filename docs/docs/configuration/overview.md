@@ -1,6 +1,6 @@
 # Configuration Overview
 
-Skippr is configured primarily with `skippr.yml`. Environment variables are still supported for secrets, deployment overrides, and backwards-compatible engine configuration.
+Skipprd is configured primarily with `skippr.yml`. Environment variables are still supported for secrets, deployment overrides, and backwards-compatible engine configuration.
 
 Start with:
 
@@ -8,7 +8,7 @@ Start with:
 - [Input Source](input.md) for `data_sources`
 - [Output Destination](output.md) for ingest `data_sinks` and `schema_sinks`
 
-`skipprd discover` / `skipprd sync` run the engine against this file. `sde model` / `sde query` compile `data_sinks` in memory. There is no separate `warehouses:` dialect. The Cloud CLI `skippr` is not this product.
+`skipprd discover` / `skipprd schema` / `skipprd sync` run the engine against this file. There is no separate `warehouses:` dialect.
 
 ## Environment overrides
 
@@ -45,9 +45,9 @@ Start with:
 | `WAL_STORAGE` | `disk` | [Buffering](buffering.md) | WAL backend: `disk`, `s3`, or `clustered` |
 | `WAL_BYTES_PER_FILE` | auto | [Buffering](buffering.md) | Optional WAL segment size override |
 | `WAL_MAX_DELAY_SECONDS` | `60` | [Buffering](buffering.md) | Coarse max WAL segment age before flush |
-| **Skippr state** | | | |
+| **Skipprd state** | | | |
 | `SKIPPR_S3_BUCKET` | | [Advanced](advanced.md) | S3 bucket for metadata, offsets, WAL (when S3), deadletters |
-| `SKIPPRD_EL_STORAGE_MODE` | `s3` | [Advanced](advanced.md) | Internal skipprd EL metadata and stats persistence: `s3` (default) or `local` |
+| `SKIPPRD_EL_STORAGE_MODE` | `s3` | [Advanced](advanced.md) | Internal Skipprd EL metadata and stats persistence: `s3` (default) or `local` |
 | `DATA_DIR` | `./data` | [Advanced](advanced.md) | Local directory for WAL segments and offsets DB |
 | **Operational** | | | |
 | `SKIPPR_CHAOS_MODE` | `no` | [Advanced](advanced.md) | Enable chaos mode (random SIGKILL for testing) |

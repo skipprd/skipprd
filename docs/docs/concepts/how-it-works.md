@@ -1,6 +1,6 @@
-# How Skippr Works
+# How Skipprd works
 
-Skippr is a host binary plus a published runtime plugin system. The host orchestrates discovery, sync, WAL recovery, compaction, and schema state, while runtime source, sink, and schema plugins are resolved from published manifests or explicit local overrides.
+Skipprd is a host binary plus a published runtime plugin system. The host orchestrates discovery, sync, WAL recovery, compaction, and schema state. Runtime source, sink, and schema plugins resolve from published manifests or explicit local overrides.
 
 ## Pipeline lifecycle
 
@@ -37,13 +37,13 @@ The main ingestion loop:
 
 On shutdown or crash recovery, the host replays from committed WAL state.
 
-### 3. Query
+### 3. Inspect schema, then query the warehouse
 
 ```bash
-skipprd query --sql "SELECT * FROM my_pipeline LIMIT 10"
+skipprd schema --pipeline my_pipeline
 ```
 
-Runs SQL against destination tables. On clustered Iceberg pipelines this is Skippr SQL over the Datalake (Iceberg tables plus live WAL). Athena remains available for warehouse destinations. Also supports pipeline management commands (`ENABLE PIPELINE`, `DROP PIPELINE`, `RESET PIPELINE`, etc.) and live streaming from the WAL (`STREAM ... FROM ...`).
+Prints the discovered contract. After `sync`, run SQL in the destination (Snowflake, Athena, PostgreSQL, BigQuery).
 
 ## Key components
 
@@ -53,7 +53,7 @@ Every ingested record is first written to the WAL before downstream compaction a
 
 - **Local disk WAL** (`WAL_STORAGE=disk`) — segments written under `DATA_DIR`
 - **S3 WAL** (`WAL_STORAGE=s3`) — segments written to `SKIPPR_S3_BUCKET`
-- **Clustered disk WAL** (`WAL_STORAGE=clustered`) — local segments plus one synchronous replica, lease and offsets in DynamoDB (self-hosted) or Cloud **tables**. Iceberg is the cold query path for Iceberg sinks; live WAL is unioned in-process with that Iceberg snapshot over Arrow Flight SQL 58.3 and Ballista 53 ([Datalake](datalake.md), [maintainer spec](../maintainers/hla-flight-sql-ballista.md)).
+- **Clustered disk WAL** (`WAL_STORAGE=clustered`) — local segments plus one synchronous replica. Iceberg is the cold query path for Iceberg sinks; live WAL is unioned in-process with that Iceberg snapshot ([Datalake](datalake.md)).
 
 ### Compactor
 
