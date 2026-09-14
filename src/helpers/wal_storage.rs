@@ -83,10 +83,13 @@ impl FromStr for OffsetStoreKind {
     type Err = ConfigError;
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
-        match raw.trim().to_ascii_lowercase().as_str() {
+        let raw = raw.trim().to_ascii_lowercase();
+        if skippr_iceberg_catalog::offset_store_is_cloud_tables(&raw) {
+            return Ok(Self::CloudTables);
+        }
+        match raw.as_str() {
             "" | "sled" => Ok(Self::Sled),
             "dynamodb" => Ok(Self::DynamoDb),
-            "cloud-tables" | "cloud_tables" | "tables" => Ok(Self::CloudTables),
             other => Err(ConfigError::InvalidOffsetStore(other.to_owned())),
         }
     }
@@ -104,7 +107,7 @@ pub enum ConfigError {
     ClusteredTableMissing,
     #[error("SKIPPR_OFFSET_STORE=cloud-tables requires CLOUD_TABLES_ENDPOINT (mesh/loopback, not *.cloud.skippr.io)")]
     CloudTablesEndpointMissing,
-    #[error("SKIPPR_OFFSET_STORE=cloud-tables requires GuestCredentialBroker (CLOUD_SYSTEM_BROKER_CONFIG)")]
+    #[error("Cloud Tables offset store requires SDK default credentials")]
     CloudTablesAuthMissing,
     #[error("WAL_STORAGE=clustered requires SKIPPR_CLUSTER_ID")]
     ClusterIdMissing,
@@ -190,6 +193,26 @@ mod tests {
         assert!(
             offenders.is_empty(),
             "WAL_STORAGE must be matched as WalStorage, found: {offenders:?}"
+        );
+    }
+
+    #[test]
+    fn cloud_tables_offset_store_aliases_parse() {
+        assert_eq!(
+            "cloud-tables".parse::<OffsetStoreKind>().unwrap(),
+            OffsetStoreKind::CloudTables
+        );
+        assert_eq!(
+            "tables".parse::<OffsetStoreKind>().unwrap(),
+            OffsetStoreKind::CloudTables
+        );
+        assert_eq!(
+            "CLOUD_TABLES".parse::<OffsetStoreKind>().unwrap(),
+            OffsetStoreKind::CloudTables
+        );
+        assert_eq!(
+            "dynamodb".parse::<OffsetStoreKind>().unwrap(),
+            OffsetStoreKind::DynamoDb
         );
     }
 }

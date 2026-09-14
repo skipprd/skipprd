@@ -28,7 +28,7 @@ aws-config = "1.5.1"
 aws-sdk-s3 = "1.32.0"
 skippr-iceberg-catalog = { path = "../../../crates/skippr-iceberg-catalog" }
 skippr-iceberg-catalog-dynamodb = { path = "../../../crates/skippr-iceberg-catalog-dynamodb" }
-skippr-store-cloud-tables = { path = "../../../crates/skippr-store-cloud-tables" }
+skippr-iceberg-catalog-cloud-tables = { path = "../../../crates/skippr-iceberg-catalog-cloud-tables" }
 iceberg = "0.9.1"
 iceberg-catalog-glue = "0.9.1"
 

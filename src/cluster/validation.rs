@@ -59,7 +59,7 @@ fn cloud_tables_endpoint_configured() -> bool {
     #[cfg(feature = "offset-store-cloud-tables")]
     {
         let endpoint = std::env::var("CLOUD_TABLES_ENDPOINT").unwrap_or_default();
-        return skippr_tables_client::parse_tables_endpoint(&endpoint).is_ok();
+        return skippr_cloud::parse_tables_endpoint(&endpoint).is_ok();
     }
     #[cfg(not(feature = "offset-store-cloud-tables"))]
     false
@@ -68,7 +68,10 @@ fn cloud_tables_endpoint_configured() -> bool {
 fn cloud_tables_auth_configured() -> bool {
     #[cfg(feature = "offset-store-cloud-tables")]
     {
-        return skippr_tables_client::mesh_auth_configured();
+        return matches!(
+            skippr_cloud::Credential::from_env(),
+            Ok(skippr_cloud::Credential::Workload(_))
+        );
     }
     #[cfg(not(feature = "offset-store-cloud-tables"))]
     false
@@ -98,7 +101,19 @@ pub fn validate_clustered_backend(
 ) -> Result<OffsetStoreKind, ConfigError> {
     match storage {
         WalStorage::Disk | WalStorage::S3 => {
-            Ok(configured_offset_store.unwrap_or(OffsetStoreKind::Sled))
+            let kind = configured_offset_store.unwrap_or(OffsetStoreKind::Sled);
+            if kind == OffsetStoreKind::CloudTables {
+                if !cloud_tables_feature_enabled() {
+                    return Err(ConfigError::ClusteredFeatureMissing);
+                }
+                if !cloud_tables_endpoint_configured() {
+                    return Err(ConfigError::CloudTablesEndpointMissing);
+                }
+                if !cloud_tables_auth_configured() {
+                    return Err(ConfigError::CloudTablesAuthMissing);
+                }
+            }
+            Ok(kind)
         }
         WalStorage::Clustered => {
             if !dynamodb_feature_enabled() && !cloud_tables_feature_enabled() {
@@ -181,14 +196,22 @@ pub fn validate_skippr_catalog_tables(
     Ok(())
 }
 
+fn validate_configured_offset_store(storage: WalStorage) -> Result<OffsetStoreKind, ConfigError> {
+    let table = Config::get_offset_dynamodb_table();
+    let configured = Config::configured_offset_store()?;
+    validate_clustered_backend(storage, configured, &table)
+}
+
 pub fn validate_clustered_cli(storage: WalStorage, mode: CliModeKind) -> Result<(), ConfigError> {
     validate_wal_storage_for_mode(storage, mode)?;
     match storage {
-        WalStorage::Disk | WalStorage::S3 => Ok(()),
+        WalStorage::Disk | WalStorage::S3 => {
+            validate_configured_offset_store(storage)?;
+            Ok(())
+        }
         WalStorage::Clustered => {
             let table = Config::get_offset_dynamodb_table();
-            let configured = Config::configured_offset_store()?;
-            validate_clustered_backend(storage, configured, &table)?;
+            validate_configured_offset_store(storage)?;
             validate_skippr_catalog_tables(&Config::get(), &table)?;
             if matches!(mode, CliModeKind::Sync { once: false }) {
                 let config = Config::get();
@@ -207,11 +230,13 @@ pub fn validate_clustered_mode(
 ) -> Result<Option<ClusterConfig>, ConfigError> {
     validate_wal_storage_for_mode(storage, mode)?;
     match storage {
-        WalStorage::Disk | WalStorage::S3 => Ok(None),
+        WalStorage::Disk | WalStorage::S3 => {
+            validate_configured_offset_store(storage)?;
+            Ok(None)
+        }
         WalStorage::Clustered => {
             let table = Config::get_offset_dynamodb_table();
-            let configured = Config::configured_offset_store()?;
-            validate_clustered_backend(storage, configured, &table)?;
+            validate_configured_offset_store(storage)?;
             validate_skippr_catalog_tables(&Config::get(), &table)?;
             let lock_data_dir = !matches!(mode, CliModeKind::Query | CliModeKind::SqlHelp);
             let config = Config::get();
@@ -297,6 +322,9 @@ mod tests {
 
     #[test]
     fn clustered_cli_validation_does_not_require_data_dir_lock() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("SKIPPR_OFFSET_STORE");
+        Config::set_offset_store("");
         assert!(
             validate_clustered_cli(WalStorage::Disk, CliModeKind::Sync { once: false }).is_ok()
         );
@@ -388,6 +416,43 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "offset-store-cloud-tables")]
+    #[test]
+    fn disk_cloud_tables_rejects_guest_held_bearer() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CLOUD_SYSTEM_BROKER_CONFIG");
+        std::env::remove_var("CLOUD_BEARER_TOKEN");
+        std::env::remove_var("CLOUD_ACCESS_KEY_ID");
+        std::env::set_var("CLOUD_TABLES_ENDPOINT", "http://127.0.0.1:8003");
+        std::env::set_var("CLOUD_BEARER_TOKEN", "guest-held-jwt");
+        let err = validate_clustered_backend(
+            WalStorage::Disk,
+            Some(OffsetStoreKind::CloudTables),
+            "offsets",
+        )
+        .unwrap_err();
+        std::env::remove_var("CLOUD_TABLES_ENDPOINT");
+        std::env::remove_var("CLOUD_BEARER_TOKEN");
+        assert_eq!(err, ConfigError::CloudTablesAuthMissing);
+    }
+
+    #[cfg(feature = "offset-store-cloud-tables")]
+    #[test]
+    fn disk_cli_rejects_cloud_tables_without_workload() {
+        let _lock = ENV_LOCK.lock().unwrap();
+        std::env::remove_var("CLOUD_SYSTEM_BROKER_CONFIG");
+        std::env::remove_var("CLOUD_ACCESS_KEY_ID");
+        Config::set_offset_store("cloud-tables");
+        std::env::set_var("CLOUD_TABLES_ENDPOINT", "http://127.0.0.1:8003");
+        std::env::set_var("CLOUD_BEARER_TOKEN", "guest-held-jwt");
+        let err = validate_clustered_cli(WalStorage::Disk, CliModeKind::Query).unwrap_err();
+        Config::set_offset_store("");
+        std::env::remove_var("SKIPPR_OFFSET_STORE");
+        std::env::remove_var("CLOUD_TABLES_ENDPOINT");
+        std::env::remove_var("CLOUD_BEARER_TOKEN");
+        assert_eq!(err, ConfigError::CloudTablesAuthMissing);
+    }
+
     fn iceberg_skippr_sink(table: &str) -> crate::helpers::plugin_config::DataSinkEntry {
         crate::helpers::plugin_config::DataSinkEntry {
             config: crate::helpers::plugin_config::PluginConfigEntry {
@@ -428,7 +493,10 @@ mod tests {
         let _lock = ENV_LOCK.lock().unwrap();
         std::env::remove_var("CLOUD_SYSTEM_BROKER_CONFIG");
         std::env::remove_var("CLOUD_SYSTEM_BROKER_ENDPOINT");
+        std::env::remove_var("CLOUD_ACCESS_KEY_ID");
+        std::env::remove_var("CLOUD_OPERATOR_ACCESS_KEY_ID");
         std::env::set_var("CLOUD_TABLES_ENDPOINT", "http://127.0.0.1:8003");
+        std::env::set_var("CLOUD_BEARER_TOKEN", "guest-held-jwt");
         std::env::set_var("CLOUD_TABLES_ACCESS_TOKEN", "guest-held-jwt");
         std::env::set_var("CLOUD_ACCESS_TOKEN", "guest-held-jwt");
         let err = validate_clustered_backend(
@@ -438,6 +506,7 @@ mod tests {
         )
         .unwrap_err();
         std::env::remove_var("CLOUD_TABLES_ENDPOINT");
+        std::env::remove_var("CLOUD_BEARER_TOKEN");
         std::env::remove_var("CLOUD_TABLES_ACCESS_TOKEN");
         std::env::remove_var("CLOUD_ACCESS_TOKEN");
         assert_eq!(err, ConfigError::CloudTablesAuthMissing);
@@ -447,8 +516,12 @@ mod tests {
             "auth error must not name guest-held JWTs, got {msg}"
         );
         assert!(
-            msg.contains("CLOUD_SYSTEM_BROKER_CONFIG"),
-            "auth error must name the broker config drive, got {msg}"
+            msg.contains("SDK default credentials"),
+            "auth error must name SDK default credentials, got {msg}"
+        );
+        assert!(
+            !msg.contains("GuestCredentialBroker"),
+            "auth error must not name GuestCredentialBroker, got {msg}"
         );
         assert!(
             !msg.contains("CLOUD_TABLES_ENDPOINT"),
@@ -476,10 +549,7 @@ mod tests {
     #[test]
     fn cloud_tables_accepts_broker_config_drive() {
         let _lock = ENV_LOCK.lock().unwrap();
-        let dir = std::env::temp_dir().join(format!(
-            "skipprd-broker-ok-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("skipprd-broker-ok-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
             dir.join("broker.json"),
@@ -498,6 +568,9 @@ mod tests {
         std::env::set_var("CLOUD_SYSTEM_BROKER_CONFIG", &dir);
         std::env::remove_var("CLOUD_TABLES_ACCESS_TOKEN");
         std::env::remove_var("CLOUD_ACCESS_TOKEN");
+        std::env::remove_var("CLOUD_BEARER_TOKEN");
+        std::env::remove_var("CLOUD_ACCESS_KEY_ID");
+        std::env::remove_var("CLOUD_OPERATOR_ACCESS_KEY_ID");
         let kind = validate_clustered_backend(
             WalStorage::Clustered,
             Some(OffsetStoreKind::CloudTables),

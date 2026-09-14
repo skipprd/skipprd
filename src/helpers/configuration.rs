@@ -490,6 +490,20 @@ impl Config {
         // Ensure SKIPPR_S3_BUCKET env var is set from config (fallbacks handled inside getter)
         let bucket = Config::get_skippr_s3_bucket();
         Config::setenv("SKIPPR_S3_BUCKET", &bucket);
+        if std::env::var("SKIPPR_OFFSET_STORE")
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .is_none()
+        {
+            if let Some(store) = Config::get()
+                .skippr
+                .as_ref()
+                .and_then(|skippr| skippr.offset_store.clone())
+                .filter(|store| !store.is_empty())
+            {
+                Config::set_offset_store(&store);
+            }
+        }
 
         // panic!("test");
         Ok(())

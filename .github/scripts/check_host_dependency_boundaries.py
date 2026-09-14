@@ -40,6 +40,7 @@ FORBIDDEN_PACKAGES = {
     "rdkafka",
     "rsa",
     "rumqttc",
+    "skippr-cloud",
     "ssh2",
     "tiberius",
     "tokio-postgres",
@@ -50,8 +51,8 @@ FORBIDDEN_PACKAGES = {
 EDGE_KINDS = "normal,build,dev"
 
 # Widest routine host build for CI (not `cargo tree --all-features`). Release-only
-# features such as `offset-store-dynamodb` intentionally pull connector SDKs and
-# are enabled only in published skipprd binaries.
+# features such as `offset-store-dynamodb` and `offset-store-cloud-tables`
+# intentionally pull connector SDKs and are enabled only in published skipprd binaries.
 HOST_WIDEST_FEATURES = ["stats_integration"]
 
 

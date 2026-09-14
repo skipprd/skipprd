@@ -1,0 +1,16 @@
+[package]
+name = "skippr-iceberg-catalog-cloud-tables"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Iceberg catalog pointers on Cloud Tables (skippr-cloud SDK)"
+
+[dependencies]
+async-trait.workspace = true
+iceberg = "0.9.1"
+iceberg-storage-opendal = "0.9.1"
+serde_json.workspace = true
+skippr-cloud.workspace = true
+skippr-iceberg-catalog = { path = "../skippr-iceberg-catalog" }
+tokio = { workspace = true, features = ["rt", "macros"] }
+uuid = { version = "1", features = ["v4"] }

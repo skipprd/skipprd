@@ -1,0 +1,16 @@
+[package]
+name = "skippr-lease-store-cloud-tables"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Cloud Tables lease, membership, and pipeline registry for skipprd"
+
+[dependencies]
+async-trait.workspace = true
+chrono = "0.4.44"
+serde_json.workspace = true
+skippr-cloud.workspace = true
+skippr-lease = { path = "../skippr-lease" }
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+tracing = "0.1"
+uuid = { version = "1", features = ["v4"] }

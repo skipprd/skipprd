@@ -10,10 +10,10 @@ use crate::helpers::Helpers;
 use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
 use crate::METRICS;
 use serde_derive::{Deserialize, Serialize};
+#[cfg(feature = "offset-store-cloud-tables")]
+use skippr_offset_store_cloud_tables::CloudTablesOffsetStore;
 #[cfg(feature = "offset-store-dynamodb")]
 use skippr_offset_store_dynamodb::DynamoDbOffsetStore;
-#[cfg(feature = "offset-store-cloud-tables")]
-use skippr_store_cloud_tables::CloudTablesOffsetStore;
 use sled::{IVec, Mode};
 use thiserror::Error;
 use tracing::{error, info};

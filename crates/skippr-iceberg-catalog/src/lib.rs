@@ -82,6 +82,14 @@ impl IcebergCatalogConfig {
     }
 }
 
+/// True when `SKIPPR_OFFSET_STORE` selects Cloud Tables (same aliases as skipprd).
+pub fn offset_store_is_cloud_tables(raw: &str) -> bool {
+    matches!(
+        raw.trim().to_ascii_lowercase().as_str(),
+        "cloud-tables" | "cloud_tables" | "tables"
+    )
+}
+
 /// Product: Iceberg `catalog.table` is a customer-created catalog table, not the offset/lease table.
 pub fn skippr_catalog_reuses_offset_table(catalog_table: &str, offset_table: &str) -> bool {
     let catalog = catalog_table.trim();
@@ -164,5 +172,14 @@ mod tests {
             "skippr-iceberg-catalog",
             "skippr-hla"
         ));
+    }
+
+    #[test]
+    fn cloud_tables_offset_store_aliases_match_skipprd() {
+        assert!(offset_store_is_cloud_tables("cloud-tables"));
+        assert!(offset_store_is_cloud_tables("CLOUD_TABLES"));
+        assert!(offset_store_is_cloud_tables(" tables "));
+        assert!(!offset_store_is_cloud_tables("dynamodb"));
+        assert!(!offset_store_is_cloud_tables(""));
     }
 }
