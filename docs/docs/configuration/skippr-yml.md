@@ -52,6 +52,17 @@ Athena ingest lives on the **same** `Athena:` sink object using Skipprd field na
 
 There is no `warehouses:` section.
 
+## `skippr` keys
+
+| Key | What it does |
+|-----|----------------|
+| `workspace` | Workspace name for this project |
+| `wal_s3_bucket` | Dedicated bucket for WAL segments when `WAL_STORAGE=s3` |
+| `offset_store` | Where skipprd stores offsets and checkpoints: `sled` (local disk, default), `dynamodb`, or `cloud-tables` (Skippr Cloud Tables) |
+| `offset_dynamodb_table` | Table name for DynamoDB or Cloud Tables. Required when `offset_store` is `dynamodb` or `cloud-tables`, and for `WAL_STORAGE=clustered` |
+
+`WAL_STORAGE` (`disk`, `s3`, `clustered`) is an environment variable, not a YAML field. See [offset store](offset-store-dynamodb.md) and [buffering](buffering.md).
+
 ## Environment values
 
 Whole YAML scalar values can reference environment variables:

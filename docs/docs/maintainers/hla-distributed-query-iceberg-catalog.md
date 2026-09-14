@@ -45,21 +45,21 @@ Cluster constants:
 - replica TCP, Flight SQL, and Ballista gRPC: ephemeral ports, **always mTLS** (SAN `skippr-cluster`);
 - gossip UDP: ephemeral port on the advertised IP (not `0.0.0.0` in `ChitchatId`).
 
-Unknown `WAL_STORAGE` values fail startup. `clustered` requires a clustered offset backend: self-hosted `offset-store-dynamodb` (DynamoDB / DynamoDB Local) or Cloud `offset-store-cloud-tables`. An explicit offset backend that is neither DynamoDB nor Cloud tables conflicts with `clustered` and fails startup.
+Unknown `WAL_STORAGE` values fail startup. `clustered` requires `SKIPPR_OFFSET_STORE` to be DynamoDB (self-hosted / HLA default) or `cloud-tables` (Skippr Cloud). Any other explicit offset backend fails startup.
 
 ### Cloud vs OSS catalog and control state
 
 | Concern | OSS / HLA harness | Skippr Cloud |
 |---------|-------------------|--------------|
-| Offsets, leases, membership | DynamoDB table `SKIPPR_OFFSET_DYNAMODB_TABLE` (DynamoDB Local in HLA) | Cloud **tables** (`offset-store-cloud-tables`) |
-| Iceberg catalog pointers | Separate DynamoDB `catalog.table` | Separate Cloud **tables** table (MUST NOT equal the offset table) |
+| Offsets, leases, membership | DynamoDB table `SKIPPR_OFFSET_DYNAMODB_TABLE` (DynamoDB Local in HLA) | Cloud Tables (`SKIPPR_OFFSET_STORE=cloud-tables`, same table name) |
+| Iceberg catalog pointers | Separate DynamoDB `catalog.table` | Separate Cloud Tables table (MUST NOT equal the offset table) |
 | Iceberg warehouse / parquet | `file://` or S3 | **objects** / R2 |
 | Replica RPC, Flight SQL, Ballista gRPC | **Always mTLS** (HLA mints a throwaway CA; SAN `skippr-cluster`) | Same PEMs; mesh only |
 | Gossip | Authenticated Chitchat (WU-5.1); `SKIPPR_CLUSTER_GOSSIP_KEY` required | Same; no tenant-string fallback |
 | Query tenant | Flight `Authorization: Basic {tenant}/{workspace}` on every RPC | Cloud **gateway** maps JWT `tenant_id` (D31) to that header; skipprd does not verify JWTs |
-| Cloud tables auth | n/a (DynamoDB Local) | SDK default credentials (`skippr-cloud` workload role). MUST NOT `CLOUD_TABLES_ACCESS_TOKEN` / `CLOUD_ACCESS_TOKEN`. MUST NOT compile unpublished Cloud crates. |
+| Cloud Tables credentials | n/a (DynamoDB Local) | Skippr Cloud default credentials |
 
-DynamoDB Local remains the OSS HLA harness. Cloud guests MUST NOT hairpin public `*.cloud.skippr.io` (D37).
+DynamoDB Local remains the OSS HLA harness.
 
 ### Process model
 
