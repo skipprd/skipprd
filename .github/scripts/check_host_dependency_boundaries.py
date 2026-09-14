@@ -127,13 +127,38 @@ def collect_plugin_source_violations() -> list[str]:
     return violations
 
 
+CLOUD_PATH_DEP = re.compile(r'path\s*=\s*"[^"]*cloud/crates')
+CLOUD_GIT_DEP = re.compile(r"github\.com/skipprd/cloud")
+
+
+def collect_cloud_repo_coupling() -> list[str]:
+    """skipprd deploys as a Cloud guest; it must not cargo-depend on the Cloud repo."""
+    violations = []
+    clone_script = REPO_ROOT / "scripts" / "ensure-sibling-cloud.sh"
+    if clone_script.is_file():
+        violations.append("scripts/ensure-sibling-cloud.sh: skipprd must not clone skipprd/cloud")
+    for path in REPO_ROOT.rglob("Cargo.toml"):
+        if "target" in path.parts:
+            continue
+        text = path.read_text(encoding="utf-8")
+        rel = str(path.relative_to(REPO_ROOT))
+        if "guest-broker" in text:
+            violations.append(f"{rel}: guest-broker crate (Cloud host broker is not a skipprd dep)")
+        if CLOUD_GIT_DEP.search(text):
+            violations.append(f"{rel}: git dependency on skipprd/cloud")
+        if CLOUD_PATH_DEP.search(text):
+            violations.append(f"{rel}: path dependency into the Cloud repo")
+    return violations
+
+
 def main() -> int:
     leaked_default = collect_leaked_host_packages(widest_features=False)
     leaked_widest = collect_leaked_host_packages(widest_features=True)
     manifest_violations = collect_plugin_manifest_violations()
     source_violations = collect_plugin_source_violations()
+    cloud_coupling = collect_cloud_repo_coupling()
 
-    if leaked_default or leaked_widest or manifest_violations or source_violations:
+    if leaked_default or leaked_widest or manifest_violations or source_violations or cloud_coupling:
         print(
             "host/plugin dependency boundary violated:",
             file=sys.stderr,
@@ -165,6 +190,13 @@ def main() -> int:
                 file=sys.stderr,
             )
             for violation in source_violations:
+                print(f"    - {violation}", file=sys.stderr)
+        if cloud_coupling:
+            print(
+                "  skipprd must not cargo-depend on the Cloud repo (Cloud deploys skipprd; skipprd has Cloud plugins only):",
+                file=sys.stderr,
+            )
+            for violation in cloud_coupling:
                 print(f"    - {violation}", file=sys.stderr)
         return 1
 

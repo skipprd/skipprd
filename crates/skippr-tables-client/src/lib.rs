@@ -1,12 +1,15 @@
-//! Async CloudTables JSON HTTP client.
+//! Async CloudTables JSON HTTP client (skipprd Cloud plugin).
 //!
-//! Guests use mesh loopback/CNI + a host-broker-issued workload JWT (D37).
-//! Public `*.cloud.skippr.io` hairpins fail closed.
+//! Mesh loopback/CNI + a host-injected broker JWT. Public `*.cloud.skippr.io`
+//! hairpins fail closed. This crate MUST NOT depend on Cloud workspace crates.
 
-use guest_broker::SystemBrokerClient;
+mod broker;
+
 use reqwest::header::CONTENT_TYPE;
 use serde_json::{json, Value};
 use thiserror::Error;
+
+use crate::broker::BrokerMint;
 
 pub const CLOUD_TARGET_HEADER: &str = "x-cloud-target";
 pub const GATEWAY_HOP_HEADER: &str = "x-cloud-gateway-hop";
@@ -47,7 +50,7 @@ impl TablesClientError {
 
 #[derive(Clone, Debug)]
 enum MeshAuthority {
-    Broker(SystemBrokerClient),
+    Broker(BrokerMint),
     #[cfg(test)]
     TestToken(String),
 }
@@ -64,14 +67,7 @@ impl CloudCredentials {
                 "clustered Cloud tables requires a mesh/loopback CLOUD_TABLES_ENDPOINT",
             ));
         }
-        if !mesh_auth_configured() {
-            return Err(TablesClientError::msg(
-                "clustered Cloud tables requires GuestCredentialBroker (CLOUD_SYSTEM_BROKER_CONFIG)",
-            ));
-        }
-        let broker = SystemBrokerClient::from_env().map_err(|error| {
-            TablesClientError::msg(format!("shared guest broker required: {error}"))
-        })?;
+        let broker = BrokerMint::from_env()?;
         Ok(Self {
             authority: MeshAuthority::Broker(broker),
         })
@@ -85,9 +81,9 @@ impl CloudCredentials {
     }
 }
 
-/// Guest mesh auth is a readable host broker config drive. Env JWTs are not authority.
+/// Guest mesh auth is a readable skippr-profile broker.json. Env JWTs are not authority.
 pub fn mesh_auth_configured() -> bool {
-    SystemBrokerClient::from_env().is_ok()
+    BrokerMint::from_env().is_ok()
 }
 
 /// Fail closed on public Cloud hostnames (D37: no `*.cloud.skippr.io` hairpin).
@@ -385,13 +381,7 @@ async fn parse_response(
 
 async fn resolve_access_token(credentials: &CloudCredentials) -> Result<String, TablesClientError> {
     match &credentials.authority {
-        MeshAuthority::Broker(broker) => {
-            let broker = broker.clone();
-            tokio::task::spawn_blocking(move || broker.platform_workload_jwt())
-                .await
-                .map_err(|error| TablesClientError::msg(format!("broker task: {error}")))?
-                .map_err(|error| TablesClientError::msg(error.to_string()))
-        }
+        MeshAuthority::Broker(broker) => broker.mint_platform_jwt().await,
         #[cfg(test)]
         MeshAuthority::TestToken(token) => Ok(token.clone()),
     }
@@ -432,6 +422,7 @@ pub fn bflag(value: bool) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::broker::BrokerMint;
     use std::sync::Mutex;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
@@ -573,5 +564,65 @@ mod tests {
         assert!(captured.contains("\"tableName\":\"offsets\""));
         assert!(captured.contains("\"conditionExpression\":\"attribute_not_exists(PK)\""));
         assert!(captured.contains("Bearer test-jwt"));
+    }
+
+    #[test]
+    fn crate_must_not_depend_on_cloud_workspace() {
+        let manifest = include_str!("../Cargo.toml");
+        assert!(
+            !manifest.contains("guest-broker"),
+            "skipprd must not cargo-depend on Cloud guest-broker"
+        );
+        assert!(
+            !manifest.contains("skipprd/cloud"),
+            "skipprd must not git-depend on skipprd/cloud"
+        );
+        assert!(
+            !manifest.contains("../../../cloud/"),
+            "skipprd must not path-depend on the Cloud repo"
+        );
+    }
+
+    #[tokio::test]
+    async fn mint_posts_skippr_catalog_jwt_and_uses_token() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            let mut buf = vec![0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap();
+            let req = String::from_utf8_lossy(&buf[..n]).to_string();
+            let body = r#"{"status":200,"body":{"token":"minted-jwt"}}"#;
+            let resp = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            let _ = sock.write_all(resp.as_bytes()).await;
+            req
+        });
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("broker.json"),
+            format!(
+                r#"{{
+  "profile": "skippr",
+  "guest_id": "skippr-0",
+  "cluster_generation": 1,
+  "guest_incarnation": "inc-1",
+  "broker_endpoint": "http://{addr}",
+  "capability": "opaque"
+}}
+"#
+            ),
+        )
+        .unwrap();
+        let mint = BrokerMint::from_dir(tmp.path()).unwrap();
+        let token = mint.mint_platform_jwt().await.unwrap();
+        assert_eq!(token, "minted-jwt");
+        let captured = server.await.unwrap();
+        assert!(captured.contains("POST /v1/system-broker"));
+        assert!(captured.contains("\"capability\":\"opaque\""));
+        assert!(captured.contains("\"kind\":\"catalog_jwt\""));
+        assert!(captured.contains("\"authority\":\"skippr_system\""));
     }
 }

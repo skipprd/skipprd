@@ -6,8 +6,8 @@ publish = false
 description = "Async CloudTables JSON HTTP client for skipprd (mesh JWT only)"
 
 [dependencies]
-guest-broker = { path = "../../../cloud/crates/guest-broker", default-features = false }
 reqwest.workspace = true
+serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "macros", "net", "io-util", "time"] }

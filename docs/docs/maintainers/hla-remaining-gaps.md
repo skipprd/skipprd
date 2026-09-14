@@ -2,7 +2,7 @@
 
 Working notes for finishing the multi-node implementation. The architecture spec remains [hla-distributed-query-iceberg-catalog.md](hla-distributed-query-iceberg-catalog.md), Flight SQL / Ballista [hla-flight-sql-ballista.md](hla-flight-sql-ballista.md), and the WBS [hla-implementation-wbs.md](hla-implementation-wbs.md). Do not treat Cursor plan todos as done.
 
-**As of 2026-08-17 (production cluster close-out):** Cluster identity is `SKIPPR_CLUSTER_ID` (membership `PK=cluster#{id}`). Clustered replica / Flight SQL / Ballista gRPC are always mTLS. Gossip HMAC (`SKIPPR_CLUSTER_GOSSIP_KEY`) is required. Wire protocol is **2**. Flight SQL requires `Authorization: Basic tenant/workspace` on every RPC. Cloud tables clustered path is host GuestCredentialBroker mesh JWT only (no env `CLOUD_TABLES_ACCESS_TOKEN` / `CLOUD_ACCESS_TOKEN`, no `AUTH_INTERNAL_URL` / guest SigV4).
+**As of 2026-08-17 (production cluster close-out):** Cluster identity is `SKIPPR_CLUSTER_ID` (membership `PK=cluster#{id}`). Clustered replica / Flight SQL / Ballista gRPC are always mTLS. Gossip HMAC (`SKIPPR_CLUSTER_GOSSIP_KEY`) is required. Wire protocol is **2**. Flight SQL requires `Authorization: Basic tenant/workspace` on every RPC. Cloud tables clustered path is host-injected broker mint (skipprd HTTP plugin POSTs CatalogJwt; no env `CLOUD_TABLES_ACCESS_TOKEN` / `CLOUD_ACCESS_TOKEN`, no `AUTH_INTERNAL_URL` / guest SigV4, no cargo-dep on Cloud `guest-broker`).
 
 HLA process e2e (`python3 tests/hla_e2e/run.py`) must be re-run after this cutover (mTLS + protocol 2 + cluster id). Do not treat the pre-cutover 2026-08-17 pass as current.
 
