@@ -1,10 +1,13 @@
 //! Clock-free pipeline lease domain types.
 //!
-//! Production storage is DynamoDB (`skippr-lease-store-dynamodb`) or Cloud
-//! tables (`skippr-store-cloud-tables`). Tests use [`MemoryLeaseStore`].
-//! Single-node `disk`/`s3` modes do not use a lease store.
+//! Production storage is DynamoDB (`skippr-lease-store-dynamodb`), Cloud
+//! tables (`skippr-store-cloud-tables`), or sled (`SledLeaseStore` in skipprd).
+//! Tests use [`MemoryLeaseStore`]. Every WAL mode uses the same
+//! [`PipelineLeaseStore`] contract; sled process exclusivity is an
+//! implementation detail of that store.
 
 mod clock;
+mod conformance;
 mod error;
 mod guard;
 mod identity;
@@ -17,6 +20,7 @@ pub use clock::{
     race_deadline, AsyncSleeper, Clock, MonoInstant, Sleeper, SystemClock, TestClock, TestSleeper,
     TokioSleeper,
 };
+pub use conformance::assert_pipeline_lease_conformance;
 pub use error::{
     is_enospc, DurableError, FenceError, LeaseError, OffsetPublishError, PathError, PromoteError,
     ReplicaNack, ShutdownError,

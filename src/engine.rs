@@ -911,6 +911,16 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
 
     let offsets_db = Arc::new(offsets_db);
 
+    let pipeline_lease = match Config::get_wal_storage() {
+        crate::helpers::wal_storage::WalStorage::Clustered => None,
+        crate::helpers::wal_storage::WalStorage::Disk
+        | crate::helpers::wal_storage::WalStorage::S3 => Some(
+            crate::pipeline_backend::acquire_ingest_lease(offsets_db.as_ref())
+                .await
+                .map_err(io::Error::other)?,
+        ),
+    };
+
     if matches!(
         Config::get_wal_storage(),
         crate::helpers::wal_storage::WalStorage::Disk
@@ -922,7 +932,13 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
 
     wal_recover(offsets_db.clone())
         .await
-        .expect("Failed to recover WAL index");
+        .map_err(|err| io::Error::other(format!("Failed to recover WAL index: {err}")))?;
+
+    if let Some(lease) = &pipeline_lease {
+        lease.activate().map_err(|err| {
+            io::Error::other(format!("pipeline writer lease activate failed: {err}"))
+        })?;
+    }
 
     {
         METRICS.write().status = MetricsStatus::Running;
@@ -1231,6 +1247,18 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
             error!("{message}");
             finalization_error = Some(message);
         }
+    }
+
+    if crate::buffer::wal_persist::wal_is_fatal() {
+        let message = "S3 WAL persist was unreconciled; writer is fatal".to_string();
+        error!("{message}");
+        finalization_error = Some(message);
+    }
+
+    if let Some(lease) = pipeline_lease {
+        lease
+            .release_after_quiesce(source_sync_result.is_ok() && finalization_error.is_none())
+            .await;
     }
 
     if reporter.enabled() {

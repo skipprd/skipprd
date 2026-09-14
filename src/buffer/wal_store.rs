@@ -1,12 +1,14 @@
 use crate::buffer::segment_file::{PartitionKey, SegmentFileMetadata};
-use crate::buffer::segment_object::SegmentObject;
+use crate::buffer::wal_persist::persist_snapshot_pair;
 use crate::helpers::configuration::Config;
 use crate::helpers::wal_storage::WalStorage;
 use arrow::array::RecordBatch;
 use async_trait::async_trait;
+use skippr_lease::LeaseGuard;
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tokio::runtime::Handle;
 
@@ -58,6 +60,35 @@ pub fn ingest_durable_store() -> Option<std::sync::Arc<crate::buffer::durable::P
                 skippr_lease::PipelineRole::ActivePrimary(_)
             )
         })
+}
+
+static PIPELINE_LEASE: Mutex<Option<Arc<LeaseGuard>>> = Mutex::new(None);
+
+pub fn install_pipeline_lease(guard: Arc<LeaseGuard>) {
+    *PIPELINE_LEASE.lock().expect("pipeline lease poisoned") = Some(guard);
+}
+
+pub fn clear_pipeline_lease() {
+    *PIPELINE_LEASE.lock().expect("pipeline lease poisoned") = None;
+}
+
+pub fn pipeline_writer_lease() -> Option<Arc<LeaseGuard>> {
+    PIPELINE_LEASE
+        .lock()
+        .expect("pipeline lease poisoned")
+        .clone()
+}
+
+pub fn require_pipeline_writer_lease() -> io::Result<Arc<LeaseGuard>> {
+    pipeline_writer_lease()
+        .ok_or_else(|| io::Error::other("pipeline writer lease is required for this WAL operation"))
+}
+
+pub fn require_offset_publish_epoch() -> io::Result<skippr_lease::LeaseEpoch> {
+    let guard = require_pipeline_writer_lease()?;
+    guard
+        .require_offset_epoch()
+        .map_err(|err| io::Error::other(format!("pipeline writer lease fenced: {err}")))
 }
 
 fn ingest_legacy_buffer_dir(leaf: &str) -> PathBuf {
@@ -116,8 +147,6 @@ impl S3WalStore {
             prefix_url: prefix_url.to_string(),
         }
     }
-
-    // no extra helpers; streaming lives in SegmentObject
 }
 
 #[async_trait]
@@ -132,23 +161,22 @@ impl WalStore for S3WalStore {
         _checkpoint_updates: &HashMap<String, crate::plugins::cdc::CheckpointEnvelope>,
     ) -> io::Result<SegmentWriteResult> {
         let client = crate::helpers::s3::get_s3_client().await;
-        let (meta, total_rows, sha256, bucket, key) = SegmentObject::stream_snapshot_to_s3(
-            &client,
+        let (bucket, _) = crate::buffer::wal_object_store::parse_s3_prefix(&self.prefix_url)?;
+        let store =
+            crate::buffer::wal_object_store::S3WalObjectStore::new((*client).clone(), bucket);
+        let lease = require_pipeline_writer_lease()?;
+        persist_snapshot_pair(
+            &store,
             &self.prefix_url,
             snapshot_id,
             offsets,
             batches,
             partitions_meta,
             part_meta_blobs,
+            lease.as_ref(),
         )
-        .await?;
-        Ok(SegmentWriteResult {
-            meta,
-            total_rows,
-            sha256,
-            location: SegmentWriteLocation::S3 { key, bucket },
-            offsets_published: false,
-        })
+        .await
+        .map_err(Into::into)
     }
 }
 
@@ -176,8 +204,9 @@ pub fn ensure_disk_durable_store(
     .map_err(|err| io::Error::other(err.to_string()))?;
     let paths =
         skippr_lease::PipelinePaths::legacy_disk(std::path::Path::new(&Config::get_data_dir()));
-    let clock = std::sync::Arc::new(skippr_lease::SystemClock::new());
-    let guard = skippr_lease::LeaseGuard::single_node(key.clone(), clock);
+    let guard = require_pipeline_writer_lease().map_err(|_| {
+        io::Error::other("disk durable store requires an acquired pipeline writer lease")
+    })?;
     let log = crate::buffer::durable::log::MutationLog::open(paths.clone())
         .map_err(|err| io::Error::other(err.to_string()))?;
     let store = crate::buffer::durable::store::PipelineDurableStore::new(
@@ -308,5 +337,18 @@ mod tests {
         install_durable_store(store);
         assert!(ingest_durable_store().is_none());
         remove_durable_store(&key);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn require_pipeline_writer_lease_fails_when_missing() {
+        clear_pipeline_lease();
+        let err = match require_pipeline_writer_lease() {
+            Ok(_) => panic!("expected missing pipeline writer lease"),
+            Err(err) => err,
+        };
+        assert!(err
+            .to_string()
+            .contains("pipeline writer lease is required"));
     }
 }

@@ -70,14 +70,16 @@ mod tests {
             kind: PipelineKind::Tenant,
             enabled: true,
             generation: 1,
-            config: None,
+            source: Some("postgres://orders".into()),
+            sink: Some("iceberg://lake".into()),
         });
         registry.upsert(PipelineRecord {
             key: PipelineKey::new("globex", "default", "orders").unwrap(),
             kind: PipelineKind::Tenant,
             enabled: true,
             generation: 1,
-            config: None,
+            source: Some("postgres://orders".into()),
+            sink: Some("iceberg://lake".into()),
         });
         registry.upsert(PipelineRecord::platform_otel(OTEL_LOGS).unwrap());
         let listed = registry.list().await.unwrap();

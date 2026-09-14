@@ -22,7 +22,7 @@ use crate::buffer::s3_wal_body_cache;
 #[cfg(test)]
 use crate::buffer::segment_file::SegmentPartMetaSummary;
 use crate::buffer::segment_file::{
-    PartitionKey, SegmentFile, SegmentFileMetadata, SegmentPartitionIndexEntry,
+    PartitionKey, SegmentFile, SegmentFileMetadata, SegmentPartitionIndexEntry, WalPairReclaim,
 };
 use crate::buffer::wal_store::{SegmentWriteLocation, SegmentWriteResult};
 use crate::buffer::BufferChunker;
@@ -119,12 +119,6 @@ impl SegmentSource {
     fn is_s3(&self) -> bool {
         matches!(self, SegmentSource::S3 { .. })
     }
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum DiskSegmentCleanup {
-    Removed,
-    AlreadyMissing,
 }
 
 fn is_s3_wal() -> bool {
@@ -970,38 +964,6 @@ impl GlobalSegment {
         self.updated_at = SystemTime::now();
         (batches, offsets, cdc_meta, checkpoint_updates, bytes)
     }
-
-    /// Re-merge a failed live flush back into the accumulator so data is not lost.
-    fn restore_after_failed_flush(
-        &mut self,
-        batches: HashMap<PartitionKey, Vec<RecordBatch>>,
-        offsets: HashMap<OffsetKey, u64>,
-        cdc_meta: HashMap<PartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
-        checkpoint_updates: Vec<(String, crate::plugins::cdc::CheckpointEnvelope)>,
-        bytes: u64,
-    ) {
-        for (key, batch_vec) in batches {
-            self.batches
-                .entry(key.clone())
-                .or_insert_with(|| Vec::with_capacity(64))
-                .extend(batch_vec);
-            if let Some(rows) = cdc_meta.get(&key) {
-                self.cdc_meta
-                    .entry(key)
-                    .or_insert_with(|| Vec::with_capacity(64))
-                    .extend(rows.iter().cloned());
-            }
-        }
-        for (k, v) in offsets {
-            self.offsets
-                .entry(k)
-                .and_modify(|p| *p = (*p).max(v))
-                .or_insert(v);
-        }
-        self.checkpoint_updates.extend(checkpoint_updates);
-        self.bytes = self.bytes.saturating_add(bytes);
-        self.updated_at = SystemTime::now();
-    }
 }
 
 fn serialize_cdc_meta_to_blobs(
@@ -1192,7 +1154,9 @@ impl Buffers {
             append_wal_debug_trace(&format!("persist_mark_offsets id={}", snapshot_id));
         }
         if !write_result.offsets_published {
-            mark_offsets_durable_in_wal(offsets_db, snapshot.offsets.iter());
+            crate::buffer::wal_store::require_offset_publish_epoch()
+                .map_err(|err| ArrowError::ExternalError(Box::new(err)))?;
+            mark_offsets_durable_in_wal(offsets_db, snapshot.offsets.iter())?;
             for (key, envelope) in snapshot.checkpoint_updates.iter() {
                 offsets_db
                     .store_checkpoint_envelope(key, envelope)
@@ -1200,6 +1164,8 @@ impl Buffers {
                         ArrowError::ExternalError(Box::new(std::io::Error::other(err)))
                     })?;
             }
+            crate::buffer::wal_store::require_offset_publish_epoch()
+                .map_err(|err| ArrowError::ExternalError(Box::new(err)))?;
         }
         if Config::debug_enabled() || Config::log_wal_enabled() {
             info!("WAL persist offsets durable id={}", snapshot_id);
@@ -1282,22 +1248,9 @@ impl Buffers {
         match Self::persist_snapshot_to_wal(&mut snapshot, offsets_db, "live flush").await {
             Ok(result) => Ok((result.total_rows, result.meta.total_bytes)),
             Err(e) => {
-                // Clustered persist already aborted the prepared mutation. The
-                // scheduler retries `run_sync`, which re-reads source files
-                // because Closed was never published. Restoring live would
-                // concatenate those retries into one segment (duplicate rows).
-                if crate::buffer::wal_store::ingest_durable_store().is_none() {
-                    let batches = std::mem::take(&mut snapshot.batches);
-                    let offsets = std::mem::take(&mut snapshot.offsets);
-                    let mut guard = SEGMENT_LIVE.lock().unwrap();
-                    guard.restore_after_failed_flush(
-                        batches,
-                        offsets,
-                        to_flush_cdc,
-                        std::mem::take(&mut snapshot.checkpoint_updates),
-                        total_bytes,
-                    );
-                }
+                // Persist is all-or-nothing. A failed flush is never restored
+                // into the live segment: the source retries on NACK, and any
+                // body-only object stays unowned debris.
                 Err(e)
             }
         }
@@ -2441,23 +2394,8 @@ impl Buffers {
         Self::tombstone_path_for_id(source.segment_id(), key)
     }
 
-    fn remove_disk_segment_and_commit_marker(seg_path: &Path) -> io::Result<DiskSegmentCleanup> {
-        let cleanup = match fs::remove_file(seg_path) {
-            Ok(_) => DiskSegmentCleanup::Removed,
-            Err(err) if err.kind() == io::ErrorKind::NotFound => DiskSegmentCleanup::AlreadyMissing,
-            Err(err) => return Err(err),
-        };
-        let commit_path = seg_path.with_extension("seg.commit");
-        if let Err(err) = fs::remove_file(&commit_path) {
-            if err.kind() != io::ErrorKind::NotFound {
-                warn!(
-                    "Failed to remove commit marker {}: {}",
-                    commit_path.to_string_lossy(),
-                    err
-                );
-            }
-        }
-        Ok(cleanup)
+    fn remove_disk_segment_and_commit_marker(seg_path: &Path) -> io::Result<WalPairReclaim> {
+        SegmentFile::reclaim_local_pair(seg_path)
     }
 
     #[cfg(not(windows))]
@@ -2480,7 +2418,7 @@ impl Buffers {
         total_bytes: u64,
     ) -> io::Result<()> {
         // Zero-copy binary commit header: MAGIC("SEGC"), VERSION(u32 LE), created_at(u64 LE), size(u64 LE), parts(u32 LE), sha256([u8;32])
-        let commit_path = seg_path.with_extension("seg.commit");
+        let commit_path = SegmentFile::commit_path_for_seg(seg_path);
         let buf = crate::buffer::segment_file::SegmentFile::build_commit_header_bytes(
             parts_count,
             total_bytes,
@@ -2495,32 +2433,12 @@ impl Buffers {
 
     pub fn read_seg_commit(
         seg_path: &PathBuf,
-    ) -> io::Result<(
-        u32,      /*version*/
-        u64,      /*created_at*/
-        u64,      /*size*/
-        u32,      /*parts*/
-        [u8; 32], /*sha*/
-    )> {
-        let commit_path = seg_path.with_extension("seg.commit");
+    ) -> io::Result<crate::buffer::segment_file::SegCommitHeader> {
+        let commit_path = SegmentFile::commit_path_for_seg(seg_path);
         let mut f = DirectIoFile::open(&commit_path)?;
         let mut buf = [0u8; 60];
         f.read_exact(&mut buf)?;
-        if &buf[0..4] != b"SEGC" {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                "bad commit magic",
-            ));
-        }
-        let mut sha = [0u8; 32];
-        sha.copy_from_slice(&buf[28..60]);
-        Ok((
-            u32::from_le_bytes(buf[4..8].try_into().unwrap()),
-            u64::from_le_bytes(buf[8..16].try_into().unwrap()),
-            u64::from_le_bytes(buf[16..24].try_into().unwrap()),
-            u32::from_le_bytes(buf[24..28].try_into().unwrap()),
-            sha,
-        ))
+        SegmentFile::parse_commit_header(&buf)
     }
 
     /// Best-effort cleanup for `.seg.commit` files that no longer have a sibling `.seg`.
@@ -2598,8 +2516,7 @@ impl Buffers {
 
     fn segment_files_bytes(seg_path: &Path) -> u64 {
         let seg_bytes = seg_path.metadata().map(|meta| meta.len()).unwrap_or(0);
-        let commit_bytes = seg_path
-            .with_extension("seg.commit")
+        let commit_bytes = SegmentFile::commit_path_for_seg(seg_path)
             .metadata()
             .map(|meta| meta.len())
             .unwrap_or(0);
@@ -2610,32 +2527,84 @@ impl Buffers {
         let mut result = WalSweepResult::default();
         for entry in SEGMENT_CACHE.iter() {
             let cached = entry.value();
-            let seg_path = match &cached.source {
-                SegmentSource::Disk(path) | SegmentSource::Wal { path, .. } => path.clone(),
-                SegmentSource::S3 { .. } => continue,
-            };
-            let commit = seg_path.with_extension("seg.commit");
-            if !commit.exists() {
-                continue;
-            }
             match Self::completion_ledger()
                 .all_complete(cached.source.segment_id(), &cached.meta.index)
             {
-                Ok(true) => {
-                    Self::remove_fully_compacted_disk_segment(&seg_path, &cached.meta, &mut result);
-                }
+                Ok(true) => match &cached.source {
+                    SegmentSource::Disk(path) | SegmentSource::Wal { path, .. } => {
+                        Self::remove_fully_compacted_disk_segment(path, &cached.meta, &mut result);
+                    }
+                    SegmentSource::S3 { key, bucket, .. } => {
+                        Self::spawn_s3_pair_reclaim(
+                            cached.source.segment_id().to_string(),
+                            bucket.clone(),
+                            key.clone(),
+                            cached.meta.index.clone(),
+                        );
+                    }
+                },
                 Ok(false) => {}
                 Err(err) => {
                     result.errors = result.errors.saturating_add(1);
                     warn!(
                         "WAL sweep: retaining segment {} with unreadable completion ledger: {}",
-                        seg_path.to_string_lossy(),
+                        cached.source.display_name(),
                         err
                     );
                 }
             }
         }
         result
+    }
+
+    fn spawn_s3_pair_reclaim(
+        segment_id: String,
+        bucket: String,
+        key: String,
+        segment_index: Vec<SegmentPartitionIndexEntry>,
+    ) {
+        tokio::spawn(async move {
+            let Ok(guard) = crate::buffer::wal_store::require_pipeline_writer_lease() else {
+                error!(
+                    "refusing S3 WAL reclaim without a pipeline writer lease {}",
+                    key
+                );
+                return;
+            };
+            if let Err(err) = guard.require_active_epoch() {
+                error!(
+                    "refusing S3 WAL reclaim without live pipeline lease {}: {}",
+                    key, err
+                );
+                return;
+            }
+            let client = crate::helpers::s3::get_s3_client().await;
+            let store =
+                crate::buffer::wal_object_store::S3WalObjectStore::new((*client).clone(), bucket);
+            if let Err(err) =
+                crate::buffer::wal_object_store::reclaim_owned_pair(&store, &key, guard.as_ref())
+                    .await
+            {
+                error!("Failed to reclaim S3 WAL pair {}: {}", key, err);
+                return;
+            }
+            if guard.require_active_epoch().is_err() {
+                error!(
+                    "pipeline lease lost after S3 reclaim {}; leaving cache until restart",
+                    key
+                );
+                return;
+            }
+            Buffers::segment_cache_remove(&segment_id);
+            if let Err(err) =
+                Buffers::completion_ledger().remove_segment(&segment_id, &segment_index)
+            {
+                error!(
+                    "Failed to remove completion state for S3 segment {}: {}",
+                    segment_id, err
+                );
+            }
+        });
     }
 
     fn remove_fully_compacted_disk_segment(
@@ -2646,7 +2615,7 @@ impl Buffers {
         let reclaim_bytes = Self::segment_files_bytes(seg_path);
         match Self::remove_disk_segment_and_commit_marker(seg_path) {
             Ok(cleanup) => {
-                if matches!(cleanup, DiskSegmentCleanup::Removed) {
+                if matches!(cleanup, WalPairReclaim::Removed) {
                     sweep.segments_deleted = sweep.segments_deleted.saturating_add(1);
                     sweep.bytes_reclaimed = sweep.bytes_reclaimed.saturating_add(reclaim_bytes);
                     crate::metrics::counters::record_wal_segment_reclaimed(reclaim_bytes);
@@ -2693,17 +2662,31 @@ impl Buffers {
                 if p.extension().and_then(|s| s.to_str()) != Some("seg") {
                     continue;
                 }
-                let commit = p.with_extension("seg.commit");
+                let commit = SegmentFile::commit_path_for_seg(&p);
+                let segment_id = p
+                    .file_stem()
+                    .and_then(|value| value.to_str())
+                    .unwrap_or("unknown")
+                    .to_string();
                 if !commit.exists() {
+                    if let Some(cached) = SEGMENT_CACHE.get(&segment_id) {
+                        match Self::completion_ledger()
+                            .all_complete(&segment_id, &cached.meta.index)
+                        {
+                            Ok(true) => {
+                                Self::remove_fully_compacted_disk_segment(
+                                    &p,
+                                    &cached.meta,
+                                    &mut result,
+                                );
+                            }
+                            Ok(false) | Err(_) => {}
+                        }
+                    }
                     continue;
                 }
-                let segf = SegmentFile { path: p.clone() };
-                if let Ok(m) = segf.read_metadata_durable() {
-                    let segment_id = p
-                        .file_stem()
-                        .and_then(|value| value.to_str())
-                        .unwrap_or("unknown");
-                    match Self::completion_ledger().all_complete(segment_id, &m.index) {
+                if let Ok(m) = SegmentFile::admit_owned_pair_path(&p) {
+                    match Self::completion_ledger().all_complete(&segment_id, &m.index) {
                         Ok(true) => {
                             Self::remove_fully_compacted_disk_segment(&p, &m, &mut result);
                         }
@@ -2753,7 +2736,7 @@ impl Buffers {
                 if path.extension().and_then(|s| s.to_str()) != Some("seg") {
                     continue;
                 }
-                let commit = path.with_extension("seg.commit");
+                let commit = SegmentFile::commit_path_for_seg(&path);
                 if !commit.exists() {
                     continue;
                 }
@@ -2766,8 +2749,7 @@ impl Buffers {
                 if SEGMENT_CACHE.contains_key(&segment_id) {
                     continue;
                 }
-                let seg = SegmentFile { path: path.clone() };
-                match seg.read_metadata_durable() {
+                match SegmentFile::admit_owned_pair_path(&path) {
                     Ok(meta) => {
                         let refs = Self::index_committed_segment(path, meta);
                         result.indexed_refs = result.indexed_refs.saturating_add(refs);
@@ -2835,7 +2817,7 @@ impl Buffers {
             for e in rd.flatten() {
                 let p = e.path();
                 if p.extension().and_then(|s| s.to_str()) == Some("seg") {
-                    let commit = p.with_extension("seg.commit");
+                    let commit = SegmentFile::commit_path_for_seg(&p);
                     if commit.exists() {
                         count += 1;
                     }
@@ -3568,34 +3550,12 @@ impl Buffers {
                         Self::remove_fully_compacted_disk_segment(seg_path, &meta, &mut sweep);
                     }
                     SegmentSource::S3 { key, bucket, .. } => {
-                        let key = key.clone();
-                        let bucket = bucket.clone();
-                        let segment_index = meta.index.clone();
-                        tokio::spawn(async move {
-                            let client = crate::helpers::s3::get_s3_client().await;
-                            let commit_key = format!("{}.commit", key);
-                            let _ = client
-                                .delete_object()
-                                .bucket(&bucket)
-                                .key(&key)
-                                .send()
-                                .await;
-                            let _ = client
-                                .delete_object()
-                                .bucket(&bucket)
-                                .key(&commit_key)
-                                .send()
-                                .await;
-                            Buffers::segment_cache_remove(&segment_id);
-                            if let Err(err) = Buffers::completion_ledger()
-                                .remove_segment(&segment_id, &segment_index)
-                            {
-                                error!(
-                                    "Failed to remove completion state for S3 segment {}: {}",
-                                    segment_id, err
-                                );
-                            }
-                        });
+                        Self::spawn_s3_pair_reclaim(
+                            segment_id,
+                            bucket.clone(),
+                            key.clone(),
+                            meta.index.clone(),
+                        );
                     }
                 },
                 Ok(false) => {}
@@ -3916,7 +3876,7 @@ impl Buffers {
     }
 }
 
-fn mark_offsets_durable_in_wal<'a, I>(offsets_db: &Offsets, offsets: I)
+fn mark_offsets_durable_in_wal<'a, I>(offsets_db: &Offsets, offsets: I) -> Result<(), ArrowError>
 where
     I: IntoIterator<Item = (&'a OffsetKey, &'a u64)>,
 {
@@ -3941,7 +3901,11 @@ where
                 offset.namespace, offset.partition
             ));
         }
-        offsets_db.set(&offset_key, OffsetTypes::Closed, 1);
+        offsets_db
+            .set(&offset_key, OffsetTypes::Closed, 1)
+            .map_err(|err| {
+                ArrowError::ExternalError(Box::new(std::io::Error::other(err.to_string())))
+            })?;
         if Config::debug_enabled() || Config::log_wal_enabled() {
             debug!(
                 "WAL offset set closed done namespace={} partition={} value=1",
@@ -3962,7 +3926,11 @@ where
                 offset.namespace, offset.partition, position
             ));
         }
-        offsets_db.set(&offset_key, OffsetTypes::Position, *position);
+        offsets_db
+            .set(&offset_key, OffsetTypes::Position, *position)
+            .map_err(|err| {
+                ArrowError::ExternalError(Box::new(std::io::Error::other(err.to_string())))
+            })?;
         if Config::debug_enabled() || Config::log_wal_enabled() {
             debug!(
                 "WAL offset set position done namespace={} partition={} value={}",
@@ -3980,6 +3948,7 @@ where
             );
         }
     }
+    Ok(())
 }
 
 fn append_wal_debug_trace(message: &str) {
@@ -4087,7 +4056,7 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
                 commit_markers_seen = commit_markers_seen.saturating_add(1);
             }
             if path.extension().and_then(|s| s.to_str()) == Some("seg") {
-                let commit = path.with_extension("seg.commit");
+                let commit = SegmentFile::commit_path_for_seg(&path);
                 if commit.exists() {
                     seg_files.push(path);
                 }
@@ -4113,11 +4082,8 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
     let failed_count = AtomicUsize::new(0);
     let recovered_segments: Vec<RecoveredSegmentMeta> = seg_files
         .par_iter()
-        .filter_map(|file_path| {
-            let seg = SegmentFile {
-                path: file_path.clone(),
-            };
-            match seg.read_metadata_durable() {
+        .filter_map(
+            |file_path| match SegmentFile::admit_owned_pair_path(file_path) {
                 Ok(meta) => {
                     let n = indexed_count.fetch_add(1, AtomicOrdering::Relaxed) + 1;
                     if n % progress_every == 0 || n == seg_files_count {
@@ -4149,8 +4115,8 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
                     );
                     None
                 }
-            }
-        })
+            },
+        )
         .collect();
 
     let failures = failed_count.load(AtomicOrdering::Relaxed);
@@ -4199,7 +4165,8 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
         }
         bytes = bytes.saturating_add(meta.total_bytes);
         count = count.saturating_add(1);
-        mark_offsets_durable_in_wal(offsets_db.as_ref(), meta.offsets.iter());
+        mark_offsets_durable_in_wal(offsets_db.as_ref(), meta.offsets.iter())
+            .map_err(|err| io::Error::other(err.to_string()))?;
         committed_offsets = committed_offsets.saturating_add(meta.offsets.len() as u64);
         Buffers::segment_cache_register(SegmentSource::Disk(file_path), meta);
     }
@@ -4247,150 +4214,78 @@ pub fn wal_recover_disk(offsets_db: Arc<Offsets>) -> io::Result<()> {
         metrics.wal_index_metrics = wal_index_metrics;
     }
 
-    offsets_db.flush();
+    offsets_db
+        .flush()
+        .map_err(|err| io::Error::other(err.to_string()))?;
     Ok(())
 }
 
-/// Async S3 WAL offset recovery: lists committed segments in S3, reads their
-/// S3 WAL recovery: lists committed segments, downloads each, parses
-/// metadata, commits offsets, and populates the segment cache.
+/// S3 WAL recovery: LIST opaque snapshot IDs, admit bound pairs only, fail closed.
 async fn wal_recover_s3(offsets_db: Arc<Offsets>) -> io::Result<()> {
     let bucket = Config::get_wal_s3_bucket();
     let prefix = Config::get_wal_s3_prefix();
-
     info!(
         "S3 WAL recovery: scanning s3://{}/{} for committed segments",
         bucket, prefix
     );
     let client = crate::helpers::s3::get_s3_client().await;
-
-    let mut token: Option<String> = None;
-    let mut segs: HashSet<String> = HashSet::new();
-    let mut commits: HashSet<String> = HashSet::new();
-    loop {
-        let mut req = client.list_objects_v2().bucket(&bucket).prefix(&prefix);
-        if let Some(t) = &token {
-            req = req.continuation_token(t);
+    let store =
+        crate::buffer::wal_object_store::S3WalObjectStore::new((*client).clone(), bucket.clone());
+    let lease = crate::buffer::wal_store::require_pipeline_writer_lease()?;
+    let recovered = crate::buffer::wal_recover::recover_owned_pairs(
+        &store,
+        &prefix,
+        offsets_db.as_ref(),
+        lease.as_ref(),
+    )
+    .await?;
+    for pair in recovered.pairs {
+        if Config::debug_enabled() || Config::log_wal_enabled() {
+            let partition_sample: Vec<String> = pair
+                .meta
+                .index
+                .iter()
+                .take(3)
+                .map(|idx| format!("{}/{}/{}B", idx.key.namespace, idx.key.partition, idx.bytes))
+                .collect();
+            info!(
+                "WAL recover s3: segment={} partitions={} offsets={} total_bytes={} partition_sample={:?} offset_sample={:?}",
+                pair.body_key,
+                pair.meta.index.len(),
+                pair.meta.offsets.len(),
+                pair.meta.total_bytes,
+                partition_sample,
+                offset_sample(pair.meta.offsets.iter(), 3)
+            );
         }
-        match req.send().await {
-            Ok(resp) => {
-                if let Some(contents) = resp.contents {
-                    for obj in contents {
-                        if let Some(k) = obj.key() {
-                            if k.ends_with(".seg") {
-                                segs.insert(k.to_string());
-                            }
-                            if k.ends_with(".seg.commit") {
-                                commits.insert(k.trim_end_matches(".commit").to_string());
-                            }
-                        }
-                    }
-                }
-                if resp.is_truncated.unwrap_or(false) {
-                    token = resp.next_continuation_token;
-                } else {
-                    break;
-                }
-            }
-            Err(e) => {
-                error!("S3 WAL recovery: list error: {}", e);
-                break;
-            }
-        }
-    }
-
-    let mut processed: u64 = 0;
-    let mut committed_offsets: u64 = 0;
-    let mut namespaces: HashSet<String> = HashSet::new();
-    let mut bytes_total: u64 = 0;
-
-    for seg_key in segs.iter() {
-        if !commits.contains(seg_key) {
-            continue;
-        }
-        match client
-            .get_object()
-            .bucket(&bucket)
-            .key(seg_key)
-            .send()
-            .await
-        {
-            Ok(resp) => match resp.body.collect().await {
-                Ok(agg) => {
-                    let data = agg.into_bytes().to_vec();
-                    let meta = match SegmentFile::read_metadata_from_bytes(&data) {
-                        Ok(m) => m,
-                        Err(e) => {
-                            warn!("S3 WAL recovery: bad segment metadata {}: {}", seg_key, e);
-                            continue;
-                        }
-                    };
-                    drop(data);
-                    if Config::debug_enabled() || Config::log_wal_enabled() {
-                        let partition_sample: Vec<String> = meta
-                            .index
-                            .iter()
-                            .take(3)
-                            .map(|idx| {
-                                format!(
-                                    "{}/{}/{}B",
-                                    idx.key.namespace, idx.key.partition, idx.bytes
-                                )
-                            })
-                            .collect();
-                        info!(
-                            "WAL recover s3: segment={} partitions={} offsets={} total_bytes={} partition_sample={:?} offset_sample={:?}",
-                            seg_key,
-                            meta.index.len(),
-                            meta.offsets.len(),
-                            meta.total_bytes,
-                            partition_sample,
-                            offset_sample(meta.offsets.iter(), 3)
-                        );
-                    }
-                    for idx in meta.index.iter() {
-                        namespaces.insert(idx.key.namespace.clone());
-                    }
-                    mark_offsets_durable_in_wal(offsets_db.as_ref(), meta.offsets.iter());
-                    committed_offsets = committed_offsets.saturating_add(meta.offsets.len() as u64);
-                    bytes_total = bytes_total.saturating_add(meta.total_bytes);
-                    processed = processed.saturating_add(1);
-                    Buffers::segment_cache_register(
-                        SegmentSource::S3 {
-                            key: seg_key.clone(),
-                            bucket: bucket.clone(),
-                            body: None,
-                        },
-                        meta,
-                    );
-                }
-                Err(e) => {
-                    error!("S3 WAL recovery: body error {}: {}", seg_key, e);
-                }
+        Buffers::segment_cache_register(
+            SegmentSource::S3 {
+                key: pair.body_key,
+                bucket: bucket.clone(),
+                body: None,
             },
-            Err(e) => {
-                error!("S3 WAL recovery: get error {}: {}", seg_key, e);
-            }
-        }
+            pair.meta,
+        );
     }
-
     info!(
         "S3 WAL recovery: indexed {} of {} segments for {} namespaces",
-        processed,
-        segs.len(),
-        namespaces.len()
+        recovered.processed,
+        recovered.listed_segments,
+        recovered.namespaces.len()
     );
     info!(
         "S3 WAL recovery: committed {} offsets, {} total bytes",
-        committed_offsets, bytes_total
+        recovered.committed_offsets, recovered.bytes_total
     );
-    if processed > 0 {
+    if recovered.processed > 0 {
         let mut w = METRICS.write();
-        w.wal_index_namespaces_total = namespaces.len() as u64;
-        w.wal_index_files_total = processed;
-        w.wal_index_bytes_total = bytes_total;
+        w.wal_index_namespaces_total = recovered.namespaces.len() as u64;
+        w.wal_index_files_total = recovered.processed;
+        w.wal_index_bytes_total = recovered.bytes_total;
     }
-    offsets_db.flush();
+    offsets_db
+        .flush()
+        .map_err(|err| io::Error::other(err.to_string()))?;
     if is_s3_wal() {
         log_wal_s3_memory_obs("after_wal_recover_s3");
     }
@@ -4625,11 +4520,12 @@ mod tests_wal_commit {
             num_partitions: index.len() as u32,
             offsets: StdHashMap::new(),
             index,
+            body_sha256: [0u8; 32],
         }
     }
 
     fn commit_exists(seg_path: &PathBuf) -> bool {
-        seg_path.with_extension("seg.commit").exists()
+        SegmentFile::commit_path_for_seg(seg_path).exists()
     }
 
     struct SyntheticDiskBacklog {
@@ -4841,11 +4737,11 @@ mod tests_wal_commit {
             .write_snapshot(&offsets, &batches, &parts_meta, &empty_blobs)
             .unwrap();
         Buffers::write_seg_commit(&segf.path, &sha, meta.num_partitions, meta.total_bytes).unwrap();
-        let (ver, _ts, size, pcount, got_sha) = Buffers::read_seg_commit(&segf.path).unwrap();
-        assert_eq!(ver, 1);
-        assert_eq!(size, meta.total_bytes);
-        assert_eq!(pcount, meta.num_partitions);
-        assert_eq!(got_sha, sha);
+        let header = Buffers::read_seg_commit(&segf.path).unwrap();
+        assert_eq!(header.version, 1);
+        assert_eq!(header.total_bytes, meta.total_bytes);
+        assert_eq!(header.parts_count, meta.num_partitions);
+        assert_eq!(header.sha256, sha);
     }
 
     #[test]
@@ -4912,14 +4808,16 @@ mod tests_wal_commit {
                 partition: k.partition.clone(),
             };
             // Write Closed first, then Position so line reflects the expected value
-            off.insert(&offset_key, crate::helpers::offsets::OffsetTypes::Closed, 1);
+            off.insert(&offset_key, crate::helpers::offsets::OffsetTypes::Closed, 1)
+                .unwrap();
             off.insert(
                 &offset_key,
                 crate::helpers::offsets::OffsetTypes::Position,
                 *pos,
-            );
+            )
+            .unwrap();
         }
-        let line = off.get_line(&ok).unwrap();
+        let line = off.get_line(&ok).unwrap().unwrap();
         assert_eq!(u64::from(line), 42);
         // Idempotent: run again using the same offsets_map, value unchanged
         for (k, pos) in offsets_map.iter() {
@@ -4927,14 +4825,16 @@ mod tests_wal_commit {
                 namespace: k.namespace.clone(),
                 partition: k.partition.clone(),
             };
-            off.insert(&offset_key, crate::helpers::offsets::OffsetTypes::Closed, 1);
+            off.insert(&offset_key, crate::helpers::offsets::OffsetTypes::Closed, 1)
+                .unwrap();
             off.insert(
                 &offset_key,
                 crate::helpers::offsets::OffsetTypes::Position,
                 *pos,
-            );
+            )
+            .unwrap();
         }
-        let line2 = off.get_line(&ok).unwrap();
+        let line2 = off.get_line(&ok).unwrap().unwrap();
         assert_eq!(u64::from(line2), 42);
     }
 
@@ -4949,7 +4849,7 @@ mod tests_wal_commit {
         };
         let offsets_map = StdHashMap::from([(key.clone(), 42_u64)]);
 
-        mark_offsets_durable_in_wal(&off, offsets_map.iter());
+        mark_offsets_durable_in_wal(&off, offsets_map.iter()).unwrap();
 
         let mut backing_bytes = off.get(&key).unwrap().unwrap();
         let layout: LayoutVerified<&mut [u8], crate::helpers::offsets::OffsetValue> =
@@ -5014,7 +4914,7 @@ mod tests_wal_commit {
                 .unwrap(),
             Some(true)
         );
-        let line = offsets_db.get_line(&offset_key).unwrap();
+        let line = offsets_db.get_line(&offset_key).unwrap().unwrap();
         assert_eq!(u64::from(line), 42);
     }
 
@@ -5111,7 +5011,7 @@ mod tests_wal_commit {
 
         let cleanup = Buffers::remove_disk_segment_and_commit_marker(&seg_path).unwrap();
 
-        assert_eq!(cleanup, DiskSegmentCleanup::Removed);
+        assert_eq!(cleanup, WalPairReclaim::Removed);
         assert!(!seg_path.exists());
         assert!(!commit_path.exists());
     }
@@ -5126,9 +5026,24 @@ mod tests_wal_commit {
 
         let cleanup = Buffers::remove_disk_segment_and_commit_marker(&seg_path).unwrap();
 
-        assert_eq!(cleanup, DiskSegmentCleanup::AlreadyMissing);
+        assert_eq!(cleanup, WalPairReclaim::AlreadyUnowned);
         assert!(!seg_path.exists());
         assert!(!commit_path.exists());
+    }
+
+    #[test]
+    #[serial]
+    fn test_remove_disk_segment_and_commit_marker_unowns_before_dropping_body() {
+        let (base, _guard) = setup_data_dir();
+        let seg_path = base.join("gate.seg");
+        let commit_path = seg_path.with_extension("seg.commit");
+        fs::create_dir(&seg_path).unwrap();
+        fs::write(&commit_path, b"commit").unwrap();
+
+        let err = Buffers::remove_disk_segment_and_commit_marker(&seg_path).unwrap_err();
+        assert_ne!(err.kind(), io::ErrorKind::NotFound);
+        assert!(!commit_path.exists());
+        assert!(seg_path.exists());
     }
 
     #[test]
@@ -5422,6 +5337,7 @@ mod compaction_semantics_tests {
                 num_partitions: 1,
                 offsets: HashMap::new(),
                 index: vec![idx.clone()],
+                body_sha256: [0u8; 32],
             },
             ordinal: 0,
             idx,
@@ -5547,11 +5463,12 @@ mod compaction_semantics_tests {
 #[cfg(test)]
 mod clustered_flush_retry_tests {
     #[test]
-    fn clustered_quorum_loss_does_not_restore_live_for_source_retry() {
+    fn persist_failure_does_not_restore_live_for_source_retry() {
         let src = include_str!("ingest_buffer.rs");
-        assert!(src.contains("ingest_durable_store().is_none()"));
-        assert!(src.contains("restore_after_failed_flush"));
-        assert!(src.contains("concatenate those retries into one segment"));
+        assert!(
+            src.contains("Persist is all-or-nothing"),
+            "S3 persist must not restore live bytes after a failed flush"
+        );
     }
 }
 
@@ -5578,6 +5495,7 @@ mod planner_sot_tests {
                     num_partitions: 0,
                     offsets: HashMap::new(),
                     index: Vec::new(),
+                    body_sha256: [0u8; 32],
                 },
             },
         );

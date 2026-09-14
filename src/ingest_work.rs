@@ -3340,8 +3340,12 @@ impl Ingest {
                         namespace: ok.namespace.clone(),
                         partition: ok.partition.clone(),
                     };
-                    offset_db_clone.set(&offset_key, OffsetTypes::Closed, 1);
-                    offset_db_clone.set(&offset_key, OffsetTypes::Position, pos);
+                    offset_db_clone
+                        .set(&offset_key, OffsetTypes::Closed, 1)
+                        .expect("deadletter offset closed publish failed");
+                    offset_db_clone
+                        .set(&offset_key, OffsetTypes::Position, pos)
+                        .expect("deadletter offset position publish failed");
                 }
             }
         }

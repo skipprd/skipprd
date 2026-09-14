@@ -459,9 +459,9 @@ fn handle_runtime_offset_request(
             .validate(&key, offset_type, offset_value)
             .map(RuntimeOffsetValue::Validate)
             .map_err(|err| err.to_string()),
-        RuntimeOffsetOperation::LoadCheckpointEnvelope { key } => Ok(
-            RuntimeOffsetValue::LoadCheckpointEnvelope(offsets.load_checkpoint_envelope(&key)),
-        ),
+        RuntimeOffsetOperation::LoadCheckpointEnvelope { key } => offsets
+            .load_checkpoint_envelope(&key)
+            .map(RuntimeOffsetValue::LoadCheckpointEnvelope),
     };
 
     RuntimeOffsetRpcResponse {
@@ -475,9 +475,13 @@ fn materialize_runtime_offset_hints(
     hints: Vec<RuntimeOffsetMaterializationHint>,
 ) {
     for hint in hints {
-        offsets.set(&hint.key, OffsetTypes::Position, hint.position);
+        offsets
+            .set(&hint.key, OffsetTypes::Position, hint.position)
+            .expect("runtime offset position publish failed");
         if hint.closed {
-            offsets.set(&hint.key, OffsetTypes::Closed, 1);
+            offsets
+                .set(&hint.key, OffsetTypes::Closed, 1)
+                .expect("runtime offset closed publish failed");
         }
     }
 }
@@ -4326,7 +4330,9 @@ mod tests {
             RuntimeOffsetValue::Validate(None)
         );
 
-        offsets.set(&key, OffsetTypes::Closed, 1);
+        offsets
+            .set(&key, OffsetTypes::Closed, 1)
+            .expect("test offset closed publish failed");
         offsets
             .store_checkpoint_payload(
                 "runtime-host-checkpoint",

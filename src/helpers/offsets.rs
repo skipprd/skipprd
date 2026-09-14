@@ -5,6 +5,7 @@ use std::time::Duration;
 use Result;
 
 use crate::helpers::configuration::Config;
+use crate::helpers::offset_store::{apply_offset_field, OffsetStore, SledOffsetStore};
 use crate::helpers::offsets::OffsetsError::VacuumError;
 use crate::helpers::Helpers;
 use crate::plugins::cdc::{CheckpointAuthority, CheckpointEnvelope, CheckpointKind};
@@ -126,94 +127,10 @@ struct LocalOffsets {
     tree: sled::Tree,
 }
 
-#[cfg(any(
-    feature = "offset-store-dynamodb",
-    feature = "offset-store-cloud-tables"
-))]
-#[derive(Clone)]
-enum RemoteOffsetStore {
-    #[cfg(feature = "offset-store-dynamodb")]
-    Dynamo(Arc<DynamoDbOffsetStore>),
-    #[cfg(feature = "offset-store-cloud-tables")]
-    Cloud(Arc<CloudTablesOffsetStore>),
-}
-
-#[cfg(any(
-    feature = "offset-store-dynamodb",
-    feature = "offset-store-cloud-tables"
-))]
-impl RemoteOffsetStore {
-    fn get_bytes(&self, sk: &str) -> Result<Option<Vec<u8>>, String> {
-        match self {
-            #[cfg(feature = "offset-store-dynamodb")]
-            Self::Dynamo(store) => store.get_bytes(sk),
-            #[cfg(feature = "offset-store-cloud-tables")]
-            Self::Cloud(store) => store.get_bytes(sk),
-        }
-    }
-
-    fn put_bytes(&self, sk: &str, bytes: &[u8]) -> Result<(), String> {
-        match self {
-            #[cfg(feature = "offset-store-dynamodb")]
-            Self::Dynamo(store) => store.put_bytes(sk, bytes),
-            #[cfg(feature = "offset-store-cloud-tables")]
-            Self::Cloud(store) => store.put_bytes(sk, bytes),
-        }
-    }
-
-    fn fetch_and_update_offset<F>(
-        &self,
-        namespace: &str,
-        partition: &str,
-        update: F,
-    ) -> Result<Option<Vec<u8>>, String>
-    where
-        F: FnOnce(Option<Vec<u8>>) -> Option<Vec<u8>>,
-    {
-        match self {
-            #[cfg(feature = "offset-store-dynamodb")]
-            Self::Dynamo(store) => store.fetch_and_update_offset(namespace, partition, update),
-            #[cfg(feature = "offset-store-cloud-tables")]
-            Self::Cloud(store) => store.fetch_and_update_offset(namespace, partition, update),
-        }
-    }
-
-    fn get_checkpoint(&self, logical_key: &str) -> Result<Option<Vec<u8>>, String> {
-        match self {
-            #[cfg(feature = "offset-store-dynamodb")]
-            Self::Dynamo(store) => store.get_checkpoint(logical_key),
-            #[cfg(feature = "offset-store-cloud-tables")]
-            Self::Cloud(store) => store.get_checkpoint(logical_key),
-        }
-    }
-
-    fn put_checkpoint(&self, logical_key: &str, bytes: &[u8]) -> Result<(), String> {
-        match self {
-            #[cfg(feature = "offset-store-dynamodb")]
-            Self::Dynamo(store) => store.put_checkpoint(logical_key, bytes),
-            #[cfg(feature = "offset-store-cloud-tables")]
-            Self::Cloud(store) => store.put_checkpoint(logical_key, bytes),
-        }
-    }
-
-    fn get_offset(&self, namespace: &str, partition: &str) -> Result<Option<Vec<u8>>, String> {
-        match self {
-            #[cfg(feature = "offset-store-dynamodb")]
-            Self::Dynamo(store) => store.get_offset(namespace, partition),
-            #[cfg(feature = "offset-store-cloud-tables")]
-            Self::Cloud(store) => store.get_offset(namespace, partition),
-        }
-    }
-}
-
 #[derive(Clone)]
 pub struct Offsets {
     local: Option<LocalOffsets>,
-    #[cfg(any(
-        feature = "offset-store-dynamodb",
-        feature = "offset-store-cloud-tables"
-    ))]
-    remote: Option<RemoteOffsetStore>,
+    store: Option<Arc<dyn OffsetStore>>,
     transport: Option<Arc<dyn OffsetTransport>>,
     checkpoint_transport: Option<Arc<dyn CheckpointTransport>>,
 }
@@ -233,35 +150,6 @@ pub enum OffsetsError {
 }
 
 impl Offsets {
-    fn offset_value_bytes(offset_type: OffsetTypes, offset: u64) -> sled::IVec {
-        match offset_type {
-            OffsetTypes::Filesize => sled::IVec::from(
-                OffsetValue {
-                    filesize: U64::new(offset),
-                    line: U64::new(0),
-                    closed: U64::new(0),
-                }
-                .as_bytes(),
-            ),
-            OffsetTypes::Position => sled::IVec::from(
-                OffsetValue {
-                    filesize: U64::new(0),
-                    line: U64::new(offset),
-                    closed: U64::new(0),
-                }
-                .as_bytes(),
-            ),
-            OffsetTypes::Closed => sled::IVec::from(
-                OffsetValue {
-                    filesize: U64::new(0),
-                    line: U64::new(0),
-                    closed: U64::new(offset),
-                }
-                .as_bytes(),
-            ),
-        }
-    }
-
     fn checkpoint_storage_key(key: &str) -> String {
         format!("cdc_checkpoint:{}", key)
     }
@@ -276,12 +164,22 @@ impl Offsets {
     ) -> Self {
         Self {
             local: None,
-            #[cfg(any(
-                feature = "offset-store-dynamodb",
-                feature = "offset-store-cloud-tables"
-            ))]
-            remote: None,
+            store: None,
             transport: Some(transport),
+            checkpoint_transport,
+        }
+    }
+
+    fn handle(
+        local: Option<LocalOffsets>,
+        store: Option<Arc<dyn OffsetStore>>,
+        transport: Option<Arc<dyn OffsetTransport>>,
+        checkpoint_transport: Option<Arc<dyn CheckpointTransport>>,
+    ) -> Self {
+        Self {
+            local,
+            store,
+            transport,
             checkpoint_transport,
         }
     }
@@ -290,33 +188,12 @@ impl Offsets {
         self.local.as_ref().map(|local| &local.tree)
     }
 
-    #[cfg(any(
-        feature = "offset-store-dynamodb",
-        feature = "offset-store-cloud-tables"
-    ))]
-    fn remote_store(&self) -> Option<&RemoteOffsetStore> {
-        self.remote.as_ref()
-    }
-
-    fn uses_remote_store(&self) -> bool {
-        #[cfg(any(
-            feature = "offset-store-dynamodb",
-            feature = "offset-store-cloud-tables"
-        ))]
-        {
-            return self.remote.is_some();
-        }
-        #[cfg(not(any(
-            feature = "offset-store-dynamodb",
-            feature = "offset-store-cloud-tables"
-        )))]
-        {
-            false
-        }
+    fn backend(&self) -> Option<&dyn OffsetStore> {
+        self.store.as_deref()
     }
 
     fn has_materialized_store(&self) -> bool {
-        self.local_tree().is_some() || self.uses_remote_store()
+        self.store.is_some()
     }
 
     fn transport(&self) -> Option<&Arc<dyn OffsetTransport>> {
@@ -350,30 +227,25 @@ impl Offsets {
             Config::get_wal_storage(),
             crate::helpers::wal_storage::WalStorage::Clustered
         );
-        let remote_kind = match Config::configured_offset_store() {
-            Ok(Some(kind)) => kind,
-            Ok(None) if clustered => {
-                if cfg!(feature = "offset-store-dynamodb") {
-                    crate::helpers::wal_storage::OffsetStoreKind::DynamoDb
-                } else {
-                    crate::helpers::wal_storage::OffsetStoreKind::CloudTables
-                }
-            }
-            Ok(None) => crate::helpers::wal_storage::OffsetStoreKind::Sled,
-            Err(err) => return Err(OffsetsError::AlreadyOpenError(err.to_string())),
-        };
-        let use_remote = clustered || remote_kind.is_clustered_control_plane();
+        let remote_kind = crate::pipeline_backend::configured_kind()
+            .map_err(|err| OffsetsError::AlreadyOpenError(err))?;
+        if clustered && !remote_kind.is_clustered_control_plane() {
+            return Err(OffsetsError::AlreadyOpenError(
+                "clustered WAL requires SKIPPR_OFFSET_STORE=dynamodb or cloud-tables".into(),
+            ));
+        }
+        let use_remote = remote_kind.is_clustered_control_plane();
         if use_remote {
-            let warn_without_s3_wal = match Config::get_wal_storage() {
-                crate::helpers::wal_storage::WalStorage::S3
-                | crate::helpers::wal_storage::WalStorage::Clustered => false,
-                crate::helpers::wal_storage::WalStorage::Disk => true,
-            };
             #[cfg(any(
                 feature = "offset-store-dynamodb",
                 feature = "offset-store-cloud-tables"
             ))]
             {
+                let warn_without_s3_wal = match Config::get_wal_storage() {
+                    crate::helpers::wal_storage::WalStorage::S3
+                    | crate::helpers::wal_storage::WalStorage::Clustered => false,
+                    crate::helpers::wal_storage::WalStorage::Disk => true,
+                };
                 let remote = match remote_kind {
                     crate::helpers::wal_storage::OffsetStoreKind::CloudTables => {
                         #[cfg(feature = "offset-store-cloud-tables")]
@@ -383,8 +255,7 @@ impl Offsets {
                                 Config::offset_store_partition_key(),
                                 warn_without_s3_wal,
                             )
-                            .map(Arc::new)
-                            .map(RemoteOffsetStore::Cloud)
+                            .map(|store| Arc::new(store) as Arc<dyn OffsetStore>)
                             .map_err(OffsetsError::AlreadyOpenError)?
                         }
                         #[cfg(not(feature = "offset-store-cloud-tables"))]
@@ -394,8 +265,7 @@ impl Offsets {
                             ));
                         }
                     }
-                    crate::helpers::wal_storage::OffsetStoreKind::DynamoDb
-                    | crate::helpers::wal_storage::OffsetStoreKind::Sled => {
+                    crate::helpers::wal_storage::OffsetStoreKind::DynamoDb => {
                         #[cfg(feature = "offset-store-dynamodb")]
                         {
                             DynamoDbOffsetStore::open(
@@ -403,8 +273,7 @@ impl Offsets {
                                 Config::offset_store_partition_key(),
                                 warn_without_s3_wal,
                             )
-                            .map(Arc::new)
-                            .map(RemoteOffsetStore::Dynamo)
+                            .map(|store| Arc::new(store) as Arc<dyn OffsetStore>)
                             .map_err(OffsetsError::AlreadyOpenError)?
                         }
                         #[cfg(not(feature = "offset-store-dynamodb"))]
@@ -414,13 +283,14 @@ impl Offsets {
                             ));
                         }
                     }
+                    crate::helpers::wal_storage::OffsetStoreKind::Sled => {
+                        return Err(OffsetsError::AlreadyOpenError(
+                            "sled offset store is the local backend, not a remote OffsetStore"
+                                .into(),
+                        ));
+                    }
                 };
-                return Ok(Offsets {
-                    local: None,
-                    remote: Some(remote),
-                    transport: None,
-                    checkpoint_transport: None,
-                });
+                return Ok(Self::handle(None, Some(remote), None, None));
             }
             #[cfg(not(any(
                 feature = "offset-store-dynamodb",
@@ -450,6 +320,7 @@ impl Offsets {
             }
         };
         let tree = db.open_tree("offsets").expect("Could not open offset tree");
+        let store: Arc<dyn OffsetStore> = Arc::new(SledOffsetStore::new(tree.clone()));
 
         let total_size_bytes = db.size_on_disk().unwrap_or_else(|err| {
             error!("Failed getting size of offsets DB, Error: {:?}", err);
@@ -510,18 +381,27 @@ impl Offsets {
         //     println!("Key: {:?}, Value: {:?}", key, value);
         // }
 
-        let store = Offsets {
-            local: Some(LocalOffsets { db, tree }),
-            #[cfg(any(
-                feature = "offset-store-dynamodb",
-                feature = "offset-store-cloud-tables"
-            ))]
-            remote: None,
-            transport: None,
-            checkpoint_transport: None,
-        };
+        Ok(Self::handle(
+            Some(LocalOffsets { db, tree }),
+            Some(store),
+            None,
+            None,
+        ))
+    }
 
-        Ok(store)
+    pub fn open_sled_lease_store(&self) -> Result<crate::store::SledLeaseStore, String> {
+        let local = self
+            .local
+            .as_ref()
+            .ok_or_else(|| "sled pipeline lease requires a local offset database".to_string())?;
+        crate::store::SledLeaseStore::open(&local.db)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn from_local_db_for_test(db: sled::Db) -> Self {
+        let tree = db.open_tree("offsets").expect("Could not open offset tree");
+        let store: Arc<dyn OffsetStore> = Arc::new(SledOffsetStore::new(tree.clone()));
+        Self::handle(Some(LocalOffsets { db, tree }), Some(store), None, None)
     }
 
     // Sled remove() currently sets the value to None, and maintains the key in the tree.
@@ -766,45 +646,47 @@ impl Offsets {
         format!("{}-{}-latest", key.namespace, key.partition)
     }
 
-    pub fn flush(&self) -> Option<usize> {
+    pub fn flush(&self) -> Result<Option<usize>, OffsetsError> {
         if let Some(tree) = self.local_tree() {
-            match tree.flush() {
-                Ok(val) => Some(val),
-                Err(err) => {
-                    println!("Failed flushing offsets, Error: {:?}", err);
-                    None
-                }
-            }
-        } else if self.uses_remote_store() {
-            None
+            return tree
+                .flush()
+                .map(Some)
+                .map_err(|err| OffsetsError::Store(format!("Failed flushing offsets: {err}")));
+        }
+        if let Some(store) = self.backend() {
+            store
+                .flush()
+                .map(|_| None)
+                .map_err(|err| OffsetsError::Store(format!("Failed flushing offsets: {err}")))
         } else {
-            None
-        }
-    }
-    pub fn set(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Option<IVec> {
-        if self.local_tree().is_none() && !self.uses_remote_store() {
-            panic!(
-                "remote/source offset handles are read-only; attempted set for {}:{} type={:?} offset={}",
-                key.namespace, key.partition, offset_type, offset
-            );
-        }
-        match self.upsert(key, offset_type, offset) {
-            Ok(val) => val,
-            Err(err) => {
-                println!("Failed setting offset, Error: {:?}", err);
-                None
-            }
+            Ok(None)
         }
     }
 
-    pub fn insert(&self, key: &OffsetKey, offset_type: OffsetTypes, offset: u64) -> Option<IVec> {
-        match self.merge_offset(key, offset_type, offset, true) {
-            Ok(val) => val,
-            Err(err) => {
-                error!("Failed inserting offset, Error: {:?}", err);
-                None
-            }
+    pub fn set(
+        &self,
+        key: &OffsetKey,
+        offset_type: OffsetTypes,
+        offset: u64,
+    ) -> Result<Option<IVec>, OffsetsError> {
+        if self.store.is_none() {
+            return Err(OffsetsError::Store(format!(
+                "remote/source offset handles are read-only; attempted set for {}:{} type={:?} offset={}",
+                key.namespace, key.partition, offset_type, offset
+            )));
         }
+        self.upsert(key, offset_type, offset)
+            .map_err(|err| OffsetsError::Store(err.to_string()))
+    }
+
+    pub fn insert(
+        &self,
+        key: &OffsetKey,
+        offset_type: OffsetTypes,
+        offset: u64,
+    ) -> Result<Option<IVec>, OffsetsError> {
+        self.merge_offset(key, offset_type, offset, true)
+            .map_err(|err| OffsetsError::Store(err.to_string()))
     }
 
     fn merge_offset(
@@ -814,77 +696,27 @@ impl Offsets {
         offset: u64,
         position_max: bool,
     ) -> Result<Option<IVec>, sled::Error> {
-        #[cfg(any(
-            feature = "offset-store-dynamodb",
-            feature = "offset-store-cloud-tables"
-        ))]
-        if let Some(remote) = self.remote_store().cloned() {
-            let key_clone = key.clone();
-            let result = remote.fetch_and_update_offset(
-                &key_clone.namespace,
-                &key_clone.partition,
-                |value_opt| {
-                    Some(Self::apply_offset_field(
-                        value_opt,
-                        offset_type,
-                        offset,
-                        position_max,
-                    ))
-                },
-            );
-            return match result {
-                Ok(val) => Ok(val.map(IVec::from)),
-                Err(e) => Err(sled::Error::ReportableBug(e.to_string())),
-            };
-        }
-        let Some(tree) = self.local_tree() else {
+        let Some(store) = self.store.as_ref() else {
             return Err(sled::Error::ReportableBug(format!(
                 "Remote offsets are read-only; refusing write for {}:{} type={:?} offset={}",
                 key.namespace, key.partition, offset_type, offset
             )));
         };
-        let key = self.build_key(key);
-        let bytes: &[u8] = key.as_bytes();
-        tree.fetch_and_update(bytes, |value_opt| {
-            Some(IVec::from(Self::apply_offset_field(
-                value_opt.map(|v| v.to_vec()),
-                offset_type,
-                offset,
-                position_max,
-            )))
-        })
-    }
-
-    fn apply_offset_field(
-        existing: Option<Vec<u8>>,
-        offset_type: OffsetTypes,
-        offset: u64,
-        position_max: bool,
-    ) -> Vec<u8> {
-        if let Some(mut backing_bytes) = existing {
-            if backing_bytes.len() == 24 {
-                if let Some(layout) =
-                    LayoutVerified::<&mut [u8], OffsetValue>::new_unaligned(&mut backing_bytes)
-                {
-                    let value: &mut OffsetValue = layout.into_mut();
-                    match offset_type {
-                        OffsetTypes::Filesize => value.filesize.set(offset),
-                        OffsetTypes::Position if position_max => {
-                            let new_value = if offset > value.line.get() {
-                                offset
-                            } else {
-                                value.line.get()
-                            };
-                            value.line.set(new_value);
-                        }
-                        OffsetTypes::Position => value.line.set(offset),
-                        OffsetTypes::Closed => value.closed.set(offset),
-                    }
-                    return backing_bytes;
-                }
-            }
-        }
-        Self::offset_value_bytes(offset_type, offset).to_vec()
+        store
+            .fetch_and_update_offset(
+                &key.namespace,
+                &key.partition,
+                Box::new(move |value_opt| {
+                    Some(apply_offset_field(
+                        value_opt,
+                        offset_type,
+                        offset,
+                        position_max,
+                    ))
+                }),
+            )
+            .map(|val| val.map(IVec::from))
+            .map_err(|e| sled::Error::ReportableBug(e))
     }
 
     /// Read the durable offset tuple for a partition with a single store lookup.
@@ -960,71 +792,25 @@ impl Offsets {
     }
 
     pub fn try_get(&self, key: &OffsetKey) -> Result<Option<IVec>, OffsetsError> {
-        #[cfg(any(
-            feature = "offset-store-dynamodb",
-            feature = "offset-store-cloud-tables"
-        ))]
-        if let Some(remote) = self.remote_store() {
-            return remote
-                .get_offset(&key.namespace, &key.partition)
-                .map(|bytes| bytes.map(IVec::from))
-                .map_err(OffsetsError::Store);
-        }
-        let Some(tree) = self.local_tree() else {
+        let Some(store) = self.backend() else {
             return Ok(None);
         };
-        let key = self.build_key(key);
-        let bytes: &[u8] = key.as_bytes();
-        tree.get(bytes)
-            .map_err(|err| OffsetsError::Store(err.to_string()))
+        store
+            .get_offset(&key.namespace, &key.partition)
+            .map(|bytes| bytes.map(IVec::from))
+            .map_err(OffsetsError::Store)
     }
 
     pub fn get(&self, key: &OffsetKey) -> Result<Option<IVec>, OffsetsError> {
         self.try_get(key)
     }
 
-    pub fn get_line(&self, key: &OffsetKey) -> Option<U64<LittleEndian>> {
-        let Some(tree) = self.local_tree() else {
-            return None;
-        };
-        let key = self.build_key(key);
-        // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
-        let bytes: &[u8] = key.as_bytes();
-        match tree.get(bytes) {
-            Ok(val) => {
-                let mut backing_bytes = sled::IVec::from(val.unwrap());
-
-                // this verifies that our value is the correct length
-                // and alignment (in this case we don't need it to be
-                // aligned, because we use the `U64` type from zerocopy)
-                let layout: LayoutVerified<&mut [u8], OffsetValue> =
-                    LayoutVerified::new_unaligned(&mut *backing_bytes)
-                        .expect("bytes do not fit schema");
-
-                let value: &mut OffsetValue = layout.into_mut();
-                Some(value.line)
-            }
-            Err(err) => {
-                println!("Failed getting offset, Error: {:?}", err);
-                None
-            }
-        }
+    pub fn get_line(&self, key: &OffsetKey) -> Result<Option<U64<LittleEndian>>, OffsetsError> {
+        Ok(self.snapshot_value(key)?.map(|value| value.line))
     }
 
-    pub fn get_latest(&self, key: &OffsetKey) -> Option<IVec> {
-        let Some(tree) = self.local_tree() else {
-            return None;
-        };
-        let key = self.build_key(key);
-        // let bytes: &[u8] = unsafe { self.any_as_u8_slice(&key) };
-        let bytes: &[u8] = key.as_bytes();
-        match tree.get(bytes) {
-            Ok(val) => val,
-            Err(err) => {
-                println!("Failed getting latest offset, Error: {:?}", err);
-                None
-            }
-        }
+    pub fn get_latest(&self, key: &OffsetKey) -> Result<Option<IVec>, OffsetsError> {
+        self.try_get(key)
     }
 
     pub fn remove(&self, key: &OffsetKey) -> Result<Option<IVec>, sled::Error> {
@@ -1065,7 +851,7 @@ impl Offsets {
         offset_type: OffsetTypes,
         offset_value: u64,
     ) -> Result<Option<bool>, OffsetsError> {
-        if self.local_tree().is_none() && !self.uses_remote_store() {
+        if self.store.is_none() {
             return match self.remote_value(RuntimeOffsetOperation::Validate {
                 key: key.clone(),
                 offset_type,
@@ -1135,13 +921,9 @@ impl Offsets {
         key: &str,
         envelope: &CheckpointEnvelope,
     ) -> Result<(), String> {
-        #[cfg(any(
-            feature = "offset-store-dynamodb",
-            feature = "offset-store-cloud-tables"
-        ))]
-        if let Some(remote) = self.remote_store() {
+        if let Some(store) = self.backend() {
             let value = bincode::serialize(envelope).map_err(|err| err.to_string())?;
-            return remote.put_checkpoint(key, &value);
+            return store.put_checkpoint(key, &value);
         }
         if self.local_tree().is_none() {
             let transport = self.checkpoint_transport().ok_or_else(|| {
@@ -1172,59 +954,58 @@ impl Offsets {
         self.store_checkpoint_envelope(key, &envelope)
     }
 
-    pub fn load_checkpoint_envelope(&self, key: &str) -> Option<CheckpointEnvelope> {
-        #[cfg(any(
-            feature = "offset-store-dynamodb",
-            feature = "offset-store-cloud-tables"
-        ))]
-        if let Some(remote) = self.remote_store() {
-            let value = remote.get_checkpoint(key).ok().flatten()?;
-            return match bincode::deserialize::<CheckpointEnvelope>(&value) {
-                Ok(envelope) => Some(envelope),
-                Err(err) => {
-                    error!(
-                        "Failed to deserialize checkpoint envelope '{}': {}",
-                        key, err
-                    );
-                    None
-                }
+    pub fn load_checkpoint_envelope(
+        &self,
+        key: &str,
+    ) -> Result<Option<CheckpointEnvelope>, String> {
+        if let Some(store) = self.backend() {
+            let Some(value) = store.get_checkpoint(key)? else {
+                return Ok(None);
             };
+            return bincode::deserialize::<CheckpointEnvelope>(&value)
+                .map(Some)
+                .map_err(|err| {
+                    format!("Failed to deserialize checkpoint envelope '{key}': {err}")
+                });
         }
         if self.local_tree().is_none() {
             return match self.remote_value(RuntimeOffsetOperation::LoadCheckpointEnvelope {
                 key: key.to_string(),
             }) {
-                Some(RuntimeOffsetValue::LoadCheckpointEnvelope(value)) => value,
-                Some(other) => {
-                    error!(
-                        "Remote load_checkpoint_envelope returned unexpected response: {:?}",
-                        other
-                    );
-                    None
-                }
-                None => None,
+                Some(RuntimeOffsetValue::LoadCheckpointEnvelope(value)) => Ok(value),
+                Some(other) => Err(format!(
+                    "Remote load_checkpoint_envelope returned unexpected response: {:?}",
+                    other
+                )),
+                None => Err("remote load_checkpoint_envelope returned no value".into()),
             };
         }
         let Some(tree) = self.local_tree() else {
-            return None;
+            return Ok(None);
         };
         let sled_key = Self::checkpoint_storage_key(key);
-        let value = tree.get(sled_key.as_bytes()).ok().flatten()?;
-        match bincode::deserialize::<CheckpointEnvelope>(&value) {
-            Ok(envelope) => Some(envelope),
-            Err(err) => {
-                error!(
-                    "Failed to deserialize checkpoint envelope '{}': {}",
-                    key, err
-                );
-                None
-            }
-        }
+        let Some(value) = tree
+            .get(sled_key.as_bytes())
+            .map_err(|err| err.to_string())?
+        else {
+            return Ok(None);
+        };
+        bincode::deserialize::<CheckpointEnvelope>(&value)
+            .map(Some)
+            .map_err(|err| format!("Failed to deserialize checkpoint envelope '{key}': {err}"))
     }
 
-    pub fn load_checkpoint_payload<T: serde::de::DeserializeOwned>(&self, key: &str) -> Option<T> {
-        self.load_checkpoint_envelope(key)
-            .and_then(|envelope| envelope.into_payload().ok())
+    pub fn load_checkpoint_payload<T: serde::de::DeserializeOwned>(
+        &self,
+        key: &str,
+    ) -> Result<Option<T>, String> {
+        match self.load_checkpoint_envelope(key)? {
+            Some(envelope) => envelope
+                .into_payload()
+                .map(Some)
+                .map_err(|err| err.to_string()),
+            None => Ok(None),
+        }
     }
 }
 
@@ -1309,7 +1090,7 @@ mod tests {
             partition: "bar".to_string(),
         };
 
-        assert_eq!(db.insert(key, OffsetTypes::Position, 1), None);
+        assert_eq!(db.insert(key, OffsetTypes::Position, 1).unwrap(), None);
         assert_eq!(
             db.validate(key, OffsetTypes::Position, 1).unwrap(),
             Some(false)
@@ -1327,7 +1108,10 @@ mod tests {
             }
             .as_bytes(),
         );
-        assert_eq!(db.insert(key, OffsetTypes::Position, 2), Some(return_val));
+        assert_eq!(
+            db.insert(key, OffsetTypes::Position, 2).unwrap(),
+            Some(return_val)
+        );
         assert_eq!(
             db.validate(key, OffsetTypes::Position, 1).unwrap(),
             Some(false)
@@ -1349,7 +1133,10 @@ mod tests {
             }
             .as_bytes(),
         );
-        assert_eq!(db.insert(key, OffsetTypes::Position, 3), Some(return_val));
+        assert_eq!(
+            db.insert(key, OffsetTypes::Position, 3).unwrap(),
+            Some(return_val)
+        );
         assert_eq!(
             db.validate(key, OffsetTypes::Position, 1).unwrap(),
             Some(false)
@@ -1375,7 +1162,10 @@ mod tests {
             }
             .as_bytes(),
         );
-        assert_eq!(db.insert(key, OffsetTypes::Position, 3), Some(return_val));
+        assert_eq!(
+            db.insert(key, OffsetTypes::Position, 3).unwrap(),
+            Some(return_val)
+        );
 
         let return_val = sled::IVec::from(
             OffsetValue {
@@ -1385,7 +1175,10 @@ mod tests {
             }
             .as_bytes(),
         );
-        assert_eq!(db.insert(key, OffsetTypes::Position, 2), Some(return_val));
+        assert_eq!(
+            db.insert(key, OffsetTypes::Position, 2).unwrap(),
+            Some(return_val)
+        );
     }
 
     #[test]
@@ -1403,8 +1196,8 @@ mod tests {
             namespace: "foo".to_string(),
             partition: "closed-preserve".to_string(),
         };
-        db.insert(key, OffsetTypes::Closed, 1);
-        db.insert(key, OffsetTypes::Position, 42);
+        db.insert(key, OffsetTypes::Closed, 1).unwrap();
+        db.insert(key, OffsetTypes::Position, 42).unwrap();
         let snap = db.snapshot_value(key).unwrap().unwrap();
         assert_eq!(snap.closed.get(), 1);
         assert_eq!(snap.line.get(), 42);
@@ -1446,7 +1239,7 @@ mod tests {
         };
 
         assert_eq!(db.validate(key, OffsetTypes::Filesize, 1).unwrap(), None);
-        db.set(key, OffsetTypes::Filesize, 1);
+        db.set(key, OffsetTypes::Filesize, 1).unwrap();
         assert_eq!(
             db.validate(key, OffsetTypes::Filesize, 1).unwrap(),
             Some(false)
@@ -1455,7 +1248,7 @@ mod tests {
             db.validate(key, OffsetTypes::Filesize, 2).unwrap(),
             Some(true)
         );
-        db.set(key, OffsetTypes::Filesize, 2);
+        db.set(key, OffsetTypes::Filesize, 2).unwrap();
         assert_eq!(
             db.validate(key, OffsetTypes::Filesize, 1).unwrap(),
             Some(false)
@@ -1484,7 +1277,7 @@ mod tests {
 
         assert_eq!(db.validate(key, OffsetTypes::Closed, 0).unwrap(), None);
         assert_eq!(db.validate(key, OffsetTypes::Closed, 1).unwrap(), None);
-        db.set(key, OffsetTypes::Closed, 1);
+        db.set(key, OffsetTypes::Closed, 1).unwrap();
         assert_eq!(
             db.validate(key, OffsetTypes::Closed, 1).unwrap(),
             Some(true)
@@ -1493,7 +1286,7 @@ mod tests {
             db.validate(key, OffsetTypes::Closed, 0).unwrap(),
             Some(false)
         );
-        db.set(key, OffsetTypes::Closed, 42);
+        db.set(key, OffsetTypes::Closed, 42).unwrap();
         assert_eq!(
             db.validate(key, OffsetTypes::Closed, 1).unwrap(),
             Some(true)
@@ -1534,10 +1327,12 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            offsets.load_checkpoint_payload::<Vec<u8>>("remote-key"),
+            offsets
+                .load_checkpoint_payload::<Vec<u8>>("remote-key")
+                .unwrap(),
             Some(b"checkpoint".to_vec())
         );
-        assert_eq!(offsets.flush(), None);
+        assert_eq!(offsets.flush().unwrap(), None);
 
         let calls = transport.calls.lock().unwrap().clone();
         assert_eq!(
@@ -1569,12 +1364,12 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "remote/source offset handles are read-only")]
     fn remote_offset_writes_fail_instead_of_silently_nooping() {
         let offsets = Offsets::from_transport(Arc::new(RecordingOffsetTransport::default()));
         let key = OffsetKey::new("remote-ns", "remote-partition");
 
-        offsets.set(&key, OffsetTypes::Position, 42);
+        let err = offsets.set(&key, OffsetTypes::Position, 42).unwrap_err();
+        assert!(err.to_string().contains("read-only"));
     }
 
     #[test]

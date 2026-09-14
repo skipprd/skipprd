@@ -716,16 +716,20 @@ fn publish_sled(
 ) -> Result<(), DurableError> {
     for offset in committed {
         let key = OffsetKey::new(&offset.namespace, &offset.partition);
-        offsets.set(
-            &key,
-            crate::helpers::offsets::OffsetTypes::Closed,
-            offset.closed,
-        );
-        offsets.set(
-            &key,
-            crate::helpers::offsets::OffsetTypes::Position,
-            offset.position,
-        );
+        offsets
+            .set(
+                &key,
+                crate::helpers::offsets::OffsetTypes::Closed,
+                offset.closed,
+            )
+            .map_err(|err| DurableError::CorruptOffset(err.to_string()))?;
+        offsets
+            .set(
+                &key,
+                crate::helpers::offsets::OffsetTypes::Position,
+                offset.position,
+            )
+            .map_err(|err| DurableError::CorruptOffset(err.to_string()))?;
     }
     let _ = checkpoints;
     Ok(())

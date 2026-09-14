@@ -1522,32 +1522,25 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                                         {
                                             continue;
                                         }
-                                        if let Ok(mut meta_file) = std::fs::File::open(&path) {
-                                            if let Ok(meta) = SegmentFile::read_metadata_from_reader(
-                                                &mut meta_file,
-                                            ) {
-                                                for idx in meta.index.iter() {
-                                                    if idx.key.namespace != pipeline_name {
-                                                        continue;
-                                                    }
-                                                    if let Ok(mut file) = std::fs::File::open(&path)
+                                        if let Ok(meta) = SegmentFile::admit_owned_pair_path(&path)
+                                        {
+                                            for idx in meta.index.iter() {
+                                                if idx.key.namespace != pipeline_name {
+                                                    continue;
+                                                }
+                                                if let Ok(mut file) = std::fs::File::open(&path) {
+                                                    if file
+                                                        .seek(std::io::SeekFrom::Start(idx.start))
+                                                        .is_ok()
                                                     {
-                                                        if file
-                                                            .seek(std::io::SeekFrom::Start(
-                                                                idx.start,
-                                                            ))
-                                                            .is_ok()
+                                                        let reader = std::io::BufReader::new(file);
+                                                        let mut take = reader.take(idx.len);
+                                                        if let Ok(sr) =
+                                                            StreamReader::try_new(&mut take, None)
                                                         {
-                                                            let reader =
-                                                                std::io::BufReader::new(file);
-                                                            let mut take = reader.take(idx.len);
-                                                            if let Ok(sr) = StreamReader::try_new(
-                                                                &mut take, None,
-                                                            ) {
-                                                                for it in sr {
-                                                                    if let Ok(b) = it {
-                                                                        wal_batches.push(b);
-                                                                    }
+                                                            for it in sr {
+                                                                if let Ok(b) = it {
+                                                                    wal_batches.push(b);
                                                                 }
                                                             }
                                                         }

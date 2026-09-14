@@ -81,7 +81,9 @@ async fn handle_offset_connection(
                 .await?;
             }
             PluginOffsetFrame::LoadCheckpoint { request_id, key } => {
-                let envelope = offsets.load_checkpoint_envelope(&key);
+                let envelope = offsets
+                    .load_checkpoint_envelope(&key)
+                    .map_err(io::Error::other)?;
                 write_frame(
                     &mut stream,
                     &HostOffsetFrame::LoadCheckpointResponse {
@@ -165,7 +167,7 @@ mod tests {
         assert_eq!(validate_entries(&offsets, &missing), vec![true]);
 
         let closed_key = OffsetKey::new("ns", "closed-key");
-        offsets.set(&closed_key, OffsetTypes::Closed, 1);
+        offsets.set(&closed_key, OffsetTypes::Closed, 1).unwrap();
         let closed = vec![RuntimeOffsetValidationEntry {
             key: closed_key,
             offset_type: OffsetTypes::Closed,

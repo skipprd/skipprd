@@ -4,7 +4,6 @@
 use std::fs;
 use std::path::Path;
 
-use sha2::{Digest, Sha256};
 use skippr_lease::{DurableError, PipelineKey, PipelinePaths, SegmentId};
 
 use crate::buffer::compaction_transaction::{CompactionTransaction, CompactionTransactionState};
@@ -162,18 +161,12 @@ fn copy_legacy_segments(
                 &SegmentId::new(id).map_err(|err| DurableError::Io(err.to_string()))?,
             ),
         )?;
-        let seg = SegmentFile::new(&clustered.segs, id)?;
-        let meta = seg
-            .read_metadata_durable()
+        let meta = SegmentFile::admit_owned_pair_path(&dest)
             .map_err(|err| DurableError::Io(err.to_string()))?;
-        let payload = fs::read(&dest)?;
-        let mut hasher = Sha256::new();
-        hasher.update(&payload);
-        let payload_sha256: [u8; 32] = hasher.finalize().into();
         descriptors.push(SegmentDescriptor {
             segment_id: id.to_string(),
             payload_len: meta.total_bytes,
-            payload_sha256,
+            payload_sha256: meta.body_sha256,
             num_partitions: meta.num_partitions,
             total_bytes: meta.total_bytes,
             created_at_secs: meta.created_at_secs,

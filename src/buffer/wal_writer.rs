@@ -284,6 +284,16 @@ async fn run_writer(mut rx: mpsc::Receiver<WalWriterCommand>) {
 
         match next {
             Some(WalWriterCommand::Submit(unit)) => {
+                if crate::buffer::wal_persist::wal_is_fatal() {
+                    complete_request_unit(
+                        unit.submit_id,
+                        &Err("s3 wal writer is fatal; refusing further work".into()),
+                    );
+                    let _ = unit
+                        .done
+                        .send(Err("s3 wal writer is fatal; refusing further work".into()));
+                    continue;
+                }
                 pending_offsets = Some(unit.offsets_db.clone());
                 let ack_started = Instant::now();
                 let arrow_bytes = unit.arrow_bytes as u64;

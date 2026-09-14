@@ -212,6 +212,12 @@ pub async fn get_or_fetch(
     }
 
     let bytes = get_object_bytes_for_bucket(bucket, key).await?;
+    crate::buffer::segment_file::SegmentFile::verify_body_checksum(&bytes).map_err(|err| {
+        std::io::Error::new(
+            err.kind(),
+            format!("S3 WAL body checksum failed for {segment_id}: {err}"),
+        )
+    })?;
     let arc = Arc::new(bytes);
     let mut g = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     g.refresh_caps();
