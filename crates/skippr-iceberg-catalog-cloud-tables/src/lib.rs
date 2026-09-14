@@ -1,3 +1,5 @@
+//! Iceberg catalog pointers on Cloud Tables. Uses skippr-cloud Client::from_env().
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -10,18 +12,18 @@ use iceberg::{
     TableIdent,
 };
 use serde_json::json;
+use skippr_cloud::{attr_n, attr_s, n, s, Client};
 use skippr_iceberg_catalog::{
     decode_name, encode_name, skippr_catalog_reuses_offset_table, warehouse_hash,
     IcebergCatalogConfig,
 };
-use skippr_tables_client::{attr_n, attr_s, n, s, TablesClient};
 use uuid::Uuid;
 
 const CATALOG_MAX_RETRIES: usize = 8;
 
 #[derive(Clone)]
 pub struct CloudTablesCatalog {
-    client: Arc<TablesClient>,
+    client: Arc<Client>,
     table: String,
     warehouse: String,
     warehouse_pk: String,
@@ -57,8 +59,8 @@ impl CloudTablesCatalog {
                 ),
             ));
         }
-        let client = TablesClient::from_env()
-            .map_err(|err| Error::new(ErrorKind::Unexpected, err.to_string()))?;
+        let client =
+            Client::from_env().map_err(|err| Error::new(ErrorKind::Unexpected, err.to_string()))?;
         Ok(Self {
             client: Arc::new(client),
             table: table.clone(),

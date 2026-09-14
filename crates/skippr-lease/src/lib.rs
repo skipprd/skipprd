@@ -1,7 +1,7 @@
 //! Clock-free pipeline lease domain types.
 //!
 //! Production storage is DynamoDB (`skippr-lease-store-dynamodb`) or Cloud
-//! tables (`skippr-store-cloud-tables`). Tests use [`MemoryLeaseStore`].
+//! tables (`skippr-lease-store-cloud-tables`). Tests use [`MemoryLeaseStore`].
 //! Single-node `disk`/`s3` modes do not use a lease store.
 
 mod clock;

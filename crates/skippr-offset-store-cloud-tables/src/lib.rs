@@ -1,3 +1,5 @@
+//! Cloud Tables offset/checkpoint store. Uses skippr-cloud Client::from_env().
+
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
 use std::sync::Arc;
 use std::thread;
@@ -6,10 +8,10 @@ use base64::{engine::general_purpose::STANDARD as B64, Engine as _};
 use chrono::Utc;
 use once_cell::sync::OnceCell;
 use serde_json::{json, Value};
-use skippr_tables_client::{attr_n, attr_s, n, s, TablesClient};
+use skippr_cloud::{attr_n, attr_s, n, s, Client};
 use tracing::{info, warn};
 
-type Job = Box<dyn FnOnce(&tokio::runtime::Runtime, Arc<TablesClient>) + Send>;
+type Job = Box<dyn FnOnce(&tokio::runtime::Runtime, Arc<Client>) + Send>;
 
 struct CloudIoWorker {
     jobs: SyncSender<Job>,
@@ -20,7 +22,7 @@ static CLOUD_WORKER: OnceCell<CloudIoWorker> = OnceCell::new();
 fn cloud_worker() -> Result<&'static CloudIoWorker, String> {
     CLOUD_WORKER.get_or_try_init(|| {
         let (job_tx, job_rx) = sync_channel::<Job>(256);
-        let (ready_tx, ready_rx) = sync_channel::<Result<Arc<TablesClient>, String>>(1);
+        let (ready_tx, ready_rx) = sync_channel::<Result<Arc<Client>, String>>(1);
         thread::Builder::new()
             .name("skippr-cloud-tables-offset-io".into())
             .spawn(move || {
@@ -28,7 +30,7 @@ fn cloud_worker() -> Result<&'static CloudIoWorker, String> {
                     .enable_all()
                     .build()
                     .expect("failed to build Cloud tables offset store runtime");
-                let client = match TablesClient::from_env() {
+                let client = match Client::from_env() {
                     Ok(client) => Arc::new(client),
                     Err(err) => {
                         let _ = ready_tx.send(Err(err.to_string()));
@@ -52,7 +54,7 @@ fn cloud_worker() -> Result<&'static CloudIoWorker, String> {
 fn run_on_worker<T, F>(f: F) -> Result<T, String>
 where
     T: Send + 'static,
-    F: FnOnce(&tokio::runtime::Runtime, Arc<TablesClient>) -> T + Send + 'static,
+    F: FnOnce(&tokio::runtime::Runtime, Arc<Client>) -> T + Send + 'static,
 {
     let (reply_tx, reply_rx): (SyncSender<T>, Receiver<T>) = sync_channel(1);
     cloud_worker()?
@@ -312,7 +314,7 @@ fn read_fence(item: &Value) -> Option<WalFence> {
 }
 
 async fn put_item_conditional(
-    client: &TablesClient,
+    client: &Client,
     table: &str,
     pk: &str,
     sk: &str,
@@ -359,7 +361,7 @@ async fn put_item_conditional(
 }
 
 async fn put_wal_commit(
-    client: &TablesClient,
+    client: &Client,
     table: &str,
     pk: &str,
     sk: &str,

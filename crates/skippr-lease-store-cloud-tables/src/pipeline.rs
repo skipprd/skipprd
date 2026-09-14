@@ -8,8 +8,8 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use serde_json::json;
+use skippr_cloud::{attr_n, attr_s, n, s, Client};
 use skippr_lease::{LeaseError, PipelineKey};
-use skippr_tables_client::{attr_n, attr_s, n, s, TablesClient};
 
 pub const PIPELINES_TABLE: &str = "cloud-pipelines";
 pub const PLATFORM_TENANT: &str = "system";
@@ -85,18 +85,18 @@ impl PipelineRegistry for MemoryPipelineRegistry {
 }
 
 pub struct CloudTablesPipelineRegistry {
-    client: Arc<TablesClient>,
+    client: Arc<Client>,
     table: String,
 }
 
 impl CloudTablesPipelineRegistry {
-    pub fn new(client: Arc<TablesClient>, table: String) -> Self {
+    pub fn new(client: Arc<Client>, table: String) -> Self {
         Self { client, table }
     }
 
     pub async fn connect() -> Result<Self, LeaseError> {
-        let client = TablesClient::from_env()
-            .map_err(|err| LeaseError::StoreUnavailable(err.to_string()))?;
+        let client =
+            Client::from_env().map_err(|err| LeaseError::StoreUnavailable(err.to_string()))?;
         Ok(Self::new(Arc::new(client), PIPELINES_TABLE.to_string()))
     }
 

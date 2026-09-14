@@ -40,8 +40,8 @@ fn yaml_pipeline_keys() -> Result<Vec<PipelineKey>, DurableError> {
 
 #[cfg(feature = "offset-store-cloud-tables")]
 async fn cloud_tables_keys() -> Result<Vec<PipelineKey>, DurableError> {
-    use skippr_store_cloud_tables::PipelineRegistry;
-    let registry = skippr_store_cloud_tables::CloudTablesPipelineRegistry::connect()
+    use skippr_lease_store_cloud_tables::PipelineRegistry;
+    let registry = skippr_lease_store_cloud_tables::CloudTablesPipelineRegistry::connect()
         .await
         .map_err(|err| DurableError::Io(err.to_string()))?;
     registry
@@ -58,7 +58,7 @@ async fn cloud_tables_keys() -> Result<Vec<PipelineKey>, DurableError> {
 #[cfg(all(test, feature = "offset-store-cloud-tables"))]
 mod tests {
     use super::*;
-    use skippr_store_cloud_tables::{
+    use skippr_lease_store_cloud_tables::{
         MemoryPipelineRegistry, PipelineKind, PipelineRecord, PipelineRegistry, OTEL_LOGS,
     };
 

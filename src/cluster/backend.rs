@@ -13,7 +13,7 @@ pub async fn open_lease_store(table: String) -> Result<Arc<dyn PipelineLeaseStor
         OffsetStoreKind::CloudTables => {
             #[cfg(feature = "offset-store-cloud-tables")]
             {
-                let store = skippr_store_cloud_tables::CloudTablesLeaseStore::connect(table)
+                let store = skippr_lease_store_cloud_tables::CloudTablesLeaseStore::connect(table)
                     .await
                     .map_err(|err| err.to_string())?;
                 return Ok(Arc::new(store));
@@ -48,9 +48,10 @@ pub async fn open_membership_store(
         OffsetStoreKind::CloudTables => {
             #[cfg(feature = "offset-store-cloud-tables")]
             {
-                let store = skippr_store_cloud_tables::CloudTablesMembershipStore::connect(table)
-                    .await
-                    .map_err(|err| err.to_string())?;
+                let store =
+                    skippr_lease_store_cloud_tables::CloudTablesMembershipStore::connect(table)
+                        .await
+                        .map_err(|err| err.to_string())?;
                 return Ok(Arc::new(store));
             }
             #[cfg(not(feature = "offset-store-cloud-tables"))]
@@ -100,7 +101,7 @@ pub async fn open_skippr_catalog(
     if uses_cloud_tables() {
         #[cfg(feature = "offset-store-cloud-tables")]
         {
-            let catalog = skippr_store_cloud_tables::CloudTablesCatalog::new(cfg)
+            let catalog = skippr_iceberg_catalog_cloud_tables::CloudTablesCatalog::new(cfg)
                 .await
                 .map_err(|err| err.to_string())?;
             return Ok(Arc::new(catalog));
@@ -140,7 +141,7 @@ pub fn offset_publisher_for(
     if uses_cloud_tables() {
         #[cfg(feature = "offset-store-cloud-tables")]
         {
-            let store = skippr_store_cloud_tables::CloudTablesOffsetStore::open(
+            let store = skippr_offset_store_cloud_tables::CloudTablesOffsetStore::open(
                 config.table.clone(),
                 key.dynamo_pk(),
                 false,

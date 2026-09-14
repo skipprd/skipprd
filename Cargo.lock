@@ -11464,6 +11464,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "sigv4"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "hmac 0.12.1",
+ "http 1.4.1",
+ "percent-encoding",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "simd-adler32"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11531,6 +11545,20 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8ee5873ec9cce0195efcb7a4e9507a04cd49aec9c83d0389df45b1ef7ba2e649"
 
 [[package]]
+name = "skippr-cloud"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "http 1.4.1",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sigv4",
+ "thiserror 2.0.18",
+ "tokio",
+]
+
+[[package]]
 name = "skippr-core"
 version = "0.1.0"
 dependencies = [
@@ -11545,6 +11573,20 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "sha2 0.10.9",
+]
+
+[[package]]
+name = "skippr-iceberg-catalog-cloud-tables"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "iceberg",
+ "iceberg-storage-opendal",
+ "serde_json",
+ "skippr-cloud",
+ "skippr-iceberg-catalog",
+ "tokio",
+ "uuid 1.23.2",
 ]
 
 [[package]]
@@ -11574,6 +11616,20 @@ dependencies = [
  "sha2 0.10.9",
  "thiserror 1.0.69",
  "tokio",
+ "uuid 1.23.2",
+]
+
+[[package]]
+name = "skippr-lease-store-cloud-tables"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "serde_json",
+ "skippr-cloud",
+ "skippr-lease",
+ "tokio",
+ "tracing",
  "uuid 1.23.2",
 ]
 
@@ -11608,6 +11664,20 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tokio",
+]
+
+[[package]]
+name = "skippr-offset-store-cloud-tables"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "chrono",
+ "once_cell",
+ "serde_json",
+ "sha2 0.10.9",
+ "skippr-cloud",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -11834,10 +11904,10 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "skippr-iceberg-catalog",
+ "skippr-iceberg-catalog-cloud-tables",
  "skippr-iceberg-catalog-dynamodb",
  "skippr-object-writer",
  "skippr-runtime-sdk",
- "skippr-store-cloud-tables",
  "tokio",
  "tracing",
 ]
@@ -13215,40 +13285,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "skippr-store-cloud-tables"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64 0.22.1",
- "chrono",
- "iceberg",
- "iceberg-storage-opendal",
- "once_cell",
- "serde_json",
- "sha2 0.10.9",
- "skippr-iceberg-catalog",
- "skippr-lease",
- "skippr-tables-client",
- "thiserror 1.0.69",
- "tokio",
- "tracing",
- "uuid 1.23.2",
-]
-
-[[package]]
-name = "skippr-tables-client"
-version = "0.1.0"
-dependencies = [
- "reqwest 0.12.28",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 1.0.69",
- "tokio",
- "url",
-]
-
-[[package]]
 name = "skipprd"
 version = "0.1.0"
 dependencies = [
@@ -13337,15 +13373,17 @@ dependencies = [
  "shellexpand",
  "signal-hook",
  "simd-json",
+ "skippr-cloud",
  "skippr-iceberg-catalog",
+ "skippr-iceberg-catalog-cloud-tables",
  "skippr-iceberg-catalog-dynamodb",
  "skippr-lease",
+ "skippr-lease-store-cloud-tables",
  "skippr-lease-store-dynamodb",
+ "skippr-offset-store-cloud-tables",
  "skippr-offset-store-dynamodb",
  "skippr-query-ballista",
  "skippr-runtime-sdk",
- "skippr-store-cloud-tables",
- "skippr-tables-client",
  "sled",
  "tar",
  "tempfile",

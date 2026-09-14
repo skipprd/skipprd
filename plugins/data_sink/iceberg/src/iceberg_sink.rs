@@ -34,6 +34,7 @@ use iceberg_catalog_glue::{GlueCatalogBuilder, GLUE_CATALOG_PROP_CATALOG_ID};
 use iceberg_catalog_glue::{AWS_REGION_NAME, GLUE_CATALOG_PROP_WAREHOUSE};
 use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 use serde_derive::{Deserialize, Serialize};
+use skippr_iceberg_catalog::offset_store_is_cloud_tables;
 pub use skippr_iceberg_catalog::IcebergCatalogConfig;
 use skippr_iceberg_catalog_dynamodb::DynamoDbCatalog;
 use skippr_object_writer::{
@@ -2468,17 +2469,17 @@ impl DataSinkIcebergPlugin {
                 )
             }
             IcebergCatalogConfig::Skippr { warehouse, .. } => {
-                let catalog: Arc<dyn Catalog> = if std::env::var("SKIPPR_OFFSET_STORE")
-                    .unwrap_or_default()
-                    .eq_ignore_ascii_case("cloud-tables")
-                {
-                    let catalog =
-                        skippr_store_cloud_tables::CloudTablesCatalog::new(&self.config.catalog)
-                            .await
-                            .map_err(|err| io::Error::other(err.to_string()))?
-                            .with_file_io(skippr_store_cloud_tables::file_io_for_warehouse(
-                                warehouse,
-                            ));
+                let catalog: Arc<dyn Catalog> = if offset_store_is_cloud_tables(
+                    &std::env::var("SKIPPR_OFFSET_STORE").unwrap_or_default(),
+                ) {
+                    let catalog = skippr_iceberg_catalog_cloud_tables::CloudTablesCatalog::new(
+                        &self.config.catalog,
+                    )
+                    .await
+                    .map_err(|err| io::Error::other(err.to_string()))?
+                    .with_file_io(
+                        skippr_iceberg_catalog_cloud_tables::file_io_for_warehouse(warehouse),
+                    );
                     Arc::new(catalog)
                 } else {
                     let catalog = DynamoDbCatalog::new(&self.config.catalog)

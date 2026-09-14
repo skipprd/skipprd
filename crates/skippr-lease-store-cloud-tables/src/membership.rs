@@ -3,20 +3,20 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::json;
+use skippr_cloud::{attr_bool, attr_n, attr_s, bflag, n, s, Client};
 use skippr_lease::{
     ClusterId, ClusterMembershipStore, HostId, LeaseError, MembershipRecord, NodeAd, NodeId,
     PROTOCOL_MAX, PROTOCOL_MIN,
 };
-use skippr_tables_client::{attr_bool, attr_n, attr_s, bflag, n, s, TablesClient};
 use uuid::Uuid;
 
 pub struct CloudTablesMembershipStore {
-    client: Arc<TablesClient>,
+    client: Arc<Client>,
     table: String,
 }
 
 impl CloudTablesMembershipStore {
-    pub fn new(client: Arc<TablesClient>, table: String) -> Self {
+    pub fn new(client: Arc<Client>, table: String) -> Self {
         Self { client, table }
     }
 
@@ -26,8 +26,8 @@ impl CloudTablesMembershipStore {
                 "SKIPPR_OFFSET_DYNAMODB_TABLE is required for clustered membership".into(),
             ));
         }
-        let client = TablesClient::from_env()
-            .map_err(|err| LeaseError::StoreUnavailable(err.to_string()))?;
+        let client =
+            Client::from_env().map_err(|err| LeaseError::StoreUnavailable(err.to_string()))?;
         Ok(Self::new(Arc::new(client), table))
     }
 

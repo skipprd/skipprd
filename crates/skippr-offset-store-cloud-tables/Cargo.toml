@@ -1,0 +1,16 @@
+[package]
+name = "skippr-offset-store-cloud-tables"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Cloud Tables offset/checkpoint store for skipprd (skippr-cloud SDK)"
+
+[dependencies]
+base64.workspace = true
+chrono = "0.4.44"
+once_cell.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+skippr-cloud.workspace = true
+tokio = { workspace = true, features = ["rt", "macros", "sync"] }
+tracing = "0.1"

@@ -11,8 +11,9 @@ members = [
     "crates/skippr-offset-store-dynamodb",
     "crates/skippr-lease",
     "crates/skippr-lease-store-dynamodb",
-    "crates/skippr-tables-client",
-    "crates/skippr-store-cloud-tables",
+    "crates/skippr-offset-store-cloud-tables",
+    "crates/skippr-lease-store-cloud-tables",
+    "crates/skippr-iceberg-catalog-cloud-tables",
     "crates/skippr-iceberg-catalog",
     "crates/skippr-iceberg-catalog-dynamodb",
     "crates/skippr-query-ballista",
@@ -63,6 +64,7 @@ skippr-object-writer = { path = "crates/skippr-object-writer" }
 skippr-runtime-sdk = { path = "crates/skippr-runtime-sdk" }
 chrono-tz = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["blocking", "json", "rustls-tls"] }
+skippr-cloud = { version = "0.1.0", path = "../cloud/crates/cloud-client" }
 
 [[bin]]
 name = "skipprd"
@@ -95,8 +97,10 @@ skippr-lease = { path = "crates/skippr-lease" }
 skippr-lease-store-dynamodb = { path = "crates/skippr-lease-store-dynamodb", optional = true }
 skippr-iceberg-catalog = { path = "crates/skippr-iceberg-catalog" }
 skippr-iceberg-catalog-dynamodb = { path = "crates/skippr-iceberg-catalog-dynamodb", optional = true }
-skippr-tables-client = { path = "crates/skippr-tables-client", optional = true }
-skippr-store-cloud-tables = { path = "crates/skippr-store-cloud-tables", optional = true }
+skippr-offset-store-cloud-tables = { path = "crates/skippr-offset-store-cloud-tables", optional = true }
+skippr-lease-store-cloud-tables = { path = "crates/skippr-lease-store-cloud-tables", optional = true }
+skippr-iceberg-catalog-cloud-tables = { path = "crates/skippr-iceberg-catalog-cloud-tables", optional = true }
+skippr-cloud = { workspace = true, optional = true }
 skippr-query-ballista = { path = "crates/skippr-query-ballista" }
 datafusion-proto = "53.1.0"
 ballista-core = "53.0.0"
@@ -198,8 +202,10 @@ offset-store-dynamodb = [
     "dep:skippr-iceberg-catalog-dynamodb",
 ]
 offset-store-cloud-tables = [
-    "dep:skippr-tables-client",
-    "dep:skippr-store-cloud-tables",
+    "dep:skippr-offset-store-cloud-tables",
+    "dep:skippr-lease-store-cloud-tables",
+    "dep:skippr-iceberg-catalog-cloud-tables",
+    "dep:skippr-cloud",
 ]
 
 [dev-dependencies]

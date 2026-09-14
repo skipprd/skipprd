@@ -8,16 +8,19 @@ Optional durable offset and checkpoint index for short-lived runtimes (for examp
 |---------|----------|
 | **sled** (default) | Long-lived hosts with a persistent `DATA_DIR` (`WAL_STORAGE=disk`) |
 | **dynamodb** | Ephemeral disks; resume across Lambda invocations (`WAL_STORAGE=s3`) |
-| **dynamodb** (required) | `WAL_STORAGE=clustered`: leases, membership, and fenced offsets/checkpoints share `SKIPPR_OFFSET_DYNAMODB_TABLE` |
+| **dynamodb** (self-hosted clustered) | `WAL_STORAGE=clustered` with `SKIPPR_OFFSET_STORE=dynamodb`: leases, membership, and fenced offsets/checkpoints share `SKIPPR_OFFSET_DYNAMODB_TABLE` |
+| **cloud-tables** (Skippr Cloud) | Same clustered control-plane rows on Cloud Tables via the published `skippr-cloud` SDK (`Client::from_env`). |
 
 DynamoDB offset rows are a **materialized index**. In `s3` mode, if a row is missing after a committed WAL write, the next run rebuilds from S3 WAL via `wal_recover_s3`. In `clustered` mode, offsets are published only after WAL quorum and are fenced by `(wal_epoch, wal_commit_index, payload_sha256)`. Clustered mode never opens a hidden sled cache.
 
 ## Build
 
-Published `skipprd` release binaries are built with `--features offset-store-dynamodb`. Local
-`cargo build -p skipprd` without that feature rejects `SKIPPR_OFFSET_STORE=dynamodb` and
-`WAL_STORAGE=clustered` at runtime
-(host/plugin dependency boundary: `aws-sdk-dynamodb` must not link into default host builds).
+Published `skipprd` release binaries are built with
+`--features offset-store-dynamodb,offset-store-cloud-tables`. Local
+`cargo build -p skipprd` without those features rejects `SKIPPR_OFFSET_STORE=dynamodb`,
+`SKIPPR_OFFSET_STORE=cloud-tables`, and `WAL_STORAGE=clustered` at runtime
+(host/plugin dependency boundary: `aws-sdk-dynamodb` and `skippr-cloud` must not link into
+default host builds).
 
 ## Configuration
 
@@ -25,7 +28,7 @@ Environment variables (also available as `skippr.yml` under `skippr:` and as CLI
 
 | Variable | Values | Description |
 |----------|--------|-------------|
-| `SKIPPR_OFFSET_STORE` | `sled` (default), `dynamodb` | Offset/checkpoint backend. `clustered` selects DynamoDB when this is unset; an explicit non-DynamoDB value fails startup. |
+| `SKIPPR_OFFSET_STORE` | `sled` (default), `dynamodb`, `cloud-tables` | Offset/checkpoint backend. `clustered` selects DynamoDB when this is unset and the DynamoDB feature is linked; Cloud guests set `cloud-tables`. An explicit value that the binary was not built for fails startup. |
 | `SKIPPR_OFFSET_DYNAMODB_TABLE` | table name | Required when store is `dynamodb` or `WAL_STORAGE=clustered` |
 | `WAL_STORAGE` | `disk`, `s3`, `clustered` | `s3` for Lambda resume; `clustered` for multi-node disk WAL |
 | `SKIPPR_WAL_S3_BUCKET` | bucket name | Dedicated WAL bucket (recommended for `s3`) |

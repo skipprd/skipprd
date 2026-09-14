@@ -869,12 +869,12 @@ impl ClusterOffsetPublisher for DynamoOffsetPublisher {
 
 #[cfg(feature = "offset-store-cloud-tables")]
 pub struct CloudOffsetPublisher {
-    store: Arc<skippr_store_cloud_tables::CloudTablesOffsetStore>,
+    store: Arc<skippr_offset_store_cloud_tables::CloudTablesOffsetStore>,
 }
 
 #[cfg(feature = "offset-store-cloud-tables")]
 impl CloudOffsetPublisher {
-    pub fn new(store: Arc<skippr_store_cloud_tables::CloudTablesOffsetStore>) -> Arc<Self> {
+    pub fn new(store: Arc<skippr_offset_store_cloud_tables::CloudTablesOffsetStore>) -> Arc<Self> {
         Arc::new(Self { store })
     }
 }
