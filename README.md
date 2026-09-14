@@ -1,14 +1,29 @@
 # Skipprd
 
+[![CI](https://github.com/skipprd/skipprd/actions/workflows/ci.yml/badge.svg)](https://github.com/skipprd/skipprd/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/skipprd/skipprd)](https://github.com/skipprd/skipprd/releases)
+
 Skipprd is the self-hosted ELT engine. Configure a `skippr.yml`, then run
 `skipprd discover` and `skipprd sync`.
 
-This private tree is engine-only. Skippr Data Engineer is the **`sde`** CLI in
-`skipprd/sde`. Cloud `skippr` is a different binary.
+This repository is **source-available** under [PolyForm Shield 1.0.0](./LICENSE), not OSI open source.
 
-Public docs: [elt.skippr.io](https://elt.skippr.io) | SQL reference: [sql-docs.md](sql-docs.md) | Performance notes: [PERFORMANCE.md](PERFORMANCE.md) | AI agent guidance: [AGENTS.md](AGENTS.md)
+Licensor Line of Business: Skipprd ELT engine (https://elt.skippr.io)
 
-The public source-available repo is [github.com/skipprd/skipprd](https://github.com/skipprd/skipprd) (PolyForm Shield 1.0.0).
+Docs: [elt.skippr.io](https://elt.skippr.io) | SQL reference: [sql-docs.md](sql-docs.md) | Performance notes: [PERFORMANCE.md](PERFORMANCE.md) | AI agent guidance: [AGENTS.md](AGENTS.md)
+
+```bash
+brew tap skipprd/tap
+brew install skipprd
+```
+
+Or download linux x86_64 / darwin arm64 tarballs from [GitHub Releases](https://github.com/skipprd/skipprd/releases), or:
+
+```bash
+curl -sL https://raw.githubusercontent.com/skipprd/skipprd/main/install.sh | sh
+```
+
+Cloud `skippr` is a different binary ([install.skippr.io](https://install.skippr.io)). Data Engineer is [`sde`](https://data-engineer.skippr.io). Managed Cloud ELT is [skippr.io/elt](https://skippr.io/elt/).
 
 ## Repository structure
 
@@ -116,7 +131,7 @@ cargo run --bin skipprd -- benchmark -f 100 -r 50000 -s 800 --name baseline
 
 ## Configuration
 
-Skippr is configured primarily via `skippr.yml`. Environment variables remain useful for secrets and deployment overrides.
+Skipprd is configured primarily via `skippr.yml`. Environment variables remain useful for secrets and deployment overrides.
 
 ```yaml
 skippr:
@@ -149,7 +164,7 @@ schema_sinks:
       glue_database_name: skippr_quickstart
 ```
 
-`data_sinks` are ingest/write targets. `skippr model` and `skippr query` use the same sink object. There is no `warehouses:` section.
+`data_sinks` are ingest/write targets. `skipprd query` uses the same sink object. There is no `warehouses:` section.
 
 See [the docs](docs/docs/configuration/skippr-yml.md) for the full config reference.
 
@@ -240,7 +255,7 @@ cargo run --bin skipprd -- sync --pipeline events --log
 
 ## Data type detection
 
-Skippr automatically infers types during schema discovery:
+Skipprd automatically infers types during schema discovery:
 
 - **Timestamps:** integer values are promoted to Timestamp (10-11 digits, epoch seconds) or TimestampMilli (13 digits, epoch millis). Only values after 2010-01-01 are recognised.
 - **Numeric:** Integer, Long (large integers), Double
@@ -258,25 +273,3 @@ E2E tests run as GitHub Actions using the scripts in `ci-e2e/` and Soda checks i
 | `event_types` | Namespace separation |
 | `deadletters` | Dead letter capture and queryability |
 | `offsets_db_rollup` | Offset database compaction |
-
-## Roadmap
-
-### Ingestion
-- [x] Deadletter queues (capture, store, SQL query access)
-- [ ] Deadletter replay
-- [ ] Configurable retention and alerting
-- [ ] S3-backed offset database (replace sled)
-- [x] TigerBeetle-style deterministic WAL segment commits
-- [x] S3-backed WAL segments
-- [x] Structured logging via `tracing`
-
-### Data modeling and querying
-- [ ] External datasets (zero-copy, discover and query without ingestion)
-- [ ] Datasets abstraction (internal + external, central catalog)
-- [ ] Views and virtual views (non-destructive query-backed transforms)
-- [ ] Field-level ABAC (attribute-based access control)
-- [ ] End-to-end data lineage
-- [ ] Source/dataset derivation lineage
-
-### Outputs
-- [ ] Apache Iceberg tables (replace Hive format)

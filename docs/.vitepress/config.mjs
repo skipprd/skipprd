@@ -214,6 +214,7 @@ export default defineSkipprDocs({
     { text: 'Discover', link: '/cli/discover' },
     { text: 'Schema', link: '/cli/schema' },
     { text: 'Sync', link: '/cli/sync' },
+    { text: 'Cloud ELT', link: 'https://skippr.io/elt/' },
   ],
   sidebar: {
     '/': sidebar,
