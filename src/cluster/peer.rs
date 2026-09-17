@@ -1625,9 +1625,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn fetch_entries_uses_ingest_store_when_session_log_is_behind() {
         let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
+        let key = PipelineKey::new("t", "w", "fetch-ingest-store").unwrap();
         let paths = PipelinePaths::new(dir.path(), &key).unwrap();
         let identity = identity();
         let session_log = MutationLog::open(paths.clone()).unwrap();
@@ -1678,9 +1679,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn fetch_entries_uses_disk_when_session_log_is_behind() {
         let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
+        let key = PipelineKey::new("t", "w", "fetch-disk-behind").unwrap();
         let paths = PipelinePaths::new(dir.path(), &key).unwrap();
         let identity = identity();
         let session_log = MutationLog::open(paths.clone()).unwrap();
@@ -1789,9 +1791,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn fetch_entries_nacks_missing_commit_segment_payload() {
         let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
+        let key = PipelineKey::new("t", "w", "fetch-missing-payload").unwrap();
         let paths = PipelinePaths::new(dir.path(), &key).unwrap();
         let mut log = MutationLog::open(paths.clone()).unwrap();
         let envelope = MutationEnvelope {
@@ -1843,9 +1846,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[serial_test::serial]
     async fn fetch_entries_streams_whole_segment_file_not_data_payload_len() {
         let dir = tempfile::tempdir().unwrap();
-        let key = PipelineKey::new("t", "w", "p").unwrap();
+        let key = PipelineKey::new("t", "w", "fetch-whole-segment").unwrap();
         let paths = PipelinePaths::new(dir.path(), &key).unwrap();
         std::fs::create_dir_all(&paths.segs).unwrap();
         let id = SegmentId::new("live").unwrap();
@@ -1990,6 +1994,7 @@ mod tests {
         );
         let identity = identity();
         let registry = ReplicaRegistry::new(identity);
+        crate::buffer::durable::store::clear_active_durable_store();
         registry.insert(session).await;
         assert!(!registry.advertised_ready().await);
         let store_key = PipelineKey::new("t", "w", "ingest").unwrap();

@@ -46,47 +46,79 @@ where
     }
 }
 
-/// Ingest-path lookup: the ActivePrimary store only.
+fn ingest_primary_store(
+    config: &Config,
+) -> Option<std::sync::Arc<crate::buffer::durable::PipelineDurableStore>> {
+    let pipeline = config.get_pipeline_name();
+    if pipeline.is_empty() {
+        return None;
+    }
+    let key =
+        skippr_lease::PipelineKey::new(config.get_tenant(), config.get_workspace_name(), pipeline)
+            .ok()?;
+    crate::buffer::durable::durable_store_for(&key).filter(|store| {
+        matches!(
+            store.guard().role(),
+            skippr_lease::PipelineRole::ActivePrimary(_)
+        )
+    })
+}
+
+/// Ingest-path lookup: the ActivePrimary store for this process.
 /// Replica/query code must use [`crate::buffer::durable::durable_store_for`].
 pub fn ingest_durable_store() -> Option<std::sync::Arc<crate::buffer::durable::PipelineDurableStore>>
 {
-    crate::buffer::durable::all_durable_stores()
-        .into_iter()
-        .find(|store| {
-            matches!(
-                store.guard().role(),
-                skippr_lease::PipelineRole::ActivePrimary(_)
-            )
-        })
+    ingest_primary_store(&Config::new()).or_else(|| {
+        crate::buffer::durable::all_durable_stores()
+            .into_iter()
+            .find(|store| {
+                matches!(
+                    store.guard().role(),
+                    skippr_lease::PipelineRole::ActivePrimary(_)
+                )
+            })
+    })
 }
 
 fn ingest_legacy_buffer_dir(config: &Config, leaf: &str) -> PathBuf {
     PathBuf::from(format!("{}/segment_buffer/{leaf}", config.get_data_dir()))
 }
 
+fn ingest_store_for_paths(
+    config: &Config,
+) -> Option<std::sync::Arc<crate::buffer::durable::PipelineDurableStore>> {
+    if let Some(store) = ingest_primary_store(config) {
+        return Some(store);
+    }
+    let data_dir = PathBuf::from(config.get_data_dir());
+    ingest_durable_store().filter(|store| {
+        store.paths().root.starts_with(&data_dir) || store.paths().segs.starts_with(&data_dir)
+    })
+}
+
 /// Segment directory for the ingest pipeline: clustered `PipelinePaths` when an
-/// ActivePrimary store is installed, otherwise the legacy `{DATA_DIR}/segment_buffer/...`
-/// layout used by S3 WAL.
+/// ActivePrimary store is installed for this config's pipeline, otherwise the
+/// legacy `{DATA_DIR}/segment_buffer/...` layout used by S3 WAL.
 pub fn ingest_segment_dir(config: &Config) -> PathBuf {
-    ingest_durable_store()
+    ingest_store_for_paths(config)
         .map(|store| store.paths().segs.clone())
         .unwrap_or_else(|| ingest_legacy_buffer_dir(config, "segs"))
 }
 
 pub fn ingest_completion_dir(config: &Config) -> PathBuf {
-    ingest_durable_store()
+    ingest_store_for_paths(config)
         .map(|store| store.paths().completions.clone())
         .unwrap_or_else(|| ingest_legacy_buffer_dir(config, "done"))
 }
 
 pub fn ingest_compaction_dir(config: &Config) -> PathBuf {
-    ingest_durable_store()
+    ingest_store_for_paths(config)
         .map(|store| store.paths().compactions.clone())
         .unwrap_or_else(|| ingest_legacy_buffer_dir(config, "compactions"))
 }
 
 pub fn ingest_quarantine_dir(config: &Config) -> PathBuf {
-    ingest_durable_store()
+    ingest_store_for_paths(config)
         .map(|store| store.paths().root.join("segment_buffer/quarantine"))
         .unwrap_or_else(|| ingest_legacy_buffer_dir(config, "quarantine"))
 }
@@ -160,7 +192,7 @@ pub fn ensure_disk_durable_store(
     config: &Config,
     offsets: std::sync::Arc<crate::helpers::offsets::Offsets>,
 ) -> io::Result<()> {
-    if ingest_durable_store().is_some() {
+    if ingest_primary_store(config).is_some() {
         return Ok(());
     }
     let pipeline = config.get_pipeline_name();
@@ -218,8 +250,8 @@ mod tests {
     use crate::buffer::durable::log::MutationLog;
     use crate::buffer::durable::replicate::ReplicationMode;
     use crate::buffer::durable::store::{
-        install_durable_store, remove_durable_store, MemoryOffsetPublisher, OffsetMode,
-        PipelineDurableStore,
+        clear_active_durable_store, install_durable_store, remove_durable_store,
+        MemoryOffsetPublisher, OffsetMode, PipelineDurableStore,
     };
     use crate::helpers::configuration::Config;
     use skippr_lease::{LeaseGuard, PipelineKey, PipelinePaths, SystemClock};
@@ -248,6 +280,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn ingest_segment_dir_uses_clustered_store_paths() {
+        clear_active_durable_store();
         let dir = tempfile::tempdir().unwrap();
         let key = PipelineKey::new("hla-e2e", "local", "hla_events").unwrap();
         let paths = PipelinePaths::new(dir.path(), &key).unwrap();
@@ -266,7 +299,7 @@ mod tests {
         install_durable_store(store);
         Config::setenv("TENANT", "hla-e2e");
         Config::setenv("WORKSPACE_NAME", "local");
-        let got = ingest_segment_dir(&Config::new());
+        let got = ingest_segment_dir(&Config::new().bind_pipeline("hla_events"));
         remove_durable_store(&key);
         Config::set_evncache("TENANT", "");
         Config::set_evncache("WORKSPACE_NAME", "");
@@ -278,6 +311,7 @@ mod tests {
     #[test]
     #[serial_test::serial]
     fn ingest_durable_store_requires_active_primary() {
+        clear_active_durable_store();
         let dir = tempfile::tempdir().unwrap();
         let key = PipelineKey::new("t", "w", "idle-only").unwrap();
         let paths = PipelinePaths::new(dir.path(), &key).unwrap();

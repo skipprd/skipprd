@@ -27,7 +27,7 @@ Public engineer docs: [elt.skippr.io](https://elt.skippr.io). Markdown is `docs/
 ## Build, test, and lint
 
 - **Build:** `cargo build`
-- **Test:** `cargo test`
+- **Test:** `cargo test`. Install the pre-commit hook with `./scripts/install-git-hooks.sh` so `cargo test -p skipprd --lib` runs before each commit.
 - **Format check:** `cargo fmt --all -- --check` (existing formatting diffs may exist)
 - **Clippy:** `cargo clippy` (run without `-D warnings` unless explicitly requested)
 - **Runtime e2e harness:** before release/tag work, run the relevant local unit and harness tests plus the targeted runtime e2e path when credentials/services are available. At minimum, validate harness changes with `python3 .github/scripts/test_runtime_e2e_harness.py`.

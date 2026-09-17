@@ -4266,7 +4266,7 @@ mod tests {
         .await
         .unwrap();
         let err = accept.await.unwrap().unwrap_err();
-        assert!(err.to_string().contains("host=17 child=16"));
+        assert!(err.to_string().contains("host=19 child=16"));
     }
 
     #[test]
