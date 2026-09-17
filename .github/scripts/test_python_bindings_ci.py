@@ -59,6 +59,10 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertNotIn("environment:", publish)
         self.assertIn("attestations: false", publish)
         self.assertIn("skippr-linux-x64-16", publish)
+        self.assertIn("skipprd/cloud", text)
+        self.assertIn("path: cloud", text)
+        self.assertIn("path: skipprd", text)
+        self.assertIn("SKIPPR_CLOUD_CHECKOUT_TOKEN", text)
 
     def test_pyproject_declares_license_and_readme(self):
         text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")

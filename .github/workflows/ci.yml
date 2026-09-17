@@ -10,13 +10,23 @@ jobs:
   linux:
     if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
     runs-on: [self-hosted, skippr-linux-x64-16]
+    defaults:
+      run:
+        working-directory: skipprd
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: skipprd
+      - uses: actions/checkout@v4
+        with:
+          repository: skipprd/cloud
+          path: cloud
+          token: ${{ secrets.SKIPPR_CLOUD_CHECKOUT_TOKEN }}
       - name: Stamp package versions from tag
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           python3 .github/scripts/set_root_package_version.py \
-            --workspace "$GITHUB_WORKSPACE" \
+            --workspace "$GITHUB_WORKSPACE/skipprd" \
             --version "${{ github.ref_name }}"
       - run: cargo test --workspace --lib --exclude skipprd-python
       - run: python3 .github/scripts/test_python_bindings_ci.py
@@ -24,7 +34,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-linux
-          path: target/wheels/*.whl
+          path: skipprd/target/wheels/*.whl
           if-no-files-found: error
       - run: |
           cd docs
@@ -33,13 +43,23 @@ jobs:
   darwin:
     if: github.event.pull_request.head.repo.full_name == github.repository || github.event_name != 'pull_request'
     runs-on: [self-hosted, skippr-darwin-arm64-8]
+    defaults:
+      run:
+        working-directory: skipprd
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: skipprd
+      - uses: actions/checkout@v4
+        with:
+          repository: skipprd/cloud
+          path: cloud
+          token: ${{ secrets.SKIPPR_CLOUD_CHECKOUT_TOKEN }}
       - name: Stamp package versions from tag
         if: startsWith(github.ref, 'refs/tags/v')
         run: |
           python3 .github/scripts/set_root_package_version.py \
-            --workspace "$GITHUB_WORKSPACE" \
+            --workspace "$GITHUB_WORKSPACE/skipprd" \
             --version "${{ github.ref_name }}"
       - run: cargo test --workspace --lib --exclude skipprd-python
       - run: python3 .github/scripts/test_python_bindings_ci.py
@@ -47,7 +67,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: wheels-darwin
-          path: target/wheels/*.whl
+          path: skipprd/target/wheels/*.whl
           if-no-files-found: error
   python-publish:
     if: github.repository == 'skipprd/skipprd' && startsWith(github.ref, 'refs/tags/v') && github.ref != 'refs/tags/v0.0.0'
