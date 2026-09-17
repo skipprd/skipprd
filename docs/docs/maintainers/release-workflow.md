@@ -43,13 +43,17 @@ Platform build jobs produce the host binary plus the runtime plugin binaries nee
 - `macos_arm64`
 - `windows_x86`
 
-On tag builds, `set_root_package_version.py` stamps the root host package version, `skipprd-python`, and `pyproject.toml` from the tag name (`v1.2.3` → `1.2.3`) before packaging.
+On tag builds, `set_root_package_version.py` stamps the root host package version from the tag name (`v1.2.3` → `1.2.3`) before packaging. It does not stamp `skipprd-python` or `pyproject.toml`.
 
 ## Python wheels (PyPI)
 
-`.github/workflows/ci.yml` builds and tests the `skipprd` wheel on every run, always on Skippr Cloud runners (`skippr-linux-x64-16`, `skippr-darwin-arm64-8`). Tagged releases (`v*`, except the scratch tag `v0.0.0`) upload both wheels and publish them to PyPI.
+Python has its own semver in `pyproject.toml` and `python/Cargo.toml` (`0.1.0` today). It is not the skipprd git tag.
 
-Publish uses **PyPI Trusted Publishing** (GitHub OIDC), not a pip login or `PYPI_API_TOKEN`. The `python-publish` job sets `id-token: write` and calls `pypa/gh-action-pypi-publish` with `attestations: false` (self-hosted Skippr Cloud runners). GitHub mints a short-lived token; PyPI accepts it because this repo's GitHub publisher is registered.
+`.github/workflows/ci.yml` **always** builds and tests the `skipprd` wheel on Skippr Cloud runners (`skippr-linux-x64-16`, `skippr-darwin-arm64-8`).
+
+`python-publish` runs on `main` or `python-v*` tags (not engine `v*` tags, not `python-v0.0.0`). It publishes only when that Python semver is absent from PyPI.
+
+Publish uses **PyPI Trusted Publishing** (GitHub OIDC), not a pip login or `PYPI_API_TOKEN`. The job sets `id-token: write` and calls `pypa/gh-action-pypi-publish` with `attestations: false` (self-hosted Skippr Cloud runners). GitHub mints a short-lived token; PyPI accepts it because this repo's GitHub publisher is registered.
 
 Registered publisher on [pypi.org](https://pypi.org):
 
@@ -61,7 +65,7 @@ Registered publisher on [pypi.org](https://pypi.org):
 
 Do not create a PyPI API token. Do not put `TWINE_PASSWORD` in GitHub secrets.
 
-The first real `v*` tag after that publisher was saved completes the link and uploads the wheels. Scratch tag `v0.0.0` is excluded so CI validation reruns do not publish.
+Bump `pyproject.toml` and `python/Cargo.toml` together, merge to `main` (or tag `python-vX.Y.Z`). Scratch `python-v0.0.0` does not publish.
 
 ## 3. Compile and test the important boundaries
 

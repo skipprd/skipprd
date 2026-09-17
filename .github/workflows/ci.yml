@@ -4,6 +4,7 @@ on:
     branches: [main]
     tags:
       - "v*"
+      - "python-v*"
   pull_request:
   workflow_dispatch:
 jobs:
@@ -23,7 +24,7 @@ jobs:
         with:
           path: skipprd
       - name: Stamp package versions from tag
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') && !startsWith(github.ref, 'refs/tags/python-v')
         run: |
           python3 .github/scripts/set_root_package_version.py \
             --workspace "$GITHUB_WORKSPACE/skipprd" \
@@ -56,7 +57,7 @@ jobs:
         with:
           path: skipprd
       - name: Stamp package versions from tag
-        if: startsWith(github.ref, 'refs/tags/v')
+        if: startsWith(github.ref, 'refs/tags/v') && !startsWith(github.ref, 'refs/tags/python-v')
         run: |
           python3 .github/scripts/set_root_package_version.py \
             --workspace "$GITHUB_WORKSPACE/skipprd" \
@@ -70,19 +71,26 @@ jobs:
           path: skipprd/target/wheels/*.whl
           if-no-files-found: error
   python-publish:
-    if: github.repository == 'skipprd/skipprd' && startsWith(github.ref, 'refs/tags/v') && github.ref != 'refs/tags/v0.0.0'
+    if: github.repository == 'skipprd/skipprd' && github.event_name != 'pull_request' && (github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/python-v')) && github.ref != 'refs/tags/python-v0.0.0'
     needs: [linux, darwin]
     runs-on: [self-hosted, skippr-linux-x64-16]
     permissions:
       id-token: write
       contents: read
     steps:
+      - uses: actions/checkout@v4
+        with:
+          path: skipprd
       - uses: actions/download-artifact@v4
         with:
           pattern: wheels-*
           path: dist
           merge-multiple: true
-      - uses: pypa/gh-action-pypi-publish@release/v1
+      - id: pypi
+        working-directory: skipprd
+        run: python3 .github/scripts/python_wheel_version.py --skip-if-published
+      - if: steps.pypi.outputs.needed == 'true'
+        uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist
           attestations: false

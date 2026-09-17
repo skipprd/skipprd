@@ -15,10 +15,19 @@ CI = ROOT / ".github" / "workflows" / "ci.yml"
 TEST_PYTHON = ROOT / "scripts" / "test-python.sh"
 SET_VERSION = ROOT / ".github" / "scripts" / "set_root_package_version.py"
 PYTHON_CARGO = ROOT / "python" / "Cargo.toml"
+WHEEL_VERSION = ROOT / ".github" / "scripts" / "python_wheel_version.py"
 
 
 def load_set_version():
     spec = importlib.util.spec_from_file_location("set_root_package_version", SET_VERSION)
+    module = importlib.util.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_wheel_version():
+    spec = importlib.util.spec_from_file_location("python_wheel_version", WHEEL_VERSION)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -58,7 +67,6 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("id-token: write", text)
         self.assertIn("upload-artifact", text)
         self.assertIn("set_root_package_version.py", text)
-        self.assertIn("github.ref != 'refs/tags/v0.0.0'", text)
         self.assertNotIn("PYPI_API_TOKEN", text)
         self.assertNotIn("TWINE_PASSWORD", text)
         self.assertIn("tags:", text)
@@ -66,6 +74,11 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertNotIn("environment:", publish)
         self.assertIn("attestations: false", publish)
         self.assertIn("skippr-linux-x64-16", publish)
+        self.assertIn("refs/heads/main", publish)
+        self.assertIn("refs/tags/python-v", publish)
+        self.assertIn("python_wheel_version.py", publish)
+        self.assertNotIn("github.ref != 'refs/tags/v0.0.0'", publish)
+        self.assertNotRegex(publish, r"startsWith\(github\.ref, 'refs/tags/v'\)")
         self.assertIn("skipprd/cloud", text)
         self.assertIn("path: cloud", text)
         self.assertIn("path: skipprd", text)
@@ -80,7 +93,14 @@ class PythonBindingsCiTests(unittest.TestCase):
         text = PYTHON_CARGO.read_text(encoding="utf-8")
         self.assertIn("abi3-py310", text)
 
-    def test_set_root_package_version_stamps_python_from_v_tag(self):
+    def test_python_semver_is_independent_of_engine_tags(self):
+        module = load_wheel_version()
+        self.assertEqual(module.python_semver(), "0.1.0")
+        self.assertTrue(module.should_publish("0.1.0", published=False))
+        self.assertFalse(module.should_publish("0.1.0", published=True))
+        self.assertFalse(module.should_publish("0.0.0", published=False))
+
+    def test_set_root_package_version_does_not_stamp_python(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             (root / "python").mkdir()
@@ -101,10 +121,10 @@ class PythonBindingsCiTests(unittest.TestCase):
             pyproject = (root / "pyproject.toml").read_text(encoding="utf-8")
             python_cargo = (root / "python" / "Cargo.toml").read_text(encoding="utf-8")
             lock = (root / "Cargo.lock").read_text(encoding="utf-8")
-            self.assertRegex(pyproject, r'(?m)^version = "9\.8\.7"$')
-            self.assertIn('name = "skipprd-python"', python_cargo)
-            self.assertRegex(python_cargo, r'(?m)^version = "9\.8\.7"$')
-            self.assertIn('name = "skipprd-python"\nversion = "9.8.7"', lock)
+            self.assertRegex((root / "Cargo.toml").read_text(encoding="utf-8"), r'(?m)^version = "9\.8\.7"$')
+            self.assertRegex(pyproject, r'(?m)^version = "0\.1\.0"$')
+            self.assertRegex(python_cargo, r'(?m)^version = "0\.1\.0"$')
+            self.assertIn('name = "skipprd-python"\nversion = "0.1.0"', lock)
 
     def test_normalize_semver_strips_v_prefix(self):
         module = load_set_version()

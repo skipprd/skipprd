@@ -6,7 +6,7 @@ This repository is a Cargo workspace with a single host binary and many separate
 
 | Path | Responsibility |
 |---|---|
-| `python/` | PyO3 `skipprd` module. Maturin crate wrapping `Session`. Workspace member `skipprd-python`; `cargo test --workspace` `--exclude skipprd-python` because the cdylib needs Python headers. CI builds the wheel and runs `python/tests` via `scripts/test-python.sh` on Skippr Cloud runners, then publishes tagged wheels to PyPI with GitHub OIDC Trusted Publishing. |
+| `python/` | PyO3 `skipprd` module. Maturin crate wrapping `Session`. Own semver in `pyproject.toml` / `python/Cargo.toml`, not the skipprd git tag. CI always builds and tests the wheel via `scripts/test-python.sh` on Skippr Cloud runners. PyPI publish is GitHub OIDC, only when that Python semver is new. |
 | `crates/skippr-core/` | Shared core logic used by the host and plugin crates. |
 | `crates/skippr-query-ballista/` | `FlightSqlExec` physical node and SkipprPhysicalCodec for Ballista 53. |
 | `src/cluster/` | Clustered WAL replica, lease scheduler, gossip, promotion, WAL head picker. |
