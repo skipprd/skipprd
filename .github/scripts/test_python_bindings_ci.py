@@ -29,6 +29,8 @@ class PythonBindingsCiTests(unittest.TestCase):
     def test_ci_runs_python_binding_script(self):
         text = CI.read_text(encoding="utf-8")
         self.assertIn("scripts/test-python.sh", text)
+        self.assertIn("cargo test -p skipprd --lib", text)
+        self.assertNotIn("cargo test --workspace", text)
 
     def test_python_script_builds_wheel_and_runs_session_tests(self):
         script = TEST_PYTHON.read_text(encoding="utf-8")
@@ -42,6 +44,10 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("skippr-darwin-arm64-8", text)
         self.assertNotIn("ubuntu-latest", text)
         self.assertNotIn("macos-latest", text)
+        self.assertNotIn("depot", text)
+        self.assertIn("working-directory: skipprd", text)
+        self.assertIn("$GITHUB_WORKSPACE/skipprd", text)
+        self.assertIn("skipprd/target/wheels/*.whl", text)
 
     def test_ci_publishes_wheels_with_pypi_oidc(self):
         text = CI.read_text(encoding="utf-8")
