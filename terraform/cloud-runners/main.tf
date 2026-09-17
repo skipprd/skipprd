@@ -53,7 +53,7 @@ resource "cloud_deploy_runner_pool" "private_darwin" {
   installation_id = cloud_deploy_runner_github_installation.app.installation_id
   repository_id   = cloud_deploy_runner_repository_binding.app.repo_id
   size            = "darwin_arm64_8"
-  labels          = ["self-hosted", "darwin", "arm64", "skippr-darwin-arm64-8"]
+  labels          = ["self-hosted", "darwin", "arm64", "skippr-darwin-arm64", "skippr-darwin-arm64-8"]
   image           = "darwin-host"
   fork_policy     = var.pool_fork_policy
 }
@@ -124,7 +124,7 @@ resource "cloud_deploy_runner_pool" "oss_darwin" {
   installation_id = cloud_deploy_runner_github_installation.app.installation_id
   repository_id   = cloud_deploy_runner_repository_binding.oss[each.key].repo_id
   size            = "darwin_arm64_8"
-  labels          = ["self-hosted", "darwin", "arm64", "skippr-darwin-arm64-8"]
+  labels          = ["self-hosted", "darwin", "arm64", "skippr-darwin-arm64", "skippr-darwin-arm64-8"]
   image           = "darwin-host"
   fork_policy     = var.pool_fork_policy
 }

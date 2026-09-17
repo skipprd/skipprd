@@ -70,7 +70,7 @@ class PublishRuntimePluginsTests(unittest.TestCase):
             triple="x86_64-unknown-linux-gnu",
             aliases=("linux-x86_64",),
             publish_artifact_dir="runtime-plugin-binaries-linux_x86",
-            build_environment={"runner_baseline": "depot-ubuntu-22.04"},
+            build_environment={"runner_baseline": "skippr-linux-x64-16"},
         )
         published = {
             "version": "0.1.1",
@@ -79,7 +79,7 @@ class PublishRuntimePluginsTests(unittest.TestCase):
             "build_checksum": "abc123",
             "artifacts": {
                 "x86_64-unknown-linux-gnu": {
-                    "build_environment": {"runner_baseline": "depot-ubuntu-22.04"}
+                    "build_environment": {"runner_baseline": "skippr-linux-x64-16"}
                 }
             },
         }
@@ -117,7 +117,7 @@ class PublishRuntimePluginsTests(unittest.TestCase):
             triple="x86_64-unknown-linux-gnu",
             aliases=("linux-x86_64",),
             publish_artifact_dir="runtime-plugin-binaries-linux_x86",
-            build_environment={"runner_baseline": "depot-ubuntu-22.04"},
+            build_environment={"runner_baseline": "skippr-linux-x64-16"},
         )
         published = {
             "version": "0.1.1",
@@ -126,7 +126,7 @@ class PublishRuntimePluginsTests(unittest.TestCase):
             "build_checksum": "abc123",
             "artifacts": {
                 "x86_64-unknown-linux-gnu": {
-                    "build_environment": {"runner_baseline": "depot-ubuntu-22.04"}
+                    "build_environment": {"runner_baseline": "skippr-linux-x64-16"}
                 }
             },
         }
@@ -152,7 +152,7 @@ class PublishRuntimePluginsTests(unittest.TestCase):
             triple="x86_64-unknown-linux-gnu",
             aliases=("linux-x86_64",),
             publish_artifact_dir="runtime-plugin-binaries-linux_x86",
-            build_environment={"runner_baseline": "depot-ubuntu-22.04"},
+            build_environment={"runner_baseline": "skippr-linux-x64-16"},
         )
         published = {
             "version": "0.1.1",
@@ -161,7 +161,7 @@ class PublishRuntimePluginsTests(unittest.TestCase):
             "build_checksum": "abc123",
             "artifacts": {
                 "x86_64-unknown-linux-gnu": {
-                    "build_environment": {"runner_baseline": "depot-ubuntu-24.04"}
+                    "build_environment": {"runner_baseline": "skippr-linux-x64-8"}
                 }
             },
         }
