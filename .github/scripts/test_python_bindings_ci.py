@@ -48,6 +48,7 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("working-directory: skipprd", text)
         self.assertIn("$GITHUB_WORKSPACE/skipprd", text)
         self.assertIn("skipprd/target/wheels/*.whl", text)
+        self.assertIn("cargo test -p skipprd --lib", text)
 
     def test_ci_publishes_wheels_with_pypi_oidc(self):
         text = CI.read_text(encoding="utf-8")

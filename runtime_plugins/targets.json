@@ -8,7 +8,7 @@
       ],
       "publish_artifact_dir": "runtime-plugin-binaries-macos_arm64",
       "build_environment": {
-        "runner_baseline": "macos-14"
+        "runner_baseline": "skippr-darwin-arm64-8"
       }
     },
     {
@@ -25,7 +25,7 @@
       ],
       "publish_artifact_dir": "runtime-plugin-binaries-linux_x86",
       "build_environment": {
-        "runner_baseline": "depot-ubuntu-22.04",
+        "runner_baseline": "skippr-linux-x64-16",
         "libc": "glibc",
         "glibc_floor": "2.35"
       }
@@ -43,7 +43,7 @@
       ],
       "publish_artifact_dir": "runtime-plugin-binaries-windows_x86",
       "build_environment": {
-        "runner_baseline": "depot-windows-2022"
+        "runner_baseline": "skippr-windows-x64-8"
       }
     }
   ]
