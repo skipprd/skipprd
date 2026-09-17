@@ -40,19 +40,6 @@ def replace_lockfile_package_version(cargo_lock_path: Path, package_name: str, v
     cargo_lock_path.write_text(updated, encoding="utf-8")
 
 
-def replace_pyproject_version(pyproject_path: Path, version: str) -> None:
-    text = pyproject_path.read_text(encoding="utf-8")
-    updated, count = re.subn(
-        r'(?m)^(version\s*=\s*")[^"]+(")',
-        rf"\g<1>{version}\g<2>",
-        text,
-        count=1,
-    )
-    if count != 1:
-        raise SystemExit(f"failed updating version in {pyproject_path}")
-    pyproject_path.write_text(updated, encoding="utf-8")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser(description="Set release package versions in checked-in manifests.")
     parser.add_argument("--workspace", required=True, help="Workspace root containing Cargo.toml and Cargo.lock")
@@ -61,14 +48,8 @@ def main() -> None:
 
     version = normalize_semver(args.version)
     workspace = Path(args.workspace).resolve()
-    release_manifests = {
-        "skipprd": workspace / "Cargo.toml",
-        "skipprd-python": workspace / "python" / "Cargo.toml",
-    }
-    for package_name, manifest_path in release_manifests.items():
-        replace_manifest_package_version(manifest_path, package_name, version)
-        replace_lockfile_package_version(workspace / "Cargo.lock", package_name, version)
-    replace_pyproject_version(workspace / "pyproject.toml", version)
+    replace_manifest_package_version(workspace / "Cargo.toml", "skipprd", version)
+    replace_lockfile_package_version(workspace / "Cargo.lock", "skipprd", version)
 
 
 if __name__ == "__main__":
