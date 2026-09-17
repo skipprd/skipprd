@@ -85,9 +85,21 @@ use walkdir::WalkDir;
 static CLEAN_FIELD_CACHE: Lazy<Arc<DashMap<String, String>>> =
     Lazy::new(|| Arc::new(DashMap::new()));
 
+fn clean_field_cache_key(flatten_events: bool, field: &str) -> String {
+    if flatten_events {
+        format!("1:{field}")
+    } else {
+        format!("0:{field}")
+    }
+}
+
 pub struct Helpers {}
 
 impl Helpers {
+    #[cfg(test)]
+    pub fn reset_clean_field_cache_for_test() {
+        CLEAN_FIELD_CACHE.clear();
+    }
     // let CLEAN_FIELD_CACHE: HashMap<String, bool> = HashMap::new();
     // pub(crate) CLEAN_FIELD_CACHE: HashMap<String, bool> = HashMap::new();
 
@@ -125,8 +137,9 @@ impl Helpers {
     }
 
     pub fn clean_field_name<'a>(config: &Config, field: String) -> String {
+        let cache_key = clean_field_cache_key(config.get_transform_flatten_events(), &field);
         {
-            if let Some(cached) = CLEAN_FIELD_CACHE.get(&field) {
+            if let Some(cached) = CLEAN_FIELD_CACHE.get(&cache_key) {
                 if cached.value() != "no" {
                     return cached.value().to_string();
                 }
@@ -168,7 +181,7 @@ impl Helpers {
 
         {
             let mut cache = CLEAN_FIELD_CACHE
-                .entry(field.clone())
+                .entry(cache_key)
                 .or_insert_with(|| "no".to_string());
             if clean != field {
                 *cache = clean.clone();
@@ -1395,7 +1408,10 @@ mod clean_field_name_tests {
         // Cache has a record
         {
             CLEAN_FIELD_CACHE.clear();
-            CLEAN_FIELD_CACHE.insert("cachedField".to_string(), "cachedfield".to_string());
+            CLEAN_FIELD_CACHE.insert(
+                clean_field_cache_key(false, "cachedField"),
+                "cachedfield".to_string(),
+            );
         }
         assert_eq!(
             Helpers::clean_field_name(&Config::new(), "cachedField".to_string()),
@@ -1405,7 +1421,10 @@ mod clean_field_name_tests {
         // Cache has a record marked as "no"
         {
             CLEAN_FIELD_CACHE.clear();
-            CLEAN_FIELD_CACHE.insert("no_change_field".to_string(), "no".to_string());
+            CLEAN_FIELD_CACHE.insert(
+                clean_field_cache_key(false, "no_change_field"),
+                "no".to_string(),
+            );
         }
         assert_eq!(
             Helpers::clean_field_name(&Config::new(), "no_change_field".to_string()),

@@ -1177,17 +1177,27 @@ mod ingest_batch_tests {
         // Production device_data has flatten_events=yes. Under that mode, clean_field_name
         // keeps numeric-only segments as digits then strips leading digits, so one vs two
         // normalizations diverge (empty path segments appear after the first pass and are
-        // dropped on the second).
-        Config::reset_envcache();
-        Config::set_evncache("TRANSFORM_FLATTEN_EVENTS", "yes");
+        // dropped on the second). Bind flatten on this Config so we do not mutate process env.
+        Helpers::reset_clean_field_cache_for_test();
+        let config =
+            serde_json::from_value::<crate::helpers::configuration::Config>(serde_json::json!({
+                "pipelines": {
+                    "roundtrip": {
+                        "transform": { "flatten_events": "yes" }
+                    }
+                }
+            }))
+            .unwrap()
+            .bind_pipeline("roundtrip");
+        assert!(config.get_transform_flatten_events());
 
         let bucket = "production-datastorage-stac-rawdevicejson568138dc-1djhnp70ebsko";
         // Unique suffix avoids CLEAN_FIELD_CACHE pollution from other tests.
         let object_key = "data/2021/05/19/11/Production-DataStorage-Stack-v3firehose-roundtrip-probe-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
-        let once = IngestBatch::normalized_offset_key(&Config::new(), bucket, object_key);
+        let once = IngestBatch::normalized_offset_key(&config, bucket, object_key);
         let plugin_batch = IngestBatch::new(
-            &Config::new(),
+            &config,
             OffsetKey::new(bucket, object_key),
             "{}".to_string(),
             2,
@@ -1198,9 +1208,8 @@ mod ingest_batch_tests {
         assert_eq!(plugin_batch.offset_key, once);
 
         let wire: RuntimeRawIngestBatch = plugin_batch.clone().into();
-        let host_batch = IngestBatch::from_runtime(&Config::new(), wire);
-        let roundtrip =
-            IngestBatch::runtime_roundtrip_offset_key(&Config::new(), bucket, object_key);
+        let host_batch = IngestBatch::from_runtime(&config, wire);
+        let roundtrip = IngestBatch::runtime_roundtrip_offset_key(&config, bucket, object_key);
 
         assert_eq!(host_batch.offset_key, roundtrip);
         assert_ne!(
@@ -1210,7 +1219,7 @@ mod ingest_batch_tests {
             roundtrip.partition
         );
 
-        Config::reset_envcache();
+        Helpers::reset_clean_field_cache_for_test();
     }
 }
 

@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn in_flight_summary_lists_active_jobs() {
-        let _guard = TEST_JOB_LOCK.lock().unwrap();
+        let _guard = TEST_JOB_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         GROUPED_COMPACTION_JOBS.clear();
         let _tracker = GroupedCompactionTracker::begin(
             "abc123def456",
@@ -398,7 +398,7 @@ mod tests {
 
     #[test]
     fn drain_status_summary_includes_progress_and_active_job() {
-        let _guard = TEST_JOB_LOCK.lock().unwrap();
+        let _guard = TEST_JOB_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         GROUPED_COMPACTION_JOBS.clear();
         let tracker = GroupedCompactionTracker::begin(
             "abc123def456",
@@ -445,6 +445,7 @@ mod tests {
 
     #[test]
     fn drain_status_summary_shows_recent_progress() {
+        let _guard = TEST_JOB_LOCK.lock().unwrap_or_else(|err| err.into_inner());
         GROUPED_COMPACTION_JOBS.clear();
         let summary = format_compactor_drain_status_summary(
             Duration::from_secs(120),

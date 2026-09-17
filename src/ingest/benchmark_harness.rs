@@ -319,10 +319,10 @@ pub fn install_fixture_metadata(fixture: BenchmarkFixture) {
     METADATA.store(Arc::new(pipeline));
 }
 
-fn prepare_benchmark_runtime(config: &Config, data_dir: &Path) {
+fn prepare_benchmark_runtime(data_dir: &Path) -> Config {
     let config_path = benchmark_root().join("skippr.yml");
     std::env::set_var("SKIPPR_CONFIG_FILE", &config_path);
-    std::env::set_var("DATA_DIR", data_dir);
+    Config::setenv("DATA_DIR", data_dir.to_str().unwrap());
     std::env::set_var("SKIPPR_PIPELINE", "ingest_benchmark");
     std::env::set_var("SKIPPR_WORKSPACE", "benchmark");
     // Disable disk guards for temp-dir benchmarks (0 = no percentage watermark).
@@ -340,6 +340,7 @@ fn prepare_benchmark_runtime(config: &Config, data_dir: &Path) {
     for sub in ["segment_buffer", "output"] {
         let _ = fs::create_dir_all(format!("{data_dir_str}/{sub}"));
     }
+    config
 }
 
 fn read_ndjson(path: &Path) -> std::io::Result<String> {
@@ -374,7 +375,7 @@ pub fn run_local_fixture_benchmark_with_options(
     ingest_profile::set_force_legacy_ingest_for_benchmark(force_legacy);
 
     fs::create_dir_all(data_dir).expect("data dir");
-    prepare_benchmark_runtime(&Config::new(), data_dir);
+    let config = prepare_benchmark_runtime(data_dir);
 
     let input_path = fixture_input_path(fixture);
     let row_count = rows.unwrap_or_else(|| fixture.default_rows());
@@ -389,10 +390,10 @@ pub fn run_local_fixture_benchmark_with_options(
 
     let payload = read_ndjson(&input_path).expect("read fixture");
     let input_bytes = payload.len();
-    let namespace = storage_namespace(&Config::new(), fixture.namespace());
+    let namespace = storage_namespace(&config, fixture.namespace());
     let offset_key = OffsetKey::new("file", fixture.name());
     let batch = IngestBatch::new(
-        &Config::new(),
+        &config,
         offset_key,
         payload,
         input_bytes,
@@ -401,8 +402,8 @@ pub fn run_local_fixture_benchmark_with_options(
         None,
     );
 
-    let _ingest = Ingest::new_for_execution(&Config::new(), RuntimeExecutionMode::Sync);
-    let offsets = Arc::new(Offsets::init(&Config::new()).expect("offsets"));
+    let _ingest = Ingest::new_for_execution(&config, RuntimeExecutionMode::Sync);
+    let offsets = Arc::new(Offsets::init(&config).expect("offsets"));
     let output: Arc<Box<dyn crate::plugins::DataSink + Send + Sync>> =
         Arc::new(Box::new(NoopOutputPlugin));
 

@@ -508,7 +508,7 @@ fn persist_bitmap(path: &Path, bitmap: &CompletionBitmap) -> io::Result<()> {
             std::process::id(),
             sequence
         ));
-        match DirectIoFile::create_new(&candidate) {
+        match DirectIoFile::create(&candidate) {
             Ok(mut file) => {
                 let result = (|| {
                     file.write_all(&bytes)?;

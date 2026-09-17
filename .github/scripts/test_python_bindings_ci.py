@@ -93,6 +93,15 @@ class PythonBindingsCiTests(unittest.TestCase):
         text = PYTHON_CARGO.read_text(encoding="utf-8")
         self.assertIn("abi3-py310", text)
 
+    def test_precommit_hook_runs_lib_tests(self):
+        hook = (ROOT / ".githooks" / "pre-commit").read_text(encoding="utf-8")
+        script = (ROOT / "scripts" / "precommit.sh").read_text(encoding="utf-8")
+        installer = (ROOT / "scripts" / "install-git-hooks.sh").read_text(encoding="utf-8")
+        self.assertIn("scripts/precommit.sh", hook)
+        self.assertIn("cargo test -p skipprd --lib", script)
+        self.assertIn("test_python_bindings_ci.py", script)
+        self.assertIn(".githooks/pre-commit", installer)
+
     def test_python_semver_is_independent_of_engine_tags(self):
         module = load_wheel_version()
         self.assertEqual(module.python_semver(), "0.1.0")

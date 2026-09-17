@@ -119,8 +119,11 @@ impl DirectIoFile {
         {
             match try_open_unbuffered(path, spec) {
                 Ok(file) => Self::from_unbuffered(file, spec.truncate),
-                Err(err) if is_direct_unsupported(&err) => {
-                    if clustered_wal_requires_direct_io() {
+                Err(err)
+                    if is_direct_unsupported(&err)
+                        || spurious_create_new_exists(&err, spec, path) =>
+                {
+                    if clustered_wal_requires_direct_io() && is_direct_unsupported(&err) {
                         return Err(io::Error::new(
                             err.kind(),
                             format!("WAL Direct I/O is required on clustered volumes: {err}"),
@@ -349,6 +352,11 @@ fn is_direct_unsupported(err: &io::Error) -> bool {
         err.raw_os_error(),
         Some(libc::EINVAL) | Some(libc::EOPNOTSUPP)
     )
+}
+
+#[cfg(not(windows))]
+fn spurious_create_new_exists(err: &io::Error, spec: OpenSpec, path: &Path) -> bool {
+    spec.create_new && err.kind() == io::ErrorKind::AlreadyExists && !path.exists()
 }
 
 #[cfg(not(windows))]

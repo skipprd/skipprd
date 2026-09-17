@@ -1701,17 +1701,19 @@ impl Config {
     }
 
     pub fn getenv(name: &str, default: &str) -> String {
-        // Try to get from environment first
         match std::env::var(name.to_uppercase()) {
             Ok(val) if !val.is_empty() => {
-                // Store in cache
                 let cache = ENV_CACHE.write();
                 cache.insert(name.to_string(), val.clone());
                 val
             }
             _ => {
-                // Use default value
-                default.to_string()
+                let cached = Self::get_envcache(name);
+                if !cached.is_empty() {
+                    cached
+                } else {
+                    default.to_string()
+                }
             }
         }
     }
@@ -2836,6 +2838,19 @@ mod tests {
         }))
         .unwrap();
         config.bind_pipeline("orders")
+    }
+
+    #[test]
+    #[serial]
+    fn getenv_reads_envcache_when_process_env_is_unset() {
+        std::env::remove_var("TRANSFORM_BATCH_PARTITION_FIELDS");
+        Config::reset_envcache();
+        Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
+        assert_eq!(
+            Config::getenv("TRANSFORM_BATCH_PARTITION_FIELDS", "NULL_VALUE"),
+            "foo"
+        );
+        Config::reset_envcache();
     }
 
     #[test]
