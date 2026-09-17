@@ -6,6 +6,7 @@ const sidebar = [
     text: 'Getting started',
     items: [
       { text: 'Install', link: '/getting-started/install' },
+      { text: 'Python', link: '/python' },
       { text: 'Snowflake', link: '/getting-started/quickstart-snowflake' },
       { text: 'PostgreSQL', link: '/getting-started/quickstart-postgres' },
       { text: 'BigQuery', link: '/getting-started/quickstart-bigquery' },
@@ -32,6 +33,9 @@ const sidebar = [
       { text: 'Skipprd discover', link: '/cli/discover' },
       { text: 'Skipprd schema', link: '/cli/schema' },
       { text: 'Skipprd sync', link: '/cli/sync' },
+      { text: 'Skipprd query', link: '/cli/query' },
+      { text: 'Skipprd doctor', link: '/cli/doctor' },
+      { text: 'Skipprd df', link: '/cli/df' },
     ],
   },
   {

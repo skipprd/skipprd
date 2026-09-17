@@ -11,7 +11,6 @@ use serde_derive::Deserialize;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info};
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::RUNNING;
 use skippr_runtime_sdk::plugins::{DataSource, SourceExecutionContract, SourceOnceContract};
@@ -32,6 +31,7 @@ pub struct DataSourceKinesisPluginConfig {
 pub struct DataSourceKinesisPlugin {
     pub(crate) config: DataSourceKinesisPluginConfig,
     client: Client,
+    data_dir: String,
 }
 
 impl TryFrom<PluginConfigEntry> for DataSourceKinesisPluginConfig {
@@ -43,17 +43,17 @@ impl TryFrom<PluginConfigEntry> for DataSourceKinesisPluginConfig {
 }
 
 impl DataSourceKinesisPlugin {
-    fn checkpoint_path(stream: &str, shard_id: &str) -> PathBuf {
+    fn checkpoint_path(&self, stream: &str, shard_id: &str) -> PathBuf {
         let safe_stream = stream.replace(['/', '\\'], "_");
         let safe_shard = shard_id.replace(['/', '\\'], "_");
-        PathBuf::from(Config::get_data_dir())
+        PathBuf::from(&self.data_dir)
             .join("kinesis_checkpoints")
             .join(safe_stream)
             .join(format!("{safe_shard}.seq"))
     }
 
-    async fn read_checkpoint(stream: &str, shard_id: &str) -> Option<String> {
-        let p = Self::checkpoint_path(stream, shard_id);
+    async fn read_checkpoint(&self, stream: &str, shard_id: &str) -> Option<String> {
+        let p = self.checkpoint_path(stream, shard_id);
         tokio::fs::read_to_string(p)
             .await
             .ok()
@@ -61,8 +61,13 @@ impl DataSourceKinesisPlugin {
             .filter(|s| !s.is_empty())
     }
 
-    async fn write_checkpoint(stream: &str, shard_id: &str, seq: &str) -> std::io::Result<()> {
-        let p = Self::checkpoint_path(stream, shard_id);
+    async fn write_checkpoint(
+        &self,
+        stream: &str,
+        shard_id: &str,
+        seq: &str,
+    ) -> std::io::Result<()> {
+        let p = self.checkpoint_path(stream, shard_id);
         if let Some(parent) = p.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
@@ -100,7 +105,7 @@ impl DataSourceKinesisPlugin {
             .ok_or_else(|| std::io::Error::other("missing shard_iterator"))
     }
 
-    async fn from_config(config: DataSourceKinesisPluginConfig) -> Self {
+    async fn from_config(config: DataSourceKinesisPluginConfig, data_dir: String) -> Self {
         let mut loader = aws_config::defaults(BehaviorVersion::latest());
         if let Some(ref region) = config.region {
             loader = loader.region(aws_types::region::Region::new(region.clone()));
@@ -112,47 +117,22 @@ impl DataSourceKinesisPlugin {
         }
         let client = Client::from_conf(client_config.build());
 
-        DataSourceKinesisPlugin { config, client }
+        DataSourceKinesisPlugin {
+            config,
+            client,
+            data_dir,
+        }
     }
 
-    pub async fn new() -> Self {
-        let config: DataSourceKinesisPluginConfig = match Config::get_pipeline_input_plugin_config()
-        {
-            Ok(input_config) => input_config.try_into().unwrap_or_else(|e| panic!("{}", e)),
-            Err(_) => DataSourceKinesisPluginConfig {
-                stream_name: Config::getenv("KINESIS_STREAM_NAME", ""),
-                region: {
-                    let r = Config::getenv("AWS_DEFAULT_REGION", "");
-                    if r.is_empty() {
-                        None
-                    } else {
-                        Some(r)
-                    }
-                },
-                endpoint_url: None,
-                mode: None,
-                format: None,
-                batch_size_bytes: Some(
-                    Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000")
-                        .parse::<i64>()
-                        .unwrap_or(1_024_000),
-                ),
-                batch_size_seconds: Some(
-                    Config::getenv("DATA_SOURCE_BATCH_SIZE_SECONDS", "600")
-                        .parse::<i64>()
-                        .unwrap_or(600),
-                ),
-            },
-        };
-
-        Self::from_config(config).await
-    }
-
-    pub async fn with_runtime_config(config: DataSourceKinesisPluginConfig) -> Self {
-        Self::from_config(config).await
+    pub async fn with_runtime_config(
+        config: DataSourceKinesisPluginConfig,
+        data_dir: &str,
+    ) -> Self {
+        Self::from_config(config, data_dir.to_string()).await
     }
 
     fn flush_shard_buffer(
+        &self,
         stream_name: &str,
         shard_id: &str,
         pending: &mut Vec<IngestBatch>,
@@ -179,7 +159,7 @@ impl DataSourceKinesisPlugin {
         if !seq.is_empty() {
             let h = tokio::runtime::Handle::try_current();
             if let Ok(handle) = h {
-                let _ = handle.block_on(Self::write_checkpoint(stream_name, &sid, &seq));
+                let _ = handle.block_on(self.write_checkpoint(stream_name, &sid, &seq));
             }
         }
         Ok(())
@@ -236,7 +216,7 @@ impl DataSourceKinesisPlugin {
 
         let mut iterators: HashMap<String, String> = HashMap::new();
         for sid in &shard_ids {
-            let ckpt = Self::read_checkpoint(&stream_name, sid).await;
+            let ckpt = self.read_checkpoint(&stream_name, sid).await;
             match Self::new_shard_iterator(&self.client, &stream_name, sid, ckpt.as_deref()).await {
                 Ok(it) => {
                     iterators.insert(sid.clone(), it);
@@ -275,7 +255,7 @@ impl DataSourceKinesisPlugin {
                     Ok(r) => r,
                     Err(e) => {
                         error!("Kinesis get_records {}: {}", sid, e);
-                        let ckpt = Self::read_checkpoint(&stream_name, sid).await;
+                        let ckpt = self.read_checkpoint(&stream_name, sid).await;
                         match Self::new_shard_iterator(
                             &self.client,
                             &stream_name,
@@ -335,7 +315,7 @@ impl DataSourceKinesisPlugin {
                     *last_seq = Some(seq);
 
                     if *bbytes >= batch_limit {
-                        Self::flush_shard_buffer(&stream_name, sid, buf, last_seq, ctx.as_ref())?;
+                        self.flush_shard_buffer(&stream_name, sid, buf, last_seq, ctx.as_ref())?;
                         *bbytes = 0;
                     }
                 }
@@ -346,7 +326,7 @@ impl DataSourceKinesisPlugin {
                     let buf = buffers.get_mut(sid).unwrap();
                     let last_seq = last_seq_per_shard.get_mut(sid).unwrap();
                     if !buf.is_empty() {
-                        Self::flush_shard_buffer(&stream_name, sid, buf, last_seq, ctx.as_ref())?;
+                        self.flush_shard_buffer(&stream_name, sid, buf, last_seq, ctx.as_ref())?;
                     }
                     *buffer_bytes.get_mut(sid).unwrap() = 0;
                 }
@@ -358,7 +338,7 @@ impl DataSourceKinesisPlugin {
                     let buf = buffers.get_mut(sid).unwrap();
                     let last_seq = last_seq_per_shard.get_mut(sid).unwrap();
                     if !buf.is_empty() {
-                        Self::flush_shard_buffer(&stream_name, sid, buf, last_seq, ctx.as_ref())?;
+                        self.flush_shard_buffer(&stream_name, sid, buf, last_seq, ctx.as_ref())?;
                     }
                     *buffer_bytes.get_mut(sid).unwrap() = 0;
                 }
@@ -377,7 +357,7 @@ impl DataSourceKinesisPlugin {
             let buf = buffers.get_mut(sid).unwrap();
             let last_seq = last_seq_per_shard.get_mut(sid).unwrap();
             if !buf.is_empty() {
-                Self::flush_shard_buffer(&stream_name, sid, buf, last_seq, ctx.as_ref())?;
+                self.flush_shard_buffer(&stream_name, sid, buf, last_seq, ctx.as_ref())?;
             }
         }
 

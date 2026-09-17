@@ -6,6 +6,7 @@ use crate::helpers::configuration::Config;
 use crate::runtime_plugins::schema_state::install_from_pipeline_metadata;
 
 pub async fn load_and_install_pipeline_schema(
+    config: &Config,
     key: &PipelineKey,
     paths: &PipelinePaths,
     log: &MutationLog,
@@ -13,7 +14,7 @@ pub async fn load_and_install_pipeline_schema(
     initialized: bool,
 ) -> Result<(), PromoteError> {
     let required = live_wal_namespaces(paths, log, key)?;
-    let mut metadata = match Config::load_pipeline_metadata(key).await {
+    let mut metadata = match config.load_pipeline_metadata(key).await {
         Ok(Some(metadata)) => metadata,
         Ok(None) => {
             if missing_metadata_is_fatal(initialized, &required) {
@@ -25,7 +26,7 @@ pub async fn load_and_install_pipeline_schema(
     };
     metadata.flattened = flatten;
     let _ = metadata.migrate_persisted_metadata();
-    install_from_pipeline_metadata(&metadata);
+    install_from_pipeline_metadata(config, &metadata);
     ensure_live_wal_namespaces_in_metadata(&required, &metadata)
 }
 
@@ -87,7 +88,7 @@ mod tests {
             "id".to_string(),
             Metadata::new_with_type(SkipprDataType::String, "id"),
         );
-        let mut pipeline = PipelineMetadata::new();
+        let mut pipeline = PipelineMetadata::new(&Config::new());
         pipeline.metadata = HashMap::from([(namespace.to_string(), root)]);
         pipeline.flattened = false;
         pipeline

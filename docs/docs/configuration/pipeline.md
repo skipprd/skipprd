@@ -17,7 +17,7 @@ pipelines:
       batch_time_unit: day
 ```
 
-The pipeline name (`events` above) is the key used by Skipprd:
+The pipeline name (`events` above) is the YAML key. `--pipeline` and Python `Session(pipeline=...)` use that key. Python `Session.pipeline` is set only in the constructor.
 
 ```bash
 skipprd discover --pipeline events
@@ -25,18 +25,9 @@ skipprd schema --pipeline events
 skipprd sync --pipeline events
 ```
 
-`data_sources.events` and `data_sinks.landing` are logical names. They are not reserved; use any keys that match your project.
+`data_sources.events` and `data_sinks.landing` are logical names. They are not reserved; use any keys that match your project. `data_sink` is optional: without it the WAL is the dataset.
 
 ## Environment overrides
-
-## PIPELINE_NAME
-
-The name of the pipeline. Used as part of the composite key for metadata, schemas, offsets, and WAL storage.
-
-| | |
-|---|---|
-| **Environment variable** | `PIPELINE_NAME` |
-| **Default** | `default` |
 
 ## WORKSPACE_NAME
 

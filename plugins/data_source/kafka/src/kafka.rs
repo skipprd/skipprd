@@ -10,7 +10,6 @@ use serde_derive::Deserialize;
 use tokio::time::{Duration, Instant};
 use tracing::{error, info};
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::RUNNING;
 use skippr_runtime_sdk::plugins::cdc::{source_capabilities, MutationKind, WalRowMeta};
@@ -53,30 +52,6 @@ pub struct DataSourceKafkaPlugin {
 }
 
 impl DataSourceKafkaPlugin {
-    pub async fn new() -> Self {
-        let config: DataSourceKafkaPluginConfig = match Config::get_pipeline_input_plugin_config() {
-            Ok(c) => c.try_into().unwrap_or_else(|e| panic!("{}", e)),
-            Err(_) => DataSourceKafkaPluginConfig {
-                brokers: Config::getenv("KAFKA_BROKERS", ""),
-                topic: Config::getenv("KAFKA_TOPIC", ""),
-                group_id: None,
-                auto_offset_reset: None,
-                security_protocol: None,
-                sasl_mechanism: None,
-                sasl_username: None,
-                sasl_password: None,
-                mode: None,
-                idle_timeout_seconds: None,
-                format: None,
-                batch_size_bytes: None,
-                batch_size_seconds: None,
-                cdc_mode: SourceCdcMode::Snapshot,
-                debezium_format: None,
-            },
-        };
-        Self { config }
-    }
-
     pub fn with_runtime_config(config: DataSourceKafkaPluginConfig) -> Self {
         Self { config }
     }

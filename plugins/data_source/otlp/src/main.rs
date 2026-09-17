@@ -23,7 +23,11 @@ async fn run() -> std::io::Result<()> {
                     .expect_plugin("Otlp")
                     .map_err(std::io::Error::other)?;
                 let cfg: OtlpConfig = start.config.0.decode().map_err(std::io::Error::other)?;
-                let plugin = DataSourceOtlpPlugin::with_runtime_config(cfg);
+                let plugin = DataSourceOtlpPlugin::with_runtime_config(
+                    cfg,
+                    start.context.pipeline_name.clone(),
+                    start.context.inject_fields.clone(),
+                );
                 Ok(Box::new(plugin) as Box<dyn DataSource + Send>)
             })
         },

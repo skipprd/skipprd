@@ -7,7 +7,6 @@ use serde_derive::Deserialize;
 use tokio::time::{timeout, Duration, Instant};
 use tracing::{error, info};
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::RUNNING;
 use skippr_runtime_sdk::plugins::{DataSource, SourceExecutionContract, SourceOnceContract};
@@ -43,26 +42,6 @@ pub struct DataSourceMqttPlugin {
 }
 
 impl DataSourceMqttPlugin {
-    pub async fn new() -> Self {
-        let config: DataSourceMqttPluginConfig = match Config::get_pipeline_input_plugin_config() {
-            Ok(c) => c.try_into().unwrap_or_else(|e| panic!("{}", e)),
-            Err(_) => DataSourceMqttPluginConfig {
-                broker_url: Config::getenv("MQTT_BROKER_URL", ""),
-                port: None,
-                topic: Config::getenv("MQTT_TOPIC", ""),
-                client_id: None,
-                qos: None,
-                username: None,
-                password: None,
-                mode: None,
-                idle_timeout_seconds: None,
-                format: None,
-                batch_size_bytes: None,
-                batch_size_seconds: None,
-            },
-        };
-        Self { config }
-    }
 
     pub fn with_runtime_config(config: DataSourceMqttPluginConfig) -> Self {
         Self { config }

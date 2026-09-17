@@ -1,3 +1,4 @@
+use crate::helpers::configuration::Config;
 use datafusion::arrow::array::{ArrayRef, StringArray};
 use datafusion::arrow::datatypes::Schema as ArrowSchema2;
 use datafusion::arrow::datatypes::{DataType as ArrowDataType, Field as ArrowField};
@@ -7,7 +8,7 @@ use datafusion::prelude::SessionContext;
 use std::sync::Arc;
 use tracing::debug;
 
-pub async fn register_catalog(ctx: &SessionContext) {
+pub async fn register_catalog(config: &Config, ctx: &SessionContext) {
     debug!(
         "{} META: begin register_semantic_and_catalog (unified catalog, S3-only)",
         chrono::Utc::now().to_rfc3339()
@@ -26,7 +27,7 @@ pub async fn register_catalog(ctx: &SessionContext) {
     ]));
 
     // Load central registry
-    let registry_opt = crate::sqlrt::registry::read_registry().await;
+    let registry_opt = crate::sqlrt::registry::read_registry(config).await;
     let registry = match registry_opt {
         Some(r) => r,
         None => {
@@ -64,7 +65,7 @@ pub async fn register_catalog(ctx: &SessionContext) {
                 ns,
                 entry.catalog_key
             );
-            if let Ok(Some(val)) = crate::adapters::storage::get_storage()
+            if let Ok(Some(val)) = crate::adapters::storage::get_storage(config)
                 .get_json_opt(&entry.catalog_key)
                 .await
             {

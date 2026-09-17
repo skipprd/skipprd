@@ -8,7 +8,6 @@ use tokio::net::{TcpListener, UdpSocket};
 use tokio::time::Duration;
 use tracing::{error, info};
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::RUNNING;
 use skippr_runtime_sdk::plugins::DataSource;
@@ -38,21 +37,6 @@ pub struct DataSourceSocketPlugin {
 }
 
 impl DataSourceSocketPlugin {
-    pub async fn new() -> Self {
-        let config: DataSourceSocketPluginConfig = match Config::get_pipeline_input_plugin_config()
-        {
-            Ok(c) => c.try_into().unwrap_or_else(|e| panic!("{}", e)),
-            Err(_) => DataSourceSocketPluginConfig {
-                mode: Config::getenv("SOCKET_MODE", "tcp"),
-                address: Config::getenv("SOCKET_ADDRESS", "0.0.0.0:9000"),
-                framing: None,
-                format: None,
-                batch_size_bytes: None,
-                batch_size_seconds: None,
-            },
-        };
-        Self { config }
-    }
 
     pub fn with_runtime_config(config: DataSourceSocketPluginConfig) -> Self {
         Self { config }

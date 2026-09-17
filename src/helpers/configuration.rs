@@ -40,10 +40,17 @@ const DEFAULT_CONFIG: &'static str = "NULL_VALUE";
 
 pub static DATA_DIR_INIT_ONCE: OnceCell<()> = OnceCell::new();
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 struct SchemaPublicationRequest {
     namespace: String,
     version: u64,
+    config: Config,
+}
+
+impl SchemaPublicationRequest {
+    fn dirty_key(&self) -> String {
+        self.config.schema_publication_identity(&self.namespace)
+    }
 }
 
 type SchemaSyncWorkerState = (
@@ -224,16 +231,10 @@ pub struct Config {
     pub dbt: Option<ProductDbtConfig>,
     /// Product CLI vector source settings. Ignored by the engine runtime.
     pub vector_sources: Option<HashMap<String, Value>>,
+    /// Bound pipeline for this session. Not YAML. Set by Session / CLI loop.
+    #[serde(skip)]
+    pub active_pipeline: Option<String>,
 }
-
-pub static APP_CONFIG: Lazy<Arc<TimedRwLock<Option<Config>>>> =
-    Lazy::new(|| Arc::new(TimedRwLock::new("config".to_string(), None)));
-pub static PIPELINE_NAME: Lazy<Arc<TimedRwLock<String>>> = Lazy::new(|| {
-    Arc::new(TimedRwLock::new(
-        "pipeline_name".to_string(),
-        "default".to_string(),
-    ))
-});
 
 #[allow(dead_code)]
 impl Config {
@@ -244,10 +245,20 @@ impl Config {
         &["deadletters", "wal", "_skippr", "skippr", "metadata"]
     }
 
+    pub fn bind_pipeline(&self, name: &str) -> Config {
+        let mut bound = self.clone();
+        bound.active_pipeline = Some(name.to_string());
+        bound
+    }
+
+    pub fn pipeline_key(&self) -> &str {
+        self.active_pipeline.as_deref().unwrap_or("")
+    }
+
     // Validate current pipeline name against reserved list
-    pub fn assert_pipeline_not_reserved() {
-        let name = Self::get_pipeline_name();
-        let cleaned = Helpers::clean_field_name(name.clone());
+    pub fn assert_pipeline_not_reserved(&self) {
+        let name = self.get_pipeline_name();
+        let cleaned = Helpers::clean_field_name(self, name.clone());
         for r in Self::reserved_pipeline_names().iter() {
             if name.eq_ignore_ascii_case(r) || cleaned.eq_ignore_ascii_case(r) {
                 error!(
@@ -359,6 +370,7 @@ impl Config {
             schema_sinks: None,
             dbt: None,
             vector_sources: None,
+            active_pipeline: None,
         }
     }
 
@@ -394,35 +406,30 @@ impl Config {
         file_path
     }
 
-    pub fn build_config() {
-        if let Err(err) = Self::try_build_config() {
-            eprintln!("[skippr] config failed: {}", err);
-            std::process::exit(1);
+    pub fn build_config() -> Config {
+        match Self::try_build_config() {
+            Ok(config) => config,
+            Err(err) => {
+                eprintln!("[skippr] config failed: {}", err);
+                std::process::exit(1);
+            }
         }
     }
 
-    pub fn try_build_config() -> Result<(), String> {
+    pub fn try_build_config() -> Result<Config, String> {
         let file_path = Config::find_config_file();
-        if !file_path.is_empty() {
-            crate::helpers::dotenv::load_dotenv_for_config_yaml_path(std::path::Path::new(
-                &file_path,
-            ));
+        if file_path.is_empty() {
+            return Ok(Config::new());
         }
+        let config = Self::load_path(std::path::Path::new(&file_path))?;
+        Ok(config)
+    }
 
-        let mut file = match File::open(&file_path) {
-            Ok(file) => file,
-            Err(_error) => {
-                if !file_path.is_empty() {
-                    return Err(format!("Config file '{}' could not be opened.", file_path));
-                }
-                {
-                    let mut app_config = APP_CONFIG.write();
-                    app_config.replace(Config::new());
-                }
-                return Ok(());
-            }
-        };
-
+    pub fn load_path(path: &std::path::Path) -> Result<Config, String> {
+        crate::helpers::dotenv::load_dotenv_for_config_yaml_path(path);
+        let file_path = path.to_string_lossy().to_string();
+        let mut file = File::open(path)
+            .map_err(|err| format!("Config file '{}' could not be opened: {err}", file_path))?;
         let mut contents = String::new();
         file.read_to_string(&mut contents)
             .map_err(|err| format!("Failed to read config file '{}': {}", file_path, err))?;
@@ -443,70 +450,20 @@ impl Config {
             ));
         };
 
-        // Serialize the serde_value::Value into a String
         let string_val = serde_json::to_string(&config)
             .map_err(|err| format!("Failed to normalize config '{}': {}", file_path, err))?;
-
-        // Deserialize the String back into serde_json::Value
         let mut config: Value = serde_json::from_str(&string_val)
             .map_err(|err| format!("Failed to normalize config '{}': {}", file_path, err))?;
-
         Config::resolve_env_refs_in_json_value(&mut config).map_err(|err| {
             format!(
                 "Invalid environment reference in config '{}': {}",
                 file_path, err
             )
         })?;
-
-        // recursively merge config with any set ENV vars
-        // let config = Config::merge_config_with_env(config);
-
         let string_val = serde_json::to_string(&config)
             .map_err(|err| format!("Failed to normalize config '{}': {}", file_path, err))?;
-        // Deserialize the String back into Config
-        let config: Config = serde_json::from_str(&string_val)
-            .map_err(|err| format!("Invalid Skippr configuration in '{}': {}", file_path, err))?;
-
-        // println!("config: {:?}", config);
-
-        {
-            // let mut app_config = APP_CONFIG.write().unwrap();
-            // let mut app_config = match APP_CONFIG.write().as_mut() {
-            //     Some(app_config) => {
-            //         app_config
-            //     }
-            //     None => {
-            //         Config::new()
-            //     }
-            // };
-            //
-            // app_config = &mut config
-
-            // set APP_CONFIG to Some(&mut config)
-            let mut app_config = APP_CONFIG.write();
-            app_config.replace(config);
-        }
-
-        // Ensure SKIPPR_S3_BUCKET env var is set from config (fallbacks handled inside getter)
-        let bucket = Config::get_skippr_s3_bucket();
-        Config::setenv("SKIPPR_S3_BUCKET", &bucket);
-        if std::env::var("SKIPPR_OFFSET_STORE")
-            .ok()
-            .filter(|value| !value.trim().is_empty())
-            .is_none()
-        {
-            if let Some(store) = Config::get()
-                .skippr
-                .as_ref()
-                .and_then(|skippr| skippr.offset_store.clone())
-                .filter(|store| !store.is_empty())
-            {
-                Config::set_offset_store(&store);
-            }
-        }
-
-        // panic!("test");
-        Ok(())
+        serde_json::from_str(&string_val)
+            .map_err(|err| format!("Invalid Skippr configuration in '{}': {}", file_path, err))
     }
 
     fn merge_env_vars(val: &mut Value, prefix: String) {
@@ -660,33 +617,29 @@ impl Config {
             "data_source",
         )?;
 
-        let data_sink_ref = pipeline.data_sink.as_ref().ok_or_else(|| {
-            format!(
-                "Invalid configuration for pipeline '{}': data_sink is required.",
-                pipeline_name
-            )
-        })?;
-        let data_sink_name = Self::validate_registry_ref_exists(
-            config.data_sinks.as_ref(),
-            data_sink_ref,
-            "data_sinks",
-            pipeline_name,
-            "data_sink",
-        )?;
-
-        if let Some(schema_ref) = config
-            .data_sinks
-            .as_ref()
-            .and_then(|sinks| sinks.get(&data_sink_name))
-            .and_then(|entry| entry.schema_sink.as_ref())
-        {
-            Self::validate_registry_ref_exists(
-                config.schema_sinks.as_ref(),
-                schema_ref,
-                "schema_sinks",
+        if let Some(data_sink_ref) = pipeline.data_sink.as_ref() {
+            let data_sink_name = Self::validate_registry_ref_exists(
+                config.data_sinks.as_ref(),
+                data_sink_ref,
+                "data_sinks",
                 pipeline_name,
-                "data_sink.schema_sink",
+                "data_sink",
             )?;
+
+            if let Some(schema_ref) = config
+                .data_sinks
+                .as_ref()
+                .and_then(|sinks| sinks.get(&data_sink_name))
+                .and_then(|entry| entry.schema_sink.as_ref())
+            {
+                Self::validate_registry_ref_exists(
+                    config.schema_sinks.as_ref(),
+                    schema_ref,
+                    "schema_sinks",
+                    pipeline_name,
+                    "data_sink.schema_sink",
+                )?;
+            }
         }
 
         if let Some(deadletter_ref) = pipeline.deadletter_sink.as_ref() {
@@ -716,9 +669,9 @@ impl Config {
         Ok(())
     }
 
-    pub fn validate_current_pipeline_registry_refs() -> Result<(), String> {
-        let config = Config::get();
-        let pipeline_name = PIPELINE_NAME.read().clone();
+    pub fn validate_current_pipeline_registry_refs(&self) -> Result<(), String> {
+        let config = self.clone();
+        let pipeline_name = self.get_pipeline_name();
         let pipeline = config
             .pipelines
             .get(pipeline_name.as_str())
@@ -757,90 +710,44 @@ impl Config {
         plugin_config
     }
 
-    pub fn get_pipeline_input_plugin_name() -> String {
-        if Config::get_envcache("DATA_SOURCE_PLUGIN_NAME") != "" {
-            return Config::get_envcache("DATA_SOURCE_PLUGIN_NAME");
-        } else {
-            let config = Config::get();
-
-            let pipline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
-                Some(pipeline) => pipeline,
-                None => {
-                    let plugin_name = Config::getenv("DATA_SOURCE_PLUGIN_NAME", "");
-
-                    Config::set_evncache("DATA_SOURCE_PLUGIN_NAME", &plugin_name.clone());
-
-                    return plugin_name;
-                }
-            };
-
-            if let Some(data_source_ref) = pipline.data_source.as_ref() {
-                let input_plugin_name =
-                    match Self::parse_registry_ref(data_source_ref, "data_sources") {
-                        Ok(name) => name,
-                        Err(_) => Config::getenv("DATA_SOURCE_PLUGIN_NAME", ""),
-                    };
-
-                let res = match config.data_sources.as_ref() {
-                    Some(data_sources) => match data_sources.get(&input_plugin_name) {
-                        Some(plugin_config) => plugin_config.plugin_name().unwrap_or_default(),
-                        None => Config::getenv("DATA_SOURCE_PLUGIN_NAME", ""),
-                    },
-                    None => Config::getenv("DATA_SOURCE_PLUGIN_NAME", ""),
-                };
-
-                Config::set_evncache("DATA_SOURCE_PLUGIN_NAME", &res.clone());
-                res
-            } else {
-                let res = Config::getenv("DATA_SOURCE_PLUGIN_NAME", "");
-                Config::set_evncache("DATA_SOURCE_PLUGIN_NAME", &res.clone());
-                res
-            }
-        }
+    pub fn get_pipeline_input_plugin_name(&self) -> String {
+        let Some(pipeline) = self.pipelines.get(self.pipeline_key()) else {
+            return Config::getenv("DATA_SOURCE_PLUGIN_NAME", "");
+        };
+        let Some(data_source_ref) = pipeline.data_source.as_ref() else {
+            return Config::getenv("DATA_SOURCE_PLUGIN_NAME", "");
+        };
+        let Ok(entry_name) = Self::parse_registry_ref(data_source_ref, "data_sources") else {
+            return Config::getenv("DATA_SOURCE_PLUGIN_NAME", "");
+        };
+        self.data_sources
+            .as_ref()
+            .and_then(|sources| sources.get(&entry_name))
+            .and_then(|plugin| plugin.plugin_name())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| Config::getenv("DATA_SOURCE_PLUGIN_NAME", ""))
     }
 
-    pub fn get_pipeline_output_plugin_name() -> String {
-        if Config::get_envcache("DATA_OUTPUT_PLUGIN_NAME") != "" {
-            return Config::get_envcache("DATA_OUTPUT_PLUGIN_NAME");
-        } else {
-            let config = Config::get();
-
-            let pipline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
-                Some(pipeline) => pipeline,
-                None => {
-                    let plugin_name = Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "");
-                    Config::set_evncache("DATA_OUTPUT_PLUGIN_NAME", &plugin_name.clone());
-                    return plugin_name;
-                }
-            };
-
-            if let Some(data_sink_ref) = pipline.data_sink.as_ref() {
-                let output_plugin_name = match Self::parse_registry_ref(data_sink_ref, "data_sinks")
-                {
-                    Ok(name) => name,
-                    Err(_) => Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""),
-                };
-
-                let res = match config.data_sinks.as_ref() {
-                    Some(data_sinks) => match data_sinks.get(&output_plugin_name) {
-                        Some(entry) => entry.config.plugin_name().unwrap_or_default(),
-                        None => Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""),
-                    },
-                    None => Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""),
-                };
-
-                Config::set_evncache("DATA_OUTPUT_PLUGIN_NAME", &res.clone());
-                res
-            } else {
-                let res = Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "");
-                Config::set_evncache("DATA_OUTPUT_PLUGIN_NAME", &res.clone());
-                res
-            }
-        }
+    pub fn get_pipeline_output_plugin_name(&self) -> String {
+        let Some(pipeline) = self.pipelines.get(self.pipeline_key()) else {
+            return Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "");
+        };
+        let Some(data_sink_ref) = pipeline.data_sink.as_ref() else {
+            return Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "");
+        };
+        let Ok(entry_name) = Self::parse_registry_ref(data_sink_ref, "data_sinks") else {
+            return Config::getenv("DATA_OUTPUT_PLUGIN_NAME", "");
+        };
+        self.data_sinks
+            .as_ref()
+            .and_then(|sinks| sinks.get(&entry_name))
+            .and_then(|entry| entry.config.plugin_name())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| Config::getenv("DATA_OUTPUT_PLUGIN_NAME", ""))
     }
 
-    pub fn get_pipeline_deadletters_ref() -> Option<String> {
-        let pipeline = Config::get_pipeline_config();
+    pub fn get_pipeline_deadletters_ref(&self) -> Option<String> {
+        let pipeline = self.get_pipeline_config();
         pipeline.deadletter_sink.clone()
     }
 
@@ -884,148 +791,105 @@ impl Config {
         violations
     }
 
-    pub fn get_pipeline_output_sink_ref() -> String {
-        let pipeline = Config::get_pipeline_config();
+    pub fn get_pipeline_output_sink_ref(&self) -> String {
+        let pipeline = self.get_pipeline_config();
         pipeline
             .data_sink
             .clone()
             .unwrap_or_else(|| "data_sinks.__default__".to_string())
     }
 
-    pub fn get_pipeline_deadletter_plugin_name() -> Result<Option<String>, String> {
-        let config = Config::get();
-        let pipeline = Config::get_pipeline_config();
+    pub fn get_pipeline_deadletter_plugin_name(&self) -> Result<Option<String>, String> {
+        let config = self.clone();
+        let pipeline = self.get_pipeline_config();
         match Self::resolve_deadletter_plugin_config_for(&config, &pipeline)? {
             Some(plugin_config) => Ok(plugin_config.plugin_name()),
             None => Ok(None),
         }
     }
 
-    pub fn get_pipeline_deadletter_schema_plugin_name() -> Result<Option<String>, String> {
-        let pipeline = Config::get_pipeline_config();
+    pub fn get_pipeline_deadletter_schema_plugin_name(&self) -> Result<Option<String>, String> {
+        let pipeline = self.get_pipeline_config();
         if pipeline.deadletter_sink.is_none() {
             return Ok(None);
         }
 
         Ok(Some(
-            Self::get_pipeline_deadletter_schema_config()?.plugin_name,
+            self.get_pipeline_deadletter_schema_config()?.plugin_name,
         ))
     }
 
-    pub fn get_pipeline_input_plugin_version() -> Result<Option<String>, String> {
-        Ok(Self::get_pipeline_input_plugin_config()?.version())
+    pub fn get_pipeline_input_plugin_version(&self) -> Result<Option<String>, String> {
+        Ok(self.get_pipeline_input_plugin_config()?.version())
     }
 
-    pub fn get_pipeline_output_plugin_version() -> Result<Option<String>, String> {
-        Ok(Self::get_pipeline_output_plugin_config()?.version())
+    pub fn get_pipeline_output_plugin_version(&self) -> Result<Option<String>, String> {
+        Ok(self.get_pipeline_output_plugin_config()?.version())
     }
 
-    pub fn get_pipeline_deadletter_plugin_version() -> Result<Option<String>, String> {
-        Ok(Self::get_pipeline_deadletter_plugin_config()?.and_then(|config| config.version()))
+    pub fn get_pipeline_deadletter_plugin_version(&self) -> Result<Option<String>, String> {
+        Ok(self
+            .get_pipeline_deadletter_plugin_config()?
+            .and_then(|config| config.version()))
     }
 
-    pub fn get_pipeline_schema_plugin_version() -> Result<Option<String>, String> {
-        Ok(Self::get_pipeline_schema_plugin_config()?.version())
+    pub fn get_pipeline_schema_plugin_version(&self) -> Result<Option<String>, String> {
+        Ok(self.get_pipeline_schema_plugin_config()?.version())
     }
 
-    pub fn get_pipeline_deadletter_schema_plugin_version() -> Result<Option<String>, String> {
-        Ok(Self::get_pipeline_deadletter_schema_config()?.version())
+    pub fn get_pipeline_deadletter_schema_plugin_version(&self) -> Result<Option<String>, String> {
+        Ok(self.get_pipeline_deadletter_schema_config()?.version())
     }
 
-    pub fn get_pipeline_schema_plugin_name() -> String {
-        if Config::get_envcache("DATA_SCHEMA_PLUGIN_NAME") != "" {
-            return Config::get_envcache("DATA_SCHEMA_PLUGIN_NAME");
-        } else {
-            let config = Config::get();
-
-            let pipline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
-                Some(pipeline) => pipeline,
-                None => {
-                    let plugin_name = Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "");
-                    Config::set_evncache("DATA_SCHEMA_PLUGIN_NAME", &plugin_name.clone());
-                    return plugin_name;
-                }
-            };
-
-            let schema_sink_ref = pipline.data_sink.as_ref().and_then(|sink_ref| {
-                let sink_name = Self::parse_registry_ref(sink_ref, "data_sinks").ok()?;
-                config
-                    .data_sinks
-                    .as_ref()?
-                    .get(&sink_name)?
-                    .schema_sink
-                    .clone()
-            });
-
-            if let Some(ref schema_ref) = schema_sink_ref {
-                let schema_name = match Self::parse_registry_ref(schema_ref, "schema_sinks") {
-                    Ok(name) => name,
-                    Err(_) => {
-                        let res = Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "");
-                        Config::set_evncache("DATA_SCHEMA_PLUGIN_NAME", &res);
-                        return res;
-                    }
-                };
-
-                let res = match config.schema_sinks.as_ref() {
-                    Some(schema_sinks) => match schema_sinks.get(&schema_name) {
-                        Some(schema_config) => schema_config.plugin_name.clone(),
-                        None => Config::getenv("DATA_SCHEMA_PLUGIN_NAME", ""),
-                    },
-                    None => Config::getenv("DATA_SCHEMA_PLUGIN_NAME", ""),
-                };
-
-                Config::set_evncache("DATA_SCHEMA_PLUGIN_NAME", &res.clone());
-                res
-            } else {
-                let res = Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "");
-                Config::set_evncache("DATA_SCHEMA_PLUGIN_NAME", &res.clone());
-                res
-            }
-        }
+    pub fn get_pipeline_schema_plugin_name(&self) -> String {
+        let Some(pipeline) = self.pipelines.get(self.pipeline_key()) else {
+            return Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "");
+        };
+        let schema_sink_ref = pipeline.data_sink.as_ref().and_then(|sink_ref| {
+            let sink_name = Self::parse_registry_ref(sink_ref, "data_sinks").ok()?;
+            self.data_sinks
+                .as_ref()?
+                .get(&sink_name)?
+                .schema_sink
+                .clone()
+        });
+        let Some(schema_ref) = schema_sink_ref else {
+            return Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "");
+        };
+        let Ok(schema_name) = Self::parse_registry_ref(&schema_ref, "schema_sinks") else {
+            return Config::getenv("DATA_SCHEMA_PLUGIN_NAME", "");
+        };
+        self.schema_sinks
+            .as_ref()
+            .and_then(|sinks| sinks.get(&schema_name))
+            .map(|cfg| cfg.plugin_name.clone())
+            .filter(|name| !name.is_empty())
+            .unwrap_or_else(|| Config::getenv("DATA_SCHEMA_PLUGIN_NAME", ""))
     }
 
-    pub fn get_skippr_s3_bucket() -> String {
-        if Config::get_envcache("SKIPPR_S3_BUCKET") != "" {
-            return Config::get_envcache("SKIPPR_S3_BUCKET");
-        } else {
-            let config = Config::get();
-
-            let default_bucket = Config::getenv("SKIPPR_S3_BUCKET", "");
-
-            let bucket = match config.skippr {
-                Some(skippr) => match skippr.skippr_s3_bucket.as_ref() {
-                    Some(bucket) => bucket.to_string(),
-                    None => default_bucket,
-                },
-                None => default_bucket,
-            };
-
-            Config::set_evncache("SKIPPR_S3_BUCKET", &bucket.clone());
-            bucket
-        }
+    pub fn get_skippr_s3_bucket(&self) -> String {
+        self.skippr
+            .as_ref()
+            .and_then(|skippr| skippr.skippr_s3_bucket.as_ref())
+            .filter(|bucket| !bucket.is_empty())
+            .cloned()
+            .unwrap_or_else(|| Config::getenv("SKIPPR_S3_BUCKET", ""))
     }
 
     /// Returns `"local"` or `"s3"` (default). Controls where skipprd
     /// extract/load metadata and stats are persisted.
-    pub fn get_storage_mode() -> String {
-        if Config::get_envcache("SKIPPRD_EL_STORAGE_MODE") != "" {
-            return Config::get_envcache("SKIPPRD_EL_STORAGE_MODE");
+    pub fn get_storage_mode(&self) -> String {
+        let v = Self::yaml_or_env(
+            self.skippr
+                .as_ref()
+                .and_then(|s| s.skipprd_el_storage_mode.as_ref()),
+            "SKIPPRD_EL_STORAGE_MODE",
+            "s3",
+        );
+        if v.is_empty() {
+            "s3".to_string()
         } else {
-            let config = Config::get();
-
-            let default_mode = Config::getenv("SKIPPRD_EL_STORAGE_MODE", "s3");
-
-            let mode = match config.skippr {
-                Some(skippr) => match skippr.skipprd_el_storage_mode.as_ref() {
-                    Some(m) => m.to_string(),
-                    None => default_mode,
-                },
-                None => default_mode,
-            };
-
-            Config::set_evncache("SKIPPRD_EL_STORAGE_MODE", &mode);
-            mode
+            v
         }
     }
 
@@ -1046,7 +910,7 @@ impl Config {
     }
 
     /// Parsed WAL backend. Unknown values exit at startup.
-    pub fn get_wal_storage() -> crate::helpers::wal_storage::WalStorage {
+    pub fn get_wal_storage(&self) -> crate::helpers::wal_storage::WalStorage {
         match Self::parse_wal_storage() {
             Ok(storage) => storage,
             Err(err) => {
@@ -1062,52 +926,42 @@ impl Config {
     }
 
     /// `Some` when `SKIPPR_OFFSET_STORE` or `skippr.offset_store` is explicitly set.
-    pub fn configured_offset_store() -> Result<
+    pub fn configured_offset_store(
+        &self,
+    ) -> Result<
         Option<crate::helpers::wal_storage::OffsetStoreKind>,
         crate::helpers::wal_storage::ConfigError,
     > {
-        if Config::get_envcache("SKIPPR_OFFSET_STORE") != "" {
-            return Config::get_envcache("SKIPPR_OFFSET_STORE")
-                .parse()
-                .map(Some);
+        if let Some(store) = self
+            .skippr
+            .as_ref()
+            .and_then(|skippr| skippr.offset_store.as_ref())
+            .filter(|store| !store.is_empty())
+        {
+            return store.parse().map(Some);
         }
         let from_env = std::env::var("SKIPPR_OFFSET_STORE").unwrap_or_default();
         if !from_env.is_empty() {
             return from_env.parse().map(Some);
         }
-        let config = Config::get();
-        if let Some(skippr) = config.skippr.as_ref() {
-            if let Some(store) = skippr.offset_store.as_ref() {
-                if !store.is_empty() {
-                    return store.parse().map(Some);
-                }
-            }
-        }
         Ok(None)
     }
 
-    /// S3 bucket for WAL segments. Prefer `SKIPPR_WAL_S3_BUCKET` / skippr.wal_s3_bucket, then datalake bucket.
-    pub fn get_wal_s3_bucket() -> String {
-        if Config::get_envcache("SKIPPR_WAL_S3_BUCKET") != "" {
-            return Config::get_envcache("SKIPPR_WAL_S3_BUCKET");
+    /// S3 bucket for WAL segments. Prefer skippr.wal_s3_bucket, then env, then datalake bucket.
+    pub fn get_wal_s3_bucket(&self) -> String {
+        if let Some(bucket) = self
+            .skippr
+            .as_ref()
+            .and_then(|skippr| skippr.wal_s3_bucket.as_ref())
+            .filter(|bucket| !bucket.is_empty())
+        {
+            return bucket.clone();
         }
         let from_env = Config::getenv("SKIPPR_WAL_S3_BUCKET", "");
         if !from_env.is_empty() {
-            Config::set_evncache("SKIPPR_WAL_S3_BUCKET", &from_env);
             return from_env;
         }
-        let config = Config::get();
-        if let Some(skippr) = config.skippr.as_ref() {
-            if let Some(bucket) = skippr.wal_s3_bucket.as_ref() {
-                if !bucket.is_empty() {
-                    Config::set_evncache("SKIPPR_WAL_S3_BUCKET", bucket);
-                    return bucket.clone();
-                }
-            }
-        }
-        let fallback = Config::get_skippr_s3_bucket();
-        Config::set_evncache("SKIPPR_WAL_S3_BUCKET", &fallback);
-        fallback
+        self.get_skippr_s3_bucket()
     }
 
     pub fn set_wal_s3_bucket(value: &str) {
@@ -1120,25 +974,16 @@ impl Config {
         Config::set_evncache("SKIPPR_OFFSET_STORE", value);
     }
 
-    pub fn get_offset_dynamodb_table() -> String {
-        if Config::get_envcache("SKIPPR_OFFSET_DYNAMODB_TABLE") != "" {
-            return Config::get_envcache("SKIPPR_OFFSET_DYNAMODB_TABLE");
+    pub fn get_offset_dynamodb_table(&self) -> String {
+        if let Some(table) = self
+            .skippr
+            .as_ref()
+            .and_then(|skippr| skippr.offset_dynamodb_table.as_ref())
+            .filter(|table| !table.is_empty())
+        {
+            return table.clone();
         }
-        let from_env = Config::getenv("SKIPPR_OFFSET_DYNAMODB_TABLE", "");
-        if !from_env.is_empty() {
-            Config::set_evncache("SKIPPR_OFFSET_DYNAMODB_TABLE", &from_env);
-            return from_env;
-        }
-        let config = Config::get();
-        if let Some(skippr) = config.skippr.as_ref() {
-            if let Some(table) = skippr.offset_dynamodb_table.as_ref() {
-                if !table.is_empty() {
-                    Config::set_evncache("SKIPPR_OFFSET_DYNAMODB_TABLE", table);
-                    return table.clone();
-                }
-            }
-        }
-        String::new()
+        Config::getenv("SKIPPR_OFFSET_DYNAMODB_TABLE", "")
     }
 
     pub fn set_offset_dynamodb_table(value: &str) {
@@ -1147,59 +992,53 @@ impl Config {
     }
 
     /// Derived identity for DynamoDB offset rows: tenant#workspace#pipeline.
-    pub fn offset_store_partition_key() -> String {
+    pub fn offset_store_partition_key(&self) -> String {
         format!(
             "{}#{}#{}",
-            Config::get_tenant(),
-            Config::get_workspace_name(),
-            Config::get_pipeline_name()
+            self.get_tenant(),
+            self.get_workspace_name(),
+            self.get_pipeline_name()
         )
     }
 
     // WAL prefix (default derived: {tenant}/{workspace}/{pipeline}/segments)
-    pub fn get_wal_s3_prefix() -> String {
+    pub fn get_wal_s3_prefix(&self) -> String {
         let default_prefix = format!(
             "{}/{}/{}/segments",
-            Config::get_tenant(),
-            Config::get_workspace_name(),
-            Config::get_pipeline_name()
+            self.get_tenant(),
+            self.get_workspace_name(),
+            self.get_pipeline_name()
         );
         default_prefix
     }
 
-    fn default_wal_bytes_per_file() -> u64 {
+    fn default_wal_bytes_per_file(&self) -> u64 {
         const MIN_WAL_BYTES_PER_FILE: u64 = 4 * 1024 * 1024;
         const MAX_WAL_BYTES_PER_FILE: u64 = 64 * 1024 * 1024;
-        Self::get_pipeline_buffer_threshold_bytes()
+        self.get_pipeline_buffer_threshold_bytes()
             .clamp(MIN_WAL_BYTES_PER_FILE, MAX_WAL_BYTES_PER_FILE)
     }
 
     // Coalescing controls for WAL. By default the WAL segment target follows the
     // pipeline buffer target so source batch, WAL, and compaction sizes do not drift.
-    pub fn get_wal_bytes_per_file() -> u64 {
-        let default = Self::default_wal_bytes_per_file();
-        if Config::get_envcache("WAL_BYTES_PER_FILE") != "" {
-            return Self::parse_cached_u64("WAL_BYTES_PER_FILE", default);
-        } else {
-            let val = Config::getenv("WAL_BYTES_PER_FILE", "");
-            if val.is_empty() {
-                Config::set_evncache("WAL_BYTES_PER_FILE", &default.to_string());
-                return default;
-            }
-            Config::set_evncache("WAL_BYTES_PER_FILE", &val);
-            val.parse::<u64>().unwrap_or_else(|_| {
-                warn!(
-                    "Invalid 'WAL_BYTES_PER_FILE' value '{}'. Falling back to default {}.",
-                    val, default
-                );
-                default
-            })
+    pub fn get_wal_bytes_per_file(&self) -> u64 {
+        let default = Self::default_wal_bytes_per_file(self);
+        let val = Config::getenv("WAL_BYTES_PER_FILE", "");
+        if val.is_empty() {
+            return default;
         }
+        val.parse::<u64>().unwrap_or_else(|_| {
+            warn!(
+                "Invalid 'WAL_BYTES_PER_FILE' value '{}'. Falling back to default {}.",
+                val, default
+            );
+            default
+        })
     }
 
-    pub fn get_wal_max_delay_seconds() -> u64 {
+    pub fn get_wal_max_delay_seconds(&self) -> u64 {
         if Config::get_envcache("WAL_MAX_DELAY_SECONDS") != "" {
-            return Self::parse_cached_u64("WAL_MAX_DELAY_SECONDS", 60);
+            return Self::parse_cached_u64(self, "WAL_MAX_DELAY_SECONDS", 60);
         } else {
             let val = Config::getenv("WAL_MAX_DELAY_SECONDS", "60");
             Config::set_evncache("WAL_MAX_DELAY_SECONDS", &val);
@@ -1213,15 +1052,15 @@ impl Config {
         }
     }
 
-    pub fn wal_rotation_thresholds() -> (u64, u64) {
+    pub fn wal_rotation_thresholds(&self) -> (u64, u64) {
         (
-            Self::get_wal_bytes_per_file(),
-            Self::get_wal_max_delay_seconds(),
+            self.get_wal_bytes_per_file(),
+            self.get_wal_max_delay_seconds(),
         )
     }
 
-    pub fn get_pipelines() -> Vec<String> {
-        let config = Config::get();
+    pub fn get_pipelines(&self) -> Vec<String> {
+        let config = self.clone();
 
         let mut pipelines = vec![];
 
@@ -1232,10 +1071,10 @@ impl Config {
         pipelines
     }
 
-    pub fn get_pipeline_config() -> Pipeline {
-        let config = Config::get();
+    pub fn get_pipeline_config(&self) -> Pipeline {
+        let config = self.clone();
 
-        let pipeline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
+        let pipeline = match config.pipelines.get(self.pipeline_key()) {
             Some(pipeline) => pipeline,
             None => {
                 return Pipeline {
@@ -1264,8 +1103,8 @@ impl Config {
         pipeline.clone()
     }
 
-    pub fn get_transform_config() -> Transform {
-        let pipline = Config::get_pipeline_config();
+    pub fn get_transform_config(&self) -> Transform {
+        let pipline = self.get_pipeline_config();
 
         match pipline.transform.as_ref() {
             Some(transform) => transform.clone(),
@@ -1286,29 +1125,27 @@ impl Config {
         }
     }
 
-    pub fn get_transform_inject_fields() -> HashMap<String, Value> {
-        Config::get_transform_config()
+    pub fn get_transform_inject_fields(&self) -> HashMap<String, Value> {
+        self.get_transform_config()
             .inject_fields
             .unwrap_or_default()
     }
 
-    pub fn get_pipeline_type() -> String {
-        if Config::get_envcache("PIPELINE_TYPE") != "" {
-            if Config::get_envcache("PIPELINE_TYPE") == DEFAULT_CONFIG {
-                return "INGEST".to_string();
-            }
-            return Config::get_envcache("PIPELINE_TYPE");
+    pub fn get_pipeline_type(&self) -> String {
+        let v = Self::yaml_or_env(
+            self.get_pipeline_config().r#type.as_ref(),
+            "PIPELINE_TYPE",
+            "INGEST",
+        );
+        if v.is_empty() {
+            "INGEST".to_string()
         } else {
-            let pipeline = Config::get_pipeline_config();
-            let default_type = &Config::getenv("PIPELINE_TYPE", "INGEST");
-            let v = pipeline.r#type.as_ref().unwrap_or(default_type);
-            Config::set_evncache("PIPELINE_TYPE", &v.clone());
-            v.to_string()
+            v
         }
     }
 
-    pub fn get_stats_config() -> Stats {
-        let pipeline = Config::get_pipeline_config();
+    pub fn get_stats_config(&self) -> Stats {
+        let pipeline = self.get_pipeline_config();
         match pipeline.stats.as_ref() {
             Some(stats) => stats.clone(),
             None => Stats {
@@ -1320,209 +1157,70 @@ impl Config {
         }
     }
 
-    pub fn get_transform_batch_partition_fields() -> String {
-        if Config::get_envcache("TRANSFORM_BATCH_PARTITION_FIELDS") != "" {
-            if Config::get_envcache("TRANSFORM_BATCH_PARTITION_FIELDS") == DEFAULT_CONFIG {
-                return "".to_string();
-            }
-            return Config::get_envcache("TRANSFORM_BATCH_PARTITION_FIELDS");
-        } else {
-            let pipline = Config::get_pipeline_config();
-
-            let default_batch_partition_fields =
-                &Config::getenv("TRANSFORM_BATCH_PARTITION_FIELDS", DEFAULT_CONFIG);
-            let batch_partition_fields = match pipline.transform.as_ref() {
-                Some(transform) => transform
-                    .batch_partition_fields
-                    .as_ref()
-                    .unwrap_or(default_batch_partition_fields),
-                None => default_batch_partition_fields,
-            };
-
-            Config::set_evncache(
-                "TRANSFORM_BATCH_PARTITION_FIELDS",
-                &batch_partition_fields.clone(),
-            );
-            batch_partition_fields.to_string()
-        }
+    pub fn get_transform_batch_partition_fields(&self) -> String {
+        Self::yaml_or_env(
+            self.get_transform_config().batch_partition_fields.as_ref(),
+            "TRANSFORM_BATCH_PARTITION_FIELDS",
+            DEFAULT_CONFIG,
+        )
     }
 
-    pub fn get_transform_batch_order_fields() -> String {
-        if Config::get_envcache("TRANSFORM_BATCH_ORDER_FIELDS") != "" {
-            if Config::get_envcache("TRANSFORM_BATCH_ORDER_FIELDS") == DEFAULT_CONFIG {
-                return "".to_string();
-            }
-            return Config::get_envcache("TRANSFORM_BATCH_ORDER_FIELDS");
-        } else {
-            let pipline = Config::get_pipeline_config();
-
-            let default_batch_order_fields =
-                &Config::getenv("TRANSFORM_BATCH_ORDER_FIELDS", DEFAULT_CONFIG);
-            let batch_order_fields = match pipline.transform.as_ref() {
-                Some(transform) => transform
-                    .batch_order_fields
-                    .as_ref()
-                    .unwrap_or(default_batch_order_fields),
-                None => default_batch_order_fields,
-            };
-
-            Config::set_evncache("TRANSFORM_BATCH_ORDER_FIELDS", &batch_order_fields.clone());
-            batch_order_fields.to_string()
-        }
+    pub fn get_transform_batch_order_fields(&self) -> String {
+        Self::yaml_or_env(
+            self.get_transform_config().batch_order_fields.as_ref(),
+            "TRANSFORM_BATCH_ORDER_FIELDS",
+            DEFAULT_CONFIG,
+        )
     }
 
-    pub fn get_partition_allowed_values() -> String {
-        if Config::get_envcache("TRANSFORM_PARTITION_ALLOWED_VALUES") != "" {
-            if Config::get_envcache("TRANSFORM_PARTITION_ALLOWED_VALUES") == DEFAULT_CONFIG {
-                return "".to_string();
-            }
-            return Config::get_envcache("TRANSFORM_PARTITION_ALLOWED_VALUES");
-        } else {
-            let pipline = Config::get_pipeline_config();
-
-            let default_partition_allowed_values =
-                &Config::getenv("TRANSFORM_PARTITION_ALLOWED_VALUES", DEFAULT_CONFIG);
-            let partition_allowed_values = match pipline.transform.as_ref() {
-                Some(transform) => transform
-                    .partition_allowed_values
-                    .as_ref()
-                    .unwrap_or(default_partition_allowed_values),
-                None => default_partition_allowed_values,
-            };
-
-            Config::set_evncache(
-                "TRANSFORM_PARTITION_ALLOWED_VALUES",
-                &partition_allowed_values.clone(),
-            );
-
-            if partition_allowed_values == DEFAULT_CONFIG {
-                return "".to_string();
-            } else {
-                partition_allowed_values.to_string()
-            }
-        }
+    pub fn get_partition_allowed_values(&self) -> String {
+        Self::yaml_or_env(
+            self.get_transform_config()
+                .partition_allowed_values
+                .as_ref(),
+            "TRANSFORM_PARTITION_ALLOWED_VALUES",
+            DEFAULT_CONFIG,
+        )
     }
 
-    pub fn get_transform_namespace_fields() -> String {
-        if Config::get_envcache("TRANSFORM_NAMESPACE_FIELDS") != "" {
-            if Config::get_envcache("TRANSFORM_NAMESPACE_FIELDS") == DEFAULT_CONFIG {
-                return "".to_string();
-            }
-            return Config::get_envcache("TRANSFORM_NAMESPACE_FIELDS");
-        } else {
-            let pipline = Config::get_pipeline_config();
-
-            let default_namespace_fields =
-                &Config::getenv("TRANSFORM_NAMESPACE_FIELDS", DEFAULT_CONFIG);
-            let namespace_fields = match pipline.transform.as_ref() {
-                Some(transform) => transform
-                    .namespace_fields
-                    .as_ref()
-                    .unwrap_or(default_namespace_fields),
-                None => default_namespace_fields,
-            };
-            Config::set_evncache("TRANSFORM_NAMESPACE_FIELDS", &namespace_fields.clone());
-
-            namespace_fields.to_string()
-        }
+    pub fn get_transform_namespace_fields(&self) -> String {
+        Self::yaml_or_env(
+            self.get_transform_config().namespace_fields.as_ref(),
+            "TRANSFORM_NAMESPACE_FIELDS",
+            DEFAULT_CONFIG,
+        )
     }
 
-    pub fn get_transform_flatten_events() -> bool {
-        if Config::get_envcache("TRANSFORM_FLATTEN_EVENTS") != "" {
-            if Config::get_envcache("TRANSFORM_FLATTEN_EVENTS") == DEFAULT_CONFIG {
-                return false;
-            }
-            return Config::truth_value(&Config::get_envcache("TRANSFORM_FLATTEN_EVENTS"));
-        } else {
-            let pipline = Config::get_pipeline_config();
-
-            let default_flatten_events =
-                &Config::getenv("TRANSFORM_FLATTEN_EVENTS", DEFAULT_CONFIG);
-            let flatten_events = match pipline.transform.as_ref() {
-                Some(transform) => transform
-                    .flatten_events
-                    .as_ref()
-                    .unwrap_or(default_flatten_events),
-                None => default_flatten_events,
-            };
-            Config::set_evncache("TRANSFORM_FLATTEN_EVENTS", &flatten_events.clone());
-
-            Config::truth_value(flatten_events)
-        }
+    pub fn get_transform_flatten_events(&self) -> bool {
+        Self::yaml_bool_or_env(
+            self.get_transform_config().flatten_events.as_ref(),
+            "TRANSFORM_FLATTEN_EVENTS",
+            DEFAULT_CONFIG,
+        )
     }
 
-    pub fn get_transform_record_field_path() -> String {
-        if Config::get_envcache("TRANSFORM_RECORD_FIELD_PATH") != "" {
-            if Config::get_envcache("TRANSFORM_RECORD_FIELD_PATH") == DEFAULT_CONFIG {
-                return "".to_string();
-            }
-            return Config::get_envcache("TRANSFORM_RECORD_FIELD_PATH");
-        } else {
-            let pipline = Config::get_pipeline_config();
-
-            let default_record_field_path =
-                &Config::getenv("TRANSFORM_RECORD_FIELD_PATH", DEFAULT_CONFIG);
-
-            let record_field_path = match pipline.transform.as_ref() {
-                Some(transform) => transform
-                    .record_field_path
-                    .as_ref()
-                    .unwrap_or(default_record_field_path),
-                None => default_record_field_path,
-            };
-
-            Config::set_evncache("TRANSFORM_RECORD_FIELD_PATH", &record_field_path.clone());
-            record_field_path.to_string()
-        }
+    pub fn get_transform_record_field_path(&self) -> String {
+        Self::yaml_or_env(
+            self.get_transform_config().record_field_path.as_ref(),
+            "TRANSFORM_RECORD_FIELD_PATH",
+            DEFAULT_CONFIG,
+        )
     }
 
-    pub fn get_transform_batch_time_fields() -> String {
-        if Config::get_envcache("TRANSFORM_BATCH_TIME_FIELDS") != "" {
-            if Config::get_envcache("TRANSFORM_BATCH_TIME_FIELDS") == DEFAULT_CONFIG {
-                return "".to_string();
-            }
-            return Config::get_envcache("TRANSFORM_BATCH_TIME_FIELDS");
-        } else {
-            let pipline = Config::get_pipeline_config();
-
-            let default_batch_time_fields =
-                &Config::getenv("TRANSFORM_BATCH_TIME_FIELDS", DEFAULT_CONFIG);
-
-            let batch_time_fields = match pipline.transform.as_ref() {
-                Some(transform) => transform
-                    .batch_time_fields
-                    .as_ref()
-                    .unwrap_or(default_batch_time_fields),
-                None => default_batch_time_fields,
-            };
-            Config::set_evncache("TRANSFORM_BATCH_TIME_FIELDS", &batch_time_fields.clone());
-            batch_time_fields.to_string()
-        }
+    pub fn get_transform_batch_time_fields(&self) -> String {
+        Self::yaml_or_env(
+            self.get_transform_config().batch_time_fields.as_ref(),
+            "TRANSFORM_BATCH_TIME_FIELDS",
+            DEFAULT_CONFIG,
+        )
     }
 
-    pub fn get_transform_batch_time_unit() -> String {
-        if Config::get_envcache("TRANSFORM_BATCH_TIME_UNIT") != "" {
-            if Config::get_envcache("TRANSFORM_BATCH_TIME_UNIT") == DEFAULT_CONFIG {
-                return "".to_string();
-            }
-            return Config::get_envcache("TRANSFORM_BATCH_TIME_UNIT");
-        } else {
-            let pipline = Config::get_pipeline_config();
-
-            let default_batch_time_unit =
-                &Config::getenv("TRANSFORM_BATCH_TIME_UNIT", DEFAULT_CONFIG);
-
-            let batch_time_unit = match pipline.transform.as_ref() {
-                Some(transform) => transform
-                    .batch_time_unit
-                    .as_ref()
-                    .unwrap_or(default_batch_time_unit),
-                None => default_batch_time_unit,
-            };
-
-            Config::set_evncache("TRANSFORM_BATCH_TIME_UNIT", &batch_time_unit.clone());
-            batch_time_unit.to_string()
-        }
+    pub fn get_transform_batch_time_unit(&self) -> String {
+        Self::yaml_or_env(
+            self.get_transform_config().batch_time_unit.as_ref(),
+            "TRANSFORM_BATCH_TIME_UNIT",
+            DEFAULT_CONFIG,
+        )
     }
 
     fn is_valid_batch_time_unit(unit: &str) -> bool {
@@ -1540,7 +1238,7 @@ impl Config {
         }
     }
 
-    fn validate_env_u64(name: &str, violations: &mut Vec<String>) {
+    fn validate_env_u64(&self, name: &str, violations: &mut Vec<String>) {
         let value = Config::getenv(name, "");
         if value.trim().is_empty() {
             return;
@@ -1553,7 +1251,7 @@ impl Config {
         }
     }
 
-    fn validate_env_u8(name: &str, violations: &mut Vec<String>) {
+    fn validate_env_u8(&self, name: &str, violations: &mut Vec<String>) {
         let value = Config::getenv(name, "");
         if value.trim().is_empty() {
             return;
@@ -1566,7 +1264,7 @@ impl Config {
         }
     }
 
-    fn parse_cached_u64(name: &str, default: u64) -> u64 {
+    fn parse_cached_u64(&self, name: &str, default: u64) -> u64 {
         let cached = Config::get_envcache(name);
         if cached == DEFAULT_CONFIG {
             return default;
@@ -1580,17 +1278,17 @@ impl Config {
         })
     }
 
-    pub fn get_config_dependency_violations() -> Vec<String> {
+    pub fn get_config_dependency_violations(&self) -> Vec<String> {
         let mut violations: Vec<String> = Vec::new();
 
         let batch_time_unit =
-            Self::normalize_optional_config_value(Config::get_transform_batch_time_unit());
+            Self::normalize_optional_config_value(self.get_transform_batch_time_unit());
         let batch_time_fields =
-            Self::normalize_optional_config_value(Config::get_transform_batch_time_fields());
+            Self::normalize_optional_config_value(self.get_transform_batch_time_fields());
         let batch_partition_fields =
-            Self::normalize_optional_config_value(Config::get_transform_batch_partition_fields());
+            Self::normalize_optional_config_value(self.get_transform_batch_partition_fields());
         let partition_allowed_values =
-            Self::normalize_optional_config_value(Config::get_partition_allowed_values());
+            Self::normalize_optional_config_value(self.get_partition_allowed_values());
 
         if !batch_time_unit.is_empty() {
             if !Self::is_valid_batch_time_unit(&batch_time_unit) {
@@ -1616,10 +1314,10 @@ impl Config {
             );
         }
 
-        let config = Config::get();
-        let pipeline = Config::get_pipeline_config();
+        let config = self.clone();
+        let pipeline = self.get_pipeline_config();
         violations.extend(Self::deadletter_config_violations_for(&config, &pipeline));
-        let pipeline_name = Config::get_pipeline_name();
+        let pipeline_name = self.get_pipeline_name();
         if config.pipelines.contains_key(&pipeline_name) {
             if let Err(err) =
                 Self::validate_pipeline_registry_refs_for(&config, &pipeline_name, &pipeline)
@@ -1628,26 +1326,26 @@ impl Config {
             }
         }
 
-        Self::validate_env_u64("SYNC_FREQUENCY", &mut violations);
-        Self::validate_env_u64("BUFFER_THRESHOLD_BYTES", &mut violations);
-        Self::validate_env_u64("BUFFER_THRESHOLD_SECONDS", &mut violations);
-        Self::validate_env_u64("WAL_BYTES_PER_FILE", &mut violations);
-        Self::validate_env_u64("WAL_MAX_DELAY_SECONDS", &mut violations);
-        Self::validate_env_u64("STATS_FLUSH_SECONDS", &mut violations);
-        Self::validate_env_u64("SCHEMA_SYNC_DEBOUNCE_MS", &mut violations);
-        Self::validate_env_u64("SCHEMA_SYNC_DRAIN_TIMEOUT_SECONDS", &mut violations);
-        Self::validate_env_u64("SCHEMA_SYNC_TIMEOUT_SECONDS", &mut violations);
-        Self::validate_env_u8("STATS_HLL_PRECISION", &mut violations);
+        Self::validate_env_u64(self, "SYNC_FREQUENCY", &mut violations);
+        Self::validate_env_u64(self, "BUFFER_THRESHOLD_BYTES", &mut violations);
+        Self::validate_env_u64(self, "BUFFER_THRESHOLD_SECONDS", &mut violations);
+        Self::validate_env_u64(self, "WAL_BYTES_PER_FILE", &mut violations);
+        Self::validate_env_u64(self, "WAL_MAX_DELAY_SECONDS", &mut violations);
+        Self::validate_env_u64(self, "STATS_FLUSH_SECONDS", &mut violations);
+        Self::validate_env_u64(self, "SCHEMA_SYNC_DEBOUNCE_MS", &mut violations);
+        Self::validate_env_u64(self, "SCHEMA_SYNC_DRAIN_TIMEOUT_SECONDS", &mut violations);
+        Self::validate_env_u64(self, "SCHEMA_SYNC_TIMEOUT_SECONDS", &mut violations);
+        Self::validate_env_u8(self, "STATS_HLL_PRECISION", &mut violations);
 
         violations
     }
 
-    pub fn config_dependencies_valid() -> bool {
-        Self::get_config_dependency_violations().is_empty()
+    pub fn config_dependencies_valid(&self) -> bool {
+        self.get_config_dependency_violations().is_empty()
     }
 
-    pub fn assert_config_dependencies_valid() {
-        let violations = Self::get_config_dependency_violations();
+    pub fn assert_config_dependencies_valid(&self) {
+        let violations = self.get_config_dependency_violations();
         if violations.is_empty() {
             return;
         }
@@ -1658,173 +1356,79 @@ impl Config {
         std::process::exit(1);
     }
 
-    pub fn get_time_partition_prefix() -> Option<String> {
-        if Config::get_envcache("TRANSFORM_TIME_PARTITION_PREFIX") != "" {
-            if Config::get_envcache("TRANSFORM_TIME_PARTITION_PREFIX") == DEFAULT_CONFIG {
-                return None;
+    pub fn get_time_partition_prefix(&self) -> Option<String> {
+        let v = Self::yaml_or_env(
+            self.get_transform_config().time_partition_prefix.as_ref(),
+            "TRANSFORM_TIME_PARTITION_PREFIX",
+            DEFAULT_CONFIG,
+        );
+        if v.is_empty() {
+            None
+        } else {
+            Some(v)
+        }
+    }
+
+    pub fn get_sync_frequency(&self) -> u64 {
+        Self::yaml_u64_or_env(
+            self.get_pipeline_config().sync_frequency_seconds.as_ref(),
+            "SYNC_FREQUENCY",
+            900,
+        )
+    }
+
+    pub fn get_pipeline_chaos_mode(&self) -> bool {
+        Self::yaml_bool_or_env(
+            self.get_pipeline_config().chaos_mode.as_ref(),
+            "SKIPPR_CHAOS_MODE",
+            "no",
+        )
+    }
+
+    pub fn get_pipeline_data_dir(&self) -> String {
+        if let Some(pipeline) = self.pipelines.get(self.pipeline_key()) {
+            if let Some(dir) = pipeline.data_dir.as_ref().filter(|d| !d.is_empty()) {
+                return dir.clone();
             }
-            return Some(Config::get_envcache("TRANSFORM_TIME_PARTITION_PREFIX"));
+        }
+        Config::getenv("DATA_DIR", "./data")
+    }
+
+    pub fn get_pipeline_env(&self) -> String {
+        let v = Self::yaml_or_env(
+            self.get_pipeline_config().env.as_ref(),
+            "SKIPPR_ENV",
+            "prod",
+        );
+        if v.is_empty() {
+            "prod".to_string()
         } else {
-            let pipline = Config::get_pipeline_config();
-
-            let default = &Config::getenv("TRANSFORM_TIME_PARTITION_PREFIX", DEFAULT_CONFIG);
-
-            let batch_time_unit = match pipline.transform.as_ref() {
-                Some(transform) => match transform.time_partition_prefix.as_ref() {
-                    Some(time_partition_prefix) => {
-                        Config::set_evncache(
-                            "TRANSFORM_TIME_PARTITION_PREFIX",
-                            &time_partition_prefix.clone(),
-                        );
-                        Some(time_partition_prefix.to_string())
-                    }
-                    None => {
-                        Config::set_evncache("TRANSFORM_TIME_PARTITION_PREFIX", &default.clone());
-                        None
-                    }
-                },
-                None => None,
-            };
-
-            batch_time_unit
+            v
         }
     }
 
-    pub fn get_sync_frequency() -> u64 {
-        const DEFAULT: u64 = 900;
-
-        if Config::get_envcache("SYNC_FREQUENCY") != "" {
-            return Self::parse_cached_u64("SYNC_FREQUENCY", DEFAULT);
-        } else {
-            let pipline = Config::get_pipeline_config();
-
-            let default_sync_frequency = &Config::getenv("SYNC_FREQUENCY", &DEFAULT.to_string())
-                .parse::<u64>()
-                .unwrap_or_else(|_| {
-                    warn!(
-                        "Invalid 'SYNC_FREQUENCY' value. Falling back to default {}.",
-                        DEFAULT
-                    );
-                    DEFAULT
-                });
-
-            let sync_frequency = pipline
-                .sync_frequency_seconds
-                .as_ref()
-                .unwrap_or(default_sync_frequency);
-
-            Config::set_evncache("SYNC_FREQUENCY", &sync_frequency.clone().to_string());
-            sync_frequency.clone()
-        }
+    pub fn get_auto_approve(&self) -> bool {
+        Self::yaml_bool_or_env(
+            self.get_pipeline_config().auto_approve.as_ref(),
+            "SCHEMA_AUTO_APPROVE",
+            "true",
+        )
     }
 
-    pub fn get_pipeline_chaos_mode() -> bool {
-        if Config::get_envcache("SKIPPR_CHAOS_MODE") != "" {
-            if Config::get_envcache("SKIPPR_CHAOS_MODE") == DEFAULT_CONFIG {
-                return false;
-            }
-            return Config::truth_value(&Config::get_envcache("SKIPPR_CHAOS_MODE"));
-        } else {
-            let pipline = Config::get_pipeline_config();
-
-            let default_chaos_mode = Config::getenv("SKIPPR_CHAOS_MODE", "no");
-            let chaos_mode = pipline.chaos_mode.as_ref().unwrap_or(&default_chaos_mode);
-
-            Config::set_evncache("SKIPPR_CHAOS_MODE", &chaos_mode.clone());
-
-            Config::truth_value(chaos_mode)
-        }
+    pub fn get_reset_offsets(&self) -> bool {
+        Self::yaml_bool_or_env(
+            self.get_pipeline_config().reset_offsets.as_ref(),
+            "RESET_OFFSETS",
+            "false",
+        )
     }
 
-    pub fn get_pipeline_data_dir() -> String {
-        if Config::get_envcache("DATA_DIR") != "" {
-            return Config::get_envcache("DATA_DIR");
-        } else {
-            let config = Config::get();
-
-            let default_data_dir = Config::getenv("DATA_DIR", "./data");
-            // let default_data_dir = "./data".to_string();
-
-            let pipeline_dir = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
-                Some(pipeline) => pipeline
-                    .data_dir
-                    .as_ref()
-                    .unwrap_or(&default_data_dir)
-                    .to_string(),
-                None => default_data_dir,
-            };
-
-            Config::set_evncache("DATA_DIR", &pipeline_dir.clone());
-            pipeline_dir
-        }
-    }
-
-    pub fn get_pipeline_env() -> String {
-        if Config::get_envcache("SKIPPR_ENV") != "" {
-            return Config::get_envcache("SKIPPR_ENV");
-        } else {
-            let config = Config::get();
-
-            let default_env = Config::getenv("SKIPPR_ENV", "prod");
-            let pipeline_env = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
-                Some(pipeline) => pipeline.env.as_ref().unwrap_or(&default_env).to_string(),
-                None => default_env,
-            };
-
-            Config::set_evncache("SKIPPR_ENV", &pipeline_env.clone());
-            pipeline_env
-        }
-    }
-
-    pub fn get_auto_approve() -> bool {
-        if Config::get_envcache("SCHEMA_AUTO_APPROVE") != "" {
-            return Config::truth_value(&Config::get_envcache("SCHEMA_AUTO_APPROVE"));
-        } else {
-            let pipeline = Config::get_pipeline_config();
-
-            let default_auto_approve = Config::getenv("SCHEMA_AUTO_APPROVE", "true");
-            let auto_approve = pipeline
-                .auto_approve
-                .as_ref()
-                .unwrap_or(&default_auto_approve);
-
-            Config::set_evncache("SCHEMA_AUTO_APPROVE", &auto_approve.clone());
-
-            Config::truth_value(auto_approve)
-        }
-    }
-
-    pub fn get_reset_offsets() -> bool {
-        if Config::get_envcache("RESET_OFFSETS") != "" {
-            return Config::truth_value(&Config::get_envcache("RESET_OFFSETS"));
-        } else {
-            let pipeline = Config::get_pipeline_config();
-
-            let default_auto_approve = &Config::getenv("RESET_OFFSETS", "false");
-            let auto_approve = pipeline
-                .reset_offsets
-                .as_ref()
-                .unwrap_or(&default_auto_approve);
-
-            Config::set_evncache("RESET_OFFSETS", &auto_approve.clone());
-
-            Config::truth_value(auto_approve)
-        }
-    }
-
-    pub fn get_reset_metadata() -> bool {
-        if Config::get_envcache("RESET_METADATA") != "" {
-            return Config::truth_value(&Config::get_envcache("RESET_METADATA"));
-        } else {
-            let pipeline = Config::get_pipeline_config();
-
-            let default = &Config::getenv("RESET_METADATA", "false");
-            let value = pipeline.reset_metadata.as_ref().unwrap_or(&default);
-
-            Config::set_evncache("RESET_METADATA", &value.clone());
-
-            Config::truth_value(value)
-        }
+    pub fn get_reset_metadata(&self) -> bool {
+        Self::yaml_bool_or_env(
+            self.get_pipeline_config().reset_metadata.as_ref(),
+            "RESET_METADATA",
+            "false",
+        )
     }
 
     pub fn get_envcache(name: &str) -> String {
@@ -1847,64 +1451,26 @@ impl Config {
         cache.clear();
     }
 
-    pub fn get_pipeline_buffer_threshold_bytes() -> u64 {
-        if Config::get_envcache("BUFFER_THRESHOLD_BYTES") != "" {
-            return Self::parse_cached_u64("BUFFER_THRESHOLD_BYTES", 10_485_760);
-        } else {
-            let pipline = Config::get_pipeline_config();
-
-            let default = Config::getenv("BUFFER_THRESHOLD_BYTES", "10485760")
-                .parse::<u64>()
-                .unwrap_or_else(|_| {
-                    warn!(
-                        "Invalid 'BUFFER_THRESHOLD_BYTES' value. Falling back to default 10485760."
-                    );
-                    10_485_760
-                });
-
-            let buffer_threshold_bytes = match pipline.buffer_threshold_bytes.as_ref() {
-                Some(buffer_threshold_bytes) => buffer_threshold_bytes,
-                None => &default,
-            };
-
-            Config::set_evncache(
-                "BUFFER_THRESHOLD_BYTES",
-                &buffer_threshold_bytes.to_string(),
-            );
-            buffer_threshold_bytes.clone()
-        }
+    pub fn get_pipeline_buffer_threshold_bytes(&self) -> u64 {
+        Self::yaml_u64_or_env(
+            self.get_pipeline_config().buffer_threshold_bytes.as_ref(),
+            "BUFFER_THRESHOLD_BYTES",
+            10_485_760,
+        )
     }
 
-    pub fn get_pipeline_buffer_threshold_seconds() -> u64 {
-        if Config::get_envcache("BUFFER_THRESHOLD_SECONDS") != "" {
-            return Self::parse_cached_u64("BUFFER_THRESHOLD_SECONDS", 60);
-        } else {
-            let pipline = Config::get_pipeline_config();
-
-            let default = Config::getenv("BUFFER_THRESHOLD_SECONDS", "60")
-                .parse::<u64>()
-                .unwrap_or_else(|_| {
-                    warn!("Invalid 'BUFFER_THRESHOLD_SECONDS' value. Falling back to default 60.");
-                    60
-                });
-
-            let buffer_threshold_seconds = match pipline.buffer_threshold_seconds.as_ref() {
-                Some(buffer_threshold_seconds) => buffer_threshold_seconds,
-                None => &default,
-            };
-
-            Config::set_evncache(
-                "BUFFER_THRESHOLD_SECONDS",
-                &buffer_threshold_seconds.to_string(),
-            );
-            buffer_threshold_seconds.clone()
-        }
+    pub fn get_pipeline_buffer_threshold_seconds(&self) -> u64 {
+        Self::yaml_u64_or_env(
+            self.get_pipeline_config().buffer_threshold_seconds.as_ref(),
+            "BUFFER_THRESHOLD_SECONDS",
+            60,
+        )
     }
 
-    pub fn get_pipeline_input_plugin_config() -> Result<DataSourcePluginConfig, String> {
+    pub fn get_pipeline_input_plugin_config(&self) -> Result<DataSourcePluginConfig, String> {
         if let Ok(raw_config_json) = std::env::var("SKIPPR_RUNTIME_INPUT_CONFIG_JSON") {
             let plugin_name = std::env::var("SKIPPR_RUNTIME_INPUT_PLUGIN_NAME")
-                .unwrap_or_else(|_| Self::get_pipeline_input_plugin_name());
+                .unwrap_or_else(|_| self.get_pipeline_input_plugin_name());
             let config = serde_json::from_str(&raw_config_json).map_err(|err| {
                 format!("Invalid SKIPPR_RUNTIME_INPUT_CONFIG_JSON override: {}", err)
             })?;
@@ -1914,9 +1480,9 @@ impl Config {
             });
         }
 
-        let pipeline_config = Config::get_pipeline_config();
-        let config = Config::get();
-        let pipeline_name = Config::get_pipeline_name();
+        let pipeline_config = self.get_pipeline_config();
+        let config = self.clone();
+        let pipeline_name = self.get_pipeline_name();
         let input_name = match pipeline_config.data_source.as_ref() {
             Some(input) => Self::parse_registry_ref(input, "data_sources").map_err(|err| {
                 format!(
@@ -1945,10 +1511,10 @@ impl Config {
             })
     }
 
-    pub fn get_pipeline_output_plugin_config() -> Result<DataSinkPluginConfig, String> {
-        let pipeline_config = Config::get_pipeline_config();
-        let config = Config::get();
-        let pipeline_name = Config::get_pipeline_name();
+    pub fn get_pipeline_output_plugin_config(&self) -> Result<DataSinkPluginConfig, String> {
+        let pipeline_config = self.get_pipeline_config();
+        let config = self.clone();
+        let pipeline_name = self.get_pipeline_name();
         let output_name = match pipeline_config.data_sink.as_ref() {
             Some(output) => Self::parse_registry_ref(output, "data_sinks").map_err(|err| {
                 format!(
@@ -1978,16 +1544,18 @@ impl Config {
         Ok(Self::inherit_schema_sink_fields(&config, entry))
     }
 
-    pub fn get_pipeline_deadletter_plugin_config() -> Result<Option<DataSinkPluginConfig>, String> {
-        let config = Config::get();
-        let pipeline = Config::get_pipeline_config();
+    pub fn get_pipeline_deadletter_plugin_config(
+        &self,
+    ) -> Result<Option<DataSinkPluginConfig>, String> {
+        let config = self.clone();
+        let pipeline = self.get_pipeline_config();
         Self::resolve_deadletter_plugin_config_for(&config, &pipeline)
     }
 
-    pub fn get_pipeline_schema_plugin_config() -> Result<SchemaSinkConfig, String> {
-        let pipeline_config = Config::get_pipeline_config();
-        let config = Config::get();
-        let pipeline_name = Config::get_pipeline_name();
+    pub fn get_pipeline_schema_plugin_config(&self) -> Result<SchemaSinkConfig, String> {
+        let pipeline_config = self.get_pipeline_config();
+        let config = self.clone();
+        let pipeline_name = self.get_pipeline_name();
 
         let sink_ref = pipeline_config.data_sink.as_ref().ok_or_else(|| {
             format!(
@@ -2042,10 +1610,10 @@ impl Config {
             })
     }
 
-    pub fn get_pipeline_deadletter_schema_config() -> Result<SchemaSinkConfig, String> {
-        let pipeline_config = Config::get_pipeline_config();
-        let config = Config::get();
-        let pipeline_name = Config::get_pipeline_name();
+    pub fn get_pipeline_deadletter_schema_config(&self) -> Result<SchemaSinkConfig, String> {
+        let pipeline_config = self.get_pipeline_config();
+        let config = self.clone();
+        let pipeline_name = self.get_pipeline_name();
 
         let sink_ref = pipeline_config.deadletter_sink.as_ref().ok_or_else(|| {
             format!(
@@ -2100,31 +1668,30 @@ impl Config {
             })
     }
 
-    pub fn deserialize_pipeline_input_plugin_config<T: DeserializeOwned>() -> Result<T, String> {
-        Self::get_pipeline_input_plugin_config()?.deserialize()
+    pub fn deserialize_pipeline_input_plugin_config<T: DeserializeOwned>(
+        &self,
+    ) -> Result<T, String> {
+        self.get_pipeline_input_plugin_config()?.deserialize()
     }
 
-    pub fn deserialize_pipeline_output_plugin_config<T: DeserializeOwned>() -> Result<T, String> {
-        Self::get_pipeline_output_plugin_config()?.deserialize()
+    pub fn deserialize_pipeline_output_plugin_config<T: DeserializeOwned>(
+        &self,
+    ) -> Result<T, String> {
+        self.get_pipeline_output_plugin_config()?.deserialize()
     }
 
     pub fn deserialize_pipeline_deadletter_plugin_config<T: DeserializeOwned>(
+        &self,
     ) -> Result<Option<T>, String> {
-        Self::get_pipeline_deadletter_plugin_config()?
+        self.get_pipeline_deadletter_plugin_config()?
             .map(|config| config.deserialize())
             .transpose()
     }
 
-    pub fn deserialize_pipeline_schema_plugin_config<T: DeserializeOwned>() -> Result<T, String> {
-        Self::get_pipeline_schema_plugin_config()?.deserialize()
-    }
-
-    // Function to access the config anywhere in the code.
-    pub fn get() -> Config {
-        match APP_CONFIG.read().as_ref() {
-            Some(app_config) => app_config.clone(),
-            None => Config::new(),
-        }
+    pub fn deserialize_pipeline_schema_plugin_config<T: DeserializeOwned>(
+        &self,
+    ) -> Result<T, String> {
+        self.get_pipeline_schema_plugin_config()?.deserialize()
     }
 
     pub fn setenv(name: &str, value: &str) {
@@ -2149,6 +1716,34 @@ impl Config {
         }
     }
 
+    fn yaml_or_env(yaml: Option<&String>, env: &str, default: &str) -> String {
+        if let Some(v) = yaml
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty() && *s != DEFAULT_CONFIG)
+        {
+            return v.to_string();
+        }
+        let v = Config::getenv(env, default);
+        if v == DEFAULT_CONFIG {
+            String::new()
+        } else {
+            v
+        }
+    }
+
+    fn yaml_u64_or_env(yaml: Option<&u64>, env: &str, default: u64) -> u64 {
+        if let Some(v) = yaml {
+            return *v;
+        }
+        Config::getenv(env, &default.to_string())
+            .parse::<u64>()
+            .unwrap_or(default)
+    }
+
+    fn yaml_bool_or_env(yaml: Option<&String>, env: &str, default: &str) -> bool {
+        Config::truth_value(&Self::yaml_or_env(yaml, env, default))
+    }
+
     pub fn list_dir_contents<P: AsRef<Path>>(path: P) -> std::io::Result<()> {
         if path.as_ref().is_dir() {
             for entry_result in fs::read_dir(path)? {
@@ -2167,14 +1762,14 @@ impl Config {
         Ok(())
     }
 
-    pub fn get_data_dir() -> String {
-        let mut data_dir = Config::get_pipeline_data_dir();
+    pub fn get_data_dir(&self) -> String {
+        let mut data_dir = self.get_pipeline_data_dir();
         if data_dir.ends_with('/') {
             data_dir.pop();
         }
 
         if !Config::truth_value(&Config::getenv("SKIPPR_PIPELINE_DATA_ROOT", "false")) {
-            let pipeline_name = Config::get_full_namespace_name();
+            let pipeline_name = self.get_full_namespace_name();
             data_dir = format!("{}/{}", data_dir, pipeline_name);
         }
         match fs::create_dir_all(&data_dir) {
@@ -2205,78 +1800,67 @@ impl Config {
         }
     }
 
-    pub fn get_pipeline_name() -> String {
-        PIPELINE_NAME.read().clone()
+    pub fn get_pipeline_name(&self) -> String {
+        self.pipeline_key().to_string()
     }
 
-    pub fn get_workspace_name() -> String {
-        if Config::get_envcache("WORKSPACE_NAME") != "" {
-            return Config::get_envcache("WORKSPACE_NAME");
-        } else {
-            let config = Config::get();
-
-            let default_token = Config::getenv("WORKSPACE_NAME", "default");
-
-            let workspace_name = config
-                .skippr
-                .as_ref()
-                .and_then(|skippr| skippr.workspace.as_ref())
-                .map(ToString::to_string)
-                .unwrap_or(default_token);
-
-            Config::set_evncache("WORKSPACE_NAME", &workspace_name.clone());
-            workspace_name
-        }
+    pub fn get_workspace_name(&self) -> String {
+        self.skippr
+            .as_ref()
+            .and_then(|skippr| skippr.workspace.as_ref())
+            .filter(|name| !name.is_empty())
+            .cloned()
+            .unwrap_or_else(|| Config::getenv("WORKSPACE_NAME", "default"))
     }
 
-    pub fn get_tenant() -> String {
-        if Config::get_envcache("TENANT") != "" {
-            return Config::get_envcache("TENANT");
-        } else {
-            let default_tenant = Config::getenv("TENANT", "default");
-            let tenant = default_tenant;
-
-            Config::set_evncache("TENANT", &tenant.clone());
-            tenant
-        }
+    pub fn get_tenant(&self) -> String {
+        self.skippr
+            .as_ref()
+            .and_then(|skippr| skippr.tenant.as_ref())
+            .filter(|name| !name.is_empty())
+            .cloned()
+            .unwrap_or_else(|| Config::getenv("TENANT", "default"))
     }
 
     // Delegates to helpers::manifest::Manifest — kept for backward compat
-    pub fn get_manifest_s3_key(namespace: &str) -> Option<(String, String)> {
-        Some(crate::helpers::manifest::Manifest::s3_key(namespace))
+    pub fn get_manifest_s3_key(&self, namespace: &str) -> Option<(String, String)> {
+        Some(crate::helpers::manifest::Manifest::s3_key(self, namespace))
     }
 
-    pub async fn read_manifest(namespace: &str) -> Option<serde_json::Value> {
-        crate::helpers::manifest::Manifest::read(namespace).await
+    pub async fn read_manifest(&self, namespace: &str) -> Option<serde_json::Value> {
+        crate::helpers::manifest::Manifest::read(self, namespace).await
     }
 
-    pub async fn get_manifest_epoch(namespace: &str) -> Option<u64> {
-        crate::helpers::manifest::Manifest::epoch(namespace).await
+    pub async fn get_manifest_epoch(&self, namespace: &str) -> Option<u64> {
+        crate::helpers::manifest::Manifest::epoch(self, namespace).await
     }
 
-    pub async fn update_manifest_with_prefix(namespace: &str, dir_prefix: &str) {
-        crate::helpers::manifest::Manifest::ensure_prefix(namespace, dir_prefix).await;
+    pub async fn update_manifest_with_prefix(&self, namespace: &str, dir_prefix: &str) {
+        crate::helpers::manifest::Manifest::ensure_prefix(self, namespace, dir_prefix).await;
     }
 
     pub async fn update_manifest_with_prefix_and_db(
+        &self,
         namespace: &str,
         dir_prefix: &str,
         database: &str,
     ) {
-        crate::helpers::manifest::Manifest::ensure_prefix_and_db(namespace, dir_prefix, database)
-            .await;
+        crate::helpers::manifest::Manifest::ensure_prefix_and_db(
+            self, namespace, dir_prefix, database,
+        )
+        .await;
     }
 
-    pub fn get_full_namespace_name() -> String {
+    pub fn get_full_namespace_name(&self) -> String {
         // let mut helpers = Helpers { CLEAN_FIELD_CACHE: Default::default() };
 
-        let workspace = Self::get_workspace_name();
-        let pipeline = Self::get_pipeline_name();
+        let workspace = self.get_workspace_name();
+        let pipeline = self.get_pipeline_name();
 
         format!("{}_{}", workspace, pipeline)
     }
 
-    fn load_file() {
+    fn load_file(&self) {
         let mut file = File::open("config/connections.yml").expect("Unable to open file");
         let mut contents = String::new();
 
@@ -2292,33 +1876,33 @@ impl Config {
         // return doc;
     }
 
-    fn inject_flatten_flag(metadata: &mut PipelineMetadata) {
-        match &Config::get_transform_config().flatten_events {
+    fn inject_flatten_flag(&self, metadata: &mut PipelineMetadata) {
+        match &self.get_transform_config().flatten_events {
             Some(val) => metadata.flattened = Config::truth_value(val),
             None => metadata.flattened = false,
         }
     }
 
-    pub async fn get_metadata() -> Result<PipelineMetadata, bool> {
-        let tenant = Self::get_tenant();
-        let workspace = Self::get_workspace_name();
-        let pipeline = Self::get_pipeline_name();
-        let key = Self::pipeline_metadata_object_path(&tenant, &workspace, &pipeline);
+    pub async fn get_metadata(&self) -> Result<PipelineMetadata, bool> {
+        let tenant = self.get_tenant();
+        let workspace = self.get_workspace_name();
+        let pipeline = self.get_pipeline_name();
+        let key = self.pipeline_metadata_object_path(&tenant, &workspace, &pipeline);
         info!("get_metadata: pipeline='{}' key='{}'", pipeline, key);
 
-        match Self::load_pipeline_metadata_json(&key).await {
+        match self.load_pipeline_metadata_json(&key).await {
             Ok(Some(json_value)) => match serde_json::from_value::<PipelineMetadata>(json_value) {
                 Ok(mut pipeline_metadata) => {
                     let num_entries = pipeline_metadata.metadata.len();
                     let keys: Vec<String> = pipeline_metadata.metadata.keys().cloned().collect();
                     info!("Loaded metadata (entries={}, keys={:?})", num_entries, keys);
-                    Self::inject_flatten_flag(&mut pipeline_metadata);
+                    self.inject_flatten_flag(&mut pipeline_metadata);
                     if pipeline_metadata.migrate_persisted_metadata() {
                         info!(
                             "Migrated persisted metadata to version {}",
                             pipeline_metadata.metadata_version
                         );
-                        Self::set_metadata(&pipeline_metadata, false).await;
+                        self.set_metadata(&pipeline_metadata, false).await;
                     }
                     Ok(pipeline_metadata)
                 }
@@ -2335,20 +1919,26 @@ impl Config {
         }
     }
 
-    pub fn pipeline_metadata_object_key(key: &skippr_lease::PipelineKey) -> String {
-        Self::pipeline_metadata_object_path(key.tenant(), key.workspace(), key.pipeline())
+    pub fn pipeline_metadata_object_key(&self, key: &skippr_lease::PipelineKey) -> String {
+        self.pipeline_metadata_object_path(key.tenant(), key.workspace(), key.pipeline())
     }
 
-    fn pipeline_metadata_object_path(tenant: &str, workspace: &str, pipeline: &str) -> String {
+    fn pipeline_metadata_object_path(
+        &self,
+        tenant: &str,
+        workspace: &str,
+        pipeline: &str,
+    ) -> String {
         format!("{tenant}/{workspace}/{pipeline}/metadata/metadata.json")
     }
 
     pub async fn load_pipeline_metadata(
+        &self,
         key: &skippr_lease::PipelineKey,
     ) -> Result<Option<crate::discover::PipelineMetadata>, String> {
-        let object_key = Self::pipeline_metadata_object_key(key);
+        let object_key = self.pipeline_metadata_object_key(key);
         info!("load_pipeline_metadata: key='{}'", object_key);
-        match Self::load_pipeline_metadata_json(&object_key).await {
+        match self.load_pipeline_metadata_json(&object_key).await {
             Ok(None) => Ok(None),
             Ok(Some(json_value)) => serde_json::from_value(json_value)
                 .map(Some)
@@ -2360,28 +1950,29 @@ impl Config {
     }
 
     async fn load_pipeline_metadata_json(
+        &self,
         object_key: &str,
     ) -> Result<Option<serde_json::Value>, String> {
-        let storage = crate::adapters::storage::get_storage();
+        let storage = crate::adapters::storage::get_storage(self);
         storage
             .get_json_opt(object_key)
             .await
             .map_err(|err| err.to_string())
     }
 
-    pub async fn delete_metadata() {
-        let tenant = Self::get_tenant();
-        let workspace = Self::get_workspace_name();
-        let pipeline = Self::get_pipeline_name();
-        let key = Self::pipeline_metadata_object_path(&tenant, &workspace, &pipeline);
-        let storage = crate::adapters::storage::get_storage();
+    pub async fn delete_metadata(&self) {
+        let tenant = self.get_tenant();
+        let workspace = self.get_workspace_name();
+        let pipeline = self.get_pipeline_name();
+        let key = self.pipeline_metadata_object_path(&tenant, &workspace, &pipeline);
+        let storage = crate::adapters::storage::get_storage(self);
         match storage.delete_object(&key).await {
             Ok(_) => info!("Deleted pipeline metadata: {}", key),
             Err(e) => error!("Failed to delete metadata: {}", e),
         }
     }
 
-    pub async fn set_metadata(pipeline_metadata: &PipelineMetadata, evolved: bool) {
+    pub async fn set_metadata(&self, pipeline_metadata: &PipelineMetadata, evolved: bool) {
         use once_cell::sync::Lazy as OnceLazy;
         static UPLOAD_LOCK: OnceLazy<tokio::sync::Mutex<()>> =
             OnceLazy::new(|| tokio::sync::Mutex::new(()));
@@ -2392,11 +1983,11 @@ impl Config {
         // regress already-evolved metadata, breaking serialization for records
         // processed during the regression window.
 
-        let tenant = Self::get_tenant();
-        let workspace = Self::get_workspace_name();
-        let pipeline = Self::get_pipeline_name();
+        let tenant = self.get_tenant();
+        let workspace = self.get_workspace_name();
+        let pipeline = self.get_pipeline_name();
 
-        let key = Self::pipeline_metadata_object_path(&tenant, &workspace, &pipeline);
+        let key = self.pipeline_metadata_object_path(&tenant, &workspace, &pipeline);
         let json_value = match serde_json::to_value(pipeline_metadata) {
             Ok(v) => v,
             Err(e) => {
@@ -2405,7 +1996,7 @@ impl Config {
             }
         };
 
-        let storage = crate::adapters::storage::get_storage();
+        let storage = crate::adapters::storage::get_storage(self);
         let _guard = UPLOAD_LOCK.lock().await;
         match storage.put_json(&key, &json_value).await {
             Ok(_) => info!("Updated pipeline metadata: {}", key),
@@ -2413,74 +2004,42 @@ impl Config {
         }
 
         if evolved {
-            let tx = Config::ensure_schema_sync_worker();
+            let tx = Config::ensure_schema_sync_worker(self);
             for ns in pipeline_metadata.metadata.keys() {
                 let _ = tx.send(SchemaPublicationRequest {
                     namespace: ns.clone(),
-                    version: Config::schema_publication_version(ns),
+                    version: Config::schema_publication_version(self, ns),
+                    config: self.clone(),
                 });
             }
         }
     }
 
     // Stats configuration toggles (env-based defaults)
-    pub fn stats_enabled() -> bool {
-        if Config::get_envcache("STATS_ENABLED") != "" {
-            if Config::get_envcache("STATS_ENABLED") == DEFAULT_CONFIG {
-                return true;
-            }
-            return Config::truth_value(&Config::get_envcache("STATS_ENABLED"));
-        } else {
-            let pipeline = Config::get_pipeline_config();
-            let default_bool = Config::truth_value(&Config::getenv("STATS_ENABLED", "true"));
-            let v_bool = match pipeline.stats.as_ref() {
-                Some(s) => s.enabled.unwrap_or(default_bool),
-                None => default_bool,
-            };
-            let v = if v_bool { "true" } else { "false" };
-            Config::set_evncache("STATS_ENABLED", v);
-            v_bool
-        }
+    pub fn stats_enabled(&self) -> bool {
+        self.get_stats_config()
+            .enabled
+            .unwrap_or_else(|| Config::truth_value(&Config::getenv("STATS_ENABLED", "true")))
     }
 
-    pub fn stats_hll_precision() -> u8 {
-        if Config::get_envcache("STATS_HLL_PRECISION") != "" {
-            return Config::get_envcache("STATS_HLL_PRECISION")
+    pub fn stats_hll_precision(&self) -> u8 {
+        self.get_stats_config().hll_precision.unwrap_or_else(|| {
+            Config::getenv("STATS_HLL_PRECISION", "12")
                 .parse::<u8>()
-                .unwrap_or(12);
-        } else {
-            let pipeline = Config::get_pipeline_config();
-            let default = Config::getenv("STATS_HLL_PRECISION", "12");
-            let v: String = match pipeline.stats.as_ref() {
-                Some(s) => s.hll_precision.map(|x| x.to_string()).unwrap_or(default),
-                None => default,
-            };
-            Config::set_evncache("STATS_HLL_PRECISION", &v.clone());
-            v.parse::<u8>().unwrap_or(12)
-        }
+                .unwrap_or(12)
+        })
     }
 
-    pub fn stats_histogram_enabled() -> bool {
-        if Config::get_envcache("STATS_HISTOGRAM_ENABLED") != "" {
-            if Config::get_envcache("STATS_HISTOGRAM_ENABLED") == DEFAULT_CONFIG {
-                return true;
-            }
-            return Config::truth_value(&Config::get_envcache("STATS_HISTOGRAM_ENABLED"));
-        } else {
-            let pipeline = Config::get_pipeline_config();
-            let default_bool =
-                Config::truth_value(&Config::getenv("STATS_HISTOGRAM_ENABLED", "true"));
-            let v_bool = match pipeline.stats.as_ref() {
-                Some(s) => s.histogram_enabled.unwrap_or(default_bool),
-                None => default_bool,
-            };
-            let v = if v_bool { "true" } else { "false" };
-            Config::set_evncache("STATS_HISTOGRAM_ENABLED", v);
-            v_bool
-        }
+    pub fn stats_histogram_enabled(&self) -> bool {
+        self.get_stats_config()
+            .histogram_enabled
+            .unwrap_or_else(|| {
+                Config::truth_value(&Config::getenv("STATS_HISTOGRAM_ENABLED", "true"))
+            })
     }
 
     pub async fn write_namespace_stats_async(
+        &self,
         namespace: &str,
         stats: &crate::discover::stats::NamespaceStats,
     ) {
@@ -2492,16 +2051,16 @@ impl Config {
             }
         };
 
-        let tenant = Self::get_tenant();
-        let workspace = Self::get_workspace_name();
-        let pipeline = Self::get_pipeline_name();
+        let tenant = self.get_tenant();
+        let workspace = self.get_workspace_name();
+        let pipeline = self.get_pipeline_name();
 
         let key = format!(
             "{}/{}/{}/stats/{}.json",
             tenant, workspace, pipeline, namespace
         );
 
-        let storage = crate::adapters::storage::get_storage();
+        let storage = crate::adapters::storage::get_storage(self);
         match storage.put_json(&key, &json_value).await {
             Ok(_) => {
                 let fields = json_value
@@ -2520,7 +2079,7 @@ impl Config {
             Err(e) => error!("Failed to persist stats: {}", e),
         }
 
-        let _ = crate::sqlrt::registry::ensure_ns_entry(&pipeline, namespace, |current| {
+        let _ = crate::sqlrt::registry::ensure_ns_entry(self, &pipeline, namespace, |current| {
             let mut e = current.unwrap_or(crate::sqlrt::registry::NamespaceEntry {
                 semantic_key: String::new(),
                 catalog_key: String::new(),
@@ -2534,6 +2093,7 @@ impl Config {
     }
 
     pub fn write_namespace_stats_sync(
+        &self,
         namespace: &str,
         stats: &crate::discover::stats::NamespaceStats,
     ) {
@@ -2541,28 +2101,29 @@ impl Config {
             // Already in a runtime: spawn fire-and-forget to avoid blocking
             let ns = namespace.to_string();
             let snapshot = stats.clone();
+            let this = self.clone();
             handle.spawn(async move {
-                Self::write_namespace_stats_async(&ns, &snapshot).await;
+                this.write_namespace_stats_async(&ns, &snapshot).await;
             });
         } else {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(Self::write_namespace_stats_async(namespace, stats));
+            rt.block_on(self.write_namespace_stats_async(namespace, stats));
         }
     }
 
-    pub async fn read_namespace_stats_async(namespace: &str) -> Option<serde_json::Value> {
-        let tenant = Self::get_tenant();
-        let workspace = Self::get_workspace_name();
-        let pipeline = Self::get_pipeline_name();
+    pub async fn read_namespace_stats_async(&self, namespace: &str) -> Option<serde_json::Value> {
+        let tenant = self.get_tenant();
+        let workspace = self.get_workspace_name();
+        let pipeline = self.get_pipeline_name();
         let key = format!(
             "{}/{}/{}/stats/{}.json",
             tenant, workspace, pipeline, namespace
         );
 
-        let storage = crate::adapters::storage::get_storage();
+        let storage = crate::adapters::storage::get_storage(self);
         match storage.get_json_opt(&key).await {
             Ok(v) => v,
             Err(e) => {
@@ -2572,30 +2133,21 @@ impl Config {
         }
     }
 
-    pub fn stats_flush_seconds() -> u64 {
-        if Config::get_envcache("STATS_FLUSH_SECONDS") != "" {
-            return Config::get_envcache("STATS_FLUSH_SECONDS")
+    pub fn stats_flush_seconds(&self) -> u64 {
+        self.get_stats_config().flush_seconds.unwrap_or_else(|| {
+            Config::getenv("STATS_FLUSH_SECONDS", "5")
                 .parse::<u64>()
-                .unwrap_or(5);
-        } else {
-            let pipeline = Config::get_pipeline_config();
-            let default = Config::getenv("STATS_FLUSH_SECONDS", "5");
-            let v: String = match pipeline.stats.as_ref() {
-                Some(s) => s.flush_seconds.map(|x| x.to_string()).unwrap_or(default),
-                None => default,
-            };
-            Config::set_evncache("STATS_FLUSH_SECONDS", &v.clone());
-            v.parse::<u64>().unwrap_or(5)
-        }
+                .unwrap_or(5)
+        })
     }
 
     // Deprecated local cache helpers removed (S3 is canonical)
 
-    pub fn catalog_llm_enabled() -> bool {
+    pub fn catalog_llm_enabled(&self) -> bool {
         Self::truth_value(&Self::getenv("CATALOG_LLM_ENABLED", "true"))
     }
 
-    fn schema_sync_debounce_duration() -> std::time::Duration {
+    fn schema_sync_debounce_duration(&self) -> std::time::Duration {
         std::time::Duration::from_millis(
             Config::getenv("SCHEMA_SYNC_DEBOUNCE_MS", "400")
                 .parse::<u64>()
@@ -2603,7 +2155,7 @@ impl Config {
         )
     }
 
-    fn schema_sync_drain_timeout() -> std::time::Duration {
+    fn schema_sync_drain_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(
             Config::getenv("SCHEMA_SYNC_DRAIN_TIMEOUT_SECONDS", "30")
                 .parse::<u64>()
@@ -2613,16 +2165,19 @@ impl Config {
 
     fn drain_available_schema_sync_requests(
         rx: &mut UnboundedReceiver<SchemaPublicationRequest>,
-        dirty: &mut HashMap<String, u64>,
+        dirty: &mut HashMap<String, SchemaPublicationRequest>,
     ) -> bool {
         let mut closed = false;
         loop {
             match rx.try_recv() {
                 Ok(request) => {
-                    dirty
-                        .entry(request.namespace)
-                        .and_modify(|version| *version = (*version).max(request.version))
-                        .or_insert(request.version);
+                    let key = request.dirty_key();
+                    match dirty.get(&key) {
+                        Some(existing) if existing.version >= request.version => {}
+                        _ => {
+                            dirty.insert(key, request);
+                        }
+                    }
                 }
                 Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
                 Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
@@ -2634,7 +2189,7 @@ impl Config {
         closed
     }
 
-    fn ensure_schema_sync_worker() -> UnboundedSender<SchemaPublicationRequest> {
+    fn ensure_schema_sync_worker(&self) -> UnboundedSender<SchemaPublicationRequest> {
         let mut guard = SCHEMA_SYNC_WORKER.lock().unwrap();
         if let Some((tx, _, _)) = guard.as_ref() {
             return tx.clone();
@@ -2651,30 +2206,40 @@ impl Config {
                 .build()
                 .unwrap();
             rt.block_on(async move {
-                let mut deadletter_plugin: Option<Box<dyn crate::plugins::SchemaSink + Send + Sync>> = None;
-                let mut dirty: HashMap<String, u64> = HashMap::new();
+                let mut deadletter_plugins: HashMap<
+                    String,
+                    Box<dyn crate::plugins::SchemaSink + Send + Sync>,
+                > = HashMap::new();
+                let mut dirty: HashMap<String, SchemaPublicationRequest> = HashMap::new();
 
                 loop {
                     if dirty.is_empty() {
                         match rx.recv().await {
                             Some(request) => {
-                                dirty.insert(request.namespace, request.version);
+                                dirty.insert(request.dirty_key(), request);
                             }
                             None => break,
                         }
                     }
-                    let debounce = Config::schema_sync_debounce_duration();
+                    let debounce = dirty
+                        .values()
+                        .next()
+                        .map(|request| request.config.schema_sync_debounce_duration())
+                        .unwrap_or_default();
                     if !debounce.is_zero() {
                         tokio::time::sleep(debounce).await;
                     }
                     let channel_closed =
                         Config::drain_available_schema_sync_requests(&mut rx, &mut dirty);
-                    let mut namespaces: Vec<(String, u64)> = dirty.drain().collect();
-                    namespaces.sort_by(|left, right| left.0.cmp(&right.0));
-                    if namespaces.len() > 1 {
+                    let mut requests: Vec<SchemaPublicationRequest> =
+                        dirty.drain().map(|(_, request)| request).collect();
+                    requests.sort_by(|left, right| {
+                        left.dirty_key().cmp(&right.dirty_key())
+                    });
+                    if requests.len() > 1 {
                         info!(
                             "Schema sync: coalesced {} namespace update requests",
-                            namespaces.len()
+                            requests.len()
                         );
                     }
                     let sync_timeout = std::time::Duration::from_secs(
@@ -2682,10 +2247,12 @@ impl Config {
                             .parse::<u64>()
                             .unwrap_or(120),
                     );
-                    let flatten = Config::get_transform_flatten_events();
-                    for (ns, requested_version) in namespaces {
-                    let schema_version =
-                        requested_version.max(Config::schema_publication_version(&ns));
+                    for request in requests {
+                    let ns = request.namespace.clone();
+                    let schema_version = request
+                        .version
+                        .max(Config::schema_publication_version(&request.config, &ns));
+                    let flatten = request.config.get_transform_flatten_events();
                     let md_snapshot = { METADATA.load().metadata.clone() };
                     let out_meta = if let Some(schema) = md_snapshot.get(&ns) {
                         Some(if flatten {
@@ -2700,11 +2267,14 @@ impl Config {
                     };
                     if let Some(out_meta) = out_meta {
 
-                        let deadletter_namespace = crate::ingest::deadletter::table_name();
+                        let deadletter_namespace =
+                            crate::ingest::deadletter::table_name(&request.config);
                         let is_deadletter_ns = ns == deadletter_namespace;
+                        let scope = request.config.primary_schema_scope();
 
                         if !is_deadletter_ns {
                             if let Err(err) = Config::coordinate_primary_schema_sync(
+                                &request.config,
                                 &ns,
                                 schema_version,
                                 &out_meta,
@@ -2717,15 +2287,19 @@ impl Config {
                         }
 
                         if is_deadletter_ns {
-                            if deadletter_plugin.is_none() {
-                                let dl_sink_cfg = Config::get_pipeline_deadletter_plugin_config().ok().flatten();
-                                match Config::get_pipeline_deadletter_schema_plugin_name() {
+                            if !deadletter_plugins.contains_key(&scope) {
+                                let dl_sink_cfg = request
+                                    .config
+                                    .get_pipeline_deadletter_plugin_config()
+                                    .ok()
+                                    .flatten();
+                                match request.config.get_pipeline_deadletter_schema_plugin_name() {
                                     Ok(Some(schema_plugin_name)) => {
                                         let runtime_config = dl_sink_cfg
                                             .clone()
                                             .and_then(|cfg| crate::runtime_plugins::protocol::RuntimeSchemaConfig::try_from(cfg).ok());
                                         let runtime_version =
-                                            match Config::get_pipeline_deadletter_schema_plugin_version()
+                                            match request.config.get_pipeline_deadletter_schema_plugin_version()
                                             {
                                                 Ok(runtime_version) => runtime_version,
                                                 Err(err) => {
@@ -2746,15 +2320,16 @@ impl Config {
                                             {
                                                 Ok(resolved) => {
                                                     match crate::runtime_plugins::host::RuntimeSchemaSinkPlugin::new(
+                                                        &request.config,
                                                         resolved,
-                                                        Config::get_pipeline_name(),
+                                                        request.config.get_pipeline_name(),
                                                         crate::runtime_plugins::protocol::RuntimeBinding::Deadletter,
                                                         runtime_config,
                                                     )
                                                     .await
                                                     {
                                                         Ok(plugin) => {
-                                                            deadletter_plugin = Some(Box::new(plugin));
+                                                            deadletter_plugins.insert(scope.clone(), Box::new(plugin));
                                                         }
                                                         Err(err) => {
                                                             warn!("Schema sync: failed to initialize runtime deadletter schema plugin: {}", err);
@@ -2777,7 +2352,7 @@ impl Config {
                                     }
                                 }
                             }
-                            if let Some(ref plugin) = deadletter_plugin {
+                            if let Some(plugin) = deadletter_plugins.get(&scope) {
                                 let deadletter_out_meta = crate::ingest::deadletter::output_metadata();
                                 info!("Schema sync: updating deadletter schema for namespace {}", ns);
                                 match tokio::time::timeout(
@@ -2819,12 +2394,12 @@ impl Config {
     /// Drop the sender to close the channel, then wait for the worker to flush
     /// pending schema updates. The drain is bounded so `--once` cannot look
     /// hung forever after data and compaction have already completed.
-    pub fn drain_schema_sync_worker() {
+    pub fn drain_schema_sync_worker(&self) {
         let mut guard = SCHEMA_SYNC_WORKER.lock().unwrap();
         if let Some((tx, handle, done_rx)) = guard.take() {
             drop(tx);
             if let Some(h) = handle {
-                let drain_timeout = Config::schema_sync_drain_timeout();
+                let drain_timeout = Config::schema_sync_drain_timeout(self);
                 info!(
                     "Schema sync: waiting up to {:?} for worker drain",
                     drain_timeout
@@ -2857,15 +2432,16 @@ impl Config {
         }
     }
 
-    pub fn sync_output_schema_namespace(namespace: &str) {
-        let tx = Config::ensure_schema_sync_worker();
+    pub fn sync_output_schema_namespace(&self, namespace: &str) {
+        let tx = Config::ensure_schema_sync_worker(self);
         let _ = tx.send(SchemaPublicationRequest {
             namespace: namespace.to_string(),
-            version: Config::schema_publication_version(namespace),
+            version: Config::schema_publication_version(self, namespace),
+            config: self.clone(),
         });
     }
 
-    fn schema_publication_version(namespace: &str) -> u64 {
+    fn schema_publication_version(&self, namespace: &str) -> u64 {
         let namespace_version = crate::ingest_work::namespace_schema_version(namespace)
             .max(crate::runtime_plugins::schema_state::runtime_schema_namespace_version(namespace));
         if namespace_version == 0 {
@@ -2875,17 +2451,23 @@ impl Config {
         }
     }
 
-    fn primary_schema_scope() -> String {
+    pub(crate) fn primary_schema_scope(&self) -> String {
         format!(
-            "{}:{}:{}:{}",
-            Config::get_workspace_name(),
-            Config::get_pipeline_name(),
-            Config::get_pipeline_output_sink_ref(),
-            Config::get_pipeline_schema_plugin_name()
+            "{}:{}:{}:{}:{}",
+            self.get_pipeline_data_dir(),
+            self.get_workspace_name(),
+            self.get_pipeline_name(),
+            self.get_pipeline_output_sink_ref(),
+            self.get_pipeline_schema_plugin_name()
         )
     }
 
+    pub(crate) fn schema_publication_identity(&self, namespace: &str) -> String {
+        format!("{}:{}", self.primary_schema_scope(), namespace)
+    }
+
     async fn blocking_primary_schema_plugin(
+        &self,
         scope: &str,
     ) -> Result<Arc<dyn crate::plugins::SchemaSink + Send + Sync>, String> {
         if let Some((_, plugin)) = BLOCKING_PRIMARY_SCHEMA_PLUGIN
@@ -2908,14 +2490,15 @@ impl Config {
             return Ok(plugin);
         }
 
-        let schema_plugin_name = Config::get_pipeline_schema_plugin_name();
-        let runtime_version = Config::get_pipeline_schema_plugin_version().map_err(|err| {
+        let schema_plugin_name = self.get_pipeline_schema_plugin_name();
+        let runtime_version = self.get_pipeline_schema_plugin_version().map_err(|err| {
             format!(
                 "Schema sync: failed to resolve runtime schema plugin version: {}",
                 err
             )
         })?;
-        let runtime_config = Config::get_pipeline_output_plugin_config()
+        let runtime_config = self
+            .get_pipeline_output_plugin_config()
             .map_err(|err| {
                 format!(
                     "Schema sync: failed to resolve output plugin config: {}",
@@ -2947,8 +2530,9 @@ impl Config {
         })?;
 
         let plugin = crate::runtime_plugins::host::RuntimeSchemaSinkPlugin::new(
+            self,
             resolved,
-            Config::get_pipeline_name(),
+            self.get_pipeline_name(),
             crate::runtime_plugins::protocol::RuntimeBinding::Primary,
             runtime_config,
         )
@@ -2966,21 +2550,22 @@ impl Config {
     }
 
     async fn coordinate_primary_schema_sync(
+        &self,
         namespace: &str,
         schema_version: u64,
         out_meta: &OutputMetadata,
         sync_timeout: std::time::Duration,
     ) -> Result<(), String> {
-        let scope = Config::primary_schema_scope();
+        let scope = self.primary_schema_scope();
         SCHEMA_COORDINATOR
             .coordinate(&scope, namespace, schema_version, || async {
-                let schema_plugin_name = Config::get_pipeline_schema_plugin_name();
+                let schema_plugin_name = self.get_pipeline_schema_plugin_name();
                 if schema_plugin_name.is_empty() {
                     debug!("Schema sync: no schema sink configured for primary output");
                     return Ok(());
                 }
 
-                let plugin = Self::blocking_primary_schema_plugin(&scope).await?;
+                let plugin = self.blocking_primary_schema_plugin(&scope).await?;
                 let source_contract = crate::METADATA
                     .load()
                     .source_contract_for_namespace(namespace);
@@ -3019,19 +2604,22 @@ impl Config {
             .await
     }
 
-    pub async fn sync_output_schema_namespace_blocking(namespace: &str) -> Result<(), String> {
+    pub async fn sync_output_schema_namespace_blocking(
+        &self,
+        namespace: &str,
+    ) -> Result<(), String> {
         let ns = namespace.trim();
         if ns.is_empty() {
             return Err("namespace must not be empty".to_string());
         }
 
-        let schema_plugin_name = Config::get_pipeline_schema_plugin_name();
+        let schema_plugin_name = self.get_pipeline_schema_plugin_name();
         if schema_plugin_name.is_empty() {
             debug!("Schema sync: no schema sink configured for primary output");
             return Ok(());
         }
 
-        let flatten = Config::get_transform_flatten_events();
+        let flatten = self.get_transform_flatten_events();
         let md_snapshot = { METADATA.load().metadata.clone() };
         let out_meta = if let Some(schema) = md_snapshot.get(ns) {
             if flatten {
@@ -3051,15 +2639,16 @@ impl Config {
                 .parse::<u64>()
                 .unwrap_or(120),
         );
-        let schema_version = Config::schema_publication_version(ns);
-        Self::coordinate_primary_schema_sync(ns, schema_version, &out_meta, sync_timeout).await
+        let schema_version = Config::schema_publication_version(self, ns);
+        self.coordinate_primary_schema_sync(ns, schema_version, &out_meta, sync_timeout)
+            .await
     }
 
-    pub async fn init() {
+    pub async fn init(&self) {
         // Enforce reserved name policy early
-        Self::assert_pipeline_not_reserved();
+        self.assert_pipeline_not_reserved();
         // Enforce config dependency rules before pipeline runtime starts.
-        Self::assert_config_dependencies_valid();
+        self.assert_config_dependencies_valid();
 
         if crate::helpers::configuration::DATA_DIR_INIT_ONCE
             .get()
@@ -3068,7 +2657,7 @@ impl Config {
             info!("Initializing data directories...");
         }
 
-        let data_dir = Config::get_data_dir();
+        let data_dir = self.get_data_dir();
         let segment_dir = &format!("{}/segment_buffer", data_dir);
         match fs::create_dir_all(segment_dir) {
             Ok(_g) => {}
@@ -3084,16 +2673,16 @@ impl Config {
         }
     }
 
-    pub fn get_enable_single_quote_parsing() -> bool {
+    pub fn get_enable_single_quote_parsing(&self) -> bool {
         let env_value = Config::getenv("SKIPPR_ENABLE_SINGLE_QUOTE_PARSING", "false");
 
         if env_value.to_lowercase() == "true" {
             return true;
         }
 
-        let config = Config::get();
+        let config = self.clone();
 
-        let pipeline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
+        let pipeline = match config.pipelines.get(self.pipeline_key()) {
             Some(pipeline) => pipeline,
             None => return false,
         };
@@ -3107,16 +2696,16 @@ impl Config {
         false
     }
 
-    pub fn get_enable_unicode_parsing() -> bool {
+    pub fn get_enable_unicode_parsing(&self) -> bool {
         let env_value = Config::getenv("SKIPPR_ENABLE_UNICODE_PARSING", "false");
 
         if env_value.to_lowercase() == "true" {
             return true;
         }
 
-        let config = Config::get();
+        let config = self.clone();
 
-        let pipeline = match config.pipelines.get(PIPELINE_NAME.read().as_str()) {
+        let pipeline = match config.pipelines.get(self.pipeline_key()) {
             Some(pipeline) => pipeline,
             None => return false,
         };
@@ -3136,7 +2725,7 @@ impl Config {
     }
 
     // Compute a stable md5 for a namespace's Metadata by canonicalizing JSON key order
-    pub fn compute_namespace_md5(meta: &Metadata) -> String {
+    pub fn compute_namespace_md5(&self, meta: &Metadata) -> String {
         // Build a canonical, schema-only view of metadata, ignoring counters and transient fields
         fn build_schema_view(meta: &Metadata) -> Value {
             // Only include fields that influence Arrow schema
@@ -3187,14 +2776,14 @@ impl Config {
         format!("{:?}", md5::compute(s))
     }
 
-    pub fn pipeline_llm_enabled() -> bool {
+    pub fn pipeline_llm_enabled(&self) -> bool {
         // env override
         if Self::getenv("LLM_ENABLED", "").len() > 0 {
             return Self::truth_value(&Self::getenv("LLM_ENABLED", "true"));
         }
         // pipeline setting
-        let cfg = Self::get();
-        let pn = PIPELINE_NAME.read();
+        let cfg = self.clone();
+        let pn = self.get_pipeline_name();
         if let Some(p) = cfg.pipelines.get(pn.as_str()) {
             if let Some(sl) = &p.semantic_layer {
                 return sl.llm_enabled.unwrap_or(true);
@@ -3203,12 +2792,12 @@ impl Config {
         true
     }
 
-    pub fn pipeline_llm_debounce_ms() -> u64 {
+    pub fn pipeline_llm_debounce_ms(&self) -> u64 {
         if let Ok(v) = Self::getenv("LLM_DEBOUNCE_MS", "").parse::<u64>() {
             return v;
         }
-        let cfg = Self::get();
-        let pn = PIPELINE_NAME.read();
+        let cfg = self.clone();
+        let pn = self.get_pipeline_name();
         if let Some(p) = cfg.pipelines.get(pn.as_str()) {
             if let Some(sl) = &p.semantic_layer {
                 return sl.llm_debounce_ms.unwrap_or(1500);
@@ -3217,9 +2806,9 @@ impl Config {
         1500
     }
 
-    pub fn get_pipeline_cache_dir() -> String {
+    pub fn get_pipeline_cache_dir(&self) -> String {
         // get_data_dir() is already the per-pipeline root (no extra suffix).
-        let path = Self::get_data_dir();
+        let path = self.get_data_dir();
         let _ = std::fs::create_dir_all(&path);
         path
     }
@@ -3232,22 +2821,87 @@ mod tests {
 
     use super::*;
 
+    fn schema_sync_test_config(data_dir: &str) -> Config {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "skippr": { "workspace": "quickstart" },
+            "pipelines": {
+                "orders": {
+                    "data_source": "data_sources.sample",
+                    "data_dir": data_dir
+                }
+            },
+            "data_sources": {
+                "sample": { "S3": { "s3_bucket": "b", "s3_prefix": "p" } }
+            }
+        }))
+        .unwrap();
+        config.bind_pipeline("orders")
+    }
+
+    #[test]
+    fn schema_sync_worker_does_not_freeze_first_caller_config() {
+        let src = include_str!("configuration.rs");
+        let (head, worker_and_rest) = src
+            .split_once("fn ensure_schema_sync_worker")
+            .expect("ensure_schema_sync_worker");
+        let worker = worker_and_rest
+            .split("pub fn drain_schema_sync_worker")
+            .next()
+            .unwrap();
+        assert!(
+            !worker.contains("let this = self.clone()"),
+            "schema sync worker must not capture the first caller's Config"
+        );
+        let request_struct = head
+            .split("struct SchemaPublicationRequest")
+            .nth(1)
+            .unwrap()
+            .split('}')
+            .next()
+            .unwrap();
+        assert!(
+            request_struct.contains("config: Config"),
+            "SchemaPublicationRequest must carry the caller's Config"
+        );
+        assert!(
+            worker.contains("request.config"),
+            "schema sync worker must apply the request's Config, not a spawn freeze"
+        );
+    }
+
+    #[test]
+    fn primary_schema_scope_isolates_session_data_dir() {
+        let a = schema_sync_test_config("/tmp/skipprd-schema-a");
+        let b = schema_sync_test_config("/tmp/skipprd-schema-b");
+        assert_ne!(
+            a.primary_schema_scope(),
+            b.primary_schema_scope(),
+            "two Sessions with different data_dirs must not share a schema-sync scope"
+        );
+        assert!(a.primary_schema_scope().contains("/tmp/skipprd-schema-a"));
+        assert!(b.primary_schema_scope().contains("/tmp/skipprd-schema-b"));
+    }
+
     #[test]
     fn schema_sync_request_drain_coalesces_duplicate_namespaces() {
+        let config = schema_sync_test_config("/tmp/skipprd-schema-a");
         let (tx, mut rx) = unbounded_channel();
         tx.send(SchemaPublicationRequest {
             namespace: "events".to_string(),
             version: 1,
+            config: config.clone(),
         })
         .unwrap();
         tx.send(SchemaPublicationRequest {
             namespace: "events".to_string(),
             version: 2,
+            config: config.clone(),
         })
         .unwrap();
         tx.send(SchemaPublicationRequest {
             namespace: "users".to_string(),
             version: 1,
+            config: config.clone(),
         })
         .unwrap();
 
@@ -3256,21 +2910,73 @@ mod tests {
 
         assert!(!closed);
         assert_eq!(dirty.len(), 2);
-        assert_eq!(dirty.get("events"), Some(&2));
-        assert_eq!(dirty.get("users"), Some(&1));
+        let events = dirty
+            .values()
+            .find(|request| request.namespace == "events")
+            .unwrap();
+        let users = dirty
+            .values()
+            .find(|request| request.namespace == "users")
+            .unwrap();
+        assert_eq!(events.version, 2);
+        assert_eq!(users.version, 1);
+        assert_eq!(
+            events.config.get_pipeline_data_dir(),
+            "/tmp/skipprd-schema-a"
+        );
     }
 
     #[test]
-    fn schema_sync_request_drain_flushes_when_sender_closes() {
+    fn schema_sync_request_drain_keeps_two_session_configs() {
+        let a = schema_sync_test_config("/tmp/skipprd-schema-a");
+        let b = schema_sync_test_config("/tmp/skipprd-schema-b");
         let (tx, mut rx) = unbounded_channel();
         tx.send(SchemaPublicationRequest {
             namespace: "events".to_string(),
             version: 1,
+            config: a,
         })
         .unwrap();
         tx.send(SchemaPublicationRequest {
             namespace: "events".to_string(),
             version: 1,
+            config: b,
+        })
+        .unwrap();
+
+        let mut dirty = HashMap::new();
+        let closed = Config::drain_available_schema_sync_requests(&mut rx, &mut dirty);
+
+        assert!(!closed);
+        assert_eq!(dirty.len(), 2);
+        let mut dirs: Vec<String> = dirty
+            .values()
+            .map(|request| request.config.get_pipeline_data_dir())
+            .collect();
+        dirs.sort();
+        assert_eq!(
+            dirs,
+            vec![
+                "/tmp/skipprd-schema-a".to_string(),
+                "/tmp/skipprd-schema-b".to_string()
+            ]
+        );
+    }
+
+    #[test]
+    fn schema_sync_request_drain_flushes_when_sender_closes() {
+        let config = schema_sync_test_config("/tmp/skipprd-schema-a");
+        let (tx, mut rx) = unbounded_channel();
+        tx.send(SchemaPublicationRequest {
+            namespace: "events".to_string(),
+            version: 1,
+            config: config.clone(),
+        })
+        .unwrap();
+        tx.send(SchemaPublicationRequest {
+            namespace: "events".to_string(),
+            version: 1,
+            config,
         })
         .unwrap();
         drop(tx);
@@ -3280,7 +2986,11 @@ mod tests {
 
         assert!(closed);
         assert_eq!(dirty.len(), 1);
-        assert_eq!(dirty.get("events"), Some(&1));
+        let events = dirty
+            .values()
+            .find(|request| request.namespace == "events")
+            .unwrap();
+        assert_eq!(events.version, 1);
     }
 
     #[test]
@@ -3291,7 +3001,7 @@ mod tests {
         std::env::set_var("SCHEMA_SYNC_DRAIN_TIMEOUT_SECONDS", "7");
 
         assert_eq!(
-            Config::schema_sync_drain_timeout(),
+            Config::new().schema_sync_drain_timeout(),
             std::time::Duration::from_secs(7)
         );
 
@@ -3375,8 +3085,6 @@ mod tests {
     #[test]
     #[serial]
     fn build_config_resolves_customer_style_plugin_env_refs() {
-        let original_config = APP_CONFIG.read().clone();
-        let original_pipeline_name = PIPELINE_NAME.read().clone();
         let original_config_file = std::env::var("SKIPPR_CONFIG_FILE").ok();
         let original_connection = std::env::var("MSSQL_CONNECTION_STRING").ok();
         let original_account = std::env::var("SNOWFLAKE_ACCOUNT").ok();
@@ -3421,14 +3129,14 @@ data_sinks:
         )
         .expect("write config");
         std::env::set_var("SKIPPR_CONFIG_FILE", &config_path);
-        PIPELINE_NAME
-            .write()
-            .clone_from(&"mssql-migration".to_string());
+        let config = Config::build_config().bind_pipeline("mssql-migration");
 
-        Config::build_config();
-
-        let input = Config::get_pipeline_input_plugin_config().expect("input config");
-        let output = Config::get_pipeline_output_plugin_config().expect("output config");
+        let input = config
+            .get_pipeline_input_plugin_config()
+            .expect("input config");
+        let output = config
+            .get_pipeline_output_plugin_config()
+            .expect("output config");
         assert_eq!(input.plugin_name, "Mssql");
         assert_eq!(
             input
@@ -3447,8 +3155,7 @@ data_sinks:
         );
 
         let _ = std::fs::remove_file(&config_path);
-        *APP_CONFIG.write() = original_config;
-        PIPELINE_NAME.write().clone_from(&original_pipeline_name);
+
         match original_config_file {
             Some(value) => std::env::set_var("SKIPPR_CONFIG_FILE", value),
             None => std::env::remove_var("SKIPPR_CONFIG_FILE"),
@@ -3469,10 +3176,10 @@ data_sinks:
     fn test_enable_single_quote_parsing() {
         // Test environment variable override
         std::env::set_var("SKIPPR_ENABLE_SINGLE_QUOTE_PARSING", "true");
-        assert_eq!(Config::get_enable_single_quote_parsing(), true);
+        assert_eq!(Config::new().get_enable_single_quote_parsing(), true);
 
         std::env::set_var("SKIPPR_ENABLE_SINGLE_QUOTE_PARSING", "false");
-        assert_eq!(Config::get_enable_single_quote_parsing(), false);
+        assert_eq!(Config::new().get_enable_single_quote_parsing(), false);
 
         // Clean up
         std::env::remove_var("SKIPPR_ENABLE_SINGLE_QUOTE_PARSING");
@@ -3482,10 +3189,10 @@ data_sinks:
     fn test_enable_unicode_parsing() {
         // Test environment variable override
         std::env::set_var("SKIPPR_ENABLE_UNICODE_PARSING", "true");
-        assert_eq!(Config::get_enable_unicode_parsing(), true);
+        assert_eq!(Config::new().get_enable_unicode_parsing(), true);
 
         std::env::set_var("SKIPPR_ENABLE_UNICODE_PARSING", "false");
-        assert_eq!(Config::get_enable_unicode_parsing(), false);
+        assert_eq!(Config::new().get_enable_unicode_parsing(), false);
 
         // Clean up
         std::env::remove_var("SKIPPR_ENABLE_UNICODE_PARSING");
@@ -3495,20 +3202,19 @@ data_sinks:
     #[serial]
     fn offset_store_partition_key_is_derived() {
         ENV_CACHE.write().clear();
-        Config::set_evncache("TENANT", "tenant-a");
-        Config::set_evncache("WORKSPACE_NAME", "workspace-b");
-        Config::set_evncache("PIPELINE_NAME", "google_analytics");
-        PIPELINE_NAME.write().clear();
-        PIPELINE_NAME.write().push_str("google_analytics");
+        std::env::set_var("TENANT", "tenant-a");
+        std::env::set_var("WORKSPACE_NAME", "workspace-b");
+        let config = Config::new().bind_pipeline("google_analytics");
         assert_eq!(
-            Config::offset_store_partition_key(),
+            config.offset_store_partition_key(),
             "tenant-a#workspace-b#google_analytics"
         );
+        std::env::remove_var("TENANT");
+        std::env::remove_var("WORKSPACE_NAME");
     }
 
     #[test]
     fn skipprd_el_storage_mode_uses_explicit_name() {
-        let original_config = APP_CONFIG.read().clone();
         let original_env = std::env::var("SKIPPRD_EL_STORAGE_MODE").ok();
         ENV_CACHE.write().clear();
         std::env::remove_var("SKIPPRD_EL_STORAGE_MODE");
@@ -3523,11 +3229,9 @@ data_sinks:
             offset_store: None,
             offset_dynamodb_table: None,
         });
-        *APP_CONFIG.write() = Some(config);
 
-        assert_eq!(Config::get_storage_mode(), "local");
+        assert_eq!(config.get_storage_mode(), "local");
 
-        *APP_CONFIG.write() = original_config;
         match original_env {
             Some(value) => std::env::set_var("SKIPPRD_EL_STORAGE_MODE", value),
             None => std::env::remove_var("SKIPPRD_EL_STORAGE_MODE"),
@@ -3574,6 +3278,7 @@ data_sinks:
             schema_sinks: None,
             dbt: None,
             vector_sources: None,
+            active_pipeline: None,
         };
 
         assert!(
@@ -3622,6 +3327,7 @@ data_sinks:
             schema_sinks: None,
             dbt: None,
             vector_sources: None,
+            active_pipeline: None,
         };
 
         assert!(Config::resolve_deadletter_plugin_config_for(&config, &pipeline).is_err());
@@ -3669,8 +3375,6 @@ data_sinks:
 
     #[test]
     fn missing_pipeline_input_config_names_missing_registry_entry() {
-        let original_config = APP_CONFIG.read().clone();
-        let original_pipeline_name = PIPELINE_NAME.read().clone();
         ENV_CACHE.write().clear();
 
         let config: Config = serde_json::from_value(json!({
@@ -3694,18 +3398,15 @@ data_sinks:
         }))
         .unwrap();
 
-        *APP_CONFIG.write() = Some(config);
-        *PIPELINE_NAME.write() = "bike_hire".to_string();
-
-        let err = Config::get_pipeline_input_plugin_config()
+        let config = config.bind_pipeline("bike_hire");
+        let err = config
+            .get_pipeline_input_plugin_config()
             .expect_err("missing input registry entry should be rejected");
 
         assert!(err.contains("pipeline 'bike_hire'"));
         assert!(err.contains("data_sources.missing"));
         assert!(err.contains("not defined in data_sources"));
 
-        *APP_CONFIG.write() = original_config;
-        *PIPELINE_NAME.write() = original_pipeline_name;
         ENV_CACHE.write().clear();
     }
 
@@ -3716,7 +3417,7 @@ data_sinks:
         ENV_CACHE.write().clear();
         std::env::set_var("BUFFER_THRESHOLD_BYTES", "lots");
 
-        let violations = Config::get_config_dependency_violations();
+        let violations = Config::new().get_config_dependency_violations();
 
         assert!(violations.iter().any(|violation| {
             violation.contains("BUFFER_THRESHOLD_BYTES")
@@ -3733,8 +3434,6 @@ data_sinks:
     #[test]
     #[serial]
     fn wal_bytes_per_file_defaults_to_pipeline_buffer_target() {
-        let original_config = APP_CONFIG.read().clone();
-        let original_pipeline_name = PIPELINE_NAME.read().clone();
         let original_wal_bytes = std::env::var("WAL_BYTES_PER_FILE").ok();
         let original_buffer_bytes = std::env::var("BUFFER_THRESHOLD_BYTES").ok();
         ENV_CACHE.write().clear();
@@ -3755,22 +3454,25 @@ pipelines:
 "#,
         )
         .unwrap();
-        *APP_CONFIG.write() = Some(config);
 
-        *PIPELINE_NAME.write() = "small".to_string();
         ENV_CACHE.write().clear();
-        assert_eq!(Config::get_wal_bytes_per_file(), 4 * 1024 * 1024);
+        assert_eq!(
+            config.bind_pipeline("small").get_wal_bytes_per_file(),
+            4 * 1024 * 1024
+        );
 
-        *PIPELINE_NAME.write() = "bike_hire".to_string();
         ENV_CACHE.write().clear();
-        assert_eq!(Config::get_wal_bytes_per_file(), 20_000_000);
+        assert_eq!(
+            config.bind_pipeline("bike_hire").get_wal_bytes_per_file(),
+            20_000_000
+        );
 
-        *PIPELINE_NAME.write() = "large".to_string();
         ENV_CACHE.write().clear();
-        assert_eq!(Config::get_wal_bytes_per_file(), 64 * 1024 * 1024);
+        assert_eq!(
+            config.bind_pipeline("large").get_wal_bytes_per_file(),
+            64 * 1024 * 1024
+        );
 
-        *APP_CONFIG.write() = original_config;
-        *PIPELINE_NAME.write() = original_pipeline_name;
         match original_wal_bytes {
             Some(value) => std::env::set_var("WAL_BYTES_PER_FILE", value),
             None => std::env::remove_var("WAL_BYTES_PER_FILE"),
@@ -3785,8 +3487,6 @@ pipelines:
     #[test]
     #[serial]
     fn wal_bytes_per_file_env_override_wins() {
-        let original_config = APP_CONFIG.read().clone();
-        let original_pipeline_name = PIPELINE_NAME.read().clone();
         let original_wal_bytes = std::env::var("WAL_BYTES_PER_FILE").ok();
         ENV_CACHE.write().clear();
         std::env::set_var("WAL_BYTES_PER_FILE", "8388608");
@@ -3801,13 +3501,12 @@ pipelines:
 "#,
         )
         .unwrap();
-        *APP_CONFIG.write() = Some(config);
-        *PIPELINE_NAME.write() = "bike_hire".to_string();
 
-        assert_eq!(Config::get_wal_bytes_per_file(), 8 * 1024 * 1024);
+        assert_eq!(
+            config.bind_pipeline("bike_hire").get_wal_bytes_per_file(),
+            8 * 1024 * 1024
+        );
 
-        *APP_CONFIG.write() = original_config;
-        *PIPELINE_NAME.write() = original_pipeline_name;
         match original_wal_bytes {
             Some(value) => std::env::set_var("WAL_BYTES_PER_FILE", value),
             None => std::env::remove_var("WAL_BYTES_PER_FILE"),
@@ -3839,8 +3538,6 @@ pipelines:
     #[test]
     #[serial]
     fn plugin_versions_are_resolved_per_active_plugin_config() {
-        let original_config = APP_CONFIG.read().clone();
-        let original_pipeline_name = PIPELINE_NAME.read().clone();
         ENV_CACHE.write().clear();
 
         let config: Config = serde_yaml::from_str(
@@ -3889,42 +3586,47 @@ schema_sinks:
         )
         .unwrap();
 
-        *APP_CONFIG.write() = Some(config);
-        *PIPELINE_NAME.write() = "bike_hire".to_string();
-
         assert_eq!(
-            Config::get_pipeline_input_plugin_version()
+            config
+                .bind_pipeline("bike_hire")
+                .get_pipeline_input_plugin_version()
                 .unwrap()
                 .as_deref(),
             Some("1.2.3")
         );
         assert_eq!(
-            Config::get_pipeline_output_plugin_version()
+            config
+                .bind_pipeline("bike_hire")
+                .get_pipeline_output_plugin_version()
                 .unwrap()
                 .as_deref(),
             Some("2.3.4")
         );
         assert_eq!(
-            Config::get_pipeline_schema_plugin_version()
+            config
+                .bind_pipeline("bike_hire")
+                .get_pipeline_schema_plugin_version()
                 .unwrap()
                 .as_deref(),
             Some("3.4.5")
         );
         assert_eq!(
-            Config::get_pipeline_deadletter_plugin_version()
+            config
+                .bind_pipeline("bike_hire")
+                .get_pipeline_deadletter_plugin_version()
                 .unwrap()
                 .as_deref(),
             Some("4.5.6")
         );
         assert_eq!(
-            Config::get_pipeline_deadletter_schema_plugin_version()
+            config
+                .bind_pipeline("bike_hire")
+                .get_pipeline_deadletter_schema_plugin_version()
                 .unwrap()
                 .as_deref(),
             Some("5.6.7")
         );
 
-        *APP_CONFIG.write() = original_config;
-        *PIPELINE_NAME.write() = original_pipeline_name;
         ENV_CACHE.write().clear();
     }
 
@@ -3999,5 +3701,40 @@ schema_sinks:
             lake.schema_sink.as_deref(),
             Some("schema_sinks.iceberg_catalog")
         );
+    }
+
+    #[test]
+    fn pipeline_without_data_sink_validates() {
+        let config: Config = serde_json::from_value(json!({
+            "skippr": { "workspace": "quickstart", "skipprd_el_storage_mode": "local" },
+            "pipelines": {
+                "bikehire": { "data_source": "data_sources.sample" }
+            },
+            "data_sources": {
+                "sample": { "S3": { "s3_bucket": "skippr-public-sample-data", "s3_prefix": "bike-hire" } }
+            }
+        }))
+        .unwrap();
+        let pipeline = config.pipelines.get("bikehire").unwrap();
+        Config::validate_pipeline_registry_refs_for(&config, "bikehire", pipeline)
+            .expect("data_sink is optional");
+    }
+
+    #[test]
+    fn pipeline_without_data_source_still_fails() {
+        let config: Config = serde_json::from_value(json!({
+            "skippr": { "workspace": "quickstart" },
+            "pipelines": {
+                "bikehire": { "data_sink": "data_sinks.warehouse" }
+            },
+            "data_sinks": {
+                "warehouse": { "Snowflake": { "account": "acct" } }
+            }
+        }))
+        .unwrap();
+        let pipeline = config.pipelines.get("bikehire").unwrap();
+        let err = Config::validate_pipeline_registry_refs_for(&config, "bikehire", pipeline)
+            .expect_err("data_source remains required");
+        assert!(err.contains("data_source is required"));
     }
 }

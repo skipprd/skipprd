@@ -63,6 +63,7 @@ pub enum DateParserKind {
 
 #[allow(dead_code)]
 pub fn discover_ingest(
+    config: &Config,
     field: &str,
     value: &mut Value,
     _parent_field: Option<&str>,
@@ -76,7 +77,7 @@ pub fn discover_ingest(
         return "".to_string();
     }
 
-    AnalyseSchema::analyse_field(&_foo, &field.to_string(), &mut value.clone(), metadata);
+    _foo.analyse_field(config, &field.to_string(), &mut value.clone(), metadata);
 
     // If this is an array of records, make sure repetition_count matches the array length
     if value.is_array() {
@@ -92,9 +93,9 @@ pub fn discover_ingest(
         }
     }
 
-    let flatten = Config::get_transform_flatten_events();
+    let flatten = config.get_transform_flatten_events();
 
-    AnalyseSchema::determine_field_types(metadata, parent_data_type, flatten);
+    AnalyseSchema::determine_field_types(config, metadata, parent_data_type, flatten);
 
     let discoverd_data_type = metadata.get(field).unwrap().determined_type.clone();
 
@@ -302,10 +303,11 @@ pub struct PipelineMetadata {
 impl crate::discover::PipelineMetadata {
     #[inline]
     #[must_use]
-    pub fn new() -> Self {
-        let pipeline_name = Config::get_pipeline_name();
+    pub fn new(config: &Config) -> Self {
+        let pipeline_name = config.get_pipeline_name();
         let flatten = Config::truth_value(
-            &Config::get_transform_config()
+            &config
+                .get_transform_config()
                 .flatten_events
                 .or(Some("no".to_string()))
                 .unwrap(),
@@ -323,10 +325,14 @@ impl crate::discover::PipelineMetadata {
         }
     }
 
-    pub fn from_metadata(metadata: HashMap<String, Metadata>) -> Result<Self, bool> {
-        let pipeline_name = Config::get_pipeline_name();
+    pub fn from_metadata(
+        config: &Config,
+        metadata: HashMap<String, Metadata>,
+    ) -> Result<Self, bool> {
+        let pipeline_name = config.get_pipeline_name();
         let flatten = Config::truth_value(
-            &Config::get_transform_config()
+            &config
+                .get_transform_config()
                 .flatten_events
                 .or(Some("no".to_string()))
                 .unwrap(),
@@ -494,8 +500,8 @@ impl Metadata {
     }
 
     /// Resolve `out_field_name` and `determined_type` for all child fields.
-    pub fn finalize_field_types(&mut self, flatten: bool) {
-        AnalyseSchema::determine_field_types(&mut self.fields, None, flatten);
+    pub fn finalize_field_types(&mut self, config: &Config, flatten: bool) {
+        AnalyseSchema::determine_field_types(config, &mut self.fields, None, flatten);
     }
 
     /// Returns (field_name, determined_type_name, nullable) for each child field.
@@ -1303,12 +1309,14 @@ impl AnalyseSchema {
 
     pub fn infer_json_schema(
         &self,
+        config: &Config,
         str: &mut String,
         max_read_records: Option<u64>,
         metadata: &mut HashMap<std::string::String, Metadata>,
         namespace_override: Option<&str>,
     ) -> u64 {
         let counts = self.infer_json_schema_from_iterator(
+            config,
             str,
             metadata,
             max_read_records,
@@ -1323,6 +1331,7 @@ impl AnalyseSchema {
     // {
     pub fn infer_json_schema_from_iterator(
         &self,
+        config: &Config,
         str: &mut String,
         metadata: &mut HashMap<std::string::String, Metadata>,
         max_read_records: Option<u64>,
@@ -1335,18 +1344,19 @@ impl AnalyseSchema {
         let mut _skpr_namespace: String = "".to_string();
         let pipeline_name = namespace_override
             .map(|s| s.to_string())
-            .unwrap_or_else(|| Config::get_pipeline_name());
+            .unwrap_or_else(|| config.get_pipeline_name());
 
         let _flatten = Config::truth_value(
-            &Config::get_transform_config()
+            &config
+                .get_transform_config()
                 .flatten_events
                 .or(Some("no".to_string()))
                 .unwrap(),
         );
 
-        let mut records: Vec<Value> = SerdeJson::deserialize(str);
+        let mut records: Vec<Value> = SerdeJson::deserialize(config, str);
 
-        let entity_field_dot = match Config::get_transform_config().record_field_path {
+        let entity_field_dot = match config.get_transform_config().record_field_path {
             Some(ref field) => field.clone(),
             None => "".to_string(),
         };
@@ -1383,6 +1393,7 @@ impl AnalyseSchema {
 
         for v in unwrapped_records {
             _skpr_namespace = Helpers::parse_namespace_field(
+                config,
                 &v,
                 pipeline_name.clone(),
                 &mut parse_namespace_cache,
@@ -1406,6 +1417,7 @@ impl AnalyseSchema {
                     counts += 1;
 
                     self.analyse_payload(
+                        config,
                         &mut record,
                         &mut metadata.get_mut(&_skpr_namespace).unwrap().fields,
                     );
@@ -1417,7 +1429,12 @@ impl AnalyseSchema {
     }
 
     // pub fn analyse_payload(&mut self, message: &HashMap<String, String>, metadata: &mut HashMap<String, Metadata>) {
-    pub fn analyse_payload(&self, message: &Value, metadata: &mut HashMap<String, Metadata>) {
+    pub fn analyse_payload(
+        &self,
+        config: &Config,
+        message: &Value,
+        metadata: &mut HashMap<String, Metadata>,
+    ) {
         // let mut helpers = Helpers { clean_field_cache: Default::default() };
 
         for (field, value) in message.as_object().unwrap() {
@@ -1436,12 +1453,13 @@ impl AnalyseSchema {
                 json_value = serde_json::from_str(value.as_str().unwrap()).unwrap();
             }
 
-            self.analyse_field(&field, &mut json_value, metadata);
+            self.analyse_field(config, &field, &mut json_value, metadata);
         }
     }
 
     pub fn analyse_field(
         &self,
+        config: &Config,
         field: &String,
         value: &mut Value,
         metadata: &mut HashMap<String, Metadata>,
@@ -1463,6 +1481,7 @@ impl AnalyseSchema {
                 let mut sv = sub_value.clone();
                 // let mut svv: Value = serde_json::from_str(sv.unwrap()).unwrap();
                 self.analyse_field(
+                    config,
                     &sub_field,
                     &mut sv,
                     metadata.get_mut(field).unwrap().fields.as_mut(),
@@ -1487,6 +1506,7 @@ impl AnalyseSchema {
             for sub_value in value.as_array().unwrap() {
                 let mut sv = sub_value.clone();
                 self.analyse_field(
+                    config,
                     // &Helpers::clean_field_name(i.to_string()),
                     &0.to_string(),
                     &mut sv,
@@ -2202,6 +2222,7 @@ impl AnalyseSchema {
     }
 
     pub fn determine_field_types(
+        config: &Config,
         metadata: &mut HashMap<String, Metadata>,
         parent_type: Option<&str>,
         flatten: bool,
@@ -2217,7 +2238,7 @@ impl AnalyseSchema {
             if field.source_field_name.is_empty() {
                 field.source_field_name = field_name.to_string();
             }
-            field.out_field_name = Helpers::clean_field_name(field_name.to_string());
+            field.out_field_name = Helpers::clean_field_name(config, field_name.to_string());
 
             if field.determined_type == SkipprDataType::Unknown {
                 let mut highest_type = SkipprDataType::Unknown;
@@ -2335,6 +2356,7 @@ impl AnalyseSchema {
                         ))
                 {
                     AnalyseSchema::determine_field_types(
+                        config,
                         &mut field.fields,
                         Some(field.determined_type.as_str()),
                         flatten,
@@ -2837,7 +2859,7 @@ mod tests {
 
         let mut record_line = serde_json::to_string(&json).unwrap();
 
-        let _data_dir = Config::get_data_dir();
+        let _data_dir = Config::new().get_data_dir();
 
         let _rng = rand::thread_rng(); // Removed mut since it's not needed
 
@@ -2865,6 +2887,7 @@ mod tests {
 
         AnalyseSchema::infer_json_schema(
             &_foo,
+            &Config::new(),
             &mut record_line,
             Some(1),
             &mut _fields,
@@ -2872,6 +2895,7 @@ mod tests {
         );
 
         AnalyseSchema::determine_field_types(
+            &Config::new(),
             &mut _fields.get_mut("default").unwrap().fields,
             None,
             false,
@@ -3053,6 +3077,7 @@ mod tests {
 
         AnalyseSchema::infer_json_schema(
             &_foo,
+            &Config::new(),
             &mut record_line,
             Some(1),
             &mut _fields,
@@ -3060,6 +3085,7 @@ mod tests {
         );
 
         AnalyseSchema::determine_field_types(
+            &Config::new(),
             &mut _fields.get_mut("default").unwrap().fields,
             None,
             false,
@@ -3279,6 +3305,7 @@ mod tests {
 
         AnalyseSchema::infer_json_schema(
             &_foo,
+            &Config::new(),
             &mut record_line,
             Some(1),
             &mut _fields,
@@ -3286,6 +3313,7 @@ mod tests {
         );
 
         AnalyseSchema::determine_field_types(
+            &Config::new(),
             &mut _fields.get_mut("default").unwrap().fields,
             None,
             false,
@@ -3944,7 +3972,15 @@ mod tests_roundtrip {
         metadata: &mut HashMap<String, Metadata>,
     ) {
         let mut updated = "no".to_string();
-        discover_ingest(field, value, None, None, metadata, &mut updated);
+        discover_ingest(
+            &Config::new(),
+            field,
+            value,
+            None,
+            None,
+            metadata,
+            &mut updated,
+        );
     }
 
     fn build_output(metadata: &HashMap<String, Metadata>) -> Box<HashMap<String, OutputMetadata>> {
@@ -3979,6 +4015,7 @@ mod tests_roundtrip {
 
         let mut updated = "no".to_string();
         let r = Evolution::evolve_field(
+            &Config::new(),
             &"x".to_string(),
             &json!(42),
             None,
@@ -4002,6 +4039,7 @@ mod tests_roundtrip {
 
         let mut updated = "no".to_string();
         let r = Evolution::evolve_field(
+            &Config::new(),
             &"data".to_string(),
             &json!({"name": "alice", "age": 30}),
             None,
@@ -4043,6 +4081,7 @@ mod tests_roundtrip {
         let mut updated = "no".to_string();
         if let Some(outer_mut) = metadata.get_mut("outer") {
             let _ = Evolution::evolve_field(
+                &Config::new(),
                 &"inner".to_string(),
                 &json!(3.15),
                 Some("outer"),
@@ -4077,6 +4116,7 @@ mod tests_roundtrip {
 
         let mut updated = "no".to_string();
         let r1 = Evolution::evolve_field(
+            &Config::new(),
             &"val".to_string(),
             &json!(42i64),
             None,
@@ -4088,6 +4128,7 @@ mod tests_roundtrip {
         assert!(r1.is_ok());
 
         let r2 = Evolution::evolve_field(
+            &Config::new(),
             &"val".to_string(),
             &json!(3.15),
             None,
@@ -4127,6 +4168,7 @@ mod tests_roundtrip {
 
         let mut updated = "no".to_string();
         let _ = Evolution::evolve_field(
+            &Config::new(),
             &"meta".to_string(),
             &json!({"key": "value", "count": 5}),
             None,
@@ -4188,14 +4230,14 @@ mod tests_discover_proptest {
         fn discover_ingest_never_panics(value in arb_json_value()) {
             let mut metadata: HashMap<std::string::String, Metadata> = HashMap::new();
             let mut updated = "no".to_string();
-            let _ = discover_ingest("test_field", &value, None, None, &mut metadata, &mut updated);
+            let _ = discover_ingest(&Config::new(), "test_field", &value, None, None, &mut metadata, &mut updated);
         }
 
         #[test]
         fn discovered_type_is_valid(value in arb_json_value()) {
             let mut metadata: HashMap<std::string::String, Metadata> = HashMap::new();
             let mut updated = "no".to_string();
-            discover_ingest("test_field", &value, None, None, &mut metadata, &mut updated);
+            discover_ingest(&Config::new(), "test_field", &value, None, None, &mut metadata, &mut updated);
 
             if let Some(md) = metadata.get("test_field") {
                 let valid_types = [
@@ -4229,10 +4271,10 @@ mod tests_discover_proptest {
         ) {
             let mut metadata: HashMap<std::string::String, Metadata> = HashMap::new();
             let mut updated = "no".to_string();
-            discover_ingest("f", &initial, None, None, &mut metadata, &mut updated);
+            discover_ingest(&Config::new(), "f", &initial, None, None, &mut metadata, &mut updated);
 
             let _ = crate::discover::evolution::Evolution::evolve_field(
-                &"f".to_string(),
+                &Config::new(), &"f".to_string(),
                 &breaking,
                 None,
                 None,

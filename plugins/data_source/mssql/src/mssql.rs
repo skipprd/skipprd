@@ -7,7 +7,7 @@ use tokio::net::TcpStream;
 use tokio_util::compat::TokioAsyncWriteCompatExt;
 use tracing::{error, info};
 
-use crate::helpers::configuration::{Config, DataSourcePluginConfig};
+use crate::helpers::configuration::DataSourcePluginConfig;
 use async_trait::async_trait;
 use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::progress::OffsetKey;
@@ -47,26 +47,6 @@ struct MssqlColumnSchema {
 }
 
 impl DataSourceMssqlPlugin {
-    pub async fn new() -> Self {
-        let config: DataSourceMssqlPluginConfig = match Config::get_pipeline_input_plugin_config() {
-            Ok(input_config) => input_config.try_into().unwrap_or_else(|e| panic!("{}", e)),
-            Err(_) => {
-                let connection_string = Config::getenv("MSSQL_CONNECTION_STRING", "");
-                DataSourceMssqlPluginConfig {
-                    connection_string,
-                    tables: None,
-                    batch_size_rows: None,
-                    query_timeout_seconds: None,
-                    format: Some("row".to_string()),
-                    batch_size_bytes: None,
-                    batch_size_seconds: None,
-                }
-            }
-        };
-
-        DataSourceMssqlPlugin { config }
-    }
-
     pub fn with_runtime_config(config: DataSourceMssqlPluginConfig) -> Self {
         Self { config }
     }

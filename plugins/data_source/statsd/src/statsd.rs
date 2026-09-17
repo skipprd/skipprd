@@ -7,7 +7,6 @@ use tokio::net::UdpSocket;
 use tokio::time::Duration;
 use tracing::{error, info};
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::RUNNING;
 use skippr_runtime_sdk::plugins::DataSource;
@@ -35,19 +34,6 @@ pub struct DataSourceStatsdPlugin {
 }
 
 impl DataSourceStatsdPlugin {
-    pub async fn new() -> Self {
-        let config: DataSourceStatsdPluginConfig = match Config::get_pipeline_input_plugin_config()
-        {
-            Ok(c) => c.try_into().unwrap_or_else(|e| panic!("{}", e)),
-            Err(_) => DataSourceStatsdPluginConfig {
-                listen_address: Some("0.0.0.0:8125".to_string()),
-                format: None,
-                batch_size_bytes: None,
-                batch_size_seconds: None,
-            },
-        };
-        Self { config }
-    }
 
     pub fn with_runtime_config(config: DataSourceStatsdPluginConfig) -> Self {
         Self { config }

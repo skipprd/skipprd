@@ -16,7 +16,7 @@ impl TimePartitioner {
         }
     }
 
-    pub fn process(&self) -> Result<String, io::Error> {
+    pub fn process(&self, config: &Config) -> Result<String, io::Error> {
         let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(&self.filename);
 
         if time_partition_str.is_empty() {
@@ -26,13 +26,13 @@ impl TimePartitioner {
             ));
         }
 
-        let granularity_target = Config::get_transform_batch_time_unit();
+        let granularity_target = config.get_transform_batch_time_unit();
         let date = self.parse_datetime(&time_partition_str)?;
 
         let mut full_key = String::new();
         for granularity in GRANULARITIES.iter() {
             let foo = TimePartitioner::get_date_component(date, &granularity)?;
-            let granularity_name = TimePartitioner::get_granularity_name(granularity);
+            let granularity_name = TimePartitioner::get_granularity_name(config, granularity);
             full_key = format!("{}/{}={}", full_key, granularity_name, foo);
 
             if granularity == &granularity_target {
@@ -77,13 +77,13 @@ impl TimePartitioner {
         }
     }
 
-    pub fn get_granularity_names() -> Vec<String> {
-        let granularity_target = Config::get_transform_batch_time_unit();
+    pub fn get_granularity_names(config: &Config) -> Vec<String> {
+        let granularity_target = config.get_transform_batch_time_unit();
 
         let mut names: Vec<String> = Vec::new();
 
         for granularity in GRANULARITIES.iter() {
-            let granularity_name = TimePartitioner::get_granularity_name(granularity);
+            let granularity_name = TimePartitioner::get_granularity_name(config, granularity);
 
             names.push(granularity_name.clone());
 
@@ -95,7 +95,7 @@ impl TimePartitioner {
         names
     }
 
-    pub fn get_granularity_values(&self) -> Result<Vec<u32>, io::Error> {
+    pub fn get_granularity_values(&self, config: &Config) -> Result<Vec<u32>, io::Error> {
         let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(&self.filename);
 
         if time_partition_str.is_empty() {
@@ -107,7 +107,7 @@ impl TimePartitioner {
 
         let date = self.parse_datetime(&time_partition_str)?;
 
-        let granularity_target = Config::get_transform_batch_time_unit();
+        let granularity_target = config.get_transform_batch_time_unit();
 
         let mut granularities: Vec<u32> = Vec::new();
 
@@ -123,8 +123,8 @@ impl TimePartitioner {
         Ok(granularities)
     }
 
-    pub fn get_granularity_name(granularity: &str) -> String {
-        let prefix = Config::get_time_partition_prefix();
+    pub fn get_granularity_name(config: &Config, granularity: &str) -> String {
+        let prefix = config.get_time_partition_prefix();
         if let Some(p) = &prefix {
             format!("{}{}", p, granularity)
         } else {

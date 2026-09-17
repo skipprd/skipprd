@@ -47,7 +47,7 @@ impl Logger {
         }))
     }
 
-    pub async fn log(&mut self, level: LogLevel, message: String) {
+    pub async fn log(&mut self, config: &Config, level: LogLevel, message: String) {
         let log = Log {
             time: SystemTime::now(),
             level,
@@ -57,13 +57,13 @@ impl Logger {
         self.logs.insert(log.clone().time, log.clone());
 
         if self.logs.len() >= self.buffer_limit {
-            self.flush().await.unwrap();
+            self.flush(config).await.unwrap();
         }
     }
 
-    pub async fn flush(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn flush(&mut self, config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         if !self.logs.is_empty() {
-            match self.log_api(self.logs.clone(), None).await {
+            match self.log_api(config, self.logs.clone(), None).await {
                 Ok(_) => {
                     info!("Successfully sent logs to API");
 
@@ -82,14 +82,15 @@ impl Logger {
 
     pub(crate) async fn log_api<'a>(
         &mut self,
+        config: &Config,
         logs: BTreeMap<SystemTime, Log>,
         exit_code: Option<i8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let tenant = Config::get_tenant();
-        let workspace = Config::get_workspace_name();
-        let pipeline = Config::get_pipeline_name();
+        let tenant = config.get_tenant();
+        let workspace = config.get_workspace_name();
+        let pipeline = config.get_pipeline_name();
 
-        let _tenant = Config::get_tenant();
+        let _tenant = config.get_tenant();
 
         let mut _run_id = "".to_string();
         {
@@ -119,7 +120,7 @@ impl Logger {
             tenant, workspace, pipeline, timestamp, _run_id
         );
 
-        let storage = crate::adapters::storage::get_storage();
+        let storage = crate::adapters::storage::get_storage(config);
         match storage.put_json(&key, &data).await {
             Ok(_) => info!("Persisted logs: {}", key),
             Err(e) => error!("Failed to persist logs: {}", e),

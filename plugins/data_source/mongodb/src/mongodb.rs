@@ -9,7 +9,6 @@ use mongodb::Client;
 use serde_derive::Deserialize;
 use tracing::{info, warn};
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use skippr_runtime_sdk::plugins::cdc::{
     source_capabilities, MongodbCheckpoint, MutationKind, WalRowMeta,
@@ -50,32 +49,6 @@ pub struct DataSourceMongodbPlugin {
 }
 
 impl DataSourceMongodbPlugin {
-    pub async fn new() -> Self {
-        let config: DataSourceMongodbPluginConfig = match Config::get_pipeline_input_plugin_config()
-        {
-            Ok(c) => c.try_into().unwrap_or_else(|e| panic!("{}", e)),
-            Err(_) => DataSourceMongodbPluginConfig {
-                connection_string: Config::getenv("MONGODB_CONNECTION_STRING", ""),
-                database: Config::getenv("MONGODB_DATABASE", ""),
-                collection: Config::getenv("MONGODB_COLLECTION", ""),
-                filter: None,
-                batch_size_rows: None,
-                format: None,
-                batch_size_bytes: Some(
-                    Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000")
-                        .parse()
-                        .unwrap_or(1_024_000),
-                ),
-                batch_size_seconds: Some(
-                    Config::getenv("DATA_SOURCE_BATCH_SIZE_SECONDS", "600")
-                        .parse()
-                        .unwrap_or(600),
-                ),
-                cdc_mode: SourceCdcMode::Snapshot,
-            },
-        };
-        Self { config }
-    }
 
     pub fn with_runtime_config(config: DataSourceMongodbPluginConfig) -> Self {
         Self { config }

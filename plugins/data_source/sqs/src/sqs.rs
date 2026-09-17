@@ -8,7 +8,6 @@ use serde_derive::Deserialize;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info};
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::RUNNING;
 use skippr_runtime_sdk::plugins::{DataSource, SourceExecutionContract, SourceOnceContract};
@@ -64,37 +63,6 @@ impl DataSourceSqsPlugin {
         DataSourceSqsPlugin { config, client }
     }
 
-    pub async fn new() -> Self {
-        let config: DataSourceSqsPluginConfig = match Config::get_pipeline_input_plugin_config() {
-            Ok(input_config) => input_config.try_into().unwrap_or_else(|e| panic!("{}", e)),
-            Err(_) => DataSourceSqsPluginConfig {
-                queue_url: Config::getenv("SQS_QUEUE_URL", ""),
-                region: {
-                    let r = Config::getenv("AWS_DEFAULT_REGION", "");
-                    if r.is_empty() {
-                        None
-                    } else {
-                        Some(r)
-                    }
-                },
-                endpoint_url: None,
-                mode: None,
-                format: None,
-                batch_size_bytes: Some(
-                    Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000")
-                        .parse::<i64>()
-                        .unwrap_or(1_024_000),
-                ),
-                batch_size_seconds: Some(
-                    Config::getenv("DATA_SOURCE_BATCH_SIZE_SECONDS", "600")
-                        .parse::<i64>()
-                        .unwrap_or(600),
-                ),
-            },
-        };
-
-        Self::from_config(config).await
-    }
 
     pub async fn with_runtime_config(config: DataSourceSqsPluginConfig) -> Self {
         Self::from_config(config).await

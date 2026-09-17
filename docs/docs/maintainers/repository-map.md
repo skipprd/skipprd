@@ -6,7 +6,7 @@ This repository is a Cargo workspace with a single host binary and many separate
 
 | Path | Responsibility |
 |---|---|
-| `src/` | Host-side Skippr application code. CLI entrypoints, ingest orchestration, WAL handling, runtime plugin discovery/hosting, and schema state live here. |
+| `python/` | PyO3 `skipprd` module. Maturin crate wrapping `Session`. Workspace member `skipprd-python`; `cargo test --workspace` `--exclude skipprd-python` because the cdylib needs Python headers. CI builds the wheel and runs `python/tests` via `scripts/test-python.sh` on Skippr Cloud runners, then publishes tagged wheels to PyPI with GitHub OIDC Trusted Publishing. |
 | `crates/skippr-core/` | Shared core logic used by the host and plugin crates. |
 | `crates/skippr-query-ballista/` | `FlightSqlExec` physical node and SkipprPhysicalCodec for Ballista 53. |
 | `src/cluster/` | Clustered WAL replica, lease scheduler, gossip, promotion, WAL head picker. |
@@ -58,6 +58,8 @@ When working on architecture boundaries, the highest-value checks are:
 - `cargo test -p skipprd --test runtime_plugin_global_guards -- --nocapture`
 - `cargo test -p skipprd --test runtime_source_plugin_guards -- --nocapture`
 - `cargo test -p skipprd --test runtime_host_contracts -- --nocapture`
-- `cargo check --workspace`
+- `cargo check --workspace --exclude skipprd-python`
+- `python3 .github/scripts/test_python_bindings_ci.py`
+- `./scripts/test-python.sh`
 
 These catch most regressions around host/plugin coupling, deleted legacy paths, and source-plugin protocol usage.

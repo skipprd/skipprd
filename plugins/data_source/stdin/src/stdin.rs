@@ -9,7 +9,6 @@ use async_trait::async_trait;
 use serde_derive::Deserialize;
 use tracing::error;
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::helpers::Helpers;
 use crate::RUNNING;
@@ -38,28 +37,6 @@ pub struct DataSourceStdinPlugin {
 }
 
 impl DataSourceStdinPlugin {
-    pub async fn new() -> Self {
-        let config: DataSourceStdinPluginConfig = match Config::get_pipeline_input_plugin_config() {
-            Ok(c) => c.try_into().unwrap_or_else(|e| panic!("{}", e)),
-            Err(_) => DataSourceStdinPluginConfig {
-                mode: Some(Config::getenv("DATA_SOURCE_STDIN_MODE", "batch")),
-                format: None,
-                batch_size_bytes: Some(
-                    Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1")
-                        .parse()
-                        .unwrap_or(1),
-                ),
-                batch_size_seconds: Some(
-                    Config::getenv("DATA_SOURCE_BATCH_SIZE_SECONDS", "1")
-                        .parse()
-                        .unwrap_or(1),
-                ),
-            },
-        };
-
-        Self { config }
-    }
-
     pub fn with_runtime_config(config: DataSourceStdinPluginConfig) -> Self {
         Self { config }
     }
@@ -91,21 +68,9 @@ impl DataSource for DataSourceStdinPlugin {
     async fn sync(&mut self, ctx: Arc<dyn SourceSyncContext>) -> Result<(), std::io::Error> {
         let (tx, rx) = mpsc::channel::<Vec<u8>>();
 
-        let buffer_size = self.config.batch_size_bytes.unwrap_or(
-            Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1")
-                .parse()
-                .unwrap_or(1),
-        ) as usize;
-        let buffer_timeout = Duration::from_secs(
-            self.config
-                .batch_size_seconds
-                .unwrap_or(
-                    Config::getenv("DATA_SOURCE_BATCH_SIZE_SECONDS", "1")
-                        .parse()
-                        .unwrap_or(1),
-                )
-                .max(0) as u64,
-        );
+        let buffer_size = self.config.batch_size_bytes.unwrap_or(1) as usize;
+        let buffer_timeout =
+            Duration::from_secs(self.config.batch_size_seconds.unwrap_or(1).max(0) as u64);
 
         thread::spawn(move || {
             let stdin = io::stdin();
@@ -146,7 +111,7 @@ impl DataSource for DataSourceStdinPlugin {
             .config
             .mode
             .clone()
-            .unwrap_or_else(|| Config::getenv("DATA_SOURCE_STDIN_MODE", "batch"));
+            .unwrap_or_else(|| "batch".to_string());
         let stream_mode = mode.eq_ignore_ascii_case("stream");
 
         let poll = Duration::from_millis(500);

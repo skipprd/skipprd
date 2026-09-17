@@ -33,8 +33,6 @@ static DISCOVERY_COMPLETE: once_cell::sync::Lazy<AtomicBool> =
     once_cell::sync::Lazy::new(|| AtomicBool::new(false));
 static DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS: once_cell::sync::Lazy<AtomicU64> =
     once_cell::sync::Lazy::new(|| AtomicU64::new(0));
-static TRANSFORM_INJECT_FIELDS: Lazy<HashMap<String, Value>> =
-    Lazy::new(Config::get_transform_inject_fields);
 use crate::metrics::counters as metrics_hot;
 use crate::metrics::ingest_profile;
 // Bounded concurrency for background metadata writes and Glue schema syncs
@@ -130,12 +128,13 @@ fn build_ingest_thread_pool(requested: usize) -> (ThreadPool, usize) {
     }
 }
 
-fn ensure_slow_ingest_worker() {
+fn ensure_slow_ingest_worker(config: &Config) {
     if SLOW_INGEST_TX.get().is_some() {
         return;
     }
     let (tx, mut rx) = mpsc::channel::<SlowIngestTask>(10_000);
     let _ = SLOW_INGEST_TX.set(tx);
+    let worker_config = config.clone();
     // Spawn single worker
     let worker = async move {
         while let Some(task) = rx.recv().await {
@@ -159,6 +158,7 @@ fn ensure_slow_ingest_worker() {
             let mut updated = "no".to_string();
             let ingest_result = if let Some(ns_meta) = md_local.metadata.get_mut(&task.namespace) {
                 ingest(
+                    &worker_config,
                     task.record.inner(),
                     &mut ns_meta.fields,
                     &task.namespace,
@@ -182,23 +182,25 @@ fn ensure_slow_ingest_worker() {
                             Ok(_) => {
                                 METADATA.store(Arc::new(md_local.clone()));
                                 let _ = Ingest::prepare_arrow_schema_with_metadata(
+                                    &worker_config,
                                     &task.namespace,
                                     &md_local.metadata,
                                     task.flatten,
                                 );
 
-                                if let Err(err) =
-                                    Config::sync_output_schema_namespace_blocking(&task.namespace)
-                                        .await
+                                if let Err(err) = worker_config
+                                    .sync_output_schema_namespace_blocking(&task.namespace)
+                                    .await
                                 {
                                     Err(err)
                                 } else {
                                     if let Ok(handle) = tokio::runtime::Handle::try_current() {
                                         let md_clone = md_local.clone();
                                         let sem = METADATA_WRITE_SEM.clone();
+                                        let cfg = worker_config.clone();
                                         handle.spawn(async move {
                                             let _permit = sem.acquire().await;
-                                            Config::set_metadata(&md_clone, false).await;
+                                            cfg.set_metadata(&md_clone, false).await;
                                         });
                                     } else {
                                         error!(
@@ -244,24 +246,26 @@ fn merge_inject_fields(record: &mut Value, fields: &HashMap<String, Value>) {
     }
 }
 
-fn apply_transform_inject_fields(record: &mut Value) {
-    if TRANSFORM_INJECT_FIELDS.is_empty() {
+fn apply_transform_inject_fields(config: &Config, record: &mut Value) {
+    let fields = config.get_transform_inject_fields();
+    if fields.is_empty() {
         return;
     }
-    merge_inject_fields(record, &*TRANSFORM_INJECT_FIELDS);
+    merge_inject_fields(record, &fields);
 }
 
 const EMPTY_PARTITION: &str = "";
 
 fn ndjson_object_stream_eligible(
+    config: &Config,
     format: InputFormat,
     payload: &str,
     entity_field_dot: &str,
     is_cdc_batch: bool,
 ) -> bool {
     format == InputFormat::Json
-        && !Config::get_enable_single_quote_parsing()
-        && !Config::get_enable_unicode_parsing()
+        && !config.get_enable_single_quote_parsing()
+        && !config.get_enable_unicode_parsing()
         && entity_field_dot.is_empty()
         && !is_cdc_batch
         && {
@@ -418,11 +422,12 @@ fn count_logical_ingest_records(records: &[Value]) -> usize {
 }
 
 fn slow_ingest_blocking(
+    config: &Config,
     namespace: &str,
     record: &SourceRecord,
     flatten: bool,
 ) -> Result<Value, String> {
-    ensure_slow_ingest_worker();
+    ensure_slow_ingest_worker(config);
     let tx = SLOW_INGEST_TX
         .get()
         .expect("slow ingest channel unavailable")
@@ -561,6 +566,7 @@ fn track_partition_offset_with_schema(
 }
 
 fn track_partition_offset(
+    config: &Config,
     buf: &mut HashMap<IngestPartitionKey, IngestBufferBatch>,
     primary_sink_ref: &str,
     schema_hash_cache: &mut HashMap<String, SchemaHash>,
@@ -573,7 +579,7 @@ fn track_partition_offset(
     cdc_meta: Option<crate::plugins::cdc::WalRowMeta>,
     cdc_row_buf: &mut HashMap<IngestPartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
 ) -> IngestPartitionKey {
-    let schema_hash = resolve_partition_schema(ns, flatten, schema_hash_cache);
+    let schema_hash = resolve_partition_schema(config, ns, flatten, schema_hash_cache);
     track_partition_offset_with_schema(
         buf,
         primary_sink_ref,
@@ -589,6 +595,7 @@ fn track_partition_offset(
 }
 
 fn enqueue_legacy_record(
+    config: &Config,
     buf: &mut HashMap<IngestPartitionKey, IngestBufferBatch>,
     raw_values: &mut HashMap<IngestPartitionKey, Vec<IngestRecord>>,
     cdc_row_buf: &mut HashMap<IngestPartitionKey, Vec<crate::plugins::cdc::WalRowMeta>>,
@@ -605,6 +612,7 @@ fn enqueue_legacy_record(
     cdc_meta: Option<crate::plugins::cdc::WalRowMeta>,
 ) {
     let key = track_partition_offset(
+        config,
         buf,
         primary_sink_ref,
         schema_hash_cache,
@@ -643,6 +651,7 @@ fn enqueue_legacy_record(
 }
 
 fn resolve_partition_schema(
+    config: &Config,
     ns: &str,
     flatten: bool,
     cache: &mut HashMap<String, SchemaHash>,
@@ -658,7 +667,7 @@ fn resolve_partition_schema(
         }
     }
     let md_snapshot = METADATA.load();
-    let sh = Ingest::load_stable_schema_hash(ns, &md_snapshot.metadata, flatten);
+    let sh = Ingest::load_stable_schema_hash(config, ns, &md_snapshot.metadata, flatten);
     drop(md_snapshot);
     cache.insert(ns.to_string(), sh.clone());
     sh
@@ -675,6 +684,7 @@ pub(crate) fn namespace_schema_version(ns: &str) -> u64 {
 /// before parallel ingest. Without this, fast-path ingest fails with "No default message
 /// template found" on namespaces that have not yet flushed a successful batch.
 pub(crate) async fn warm_output_schemas_for_metadata(
+    config: &Config,
     metadata: &HashMap<String, Metadata>,
     flatten: bool,
 ) {
@@ -682,21 +692,25 @@ pub(crate) async fn warm_output_schemas_for_metadata(
         if ns.is_empty() || ns.starts_with("_dl_") {
             continue;
         }
-        let _ = Ingest::prepare_arrow_schema_with_metadata(ns, metadata, flatten);
-        if let Err(err) = Config::sync_output_schema_namespace_blocking(ns.as_str()).await {
+        let _ = Ingest::prepare_arrow_schema_with_metadata(config, ns, metadata, flatten);
+        if let Err(err) = config
+            .sync_output_schema_namespace_blocking(ns.as_str())
+            .await
+        {
             warn!("Schema pre-warm sync failed for namespace {}: {}", ns, err);
         }
     }
 }
 
-fn ensure_output_schema_synced_for_namespace(ns: &str) -> Result<(), String> {
+fn ensure_output_schema_synced_for_namespace(config: &Config, ns: &str) -> Result<(), String> {
     if ns.is_empty() || ns.starts_with("_dl_") {
         return Ok(());
     }
 
+    let key = config.schema_publication_identity(ns);
     let target_version = std::cmp::max(namespace_schema_version(ns), 1);
     if SCHEMA_SYNCED_VERSION
-        .get(ns)
+        .get(&key)
         .map(|v| v.value().load(Ordering::Acquire) >= target_version)
         .unwrap_or(false)
     {
@@ -704,20 +718,20 @@ fn ensure_output_schema_synced_for_namespace(ns: &str) -> Result<(), String> {
     }
 
     let lock = SCHEMA_SYNC_LOCKS
-        .entry(ns.to_string())
+        .entry(key.clone())
         .or_insert_with(|| Arc::new(std::sync::Mutex::new(())))
         .clone();
     let _guard = lock.lock().unwrap();
 
     let target_version = std::cmp::max(namespace_schema_version(ns), 1);
     let synced_entry = SCHEMA_SYNCED_VERSION
-        .entry(ns.to_string())
+        .entry(key)
         .or_insert_with(|| AtomicU64::new(0));
     if synced_entry.load(Ordering::Acquire) >= target_version {
         return Ok(());
     }
 
-    INGEST_RT.block_on(Config::sync_output_schema_namespace_blocking(ns))?;
+    INGEST_RT.block_on(config.sync_output_schema_namespace_blocking(ns))?;
     synced_entry.store(target_version, Ordering::Release);
     Ok(())
 }
@@ -869,8 +883,8 @@ fn should_ingest_at_offset(
 /// Delegates to [`Helpers::clean_field_name`] (same rules as legacy namespace parsing):
 /// lowercase snake_case, non-alphanumeric characters → `_`, collapsed underscores.
 /// Apply once at ingest; sinks (Athena, Glue, etc.) must use the namespace as-is.
-pub fn storage_namespace(namespace: &str) -> String {
-    Helpers::clean_field_name(namespace.to_string())
+pub fn storage_namespace(config: &Config, namespace: &str) -> String {
+    Helpers::clean_field_name(config, namespace.to_string())
 }
 
 static STORAGE_PATH_NON_ALNUM: Lazy<regex::Regex> =
@@ -893,7 +907,7 @@ fn storage_path_token(raw: &str) -> String {
 ///
 /// Hive-style paths (`col=val/...`) keep `/` and `=`; segment names use [`Helpers::clean_field_name`];
 /// values use [`storage_path_token`] so years and timestamps keep leading digits.
-pub fn storage_partition(partition: &str) -> String {
+pub fn storage_partition(config: &Config, partition: &str) -> String {
     if partition.is_empty() {
         return String::new();
     }
@@ -905,11 +919,11 @@ pub fn storage_partition(partition: &str) -> String {
                 if let Some((key, value)) = segment.split_once('=') {
                     format!(
                         "{}={}",
-                        Helpers::clean_field_name(key.to_string()),
+                        Helpers::clean_field_name(config, key.to_string()),
                         storage_path_token(value)
                     )
                 } else {
-                    Helpers::clean_field_name(segment.to_string())
+                    Helpers::clean_field_name(config, segment.to_string())
                 }
             })
             .collect::<Vec<_>>()
@@ -933,11 +947,11 @@ thread_local! {
     pub static PARTITION_ALLOWED_VALUES_CACHE: Lazy<RwLock<HashSet<String>>> = Lazy::new(|| RwLock::new(HashSet::new()));
 }
 
-fn cleaned_partition_allowed_values(raw: &str) -> HashSet<String> {
+fn cleaned_partition_allowed_values(config: &Config, raw: &str) -> HashSet<String> {
     raw.split(',')
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .map(|value| Helpers::clean_field_name(value.to_string()))
+        .map(|value| Helpers::clean_field_name(config, value.to_string()))
         .filter(|value| !value.is_empty())
         .collect()
 }
@@ -949,8 +963,8 @@ mod partition_allowed_values_tests {
 
     #[test]
     fn empty_partition_allowed_values_remain_unrestricted() {
-        assert!(cleaned_partition_allowed_values("").is_empty());
-        assert!(cleaned_partition_allowed_values(" , ").is_empty());
+        assert!(cleaned_partition_allowed_values(&Config::new(), "").is_empty());
+        assert!(cleaned_partition_allowed_values(&Config::new(), " , ").is_empty());
     }
 
     #[test]
@@ -960,7 +974,7 @@ mod partition_allowed_values_tests {
         Config::reset_envcache();
         Config::set_evncache("TRANSFORM_FLATTEN_EVENTS", "no");
 
-        let allowed = cleaned_partition_allowed_values("Foo Bar, 123, , baz");
+        let allowed = cleaned_partition_allowed_values(&Config::new(), "Foo Bar, 123, , baz");
 
         assert!(allowed.contains("foo_bar"));
         assert!(allowed.contains("item_123"));
@@ -1005,12 +1019,13 @@ impl IngestBatch {
     }
 
     pub fn normalized_offset_key(
+        config: &Config,
         namespace: impl Into<String>,
         partition: impl Into<String>,
     ) -> OffsetKey {
         OffsetKey {
-            namespace: storage_namespace(&namespace.into()),
-            partition: storage_partition(&partition.into()),
+            namespace: storage_namespace(config, &namespace.into()),
+            partition: storage_partition(config, &partition.into()),
         }
     }
 
@@ -1022,14 +1037,16 @@ impl IngestBatch {
     /// path segments under `flatten_events`), so list-time validation must use this twice-applied
     /// form to match Closed offsets written by prior host ingest.
     pub fn runtime_roundtrip_offset_key(
+        config: &Config,
         namespace: impl Into<String>,
         partition: impl Into<String>,
     ) -> OffsetKey {
-        let once = Self::normalized_offset_key(namespace, partition);
-        Self::normalized_offset_key(once.namespace, once.partition)
+        let once = Self::normalized_offset_key(config, namespace, partition);
+        Self::normalized_offset_key(config, once.namespace, once.partition)
     }
 
     pub fn new(
+        config: &Config,
         offset_key: OffsetKey,
         data: String,
         bytes: usize,
@@ -1037,19 +1054,21 @@ impl IngestBatch {
         namespace: Option<String>,
         cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
     ) -> Self {
-        let offset_key = Self::normalized_offset_key(offset_key.namespace, offset_key.partition);
+        let offset_key =
+            Self::normalized_offset_key(config, offset_key.namespace, offset_key.partition);
         Self {
             offset_key,
             data,
             bytes,
             offset_pos: None,
             source_uri,
-            namespace: namespace.map(|ns| storage_namespace(&ns)),
+            namespace: namespace.map(|ns| storage_namespace(config, &ns)),
             cdc_rows: Self::normalize_cdc_rows(cdc_rows),
         }
     }
 
     pub fn new_with_offset_pos(
+        config: &Config,
         offset_key: OffsetKey,
         data: String,
         bytes: usize,
@@ -1058,7 +1077,9 @@ impl IngestBatch {
         namespace: Option<String>,
         cdc_rows: Option<Vec<crate::plugins::cdc::WalRowMeta>>,
     ) -> Self {
-        let mut batch = Self::new(offset_key, data, bytes, source_uri, namespace, cdc_rows);
+        let mut batch = Self::new(
+            config, offset_key, data, bytes, source_uri, namespace, cdc_rows,
+        );
         batch.offset_pos = Some(offset_pos);
         batch
     }
@@ -1101,6 +1122,7 @@ mod ingest_batch_tests {
     #[test]
     fn explicit_offset_pos_overrides_line_number() {
         let batch = IngestBatch::new_with_offset_pos(
+            &Config::new(),
             OffsetKey::new("postgres.orders", "orders"),
             "{}".to_string(),
             2,
@@ -1117,6 +1139,7 @@ mod ingest_batch_tests {
     #[test]
     fn default_offset_pos_uses_line_number() {
         let batch = IngestBatch::new(
+            &Config::new(),
             OffsetKey::new("file.orders", "orders"),
             "{}".to_string(),
             2,
@@ -1132,10 +1155,12 @@ mod ingest_batch_tests {
     fn normalized_offset_key_matches_constructor() {
         let raw_key = OffsetKey::new("source-bucket", "raw/path/date=2026-06-24/file-1.json.gz");
         let helper_key = IngestBatch::normalized_offset_key(
+            &Config::new(),
             raw_key.namespace.clone(),
             raw_key.partition.clone(),
         );
         let batch = IngestBatch::new(
+            &Config::new(),
             raw_key,
             "{}".to_string(),
             2,
@@ -1160,8 +1185,9 @@ mod ingest_batch_tests {
         // Unique suffix avoids CLEAN_FIELD_CACHE pollution from other tests.
         let object_key = "data/2021/05/19/11/Production-DataStorage-Stack-v3firehose-roundtrip-probe-aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee";
 
-        let once = IngestBatch::normalized_offset_key(bucket, object_key);
+        let once = IngestBatch::normalized_offset_key(&Config::new(), bucket, object_key);
         let plugin_batch = IngestBatch::new(
+            &Config::new(),
             OffsetKey::new(bucket, object_key),
             "{}".to_string(),
             2,
@@ -1172,8 +1198,9 @@ mod ingest_batch_tests {
         assert_eq!(plugin_batch.offset_key, once);
 
         let wire: RuntimeRawIngestBatch = plugin_batch.clone().into();
-        let host_batch = IngestBatch::from(wire);
-        let roundtrip = IngestBatch::runtime_roundtrip_offset_key(bucket, object_key);
+        let host_batch = IngestBatch::from_runtime(&Config::new(), wire);
+        let roundtrip =
+            IngestBatch::runtime_roundtrip_offset_key(&Config::new(), bucket, object_key);
 
         assert_eq!(host_batch.offset_key, roundtrip);
         assert_ne!(
@@ -1201,9 +1228,10 @@ impl From<IngestBatch> for RuntimeRawIngestBatch {
     }
 }
 
-impl From<RuntimeRawIngestBatch> for IngestBatch {
-    fn from(batch: RuntimeRawIngestBatch) -> Self {
+impl IngestBatch {
+    pub fn from_runtime(config: &Config, batch: RuntimeRawIngestBatch) -> Self {
         let mut ingest_batch = IngestBatch::new(
+            config,
             batch.offset_key,
             batch.data,
             batch.bytes,
@@ -1278,6 +1306,7 @@ pub struct ThroughputMetrics {
 /// Main struct for managing ingestion of data
 /// Handles queueing, processing, and distribution of tasks to worker threads
 pub struct Ingest {
+    app_config: Config,
     thread_pool: Arc<ThreadPool>,
     num_cpus: usize,
     execution_mode: RuntimeExecutionMode,
@@ -1365,12 +1394,12 @@ impl Ingest {
     }
 
     #[cfg(unix)]
-    fn data_dir_disk_usage() -> Option<(u64, u64, f64)> {
+    fn data_dir_disk_usage(config: &Config) -> Option<(u64, u64, f64)> {
         use std::ffi::CString;
         use std::os::unix::ffi::OsStrExt;
         use std::path::Path;
 
-        let data_dir = Config::get_data_dir();
+        let data_dir = config.get_data_dir();
         let path = Path::new(&data_dir);
         let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
         let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
@@ -1427,6 +1456,7 @@ impl Ingest {
     }
 
     fn evaluate_exhausted_pause_escape(
+        config: &Config,
         avail_bytes: u64,
         total_bytes: u64,
         used_pct: f64,
@@ -1440,12 +1470,12 @@ impl Ingest {
                 message: format!(
                     "DATA_DIR pause escape found {} unreadable committed WAL segment(s) for pipeline {}; integrity check required before resuming ingest",
                     reconcile.unreadable_segments,
-                    Config::get_pipeline_name()
+                    config.get_pipeline_name()
                 ),
             };
         }
 
-        let pressure = crate::buffer::ingest_buffer::Buffers::wal_pressure_snapshot();
+        let pressure = crate::buffer::ingest_buffer::Buffers::wal_pressure_snapshot(config);
         if reconcile.schedulable_refs > 0
             || pressure.wal_compactions_in_flight > 0
             || pressure.sink_work_in_flight > 0
@@ -1465,12 +1495,13 @@ impl Ingest {
     }
 
     fn log_yield_pipeline_after_wal_drain(
+        config: &Config,
         avail_bytes: u64,
         total_bytes: u64,
         used_pct: f64,
         low_watermark: u8,
     ) {
-        let progress = crate::buffer::ingest_buffer::Buffers::pause_progress_snapshot();
+        let progress = crate::buffer::ingest_buffer::Buffers::pause_progress_snapshot(config);
         info!(
             "Yielding pipeline after WAL drain: DATA_DIR usage {:.1}% remains above low watermark {}% (free {} / total {}). Advancing so other pipelines can compact. pipeline={}, committed_segments={}, indexed_refs={}, bytes_reclaimed={}, last_progress_age_secs={:?}",
             used_pct,
@@ -1486,6 +1517,7 @@ impl Ingest {
     }
 
     fn attempt_pause_escape(
+        config: &Config,
         avail_bytes: u64,
         total_bytes: u64,
         used_pct: f64,
@@ -1493,12 +1525,14 @@ impl Ingest {
         high_watermark: u8,
         low_watermark: u8,
     ) -> DataDirCapacityDecision {
-        let _sweep = crate::buffer::ingest_buffer::Buffers::sweep_pressure_safe();
-        let reconcile = crate::buffer::ingest_buffer::Buffers::reconcile_missing_cache_entries();
-        let refreshed = Self::data_dir_disk_usage();
+        let _sweep = crate::buffer::ingest_buffer::Buffers::sweep_pressure_safe(config);
+        let reconcile =
+            crate::buffer::ingest_buffer::Buffers::reconcile_missing_cache_entries(config);
+        let refreshed = Self::data_dir_disk_usage(config);
         let (avail_bytes, total_bytes, used_pct) =
             refreshed.unwrap_or((avail_bytes, total_bytes, used_pct));
         Self::evaluate_exhausted_pause_escape(
+            config,
             avail_bytes,
             total_bytes,
             used_pct,
@@ -1518,7 +1552,7 @@ impl Ingest {
         }
     }
 
-    fn wait_for_data_dir_capacity() -> bool {
+    fn wait_for_data_dir_capacity(config: &Config) -> bool {
         if crate::data_dir_capacity_exceeded() {
             return false;
         }
@@ -1528,7 +1562,8 @@ impl Ingest {
         let mut paused = data_dir_ingest_paused();
 
         loop {
-            let Some((avail_bytes, total_bytes, used_pct)) = Self::data_dir_disk_usage() else {
+            let Some((avail_bytes, total_bytes, used_pct)) = Self::data_dir_disk_usage(config)
+            else {
                 if paused {
                     set_data_dir_ingest_paused(false);
                 }
@@ -1544,8 +1579,9 @@ impl Ingest {
                 if !should_block {
                     return true;
                 }
-                if !Buffers::has_reclaimable_wal() {
+                if !Buffers::has_reclaimable_wal(config) {
                     match Self::attempt_pause_escape(
+                        config,
                         avail_bytes,
                         total_bytes,
                         used_pct,
@@ -1563,6 +1599,7 @@ impl Ingest {
                             // Keep ingest paused so the next pipeline force-compacts immediately.
                             set_data_dir_ingest_paused(true);
                             Self::log_yield_pipeline_after_wal_drain(
+                                config,
                                 avail_bytes,
                                 total_bytes,
                                 used_pct,
@@ -1583,7 +1620,8 @@ impl Ingest {
                 }
                 if paused {
                     DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS.store(0, Ordering::Relaxed);
-                    let progress = crate::buffer::ingest_buffer::Buffers::pause_progress_snapshot();
+                    let progress =
+                        crate::buffer::ingest_buffer::Buffers::pause_progress_snapshot(config);
                     if below_min_free {
                         warn!(
                         "Pausing ingest: free {} is below minimum {} (usage {:.1}%, total {}). Force compaction will run with raised concurrency until resume thresholds are met. WAL state: pipeline={}, committed_segments={}, indexed_refs={}, schedulable_refs={}",
@@ -1624,8 +1662,9 @@ impl Ingest {
                 return true;
             }
 
-            if Buffers::current_pipeline_work_exhausted() {
+            if Buffers::current_pipeline_work_exhausted(config) {
                 match Self::attempt_pause_escape(
+                    config,
                     avail_bytes,
                     total_bytes,
                     used_pct,
@@ -1649,6 +1688,7 @@ impl Ingest {
                         // Keep ingest paused so the next pipeline force-compacts immediately.
                         set_data_dir_ingest_paused(true);
                         Self::log_yield_pipeline_after_wal_drain(
+                            config,
                             avail_bytes,
                             total_bytes,
                             used_pct,
@@ -1671,7 +1711,8 @@ impl Ingest {
             let last_log = DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS.load(Ordering::Relaxed);
             if now_secs.saturating_sub(last_log) >= 30 {
                 DATA_DIR_INGEST_PAUSE_LAST_LOG_SECS.store(now_secs, Ordering::Relaxed);
-                let progress = crate::buffer::ingest_buffer::Buffers::pause_progress_snapshot();
+                let progress =
+                    crate::buffer::ingest_buffer::Buffers::pause_progress_snapshot(config);
                 info!(
                     "Ingest remains paused: DATA_DIR usage {:.1}% (resume below {}%, free {} / total {}). WAL pressure: pipeline={}, committed_segments={}, indexed_refs={}, schedulable_refs={}, sink_work_inflight={}, wal_compactions_inflight={}, segments_deleted={}, bytes_reclaimed={}, last_progress_age_secs={:?}, wal_compactions_completed={}, wal_txn_completed={}, wal_refs_tombstoned={}",
                     used_pct,
@@ -1754,11 +1795,14 @@ impl Ingest {
         budget
     }
 
-    fn autotuned_ingest_admission_budget_bytes(num_ingest_threads: usize) -> usize {
+    fn autotuned_ingest_admission_budget_bytes(
+        config: &Config,
+        num_ingest_threads: usize,
+    ) -> usize {
         let hint = crate::buffer::s3_wal_memory_budget::memory_hint_bytes()
             .unwrap_or(crate::buffer::s3_wal_memory_budget::FALLBACK_MEMORY_HINT_BYTES);
         let wal_s3 = matches!(
-            Config::get_wal_storage(),
+            config.get_wal_storage(),
             crate::helpers::wal_storage::WalStorage::S3
         );
         Self::compute_admission_budget_bytes(hint, wal_s3, num_ingest_threads)
@@ -1770,7 +1814,7 @@ impl Ingest {
             return;
         }
         let outstanding = self.outstanding_bytes.load(Ordering::Acquire);
-        let budget = Self::autotuned_ingest_admission_budget_bytes(self.num_cpus);
+        let budget = Self::autotuned_ingest_admission_budget_bytes(&self.app_config, self.num_cpus);
         let ql = self.queue_length.load(Ordering::Acquire);
         let active = self.active_count.load(Ordering::Acquire);
         info!(
@@ -1837,6 +1881,7 @@ impl Ingest {
     }
     #[inline]
     fn load_stable_schema_hash(
+        config: &Config,
         skpr_namespace: &str,
         metadata: &HashMap<String, Metadata>,
         flatten: bool,
@@ -1860,6 +1905,7 @@ impl Ingest {
                 let _guard = lock.lock().unwrap();
                 if ARROW_SCHEMA.get(skpr_namespace).is_none() {
                     let _ = Ingest::prepare_arrow_schema_with_metadata(
+                        config,
                         skpr_namespace,
                         metadata,
                         flatten,
@@ -1893,11 +1939,11 @@ impl Ingest {
             iters += 1;
         }
     }
-    pub fn new() -> Ingest {
-        Self::new_for_execution(RuntimeExecutionMode::Sync)
+    pub fn new(config: &Config) -> Ingest {
+        Self::new_for_execution(config, RuntimeExecutionMode::Sync)
     }
 
-    pub fn new_for_execution(execution_mode: RuntimeExecutionMode) -> Ingest {
+    pub fn new_for_execution(config: &Config, execution_mode: RuntimeExecutionMode) -> Ingest {
         // We always want to use all cores unless overridden by env
         // On CI, cap default threads to reduce contention unless explicitly overridden
         let is_ci = {
@@ -1983,7 +2029,7 @@ impl Ingest {
             );
         }
         let num_cpus = effective_cpus;
-        crate::buffer::wal_writer::start(num_cpus);
+        crate::buffer::wal_writer::start(config, num_cpus);
         let thread_pool = Arc::new(thread_pool);
         let thread_pool_clone = thread_pool.clone();
 
@@ -1994,6 +2040,7 @@ impl Ingest {
                 .parse::<usize>()
                 .unwrap_or(if is_ci { 1 } else { 2 });
         let max_queue_length = (num_cpus * queue_factor).max(num_cpus);
+        let worker_config = config.clone();
         std::thread::spawn(move || {
             while let Ok(completed_bytes) = rx.recv() {
                 // Check if we're shutting down
@@ -2066,10 +2113,12 @@ impl Ingest {
 
                         let queued_handle = shared_handle.clone();
                         let completed_bytes: u64 = datas_clone.iter().map(|b| b.bytes as u64).sum();
+                        let queued_config = worker_config.clone();
                         thread_pool_clone.execute(move || {
                             let result =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     Ingest::process_batch(
+                                        &queued_config,
                                         &datas_clone,
                                         &offset_db_clone,
                                         queued_handle,
@@ -2102,6 +2151,7 @@ impl Ingest {
         // let adjustment_cooldown = Duration::from_secs(10); // 10 second cooldown between adjustments
 
         Ingest {
+            app_config: config.clone(),
             num_cpus,
             execution_mode,
             thread_pool,
@@ -2201,6 +2251,7 @@ impl Ingest {
     /// Returns: A ThroughputMetrics struct containing current system state and optimal chunk size
     pub fn ingest_file(
         &self,
+        config: &Config,
         ingest_batches: &Arc<IngestTasks>,
         offset_db: &Arc<Offsets>,
         shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
@@ -2246,6 +2297,7 @@ impl Ingest {
                             }
                         };
                         count += self.analyse_schema.infer_json_schema(
+                            config,
                             &mut data.data.clone(),
                             Some(max_records),
                             &mut pipeline_metadata.metadata,
@@ -2282,13 +2334,15 @@ impl Ingest {
                         }
 
                         let flatten = Config::truth_value(
-                            &Config::get_transform_config()
+                            &config
+                                .get_transform_config()
                                 .flatten_events
                                 .unwrap_or("false".to_string()),
                         );
 
                         for (_namespace, metadata) in pipeline_metadata.metadata.iter_mut() {
                             AnalyseSchema::determine_field_types(
+                                config,
                                 &mut metadata.fields,
                                 None,
                                 flatten,
@@ -2298,7 +2352,7 @@ impl Ingest {
                         info!("Schema discovery complete, writing metadata to Skippr");
 
                         pipeline_metadata.enabled = true;
-                        INGEST_RT.block_on(Config::set_metadata(&pipeline_metadata, false));
+                        INGEST_RT.block_on(config.set_metadata(&pipeline_metadata, false));
                         DISCOVERY_COMPLETE.store(true, Ordering::Release);
                     }
 
@@ -2327,7 +2381,7 @@ impl Ingest {
             let mut _active_threads_snapshot = self.active_count.load(Ordering::SeqCst);
 
             for datas in ingest_batches.tasks.iter() {
-                if !Self::wait_for_data_dir_capacity() {
+                if !Self::wait_for_data_dir_capacity(config) {
                     info!("Stopping ingest after DATA_DIR capacity exhaustion");
                     // Units already registered with the WAL writer must resolve. YieldPipeline
                     // does not set DATA_DIR_CAPACITY_EXCEEDED, so without an explicit fail the
@@ -2343,7 +2397,8 @@ impl Ingest {
                 }
                 let task_bytes: usize = datas.datas.iter().map(|v| v.bytes).sum();
                 let byte_budget =
-                    Self::autotuned_ingest_admission_budget_bytes(self.num_cpus).max(task_bytes);
+                    Self::autotuned_ingest_admission_budget_bytes(&self.app_config, self.num_cpus)
+                        .max(task_bytes);
                 let (lock, cv) = &*self.queue_cv;
                 let mut guard = lock.lock().unwrap();
                 let mut pressure_logged = false;
@@ -2382,6 +2437,7 @@ impl Ingest {
                     let shared_output_clone = shared_output.clone();
                     let submit_id = datas.submit_id;
                     let completed_bytes: u64 = datas_clone.iter().map(|b| b.bytes as u64).sum();
+                    let cfg = config.clone();
 
                     // Increment active count and queue length before spawning
                     self.active_count.fetch_add(1, Ordering::Acquire);
@@ -2398,6 +2454,7 @@ impl Ingest {
                         // Ensure panics do not wedge queue accounting; always signal completion
                         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                             Ingest::process_batch(
+                                &cfg,
                                 &datas_clone,
                                 &offset_db_clone,
                                 handle,
@@ -2521,7 +2578,8 @@ impl Ingest {
             );
             if Config::log_wal_enabled() {
                 let outstanding = self.outstanding_bytes.load(Ordering::Acquire);
-                let budget = Self::autotuned_ingest_admission_budget_bytes(self.num_cpus);
+                let budget =
+                    Self::autotuned_ingest_admission_budget_bytes(&self.app_config, self.num_cpus);
                 info!(
                     "ingest WAL pressure (post-submit): outstanding_bytes={} admission_budget_bytes={}",
                     outstanding, budget
@@ -2539,13 +2597,14 @@ impl Ingest {
     }
 
     fn process_batch(
+        config: &Config,
         datas: &Arc<Vec<IngestBatch>>,
         offset_db_clone: &Arc<Offsets>,
         handle: runtime::Handle,
         _shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
         submit_id: u64,
     ) {
-        if !Self::wait_for_data_dir_capacity() {
+        if !Self::wait_for_data_dir_capacity(config) {
             if submit_id != 0 {
                 crate::buffer::wal_writer::fail_request(
                     submit_id,
@@ -2560,21 +2619,21 @@ impl Ingest {
             panic!("host ingest must use local offsets; runtime sources submit payloads through SourceSyncContext");
         }
 
-        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values = config.get_partition_allowed_values();
 
         PARTITION_ALLOWED_VALUES_CACHE.with(|cache| {
             let mut w = cache.write().unwrap();
             if w.is_empty() {
-                w.extend(cleaned_partition_allowed_values(&allowed_values));
+                w.extend(cleaned_partition_allowed_values(config, &allowed_values));
             }
         });
 
         let _default_schema_hash = format!("{:?}", md5::compute(Helpers::random_str(10)));
 
-        let transform_snap = IngestTransformSnapshot::capture();
+        let transform_snap = IngestTransformSnapshot::capture(config);
         let flatten = transform_snap.flatten;
 
-        let data_dir = Config::get_data_dir();
+        let data_dir = config.get_data_dir();
         let _output_dir = format!("{}/output", data_dir);
 
         let _aprox_now = SystemTime::now();
@@ -2607,15 +2666,15 @@ impl Ingest {
         let mut _j = 0;
         let x = 0;
 
-        let primary_sink_ref = Config::get_pipeline_output_sink_ref();
-        let deadletter_sink_ref = Config::get_pipeline_deadletters_ref();
+        let primary_sink_ref = config.get_pipeline_output_sink_ref();
+        let deadletter_sink_ref = config.get_pipeline_deadletters_ref();
         if deadletter_sink_ref.is_some() {
-            deadletter::ensure_namespace_registered();
+            deadletter::ensure_namespace_registered(config);
         }
         let mut dl_records: Vec<DeadletterRecord> = Vec::new();
         let mut dl_offsets: HashMap<OffsetKey, u64> = HashMap::new();
 
-        let format = match Config::get_pipeline_input_plugin_config() {
+        let format = match config.get_pipeline_input_plugin_config() {
             Ok(plugin) => plugin.input_format(),
             Err(_) => Default::default(),
         };
@@ -2644,7 +2703,7 @@ impl Ingest {
         #[cfg(not(test))]
         let use_exact_arrow = true;
 
-        let pipeline_name_cached = Config::get_pipeline_name();
+        let pipeline_name_cached = config.get_pipeline_name();
         let mut schema_hash_cache: HashMap<String, SchemaHash> = HashMap::new();
         for ingest_batch in datas.iter() {
             bytes += ingest_batch.data.len() as u64;
@@ -2671,6 +2730,7 @@ impl Ingest {
             let track_position = is_cdc_batch || ingest_batch.offset_pos.is_some();
 
             let use_ndjson_stream = ndjson_object_stream_eligible(
+                config,
                 format,
                 &ingest_batch.data,
                 &entity_field_dot,
@@ -2682,32 +2742,35 @@ impl Ingest {
                 IngestFlattenIter::from_ndjson(&ingest_batch.data)
             } else {
                 let decode_started = Instant::now();
-                let mut records: Vec<Value> = match decode_records(format, &ingest_batch.data) {
-                    Ok(records) => records,
-                    Err(err) => {
-                        ingest_profile::add_decode_ns(decode_started.elapsed().as_nanos() as u64);
-                        let decode_offset_pos = ingest_batch.data.lines().count().max(1) as u64;
-                        dl_records.push(DeadletterRecord {
-                            namespace: Config::get_pipeline_name(),
-                            record: ingest_batch.data.clone(),
-                            error: err.to_string(),
-                            failure_code: "INPUT_FORMAT".to_string(),
-                            event_time: None,
-                            source_uri: ingest_batch.source_uri.clone(),
-                            offset_key: format!(
-                                "{}:{}",
-                                ingest_batch.offset_key.namespace,
-                                ingest_batch.offset_key.partition
-                            ),
-                            offset_pos: 1,
-                        });
-                        dl_offsets
-                            .entry(ingest_batch.offset_key.clone())
-                            .and_modify(|pos| *pos = (*pos).max(decode_offset_pos))
-                            .or_insert(decode_offset_pos);
-                        continue;
-                    }
-                };
+                let mut records: Vec<Value> =
+                    match decode_records(config, format, &ingest_batch.data) {
+                        Ok(records) => records,
+                        Err(err) => {
+                            ingest_profile::add_decode_ns(
+                                decode_started.elapsed().as_nanos() as u64
+                            );
+                            let decode_offset_pos = ingest_batch.data.lines().count().max(1) as u64;
+                            dl_records.push(DeadletterRecord {
+                                namespace: config.get_pipeline_name(),
+                                record: ingest_batch.data.clone(),
+                                error: err.to_string(),
+                                failure_code: "INPUT_FORMAT".to_string(),
+                                event_time: None,
+                                source_uri: ingest_batch.source_uri.clone(),
+                                offset_key: format!(
+                                    "{}:{}",
+                                    ingest_batch.offset_key.namespace,
+                                    ingest_batch.offset_key.partition
+                                ),
+                                offset_pos: 1,
+                            });
+                            dl_offsets
+                                .entry(ingest_batch.offset_key.clone())
+                                .and_modify(|pos| *pos = (*pos).max(decode_offset_pos))
+                                .or_insert(decode_offset_pos);
+                            continue;
+                        }
+                    };
                 ingest_profile::add_decode_ns(decode_started.elapsed().as_nanos() as u64);
                 if Config::debug_enabled() {
                     debug!(
@@ -2753,7 +2816,7 @@ impl Ingest {
                 match item {
                     IngestFlattenItem::NotObject { line, offset_pos } => {
                         dl_records.push(DeadletterRecord {
-                            namespace: Config::get_pipeline_name(),
+                            namespace: config.get_pipeline_name(),
                             record: line,
                             error: "Source data is not an object or array".to_string(),
                             failure_code: "INPUT_FORMAT".to_string(),
@@ -2779,7 +2842,7 @@ impl Ingest {
                         error,
                     } => {
                         dl_records.push(DeadletterRecord {
-                            namespace: Config::get_pipeline_name(),
+                            namespace: config.get_pipeline_name(),
                             record: line,
                             error,
                             failure_code: "INPUT_FORMAT".to_string(),
@@ -2816,7 +2879,7 @@ impl Ingest {
 
                             let empty_offset_pos = ingest_batch.offset_pos_for_line(line);
                             dl_records.push(DeadletterRecord {
-                                namespace: Config::get_pipeline_name(),
+                                namespace: config.get_pipeline_name(),
                                 record: line_str.to_string(),
                                 error: "Source data is empty".to_string(),
                                 failure_code: "EMPTY_RECORD".to_string(),
@@ -2856,16 +2919,19 @@ impl Ingest {
                             {
                                 &batch_namespace_override
                             } else {
-                                namespace_scratch =
-                                    storage_namespace(&PARSE_NAMESPACE_CACHE.with(|cache| {
+                                namespace_scratch = storage_namespace(
+                                    config,
+                                    &PARSE_NAMESPACE_CACHE.with(|cache| {
                                         let mut namespace_cache = cache.write().unwrap();
                                         Helpers::parse_namespace_field_with_fields(
+                                            config,
                                             &record,
                                             batch_namespace_override.clone(),
                                             &mut namespace_cache,
                                             &transform_snap.namespace_fields,
                                         )
-                                    }));
+                                    }),
+                                );
                                 &namespace_scratch
                             };
 
@@ -2875,6 +2941,7 @@ impl Ingest {
                                 skpr_partition_owned =
                                     PARTITION_ALLOWED_VALUES_CACHE.with(|cache| {
                                         Helpers::parse_partition_field_with_fields(
+                                            config,
                                             &record,
                                             &cache.read().unwrap(),
                                             &transform_snap.partition_fields,
@@ -2895,7 +2962,7 @@ impl Ingest {
 
                             if let Some(event_time) = skpr_time {
                                 skpr_time_bucket =
-                                    Some(BufferChunker::event_time_bucket(event_time));
+                                    Some(BufferChunker::event_time_bucket(config, event_time));
 
                                 if event_time > latest_timestamp {
                                     latest_timestamp = event_time;
@@ -2905,7 +2972,7 @@ impl Ingest {
                                 partition_started.elapsed().as_nanos() as u64,
                             );
 
-                            apply_transform_inject_fields(&mut record);
+                            apply_transform_inject_fields(config, &mut record);
 
                             refresh_metadata_snapshot_for_namespace(
                                 skpr_namespace,
@@ -2919,6 +2986,7 @@ impl Ingest {
                                     metadata_snapshot.metadata.get(skpr_namespace)
                                 {
                                     let schema_hash = resolve_partition_schema(
+                                        config,
                                         skpr_namespace,
                                         flatten,
                                         &mut schema_hash_cache,
@@ -3004,6 +3072,7 @@ impl Ingest {
                             let fast_started = Instant::now();
                             let msg = match metadata_snapshot.metadata.get(skpr_namespace) {
                                 Some(metadata) => fast_path_ingest(
+                                    config,
                                     source.inner(),
                                     metadata.fields.as_ref(),
                                     &skpr_namespace,
@@ -3024,8 +3093,12 @@ impl Ingest {
                                 Err(_err) => {
                                     let slow_started = Instant::now();
                                     // Simple fallback: single-record slow path
-                                    let slow_result =
-                                        slow_ingest_blocking(&skpr_namespace, &source, flatten);
+                                    let slow_result = slow_ingest_blocking(
+                                        config,
+                                        &skpr_namespace,
+                                        &source,
+                                        flatten,
+                                    );
                                     ingest_profile::add_slow_path_ns(
                                         slow_started.elapsed().as_nanos() as u64,
                                     );
@@ -3081,6 +3154,7 @@ impl Ingest {
                                 .as_ref()
                                 .and_then(|rows| rows.get(cdc_row_idx - 1).cloned());
                             enqueue_legacy_record(
+                                config,
                                 &mut buf,
                                 &mut raw_values,
                                 &mut cdc_row_buf,
@@ -3282,9 +3356,10 @@ impl Ingest {
             metrics_hot::add_deadletters(dl_count as u64);
             let mut dl_offsets_committed = false;
             if let Some(deadletter_sink_ref) = deadletter_sink_ref.clone() {
-                let dl_ns = deadletter::table_name();
+                let dl_ns = deadletter::table_name(config);
                 let dl_schema: SchemaRef = deadletter::arrow_schema();
                 let dl_time_bucket = BufferChunker::event_time_bucket(
+                    config,
                     SystemTime::now()
                         .duration_since(SystemTime::UNIX_EPOCH)
                         .unwrap()
@@ -3355,7 +3430,7 @@ impl Ingest {
             }
         }
         for namespace in schema_sync_namespaces {
-            if let Err(err) = ensure_output_schema_synced_for_namespace(&namespace) {
+            if let Err(err) = ensure_output_schema_synced_for_namespace(config, &namespace) {
                 warn!(
                     "Schema sync barrier failed for namespace {}; deferring batch without committing offsets: {}",
                     namespace, err
@@ -3445,9 +3520,10 @@ impl Ingest {
             .enable_all()
             .build()
             .expect("benchmark runtime");
-        crate::buffer::wal_writer::start(1);
+        crate::buffer::wal_writer::start(&Config::new(), 1);
         let handle = rt.handle().clone();
         Self::process_batch(
+            &Config::new(),
             &Arc::new(datas.to_vec()),
             offset_db,
             handle,
@@ -3455,11 +3531,13 @@ impl Ingest {
             submit_id,
         );
         rt.block_on(async {
-            let _ = crate::buffer::wal_writer::flush_and_drain(offset_db.clone()).await;
+            let _ =
+                crate::buffer::wal_writer::flush_and_drain(&Config::new(), offset_db.clone()).await;
         });
     }
 
     pub fn prepare_arrow_schema_with_metadata(
+        config: &Config,
         skpr_namespace: &str,
         metadata: &HashMap<String, Metadata>,
         flatten: bool,
@@ -3548,7 +3626,7 @@ impl Ingest {
         }
 
         if did_update_schema {
-            crate::helpers::configuration::Config::sync_output_schema_namespace(skpr_namespace);
+            config.sync_output_schema_namespace(skpr_namespace);
         }
 
         // Mark schema as ready deterministically for this namespace
@@ -3657,7 +3735,7 @@ mod warm_output_schemas_tests {
 
     #[tokio::test]
     async fn warm_from_tokio_runtime_does_not_panic_with_multiple_namespaces() {
-        let mut pipeline = PipelineMetadata::new();
+        let mut pipeline = PipelineMetadata::new(&Config::new());
         for ns in [
             "dataforseo_seo_opportunities_keyword_suggestion_daily",
             "dataforseo_seo_opportunities_keyword_metric_daily",
@@ -3668,7 +3746,74 @@ mod warm_output_schemas_tests {
         }
         METADATA.store(Arc::new(pipeline));
 
-        warm_output_schemas_for_metadata(&METADATA.load().metadata, false).await;
+        warm_output_schemas_for_metadata(&Config::new(), &METADATA.load().metadata, false).await;
+    }
+}
+
+#[cfg(test)]
+mod schema_sync_skip_key_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn schema_sync_test_config(data_dir: &str) -> Config {
+        let config: Config = serde_json::from_value(json!({
+            "skippr": { "workspace": "quickstart" },
+            "pipelines": {
+                "orders": {
+                    "data_source": "data_sources.sample",
+                    "data_dir": data_dir
+                }
+            },
+            "data_sources": {
+                "sample": { "S3": { "s3_bucket": "b", "s3_prefix": "p" } }
+            }
+        }))
+        .unwrap();
+        config.bind_pipeline("orders")
+    }
+
+    #[test]
+    fn schema_synced_version_does_not_skip_second_session_by_namespace() {
+        let ns = "skip_key_isolation_events";
+        SCHEMA_SYNCED_VERSION.insert(ns.to_string(), AtomicU64::new(u64::MAX));
+
+        let a = schema_sync_test_config("/tmp/skipprd-schema-skip-a");
+        let b = schema_sync_test_config("/tmp/skipprd-schema-skip-b");
+        let a_key = a.schema_publication_identity(ns);
+        let b_key = b.schema_publication_identity(ns);
+        assert_ne!(a_key, ns);
+        assert_ne!(b_key, ns);
+        assert_ne!(a_key, b_key);
+
+        ensure_output_schema_synced_for_namespace(&b, ns).unwrap();
+        assert!(
+            SCHEMA_SYNCED_VERSION.get(&b_key).is_some(),
+            "session B must record its own skip key even when the namespace-only slot is already synced"
+        );
+        assert!(
+            SCHEMA_SYNC_LOCKS.get(&b_key).is_some(),
+            "session B must take its own schema-sync lock, not the namespace-only lock"
+        );
+
+        ensure_output_schema_synced_for_namespace(&a, ns).unwrap();
+        assert!(SCHEMA_SYNCED_VERSION.get(&a_key).is_some());
+        assert!(SCHEMA_SYNC_LOCKS.get(&a_key).is_some());
+    }
+
+    #[test]
+    fn schema_publication_identity_isolates_session_data_dir() {
+        let a = schema_sync_test_config("/tmp/skipprd-schema-a");
+        let b = schema_sync_test_config("/tmp/skipprd-schema-b");
+        assert_ne!(
+            a.schema_publication_identity("events"),
+            b.schema_publication_identity("events")
+        );
+        assert!(a
+            .schema_publication_identity("events")
+            .contains("/tmp/skipprd-schema-a"));
+        assert!(b
+            .schema_publication_identity("events")
+            .contains("/tmp/skipprd-schema-b"));
     }
 }
 
@@ -3693,15 +3838,17 @@ mod empty_ingest_tasks_tests {
 
     #[test]
     fn ingest_file_empty_tasks_in_discover_mode_does_not_panic() {
-        let ingest = Ingest::new_for_execution(RuntimeExecutionMode::Discover);
+        let ingest = Ingest::new_for_execution(&Config::new(), RuntimeExecutionMode::Discover);
         let empty_tasks = Arc::new(IngestTasks::new());
 
-        let offsets = Arc::new(crate::helpers::offsets::Offsets::init().expect("offset DB init"));
+        let offsets = Arc::new(
+            crate::helpers::offsets::Offsets::init(&Config::new()).expect("offset DB init"),
+        );
         let noop: Box<dyn crate::plugins::DataSink + Send + Sync> =
             Box::new(crate::plugins::NoopOutputPlugin);
         let output = Arc::new(noop);
 
-        ingest.ingest_file(&empty_tasks, &offsets, output);
+        ingest.ingest_file(&Config::new(), &empty_tasks, &offsets, output);
     }
 }
 
@@ -3800,6 +3947,7 @@ mod transform_inject_fields_tests {
 #[cfg(test)]
 mod ingest_admission_tests {
     use super::*;
+    use crate::helpers::configuration::Config;
     #[test]
     fn admission_budget_s3_fits_shared_70pct_envelope() {
         let hint = 8_usize * 1024 * 1024 * 1024;
@@ -3829,6 +3977,7 @@ mod ingest_admission_tests {
 #[cfg(test)]
 mod data_dir_watermark_tests {
     use super::Ingest;
+    use crate::helpers::configuration::Config;
 
     const GB: u64 = 1024 * 1024 * 1024;
 
@@ -3898,6 +4047,7 @@ mod data_dir_watermark_tests {
             unreadable_segments: 0,
         };
         let decision = Ingest::evaluate_exhausted_pause_escape(
+            &Config::new(),
             80 * GB,
             200 * GB,
             60.0,
@@ -3913,6 +4063,7 @@ mod data_dir_watermark_tests {
     fn exhausted_escape_yields_between_low_and_high_when_no_work() {
         let reconcile = crate::buffer::ingest_buffer::WalReconcileResult::default();
         let decision = Ingest::evaluate_exhausted_pause_escape(
+            &Config::new(),
             60 * GB,
             200 * GB,
             70.0,
@@ -3928,6 +4079,7 @@ mod data_dir_watermark_tests {
     fn exhausted_escape_yields_at_or_above_high_when_no_work() {
         let reconcile = crate::buffer::ingest_buffer::WalReconcileResult::default();
         let decision = Ingest::evaluate_exhausted_pause_escape(
+            &Config::new(),
             10 * GB,
             200 * GB,
             95.0,
@@ -3944,7 +4096,7 @@ mod data_dir_watermark_tests {
 mod stats_integration_tests {
     use super::*;
     // stats_tailer removed
-    use crate::helpers::configuration::{Config, PIPELINE_NAME};
+    use crate::helpers::configuration::Config;
     use serde_json::json;
 
     #[test]
@@ -3964,14 +4116,13 @@ mod stats_integration_tests {
         // Wait longer than default flush
         std::thread::sleep(std::time::Duration::from_millis(1500));
         // Read stats from S3
-        PIPELINE_NAME.write().clear();
-        PIPELINE_NAME.write().push_str(ns);
+        let config = Config::new().bind_pipeline(ns);
         let v: serde_json::Value = {
             let rt = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
                 .unwrap();
-            rt.block_on(async { Config::read_namespace_stats_async(ns).await })
+            rt.block_on(async { config.read_namespace_stats_async(ns).await })
                 .expect("missing stats in S3")
         };
         let fields = v
@@ -4093,16 +4244,19 @@ mod storage_key_tests {
     #[test]
     fn storage_namespace_sanitizes_special_chars() {
         assert_eq!(
-            storage_namespace("acme.source/stream-name"),
+            storage_namespace(&Config::new(), "acme.source/stream-name"),
             "acme_source_stream_name"
         );
-        assert_eq!(storage_namespace("My-Stream/v2"), "my_stream_v2");
+        assert_eq!(
+            storage_namespace(&Config::new(), "My-Stream/v2"),
+            "my_stream_v2"
+        );
     }
 
     #[test]
     fn storage_partition_preserves_hive_segments() {
         assert_eq!(
-            storage_partition("crawl_date=2026-05-30T00:00:00/year=2026"),
+            storage_partition(&Config::new(), "crawl_date=2026-05-30T00:00:00/year=2026"),
             "crawl_date=2026_05_30t00_00_00/year=2026"
         );
     }

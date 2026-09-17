@@ -51,11 +51,11 @@ pub struct IngestTransformSnapshot {
 }
 
 impl IngestTransformSnapshot {
-    pub fn capture() -> Self {
-        let transform = Config::get_transform_config();
-        let partition_fields = Config::get_transform_batch_partition_fields();
-        let namespace_fields = Config::get_transform_namespace_fields();
-        let time_fields = Config::get_transform_batch_time_fields();
+    pub fn capture(config: &Config) -> Self {
+        let transform = config.get_transform_config();
+        let partition_fields = config.get_transform_batch_partition_fields();
+        let namespace_fields = config.get_transform_namespace_fields();
+        let time_fields = config.get_transform_batch_time_fields();
         Self {
             skip_partition_parse: partition_fields.trim().is_empty(),
             skip_time_parse: time_fields.trim().is_empty(),
@@ -124,7 +124,7 @@ impl Helpers {
         // arr.iter().enumerate().all(|(i, v)| i as i32 == v)
     }
 
-    pub fn clean_field_name<'a>(field: String) -> String {
+    pub fn clean_field_name<'a>(config: &Config, field: String) -> String {
         {
             if let Some(cached) = CLEAN_FIELD_CACHE.get(&field) {
                 if cached.value() != "no" {
@@ -135,7 +135,7 @@ impl Helpers {
 
         let mut clean = field.clone();
         if field.parse::<i32>().is_ok() {
-            if Config::get_transform_flatten_events() {
+            if config.get_transform_flatten_events() {
                 clean = "".to_string() + &field;
             } else {
                 clean = "item_".to_string() + &field;
@@ -398,15 +398,21 @@ impl Helpers {
         false
     }
 
-    pub fn parse_partition_field(message: &Value, clean_allowed_values: HashSet<String>) -> String {
+    pub fn parse_partition_field(
+        config: &Config,
+        message: &Value,
+        clean_allowed_values: HashSet<String>,
+    ) -> String {
         Self::parse_partition_field_with_fields(
+            config,
             message,
             &clean_allowed_values,
-            &Config::get_transform_batch_partition_fields(),
+            &config.get_transform_batch_partition_fields(),
         )
     }
 
     pub fn parse_partition_field_with_fields(
+        config: &Config,
         message: &Value,
         clean_allowed_values: &HashSet<String>,
         partition_fields: &str,
@@ -429,10 +435,13 @@ impl Helpers {
                 let mut clean_entity_value =
                     match Helpers::get_nested_value_from_dot_notation(message, entity_field_dot) {
                         Some(entity_value) => {
-                            Helpers::clean_field_name(match entity_value.as_str() {
-                                Some(val) => val.to_string(),
-                                None => "".to_string(),
-                            })
+                            Helpers::clean_field_name(
+                                config,
+                                match entity_value.as_str() {
+                                    Some(val) => val.to_string(),
+                                    None => "".to_string(),
+                                },
+                            )
                             // let entity_name = match entity_field_dot.rfind('.') {
                             //     Some(index) => &entity_field_dot[index + 1..],
                             //     None => entity_field_dot,
@@ -456,7 +465,7 @@ impl Helpers {
                     Some(index) => format!("p_{}", &entity_field_dot[index + 1..]),
                     None => format!("p_{}", entity_field_dot),
                 };
-                let clean_entity_name = Helpers::clean_field_name(entity_name.to_string());
+                let clean_entity_name = Helpers::clean_field_name(config, entity_name.to_string());
                 partitions.push(format!("{}={}", clean_entity_name, clean_entity_value));
             }
 
@@ -469,19 +478,22 @@ impl Helpers {
     }
 
     pub fn parse_namespace_field(
+        config: &Config,
         message: &Value,
         namespace: String,
         parse_namespace_cache: &mut HashMap<String, String>,
     ) -> String {
         Self::parse_namespace_field_with_fields(
+            config,
             message,
             namespace,
             parse_namespace_cache,
-            &Config::get_transform_namespace_fields(),
+            &config.get_transform_namespace_fields(),
         )
     }
 
     pub fn parse_namespace_field_with_fields(
+        config: &Config,
         message: &Value,
         namespace: String,
         parse_namespace_cache: &mut HashMap<String, String>,
@@ -492,7 +504,7 @@ impl Helpers {
         if !parse_namespace_cache.contains_key(&namespace)
             || parse_namespace_cache.get(&namespace).unwrap() == "yes"
         {
-            clean_namespace = Helpers::clean_field_name(clean_namespace);
+            clean_namespace = Helpers::clean_field_name(config, clean_namespace);
 
             if !namespace_fields.is_empty() {
                 let mut namespaces = vec!["".to_string()];
@@ -509,7 +521,7 @@ impl Helpers {
                 let join = namespaces.join("_").trim_matches('_').to_lowercase();
 
                 if join != "" {
-                    clean_namespace = Helpers::clean_field_name(join);
+                    clean_namespace = Helpers::clean_field_name(config, join);
                 }
             }
         }
@@ -527,8 +539,8 @@ impl Helpers {
         let num_digits = ((time as f64).log10() + 1.0).floor() as i32;
         num_digits > 10
     }
-    pub fn parse_time_field(message: &Value) -> Option<i64> {
-        Self::parse_time_field_with_fields(message, &Config::get_transform_batch_time_fields())
+    pub fn parse_time_field(config: &Config, message: &Value) -> Option<i64> {
+        Self::parse_time_field_with_fields(message, &config.get_transform_batch_time_fields())
     }
 
     pub fn parse_time_field_with_fields(message: &Value, time_fields: &str) -> Option<i64> {
@@ -1340,7 +1352,7 @@ mod clean_field_name_tests {
             CLEAN_FIELD_CACHE.clear();
         }
         assert_eq!(
-            Helpers::clean_field_name("testField".to_string()),
+            Helpers::clean_field_name(&Config::new(), "testField".to_string()),
             "testfield".to_string()
         );
 
@@ -1349,7 +1361,7 @@ mod clean_field_name_tests {
             CLEAN_FIELD_CACHE.clear();
         }
         assert_eq!(
-            Helpers::clean_field_name("test!@#Field$%^&".to_string()),
+            Helpers::clean_field_name(&Config::new(), "test!@#Field$%^&".to_string()),
             "test_field".to_string()
         );
 
@@ -1358,7 +1370,7 @@ mod clean_field_name_tests {
             CLEAN_FIELD_CACHE.clear();
         }
         assert_eq!(
-            Helpers::clean_field_name("123testField".to_string()),
+            Helpers::clean_field_name(&Config::new(), "123testField".to_string()),
             "testfield".to_string()
         );
 
@@ -1367,7 +1379,7 @@ mod clean_field_name_tests {
             CLEAN_FIELD_CACHE.clear();
         }
         assert_eq!(
-            Helpers::clean_field_name("_123testField".to_string()),
+            Helpers::clean_field_name(&Config::new(), "_123testField".to_string()),
             "123testfield".to_string()
         );
 
@@ -1376,7 +1388,7 @@ mod clean_field_name_tests {
             CLEAN_FIELD_CACHE.clear();
         }
         assert_eq!(
-            Helpers::clean_field_name("1".to_string()),
+            Helpers::clean_field_name(&Config::new(), "1".to_string()),
             "item_1".to_string()
         );
 
@@ -1386,7 +1398,7 @@ mod clean_field_name_tests {
             CLEAN_FIELD_CACHE.insert("cachedField".to_string(), "cachedfield".to_string());
         }
         assert_eq!(
-            Helpers::clean_field_name("cachedField".to_string()),
+            Helpers::clean_field_name(&Config::new(), "cachedField".to_string()),
             "cachedfield".to_string()
         );
 
@@ -1396,7 +1408,7 @@ mod clean_field_name_tests {
             CLEAN_FIELD_CACHE.insert("no_change_field".to_string(), "no".to_string());
         }
         assert_eq!(
-            Helpers::clean_field_name("no_change_field".to_string()),
+            Helpers::clean_field_name(&Config::new(), "no_change_field".to_string()),
             "no_change_field".to_string()
         );
     }
@@ -1419,7 +1431,7 @@ mod parse_time_field_tests {
             "time2": 999999999999999999 as i64 // Invalid millisecond timestamp (too large)
         });
 
-        assert_eq!(Helpers::parse_time_field(&message), None);
+        assert_eq!(Helpers::parse_time_field(&Config::new(), &message), None);
     }
 
     #[test]
@@ -1430,7 +1442,10 @@ mod parse_time_field_tests {
         let time = 1646901960000i64; // Valid millisecond timestamp
         let message = json!({ "time1": time });
 
-        assert_eq!(Helpers::parse_time_field(&message), Some(1646901960));
+        assert_eq!(
+            Helpers::parse_time_field(&Config::new(), &message),
+            Some(1646901960)
+        );
     }
 
     #[test]
@@ -1441,7 +1456,10 @@ mod parse_time_field_tests {
         let time = 1646901960i64; // Valid second timestamp
         let message = json!({ "time3": time });
 
-        assert_eq!(Helpers::parse_time_field(&message), Some(time));
+        assert_eq!(
+            Helpers::parse_time_field(&Config::new(), &message),
+            Some(time)
+        );
     }
 
     #[test]
@@ -1453,7 +1471,7 @@ mod parse_time_field_tests {
             "time": 1646901960
         });
 
-        assert_eq!(Helpers::parse_time_field(&message), None);
+        assert_eq!(Helpers::parse_time_field(&Config::new(), &message), None);
     }
 
     #[test]
@@ -1465,7 +1483,10 @@ mod parse_time_field_tests {
             "time": "2022-03-10T12:00:00Z"
         });
 
-        assert_eq!(Helpers::parse_time_field(&message), Some(1646913600));
+        assert_eq!(
+            Helpers::parse_time_field(&Config::new(), &message),
+            Some(1646913600)
+        );
     }
 
     #[test]
@@ -1477,7 +1498,7 @@ mod parse_time_field_tests {
             "time": 1646901960
         });
 
-        assert_eq!(Helpers::parse_time_field(&message), None);
+        assert_eq!(Helpers::parse_time_field(&Config::new(), &message), None);
     }
 }
 
@@ -1492,7 +1513,7 @@ mod parse_partition_tests {
     fn test_parse_partition_field_no_config() {
         let message = json!({"foo": "bar", "abc1": "def"});
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "NULL_VALUE");
-        let partition = Helpers::parse_partition_field(&message, HashSet::new());
+        let partition = Helpers::parse_partition_field(&Config::new(), &message, HashSet::new());
         assert_eq!(partition, "");
     }
 
@@ -1501,7 +1522,7 @@ mod parse_partition_tests {
     fn test_parse_partition_field_empty_field() {
         let message = json!({"foo": "", "abc1": "def"});
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
-        let partition = Helpers::parse_partition_field(&message, HashSet::new());
+        let partition = Helpers::parse_partition_field(&Config::new(), &message, HashSet::new());
         assert_eq!(partition, "p_foo=");
     }
 
@@ -1519,7 +1540,7 @@ mod parse_partition_tests {
     fn test_parse_partition_field_composite_key() {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar");
-        let partition = Helpers::parse_partition_field(&message, HashSet::new());
+        let partition = Helpers::parse_partition_field(&Config::new(), &message, HashSet::new());
         assert_eq!(partition, "p_bar=baz");
     }
 
@@ -1528,7 +1549,7 @@ mod parse_partition_tests {
     fn test_parse_partition_field_several_composite_keys() {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar,abc1");
-        let partition = Helpers::parse_partition_field(&message, HashSet::new());
+        let partition = Helpers::parse_partition_field(&Config::new(), &message, HashSet::new());
         assert_eq!(partition, "p_bar=baz/p_abc1=def");
     }
 
@@ -1537,7 +1558,7 @@ mod parse_partition_tests {
     fn test_parse_partition_field_several_composite_keys_with_spaces() {
         let message = json!({"foo": {"bar": "baz"}, "abc1": "def"});
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", " foo.bar  , abc1  ");
-        let partition = Helpers::parse_partition_field(&message, HashSet::new());
+        let partition = Helpers::parse_partition_field(&Config::new(), &message, HashSet::new());
         assert_eq!(partition, "p_bar=baz/p_abc1=def");
     }
 
@@ -1556,10 +1577,18 @@ mod parse_partition_tests {
             "source_url_id": "20"
         });
         let fields = "crawl_id,target_domain_hash_bucket";
-        let partition_a =
-            Helpers::parse_partition_field_with_fields(&row_a, &HashSet::new(), fields);
-        let partition_b =
-            Helpers::parse_partition_field_with_fields(&row_b, &HashSet::new(), fields);
+        let partition_a = Helpers::parse_partition_field_with_fields(
+            &Config::new(),
+            &row_a,
+            &HashSet::new(),
+            fields,
+        );
+        let partition_b = Helpers::parse_partition_field_with_fields(
+            &Config::new(),
+            &row_b,
+            &HashSet::new(),
+            fields,
+        );
         assert_eq!(
             partition_a,
             "p_crawl_id=cc_main_x/p_target_domain_hash_bucket=item_1"
@@ -1585,8 +1614,10 @@ mod parse_partition_tests {
             "target_domain_id": "2",
             "source_url_id": "20"
         });
-        let partition_a = Helpers::parse_partition_field_with_fields(&row_a, &HashSet::new(), "");
-        let partition_b = Helpers::parse_partition_field_with_fields(&row_b, &HashSet::new(), "");
+        let partition_a =
+            Helpers::parse_partition_field_with_fields(&Config::new(), &row_a, &HashSet::new(), "");
+        let partition_b =
+            Helpers::parse_partition_field_with_fields(&Config::new(), &row_b, &HashSet::new(), "");
         assert_eq!(partition_a, "");
         assert_eq!(partition_b, "");
     }
@@ -1607,11 +1638,12 @@ mod parse_partition_allowed_values_tests {
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "NULL_VALUE");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "bar");
 
-        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values = Config::new().get_partition_allowed_values();
         let allowed_values_vec: HashSet<String> =
             allowed_values.split(',').map(|s| s.to_string()).collect();
 
-        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
+        let partition =
+            Helpers::parse_partition_field(&Config::new(), &message, allowed_values_vec);
         assert_eq!(partition, "");
     }
 
@@ -1622,11 +1654,12 @@ mod parse_partition_allowed_values_tests {
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "baz,def");
 
-        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values = Config::new().get_partition_allowed_values();
         let allowed_values_vec: HashSet<String> =
             allowed_values.split(',').map(|s| s.to_string()).collect();
 
-        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
+        let partition =
+            Helpers::parse_partition_field(&Config::new(), &message, allowed_values_vec);
         assert_eq!(partition, "p_foo=");
     }
 
@@ -1637,11 +1670,12 @@ mod parse_partition_allowed_values_tests {
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "bar,def");
 
-        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values = Config::new().get_partition_allowed_values();
         let allowed_values_vec: HashSet<String> =
             allowed_values.split(',').map(|s| s.to_string()).collect();
 
-        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
+        let partition =
+            Helpers::parse_partition_field(&Config::new(), &message, allowed_values_vec);
         assert_eq!(partition, "p_foo=bar");
     }
 
@@ -1652,11 +1686,12 @@ mod parse_partition_allowed_values_tests {
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "baz,def");
 
-        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values = Config::new().get_partition_allowed_values();
         let allowed_values_vec: HashSet<String> =
             allowed_values.split(',').map(|s| s.to_string()).collect();
 
-        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
+        let partition =
+            Helpers::parse_partition_field(&Config::new(), &message, allowed_values_vec);
         assert_eq!(partition, "p_bar=baz");
     }
 
@@ -1667,11 +1702,12 @@ mod parse_partition_allowed_values_tests {
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar,abc1");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "baz,def");
 
-        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values = Config::new().get_partition_allowed_values();
         let allowed_values_vec: HashSet<String> =
             allowed_values.split(',').map(|s| s.to_string()).collect();
 
-        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
+        let partition =
+            Helpers::parse_partition_field(&Config::new(), &message, allowed_values_vec);
         assert_eq!(partition, "p_bar=baz/p_abc1=def");
     }
 
@@ -1682,13 +1718,14 @@ mod parse_partition_allowed_values_tests {
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", " foo.bar  , abc1  ");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "baz  , def  ");
 
-        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values = Config::new().get_partition_allowed_values();
         let allowed_values_vec: HashSet<String> = allowed_values
             .split(',')
-            .map(|s| Helpers::clean_field_name(s.to_string()))
+            .map(|s| Helpers::clean_field_name(&Config::new(), s.to_string()))
             .collect();
 
-        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
+        let partition =
+            Helpers::parse_partition_field(&Config::new(), &message, allowed_values_vec);
         assert_eq!(partition, "p_bar=baz/p_abc1=def");
     }
 }
@@ -1706,11 +1743,12 @@ mod parse_partition_not_allowed_values_tests {
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "NULL_VALUE");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "nah");
 
-        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values = Config::new().get_partition_allowed_values();
         let allowed_values_vec: HashSet<String> =
             allowed_values.split(',').map(|s| s.to_string()).collect();
 
-        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
+        let partition =
+            Helpers::parse_partition_field(&Config::new(), &message, allowed_values_vec);
         assert_eq!(partition, "");
     }
 
@@ -1721,11 +1759,12 @@ mod parse_partition_not_allowed_values_tests {
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "baz,def");
 
-        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values = Config::new().get_partition_allowed_values();
         let allowed_values_vec: HashSet<String> =
             allowed_values.split(',').map(|s| s.to_string()).collect();
 
-        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
+        let partition =
+            Helpers::parse_partition_field(&Config::new(), &message, allowed_values_vec);
         assert_eq!(partition, "p_foo=");
     }
 
@@ -1736,11 +1775,12 @@ mod parse_partition_not_allowed_values_tests {
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "nah,def");
 
-        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values = Config::new().get_partition_allowed_values();
         let allowed_values_vec: HashSet<String> =
             allowed_values.split(',').map(|s| s.to_string()).collect();
 
-        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
+        let partition =
+            Helpers::parse_partition_field(&Config::new(), &message, allowed_values_vec);
         assert_eq!(partition, "p_foo=");
     }
 
@@ -1751,11 +1791,12 @@ mod parse_partition_not_allowed_values_tests {
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "nah,def");
 
-        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values = Config::new().get_partition_allowed_values();
         let allowed_values_vec: HashSet<String> =
             allowed_values.split(',').map(|s| s.to_string()).collect();
 
-        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
+        let partition =
+            Helpers::parse_partition_field(&Config::new(), &message, allowed_values_vec);
         assert_eq!(partition, "p_bar=");
     }
 
@@ -1766,11 +1807,12 @@ mod parse_partition_not_allowed_values_tests {
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", "foo.bar,abc1");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "nah,nope");
 
-        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values = Config::new().get_partition_allowed_values();
         let allowed_values_vec: HashSet<String> =
             allowed_values.split(',').map(|s| s.to_string()).collect();
 
-        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
+        let partition =
+            Helpers::parse_partition_field(&Config::new(), &message, allowed_values_vec);
         assert_eq!(partition, "p_bar=/p_abc1=");
     }
 
@@ -1781,11 +1823,12 @@ mod parse_partition_not_allowed_values_tests {
         Config::set_evncache("TRANSFORM_BATCH_PARTITION_FIELDS", " foo.bar  , abc1  ");
         Config::set_evncache("TRANSFORM_PARTITION_ALLOWED_VALUES", "nah  , nope  ");
 
-        let allowed_values = Config::get_partition_allowed_values();
+        let allowed_values = Config::new().get_partition_allowed_values();
         let allowed_values_vec: HashSet<String> =
             allowed_values.split(',').map(|s| s.to_string()).collect();
 
-        let partition = Helpers::parse_partition_field(&message, allowed_values_vec);
+        let partition =
+            Helpers::parse_partition_field(&Config::new(), &message, allowed_values_vec);
         assert_eq!(partition, "p_bar=/p_abc1=");
     }
 }
@@ -1803,7 +1846,8 @@ mod parse_namespace_field_tests {
         let message = json!({"my_field": ""});
         let namespace = "my_namespace".to_string();
         Config::setenv("TRANSFORM_NAMESPACE_FIELDS", "my_field");
-        let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);
+        let result =
+            Helpers::parse_namespace_field(&Config::new(), &message, namespace, &mut cache);
         assert_eq!(result, "my_namespace");
         assert_eq!(cache.get("my_namespace"), Some(&"no".to_string()));
     }
@@ -1815,7 +1859,8 @@ mod parse_namespace_field_tests {
         let message = json!({"my_field": "blah"});
         let namespace = "my_namespace".to_string();
         Config::setenv("TRANSFORM_NAMESPACE_FIELDS", "abc");
-        let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);
+        let result =
+            Helpers::parse_namespace_field(&Config::new(), &message, namespace, &mut cache);
         assert_eq!(result, "my_namespace");
         assert_eq!(cache.get("my_namespace"), Some(&"no".to_string()));
     }
@@ -1828,7 +1873,8 @@ mod parse_namespace_field_tests {
         let message = json!({"my_field": "my_value"});
         let namespace = "my_namespace".to_string();
         Config::setenv("TRANSFORM_NAMESPACE_FIELDS", "");
-        let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);
+        let result =
+            Helpers::parse_namespace_field(&Config::new(), &message, namespace, &mut cache);
         assert_eq!(result, "my_namespace");
         assert_eq!(cache.get("my_namespace"), Some(&"no".to_string()));
     }
@@ -1840,7 +1886,8 @@ mod parse_namespace_field_tests {
         let message = json!({"my_field": "my_value"});
         let namespace = "my_namespace".to_string();
         Config::setenv("TRANSFORM_NAMESPACE_FIELDS", "");
-        let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);
+        let result =
+            Helpers::parse_namespace_field(&Config::new(), &message, namespace, &mut cache);
         assert_eq!(result, "my_namespace");
         assert_eq!(cache.get("my_namespace"), Some(&"no".to_string()));
     }
@@ -1856,7 +1903,8 @@ mod parse_namespace_field_tests {
             "TRANSFORM_NAMESPACE_FIELDS",
             "entity_field_1,entity_field_2",
         );
-        let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);
+        let result =
+            Helpers::parse_namespace_field(&Config::new(), &message, namespace, &mut cache);
         assert_eq!(result, "entity_value_1_entity_value_2");
         assert_eq!(cache.get("my_namespace"), Some(&"yes".to_string()));
         // assert_eq!(cache.get("entity_field_1,entity_field_2"), Some(&"yes".to_string()));
@@ -1878,7 +1926,8 @@ mod parse_namespace_field_tests {
             "TRANSFORM_NAMESPACE_FIELDS",
             "entity_field_1,entity_field_3.entity_field_3a",
         );
-        let result = Helpers::parse_namespace_field(&message, namespace, &mut cache);
+        let result =
+            Helpers::parse_namespace_field(&Config::new(), &message, namespace, &mut cache);
         assert_eq!(result, "entity_value_1_entity_value_3a");
         assert_eq!(cache.get("my_namespace"), Some(&"yes".to_string()));
         // assert_eq!(cache.get("entity_field_1,entity_field_2"), Some(&"yes".to_string()));

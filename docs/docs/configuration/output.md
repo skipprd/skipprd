@@ -1,6 +1,6 @@
 # Output Destination
 
-Ingest outputs are configured under `data_sinks:` and optional `schema_sinks:` in `skippr.yml`.
+Ingest outputs are configured under `data_sinks:` and optional `schema_sinks:` in `skippr.yml`. `data_sink` on a pipeline is optional. Leave it out to stop at the write-ahead log; skipprd does not compact or reclaim until a sink exists.
 
 ```yaml
 pipelines:

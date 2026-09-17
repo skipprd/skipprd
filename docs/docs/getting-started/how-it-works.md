@@ -5,12 +5,12 @@ description: Skipprd discover infers schema; Skipprd schema prints it; Skipprd s
 
 # Pipeline flow
 
-A pipeline is a named path from a source plugin to a sink plugin in `skippr.yml`. Skipprd loads that file, discovers the source shape, then moves rows through a write-ahead log into the destination you configured.
+A pipeline is a named path from a source plugin in `skippr.yml`, optionally to a sink plugin. Skipprd loads that file, discovers the source shape, then writes rows through a write-ahead log. If you set a `data_sink`, it then lands those rows in the destination. Without a sink, `skipprd query` / `Session.df()` read the WAL.
 
 ## Prerequisites
 
 - `skipprd` on `PATH` ([Install](install.md))
-- A `skippr.yml` with at least one pipeline, `data_source`, and `data_sink`
+- A `skippr.yml` with at least one pipeline and a `data_source`. `data_sink` is optional: without it the WAL is the dataset and skipprd does not compact or reclaim.
 
 ## Discover
 

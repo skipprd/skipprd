@@ -24,8 +24,8 @@ pub(crate) struct DeadletterRecord {
     pub offset_pos: u64,
 }
 
-pub fn table_name() -> String {
-    format!("_dl_{}", Config::get_pipeline_name())
+pub fn table_name(config: &Config) -> String {
+    format!("_dl_{}", config.get_pipeline_name())
 }
 
 pub(crate) fn arrow_schema() -> Arc<ArrowSchema> {
@@ -159,8 +159,8 @@ pub(crate) fn build_batch(records: &[DeadletterRecord]) -> Option<RecordBatch> {
 
 /// Lazily registers the deadletter namespace schema in ARROW_SCHEMA and METADATA
 /// so the table is created alongside normal pipeline tables with no special branches.
-pub fn ensure_namespace_registered() {
-    let dl_ns = table_name();
+pub fn ensure_namespace_registered(config: &Config) {
+    let dl_ns = table_name(config);
     if ARROW_SCHEMA.get(&dl_ns).is_some() {
         return;
     }
@@ -172,7 +172,7 @@ pub fn ensure_namespace_registered() {
         .entry(dl_ns.clone())
         .or_insert_with(|| AtomicU64::new(0));
 
-    fn dl_field(name: &str, dt: SkipprDataType) -> Metadata {
+    fn dl_field(config: &Config, name: &str, dt: SkipprDataType) -> Metadata {
         let mut m = Metadata::new().unwrap();
         m.determined_type = dt;
         m.out_field_name = name.to_string();
@@ -180,36 +180,42 @@ pub fn ensure_namespace_registered() {
     }
 
     let mut fields: HashMap<String, Metadata> = HashMap::new();
-    fields.insert("id".into(), dl_field("id", SkipprDataType::String));
+    fields.insert("id".into(), dl_field(config, "id", SkipprDataType::String));
     fields.insert(
         "namespace".into(),
-        dl_field("namespace", SkipprDataType::String),
+        dl_field(config, "namespace", SkipprDataType::String),
     );
-    fields.insert("record".into(), dl_field("record", SkipprDataType::String));
-    fields.insert("error".into(), dl_field("error", SkipprDataType::String));
+    fields.insert(
+        "record".into(),
+        dl_field(config, "record", SkipprDataType::String),
+    );
+    fields.insert(
+        "error".into(),
+        dl_field(config, "error", SkipprDataType::String),
+    );
     fields.insert(
         "failure_code".into(),
-        dl_field("failure_code", SkipprDataType::String),
+        dl_field(config, "failure_code", SkipprDataType::String),
     );
     fields.insert(
         "event_time".into(),
-        dl_field("event_time", SkipprDataType::Long),
+        dl_field(config, "event_time", SkipprDataType::Long),
     );
     fields.insert(
         "processed_time".into(),
-        dl_field("processed_time", SkipprDataType::Long),
+        dl_field(config, "processed_time", SkipprDataType::Long),
     );
     fields.insert(
         "source_uri".into(),
-        dl_field("source_uri", SkipprDataType::String),
+        dl_field(config, "source_uri", SkipprDataType::String),
     );
     fields.insert(
         "offset_key".into(),
-        dl_field("offset_key", SkipprDataType::String),
+        dl_field(config, "offset_key", SkipprDataType::String),
     );
     fields.insert(
         "offset_pos".into(),
-        dl_field("offset_pos", SkipprDataType::Long),
+        dl_field(config, "offset_pos", SkipprDataType::Long),
     );
 
     let mut ns_meta = Metadata::new().unwrap();
@@ -221,5 +227,5 @@ pub fn ensure_namespace_registered() {
     METADATA.store(Arc::new(pm));
     bump_pipeline_schema_version();
 
-    Config::sync_output_schema_namespace(&dl_ns);
+    config.sync_output_schema_namespace(&dl_ns);
 }

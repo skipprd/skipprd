@@ -15,7 +15,7 @@ use crate::discover::{
     date_formats::DateFormats, DateCandidate, DateParserKind, Metadata, PipelineMetadata,
     SkipprDataType,
 };
-use crate::helpers::configuration::{Config, PIPELINE_NAME};
+use crate::helpers::configuration::Config;
 use crate::helpers::offsets::{OffsetKey, Offsets};
 use crate::ingest::fast_ingest::{create_default_nested_message, DEFAULT_NESTED_MESSAGE};
 use crate::ingest_work::storage_namespace;
@@ -296,7 +296,7 @@ pub fn pipeline_metadata_for_fixture(fixture: BenchmarkFixture) -> PipelineMetad
     let mut ns_meta = Metadata::new_with_type(SkipprDataType::Record, namespace);
     ns_meta.fields = Box::new(fields.clone());
 
-    let mut pipeline = PipelineMetadata::new();
+    let mut pipeline = PipelineMetadata::new(&Config::new());
     pipeline.name = "ingest_benchmark".to_string();
     pipeline.enabled = true;
     pipeline.metadata.insert(namespace.to_string(), ns_meta);
@@ -310,11 +310,16 @@ pub fn pipeline_metadata_for_fixture(fixture: BenchmarkFixture) -> PipelineMetad
 pub fn install_fixture_metadata(fixture: BenchmarkFixture) {
     let pipeline = pipeline_metadata_for_fixture(fixture);
     let namespace = fixture.namespace();
-    let _ = Ingest::prepare_arrow_schema_with_metadata(namespace, &pipeline.metadata, false);
+    let _ = Ingest::prepare_arrow_schema_with_metadata(
+        &Config::new(),
+        namespace,
+        &pipeline.metadata,
+        false,
+    );
     METADATA.store(Arc::new(pipeline));
 }
 
-fn prepare_benchmark_runtime(data_dir: &Path) {
+fn prepare_benchmark_runtime(config: &Config, data_dir: &Path) {
     let config_path = benchmark_root().join("skippr.yml");
     std::env::set_var("SKIPPR_CONFIG_FILE", &config_path);
     std::env::set_var("DATA_DIR", data_dir);
@@ -325,15 +330,13 @@ fn prepare_benchmark_runtime(data_dir: &Path) {
     std::env::set_var("DATA_DIR_HIGH_WATERMARK_PCT", "0");
     std::env::set_var("DATA_DIR_LOW_WATERMARK_PCT", "0");
 
-    crate::reset_data_dir_capacity_state_for_test();
+    crate::reset_data_dir_capacity_state_for_test(&Config::new());
 
-    PIPELINE_NAME
-        .write()
-        .clone_from(&"ingest_benchmark".to_string());
+    let config = Config::try_build_config()
+        .expect("benchmark skippr.yml")
+        .bind_pipeline("ingest_benchmark");
 
-    Config::try_build_config().expect("benchmark skippr.yml");
-
-    let data_dir_str = Config::get_data_dir();
+    let data_dir_str = config.get_data_dir();
     for sub in ["segment_buffer", "output"] {
         let _ = fs::create_dir_all(format!("{data_dir_str}/{sub}"));
     }
@@ -371,7 +374,7 @@ pub fn run_local_fixture_benchmark_with_options(
     ingest_profile::set_force_legacy_ingest_for_benchmark(force_legacy);
 
     fs::create_dir_all(data_dir).expect("data dir");
-    prepare_benchmark_runtime(data_dir);
+    prepare_benchmark_runtime(&Config::new(), data_dir);
 
     let input_path = fixture_input_path(fixture);
     let row_count = rows.unwrap_or_else(|| fixture.default_rows());
@@ -386,9 +389,10 @@ pub fn run_local_fixture_benchmark_with_options(
 
     let payload = read_ndjson(&input_path).expect("read fixture");
     let input_bytes = payload.len();
-    let namespace = storage_namespace(fixture.namespace());
+    let namespace = storage_namespace(&Config::new(), fixture.namespace());
     let offset_key = OffsetKey::new("file", fixture.name());
     let batch = IngestBatch::new(
+        &Config::new(),
         offset_key,
         payload,
         input_bytes,
@@ -397,8 +401,8 @@ pub fn run_local_fixture_benchmark_with_options(
         None,
     );
 
-    let _ingest = Ingest::new_for_execution(RuntimeExecutionMode::Sync);
-    let offsets = Arc::new(Offsets::init().expect("offsets"));
+    let _ingest = Ingest::new_for_execution(&Config::new(), RuntimeExecutionMode::Sync);
+    let offsets = Arc::new(Offsets::init(&Config::new()).expect("offsets"));
     let output: Arc<Box<dyn crate::plugins::DataSink + Send + Sync>> =
         Arc::new(Box::new(NoopOutputPlugin));
 

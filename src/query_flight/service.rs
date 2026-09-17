@@ -30,6 +30,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 use crate::cluster::identity::{ClusterIdentity, TenantScope};
 use crate::cluster::peer::ReplicaRegistry;
+use crate::helpers::configuration::Config;
 use crate::query_flight::sql::{classify_sql, matches_sql_like, reject_ddl, ClassifiedSql};
 
 pub struct QueryFlightServer {
@@ -48,13 +49,14 @@ impl Drop for InFlightGuard {
 
 impl QueryFlightServer {
     pub async fn start(bind: SocketAddr, identity: ClusterIdentity) -> Result<Self, DurableError> {
-        Self::start_with_registry(bind, identity, None).await
+        Self::start_with_registry(bind, identity, None, Config::new()).await
     }
 
     pub async fn start_with_registry(
         bind: SocketAddr,
         identity: ClusterIdentity,
         registry: Option<Arc<ReplicaRegistry>>,
+        app_config: Config,
     ) -> Result<Self, DurableError> {
         let _ = crate::cluster::tls::tonic_server_tls()
             .map_err(|err| DurableError::Io(err.to_string()))?;
@@ -70,6 +72,7 @@ impl QueryFlightServer {
             _identity: identity,
             registry,
             in_flight: in_flight.clone(),
+            app_config,
         };
         let inflight_for_shutdown = in_flight.clone();
         tokio::spawn(async move {
@@ -137,6 +140,7 @@ struct SkipprFlightSql {
     _identity: ClusterIdentity,
     registry: Option<Arc<ReplicaRegistry>>,
     in_flight: Arc<AtomicUsize>,
+    app_config: Config,
 }
 
 impl SkipprFlightSql {
@@ -217,14 +221,24 @@ impl SkipprFlightSql {
         Ok(Response::new(Box::pin(encoded)))
     }
 
-    async fn schema_for_sql(&self, sql: &str, scope: &TenantScope) -> Result<SchemaRef, Status> {
+    async fn schema_for_sql(
+        &self,
+        config: &Config,
+        sql: &str,
+        scope: &TenantScope,
+    ) -> Result<SchemaRef, Status> {
         Self::check_sql(sql)?;
         match classify_sql(sql, scope).map_err(|err| Status::invalid_argument(err.to_string()))? {
-            ClassifiedSql::LiveWal(request) => Ok(iceberg_schema_for_namespace(&request.namespace)
-                .await
-                .unwrap_or_else(|_| Arc::new(Schema::empty()))),
-            ClassifiedSql::Iceberg(namespace) => iceberg_schema_for_namespace(&namespace).await,
+            ClassifiedSql::LiveWal(request) => {
+                Ok(iceberg_schema_for_namespace(config, &request.namespace)
+                    .await
+                    .unwrap_or_else(|_| Arc::new(Schema::empty())))
+            }
+            ClassifiedSql::Iceberg(namespace) => {
+                iceberg_schema_for_namespace(config, &namespace).await
+            }
             ClassifiedSql::User => crate::sqlrt::tables::schema_for_clustered_select(
+                config,
                 sql,
                 &crate::sqlrt::tables::process_clustered_select_opts(scope.clone())
                     .map_err(|err| Status::internal(err.to_string()))?,
@@ -269,13 +283,15 @@ impl SkipprFlightSql {
         Self::check_sql(sql)?;
         match classify_sql(sql, scope).map_err(|err| Status::invalid_argument(err.to_string()))? {
             ClassifiedSql::LiveWal(request) => {
-                let (schema, stream) = execute_live_wal(&request, self.registry.as_ref()).await?;
+                let (schema, stream) =
+                    execute_live_wal(&self.app_config, &request, self.registry.as_ref()).await?;
                 return Ok((schema, stream));
             }
             ClassifiedSql::Iceberg(namespace) => {
-                let df = crate::sqlrt::tables::plan_iceberg_scan(&namespace, scope)
-                    .await
-                    .map_err(|err| Status::internal(err.to_string()))?;
+                let df =
+                    crate::sqlrt::tables::plan_iceberg_scan(&self.app_config, &namespace, scope)
+                        .await
+                        .map_err(|err| Status::internal(err.to_string()))?;
                 let schema = df.schema().inner().clone();
                 let stream = df
                     .execute_stream()
@@ -290,6 +306,7 @@ impl SkipprFlightSql {
             .await
             .map_err(|err| Status::internal(err.to_string()))?;
         let df = crate::sqlrt::tables::plan_clustered_select(
+            &self.app_config,
             sql,
             &crate::sqlrt::tables::process_clustered_select_opts(scope.clone())
                 .map_err(|err| Status::internal(err.to_string()))?,
@@ -336,7 +353,9 @@ impl FlightSqlService for SkipprFlightSql {
         Self::check_sql(&query.query)?;
         Self::flight_info_for_sql(
             &query.query,
-            self.schema_for_sql(&query.query, &scope).await?.as_ref(),
+            self.schema_for_sql(&self.app_config, &query.query, &scope)
+                .await?
+                .as_ref(),
         )
     }
 
@@ -371,7 +390,12 @@ impl FlightSqlService for SkipprFlightSql {
         let sql = std::str::from_utf8(&query.prepared_statement_handle)
             .map_err(|err| Status::invalid_argument(err.to_string()))?;
         Self::check_sql(sql)?;
-        Self::flight_info_for_sql(sql, self.schema_for_sql(sql, &scope).await?.as_ref())
+        Self::flight_info_for_sql(
+            sql,
+            self.schema_for_sql(&self.app_config, sql, &scope)
+                .await?
+                .as_ref(),
+        )
     }
 
     async fn do_get_prepared_statement(
@@ -542,7 +566,8 @@ impl FlightSqlService for SkipprFlightSql {
         request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
         let scope = Self::session_scope(&request)?;
-        let tables = crate::sqlrt::tables::list_configured_iceberg_tables(&scope).await;
+        let tables =
+            crate::sqlrt::tables::list_configured_iceberg_tables(&self.app_config, &scope).await;
         let pattern = query.table_name_filter_pattern.clone();
         let mut builder = query.into_builder();
         for (name, schema) in tables {
@@ -604,13 +629,17 @@ impl FlightSqlService for SkipprFlightSql {
     }
 }
 
-async fn iceberg_schema_for_namespace(namespace: &str) -> Result<SchemaRef, Status> {
-    crate::sqlrt::tables::iceberg_schema_for_namespace(namespace)
+async fn iceberg_schema_for_namespace(
+    config: &Config,
+    namespace: &str,
+) -> Result<SchemaRef, Status> {
+    crate::sqlrt::tables::iceberg_schema_for_namespace(config, namespace)
         .await
         .map_err(|err| Status::internal(err.to_string()))
 }
 
 async fn execute_live_wal(
+    config: &Config,
     request: &crate::query_flight::live_wal::LiveWalScanRequest,
     registry: Option<&Arc<ReplicaRegistry>>,
 ) -> Result<
@@ -626,7 +655,7 @@ async fn execute_live_wal(
             .ok_or_else(|| {
                 Status::not_found(format!("unknown pipeline {}", request.pipeline.pipeline()))
             })?;
-    let schema = iceberg_schema_for_namespace(&request.namespace)
+    let schema = iceberg_schema_for_namespace(config, &request.namespace)
         .await
         .unwrap_or_else(|_| Arc::new(Schema::empty()));
     let provider = crate::sqlrt::wal_table::WalTableProvider::live_unpinned(
@@ -732,6 +761,7 @@ mod tests {
             "127.0.0.1:0".parse().unwrap(),
             identity,
             Some(registry),
+            Config::new(),
         )
         .await
         .unwrap();
@@ -875,6 +905,7 @@ mod tests {
             "127.0.0.1:0".parse().unwrap(),
             identity,
             Some(registry),
+            Config::new(),
         )
         .await
         .unwrap();

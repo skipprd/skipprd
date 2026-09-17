@@ -11,8 +11,8 @@ pub struct AthenaAdminConfig {
     pub glue_database_name: String,
 }
 
-pub fn output_athena_admin_config() -> Result<AthenaAdminConfig, String> {
-    match Config::get_pipeline_output_plugin_config() {
+pub fn output_athena_admin_config(config: &Config) -> Result<AthenaAdminConfig, String> {
+    match config.get_pipeline_output_plugin_config() {
         Ok(config) if config.plugin_name == "Athena" => config.deserialize(),
         Ok(config) => Err(format!(
             "pipeline output plugin '{}' is not Athena",

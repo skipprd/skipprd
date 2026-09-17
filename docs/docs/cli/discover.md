@@ -13,7 +13,7 @@ skipprd --config skippr.yml discover --pipeline <name> [--output <mode>] [--log 
 
 | Flag | Required | Description |
 |---|---|---|
-| `--pipeline, -p` | No | Pipeline name. Falls back to `PIPELINE_NAME` env var. |
+| `--pipeline, -p` | No | Pipeline name. Falls back to `PIPELINE_NAME`. Required when that env is unset. |
 | `--output` | No | Output mode: `progress` (default, interactive spinner), `json` (structured JSON lines to stdout), or `text` (plain text summaries). |
 | `--log` | No | Enable logging. Optional level: `debug`, `info`, `warn`, `error`. Defaults to `info` when flag is present. |
 

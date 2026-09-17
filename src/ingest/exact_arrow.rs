@@ -634,6 +634,7 @@ mod tests {
     use super::*;
     use crate::discover::date_formats::DateFormats;
     use crate::discover::{DateCandidate, DateParserKind};
+    use crate::helpers::configuration::Config;
     use crate::ingest::fast_ingest::fast_path_ingest;
     use crate::ingest::fast_ingest::DEFAULT_NESTED_MESSAGE;
     use crate::ingest_work::Ingest;
@@ -698,13 +699,17 @@ mod tests {
         let mut fields = flat_metadata();
         install_template(namespace, &fields);
 
-        let mut pipeline = crate::discover::PipelineMetadata::new();
+        let mut pipeline = crate::discover::PipelineMetadata::new(&Config::new());
         let mut ns_meta = Metadata::new_with_type(SkipprDataType::Record, namespace);
         ns_meta.fields = Box::new(fields.clone());
         pipeline.metadata.insert(namespace.to_string(), ns_meta);
-        let schema =
-            Ingest::prepare_arrow_schema_with_metadata(namespace, &pipeline.metadata, false)
-                .expect("schema");
+        let schema = Ingest::prepare_arrow_schema_with_metadata(
+            &Config::new(),
+            namespace,
+            &pipeline.metadata,
+            false,
+        )
+        .expect("schema");
 
         let plan = plan_for_namespace(&fields, false, schema.clone()).expect("plan");
         let mut builders = ExactArrowBuilders::new(&plan, 4).expect("builders");
@@ -717,8 +722,10 @@ mod tests {
         let mut legacy_values = Vec::new();
         for row in &rows {
             try_append_row(&plan, row, &fields, &mut builders).expect("append");
-            legacy_values
-                .push(fast_path_ingest(row, &fields, namespace, false).expect("legacy normalize"));
+            legacy_values.push(
+                fast_path_ingest(&Config::new(), row, &fields, namespace, false)
+                    .expect("legacy normalize"),
+            );
         }
 
         let exact_batch = builders.finish().expect("exact batch");
@@ -736,13 +743,17 @@ mod tests {
         let mut fields = flat_metadata();
         let namespace = "bench_fallback";
         install_template(namespace, &fields);
-        let mut pipeline = crate::discover::PipelineMetadata::new();
+        let mut pipeline = crate::discover::PipelineMetadata::new(&Config::new());
         let mut ns_meta = Metadata::new_with_type(SkipprDataType::Record, namespace);
         ns_meta.fields = Box::new(fields.clone());
         pipeline.metadata.insert(namespace.to_string(), ns_meta);
-        let schema =
-            Ingest::prepare_arrow_schema_with_metadata(namespace, &pipeline.metadata, false)
-                .expect("schema");
+        let schema = Ingest::prepare_arrow_schema_with_metadata(
+            &Config::new(),
+            namespace,
+            &pipeline.metadata,
+            false,
+        )
+        .expect("schema");
         let plan = plan_for_namespace(&fields, false, schema).expect("plan");
         let mut builders = ExactArrowBuilders::new(&plan, 1).expect("builders");
         let row =
@@ -757,13 +768,17 @@ mod tests {
         let namespace = "cache_hit";
         let mut fields = flat_metadata();
         install_template(namespace, &fields);
-        let mut pipeline = crate::discover::PipelineMetadata::new();
+        let mut pipeline = crate::discover::PipelineMetadata::new(&Config::new());
         let mut ns_meta = Metadata::new_with_type(SkipprDataType::Record, namespace);
         ns_meta.fields = Box::new(fields.clone());
         pipeline.metadata.insert(namespace.to_string(), ns_meta);
-        let schema =
-            Ingest::prepare_arrow_schema_with_metadata(namespace, &pipeline.metadata, false)
-                .expect("schema");
+        let schema = Ingest::prepare_arrow_schema_with_metadata(
+            &Config::new(),
+            namespace,
+            &pipeline.metadata,
+            false,
+        )
+        .expect("schema");
 
         ingest_profile::reset_profile_counters();
         let mut cache = HashMap::new();
@@ -783,13 +798,17 @@ mod tests {
         let namespace = "cache_version";
         let mut fields = flat_metadata();
         install_template(namespace, &fields);
-        let mut pipeline = crate::discover::PipelineMetadata::new();
+        let mut pipeline = crate::discover::PipelineMetadata::new(&Config::new());
         let mut ns_meta = Metadata::new_with_type(SkipprDataType::Record, namespace);
         ns_meta.fields = Box::new(fields.clone());
         pipeline.metadata.insert(namespace.to_string(), ns_meta);
-        let schema_v1 =
-            Ingest::prepare_arrow_schema_with_metadata(namespace, &pipeline.metadata, false)
-                .expect("schema");
+        let schema_v1 = Ingest::prepare_arrow_schema_with_metadata(
+            &Config::new(),
+            namespace,
+            &pipeline.metadata,
+            false,
+        )
+        .expect("schema");
 
         let mut cache = HashMap::new();
         let p1 = resolve_cached_exact_plan(
@@ -806,13 +825,17 @@ mod tests {
             "new_col".to_string(),
             Metadata::new_with_type(SkipprDataType::String, "new_col"),
         );
-        let mut pipeline2 = crate::discover::PipelineMetadata::new();
+        let mut pipeline2 = crate::discover::PipelineMetadata::new(&Config::new());
         let mut ns_meta2 = Metadata::new_with_type(SkipprDataType::Record, namespace);
         ns_meta2.fields = Box::new(fields.clone());
         pipeline2.metadata.insert(namespace.to_string(), ns_meta2);
-        let schema_v2 =
-            Ingest::prepare_arrow_schema_with_metadata(namespace, &pipeline2.metadata, false)
-                .expect("schema v2");
+        let schema_v2 = Ingest::prepare_arrow_schema_with_metadata(
+            &Config::new(),
+            namespace,
+            &pipeline2.metadata,
+            false,
+        )
+        .expect("schema v2");
 
         let p2 = resolve_cached_exact_plan(&mut cache, namespace, "2", &fields, false, schema_v2)
             .expect("plan v2");
@@ -837,16 +860,26 @@ mod tests {
         install_template(ns_a, &fields_a);
         install_template(ns_b, &fields_b);
 
-        let mut pipeline = crate::discover::PipelineMetadata::new();
+        let mut pipeline = crate::discover::PipelineMetadata::new(&Config::new());
         for (ns, fields) in [(ns_a, &fields_a), (ns_b, &fields_b)] {
             let mut ns_meta = Metadata::new_with_type(SkipprDataType::Record, ns);
             ns_meta.fields = Box::new(fields.clone());
             pipeline.metadata.insert(ns.to_string(), ns_meta);
         }
-        let schema_a =
-            Ingest::prepare_arrow_schema_with_metadata(ns_a, &pipeline.metadata, false).unwrap();
-        let schema_b =
-            Ingest::prepare_arrow_schema_with_metadata(ns_b, &pipeline.metadata, false).unwrap();
+        let schema_a = Ingest::prepare_arrow_schema_with_metadata(
+            &Config::new(),
+            ns_a,
+            &pipeline.metadata,
+            false,
+        )
+        .unwrap();
+        let schema_b = Ingest::prepare_arrow_schema_with_metadata(
+            &Config::new(),
+            ns_b,
+            &pipeline.metadata,
+            false,
+        )
+        .unwrap();
 
         let mut cache = HashMap::new();
         let plan_a = resolve_cached_exact_plan(&mut cache, ns_a, "1", &fields_a, false, schema_a)
@@ -863,12 +896,17 @@ mod tests {
         let mut fields = flat_metadata();
         install_template(ns, &fields);
         let mut partitions: HashMap<(String, String), ExactArrowPartition> = HashMap::new();
-        let mut pipeline = crate::discover::PipelineMetadata::new();
+        let mut pipeline = crate::discover::PipelineMetadata::new(&Config::new());
         let mut ns_meta = Metadata::new_with_type(SkipprDataType::Record, ns);
         ns_meta.fields = Box::new(fields.clone());
         pipeline.metadata.insert(ns.to_string(), ns_meta);
-        let schema_v1 =
-            Ingest::prepare_arrow_schema_with_metadata(ns, &pipeline.metadata, false).unwrap();
+        let schema_v1 = Ingest::prepare_arrow_schema_with_metadata(
+            &Config::new(),
+            ns,
+            &pipeline.metadata,
+            false,
+        )
+        .unwrap();
         let mut cache = HashMap::new();
         let plan_v1 =
             resolve_cached_exact_plan(&mut cache, ns, "1", &fields, false, schema_v1).unwrap();
@@ -887,12 +925,17 @@ mod tests {
             "extra".to_string(),
             Metadata::new_with_type(SkipprDataType::String, "extra"),
         );
-        let mut pipeline2 = crate::discover::PipelineMetadata::new();
+        let mut pipeline2 = crate::discover::PipelineMetadata::new(&Config::new());
         let mut ns_meta2 = Metadata::new_with_type(SkipprDataType::Record, ns);
         ns_meta2.fields = Box::new(fields.clone());
         pipeline2.metadata.insert(ns.to_string(), ns_meta2);
-        let schema_v2 =
-            Ingest::prepare_arrow_schema_with_metadata(ns, &pipeline2.metadata, false).unwrap();
+        let schema_v2 = Ingest::prepare_arrow_schema_with_metadata(
+            &Config::new(),
+            ns,
+            &pipeline2.metadata,
+            false,
+        )
+        .unwrap();
         let plan_v2 =
             resolve_cached_exact_plan(&mut cache, ns, "2", &fields, false, schema_v2).unwrap();
         append_row_to_exact_partition(
@@ -928,12 +971,17 @@ mod tests {
         let ns = "metadata_version";
         let mut fields = flat_metadata();
         install_template(ns, &fields);
-        let mut pipeline = crate::discover::PipelineMetadata::new();
+        let mut pipeline = crate::discover::PipelineMetadata::new(&Config::new());
         let mut ns_meta = Metadata::new_with_type(SkipprDataType::Record, ns);
         ns_meta.fields = Box::new(fields.clone());
         pipeline.metadata.insert(ns.to_string(), ns_meta);
-        let _schema_v1 =
-            Ingest::prepare_arrow_schema_with_metadata(ns, &pipeline.metadata, false).unwrap();
+        let _schema_v1 = Ingest::prepare_arrow_schema_with_metadata(
+            &Config::new(),
+            ns,
+            &pipeline.metadata,
+            false,
+        )
+        .unwrap();
 
         let mut snapshot = METADATA.load().clone();
         METADATA.store(Arc::new(pipeline));
@@ -950,14 +998,18 @@ mod tests {
             "extra".to_string(),
             Metadata::new_with_type(SkipprDataType::String, "extra"),
         );
-        let mut pipeline2 = crate::discover::PipelineMetadata::new();
+        let mut pipeline2 = crate::discover::PipelineMetadata::new(&Config::new());
         let mut ns_meta2 = Metadata::new_with_type(SkipprDataType::Record, ns);
         ns_meta2.fields = Box::new(fields);
         pipeline2.metadata.insert(ns.to_string(), ns_meta2);
         METADATA.store(Arc::new(pipeline2));
-        let _schema_v2 =
-            Ingest::prepare_arrow_schema_with_metadata(ns, &METADATA.load().metadata, false)
-                .unwrap();
+        let _schema_v2 = Ingest::prepare_arrow_schema_with_metadata(
+            &Config::new(),
+            ns,
+            &METADATA.load().metadata,
+            false,
+        )
+        .unwrap();
 
         let v2 = crate::ingest_work::namespace_schema_version(ns);
         assert!(v2 > v1);

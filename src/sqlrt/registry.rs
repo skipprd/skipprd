@@ -27,15 +27,15 @@ pub struct Registry {
 static REGISTRY_CACHE: Lazy<Arc<RwLock<Option<Registry>>>> =
     Lazy::new(|| Arc::new(RwLock::new(None)));
 
-fn central_registry_key() -> String {
-    let tenant = Config::get_tenant();
-    let workspace = Config::get_workspace_name();
+fn central_registry_key(config: &Config) -> String {
+    let tenant = config.get_tenant();
+    let workspace = config.get_workspace_name();
     format!("{}/{}/registry.json", tenant, workspace)
 }
 
-async fn load_registry() -> Option<Registry> {
-    let key = central_registry_key();
-    let storage = crate::adapters::storage::get_storage();
+async fn load_registry(config: &Config) -> Option<Registry> {
+    let key = central_registry_key(config);
+    let storage = crate::adapters::storage::get_storage(config);
     match storage.get_json_opt(&key).await {
         Ok(Some(val)) => serde_json::from_value::<Registry>(val).ok(),
         Ok(None) => None,
@@ -46,10 +46,10 @@ async fn load_registry() -> Option<Registry> {
     }
 }
 
-async fn save_registry(reg: &Registry) -> Result<(), String> {
-    let key = central_registry_key();
+async fn save_registry(config: &Config, reg: &Registry) -> Result<(), String> {
+    let key = central_registry_key(config);
     let json_val = serde_json::to_value(reg).map_err(|e| e.to_string())?;
-    let storage = crate::adapters::storage::get_storage();
+    let storage = crate::adapters::storage::get_storage(config);
     storage.put_json(&key, &json_val).await?;
     {
         let mut guard = REGISTRY_CACHE.write().await;
@@ -59,11 +59,11 @@ async fn save_registry(reg: &Registry) -> Result<(), String> {
     Ok(())
 }
 
-pub async fn read_registry() -> Option<Registry> {
+pub async fn read_registry(config: &Config) -> Option<Registry> {
     if let Some(r) = REGISTRY_CACHE.read().await.as_ref() {
         return Some(r.clone());
     }
-    let loaded = load_registry().await;
+    let loaded = load_registry(config).await;
     if loaded.is_some() {
         let mut guard = REGISTRY_CACHE.write().await;
         *guard = loaded.clone();
@@ -71,16 +71,16 @@ pub async fn read_registry() -> Option<Registry> {
     loaded
 }
 
-pub async fn write_registry(mut reg: Registry) -> Result<(), String> {
+pub async fn write_registry(config: &Config, mut reg: Registry) -> Result<(), String> {
     reg.last_updated_epoch = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap_or_default()
         .as_secs();
-    save_registry(&reg).await
+    save_registry(config, &reg).await
 }
 
-pub async fn list_pipelines() -> Vec<String> {
-    read_registry()
+pub async fn list_pipelines(config: &Config) -> Vec<String> {
+    read_registry(config)
         .await
         .map(|r| {
             let mut v = r.pipelines.clone();
@@ -91,8 +91,8 @@ pub async fn list_pipelines() -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub async fn list_namespaces(pipeline: &str) -> Vec<String> {
-    if let Some(r) = read_registry().await {
+pub async fn list_namespaces(config: &Config, pipeline: &str) -> Vec<String> {
+    if let Some(r) = read_registry(config).await {
         if let Some(nsmap) = r.namespaces_by_pipeline.get(pipeline) {
             let mut v: Vec<String> = nsmap.keys().cloned().collect();
             v.sort();
@@ -102,8 +102,12 @@ pub async fn list_namespaces(pipeline: &str) -> Vec<String> {
     Vec::new()
 }
 
-pub async fn find_entry(pipeline: &str, namespace: &str) -> Option<NamespaceEntry> {
-    read_registry().await.and_then(|r| {
+pub async fn find_entry(
+    config: &Config,
+    pipeline: &str,
+    namespace: &str,
+) -> Option<NamespaceEntry> {
+    read_registry(config).await.and_then(|r| {
         r.namespaces_by_pipeline
             .get(pipeline)
             .and_then(|m| m.get(namespace).cloned())
@@ -111,11 +115,12 @@ pub async fn find_entry(pipeline: &str, namespace: &str) -> Option<NamespaceEntr
 }
 
 pub async fn ensure_ns_entry(
+    config: &Config,
     pipeline: &str,
     namespace: &str,
     mut updater: impl FnMut(Option<NamespaceEntry>) -> NamespaceEntry,
 ) -> Result<(), String> {
-    let mut reg = read_registry().await.unwrap_or_default();
+    let mut reg = read_registry(config).await.unwrap_or_default();
     if !reg.pipelines.iter().any(|p| p == pipeline) {
         reg.pipelines.push(pipeline.to_string());
     }
@@ -130,20 +135,20 @@ pub async fn ensure_ns_entry(
         .unwrap_or_default()
         .as_secs();
     nsmap.insert(namespace.to_string(), new_entry);
-    write_registry(reg).await
+    write_registry(config, reg).await
 }
 
-pub async fn set_embeddings_uri(pipeline: &str, uri: &str) -> Result<(), String> {
-    let mut reg = read_registry().await.unwrap_or_default();
+pub async fn set_embeddings_uri(config: &Config, pipeline: &str, uri: &str) -> Result<(), String> {
+    let mut reg = read_registry(config).await.unwrap_or_default();
     if !reg.pipelines.iter().any(|p| p == pipeline) {
         reg.pipelines.push(pipeline.to_string());
     }
     reg.embeddings_uri_by_pipeline
         .insert(pipeline.to_string(), uri.to_string());
-    write_registry(reg).await
+    write_registry(config, reg).await
 }
 
 /// Build the S3 key for a namespace manifest for a given pipeline, independent of any global pipeline state.
-pub fn manifest_key_for(pipeline: &str, namespace: &str) -> String {
-    crate::helpers::manifest::Manifest::s3_key_for(pipeline, namespace)
+pub fn manifest_key_for(config: &Config, pipeline: &str, namespace: &str) -> String {
+    crate::helpers::manifest::Manifest::s3_key_for(config, pipeline, namespace)
 }

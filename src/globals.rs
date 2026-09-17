@@ -6,6 +6,7 @@ use arrow::datatypes::Schema;
 use once_cell::sync::Lazy;
 
 use crate::discover::PipelineMetadata;
+use crate::helpers::configuration::Config;
 use crate::helpers::logger::Logger;
 use crate::helpers::timed_rwlock::TimedRwLock;
 use crate::metrics::Metrics;
@@ -54,7 +55,7 @@ pub fn set_data_dir_ingest_paused(paused: bool) {
 
 /// Reset process-wide ingest pause flags between benchmark / unit tests.
 #[cfg(test)]
-pub fn reset_data_dir_capacity_state_for_test() {
+pub fn reset_data_dir_capacity_state_for_test(config: &Config) {
     use crate::metrics::counters::{
         LAST_WAL_RECLAIM_PROGRESS_EPOCH_SECS, WAL_BYTES_RECLAIMED_TOTAL,
         WAL_SEGMENTS_RECLAIMED_TOTAL,
@@ -74,7 +75,7 @@ pub static METRICS: Lazy<Arc<TimedRwLock<Metrics>>> =
 
 /// Publish pipeline metadata via ArcSwap; readers do lock-free loads.
 pub static METADATA: Lazy<ArcSwap<PipelineMetadata>> =
-    Lazy::new(|| ArcSwap::new(Arc::new(PipelineMetadata::new())));
+    Lazy::new(|| ArcSwap::new(Arc::new(PipelineMetadata::new(&Config::new()))));
 
 /// Per-namespace Arrow schema snapshots and versions.
 pub static ARROW_SCHEMA: Lazy<dashmap::DashMap<String, ArcSwap<Schema>>> =

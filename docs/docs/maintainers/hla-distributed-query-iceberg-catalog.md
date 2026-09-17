@@ -65,8 +65,7 @@ DynamoDB Local remains the OSS HLA harness.
 
 - One process runs at most one ActivePrimary ingest pipeline at a time.
 - A process may hold durable replicas and serve query sockets for many pipelines.
-- Ingest looks up the ActivePrimary `PipelineDurableStore` (else the sole installed store). It does not resolve the store by `Config::get_pipeline_name()`. Clustered `engine::run_sync_pipeline` sets `PIPELINE_NAME` for that lease only.
-- Replica/query/catch-up code is keyed by explicit `(tenant, workspace, pipeline)` and never reads process-global `PIPELINE_NAME` or `Config::get_data_dir()`.
+- Replica/query/catch-up code is keyed by explicit `(tenant, workspace, pipeline)` via `PipelineConfigView` / `bind_pipeline`. It does not resolve identity from process env. Clustered `engine::run_sync_pipeline` binds that pipeline on `Config` for the lease.
 - File sources keep the lease after scan complete (mtime wait). Other finite sources drain, `release_after_drain`, and let the scheduler try the next pipeline. An indefinite source retains the lease until fence.
 - One clustered process owns one `DATA_DIR`. Multiple processes on a host require separate existing `DATA_DIR` values.
 - Process identity is a UUID v4 generation. Host failure-domain identity is derived from Kubernetes/ECS/EC2 metadata, `/etc/machine-id`, then hostname.

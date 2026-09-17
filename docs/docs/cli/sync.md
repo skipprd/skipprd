@@ -1,6 +1,6 @@
 # Skipprd sync
 
-Ingest data from the source, buffer through the WAL, compact into Parquet, and upload to the destination.
+Ingest data from the source into the WAL. If the pipeline has a `data_sink`, compact into Parquet and upload to the destination. Without a sink, the WAL is the dataset — skipprd does not compact or reclaim.
 
 ## Usage
 
@@ -13,7 +13,7 @@ skipprd --config skippr.yml sync --pipeline <name> [--once] [--output <mode>] [-
 
 | Flag | Required | Description |
 |---|---|---|
-| `--pipeline, -p` | No | Pipeline name. Falls back to `PIPELINE_NAME` env var. |
+| `--pipeline, -p` | No | Pipeline name. Falls back to `PIPELINE_NAME`. |
 | `--once` | No | Run a single sync pass across all pipelines and exit. Without this flag, multi-pipeline mode loops continuously. |
 | `--output` | No | Output mode: `progress` (default, interactive spinner), `json` (structured JSON lines to stdout), or `text` (plain text summaries). |
 | `--log` | No | Enable logging. Optional level: `debug`, `info`, `warn`, `error`. Defaults to `info` when flag is present. |
@@ -21,11 +21,11 @@ skipprd --config skippr.yml sync --pipeline <name> [--once] [--output <mode>] [-
 ## What it does
 
 1. Loads pipeline metadata (schema) from S3
-2. Syncs the schema to the destination (creates Glue database/tables if needed)
+2. Syncs the schema to the destination when a sink is configured
 3. Reads data from the source in batches
 4. Writes records to the WAL as segments
-5. The compactor service continuously reads segments, converts to Parquet, uploads to S3, and registers Glue partitions
-6. On completion, the compactor drains all remaining segments before exit
+5. If a `data_sink` is set, the compactor reads segments, converts to Parquet, and lands them. Without a sink this step is skipped.
+6. On completion with a sink, the compactor drains remaining segments before exit
 7. Commits offsets to the offsets database
 
 ## Example

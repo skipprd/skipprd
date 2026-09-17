@@ -48,8 +48,13 @@ pub struct PerformanceBenchmark {
 }
 
 impl PerformanceBenchmark {
-    pub fn new(num_files: usize, records_per_file: usize, avg_record_size_bytes: usize) -> Self {
-        let data_dir = Config::get_data_dir();
+    pub fn new(
+        config: &Config,
+        num_files: usize,
+        records_per_file: usize,
+        avg_record_size_bytes: usize,
+    ) -> Self {
+        let data_dir = config.get_data_dir();
         let temp_dir = format!("{}/benchmark", data_dir);
 
         PerformanceBenchmark {

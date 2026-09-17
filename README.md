@@ -13,6 +13,10 @@ Licensor Line of Business: Skipprd ELT engine (https://elt.skippr.io)
 Docs: [elt.skippr.io](https://elt.skippr.io) | SQL reference: [sql-docs.md](sql-docs.md) | Performance notes: [PERFORMANCE.md](PERFORMANCE.md) | AI agent guidance: [AGENTS.md](AGENTS.md)
 
 ```bash
+pip install skipprd
+```
+
+```bash
 brew tap skipprd/tap
 brew install skipprd
 ```
@@ -59,7 +63,8 @@ test-data/              Sample data for tests
 
 ```bash
 cargo build
-cargo test
+cargo test --workspace --lib --exclude skipprd-python
+./scripts/test-python.sh
 cargo fmt --all -- --check
 cargo clippy
 ```
@@ -170,13 +175,13 @@ See [the docs](docs/docs/configuration/skippr-yml.md) for the full config refere
 
 Legacy and deployment environment variables include:
 
-### Pipeline identity
+### CLI mapping
 
 | Variable | Default | Description |
 |---|---|---|
-| `PIPELINE_NAME` | `default` | Pipeline name |
-| `WORKSPACE_NAME` | `default` | Workspace/domain |
-| `TENANT` | `default` | Tenant identifier |
+| `PIPELINE_NAME` | | Maps onto `--pipeline` / `Session.pipeline` when the flag is omitted. Not process-wide identity. |
+| `WORKSPACE_NAME` | `default` | Workspace/domain when `skippr.workspace` is unset |
+| `TENANT` | `default` | Tenant identifier when `skippr.tenant` is unset |
 | `SKIPPR_S3_BUCKET` | | State bucket (metadata, WAL, deadletters) |
 
 ### Input source

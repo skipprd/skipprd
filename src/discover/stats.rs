@@ -1,3 +1,4 @@
+use crate::helpers::configuration::Config;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -81,7 +82,7 @@ impl FieldStats {
         }
     }
 
-    pub fn finalize(&mut self) {
+    pub fn finalize(&mut self, config: &Config) {
         // Compute nullable ratio
         let denom = self.total.max(1); // avoid div-by-zero
         self.nullable_ratio = Some((self.nulls as f64) / (denom as f64));
@@ -96,7 +97,7 @@ impl FieldStats {
             }
         }
         // Histogram for numeric fields (if enabled via config)
-        if crate::helpers::configuration::Config::stats_histogram_enabled() {
+        if crate::helpers::configuration::Config::stats_histogram_enabled(config) {
             let non_null = self.total.saturating_sub(self.nulls);
             if non_null > 0 && (!self.numeric_samples.is_empty()) {
                 let min_v = self.min_numeric.unwrap_or_else(|| {
@@ -245,7 +246,7 @@ mod tests {
             ns.update_field("k", &json!(format!("val{}", i)));
         }
         if let Some(fs) = ns.fields.get_mut("k") {
-            fs.finalize();
+            fs.finalize(&Config::new());
             assert!(fs.approx_distinct.unwrap_or(0) > 0);
         } else {
             panic!("missing field stats");
@@ -261,7 +262,7 @@ mod tests {
             ..Default::default()
         };
 
-        f.finalize();
+        f.finalize(&Config::new());
 
         assert_eq!(f.approx_distinct, Some(4));
         assert_eq!(f.nullable_ratio, Some(0.0));
@@ -286,7 +287,7 @@ mod tests {
         assert!(f2.last_updated_epoch_ms >= prev);
         // no approx when only nulls
         let mut f3 = f2.clone();
-        f3.finalize();
+        f3.finalize(&Config::new());
         assert!(f3.approx_distinct.is_none());
     }
 
@@ -316,7 +317,7 @@ mod tests {
         assert!(f.max_numeric.is_none());
         assert!(f.min_len.is_none());
         assert!(f.max_len.is_none());
-        f.finalize();
+        f.finalize(&Config::new());
         assert!(f.approx_distinct.unwrap_or(0) >= 1);
     }
 
@@ -328,7 +329,7 @@ mod tests {
             ns.update_field("x", &json!(i as f64));
         }
         let mut f = ns.fields.get("x").unwrap().clone();
-        f.finalize();
+        f.finalize(&Config::new());
         assert!(f.histogram_bins.is_some());
         let bins = f.histogram_bins.unwrap();
         assert_eq!(bins.len(), 20);

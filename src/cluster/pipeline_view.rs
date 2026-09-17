@@ -7,7 +7,7 @@ use crate::plugins::cdc::SinkCapability;
 use skippr_lease::{PipelineKey, PipelinePaths};
 
 /// Immutable per-pipeline view. Replica/query/scheduler code uses this instead of
-/// mutating process-global `PIPELINE_NAME`.
+/// process-global pipeline identity.
 #[derive(Clone, Debug)]
 pub struct PipelineConfigView {
     pub key: PipelineKey,

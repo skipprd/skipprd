@@ -1,3 +1,4 @@
+use crate::helpers::configuration::Config;
 #[cfg(test)]
 mod in_memory;
 mod local_disk;
@@ -9,7 +10,6 @@ pub use local_disk::LocalDiskStorageAdapter;
 pub use s3::S3StorageAdapter;
 
 use async_trait::async_trait;
-use once_cell::sync::OnceCell;
 use serde_json::Value;
 use std::sync::Arc;
 
@@ -60,8 +60,6 @@ pub trait StorageAdapter: Send + Sync {
     }
 }
 
-static STORAGE: OnceCell<Arc<dyn StorageAdapter>> = OnceCell::new();
-
 /// Clustered WAL is per-node; extract/load objects (`metadata.json`) are cluster
 /// SoT, same as S3. Local clustered processes on one host share a sibling dir.
 pub(crate) fn clustered_local_storage_root(data_dir: &str) -> String {
@@ -72,25 +70,21 @@ pub(crate) fn clustered_local_storage_root(data_dir: &str) -> String {
         .unwrap_or_else(|| data_dir.to_string())
 }
 
-pub fn get_storage() -> Arc<dyn StorageAdapter> {
-    STORAGE
-        .get_or_init(|| {
-            let mode = crate::helpers::configuration::Config::get_storage_mode();
-            if mode == "local" {
-                let data_dir = crate::helpers::configuration::Config::get_pipeline_data_dir();
-                let root = if crate::helpers::configuration::Config::wal_storage_raw()
-                    .eq_ignore_ascii_case("clustered")
-                {
-                    clustered_local_storage_root(&data_dir)
-                } else {
-                    crate::helpers::configuration::Config::get_data_dir()
-                };
-                Arc::new(LocalDiskStorageAdapter::new(&root))
-            } else {
-                Arc::new(S3StorageAdapter)
-            }
-        })
-        .clone()
+pub fn get_storage(config: &Config) -> Arc<dyn StorageAdapter> {
+    let mode = config.get_storage_mode();
+    if mode == "local" {
+        let data_dir = config.get_pipeline_data_dir();
+        let root = if crate::helpers::configuration::Config::wal_storage_raw()
+            .eq_ignore_ascii_case("clustered")
+        {
+            clustered_local_storage_root(&data_dir)
+        } else {
+            config.get_data_dir()
+        };
+        Arc::new(LocalDiskStorageAdapter::new(&root))
+    } else {
+        Arc::new(S3StorageAdapter::new(config.get_skippr_s3_bucket()))
+    }
 }
 
 #[cfg(test)]

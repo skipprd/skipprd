@@ -440,6 +440,7 @@ async fn multiplex_test_sink(
         Some(marker_path),
     );
     RuntimeDataSinkPlugin::new(
+        &Config::new(),
         ResolvedRuntimePlugin::load(&manifest_path).unwrap(),
         pipeline_name.to_string(),
         RuntimeBinding::Primary,
@@ -466,6 +467,7 @@ async fn runtime_sink_does_not_reinstall_unchanged_schema_between_writes() {
         Some(&marker_path),
     );
     let sink = RuntimeDataSinkPlugin::new(
+        &Config::new(),
         ResolvedRuntimePlugin::load(&manifest_path).unwrap(),
         "runtime_host_schema_publish_once".to_string(),
         RuntimeBinding::Primary,
@@ -503,6 +505,7 @@ async fn runtime_sink_pool_growth_installs_latest_schema_once_on_new_worker() {
         Some(&marker_path),
     );
     let sink = RuntimeDataSinkPlugin::new(
+        &Config::new(),
         ResolvedRuntimePlugin::load(&manifest_path).unwrap(),
         "runtime_host_schema_pool_growth".to_string(),
         RuntimeBinding::Primary,
@@ -551,6 +554,7 @@ async fn runtime_sink_restarts_after_child_crash() {
 
     let resolved = ResolvedRuntimePlugin::load(&manifest_path).unwrap();
     let sink = RuntimeDataSinkPlugin::new(
+        &Config::new(),
         resolved,
         "runtime_host_restart".to_string(),
         RuntimeBinding::Primary,
@@ -584,6 +588,7 @@ async fn prepare_already_applied_sends_zero_payload_bytes() {
         Some(&marker_path),
     );
     let sink = RuntimeDataSinkPlugin::new(
+        &Config::new(),
         ResolvedRuntimePlugin::load(&manifest_path).unwrap(),
         "runtime_host_already_applied".to_string(),
         RuntimeBinding::Primary,
@@ -877,6 +882,7 @@ async fn adapter_capability_limits_effective_per_child_sessions() {
         Some(&postgres_marker),
     );
     let postgres_sink = RuntimeDataSinkPlugin::new(
+        &Config::new(),
         ResolvedRuntimePlugin::load(&postgres_manifest).unwrap(),
         "runtime_host_postgres_adapter_limit".to_string(),
         RuntimeBinding::Primary,
@@ -1185,6 +1191,7 @@ async fn prepare_rejection_leaves_payload_retryable() {
         Some(&marker_path),
     );
     let sink = RuntimeDataSinkPlugin::new(
+        &Config::new(),
         ResolvedRuntimePlugin::load(&manifest_path).unwrap(),
         "runtime_host_rejected".to_string(),
         RuntimeBinding::Primary,
@@ -1227,6 +1234,7 @@ async fn stale_prepare_frame_restarts_before_payload_consumption() {
         Some(&marker_path),
     );
     let sink = RuntimeDataSinkPlugin::new(
+        &Config::new(),
         ResolvedRuntimePlugin::load(&manifest_path).unwrap(),
         "runtime_host_stale_prepare".to_string(),
         RuntimeBinding::Primary,
@@ -1272,6 +1280,7 @@ async fn runtime_sink_global_budget_keeps_primary_and_deadletter_live() {
     );
     let pipeline_name = "runtime_host_global_sink_budget".to_string();
     let primary = RuntimeDataSinkPlugin::new(
+        &Config::new(),
         ResolvedRuntimePlugin::load(&primary_manifest).unwrap(),
         pipeline_name.clone(),
         RuntimeBinding::Primary,
@@ -1280,6 +1289,7 @@ async fn runtime_sink_global_budget_keeps_primary_and_deadletter_live() {
     .await
     .unwrap();
     let deadletter = RuntimeDataSinkPlugin::new(
+        &Config::new(),
         ResolvedRuntimePlugin::load(&deadletter_manifest).unwrap(),
         pipeline_name,
         RuntimeBinding::Deadletter,
@@ -1322,6 +1332,7 @@ async fn runtime_sink_restarts_after_io_disconnect() {
 
     let resolved = ResolvedRuntimePlugin::load(&manifest_path).unwrap();
     let sink = RuntimeDataSinkPlugin::new(
+        &Config::new(),
         resolved,
         "runtime_host_disconnect".to_string(),
         RuntimeBinding::Primary,
@@ -1357,6 +1368,7 @@ async fn runtime_sink_retries_schema_state_install_after_disconnect() {
 
     let resolved = ResolvedRuntimePlugin::load(&manifest_path).unwrap();
     let sink = RuntimeDataSinkPlugin::new(
+        &Config::new(),
         resolved,
         "runtime_host_schema_install_disconnect".to_string(),
         RuntimeBinding::Primary,
@@ -1397,6 +1409,7 @@ async fn runtime_manifest_rejects_capability_drift() {
 
     let resolved = ResolvedRuntimePlugin::load(&manifest_path).unwrap();
     let err = match RuntimeDataSinkPlugin::new(
+        &Config::new(),
         resolved,
         "runtime_host_drift".to_string(),
         RuntimeBinding::Primary,
@@ -1458,6 +1471,7 @@ async fn runtime_manifest_rejects_bad_checksum() {
 
     let resolved = ResolvedRuntimePlugin::load(&manifest_path).unwrap();
     let err = match RuntimeDataSinkPlugin::new(
+        &Config::new(),
         resolved,
         "runtime_host_checksum".to_string(),
         RuntimeBinding::Primary,
@@ -1491,6 +1505,7 @@ async fn runtime_manifest_rejects_missing_artifact() {
 
     let resolved = ResolvedRuntimePlugin::load(&manifest_path).unwrap();
     let err = match RuntimeDataSinkPlugin::new(
+        &Config::new(),
         resolved,
         "runtime_host_missing_artifact".to_string(),
         RuntimeBinding::Primary,
@@ -1525,6 +1540,7 @@ async fn runtime_sink_installs_context_and_schema_state() {
 
     let resolved = ResolvedRuntimePlugin::load(&manifest_path).unwrap();
     let sink = RuntimeDataSinkPlugin::new(
+        &Config::new(),
         resolved,
         "runtime_host_context".to_string(),
         RuntimeBinding::Primary,
@@ -1574,6 +1590,7 @@ async fn runtime_sink_refreshes_schema_state_on_demand() {
 
     let resolved = ResolvedRuntimePlugin::load(&manifest_path).unwrap();
     let sink = RuntimeDataSinkPlugin::new(
+        &Config::new(),
         resolved,
         "runtime_host_refresh".to_string(),
         RuntimeBinding::Primary,
@@ -1614,6 +1631,7 @@ async fn runtime_sink_reuses_compaction_id_across_replays() {
 
     let resolved = ResolvedRuntimePlugin::load(&manifest_path).unwrap();
     let sink = RuntimeDataSinkPlugin::new(
+        &Config::new(),
         resolved,
         "runtime_host_compaction_id".to_string(),
         RuntimeBinding::Primary,
@@ -1660,6 +1678,7 @@ async fn runtime_schema_sink_restarts_after_io_disconnect() {
 
     let resolved = ResolvedRuntimePlugin::load(&manifest_path).unwrap();
     let sink = RuntimeSchemaSinkPlugin::new(
+        &Config::new(),
         resolved,
         "runtime_schema_host_disconnect".to_string(),
         RuntimeBinding::Primary,
@@ -1704,6 +1723,7 @@ async fn runtime_schema_ddl_shares_global_catalog_operation_budget() {
         Some(&marker_path),
     );
     let sink = RuntimeSchemaSinkPlugin::new(
+        &Config::new(),
         ResolvedRuntimePlugin::load(&manifest_path).unwrap(),
         "runtime_schema_global_catalog_budget".to_string(),
         RuntimeBinding::Primary,
@@ -1743,6 +1763,7 @@ async fn runtime_schema_sink_reuses_compaction_id_across_replays() {
 
     let resolved = ResolvedRuntimePlugin::load(&manifest_path).unwrap();
     let sink = RuntimeSchemaSinkPlugin::new(
+        &Config::new(),
         resolved,
         "runtime_schema_host_compaction_id".to_string(),
         RuntimeBinding::Primary,
@@ -1791,6 +1812,7 @@ async fn runtime_schema_sink_retries_schema_state_install_after_disconnect() {
 
     let resolved = ResolvedRuntimePlugin::load(&manifest_path).unwrap();
     let sink = RuntimeSchemaSinkPlugin::new(
+        &Config::new(),
         resolved,
         "runtime_schema_host_install_disconnect".to_string(),
         RuntimeBinding::Primary,

@@ -1,6 +1,6 @@
 # skippr.yml
 
-`skippr.yml` is the canonical Skipprd project file. One file, one shape: Skipprd plugin entries under `data_sources` and `data_sinks`. `skipprd discover`, `skipprd schema`, and `skipprd sync` run against this file.
+`skippr.yml` is the canonical Skipprd project file. One file, one shape: Skipprd plugin entries under `data_sources` and optional `data_sinks`. `skipprd discover`, `skipprd schema`, and `skipprd sync` run against this file. Python `Session` loads the same file.
 
 `source` and `warehouse` in the example below are **logical names**, not reserved words. They may be `mssql_prod`, `raw_snowflake`, `my_warehouse`, or any other key. Pipelines refer to them by section-qualified reference.
 

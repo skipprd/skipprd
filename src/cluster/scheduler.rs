@@ -29,27 +29,7 @@ use crate::helpers::wal_storage::WalStorage;
 use crate::metrics::counters as metrics;
 use crate::query_flight::QueryFlightServer;
 
-pub async fn run_clustered_from_config() -> Result<(), DurableError> {
-    let storage = Config::get_wal_storage();
-    match storage {
-        WalStorage::Clustered => {
-            let config = crate::cluster::validation::validate_clustered_mode(
-                storage,
-                crate::cluster::validation::CliModeKind::Sync { once: false },
-            )
-            .map_err(|err| DurableError::ProtocolMismatch(err.to_string()))?
-            .ok_or_else(|| {
-                DurableError::ProtocolMismatch("clustered mode produced no ClusterConfig".into())
-            })?;
-            run_clustered(config).await
-        }
-        WalStorage::Disk | WalStorage::S3 => Err(DurableError::ProtocolMismatch(
-            "run_clustered_from_config requires WAL_STORAGE=clustered".into(),
-        )),
-    }
-}
-
-pub async fn run_clustered(config: ClusterConfig) -> Result<(), DurableError> {
+pub async fn run_clustered(app_cfg: Config, config: ClusterConfig) -> Result<(), DurableError> {
     let identity = config.identity();
     crate::query_flight::ballista::start(config.advertised_ip).await?;
     let registry = ReplicaRegistry::new(identity.clone());
@@ -59,6 +39,7 @@ pub async fn run_clustered(config: ClusterConfig) -> Result<(), DurableError> {
         "0.0.0.0:0".parse().unwrap(),
         identity.clone(),
         Some(registry.clone()),
+        app_cfg.clone(),
     )
     .await?;
     let gossip = Arc::new(
@@ -114,10 +95,9 @@ pub async fn run_clustered(config: ClusterConfig) -> Result<(), DurableError> {
         "clustered scheduler started"
     );
     metrics::set_cluster_ready(0);
-    let cfg = Config::get();
-    let keys = crate::cluster::pipeline_registry::scheduled_pipeline_keys().await?;
+    let keys = crate::cluster::pipeline_registry::scheduled_pipeline_keys(&app_cfg).await?;
     for key in &keys {
-        let view = PipelineConfigView::for_registry(&cfg, key)
+        let view = PipelineConfigView::for_registry(&app_cfg, key)
             .map_err(|err| DurableError::ProtocolMismatch(err.to_string()))?;
         view.validate_clustered_sink()
             .map_err(|err| DurableError::ProtocolMismatch(err.to_string()))?;
@@ -207,7 +187,7 @@ pub async fn run_clustered(config: ClusterConfig) -> Result<(), DurableError> {
         clock.clone(),
     ));
     let leases: Arc<dyn PipelineLeaseStore> =
-        crate::cluster::backend::open_lease_store(config.table.clone())
+        crate::cluster::backend::open_lease_store(&app_cfg, config.table.clone())
             .await
             .map_err(|err| DurableError::Io(err))?;
     tokio::select! {
@@ -216,6 +196,7 @@ pub async fn run_clustered(config: ClusterConfig) -> Result<(), DurableError> {
             scheduler.stop_acquiring();
         }
         _ = run_primary_loop(
+            app_cfg.clone(),
             config.clone(),
             advertised_replica,
             gossip.clone(),
@@ -234,12 +215,13 @@ pub async fn run_clustered(config: ClusterConfig) -> Result<(), DurableError> {
     let catalog_ok = crate::catalog_coordinator::drain_catalog_outboxes(Duration::from_secs(30))
         .await
         .is_ok();
-    let quiescent = match crate::helpers::offsets::Offsets::init() {
+    let quiescent = match crate::helpers::offsets::Offsets::init(&app_cfg) {
         Ok(offsets) => {
             catalog_ok
-                && crate::buffer::ingest_buffer::Buffers::drain_and_stop_compactor(Arc::new(
-                    offsets,
-                ))
+                && crate::buffer::ingest_buffer::Buffers::drain_and_stop_compactor(
+                    &app_cfg,
+                    Arc::new(offsets),
+                )
                 .await
         }
         Err(_) => false,
@@ -270,6 +252,7 @@ pub async fn run_clustered(config: ClusterConfig) -> Result<(), DurableError> {
 }
 
 async fn run_primary_loop(
+    app_cfg: Config,
     config: ClusterConfig,
     local_replica: std::net::SocketAddr,
     gossip: Arc<GossipService>,
@@ -288,7 +271,8 @@ async fn run_primary_loop(
         ) {
             break;
         }
-        let keys = match crate::cluster::pipeline_registry::scheduled_pipeline_keys().await {
+        let keys = match crate::cluster::pipeline_registry::scheduled_pipeline_keys(&app_cfg).await
+        {
             Ok(keys) => keys,
             Err(err) => {
                 tracing::error!(error = %err, "pipeline registry unavailable; fail closed");
@@ -312,6 +296,7 @@ async fn run_primary_loop(
                 continue;
             }
             match try_promote_and_ingest(
+                &app_cfg,
                 &config,
                 local_replica,
                 gossip.clone(),
@@ -368,6 +353,7 @@ fn holds_lease_after_source_complete(source_plugin: &str) -> bool {
 }
 
 async fn try_promote_and_ingest(
+    app_cfg: &Config,
     config: &ClusterConfig,
     local_replica: std::net::SocketAddr,
     gossip: Arc<GossipService>,
@@ -377,8 +363,7 @@ async fn try_promote_and_ingest(
     leases: Arc<dyn PipelineLeaseStore>,
     key: &skippr_lease::PipelineKey,
 ) -> Result<PrimaryRun, DurableError> {
-    let cfg = Config::get();
-    let view = PipelineConfigView::for_registry(&cfg, key)
+    let view = PipelineConfigView::for_registry(app_cfg, key)
         .map_err(|err| DurableError::ProtocolMismatch(err.to_string()))?;
     let name = key.pipeline();
     let paths = PipelinePaths::new(&config.data_root, &view.key)
@@ -388,6 +373,7 @@ async fn try_promote_and_ingest(
     let statuses = statuses_from_gossip(&gossip, &view.key, &identity).await;
     let candidates = replica_candidates_for(&gossip, &membership).await;
     let ctx = PromoteContext {
+        app_config: app_cfg.clone(),
         paths: paths.clone(),
         identity: identity.clone(),
         local_replica,
@@ -434,7 +420,7 @@ async fn try_promote_and_ingest(
             replica_client.clone(),
             outcome.replica_endpoint,
         ));
-        let offsets = offset_mode(config, &view.key)?;
+        let offsets = offset_mode(app_cfg, config, &view.key)?;
         let store = PipelineDurableStore::new(
             view.key.clone(),
             paths.clone(),
@@ -566,7 +552,7 @@ async fn try_promote_and_ingest(
         ) {
             break;
         }
-        let ingest = crate::engine::run_sync_pipeline(name, "text", false);
+        let ingest = crate::engine::run_sync_pipeline(app_cfg, name, "text", false);
         match outcome.guard.run_until_fenced(ingest).await {
             Ok(Ok(()))
                 if !matches!(
@@ -597,8 +583,7 @@ async fn try_promote_and_ingest(
                     pipeline = %name,
                     "clustered source scan complete; remaining primary until fenced"
                 );
-                let cfg = Config::get();
-                let mut seen = file_source_mtime(&cfg);
+                let mut seen = file_source_mtime(app_cfg);
                 loop {
                     if matches!(
                         outcome.guard.lifecycle(),
@@ -614,7 +599,7 @@ async fn try_promote_and_ingest(
                                 .saturating_add(skippr_lease::LEASE_RENEW_PERIOD),
                         )
                         .await;
-                    let now = file_source_mtime(&cfg);
+                    let now = file_source_mtime(app_cfg);
                     if now > seen {
                         seen = now;
                         break;
@@ -714,13 +699,21 @@ fn resolve_legacy_root(data_root: &std::path::Path, pipeline: &str) -> Option<st
         .find(|path| path.join("segment_buffer/segs").exists() || path.join("db").exists())
 }
 
-fn offset_mode(config: &ClusterConfig, key: &PipelineKey) -> Result<OffsetMode, DurableError> {
-    crate::cluster::backend::offset_publisher_for(config, key)
+fn offset_mode(
+    app_cfg: &Config,
+    config: &ClusterConfig,
+    key: &PipelineKey,
+) -> Result<OffsetMode, DurableError> {
+    crate::cluster::backend::offset_publisher_for(app_cfg, config, key)
 }
 
-pub async fn run_clustered_query(sql: Option<String>) -> Result<(), DurableError> {
-    let storage = Config::get_wal_storage();
+pub async fn clustered_query_collect(
+    app_cfg: &Config,
+    sql: &str,
+) -> Result<Vec<arrow::array::RecordBatch>, DurableError> {
+    let storage = app_cfg.get_wal_storage();
     let config = crate::cluster::validation::validate_clustered_mode(
+        app_cfg,
         storage,
         crate::cluster::validation::CliModeKind::Query,
     )
@@ -728,9 +721,7 @@ pub async fn run_clustered_query(sql: Option<String>) -> Result<(), DurableError
     .ok_or_else(|| {
         DurableError::ProtocolMismatch("clustered query requires ClusterConfig".into())
     })?;
-    let sql =
-        sql.ok_or_else(|| DurableError::ProtocolMismatch("clustered query requires --sql".into()))?;
-    let store = crate::cluster::backend::open_membership_store(config.table.clone())
+    let store = crate::cluster::backend::open_membership_store(app_cfg, config.table.clone())
         .await
         .map_err(DurableError::Io)?;
     let members = store
@@ -745,7 +736,7 @@ pub async fn run_clustered_query(sql: Option<String>) -> Result<(), DurableError
     let mut last_err = None;
     for record in &ready {
         let endpoint = record.ad.flight_addr;
-        match crate::query_flight::client::fetch_flight_sql(endpoint, &sql).await {
+        match crate::query_flight::client::fetch_flight_sql(endpoint, sql).await {
             Ok(batches) => {
                 let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
                 tracing::info!(
@@ -753,10 +744,7 @@ pub async fn run_clustered_query(sql: Option<String>) -> Result<(), DurableError
                     rows,
                     "clustered query Flight SQL"
                 );
-                for batch in &batches {
-                    crate::sqlrt::query::print_batches_plain(batch);
-                }
-                return Ok(());
+                return Ok(batches);
             }
             Err(err) => {
                 tracing::info!(
@@ -772,10 +760,14 @@ pub async fn run_clustered_query(sql: Option<String>) -> Result<(), DurableError
         error = last_err.as_deref().unwrap_or("no ready Flight SQL node"),
         "clustered query Flight SQL unreachable; Iceberg-only"
     );
-    run_iceberg_only_query(&sql, &config).await
+    run_iceberg_only_query(app_cfg, sql, &config).await
 }
 
-async fn run_iceberg_only_query(sql: &str, config: &ClusterConfig) -> Result<(), DurableError> {
+async fn run_iceberg_only_query(
+    app_cfg: &Config,
+    sql: &str,
+    config: &ClusterConfig,
+) -> Result<Vec<arrow::array::RecordBatch>, DurableError> {
     let scope = crate::cluster::identity::query_tenant_scope_from_env()
         .map_err(|err| DurableError::ProtocolMismatch(err.to_string()))?;
     let opts = crate::sqlrt::tables::ClusteredSelectOpts {
@@ -785,7 +777,7 @@ async fn run_iceberg_only_query(sql: &str, config: &ClusterConfig) -> Result<(),
         registry: None,
         iceberg_only: true,
     };
-    let df = crate::sqlrt::tables::plan_clustered_select(sql, &opts)
+    let df = crate::sqlrt::tables::plan_clustered_select(app_cfg, sql, &opts)
         .await
         .map_err(|err| DurableError::Io(err.to_string()))?;
     let batches = df
@@ -796,10 +788,7 @@ async fn run_iceberg_only_query(sql: &str, config: &ClusterConfig) -> Result<(),
         rows = batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
         "clustered query Iceberg-only"
     );
-    for batch in &batches {
-        crate::sqlrt::query::print_batches_plain(batch);
-    }
-    Ok(())
+    Ok(batches)
 }
 
 pub struct PipelineScheduler {
@@ -874,7 +863,7 @@ mod tests {
     fn clustered_query_is_one_flight_or_iceberg_only() {
         let src = include_str!("scheduler.rs");
         let query = src
-            .split("pub async fn run_clustered_query")
+            .split("pub async fn clustered_query_collect")
             .nth(1)
             .unwrap()
             .split("pub struct PipelineScheduler")
@@ -888,5 +877,12 @@ mod tests {
         assert!(!query.contains("select_highest_hash_consistent"));
         assert!(!query.contains("skipped unreachable replica"));
         assert!(!query.contains("execute_clustered_select"));
+        assert!(
+            !query.contains("print_batches_plain"),
+            "clustered_query_collect returns batches; CLI Session.query prints"
+        );
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(!prod.contains("run_clustered_from_config"));
+        assert!(!prod.contains("fn run_clustered_query"));
     }
 }

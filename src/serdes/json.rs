@@ -31,9 +31,9 @@ impl SerdeJson {
         }
     }
 
-    pub fn deserialize(record: &str) -> Vec<Value> {
-        let enable_sq = Self::is_single_quote_parsing_enabled();
-        let enable_unicode = Self::is_unicode_parsing_enabled();
+    pub fn deserialize(config: &Config, record: &str) -> Vec<Value> {
+        let enable_sq = Self::is_single_quote_parsing_enabled(config);
+        let enable_unicode = Self::is_unicode_parsing_enabled(config);
 
         // Standard NDJSON: one JSON object per line, no special parsing features.
         if !enable_sq && !enable_unicode {
@@ -93,14 +93,14 @@ impl SerdeJson {
     }
 
     // New method: Process multiple records in batch for better performance
-    pub fn deserialize_batch(records: &[&str]) -> Vec<Value> {
+    pub fn deserialize_batch(config: &Config, records: &[&str]) -> Vec<Value> {
         // Pre-allocate with a reasonable capacity
         let estimated_size = records.len() * 2;
         let mut messages: Vec<Value> = Vec::with_capacity(estimated_size);
 
         // Reuse parser for better performance
-        let enable_sq = Self::is_single_quote_parsing_enabled();
-        let enable_unicode = Self::is_unicode_parsing_enabled();
+        let enable_sq = Self::is_single_quote_parsing_enabled(config);
+        let enable_unicode = Self::is_unicode_parsing_enabled(config);
         let parser = OptimizedJsonParser::new(enable_sq, enable_unicode);
 
         for record in records {
@@ -143,19 +143,19 @@ impl SerdeJson {
     }
 
     // Check if single quote parsing is enabled
-    fn is_single_quote_parsing_enabled() -> bool {
-        Config::get_enable_single_quote_parsing()
+    fn is_single_quote_parsing_enabled(config: &Config) -> bool {
+        config.get_enable_single_quote_parsing()
     }
 
     // Check if unicode parsing is enabled
-    fn is_unicode_parsing_enabled() -> bool {
-        Config::get_enable_unicode_parsing()
+    fn is_unicode_parsing_enabled(config: &Config) -> bool {
+        config.get_enable_unicode_parsing()
     }
 
-    pub fn json_decode(string: &str) -> Vec<Value> {
+    pub fn json_decode(config: &Config, string: &str) -> Vec<Value> {
         // Create an instance of the optimized parser
-        let enable_sq = Self::is_single_quote_parsing_enabled();
-        let enable_unicode = Self::is_unicode_parsing_enabled();
+        let enable_sq = Self::is_single_quote_parsing_enabled(config);
+        let enable_unicode = Self::is_unicode_parsing_enabled(config);
         let parser = OptimizedJsonParser::new(enable_sq, enable_unicode);
 
         // Use the optimized parser
@@ -185,14 +185,14 @@ mod json_serde_tests {
     #[test]
     fn test_basic_valid_json_test() {
         let record: String = r#"{"status": "200"}"#.to_string();
-        let msg = SerdeJson::deserialize(&record);
+        let msg = SerdeJson::deserialize(&Config::new(), &record);
         assert_eq!(msg.first().unwrap()["status"], "200");
     }
 
     #[test]
     fn test_nested_valid_json_2() {
         let record: String = r#"{"status": "200", "items": {"foo": "bar"}}"#.to_string();
-        let msg = SerdeJson::deserialize(&record);
+        let msg = SerdeJson::deserialize(&Config::new(), &record);
         assert_eq!(msg.first().unwrap()["status"], "200");
         assert_eq!(msg.first().unwrap()["items"]["foo"], "bar");
     }
@@ -200,7 +200,7 @@ mod json_serde_tests {
     #[test]
     fn test_nested_array_valid_json() {
         let record: String = r#"{"status": "200", "items": [{"foo": "bar"}]}"#.to_string();
-        let msg = SerdeJson::deserialize(&record);
+        let msg = SerdeJson::deserialize(&Config::new(), &record);
         assert_eq!(msg.first().unwrap()["status"], "200");
         assert_eq!(msg.first().unwrap()["items"][0]["foo"], "bar");
     }
@@ -226,7 +226,7 @@ mod json_serde_tests {
     #[test]
     fn test_null_value_valid_json() {
         let record: String = r#"{"start":"0.620131100002421","end":null}"#.to_string();
-        let msg = SerdeJson::deserialize(&record);
+        let msg = SerdeJson::deserialize(&Config::new(), &record);
         assert_eq!(msg.first().unwrap()["start"], "0.620131100002421");
         assert_eq!(msg.first().unwrap()["end"], Value::Null);
     }
@@ -234,7 +234,7 @@ mod json_serde_tests {
     #[test]
     fn test_single_quote_value_json() {
         let record: String = r#"{"binary": "b'H'"}"#.to_string();
-        let msg = SerdeJson::deserialize(&record);
+        let msg = SerdeJson::deserialize(&Config::new(), &record);
         assert_eq!(msg.first().unwrap()["binary"], "b'H'");
     }
 
@@ -245,7 +245,7 @@ mod json_serde_tests {
         setup_test_env(true, false);
 
         let record: String = r#"{'status': '200'}"#.to_string();
-        let msg = SerdeJson::deserialize(&record);
+        let msg = SerdeJson::deserialize(&Config::new(), &record);
         assert_eq!(msg.first().unwrap()["status"], "200");
 
         // Reset to default
@@ -255,7 +255,7 @@ mod json_serde_tests {
     #[test]
     fn test_string_before_json() {
         let record: String = r#"some, string, that exists)/ 20080808115538 {"status":"200","length":"4742","mime":"text/html","offset":"16518203"}"#.to_string();
-        let msg = SerdeJson::deserialize(&record);
+        let msg = SerdeJson::deserialize(&Config::new(), &record);
         assert_eq!(msg.first().unwrap()["status"], "200");
         // assert!(msg.first().unwrap().get("some, string").is_none());
     }
@@ -275,7 +275,7 @@ mod json_serde_tests {
         setup_test_env(true, true);
 
         let record: String = r#"{u'status': u'200'}"#.to_string();
-        let msg = SerdeJson::deserialize(&record);
+        let msg = SerdeJson::deserialize(&Config::new(), &record);
         assert_eq!(msg.first().unwrap()["status"], "200");
 
         // Reset to default
@@ -285,7 +285,7 @@ mod json_serde_tests {
     #[test]
     fn test_unicode_string_value_json() {
         let record: String = r#"{"status": "\u0023"}"#.to_string();
-        let msg = SerdeJson::deserialize(&record);
+        let msg = SerdeJson::deserialize(&Config::new(), &record);
         assert_eq!(msg.first().unwrap()["status"], "#");
         assert_ne!(msg.first().unwrap()["status"], 2605);
     }
@@ -293,7 +293,7 @@ mod json_serde_tests {
     #[test]
     fn test_multi_record_array_json() {
         let record: String = r#"[{"status": "200"},{"status": "500"}]"#.to_string();
-        let msg = SerdeJson::deserialize(&record);
+        let msg = SerdeJson::deserialize(&Config::new(), &record);
         assert_eq!(msg.first().unwrap()["status"], "200");
         assert_eq!(msg.last().unwrap()["status"], "500");
     }
@@ -301,7 +301,7 @@ mod json_serde_tests {
     #[test]
     fn test_valid_multi_line_json() {
         let record: String = "{\"status\": \"200\"}\n{\"status\": \"500\"}".to_string();
-        let msg = SerdeJson::deserialize(&record);
+        let msg = SerdeJson::deserialize(&Config::new(), &record);
         assert_eq!(msg.first().unwrap()["status"], "200");
         assert_eq!(msg.last().unwrap()["status"], "500");
     }
@@ -309,7 +309,7 @@ mod json_serde_tests {
     #[test]
     fn test_valid_multi_line_with_multi_record_arrays_json() {
         let record: String = "[{\"status\": \"200\"},{\"status\": \"201\"}]\n[{\"status\": \"202\"},{\"status\": \"203\"}]".to_string();
-        let msg = SerdeJson::deserialize(&record);
+        let msg = SerdeJson::deserialize(&Config::new(), &record);
         assert_eq!(msg.first().unwrap()[0]["status"], "200");
         assert_eq!(msg.first().unwrap()[1]["status"], "201");
         assert_eq!(msg.last().unwrap()[0]["status"], "202");
@@ -324,7 +324,7 @@ mod json_serde_tests {
         let record: String =
             r#"{"foo": {"nest": "bar"}}{"foo": {"nest": "baz"}}{"foo": {"nest": "boo"}}"#
                 .to_string();
-        let msg = SerdeJson::deserialize(&record);
+        let msg = SerdeJson::deserialize(&Config::new(), &record);
         // assert!( msg.first().unwrap().is_array());
         assert_eq!(msg[0]["foo"]["nest"], "bar");
         assert_eq!(msg[1]["foo"]["nest"], "baz");
@@ -340,7 +340,7 @@ mod json_serde_tests {
         let record: String =
             r#"{"id":"123","data":{"value":42,"metadata":{"source":"system"}}}{"id":"456","data":{"value":99,"metadata":{"source":"user"}}}"#
                 .to_string();
-        let msg = SerdeJson::deserialize(&record);
+        let msg = SerdeJson::deserialize(&Config::new(), &record);
         assert_eq!(msg.len(), 2);
         assert_eq!(msg[0]["id"], "123");
         assert_eq!(msg[0]["data"]["value"], 42);
@@ -353,14 +353,14 @@ mod json_serde_tests {
     #[test]
     fn test_deserialize_reparses_stringified_json_payloads() {
         let record = r#""{\"status\":\"200\"}""#.to_string();
-        let msg = SerdeJson::deserialize(&record);
+        let msg = SerdeJson::deserialize(&Config::new(), &record);
         assert_eq!(msg, vec![json!({"status": "200"})]);
     }
 
     #[test]
     fn test_deserialize_preserves_plain_string_when_reparse_fails() {
         let record = r#""plain string""#.to_string();
-        let msg = SerdeJson::deserialize(&record);
+        let msg = SerdeJson::deserialize(&Config::new(), &record);
         assert_eq!(msg, vec![Value::String("plain string".to_string())]);
     }
 
@@ -370,7 +370,7 @@ mod json_serde_tests {
             r#"{"status":"200"}{"status":"201"}"#,
             r#"[{"status":"202"}]"#,
         ];
-        let msg = SerdeJson::deserialize_batch(&records);
+        let msg = SerdeJson::deserialize_batch(&Config::new(), &records);
         assert_eq!(msg.len(), 3);
         assert_eq!(msg[0]["status"], "200");
         assert_eq!(msg[1]["status"], "201");
@@ -381,7 +381,7 @@ mod json_serde_tests {
     fn test_json_decode_respects_feature_flags() {
         setup_test_env(true, true);
 
-        let msg = SerdeJson::json_decode("{u'status': u'200'}");
+        let msg = SerdeJson::json_decode(&Config::new(), "{u'status': u'200'}");
         assert_eq!(msg, vec![json!({"status": "200"})]);
 
         setup_test_env(false, false);

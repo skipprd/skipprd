@@ -14,6 +14,7 @@ use crate::cluster::gossip::GossipService;
 use crate::cluster::identity::ClusterIdentity;
 use crate::cluster::peer::{assign_replica, query_status};
 use crate::cluster::placement::{rank_replicas, ReplicaCandidate};
+use crate::helpers::configuration::Config;
 
 /// Control RPCs during promote/replace must fail fast. Replication of WAL
 /// payloads still uses the longer replica idle timeout.
@@ -89,6 +90,7 @@ pub fn select_highest_hash_consistent(
 }
 
 pub struct PromoteContext {
+    pub app_config: Config,
     pub paths: PipelinePaths,
     pub identity: ClusterIdentity,
     pub local_replica: SocketAddr,
@@ -280,6 +282,7 @@ async fn promote_after_acquire(
     .await
     .map_err(promote_durable_err)?;
     crate::cluster::schema::load_and_install_pipeline_schema(
+        &ctx.app_config,
         &key,
         &ctx.paths,
         &log,

@@ -3,57 +3,63 @@ use serde_json::Value;
 
 use super::StorageAdapter;
 
-#[derive(Clone, Default)]
-pub struct S3StorageAdapter;
+pub struct S3StorageAdapter {
+    bucket: String,
+}
+
+impl S3StorageAdapter {
+    pub fn new(bucket: String) -> Self {
+        Self { bucket }
+    }
+}
 
 #[async_trait]
 impl StorageAdapter for S3StorageAdapter {
     async fn get_json(&self, key: &str) -> Result<Value, String> {
-        crate::helpers::s3::get_json(key)
+        crate::helpers::s3::get_json(&self.bucket, key)
             .await
             .map_err(|e| format!("{:?}", e))
     }
 
     async fn put_json(&self, key: &str, value: &Value) -> Result<(), String> {
-        crate::helpers::s3::put_json(key, value)
+        crate::helpers::s3::put_json(&self.bucket, key, value)
             .await
             .map_err(|e| format!("{:?}", e))
     }
 
     async fn get_bytes(&self, key: &str) -> Result<Vec<u8>, String> {
-        crate::helpers::s3::get_bytes(key)
+        crate::helpers::s3::get_bytes(&self.bucket, key)
             .await
             .map_err(|e| format!("{:?}", e))
             .map(|b| b.to_vec())
     }
 
     async fn put_bytes(&self, key: &str, bytes: &[u8], content_type: &str) -> Result<(), String> {
-        crate::helpers::s3::put_bytes(key, bytes, content_type)
+        crate::helpers::s3::put_bytes(&self.bucket, key, bytes, content_type)
             .await
             .map_err(|e| format!("{:?}", e))
     }
 
     async fn delete_object(&self, key: &str) -> Result<(), String> {
-        crate::helpers::s3::delete_object(key)
+        crate::helpers::s3::delete_object(&self.bucket, key)
             .await
             .map_err(|e| format!("{:?}", e))
     }
 
     async fn head_etag(&self, key: &str) -> Result<Option<String>, String> {
-        crate::helpers::s3::head_etag(key)
+        crate::helpers::s3::head_etag(&self.bucket, key)
             .await
             .map_err(|e| format!("{:?}", e))
     }
 
     async fn list_prefix(&self, prefix: &str) -> Result<Vec<String>, String> {
-        let bucket = crate::helpers::configuration::Config::get_skippr_s3_bucket();
         let client = crate::helpers::s3::get_s3_client().await;
         let mut token: Option<String> = None;
         let mut out: Vec<String> = Vec::new();
         loop {
             let mut req = client
                 .list_objects_v2()
-                .bucket(&bucket)
+                .bucket(&self.bucket)
                 .prefix(prefix)
                 .max_keys(1000);
             if let Some(t) = token.as_ref() {
@@ -78,6 +84,6 @@ impl StorageAdapter for S3StorageAdapter {
     }
 
     async fn delete_prefix(&self, prefix: &str) -> Result<usize, String> {
-        crate::helpers::s3::delete_prefix(prefix).await
+        crate::helpers::s3::delete_prefix(&self.bucket, prefix).await
     }
 }

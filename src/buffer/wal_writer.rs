@@ -93,6 +93,7 @@ fn adaptive_ack_delay_ms(
 }
 
 fn next_ack_deadline(
+    config: &Config,
     pending_acks: &[(oneshot::Sender<WalPersistResult>, Instant, u64, u64)],
     live_segment_bytes: u64,
     submit_rate_bytes_per_sec: f64,
@@ -104,7 +105,7 @@ fn next_ack_deadline(
         .min()?;
     let adaptive_delay = Duration::from_millis(adaptive_ack_delay_ms(
         live_segment_bytes,
-        Config::get_wal_bytes_per_file(),
+        config.get_wal_bytes_per_file(),
         submit_rate_bytes_per_sec,
         persist_avg_ms(),
     ));
@@ -113,7 +114,7 @@ fn next_ack_deadline(
     Some(ack_deadline.min(max_deadline))
 }
 
-pub fn start(ingest_threads: usize) {
+pub fn start(config: &Config, ingest_threads: usize) {
     if WAL_WRITER_TX.get().is_some() {
         return;
     }
@@ -122,9 +123,9 @@ pub fn start(ingest_threads: usize) {
     if WAL_WRITER_TX.set(tx).is_ok() {
         WAL_WRITER_CAPACITY.store(capacity, Ordering::Relaxed);
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
-            handle.spawn(run_writer(rx));
+            handle.spawn(run_writer(config.clone(), rx));
         } else {
-            crate::ingest_work::INGEST_RT.spawn(run_writer(rx));
+            crate::ingest_work::INGEST_RT.spawn(run_writer(config.clone(), rx));
         }
         info!("WAL writer started with queue_capacity={}", capacity);
     }
@@ -194,9 +195,9 @@ pub fn fail_request(request_id: u64, message: impl Into<String>) {
     complete_request_unit(request_id, &Err(message.into()));
 }
 
-pub async fn flush_and_drain(offsets_db: Arc<Offsets>) -> Result<(), ArrowError> {
+pub async fn flush_and_drain(config: &Config, offsets_db: Arc<Offsets>) -> Result<(), ArrowError> {
     let Some(tx) = WAL_WRITER_TX.get() else {
-        return crate::buffer::ingest_buffer::flush_all_segments_direct(offsets_db).await;
+        return crate::buffer::ingest_buffer::flush_all_segments_direct(config, offsets_db).await;
     };
     let (done_tx, done_rx) = oneshot::channel();
     tx.send(WalWriterCommand::Flush {
@@ -257,7 +258,7 @@ pub fn has_pending_work() -> bool {
     pending_count() > 0 || Buffers::live_segment_bytes() > 0
 }
 
-async fn run_writer(mut rx: mpsc::Receiver<WalWriterCommand>) {
+async fn run_writer(config: Config, mut rx: mpsc::Receiver<WalWriterCommand>) {
     let mut pending_acks: Vec<(oneshot::Sender<WalPersistResult>, Instant, u64, u64)> = Vec::new();
     let mut pending_offsets: Option<Arc<Offsets>> = None;
     let mut last_flush = Instant::now();
@@ -265,11 +266,12 @@ async fn run_writer(mut rx: mpsc::Receiver<WalWriterCommand>) {
     let mut submit_rate_bytes_per_sec = 0.0f64;
 
     loop {
-        let max_delay = Duration::from_secs(Config::get_wal_max_delay_seconds().max(1));
+        let max_delay = Duration::from_secs(config.get_wal_max_delay_seconds().max(1));
         let next = if pending_acks.is_empty() {
             rx.recv().await
         } else {
             let deadline = next_ack_deadline(
+                &config,
                 &pending_acks,
                 Buffers::live_segment_bytes(),
                 submit_rate_bytes_per_sec,
@@ -327,11 +329,13 @@ async fn run_writer(mut rx: mpsc::Receiver<WalWriterCommand>) {
                         let _ = unit.done.send(Err(err));
                     }
                 }
-                if Buffers::live_segment_bytes() >= Config::get_wal_bytes_per_file() {
+                if Buffers::live_segment_bytes() >= config.get_wal_bytes_per_file() {
                     if let Some(offsets) = pending_offsets.clone() {
-                        flush_live_and_ack(&offsets, &mut pending_acks, &mut last_flush).await;
+                        flush_live_and_ack(&config, &offsets, &mut pending_acks, &mut last_flush)
+                            .await;
                     }
                 } else if let Some(deadline) = next_ack_deadline(
+                    &config,
                     &pending_acks,
                     Buffers::live_segment_bytes(),
                     submit_rate_bytes_per_sec,
@@ -339,14 +343,21 @@ async fn run_writer(mut rx: mpsc::Receiver<WalWriterCommand>) {
                 ) {
                     if Instant::now() >= deadline {
                         if let Some(offsets) = pending_offsets.clone() {
-                            flush_live_and_ack(&offsets, &mut pending_acks, &mut last_flush).await;
+                            flush_live_and_ack(
+                                &config,
+                                &offsets,
+                                &mut pending_acks,
+                                &mut last_flush,
+                            )
+                            .await;
                         }
                     }
                 }
             }
             Some(WalWriterCommand::Flush { offsets_db, done }) => {
                 let result =
-                    flush_everything(&offsets_db, &mut pending_acks, &mut last_flush).await;
+                    flush_everything(&config, &offsets_db, &mut pending_acks, &mut last_flush)
+                        .await;
                 let _ = done.send(result);
                 pending_offsets = None;
             }
@@ -355,7 +366,7 @@ async fn run_writer(mut rx: mpsc::Receiver<WalWriterCommand>) {
                     break;
                 }
                 if let Some(offsets) = pending_offsets.clone() {
-                    flush_live_and_ack(&offsets, &mut pending_acks, &mut last_flush).await;
+                    flush_live_and_ack(&config, &offsets, &mut pending_acks, &mut last_flush).await;
                 }
             }
         }
@@ -364,15 +375,17 @@ async fn run_writer(mut rx: mpsc::Receiver<WalWriterCommand>) {
 }
 
 async fn flush_everything(
+    config: &Config,
     offsets_db: &Arc<Offsets>,
     pending_acks: &mut Vec<(oneshot::Sender<WalPersistResult>, Instant, u64, u64)>,
     last_flush: &mut Instant,
 ) -> Result<(), ArrowError> {
-    flush_live_and_ack(offsets_db, pending_acks, last_flush).await;
+    flush_live_and_ack(config, offsets_db, pending_acks, last_flush).await;
     Ok(())
 }
 
 async fn flush_live_and_ack(
+    config: &Config,
     offsets_db: &Arc<Offsets>,
     pending_acks: &mut Vec<(oneshot::Sender<WalPersistResult>, Instant, u64, u64)>,
     last_flush: &mut Instant,
@@ -381,7 +394,7 @@ async fn flush_live_and_ack(
         return;
     }
     let started = Instant::now();
-    let result = Buffers::flush_live_segment_for_writer(offsets_db.as_ref()).await;
+    let result = Buffers::flush_live_segment_for_writer(config, offsets_db.as_ref()).await;
     let elapsed_ns = started.elapsed().as_nanos().min(u128::from(u64::MAX)) as u64;
     WAL_WRITER_PERSIST_LATENCY_NS_TOTAL.fetch_add(elapsed_ns, Ordering::Relaxed);
     WAL_WRITER_PERSIST_COUNT.fetch_add(1, Ordering::Relaxed);

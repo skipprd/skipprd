@@ -1,4 +1,3 @@
-use crate::helpers::configuration::Config;
 use aws_sdk_s3::error::SdkError;
 use aws_sdk_s3::operation::delete_object::DeleteObjectError;
 use aws_sdk_s3::operation::get_object::GetObjectError;
@@ -27,13 +26,8 @@ pub async fn get_s3_client() -> Arc<S3Client> {
         .clone()
 }
 
-fn get_skippr_bucket() -> String {
-    Config::get_skippr_s3_bucket()
-}
-
-pub async fn put_json(key: &str, value: &Value) -> Result<(), S3Error> {
+pub async fn put_json(bucket: &str, key: &str, value: &Value) -> Result<(), S3Error> {
     let client = get_s3_client().await;
-    let bucket = get_skippr_bucket();
     let body = serde_json::to_vec(value).unwrap();
 
     // Simple retry with exponential backoff and jitter for transient throttling
@@ -42,7 +36,7 @@ pub async fn put_json(key: &str, value: &Value) -> Result<(), S3Error> {
     loop {
         match client
             .put_object()
-            .bucket(&bucket)
+            .bucket(bucket)
             .key(key)
             .body(ByteStream::from(body.clone()))
             .send()
@@ -68,9 +62,13 @@ pub async fn put_json(key: &str, value: &Value) -> Result<(), S3Error> {
     }
 }
 
-pub async fn put_bytes(key: &str, bytes: &[u8], content_type: &str) -> Result<(), S3Error> {
+pub async fn put_bytes(
+    bucket: &str,
+    key: &str,
+    bytes: &[u8],
+    content_type: &str,
+) -> Result<(), S3Error> {
     let client = get_s3_client().await;
-    let bucket = get_skippr_bucket();
 
     // Simple retry with exponential backoff and jitter for transient throttling
     let mut attempt: u32 = 0;
@@ -78,7 +76,7 @@ pub async fn put_bytes(key: &str, bytes: &[u8], content_type: &str) -> Result<()
     loop {
         let req = client
             .put_object()
-            .bucket(&bucket)
+            .bucket(bucket)
             .key(key)
             .body(ByteStream::from(bytes.to_vec()))
             .content_type(content_type);
@@ -102,9 +100,8 @@ pub async fn put_bytes(key: &str, bytes: &[u8], content_type: &str) -> Result<()
     }
 }
 
-pub async fn get_json(key: &str) -> Result<Value, SdkError<GetObjectError>> {
+pub async fn get_json(bucket: &str, key: &str) -> Result<Value, SdkError<GetObjectError>> {
     let client = get_s3_client().await;
-    let bucket = get_skippr_bucket();
 
     debug!("Fetching JSON from S3: bucket='{}' key='{}'", &bucket, key);
 
@@ -112,7 +109,7 @@ pub async fn get_json(key: &str) -> Result<Value, SdkError<GetObjectError>> {
     let max_attempts: u32 = 6;
     loop {
         debug!("get_json attempt {} for key '{}'", attempt + 1, key);
-        let res = client.get_object().bucket(&bucket).key(key).send().await;
+        let res = client.get_object().bucket(bucket).key(key).send().await;
         match res {
             Ok(resp) => {
                 let bytes = resp.body.collect().await.unwrap().into_bytes();
@@ -139,13 +136,12 @@ pub async fn get_json(key: &str) -> Result<Value, SdkError<GetObjectError>> {
     }
 }
 
-pub async fn get_bytes(key: &str) -> Result<Vec<u8>, SdkError<GetObjectError>> {
+pub async fn get_bytes(bucket: &str, key: &str) -> Result<Vec<u8>, SdkError<GetObjectError>> {
     let client = get_s3_client().await;
-    let bucket = get_skippr_bucket();
     let mut attempt: u32 = 0;
     let max_attempts: u32 = 6;
     loop {
-        let res = client.get_object().bucket(&bucket).key(key).send().await;
+        let res = client.get_object().bucket(bucket).key(key).send().await;
         match res {
             Ok(resp) => {
                 let bytes = resp.body.collect().await.unwrap().into_bytes();
@@ -211,9 +207,8 @@ pub async fn get_object_bytes_for_bucket(bucket: &str, key: &str) -> io::Result<
     }
 }
 
-pub async fn delete_object(key: &str) -> Result<(), SdkError<DeleteObjectError>> {
+pub async fn delete_object(bucket: &str, key: &str) -> Result<(), SdkError<DeleteObjectError>> {
     let client = get_s3_client().await;
-    let bucket = get_skippr_bucket();
     client
         .delete_object()
         .bucket(bucket)
@@ -223,10 +218,9 @@ pub async fn delete_object(key: &str) -> Result<(), SdkError<DeleteObjectError>>
     Ok(())
 }
 
-pub async fn delete_prefix(prefix: &str) -> Result<usize, String> {
+pub async fn delete_prefix(bucket: &str, prefix: &str) -> Result<usize, String> {
     use aws_sdk_s3::types::{Delete, ObjectIdentifier};
     let client = get_s3_client().await;
-    let bucket = get_skippr_bucket();
     // Safety checks
     if prefix.is_empty() || prefix == "/" || prefix == "." || prefix == ".." {
         return Err("Refusing to delete unsafe or empty prefix".to_string());
@@ -242,7 +236,7 @@ pub async fn delete_prefix(prefix: &str) -> Result<usize, String> {
     loop {
         let mut req = client
             .list_objects_v2()
-            .bucket(&bucket)
+            .bucket(bucket)
             .prefix(prefix)
             .max_keys(1000);
         if let Some(t) = token.as_ref() {
@@ -275,7 +269,7 @@ pub async fn delete_prefix(prefix: &str) -> Result<usize, String> {
                         .map_err(|e| format!("delete build error: {:?}", e))?;
                     client
                         .delete_objects()
-                        .bucket(&bucket)
+                        .bucket(bucket)
                         .delete(del)
                         .send()
                         .await
@@ -294,7 +288,7 @@ pub async fn delete_prefix(prefix: &str) -> Result<usize, String> {
                     .map_err(|e| format!("delete build error: {:?}", e))?;
                 client
                     .delete_objects()
-                    .bucket(&bucket)
+                    .bucket(bucket)
                     .delete(del)
                     .send()
                     .await
@@ -447,10 +441,12 @@ pub async fn list_parquet_keys(bucket: &str, prefix: &str, max: usize) -> Vec<St
 }
 
 /// HEAD an object and return its ETag (without surrounding quotes) if present.
-pub async fn head_etag(key: &str) -> Result<Option<String>, SdkError<HeadObjectError>> {
+pub async fn head_etag(
+    bucket: &str,
+    key: &str,
+) -> Result<Option<String>, SdkError<HeadObjectError>> {
     let client = get_s3_client().await;
-    let bucket = get_skippr_bucket();
-    let res = client.head_object().bucket(&bucket).key(key).send().await;
+    let res = client.head_object().bucket(bucket).key(key).send().await;
     match res {
         Ok(resp) => {
             let et = resp.e_tag().map(|s| s.trim_matches('"').to_string());

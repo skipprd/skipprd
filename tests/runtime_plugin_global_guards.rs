@@ -88,6 +88,31 @@ fn runtime_sink_and_schema_plugins_do_not_reintroduce_host_globals() {
 }
 
 #[test]
+fn runtime_source_plugins_do_not_reload_host_yaml_config() {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let banned = Regex::new(r"\bConfig::").unwrap();
+    let mut violations = Vec::new();
+    for entry in WalkDir::new(root.join("plugins/data_source"))
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .filter(|entry| entry.path().extension().is_some_and(|ext| ext == "rs"))
+    {
+        let path = entry.path();
+        let contents = std::fs::read_to_string(path)
+            .unwrap_or_else(|err| panic!("failed to read {}: {}", path.display(), err));
+        if banned.is_match(&contents) {
+            violations.push(path.display().to_string());
+        }
+    }
+    assert!(
+        violations.is_empty(),
+        "data_source plugins must not call skippr Config:: (framed start.context is SoT):\n{}",
+        violations.join("\n")
+    );
+}
+
+#[test]
 fn legacy_runtime_plugin_authoring_artifacts_are_deleted() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     assert!(
@@ -187,5 +212,21 @@ fn athena_data_upload_stays_on_the_shared_async_object_writer() {
     assert!(
         contents.contains("reader.into_stream()"),
         "Athena grouped writes must flatten chunks without precollection"
+    );
+}
+
+#[test]
+fn runtime_sdk_source_child_does_not_reload_host_yaml() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("crates/skippr-runtime-sdk/src/append_source_runtime.rs");
+    let src = std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("failed to read {}: {}", path.display(), err));
+    assert!(
+        !src.contains("Config::build_config"),
+        "plugin children must not reload skippr.yml; framed start is SoT"
+    );
+    assert!(
+        !src.contains("bind_pipeline"),
+        "plugin children must not bind a host yaml Config"
     );
 }

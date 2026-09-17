@@ -60,35 +60,35 @@ pub fn ingest_durable_store() -> Option<std::sync::Arc<crate::buffer::durable::P
         })
 }
 
-fn ingest_legacy_buffer_dir(leaf: &str) -> PathBuf {
-    PathBuf::from(format!("{}/segment_buffer/{leaf}", Config::get_data_dir()))
+fn ingest_legacy_buffer_dir(config: &Config, leaf: &str) -> PathBuf {
+    PathBuf::from(format!("{}/segment_buffer/{leaf}", config.get_data_dir()))
 }
 
 /// Segment directory for the ingest pipeline: clustered `PipelinePaths` when an
 /// ActivePrimary store is installed, otherwise the legacy `{DATA_DIR}/segment_buffer/...`
 /// layout used by S3 WAL.
-pub fn ingest_segment_dir() -> PathBuf {
+pub fn ingest_segment_dir(config: &Config) -> PathBuf {
     ingest_durable_store()
         .map(|store| store.paths().segs.clone())
-        .unwrap_or_else(|| ingest_legacy_buffer_dir("segs"))
+        .unwrap_or_else(|| ingest_legacy_buffer_dir(config, "segs"))
 }
 
-pub fn ingest_completion_dir() -> PathBuf {
+pub fn ingest_completion_dir(config: &Config) -> PathBuf {
     ingest_durable_store()
         .map(|store| store.paths().completions.clone())
-        .unwrap_or_else(|| ingest_legacy_buffer_dir("done"))
+        .unwrap_or_else(|| ingest_legacy_buffer_dir(config, "done"))
 }
 
-pub fn ingest_compaction_dir() -> PathBuf {
+pub fn ingest_compaction_dir(config: &Config) -> PathBuf {
     ingest_durable_store()
         .map(|store| store.paths().compactions.clone())
-        .unwrap_or_else(|| ingest_legacy_buffer_dir("compactions"))
+        .unwrap_or_else(|| ingest_legacy_buffer_dir(config, "compactions"))
 }
 
-pub fn ingest_quarantine_dir() -> PathBuf {
+pub fn ingest_quarantine_dir(config: &Config) -> PathBuf {
     ingest_durable_store()
         .map(|store| store.paths().root.join("segment_buffer/quarantine"))
-        .unwrap_or_else(|| ingest_legacy_buffer_dir("quarantine"))
+        .unwrap_or_else(|| ingest_legacy_buffer_dir(config, "quarantine"))
 }
 
 /// Minimal WAL store interface.
@@ -157,25 +157,23 @@ impl WalStore for S3WalStore {
 /// Install a local-only [`PipelineDurableStore`] on the legacy disk layout.
 /// Clustered mode must not call this; it uses tenant-scoped [`skippr_lease::PipelinePaths::new`].
 pub fn ensure_disk_durable_store(
+    config: &Config,
     offsets: std::sync::Arc<crate::helpers::offsets::Offsets>,
 ) -> io::Result<()> {
     if ingest_durable_store().is_some() {
         return Ok(());
     }
-    let pipeline = Config::get_pipeline_name();
+    let pipeline = config.get_pipeline_name();
     if pipeline.is_empty() {
         return Err(io::Error::other(
             "disk durable store requires a pipeline name",
         ));
     }
-    let key = skippr_lease::PipelineKey::new(
-        Config::get_tenant(),
-        Config::get_workspace_name(),
-        pipeline,
-    )
-    .map_err(|err| io::Error::other(err.to_string()))?;
+    let key =
+        skippr_lease::PipelineKey::new(config.get_tenant(), config.get_workspace_name(), pipeline)
+            .map_err(|err| io::Error::other(err.to_string()))?;
     let paths =
-        skippr_lease::PipelinePaths::legacy_disk(std::path::Path::new(&Config::get_data_dir()));
+        skippr_lease::PipelinePaths::legacy_disk(std::path::Path::new(&config.get_data_dir()));
     let clock = std::sync::Arc::new(skippr_lease::SystemClock::new());
     let guard = skippr_lease::LeaseGuard::single_node(key.clone(), clock);
     let log = crate::buffer::durable::log::MutationLog::open(paths.clone())
@@ -196,13 +194,14 @@ pub struct WalStoreFactory;
 
 impl WalStoreFactory {
     pub fn for_batches(
+        config: &Config,
         batches: &HashMap<PartitionKey, Vec<RecordBatch>>,
     ) -> Box<dyn WalStore + Send + Sync> {
         let _ = batches; // unused; selection via root-level storage
-        match Config::get_wal_storage() {
+        match config.get_wal_storage() {
             WalStorage::S3 => {
-                let bucket = Config::get_wal_s3_bucket();
-                let base = Config::get_wal_s3_prefix();
+                let bucket = config.get_wal_s3_bucket();
+                let base = config.get_wal_s3_prefix();
                 let prefix_url = format!("s3://{}/{}", bucket, base.trim_start_matches('/'));
                 Box::new(S3WalStore::new(&prefix_url))
             }
@@ -222,7 +221,7 @@ mod tests {
         install_durable_store, remove_durable_store, MemoryOffsetPublisher, OffsetMode,
         PipelineDurableStore,
     };
-    use crate::helpers::configuration::{Config, PIPELINE_NAME};
+    use crate::helpers::configuration::Config;
     use skippr_lease::{LeaseGuard, PipelineKey, PipelinePaths, SystemClock};
     use std::sync::Arc;
 
@@ -267,17 +266,8 @@ mod tests {
         install_durable_store(store);
         Config::setenv("TENANT", "hla-e2e");
         Config::setenv("WORKSPACE_NAME", "local");
-        {
-            let mut name = PIPELINE_NAME.write();
-            name.clear();
-            name.push_str("hla_events");
-        }
-        let got = ingest_segment_dir();
+        let got = ingest_segment_dir(&Config::new());
         remove_durable_store(&key);
-        {
-            let mut name = PIPELINE_NAME.write();
-            name.clear();
-        }
         Config::set_evncache("TENANT", "");
         Config::set_evncache("WORKSPACE_NAME", "");
         std::env::remove_var("TENANT");

@@ -145,13 +145,14 @@ impl OffsetServiceEndpoint {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::helpers::configuration::Config;
     use crate::helpers::offsets::OffsetKey;
     use serial_test::serial;
 
     #[test]
     #[serial]
     fn validate_entries_closed_semantics() {
-        let offsets = match Offsets::init() {
+        let offsets = match Offsets::init(&Config::new()) {
             Ok(offsets) => Arc::new(offsets),
             Err(_) => return,
         };

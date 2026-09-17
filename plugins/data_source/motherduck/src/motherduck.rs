@@ -5,7 +5,6 @@ use reqwest::Client;
 use serde_derive::Deserialize;
 use tracing::info;
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::progress::OffsetKey;
@@ -39,26 +38,6 @@ pub struct DataSourceMotherduckPlugin {
 const MOTHERDUCK_SQL_ENDPOINT: &str = "https://api.motherduck.com/v1/sql";
 
 impl DataSourceMotherduckPlugin {
-    pub async fn new() -> Self {
-        let config: DataSourceMotherduckPluginConfig =
-            match Config::get_pipeline_input_plugin_config() {
-                Ok(c) => c.try_into().unwrap_or_else(|e| panic!("{}", e)),
-                Err(_) => DataSourceMotherduckPluginConfig {
-                    motherduck_token: Config::getenv("MOTHERDUCK_TOKEN", ""),
-                    database: None,
-                    tables: None,
-                    query: None,
-                    batch_size_rows: None,
-                    format: None,
-                    batch_size_bytes: None,
-                    batch_size_seconds: None,
-                },
-            };
-        Self {
-            config,
-            client: Client::new(),
-        }
-    }
 
     pub fn with_runtime_config(config: DataSourceMotherduckPluginConfig) -> Self {
         Self {
