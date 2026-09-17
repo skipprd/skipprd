@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use std::fmt;
 
 use crate::discover::PipelineMetadata;
+use crate::helpers::configuration::Config;
 use crate::plugins::cdc::NamespaceContract;
 use crate::runtime_plugins::protocol::RuntimeSinkCapabilityDescriptor;
 
@@ -237,6 +238,7 @@ pub fn validate_namespace_contracts(
 /// Namespaces not present in `contracts` are removed. Used for runtime `ContractsUpdate`
 /// events that publish the complete contract set for the active source.
 pub fn replace_source_contracts_authoritative(
+    config: &Config,
     pipeline: &mut PipelineMetadata,
     contracts: impl IntoIterator<Item = SourceNamespaceContract>,
 ) -> Result<bool, SourceContractError> {
@@ -245,7 +247,7 @@ pub fn replace_source_contracts_authoritative(
     let next: HashMap<String, SourceNamespaceContract> = contracts
         .into_iter()
         .map(|mut contract| {
-            contract.namespace = crate::ingest_work::storage_namespace(&contract.namespace);
+            contract.namespace = crate::ingest_work::storage_namespace(config, &contract.namespace);
             (contract.namespace.clone(), contract)
         })
         .collect();
@@ -260,10 +262,11 @@ pub fn replace_source_contracts_authoritative(
 ///
 /// Prefer [`replace_source_contracts_authoritative`] for runtime `ContractsUpdate` events.
 pub fn merge_source_contracts_into_pipeline(
+    config: &Config,
     pipeline: &mut PipelineMetadata,
     contracts: impl IntoIterator<Item = SourceNamespaceContract>,
 ) -> bool {
-    replace_source_contracts_authoritative(pipeline, contracts).unwrap_or_else(|err| {
+    replace_source_contracts_authoritative(config, pipeline, contracts).unwrap_or_else(|err| {
         panic!("invalid source namespace contracts: {err}");
     })
 }
@@ -279,6 +282,7 @@ impl PipelineMetadata {
 
 /// Validate that the configured output sink supports every contract write policy.
 pub async fn validate_active_sink_supports_contracts(
+    config: &Config,
     contracts: &[SourceNamespaceContract],
 ) -> Result<(), SourceContractError> {
     use crate::helpers::configuration::Config;
@@ -289,8 +293,8 @@ pub async fn validate_active_sink_supports_contracts(
         return Ok(());
     }
     validate_namespace_contracts(contracts)?;
-    let output_plugin_name = Config::get_pipeline_output_plugin_name();
-    let runtime_output_version = Config::get_pipeline_output_plugin_version().ok().flatten();
+    let output_plugin_name = config.get_pipeline_output_plugin_name();
+    let runtime_output_version = config.get_pipeline_output_plugin_version().ok().flatten();
     let sink_manifest = resolve_runtime_plugin(
         RuntimePluginKind::DataSink,
         &output_plugin_name,
@@ -316,26 +320,27 @@ pub async fn validate_active_sink_supports_contracts(
     Ok(())
 }
 
-async fn persist_pipeline_metadata(pipeline: &PipelineMetadata) {
+async fn persist_pipeline_metadata(config: &Config, pipeline: &PipelineMetadata) {
     use std::sync::Arc;
 
     use crate::helpers::configuration::Config;
     use crate::METADATA;
 
     METADATA.store(Arc::new(pipeline.clone()));
-    Config::set_metadata(pipeline, false).await;
+    config.set_metadata(pipeline, false).await;
 }
 
 /// Authoritatively apply runtime-published contracts (empty vec clears all).
 pub async fn apply_runtime_source_namespace_contracts(
+    config: &Config,
     contracts: Vec<SourceNamespaceContract>,
 ) -> Result<bool, SourceContractError> {
-    validate_active_sink_supports_contracts(&contracts).await?;
+    validate_active_sink_supports_contracts(config, &contracts).await?;
 
     let mut pipeline = crate::METADATA.load().as_ref().clone();
-    let changed = replace_source_contracts_authoritative(&mut pipeline, contracts)?;
+    let changed = replace_source_contracts_authoritative(config, &mut pipeline, contracts)?;
     if changed {
-        persist_pipeline_metadata(&pipeline).await;
+        persist_pipeline_metadata(config, &pipeline).await;
     }
     Ok(changed)
 }
@@ -460,7 +465,7 @@ mod tests {
 
     #[test]
     fn empty_authoritative_replace_clears_all_contracts() {
-        let mut pipeline = crate::discover::PipelineMetadata::new();
+        let mut pipeline = crate::discover::PipelineMetadata::new(&Config::new());
         pipeline.source_contracts.insert(
             "stale".into(),
             SourceNamespaceContract {
@@ -474,14 +479,16 @@ mod tests {
                 semantics: None,
             },
         );
-        let changed = replace_source_contracts_authoritative(&mut pipeline, Vec::new()).unwrap();
+        let changed =
+            replace_source_contracts_authoritative(&Config::new(), &mut pipeline, Vec::new())
+                .unwrap();
         assert!(changed);
         assert!(pipeline.source_contracts.is_empty());
     }
 
     #[test]
     fn authoritative_replace_removes_stale_namespaces() {
-        let mut pipeline = crate::discover::PipelineMetadata::new();
+        let mut pipeline = crate::discover::PipelineMetadata::new(&Config::new());
         pipeline.source_contracts.insert(
             "stale".into(),
             SourceNamespaceContract {
@@ -496,6 +503,7 @@ mod tests {
             },
         );
         let changed = replace_source_contracts_authoritative(
+            &Config::new(),
             &mut pipeline,
             vec![SourceNamespaceContract {
                 namespace: "active".into(),
@@ -590,10 +598,16 @@ mod tests {
     #[test]
     fn authoritative_replace_unchanged_returns_false() {
         let contract = sample_contract("ns", WritePolicy::Append);
-        let mut pipeline = crate::discover::PipelineMetadata::new();
-        replace_source_contracts_authoritative(&mut pipeline, vec![contract.clone()]).unwrap();
+        let mut pipeline = crate::discover::PipelineMetadata::new(&Config::new());
+        replace_source_contracts_authoritative(
+            &Config::new(),
+            &mut pipeline,
+            vec![contract.clone()],
+        )
+        .unwrap();
         let changed =
-            replace_source_contracts_authoritative(&mut pipeline, vec![contract]).unwrap();
+            replace_source_contracts_authoritative(&Config::new(), &mut pipeline, vec![contract])
+                .unwrap();
         assert!(!changed);
     }
 

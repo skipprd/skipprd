@@ -10,7 +10,6 @@ use serde_derive::Deserialize;
 use serde_json::{json, Map, Value};
 use tracing::{error, info, warn};
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use skippr_runtime_sdk::plugins::cdc::{
     source_capabilities, MutationKind, MysqlCheckpoint, WalRowMeta,
@@ -51,26 +50,6 @@ pub struct DataSourceMysqlPlugin {
 }
 
 impl DataSourceMysqlPlugin {
-    pub async fn new() -> Self {
-        let config: DataSourceMysqlPluginConfig = match Config::get_pipeline_input_plugin_config() {
-            Ok(input_config) => input_config.try_into().unwrap_or_else(|e| panic!("{}", e)),
-            Err(_) => {
-                let connection_string = Config::getenv("MYSQL_CONNECTION_STRING", "");
-                DataSourceMysqlPluginConfig {
-                    connection_string,
-                    tables: None,
-                    format: Some("row".to_string()),
-                    batch_size_bytes: None,
-                    batch_size_seconds: None,
-                    cdc_mode: SourceCdcMode::Snapshot,
-                    server_id: None,
-                    cdc_idle_timeout_seconds: None,
-                }
-            }
-        };
-
-        DataSourceMysqlPlugin { config }
-    }
 
     pub fn with_runtime_config(config: DataSourceMysqlPluginConfig) -> Self {
         Self { config }

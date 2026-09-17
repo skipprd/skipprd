@@ -345,12 +345,12 @@ impl Offsets {
         }
     }
 
-    pub fn init() -> Result<Offsets, OffsetsError> {
+    pub fn init(config: &Config) -> Result<Offsets, OffsetsError> {
         let clustered = matches!(
-            Config::get_wal_storage(),
+            config.get_wal_storage(),
             crate::helpers::wal_storage::WalStorage::Clustered
         );
-        let remote_kind = match Config::configured_offset_store() {
+        let remote_kind = match config.configured_offset_store() {
             Ok(Some(kind)) => kind,
             Ok(None) if clustered => {
                 if cfg!(feature = "offset-store-dynamodb") {
@@ -364,7 +364,7 @@ impl Offsets {
         };
         let use_remote = clustered || remote_kind.is_clustered_control_plane();
         if use_remote {
-            let warn_without_s3_wal = match Config::get_wal_storage() {
+            let warn_without_s3_wal = match config.get_wal_storage() {
                 crate::helpers::wal_storage::WalStorage::S3
                 | crate::helpers::wal_storage::WalStorage::Clustered => false,
                 crate::helpers::wal_storage::WalStorage::Disk => true,
@@ -379,8 +379,8 @@ impl Offsets {
                         #[cfg(feature = "offset-store-cloud-tables")]
                         {
                             CloudTablesOffsetStore::open(
-                                Config::get_offset_dynamodb_table(),
-                                Config::offset_store_partition_key(),
+                                config.get_offset_dynamodb_table(),
+                                config.offset_store_partition_key(),
                                 warn_without_s3_wal,
                             )
                             .map(Arc::new)
@@ -399,8 +399,8 @@ impl Offsets {
                         #[cfg(feature = "offset-store-dynamodb")]
                         {
                             DynamoDbOffsetStore::open(
-                                Config::get_offset_dynamodb_table(),
-                                Config::offset_store_partition_key(),
+                                config.get_offset_dynamodb_table(),
+                                config.offset_store_partition_key(),
                                 warn_without_s3_wal,
                             )
                             .map(Arc::new)
@@ -441,7 +441,7 @@ impl Offsets {
         //     }
         // }
 
-        let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
+        let db_path = format!("{}/{}", config.get_data_dir(), SLED_NAME);
         let db = match sled::open(&db_path) {
             // open in high-throughput mode
             Ok(db) => db,
@@ -528,8 +528,8 @@ impl Offsets {
     // Since the key is the largest part of the data, we need to purge keys with None values
     // periodically to save space.
     #[allow(dead_code)]
-    fn vacuum() -> Result<u64, OffsetsError> {
-        let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
+    fn vacuum(config: &Config) -> Result<u64, OffsetsError> {
+        let db_path = format!("{}/{}", config.get_data_dir(), SLED_NAME);
         // // Ensure database isn't already open before we start operating
         // let db = match sled::Config::default()
         //     .path(&db_path)
@@ -556,7 +556,7 @@ impl Offsets {
         // drop(db);
 
         // Rename database file to a temporary file
-        // let temp_db_path = format!("{}/{}.tmp", Config::get_data_dir(), SLED_NAME);
+        // let temp_db_path = format!("{}/{}.tmp", config.get_data_dir(), SLED_NAME);
         //
         // if std::fs::metadata(&db_path).is_err() {
         //     return Ok(0);
@@ -690,9 +690,9 @@ impl Offsets {
     }
 
     #[allow(dead_code)]
-    fn rollback_vacuum() -> Result<bool, OffsetsError> {
-        let db_path = format!("{}/{}", Config::get_data_dir(), SLED_NAME);
-        let temp_db_path = format!("{}/{}.tmp", Config::get_data_dir(), SLED_NAME);
+    fn rollback_vacuum(config: &Config) -> Result<bool, OffsetsError> {
+        let db_path = format!("{}/{}", config.get_data_dir(), SLED_NAME);
+        let temp_db_path = format!("{}/{}.tmp", config.get_data_dir(), SLED_NAME);
 
         if std::fs::metadata(&temp_db_path).is_ok() {
             match std::fs::remove_dir_all(&db_path) {
@@ -1232,6 +1232,7 @@ impl Offsets {
 mod tests {
     use std::sync::{Arc, Mutex};
 
+    use crate::helpers::configuration::Config;
     use crate::helpers::offsets::{
         CheckpointTransport, OffsetKey, OffsetTransport, OffsetTypes, OffsetValue, Offsets,
         OffsetsError, RuntimeOffsetOperation, RuntimeOffsetValue,
@@ -1294,7 +1295,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_insert_position() {
-        let db = match Offsets::init() {
+        let db = match Offsets::init(&Config::new()) {
             Ok(offsets) => offsets,
             Err(e) => {
                 println!("Skipping: {}", e);
@@ -1391,7 +1392,7 @@ mod tests {
     #[test]
     #[serial]
     fn insert_position_preserves_closed() {
-        let db = match Offsets::init() {
+        let db = match Offsets::init(&Config::new()) {
             Ok(offsets) => offsets,
             Err(e) => {
                 println!("Skipping: {}", e);
@@ -1420,7 +1421,7 @@ mod tests {
     #[test]
     #[serial]
     fn test_validate() {
-        let db = match Offsets::init() {
+        let db = match Offsets::init(&Config::new()) {
             Ok(offsets) => offsets,
             Err(e) => {
                 println!("Skipping: {}", e);
@@ -1629,7 +1630,7 @@ mod tests {
     //     planner.start();
     //
     //
-    //     let db = Offsets::init().unwrap();
+    //     let db = Offsets::init(&Config::new()).unwrap();
     //
     //     // for i in 1..=100000000 {
     //     for i in 1..=10000000 {

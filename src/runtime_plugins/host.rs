@@ -141,6 +141,7 @@ impl Drop for RuntimePluginChild {
 }
 
 struct RuntimeChildConnection {
+    app_config: Config,
     resolved: ResolvedRuntimePlugin,
     pipeline_name: String,
     sink_session_capacity: usize,
@@ -297,6 +298,7 @@ impl RuntimeChildConnection {
     }
 
     async fn spawn(
+        config: &Config,
         resolved: ResolvedRuntimePlugin,
         pipeline_name: String,
         offset_addr: Option<String>,
@@ -330,8 +332,8 @@ impl RuntimeChildConnection {
         command
             .args(&resolved.manifest.args)
             .env("PIPELINE_NAME", &pipeline_name)
-            .env("WORKSPACE_NAME", Config::get_workspace_name())
-            .env("DATA_DIR", Config::get_pipeline_data_dir())
+            .env("WORKSPACE_NAME", config.get_workspace_name())
+            .env("DATA_DIR", config.get_pipeline_data_dir())
             .env(SKIPPR_RUNTIME_CONTROL_ADDR_ENV, control_addr.to_string())
             .env(SKIPPR_RUNTIME_DATA_ADDR_ENV, data_addr.to_string())
             .env(SKIPPR_RUNTIME_SESSION_TOKEN_ENV, &session_token);
@@ -358,6 +360,7 @@ impl RuntimeChildConnection {
         .await
         .map_err(|_| io::Error::other("timed out waiting for runtime data channel"))??;
         let mut connection = Self {
+            app_config: config.clone(),
             resolved,
             pipeline_name,
             sink_session_capacity: sink_session_capacity.max(1),
@@ -379,6 +382,7 @@ impl RuntimeChildConnection {
         let _ = self.child.kill().await;
         unregister_runtime_plugin_child(child_pid);
         let replacement = Self::spawn(
+            &self.app_config,
             self.resolved.clone(),
             self.pipeline_name.clone(),
             None,
@@ -631,17 +635,20 @@ fn is_runtime_channel_eof(err: &io::Error) -> bool {
 }
 
 fn build_source_start_request_for_pipeline(
+    config: &Config,
     pipeline_name: &str,
     execution_mode: RuntimeExecutionMode,
     source_once: bool,
 ) -> io::Result<SourceStartRequest> {
     let source_config = RuntimeSourceConfig::try_from(
-        Config::get_pipeline_input_plugin_config().map_err(io::Error::other)?,
+        config
+            .get_pipeline_input_plugin_config()
+            .map_err(io::Error::other)?,
     )
     .map_err(io::Error::other)?;
 
     Ok(SourceStartRequest {
-        context: runtime_execution_context(pipeline_name, execution_mode),
+        context: runtime_execution_context(config, pipeline_name, execution_mode),
         config: source_config,
         once: source_once || execution_mode == RuntimeExecutionMode::Discover,
         source_ingest_window: runtime_source_ingest_window(),
@@ -732,7 +739,7 @@ fn query_value_from_runtime_filename(filename: &str, key: &str) -> Option<String
     })
 }
 
-fn apply_derived_runtime_schema(namespace: String, schema: &SchemaRef) {
+fn apply_derived_runtime_schema(config: &Config, namespace: String, schema: &SchemaRef) {
     if current_runtime_schema_state()
         .namespaces
         .contains_key(&namespace)
@@ -741,14 +748,21 @@ fn apply_derived_runtime_schema(namespace: String, schema: &SchemaRef) {
     }
 
     let version = bump_pipeline_schema_version();
-    apply_runtime_source_schema_state(RuntimeSchemaState {
-        version,
-        namespaces: BTreeMap::from([(namespace.clone(), output_metadata_for_arrow_schema(schema))]),
-        namespace_versions: BTreeMap::from([(namespace, version)]),
-    });
+    apply_runtime_source_schema_state(
+        config,
+        RuntimeSchemaState {
+            version,
+            namespaces: BTreeMap::from([(
+                namespace.clone(),
+                output_metadata_for_arrow_schema(schema),
+            )]),
+            namespace_versions: BTreeMap::from([(namespace, version)]),
+        },
+    );
 }
 
 async fn ingest_runtime_batches_into_core(
+    config: &Config,
     request_id: u64,
     batches: Vec<crate::runtime_plugins::protocol::RuntimeIngestPartitionBatch>,
     offsets: Arc<Offsets>,
@@ -775,7 +789,7 @@ async fn ingest_runtime_batches_into_core(
             .first()
             .map(|batch| batch.schema())
             .unwrap_or_else(|| Arc::new(arrow::datatypes::Schema::empty()));
-        let namespace = storage_namespace(&batch.namespace);
+        let namespace = storage_namespace(config, &batch.namespace);
         derived_namespaces.insert(namespace.clone(), output_metadata_for_arrow_schema(&schema));
         let offsets_map = batch
             .offsets
@@ -786,7 +800,7 @@ async fn ingest_runtime_batches_into_core(
             offsets: offsets_map,
             sink_ref: batch.sink_ref,
             _namespace: namespace,
-            _partition: storage_partition(&batch.partition),
+            _partition: storage_partition(config, &batch.partition),
             _time: batch.time,
             _schema_fingerprint: batch.schema_fingerprint,
             schema,
@@ -803,13 +817,17 @@ async fn ingest_runtime_batches_into_core(
             .keys()
             .map(|namespace| (namespace.clone(), version))
             .collect();
-        let changed_namespaces = apply_runtime_source_schema_state(RuntimeSchemaState {
-            version,
-            namespaces: derived_namespaces,
-            namespace_versions,
-        });
+        let changed_namespaces = apply_runtime_source_schema_state(
+            config,
+            RuntimeSchemaState {
+                version,
+                namespaces: derived_namespaces,
+                namespace_versions,
+            },
+        );
         for namespace in changed_namespaces {
-            Config::sync_output_schema_namespace_blocking(&namespace)
+            config
+                .sync_output_schema_namespace_blocking(&namespace)
                 .await
                 .map_err(io::Error::other)?;
         }
@@ -844,6 +862,7 @@ fn decode_plugin_data_frame(payload: Vec<u8>) -> io::Result<PluginDataFrame> {
 }
 
 fn ingest_source_payload_batches_into_core(
+    config: &Config,
     request_id: u64,
     tasks: Vec<Vec<crate::runtime_plugins::protocol::RuntimeRawIngestBatch>>,
     offsets: Arc<Offsets>,
@@ -859,14 +878,17 @@ fn ingest_source_payload_batches_into_core(
         if task.is_empty() {
             continue;
         }
-        let batches = task.into_iter().map(IngestBatch::from).collect::<Vec<_>>();
+        let batches = task
+            .into_iter()
+            .map(|batch| IngestBatch::from_runtime(config, batch))
+            .collect::<Vec<_>>();
         ingest_tasks.add(
             IngestTask::new(batches, offsets.clone(), shared_output.clone())
                 .with_submit_id(request_id),
         );
     }
     let ingest_tasks = Arc::new(ingest_tasks);
-    let _ = ingest.ingest_file(&ingest_tasks, &offsets, shared_output);
+    let _ = ingest.ingest_file(config, &ingest_tasks, &offsets, shared_output);
     ingest.log_wal_ingest_pressure_snapshot();
     if crate::data_dir_capacity_exceeded() {
         return Err(io::Error::other(
@@ -987,6 +1009,7 @@ async fn stop_runtime_discovery_source(
 }
 
 pub async fn sync_runtime_input_plugin(
+    config: &Config,
     resolved: ResolvedRuntimePlugin,
     pipeline_name: String,
     execution_mode: RuntimeExecutionMode,
@@ -1000,6 +1023,7 @@ pub async fn sync_runtime_input_plugin(
             io::Error::other(format!("failed to start runtime offset service: {err}"))
         })?;
     let mut connection = RuntimeChildConnection::spawn(
+        config,
         resolved,
         pipeline_name,
         Some(_offset_service.env_value()),
@@ -1008,6 +1032,7 @@ pub async fn sync_runtime_input_plugin(
     )
     .await?;
     let start_request = build_source_start_request_for_pipeline(
+        config,
         &connection.pipeline_name,
         execution_mode,
         source_once,
@@ -1022,7 +1047,7 @@ pub async fn sync_runtime_input_plugin(
     let mut pending_source_tasks: JoinSet<io::Result<()>> = JoinSet::new();
     let (ingest_ack_tx, mut ingest_ack_rx) =
         tokio::sync::mpsc::unbounded_channel::<RuntimeIngestAck>();
-    let ingest = Arc::new(Ingest::new_for_execution(execution_mode));
+    let ingest = Arc::new(Ingest::new_for_execution(config, execution_mode));
     let mut control_reader = BufferedRuntimeFrameReader::new();
     let mut data_reader = BufferedRuntimeFrameReader::new();
     loop {
@@ -1036,6 +1061,7 @@ pub async fn sync_runtime_input_plugin(
                 match control_frame {
                     PluginFrame::SourceEvent(SourceEvent::ContractsUpdate(contracts)) => {
                         match crate::plugins::source_contract::apply_runtime_source_namespace_contracts(
+                            config,
                             contracts,
                         )
                         .await
@@ -1055,7 +1081,7 @@ pub async fn sync_runtime_input_plugin(
                     }
                     PluginFrame::SourceEvent(SourceEvent::SchemaStateUpdate(schema_state)) => {
                         let namespace_count = schema_state.namespaces.len();
-                        let changed_namespaces = apply_runtime_source_schema_state(schema_state);
+                        let changed_namespaces = apply_runtime_source_schema_state(config, schema_state);
                         if namespace_count > 0 {
                             info!(
                                 "Runtime source schema state update: {} namespaces received, {} changed",
@@ -1068,7 +1094,7 @@ pub async fn sync_runtime_input_plugin(
                             "false",
                         )) {
                             for namespace in changed_namespaces {
-                                Config::sync_output_schema_namespace(&namespace);
+                                config.sync_output_schema_namespace(&namespace);
                             }
                         } else if !changed_namespaces.is_empty() {
                             crate::metrics::counters::add_runtime_schema_state_publication_skipped(
@@ -1088,7 +1114,7 @@ pub async fn sync_runtime_input_plugin(
                             .map(|(namespace, entry)| (namespace.clone(), entry.version))
                             .collect();
                         let changed_namespaces =
-                            apply_runtime_source_schema_state(RuntimeSchemaState {
+                            apply_runtime_source_schema_state(config, RuntimeSchemaState {
                                 version: delta.version,
                                 namespaces: delta
                                     .namespaces
@@ -1208,10 +1234,12 @@ pub async fn sync_runtime_input_plugin(
                         let offsets = offsets.clone();
                         let shared_output = shared_output.clone();
                         let ingest = ingest.clone();
+                        let cfg = config.clone();
                         pending_source_tasks.spawn_blocking(move || {
                             let result =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     ingest_source_payload_batches_into_core(
+                                        &cfg,
                                         request_id,
                                         tasks,
                                         offsets,
@@ -1295,12 +1323,14 @@ pub async fn sync_runtime_input_plugin(
                         }
                         let offsets = offsets.clone();
                         let shared_output = shared_output.clone();
+                        let cfg = config.clone();
                         pending_source_tasks.spawn_blocking(move || {
                             let result =
                                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                     INGEST_RT
                                         .handle()
                                         .block_on(ingest_runtime_batches_into_core(
+                                            &cfg,
                                             request_id,
                                             batches,
                                             offsets,
@@ -1332,6 +1362,7 @@ pub async fn sync_runtime_input_plugin(
                 }
                 PluginDataFrame::SinkWrite(write) => {
                     let shared_output = shared_output.clone();
+                    let cfg = config.clone();
                     pending_source_tasks.spawn(async move {
                         let source_bytes = write.arrow_stream_bytes.len() as u64;
                         let decoded =
@@ -1342,7 +1373,7 @@ pub async fn sync_runtime_input_plugin(
                         let namespace =
                             query_value_from_runtime_filename(&write.filename, "namespace");
                         if let Some(ref ns) = namespace {
-                            apply_derived_runtime_schema(ns.clone(), &stream.schema());
+                            apply_derived_runtime_schema(&cfg, ns.clone(), &stream.schema());
                         }
                         let source_contract = write.source_contract.or_else(|| {
                             namespace.as_deref().and_then(
@@ -1374,7 +1405,7 @@ pub async fn sync_runtime_input_plugin(
                         );
                     }
                     if saw_unflushed_batches {
-                        flush_all_segments(offsets.clone())
+                        flush_all_segments(config, offsets.clone())
                             .await
                             .map_err(|err| io::Error::other(err.to_string()))?;
                         saw_unflushed_batches = false;
@@ -1384,7 +1415,7 @@ pub async fn sync_runtime_input_plugin(
                 PluginDataFrame::OffsetMaterializationHints { hints } => {
                     drain_runtime_source_ingest(&mut pending_source_tasks, ingest.clone()).await?;
                     if saw_unflushed_batches {
-                        flush_all_segments(offsets.clone())
+                        flush_all_segments(config, offsets.clone())
                             .await
                             .map_err(|err| io::Error::other(err.to_string()))?;
                         saw_unflushed_batches = false;
@@ -1402,7 +1433,7 @@ pub async fn sync_runtime_input_plugin(
         if control_completed && data_completed {
             drain_runtime_source_ingest(&mut pending_source_tasks, ingest.clone()).await?;
             if saw_unflushed_batches {
-                flush_all_segments(offsets.clone())
+                flush_all_segments(config, offsets.clone())
                     .await
                     .map_err(|err| io::Error::other(err.to_string()))?;
             }
@@ -1474,31 +1505,44 @@ pub async fn sync_runtime_input_plugin(
 }
 
 fn runtime_execution_context(
+    config: &Config,
     pipeline_name: &str,
     execution_mode: RuntimeExecutionMode,
 ) -> RuntimeExecutionContext {
-    let partition_fields = Config::get_transform_batch_partition_fields()
+    let partition_fields = config
+        .get_transform_batch_partition_fields()
         .split(',')
         .map(str::trim)
         .filter(|field| !field.is_empty())
         .map(|field| field.to_string())
         .collect();
-    let order_fields = Config::get_transform_batch_order_fields()
+    let order_fields = config
+        .get_transform_batch_order_fields()
         .split(',')
         .map(str::trim)
         .filter(|field| !field.is_empty())
         .map(|field| field.to_string())
         .collect();
-    let time_partition_granularity = match Config::get_transform_batch_time_unit() {
+    let time_partition_granularity = match config.get_transform_batch_time_unit() {
         value if value.is_empty() => None,
         value => Some(value),
     };
-    let time_partition_prefix = Config::get_time_partition_prefix();
+    let time_partition_prefix = config.get_time_partition_prefix();
+    let inject_fields = config
+        .get_transform_inject_fields()
+        .into_iter()
+        .filter_map(|(k, v)| match v {
+            serde_json::Value::String(s) => Some((k, s)),
+            serde_json::Value::Number(n) => Some((k, n.to_string())),
+            serde_json::Value::Bool(b) => Some((k, b.to_string())),
+            _ => None,
+        })
+        .collect();
 
     RuntimeExecutionContext {
         pipeline_name: pipeline_name.to_string(),
-        workspace_name: Config::get_workspace_name(),
-        data_dir: Config::get_data_dir(),
+        workspace_name: config.get_workspace_name(),
+        data_dir: config.get_data_dir(),
         execution_mode,
         output_layout: RuntimeOutputLayout {
             partition_fields,
@@ -1506,6 +1550,7 @@ fn runtime_execution_context(
             time_partition_granularity,
             time_partition_prefix,
         },
+        inject_fields,
     }
 }
 
@@ -2441,6 +2486,7 @@ impl RuntimeSinkSlotQueue {
 }
 
 struct RuntimeSinkConnectionPool {
+    app_config: Config,
     install_request: RuntimeSinkInstallRequest,
     resolved: ResolvedRuntimePlugin,
     pipeline_name: String,
@@ -2489,6 +2535,7 @@ impl Drop for RuntimeSinkPoolWaitMetrics {
 }
 
 async fn spawn_installed_runtime_sink_connection(
+    config: &Config,
     resolved: &ResolvedRuntimePlugin,
     pipeline_name: &str,
     install_request: &RuntimeSinkInstallRequest,
@@ -2497,6 +2544,7 @@ async fn spawn_installed_runtime_sink_connection(
     let mut last_error = None;
     for attempt in 0..2 {
         let mut connection = RuntimeChildConnection::spawn(
+            config,
             resolved.clone(),
             pipeline_name.to_string(),
             None,
@@ -2547,6 +2595,7 @@ async fn spawn_installed_runtime_sink_connection(
 
 impl RuntimeSinkConnectionPool {
     async fn new(
+        config: &Config,
         resolved: ResolvedRuntimePlugin,
         pipeline_name: String,
         install_request: RuntimeSinkInstallRequest,
@@ -2558,6 +2607,7 @@ impl RuntimeSinkConnectionPool {
             process_budget.register(install_request.binding, session_capacity);
         let process_permit = budget_registration.acquire_initial()?;
         let (connection, schema_state) = spawn_installed_runtime_sink_connection(
+            config,
             &resolved,
             &pipeline_name,
             &install_request,
@@ -2577,6 +2627,7 @@ impl RuntimeSinkConnectionPool {
         slots.add_worker(Arc::clone(&first_worker));
         let workers = vec![first_worker];
         let pool = Arc::new(Self {
+            app_config: config.clone(),
             install_request,
             resolved,
             pipeline_name,
@@ -2625,6 +2676,7 @@ impl RuntimeSinkConnectionPool {
             return Ok(false);
         };
         let (connection, schema_state) = spawn_installed_runtime_sink_connection(
+            &self.app_config,
             &self.resolved,
             &self.pipeline_name,
             &self.install_request,
@@ -2807,6 +2859,7 @@ impl Drop for RuntimeSinkConnectionPool {
 }
 
 pub struct RuntimeDataSinkPlugin {
+    app_config: Config,
     install_request: RuntimeSinkInstallRequest,
     capability: &'static cdc::SinkCapability,
     pool: Arc<RuntimeSinkConnectionPool>,
@@ -2825,17 +2878,26 @@ impl RuntimeDataSinkPlugin {
     }
 
     pub async fn new(
+        app_cfg: &Config,
         resolved: ResolvedRuntimePlugin,
         pipeline_name: String,
         binding: RuntimeBinding,
         config: RuntimeSinkConfig,
     ) -> io::Result<Self> {
         let process_budget = RuntimeSinkProcessBudget::for_pipeline(&pipeline_name, 1);
-        Self::new_with_process_budget(resolved, pipeline_name, binding, config, process_budget)
-            .await
+        Self::new_with_process_budget(
+            app_cfg,
+            resolved,
+            pipeline_name,
+            binding,
+            config,
+            process_budget,
+        )
+        .await
     }
 
     pub(crate) async fn new_with_process_budget(
+        app_cfg: &Config,
         resolved: ResolvedRuntimePlugin,
         pipeline_name: String,
         binding: RuntimeBinding,
@@ -2843,6 +2905,7 @@ impl RuntimeDataSinkPlugin {
         process_budget: Arc<RuntimeSinkProcessBudget>,
     ) -> io::Result<Self> {
         Self::new_with_process_budget_and_data_dir(
+            app_cfg,
             resolved,
             pipeline_name,
             binding,
@@ -2863,6 +2926,7 @@ impl RuntimeDataSinkPlugin {
     ) -> io::Result<Self> {
         let process_budget = RuntimeSinkProcessBudget::for_pipeline(&pipeline_name, 1);
         Self::new_with_process_budget_and_data_dir(
+            &Config::new(),
             resolved,
             pipeline_name,
             binding,
@@ -2874,6 +2938,7 @@ impl RuntimeDataSinkPlugin {
     }
 
     async fn new_with_process_budget_and_data_dir(
+        app_cfg: &Config,
         resolved: ResolvedRuntimePlugin,
         pipeline_name: String,
         binding: RuntimeBinding,
@@ -2894,7 +2959,8 @@ impl RuntimeDataSinkPlugin {
                     resolved.manifest.name
                 ))
             })?;
-        let mut context = runtime_execution_context(&pipeline_name, RuntimeExecutionMode::Sync);
+        let mut context =
+            runtime_execution_context(app_cfg, &pipeline_name, RuntimeExecutionMode::Sync);
         if let Some(data_dir) = data_dir {
             context.data_dir = data_dir;
         }
@@ -2904,6 +2970,7 @@ impl RuntimeDataSinkPlugin {
             config,
         };
         let pool = RuntimeSinkConnectionPool::new(
+            app_cfg,
             resolved.clone(),
             pipeline_name.clone(),
             install_request.clone(),
@@ -2914,6 +2981,7 @@ impl RuntimeDataSinkPlugin {
         let catalog_coordinator =
             CatalogCoordinator::for_pipeline_data_dir(&install_request.context.data_dir)?;
         let plugin = Self {
+            app_config: app_cfg.clone(),
             install_request,
             capability,
             pool,
@@ -2943,6 +3011,7 @@ impl RuntimeDataSinkPlugin {
             return Ok(current);
         }
         let (replacement, schema_state) = spawn_installed_runtime_sink_connection(
+            &self.app_config,
             self.pool.resolved(),
             self.pool.pipeline_name(),
             self.pool.install_request(),
@@ -3595,7 +3664,7 @@ impl DataSink for RuntimeDataSinkPlugin {
         if let Some(namespace) = query_value_from_runtime_filename(&ctx.filename, "namespace") {
             let schema = stream.schema();
             if !schema.fields().is_empty() {
-                apply_derived_runtime_schema(namespace, &schema);
+                apply_derived_runtime_schema(&self.app_config, namespace, &schema);
             }
         }
         let namespace =
@@ -3651,7 +3720,7 @@ impl DataSink for RuntimeDataSinkPlugin {
         if let Some(namespace) = query_value_from_runtime_filename(&ctx.filename, "namespace") {
             let schema = reader.schema();
             if !schema.fields().is_empty() {
-                apply_derived_runtime_schema(namespace, &schema);
+                apply_derived_runtime_schema(&self.app_config, namespace, &schema);
             }
         }
         let namespace =
@@ -3713,11 +3782,14 @@ impl DataSink for RuntimeDataSinkPlugin {
             .keys()
             .map(|namespace| (namespace.clone(), schema_version))
             .collect();
-        let changed = apply_runtime_source_schema_state(RuntimeSchemaState {
-            version: schema_version,
-            namespaces: namespaces.clone(),
-            namespace_versions,
-        });
+        let changed = apply_runtime_source_schema_state(
+            &self.app_config,
+            RuntimeSchemaState {
+                version: schema_version,
+                namespaces: namespaces.clone(),
+                namespace_versions,
+            },
+        );
         let current = current_runtime_schema_state();
         for namespace in changed {
             let metadata = current.namespaces.get(&namespace).cloned().ok_or_else(|| {
@@ -3761,18 +3833,19 @@ pub struct RuntimeSchemaSinkPlugin {
 
 impl RuntimeSchemaSinkPlugin {
     pub async fn new(
+        app_cfg: &Config,
         resolved: ResolvedRuntimePlugin,
         pipeline_name: String,
         binding: RuntimeBinding,
         config: RuntimeSchemaConfig,
     ) -> io::Result<Self> {
         let install_request = RuntimeSchemaInstallRequest {
-            context: runtime_execution_context(&pipeline_name, RuntimeExecutionMode::Sync),
+            context: runtime_execution_context(app_cfg, &pipeline_name, RuntimeExecutionMode::Sync),
             binding,
             config,
         };
         let connection =
-            RuntimeChildConnection::spawn(resolved, pipeline_name, None, None, 1).await?;
+            RuntimeChildConnection::spawn(app_cfg, resolved, pipeline_name, None, None, 1).await?;
         let plugin = Self {
             install_request,
             connection: Mutex::new(connection),
@@ -4121,7 +4194,7 @@ mod tests {
         let old_data_dir = std::env::var("DATA_DIR").ok();
         Config::setenv("DATA_DIR", temp_dir.path().to_str().unwrap());
         Config::reset_envcache();
-        let offsets = Offsets::init().unwrap();
+        let offsets = Offsets::init(&Config::new()).unwrap();
         offsets.clear_for_test();
         (
             DataDirGuard {

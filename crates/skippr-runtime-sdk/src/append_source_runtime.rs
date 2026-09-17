@@ -7,7 +7,6 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::Parser;
 use skippr_core::discover::OutputMetadata as CoreOutputMetadata;
-use skippr_core::helpers::configuration::{Config, PIPELINE_NAME};
 use skippr_core::helpers::logging::init_logging;
 use skippr_core::plugins::source_sync::SourceSyncContext;
 use skippr_core::plugins::traits::SourceOnceContract;
@@ -391,12 +390,6 @@ pub async fn run_append_data_source_main(
         return Err(io::Error::other("runtime protocol version mismatch"));
     }
 
-    {
-        let mut current = PIPELINE_NAME.write();
-        current.clear();
-        current.push_str(&handshake.pipeline_name);
-    }
-
     let control_writer = ControlWriter::new(control_writer_raw);
     let data_writer = DataWriter::new(data_writer_raw);
 
@@ -435,9 +428,6 @@ pub async fn run_append_data_source_main(
         RuntimeExecutionMode::Sync => "sync",
     };
     std::env::set_var(SKIPPR_RUNTIME_EXECUTION_MODE_ENV, execution_mode_label);
-    Config::reset_envcache();
-    Config::build_config();
-    Config::init().await;
     let suppress_data_relay = runtime_mode_suppresses_data_relay(start.context.execution_mode);
 
     let control = RuntimeSourceControl::new();
@@ -557,6 +547,7 @@ mod tests {
                 data_dir: "/tmp/skippr-runtime-test".to_string(),
                 execution_mode: RuntimeExecutionMode::Sync,
                 output_layout: RuntimeOutputLayout::default(),
+                inject_fields: Default::default(),
             },
             config: RuntimeSourceConfig(RuntimePluginConfigEnvelope::new("Test", json!({}))),
             once,

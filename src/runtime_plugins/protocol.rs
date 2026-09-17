@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 // separate from the skippr/React adapter's CLI subprocess JSON summaries.
 // Schema freshness is negotiated through required_schema_version plus
 // SchemaStateRefreshRequired, not by sending discover stdout metadata payloads.
-pub const RUNTIME_PROTOCOL_VERSION: u32 = 18;
+pub const RUNTIME_PROTOCOL_VERSION: u32 = 19;
 pub const COMMIT_RECEIPT_VERSION: u32 = 1;
 pub const CATALOG_INTENT_VERSION: u32 = 2;
 pub const GLUE_PARTITION_CATALOG_INTENT_VERSION: u32 = 1;
@@ -279,6 +279,8 @@ pub struct RuntimeExecutionContext {
     pub execution_mode: RuntimeExecutionMode,
     #[serde(default)]
     pub output_layout: RuntimeOutputLayout,
+    #[serde(default)]
+    pub inject_fields: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
@@ -802,6 +804,7 @@ mod tests {
                 data_dir: "/tmp/data".to_string(),
                 execution_mode: RuntimeExecutionMode::Sync,
                 output_layout: RuntimeOutputLayout::default(),
+                inject_fields: Default::default(),
             },
             config: RuntimeSourceConfig(RuntimePluginConfigEnvelope::new(
                 "Test",
@@ -1158,8 +1161,8 @@ mod tests {
     }
 
     #[test]
-    fn protocol_version_is_hard_cut_to_v18() {
-        assert_eq!(RUNTIME_PROTOCOL_VERSION, 18);
+    fn protocol_version_is_hard_cut_to_v19() {
+        assert_eq!(RUNTIME_PROTOCOL_VERSION, 19);
     }
 
     #[test]

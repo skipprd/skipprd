@@ -9,7 +9,6 @@ use tokio::time::{Duration, Instant};
 use tokio_tungstenite::connect_async;
 use tracing::{error, info};
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::RUNNING;
 use skippr_runtime_sdk::plugins::{DataSource, SourceExecutionContract, SourceOnceContract};
@@ -41,23 +40,6 @@ pub struct DataSourceWebsocketPlugin {
 }
 
 impl DataSourceWebsocketPlugin {
-    pub async fn new() -> Self {
-        let config: DataSourceWebsocketPluginConfig =
-            match Config::get_pipeline_input_plugin_config() {
-                Ok(c) => c.try_into().unwrap_or_else(|e| panic!("{}", e)),
-                Err(_) => DataSourceWebsocketPluginConfig {
-                    url: Config::getenv("WEBSOCKET_URL", ""),
-                    headers: None,
-                    ping_interval_seconds: None,
-                    mode: None,
-                    idle_timeout_seconds: None,
-                    format: None,
-                    batch_size_bytes: None,
-                    batch_size_seconds: None,
-                },
-            };
-        Self { config }
-    }
 
     pub fn with_runtime_config(config: DataSourceWebsocketPluginConfig) -> Self {
         Self { config }

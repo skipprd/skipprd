@@ -14,6 +14,7 @@ pub mod globals;
 pub use globals::*;
 
 pub mod adapters;
+pub mod api;
 pub mod arr;
 pub mod benchmark;
 pub mod buffer;
@@ -24,6 +25,7 @@ pub mod cli;
 pub mod cluster;
 pub mod converters;
 pub mod discover;
+pub mod doctor;
 pub mod engine;
 pub mod helpers;
 pub mod ingest;

@@ -24,7 +24,8 @@ async fn run() -> std::io::Result<()> {
                     .map_err(std::io::Error::other)?;
                 let cfg: DataSourceLocalFilePluginConfig =
                     start.config.0.decode().map_err(std::io::Error::other)?;
-                let plugin = DataSourceLocalFilePlugin::with_runtime_config(cfg);
+                let plugin =
+                    DataSourceLocalFilePlugin::with_runtime_config(cfg, &start.context.data_dir);
                 Ok(Box::new(plugin) as Box<dyn DataSource + Send>)
             })
         },

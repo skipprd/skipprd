@@ -14,7 +14,6 @@ use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::info;
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::RUNNING;
 use skippr_runtime_sdk::plugins::DataSource;
@@ -73,21 +72,6 @@ pub struct DataSourceHttpServerPlugin {
 }
 
 impl DataSourceHttpServerPlugin {
-    pub async fn new() -> Self {
-        let config: DataSourceHttpServerPluginConfig =
-            match Config::get_pipeline_input_plugin_config() {
-                Ok(c) => c.try_into().unwrap_or_else(|e| panic!("{}", e)),
-                Err(_) => DataSourceHttpServerPluginConfig {
-                    listen_address: Some("0.0.0.0:8080".to_string()),
-                    path: Some("/".to_string()),
-                    auth_token: None,
-                    format: None,
-                    batch_size_bytes: None,
-                    batch_size_seconds: None,
-                },
-            };
-        Self { config }
-    }
 
     pub fn with_runtime_config(config: DataSourceHttpServerPluginConfig) -> Self {
         Self { config }

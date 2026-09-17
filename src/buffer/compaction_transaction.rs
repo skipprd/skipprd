@@ -291,16 +291,16 @@ pub fn deterministic_compaction_id(
     hex::encode(hasher.finalize())
 }
 
-pub fn manifest_dir() -> PathBuf {
-    crate::buffer::wal_store::ingest_compaction_dir()
+pub fn manifest_dir(config: &Config) -> PathBuf {
+    crate::buffer::wal_store::ingest_compaction_dir(config)
 }
 
 pub fn manifest_path_for(dir: &Path, id: &str) -> PathBuf {
     dir.join(format!("{id}.json"))
 }
 
-pub fn persist_manifest(txn: &CompactionTransaction) -> io::Result<()> {
-    let dir = manifest_dir();
+pub fn persist_manifest(config: &Config, txn: &CompactionTransaction) -> io::Result<()> {
+    let dir = manifest_dir(config);
     fs::create_dir_all(&dir)?;
     let path = manifest_path_for(&dir, &txn.id);
     let tmp = path.with_extension("json.tmp");
@@ -311,8 +311,8 @@ pub fn persist_manifest(txn: &CompactionTransaction) -> io::Result<()> {
     Ok(())
 }
 
-pub fn remove_manifest(id: &str) -> io::Result<()> {
-    let path = manifest_path_for(&manifest_dir(), id);
+pub fn remove_manifest(config: &Config, id: &str) -> io::Result<()> {
+    let path = manifest_path_for(&manifest_dir(config), id);
     match fs::remove_file(path) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(()),
@@ -372,9 +372,9 @@ impl Drop for ManifestDirectoryScanMetrics {
 
 /// Load every live manifest exactly as persisted. In-memory scheduling applies
 /// Sent staleness without rescanning this directory on every planner cycle.
-pub fn load_manifest_index() -> io::Result<Vec<CompactionTransaction>> {
+pub fn load_manifest_index(config: &Config) -> io::Result<Vec<CompactionTransaction>> {
     let mut scan_metrics = ManifestDirectoryScanMetrics::default();
-    let dir = manifest_dir();
+    let dir = manifest_dir(config);
     if !dir.exists() {
         return Ok(Vec::new());
     }
@@ -399,7 +399,7 @@ pub fn load_manifest_index() -> io::Result<Vec<CompactionTransaction>> {
     Ok(out)
 }
 
-pub fn load_pending_manifests() -> io::Result<Vec<CompactionTransaction>> {
+pub fn load_pending_manifests(config: &Config) -> io::Result<Vec<CompactionTransaction>> {
     let now = now_secs();
     let sent_stale_secs = Config::getenv("WAL_COMPACTION_SENT_STALE_SECS", "300")
         .parse::<u64>()
@@ -407,7 +407,7 @@ pub fn load_pending_manifests() -> io::Result<Vec<CompactionTransaction>> {
         .filter(|value| *value > 0)
         .unwrap_or(300);
     let mut out = Vec::new();
-    for mut txn in load_manifest_index()? {
+    for mut txn in load_manifest_index(config)? {
         if matches!(txn.state, CompactionTransactionState::Sent)
             && now.saturating_sub(txn.updated_at_secs) < sent_stale_secs
         {
@@ -547,7 +547,7 @@ mod tests {
         Config::setenv("DATA_DIR", temp.path().to_str().unwrap());
         Config::setenv("SKIPPR_PIPELINE_DATA_ROOT", "true");
 
-        let comp_dir = manifest_dir();
+        let comp_dir = manifest_dir(&Config::new());
         fs::create_dir_all(&comp_dir).unwrap();
 
         let good = CompactionTransaction::new(
@@ -559,11 +559,11 @@ mod tests {
             vec![ref_for("good", 1)],
             "out.parquet".to_string(),
         );
-        persist_manifest(&good).unwrap();
+        persist_manifest(&Config::new(), &good).unwrap();
         fs::write(comp_dir.join("empty.json"), b"").unwrap();
         fs::write(comp_dir.join("corrupt.json"), b"{not-json").unwrap();
 
-        let loaded = load_pending_manifests().unwrap();
+        let loaded = load_pending_manifests(&Config::new()).unwrap();
         assert_eq!(loaded.len(), 1);
         assert_eq!(loaded[0].id, good.id);
         assert!(!comp_dir.join("empty.json").exists());

@@ -8,7 +8,6 @@ use serde_derive::Deserialize;
 use tokio::time::{sleep, Duration};
 use tracing::info;
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::RUNNING;
 use skippr_runtime_sdk::plugins::DataSource;
@@ -55,22 +54,6 @@ impl DataSourceSnsPlugin {
         Self { config, sqs_client }
     }
 
-    pub async fn new() -> Self {
-        let config: DataSourceSnsPluginConfig = match Config::get_pipeline_input_plugin_config() {
-            Ok(c) => c.try_into().unwrap_or_else(|e| panic!("{}", e)),
-            Err(_) => DataSourceSnsPluginConfig {
-                topic_arn: Config::getenv("SNS_TOPIC_ARN", ""),
-                sqs_queue_url: Config::getenv("SNS_SQS_QUEUE_URL", ""),
-                region: None,
-                endpoint_url: None,
-                format: None,
-                batch_size_bytes: None,
-                batch_size_seconds: None,
-            },
-        };
-
-        Self::from_config(config).await
-    }
 
     pub async fn with_runtime_config(config: DataSourceSnsPluginConfig) -> Self {
         Self::from_config(config).await

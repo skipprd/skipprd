@@ -3542,6 +3542,7 @@ mod contract_schema_tests {
                 time_partition_granularity: Some("day".to_string()),
                 time_partition_prefix: None,
             },
+            inject_fields: Default::default(),
         };
         let keys = build_glue_partition_keys(
             &context,

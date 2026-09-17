@@ -13,17 +13,19 @@ use clap::Parser;
 
 use std::string::ToString;
 
-use skipprd::helpers::configuration::{Config, PIPELINE_NAME};
+use skipprd::api::{cli_named_pipeline, Session};
+use skipprd::helpers::configuration::Config;
 use skipprd::helpers::logging::init_logging;
 use tracing::{error, info};
 
 use skipprd::metrics::Metrics;
 use skipprd::METRICS;
 
+use serde_json;
 use skipprd::benchmark::PerformanceBenchmark;
 use skipprd::sqlrt::doc_parser::SqlDocParser;
 use skipprd::sqlrt::docs::{get_docs_in_format, DocFormat};
-use skipprd::sqlrt::query::{query_with_options, QueryExecutionMode, QueryExecutionOptions};
+use skipprd::sqlrt::query::{QueryExecutionMode, QueryExecutionOptions};
 
 // pub static DISPLAY_METRICS: Lazy<TimedRwLock<AtomicBool>> =
 //     Lazy::new(|| TimedRwLock::new("display_metrics".to_string(), AtomicBool::new(false)));
@@ -35,63 +37,41 @@ struct PipelineCache {}
 
 // @todo, last_ran should be the updated_at timestamp for the file DATA_DIR/LASTRAN
 impl PipelineCache {
-    fn get_metadata() -> fs::Metadata {
-        let last_ran_file = format!("{}/LASTRAN", Config::get_data_dir());
+    fn get_metadata(config: &Config) -> fs::Metadata {
+        let last_ran_file = format!("{}/LASTRAN", config.get_data_dir());
 
         match fs::metadata(&last_ran_file) {
             Ok(metadata) => metadata,
-            Err(_e) => PipelineCache::set_last_ran(),
+            Err(_e) => PipelineCache::set_last_ran(config),
         }
     }
 
-    fn last_ran() -> SystemTime {
-        PipelineCache::get_metadata().modified().unwrap()
+    fn last_ran(config: &Config) -> SystemTime {
+        PipelineCache::get_metadata(config).modified().unwrap()
     }
 
-    fn set_last_ran() -> fs::Metadata {
-        let last_ran_file = format!("{}/LASTRAN", Config::get_data_dir());
+    fn set_last_ran(config: &Config) -> fs::Metadata {
+        let last_ran_file = format!("{}/LASTRAN", config.get_data_dir());
 
         fs::write(&last_ran_file, "").expect("Failed to write LASTRAN file");
         fs::metadata(&last_ran_file).expect("Failed to create LASTRAN file")
     }
 
-    fn get_last_ran_elapsed() -> u64 {
+    fn get_last_ran_elapsed(config: &Config) -> u64 {
         SystemTime::now()
-            .duration_since(PipelineCache::last_ran())
+            .duration_since(PipelineCache::last_ran(config))
             .unwrap()
             .as_secs()
     }
 
-    fn last_ran_is_elapsed() -> bool {
-        let duration = match SystemTime::now().duration_since(PipelineCache::last_ran()) {
+    fn last_ran_is_elapsed(config: &Config) -> bool {
+        let duration = match SystemTime::now().duration_since(PipelineCache::last_ran(config)) {
             Ok(duration) => duration,
             Err(_e) => Duration::from_secs(0), // probably microsecond difference
         };
 
-        duration.as_secs() > Config::get_sync_frequency() || duration.as_secs() == 0
+        duration.as_secs() > config.get_sync_frequency() || duration.as_secs() == 0
         // just created on first run
-    }
-}
-
-async fn run_sync_or_exit(output_mode: &str, source_once: bool) {
-    if let Err(err) = skipprd::engine::run_sync(output_mode, source_once).await {
-        error!(
-            "Pipeline '{}' sync failed: {}",
-            Config::get_pipeline_name(),
-            err
-        );
-        process::exit(1);
-    }
-}
-
-async fn run_discover_or_exit(output_mode: &str) {
-    if let Err(err) = skipprd::engine::run_discover(output_mode).await {
-        error!(
-            "Pipeline '{}' discover failed: {}",
-            Config::get_pipeline_name(),
-            err
-        );
-        process::exit(1);
     }
 }
 
@@ -106,8 +86,8 @@ fn reject_invalid_wal_storage() -> WalStorage {
     }
 }
 
-fn reject_invalid_clustered_mode(storage: WalStorage, mode: CliModeKind) {
-    if let Err(err) = validate_clustered_cli(storage, mode) {
+fn reject_invalid_clustered_mode(config: &Config, storage: WalStorage, mode: CliModeKind) {
+    if let Err(err) = validate_clustered_cli(config, storage, mode) {
         error!("{err}");
         eprintln!("{err}");
         process::exit(1);
@@ -169,147 +149,169 @@ async fn async_main() {
 
     match cli.mode.clone() {
         Mode::Sync(options) => {
-            Config::build_config();
+            let loaded = Config::build_config();
             let storage = reject_invalid_wal_storage();
-            reject_invalid_clustered_mode(storage, CliModeKind::Sync { once: options.once });
+            reject_invalid_clustered_mode(
+                &loaded,
+                storage,
+                CliModeKind::Sync { once: options.once },
+            );
+            let output_mode = options.output.clone();
+            let run_once = options.once;
+            let named = cli_named_pipeline(options.pipeline.as_deref());
             if storage == WalStorage::Clustered {
-                if let Err(err) = skipprd::cluster::scheduler::run_clustered_from_config().await {
+                let session =
+                    Session::from_config(loaded, named.as_deref()).unwrap_or_else(|err| {
+                        error!("{err}");
+                        process::exit(1);
+                    });
+                if let Err(err) = session.sync(run_once, &output_mode).await {
                     error!("clustered sync failed: {err}");
                     process::exit(1);
                 }
                 return;
             }
 
-            Metrics::init_send_loop();
+            Metrics::init_send_loop(&loaded);
 
-            let output_mode = options.output.clone();
-            let run_once = options.once;
-
-            if options.pipeline.is_some() {
-                PIPELINE_NAME.write().clear();
-                PIPELINE_NAME
-                    .write()
-                    .push_str(&options.pipeline.unwrap().clone());
-                Config::init().await;
-
-                run_sync_or_exit(&output_mode, run_once).await;
+            if let Some(pipeline_name) = named {
+                let session =
+                    Session::from_config(loaded, Some(&pipeline_name)).unwrap_or_else(|err| {
+                        error!("{err}");
+                        process::exit(1);
+                    });
+                if let Err(err) = session.sync(run_once, &output_mode).await {
+                    error!("Pipeline '{}' sync failed: {}", pipeline_name, err);
+                    process::exit(1);
+                }
             } else {
-                let pipeline_name = Config::getenv("PIPELINE_NAME", "");
-                if !pipeline_name.is_empty() {
-                    PIPELINE_NAME.write().clear();
-                    PIPELINE_NAME.write().push_str(&pipeline_name.clone());
-                    Config::init().await;
+                info!("Syncing all pipelines");
+                let pipelines = loaded.get_pipelines();
+                loop {
+                    for pipeline_name in pipelines.iter() {
+                        let session = Session::from_config(loaded.clone(), Some(pipeline_name))
+                            .unwrap_or_else(|err| {
+                                error!("{err}");
+                                process::exit(1);
+                            });
+                        let bound = loaded.bind_pipeline(pipeline_name);
+                        bound.init().await;
 
-                    run_sync_or_exit(&output_mode, run_once).await;
-                } else {
-                    info!("Syncing all pipelines");
-                    let pipelines = Config::get_pipelines();
-                    loop {
-                        for pipeline_name in pipelines.iter() {
-                            Config::reset_envcache();
-                            {
-                                PIPELINE_NAME.write().clear();
-                                PIPELINE_NAME.write().push_str(pipeline_name);
-                            }
-                            Config::init().await;
-
-                            if !PipelineCache::last_ran_is_elapsed() {
-                                let remaining = Config::get_sync_frequency()
-                                    - PipelineCache::get_last_ran_elapsed();
-                                info!(
-                                    "Pipeline '{}' last ran {} seconds ago, skipping for {} seconds.",
-                                    &pipeline_name,
-                                    PipelineCache::get_last_ran_elapsed(),
-                                    remaining
-                                );
-                                continue;
-                            }
-
-                            PipelineCache::set_last_ran();
-
-                            {
-                                let mut counter_lock = METRICS.write();
-                                counter_lock.reset();
-                            }
-
-                            run_sync_or_exit(&output_mode, run_once).await;
+                        if !PipelineCache::last_ran_is_elapsed(&bound) {
+                            let remaining = bound.get_sync_frequency()
+                                - PipelineCache::get_last_ran_elapsed(&bound);
+                            info!(
+                                "Pipeline '{}' last ran {} seconds ago, skipping for {} seconds.",
+                                &pipeline_name,
+                                PipelineCache::get_last_ran_elapsed(&bound),
+                                remaining
+                            );
+                            continue;
                         }
 
-                        if run_once {
-                            break;
+                        PipelineCache::set_last_ran(&bound);
+
+                        {
+                            let mut counter_lock = METRICS.write();
+                            counter_lock.reset();
                         }
-                        sleep(Duration::from_secs(10));
+
+                        if let Err(err) = session.sync(run_once, &output_mode).await {
+                            error!("Pipeline '{}' sync failed: {}", pipeline_name, err);
+                            process::exit(1);
+                        }
                     }
+
+                    if run_once {
+                        break;
+                    }
+                    sleep(Duration::from_secs(10));
                 }
             }
         }
         Mode::Discover(options) => {
-            Config::build_config();
+            let loaded = Config::build_config();
             let storage = reject_invalid_wal_storage();
-            reject_invalid_clustered_mode(storage, CliModeKind::Discover);
+            reject_invalid_clustered_mode(&loaded, storage, CliModeKind::Discover);
 
             let output_mode = options.output.clone();
+            let named = cli_named_pipeline(options.pipeline.as_deref());
 
-            if options.pipeline.is_some() {
-                PIPELINE_NAME.write().clear();
-                PIPELINE_NAME
-                    .write()
-                    .push_str(&options.pipeline.unwrap().clone());
-                Config::init().await;
-
-                run_discover_or_exit(&output_mode).await;
+            if let Some(pipeline) = named {
+                let session = Session::from_config(loaded, Some(&pipeline)).unwrap_or_else(|err| {
+                    error!("{err}");
+                    process::exit(1);
+                });
+                if let Err(err) = session.discover(&output_mode).await {
+                    error!("Pipeline '{}' discover failed: {}", pipeline, err);
+                    process::exit(1);
+                }
             } else {
                 error!("No pipeline name provided, you must provide a pipeline name to discover schemas");
             }
         }
         Mode::Metadata { action } => {
-            Config::build_config();
+            let loaded = Config::build_config();
             let storage = reject_invalid_wal_storage();
-            reject_invalid_clustered_mode(storage, CliModeKind::Metadata);
+            reject_invalid_clustered_mode(&loaded, storage, CliModeKind::Metadata);
             let pipeline = skipprd::cli::metadata::pipeline_for_action(&action);
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME.write().push_str(pipeline);
-            Config::init().await;
+            let bound = loaded.bind_pipeline(pipeline);
+            bound.init().await;
             match &action {
                 skipprd::cli::metadata::MetadataAction::Show(_) => {
-                    skipprd::cli::metadata::run_metadata_show().await;
+                    skipprd::cli::metadata::run_metadata_show(&bound).await;
                 }
                 skipprd::cli::metadata::MetadataAction::Apply(args) => {
-                    skipprd::cli::metadata::run_metadata_apply(args).await;
+                    skipprd::cli::metadata::run_metadata_apply(&bound, args).await;
                 }
             }
         }
         Mode::Query(options) => {
-            Config::build_config();
+            let loaded = Config::build_config();
             let storage = reject_invalid_wal_storage();
-            reject_invalid_clustered_mode(storage, CliModeKind::Query);
-            if storage == WalStorage::Clustered {
-                if let Err(err) =
-                    skipprd::cluster::scheduler::run_clustered_query(options.sql.clone()).await
-                {
-                    error!("clustered query failed: {err}");
-                    eprintln!("clustered query failed: {err}");
-                    process::exit(1);
-                }
-                return;
-            }
+            reject_invalid_clustered_mode(&loaded, storage, CliModeKind::Query);
+            let session = Session::from_config(loaded, None).unwrap_or_else(|err| {
+                error!("{err}");
+                process::exit(1);
+            });
+            let collect_plain =
+                storage == WalStorage::Clustered || (options.plain && options.watch.is_none());
             if let Some(sql) = options.sql {
                 let now = Instant::now();
-                query_with_options(
-                    &sql,
-                    QueryExecutionOptions {
-                        mode: QueryExecutionMode::Query,
-                        plain: options.plain,
-                        watch: options.watch,
-                    },
-                )
-                .await;
+                if collect_plain {
+                    match session.query(&sql).await {
+                        Ok(batches) => {
+                            for batch in &batches {
+                                skipprd::sqlrt::query::print_batches_plain(batch);
+                            }
+                        }
+                        Err(err) => {
+                            error!("query failed: {err}");
+                            eprintln!("query failed: {err}");
+                            process::exit(1);
+                        }
+                    }
+                } else {
+                    session
+                        .query_with_options(
+                            &sql,
+                            QueryExecutionOptions {
+                                mode: QueryExecutionMode::Query,
+                                plain: options.plain,
+                                watch: options.watch,
+                            },
+                        )
+                        .await;
+                }
                 let elapsed = now.elapsed();
-                if !options.plain {
+                if !options.plain && storage != WalStorage::Clustered {
                     println!("Query time: {} seconds", elapsed.as_secs());
                 }
+            } else if storage == WalStorage::Clustered {
+                error!("clustered query requires --sql");
+                eprintln!("clustered query requires --sql");
+                process::exit(1);
             } else {
-                // Simple interactive REPL
                 use std::io::{self, Write};
                 println!("Skippr SQL REPL. Type SQL and press Enter. Type :q to quit.");
                 loop {
@@ -327,25 +329,63 @@ async fn async_main() {
                         break;
                     }
                     let now = Instant::now();
-                    query_with_options(
-                        stmt,
-                        QueryExecutionOptions {
-                            mode: QueryExecutionMode::Query,
-                            plain: options.plain,
-                            watch: options.watch,
-                        },
-                    )
-                    .await;
+                    session
+                        .query_with_options(
+                            stmt,
+                            QueryExecutionOptions {
+                                mode: QueryExecutionMode::Query,
+                                plain: options.plain,
+                                watch: options.watch,
+                            },
+                        )
+                        .await;
                     let elapsed = now.elapsed();
                     println!("Query time: {} seconds", elapsed.as_secs());
                 }
             }
         }
         Mode::Schema(options) => {
-            Config::build_config();
+            let loaded = Config::build_config();
             let storage = reject_invalid_wal_storage();
-            reject_invalid_clustered_mode(storage, CliModeKind::Schema);
-            skipprd::engine::run_schema(&options.pipeline).await;
+            reject_invalid_clustered_mode(&loaded, storage, CliModeKind::Schema);
+            skipprd::engine::run_schema(&loaded, &options.pipeline).await;
+        }
+        Mode::Doctor(options) => {
+            let loaded = Config::build_config();
+            let session = Session::from_config(loaded, None).unwrap_or_else(|err| {
+                error!("{err}");
+                process::exit(1);
+            });
+            let result = session.doctor().await;
+            if options.output == "json" {
+                println!("{}", serde_json::to_string_pretty(&result).unwrap());
+            } else {
+                result.print_text();
+            }
+            if !result.ok {
+                process::exit(1);
+            }
+        }
+        Mode::Df(options) => {
+            let named = cli_named_pipeline(options.pipeline.as_deref());
+            let loaded = Config::build_config();
+            let storage = reject_invalid_wal_storage();
+            reject_invalid_clustered_mode(&loaded, storage, CliModeKind::Query);
+            let session = Session::from_config(loaded, named.as_deref()).unwrap_or_else(|err| {
+                error!("{err}");
+                process::exit(1);
+            });
+            match session.df(options.namespace.as_deref()).await {
+                Ok(batches) => {
+                    for batch in &batches {
+                        skipprd::sqlrt::query::print_batches_plain(batch);
+                    }
+                }
+                Err(err) => {
+                    error!("df failed: {err}");
+                    process::exit(1);
+                }
+            }
         }
         Mode::SqlHelp(options) => {
             // Handle SQL help and documentation
@@ -468,16 +508,15 @@ async fn async_main() {
             }
         }
         Mode::Benchmark(options) => {
-            Config::build_config();
+            let loaded = Config::build_config();
             let storage = reject_invalid_wal_storage();
-            reject_invalid_clustered_mode(storage, CliModeKind::Benchmark);
-            // Setup default pipeline name for benchmarking
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME.write().push_str("benchmark");
-            Config::init().await;
+            reject_invalid_clustered_mode(&loaded, storage, CliModeKind::Benchmark);
+            let bound = loaded.bind_pipeline("benchmark");
+            bound.init().await;
 
             // Initialize benchmark
             let benchmark = PerformanceBenchmark::new(
+                &bound,
                 options.num_files,
                 options.records_per_file,
                 options.record_size,

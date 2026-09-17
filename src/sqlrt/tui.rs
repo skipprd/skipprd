@@ -522,6 +522,7 @@ impl QueryEditorView {
 
     pub fn run(
         self,
+        config: &Config,
         cfg: QueryEditorConfig,
         result_rx: mpsc::Receiver<Vec<RecordBatch>>,
         request_tx: mpsc::Sender<String>,
@@ -553,7 +554,8 @@ impl QueryEditorView {
                 None
             };
             let current_schema_opt: Option<&ArrowSchema> = schema_arc_opt.as_deref();
-            let suggestions = build_suggestions(&s.input, tok, current_schema_opt, s.cursor, &data);
+            let suggestions =
+                build_suggestions(config, &s.input, tok, current_schema_opt, s.cursor, &data);
             if s.sugg_idx >= suggestions.len() {
                 s.sugg_idx = 0;
             }
@@ -1029,6 +1031,7 @@ fn current_token<'a>(input: &'a str, cursor: usize) -> (&'a str, usize) {
 }
 
 fn build_suggestions(
+    config: &Config,
     input: &str,
     prefix: &str,
     current_schema: Option<&ArrowSchema>,
@@ -1120,7 +1123,7 @@ fn build_suggestions(
     // table names from config
     if after_from_ctx || (!is_projection_ctx && !in_where_ctx && !in_order_ctx && !in_group_ctx) {
         // Prefer tables only when appropriate (e.g., after FROM or at top-level)
-        for t in Config::get_pipelines() {
+        for t in config.get_pipelines() {
             if !has_prefix || t.starts_with(prefix) {
                 out.push(t);
             }

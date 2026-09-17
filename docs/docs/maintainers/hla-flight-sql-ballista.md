@@ -61,7 +61,7 @@ Shipped: every clustered `skipprd` process serves Arrow Flight SQL 58.3 on membe
 | Iceberg cold scan | `src/sqlrt/iceberg_table.rs` | Current snapshot, fail closed if none; schema/field IDs authoritative |
 | Live ordinals | `src/query_flight/live_wal.rs` `select_live_ordinals` | Snapshot segments ∪ suffix `CommitSegment`, minus reclaim, minus Iceberg named ids; skip unreadable ordinals. Ledger-complete ordinals stay visible until Iceberg lists the segment. |
 | In-process UNION | `IcebergWalUnionProvider` | `UnionExec` + `GlobalLimitExec` on the union; WAL is always `FlightSqlExec` to the picker winner's advertised `flight_addr` |
-| Client | `run_clustered_query` | Flight SQL to ready `flight_addr`s in `node_id` contact order; Iceberg-only is inside the serving node; never takes an ingest lease |
+| Client | `Session.query` → `clustered_query_collect` | Flight SQL to ready `flight_addr`s in `node_id` contact order; Iceberg-only is inside the serving node; never takes an ingest lease |
 | Catalog prefix | `catalog_table_to_namespace` | Shared Dynamo namespace, per-sink prefix |
 
 Move `select_live_ordinals` with the Flight SQL module. Do not fork a second selector.
@@ -287,4 +287,4 @@ Product SQL stays `sde query` / `skipprd query --sql`. Clustered mode:
 | `SkipprLogicalCodec` | Tagged prost for UNION / Flight SQL / Iceberg table providers; `WalTableProvider` encode fails closed |
 | Scheduler/executor bins | Deleted; elected in-process Ballista cluster inside `run_clustered` |
 | `query-scheduler#` | Deleted from the membership store; not a query-client gate |
-| `run_clustered_query` | Flight SQL client to ready `flight_addr`s |
+| `clustered_query_collect` | Flight SQL client to ready `flight_addr`s; `Session.query` is the product entry |

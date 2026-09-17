@@ -13,7 +13,6 @@ use tar::Archive;
 use tracing::error;
 use zip::ZipArchive;
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::serdes::input_format::InputFormat;
 use skippr_runtime_sdk::plugins::DataSource;
@@ -172,42 +171,7 @@ fn process_reader<R: Read>(
 }
 
 impl DataSourceLocalFilePlugin {
-    pub async fn new() -> DataSourceLocalFilePlugin {
-        let data_dir = Config::get_data_dir();
-        let temp_dir = &format!("{}/source", data_dir);
-
-        match fs::create_dir(temp_dir) {
-            Ok(_g) => {}
-            Err(_err) => {}
-        }
-
-        let config: DataSourceLocalFilePluginConfig =
-            match Config::get_pipeline_input_plugin_config() {
-                Ok(config) => config.try_into().unwrap_or_else(|e| panic!("{}", e)),
-                Err(_) => DataSourceLocalFilePluginConfig {
-                    format: None,
-                    batch_size_seconds: Some(
-                        Config::getenv("DATA_SOURCE_BATCH_SIZE_SECONDS", "600")
-                            .parse::<i64>()
-                            .unwrap(),
-                    ),
-                    batch_size_bytes: Some(
-                        Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000")
-                            .parse::<i64>()
-                            .unwrap(),
-                    ),
-                    path: Config::getenv("DATA_SOURCE_PATH", ""),
-                },
-            };
-
-        DataSourceLocalFilePlugin {
-            temp_dir: temp_dir.to_string(),
-            config,
-        }
-    }
-
-    pub fn with_runtime_config(config: DataSourceLocalFilePluginConfig) -> Self {
-        let data_dir = Config::get_data_dir();
+    pub fn with_runtime_config(config: DataSourceLocalFilePluginConfig, data_dir: &str) -> Self {
         let temp_dir = format!("{}/source", data_dir);
         let _ = fs::create_dir(&temp_dir);
         DataSourceLocalFilePlugin { temp_dir, config }

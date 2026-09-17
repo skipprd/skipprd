@@ -38,12 +38,12 @@ pub static LAST_PARQUET_PERSISTED_OBJECTS_TOTAL: AtomicU64 = AtomicU64::new(0);
 pub static LAST_PRINT_MESSAGES_TOTAL: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(unix)]
-fn data_dir_disk_usage() -> Option<(u64, f64)> {
+fn data_dir_disk_usage(config: &Config) -> Option<(u64, f64)> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     use std::path::Path;
 
-    let data_dir = Config::get_data_dir();
+    let data_dir = config.get_data_dir();
     let path = Path::new(&data_dir);
     let c_path = CString::new(path.as_os_str().as_bytes()).ok()?;
     let mut stats = std::mem::MaybeUninit::<libc::statvfs>::uninit();
@@ -106,36 +106,36 @@ struct MetricsEnvConfig {
 
 impl MetricsEnvConfig {
     // default()
-    fn new() -> Self {
+    fn new(config: &Config) -> Self {
         Self {
-            data_source_plugin_name: Config::get_pipeline_input_plugin_name(),
-            data_output_plugin_name: Config::get_pipeline_output_plugin_name(),
-            schema_output_plugin_name: Config::get_pipeline_schema_plugin_name(),
-            data_source_batch_size_bytes: match Config::get_pipeline_input_plugin_config() {
+            data_source_plugin_name: config.get_pipeline_input_plugin_name(),
+            data_output_plugin_name: config.get_pipeline_output_plugin_name(),
+            schema_output_plugin_name: config.get_pipeline_schema_plugin_name(),
+            data_source_batch_size_bytes: match config.get_pipeline_input_plugin_config() {
                 Ok(config) => config.batch_size_bytes().or(Some(0)).unwrap(),
                 Err(_) => 0,
             },
-            data_source_batch_size_seconds: match Config::get_pipeline_input_plugin_config() {
+            data_source_batch_size_seconds: match config.get_pipeline_input_plugin_config() {
                 Ok(config) => config.batch_size_seconds().or(Some(0)).unwrap(),
                 Err(_) => 0,
             },
-            buffer_threshold_bytes: Config::get_pipeline_buffer_threshold_bytes() as u64,
-            buffer_threshold_seconds: Config::get_pipeline_buffer_threshold_seconds() as u64,
-            transform_namespace_fields: Config::get_transform_namespace_fields(),
-            transform_batch_partition_fields: Config::get_transform_batch_partition_fields(),
-            transform_flatten_events: Config::get_transform_flatten_events().to_string(),
-            transform_batch_time_fields: Config::get_transform_batch_time_fields(),
-            transform_batch_time_units: Config::get_transform_batch_time_unit(),
-            transform_batch_order_fields: Config::get_transform_batch_order_fields(),
-            config_dependency_valid: Config::config_dependencies_valid(),
-            config_dependency_error_count: Config::get_config_dependency_violations().len(),
-            data_dir: Config::get_pipeline_data_dir(),
-            chaos_mode: Config::get_pipeline_chaos_mode().to_string(),
-            input_format: match Config::get_pipeline_input_plugin_config() {
+            buffer_threshold_bytes: config.get_pipeline_buffer_threshold_bytes() as u64,
+            buffer_threshold_seconds: config.get_pipeline_buffer_threshold_seconds() as u64,
+            transform_namespace_fields: config.get_transform_namespace_fields(),
+            transform_batch_partition_fields: config.get_transform_batch_partition_fields(),
+            transform_flatten_events: config.get_transform_flatten_events().to_string(),
+            transform_batch_time_fields: config.get_transform_batch_time_fields(),
+            transform_batch_time_units: config.get_transform_batch_time_unit(),
+            transform_batch_order_fields: config.get_transform_batch_order_fields(),
+            config_dependency_valid: Config::config_dependencies_valid(config),
+            config_dependency_error_count: config.get_config_dependency_violations().len(),
+            data_dir: config.get_pipeline_data_dir(),
+            chaos_mode: config.get_pipeline_chaos_mode().to_string(),
+            input_format: match config.get_pipeline_input_plugin_config() {
                 Ok(config) => config.format().to_string(),
                 Err(_) => String::from(""),
             },
-            output_format: match Config::get_pipeline_output_plugin_config() {
+            output_format: match config.get_pipeline_output_plugin_config() {
                 Ok(config) => config.format().to_string(),
                 Err(_) => String::from(""),
             },
@@ -282,16 +282,19 @@ impl Metrics {
         LAST_DEADLETTERS_TOTAL.store(0, Ordering::SeqCst);
     }
 
-    pub async fn send_metrics<'a>(exit_code: Option<i8>) -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn send_metrics<'a>(
+        config: &Config,
+        exit_code: Option<i8>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
         let metrics: Metrics;
         {
             metrics = METRICS.read().clone();
         }
 
-        let workspace = Config::get_workspace_name();
-        let pipeline = Config::get_pipeline_name();
+        let workspace = config.get_workspace_name();
+        let pipeline = config.get_pipeline_name();
 
-        let tenant = Config::get_tenant();
+        let tenant = config.get_tenant();
 
         // Merge counters (atomics) into snapshot before computing deltas
         use crate::metrics::counters;
@@ -592,7 +595,7 @@ impl Metrics {
             tenant, workspace, pipeline, timestamp, metrics.run_id
         );
 
-        let storage = crate::adapters::storage::get_storage();
+        let storage = crate::adapters::storage::get_storage(config);
         match storage.put_json(&key, &data).await {
             Ok(_) => {
                 if exit_code.is_some() {
@@ -608,16 +611,16 @@ impl Metrics {
         Ok(())
     }
 
-    pub async fn send_config() -> Result<(), Box<dyn std::error::Error>> {
+    pub async fn send_config(config: &Config) -> Result<(), Box<dyn std::error::Error>> {
         let metrics: Metrics;
         {
             metrics = METRICS.read().clone();
         }
 
-        let workspace = Config::get_workspace_name();
-        let pipeline = Config::get_pipeline_name();
+        let workspace = config.get_workspace_name();
+        let pipeline = config.get_pipeline_name();
 
-        let tenant = Config::get_tenant();
+        let tenant = config.get_tenant();
 
         let current_time = chrono::Utc::now();
         let run_time_seconds = (current_time - metrics.start_time).num_seconds();
@@ -626,7 +629,7 @@ impl Metrics {
             .sub(chrono::Duration::seconds(run_time_seconds as i64))
             .to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
-        let metrics_env_config = MetricsEnvConfig::new();
+        let metrics_env_config = MetricsEnvConfig::new(config);
 
         let data = json!({
             "config": metrics_env_config,
@@ -647,7 +650,7 @@ impl Metrics {
             tenant, workspace, pipeline, timestamp, metrics.run_id
         );
 
-        let storage = crate::adapters::storage::get_storage();
+        let storage = crate::adapters::storage::get_storage(config);
         match storage.put_json(&key, &data).await {
             Ok(_) => info!("Persisted config: {}", key),
             Err(e) => error!("Failed to persist config: {}", e),
@@ -656,10 +659,11 @@ impl Metrics {
         Ok(())
     }
 
-    pub fn init_send_loop() {
+    pub fn init_send_loop(config: &Config) {
         let now = Arc::new(TimedRwLock::new("now".to_string(), Instant::now()));
 
         let now_clone = now.clone();
+        let loop_config = config.clone();
 
         // get curent tokio runtime
         let handle = runtime::Handle::current();
@@ -668,6 +672,8 @@ impl Metrics {
         let mut planner = periodic::Planner::new();
 
         planner.add(
+            {
+            let loop_config = loop_config.clone();
             move || {
                 if RUNNING.read().load(Ordering::SeqCst) {
 
@@ -717,8 +723,8 @@ impl Metrics {
                     let wal_refs_tombstoned_min = wal_refs_tombstoned_total.saturating_sub(
                         LAST_PRINT_WAL_REFS_TOMBSTONED.swap(wal_refs_tombstoned_total, Ordering::SeqCst),
                     );
-                    let reclaimable_partitions = crate::buffer::ingest_buffer::Buffers::reclaimable_wal_partition_count(10_000);
-                    let pressure = crate::buffer::ingest_buffer::Buffers::wal_pressure_snapshot();
+                    let reclaimable_partitions = crate::buffer::ingest_buffer::Buffers::reclaimable_wal_partition_count(&loop_config, 10_000);
+                    let pressure = crate::buffer::ingest_buffer::Buffers::wal_pressure_snapshot(&loop_config);
                     let data_dir_paused = crate::data_dir_ingest_paused();
                     let should_print_wal_digest = wal_pending_count > 0
                         || wal_pending_bytes > 0
@@ -872,9 +878,9 @@ impl Metrics {
                                 data_dir_paused,
                             );
                         }
-                        if let Some((free_bytes, used_pct)) = data_dir_disk_usage() {
+                        if let Some((free_bytes, used_pct)) = data_dir_disk_usage(&loop_config) {
                             let pause_progress = if data_dir_paused {
-                                Some(crate::buffer::ingest_buffer::Buffers::pause_progress_snapshot())
+                                Some(crate::buffer::ingest_buffer::Buffers::pause_progress_snapshot(&loop_config))
                             } else {
                                 None
                             };
@@ -907,14 +913,16 @@ impl Metrics {
                         }
                     }
 
+                    let metrics_cfg = loop_config.clone();
                     handle_clone.spawn(async move {
-                        match Metrics::send_metrics(None).await {
+                        match Metrics::send_metrics(&metrics_cfg, None).await {
                             Ok(_g) => {}
                             Err(_err) => {}
                         }
                     });
 
                 }
+            }
             },
             periodic::Every::new(Duration::from_secs(60)),
         );

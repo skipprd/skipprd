@@ -155,9 +155,9 @@ async fn load_schema_fields(args: &MetadataApplyArgs) -> Result<Vec<MetadataFiel
     parse_schema_fields(&raw)
 }
 
-pub async fn run_metadata_show() {
-    let pipeline_name = Config::get_pipeline_name();
-    let response = match Config::get_metadata().await {
+pub async fn run_metadata_show(config: &Config) {
+    let pipeline_name = config.get_pipeline_name();
+    let response = match config.get_metadata().await {
         Ok(pipeline_metadata) => metadata_show_ok(&pipeline_metadata),
         Err(_) => MetadataShowResponse {
             ok: true,
@@ -190,7 +190,7 @@ fn metadata_show_ok(pipeline_metadata: &PipelineMetadata) -> MetadataShowRespons
     }
 }
 
-pub async fn run_metadata_apply(args: &MetadataApplyArgs) {
+pub async fn run_metadata_apply(config: &Config, args: &MetadataApplyArgs) {
     let namespace = args.namespace.clone();
     let evolved = args.evolved;
     let fields = match load_schema_fields(args).await {
@@ -206,7 +206,7 @@ pub async fn run_metadata_apply(args: &MetadataApplyArgs) {
             std::process::exit(1);
         }
     };
-    match apply_namespace_field_rows(&args.namespace, &fields, evolved).await {
+    match apply_namespace_field_rows(config, &args.namespace, &fields, evolved).await {
         Ok(fields_written) => {
             emit_metadata_json(&MetadataApplyResponse {
                 ok: true,

@@ -19,6 +19,7 @@ pub struct MetadataFieldRow {
 
 /// Build a namespace [`Metadata`] tree from flat `(name, type, nullable)` rows.
 pub fn namespace_metadata_from_field_rows(
+    config: &Config,
     fields: &[MetadataFieldRow],
     flatten: bool,
 ) -> Result<Metadata, String> {
@@ -40,12 +41,13 @@ pub fn namespace_metadata_from_field_rows(
         field_meta.nullable = row.nullable;
         metadata.set_field(name, field_meta);
     }
-    metadata.finalize_field_types(flatten);
+    metadata.finalize_field_types(config, flatten);
     Ok(metadata)
 }
 
 /// Replace one namespace in pipeline metadata, update in-memory `METADATA`, and persist.
 pub async fn apply_namespace_field_rows(
+    config: &Config,
     namespace: &str,
     fields: &[MetadataFieldRow],
     evolved: bool,
@@ -54,13 +56,13 @@ pub async fn apply_namespace_field_rows(
     if ns.is_empty() {
         return Err("namespace must not be empty".to_string());
     }
-    let flatten = Config::get_transform_flatten_events();
-    let namespace_metadata = namespace_metadata_from_field_rows(fields, flatten)?;
+    let flatten = config.get_transform_flatten_events();
+    let namespace_metadata = namespace_metadata_from_field_rows(config, fields, flatten)?;
     let fields_written = namespace_metadata.field_details().len();
 
-    let mut pipeline_metadata = match Config::get_metadata().await {
+    let mut pipeline_metadata = match config.get_metadata().await {
         Ok(pm) => pm,
-        Err(_) => PipelineMetadata::new(),
+        Err(_) => PipelineMetadata::new(config),
     };
     pipeline_metadata
         .metadata
@@ -68,7 +70,7 @@ pub async fn apply_namespace_field_rows(
     pipeline_metadata.enabled = true;
 
     METADATA.store(Arc::new(pipeline_metadata.clone()));
-    Config::set_metadata(&pipeline_metadata, evolved).await;
+    config.set_metadata(&pipeline_metadata, evolved).await;
 
     Ok(fields_written)
 }
@@ -97,7 +99,8 @@ mod tests {
                 nullable: true,
             },
         ];
-        let metadata = namespace_metadata_from_field_rows(&rows, false).expect("build metadata");
+        let metadata = namespace_metadata_from_field_rows(&Config::new(), &rows, false)
+            .expect("build metadata");
         let mut details = metadata.field_details();
         details.sort_by(|a, b| a.0.cmp(&b.0));
         assert_eq!(details.len(), 3);
@@ -122,7 +125,7 @@ mod tests {
             field_type: "not_a_real_type".to_string(),
             nullable: true,
         }];
-        let err = namespace_metadata_from_field_rows(&rows, false).unwrap_err();
+        let err = namespace_metadata_from_field_rows(&Config::new(), &rows, false).unwrap_err();
         assert!(err.contains("unknown field type"));
     }
 }

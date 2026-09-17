@@ -121,7 +121,7 @@ src/sqlrt/
 - Require existing `offset-store-dynamodb` feature and table.
 - Select DynamoDB offsets when unset; reject explicit sled.
 - Reject clustered `--once`, discover, AtLeastOnce sink, NonRetryable sink, and duplicate `DATA_DIR` process.
-- Add `PipelineConfigView::for_name` for immutable per-pipeline resolution without mutating `PIPELINE_NAME`.
+- Add `PipelineConfigView::for_name` for immutable per-pipeline resolution without process-global pipeline identity.
 
 **Tests:** all valid/invalid mode and connector combinations.
 

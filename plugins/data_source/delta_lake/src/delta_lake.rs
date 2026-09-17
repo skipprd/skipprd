@@ -6,7 +6,6 @@ use futures::StreamExt;
 use serde_derive::Deserialize;
 use tracing::info;
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::progress::OffsetKey;
@@ -38,23 +37,6 @@ pub struct DataSourceDeltaLakePlugin {
 }
 
 impl DataSourceDeltaLakePlugin {
-    pub async fn new() -> Self {
-        let config: DataSourceDeltaLakePluginConfig =
-            match Config::get_pipeline_input_plugin_config() {
-                Ok(c) => c.try_into().unwrap_or_else(|e| panic!("{}", e)),
-                Err(_) => DataSourceDeltaLakePluginConfig {
-                    table_uri: Config::getenv("DELTA_TABLE_URI", ""),
-                    storage_options: None,
-                    version: None,
-                    filter: None,
-                    batch_size_rows: None,
-                    format: None,
-                    batch_size_bytes: None,
-                    batch_size_seconds: None,
-                },
-            };
-        Self { config }
-    }
 
     pub fn with_runtime_config(config: DataSourceDeltaLakePluginConfig) -> Self {
         Self { config }

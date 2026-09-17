@@ -1,0 +1,24 @@
+[build-system]
+requires = ["maturin>=1.7,<2"]
+build-backend = "maturin"
+
+[project]
+name = "skipprd"
+version = "0.1.0"
+description = "skipprd ELT engine — Session, discover, sync, df, query"
+readme = "README.md"
+license = { file = "LICENSE" }
+requires-python = ">=3.10"
+dependencies = ["pyarrow>=17"]
+
+[project.urls]
+Homepage = "https://elt.skippr.io"
+Documentation = "https://elt.skippr.io"
+Repository = "https://github.com/skipprd/skipprd"
+
+[project.optional-dependencies]
+pandas = ["pandas"]
+
+[tool.maturin]
+manifest-path = "python/Cargo.toml"
+module-name = "skipprd"

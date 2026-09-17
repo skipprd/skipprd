@@ -8,7 +8,6 @@ use serde_derive::Deserialize;
 use tokio::time::{sleep, Duration};
 use tracing::info;
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::RUNNING;
 use skippr_runtime_sdk::plugins::DataSource;
@@ -56,24 +55,6 @@ impl DataSourceEventbridgePlugin {
         Self { config, sqs_client }
     }
 
-    pub async fn new() -> Self {
-        let config: DataSourceEventbridgePluginConfig =
-            match Config::get_pipeline_input_plugin_config() {
-                Ok(c) => c.try_into().unwrap_or_else(|e| panic!("{}", e)),
-                Err(_) => DataSourceEventbridgePluginConfig {
-                    event_bus_name: Config::getenv("EVENTBRIDGE_EVENT_BUS_NAME", ""),
-                    rule_name: None,
-                    region: None,
-                    endpoint_url: None,
-                    sqs_queue_url: Config::getenv("EVENTBRIDGE_SQS_QUEUE_URL", ""),
-                    format: None,
-                    batch_size_bytes: None,
-                    batch_size_seconds: None,
-                },
-            };
-
-        Self::from_config(config).await
-    }
 
     pub async fn with_runtime_config(config: DataSourceEventbridgePluginConfig) -> Self {
         Self::from_config(config).await

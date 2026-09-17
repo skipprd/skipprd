@@ -43,6 +43,8 @@ pub enum Mode {
         #[command(subcommand)]
         action: metadata::MetadataAction,
     },
+    Doctor(DoctorOptions),
+    Df(DfOptions),
 }
 
 #[derive(Parser, Clone, PartialEq)]
@@ -124,4 +126,24 @@ pub struct BenchmarkOptions {
     /// Description of what's being benchmarked (e.g., specific optimization)
     #[arg(short = 'd', long)]
     pub description: Option<String>,
+}
+
+#[derive(Parser, Clone, PartialEq)]
+pub struct DoctorOptions {
+    /// Output mode: text or json
+    #[arg(long, default_value = "text")]
+    pub output: String,
+}
+
+#[derive(Parser, Clone, PartialEq)]
+pub struct DfOptions {
+    /// Pipeline to read (also `-p`)
+    #[arg(short, long)]
+    pub pipeline: Option<String>,
+    /// Namespace, or pipeline.namespace
+    #[arg(long)]
+    pub namespace: Option<String>,
+    /// Print CSV-like rows instead of a table
+    #[arg(long, default_value_t = false)]
+    pub plain: bool,
 }

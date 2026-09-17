@@ -3,12 +3,10 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde_json::Value;
 use tokio::net::TcpListener;
 use tokio::sync::mpsc;
 use tracing::info;
 
-use skippr_runtime_sdk::helpers::configuration::Config;
 use skippr_runtime_sdk::plugins::{
     DataSource, SourceExecutionContract, SourceNamespaceContract, SourceOnceContract,
 };
@@ -24,23 +22,21 @@ use crate::http::{otlp_http_router, HttpState};
 
 pub struct DataSourceOtlpPlugin {
     config: OtlpConfig,
+    pipeline_name: String,
+    inject_fields: BTreeMap<String, String>,
 }
 
 impl DataSourceOtlpPlugin {
-    pub fn with_runtime_config(config: OtlpConfig) -> Self {
-        Self { config }
-    }
-
-    fn inject_fields() -> BTreeMap<String, String> {
-        Config::get_transform_inject_fields()
-            .into_iter()
-            .filter_map(|(k, v)| match v {
-                Value::String(s) => Some((k, s)),
-                Value::Number(n) => Some((k, n.to_string())),
-                Value::Bool(b) => Some((k, b.to_string())),
-                _ => None,
-            })
-            .collect()
+    pub fn with_runtime_config(
+        config: OtlpConfig,
+        pipeline_name: String,
+        inject_fields: BTreeMap<String, String>,
+    ) -> Self {
+        Self {
+            config,
+            pipeline_name,
+            inject_fields,
+        }
     }
 }
 
@@ -76,7 +72,7 @@ impl DataSource for DataSourceOtlpPlugin {
             .unwrap_or_else(|_| "0.0.0.0:4317".parse().unwrap());
 
         let (tx, mut rx) = mpsc::channel::<DecodedSignal>(32);
-        let inject = Arc::new(Self::inject_fields());
+        let inject = Arc::new(self.inject_fields.clone());
         let cfg = Arc::new(self.config.clone());
 
         let http_state = HttpState {
@@ -110,7 +106,7 @@ impl DataSource for DataSourceOtlpPlugin {
                             submit_arrow_ipc_batches(ctx.as_ref(), batches)?;
                         }
                         Err(err) => {
-                            let ns = format!("_dl_{}", Config::get_pipeline_name());
+                            let ns = format!("_dl_{}", self.pipeline_name);
                             let batch = deadletter_batch(
                                 NS_SPANS,
                                 &err.to_string(),
@@ -161,7 +157,8 @@ mod tests {
     fn logs_only_contracts_skip_spans() {
         let cfg: OtlpConfig =
             serde_json::from_value(serde_json::json!({"signals":["logs"]})).unwrap();
-        let plugin = DataSourceOtlpPlugin::with_runtime_config(cfg);
+        let plugin =
+            DataSourceOtlpPlugin::with_runtime_config(cfg, "otlp".to_string(), Default::default());
         let names: Vec<_> = plugin
             .source_namespace_contracts()
             .into_iter()

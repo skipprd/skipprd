@@ -18,6 +18,7 @@ members = [
     "crates/skippr-iceberg-catalog-dynamodb",
     "crates/skippr-query-ballista",
     "crates/skippr-runtime-sdk",
+    "python",
     "plugins/data_source/*",
     "plugins/data_sink/*",
     "plugins/schema_sink/*",

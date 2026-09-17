@@ -217,11 +217,11 @@ impl WalReader for S3WalReader {
 pub struct WalReaderFactory;
 
 impl WalReaderFactory {
-    pub fn for_pipeline(_pipeline: &str) -> Box<dyn WalReader + Send + Sync> {
-        match Config::get_wal_storage() {
+    pub fn for_pipeline(config: &Config, _pipeline: &str) -> Box<dyn WalReader + Send + Sync> {
+        match config.get_wal_storage() {
             WalStorage::S3 => {
-                let bucket = Config::get_wal_s3_bucket();
-                let base = Config::get_wal_s3_prefix();
+                let bucket = config.get_wal_s3_bucket();
+                let base = config.get_wal_s3_prefix();
                 let prefix_url = format!("s3://{}/{}", bucket, base.trim_start_matches('/'));
                 Box::new(S3WalReader { prefix_url })
             }
@@ -229,8 +229,11 @@ impl WalReaderFactory {
         }
     }
 
-    pub async fn for_pipeline_async(_pipeline: &str) -> Box<dyn WalReader + Send + Sync> {
-        Self::for_pipeline(_pipeline)
+    pub async fn for_pipeline_async(
+        config: &Config,
+        _pipeline: &str,
+    ) -> Box<dyn WalReader + Send + Sync> {
+        Self::for_pipeline(config, _pipeline)
     }
 }
 

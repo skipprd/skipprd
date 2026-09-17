@@ -45,10 +45,10 @@ impl BufferChunker {
         result
     }
 
-    pub fn event_time_bucket(event_time: i64) -> i64 {
+    pub fn event_time_bucket(config: &Config, event_time: i64) -> i64 {
         let datetime = Utc.timestamp_opt(event_time, 0).unwrap();
 
-        let bucket_rounded_timestamp = match Config::get_transform_batch_time_unit().as_str() {
+        let bucket_rounded_timestamp = match config.get_transform_batch_time_unit().as_str() {
             "year" => {
                 let year = datetime.year();
                 Utc.with_ymd_and_hms(year, 1, 1, 0, 0, 0)
@@ -245,8 +245,8 @@ impl BufferChunker {
     }
 
     #[allow(dead_code)]
-    pub fn next_file(buffer_name: &str) -> Option<String> {
-        let data_dir = Config::get_data_dir();
+    pub fn next_file(config: &Config, buffer_name: &str) -> Option<String> {
+        let data_dir = config.get_data_dir();
         let pattern = format!(
             "{}/{}_buffer/buffer={}*.parquet",
             data_dir, buffer_name, buffer_name
@@ -405,42 +405,60 @@ mod event_time_bucket_tests {
     #[serial]
     fn test_event_time_bucket_year() {
         Config::setenv("TRANSFORM_BATCH_TIME_UNIT", "year");
-        assert_eq!(BufferChunker::event_time_bucket(1645296045), 1640995200);
+        assert_eq!(
+            BufferChunker::event_time_bucket(&Config::new(), 1645296045),
+            1640995200
+        );
     }
 
     #[test]
     #[serial]
     fn test_event_time_bucket_month() {
         Config::setenv("TRANSFORM_BATCH_TIME_UNIT", "month");
-        assert_eq!(BufferChunker::event_time_bucket(1645296045), 1643673600);
+        assert_eq!(
+            BufferChunker::event_time_bucket(&Config::new(), 1645296045),
+            1643673600
+        );
     }
 
     #[test]
     #[serial]
     fn test_event_time_bucket_day() {
         Config::setenv("TRANSFORM_BATCH_TIME_UNIT", "day");
-        assert_eq!(BufferChunker::event_time_bucket(1645296045), 1645228800);
+        assert_eq!(
+            BufferChunker::event_time_bucket(&Config::new(), 1645296045),
+            1645228800
+        );
     }
 
     #[test]
     #[serial]
     fn test_event_time_bucket_hour() {
         Config::setenv("TRANSFORM_BATCH_TIME_UNIT", "hour");
-        assert_eq!(BufferChunker::event_time_bucket(1645296045), 1645293600);
+        assert_eq!(
+            BufferChunker::event_time_bucket(&Config::new(), 1645296045),
+            1645293600
+        );
     }
 
     #[test]
     #[serial]
     fn test_event_time_bucket_minute() {
         Config::setenv("TRANSFORM_BATCH_TIME_UNIT", "minute");
-        assert_eq!(BufferChunker::event_time_bucket(1645296045), 1645296000);
+        assert_eq!(
+            BufferChunker::event_time_bucket(&Config::new(), 1645296045),
+            1645296000
+        );
     }
 
     #[test]
     #[serial]
     fn test_event_time_bucket_none() {
         Config::setenv("TRANSFORM_BATCH_TIME_UNIT", "");
-        assert_eq!(BufferChunker::event_time_bucket(1645296045), 0);
+        assert_eq!(
+            BufferChunker::event_time_bucket(&Config::new(), 1645296045),
+            0
+        );
     }
 }
 

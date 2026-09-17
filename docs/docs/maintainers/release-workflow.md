@@ -1,6 +1,6 @@
 # Release Workflow
 
-The main release pipeline is `.github/workflows/build-publish.yml`. It is tag-driven and publishes the host binary and runtime plugin registry as separate artifacts.
+Python wheels publish from `.github/workflows/ci.yml`. Host binary and runtime plugin registry publishing use the scripts and composite actions under `.github/`.
 
 ## High-level flow
 
@@ -43,7 +43,25 @@ Platform build jobs produce the host binary plus the runtime plugin binaries nee
 - `macos_arm64`
 - `windows_x86`
 
-On tag builds, `set_root_package_version.py` stamps the root host package version from the tag name before packaging `skipprd`.
+On tag builds, `set_root_package_version.py` stamps the root host package version, `skipprd-python`, and `pyproject.toml` from the tag name (`v1.2.3` → `1.2.3`) before packaging.
+
+## Python wheels (PyPI)
+
+`.github/workflows/ci.yml` builds and tests the `skipprd` wheel on every run, always on Skippr Cloud runners (`skippr-linux-x64-16`, `skippr-darwin-arm64-8`). Tagged releases (`v*`, except the scratch tag `v0.0.0`) upload both wheels and publish them to PyPI.
+
+Publish uses **PyPI Trusted Publishing** (GitHub OIDC), not a pip login or `PYPI_API_TOKEN`. The `python-publish` job sets `id-token: write` and calls `pypa/gh-action-pypi-publish` with `attestations: false` (self-hosted Skippr Cloud runners). GitHub mints a short-lived token; PyPI accepts it because this repo's GitHub publisher is registered.
+
+Registered publisher on [pypi.org](https://pypi.org):
+
+- Project: `skipprd`
+- Owner: `skipprd`
+- Repository: `skipprd`
+- Workflow name: `ci.yml`
+- Environment: empty (the job must not set `environment:`)
+
+Do not create a PyPI API token. Do not put `TWINE_PASSWORD` in GitHub secrets.
+
+The first real `v*` tag after that publisher was saved completes the link and uploads the wheels. Scratch tag `v0.0.0` is excluded so CI validation reruns do not publish.
 
 ## 3. Compile and test the important boundaries
 

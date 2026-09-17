@@ -31,7 +31,7 @@ Public engineer docs: [elt.skippr.io](https://elt.skippr.io). Markdown is `docs/
 - **Format check:** `cargo fmt --all -- --check` (existing formatting diffs may exist)
 - **Clippy:** `cargo clippy` (run without `-D warnings` unless explicitly requested)
 - **Runtime e2e harness:** before release/tag work, run the relevant local unit and harness tests plus the targeted runtime e2e path when credentials/services are available. At minimum, validate harness changes with `python3 .github/scripts/test_runtime_e2e_harness.py`.
-- **GitHub release CI:** the release workflow is tag-triggered. Use the scratch tag `0.0.0` for CI validation reruns, then move the intended release tag only after local tests pass and the relevant `0.0.0` GitHub Actions run is healthy.
+- **GitHub release CI:** the release workflow is tag-triggered. Use the scratch tag `v0.0.0` for CI validation reruns, then move the intended release tag only after local tests pass and the relevant `v0.0.0` GitHub Actions run is healthy. `python-publish` skips `v0.0.0` so scratch tags never hit PyPI. PyPI auth is GitHub OIDC Trusted Publishing (`id-token: write`); do not add a `PYPI_API_TOKEN`.
 
 ## GitHub E2E testing
 

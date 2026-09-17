@@ -45,6 +45,7 @@ impl ResolvedFieldValue {
 // pub fn fast_path_ingest(unwrapped_message: &mut IngestRecord, metadata: &mut HashMap<String, Metadata>) -> HashMap<String, Message<Value>> {
 // pub fn fast_path_ingest(unwrapped_message: &mut IngestRecord, metadata: &mut HashMap<String, Metadata>) {
 pub fn ingest(
+    config: &Config,
     unwrapped_message: &Value,
     metadata: &mut HashMap<String, Metadata>,
     namespace: &str,
@@ -107,6 +108,7 @@ pub fn ingest(
         };
 
         let resolved_value = match set_value(
+            config,
             &field_data_type,
             &field.to_string(),
             value,
@@ -121,6 +123,7 @@ pub fn ingest(
             Err(_e) => {
                 // apply evolution strategy
                 match Evolution::evolve_field(
+                    config,
                     &field.to_string(),
                     value,
                     None,
@@ -194,6 +197,7 @@ pub fn ingest(
 * @return mixed|null - value data type on success or null on error
 */
 pub fn set_value(
+    config: &Config,
     data_type: &str,
     field: &str,
     value: &Value,
@@ -246,6 +250,7 @@ pub fn set_value(
                             None => {
                                 // println!("({}) no metadata for {} => {} with value: {}", data_type, field, &sub_field.to_string(), sub_value);
                                 discover_ingest(
+                                    config,
                                     &sub_field.to_string(),
                                     sub_value,
                                     Some(field),
@@ -277,6 +282,7 @@ pub fn set_value(
                                 .enabled
                         {
                             let newval = set_value(
+                                config,
                                 &metadata
                                     .get_mut(&field.to_string())
                                     .unwrap()
@@ -327,6 +333,7 @@ pub fn set_value(
                                 // println!("({}.array) no metadata for {} => {} with value: {}", data_type, &field.to_string(), i.to_string(), sub_value);
                                 // discover_ingest(&field.to_string(), value, metadata, updatedSchema, flatten);
                                 discover_ingest(
+                                    config,
                                     &i.to_string(),
                                     sub_value,
                                     Some(field),
@@ -354,6 +361,7 @@ pub fn set_value(
                                 .enabled
                         {
                             let newval = set_value(
+                                config,
                                 &metadata
                                     .get_mut(&field.to_string())
                                     .unwrap()
@@ -398,6 +406,7 @@ pub fn set_value(
 
                         if metadata.get(field).unwrap().fields.get(key).is_none() {
                             discover_ingest(
+                                config,
                                 key,
                                 val,
                                 Some(field),
@@ -426,6 +435,7 @@ pub fn set_value(
                             // println!("ingesting {} => {} with value: {}", field, key, val);
 
                             let newval = set_value(
+                                config,
                                 &metadata
                                     .get_mut(field)
                                     .unwrap()
@@ -471,7 +481,7 @@ pub fn set_value(
                 //     }
                 // }
             } else if data_type == "array" {
-                let flatten = Config::get_transform_flatten_events();
+                let flatten = config.get_transform_flatten_events();
 
                 if metadata.get(field).unwrap().determined_type_values
                     == Some(SkipprDataType::Record)
@@ -492,6 +502,7 @@ pub fn set_value(
                                 // println!("({}.array) no metadata for {} => {} with value: {}", data_type, &field.to_string(), i.to_string(), sub_value);
                                 // discover_ingest(&field.to_string(), value, metadata, updatedSchema, flatten);
                                 discover_ingest(
+                                    config,
                                     index,
                                     sub_value,
                                     Some(field),
@@ -508,6 +519,7 @@ pub fn set_value(
                         };
 
                         let foo = set_value(
+                            config,
                             "record",
                             index,
                             sub_value,
@@ -575,6 +587,7 @@ pub fn set_value(
                                     )));
                                 } else if let Some(ref mut inner) = inner_fields {
                                     let foo = set_value(
+                                        config,
                                         "array",
                                         "0",
                                         sub_value,
@@ -600,6 +613,7 @@ pub fn set_value(
                                             // println!("({}.array) no metadata for {} => {} with value: {}", data_type, &field.to_string(), i.to_string(), sub_value);
                                             // discover_ingest(&field.to_string(), value, metadata, updatedSchema, flatten);
                                             discover_ingest(
+                                                config,
                                                 field,
                                                 sub_value,
                                                 parent_field,
@@ -621,6 +635,7 @@ pub fn set_value(
                                         .map(|t| t.to_string())
                                         .unwrap_or_default();
                                     let foo = set_value(
+                                        config,
                                         &sub_data_type,
                                         field,
                                         sub_value,
@@ -686,6 +701,7 @@ pub fn set_value(
 
                     // @todo - handle return Result<Value, Error>
                     new_value = match_scalar_value(
+                        config,
                         field,
                         data_type,
                         value,
@@ -745,6 +761,7 @@ pub fn set_value(
         // println!("({}) no metadata for {} with value: {}", data_type, &field.to_string(), value);
 
         let discoverd_data_type = discover_ingest(
+            config,
             &field.to_string(),
             value,
             parent_field,
@@ -755,6 +772,7 @@ pub fn set_value(
 
         if discoverd_data_type != "" {
             return set_value(
+                config,
                 &discoverd_data_type,
                 &field.to_string(),
                 value,
@@ -772,6 +790,7 @@ pub fn set_value(
 }
 
 fn match_scalar_value(
+    config: &Config,
     field: &str,
     data_type: &str,
     value: &Value,
@@ -816,6 +835,7 @@ fn match_scalar_value(
                             }
                             // Handle the value error applying the Evolution Strategy
                             Evolution::evolve_field(
+                                config,
                                 &field.to_string(),
                                 value,
                                 parent_field,
@@ -863,6 +883,7 @@ fn match_scalar_value(
                             }
                             // Handle the value error applying the Evolution Strategy
                             Evolution::evolve_field(
+                                config,
                                 &field.to_string(),
                                 value,
                                 parent_field,
@@ -946,6 +967,7 @@ fn match_scalar_value(
                             }
                             // Handle the value error applying the Evolution Strategy
                             Evolution::evolve_field(
+                                config,
                                 &field.to_string(),
                                 value,
                                 parent_field,
@@ -993,6 +1015,7 @@ fn match_scalar_value(
                             }
                             // Handle the value error applying the Evolution Strategy
                             Evolution::evolve_field(
+                                config,
                                 &field.to_string(),
                                 value,
                                 parent_field,
@@ -1042,6 +1065,7 @@ fn match_scalar_value(
                             }
                             // Handle the value error applying the Evolution Strategy
                             Evolution::evolve_field(
+                                config,
                                 &field.to_string(),
                                 value,
                                 parent_field,
@@ -1063,6 +1087,7 @@ fn match_scalar_value(
 }
 
 pub fn discover_ingest(
+    config: &Config,
     field: &str,
     value: &Value,
     parent_field: Option<&str>,
@@ -1086,8 +1111,8 @@ pub fn discover_ingest(
 
         metadata.insert(field.to_string(), new_field);
     } else {
-        AnalyseSchema::analyse_field(
-            &_foo,
+        _foo.analyse_field(
+            config,
             &field.to_string(),
             value.clone().borrow_mut(),
             metadata,
@@ -1100,9 +1125,9 @@ pub fn discover_ingest(
         // } else {
     }
 
-    let flatten = Config::get_transform_flatten_events();
+    let flatten = config.get_transform_flatten_events();
 
-    AnalyseSchema::determine_field_types(metadata, parent_data_type, flatten);
+    AnalyseSchema::determine_field_types(config, metadata, parent_data_type, flatten);
 
     // discoverd_data_type = metadata.get(field).unwrap().determined_type;
 
@@ -1347,6 +1372,7 @@ mod tests_nested_ingest_evolution {
         let mut updated_schema = "no".to_string();
 
         let resolved = set_value(
+            &Config::new(),
             "record",
             "profile",
             &json!({"name": "Ada", "active": true}),
@@ -1379,6 +1405,7 @@ mod tests_nested_ingest_evolution {
         let mut updated_schema = "no".to_string();
 
         let resolved = set_value(
+            &Config::new(),
             "map",
             "attrs",
             &json!({"existing": "kept", "flag": true}),
@@ -1412,6 +1439,7 @@ mod tests_nested_ingest_evolution {
         let mut updated_schema = "no".to_string();
 
         let resolved = set_value(
+            &Config::new(),
             "record",
             "profile",
             &json!({"age": "senior"}),
@@ -1602,6 +1630,7 @@ mod test_smoke_tests {
     use serde_json::{Number, Value};
 
     use crate::discover::AnalyseSchema;
+    use crate::helpers::configuration::Config;
 
     use crate::ingest::ingest::ingest;
 
@@ -1693,6 +1722,7 @@ mod test_smoke_tests {
 
         AnalyseSchema::infer_json_schema(
             &mut foo,
+            &Config::new(),
             &mut record_line,
             Some(1),
             &mut metadata,
@@ -1701,12 +1731,13 @@ mod test_smoke_tests {
 
         let str = r#"{"rider_id":"10e974bf-4a43-305a-9e39-1636c43cb22a","bike_id":"8b86f753-05f8-3254-aba6-739188a3c0b6","isbn":"9407496597","trip":{"start_temprature":0,"end_temprature":2},"last_crank":[2,15,33,45,56,57,47,36,19,5],"crank_torques":[[2,15,33,45,56,57,47,36,19,5],[1,13,33,48,56,58,45,35,15,6]],"hardware":{"manufacturer":"Beier, Emmerich and Rutherford","model":"synergize ubiquitous e-commerce","maintenance":{"last_rebuild":"20\/04\/2010","last_service":"12\/07\/1973"}},"metadata":{"rcvd_time":1615474895,"sent_time":1615474930,"prcd_micro_time":1615474853.999185,"tags":[{"name":"type","value":"trip"},{"name":"auto","value":false}]}}"#;
 
-        let records: Vec<Value> = SerdeJson::deserialize(str);
+        let records: Vec<Value> = SerdeJson::deserialize(&Config::new(), str);
 
         let mut updated_schema = "no".to_string();
 
         // NOTE: This schema is assert tested in discovery
         let ingest_value = ingest(
+            &Config::new(),
             records.first().unwrap(),
             &mut metadata.get_mut("default").unwrap().fields,
             "foo",

@@ -8,7 +8,6 @@ use serde_derive::Deserialize;
 use tokio::time::{Duration, Instant};
 use tracing::{error, info};
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::RUNNING;
 use skippr_runtime_sdk::plugins::{DataSource, SourceExecutionContract, SourceOnceContract};
@@ -43,25 +42,6 @@ pub struct DataSourceAmqpPlugin {
 }
 
 impl DataSourceAmqpPlugin {
-    pub async fn new() -> Self {
-        let config: DataSourceAmqpPluginConfig = match Config::get_pipeline_input_plugin_config() {
-            Ok(c) => c.try_into().unwrap_or_else(|e| panic!("{}", e)),
-            Err(_) => DataSourceAmqpPluginConfig {
-                connection_string: Config::getenv("AMQP_CONNECTION_STRING", ""),
-                queue: Config::getenv("AMQP_QUEUE", ""),
-                exchange: None,
-                routing_key: None,
-                consumer_tag: None,
-                prefetch_count: None,
-                mode: None,
-                idle_timeout_seconds: None,
-                format: None,
-                batch_size_bytes: None,
-                batch_size_seconds: None,
-            },
-        };
-        Self { config }
-    }
 
     pub fn with_runtime_config(config: DataSourceAmqpPluginConfig) -> Self {
         Self { config }

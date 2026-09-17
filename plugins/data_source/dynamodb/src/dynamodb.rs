@@ -13,7 +13,6 @@ use serde_derive::{Deserialize, Serialize};
 use serde_json::{json, Map, Value};
 use tracing::{error, info, warn};
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use skippr_runtime_sdk::plugins::cdc::{
     source_capabilities, DynamodbCheckpoint, MutationKind, WalRowMeta,
@@ -91,34 +90,6 @@ impl DataSourceDynamodbPlugin {
         }
     }
 
-    pub async fn new() -> Self {
-        let config: DataSourceDynamodbPluginConfig =
-            match Config::get_pipeline_input_plugin_config() {
-                Ok(input_config) => input_config.try_into().unwrap_or_else(|e| panic!("{}", e)),
-                Err(_) => {
-                    let table_name = Config::getenv("DYNAMODB_TABLE_NAME", "");
-                    let region = {
-                        let r = Config::getenv("AWS_DEFAULT_REGION", "");
-                        if r.is_empty() {
-                            None
-                        } else {
-                            Some(r)
-                        }
-                    };
-                    DataSourceDynamodbPluginConfig {
-                        table_name,
-                        region,
-                        endpoint_url: None,
-                        format: Some("row".to_string()),
-                        batch_size_bytes: None,
-                        batch_size_seconds: None,
-                        cdc_mode: SourceCdcMode::Snapshot,
-                    }
-                }
-            };
-
-        Self::from_config(config).await
-    }
 
     pub async fn with_runtime_config(config: DataSourceDynamodbPluginConfig) -> Self {
         Self::from_config(config).await

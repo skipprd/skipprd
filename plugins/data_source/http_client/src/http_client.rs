@@ -10,7 +10,6 @@ use serde_derive::Deserialize;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info};
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::RUNNING;
 use skippr_runtime_sdk::plugins::{DataSource, SourceExecutionContract, SourceOnceContract};
@@ -55,37 +54,6 @@ pub struct DataSourceHttpClientPlugin {
 }
 
 impl DataSourceHttpClientPlugin {
-    pub async fn new() -> Self {
-        let config: DataSourceHttpClientPluginConfig =
-            match Config::get_pipeline_input_plugin_config() {
-                Ok(c) => c.try_into().unwrap_or_else(|e| panic!("{}", e)),
-                Err(_) => DataSourceHttpClientPluginConfig {
-                    url: Config::getenv("DATA_SOURCE_HTTP_URL", ""),
-                    method: None,
-                    headers: None,
-                    body: None,
-                    auth: None,
-                    scrape_interval_seconds: None,
-                    scrape_timeout_seconds: None,
-                    format: None,
-                    batch_size_bytes: Some(
-                        Config::getenv("DATA_SOURCE_BATCH_SIZE_BYTES", "1024000")
-                            .parse()
-                            .unwrap_or(1_024_000),
-                    ),
-                    batch_size_seconds: Some(
-                        Config::getenv("DATA_SOURCE_BATCH_SIZE_SECONDS", "600")
-                            .parse()
-                            .unwrap_or(600),
-                    ),
-                },
-            };
-
-        Self {
-            client: Client::new(),
-            config,
-        }
-    }
 
     pub fn with_runtime_config(config: DataSourceHttpClientPluginConfig) -> Self {
         Self {

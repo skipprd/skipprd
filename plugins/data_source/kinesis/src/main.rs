@@ -24,7 +24,9 @@ async fn run() -> std::io::Result<()> {
                     .map_err(std::io::Error::other)?;
                 let cfg: DataSourceKinesisPluginConfig =
                     start.config.0.decode().map_err(std::io::Error::other)?;
-                let plugin = DataSourceKinesisPlugin::with_runtime_config(cfg).await;
+                let plugin =
+                    DataSourceKinesisPlugin::with_runtime_config(cfg, &start.context.data_dir)
+                        .await;
                 Ok(Box::new(plugin) as Box<dyn DataSource + Send>)
             })
         },

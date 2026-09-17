@@ -16,8 +16,8 @@ use crate::helpers::configuration::Config;
 static MATCHED_ORDER_FIELDS: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 
 /// Returns the user-configured batch order field names, or an empty vec if unset.
-fn configured_order_fields() -> Vec<String> {
-    let raw = Config::get_transform_batch_order_fields();
+fn configured_order_fields(config: &Config) -> Vec<String> {
+    let raw = config.get_transform_batch_order_fields();
     if raw.is_empty() {
         return vec![];
     }
@@ -47,15 +47,15 @@ pub fn resolve_effective_order_from_fields(
     effective
 }
 
-pub fn resolve_effective_order(schema: &SchemaRef) -> Vec<String> {
-    let configured = configured_order_fields();
+pub fn resolve_effective_order(config: &Config, schema: &SchemaRef) -> Vec<String> {
+    let configured = configured_order_fields(config);
     resolve_effective_order_from_fields(schema, &configured)
 }
 
 /// Log a single end-of-run warning for configured order fields that never
 /// matched any namespace observed during this process lifetime.
-pub fn log_unmatched_order_fields() {
-    let configured = configured_order_fields();
+pub fn log_unmatched_order_fields(config: &Config) {
+    let configured = configured_order_fields(config);
     if configured.is_empty() {
         return;
     }

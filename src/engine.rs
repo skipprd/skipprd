@@ -21,7 +21,7 @@ use tracing::{error, info, warn};
 use crate::buffer::ingest_buffer::{wal_recover, Buffers};
 use crate::buffer::BufferChunker;
 use crate::discover::{Metadata, OutputMetadata, PipelineMetadata};
-use crate::helpers::configuration::{Config, PIPELINE_NAME};
+use crate::helpers::configuration::Config;
 use crate::helpers::logger::LogLevel;
 use crate::helpers::offsets::{Offsets, SLED_NAME};
 use crate::helpers::sync_reporter::{affected_assets_stub, RunTelemetry, SyncReporter};
@@ -145,8 +145,8 @@ fn schema_diff_has_changes(diff: &Value) -> bool {
     })
 }
 
-fn freshness_json() -> Option<Value> {
-    let fields = Config::get_transform_batch_time_fields();
+fn freshness_json(config: &Config) -> Option<Value> {
+    let fields = config.get_transform_batch_time_fields();
     let configured_fields: Vec<String> = fields
         .split(',')
         .map(str::trim)
@@ -180,9 +180,9 @@ fn freshness_json() -> Option<Value> {
     }))
 }
 
-fn deadletters_json() -> Value {
+fn deadletters_json(config: &Config) -> Value {
     json!({
-        "configured": Config::get_pipeline_deadletters_ref().is_some(),
+        "configured": config.get_pipeline_deadletters_ref().is_some(),
         "total": crate::metrics::counters::DEADLETTERS_TOTAL.load(std::sync::atomic::Ordering::Relaxed)
     })
 }
@@ -207,18 +207,19 @@ fn sync_metrics_json(
     })
 }
 
-fn run_telemetry(pipeline: &str, phase: &str) -> RunTelemetry {
+fn run_telemetry(config: &Config, pipeline: &str, phase: &str) -> RunTelemetry {
     RunTelemetry {
         run_id: Some(current_run_id()),
         phase: Some(phase.to_string()),
-        freshness: freshness_json(),
-        deadletters: Some(deadletters_json()),
+        freshness: freshness_json(config),
+        deadletters: Some(deadletters_json(config)),
         affected_assets: Some(affected_assets_stub(pipeline)),
         ..RunTelemetry::default()
     }
 }
 
 fn sync_status_telemetry(
+    config: &Config,
     pipeline: &str,
     messages_total: u64,
     bytes_total: u64,
@@ -236,15 +237,15 @@ fn sync_status_telemetry(
     RunTelemetry {
         metrics: Some(metrics.clone()),
         metric_points: Some(metrics),
-        ..run_telemetry(pipeline, "syncing")
+        ..run_telemetry(config, pipeline, "syncing")
     }
 }
 
-async fn cleanup_discover_ingest_artifacts() {
-    match Config::get_wal_storage() {
+async fn cleanup_discover_ingest_artifacts(config: &Config) {
+    match config.get_wal_storage() {
         crate::helpers::wal_storage::WalStorage::S3 => {
-            let prefix = Config::get_wal_s3_prefix();
-            match crate::helpers::s3::delete_prefix(&prefix).await {
+            let prefix = config.get_wal_s3_prefix();
+            match crate::helpers::s3::delete_prefix(&config.get_skippr_s3_bucket(), &prefix).await {
                 Ok(deleted) if deleted > 0 => {
                     info!(
                         "Discover cleanup: removed {} leaked S3 WAL objects under {}",
@@ -266,7 +267,7 @@ async fn cleanup_discover_ingest_artifacts() {
     // and config live under DATA_DIR (`{tenant}/{workspace}/{pipeline}/...`). Only strip
     // transient ingest/WAL/runtime-child paths so implicit discover cannot leave recoverable
     // WAL/offsets while keeping persisted metadata intact.
-    cleanup_discover_local_pipeline_artifacts(&Config::get_data_dir());
+    cleanup_discover_local_pipeline_artifacts(&config.get_data_dir());
 }
 
 fn cleanup_discover_local_pipeline_artifacts(data_dir: &str) {
@@ -497,24 +498,22 @@ impl DataSink for OutputRouter {
     }
 }
 
-pub async fn run_schema(pipeline: &str) {
+pub async fn run_schema(config: &Config, pipeline: &str) {
     // register the table
     // let mut options = ConfigOptions::default();
     // options.catalog.information_schema = true;
 
     let ctx = crate::sqlrt::session::build_query_context(SessionConfig::new());
 
-    PIPELINE_NAME.write().clear();
-    PIPELINE_NAME.write().push_str(&pipeline);
-    Config::init().await;
-    let workspace = Config::get_workspace_name();
-    // Config::setenv("PIPELINE_NAME", &table_name);
+    let config = config.bind_pipeline(pipeline);
+    config.init().await;
+    let workspace = config.get_workspace_name();
     let _full_table_name = format!("{}.{}", workspace, pipeline);
 
     // @todo - check dir exists for provided table name, otherwise we end up creating erroneous dirs
 
     // iterate over local output files
-    let data_dir = Config::get_data_dir();
+    let data_dir = config.get_data_dir();
     let output_dir = format!("{}/output", data_dir);
 
     info!("Querying data dir: {}", output_dir);
@@ -553,9 +552,11 @@ pub async fn run_schema(pipeline: &str) {
     }
 }
 
-pub async fn run_discover(output_mode: &str) -> io::Result<()> {
-    let pipeline_name = Config::get_pipeline_name();
-    Config::validate_current_pipeline_registry_refs().map_err(io::Error::other)?;
+pub async fn run_discover(config: &Config, output_mode: &str) -> io::Result<()> {
+    let pipeline_name = config.get_pipeline_name();
+    config
+        .validate_current_pipeline_registry_refs()
+        .map_err(io::Error::other)?;
     Ingest::reset_discovery_progress();
     let start_time = Instant::now();
 
@@ -565,29 +566,32 @@ pub async fn run_discover(output_mode: &str) -> io::Result<()> {
     if reporter.enabled() {
         reporter.add_tasks(&["Discovering"]);
     }
-    reporter.discover_start(&pipeline_name, run_telemetry(&pipeline_name, "discovering"));
+    reporter.discover_start(
+        &pipeline_name,
+        run_telemetry(config, &pipeline_name, "discovering"),
+    );
 
     info!(
         "Analysing data and generating Skippr metadata for pipeline: {}",
         pipeline_name
     );
 
-    let _data_dir = Config::get_data_dir();
+    let _data_dir = config.get_data_dir();
 
-    let pipeline_metadata = match Config::get_metadata().await {
+    let pipeline_metadata = match config.get_metadata().await {
         Ok(pipeline_metadata) => {
             info!("Found existing Skippr metadata, will update with schema discovered from sampled data");
             pipeline_metadata
         }
         Err(_e) => {
             info!("No existing Skippr metadata, will discover schemas");
-            PipelineMetadata::new()
+            PipelineMetadata::new(config)
         }
     };
 
     METADATA.store(Arc::new(pipeline_metadata.clone()));
 
-    let offsets = match Offsets::init() {
+    let offsets = match Offsets::init(config) {
         Ok(offsets) => offsets,
         Err(e) => {
             return Err(io::Error::other(format!(
@@ -604,7 +608,7 @@ pub async fn run_discover(output_mode: &str) -> io::Result<()> {
     let shared_output = Arc::new(noop_output);
 
     {
-        let flatten = Config::get_transform_flatten_events();
+        let flatten = config.get_transform_flatten_events();
         for (namespace, _metadata) in pipeline_metadata.metadata.iter() {
             match Ingest::prepare_arrow_schema_with_metadata_for_query(
                 &namespace,
@@ -628,6 +632,7 @@ pub async fn run_discover(output_mode: &str) -> io::Result<()> {
     let previous_ingest_threads = std::env::var_os("INGEST_THREADS");
     std::env::set_var("INGEST_THREADS", "1");
     let discover_result = sync_input_plugin(
+        config,
         offsets_db.clone(),
         shared_output,
         RuntimeExecutionMode::Discover,
@@ -651,7 +656,8 @@ pub async fn run_discover(output_mode: &str) -> io::Result<()> {
     info!("Reached end of source data, persisting discovered metadata");
 
     let flatten = Config::truth_value(
-        &Config::get_transform_config()
+        &config
+            .get_transform_config()
             .flatten_events
             .unwrap_or("false".to_string()),
     );
@@ -665,13 +671,13 @@ pub async fn run_discover(output_mode: &str) -> io::Result<()> {
             .or_insert_with(|| metadata_from_runtime_output(&output_metadata));
     }
     for (_namespace, metadata) in updated_metadata.metadata.iter_mut() {
-        metadata.finalize_field_types(flatten);
+        metadata.finalize_field_types(config, flatten);
     }
     updated_metadata.enabled = true;
     METADATA.store(Arc::new(updated_metadata.clone()));
 
-    Config::set_metadata(&updated_metadata, true).await;
-    cleanup_discover_ingest_artifacts().await;
+    config.set_metadata(&updated_metadata, true).await;
+    cleanup_discover_ingest_artifacts(config).await;
 
     let namespaces_discovered = updated_metadata.metadata.len();
     let total_fields = updated_metadata
@@ -686,7 +692,7 @@ pub async fn run_discover(output_mode: &str) -> io::Result<()> {
             metadata.field_details().len(),
             RunTelemetry {
                 schema: Some(metadata_schema_json(namespace, metadata)),
-                ..run_telemetry(&pipeline_name, "schema")
+                ..run_telemetry(config, &pipeline_name, "schema")
             },
         );
         let diff = schema_diff_json(pipeline_metadata.metadata.get(namespace), metadata);
@@ -708,7 +714,7 @@ pub async fn run_discover(output_mode: &str) -> io::Result<()> {
                 RunTelemetry {
                     schema: Some(metadata_schema_json(namespace, metadata)),
                     schema_diff: Some(diff),
-                    ..run_telemetry(&pipeline_name, "schema")
+                    ..run_telemetry(config, &pipeline_name, "schema")
                 },
             );
         }
@@ -726,7 +732,7 @@ pub async fn run_discover(output_mode: &str) -> io::Result<()> {
                 "total_fields": total_fields,
                 "elapsed_ms": elapsed_ms
             })),
-            ..run_telemetry(&pipeline_name, "complete")
+            ..run_telemetry(config, &pipeline_name, "complete")
         },
     );
 
@@ -737,8 +743,8 @@ pub async fn run_discover(output_mode: &str) -> io::Result<()> {
     Ok(())
 }
 
-fn otlp_signals_from_pipeline_config() -> Vec<String> {
-    let Ok(entry) = Config::get_pipeline_input_plugin_config() else {
+fn otlp_signals_from_pipeline_config(config: &Config) -> Vec<String> {
+    let Ok(entry) = config.get_pipeline_input_plugin_config() else {
         return Vec::new();
     };
     let signals = entry
@@ -762,19 +768,26 @@ fn otlp_signals_from_pipeline_config() -> Vec<String> {
     }
 }
 
+/// WAL is the dataset until a `data_sink` exists. Compaction and reclaim stay off.
+pub fn wal_only(config: &Config) -> bool {
+    config.get_pipeline_config().data_sink.is_none()
+}
+
 pub async fn run_sync_pipeline(
+    config: &Config,
     pipeline: &str,
     output_mode: &str,
     source_once: bool,
 ) -> io::Result<()> {
-    PIPELINE_NAME.write().clear();
-    PIPELINE_NAME.write().push_str(pipeline);
-    run_sync(output_mode, source_once).await
+    let config = config.bind_pipeline(pipeline);
+    run_sync(&config, output_mode, source_once).await
 }
 
-pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
-    let pipeline_name = Config::get_pipeline_name();
-    Config::validate_current_pipeline_registry_refs().map_err(io::Error::other)?;
+pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> io::Result<()> {
+    let pipeline_name = config.get_pipeline_name();
+    config
+        .validate_current_pipeline_registry_refs()
+        .map_err(io::Error::other)?;
     let sync_started = Instant::now();
 
     let stdout_is_tty = std::io::stdout().is_terminal();
@@ -786,7 +799,10 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
     if reporter.enabled() {
         reporter.add_tasks(&["Ingesting", "Finalising"]);
     }
-    reporter.sync_start(&pipeline_name, run_telemetry(&pipeline_name, "starting"));
+    reporter.sync_start(
+        &pipeline_name,
+        run_telemetry(config, &pipeline_name, "starting"),
+    );
 
     {
         let mut counter_lock = METRICS.write();
@@ -794,13 +810,14 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
     }
 
     {
-        match Metrics::send_config().await {
+        match Metrics::send_config(config).await {
             Ok(_res) => (),
             Err(e) => {
                 LOGGER
                     .write()
                     .await
                     .log(
+                        config,
                         LogLevel::Error,
                         format!("Failed to send config to Skippr API: {}", e),
                     )
@@ -813,7 +830,7 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
 
     // @todo - we don't cache Pipeline metatdata, as currently SQL statements are not stored in metadata.
     //         Refactor to accept SQL directly via database connection
-    pipeline_metadata = match Config::get_metadata().await {
+    pipeline_metadata = match config.get_metadata().await {
         Ok(pipeline_metadata) => {
             info!("Found existing Skippr metadata");
 
@@ -824,6 +841,7 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
 
                         // Important to exec the SQL before saving metadata, as the SQL may drop or otherwise alter the metadata
                         query_with_options(
+                            config,
                             &stmt,
                             QueryExecutionOptions {
                                 mode: QueryExecutionMode::Sync,
@@ -847,13 +865,13 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
         }
         Err(false) => {
             let source_plugin =
-                crate::cluster::PipelineConfigView::for_name(&Config::get(), &pipeline_name)
+                crate::cluster::PipelineConfigView::for_name(&config.clone(), &pipeline_name)
                     .map(|view| view.source_plugin)
                     .unwrap_or_default();
-            let signals = otlp_signals_from_pipeline_config();
+            let signals = otlp_signals_from_pipeline_config(config);
             let signal_refs: Vec<&str> = signals.iter().map(String::as_str).collect();
             if let Some(seeded) = crate::sqlrt::schema_seed::seed_otel_pipeline_metadata(
-                &PipelineMetadata::new(),
+                &PipelineMetadata::new(config),
                 &source_plugin,
                 &signal_refs,
             ) {
@@ -861,15 +879,15 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
                     "Seeded OTel OutputMetadata for pipeline '{}'",
                     pipeline_name
                 );
-                Config::set_metadata(&seeded, false).await;
+                config.set_metadata(&seeded, false).await;
                 seeded
             } else {
                 info!(
                     "No existing Skippr metadata for pipeline '{}'; running discover first",
                     pipeline_name
                 );
-                run_discover(output_mode).await?;
-                Config::get_metadata().await.map_err(|_| {
+                run_discover(config, output_mode).await?;
+                config.get_metadata().await.map_err(|_| {
                     io::Error::other(format!(
                         "discover completed but metadata is still missing for pipeline '{}'",
                         pipeline_name
@@ -877,7 +895,7 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
                 })?
             }
         }
-        Err(true) => PipelineMetadata::new(),
+        Err(true) => PipelineMetadata::new(config),
     };
 
     info!("Syncing pipeline: {}", pipeline_name);
@@ -888,18 +906,23 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
     METADATA.store(Arc::new(pipeline_metadata.clone()));
     {
         let flatten = Config::truth_value(
-            &Config::get_transform_config()
+            &config
+                .get_transform_config()
                 .flatten_events
                 .unwrap_or_else(|| "false".to_string()),
         );
-        crate::ingest_work::warm_output_schemas_for_metadata(&pipeline_metadata.metadata, flatten)
-            .await;
+        crate::ingest_work::warm_output_schemas_for_metadata(
+            config,
+            &pipeline_metadata.metadata,
+            flatten,
+        )
+        .await;
     }
-    if Config::get_pipeline_deadletters_ref().is_some() {
-        deadletter::ensure_namespace_registered();
+    if config.get_pipeline_deadletters_ref().is_some() {
+        deadletter::ensure_namespace_registered(config);
     }
 
-    let offsets_db = match Offsets::init() {
+    let offsets_db = match Offsets::init(config) {
         Ok(offsets) => offsets,
         Err(e) => {
             return Err(io::Error::other(format!(
@@ -912,15 +935,15 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
     let offsets_db = Arc::new(offsets_db);
 
     if matches!(
-        Config::get_wal_storage(),
+        config.get_wal_storage(),
         crate::helpers::wal_storage::WalStorage::Disk
     ) {
-        crate::buffer::wal_store::ensure_disk_durable_store(offsets_db.clone())?;
+        crate::buffer::wal_store::ensure_disk_durable_store(config, offsets_db.clone())?;
     }
 
     let _offsets_clone = offsets_db.clone();
 
-    wal_recover(offsets_db.clone())
+    wal_recover(config, offsets_db.clone())
         .await
         .expect("Failed to recover WAL index");
 
@@ -928,24 +951,40 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
         METRICS.write().status = MetricsStatus::Running;
     }
 
-    let output_plugin_name = Config::get_pipeline_output_plugin_name();
-    let output = sync_output_plugin(&output_plugin_name, "output".to_string()).await?;
-    let shared_output = Arc::new(output);
+    let pipeline_cfg = config.get_pipeline_config();
+    let shared_output = if pipeline_cfg.data_sink.is_some() {
+        let output_plugin_name = config.get_pipeline_output_plugin_name();
+        let output = sync_output_plugin(config, &output_plugin_name, "output".to_string()).await?;
+        Arc::new(output)
+    } else {
+        info!("No data_sink for pipeline; WAL is the dataset (compaction/reclaim skipped)");
+        Arc::new(Box::new(crate::plugins::NoopOutputPlugin)
+            as Box<dyn crate::plugins::DataSink + Send + Sync>)
+    };
+    let output_plugin_name = if pipeline_cfg.data_sink.is_some() {
+        config.get_pipeline_output_plugin_name()
+    } else {
+        String::new()
+    };
 
-    // CDC compatibility validation at startup
-    {
+    // CDC compatibility validation at startup (requires a data sink)
+    if wal_only(config) {
+        crate::plugins::cdc::set_global_cdc_contract(None);
+    } else {
         use crate::plugins::cdc::{
             derive_and_validate, set_global_cdc_contract, set_namespace_cdc_contracts,
             CompatibilityResult,
         };
         use std::collections::BTreeMap;
-        let pipeline = Config::get_pipeline_config();
+        let pipeline = config.get_pipeline_config();
         if let Some(ref cdc_cfg) = pipeline.cdc {
-            let input_name = Config::get_pipeline_input_plugin_name();
+            let input_name = config.get_pipeline_input_plugin_name();
             let runtime_input_version =
-                Config::get_pipeline_input_plugin_version().unwrap_or_else(|err| {
-                    panic!("Runtime input plugin version lookup failed: {}", err)
-                });
+                config
+                    .get_pipeline_input_plugin_version()
+                    .unwrap_or_else(|err| {
+                        panic!("Runtime input plugin version lookup failed: {}", err)
+                    });
             let runtime_input_manifest = resolve_runtime_plugin(
                 RuntimePluginKind::DataSource,
                 &input_name,
@@ -953,7 +992,8 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
             )
             .await
             .unwrap_or_else(|err| panic!("Runtime input manifest resolution failed: {}", err));
-            let runtime_output_version = Config::get_pipeline_output_plugin_version()
+            let runtime_output_version = config
+                .get_pipeline_output_plugin_version()
                 .unwrap_or_else(|err| {
                     panic!("Runtime output plugin version lookup failed: {}", err)
                 });
@@ -1027,17 +1067,16 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
         } else {
             set_global_cdc_contract(None);
         }
+
+        validate_pipeline_source_contracts_at_startup(config, &output_plugin_name).await;
+        Buffers::start_compactor_service(config, shared_output.clone(), offsets_db.clone());
     }
-
-    validate_pipeline_source_contracts_at_startup(&output_plugin_name).await;
-
-    Buffers::start_compactor_service(shared_output.clone(), offsets_db.clone());
 
     let shared_output_clone = shared_output.clone();
 
     // Arm chaos interrupt for sync runs using the old planner (deterministic tick)
     let mut out_pnanner = periodic::Planner::new();
-    if Config::get_pipeline_chaos_mode() {
+    if config.get_pipeline_chaos_mode() {
         out_pnanner.add(
             move || {
                 if RUNNING.read().load(Ordering::SeqCst) {
@@ -1064,7 +1103,7 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
     // local cache warmup only; it must not enqueue Glue/schema publication for
     // every persisted namespace on process start.
     {
-        let flatten = Config::get_transform_flatten_events();
+        let flatten = config.get_transform_flatten_events();
         for (namespace, _ns_metadata) in pipeline_metadata.metadata.iter() {
             match Ingest::prepare_arrow_schema_with_metadata_for_query(
                 namespace,
@@ -1088,7 +1127,7 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
                                     }))
                                     .collect::<Vec<_>>()
                             })),
-                            ..run_telemetry(&pipeline_name, "schema")
+                            ..run_telemetry(config, &pipeline_name, "schema")
                         },
                     );
                 }
@@ -1111,6 +1150,7 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
     let heartbeat_started = sync_started;
     let is_json_mode = matches!(&reporter, SyncReporter::Json);
     if is_json_mode {
+        let heartbeat_config = config.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(10));
             interval.tick().await;
@@ -1132,6 +1172,7 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
                             elapsed,
                             uploads,
                             sync_status_telemetry(
+                                &heartbeat_config,
                                 &heartbeat_pipeline,
                                 msgs,
                                 bytes,
@@ -1148,6 +1189,7 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
     }
 
     let source_sync_result = sync_input_plugin(
+        config,
         offsets_db.clone(),
         shared_output_clone,
         RuntimeExecutionMode::Sync,
@@ -1162,7 +1204,8 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
             info!("Reached end of source data");
             info!(
                 "Ingest completed, flushing remaining buffers to output plugin {}",
-                Config::get_pipeline_config()
+                config
+                    .get_pipeline_config()
                     .data_sink
                     .or(Some("".to_string()))
                     .unwrap()
@@ -1187,7 +1230,7 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
         }
         let finalising_started = std::time::Instant::now();
         info!("Finalising: draining and stopping compactor");
-        let compactor_ok = Buffers::drain_and_stop_compactor(offsets_db.clone()).await;
+        let compactor_ok = Buffers::drain_and_stop_compactor(config, offsets_db.clone()).await;
         if compactor_ok {
             info!("Finalising: compactor drained and stopped");
         } else {
@@ -1202,7 +1245,7 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
             finalization_error = Some(message);
         }
         let (scanned_commits, removed_orphans, orphan_errors) =
-            Buffers::cleanup_orphan_seg_commits(200_000);
+            Buffers::cleanup_orphan_seg_commits(config, 200_000);
         info!(
             "Finalising: orphan commit cleanup scanned={} removed={} errors={}",
             scanned_commits, removed_orphans, orphan_errors
@@ -1213,7 +1256,7 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
         );
     }
     info!("Finalising: draining schema sync worker");
-    Config::drain_schema_sync_worker();
+    config.drain_schema_sync_worker();
     info!("Finalising: schema sync worker drained");
     let catalog_drain_timeout = Duration::from_secs(
         Config::getenv("CATALOG_OUTBOX_DRAIN_TIMEOUT_SECONDS", "30")
@@ -1258,7 +1301,7 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
         }
     }
 
-    crate::converters::parquet_ordering::log_unmatched_order_fields();
+    crate::converters::parquet_ordering::log_unmatched_order_fields(config);
 
     {
         METRICS.write().status = if source_sync_result.is_ok() && finalization_error.is_none() {
@@ -1268,13 +1311,14 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
         };
     }
 
-    match Metrics::send_metrics(Some(0)).await {
+    match Metrics::send_metrics(config, Some(0)).await {
         Ok(_res) => (),
         Err(e) => {
             LOGGER
                 .write()
                 .await
                 .log(
+                    config,
                     LogLevel::Error,
                     format!("Failed to send metrics to Skippr API: {}", e),
                 )
@@ -1373,7 +1417,7 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
                         .load(std::sync::atomic::Ordering::Relaxed) as u64,
                     elapsed_ms,
                 )),
-                ..run_telemetry(&pipeline_name, "complete")
+                ..run_telemetry(config, &pipeline_name, "complete")
             },
         );
     }
@@ -1386,28 +1430,32 @@ pub async fn run_sync(output_mode: &str, source_once: bool) -> io::Result<()> {
 }
 
 pub async fn sync_output_plugin(
+    config: &Config,
     plugin_name: &str,
     _buffer_name: String,
 ) -> Result<Box<dyn DataSink + Send + Sync>, io::Error> {
     info!("Output plugin: {}", plugin_name);
 
-    let pipeline_name = Config::get_pipeline_name();
-    let has_deadletter_binding = Config::get_pipeline_deadletters_ref().is_some();
+    let pipeline_name = config.get_pipeline_name();
+    let has_deadletter_binding = config.get_pipeline_deadletters_ref().is_some();
     let process_budget = RuntimeSinkProcessBudget::for_pipeline(
         &pipeline_name,
         1 + usize::from(has_deadletter_binding),
     );
-    let primary_sink_ref = Config::get_pipeline_output_sink_ref();
-    let runtime_version = Config::get_pipeline_output_plugin_version().map_err(io::Error::other)?;
+    let primary_sink_ref = config.get_pipeline_output_sink_ref();
+    let runtime_version = config
+        .get_pipeline_output_plugin_version()
+        .map_err(io::Error::other)?;
     let resolved = resolve_runtime_plugin(
         RuntimePluginKind::DataSink,
         plugin_name,
         runtime_version.as_deref(),
     )
     .await?;
-    let runtime_config = resolve_runtime_sink_config(RuntimeBinding::Primary)?;
+    let runtime_config = resolve_runtime_sink_config(config, RuntimeBinding::Primary)?;
     let primary_plugin = Box::new(
         RuntimeDataSinkPlugin::new_with_process_budget(
+            config,
             resolved,
             pipeline_name,
             RuntimeBinding::Primary,
@@ -1421,8 +1469,12 @@ pub async fn sync_output_plugin(
     sinks.insert(primary_sink_ref.clone(), Arc::new(primary_plugin));
 
     if let Some((deadletter_sink_ref, deadletter_plugin)) =
-        sync_deadletter_plugin_with_process_budget("deadletters".to_string(), process_budget)
-            .await?
+        sync_deadletter_plugin_with_process_budget(
+            config,
+            "deadletters".to_string(),
+            process_budget,
+        )
+        .await?
     {
         sinks.insert(deadletter_sink_ref, Arc::new(deadletter_plugin));
     }
@@ -1434,39 +1486,44 @@ pub async fn sync_output_plugin(
 }
 
 pub async fn sync_deadletter_plugin(
+    config: &Config,
     buffer_name: String,
 ) -> Result<Option<(String, Box<dyn DataSink + Send + Sync>)>, io::Error> {
-    let pipeline_name = Config::get_pipeline_name();
+    let pipeline_name = config.get_pipeline_name();
     let process_budget = RuntimeSinkProcessBudget::for_pipeline(&pipeline_name, 2);
-    sync_deadletter_plugin_with_process_budget(buffer_name, process_budget).await
+    sync_deadletter_plugin_with_process_budget(config, buffer_name, process_budget).await
 }
 
 async fn sync_deadletter_plugin_with_process_budget(
+    config: &Config,
     _buffer_name: String,
     process_budget: Arc<RuntimeSinkProcessBudget>,
 ) -> Result<Option<(String, Box<dyn DataSink + Send + Sync>)>, io::Error> {
-    let sink_ref = match Config::get_pipeline_deadletters_ref() {
+    let sink_ref = match config.get_pipeline_deadletters_ref() {
         Some(sink_ref) => sink_ref,
         None => return Ok(None),
     };
-    let Some(plugin_name) =
-        Config::get_pipeline_deadletter_plugin_name().map_err(io::Error::other)?
+    let Some(plugin_name) = config
+        .get_pipeline_deadletter_plugin_name()
+        .map_err(io::Error::other)?
     else {
         return Ok(None);
     };
-    let runtime_version =
-        Config::get_pipeline_deadletter_plugin_version().map_err(io::Error::other)?;
+    let runtime_version = config
+        .get_pipeline_deadletter_plugin_version()
+        .map_err(io::Error::other)?;
     let resolved = resolve_runtime_plugin(
         RuntimePluginKind::DataSink,
         &plugin_name,
         runtime_version.as_deref(),
     )
     .await?;
-    let runtime_config = resolve_runtime_sink_config(RuntimeBinding::Deadletter)?;
+    let runtime_config = resolve_runtime_sink_config(config, RuntimeBinding::Deadletter)?;
     let plugin = Box::new(
         RuntimeDataSinkPlugin::new_with_process_budget(
+            config,
             resolved,
-            Config::get_pipeline_name(),
+            config.get_pipeline_name(),
             RuntimeBinding::Deadletter,
             runtime_config,
             process_budget,
@@ -1476,7 +1533,7 @@ async fn sync_deadletter_plugin_with_process_budget(
     Ok(Some((sink_ref, plugin)))
 }
 
-async fn validate_pipeline_source_contracts_at_startup(output_plugin_name: &str) {
+async fn validate_pipeline_source_contracts_at_startup(config: &Config, output_plugin_name: &str) {
     use crate::plugins::source_contract::{validate_active_sink_supports_contracts, WritePolicy};
     use crate::METADATA;
 
@@ -1484,7 +1541,7 @@ async fn validate_pipeline_source_contracts_at_startup(output_plugin_name: &str)
     if contracts.is_empty() {
         return;
     }
-    if let Err(err) = validate_active_sink_supports_contracts(&contracts).await {
+    if let Err(err) = validate_active_sink_supports_contracts(config, &contracts).await {
         panic!("Invalid source namespace contracts for sink '{output_plugin_name}': {err}");
     }
     for contract in &contracts {
@@ -1532,12 +1589,16 @@ fn runtime_sink_capability_for_manifest(
         .map(|capability| capability.to_cdc_capability())
 }
 
-fn resolve_runtime_sink_config(binding: RuntimeBinding) -> Result<RuntimeSinkConfig, io::Error> {
+fn resolve_runtime_sink_config(
+    app_cfg: &Config,
+    binding: RuntimeBinding,
+) -> Result<RuntimeSinkConfig, io::Error> {
     let config = match binding {
-        RuntimeBinding::Primary => {
-            Config::get_pipeline_output_plugin_config().map_err(io::Error::other)?
-        }
-        RuntimeBinding::Deadletter => Config::get_pipeline_deadletter_plugin_config()
+        RuntimeBinding::Primary => app_cfg
+            .get_pipeline_output_plugin_config()
+            .map_err(io::Error::other)?,
+        RuntimeBinding::Deadletter => app_cfg
+            .get_pipeline_deadletter_plugin_config()
             .map_err(io::Error::other)?
             .ok_or_else(|| io::Error::other("deadletter sink is not configured"))?,
     };
@@ -1603,13 +1664,14 @@ fn sink_capability_for_plugin(name: &str) -> Option<&'static crate::plugins::cdc
 }
 
 pub async fn sync_input_plugin(
+    config: &Config,
     offsets_clone: Arc<Offsets>,
     shared_output: Arc<Box<dyn DataSink + Send + Sync>>,
     execution_mode: RuntimeExecutionMode,
     source_once: bool,
 ) -> io::Result<()> {
-    let plugin_name = Config::get_pipeline_input_plugin_name();
-    let runtime_version = Config::get_pipeline_input_plugin_version().map_err(|err| {
+    let plugin_name = config.get_pipeline_input_plugin_name();
+    let runtime_version = config.get_pipeline_input_plugin_version().map_err(|err| {
         io::Error::other(format!(
             "Failed to resolve runtime input plugin version: {}",
             err
@@ -1625,8 +1687,9 @@ pub async fn sync_input_plugin(
         io::Error::other(format!("Runtime input manifest resolution failed: {}", err))
     })?;
     sync_runtime_input_plugin(
+        config,
         resolved,
-        Config::get_pipeline_name(),
+        config.get_pipeline_name(),
         execution_mode,
         source_once,
         offsets_clone,
@@ -1634,6 +1697,51 @@ pub async fn sync_input_plugin(
     )
     .await
     .map_err(|err| io::Error::other(format!("Runtime data source sync failed: {}", err)))
+}
+
+#[cfg(test)]
+mod wal_only_tests {
+    use super::wal_only;
+    use crate::helpers::configuration::Config;
+    use serde_json::json;
+
+    #[test]
+    fn missing_data_sink_is_wal_only() {
+        let config: Config = serde_json::from_value(json!({
+            "skippr": { "workspace": "quickstart" },
+            "pipelines": {
+                "bikehire": { "data_source": "data_sources.sample" }
+            },
+            "data_sources": {
+                "sample": { "S3": { "s3_bucket": "b", "s3_prefix": "p" } }
+            }
+        }))
+        .unwrap();
+        let bound = config.bind_pipeline("bikehire");
+        assert!(wal_only(&bound));
+    }
+
+    #[test]
+    fn present_data_sink_is_not_wal_only() {
+        let config: Config = serde_json::from_value(json!({
+            "skippr": { "workspace": "quickstart" },
+            "pipelines": {
+                "bikehire": {
+                    "data_source": "data_sources.sample",
+                    "data_sink": "data_sinks.warehouse"
+                }
+            },
+            "data_sources": {
+                "sample": { "S3": { "s3_bucket": "b", "s3_prefix": "p" } }
+            },
+            "data_sinks": {
+                "warehouse": { "Stdout": {} }
+            }
+        }))
+        .unwrap();
+        let bound = config.bind_pipeline("bikehire");
+        assert!(!wal_only(&bound));
+    }
 }
 
 #[cfg(test)]

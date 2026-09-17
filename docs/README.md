@@ -2,7 +2,7 @@
 
 Public engineer docs for [elt.skippr.io](https://elt.skippr.io).
 
-Markdown lives in `docs/`. VitePress is the public renderer. Publish:
+Markdown lives in `docs/docs/`. VitePress is the public renderer (`srcDir: docs`). Publish:
 
 ```bash
 npm --prefix docs ci

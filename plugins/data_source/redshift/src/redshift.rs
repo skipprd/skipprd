@@ -7,7 +7,6 @@ use serde_derive::Deserialize;
 use tokio::time::{sleep, Duration};
 use tracing::info;
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::progress::OffsetKey;
@@ -52,26 +51,6 @@ impl DataSourceRedshiftPlugin {
         Self { config, client }
     }
 
-    pub async fn new() -> Self {
-        let config: DataSourceRedshiftPluginConfig =
-            match Config::get_pipeline_input_plugin_config() {
-                Ok(c) => c.try_into().unwrap_or_else(|e| panic!("{}", e)),
-                Err(_) => DataSourceRedshiftPluginConfig {
-                    cluster_identifier: Some(Config::getenv("REDSHIFT_CLUSTER_IDENTIFIER", "")),
-                    workgroup_name: None,
-                    database: Config::getenv("REDSHIFT_DATABASE", ""),
-                    db_user: None,
-                    tables: None,
-                    query: None,
-                    region: None,
-                    format: None,
-                    batch_size_bytes: None,
-                    batch_size_seconds: None,
-                },
-            };
-
-        Self::from_config(config).await
-    }
 
     pub async fn with_runtime_config(config: DataSourceRedshiftPluginConfig) -> Self {
         Self::from_config(config).await

@@ -30,6 +30,8 @@ impl CliModeKind {
             Mode::Schema(_) => Self::Schema,
             Mode::SqlHelp(_) => Self::SqlHelp,
             Mode::Benchmark(_) => Self::Benchmark,
+            Mode::Doctor(_) => Self::SqlHelp,
+            Mode::Df(_) => Self::Query,
         }
     }
 
@@ -196,27 +198,33 @@ pub fn validate_skippr_catalog_tables(
     Ok(())
 }
 
-fn validate_configured_offset_store(storage: WalStorage) -> Result<OffsetStoreKind, ConfigError> {
-    let table = Config::get_offset_dynamodb_table();
-    let configured = Config::configured_offset_store()?;
+fn validate_configured_offset_store(
+    config: &Config,
+    storage: WalStorage,
+) -> Result<OffsetStoreKind, ConfigError> {
+    let table = config.get_offset_dynamodb_table();
+    let configured = config.configured_offset_store()?;
     validate_clustered_backend(storage, configured, &table)
 }
 
-pub fn validate_clustered_cli(storage: WalStorage, mode: CliModeKind) -> Result<(), ConfigError> {
+pub fn validate_clustered_cli(
+    config: &Config,
+    storage: WalStorage,
+    mode: CliModeKind,
+) -> Result<(), ConfigError> {
     validate_wal_storage_for_mode(storage, mode)?;
     match storage {
         WalStorage::Disk | WalStorage::S3 => {
-            validate_configured_offset_store(storage)?;
+            validate_configured_offset_store(config, storage)?;
             Ok(())
         }
         WalStorage::Clustered => {
-            let table = Config::get_offset_dynamodb_table();
-            validate_configured_offset_store(storage)?;
-            validate_skippr_catalog_tables(&Config::get(), &table)?;
+            let table = config.get_offset_dynamodb_table();
+            validate_configured_offset_store(config, storage)?;
+            validate_skippr_catalog_tables(config, &table)?;
             if matches!(mode, CliModeKind::Sync { once: false }) {
-                let config = Config::get();
                 for name in config.pipelines.keys() {
-                    PipelineConfigView::for_name(&config, name)?.validate_clustered_sink()?;
+                    PipelineConfigView::for_name(config, name)?.validate_clustered_sink()?;
                 }
             }
             Ok(())
@@ -225,27 +233,27 @@ pub fn validate_clustered_cli(storage: WalStorage, mode: CliModeKind) -> Result<
 }
 
 pub fn validate_clustered_mode(
+    config: &Config,
     storage: WalStorage,
     mode: CliModeKind,
 ) -> Result<Option<ClusterConfig>, ConfigError> {
     validate_wal_storage_for_mode(storage, mode)?;
     match storage {
         WalStorage::Disk | WalStorage::S3 => {
-            validate_configured_offset_store(storage)?;
+            validate_configured_offset_store(config, storage)?;
             Ok(None)
         }
         WalStorage::Clustered => {
-            let table = Config::get_offset_dynamodb_table();
-            validate_configured_offset_store(storage)?;
-            validate_skippr_catalog_tables(&Config::get(), &table)?;
+            let table = config.get_offset_dynamodb_table();
+            validate_configured_offset_store(config, storage)?;
+            validate_skippr_catalog_tables(config, &table)?;
             let lock_data_dir = !matches!(mode, CliModeKind::Query | CliModeKind::SqlHelp);
-            let config = Config::get();
             if lock_data_dir {
                 for name in config.pipelines.keys() {
-                    PipelineConfigView::for_name(&config, name)?.validate_clustered_sink()?;
+                    PipelineConfigView::for_name(config, name)?.validate_clustered_sink()?;
                 }
             }
-            let data_root = PathBuf::from(Config::get_pipeline_data_dir());
+            let data_root = PathBuf::from(config.get_pipeline_data_dir());
             if lock_data_dir {
                 let _lock = exclusive_data_dir_lock(&data_root)?;
                 std::mem::forget(_lock);
@@ -325,9 +333,12 @@ mod tests {
         let _lock = ENV_LOCK.lock().unwrap();
         std::env::remove_var("SKIPPR_OFFSET_STORE");
         Config::set_offset_store("");
-        assert!(
-            validate_clustered_cli(WalStorage::Disk, CliModeKind::Sync { once: false }).is_ok()
-        );
+        assert!(validate_clustered_cli(
+            &Config::new(),
+            WalStorage::Disk,
+            CliModeKind::Sync { once: false }
+        )
+        .is_ok());
     }
 
     #[test]
@@ -445,7 +456,8 @@ mod tests {
         Config::set_offset_store("cloud-tables");
         std::env::set_var("CLOUD_TABLES_ENDPOINT", "http://127.0.0.1:8003");
         std::env::set_var("CLOUD_BEARER_TOKEN", "guest-held-jwt");
-        let err = validate_clustered_cli(WalStorage::Disk, CliModeKind::Query).unwrap_err();
+        let err = validate_clustered_cli(&Config::new(), WalStorage::Disk, CliModeKind::Query)
+            .unwrap_err();
         Config::set_offset_store("");
         std::env::remove_var("SKIPPR_OFFSET_STORE");
         std::env::remove_var("CLOUD_TABLES_ENDPOINT");

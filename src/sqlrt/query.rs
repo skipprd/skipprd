@@ -6,7 +6,7 @@ use crate::discover::{Metadata, PipelineMetadata, SkipprDataType};
 use crate::helpers::athena_admin::{
     delete_glue_database, glue_delete_table, output_athena_admin_config,
 };
-use crate::helpers::configuration::{Config, PIPELINE_NAME};
+use crate::helpers::configuration::Config;
 use crate::sqlrt::operators::alter_column::alter_column_type;
 use crate::sqlrt::operators::drop_column::alter_column_drop;
 use crate::sqlrt::operators::drop_table::drop_table;
@@ -79,24 +79,25 @@ impl Default for QueryExecutionOptions {
 }
 
 // Build a SessionContext and pre-register all pipelines/namespaces so two-part names resolve
-pub async fn new_context_all_namespaces() -> SessionContext {
+pub async fn new_context_all_namespaces(config: &Config) -> SessionContext {
     let ctx = crate::sqlrt::session::build_query_context(SessionConfig::new());
-    let pipelines = crate::sqlrt::registry::list_pipelines().await;
+    let pipelines = crate::sqlrt::registry::list_pipelines(&config).await;
     for pipeline in pipelines {
-        let mut namespaces = crate::sqlrt::registry::list_namespaces(&pipeline).await;
+        let mut namespaces = crate::sqlrt::registry::list_namespaces(&config, &pipeline).await;
         namespaces.sort();
         for ns in namespaces {
             // Keep sqlrt self-contained: register DataFusion views directly via sqlrt tables.
-            let _ = crate::sqlrt::tables::register_namespace_view(&ctx, &pipeline, &ns).await;
+            let _ =
+                crate::sqlrt::tables::register_namespace_view(&ctx, config, &pipeline, &ns).await;
         }
-        let _ = crate::sqlrt::tables::register_deadletters(&ctx, &pipeline).await;
+        let _ = crate::sqlrt::tables::register_deadletters(&ctx, config, &pipeline).await;
     }
     ctx
 }
 
-pub async fn register_catalog(ctx: &SessionContext) {
+pub async fn register_catalog(config: &Config, ctx: &SessionContext) {
     // Delegate to S3-only registry-backed builder
-    crate::sqlrt::metadata::register_catalog(ctx).await;
+    crate::sqlrt::metadata::register_catalog(&config, ctx).await;
 }
 
 // WalReader abstraction handles WAL batch loading; helpers removed.
@@ -239,11 +240,31 @@ pub async fn explain_query(sql_str: &str) -> String {
     }
 }
 
-pub async fn query(sql_str: &str) {
-    query_with_options(sql_str, QueryExecutionOptions::default()).await;
+pub async fn query(config: &Config, sql_str: &str) {
+    query_with_options(&config, sql_str, QueryExecutionOptions::default()).await;
 }
 
-pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOptions) {
+pub async fn query_collect(
+    config: &Config,
+    sql_str: &str,
+) -> std::io::Result<Vec<arrow::array::RecordBatch>> {
+    config.init().await;
+    let ctx = new_context_all_namespaces(&config).await;
+    let df = ctx
+        .sql(sql_str)
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    collect_user_sql(df)
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))
+}
+
+pub async fn query_with_options(
+    config: &Config,
+    sql_str: &str,
+    query_options: QueryExecutionOptions,
+) {
+    let mut config = config.clone();
     let sql_trim = sql_str.trim();
     // Enforce fully-qualified table names: require <pipeline>.<namespace>, forbid default.*
     {
@@ -266,9 +287,9 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
             }
             // Require at least one fully-qualified <pipeline>.<namespace> present
             let mut allowed: Vec<String> = Vec::new();
-            let pipes = crate::sqlrt::registry::list_pipelines().await;
+            let pipes = crate::sqlrt::registry::list_pipelines(&config).await;
             for p in pipes {
-                let nss = crate::sqlrt::registry::list_namespaces(&p).await;
+                let nss = crate::sqlrt::registry::list_namespaces(&config, &p).await;
                 for ns in nss {
                     allowed.push(format!("{}.{}", p, ns));
                 }
@@ -406,7 +427,9 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
         let (tx_req, rx_req) = mpsc::channel::<String>();
         let (tx_res, rx_res) = mpsc::channel::<Vec<RecordBatch>>();
         let initial_stream_sql = select_sql.clone();
+        let stream_config = config.clone();
         tokio::spawn(async move {
+            let mut config = stream_config;
             // helper to build (pipeline, select_sql) from either STREAM ... or SELECT ...
             let build_plan = |input: &str| -> Option<(String, String)> {
                 let s = input.trim();
@@ -480,17 +503,17 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                 if let Some((pipeline_name, run_sql)) = build_plan(&current_sql) {
                     let ctx = crate::sqlrt::session::build_query_context(SessionConfig::new());
                     // Set pipeline context BEFORE any config that might create dirs
-                    PIPELINE_NAME.write().clear();
-                    PIPELINE_NAME.write().push_str(&pipeline_name);
-                    Config::init().await;
-                    register_catalog(&ctx).await;
+                    config = config.bind_pipeline(&pipeline_name);
+                    config.init().await;
+                    register_catalog(&config, &ctx).await;
                     // Unified WAL reader (local disk or S3 based on manifest/env)
                     let reader = crate::sqlrt::wal_reader::WalReaderFactory::for_pipeline_async(
+                        &config,
                         &pipeline_name,
                     )
                     .await;
                     let wal_batches: Vec<RecordBatch> = reader
-                        .load_committed_batches(&pipeline_name, 64)
+                        .load_committed_batches(&pipeline_name, usize::MAX)
                         .unwrap_or_default();
 
                     if !wal_batches.is_empty() {
@@ -532,6 +555,7 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
         });
 
         QueryEditorView::new(&select_sql).run(
+            &config,
             QueryEditorConfig {
                 title: &format!("STREAM {}", pipeline),
                 footer: Some("Enter:run q:quit"),
@@ -629,22 +653,18 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
             namespace,
         }) => {
             let pipeline = pipeline.replace('"', "");
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME.write().push_str(&pipeline);
-            Config::init().await;
+            config = config.bind_pipeline(&pipeline);
+            config.init().await;
             let ns = namespace.as_deref().unwrap_or(&pipeline);
-            show_stats(&pipeline, ns).await;
+            show_stats(&config, &pipeline, ns).await;
             return;
         }
         Ok(Statement::PipelineDrop(stmt)) => {
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME
-                .write()
-                .push_str(format!("{}", &stmt.pipeline).as_str());
-            Config::init().await;
+            config = config.bind_pipeline(format!("{}", &stmt.pipeline).as_str());
+            config.init().await;
 
-            let data_dir = Config::get_data_dir();
-            let pipeline_name = Config::get_pipeline_name();
+            let data_dir = config.get_data_dir();
+            let pipeline_name = config.get_pipeline_name();
 
             println!("Dropping all schemas and data for: {}", pipeline_name);
 
@@ -652,15 +672,15 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                 QueryExecutionMode::Sync => {
                     let _ = fs::remove_dir_all(&data_dir)
                         .expect(format!("Failed to remove dir: {}", data_dir).as_str());
-                    Config::delete_metadata().await;
+                    config.delete_metadata().await;
                     println!("Dropped Pipeline");
                 }
-                QueryExecutionMode::Query => match Config::get_metadata().await {
+                QueryExecutionMode::Query => match config.get_metadata().await {
                     Ok(_metadata) => {
-                        let mut empty_pipeline_metadata = PipelineMetadata::new();
+                        let mut empty_pipeline_metadata = PipelineMetadata::new(&config);
                         empty_pipeline_metadata.append_sql(sql_str.to_string());
 
-                        Config::set_metadata(&empty_pipeline_metadata, false).await;
+                        config.set_metadata(&empty_pipeline_metadata, false).await;
 
                         println!("Done. Pipeline will drop on next sync run");
                     }
@@ -671,21 +691,19 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
             }
         }
         Ok(Statement::PipelineReset(stmt)) => {
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME
-                .write()
-                .push_str(format!("{}", &stmt.pipeline).as_str());
-            Config::init().await;
+            config = config.bind_pipeline(format!("{}", &stmt.pipeline).as_str());
+            config.init().await;
 
-            let data_dir = Config::get_data_dir();
-            let pipeline_name = Config::get_pipeline_name();
+            let data_dir = config.get_data_dir();
+            let pipeline_name = config.get_pipeline_name();
 
             println!(
                 "Resetting offset database and purging WAL files for pipeline: {}, dir: {}",
                 pipeline_name, data_dir
             );
 
-            let mut metadata = Config::get_metadata()
+            let mut metadata = config
+                .get_metadata()
                 .await
                 .expect(format!("No metadata found for pipeline: {}", pipeline_name).as_str());
 
@@ -717,25 +735,22 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
 
                     // remove the SQL stmt from metadata
                     metadata.sql = None;
-                    Config::set_metadata(&metadata, false).await;
+                    config.set_metadata(&metadata, false).await;
                 }
                 QueryExecutionMode::Query => {
                     metadata.append_sql(sql_str.to_string());
 
-                    Config::set_metadata(&metadata, false).await;
+                    config.set_metadata(&metadata, false).await;
 
                     println!("Done. Pipeline will reset on next sync run");
                 }
             }
         }
         Ok(Statement::PipelineToggle(stmt)) => {
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME
-                .write()
-                .push_str(format!("{}", &stmt.pipeline).as_str());
-            Config::init().await;
+            config = config.bind_pipeline(format!("{}", &stmt.pipeline).as_str());
+            config.init().await;
 
-            let mut skippr_metadata = match Config::get_metadata().await {
+            let mut skippr_metadata = match config.get_metadata().await {
                 Ok(metadata) => metadata,
                 Err(_e) => {
                     println!("Pipeline '{}' not found", stmt.pipeline);
@@ -748,18 +763,16 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                 PipelineToggle::Disable => false,
             };
 
-            Config::set_metadata(&skippr_metadata, false).await;
+            config.set_metadata(&skippr_metadata, false).await;
 
             println!("Toggled pipeline '{}' to: {}d", stmt.pipeline, stmt.toggle);
         }
         Ok(Statement::SchemaDrop(stmt)) => {
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME
-                .write()
-                .push_str(format!("{}", &stmt.pipeline).as_str());
-            Config::init().await;
+            config = config.bind_pipeline(format!("{}", &stmt.pipeline).as_str());
+            config.init().await;
 
-            let mut metadata = Config::get_metadata()
+            let mut metadata = config
+                .get_metadata()
                 .await
                 .expect(format!("No metadata found for pipeline: {}", stmt.pipeline).as_str());
 
@@ -769,7 +782,7 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                 Some(_) => {
                     println!("Dropping schema: '{}' for pipeline: '{}', on next sync schema will be re-discovered", schema, &stmt.pipeline);
                     METADATA.store(Arc::new(metadata.clone()));
-                    Config::set_metadata(&metadata, true).await;
+                    config.set_metadata(&metadata, true).await;
                     println!("Dropped Schema, on next sync schema will be re-discovered");
                 }
                 None => {
@@ -782,21 +795,18 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
         }
 
         Ok(Statement::SchemaLoad(stmt)) => {
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME
-                .write()
-                .push_str(format!("{}", &stmt.pipeline).as_str());
-            Config::init().await;
+            config = config.bind_pipeline(format!("{}", &stmt.pipeline).as_str());
+            config.init().await;
 
-            let mut skippr_metadata = match Config::get_metadata().await {
+            let mut skippr_metadata = match config.get_metadata().await {
                 Ok(metadata) => metadata,
-                Err(_e) => PipelineMetadata::new(),
+                Err(_e) => PipelineMetadata::new(&config),
             };
 
             let source_path = if std::path::Path::new(&stmt.source).is_absolute() {
                 stmt.source.clone()
             } else {
-                let data_dir = Config::get_data_dir();
+                let data_dir = config.get_data_dir();
                 format!("{}/{}", data_dir, stmt.source)
             };
 
@@ -861,20 +871,17 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
             }
 
             METADATA.store(Arc::new(skippr_metadata.clone()));
-            Config::set_metadata(&skippr_metadata, true).await;
+            config.set_metadata(&skippr_metadata, true).await;
 
             let count = tables.len();
             println!("Schema loaded: {} namespace(s) updated.", count);
         }
         Ok(Statement::SchemaDump(stmt)) => {
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME
-                .write()
-                .push_str(format!("{}", &stmt.pipeline).as_str());
-            Config::init().await;
-            let _workspace = Config::get_workspace_name();
+            config = config.bind_pipeline(format!("{}", &stmt.pipeline).as_str());
+            config.init().await;
+            let _workspace = config.get_workspace_name();
 
-            let skippr_metadata = match Config::get_metadata().await {
+            let skippr_metadata = match config.get_metadata().await {
                 Ok(metadata) => metadata,
                 Err(_e) => {
                     println!("No existing schema for pipeline '{}'", stmt.pipeline);
@@ -902,13 +909,10 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
         Ok(Statement::AlterSchemaDropColumn(stmt)) => {
             // println!("Alter table drop column: {}", stmt.column_name);
 
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME
-                .write()
-                .push_str(format!("{}", &stmt.pipeline).as_str());
-            Config::init().await;
+            config = config.bind_pipeline(format!("{}", &stmt.pipeline).as_str());
+            config.init().await;
 
-            let mut skippr_metadata = match Config::get_metadata().await {
+            let mut skippr_metadata = match config.get_metadata().await {
                 Ok(metadata) => metadata,
                 Err(_e) => {
                     println!("No existing schema for {}", &stmt.pipeline);
@@ -937,7 +941,7 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                 METADATA.store(Arc::new(skippr_metadata.clone()));
             }
 
-            Config::set_metadata(&skippr_metadata, true).await;
+            config.set_metadata(&skippr_metadata, true).await;
 
             println!(
                 "Alter schema, dropped column '{}, on pipeline: '{}' of schema '{}'.",
@@ -945,15 +949,12 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
             );
         }
         Ok(Statement::AlterSchemaAlterColumnType(stmt)) => {
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME
-                .write()
-                .push_str(format!("{}", &stmt.pipeline).as_str());
-            Config::init().await;
+            config = config.bind_pipeline(format!("{}", &stmt.pipeline).as_str());
+            config.init().await;
 
             let schema = stmt.schema.clone().unwrap_or(stmt.pipeline.clone());
 
-            let mut skippr_metadata = match Config::get_metadata().await {
+            let mut skippr_metadata = match config.get_metadata().await {
                 Ok(metadata) => metadata,
                 Err(_e) => {
                     println!("No existing schema for {}", stmt.pipeline);
@@ -974,7 +975,7 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                 METADATA.store(Arc::new(skippr_metadata.clone()));
             }
 
-            Config::set_metadata(&skippr_metadata, false).await;
+            config.set_metadata(&skippr_metadata, false).await;
 
             println!(
                 "Alter schema: {} column: '{}' type to {}",
@@ -990,18 +991,15 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
             };
 
             // Set the pipeline name based on the table or schema
-            PIPELINE_NAME.write().clear();
             if schema_str.is_empty() {
-                // If no schema specified, use the table name as the pipeline
-                PIPELINE_NAME.write().push_str(&table_str);
+                config = config.bind_pipeline(&table_str);
             } else {
-                // Otherwise use the schema name as the pipeline
-                PIPELINE_NAME.write().push_str(&schema_str);
+                config = config.bind_pipeline(&schema_str);
             }
-            Config::init().await;
+            config.init().await;
 
             // Get the current metadata
-            let mut skippr_metadata = match Config::get_metadata().await {
+            let mut skippr_metadata = match config.get_metadata().await {
                 Ok(metadata) => metadata,
                 Err(_) => {
                     println!("No existing metadata for pipeline");
@@ -1010,7 +1008,7 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
             };
 
             // Use the drop_table operator to remove the table from metadata
-            match drop_table(&mut skippr_metadata, &stmt).await {
+            match drop_table(&config, &mut skippr_metadata, &stmt).await {
                 Ok(_) => {
                     let metadata_key = if schema_str.is_empty() {
                         table_str.clone()
@@ -1026,11 +1024,11 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                     }
 
                     // Save the updated metadata
-                    Config::set_metadata(&skippr_metadata, false).await; // we don't need to sync the schemas as we are dropping the table below
+                    config.set_metadata(&skippr_metadata, false).await; // we don't need to sync the schemas as we are dropping the table below
 
                     // Delete Glue table
-                    match output_athena_admin_config() {
-                        Ok(config) => match glue_delete_table(&config, &table_str).await {
+                    match output_athena_admin_config(&config) {
+                        Ok(admin_cfg) => match glue_delete_table(&admin_cfg, &table_str).await {
                             Ok(_) => {
                                 println!("Dropped table: {}", table_str);
                             }
@@ -1068,11 +1066,10 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                             namespace,
                         } => {
                             let pipeline = pipeline.replace('"', "");
-                            PIPELINE_NAME.write().clear();
-                            PIPELINE_NAME.write().push_str(&pipeline);
-                            Config::init().await;
+                            config = config.bind_pipeline(&pipeline);
+                            config.init().await;
                             let ns = namespace.unwrap_or_else(|| pipeline.clone());
-                            show_stats(&pipeline, &ns).await;
+                            show_stats(&config, &pipeline, &ns).await;
                             return;
                         }
                         Statement::ShowSemantic {
@@ -1080,10 +1077,9 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                             namespace,
                         } => {
                             // Establish pipeline context (pipeline is the dataset); namespace may further scope
-                            PIPELINE_NAME.write().clear();
-                            PIPELINE_NAME.write().push_str(&pipeline);
-                            Config::init().await;
-                            register_catalog(&ctx).await;
+                            config = config.bind_pipeline(&pipeline);
+                            config.init().await;
+                            register_catalog(&config, &ctx).await;
                             let _ = show_semantic(&ctx, namespace.as_deref()).await;
                             return;
                         }
@@ -1091,19 +1087,17 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                             pipeline,
                             namespace,
                         } => {
-                            PIPELINE_NAME.write().clear();
-                            PIPELINE_NAME.write().push_str(&pipeline);
-                            Config::init().await;
-                            register_catalog(&ctx).await;
-                            let _ = show_catalog(&ctx, namespace.as_deref()).await;
+                            config = config.bind_pipeline(&pipeline);
+                            config.init().await;
+                            register_catalog(&config, &ctx).await;
+                            let _ = show_catalog(&config, &ctx, namespace.as_deref()).await;
                             return;
                         }
                         Statement::ShowPipeline { pipeline } => {
                             let pipeline = pipeline.replace('"', "");
-                            PIPELINE_NAME.write().clear();
-                            PIPELINE_NAME.write().push_str(&pipeline);
-                            Config::init().await;
-                            show_pipeline(&pipeline).await;
+                            config = config.bind_pipeline(&pipeline);
+                            config.init().await;
+                            show_pipeline(&config, &pipeline).await;
                             return;
                         }
                         _ => {}
@@ -1112,7 +1106,7 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
             }
 
             // Build union views ONLY for tables referenced in this SQL
-            let original_pipeline = Config::get_pipeline_name();
+            let original_pipeline = config.get_pipeline_name();
             let dialect = GenericDialect {};
             #[derive(Clone)]
             struct TableRef {
@@ -1199,21 +1193,20 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
             } in table_refs
             {
                 // Switch pipeline context for correct local WAL dir and config resolution
-                PIPELINE_NAME.write().clear();
-                PIPELINE_NAME.write().push_str(&pipeline);
-                Config::init().await;
+                config = config.bind_pipeline(&pipeline);
+                config.init().await;
                 println!("Context: pipeline='{}' namespace='{}'", pipeline, namespace);
                 if first {
-                    register_catalog(&ctx).await;
+                    register_catalog(&config, &ctx).await;
                     first = false;
                 }
 
                 // Bootstrap METADATA and ARROW_SCHEMA like main sync
-                match Config::get_metadata().await {
+                match config.get_metadata().await {
                     Ok(pm) => {
                         let _keys: Vec<String> = pm.metadata.keys().cloned().collect();
                         METADATA.store(Arc::new(pm.clone()));
-                        let flatten = Config::get_transform_flatten_events();
+                        let flatten = config.get_transform_flatten_events();
                         if pm.metadata.contains_key(&namespace) {
                             match Ingest::prepare_arrow_schema_with_metadata_for_query(
                                 &namespace,
@@ -1252,24 +1245,25 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                     }
                     Err(_) => {
                         // no metadata; proceed
-                        METADATA.store(Arc::new(PipelineMetadata::new()));
+                        METADATA.store(Arc::new(PipelineMetadata::new(&config)));
                         println!("No pipeline metadata found; proceeding without schema");
                     }
                 }
 
-                let _ = crate::sqlrt::tables::register_namespace_view(&ctx, &pipeline, &namespace)
-                    .await
-                    .map_err(|e| {
-                        println!(
-                            "Failed to register namespace view for {}.{}: {}",
-                            pipeline, namespace, e
-                        );
-                        e
-                    });
+                let _ = crate::sqlrt::tables::register_namespace_view(
+                    &ctx, &config, &pipeline, &namespace,
+                )
+                .await
+                .map_err(|e| {
+                    println!(
+                        "Failed to register namespace view for {}.{}: {}",
+                        pipeline, namespace, e
+                    );
+                    e
+                });
             }
             // Restore original pipeline context
-            PIPELINE_NAME.write().clear();
-            PIPELINE_NAME.write().push_str(&original_pipeline);
+            config = config.bind_pipeline(&original_pipeline);
 
             // Execute the query
             // Build whitelist of timestamp paths from ARROW_SCHEMA for all referenced tables
@@ -1453,7 +1447,9 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
             let (tx_req, rx_req) = mpsc::channel::<String>();
             let (tx_res, rx_res) = mpsc::channel::<Vec<RecordBatch>>();
             let ctx_clone = ctx.clone();
+            let select_config = config.clone();
             tokio::spawn(async move {
+                let mut config = select_config;
                 let mut current = initial_sql.clone();
                 loop {
                     // Decide between STREAM (WAL-only) and SELECT (ctx_clone)
@@ -1504,11 +1500,10 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                         if let Some(pipeline_name) = table_opt {
                             let ctx =
                                 crate::sqlrt::session::build_query_context(SessionConfig::new());
-                            register_catalog(&ctx).await;
-                            PIPELINE_NAME.write().clear();
-                            PIPELINE_NAME.write().push_str(&pipeline_name);
-                            Config::init().await;
-                            let seg_dir = format!("{}/segment_buffer/segs", Config::get_data_dir());
+                            register_catalog(&config, &ctx).await;
+                            config = config.bind_pipeline(&pipeline_name);
+                            config.init().await;
+                            let seg_dir = format!("{}/segment_buffer/segs", config.get_data_dir());
                             let mut wal_batches: Vec<RecordBatch> = Vec::new();
                             if std::path::Path::new(&seg_dir).exists() {
                                 let dir_iter = match std::fs::read_dir(&seg_dir) {
@@ -1631,6 +1626,7 @@ pub async fn query_with_options(sql_str: &str, query_options: QueryExecutionOpti
                 "Enter:run q:quit".to_string()
             };
             QueryEditorView::new(&rewritten_sql).run(
+                &config,
                 QueryEditorConfig {
                     title: "SELECT",
                     footer: Some(&footer),
@@ -1669,8 +1665,8 @@ fn recurse_paths(
     }
 }
 
-async fn show_stats(pipeline: &str, namespace: &str) {
-    match crate::helpers::configuration::Config::read_namespace_stats_async(namespace).await {
+async fn show_stats(config: &Config, pipeline: &str, namespace: &str) {
+    match config.read_namespace_stats_async(namespace).await {
         Some(val) => {
             println!("{}", serde_json::to_string(&val).unwrap_or_default());
         }
@@ -1711,15 +1707,16 @@ async fn show_semantic(
 }
 
 async fn show_catalog(
+    config: &Config,
     ctx: &SessionContext,
     namespace: Option<&str>,
 ) -> Result<(), DataFusionError> {
     let ns = namespace.unwrap_or("").replace('"', "");
     // Fetch description from S3 catalog JSON if present
     if !ns.is_empty() {
-        let pipeline = Config::get_pipeline_name();
-        if let Some(entry) = crate::sqlrt::registry::find_entry(&pipeline, &ns).await {
-            if let Ok(Some(val)) = crate::adapters::storage::get_storage()
+        let pipeline = config.get_pipeline_name();
+        if let Some(entry) = crate::sqlrt::registry::find_entry(&config, &pipeline, &ns).await {
+            if let Ok(Some(val)) = crate::adapters::storage::get_storage(&config)
                 .get_json_opt(&entry.catalog_key)
                 .await
             {
@@ -1750,7 +1747,7 @@ async fn show_catalog(
     Ok(())
 }
 
-pub(crate) fn print_batches_plain(batch: &RecordBatch) {
+pub fn print_batches_plain(batch: &RecordBatch) {
     let schema = batch.schema();
     let headers: Vec<String> = schema
         .fields()
@@ -1794,8 +1791,8 @@ fn map_destination_type_to_skippr(type_str: &str) -> SkipprDataType {
     }
 }
 
-async fn show_pipeline(pipeline_name: &str) {
-    let pipeline_metadata = match Config::get_metadata().await {
+async fn show_pipeline(config: &Config, pipeline_name: &str) {
+    let pipeline_metadata = match config.get_metadata().await {
         Ok(m) => m,
         Err(_) => {
             let result = serde_json::json!({
@@ -1855,20 +1852,20 @@ async fn show_pipeline(pipeline_name: &str) {
         }));
     }
 
-    let metadata_location = if Config::get_storage_mode() == "local" {
+    let metadata_location = if config.get_storage_mode() == "local" {
         format!(
             "{}/{}/{}/{}/metadata/metadata.json",
-            Config::get_data_dir(),
-            Config::get_tenant(),
-            Config::get_workspace_name(),
+            config.get_data_dir(),
+            config.get_tenant(),
+            config.get_workspace_name(),
             pipeline_name,
         )
     } else {
         format!(
             "s3://{}/{}/{}/{}/metadata/metadata.json",
-            Config::get_skippr_s3_bucket(),
-            Config::get_tenant(),
-            Config::get_workspace_name(),
+            config.get_skippr_s3_bucket(),
+            config.get_tenant(),
+            config.get_workspace_name(),
             pipeline_name,
         )
     };

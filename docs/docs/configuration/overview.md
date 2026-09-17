@@ -14,9 +14,9 @@ Start with:
 
 | Variable | Default | Section | Description |
 |---|---|---|---|
-| **Pipeline identity** | | | |
-| `PIPELINE_NAME` | `default` | [Pipeline](pipeline.md) | Pipeline name |
-| `WORKSPACE_NAME` | `default` | [Pipeline](pipeline.md) | Workspace/domain name |
+| **CLI mapping** | | | |
+| `PIPELINE_NAME` | | [Pipeline](pipeline.md) | Used when `--pipeline` is omitted |
+| `WORKSPACE_NAME` | `default` | [Pipeline](pipeline.md) | Workspace/domain name when `skippr.workspace` is unset |
 | `TENANT` | `default` | [Pipeline](pipeline.md) | Tenant identifier |
 | **Input source** | | | |
 | `DATA_SOURCE_PLUGIN_NAME` | *(required)* | [Input](input.md) | Source plugin: `s3`, `file` |

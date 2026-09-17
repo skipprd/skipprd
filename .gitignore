@@ -44,6 +44,8 @@ logs
 .skippr/local-runtime-plugins/
 __pycache__/
 *.pyc
+.pytest_cache/
+.venv-python/
 .cargo/*
 !.cargo/config.toml
 plugins/data_source/site_quality/worker/node_modules

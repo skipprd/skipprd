@@ -1,5 +1,6 @@
 use crate::discover::PipelineMetadata;
 use crate::discover::{AnalyseSchema, Metadata, SkipprDataType, LAST_SUCCESSFUL_EVOLUTION};
+use crate::helpers::configuration::Config;
 use crate::ingest::fast_ingest::fast_set_value;
 use crate::ingest::ingest::{discover_ingest, ResolvedFieldValue};
 use arrow::error::ArrowError;
@@ -56,6 +57,7 @@ impl EvolutionType {
 
 impl Evolution {
     pub fn evolve_array_field(
+        config: &Config,
         field: &String,
         value: &Value,
         parent_field: Option<&str>,
@@ -68,6 +70,7 @@ impl Evolution {
         let mut update_schmea_mock = "no".to_string();
 
         discover_ingest(
+            config,
             temp_feild_name,
             value,
             parent_field,
@@ -106,6 +109,7 @@ impl Evolution {
     }
 
     pub fn evolve_field(
+        config: &Config,
         field: &String,
         value: &Value,
         parent_field: Option<&str>,
@@ -134,6 +138,7 @@ impl Evolution {
                         *updated_schema = "yes".to_string();
 
                         Evolution::evolve_array_field(
+                            config,
                             field,
                             value,
                             parent_field,
@@ -150,6 +155,7 @@ impl Evolution {
                         *updated_schema = "yes".to_string();
 
                         Evolution::evolve_array_field(
+                            config,
                             field,
                             value,
                             parent_field,
@@ -175,6 +181,7 @@ impl Evolution {
                     let mut update_schmea_mock = "no".to_string();
 
                     discover_ingest(
+                        config,
                         new_feild_name,
                         value,
                         parent_field,
@@ -198,7 +205,7 @@ impl Evolution {
                 }
             };
 
-            match Evolution::apply_evolution_factory(field, value, metadata, flatten) {
+            match Evolution::apply_evolution_factory(config, field, value, metadata, flatten) {
                 Ok(v) => Ok(v),
                 Err(e) => {
                     // println!("#### Error applying evolution factory: {}", e);
@@ -214,6 +221,7 @@ impl Evolution {
     }
 
     pub fn apply_evolution_factory(
+        config: &Config,
         field: &str,
         value: &Value,
         metadata: &mut HashMap<String, Metadata>,
@@ -250,6 +258,7 @@ impl Evolution {
                 if let (Some(new_field), Some(type_string)) = (new_field_name, type_string_opt) {
                     // Try fast mapping first; only discover if needed
                     match fast_set_value(
+                        config,
                         type_string.as_str(),
                         &new_field,
                         value,
@@ -271,8 +280,17 @@ impl Evolution {
                         }
                         Err(_) => {
                             let mut updated = "no".to_string();
-                            discover_ingest(&new_field, value, None, None, metadata, &mut updated);
+                            discover_ingest(
+                                config,
+                                &new_field,
+                                value,
+                                None,
+                                None,
+                                metadata,
+                                &mut updated,
+                            );
                             if let Ok(v2) = fast_set_value(
+                                config,
                                 type_string.as_str(),
                                 &new_field,
                                 value,
@@ -314,6 +332,7 @@ impl Evolution {
 
                 // Rank evolutions by how specific/appropriate they are for the given value
                 fn score_evolution(
+                    config: &Config,
                     value: &Value,
                     evolution: &Evolution,
                     metadata: &HashMap<String, Metadata>,
@@ -411,13 +430,14 @@ impl Evolution {
 
                 let mut ranked: Vec<(i32, (String, Evolution))> = evolutions
                     .into_iter()
-                    .map(|(k, e)| (score_evolution(value, &e, metadata), (k, e)))
+                    .map(|(k, e)| (score_evolution(config, value, &e, metadata), (k, e)))
                     .collect();
                 ranked.sort_by(|a, b| b.0.cmp(&a.0));
 
                 for (_score, (evolution_key, evolution)) in ranked.into_iter() {
                     // Try fast mapping first; if it fails, discover then retry
                     match fast_set_value(
+                        config,
                         evolution.type_string.as_str(),
                         &evolution.new_field,
                         value,
@@ -446,6 +466,7 @@ impl Evolution {
                         Err(first_err) => {
                             let mut updated = "no".to_string();
                             discover_ingest(
+                                config,
                                 &evolution.new_field,
                                 value,
                                 None,
@@ -454,6 +475,7 @@ impl Evolution {
                                 &mut updated,
                             );
                             match fast_set_value(
+                                config,
                                 evolution.type_string.as_str(),
                                 &evolution.new_field,
                                 value,
@@ -686,8 +708,14 @@ mod tests_apply_evolution_factory_recordish {
         });
 
         // Apply evolution factory on parent field; should discover child and map value
-        let res = Evolution::apply_evolution_factory("water_flowmeter", &obj, &mut root, flatten)
-            .expect("evolution should succeed");
+        let res = Evolution::apply_evolution_factory(
+            &Config::new(),
+            "water_flowmeter",
+            &obj,
+            &mut root,
+            flatten,
+        )
+        .expect("evolution should succeed");
 
         // Evolved field should be the record sibling
         assert_eq!(res.field, "water_flowmeter_record");
@@ -726,9 +754,14 @@ mod tests_apply_evolution_factory_recordish {
         // Incoming numeric value
         let v = json!(12.34);
 
-        let out =
-            Evolution::apply_evolution_factory("temperature_degc", &v, &mut parent_fields, flatten)
-                .expect("child evolution should succeed");
+        let out = Evolution::apply_evolution_factory(
+            &Config::new(),
+            "temperature_degc",
+            &v,
+            &mut parent_fields,
+            flatten,
+        )
+        .expect("child evolution should succeed");
 
         // Should return the evolved sibling and numeric value
         assert_eq!(out.field, "temperature_degc_double");
@@ -791,7 +824,7 @@ mod tests_evolution_chained {
 
         // Provide a float -> should resolve to v_double
         let val = json!(12.34);
-        let out = Evolution::apply_evolution_factory("v", &val, &mut root, flatten)
+        let out = Evolution::apply_evolution_factory(&Config::new(), "v", &val, &mut root, flatten)
             .expect("evolution succeeds");
         assert_eq!(out.field, "v_double");
         assert!(out.value.is_number());
@@ -825,8 +858,9 @@ mod tests_evolution_chained {
         root.insert("ts".to_string(), ts);
 
         let val = json!(1700000000123i64); // ms
-        let out = Evolution::apply_evolution_factory("ts", &val, &mut root, flatten)
-            .expect("evolution succeeds");
+        let out =
+            Evolution::apply_evolution_factory(&Config::new(), "ts", &val, &mut root, flatten)
+                .expect("evolution succeeds");
         assert_eq!(out.field, "ts_timestamp_milli");
         assert!(out.value.is_number());
     }
@@ -869,13 +903,15 @@ mod tests_evolution_chained {
 
         // First apply parent evolution
         let obj = json!({ "a": 1.23 });
-        let r = Evolution::apply_evolution_factory("sensor", &obj, &mut root, flatten)
-            .expect("parent evolve ok");
+        let r =
+            Evolution::apply_evolution_factory(&Config::new(), "sensor", &obj, &mut root, flatten)
+                .expect("parent evolve ok");
         assert_eq!(r.field, "sensor_record");
 
         // Now evolve child under the record
         if let Some(rec_md) = root.get_mut("sensor_record") {
             let out = Evolution::apply_evolution_factory(
+                &Config::new(),
                 "a",
                 &json!(1.23),
                 rec_md.fields.as_mut(),
@@ -924,8 +960,9 @@ mod tests_evolution_chained {
         root.insert("arr_array_double".to_string(), arr_double);
 
         let val = json!([1.1, 2.2, 3.3]);
-        let out = Evolution::apply_evolution_factory("arr", &val, &mut root, flatten)
-            .expect("array evolve ok");
+        let out =
+            Evolution::apply_evolution_factory(&Config::new(), "arr", &val, &mut root, flatten)
+                .expect("array evolve ok");
         assert_eq!(out.field, "arr_array_double");
         assert!(out.value.is_array());
     }
@@ -965,8 +1002,9 @@ mod tests_evolution_chained {
         root.insert("attrs_map_double".to_string(), map_double);
 
         let val = json!({"k1": 1.2, "k2": 3.4});
-        let out = Evolution::apply_evolution_factory("attrs", &val, &mut root, flatten)
-            .expect("map evolve ok");
+        let out =
+            Evolution::apply_evolution_factory(&Config::new(), "attrs", &val, &mut root, flatten)
+                .expect("map evolve ok");
         assert_eq!(out.field, "attrs_map_double");
         assert!(out.value.is_object());
     }
@@ -1000,8 +1038,9 @@ mod tests_evolution_more_types {
         root.insert("flag".to_string(), f);
 
         let val = json!("true");
-        let out = Evolution::apply_evolution_factory("flag", &val, &mut root, flatten)
-            .expect("bool evolve ok");
+        let out =
+            Evolution::apply_evolution_factory(&Config::new(), "flag", &val, &mut root, flatten)
+                .expect("bool evolve ok");
         assert_eq!(out.field, "flag_bool");
         assert!(out.value.is_boolean());
     }
@@ -1025,7 +1064,7 @@ mod tests_evolution_more_types {
         root.insert("d".to_string(), d);
 
         let val = json!("2024-01-02");
-        let out = Evolution::apply_evolution_factory("d", &val, &mut root, flatten)
+        let out = Evolution::apply_evolution_factory(&Config::new(), "d", &val, &mut root, flatten)
             .expect("date evolve ok");
         assert_eq!(out.field, "d_date");
     }
@@ -1056,8 +1095,9 @@ mod tests_evolution_more_types {
         root.insert("ts".to_string(), ts);
 
         let val = json!(1_700_000_000i64); // seconds-ish
-        let out = Evolution::apply_evolution_factory("ts", &val, &mut root, flatten)
-            .expect("ts evolve ok");
+        let out =
+            Evolution::apply_evolution_factory(&Config::new(), "ts", &val, &mut root, flatten)
+                .expect("ts evolve ok");
         assert_eq!(out.field, "ts_timestamp");
     }
 
@@ -1087,8 +1127,9 @@ mod tests_evolution_more_types {
         root.insert("arr_array_long".to_string(), target);
 
         let val = json!(["1", "2", "3"]);
-        let out = Evolution::apply_evolution_factory("arr", &val, &mut root, flatten)
-            .expect("array long evolve ok");
+        let out =
+            Evolution::apply_evolution_factory(&Config::new(), "arr", &val, &mut root, flatten)
+                .expect("array long evolve ok");
         assert_eq!(out.field, "arr_array_long");
         assert!(out.value.is_array());
     }
@@ -1118,6 +1159,7 @@ mod tests_evolution_more_types {
         // value for child
         if let Some(rec_md) = root.get_mut("rec") {
             let out = Evolution::apply_evolution_factory(
+                &Config::new(),
                 "n",
                 &json!("1234"),
                 rec_md.fields.as_mut(),
@@ -1157,6 +1199,7 @@ mod tests_evolve_field {
         let mut updated_schema = "no".to_string();
 
         let result = Evolution::evolve_field(
+            &Config::new(),
             &field,
             &value,
             None,
@@ -1202,6 +1245,7 @@ mod tests_evolve_field {
         let mut updated_schema = "no".to_string();
 
         let result = Evolution::evolve_field(
+            &Config::new(),
             &field,
             &value,
             None,
@@ -1249,6 +1293,7 @@ mod tests_evolve_field {
         let mut updated_schema = "no".to_string();
 
         let result = Evolution::evolve_field(
+            &Config::new(),
             &field,
             &value,
             None,
@@ -1294,6 +1339,7 @@ mod tests_evolve_field {
         let mut updated_schema = "no".to_string();
 
         let result = Evolution::evolve_field(
+            &Config::new(),
             &field,
             &value,
             None,
@@ -1337,6 +1383,7 @@ mod tests_evolve_field {
         let mut updated_schema = "no".to_string();
 
         let result = Evolution::evolve_field(
+            &Config::new(),
             &field,
             &value,
             None,
@@ -1390,6 +1437,7 @@ mod tests_evolve_field {
         let mut updated_schema = "no".to_string();
 
         let result = Evolution::evolve_field(
+            &Config::new(),
             &field,
             &value,
             None,
@@ -1445,6 +1493,7 @@ mod tests_evolve_field {
         let mut updated_schema = "no".to_string();
 
         let result = Evolution::evolve_field(
+            &Config::new(),
             &field,
             &value,
             None,
@@ -1534,7 +1583,7 @@ mod tests_evolution_type_matrix {
         let target_str = target.as_str();
         let mut root = setup_field("f", source.clone(), target);
         let expected_field = format!("f_{}", target_str);
-        let res = Evolution::apply_evolution_factory("f", &value, &mut root, false);
+        let res = Evolution::apply_evolution_factory(&Config::new(), "f", &value, &mut root, false);
         assert!(
             res.is_ok(),
             "evolution {:?} -> {} should succeed for {:?}, got {:?}",
@@ -1548,7 +1597,7 @@ mod tests_evolution_type_matrix {
 
     fn assert_no_panic(source: SkipprDataType, target: SkipprDataType, value: serde_json::Value) {
         let mut root = setup_field("f", source, target);
-        let _ = Evolution::apply_evolution_factory("f", &value, &mut root, false);
+        let _ = Evolution::apply_evolution_factory(&Config::new(), "f", &value, &mut root, false);
     }
 
     // ── string → X ──────────────────────────────────────────
@@ -1607,7 +1656,13 @@ mod tests_evolution_type_matrix {
         map_md.determined_type = SkipprDataType::Map;
         map_md.determined_type_values = Some(SkipprDataType::String);
         root.insert("f_map".to_string(), map_md);
-        let res = Evolution::apply_evolution_factory("f", &json!({"k": "v"}), &mut root, false);
+        let res = Evolution::apply_evolution_factory(
+            &Config::new(),
+            "f",
+            &json!({"k": "v"}),
+            &mut root,
+            false,
+        );
         assert!(res.is_ok());
     }
 
@@ -1872,7 +1927,8 @@ mod tests_evolution_type_matrix {
         arr_md.determined_type = SkipprDataType::Array;
         arr_md.determined_type_values = Some(SkipprDataType::String);
         root.insert("f_array".to_string(), arr_md);
-        let res = Evolution::apply_evolution_factory("f", &json!([]), &mut root, false);
+        let res =
+            Evolution::apply_evolution_factory(&Config::new(), "f", &json!([]), &mut root, false);
         assert!(res.is_ok(), "empty array evolution should succeed");
     }
 
@@ -1884,7 +1940,7 @@ mod tests_evolution_type_matrix {
         arr_md.determined_type_values = Some(SkipprDataType::String);
         root.insert("f_array".to_string(), arr_md);
         let val = json!([1, "two", true, null, 3.15]);
-        let res = Evolution::apply_evolution_factory("f", &val, &mut root, false);
+        let res = Evolution::apply_evolution_factory(&Config::new(), "f", &val, &mut root, false);
         assert!(res.is_ok(), "mixed array should not panic");
     }
 
@@ -1903,14 +1959,26 @@ mod tests_evolution_type_matrix {
             },
         );
         root.insert("data".to_string(), f);
-        let res = Evolution::apply_evolution_factory("data", &json!({"x": 1}), &mut root, true);
+        let res = Evolution::apply_evolution_factory(
+            &Config::new(),
+            "data",
+            &json!({"x": 1}),
+            &mut root,
+            true,
+        );
         assert!(res.is_ok(), "flatten=true should work");
     }
 
     #[test]
     fn unicode_field_name_evolves() {
         let mut root = setup_field("café", SkipprDataType::String, SkipprDataType::Long);
-        let res = Evolution::apply_evolution_factory("café", &json!(42), &mut root, false);
+        let res = Evolution::apply_evolution_factory(
+            &Config::new(),
+            "café",
+            &json!(42),
+            &mut root,
+            false,
+        );
         assert!(res.is_ok(), "unicode field name should evolve");
         assert_eq!(res.unwrap().field, "café_long");
     }
@@ -1955,7 +2023,7 @@ mod tests_evolution_depth_matrix {
         value: &serde_json::Value,
     ) -> Result<ResolvedFieldValue, Box<dyn std::error::Error>> {
         if path.len() == 1 {
-            return Evolution::apply_evolution_factory(path[0], value, root, false);
+            return Evolution::apply_evolution_factory(&Config::new(), path[0], value, root, false);
         }
         let first = path[0];
         let rec_name = format!("{}_record", first);
@@ -1982,7 +2050,13 @@ mod tests_evolution_depth_matrix {
             },
         );
         root.insert("leaf".to_string(), f);
-        let r = Evolution::apply_evolution_factory("leaf", &json!(42i64), &mut root, false);
+        let r = Evolution::apply_evolution_factory(
+            &Config::new(),
+            "leaf",
+            &json!(42i64),
+            &mut root,
+            false,
+        );
         assert!(r.is_ok());
         assert_eq!(r.unwrap().field, "leaf_long");
     }
@@ -2006,9 +2080,14 @@ mod tests_evolution_depth_matrix {
             make_record_with_child_evolution("leaf", SkipprDataType::String, SkipprDataType::Long),
         );
 
-        let r0 =
-            Evolution::apply_evolution_factory("outer", &json!({"leaf": 42}), &mut root, false)
-                .unwrap();
+        let r0 = Evolution::apply_evolution_factory(
+            &Config::new(),
+            "outer",
+            &json!({"leaf": 42}),
+            &mut root,
+            false,
+        )
+        .unwrap();
         assert_eq!(r0.field, "outer_record");
 
         let r1 = evolve_at_depth(&mut root, &["outer_record", "leaf"], &json!(42i64)).unwrap();
@@ -2050,9 +2129,14 @@ mod tests_evolution_depth_matrix {
         );
         root.insert("a_record".to_string(), a_rec);
 
-        let r0 =
-            Evolution::apply_evolution_factory("a", &json!({"b": {"c": 1.5}}), &mut root, false)
-                .unwrap();
+        let r0 = Evolution::apply_evolution_factory(
+            &Config::new(),
+            "a",
+            &json!({"b": {"c": 1.5}}),
+            &mut root,
+            false,
+        )
+        .unwrap();
         assert_eq!(r0.field, "a_record");
 
         let r1 = evolve_at_depth(&mut root, &["a_record", "b"], &json!({"c": 1.5})).unwrap();
@@ -2113,7 +2197,8 @@ mod tests_evolution_depth_matrix {
         root.insert("d0_record".into(), d0_rec);
 
         let val = json!({"d1": {"d2": {"leaf": 99}}});
-        let r0 = Evolution::apply_evolution_factory("d0", &val, &mut root, false).unwrap();
+        let r0 = Evolution::apply_evolution_factory(&Config::new(), "d0", &val, &mut root, false)
+            .unwrap();
         assert_eq!(r0.field, "d0_record");
 
         let r3 = evolve_at_depth(
@@ -2209,7 +2294,8 @@ mod tests_evolution_depth_matrix {
         root.insert("l0_record".into(), l0_rec);
 
         let val = json!({"l1": {"l2": {"l3": {"leaf": 3.15}}}});
-        let r0 = Evolution::apply_evolution_factory("l0", &val, &mut root, false).unwrap();
+        let r0 = Evolution::apply_evolution_factory(&Config::new(), "l0", &val, &mut root, false)
+            .unwrap();
         assert_eq!(r0.field, "l0_record");
 
         let r_leaf = evolve_at_depth(
@@ -2240,8 +2326,13 @@ mod tests_evolution_depth_matrix {
             make_record_with_child_evolution("inner", SkipprDataType::String, SkipprDataType::Long),
         );
 
-        let res =
-            Evolution::apply_evolution_factory("outer", &json!({"inner": 42}), &mut root, true);
+        let res = Evolution::apply_evolution_factory(
+            &Config::new(),
+            "outer",
+            &json!({"inner": 42}),
+            &mut root,
+            true,
+        );
         assert!(res.is_ok(), "flatten=true at depth 2 should work");
     }
 
@@ -2275,6 +2366,7 @@ mod tests_evolution_depth_matrix {
             );
 
             let r0 = Evolution::apply_evolution_factory(
+                &Config::new(),
                 "outer",
                 &json!({"leaf": value.clone()}),
                 &mut root,
@@ -2357,7 +2449,7 @@ mod tests_evolution_proptest {
                 },
             );
             root.insert("f".to_string(), f);
-            let _ = Evolution::apply_evolution_factory("f", &value, &mut root, false);
+            let _ = Evolution::apply_evolution_factory(&Config::new(), "f", &value, &mut root, false);
         }
 
         #[test]
@@ -2372,7 +2464,7 @@ mod tests_evolution_proptest {
 
             let mut updated = "no".to_string();
             let _ = Evolution::evolve_field(
-                &"test_field".to_string(),
+                &Config::new(), &"test_field".to_string(),
                 &value,
                 None,
                 None,
@@ -2394,7 +2486,7 @@ mod tests_evolution_proptest {
 
             let mut updated = "no".to_string();
             let _ = Evolution::evolve_field(
-                &"test_field".to_string(),
+                &Config::new(), &"test_field".to_string(),
                 &value,
                 None,
                 None,
@@ -2419,7 +2511,7 @@ mod tests_evolution_proptest {
 
             let mut updated = "no".to_string();
             let _ = Evolution::evolve_field(
-                &"n".to_string(),
+                &Config::new(), &"n".to_string(),
                 &nested,
                 None,
                 None,
@@ -2464,7 +2556,13 @@ mod tests_evolution_edge_cases {
         existing.out_field_name = "foo_long".to_string();
         root.insert("foo_long".to_string(), existing);
 
-        let res = Evolution::apply_evolution_factory("foo", &json!(42i64), &mut root, false);
+        let res = Evolution::apply_evolution_factory(
+            &Config::new(),
+            "foo",
+            &json!(42i64),
+            &mut root,
+            false,
+        );
         assert!(res.is_ok(), "should handle collision gracefully");
         assert_eq!(res.unwrap().field, "foo_long");
     }
@@ -2479,6 +2577,7 @@ mod tests_evolution_edge_cases {
 
         let mut updated = "no".to_string();
         let _ = Evolution::evolve_field(
+            &Config::new(),
             &"test_field".to_string(),
             &json!(""),
             None,
@@ -2500,6 +2599,7 @@ mod tests_evolution_edge_cases {
 
         let mut updated = "no".to_string();
         let _ = Evolution::evolve_field(
+            &Config::new(),
             &"test_field".to_string(),
             &json!(null),
             None,
@@ -2521,6 +2621,7 @@ mod tests_evolution_edge_cases {
         let val = json!(i64::MAX);
         let mut updated = "no".to_string();
         let _ = Evolution::evolve_field(
+            &Config::new(),
             &"big".to_string(),
             &val,
             None,
@@ -2545,7 +2646,8 @@ mod tests_evolution_edge_cases {
             },
         );
         root.insert("f".into(), f);
-        let _ = Evolution::apply_evolution_factory("f", &json!(0i64), &mut root, false);
+        let _ =
+            Evolution::apply_evolution_factory(&Config::new(), "f", &json!(0i64), &mut root, false);
     }
 
     #[test]
@@ -2562,7 +2664,13 @@ mod tests_evolution_edge_cases {
             },
         );
         root.insert("f".into(), f);
-        let _ = Evolution::apply_evolution_factory("f", &json!(-1000i64), &mut root, false);
+        let _ = Evolution::apply_evolution_factory(
+            &Config::new(),
+            "f",
+            &json!(-1000i64),
+            &mut root,
+            false,
+        );
     }
 
     #[test]
@@ -2576,6 +2684,7 @@ mod tests_evolution_edge_cases {
         let val = json!({"a": {"b": {"c": {}}}});
         let mut updated = "no".to_string();
         let _ = Evolution::evolve_field(
+            &Config::new(),
             &"deep".to_string(),
             &val,
             None,
@@ -2589,7 +2698,13 @@ mod tests_evolution_edge_cases {
     #[test]
     fn no_metadata_for_field_returns_error() {
         let mut root: HashMap<String, Metadata> = HashMap::new();
-        let res = Evolution::apply_evolution_factory("nonexistent", &json!(42), &mut root, false);
+        let res = Evolution::apply_evolution_factory(
+            &Config::new(),
+            "nonexistent",
+            &json!(42),
+            &mut root,
+            false,
+        );
         assert!(res.is_err(), "should error when field has no metadata");
     }
 
@@ -2599,7 +2714,8 @@ mod tests_evolution_edge_cases {
         let mut f = md();
         f.determined_type = SkipprDataType::String;
         root.insert("f".to_string(), f);
-        let res = Evolution::apply_evolution_factory("f", &json!(42), &mut root, false);
+        let res =
+            Evolution::apply_evolution_factory(&Config::new(), "f", &json!(42), &mut root, false);
         assert!(res.is_err(), "should error when no evolutions registered");
     }
 }

@@ -3,7 +3,6 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde_derive::Deserialize;
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::source_compat::SourceSyncContext;
@@ -24,13 +23,6 @@ pub struct DataSourcePcapPlugin {
 }
 
 impl DataSourcePcapPlugin {
-    pub async fn new() -> Self {
-        let _config: DataSourcePcapPluginConfig = match Config::get_pipeline_input_plugin_config() {
-            Ok(c) => c.try_into().unwrap_or_else(|e| panic!("{}", e)),
-            Err(_) => DataSourcePcapPluginConfig::default(),
-        };
-        Self { _config }
-    }
 
     pub fn with_runtime_config(config: DataSourcePcapPluginConfig) -> Self {
         Self { _config: config }

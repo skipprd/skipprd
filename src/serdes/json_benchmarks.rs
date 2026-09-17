@@ -178,37 +178,37 @@ mod json_benchmarks {
 
         // Benchmark with standard JSON (100000 iterations)
         benchmark("Original - Standard JSON", 100000, || {
-            SerdeJson::deserialize(STANDARD_JSON)
+            SerdeJson::deserialize(&Config::new(), STANDARD_JSON)
         });
 
         // Benchmark with complex nested JSON (10000 iterations)
         benchmark("Original - Complex Nested JSON", 10000, || {
-            SerdeJson::deserialize(COMPLEX_NESTED_JSON)
+            SerdeJson::deserialize(&Config::new(), COMPLEX_NESTED_JSON)
         });
 
         // Benchmark with array of records (50000 iterations)
         benchmark("Original - Array of Records", 50000, || {
-            SerdeJson::deserialize(ARRAY_OF_RECORDS_JSON)
+            SerdeJson::deserialize(&Config::new(), ARRAY_OF_RECORDS_JSON)
         });
 
         // Benchmark with single quote JSON (50000 iterations)
         benchmark("Original - Single Quote JSON", 50000, || {
-            SerdeJson::deserialize(SINGLE_QUOTE_JSON)
+            SerdeJson::deserialize(&Config::new(), SINGLE_QUOTE_JSON)
         });
 
         // Benchmark with Unicode JSON (50000 iterations)
         benchmark("Original - Unicode JSON", 50000, || {
-            SerdeJson::deserialize(UNICODE_JSON)
+            SerdeJson::deserialize(&Config::new(), UNICODE_JSON)
         });
 
         // Benchmark with concatenated JSON (20000 iterations)
         benchmark("Original - Concatenated JSON", 20000, || {
-            SerdeJson::deserialize(CONCATENATED_JSON)
+            SerdeJson::deserialize(&Config::new(), CONCATENATED_JSON)
         });
 
         // Benchmark with large nested JSON (5000 iterations)
         benchmark("Original - Large Nested JSON", 5000, || {
-            SerdeJson::deserialize(LARGE_NESTED_JSON)
+            SerdeJson::deserialize(&Config::new(), LARGE_NESTED_JSON)
         });
 
         // Clean up environment variables
@@ -220,13 +220,14 @@ mod json_benchmarks {
     #[test]
     #[ignore] // Only run when explicitly requested
     fn benchmark_optimized_implementation() {
+        let config = Config::new();
         // Set up environment for special processing
         std::env::set_var("SKIPPR_ENABLE_SINGLE_QUOTE_PARSING", "true");
         std::env::set_var("SKIPPR_ENABLE_UNICODE_PARSING", "true");
 
         // Create parser instances
-        let enable_sq = Config::get_enable_single_quote_parsing();
-        let enable_unicode = Config::get_enable_unicode_parsing();
+        let enable_sq = config.get_enable_single_quote_parsing();
+        let enable_unicode = config.get_enable_unicode_parsing();
         let parser = OptimizedJsonParser::new(enable_sq, enable_unicode);
 
         // Benchmark with standard JSON (100000 iterations)
@@ -273,20 +274,23 @@ mod json_benchmarks {
     #[test]
     #[ignore] // Only run when explicitly requested
     fn benchmark_comparison() {
+        let config = Config::new();
         // Set up environment for special processing
         std::env::set_var("SKIPPR_ENABLE_SINGLE_QUOTE_PARSING", "true");
         std::env::set_var("SKIPPR_ENABLE_UNICODE_PARSING", "true");
 
         // Create parser instance
-        let enable_sq = Config::get_enable_single_quote_parsing();
-        let enable_unicode = Config::get_enable_unicode_parsing();
+        let enable_sq = config.get_enable_single_quote_parsing();
+        let enable_unicode = config.get_enable_unicode_parsing();
         let parser = OptimizedJsonParser::new(enable_sq, enable_unicode);
 
         println!("\n==== BENCHMARK COMPARISON ====\n");
 
         // Standard JSON comparison
         println!("--- Standard JSON ---");
-        let orig_time = benchmark("Original", 10000, || SerdeJson::deserialize(STANDARD_JSON));
+        let orig_time = benchmark("Original", 10000, || {
+            SerdeJson::deserialize(&Config::new(), STANDARD_JSON)
+        });
 
         let opt_time = benchmark("Optimized", 10000, || parser.parse(STANDARD_JSON));
 
@@ -297,7 +301,7 @@ mod json_benchmarks {
         // Complex nested JSON comparison
         println!("--- Complex Nested JSON ---");
         let orig_time = benchmark("Original", 5000, || {
-            SerdeJson::deserialize(COMPLEX_NESTED_JSON)
+            SerdeJson::deserialize(&Config::new(), COMPLEX_NESTED_JSON)
         });
 
         let opt_time = benchmark("Optimized", 5000, || parser.parse(COMPLEX_NESTED_JSON));
@@ -309,7 +313,7 @@ mod json_benchmarks {
         // Single quote JSON comparison
         println!("--- Single Quote JSON ---");
         let orig_time = benchmark("Original", 10000, || {
-            SerdeJson::deserialize(SINGLE_QUOTE_JSON)
+            SerdeJson::deserialize(&Config::new(), SINGLE_QUOTE_JSON)
         });
 
         let opt_time = benchmark("Optimized", 10000, || parser.parse(SINGLE_QUOTE_JSON));
@@ -320,7 +324,9 @@ mod json_benchmarks {
 
         // Unicode JSON comparison
         println!("--- Unicode JSON ---");
-        let orig_time = benchmark("Original", 10000, || SerdeJson::deserialize(UNICODE_JSON));
+        let orig_time = benchmark("Original", 10000, || {
+            SerdeJson::deserialize(&Config::new(), UNICODE_JSON)
+        });
 
         let opt_time = benchmark("Optimized", 10000, || parser.parse(UNICODE_JSON));
 
@@ -331,7 +337,7 @@ mod json_benchmarks {
         // Concatenated JSON comparison
         println!("--- Concatenated JSON ---");
         let orig_time = benchmark("Original", 5000, || {
-            SerdeJson::deserialize(CONCATENATED_JSON)
+            SerdeJson::deserialize(&Config::new(), CONCATENATED_JSON)
         });
 
         let opt_time = benchmark("Optimized", 5000, || parser.parse(CONCATENATED_JSON));
@@ -343,7 +349,7 @@ mod json_benchmarks {
         // Large nested JSON comparison
         println!("--- Large Nested JSON ---");
         let orig_time = benchmark("Original", 1000, || {
-            SerdeJson::deserialize(LARGE_NESTED_JSON)
+            SerdeJson::deserialize(&Config::new(), LARGE_NESTED_JSON)
         });
 
         let opt_time = benchmark("Optimized", 1000, || parser.parse(LARGE_NESTED_JSON));

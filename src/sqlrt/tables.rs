@@ -200,13 +200,15 @@ async fn build_s3_df(
 }
 
 async fn build_wal_df(
+    config: &Config,
     ctx: &SessionContext,
     pipeline: &str,
     namespace: &str,
 ) -> Result<Option<datafusion::prelude::DataFrame>, DataFusionError> {
-    let reader = crate::sqlrt::wal_reader::WalReaderFactory::for_pipeline_async(pipeline).await;
+    let reader =
+        crate::sqlrt::wal_reader::WalReaderFactory::for_pipeline_async(config, pipeline).await;
     let wal_batches: Vec<RecordBatch> = reader
-        .load_committed_batches(namespace, 64)
+        .load_committed_batches(namespace, usize::MAX)
         .unwrap_or_default();
     if wal_batches.is_empty() {
         return Ok(None);
@@ -229,6 +231,7 @@ async fn build_wal_df(
 
 pub async fn register_namespace_view(
     ctx: &SessionContext,
+    config: &Config,
     pipeline: &str,
     namespace: &str,
 ) -> Result<(), DataFusionError> {
@@ -249,22 +252,23 @@ pub async fn register_namespace_view(
         }
     }
     // Initialize config (tenant/workspace/bucket), but do NOT touch global pipeline state
-    Config::init().await;
-    match crate::cluster::PipelineConfigView::for_name(&Config::get(), pipeline) {
+    config.init().await;
+    match crate::cluster::PipelineConfigView::for_name(config, pipeline) {
         Ok(view) if view.iceberg => {
             return register_iceberg_union_view(
+                config,
                 ctx,
                 pipeline,
                 namespace,
                 &view,
-                &namespace_union_opts(),
+                &namespace_union_opts(config),
             )
             .await;
         }
         Ok(_) => {}
         Err(err)
             if matches!(
-                Config::get_wal_storage(),
+                config.get_wal_storage(),
                 crate::helpers::wal_storage::WalStorage::Clustered
             ) =>
         {
@@ -283,8 +287,8 @@ pub async fn register_namespace_view(
     let mut s3_paths: Vec<String> = Vec::new();
     // Build manifest key from explicit pipeline/namespace (no global pipeline)
     let man_opt = {
-        let key = crate::sqlrt::registry::manifest_key_for(pipeline, namespace);
-        let storage = crate::adapters::storage::get_storage();
+        let key = crate::sqlrt::registry::manifest_key_for(config, pipeline, namespace);
+        let storage = crate::adapters::storage::get_storage(config);
         match tokio::time::timeout(Duration::from_secs(12), storage.get_json_opt(&key)).await {
             Ok(Ok(Some(v))) => {
                 debug!("Reading manifest key='{}'", key);
@@ -335,7 +339,7 @@ pub async fn register_namespace_view(
     }
     if s3_paths.is_empty() {
         // First-sync fallback: derive standard datalake prefix and proceed
-        let bucket = Config::get_skippr_s3_bucket();
+        let bucket = config.get_skippr_s3_bucket();
         let fallback = format!("s3://{}/datalake/{}/", bucket, namespace);
         info!(
             "register_namespace_view: no manifest prefixes for '{}.{}'; falling back to {}",
@@ -382,7 +386,7 @@ pub async fn register_namespace_view(
     );
 
     // WAL DF
-    let df_wal_opt = build_wal_df(ctx, pipeline, namespace).await?;
+    let df_wal_opt = build_wal_df(config, ctx, pipeline, namespace).await?;
     let df_union = match df_wal_opt {
         None => df_s3.clone(),
         Some(df_wal) => {
@@ -461,13 +465,14 @@ pub async fn register_namespace_view(
 /// Register deadletters as a recursive Parquet listing with partition columns
 pub async fn register_deadletters(
     ctx: &SessionContext,
+    config: &Config,
     pipeline: &str,
 ) -> Result<(), DataFusionError> {
     // ensure config for bucket resolution
-    Config::init().await;
-    let bucket = Config::get_skippr_s3_bucket();
-    let tenant = Config::get_tenant();
-    let workspace = Config::get_workspace_name();
+    config.init().await;
+    let bucket = config.get_skippr_s3_bucket();
+    let tenant = config.get_tenant();
+    let workspace = config.get_workspace_name();
     let dl_url = format!(
         "s3://{}/deadletters/{}/{}/{}/",
         bucket, tenant, workspace, pipeline
@@ -514,14 +519,17 @@ pub fn ensure_dbt_schema(ctx: &SessionContext) -> Result<(), DataFusionError> {
 }
 
 /// Scan S3 for compiled dbt model SQL and register each as a view: dbt.<model>
-pub async fn register_dbt_models(ctx: &SessionContext) -> Result<(), DataFusionError> {
+pub async fn register_dbt_models(
+    ctx: &SessionContext,
+    config: &Config,
+) -> Result<(), DataFusionError> {
     // Ensure config (tenant/workspace/bucket)
-    Config::init().await;
+    config.init().await;
     ensure_dbt_schema(ctx)?;
-    let tenant = Config::get_tenant();
-    let workspace = Config::get_workspace_name();
-    let pipelines = crate::sqlrt::registry::list_pipelines().await;
-    let storage = crate::adapters::storage::get_storage();
+    let tenant = config.get_tenant();
+    let workspace = config.get_workspace_name();
+    let pipelines = crate::sqlrt::registry::list_pipelines(config).await;
+    let storage = crate::adapters::storage::get_storage(config);
     use std::collections::HashSet;
     let mut seen_models: HashSet<String> = HashSet::new();
     let mut total_registered: usize = 0;
@@ -627,34 +635,37 @@ pub(crate) fn process_clustered_select_opts(
     })
 }
 
-fn fallback_ingest_scope() -> TenantScope {
-    TenantScope::new(Config::get_tenant(), Config::get_workspace_name()).unwrap_or_else(|_| {
+fn fallback_ingest_scope(config: &Config) -> TenantScope {
+    TenantScope::new(config.get_tenant(), config.get_workspace_name()).unwrap_or_else(|_| {
         TenantScope {
-            tenant: Config::get_tenant(),
-            workspace: Config::get_workspace_name(),
+            tenant: config.get_tenant(),
+            workspace: config.get_workspace_name(),
         }
     })
 }
 
-fn namespace_union_opts() -> ClusteredSelectOpts {
-    process_clustered_select_opts(fallback_ingest_scope()).unwrap_or_else(|_| ClusteredSelectOpts {
-        identity: ClusterIdentity::new(
-            skippr_lease::ClusterId::new("local").expect("static cluster id"),
-            skippr_lease::NodeId::from_uuid(uuid::Uuid::nil()),
-        ),
-        scope: fallback_ingest_scope(),
-        local_flight: "127.0.0.1:0".parse().unwrap(),
-        registry: crate::cluster::peer::process_registry(),
-        iceberg_only: false,
+fn namespace_union_opts(config: &Config) -> ClusteredSelectOpts {
+    process_clustered_select_opts(fallback_ingest_scope(config)).unwrap_or_else(|_| {
+        ClusteredSelectOpts {
+            identity: ClusterIdentity::new(
+                skippr_lease::ClusterId::new("local").expect("static cluster id"),
+                skippr_lease::NodeId::from_uuid(uuid::Uuid::nil()),
+            ),
+            scope: fallback_ingest_scope(config),
+            local_flight: "127.0.0.1:0".parse().unwrap(),
+            registry: crate::cluster::peer::process_registry(),
+            iceberg_only: false,
+        }
     })
 }
 
 pub async fn plan_clustered_select(
+    config: &Config,
     sql: &str,
     opts: &ClusteredSelectOpts,
 ) -> Result<datafusion::dataframe::DataFrame, DataFusionError> {
-    Config::init().await;
-    let cfg = Config::get();
+    config.init().await;
+    let cfg = config.clone();
     let ctx = if opts.iceberg_only {
         SessionContext::new()
     } else {
@@ -669,7 +680,7 @@ pub async fn plan_clustered_select(
         if !opts.scope.matches_pipeline(&view.key) {
             continue;
         }
-        let namespaces = match list_iceberg_source_namespaces(&view).await {
+        let namespaces = match list_iceberg_source_namespaces(config, &view).await {
             Ok(namespaces) => namespaces,
             Err(err) => {
                 warn!(
@@ -685,33 +696,39 @@ pub async fn plan_clustered_select(
         }
         for namespace in namespaces {
             let _ = ctx.deregister_table(&namespace);
-            register_iceberg_union_view(&ctx, name, &namespace, &view, opts).await?;
+            register_iceberg_union_view(config, &ctx, name, &namespace, &view, opts).await?;
         }
     }
     ctx.sql(sql).await
 }
 
 pub async fn execute_clustered_select(
+    config: &Config,
     sql: &str,
     opts: &ClusteredSelectOpts,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
-    plan_clustered_select(sql, opts).await?.collect().await
+    plan_clustered_select(config, sql, opts)
+        .await?
+        .collect()
+        .await
 }
 
 pub async fn schema_for_clustered_select(
+    config: &Config,
     sql: &str,
     opts: &ClusteredSelectOpts,
 ) -> Result<SchemaRef, DataFusionError> {
-    let df = plan_clustered_select(sql, opts).await?;
+    let df = plan_clustered_select(config, sql, opts).await?;
     Ok(df.schema().inner().clone())
 }
 
 pub async fn plan_iceberg_scan(
+    config: &Config,
     namespace: &str,
     scope: &TenantScope,
 ) -> Result<datafusion::dataframe::DataFrame, DataFusionError> {
-    Config::init().await;
-    let cfg = Config::get();
+    config.init().await;
+    let cfg = config.clone();
     let ctx = datafusion::prelude::SessionContext::new();
     let mut found = false;
     for name in cfg.pipelines.keys() {
@@ -723,7 +740,7 @@ pub async fn plan_iceberg_scan(
         if !scope.matches_pipeline(&view.key) {
             continue;
         }
-        match load_iceberg_scan_provider(&view, namespace).await {
+        match load_iceberg_scan_provider(config, &view, namespace).await {
             Ok(loaded) => {
                 let _ = ctx.deregister_table(namespace);
                 ctx.register_table(namespace, loaded.provider)
@@ -743,22 +760,29 @@ pub async fn plan_iceberg_scan(
 }
 
 pub async fn execute_iceberg_scan(
+    config: &Config,
     namespace: &str,
     scope: &TenantScope,
 ) -> Result<Vec<RecordBatch>, DataFusionError> {
-    plan_iceberg_scan(namespace, scope).await?.collect().await
+    plan_iceberg_scan(config, namespace, scope)
+        .await?
+        .collect()
+        .await
 }
 
-pub async fn iceberg_schema_for_namespace(namespace: &str) -> Result<SchemaRef, DataFusionError> {
-    Config::init().await;
-    let cfg = Config::get();
+pub async fn iceberg_schema_for_namespace(
+    config: &Config,
+    namespace: &str,
+) -> Result<SchemaRef, DataFusionError> {
+    config.init().await;
+    let cfg = config.clone();
     for name in cfg.pipelines.keys() {
         let view = crate::cluster::PipelineConfigView::for_name(&cfg, name)
             .map_err(|err| DataFusionError::Plan(err.to_string()))?;
         if !view.iceberg {
             continue;
         }
-        if let Ok(loaded) = load_iceberg_scan_provider(&view, namespace).await {
+        if let Ok(loaded) = load_iceberg_scan_provider(config, &view, namespace).await {
             return Ok(datafusion::datasource::TableProvider::schema(
                 loaded.provider.as_ref(),
             ));
@@ -769,9 +793,12 @@ pub async fn iceberg_schema_for_namespace(namespace: &str) -> Result<SchemaRef, 
     )))
 }
 
-pub async fn list_configured_iceberg_tables(scope: &TenantScope) -> Vec<(String, SchemaRef)> {
-    Config::init().await;
-    let cfg = Config::get();
+pub async fn list_configured_iceberg_tables(
+    config: &Config,
+    scope: &TenantScope,
+) -> Vec<(String, SchemaRef)> {
+    config.init().await;
+    let cfg = config.clone();
     let mut out = Vec::new();
     for name in cfg.pipelines.keys() {
         let Ok(view) = crate::cluster::PipelineConfigView::for_name(&cfg, name) else {
@@ -780,11 +807,11 @@ pub async fn list_configured_iceberg_tables(scope: &TenantScope) -> Vec<(String,
         if !view.iceberg || !scope.matches_pipeline(&view.key) {
             continue;
         }
-        let Ok(namespaces) = list_iceberg_source_namespaces(&view).await else {
+        let Ok(namespaces) = list_iceberg_source_namespaces(config, &view).await else {
             continue;
         };
         for namespace in namespaces {
-            let schema = iceberg_schema_for_namespace(&namespace)
+            let schema = iceberg_schema_for_namespace(config, &namespace)
                 .await
                 .unwrap_or_else(|_| Arc::new(datafusion::arrow::datatypes::Schema::empty()));
             out.push((namespace, schema));
@@ -801,9 +828,10 @@ struct IcebergSinkCatalog {
 }
 
 fn iceberg_sink_catalog(
+    config: &Config,
     view: &crate::cluster::PipelineConfigView,
 ) -> Result<IcebergSinkCatalog, DataFusionError> {
-    let cfg = Config::get();
+    let cfg = config.clone();
     let sink_ref = view.sink_ref.as_ref().ok_or_else(|| {
         DataFusionError::Plan(format!(
             "Iceberg pipeline '{}' has no data_sink",
@@ -859,9 +887,10 @@ pub(crate) fn catalog_table_to_namespace(name: &str, prefix: Option<&str>) -> Op
 }
 
 async fn list_iceberg_source_namespaces(
+    config: &Config,
     view: &crate::cluster::PipelineConfigView,
 ) -> Result<Vec<String>, DataFusionError> {
-    let sink = iceberg_sink_catalog(view)?;
+    let sink = iceberg_sink_catalog(config, view)?;
     #[cfg(any(
         feature = "offset-store-dynamodb",
         feature = "offset-store-cloud-tables"
@@ -909,13 +938,14 @@ struct LoadedIcebergScan {
 }
 
 async fn register_iceberg_union_view(
+    config: &Config,
     ctx: &SessionContext,
     _pipeline: &str,
     namespace: &str,
     view: &crate::cluster::PipelineConfigView,
     opts: &ClusteredSelectOpts,
 ) -> Result<(), DataFusionError> {
-    let (loaded, skip_wal) = match load_iceberg_scan_provider(view, namespace).await {
+    let (loaded, skip_wal) = match load_iceberg_scan_provider(config, view, namespace).await {
         Ok(loaded) => (loaded, opts.iceberg_only),
         Err(err) if !opts.iceberg_only => match load_iceberg_from_peer(namespace, opts).await {
             Ok(loaded) => (loaded, opts.iceberg_only),
@@ -1127,10 +1157,11 @@ impl TableProvider for IcebergWalUnionProvider {
 }
 
 async fn load_iceberg_scan_provider(
+    config: &Config,
     view: &crate::cluster::PipelineConfigView,
     namespace: &str,
 ) -> Result<LoadedIcebergScan, DataFusionError> {
-    let sink = iceberg_sink_catalog(view)?;
+    let sink = iceberg_sink_catalog(config, view)?;
     let table_name = match sink.table_prefix.as_deref() {
         Some(prefix) => format!("{prefix}_{namespace}"),
         None => namespace.to_string(),

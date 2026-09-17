@@ -13,11 +13,11 @@ static CACHE: Lazy<Mutex<HashMap<String, HashSet<(String, String)>>>> =
 pub struct Manifest;
 
 impl Manifest {
-    pub fn s3_key(namespace: &str) -> (String, String) {
-        let tenant = Config::get_tenant();
-        let workspace = Config::get_workspace_name();
-        let pipeline = Config::get_pipeline_name();
-        let bucket = Config::get_skippr_s3_bucket();
+    pub fn s3_key(config: &Config, namespace: &str) -> (String, String) {
+        let tenant = config.get_tenant();
+        let workspace = config.get_workspace_name();
+        let pipeline = config.get_pipeline_name();
+        let bucket = config.get_skippr_s3_bucket();
         let filename = format!("{}.json", namespace);
         let key = format!(
             "{}/{}/{}/manifest/{}",
@@ -27,9 +27,9 @@ impl Manifest {
     }
 
     /// Build manifest key for a specific pipeline (no global pipeline state dependency).
-    pub fn s3_key_for(pipeline: &str, namespace: &str) -> String {
-        let tenant = Config::get_tenant();
-        let workspace = Config::get_workspace_name();
+    pub fn s3_key_for(config: &Config, pipeline: &str, namespace: &str) -> String {
+        let tenant = config.get_tenant();
+        let workspace = config.get_workspace_name();
         let filename = format!("{}.json", namespace);
         format!(
             "{}/{}/{}/manifest/{}",
@@ -37,13 +37,13 @@ impl Manifest {
         )
     }
 
-    pub async fn read(namespace: &str) -> Option<Value> {
-        let (_bucket, key) = Self::s3_key(namespace);
+    pub async fn read(config: &Config, namespace: &str) -> Option<Value> {
+        let (_bucket, key) = Self::s3_key(config, namespace);
         debug!(
             "Reading manifest for namespace '{}' key='{}'",
             namespace, key
         );
-        let storage = crate::adapters::storage::get_storage();
+        let storage = crate::adapters::storage::get_storage(config);
         match storage.get_json_opt(&key).await {
             Ok(Some(v)) => {
                 debug!("Manifest loaded for namespace '{}'", namespace);
@@ -60,28 +60,33 @@ impl Manifest {
         }
     }
 
-    pub async fn epoch(namespace: &str) -> Option<u64> {
-        Self::read(namespace)
+    pub async fn epoch(config: &Config, namespace: &str) -> Option<u64> {
+        Self::read(config, namespace)
             .await
             .and_then(|v| v.get("epoch").and_then(|e| e.as_u64()))
     }
 
-    fn resolve_abs_prefix(namespace: &str, dir_prefix: &str) -> String {
+    fn resolve_abs_prefix(config: &Config, namespace: &str, dir_prefix: &str) -> String {
         if dir_prefix.starts_with("s3://") {
             dir_prefix.trim().to_string()
         } else {
-            let bucket = Config::get_skippr_s3_bucket();
-            let (_b, manifest_key) = Self::s3_key(namespace);
+            let bucket = config.get_skippr_s3_bucket();
+            let (_b, manifest_key) = Self::s3_key(config, namespace);
             format!("s3://{}/{}{}", bucket, manifest_key, dir_prefix)
         }
     }
 
-    pub async fn ensure_prefix(namespace: &str, dir_prefix: &str) {
-        Self::ensure_prefix_and_db(namespace, dir_prefix, "").await;
+    pub async fn ensure_prefix(config: &Config, namespace: &str, dir_prefix: &str) {
+        Self::ensure_prefix_and_db(config, namespace, dir_prefix, "").await;
     }
 
-    pub async fn ensure_prefix_and_db(namespace: &str, dir_prefix: &str, database: &str) {
-        let abs_prefix = Self::resolve_abs_prefix(namespace, dir_prefix);
+    pub async fn ensure_prefix_and_db(
+        config: &Config,
+        namespace: &str,
+        dir_prefix: &str,
+        database: &str,
+    ) {
+        let abs_prefix = Self::resolve_abs_prefix(config, namespace, dir_prefix);
         let cache_key = (abs_prefix.clone(), database.to_string());
 
         // Fast path: already cached
@@ -95,7 +100,7 @@ impl Manifest {
         }
 
         // Slow path: read from S3, populate cache, merge if needed
-        let mut manifest = Self::read(namespace).await.unwrap_or(json!({
+        let mut manifest = Self::read(config, namespace).await.unwrap_or(json!({
             "epoch": 0u64,
             "tables": {}
         }));
@@ -177,8 +182,8 @@ impl Manifest {
             if let Some(obj) = manifest.as_object_mut() {
                 obj.insert("epoch".to_string(), json!(now_epoch));
             }
-            let (_bucket, key) = Self::s3_key(namespace);
-            let storage = crate::adapters::storage::get_storage();
+            let (_bucket, key) = Self::s3_key(config, namespace);
+            let storage = crate::adapters::storage::get_storage(config);
             let _ = storage.put_json(&key, &manifest).await;
             info!(
                 "Updated manifest for namespace '{}' (prefix={})",

@@ -5,9 +5,9 @@ description: Self-hosted ELT engine. Describe a source and a destination in skip
 
 # Skipprd
 
-Skipprd is an ELT engine in a single, portable binary. It discovers your source data, evolves your schemas, fixes common serialisation issues and more, on the fly during ingest. It guarantees deliverable, backwards-compatible data to your destination. New field, no problem. Existing field changed type, no problem. Nested data types evolved a new array, no problem. It just works.
+Skipprd is an ELT engine in a single, portable binary — and a Python `Session` wrapping that same engine. It discovers your source data, evolves your schemas, fixes common serialisation issues and more, on the fly during ingest. It guarantees deliverable, backwards-compatible data to your destination. New field, no problem. Existing field changed type, no problem. Nested data types evolved a new array, no problem. It just works.
 
-You describe a source and a destination in one `skippr.yml`, then Skipprd reads the shape of the data and moves it — durably — into a warehouse you already run. Discovery walks the source, maps types the same way every time, and writes that contract down. Change data capture aims at the table as it should be: order tokens, tombstones, a final state you can reconcile, not a pile of logs to replay by hand. Ingest is WAL-first. A batch is real once it is committed. Crash recovery starts there. Rows travel from the machine running `skipprd` to your destination.
+You describe a source (and optionally a destination) in one `skippr.yml`. Skipprd reads the shape of the data and writes it — durably — through a write-ahead log. Add a warehouse sink when you want one. Discovery walks the source, maps types the same way every time, and writes that contract down. Change data capture aims at the table as it should be: order tokens, tombstones, a final state you can reconcile, not a pile of logs to replay by hand. Ingest is WAL-first. A batch is real once it is committed. Crash recovery starts there.
 
 Plugins arrive on demand from `install.skippr.io`. The host stays small; connectors version on their own.
 

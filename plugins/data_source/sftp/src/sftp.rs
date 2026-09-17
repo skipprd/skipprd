@@ -7,7 +7,6 @@ use serde_derive::Deserialize;
 use ssh2::Session;
 use tracing::info;
 
-use crate::helpers::configuration::Config;
 use crate::helpers::plugin_config::PluginConfigEntry;
 use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::progress::OffsetKey;
@@ -39,23 +38,6 @@ pub struct DataSourceSftpPlugin {
 }
 
 impl DataSourceSftpPlugin {
-    pub async fn new() -> Self {
-        let config: DataSourceSftpPluginConfig = match Config::get_pipeline_input_plugin_config() {
-            Ok(c) => c.try_into().unwrap_or_else(|e| panic!("{}", e)),
-            Err(_) => DataSourceSftpPluginConfig {
-                host: Config::getenv("SFTP_HOST", ""),
-                port: None,
-                username: Config::getenv("SFTP_USERNAME", ""),
-                password: Some(Config::getenv("SFTP_PASSWORD", "")),
-                private_key_path: None,
-                remote_path: Config::getenv("SFTP_REMOTE_PATH", ""),
-                format: None,
-                batch_size_bytes: None,
-                batch_size_seconds: None,
-            },
-        };
-        Self { config }
-    }
 
     pub fn with_runtime_config(config: DataSourceSftpPluginConfig) -> Self {
         Self { config }

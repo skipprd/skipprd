@@ -1,8 +1,8 @@
 //! Clustered WAL coordination: identity, membership, replica protocol, and scheduler.
 //!
 //! Replica/query/catch-up code must use [`skippr_lease::PipelineKey`] and
-//! [`skippr_lease::PipelinePaths`]. It must not call `Config::get_pipeline_name()`
-//! or `Config::get_data_dir()`.
+//! [`skippr_lease::PipelinePaths`]. It must not call `config.get_pipeline_name()`
+//! or `config.get_data_dir()`.
 
 pub mod backend;
 pub mod baseline;
@@ -39,7 +39,7 @@ mod tests {
     #[test]
     fn replica_modules_do_not_call_process_global_pipeline_config() {
         let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src");
-        let forbidden = ["Config::get_pipeline_name()", "Config::get_data_dir()"];
+        let forbidden = ["config.get_pipeline_name()", "config.get_data_dir()"];
         for rel in ["cluster", "buffer/durable", "query_flight"] {
             let dir = root.join(rel);
             if !dir.exists() {

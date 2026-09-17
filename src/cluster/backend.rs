@@ -8,8 +8,11 @@ use crate::cluster::identity::ClusterConfig;
 use crate::helpers::configuration::Config;
 use crate::helpers::wal_storage::OffsetStoreKind;
 
-pub async fn open_lease_store(table: String) -> Result<Arc<dyn PipelineLeaseStore>, String> {
-    match configured_kind()? {
+pub async fn open_lease_store(
+    config: &Config,
+    table: String,
+) -> Result<Arc<dyn PipelineLeaseStore>, String> {
+    match configured_kind(config)? {
         OffsetStoreKind::CloudTables => {
             #[cfg(feature = "offset-store-cloud-tables")]
             {
@@ -42,9 +45,10 @@ pub async fn open_lease_store(table: String) -> Result<Arc<dyn PipelineLeaseStor
 }
 
 pub async fn open_membership_store(
+    config: &Config,
     table: String,
 ) -> Result<Arc<dyn ClusterMembershipStore>, String> {
-    match configured_kind()? {
+    match configured_kind(config)? {
         OffsetStoreKind::CloudTables => {
             #[cfg(feature = "offset-store-cloud-tables")]
             {
@@ -77,8 +81,8 @@ pub async fn open_membership_store(
     }
 }
 
-pub fn configured_kind() -> Result<OffsetStoreKind, String> {
-    match Config::configured_offset_store() {
+pub fn configured_kind(config: &Config) -> Result<OffsetStoreKind, String> {
+    match config.configured_offset_store() {
         Ok(Some(kind)) => Ok(kind),
         Ok(None) => {
             if cfg!(feature = "offset-store-dynamodb") {
@@ -91,14 +95,15 @@ pub fn configured_kind() -> Result<OffsetStoreKind, String> {
     }
 }
 
-pub fn uses_cloud_tables() -> bool {
-    matches!(configured_kind(), Ok(OffsetStoreKind::CloudTables))
+pub fn uses_cloud_tables(config: &Config) -> bool {
+    matches!(configured_kind(config), Ok(OffsetStoreKind::CloudTables))
 }
 
 pub async fn open_skippr_catalog(
+    config: &Config,
     cfg: &skippr_iceberg_catalog::IcebergCatalogConfig,
 ) -> Result<Arc<dyn iceberg::Catalog>, String> {
-    if uses_cloud_tables() {
+    if uses_cloud_tables(config) {
         #[cfg(feature = "offset-store-cloud-tables")]
         {
             let catalog = skippr_iceberg_catalog_cloud_tables::CloudTablesCatalog::new(cfg)
@@ -133,12 +138,13 @@ pub async fn open_skippr_catalog(
 }
 
 pub fn offset_publisher_for(
+    app_cfg: &Config,
     config: &ClusterConfig,
     key: &skippr_lease::PipelineKey,
 ) -> Result<crate::buffer::durable::store::OffsetMode, skippr_lease::DurableError> {
     use crate::buffer::durable::store::OffsetMode;
     use skippr_lease::DurableError;
-    if uses_cloud_tables() {
+    if uses_cloud_tables(app_cfg) {
         #[cfg(feature = "offset-store-cloud-tables")]
         {
             let store = skippr_offset_store_cloud_tables::CloudTablesOffsetStore::open(

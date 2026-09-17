@@ -7,6 +7,7 @@ use arc_swap::ArcSwap;
 use once_cell::sync::Lazy;
 
 use crate::discover::OutputMetadata;
+use crate::helpers::configuration::Config;
 use crate::ingest_work::storage_namespace;
 use crate::runtime_plugins::protocol::RuntimeSchemaState;
 use crate::{METADATA, PIPELINE_SCHEMA_VERSION};
@@ -75,7 +76,10 @@ fn output_schema_equivalent(left: &OutputMetadata, right: &OutputMetadata) -> bo
         })
 }
 
-pub fn apply_runtime_source_schema_state(schema_state: RuntimeSchemaState) -> Vec<String> {
+pub fn apply_runtime_source_schema_state(
+    config: &Config,
+    schema_state: RuntimeSchemaState,
+) -> Vec<String> {
     let _guard = RUNTIME_SOURCE_SCHEMA_STATE_UPDATE_LOCK
         .lock()
         .expect("runtime source schema state update lock poisoned");
@@ -94,7 +98,7 @@ pub fn apply_runtime_source_schema_state(schema_state: RuntimeSchemaState) -> Ve
     let mut changed_namespaces = Vec::new();
     let update_version = schema_state.version;
     for (namespace, output) in schema_state.namespaces {
-        let namespace = storage_namespace(&namespace);
+        let namespace = storage_namespace(config, &namespace);
         let namespace_version = schema_state
             .namespace_versions
             .get(&namespace)
@@ -170,13 +174,17 @@ pub fn runtime_schema_output_metadata(namespace: &str) -> Option<OutputMetadata>
         .cloned()
 }
 
-pub fn install_from_pipeline_metadata(metadata: &crate::discover::PipelineMetadata) -> u64 {
+pub fn install_from_pipeline_metadata(
+    config: &Config,
+    metadata: &crate::discover::PipelineMetadata,
+) -> u64 {
     crate::METADATA.store(Arc::new(metadata.clone()));
     for namespace in metadata.metadata.keys() {
         if namespace.is_empty() || namespace.starts_with("_dl_") {
             continue;
         }
         let _ = crate::ingest_work::Ingest::prepare_arrow_schema_with_metadata(
+            config,
             namespace,
             &metadata.metadata,
             metadata.flattened,
@@ -193,11 +201,14 @@ pub fn install_from_pipeline_metadata(metadata: &crate::discover::PipelineMetada
         })
         .collect::<BTreeMap<_, _>>();
     let version = namespace_versions.values().copied().max().unwrap_or(1);
-    apply_runtime_source_schema_state(RuntimeSchemaState {
-        version,
-        namespaces,
-        namespace_versions,
-    });
+    apply_runtime_source_schema_state(
+        config,
+        RuntimeSchemaState {
+            version,
+            namespaces,
+            namespace_versions,
+        },
+    );
     version
 }
 
@@ -211,6 +222,7 @@ mod tests {
 
     use super::*;
     use crate::discover::{Metadata, PipelineMetadata, SkipprDataType};
+    use crate::helpers::configuration::Config;
 
     fn root_record_with_field(field_name: &str, field_type: SkipprDataType) -> Metadata {
         let mut root = Metadata::new_with_type(SkipprDataType::Record, "");
@@ -222,7 +234,7 @@ mod tests {
     }
 
     fn install_metadata(namespaces: HashMap<String, Metadata>) {
-        let mut pipeline_metadata = PipelineMetadata::new();
+        let mut pipeline_metadata = PipelineMetadata::new(&Config::new());
         pipeline_metadata.metadata = namespaces;
         pipeline_metadata.flattened = false;
         METADATA.store(Arc::new(pipeline_metadata));
@@ -243,11 +255,14 @@ mod tests {
             let output = OutputMetadata::from_metadata(&namespace_metadata);
             install_metadata(HashMap::from([("events".to_string(), namespace_metadata)]));
 
-            let changed = apply_runtime_source_schema_state(RuntimeSchemaState {
-                version: 1,
-                namespaces: BTreeMap::from([("events".to_string(), output)]),
-                namespace_versions: BTreeMap::from([("events".to_string(), 1)]),
-            });
+            let changed = apply_runtime_source_schema_state(
+                &Config::new(),
+                RuntimeSchemaState {
+                    version: 1,
+                    namespaces: BTreeMap::from([("events".to_string(), output)]),
+                    namespace_versions: BTreeMap::from([("events".to_string(), 1)]),
+                },
+            );
 
             assert!(changed.is_empty());
         });
@@ -264,11 +279,14 @@ mod tests {
             output.lineage_id = "runtime-lineage".to_string();
             install_metadata(HashMap::from([("events".to_string(), namespace_metadata)]));
 
-            let changed = apply_runtime_source_schema_state(RuntimeSchemaState {
-                version: 1,
-                namespaces: BTreeMap::from([("events".to_string(), output)]),
-                namespace_versions: BTreeMap::from([("events".to_string(), 1)]),
-            });
+            let changed = apply_runtime_source_schema_state(
+                &Config::new(),
+                RuntimeSchemaState {
+                    version: 1,
+                    namespaces: BTreeMap::from([("events".to_string(), output)]),
+                    namespace_versions: BTreeMap::from([("events".to_string(), 1)]),
+                },
+            );
 
             assert!(changed.is_empty());
         });
@@ -284,17 +302,20 @@ mod tests {
                 OutputMetadata::from_metadata(&root_record_with_field("id", SkipprDataType::Long));
             install_metadata(HashMap::from([("events".to_string(), events_metadata)]));
 
-            let changed = apply_runtime_source_schema_state(RuntimeSchemaState {
-                version: 1,
-                namespaces: BTreeMap::from([
-                    ("events".to_string(), metadata_output),
-                    ("users".to_string(), changed_output),
-                ]),
-                namespace_versions: BTreeMap::from([
-                    ("events".to_string(), 1),
-                    ("users".to_string(), 1),
-                ]),
-            });
+            let changed = apply_runtime_source_schema_state(
+                &Config::new(),
+                RuntimeSchemaState {
+                    version: 1,
+                    namespaces: BTreeMap::from([
+                        ("events".to_string(), metadata_output),
+                        ("users".to_string(), changed_output),
+                    ]),
+                    namespace_versions: BTreeMap::from([
+                        ("events".to_string(), 1),
+                        ("users".to_string(), 1),
+                    ]),
+                },
+            );
 
             assert_eq!(changed, vec!["users".to_string()]);
         });
@@ -305,14 +326,14 @@ mod tests {
     fn install_from_pipeline_metadata_publishes_runtime_schema_state() {
         with_metadata_test_lock(|| {
             let namespace_metadata = root_record_with_field("id", SkipprDataType::String);
-            let mut pipeline_metadata = PipelineMetadata::new();
+            let mut pipeline_metadata = PipelineMetadata::new(&Config::new());
             pipeline_metadata.metadata =
                 HashMap::from([("events".to_string(), namespace_metadata)]);
             pipeline_metadata.flattened = false;
             pipeline_metadata.metadata_version = 4;
             clear_runtime_source_schema_state();
             PIPELINE_SCHEMA_VERSION.store(0, Ordering::Release);
-            let version = install_from_pipeline_metadata(&pipeline_metadata);
+            let version = install_from_pipeline_metadata(&Config::new(), &pipeline_metadata);
             assert_eq!(
                 version,
                 crate::ingest_work::namespace_schema_version("events").max(1)
