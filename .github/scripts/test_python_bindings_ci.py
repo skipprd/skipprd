@@ -57,6 +57,7 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("rustc-wrapper", script)
         self.assertIn("CARGO_ENCODED_RUSTFLAGS", script)
         self.assertIn("scripts/bin/cargo", script)
+        self.assertIn("export CARGO=", script)
 
     def test_ci_builds_on_skippr_cloud_runners(self):
         text = CI.read_text(encoding="utf-8")

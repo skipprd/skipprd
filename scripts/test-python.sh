@@ -21,14 +21,19 @@ if [ "$(uname -s)" = Darwin ]; then
   if ! grep -q rustc-wrapper "$ROOT/.cargo/config.toml" 2>/dev/null; then
     printf '\n[build]\nrustc-wrapper = "%s"\n' "$RUSTC_WRAPPER" >>"$ROOT/.cargo/config.toml"
   fi
-  REAL_CARGO="$(command -v cargo)"
+  REAL_CARGO="${CARGO:-$(command -v cargo)}"
+  case "$REAL_CARGO" in
+    */scripts/bin/cargo) REAL_CARGO=/usr/local/cargo/bin/cargo ;;
+  esac
   cat >"$ROOT/scripts/bin/cargo" <<EOF
 #!/bin/sh
 unset CARGO_ENCODED_RUSTFLAGS
+unset CARGO
 exec '${REAL_CARGO}' "\$@"
 EOF
   chmod +x "$ROOT/scripts/bin/cargo"
   export PATH="$ROOT/scripts/bin:$PATH"
+  export CARGO="$ROOT/scripts/bin/cargo"
   maturin develop -- -C link-arg=-undefined -C link-arg=dynamic_lookup
 else
   maturin develop
