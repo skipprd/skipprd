@@ -9,19 +9,34 @@ python3 -m venv .venv-python
 source .venv-python/bin/activate
 python -m pip install -U pip
 python -m pip install "maturin>=1.7,<2" "pyarrow>=17" pytest
-# Maturin sets CARGO_ENCODED_RUSTFLAGS for the cdylib. Reusing cargo-test's
-# target dir rebuilds build-scripts with those flags and Darwin then fails
-# with `cannot execute binary file` (ENOEXEC). Isolate maturin artifacts.
+# Maturin sets CARGO_ENCODED_RUSTFLAGS for the cdylib. Cargo applies those
+# flags to build-scripts; Darwin then fails with `cannot execute binary file`.
+# Isolate the maturin target, wrap cargo to drop the encoded flags, and pass
+# macOS cdylib link args only to the final `cargo rustc` crate.
 if [ "$(uname -s)" = Darwin ]; then
   export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/var/tmp/cargo-target}-maturin"
   export RUSTC_WRAPPER="$ROOT/scripts/darwin-rustc-wrapper.py"
   chmod +x "$RUSTC_WRAPPER"
-  mkdir -p "$ROOT/.cargo"
+  mkdir -p "$ROOT/.cargo" "$ROOT/scripts/bin"
   if ! grep -q rustc-wrapper "$ROOT/.cargo/config.toml" 2>/dev/null; then
     printf '\n[build]\nrustc-wrapper = "%s"\n' "$RUSTC_WRAPPER" >>"$ROOT/.cargo/config.toml"
   fi
+  REAL_CARGO="$(command -v cargo)"
+  cat >"$ROOT/scripts/bin/cargo" <<EOF
+#!/bin/sh
+unset CARGO_ENCODED_RUSTFLAGS
+exec '${REAL_CARGO}' "\$@"
+EOF
+  chmod +x "$ROOT/scripts/bin/cargo"
+  export PATH="$ROOT/scripts/bin:$PATH"
+  maturin develop -- -C link-arg=-undefined -C link-arg=dynamic_lookup
+else
+  maturin develop
 fi
-maturin develop
 python -m pytest python/tests
-maturin build --out target/wheels
+if [ "$(uname -s)" = Darwin ]; then
+  maturin build --out target/wheels -- -C link-arg=-undefined -C link-arg=dynamic_lookup
+else
+  maturin build --out target/wheels
+fi
 ls target/wheels/*.whl
