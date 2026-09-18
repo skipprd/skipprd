@@ -1,8 +1,9 @@
 use clap::Parser;
 use std::path::PathBuf;
 
-use crate::helpers::wal_storage::WalStorage;
+use crate::helpers::wal_storage::{ElStorageMode, OffsetStoreKind, WalStorage};
 
+mod connect_generated;
 pub mod metadata;
 
 #[derive(Parser)]
@@ -21,11 +22,23 @@ pub struct Cli {
     #[arg(long, global = true)]
     pub wal_s3_bucket: Option<String>,
     /// Offset store: sled (default), dynamodb, or cloud-tables (also SKIPPR_OFFSET_STORE env)
-    #[arg(long, global = true)]
-    pub offset_store: Option<String>,
+    #[arg(long, global = true, value_enum)]
+    pub offset_store: Option<OffsetStoreKind>,
     /// DynamoDB table for offsets when offset_store=dynamodb
     #[arg(long, global = true)]
     pub offset_dynamodb_table: Option<String>,
+    /// skippr.workspace
+    #[arg(long, global = true)]
+    pub workspace: Option<String>,
+    /// skippr.skipprd_el_storage_mode
+    #[arg(long, global = true, value_enum)]
+    pub storage_mode: Option<ElStorageMode>,
+    /// skippr.skippr_s3_bucket
+    #[arg(long, global = true)]
+    pub skippr_s3_bucket: Option<String>,
+    /// skippr.tenant
+    #[arg(long, global = true)]
+    pub tenant: Option<String>,
     #[command(subcommand)]
     pub mode: Mode,
 }
@@ -45,6 +58,7 @@ pub enum Mode {
     },
     Doctor(DoctorOptions),
     Df(DfOptions),
+    Connect(connect_generated::ConnectArgs),
 }
 
 #[derive(Parser, Clone, PartialEq)]

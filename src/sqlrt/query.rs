@@ -1852,23 +1852,24 @@ async fn show_pipeline(config: &Config, pipeline_name: &str) {
         }));
     }
 
-    let metadata_location = if config.get_storage_mode() == "local" {
-        format!(
-            "{}/{}/{}/{}/metadata/metadata.json",
-            config.get_data_dir(),
-            config.get_tenant(),
-            config.get_workspace_name(),
-            pipeline_name,
-        )
-    } else {
-        format!(
-            "s3://{}/{}/{}/{}/metadata/metadata.json",
-            config.get_skippr_s3_bucket(),
-            config.get_tenant(),
-            config.get_workspace_name(),
-            pipeline_name,
-        )
-    };
+    let metadata_location =
+        if config.get_storage_mode() == crate::helpers::wal_storage::ElStorageMode::Local {
+            format!(
+                "{}/{}/{}/{}/metadata/metadata.json",
+                config.get_data_dir(),
+                config.get_tenant(),
+                config.get_workspace_name(),
+                pipeline_name,
+            )
+        } else {
+            format!(
+                "s3://{}/{}/{}/{}/metadata/metadata.json",
+                config.get_skippr_s3_bucket(),
+                config.get_tenant(),
+                config.get_workspace_name(),
+                pipeline_name,
+            )
+        };
 
     let result = serde_json::json!({
         "pipeline": pipeline_name,

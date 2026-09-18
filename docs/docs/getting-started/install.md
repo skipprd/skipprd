@@ -5,7 +5,7 @@ description: Install the Skipprd ELT engine on macOS or Linux, then verify Skipp
 
 # Install
 
-Skipprd is the self-hosted ELT engine. After install you run `skipprd discover`, `skipprd schema`, and `skipprd sync` against a `skippr.yml`, or `import skipprd` and use `Session`.
+Skipprd is the self-hosted ELT engine. After install you run `skipprd discover`, `skipprd schema`, and `skipprd sync` against a `skippr.yml`, or `import skippr` and use `Session`.
 
 ## Prerequisites
 
@@ -18,11 +18,11 @@ Installing Skipprd means accepting the [Skipprd EULA](https://skippr.io/terms/eu
 ## pip
 
 ```bash
-pip install skipprd
-python -c "import skipprd; print(skipprd.Session)"
+pip install skippr
+python -c "import skippr; print(skippr.Session)"
 ```
 
-The wheel is the same engine as the CLI. Pandas is optional: `pip install skipprd[pandas]`, then `s.df().to_pandas()`.
+The wheel is the same engine as the CLI. Pandas is optional: `pip install skippr[pandas]`, then `s.df().to_pandas()`.
 
 ## Homebrew
 

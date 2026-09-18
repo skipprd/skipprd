@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::collections::HashMap;
 
 use serde::Deserialize;
@@ -122,11 +123,12 @@ pub struct IntersectionJob {
     pub internal_list_limit: Option<u32>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, SkipprConfig)]
 pub struct DataForSeoBacklinksPluginConfig {
     #[serde(default)]
     pub login: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub password: Option<String>,
     #[serde(default)]
     pub site: Option<String>,

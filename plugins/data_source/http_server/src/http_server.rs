@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -20,10 +21,11 @@ use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch, SourceSyncContext};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSourceHttpServerPluginConfig {
     pub listen_address: Option<String>,
     pub path: Option<String>,
+    #[skippr(secret)]
     pub auth_token: Option<String>,
     pub format: Option<String>,
     pub batch_size_bytes: Option<i64>,

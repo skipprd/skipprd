@@ -138,7 +138,7 @@ async fn async_main() {
         Config::set_wal_s3_bucket(bucket);
     }
     if let Some(store) = &cli.offset_store {
-        Config::set_offset_store(store);
+        Config::set_offset_store(store.as_str());
     }
     if let Some(table) = &cli.offset_dynamodb_table {
         Config::set_offset_dynamodb_table(table);
@@ -555,6 +555,74 @@ async fn async_main() {
                     println!("Failed to create benchmark data: {}", e);
                     process::exit(1);
                 }
+            }
+        }
+        Mode::Connect(args) => {
+            let path = cli
+                .config
+                .clone()
+                .unwrap_or_else(skipprd::connect::discover_config_path);
+            if cli.workspace.is_some()
+                || cli.storage_mode.is_some()
+                || cli.wal_s3_bucket.is_some()
+                || cli.offset_store.is_some()
+                || cli.offset_dynamodb_table.is_some()
+                || cli.skippr_s3_bucket.is_some()
+                || cli.tenant.is_some()
+            {
+                if let Err(err) = skipprd::connect::persist_skippr_keys(
+                    &path,
+                    cli.workspace.as_deref(),
+                    cli.storage_mode,
+                    cli.wal_s3_bucket.as_deref(),
+                    cli.offset_store,
+                    cli.offset_dynamodb_table.as_deref(),
+                    cli.skippr_s3_bucket.as_deref(),
+                    cli.tenant.as_deref(),
+                ) {
+                    error!("{err}");
+                    eprintln!("{err}");
+                    process::exit(1);
+                }
+            }
+            let plugin = args.role.plugin();
+            let pipeline = match args.role.pipeline() {
+                Some(value) if !value.is_empty() => value.to_string(),
+                _ => match skipprd::connect::prompt_if_tty("pipeline") {
+                    Ok(value) if !value.is_empty() => value,
+                    Ok(_) | Err(_) => {
+                        eprintln!("connect requires --pipeline");
+                        process::exit(1);
+                    }
+                },
+            };
+            let name = match args.role.name() {
+                Some(value) if !value.is_empty() => value.to_string(),
+                _ => match skipprd::connect::prompt_if_tty("name") {
+                    Ok(value) if !value.is_empty() => value,
+                    Ok(_) | Err(_) => {
+                        eprintln!("connect requires --name");
+                        process::exit(1);
+                    }
+                },
+            };
+            if let Err(err) = skipprd::connect::persist_plugin(
+                &path,
+                &pipeline,
+                plugin,
+                &name,
+                match skipprd::connect::yaml_path_fields(plugin, &args.role.to_yaml_map()) {
+                    Ok(fields) => fields,
+                    Err(err) => {
+                        error!("{err}");
+                        eprintln!("{err}");
+                        process::exit(1);
+                    }
+                },
+            ) {
+                error!("{err}");
+                eprintln!("{err}");
+                process::exit(1);
             }
         }
     }

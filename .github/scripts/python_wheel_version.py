@@ -13,7 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 PYPROJECT = ROOT / "pyproject.toml"
 PYTHON_CARGO = ROOT / "python" / "Cargo.toml"
-PYPI_PROJECT = "skipprd"
+PYPI_PROJECT = "skippr"
 VERSION_RE = re.compile(r'(?m)^version\s*=\s*"([^"]+)"')
 SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
@@ -58,7 +58,7 @@ def should_publish(version: str, *, published: bool) -> bool:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Read or gate the skipprd Python wheel semver.")
+    parser = argparse.ArgumentParser(description="Read or gate the skippr Python wheel semver.")
     parser.add_argument(
         "--skip-if-published",
         action="store_true",

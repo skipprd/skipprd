@@ -12,7 +12,7 @@ The exact contract is documented in [Runtime Plugin Contract](runtime-plugin-con
 
 For API/SaaS marketing and analytics connectors, see [API / SaaS source plugins](./api-saas-source-plugins.md).
 
-When adding a **user-facing** runtime source, also wire `sde connect source <kebab-name>` in `sde` and map the public `kind` in `skippr_impl.rs` — see the **CLI (`sde connect source`)** checklist in [API / SaaS source plugins](./api-saas-source-plugins.md#cli-skippr-connect-source).
+When adding a **user-facing** runtime source, annotate the plugin config struct and regenerate connect (`cargo run -p skippr-connect-gen`) — see the **CLI (`skipprd connect data-source`)** checklist in [API / SaaS source plugins](./api-saas-source-plugins.md#cli-skipprd-connect-data-source).
 
 ## Single source of truth
 

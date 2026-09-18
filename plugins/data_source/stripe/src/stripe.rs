@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -32,7 +33,7 @@ use crate::stripe_api::{
     map_promotion_code, map_refund, map_subscription, StripeApiClient, FIXTURE_ENV,
 };
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, SkipprConfig)]
 pub struct DataSourceStripePluginConfig {
     pub stripe_account_id: String,
     pub start_date: String,
@@ -47,14 +48,18 @@ pub struct DataSourceStripePluginConfig {
     #[serde(default)]
     pub write_policy: Option<WritePolicy>,
     #[serde(default)]
+    #[skippr(secret)]
     pub access_token: Option<String>,
     #[serde(default)]
+    #[skippr(not_secret)]
     pub oauth_token_url: Option<String>,
     #[serde(default)]
     pub oauth_client_id: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub oauth_client_secret: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub oauth_refresh_token: Option<String>,
     #[serde(default)]
     pub privacy: PrivacyConfig,

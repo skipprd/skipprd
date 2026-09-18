@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use skippr_plugin_macros::SkipprConfig;
 
 static ICEBERG_CAS_CONFLICTS: AtomicU64 = AtomicU64::new(0);
 
@@ -13,7 +14,7 @@ pub fn take_cas_conflicts() -> u64 {
     ICEBERG_CAS_CONFLICTS.swap(0, Ordering::Relaxed)
 }
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, SkipprConfig)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum IcebergCatalogConfig {
     Glue {
@@ -39,6 +40,7 @@ pub enum IcebergCatalogConfig {
         uri: String,
         warehouse: String,
         #[serde(default)]
+        #[skippr(secret)]
         token: Option<String>,
     },
     Polaris {
@@ -47,6 +49,7 @@ pub enum IcebergCatalogConfig {
         #[serde(default)]
         client_id: Option<String>,
         #[serde(default)]
+        #[skippr(secret)]
         client_secret: Option<String>,
     },
 }

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""CI must build the skipprd wheel and run Session tests."""
+"""CI must build the skippr wheel and run Session tests."""
 
 from __future__ import annotations
 
@@ -41,12 +41,13 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertEqual(CI.name, "ci.yml")
         self.assertIn("scripts/test-python.sh", text)
         self.assertIn("cargo test -p skipprd --lib", text)
+        self.assertIn("skippr-connect-gen", text)
         self.assertNotIn("cargo test --workspace", text)
 
     def test_python_script_builds_wheel_and_runs_session_tests(self):
         script = TEST_PYTHON.read_text(encoding="utf-8")
         self.assertIn("maturin develop", script)
-        self.assertIn("python/tests/test_session.py", script)
+        self.assertIn("python/tests", script)
         self.assertIn("maturin build", script)
 
     def test_ci_builds_on_skippr_cloud_runners(self):
@@ -57,7 +58,7 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertNotIn("macos-latest", text)
         self.assertNotIn("depot", text)
         self.assertIn("working-directory: skipprd", text)
-        self.assertIn("$GITHUB_WORKSPACE/skipprd", text)
+        self.assertIn("path: skipprd", text)
         self.assertIn("skipprd/target/wheels/*.whl", text)
         self.assertIn("cargo test -p skipprd --lib", text)
 
@@ -68,7 +69,7 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("pypa/gh-action-pypi-publish", text)
         self.assertIn("id-token: write", text)
         self.assertIn("upload-artifact", text)
-        self.assertIn("set_root_package_version.py", text)
+        self.assertNotIn("set_root_package_version.py", text)
         self.assertNotIn("PYPI_API_TOKEN", text)
         self.assertNotIn("TWINE_PASSWORD", text)
         self.assertIn("tags:", text)
@@ -86,10 +87,27 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("path: skipprd", text)
         self.assertIn("SKIPPR_CLOUD_CHECKOUT_TOKEN", text)
 
+    def test_release_workflow_registers_pypi_project_skippr(self):
+        text = (ROOT / "docs" / "docs" / "maintainers" / "release-workflow.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("- Project: `skippr`", text)
+        self.assertIn("- Workflow name: `ci.yml`", text)
+        self.assertNotIn("- Project: `skipprd`", text)
+
     def test_pyproject_declares_license_and_readme(self):
         text = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertRegex(text, r'(?m)^name\s*=\s*"skippr"$')
         self.assertRegex(text, r'(?m)^readme\s*=')
         self.assertIn("LICENSE", text)
+        self.assertNotIn("[project.scripts]", text)
+
+    def test_python_module_name_is_skippr(self):
+        cargo = PYTHON_CARGO.read_text(encoding="utf-8")
+        self.assertIn('name = "skippr"\ncrate-type = ["cdylib"]', cargo)
+        pyproject = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+        self.assertIn('module-name = "skippr"', pyproject)
+        self.assertEqual(load_wheel_version().PYPI_PROJECT, "skippr")
 
     def test_python_wheel_is_abi3_py310(self):
         text = PYTHON_CARGO.read_text(encoding="utf-8")
@@ -101,6 +119,7 @@ class PythonBindingsCiTests(unittest.TestCase):
         installer = (ROOT / "scripts" / "install-git-hooks.sh").read_text(encoding="utf-8")
         self.assertIn("scripts/precommit.sh", hook)
         self.assertIn("cargo test -p skipprd --lib", script)
+        self.assertIn("skippr-connect-gen", script)
         self.assertIn("test_python_bindings_ci.py", script)
         self.assertIn(".githooks/pre-commit", installer)
 

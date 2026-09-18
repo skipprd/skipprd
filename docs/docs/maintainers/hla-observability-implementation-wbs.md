@@ -85,7 +85,7 @@ docs/docs/query/observability-udfs.md
 | A.10 | Attribute allowlist; promotion first | keep/drop keys |
 | A.11–A.14 | HTTP `/v1/traces\|logs\|metrics`, JSON content-type, gRPC, bearer, 16 MiB | 401/413/signal filter |
 | A.15 | Contracts + Arrow IPC emit (not IngestBatch JSON) | traces → three namespaces; logs-only no spans |
-| A.16 | `sde connect source otlp` | `--help`; plugin name `Otlp` |
+| A.16 | `skipprd connect data-source otlp` | `--help`; plugin name `Otlp` |
 | A.17 | Example three-pipeline YAML | Config parse |
 | A.18 | Discover goldens from bronze/Arrow + `otel_columns.txt` | names match |
 | A.19 | Iceberg identity PartitionSpec on hour/service_name/tenant_id when those fields exist | create table has spec |

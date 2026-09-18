@@ -79,14 +79,15 @@ Set `SKIPPR_DATAFORSEO_SEO_OPPORTUNITIES_FIXTURE_DIR` to the crate `fixtures/` d
 ## CLI
 
 ```bash
-sde connect source dataforseo-seo-opportunities \
-  --login "${DATAFORSEO_API_USER}" \
-  --password "${DATAFORSEO_API_PASS}" \
-  --site example.com \
-  --seed-keywords "meal planning app,family calendar app"
+skipprd connect data-source data-for-seo-seo-opportunities \
+  --pipeline seo \
+  --name opportunities \
+  --login '${DATAFORSEO_API_USER}' \
+  --password '${DATAFORSEO_API_PASS}' \
+  --site example.com
 ```
 
-For `competitors`, `streams`, `limits`, and `scoring`, edit engine `skippr.yml` under `DataForSeoSeoOpportunities:`.
+List fields (`seed_keywords`, `competitors`, `streams`) stay in engine `skippr.yml` under `DataForSeoSeoOpportunities:`. Flattened `--limits-*` and `--scoring-*` flags match the nested YAML keys.
 
 ## API cost drivers
 
@@ -100,5 +101,4 @@ For `competitors`, `streams`, `limits`, and `scoring`, edit engine `skippr.yml` 
 
 ```bash
 cargo test -p skippr-plugin-data-source-dataforseo-seo-opportunities
-cargo test -p sde translate_dataforseo_seo_opportunities_source
 ```

@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
@@ -53,7 +54,7 @@ fn runtime_is_discover_mode() -> bool {
         .unwrap_or(false)
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, SkipprConfig)]
 pub struct DataSourceShopifyAdminPluginConfig {
     pub shop_domain: String,
     #[serde(default)]
@@ -74,8 +75,10 @@ pub struct DataSourceShopifyAdminPluginConfig {
     #[serde(default)]
     pub oauth_client_id: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub oauth_client_secret: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub oauth_access_token: Option<String>,
 }
 

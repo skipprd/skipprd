@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use crate::helpers::configuration::DataSinkPluginConfig;
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
@@ -25,10 +26,12 @@ use std::io;
 use std::sync::Arc;
 use tracing::info;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSinkAzureBlobPluginConfig {
     pub account_name: String,
+    #[skippr(secret)]
     pub account_key: Option<String>,
+    #[skippr(secret)]
     pub sas_token: Option<String>,
     pub container: String,
     pub prefix: Option<String>,

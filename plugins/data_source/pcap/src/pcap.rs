@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -7,7 +8,7 @@ use crate::helpers::plugin_config::PluginConfigEntry;
 use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::source_compat::SourceSyncContext;
 
-#[derive(Debug, Deserialize, Clone, Default)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone, Default)]
 pub struct DataSourcePcapPluginConfig {}
 
 impl TryFrom<PluginConfigEntry> for DataSourcePcapPluginConfig {

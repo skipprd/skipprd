@@ -23,6 +23,7 @@ pub mod catalog_coordinator;
 pub mod catalog_outbox;
 pub mod cli;
 pub mod cluster;
+pub mod connect;
 pub mod converters;
 pub mod discover;
 pub mod doctor;

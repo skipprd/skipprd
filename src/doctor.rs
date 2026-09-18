@@ -83,11 +83,7 @@ pub fn run(config: &Config) -> DoctorResult {
 }
 
 fn wal_checks(checks: &mut Vec<DoctorCheck>, config: &Config, _pipeline: &Pipeline) {
-    let mode = config
-        .skippr
-        .as_ref()
-        .and_then(|s| s.skipprd_el_storage_mode.as_deref())
-        .unwrap_or("s3");
+    let mode = config.get_storage_mode();
     checks.push(pass(&format!("skipprd_el_storage_mode={mode}")));
 }
 

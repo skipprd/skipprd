@@ -72,10 +72,9 @@ pub(crate) fn clustered_local_storage_root(data_dir: &str) -> String {
 
 pub fn get_storage(config: &Config) -> Arc<dyn StorageAdapter> {
     let mode = config.get_storage_mode();
-    if mode == "local" {
+    if mode == crate::helpers::wal_storage::ElStorageMode::Local {
         let data_dir = config.get_pipeline_data_dir();
-        let root = if crate::helpers::configuration::Config::wal_storage_raw()
-            .eq_ignore_ascii_case("clustered")
+        let root = if config.get_wal_storage() == crate::helpers::wal_storage::WalStorage::Clustered
         {
             clustered_local_storage_root(&data_dir)
         } else {

@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::collections::BTreeSet;
 
 use serde_derive::Deserialize;
@@ -24,7 +25,7 @@ impl OtlpSignal {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, SkipprConfig)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct OtlpConfigRaw {
     #[serde(default)]
@@ -34,6 +35,7 @@ pub(crate) struct OtlpConfigRaw {
     #[serde(default)]
     signals: Option<Vec<OtlpSignal>>,
     #[serde(default)]
+    #[skippr(secret)]
     auth_token: Option<String>,
     /// `None` keeps all attributes. `Some([])` drops every attribute.
     #[serde(default)]

@@ -1,8 +1,9 @@
+use skippr_runtime_sdk::SkipprConfig;
 use serde::{Deserialize, Serialize};
 
 use crate::entity::EntityKind;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, SkipprConfig, PartialEq)]
 pub struct UpfoundryBacklinksConfig {
     pub site: String,
     #[serde(default)]

@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
@@ -25,12 +26,14 @@ use tracing::info;
 
 use crate::helpers::configuration::DataSinkPluginConfig;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSinkSftpPluginConfig {
     pub host: String,
     pub port: Option<u16>,
     pub username: String,
+    #[skippr(secret)]
     pub password: Option<String>,
+    #[skippr(secret_path)]
     pub private_key_path: Option<String>,
     pub remote_path: String,
     pub format: Option<String>,

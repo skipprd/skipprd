@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use serde::Deserialize;
 use serde_derive::Serialize;
 
@@ -238,11 +239,12 @@ impl Default for LimitsConfig {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, SkipprConfig, Serialize)]
 pub struct DataForSeoSeoOpportunitiesPluginConfig {
     #[serde(default)]
     pub login: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub password: Option<String>,
     pub site: String,
     #[serde(default = "default_location_code")]

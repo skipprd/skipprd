@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use serde::{Deserialize, Serialize};
 
 fn default_bucket_count() -> u32 {
@@ -24,7 +25,7 @@ fn default_sqs_visibility_timeout_seconds() -> i32 {
     14_400
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, SkipprConfig, PartialEq)]
 pub struct UpfoundryLinkGraphWatIndexConfig {
     #[serde(default)]
     pub crawl_id: String,

@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -54,20 +55,25 @@ struct GscNamespaceCheckpoint {
     last_completed_date: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, SkipprConfig)]
 pub struct DataSourceGoogleSearchConsolePluginConfig {
     pub site_url: String,
     #[serde(default)]
+    #[skippr(secret)]
     pub access_token: Option<String>,
     #[serde(default)]
+    #[skippr(not_secret)]
     pub oauth_token_url: Option<String>,
     #[serde(default)]
     pub oauth_client_id: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub oauth_client_secret: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub oauth_refresh_token: Option<String>,
     #[serde(default)]
+    #[skippr(secret_path)]
     pub service_account_json_path: Option<String>,
     pub start_date: String,
     #[serde(default)]

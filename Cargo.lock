@@ -11630,6 +11630,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippr-connect-gen"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "serde",
+ "serde_derive",
+ "syn 2.0.117",
+ "toml",
+ "walkdir",
+]
+
+[[package]]
 name = "skippr-core"
 version = "0.1.0"
 dependencies = [
@@ -11644,6 +11657,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "sha2 0.10.9",
+ "skippr-plugin-macros",
 ]
 
 [[package]]
@@ -13199,6 +13213,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippr-plugin-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "skippr-plugin-schema-sink-bigquery"
 version = "0.1.3"
 dependencies = [
@@ -13351,6 +13374,7 @@ dependencies = [
  "serde_derive",
  "serde_json",
  "skippr-core",
+ "skippr-plugin-macros",
  "tempfile",
  "tokio",
 ]
@@ -13484,6 +13508,7 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "pyo3",
+ "serde",
  "serde_json",
  "skipprd",
  "tokio",

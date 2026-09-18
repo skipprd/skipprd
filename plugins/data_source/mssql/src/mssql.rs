@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -15,8 +16,9 @@ use skippr_runtime_sdk::source_compat::{
     partition_already_closed, submit_payload_batch_groups, IngestBatch, SourceSyncContext,
 };
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSourceMssqlPluginConfig {
+    #[skippr(secret)]
     pub connection_string: String,
     pub tables: Option<Vec<String>>,
     pub batch_size_rows: Option<usize>,

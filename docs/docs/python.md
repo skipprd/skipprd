@@ -1,14 +1,14 @@
 ---
 title: Python
-description: skipprd Session — discover, sync, df, and query. Same engine as the CLI.
+description: skippr Session — discover, sync, df, and query. Same engine as the CLI.
 ---
 
 # Python
 
-`import skipprd` is the engine. YAML describes the pipeline. `Session` runs it. You get Arrow. dbt and Soda stay warehouse tools.
+`import skippr` is the engine. YAML describes the pipeline. `Session` runs it. You get Arrow. dbt and Soda stay warehouse tools.
 
 ```bash
-pip install skipprd
+pip install skippr
 ```
 
 The wheel and the CLI are the same engine. Connector plugins download on first use from `install.skippr.io`.
@@ -18,9 +18,9 @@ The wheel and the CLI are the same engine. Connector plugins download on first u
 ::: code-group
 
 ```python [Python]
-import skipprd
+import skippr
 
-s = skipprd.Session(config="skippr.yml", pipeline="bikehire")
+s = skippr.Session(pipeline="bikehire")
 s.doctor()
 s.discover()
 s.sync(once=True)
@@ -36,23 +36,82 @@ skipprd df --pipeline bikehire
 
 :::
 
-`pipeline=` is fixed at construction. Another pipeline is another `Session`. There is no process-wide pipeline name.
+`pipeline=` is required. `Session` auto-discovers `skippr.yml`. Another pipeline is another `Session`. There is no process-wide pipeline name.
+
+## Connect
+
+Module functions write root `skippr:` keys. `Session.connect()` writes plugin entries. There is no `skippr()` helper for YAML.
+
+```python
+import skippr
+from skippr import DataSource, DataSink, StorageMode
+
+(
+    skippr.workspace("bikehire")
+    .storage_mode(StorageMode.LOCAL)
+)
+
+s = skippr.Session(pipeline="bikehire")
+(
+    s.connect()
+    .data_source(DataSource.S3)
+    .name("sample")
+    .s3_bucket("bucket")
+    .s3_prefix("bike-hire")
+)
+s.discover()
+```
+
+Python persists when required fields are set. Secret fields must be `${ENV}` references — a Python string, quoted in the shell so the shell does not expand it.
+
+```python
+(
+    s.connect()
+    .data_sink(DataSink.Postgres)
+    .name("warehouse")
+    .host("localhost")
+    .user("skippr")
+    .password("${POSTGRES_PASSWORD}")
+    .database("analytics")
+)
+```
+
+```bash
+skipprd connect data-sink postgres \
+  --pipeline bikehire \
+  --name warehouse \
+  --host localhost \
+  --user skippr \
+  --password '${POSTGRES_PASSWORD}' \
+  --database analytics
+```
+
+See [`skipprd connect`](/cli/connect).
 
 ## Config without a file
 
-Constructor kwargs match `skippr.yml` fields. Secrets still come from `${ENV}` when you use YAML.
+Build a `Config` and pass it, or chain it onto the session. Either way it applies on run.
 
 ```python
-import skipprd
+import skippr
+from skippr import StorageMode
 
-s = skipprd.Session(
-    pipeline="bikehire",
-    skippr={"workspace": "dev", "skipprd_el_storage_mode": "local"},
-    pipelines={"bikehire": {"data_source": "data_sources.src"}},
-    data_sources={"src": {"File": {"path": "events.json"}}},
+cfg = (
+    skippr.Config()
+    .workspace("dev")
+    .storage_mode(StorageMode.LOCAL)
+    .pipelines({"bikehire": {"data_source": "data_sources.src"}})
+    .data_sources({"src": {"File": {"path": "events.json"}}})
 )
+
+s = skippr.Session(pipeline="bikehire", config=cfg)
 s.discover()
 s.sync(once=True)
+```
+
+```python
+s = skippr.Session(pipeline="bikehire").config(cfg)
+s.discover()
 ```
 
 ## df and query

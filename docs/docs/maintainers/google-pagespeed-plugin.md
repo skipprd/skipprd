@@ -47,9 +47,11 @@ Key: `google_pagespeed:run:{run_date}:{site}`. Value: completed `(canonical_url,
 ## CLI
 
 ```bash
-sde connect source google-pagespeed \
+skipprd connect data-source google-page-speed \
+  --pipeline pagespeed \
+  --name pagespeed \
   --site https://example.com \
-  --api-key "${PAGESPEED_API_KEY}"
+  --api-key '${PAGESPEED_API_KEY}'
 ```
 
 ## Tests
@@ -57,5 +59,4 @@ sde connect source google-pagespeed \
 ```bash
 export SKIPPR_GOOGLE_PAGESPEED_FIXTURE_DIR=plugins/data_source/google_pagespeed/fixtures
 cargo test -p skippr-plugin-data-source-google-pagespeed
-cargo test -p sde translate_google_pagespeed
 ```

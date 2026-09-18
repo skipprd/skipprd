@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
@@ -21,13 +22,15 @@ use skippr_runtime_sdk::source_compat::{
     SourceSyncContext,
 };
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Serialize, Clone)]
 pub struct DataSourcePostgresPluginConfig {
     pub host: Option<String>,
     pub port: Option<u16>,
     pub user: Option<String>,
+    #[skippr(secret)]
     pub password: Option<String>,
     pub database: Option<String>,
+    #[skippr(secret)]
     pub connection_string: Option<String>,
     pub tables: Option<Vec<String>>,
     pub query: Option<String>,

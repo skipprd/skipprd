@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use crate::helpers::configuration::DataSinkPluginConfig;
 use async_trait::async_trait;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -21,8 +22,9 @@ const DEFAULT_MAX_IN_FLIGHT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_IN_FLIGHT_ENV: &str = "SKIPPR_AMQP_MAX_IN_FLIGHT";
 const MAX_IN_FLIGHT_BYTES_ENV: &str = "SKIPPR_AMQP_MAX_IN_FLIGHT_BYTES";
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSinkAmqpPluginConfig {
+    #[skippr(secret)]
     pub connection_string: String,
     pub exchange: String,
     pub routing_key: Option<String>,

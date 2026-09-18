@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use async_trait::async_trait;
 use datafusion::arrow::array::*;
 use datafusion::arrow::datatypes::DataType as ArrowDataType;
@@ -163,11 +164,12 @@ impl super::cdc_apply::CdcApplyBackend for ClickhouseCdcBackend {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSinkClickhousePluginConfig {
     pub url: String,
     pub database: Option<String>,
     pub user: Option<String>,
+    #[skippr(secret)]
     pub password: Option<String>,
     pub table: Option<String>,
     pub format: Option<String>,

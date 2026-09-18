@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::collections::HashMap;
 
 use super::parquet_util::serialize_to_parquet;
@@ -30,11 +31,12 @@ impl super::cdc_apply::CdcApplyBackend for DatabricksCdcBackend {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSinkDatabricksPluginConfig {
     #[serde(default)]
     pub workspace_url: String,
     #[serde(default)]
+    #[skippr(secret)]
     pub token: String,
     pub warehouse_id: Option<String>,
     pub catalog: Option<String>,

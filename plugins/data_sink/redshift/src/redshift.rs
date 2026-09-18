@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_redshiftdata::Client as RedshiftClient;
@@ -33,7 +34,7 @@ impl super::cdc_apply::CdcApplyBackend for RedshiftCdcBackend {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSinkRedshiftPluginConfig {
     pub cluster_identifier: Option<String>,
     pub workgroup_name: Option<String>,

@@ -3,13 +3,14 @@
 //! CLI and Python both call this type. Process statics are not the product API.
 
 use std::io;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use arrow::array::RecordBatch;
 use arrow::compute::concat_batches;
 use datafusion::prelude::SessionConfig;
 
 use crate::cluster::validation::CliModeKind;
+use crate::connect;
 use crate::doctor::{self, DoctorResult};
 use crate::helpers::configuration::Config;
 use crate::helpers::wal_storage::WalStorage;
@@ -18,39 +19,102 @@ use crate::sqlrt::tables::register_namespace_view;
 
 #[derive(Clone, Debug)]
 pub struct Session {
+    pub path: Option<PathBuf>,
+    document: serde_yaml::Value,
     pub config: Config,
     pub pipeline: Option<String>,
 }
 
 impl Session {
     pub fn from_yml(path: impl AsRef<Path>, pipeline: Option<&str>) -> Result<Self, String> {
-        let config = Config::load_path(path.as_ref())?;
+        let path = path.as_ref();
+        let document = connect::load_document(path)?;
+        let config = if path.exists() {
+            Config::load_path(path)?
+        } else {
+            Config::new()
+        };
         Ok(Self {
+            path: Some(path.to_path_buf()),
+            document,
             config,
             pipeline: pipeline.map(str::to_string),
         })
     }
 
+    pub fn from_discovered(pipeline: Option<&str>) -> Result<Self, String> {
+        Self::from_yml(connect::discover_config_path(), pipeline)
+    }
+
     pub fn from_config(config: Config, pipeline: Option<&str>) -> Result<Self, String> {
         Ok(Self {
+            path: None,
+            document: serde_yaml::Value::Mapping(serde_yaml::Mapping::new()),
             config,
             pipeline: pipeline.map(str::to_string),
         })
+    }
+
+    pub fn set_config(&mut self, config: Config) {
+        self.path = None;
+        self.document = serde_yaml::Value::Mapping(serde_yaml::Mapping::new());
+        self.config = config;
+    }
+
+    pub fn document(&self) -> &serde_yaml::Value {
+        &self.document
+    }
+
+    pub fn connect_path(&self) -> PathBuf {
+        self.path
+            .clone()
+            .unwrap_or_else(connect::discover_config_path)
+    }
+
+    pub fn reload_from_document(
+        &mut self,
+        path: PathBuf,
+        document: serde_yaml::Value,
+    ) -> Result<(), String> {
+        self.path = Some(path.clone());
+        self.document = document;
+        if let Ok(config) = Config::load_path(&path) {
+            self.config = config;
+        }
+        Ok(())
+    }
+
+    pub fn require_pipeline(&self) -> Result<&str, String> {
+        self.pipeline
+            .as_deref()
+            .filter(|name| !name.is_empty())
+            .ok_or_else(|| "connect requires a pipeline".to_string())
+    }
+
+    fn runtime_config(&self) -> Config {
+        if let Some(path) = &self.path {
+            if path.exists() {
+                if let Ok(config) = Config::load_path(path) {
+                    return config;
+                }
+            }
+        }
+        self.config.clone()
     }
 
     fn pipeline_names(&self) -> Vec<String> {
         match &self.pipeline {
             Some(name) => vec![name.clone()],
-            None => self.config.pipelines.keys().cloned().collect(),
+            None => self.runtime_config().pipelines.keys().cloned().collect(),
         }
     }
 
     fn bound(&self, pipeline: &str) -> Config {
-        self.config.bind_pipeline(pipeline)
+        self.runtime_config().bind_pipeline(pipeline)
     }
 
     pub async fn doctor(&self) -> DoctorResult {
-        doctor::run(&self.config)
+        doctor::run(&self.runtime_config())
     }
 
     pub async fn discover(&self, output_mode: &str) -> io::Result<()> {
@@ -63,15 +127,16 @@ impl Session {
     }
 
     pub async fn sync(&self, once: bool, output_mode: &str) -> io::Result<()> {
-        if self.config.get_wal_storage() == WalStorage::Clustered {
+        let config = self.runtime_config();
+        if config.get_wal_storage() == WalStorage::Clustered {
             let cluster = crate::cluster::validation::validate_clustered_mode(
-                &self.config,
+                &config,
                 WalStorage::Clustered,
                 CliModeKind::Sync { once },
             )
             .map_err(|e| io::Error::other(e.to_string()))?
             .ok_or_else(|| io::Error::other("clustered mode produced no ClusterConfig"))?;
-            crate::cluster::scheduler::run_clustered(self.config.clone(), cluster)
+            crate::cluster::scheduler::run_clustered(config, cluster)
                 .await
                 .map_err(|e| io::Error::other(e.to_string()))?;
             return Ok(());
@@ -87,7 +152,7 @@ impl Session {
     fn query_config(&self) -> Config {
         match &self.pipeline {
             Some(name) => self.bound(name),
-            None => self.config.clone(),
+            None => self.runtime_config(),
         }
     }
 
@@ -400,5 +465,8 @@ mod tests {
         let overview = include_str!("../docs/docs/cli/overview.md");
         assert!(overview.contains("](doctor.md)"));
         assert!(overview.contains("](df.md)"));
+        let connect = include_str!("../docs/docs/cli/connect.md");
+        assert!(connect.contains("skipprd connect"));
+        assert!(overview.contains("](connect.md)"));
     }
 }

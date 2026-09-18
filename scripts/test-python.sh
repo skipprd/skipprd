@@ -10,6 +10,6 @@ source .venv-python/bin/activate
 python -m pip install -U pip
 python -m pip install "maturin>=1.7,<2" "pyarrow>=17" pytest
 maturin develop
-python -m pytest python/tests/test_session.py
+python -m pytest python/tests
 maturin build --out target/wheels
 ls target/wheels/*.whl

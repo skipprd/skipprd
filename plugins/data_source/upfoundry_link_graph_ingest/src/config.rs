@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use serde::{Deserialize, Serialize};
 
 fn default_true() -> bool {
@@ -32,7 +33,7 @@ fn default_cc_index_source() -> String {
     "local_urls_index".into()
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, SkipprConfig, PartialEq)]
 pub struct UpfoundryLinkGraphIngestConfig {
     /// Ops corpus bucket, e.g. upfoundry-prod-ops
     pub ops_bucket: String,

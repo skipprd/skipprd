@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
@@ -17,7 +18,7 @@ use skippr_runtime_sdk::plugins::{DataSource, SourceExecutionContract, SourceOnc
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch, SourceSyncContext};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSourceKinesisPluginConfig {
     pub stream_name: String,
     pub region: Option<String>,

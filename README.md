@@ -13,7 +13,7 @@ Licensor Line of Business: Skipprd ELT engine (https://elt.skippr.io)
 Docs: [elt.skippr.io](https://elt.skippr.io) | SQL reference: [sql-docs.md](sql-docs.md) | Performance notes: [PERFORMANCE.md](PERFORMANCE.md) | AI agent guidance: [AGENTS.md](AGENTS.md)
 
 ```bash
-pip install skipprd
+pip install skippr
 ```
 
 ```bash
@@ -27,7 +27,7 @@ Or download linux x86_64 / darwin arm64 tarballs from [GitHub Releases](https://
 curl -sL https://raw.githubusercontent.com/skipprd/skipprd/main/install.sh | sh
 ```
 
-Cloud `skippr` is a different binary ([install.skippr.io](https://install.skippr.io)). Data Engineer is [`sde`](https://data-engineer.skippr.io). Managed Cloud ELT is [skippr.io/elt](https://skippr.io/elt/).
+Cloud `skippr-cloud` is a different binary ([install.skippr.io](https://install.skippr.io)). Data Engineer is [`sde`](https://data-engineer.skippr.io). Managed Cloud ELT is [skippr.io/elt](https://skippr.io/elt/).
 
 ## Repository structure
 

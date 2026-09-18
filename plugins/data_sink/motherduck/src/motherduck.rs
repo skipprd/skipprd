@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use async_trait::async_trait;
 use datafusion::arrow::array::*;
 use datafusion::arrow::datatypes::DataType as ArrowDataType;
@@ -28,8 +29,9 @@ impl super::cdc_apply::CdcApplyBackend for MotherduckCdcBackend {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSinkMotherduckPluginConfig {
+    #[skippr(secret)]
     pub motherduck_token: String,
     pub database: Option<String>,
     pub table: Option<String>,

@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -49,17 +50,20 @@ struct AsaNamespaceCheckpoint {
     last_completed_date: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, SkipprConfig)]
 pub struct DataSourceAppleSearchAdsPluginConfig {
     pub org_id: String,
     pub client_id: String,
     pub team_id: String,
     pub key_id: String,
     #[serde(default)]
+    #[skippr(secret_path)]
     pub private_key_path: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub private_key_pem: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub access_token: Option<String>,
     pub start_date: String,
     #[serde(default)]

@@ -82,7 +82,6 @@ The worker script is resolved automatically (plugin crate `worker/`, skipprd rep
 ```bash
 cargo build -p skippr-plugin-data-source-site-quality
 cargo test -p skippr-plugin-data-source-site-quality
-cargo test -p sde translate_site_quality_source
 ```
 
 Fixture-only sync (no live browser):
@@ -100,7 +99,9 @@ skipprd sync --once --pipeline my_pipeline
 ## CLI
 
 ```bash
-sde connect source site-quality \
+skipprd connect data-source site-quality \
+  --pipeline site_quality \
+  --name site_quality \
   --site https://example.com \
   --url-mode tld_sample \
   --max-pages-per-run 50

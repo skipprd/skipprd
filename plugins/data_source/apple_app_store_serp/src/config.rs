@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use serde::Deserialize;
 use serde_derive::Serialize;
 
@@ -51,7 +52,7 @@ impl Default for AppStoreEntity {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, SkipprConfig, Serialize)]
 pub struct DataSourceAppleAppStoreSerpPluginConfig {
     pub targets: Vec<TargetEntry>,
     pub keywords: Vec<String>,

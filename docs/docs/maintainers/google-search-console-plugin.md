@@ -58,11 +58,13 @@ See `plugins/data_source/google_search_console/tests/fixtures/`.
 ## CLI
 
 ```bash
-sde connect source google-search-console \
+skipprd connect data-source google-search-console \
+  --pipeline gsc \
+  --name gsc \
   --site-url "https://example.com/" \
   --start-date 2024-01-01 \
   --stream-profile standard \
-  --access-token "${GSC_ACCESS_TOKEN}"
+  --access-token '${GSC_ACCESS_TOKEN}'
 ```
 
 ## Checklist
@@ -70,6 +72,5 @@ sde connect source google-search-console \
 - [x] `source_namespace_contracts()` + `replace_partition` on `date`
 - [x] Per-namespace checkpoints (`last_completed_date`)
 - [x] `skippr_plugin_name`: `google_search_console` → `GoogleSearchConsole`
-- [x] `translate_google_search_console_source` test in `sde`
 
 See [API / SaaS source plugins](api-saas-source-plugins.md) and [GA4 plugin](../connectors/inputs/google_analytics.md) for shared patterns.

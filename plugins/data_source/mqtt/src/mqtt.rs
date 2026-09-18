@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -13,7 +14,7 @@ use skippr_runtime_sdk::plugins::{DataSource, SourceExecutionContract, SourceOnc
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch, SourceSyncContext};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSourceMqttPluginConfig {
     pub broker_url: String,
     pub port: Option<u16>,
@@ -21,6 +22,7 @@ pub struct DataSourceMqttPluginConfig {
     pub client_id: Option<String>,
     pub qos: Option<u8>,
     pub username: Option<String>,
+    #[skippr(secret)]
     pub password: Option<String>,
     pub mode: Option<String>,
     pub idle_timeout_seconds: Option<u64>,

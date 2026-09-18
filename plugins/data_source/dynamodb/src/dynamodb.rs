@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
@@ -37,7 +38,7 @@ struct DynamodbSnapshotCheckpoint {
     stream_arn: String,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSourceDynamodbPluginConfig {
     pub table_name: String,
     pub region: Option<String>,

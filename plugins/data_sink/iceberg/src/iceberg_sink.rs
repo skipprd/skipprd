@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
 use std::path::PathBuf;
@@ -79,7 +80,7 @@ use skippr_runtime_sdk::protocol::{
 use skippr_runtime_sdk::sink_compat::BufferChunker;
 use skippr_runtime_sdk::sink_idempotency::{manifest_object_name, ObjectWriteManifest};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSinkIcebergPluginConfig {
     pub catalog: IcebergCatalogConfig,
     #[serde(default)]
