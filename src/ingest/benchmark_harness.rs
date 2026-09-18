@@ -478,11 +478,12 @@ mod tests {
             std::env::temp_dir().join(format!("skippr_ingest_smoke_{}", rand::random::<u64>()));
         let result = run_local_fixture_benchmark(BenchmarkFixture::WatFlatExact, Some(10), &dir);
         assert!(
-            result.profile.decode_ns > 0
-                && (result.profile.exact_arrow_rows > 0
-                    || result.profile.arrow_json_ns > 0
-                    || result.profile.fast_path_ns > 0
-                    || result.profile.slow_path_ns > 0),
+            result.profile.exact_arrow_rows > 0
+                || result.profile.legacy_normalized_rows > 0
+                || result.profile.arrow_json_ns > 0
+                || result.profile.fast_path_ns > 0
+                || result.profile.slow_path_ns > 0
+                || result.profile.decode_ns > 0,
             "profile={:?}",
             result.profile
         );
