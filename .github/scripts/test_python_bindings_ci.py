@@ -37,6 +37,8 @@ def load_wheel_version():
 class PythonBindingsCiTests(unittest.TestCase):
     def test_ci_runs_python_binding_script(self):
         text = CI.read_text(encoding="utf-8")
+        self.assertTrue(text.startswith("name: Python CI/CD Pipeline\n"))
+        self.assertEqual(CI.name, "ci.yml")
         self.assertIn("scripts/test-python.sh", text)
         self.assertIn("cargo test -p skipprd --lib", text)
         self.assertNotIn("cargo test --workspace", text)
