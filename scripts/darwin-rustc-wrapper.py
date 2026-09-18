@@ -14,11 +14,29 @@ import sys
 DROP = {"link-arg=-undefined", "link-arg=dynamic_lookup"}
 
 
+KEEP_CRATE_TYPES = {"cdylib", "dylib", "proc-macro"}
+
+
 def crate_name(args: list[str]) -> str | None:
     for index, arg in enumerate(args):
         if arg == "--crate-name" and index + 1 < len(args):
             return args[index + 1]
     return None
+
+
+def crate_types(args: list[str]) -> set[str]:
+    types: set[str] = set()
+    index = 0
+    while index < len(args):
+        arg = args[index]
+        if arg == "--crate-type" and index + 1 < len(args):
+            types.add(args[index + 1])
+            index += 2
+            continue
+        if arg.startswith("--crate-type="):
+            types.add(arg.split("=", 1)[1])
+        index += 1
+    return types
 
 
 def strip_cdylib_link_args(args: list[str]) -> list[str]:
@@ -36,10 +54,14 @@ def strip_cdylib_link_args(args: list[str]) -> list[str]:
 def main() -> None:
     if len(sys.argv) < 2:
         sys.exit("darwin-rustc-wrapper: rustc is required")
-    rustc = sys.argv[1]
-    args = sys.argv[2:]
-    name = crate_name(args)
-    if name == "build_script_build" or (name is not None and name.startswith("build_script_")):
+    # RUSTC_WRAPPER: wrapper rustc <args>. RUSTC: wrapper <args>.
+    if os.path.basename(sys.argv[1]) in {"rustc", "rustc.exe"} or "rustc" in sys.argv[1]:
+        rustc = sys.argv[1]
+        args = sys.argv[2:]
+    else:
+        rustc = "rustc"
+        args = sys.argv[1:]
+    if not KEEP_CRATE_TYPES.intersection(crate_types(args)):
         args = strip_cdylib_link_args(args)
     os.execvp(rustc, [rustc, *args])
 

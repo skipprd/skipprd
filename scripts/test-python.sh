@@ -16,6 +16,10 @@ if [ "$(uname -s)" = Darwin ]; then
   export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/var/tmp/cargo-target}-maturin"
   export RUSTC_WRAPPER="$ROOT/scripts/darwin-rustc-wrapper.py"
   chmod +x "$RUSTC_WRAPPER"
+  mkdir -p "$ROOT/.cargo"
+  if ! grep -q rustc-wrapper "$ROOT/.cargo/config.toml" 2>/dev/null; then
+    printf '\n[build]\nrustc-wrapper = "%s"\n' "$RUSTC_WRAPPER" >>"$ROOT/.cargo/config.toml"
+  fi
 fi
 maturin develop
 python -m pytest python/tests

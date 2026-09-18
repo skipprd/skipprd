@@ -54,6 +54,7 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("CARGO_TARGET_DIR", script)
         self.assertIn("RUSTC_WRAPPER", script)
         self.assertIn("darwin-rustc-wrapper.py", script)
+        self.assertIn("rustc-wrapper", script)
 
     def test_ci_builds_on_skippr_cloud_runners(self):
         text = CI.read_text(encoding="utf-8")
@@ -178,6 +179,8 @@ class PythonBindingsCiTests(unittest.TestCase):
         args = [
             "--crate-name",
             "build_script_build",
+            "--crate-type",
+            "bin",
             "-C",
             "link-arg=-undefined",
             "-C",
@@ -185,11 +188,26 @@ class PythonBindingsCiTests(unittest.TestCase):
             "-C",
             "debuginfo=2",
         ]
+        self.assertEqual(module.crate_types(args), {"bin"})
         self.assertEqual(
             module.strip_cdylib_link_args(args),
-            ["--crate-name", "build_script_build", "-C", "debuginfo=2"],
+            [
+                "--crate-name",
+                "build_script_build",
+                "--crate-type",
+                "bin",
+                "-C",
+                "debuginfo=2",
+            ],
         )
-        self.assertEqual(module.crate_name(args), "build_script_build")
+        cdylib = [
+            "--crate-type",
+            "cdylib",
+            "-C",
+            "link-arg=-undefined",
+        ]
+        self.assertEqual(module.crate_types(cdylib), {"cdylib"})
+        self.assertTrue(module.KEEP_CRATE_TYPES.intersection(module.crate_types(cdylib)))
 
 
 if __name__ == "__main__":
