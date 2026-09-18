@@ -49,6 +49,9 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("maturin develop", script)
         self.assertIn("python/tests", script)
         self.assertIn("maturin build", script)
+        self.assertIn("Darwin", script)
+        self.assertIn("CARGO_TARGET_DIR", script)
+        self.assertIn("maturin", script)
 
     def test_ci_builds_on_skippr_cloud_runners(self):
         text = CI.read_text(encoding="utf-8")
