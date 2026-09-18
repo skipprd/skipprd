@@ -483,7 +483,8 @@ mod tests {
                 || result.profile.arrow_json_ns > 0
                 || result.profile.fast_path_ns > 0
                 || result.profile.slow_path_ns > 0
-                || result.profile.decode_ns > 0,
+                || result.profile.decode_ns > 0
+                || result.profile.exact_plan_ns > 0,
             "profile={:?}",
             result.profile
         );
