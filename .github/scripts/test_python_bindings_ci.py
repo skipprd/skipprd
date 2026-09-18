@@ -13,6 +13,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[2]
 CI = ROOT / ".github" / "workflows" / "ci.yml"
 TEST_PYTHON = ROOT / "scripts" / "test-python.sh"
+DARWIN_RUSTC_WRAPPER = ROOT / "scripts" / "darwin-rustc-wrapper.py"
 SET_VERSION = ROOT / ".github" / "scripts" / "set_root_package_version.py"
 PYTHON_CARGO = ROOT / "python" / "Cargo.toml"
 WHEEL_VERSION = ROOT / ".github" / "scripts" / "python_wheel_version.py"
@@ -51,7 +52,8 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("maturin build", script)
         self.assertIn("Darwin", script)
         self.assertIn("CARGO_TARGET_DIR", script)
-        self.assertIn("maturin", script)
+        self.assertIn("RUSTC_WRAPPER", script)
+        self.assertIn("darwin-rustc-wrapper.py", script)
 
     def test_ci_builds_on_skippr_cloud_runners(self):
         text = CI.read_text(encoding="utf-8")
@@ -165,6 +167,29 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertEqual(module.normalize_semver("1.2.3"), "1.2.3")
         with self.assertRaises(SystemExit):
             module.normalize_semver("v0.0.0-rc1")
+
+    def test_darwin_rustc_wrapper_strips_cdylib_flags_from_build_scripts(self):
+        spec = importlib.util.spec_from_file_location(
+            "darwin_rustc_wrapper", DARWIN_RUSTC_WRAPPER
+        )
+        module = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+        args = [
+            "--crate-name",
+            "build_script_build",
+            "-C",
+            "link-arg=-undefined",
+            "-C",
+            "link-arg=dynamic_lookup",
+            "-C",
+            "debuginfo=2",
+        ]
+        self.assertEqual(
+            module.strip_cdylib_link_args(args),
+            ["--crate-name", "build_script_build", "-C", "debuginfo=2"],
+        )
+        self.assertEqual(module.crate_name(args), "build_script_build")
 
 
 if __name__ == "__main__":
