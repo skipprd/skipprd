@@ -14,6 +14,8 @@ python -m pip install "maturin>=1.7,<2" "pyarrow>=17" pytest
 # with `cannot execute binary file` (ENOEXEC). Isolate maturin artifacts.
 if [ "$(uname -s)" = Darwin ]; then
   export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/var/tmp/cargo-target}-maturin"
+  export RUSTC_WRAPPER="$ROOT/scripts/darwin-rustc-wrapper.py"
+  chmod +x "$RUSTC_WRAPPER"
 fi
 maturin develop
 python -m pytest python/tests
