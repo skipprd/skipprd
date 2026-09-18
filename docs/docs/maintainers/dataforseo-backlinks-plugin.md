@@ -68,11 +68,12 @@ Set `SKIPPR_DATAFORSEO_BACKLINKS_FIXTURE_DIR` to the crate `fixtures/` directory
 ## CLI
 
 ```bash
-sde connect source dataforseo-backlinks \
-  --login "${DATAFORSEO_API_USER}" \
-  --password "${DATAFORSEO_API_PASS}" \
-  --site example.com \
-  --backlink-target example.com
+skipprd connect data-source data-for-seo-backlinks \
+  --pipeline backlinks \
+  --name backlinks \
+  --login '${DATAFORSEO_API_USER}' \
+  --password '${DATAFORSEO_API_PASS}' \
+  --site example.com
 ```
 
-For `competitors`, `streams`, `intersection_jobs`, and multiple `backlink_jobs`, edit engine `skippr.yml` under `DataForSeoBacklinks:`.
+List fields (`competitors`, `streams`, `intersection_jobs`, `backlink_jobs`) stay in engine `skippr.yml` under `DataForSeoBacklinks:`.

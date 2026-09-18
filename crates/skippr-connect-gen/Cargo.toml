@@ -1,0 +1,18 @@
+[package]
+name = "skippr-connect-gen"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "skippr-connect-gen"
+path = "src/main.rs"
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+syn = { version = "2", features = ["full", "parsing", "extra-traits"] }
+toml = "0.8"
+walkdir = "2"
+serde = { version = "1", features = ["derive"] }
+serde_derive = "1"

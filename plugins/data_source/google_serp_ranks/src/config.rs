@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use serde::Deserialize;
 use serde_derive::Serialize;
 
@@ -39,7 +40,7 @@ impl Default for SerpDevice {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, SkipprConfig, Serialize)]
 pub struct DataSourceGoogleSerpRanksPluginConfig {
     pub targets: Vec<TargetEntry>,
     pub keywords: Vec<String>,

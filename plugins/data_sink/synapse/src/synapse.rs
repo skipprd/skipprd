@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use crate::helpers::configuration::DataSinkPluginConfig;
 use async_trait::async_trait;
 use dashmap::DashSet;
@@ -66,8 +67,9 @@ impl super::cdc_apply::CdcApplyBackend for SynapseCdcBackend {
     }
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSinkSynapsePluginConfig {
+    #[skippr(secret)]
     pub connection_string: String,
     pub schema: Option<String>,
     pub table: Option<String>,

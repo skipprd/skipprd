@@ -19,6 +19,7 @@ pub use skippr_core::RUNNING;
 pub use skippr_core::{
     buffer, converters, discover, helpers, ingest, lineage, metrics, plugins, serdes,
 };
+pub use skippr_plugin_macros::SkipprConfig;
 
 #[macro_export]
 macro_rules! declare_sink_spec {

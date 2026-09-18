@@ -20,12 +20,13 @@ use skippr_runtime_sdk::sink_idempotency::{
     legacy_chunk_idempotency_key, persisted_object_write_matches, sidecar_manifest_object_key,
     GroupedWriteReceipt, ObjectWriteManifest,
 };
+use skippr_runtime_sdk::SkipprConfig;
 use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
 use tracing::info;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSinkS3PluginConfig {
     pub format: Option<String>,
     pub endpoint_url: Option<String>,
@@ -426,7 +427,9 @@ impl DataSinkS3Plugin {
         }
 
         let filename_owned = filename.to_string();
-        if let Ok(k) = TimePartitioner::new(&filename_owned).process() {
+        if let Ok(k) = TimePartitioner::new(&filename_owned)
+            .process(&skippr_runtime_sdk::helpers::configuration::Config::new())
+        {
             full_key = format!("{}/{}", full_key, k);
         }
 
@@ -572,7 +575,10 @@ impl DataSinkS3Plugin {
 
         let schema = stream.schema();
         let order_fields =
-            skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order(&schema);
+            skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order(
+                &skippr_runtime_sdk::helpers::configuration::Config::new(),
+                &schema,
+            );
         let writer_properties =
             skippr_runtime_sdk::converters::parquet_ordering::build_writer_properties(
                 &schema,

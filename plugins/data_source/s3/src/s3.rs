@@ -1,5 +1,6 @@
 use crate::helpers::plugin_config::PluginConfigEntry;
 use async_trait::async_trait;
+use skippr_runtime_sdk::SkipprConfig;
 
 use aws_sdk_s3::Client;
 
@@ -20,6 +21,7 @@ use skippr_runtime_sdk::source_sync::offset_validation_entry;
 
 use crate::helpers::Helpers;
 use futures::stream::{self, StreamExt};
+use skippr_runtime_sdk::helpers::configuration::Config;
 use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::protocol::RuntimeExecutionContext;
 use std::io::BufRead as _;
@@ -74,7 +76,7 @@ fn runtime_log_wal_enabled() -> bool {
     env_truthy("LOG_WAL") || env_truthy("LOG_WAL_DEBUG") || env_truthy("LOG_WAL_UPLOADS")
 }
 
-#[derive(Deserialize, Debug, Clone)]
+#[derive(Deserialize, SkipprConfig, Debug, Clone)]
 pub struct DataSourceS3PluginConfig {
     pub format: Option<String>,
     pub batch_size_seconds: Option<i64>,
@@ -166,6 +168,7 @@ impl DataSourceS3Plugin {
         let s3_bucket_dl = s3_bucket.clone();
         let s3_bucket_outer = s3_bucket_dl.clone();
         let s3_bucket_ns = s3_bucket.clone();
+        let ingest_config = Config::new();
         let delimiter = "/".to_string();
         let inventory_prefix = self.config.s3_prefix.clone();
         let total_cpus = num_cpus::get();
@@ -236,6 +239,7 @@ impl DataSourceS3Plugin {
                     // Match the key host ingest uses after the runtime wire round-trip
                     // (normalize twice). Existing Closed offsets were written under that form.
                     let offset_key = IngestBatch::runtime_roundtrip_offset_key(
+                        &ingest_config,
                         s3_bucket_filter.clone(),
                         key.clone(),
                     );
@@ -519,6 +523,7 @@ impl DataSourceS3Plugin {
                 current_bytes += bytes;
                 let source_uri = format!("s3://{}/{}", s3_bucket_outer, key);
                 current_batch.push(IngestBatch::new(
+                    &ingest_config,
                     OffsetKey {
                         namespace: s3_bucket_ns.clone(),
                         partition: key,

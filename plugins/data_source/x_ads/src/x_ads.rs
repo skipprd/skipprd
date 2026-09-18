@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use crate::streams::{resolve_streams, StreamProfile, XAdsStreamDef, XAdsStreamKind};
 use crate::x_ads_api::{normalize_account_id, parse_rows, XAdsApiClient, XOAuth1Credentials};
 use async_trait::async_trait;
@@ -24,22 +25,28 @@ const DISCOVER_SAMPLE_DAYS: u32 = 3;
 struct XAdsCheckpoint {
     last_completed_date: String,
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, SkipprConfig)]
 pub struct DataSourceXAdsPluginConfig {
     pub account_id: String,
     #[serde(default)]
     pub ad_account_id: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub bearer_token: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub access_token: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub oauth_consumer_key: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub oauth_consumer_secret: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub oauth_token: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub oauth_token_secret: Option<String>,
     pub start_date: String,
     #[serde(default)]

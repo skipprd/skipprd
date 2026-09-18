@@ -68,8 +68,10 @@ async fn serialize_to_parquet_inner(
         None => first_batch,
     };
     let schema = first_batch.schema();
-    let order_fields =
-        skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order(&schema);
+    let order_fields = skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order(
+        &skippr_runtime_sdk::helpers::configuration::Config::new(),
+        &schema,
+    );
     let props = skippr_runtime_sdk::converters::parquet_ordering::build_writer_properties(
         &schema,
         &order_fields,

@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -35,21 +36,26 @@ struct GoogleAdsNamespaceCheckpoint {
     last_completed_date: String,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, SkipprConfig)]
 pub struct DataSourceGoogleAdsPluginConfig {
     pub customer_id: String,
+    #[skippr(secret)]
     pub developer_token: String,
     #[serde(default)]
     pub login_customer_id: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub access_token: Option<String>,
     #[serde(default)]
+    #[skippr(not_secret)]
     pub oauth_token_url: Option<String>,
     #[serde(default)]
     pub oauth_client_id: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub oauth_client_secret: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub oauth_refresh_token: Option<String>,
     #[serde(default)]
     pub api_version: Option<String>,

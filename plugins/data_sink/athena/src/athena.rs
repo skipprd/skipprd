@@ -28,6 +28,7 @@ use skippr_runtime_sdk::sink_idempotency::{
     legacy_chunk_idempotency_key, sidecar_manifest_object_key, GroupedWriteReceipt,
     ObjectWriteManifest,
 };
+use skippr_runtime_sdk::SkipprConfig;
 
 use arrow::array::RecordBatch;
 use arrow::util::display::array_value_to_string;
@@ -225,7 +226,7 @@ fn maybe_restore_glue_cp_target() {
     );
 }
 
-#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone, PartialEq, Eq)]
 pub struct DataSinkAthenaPluginConfig {
     pub format: Option<String>,
     // pub batch_size_seconds: Option<i64>,
@@ -547,7 +548,10 @@ impl InstalledAthenaSchemaState {
 
 fn is_deadletter_athena_target(binding: RuntimeBinding, namespace: &str) -> bool {
     binding == RuntimeBinding::Deadletter
-        && namespace == skippr_runtime_sdk::sink_compat::deadletter::table_name()
+        && namespace
+            == skippr_runtime_sdk::sink_compat::deadletter::table_name(
+                &skippr_runtime_sdk::helpers::configuration::Config::new(),
+            )
 }
 
 fn deadletter_output_metadata() -> OutputMetadata {
@@ -1806,12 +1810,12 @@ impl DataSinkAthenaPlugin {
         {
             let ns = namespace.to_string();
             let prefix_for_manifest = abs_prefix.clone();
-            let pipeline_name = self.context.pipeline_name.clone();
             tokio::spawn(async move {
                 crate::helpers::manifest::Manifest::ensure_prefix_and_db(
+                    &crate::helpers::configuration::Config::new(),
                     &ns,
                     &prefix_for_manifest,
-                    &pipeline_name,
+                    "",
                 )
                 .await;
             });
@@ -2600,7 +2604,10 @@ impl AwsAthena {
                 Some(index) => format!("p_{}", &field_dot[index + 1..]),
                 None => format!("p_{}", field_dot),
             };
-            let clean_field_name = Helpers::clean_field_name(entity_name.to_string());
+            let clean_field_name = Helpers::clean_field_name(
+                &crate::helpers::configuration::Config::new(),
+                entity_name.to_string(),
+            );
 
             partitions.push(
                 Column::builder()
@@ -3063,7 +3070,10 @@ fn build_glue_partition_keys(
     partition_columns_override: Option<&[Column]>,
 ) -> Vec<Column> {
     let is_deadletter = binding == RuntimeBinding::Deadletter
-        && namespace == skippr_runtime_sdk::sink_compat::deadletter::table_name();
+        && namespace
+            == skippr_runtime_sdk::sink_compat::deadletter::table_name(
+                &skippr_runtime_sdk::helpers::configuration::Config::new(),
+            );
     if is_deadletter {
         return Vec::new();
     }

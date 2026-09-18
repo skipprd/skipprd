@@ -18,6 +18,7 @@ pub enum CliModeKind {
     Schema,
     SqlHelp,
     Benchmark,
+    Connect,
 }
 
 impl CliModeKind {
@@ -32,6 +33,7 @@ impl CliModeKind {
             Mode::Benchmark(_) => Self::Benchmark,
             Mode::Doctor(_) => Self::SqlHelp,
             Mode::Df(_) => Self::Query,
+            Mode::Connect(_) => Self::Connect,
         }
     }
 
@@ -45,6 +47,7 @@ impl CliModeKind {
             Self::Schema => "schema",
             Self::SqlHelp => "sql-help",
             Self::Benchmark => "benchmark",
+            Self::Connect => "connect",
         }
     }
 }
@@ -91,7 +94,10 @@ pub fn validate_wal_storage_for_mode(
             CliModeKind::Metadata => Err(ConfigError::ClusteredModeRejected("metadata".into())),
             CliModeKind::Benchmark => Err(ConfigError::ClusteredModeRejected("benchmark".into())),
             CliModeKind::Schema => Err(ConfigError::ClusteredModeRejected("schema".into())),
-            CliModeKind::Sync { once: false } | CliModeKind::Query | CliModeKind::SqlHelp => Ok(()),
+            CliModeKind::Sync { once: false }
+            | CliModeKind::Query
+            | CliModeKind::SqlHelp
+            | CliModeKind::Connect => Ok(()),
         },
     }
 }
@@ -247,7 +253,10 @@ pub fn validate_clustered_mode(
             let table = config.get_offset_dynamodb_table();
             validate_configured_offset_store(config, storage)?;
             validate_skippr_catalog_tables(config, &table)?;
-            let lock_data_dir = !matches!(mode, CliModeKind::Query | CliModeKind::SqlHelp);
+            let lock_data_dir = !matches!(
+                mode,
+                CliModeKind::Query | CliModeKind::SqlHelp | CliModeKind::Connect
+            );
             if lock_data_dir {
                 for name in config.pipelines.keys() {
                     PipelineConfigView::for_name(config, name)?.validate_clustered_sink()?;

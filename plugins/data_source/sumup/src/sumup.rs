@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -30,7 +31,7 @@ use crate::sumup_api::{
     DEFAULT_TOKEN_URL, FIXTURE_ENV,
 };
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, SkipprConfig)]
 pub struct DataSourceSumUpPluginConfig {
     pub merchant_code: String,
     pub start_date: String,
@@ -43,14 +44,18 @@ pub struct DataSourceSumUpPluginConfig {
     #[serde(default = "default_min_query_interval_ms")]
     pub min_query_interval_ms: u64,
     #[serde(default = "default_oauth_token_url")]
+    #[skippr(not_secret)]
     pub oauth_token_url: String,
     #[serde(default)]
     pub oauth_client_id: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub oauth_client_secret: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub oauth_refresh_token: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub access_token: Option<String>,
     #[serde(default)]
     pub privacy: PrivacyConfig,

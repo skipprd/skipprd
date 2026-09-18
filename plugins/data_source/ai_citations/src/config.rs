@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use serde::Deserialize;
 use serde_derive::Serialize;
 
@@ -13,7 +14,7 @@ pub struct TrackedPrompt {
     pub intent: Option<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, SkipprConfig)]
 pub struct DataSourceAiCitationsPluginConfig {
     pub site: String,
     #[serde(default)]

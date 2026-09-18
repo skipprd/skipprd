@@ -1,4 +1,5 @@
 use clap::ValueEnum;
+use serde_derive::{Deserialize, Serialize};
 use std::fmt;
 use std::str::FromStr;
 
@@ -56,12 +57,54 @@ impl FromStr for WalStorage {
     }
 }
 
+/// Extract/load metadata storage selected by `skippr.skipprd_el_storage_mode`.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ElStorageMode {
+    Local,
+    #[default]
+    S3,
+}
+
+impl ElStorageMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Local => "local",
+            Self::S3 => "s3",
+        }
+    }
+}
+
+impl fmt::Display for ElStorageMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ElStorageMode {
+    type Err = ConfigError;
+
+    fn from_str(raw: &str) -> Result<Self, Self::Err> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "local" => Ok(Self::Local),
+            "s3" | "" => Ok(Self::S3),
+            other => Err(ConfigError::InvalidElStorageMode(other.to_owned())),
+        }
+    }
+}
+
 /// Offset/checkpoint backend selected by `SKIPPR_OFFSET_STORE`.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, Deserialize, Serialize)]
 pub enum OffsetStoreKind {
     #[default]
+    #[serde(rename = "sled")]
+    #[value(name = "sled")]
     Sled,
+    #[serde(rename = "dynamodb")]
+    #[value(name = "dynamodb")]
     DynamoDb,
+    #[serde(rename = "cloud-tables", alias = "cloud_tables", alias = "tables")]
+    #[value(name = "cloud-tables")]
     CloudTables,
 }
 
@@ -99,6 +142,8 @@ impl FromStr for OffsetStoreKind {
 pub enum ConfigError {
     #[error("invalid WAL_STORAGE value '{0}'; expected disk, s3, or clustered")]
     InvalidWalStorage(String),
+    #[error("invalid skipprd_el_storage_mode value '{0}'; expected local or s3")]
+    InvalidElStorageMode(String),
     #[error("invalid SKIPPR_OFFSET_STORE value '{0}'; expected sled, dynamodb, or cloud-tables")]
     InvalidOffsetStore(String),
     #[error("WAL_STORAGE=clustered requires skipprd built with --features offset-store-dynamodb or offset-store-cloud-tables")]
@@ -168,6 +213,16 @@ mod tests {
             Err(ConfigError::InvalidWalStorage(value)) => assert_eq!(value, "memory"),
             other => panic!("unexpected parse result: {other:?}"),
         }
+    }
+
+    #[test]
+    fn parses_el_storage_mode() {
+        assert_eq!(
+            "local".parse::<ElStorageMode>().unwrap(),
+            ElStorageMode::Local
+        );
+        assert_eq!("S3".parse::<ElStorageMode>().unwrap(), ElStorageMode::S3);
+        assert!("memory".parse::<ElStorageMode>().is_err());
     }
 
     #[test]

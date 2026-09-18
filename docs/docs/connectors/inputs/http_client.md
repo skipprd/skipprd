@@ -51,8 +51,9 @@ The relevant part of `skippr.yml` looks like this:
 data_sources:
   source:
     HttpClient:
-      auth_strategy: bearer
-      auth_token: "${HTTP_CLIENT_AUTH_TOKEN}"
+      auth:
+        strategy: bearer
+        token: "${HTTP_CLIENT_AUTH_TOKEN}"
 ```
 
 Set the env var before running `skipprd`:

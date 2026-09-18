@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 #[path = "../../../shared/cdc_encode.rs"]
 mod cdc_encode;
 
@@ -32,7 +33,7 @@ use tracing::error;
 #[derive(Debug, Parser)]
 struct FileRuntimePluginCli {}
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Serialize, Clone)]
 struct DataSinkFilePluginConfig {
     pub format: Option<String>,
     pub output_dir: Option<String>,
@@ -513,7 +514,9 @@ fn output_file_path(
     }
 
     let filename_owned = filename.to_string();
-    if let Ok(time_key) = TimePartitioner::new(&filename_owned).process() {
+    if let Ok(time_key) = TimePartitioner::new(&filename_owned)
+        .process(&skippr_runtime_sdk::helpers::configuration::Config::new())
+    {
         full_key = format!("{}/{}", full_key, time_key);
     }
 

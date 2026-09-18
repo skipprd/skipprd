@@ -53,7 +53,6 @@ OAuth alternative: `oauth_token_url`, `oauth_client_id`, `oauth_client_secret`, 
 ```bash
 cargo build -p skippr-plugin-data-source-meta-instagram-ads
 cargo test -p skippr-plugin-data-source-meta-instagram-ads
-cargo test -p sde translate_meta_instagram_ads
 ```
 
 Fixture-only sync (no live Graph API):
@@ -73,7 +72,9 @@ Live E2E requires a Marketing API token with `ads_read` and access to the config
 ## CLI
 
 ```bash
-sde connect source meta-instagram-ads \
+skipprd connect data-source meta-instagram-ads \
+  --pipeline ads \
+  --name meta \
   --ad-account-id 123456789 \
   --start-date 2024-01-01 \
   --access-token '${META_INSTAGRAM_ADS_ACCESS_TOKEN}'

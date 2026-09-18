@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -44,7 +45,7 @@ fn default_api_base() -> String {
     DEFAULT_API_BASE.to_string()
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, SkipprConfig)]
 pub struct DataSourceRevolutBusinessPluginConfig {
     pub client_id: String,
     pub start_date: String,
@@ -59,10 +60,13 @@ pub struct DataSourceRevolutBusinessPluginConfig {
     #[serde(default = "default_api_base")]
     pub api_base: String,
     #[serde(default)]
+    #[skippr(secret)]
     pub private_key_pem: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub refresh_token: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub access_token: Option<String>,
     #[serde(default)]
     pub issuer_domain: Option<String>,

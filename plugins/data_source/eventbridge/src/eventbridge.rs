@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -14,7 +15,7 @@ use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch, SourceSyncContext};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSourceEventbridgePluginConfig {
     pub event_bus_name: String,
     pub rule_name: Option<String>,

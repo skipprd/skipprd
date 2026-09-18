@@ -36,7 +36,7 @@ data_sources:
       user_agent: "SkipprSeoCrawl/1.0"
 ```
 
-Public config (`sde connect source seo-crawl`): `kind: seo_crawl` with the same fields (camelCase in JSON export).
+Public config is `skipprd connect data-source seo-crawl` (`--site`, `--max-urls`, `--max-depth`, …). List fields (`seed_urls`, `url_list`, `sitemap_probe_paths`) stay in engine `skippr.yml` under `SeoCrawl:`.
 
 ## Environment
 

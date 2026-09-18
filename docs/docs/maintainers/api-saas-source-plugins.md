@@ -21,7 +21,7 @@ See also [Runtime plugins](./runtime-plugins.md) and [Runtime Plugin Contract](.
 | Checkpoints (extraction progress) | WAL, compaction, offsets |
 | Faithful bronze JSON/records | `SourceNamespaceContract` persistence |
 | `SourceNamespaceContract` per namespace | Sink write policy enforcement |
-| Parent/child extraction when required | Business modeling (`sde model`) |
+| Parent/child extraction when required | Business modeling |
 
 ## End-to-end flow
 
@@ -137,35 +137,23 @@ Reference: `runtime_is_discover_mode()` and `streams_for_run(discover)` in `plug
 - [ ] Checkpoint serialize/deserialize + version check
 - [ ] Auth happy path + missing-credentials error path
 
-### CLI (`sde connect source`)
+### CLI (`skipprd connect data-source`)
 
 Ship operator wiring whenever a source is user-facing (not internal-only). Without this, users must hand-edit `skippr.yml` and public docs drift.
 
-**`sde` (`crates/sde` in skipprd/sde)**
+Connect flags and Python setters are generated from the plugin `*PluginConfig` struct plus `[package.metadata.skippr-plugin]`. Do not add a parallel catalog.
 
-- [ ] `SourceKind::<Variant>` on the `connect source` subcommand (kebab-case CLI name, e.g. `google-analytics`)
-- [ ] `source_plugin_and_config()` — `plugin_name` must match `[package.metadata.skippr-plugin] plugin_name` exactly (e.g. `"GoogleAnalytics"`)
-- [ ] JSON keys in `source_plugin_and_config` must match the plugin’s `Deserialize` config struct field names (snake_case)
-- [ ] `SourceConfig` variant in `public_config.rs` with `#[serde(rename = "snake_case_kind")]` for public `skippr.yaml`
-- [ ] `translate.rs` — map public `kind` + fields into `skippr_input` (flat fields for runtime plugins; nested shapes only when the EL layer expects them)
-- [ ] `cmd_connect_source` — interactive prompts for required fields when flags omitted; prefer `${ENV_VAR}` defaults for secrets
-- [ ] `source_kind_str()` / legacy `kind_label` match arm for JSON connect output
-
-**`react-suite-data-engineer` in skipprd/sde (`skippr_impl.rs`)**
-
-- [ ] `skippr_plugin_name()` — explicit `"snake_kind" => "PluginName"` when `capitalize_first` would be wrong (e.g. `google_analytics` → `GoogleAnalytics`, not `Google_analytics`)
-
-**Docs**
-
-- [ ] Public connector page (`skippr-web` and/or `skipprd` inputs doc) with `sde connect source …` example and flag table
-- [ ] `react/docs/docs/cli/connect.md` section for the new source
+- [ ] `[package.metadata.skippr-plugin]` `kind` + `plugin_name` on the plugin crate
+- [ ] `#[derive(SkipprConfig)]` on the Deserialize config struct
+- [ ] `#[skippr(secret|secret_path|not_secret)]` on credential fields (generator fail-closed if a heuristic match is unmarked)
+- [ ] `cargo run -p skippr-connect-gen` so clap / Python / persist maps include the plugin
+- [ ] Public connector page with `skipprd connect data-source …` example and flag table
 
 **Verification**
 
 ```bash
-cargo test -p sde translate_google_analytics
-cargo test -p sde translate_meta_instagram_ads
-sde connect source <kebab-name> --help
+cargo run -p skippr-connect-gen -- --check
+skipprd connect data-source <kebab-name> --help
 ```
 
 Reference: `google-analytics` / `GoogleAnalytics` in `plugins/data_source/google_analytics/`, `meta-instagram-ads` / `MetaInstagramAds` in `plugins/data_source/meta_instagram_ads/`.
@@ -411,7 +399,7 @@ Pair with Athena or Iceberg sinks that declare `supports_replace_partition` in t
 
 ### Ship CLI, lineage, and plugin name mapping together
 
-A source plugin without `sde connect`, `public_config`, `translate`, and `skippr_impl` / `lineage_builder` arms forces hand-edited YAML and produces lineage errors (“not supported by config translation”). Add these in the same PR as the plugin when the connector is user-facing.
+A source plugin without generated `skipprd connect data-source` flags forces hand-edited YAML. Annotate the config struct and regenerate connect in the same PR when the connector is user-facing.
 
 ### Optional-stream pattern for incompatible report grains
 

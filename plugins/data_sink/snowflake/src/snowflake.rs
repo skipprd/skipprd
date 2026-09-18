@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use async_trait::async_trait;
 use aws_credential_types::provider::ProvideCredentials;
 use aws_sdk_s3::primitives::ByteStream;
@@ -37,11 +38,12 @@ static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 const SNOWFLAKE_CDC_FILE_STAGE_BLOCKER: &str = "the current PUT/COPY path serializes target-only \
     Parquet and does not load CDC metadata into a transaction-local staging table";
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSinkSnowflakePluginConfig {
     pub account: String,
     pub user: String,
     #[serde(default)]
+    #[skippr(secret)]
     pub password: Option<String>,
     pub warehouse: String,
     pub database: String,
@@ -50,16 +52,20 @@ pub struct DataSinkSnowflakePluginConfig {
     pub stage: Option<String>,
     pub format: Option<String>,
     #[serde(default)]
+    #[skippr(secret_path)]
     pub private_key_path: Option<String>,
     #[serde(default)]
     pub staging_uri: Option<String>,
     #[serde(default)]
     pub staging_storage_integration: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub staging_azure_sas_token: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub staging_azure_account_key: Option<String>,
     #[serde(default)]
+    #[skippr(secret_path)]
     pub staging_gcs_service_account_key_path: Option<String>,
     /// Query/model only; ignored at ingest.
     #[serde(default)]

@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::fs;
 use std::fs::File;
 use std::io::{BufRead, BufReader, Read};
@@ -15,6 +16,7 @@ use zip::ZipArchive;
 
 use crate::helpers::plugin_config::PluginConfigEntry;
 use crate::serdes::input_format::InputFormat;
+use skippr_runtime_sdk::helpers::configuration::Config;
 use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{
@@ -58,7 +60,7 @@ fn collect_source_files(source: &Path) -> Vec<PathBuf> {
     out
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSourceLocalFilePluginConfig {
     pub format: Option<String>,
     pub batch_size_seconds: Option<i64>,
@@ -201,6 +203,7 @@ impl DataSourceLocalFilePlugin {
     ) -> impl futures::Stream<Item = Vec<Vec<IngestBatch>>> {
         let (tx, rx) = futures::channel::mpsc::unbounded();
         let input_format = InputFormat::from_option(self.config.format.as_deref());
+        let ingest_config = Config::new();
         for path in collect_source_files(Path::new(&source_dir)) {
             let offset_key = OffsetKey {
                 namespace: file_source_namespace(&source_dir),
@@ -209,6 +212,7 @@ impl DataSourceLocalFilePlugin {
             // List-time Closed must use the same key host ingest stores after the
             // runtime wire round-trip (normalize twice). See S3 source.
             let closed_key = IngestBatch::runtime_roundtrip_offset_key(
+                &ingest_config,
                 offset_key.namespace.clone(),
                 offset_key.partition.clone(),
             );

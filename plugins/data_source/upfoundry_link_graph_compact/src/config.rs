@@ -1,6 +1,7 @@
+use skippr_runtime_sdk::SkipprConfig;
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, SkipprConfig, PartialEq)]
 pub struct UpfoundryLinkGraphCompactConfig {
     pub ops_bucket: String,
     #[serde(default = "default_ops_prefix")]

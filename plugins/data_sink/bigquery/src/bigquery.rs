@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use async_trait::async_trait;
 use dashmap::DashSet;
 use datafusion::arrow::array::*;
@@ -17,11 +18,12 @@ static CDC_DDL_ENSURED: Lazy<DashSet<String>> = Lazy::new(DashSet::new);
 const BIGQUERY_CDC_LOAD_JOB_BLOCKER: &str =
     "the connector currently exposes query jobs only and has no CDC-enriched load-job path";
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSinkBigqueryPluginConfig {
     pub project: String,
     pub dataset: String,
     pub location: Option<String>,
+    #[skippr(secret_path)]
     pub credentials_path: Option<String>,
     pub format: Option<String>,
     /// Query/model only; ignored at ingest.

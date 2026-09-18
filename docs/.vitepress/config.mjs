@@ -30,6 +30,7 @@ const sidebar = [
     text: 'CLI',
     items: [
       { text: 'Overview', link: '/cli/overview' },
+      { text: 'Skipprd connect', link: '/cli/connect' },
       { text: 'Skipprd discover', link: '/cli/discover' },
       { text: 'Skipprd schema', link: '/cli/schema' },
       { text: 'Skipprd sync', link: '/cli/sync' },

@@ -9,6 +9,7 @@ description = "Shared Iceberg catalog configuration for skipprd and Iceberg plug
 sha2.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_derive.workspace = true
+skippr-plugin-macros = { path = "../skippr-plugin-macros" }
 
 [dev-dependencies]
 serde_json.workspace = true

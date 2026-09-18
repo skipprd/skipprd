@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use crate::adroll_ads_api::{parse_rows, AdRollAdsApiClient};
 use crate::streams::{resolve_streams, AdRollStreamDef, AdRollStreamKind, StreamProfile};
 use async_trait::async_trait;
@@ -26,20 +27,25 @@ const DISCOVER_SAMPLE_DAYS: u32 = 3;
 struct AdRollCheckpoint {
     last_completed_date: String,
 }
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, SkipprConfig)]
 pub struct DataSourceAdRollAdsPluginConfig {
     pub advertiser_id: String,
     #[serde(default)]
+    #[skippr(secret)]
     pub access_token: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub personal_access_token: Option<String>,
     #[serde(default)]
+    #[skippr(not_secret)]
     pub oauth_token_url: Option<String>,
     #[serde(default)]
     pub oauth_client_id: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub oauth_client_secret: Option<String>,
     #[serde(default)]
+    #[skippr(secret)]
     pub oauth_refresh_token: Option<String>,
     #[serde(default)]
     pub api_base_url: Option<String>,

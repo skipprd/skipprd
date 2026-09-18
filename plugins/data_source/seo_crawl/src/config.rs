@@ -1,7 +1,8 @@
+use skippr_runtime_sdk::SkipprConfig;
 use serde::Deserialize;
 use serde_derive::Serialize;
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, Deserialize, SkipprConfig, PartialEq)]
 pub struct DataSourceSeoCrawlPluginConfig {
     pub site: String,
     #[serde(default = "default_max_urls")]

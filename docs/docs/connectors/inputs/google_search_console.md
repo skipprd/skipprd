@@ -31,10 +31,12 @@ Public connector docs: [Google Search Console](https://docs.skippr.io/connectors
 ## CLI
 
 ```bash
-sde connect source google-search-console \
+skipprd connect data-source google-search-console \
+  --pipeline gsc \
+  --name gsc \
   --site-url "https://example.com/" \
   --start-date 2024-01-01 \
-  --access-token ${GSC_ACCESS_TOKEN}
+  --access-token '${GSC_ACCESS_TOKEN}'
 ```
 
 ## Fixtures

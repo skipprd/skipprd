@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -22,8 +23,9 @@ use skippr_runtime_sdk::source_compat::{
     SourceSyncContext,
 };
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSourceMongodbPluginConfig {
+    #[skippr(secret)]
     pub connection_string: String,
     pub database: String,
     pub collection: String,

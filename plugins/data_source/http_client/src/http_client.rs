@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::collections::HashMap;
 use std::io::{Cursor, Read as IoRead};
 use std::sync::atomic::Ordering;
@@ -18,15 +19,17 @@ use skippr_runtime_sdk::source_compat::{
     submit_payload_batch_groups, IngestBatch, SourceSyncContext,
 };
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSourceHttpAuthConfig {
     pub strategy: Option<String>,
     pub user: Option<String>,
+    #[skippr(secret)]
     pub password: Option<String>,
+    #[skippr(secret)]
     pub token: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSourceHttpClientPluginConfig {
     pub url: String,
     pub method: Option<String>,

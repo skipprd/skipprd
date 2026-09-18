@@ -3,7 +3,7 @@ requires = ["maturin>=1.7,<2"]
 build-backend = "maturin"
 
 [project]
-name = "skipprd"
+name = "skippr"
 version = "0.1.0"
 description = "skipprd ELT engine — Session, discover, sync, df, query"
 readme = "README.md"
@@ -21,4 +21,4 @@ pandas = ["pandas"]
 
 [tool.maturin]
 manifest-path = "python/Cargo.toml"
-module-name = "skipprd"
+module-name = "skippr"

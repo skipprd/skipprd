@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use serde::Deserialize;
 use serde_derive::Serialize;
 
@@ -27,10 +28,11 @@ impl Strategy {
     }
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, SkipprConfig)]
 pub struct DataSourceGooglePageSpeedPluginConfig {
     pub site: String,
     #[serde(default)]
+    #[skippr(secret)]
     pub api_key: Option<String>,
     #[serde(default = "default_url_mode")]
     pub url_mode: UrlMode,

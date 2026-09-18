@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use crate::helpers::configuration::DataSinkPluginConfig;
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
@@ -25,10 +26,11 @@ use std::io;
 use std::sync::Arc;
 use tracing::info;
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSinkGcsPluginConfig {
     pub bucket: String,
     pub prefix: Option<String>,
+    #[skippr(secret_path)]
     pub service_account_key_path: Option<String>,
     pub format: Option<String>,
 }

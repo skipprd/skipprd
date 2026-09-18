@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::io::{self, BufRead, BufReader};
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -16,7 +17,7 @@ use skippr_runtime_sdk::plugins::{DataSource, SourceExecutionContract, SourceOnc
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch, SourceSyncContext};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSourceStdinPluginConfig {
     pub mode: Option<String>,
     pub format: Option<String>,

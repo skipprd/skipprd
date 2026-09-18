@@ -68,7 +68,6 @@ When `SKIPPR_RUNTIME_EXECUTION_MODE=discover`:
 ```bash
 cargo build -p skippr-plugin-data-source-google-serp-ranks
 cargo test -p skippr-plugin-data-source-google-serp-ranks
-cargo test -p sde translate_google_serp_ranks_source
 cd plugins/data_source/google_serp_ranks/worker && npm test
 ```
 
@@ -107,11 +106,11 @@ export SKIPPR_GOOGLE_SERP_RANKS_FIXTURE_DIR=plugins/data_source/google_serp_rank
 ## CLI
 
 ```bash
-sde connect source google-serp-ranks \
-  --target-site example.com \
-  --keywords "best widgets,widget reviews" \
+skipprd connect data-source google-serp-ranks \
+  --pipeline google_serp_ranks \
+  --name ranks \
   --country uk \
   --language en
 ```
 
-For multiple targets or advanced options, edit engine `skippr.yml` under `GoogleSerpRanks:`.
+List fields (`targets`, `keywords`) stay in engine `skippr.yml` under `GoogleSerpRanks:`.

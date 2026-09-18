@@ -85,7 +85,6 @@ Unit tests cover config validation, client fixture/skip behavior, extraction, ch
 ```bash
 cargo build -p skippr-plugin-data-source-ai-citations
 cargo test -p skippr-plugin-data-source-ai-citations
-cargo test -p sde translate_ai_citations_source
 ```
 
 Fixture-only sync (no live API):

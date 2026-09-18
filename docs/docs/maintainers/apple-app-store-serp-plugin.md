@@ -38,7 +38,10 @@ Fixture matrix:
 ## CLI
 
 ```bash
-sde connect source apple-app-store-serp --app-id 123 --keywords "term" --storefronts us
+skipprd connect data-source apple-app-store-serp \
+  --pipeline apple_app_store_serp \
+  --name example_site \
+  --entity software
 ```
 
-Pipeline name: `apple_app_store_serp`.
+List fields (`targets`, `keywords`, `storefronts`) stay in engine `skippr.yml` under `AppleAppStoreSerp:`.

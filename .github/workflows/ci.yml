@@ -23,12 +23,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: skipprd
-      - name: Stamp package versions from tag
-        if: startsWith(github.ref, 'refs/tags/v') && !startsWith(github.ref, 'refs/tags/python-v')
-        run: |
-          python3 .github/scripts/set_root_package_version.py \
-            --workspace "$GITHUB_WORKSPACE/skipprd" \
-            --version "${{ github.ref_name }}"
+      - run: cargo run -p skippr-connect-gen -- --check
       - run: cargo test -p skipprd --lib
       - run: python3 .github/scripts/test_python_bindings_ci.py
       - run: ./scripts/test-python.sh
@@ -56,12 +51,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: skipprd
-      - name: Stamp package versions from tag
-        if: startsWith(github.ref, 'refs/tags/v') && !startsWith(github.ref, 'refs/tags/python-v')
-        run: |
-          python3 .github/scripts/set_root_package_version.py \
-            --workspace "$GITHUB_WORKSPACE/skipprd" \
-            --version "${{ github.ref_name }}"
+      - run: cargo run -p skippr-connect-gen -- --check
       - run: cargo test -p skipprd --lib
       - run: python3 .github/scripts/test_python_bindings_ci.py
       - run: ./scripts/test-python.sh

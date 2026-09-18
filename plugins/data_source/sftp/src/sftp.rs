@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::io::Read as IoRead;
 use std::net::TcpStream;
 use std::sync::Arc;
@@ -12,12 +13,14 @@ use skippr_runtime_sdk::plugins::DataSource;
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch, SourceSyncContext};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSourceSftpPluginConfig {
     pub host: String,
     pub port: Option<u16>,
     pub username: String,
+    #[skippr(secret)]
     pub password: Option<String>,
+    #[skippr(secret_path)]
     pub private_key_path: Option<String>,
     pub remote_path: String,
     pub format: Option<String>,

@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use serde::Deserialize;
 use serde_derive::Serialize;
 
@@ -48,7 +49,7 @@ pub struct ThrottleConfig {
     pub cpu_slowdown: u32,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, SkipprConfig)]
 pub struct DataSourceSiteQualityPluginConfig {
     pub site: String,
     #[serde(default = "default_url_mode")]

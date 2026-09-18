@@ -1,3 +1,4 @@
+use skippr_runtime_sdk::SkipprConfig;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
@@ -19,7 +20,7 @@ use skippr_runtime_sdk::plugins::{
 use skippr_runtime_sdk::progress::OffsetKey;
 use skippr_runtime_sdk::source_compat::{submit_payload_batches, IngestBatch, SourceSyncContext};
 
-#[derive(Debug, Deserialize, Clone)]
+#[derive(Debug, Deserialize, SkipprConfig, Clone)]
 pub struct DataSourceKafkaPluginConfig {
     pub brokers: String,
     pub topic: String,
@@ -28,6 +29,7 @@ pub struct DataSourceKafkaPluginConfig {
     pub security_protocol: Option<String>,
     pub sasl_mechanism: Option<String>,
     pub sasl_username: Option<String>,
+    #[skippr(secret)]
     pub sasl_password: Option<String>,
     pub mode: Option<String>,
     pub idle_timeout_seconds: Option<u64>,

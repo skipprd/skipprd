@@ -23,6 +23,7 @@ use serde_json::Value;
 
 use crate::discover::{Metadata, OutputMetadata, PipelineMetadata};
 use crate::helpers::plugin_config::{DataSinkEntry, PluginConfigEntry};
+use crate::helpers::wal_storage::{ElStorageMode, OffsetStoreKind};
 use crate::METADATA;
 
 use crate::helpers::timed_rwlock::TimedRwLock;
@@ -73,11 +74,11 @@ pub struct Skippr {
     pub workspace: Option<String>,
     pub tenant: Option<String>,
     pub skippr_s3_bucket: Option<String>,
-    pub skipprd_el_storage_mode: Option<String>,
+    pub skipprd_el_storage_mode: Option<ElStorageMode>,
     /// Dedicated S3 bucket for WAL segments (falls back to skippr_s3_bucket).
     pub wal_s3_bucket: Option<String>,
     /// Offset store backend: `sled` (default) or `dynamodb`.
-    pub offset_store: Option<String>,
+    pub offset_store: Option<OffsetStoreKind>,
     /// DynamoDB table for offset/checkpoint rows when offset_store=dynamodb.
     pub offset_dynamodb_table: Option<String>,
 }
@@ -122,29 +123,6 @@ pub struct ProductDbtConfig {
 }
 
 pub type DataSourcePluginConfig = PluginConfigEntry;
-
-#[derive(Debug, Deserialize, Serialize, Clone)]
-pub struct DataSinkPostgresPluginConfig {
-    #[serde(default = "default_postgres_host")]
-    pub host: String,
-    pub port: Option<u16>,
-    pub user: String,
-    #[serde(default)]
-    pub password: Option<String>,
-    pub database: String,
-    #[serde(default = "default_postgres_schema")]
-    pub schema: String,
-    pub sslmode: Option<String>,
-    pub format: Option<String>,
-}
-
-fn default_postgres_host() -> String {
-    "localhost".to_string()
-}
-
-fn default_postgres_schema() -> String {
-    "public".to_string()
-}
 
 pub type DataSinkPluginConfig = PluginConfigEntry;
 pub type SchemaSinkConfig = PluginConfigEntry;
@@ -876,20 +854,21 @@ impl Config {
             .unwrap_or_else(|| Config::getenv("SKIPPR_S3_BUCKET", ""))
     }
 
-    /// Returns `"local"` or `"s3"` (default). Controls where skipprd
-    /// extract/load metadata and stats are persisted.
-    pub fn get_storage_mode(&self) -> String {
-        let v = Self::yaml_or_env(
-            self.skippr
-                .as_ref()
-                .and_then(|s| s.skipprd_el_storage_mode.as_ref()),
-            "SKIPPRD_EL_STORAGE_MODE",
-            "s3",
-        );
-        if v.is_empty() {
-            "s3".to_string()
-        } else {
-            v
+    /// Controls where skipprd extract/load metadata and stats are persisted.
+    pub fn get_storage_mode(&self) -> ElStorageMode {
+        if let Some(mode) = self.skippr.as_ref().and_then(|s| s.skipprd_el_storage_mode) {
+            return mode;
+        }
+        let v = Config::getenv("SKIPPRD_EL_STORAGE_MODE", "s3");
+        if v.is_empty() || v == DEFAULT_CONFIG {
+            return ElStorageMode::S3;
+        }
+        match v.parse::<ElStorageMode>() {
+            Ok(mode) => mode,
+            Err(err) => {
+                eprintln!("[skippr] config failed: {err}");
+                std::process::exit(1);
+            }
         }
     }
 
@@ -932,13 +911,8 @@ impl Config {
         Option<crate::helpers::wal_storage::OffsetStoreKind>,
         crate::helpers::wal_storage::ConfigError,
     > {
-        if let Some(store) = self
-            .skippr
-            .as_ref()
-            .and_then(|skippr| skippr.offset_store.as_ref())
-            .filter(|store| !store.is_empty())
-        {
-            return store.parse().map(Some);
+        if let Some(store) = self.skippr.as_ref().and_then(|skippr| skippr.offset_store) {
+            return Ok(Some(store));
         }
         let from_env = std::env::var("SKIPPR_OFFSET_STORE").unwrap_or_default();
         if !from_env.is_empty() {
@@ -3239,13 +3213,13 @@ data_sinks:
             workspace: None,
             tenant: None,
             skippr_s3_bucket: None,
-            skipprd_el_storage_mode: Some("local".to_string()),
+            skipprd_el_storage_mode: Some(ElStorageMode::Local),
             wal_s3_bucket: None,
             offset_store: None,
             offset_dynamodb_table: None,
         });
 
-        assert_eq!(config.get_storage_mode(), "local");
+        assert_eq!(config.get_storage_mode(), ElStorageMode::Local);
 
         match original_env {
             Some(value) => std::env::set_var("SKIPPRD_EL_STORAGE_MODE", value),
