@@ -52,12 +52,17 @@ class PythonBindingsCiTests(unittest.TestCase):
         self.assertIn("maturin build", script)
         self.assertIn("Darwin", script)
         self.assertIn("CARGO_TARGET_DIR", script)
+        self.assertIn('"$ROOT/target/maturin"', script)
+        self.assertNotIn("/var/tmp/cargo-target", script)
+        self.assertIn("debug/build", script)
         self.assertIn("RUSTC_WRAPPER", script)
         self.assertIn("darwin-rustc-wrapper.py", script)
-        self.assertIn("rustc-wrapper", script)
+        self.assertNotIn("config.toml", script)
+        self.assertNotIn("[build]", script)
         self.assertIn("CARGO_ENCODED_RUSTFLAGS", script)
         self.assertIn("scripts/bin/cargo", script)
         self.assertIn("export CARGO=", script)
+        self.assertNotIn("/usr/local/cargo/bin/cargo", script)
 
     def test_ci_builds_on_skippr_cloud_runners(self):
         text = CI.read_text(encoding="utf-8")
@@ -188,6 +193,8 @@ class PythonBindingsCiTests(unittest.TestCase):
             "link-arg=-undefined",
             "-C",
             "link-arg=dynamic_lookup",
+            "-C",
+            "link-args=-Wl,-install_name,@rpath/skippr.abi3.so",
             "-C",
             "debuginfo=2",
         ]
