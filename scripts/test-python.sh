@@ -14,16 +14,16 @@ python -m pip install "maturin>=1.7,<2" "pyarrow>=17" pytest
 # Isolate the maturin target, wrap cargo to drop the encoded flags, and pass
 # macOS cdylib link args only to the final `cargo rustc` crate.
 if [ "$(uname -s)" = Darwin ]; then
-  export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-/var/tmp/cargo-target}-maturin"
+  export CARGO_TARGET_DIR="$ROOT/target/maturin"
+  rm -rf "$CARGO_TARGET_DIR/debug/build" "$CARGO_TARGET_DIR/release/build"
   export RUSTC_WRAPPER="$ROOT/scripts/darwin-rustc-wrapper.py"
   chmod +x "$RUSTC_WRAPPER"
-  mkdir -p "$ROOT/.cargo" "$ROOT/scripts/bin"
-  if ! grep -q rustc-wrapper "$ROOT/.cargo/config.toml" 2>/dev/null; then
-    printf '\n[build]\nrustc-wrapper = "%s"\n' "$RUSTC_WRAPPER" >>"$ROOT/.cargo/config.toml"
-  fi
+  mkdir -p "$ROOT/scripts/bin"
   REAL_CARGO="${CARGO:-$(command -v cargo)}"
   case "$REAL_CARGO" in
-    */scripts/bin/cargo) REAL_CARGO=/usr/local/cargo/bin/cargo ;;
+    "$ROOT/scripts/bin/cargo"|*/scripts/bin/cargo)
+      REAL_CARGO="${CARGO_HOME:-$HOME/.cargo}/bin/cargo"
+      ;;
   esac
   cat >"$ROOT/scripts/bin/cargo" <<EOF
 #!/bin/sh

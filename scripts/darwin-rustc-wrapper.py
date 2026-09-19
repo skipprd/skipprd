@@ -12,6 +12,7 @@ import os
 import sys
 
 DROP = {"link-arg=-undefined", "link-arg=dynamic_lookup"}
+DROP_SUBSTRINGS = ("undefined", "dynamic_lookup", "install_name")
 
 
 KEEP_CRATE_TYPES = {"cdylib", "dylib", "proc-macro"}
@@ -43,9 +44,11 @@ def strip_cdylib_link_args(args: list[str]) -> list[str]:
     out: list[str] = []
     index = 0
     while index < len(args):
-        if args[index] == "-C" and index + 1 < len(args) and args[index + 1] in DROP:
-            index += 2
-            continue
+        if args[index] == "-C" and index + 1 < len(args):
+            value = args[index + 1]
+            if value in DROP or any(part in value for part in DROP_SUBSTRINGS):
+                index += 2
+                continue
         out.append(args[index])
         index += 1
     return out
