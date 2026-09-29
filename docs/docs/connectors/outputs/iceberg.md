@@ -31,6 +31,18 @@ catalog:
   region: us-east-1
 ```
 
+Parquet FileIO is `catalog.file_io`. Omit it or set `type: s3` for the AWS default credential chain. Use `type: r2` for Cloudflare R2 (or other path-style S3-compatible stores). Catalog pointer credentials (DynamoDB / Cloud Tables) stay on the catalog backend, not FileIO.
+
+```yaml
+file_io:
+  type: r2
+  endpoint: ${OBJECTS_S3_ENDPOINT}
+  region: auto
+  access_key_id: ${OBJECTS_ACCESS_KEY_ID}
+  secret_access_key: ${OBJECTS_SECRET_ACCESS_KEY}
+  path_style: true
+```
+
 ### Glue catalog
 
 ```yaml
@@ -61,9 +73,14 @@ Unity and Polaris use the same `uri` + `warehouse` shape with optional auth fiel
 | `table_location_prefix` | | Override base path for new tables |
 | `properties` | | Extra Iceberg table properties (map) |
 | `format` | `parquet` | File format for data files |
-| `query_engine` | | Optional Athena query engine |
+| `query_engine` | | Query engine for `skippr model` / `skipprd query`. `type: skippr` uses skipprd DataFusion over Iceberg ∪ WAL. `type: athena` is an explicit Athena opt-in. |
 
 Iceberg stays Iceberg. Model and query use `query_engine` on this sink. Do not project Iceberg YAML into a separate `Athena:` block.
+
+```yaml
+query_engine:
+  type: skippr
+```
 
 ```yaml
 query_engine:

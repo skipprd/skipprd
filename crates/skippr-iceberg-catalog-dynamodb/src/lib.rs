@@ -40,6 +40,7 @@ impl DynamoDbCatalog {
             table,
             warehouse,
             region,
+            ..
         } = config
         else {
             return Err(Error::new(
@@ -71,7 +72,7 @@ impl DynamoDbCatalog {
             table: table.clone(),
             warehouse: warehouse.clone(),
             warehouse_pk: format!("catalog#{}", warehouse_hash(warehouse)),
-            file_io: file_io_for_warehouse(warehouse),
+            file_io: file_io_for_warehouse(config)?,
         })
     }
 
@@ -138,19 +139,23 @@ impl DynamoDbCatalog {
     }
 }
 
-pub fn file_io_for_warehouse(warehouse: &str) -> FileIO {
+pub fn file_io_for_warehouse(config: &IcebergCatalogConfig) -> Result<FileIO> {
+    let warehouse = config.warehouse();
     if warehouse.starts_with("memory:") || warehouse.starts_with("memory://") {
-        FileIO::new_with_memory()
+        Ok(FileIO::new_with_memory())
     } else if warehouse.starts_with("s3://") || warehouse.starts_with("s3a://") {
-        FileIOBuilder::new(Arc::new(
+        let props = skippr_iceberg_catalog::s3_file_io_props(config.file_io())
+            .map_err(|err| Error::new(ErrorKind::DataInvalid, err))?;
+        Ok(FileIOBuilder::new(Arc::new(
             iceberg_storage_opendal::OpenDalStorageFactory::S3 {
                 configured_scheme: "s3".to_string(),
                 customized_credential_load: None,
             },
         ))
-        .build()
+        .with_props(props)
+        .build())
     } else {
-        FileIO::new_with_fs()
+        Ok(FileIO::new_with_fs())
     }
 }
 
@@ -559,7 +564,7 @@ impl Catalog for DynamoDbCatalog {
 
 #[cfg(test)]
 mod tests {
-    use skippr_iceberg_catalog::{decode_name, encode_name};
+    use skippr_iceberg_catalog::{decode_name, encode_name, IcebergCatalogConfig};
 
     #[test]
     fn table_sk_uses_length_prefixed_encoding() {
@@ -569,7 +574,19 @@ mod tests {
 
     #[test]
     fn memory_warehouse_builds_file_io() {
-        let _ = super::file_io_for_warehouse("memory://warehouse");
-        let _ = super::file_io_for_warehouse("/tmp/warehouse");
+        let cfg = IcebergCatalogConfig::Skippr {
+            table: "t".into(),
+            warehouse: "memory://warehouse".into(),
+            region: None,
+            file_io: Default::default(),
+        };
+        let _ = super::file_io_for_warehouse(&cfg).unwrap();
+        let cfg = IcebergCatalogConfig::Skippr {
+            table: "t".into(),
+            warehouse: "/tmp/warehouse".into(),
+            region: None,
+            file_io: Default::default(),
+        };
+        let _ = super::file_io_for_warehouse(&cfg).unwrap();
     }
 }

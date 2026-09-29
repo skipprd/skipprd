@@ -66,7 +66,7 @@ impl CloudTablesCatalog {
             table: table.clone(),
             warehouse: warehouse.clone(),
             warehouse_pk: format!("catalog#{}", warehouse_hash(warehouse)),
-            file_io: file_io_for_warehouse(warehouse),
+            file_io: file_io_for_warehouse(config)?,
         })
     }
 
@@ -154,19 +154,23 @@ impl CloudTablesCatalog {
     }
 }
 
-pub fn file_io_for_warehouse(warehouse: &str) -> FileIO {
+pub fn file_io_for_warehouse(config: &IcebergCatalogConfig) -> Result<FileIO> {
+    let warehouse = config.warehouse();
     if warehouse.starts_with("memory:") || warehouse.starts_with("memory://") {
-        FileIO::new_with_memory()
+        Ok(FileIO::new_with_memory())
     } else if warehouse.starts_with("s3://") || warehouse.starts_with("s3a://") {
-        FileIOBuilder::new(Arc::new(
+        let props = skippr_iceberg_catalog::s3_file_io_props(config.file_io())
+            .map_err(|err| Error::new(ErrorKind::DataInvalid, err))?;
+        Ok(FileIOBuilder::new(Arc::new(
             iceberg_storage_opendal::OpenDalStorageFactory::S3 {
                 configured_scheme: "s3".to_string(),
                 customized_credential_load: None,
             },
         ))
-        .build()
+        .with_props(props)
+        .build())
     } else {
-        FileIO::new_with_fs()
+        Ok(FileIO::new_with_fs())
     }
 }
 
