@@ -11535,20 +11535,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "sigv4"
-version = "0.1.0"
-dependencies = [
- "chrono",
- "hex",
- "hmac 0.12.1",
- "http 1.4.1",
- "percent-encoding",
- "serde",
- "sha2 0.10.9",
- "thiserror 2.0.18",
-]
-
-[[package]]
 name = "simd-adler32"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -11624,7 +11610,7 @@ dependencies = [
  "reqwest 0.12.28",
  "serde",
  "serde_json",
- "sigv4",
+ "skippr-sigv4",
  "thiserror 2.0.18",
  "tokio",
 ]
@@ -13380,6 +13366,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippr-sigv4"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "hex",
+ "hmac 0.12.1",
+ "http 1.4.1",
+ "percent-encoding",
+ "serde",
+ "sha2 0.10.9",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "skipprd"
 version = "0.1.0"
 dependencies = [
@@ -13510,6 +13510,7 @@ dependencies = [
  "pyo3",
  "serde",
  "serde_json",
+ "serde_yaml",
  "skipprd",
  "tokio",
 ]

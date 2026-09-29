@@ -48,7 +48,7 @@ curl -sL https://raw.githubusercontent.com/skipprd/skipprd/main/install.sh | SKI
 Pin a release with `SKIPPR_VERSION`:
 
 ```bash
-curl -sL https://raw.githubusercontent.com/skipprd/skipprd/main/install.sh | SKIPPR_VERSION=v6.10.0 sh
+curl -sL https://raw.githubusercontent.com/skipprd/skipprd/main/install.sh | SKIPPR_VERSION=6.10.0 sh
 ```
 
 ## Runtime plugins

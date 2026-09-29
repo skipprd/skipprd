@@ -218,7 +218,8 @@ class PublishRuntimePluginsTests(unittest.TestCase):
 
     def test_release_bundle_version_parses_semver_tags(self) -> None:
         self.assertEqual(publish_runtime_plugins.release_bundle_version("15.13.0"), "15.13.0")
-        self.assertEqual(publish_runtime_plugins.release_bundle_version("v15.13.0"), "15.13.0")
+        self.assertIsNone(publish_runtime_plugins.release_bundle_version("v15.13.0"))
+        self.assertIsNone(publish_runtime_plugins.release_bundle_version("python-v0.1.0"))
         self.assertIsNone(publish_runtime_plugins.release_bundle_version("latest"))
         self.assertIsNone(publish_runtime_plugins.release_bundle_version("main"))
 

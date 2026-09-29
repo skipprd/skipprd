@@ -3,7 +3,7 @@ on:
   push:
     branches: [main]
     tags:
-      - "v*"
+      - "[0-9]*"
       - "python-v*"
   pull_request:
   workflow_dispatch:
@@ -26,6 +26,7 @@ jobs:
       - run: cargo run -p skippr-connect-gen -- --check
       - run: cargo test -p skipprd --lib
       - run: python3 .github/scripts/test_python_bindings_ci.py
+      - run: python3 .github/scripts/test_publish_runtime_plugins.py
       - run: ./scripts/test-python.sh
       - uses: actions/upload-artifact@v4
         with:
@@ -54,6 +55,7 @@ jobs:
       - run: cargo run -p skippr-connect-gen -- --check
       - run: cargo test -p skipprd --lib
       - run: python3 .github/scripts/test_python_bindings_ci.py
+      - run: python3 .github/scripts/test_publish_runtime_plugins.py
       - run: ./scripts/test-python.sh
       - uses: actions/upload-artifact@v4
         with:

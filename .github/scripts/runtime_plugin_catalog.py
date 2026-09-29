@@ -223,6 +223,8 @@ def local_dependency_manifest_paths(
 
         dependency_spec = raw_spec
         dependency_base = manifest_path.parent
+        if raw_spec.get("optional") is True:
+            continue
         if raw_spec.get("workspace") is True:
             workspace_spec = workspace_dependencies.get(dependency_name)
             if not isinstance(workspace_spec, dict):
@@ -249,11 +251,10 @@ def local_dependency_manifest_paths(
             )
         try:
             dependency_manifest.relative_to(workspace)
-        except ValueError as err:
-            raise SystemExit(
-                "runtime SDK local dependency must remain inside the workspace: "
-                f"{dependency_manifest}"
-            ) from err
+        except ValueError:
+            # Sibling-repo path deps (e.g. skippr-cloud → ../cloud) are not
+            # fingerprint inputs for this workspace.
+            continue
         manifests.append(dependency_manifest)
     return sorted(set(manifests))
 

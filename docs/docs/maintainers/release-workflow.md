@@ -43,7 +43,7 @@ Platform build jobs produce the host binary plus the runtime plugin binaries nee
 - `macos_arm64`
 - `windows_x86`
 
-On tag builds, `set_root_package_version.py` stamps the root host package version from the tag name (`v1.2.3` → `1.2.3`) before packaging. It does not stamp `skipprd-python` or `pyproject.toml`.
+On tag builds, `set_root_package_version.py` stamps the root host package version from the tag name (`1.2.3`) before packaging. It does not stamp `skipprd-python` or `pyproject.toml`. Engine tags are unprefixed (`0.0.0`, `0.1.0`).
 
 ## Python wheels (PyPI)
 
@@ -51,7 +51,7 @@ Python has its own semver in `pyproject.toml` and `python/Cargo.toml` (`0.1.0` t
 
 `.github/workflows/ci.yml` **always** builds and tests the `skippr` wheel on Skippr Cloud runners (`skippr-linux-x64-16`, `skippr-darwin-arm64-8`).
 
-`python-publish` runs on `main` or `python-v*` tags (not engine `v*` tags, not `python-v0.0.0`). It publishes only when that Python semver is absent from PyPI.
+`python-publish` runs on `main` or `python-v*` tags (not engine unprefixed host tags, not `python-v0.0.0`). It publishes only when that Python semver is absent from PyPI.
 
 Publish uses **PyPI Trusted Publishing** (GitHub OIDC), not a pip login or `PYPI_API_TOKEN`. The job sets `id-token: write` and calls `pypa/gh-action-pypi-publish` with `attestations: false` (self-hosted Skippr Cloud runners). GitHub mints a short-lived token; PyPI accepts it because this repo's GitHub publisher is registered.
 
