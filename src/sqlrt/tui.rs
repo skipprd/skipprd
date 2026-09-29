@@ -295,8 +295,9 @@ pub(crate) fn value_to_string(arr: &dyn datafusion::arrow::array::Array, row: us
             .downcast_ref::<Float32Array>()
             .map(|a| a.value(row).to_string())
             .unwrap_or_default(),
-        // Fallback: debug
-        _ => format!("{:?}", arr),
+        // Fallback: per-cell Display (Decimal128, dates, …). Debug of the
+        // whole array leaked PrimitiveArray dumps into `query --plain` JSON cells.
+        _ => datafusion::arrow::util::display::array_value_to_string(arr, row).unwrap_or_default(),
     }
 }
 
@@ -1492,4 +1493,26 @@ fn is_in_select_list(input: &str, cursor: usize) -> bool {
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::value_to_string;
+    use datafusion::arrow::array::{Array, Decimal128Array};
+
+    #[test]
+    fn value_to_string_decimal128_is_scalar_not_array_debug() {
+        let arr = Decimal128Array::from(vec![Some(1_999i128)])
+            .with_precision_and_scale(38, 2)
+            .expect("scale");
+        let cell = value_to_string(&arr, 0);
+        assert!(
+            !cell.contains("PrimitiveArray"),
+            "plain CSV must print the cell, not Debug(array): {cell}"
+        );
+        assert!(
+            cell.contains("19.99"),
+            "expected scaled decimal, got {cell}"
+        );
+    }
 }

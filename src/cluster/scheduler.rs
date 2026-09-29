@@ -25,7 +25,6 @@ use crate::cluster::promote::{
     wait_until_replica_ready, PromoteContext,
 };
 use crate::helpers::configuration::Config;
-use crate::helpers::wal_storage::WalStorage;
 use crate::metrics::counters as metrics;
 use crate::query_flight::QueryFlightServer;
 
@@ -66,6 +65,7 @@ pub async fn run_clustered(app_cfg: Config, config: ClusterConfig) -> Result<(),
         },
     );
     let membership = MembershipService::start(
+        &app_cfg,
         config.clone(),
         MembershipEndpoints {
             replica: advertised_replica,
@@ -838,12 +838,6 @@ mod tests {
     }
 
     #[test]
-    fn s3_mode_does_not_start_cluster_services() {
-        assert!(matches!(WalStorage::S3, WalStorage::S3));
-        assert!(!matches!(WalStorage::S3, WalStorage::Clustered));
-    }
-
-    #[test]
     fn file_sources_hold_lease_after_scan_other_plugins_release() {
         assert!(holds_lease_after_source_complete("File"));
         assert!(holds_lease_after_source_complete("file"));
@@ -879,6 +873,10 @@ mod tests {
         assert!(!query.contains("execute_clustered_select"));
         assert!(
             !query.contains("print_batches_plain"),
+            "clustered_query_collect returns batches; CLI Session.query prints"
+        );
+        assert!(
+            !query.contains("print_query_plain_json"),
             "clustered_query_collect returns batches; CLI Session.query prints"
         );
         let prod = src.split("#[cfg(test)]").next().unwrap();

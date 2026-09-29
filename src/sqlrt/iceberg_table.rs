@@ -16,6 +16,12 @@ use iceberg::Catalog;
 
 use skippr_query_ballista::{schema_from_ipc, schema_to_ipc, IcebergScanNode};
 
+#[cfg(any(
+    feature = "offset-store-dynamodb",
+    feature = "offset-store-cloud-tables"
+))]
+use crate::helpers::configuration::Config;
+
 /// Read-only Iceberg scan over a pinned snapshot. Iceberg pipelines never fall
 /// back to Parquet listing.
 pub struct IcebergScanTableProvider {
@@ -480,9 +486,10 @@ async fn reload_iceberg_table(
     {
         match &catalog_cfg {
             skippr_iceberg_catalog::IcebergCatalogConfig::Skippr { .. } => {
-                let catalog = crate::cluster::backend::open_skippr_catalog(&catalog_cfg)
-                    .await
-                    .map_err(DataFusionError::Plan)?;
+                let catalog =
+                    crate::cluster::backend::open_skippr_catalog(&Config::new(), &catalog_cfg)
+                        .await
+                        .map_err(DataFusionError::Plan)?;
                 let (table, _) = load_pinned_iceberg_table(catalog, &ident).await?;
                 Ok(table)
             }

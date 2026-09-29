@@ -80,26 +80,39 @@ pub async fn write_registry(config: &Config, mut reg: Registry) -> Result<(), St
 }
 
 pub async fn list_pipelines(config: &Config) -> Vec<String> {
-    read_registry(config)
-        .await
-        .map(|r| {
+    if let Some(r) = read_registry(config).await {
+        if !r.pipelines.is_empty() {
             let mut v = r.pipelines.clone();
             v.sort();
             v.dedup();
-            v
-        })
-        .unwrap_or_default()
+            return v;
+        }
+    }
+    let mut v: Vec<String> = config.pipelines.keys().cloned().collect();
+    v.sort();
+    v
 }
 
 pub async fn list_namespaces(config: &Config, pipeline: &str) -> Vec<String> {
     if let Some(r) = read_registry(config).await {
         if let Some(nsmap) = r.namespaces_by_pipeline.get(pipeline) {
-            let mut v: Vec<String> = nsmap.keys().cloned().collect();
-            v.sort();
-            return v;
+            if !nsmap.is_empty() {
+                let mut v: Vec<String> = nsmap.keys().cloned().collect();
+                v.sort();
+                return v;
+            }
         }
     }
-    Vec::new()
+    let bound = config.clone().bind_pipeline(pipeline);
+    bound.init().await;
+    match bound.get_metadata().await {
+        Ok(meta) => {
+            let mut v: Vec<String> = meta.metadata.keys().cloned().collect();
+            v.sort();
+            v
+        }
+        Err(_) => Vec::new(),
+    }
 }
 
 pub async fn find_entry(
