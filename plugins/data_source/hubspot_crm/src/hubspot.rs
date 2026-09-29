@@ -422,8 +422,14 @@ impl DataSourceHubspotCrmPlugin {
         format!("hubspot:{}:{}", self.hub_id, NAMESPACE_EVENT_FACT)
     }
 
-    fn load_last_occurred_at(ctx: &dyn SourceSyncContext, key: &str) -> Option<String> {
-        load_checkpoint_payload::<HubspotIngestCheckpoint>(ctx, key).map(|cp| cp.last_occurred_at)
+    fn load_last_occurred_at(
+        ctx: &dyn SourceSyncContext,
+        key: &str,
+    ) -> Result<Option<String>, std::io::Error> {
+        Ok(
+            load_checkpoint_payload::<HubspotIngestCheckpoint>(ctx, key)?
+                .map(|cp| cp.last_occurred_at),
+        )
     }
 
     fn store_last_occurred_at(
@@ -877,7 +883,7 @@ impl DataSource for DataSourceHubspotCrmPlugin {
         let watermark = if discover {
             None
         } else {
-            Self::load_last_occurred_at(ctx.as_ref(), &checkpoint_key)
+            Self::load_last_occurred_at(ctx.as_ref(), &checkpoint_key)?
         };
         let mut all_events: Vec<Value> = Vec::new();
         let mut synced: Vec<&str> = Vec::new();

@@ -10,8 +10,10 @@ pub mod ingest_buffer;
 pub mod s3_wal_body_cache;
 pub mod s3_wal_memory_budget;
 pub mod segment_file;
-pub mod segment_object;
 pub mod sink_conflict;
+pub mod wal_object_store;
+pub mod wal_persist;
+pub mod wal_recover;
 pub mod wal_store;
 pub mod wal_writer;
 // wal_accumulator removed in simplified model

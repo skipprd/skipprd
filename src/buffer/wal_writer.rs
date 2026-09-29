@@ -49,6 +49,11 @@ static WAL_WRITER_ACK_LATENCY_NS_TOTAL: AtomicU64 = AtomicU64::new(0);
 static WAL_WRITER_ACK_COUNT: AtomicU64 = AtomicU64::new(0);
 static REQUEST_ACKS: Lazy<Mutex<HashMap<u64, RequestAckState>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
+fn ingest_lease_refuses_snapshots() -> bool {
+    crate::buffer::wal_store::ingest_durable_store()
+        .map(|store| store.guard().require_active_epoch().is_err())
+        .unwrap_or(false)
+}
 
 const ACK_DELAY_MIN_MS: u64 = 100;
 const ACK_DELAY_COLD_START_MS: u64 = 250;
@@ -391,6 +396,18 @@ async fn flush_live_and_ack(
     last_flush: &mut Instant,
 ) {
     if pending_acks.is_empty() && Buffers::live_segment_bytes() == 0 {
+        return;
+    }
+    if ingest_lease_refuses_snapshots() {
+        let ack_result: WalPersistResult =
+            Err("ingest lease has no active epoch; refusing further snapshots".into());
+        let acked = std::mem::take(pending_acks);
+        for (done, _, bytes, submit_id) in acked {
+            WAL_WRITER_PENDING_COUNT.fetch_sub(1, Ordering::Relaxed);
+            WAL_WRITER_PENDING_BYTES.fetch_sub(bytes as usize, Ordering::Relaxed);
+            complete_request_unit(submit_id, &ack_result);
+            let _ = done.send(ack_result.clone());
+        }
         return;
     }
     let started = Instant::now();

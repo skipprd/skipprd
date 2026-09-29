@@ -580,14 +580,13 @@ impl SourceSyncContext for RuntimeSourceSyncContext {
         })
     }
 
-    fn load_checkpoint_envelope(&self, key: &str) -> Option<CheckpointEnvelope> {
+    fn load_checkpoint_envelope(&self, key: &str) -> Result<Option<CheckpointEnvelope>, String> {
         block_on_handle(&self.offset_client.handle, async {
             self.offset_client
                 .send_load_checkpoint(key.to_string())
                 .await
         })
-        .ok()
-        .flatten()
+        .map_err(|err| err.to_string())
     }
 }
 
@@ -647,31 +646,33 @@ pub fn submit_arrow_ipc_batches(
 
 /// Returns true when a Closed partition was already ingested and should be skipped.
 ///
-/// Offset-service I/O and missing results fail closed: skip ingest rather than
-/// treat the partition as never seen.
-pub fn partition_already_closed(ctx: &dyn SourceSyncContext, key: &OffsetKey) -> bool {
-    !validate_offset_key(ctx, key, OffsetTypes::Closed, 1).unwrap_or(false)
+/// Offset-service I/O fails the call (`Err`); callers must not ingest as unseen.
+pub fn partition_already_closed(
+    ctx: &dyn SourceSyncContext,
+    key: &OffsetKey,
+) -> Result<bool, io::Error> {
+    Ok(!validate_offset_key(ctx, key, OffsetTypes::Closed, 1)?)
 }
 
 /// Validate a single offset key through the batched offset service.
 ///
 /// For Closed offsets this returns whether the partition should still be processed.
-/// `None` means the offset service did not answer; callers must fail closed.
 pub fn validate_offset_key(
     ctx: &dyn SourceSyncContext,
     key: &OffsetKey,
     offset_type: OffsetTypes,
     offset_value: u64,
-) -> Option<bool> {
+) -> Result<bool, io::Error> {
     let entry = offset_validation_entry(
         key.namespace.clone(),
         key.partition.clone(),
         offset_type,
         offset_value,
     );
-    ctx.validate_offset_batch(&[entry])
-        .ok()
-        .and_then(|mut results| results.pop())
+    let mut results = ctx.validate_offset_batch(&[entry])?;
+    results
+        .pop()
+        .ok_or_else(|| io::Error::other("offset service returned no result"))
 }
 
 pub const CHECKPOINT_PAYLOAD_VERSION: u32 = 1;
@@ -680,9 +681,17 @@ pub const CHECKPOINT_PAYLOAD_VERSION: u32 = 1;
 pub fn load_checkpoint_payload<T: serde::de::DeserializeOwned>(
     ctx: &dyn SourceSyncContext,
     key: &str,
-) -> Option<T> {
-    ctx.load_checkpoint_envelope(key)
-        .and_then(|envelope| envelope.into_payload().ok())
+) -> Result<Option<T>, io::Error> {
+    match ctx
+        .load_checkpoint_envelope(key)
+        .map_err(io::Error::other)?
+    {
+        None => Ok(None),
+        Some(envelope) => envelope
+            .into_payload()
+            .map(Some)
+            .map_err(|err| io::Error::other(err.to_string())),
+    }
 }
 
 /// Persist a typed checkpoint payload to the host offset store.
@@ -823,8 +832,11 @@ mod tests {
             Ok(())
         }
 
-        fn load_checkpoint_envelope(&self, _key: &str) -> Option<CheckpointEnvelope> {
-            None
+        fn load_checkpoint_envelope(
+            &self,
+            _key: &str,
+        ) -> Result<Option<CheckpointEnvelope>, String> {
+            Ok(None)
         }
     }
 
@@ -834,15 +846,15 @@ mod tests {
         let missing = ClosedCheckCtx {
             batch: Ok(vec![true]),
         };
-        assert!(!partition_already_closed(&missing, &key));
+        assert!(!partition_already_closed(&missing, &key).unwrap());
         let closed = ClosedCheckCtx {
             batch: Ok(vec![false]),
         };
-        assert!(partition_already_closed(&closed, &key));
+        assert!(partition_already_closed(&closed, &key).unwrap());
         let down = ClosedCheckCtx {
             batch: Err(io::ErrorKind::Other),
         };
-        assert!(partition_already_closed(&down, &key));
+        assert!(partition_already_closed(&down, &key).is_err());
     }
 
     #[test]

@@ -175,12 +175,12 @@ fn read_ordinal_batches(
     if !path.exists() {
         return Ok(Vec::new());
     }
+    let Ok(meta) = SegmentFile::admit_owned_pair_path(&path) else {
+        return Ok(Vec::new());
+    };
     let mut file = match fs::File::open(&path) {
         Ok(file) => file,
         Err(_) => return Ok(Vec::new()),
-    };
-    let Ok(meta) = SegmentFile::read_metadata_from_reader(&mut file) else {
-        return Ok(Vec::new());
     };
     let Some(idx) = meta.index.get(ordinal as usize) else {
         return Ok(Vec::new());
@@ -526,8 +526,10 @@ mod tests {
             )
             .unwrap()],
         );
-        seg.write_snapshot(&HashMap::new(), &batches, &HashMap::new(), &HashMap::new())
+        let (meta, _rows, _sha) = seg
+            .write_snapshot(&HashMap::new(), &batches, &HashMap::new(), &HashMap::new())
             .unwrap();
+        seg.write_commit_marker(&meta).unwrap();
         let mut log = crate::buffer::durable::log::MutationLog::open(paths.clone()).unwrap();
         let commit = MutationEnvelope {
             protocol_version: 1,

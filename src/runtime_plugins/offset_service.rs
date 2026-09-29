@@ -6,7 +6,7 @@ use tokio::net::{TcpListener, TcpStream};
 use tokio::runtime::Runtime;
 use tracing::warn;
 
-use crate::helpers::offsets::{OffsetTypes, Offsets};
+use crate::helpers::offsets::{OffsetTypes, Offsets, OffsetsError};
 use crate::runtime_plugins::protocol::{
     HostOffsetFrame, PluginOffsetFrame, RuntimeOffsetValidationEntry, RuntimeSessionHello,
     RUNTIME_PROTOCOL_VERSION,
@@ -16,28 +16,27 @@ use crate::runtime_plugins::wire::{read_frame, write_frame};
 static OFFSET_SERVICE_RT: Lazy<Runtime> =
     Lazy::new(|| Runtime::new().expect("offset service runtime"));
 
-fn should_process(
-    result: Result<Option<bool>, crate::helpers::offsets::OffsetsError>,
-    offset_type: OffsetTypes,
-) -> bool {
-    match result {
-        Err(_) => false,
-        Ok(None) => true,
-        Ok(Some(allow)) => match offset_type {
+fn should_process(decision: Option<bool>, offset_type: OffsetTypes) -> bool {
+    match decision {
+        None => true,
+        Some(allow) => match offset_type {
             OffsetTypes::Closed => !allow,
             OffsetTypes::Filesize | OffsetTypes::Position => allow,
         },
     }
 }
 
-fn validate_entries(offsets: &Offsets, entries: &[RuntimeOffsetValidationEntry]) -> Vec<bool> {
+fn validate_entries(
+    offsets: &Offsets,
+    entries: &[RuntimeOffsetValidationEntry],
+) -> Result<Vec<bool>, OffsetsError> {
     entries
         .iter()
         .map(|entry| {
-            should_process(
-                offsets.validate(&entry.key, entry.offset_type, entry.offset_value),
+            Ok(should_process(
+                offsets.validate(&entry.key, entry.offset_type, entry.offset_value)?,
                 entry.offset_type,
-            )
+            ))
         })
         .collect()
 }
@@ -70,7 +69,8 @@ async fn handle_offset_connection(
                 request_id,
                 entries,
             } => {
-                let should_process = validate_entries(&offsets, &entries);
+                let should_process =
+                    validate_entries(&offsets, &entries).map_err(io::Error::from)?;
                 write_frame(
                     &mut stream,
                     &HostOffsetFrame::ValidateOffsetBatchResponse {
@@ -81,7 +81,9 @@ async fn handle_offset_connection(
                 .await?;
             }
             PluginOffsetFrame::LoadCheckpoint { request_id, key } => {
-                let envelope = offsets.load_checkpoint_envelope(&key);
+                let envelope = offsets
+                    .load_checkpoint_envelope(&key)
+                    .map_err(io::Error::other)?;
                 write_frame(
                     &mut stream,
                     &HostOffsetFrame::LoadCheckpointResponse {
@@ -146,7 +148,9 @@ impl OffsetServiceEndpoint {
 mod tests {
     use super::*;
     use crate::helpers::configuration::Config;
-    use crate::helpers::offsets::OffsetKey;
+    use crate::helpers::offsets::{
+        OffsetKey, OffsetTransport, RuntimeOffsetOperation, RuntimeOffsetValue,
+    };
     use serial_test::serial;
 
     #[test]
@@ -163,25 +167,40 @@ mod tests {
             offset_type: OffsetTypes::Closed,
             offset_value: 1,
         }];
-        assert_eq!(validate_entries(&offsets, &missing), vec![true]);
+        assert_eq!(validate_entries(&offsets, &missing).unwrap(), vec![true]);
 
         let closed_key = OffsetKey::new("ns", "closed-key");
-        offsets.set(&closed_key, OffsetTypes::Closed, 1);
+        offsets.set(&closed_key, OffsetTypes::Closed, 1).unwrap();
         let closed = vec![RuntimeOffsetValidationEntry {
             key: closed_key,
             offset_type: OffsetTypes::Closed,
             offset_value: 1,
         }];
-        assert_eq!(validate_entries(&offsets, &closed), vec![false]);
+        assert_eq!(validate_entries(&offsets, &closed).unwrap(), vec![false]);
+    }
+
+    struct FailingOffsetTransport;
+
+    impl OffsetTransport for FailingOffsetTransport {
+        fn call(&self, _operation: RuntimeOffsetOperation) -> Result<RuntimeOffsetValue, String> {
+            Err("transport disconnected".to_string())
+        }
     }
 
     #[test]
-    fn store_error_does_not_process() {
-        let err = crate::helpers::offsets::OffsetsError::Store("dynamo down".into());
-        assert!(!should_process(Err(err), OffsetTypes::Closed));
-        assert!(!should_process(
-            Err(crate::helpers::offsets::OffsetsError::Store("x".into())),
-            OffsetTypes::Position
-        ));
+    fn validate_entries_surfaces_store_errors() {
+        let offsets = Offsets::from_transport(Arc::new(FailingOffsetTransport));
+        let entries = vec![RuntimeOffsetValidationEntry {
+            key: OffsetKey::new("ns", "p"),
+            offset_type: OffsetTypes::Closed,
+            offset_value: 1,
+        }];
+        let err = validate_entries(&offsets, &entries).unwrap_err();
+        match err {
+            OffsetsError::Store(message) => {
+                assert!(message.contains("transport disconnected"), "{message}");
+            }
+            other => panic!("expected store error, got {other:?}"),
+        }
     }
 }

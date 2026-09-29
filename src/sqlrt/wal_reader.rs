@@ -79,15 +79,11 @@ fn load_seg_dir_batches(
         if path.extension().and_then(|s| s.to_str()) != Some("seg") {
             continue;
         }
-        let commit = path.with_extension("seg.commit");
+        let commit = SegmentFile::commit_path_for_seg(&path);
         if !commit.exists() {
             continue;
         }
-        let mut meta_file = match fs::File::open(&path) {
-            Ok(file) => file,
-            Err(_) => continue,
-        };
-        let meta = match SegmentFile::read_metadata_from_reader(&mut meta_file) {
+        let meta = match SegmentFile::admit_owned_pair_path(&path) {
             Ok(m) => m,
             Err(_) => continue,
         };
@@ -160,15 +156,13 @@ impl WalReader for S3WalReader {
                 }
                 match req.send().await {
                     Ok(resp) => {
-                        if let Some(contents) = resp.contents {
-                            for obj in contents {
-                                if let Some(k) = obj.key() {
-                                    all.push(k.to_string());
-                                }
+                        for obj in resp.contents() {
+                            if let Some(k) = obj.key() {
+                                all.push(k.to_string());
                             }
                         }
-                        if resp.is_truncated.unwrap_or(false) {
-                            token = resp.next_continuation_token;
+                        if resp.is_truncated().unwrap_or(false) {
+                            token = resp.next_continuation_token().map(|s| s.to_string());
                         } else {
                             break;
                         }
@@ -190,11 +184,18 @@ impl WalReader for S3WalReader {
                 if !set.contains(&commit) {
                     continue;
                 }
+                let commit_bytes =
+                    match crate::helpers::s3::get_object_bytes_for_bucket(&bucket, &commit).await {
+                        Ok(bytes) => bytes,
+                        Err(_) => continue,
+                    };
                 match client.get_object().bucket(&bucket).key(&k).send().await {
                     Ok(resp) => match resp.body.collect().await {
                         Ok(agg) => {
                             let bytes = agg.into_bytes().to_vec();
-                            if let Ok(meta) = SegmentFile::read_metadata_from_bytes(&bytes) {
+                            if let Ok(meta) =
+                                SegmentFile::admit_owned_pair_bytes(&bytes, &commit_bytes)
+                            {
                                 for idx in meta.index.iter() {
                                     if idx.key.namespace != pipe {
                                         continue;
@@ -326,9 +327,10 @@ mod tests {
             )
             .unwrap()],
         );
-        seg.write_snapshot(&HashMap::new(), &batches, &HashMap::new(), &HashMap::new())
+        let (meta, _rows, _sha) = seg
+            .write_snapshot(&HashMap::new(), &batches, &HashMap::new(), &HashMap::new())
             .unwrap();
-        std::fs::write(segs.join("file-seg.seg.commit"), []).unwrap();
+        seg.write_commit_marker(&meta).unwrap();
         let reader = DiskWalReader { segs };
         let loaded = reader
             .load_committed_batches("orders_el", usize::MAX)

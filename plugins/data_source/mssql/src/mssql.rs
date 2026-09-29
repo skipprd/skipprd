@@ -348,7 +348,7 @@ impl DataSourceMssqlPlugin {
                 partition: table_fq.clone(),
             };
 
-            if partition_already_closed(ctx.as_ref(), &offset_key) {
+            if partition_already_closed(ctx.as_ref(), &offset_key)? {
                 info!("Skipping already-ingested table: {}", table_fq);
                 continue;
             }

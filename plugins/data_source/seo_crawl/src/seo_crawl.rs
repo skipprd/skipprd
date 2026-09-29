@@ -219,7 +219,7 @@ impl DataSource for DataSourceSeoCrawlPlugin {
             let checkpoint = if discover {
                 None
             } else {
-                load_page_checkpoint(ctx.as_ref(), &url)
+                load_page_checkpoint(ctx.as_ref(), &url)?
             };
             let unchanged = content_unchanged(
                 self.config.skip_unchanged_content,
@@ -443,8 +443,11 @@ mod tests {
             Ok(())
         }
 
-        fn load_checkpoint_envelope(&self, key: &str) -> Option<CheckpointEnvelope> {
-            self.checkpoints.lock().unwrap().get(key).cloned()
+        fn load_checkpoint_envelope(
+            &self,
+            key: &str,
+        ) -> Result<Option<CheckpointEnvelope>, String> {
+            Ok(self.checkpoints.lock().unwrap().get(key).cloned())
         }
     }
 
@@ -462,7 +465,9 @@ mod tests {
             },
         )
         .unwrap();
-        let loaded = load_page_checkpoint(&ctx, url).unwrap();
+        let loaded = load_page_checkpoint(&ctx, url)
+            .unwrap()
+            .expect("checkpoint stored");
         assert_eq!(loaded.content_hash, "sha256:abc");
         assert_eq!(ctx.writes.lock().unwrap()[0], checkpoint_key(url));
     }

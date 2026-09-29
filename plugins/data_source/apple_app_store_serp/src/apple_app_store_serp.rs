@@ -218,7 +218,7 @@ impl DataSource for DataSourceAppleAppStoreSerpPlugin {
         for pair in &pairs {
             if !discover {
                 let prior =
-                    load_query_checkpoint(ctx.as_ref(), &pair.keyword, &pair.storefront, &entity);
+                    load_query_checkpoint(ctx.as_ref(), &pair.keyword, &pair.storefront, &entity)?;
                 if should_skip_query_today(
                     prior.as_ref(),
                     &run_date,
@@ -445,7 +445,9 @@ mod tests {
         let runs = ctx.rows_for_namespace(NAMESPACE_RUN_DAILY);
         assert_eq!(runs[0]["status"], "error");
 
-        let cp = load_query_checkpoint(ctx.as_ref(), "http error", "us", "software").expect("cp");
+        let cp = load_query_checkpoint(ctx.as_ref(), "http error", "us", "software")
+            .expect("cp")
+            .expect("checkpoint stored");
         assert_eq!(cp.status, QueryTerminalStatus::Error);
 
         clear_fixture_dir();

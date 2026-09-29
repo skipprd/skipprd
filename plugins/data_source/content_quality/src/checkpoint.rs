@@ -39,7 +39,7 @@ pub fn checkpoint_key(canonical_url: &str) -> String {
 pub fn load_page_checkpoint(
     ctx: &dyn SourceSyncContext,
     canonical_url: &str,
-) -> Option<PageContentCheckpoint> {
+) -> Result<Option<PageContentCheckpoint>, std::io::Error> {
     load_checkpoint_payload::<PageContentCheckpoint>(ctx, &checkpoint_key(canonical_url))
 }
 

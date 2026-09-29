@@ -161,13 +161,18 @@ impl DataForSeoBacklinksPlugin {
         }
     }
 
-    fn load_job_checkpoint(ctx: &dyn SourceSyncContext, key: &str) -> JobPaginationCheckpoint {
-        load_checkpoint_payload::<JobPaginationCheckpoint>(ctx, key).unwrap_or(
-            JobPaginationCheckpoint {
-                offset: 0,
-                search_after_token: None,
-                pages_completed: 0,
-            },
+    fn load_job_checkpoint(
+        ctx: &dyn SourceSyncContext,
+        key: &str,
+    ) -> Result<JobPaginationCheckpoint, std::io::Error> {
+        Ok(
+            load_checkpoint_payload::<JobPaginationCheckpoint>(ctx, key)?.unwrap_or(
+                JobPaginationCheckpoint {
+                    offset: 0,
+                    search_after_token: None,
+                    pages_completed: 0,
+                },
+            ),
         )
     }
 
@@ -253,7 +258,7 @@ impl DataForSeoBacklinksPlugin {
         let mut checkpoint = if discover {
             JobPaginationCheckpoint::default()
         } else {
-            Self::load_job_checkpoint(ctx.as_ref(), &cp_key)
+            Self::load_job_checkpoint(ctx.as_ref(), &cp_key)?
         };
 
         let limit = job.effective_limit(discover);
@@ -434,7 +439,7 @@ impl DataForSeoBacklinksPlugin {
         let mut checkpoint = if discover {
             JobPaginationCheckpoint::default()
         } else {
-            Self::load_job_checkpoint(ctx.as_ref(), &cp_key)
+            Self::load_job_checkpoint(ctx.as_ref(), &cp_key)?
         };
 
         let (limit, max_pages) = self.paginated_limit_max_pages(discover);
@@ -652,7 +657,7 @@ impl DataForSeoBacklinksPlugin {
         let mut checkpoint = if discover {
             JobPaginationCheckpoint::default()
         } else {
-            Self::load_job_checkpoint(ctx.as_ref(), &cp_key)
+            Self::load_job_checkpoint(ctx.as_ref(), &cp_key)?
         };
 
         let limit = job.effective_limit(discover);

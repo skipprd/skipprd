@@ -179,9 +179,12 @@ impl DataSourceXAdsPlugin {
     fn checkpoint_key(&self, ns: &str) -> String {
         format!("x_ads:{}:{}", self.account_id, ns)
     }
-    fn load_last_completed(ctx: &dyn SourceSyncContext, key: &str) -> Option<NaiveDate> {
-        load_checkpoint_payload::<XAdsCheckpoint>(ctx, key)
-            .and_then(|cp| Self::parse_date(&cp.last_completed_date).ok())
+    fn load_last_completed(
+        ctx: &dyn SourceSyncContext,
+        key: &str,
+    ) -> Result<Option<NaiveDate>, std::io::Error> {
+        Ok(load_checkpoint_payload::<XAdsCheckpoint>(ctx, key)?
+            .and_then(|cp| Self::parse_date(&cp.last_completed_date).ok()))
     }
     fn store_last_completed(
         ctx: &dyn SourceSyncContext,
@@ -305,7 +308,7 @@ impl DataSource for DataSourceXAdsPlugin {
                     let last = if discover {
                         None
                     } else {
-                        Self::load_last_completed(ctx.as_ref(), &key)
+                        Self::load_last_completed(ctx.as_ref(), &key)?
                     };
                     let end = if discover {
                         discover_sample_date_window(end).1

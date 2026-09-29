@@ -314,9 +314,12 @@ impl DataSourceShopifyAdminPlugin {
         format!("shopify:{}:{}", self.shop_domain, NAMESPACE_ORDER_FACT)
     }
 
-    fn load_last_completed_order_date(ctx: &dyn SourceSyncContext, key: &str) -> Option<NaiveDate> {
-        load_checkpoint_payload::<ShopifyOrderCheckpoint>(ctx, key)
-            .and_then(|cp| NaiveDate::parse_from_str(&cp.last_completed_date, "%Y-%m-%d").ok())
+    fn load_last_completed_order_date(
+        ctx: &dyn SourceSyncContext,
+        key: &str,
+    ) -> Result<Option<NaiveDate>, std::io::Error> {
+        Ok(load_checkpoint_payload::<ShopifyOrderCheckpoint>(ctx, key)?
+            .and_then(|cp| NaiveDate::parse_from_str(&cp.last_completed_date, "%Y-%m-%d").ok()))
     }
 
     fn store_last_completed_order_date(
@@ -619,7 +622,7 @@ impl DataSourceShopifyAdminPlugin {
         let last_completed = if discover {
             None
         } else {
-            Self::load_last_completed_order_date(ctx, &checkpoint_key)
+            Self::load_last_completed_order_date(ctx, &checkpoint_key)?
         };
         let (start, end) = self.order_date_window(discover, last_completed)?;
         let mut cursor_day = start;

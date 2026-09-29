@@ -52,7 +52,7 @@ fn clustered_query_is_allowed() {
 
 #[test]
 fn clustered_requires_dynamodb_table() {
-    let err = validate_clustered_backend(WalStorage::Clustered, None, "").unwrap_err();
+    let err = validate_clustered_backend(WalStorage::Clustered, OffsetStoreKind::default_for_wal(WalStorage::Clustered), "").unwrap_err();
     #[cfg(feature = "offset-store-dynamodb")]
     assert_eq!(err, ConfigError::ClusteredTableMissing);
     #[cfg(not(feature = "offset-store-dynamodb"))]
@@ -63,7 +63,7 @@ fn clustered_requires_dynamodb_table() {
 fn clustered_rejects_explicit_sled_offset_store() {
     let err = validate_clustered_backend(
         WalStorage::Clustered,
-        Some(OffsetStoreKind::Sled),
+        OffsetStoreKind::Sled,
         "offsets",
     )
     .unwrap_err();

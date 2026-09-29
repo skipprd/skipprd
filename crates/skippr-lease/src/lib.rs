@@ -2,9 +2,11 @@
 //!
 //! Production storage is DynamoDB (`skippr-lease-store-dynamodb`) or Cloud
 //! tables (`skippr-lease-store-cloud-tables`). Tests use [`MemoryLeaseStore`].
-//! Single-node `disk`/`s3` modes do not use a lease store.
+//! Disk and S3 ingest acquire a writer lease through the same [`PipelineLeaseStore`]
+//! (sled locally; Dynamo/Cloud Tables when those are the offset backend).
 
 mod clock;
+mod conformance;
 mod error;
 mod guard;
 mod identity;
@@ -17,6 +19,7 @@ pub use clock::{
     race_deadline, AsyncSleeper, Clock, MonoInstant, Sleeper, SystemClock, TestClock, TestSleeper,
     TokioSleeper,
 };
+pub use conformance::assert_pipeline_lease_conformance;
 pub use error::{
     is_enospc, DurableError, FenceError, LeaseError, OffsetPublishError, PathError, PromoteError,
     ReplicaNack, ShutdownError,

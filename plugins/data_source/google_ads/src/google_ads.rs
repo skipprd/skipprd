@@ -166,9 +166,14 @@ impl DataSourceGoogleAdsPlugin {
         format!("google_ads:{}:{}", self.customer_id, namespace)
     }
 
-    fn load_last_completed(ctx: &dyn SourceSyncContext, key: &str) -> Option<NaiveDate> {
-        load_checkpoint_payload::<GoogleAdsNamespaceCheckpoint>(ctx, key)
-            .and_then(|cp| Self::parse_date(&cp.last_completed_date).ok())
+    fn load_last_completed(
+        ctx: &dyn SourceSyncContext,
+        key: &str,
+    ) -> Result<Option<NaiveDate>, std::io::Error> {
+        Ok(
+            load_checkpoint_payload::<GoogleAdsNamespaceCheckpoint>(ctx, key)?
+                .and_then(|cp| Self::parse_date(&cp.last_completed_date).ok()),
+        )
     }
 
     fn store_last_completed(
@@ -327,7 +332,7 @@ impl DataSource for DataSourceGoogleAdsPlugin {
             let last = if discover {
                 None
             } else {
-                Self::load_last_completed(ctx.as_ref(), &key)
+                Self::load_last_completed(ctx.as_ref(), &key)?
             };
             let window = DateWindowPlanner {
                 lookback_days: if discover {

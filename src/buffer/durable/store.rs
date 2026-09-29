@@ -338,7 +338,7 @@ impl PipelineDurableStore {
         let seg_file = SegmentFile {
             path: self.paths.segment(&id),
         };
-        let meta = seg_file.read_metadata_durable()?;
+        let meta = SegmentFile::admit_owned_pair_path(&seg_file.path)?;
         if !log.has_format_marker() {
             log.write_format_marker()?;
         }
@@ -716,16 +716,20 @@ fn publish_sled(
 ) -> Result<(), DurableError> {
     for offset in committed {
         let key = OffsetKey::new(&offset.namespace, &offset.partition);
-        offsets.set(
-            &key,
-            crate::helpers::offsets::OffsetTypes::Closed,
-            offset.closed,
-        );
-        offsets.set(
-            &key,
-            crate::helpers::offsets::OffsetTypes::Position,
-            offset.position,
-        );
+        offsets
+            .set(
+                &key,
+                crate::helpers::offsets::OffsetTypes::Closed,
+                offset.closed,
+            )
+            .map_err(|err| DurableError::Io(err.to_string()))?;
+        offsets
+            .set(
+                &key,
+                crate::helpers::offsets::OffsetTypes::Position,
+                offset.position,
+            )
+            .map_err(|err| DurableError::Io(err.to_string()))?;
     }
     let _ = checkpoints;
     Ok(())
@@ -943,7 +947,7 @@ impl WalStore for ClusteredWalStore {
         checkpoint_updates: &HashMap<String, crate::plugins::cdc::CheckpointEnvelope>,
     ) -> std::io::Result<SegmentWriteResult> {
         let store = crate::buffer::wal_store::ingest_durable_store().ok_or_else(|| {
-            std::io::Error::other("WAL write requires an ActivePrimary durable store")
+            std::io::Error::other("WAL write requires an installed ingest durable store")
         })?;
         store
             .commit_segment(

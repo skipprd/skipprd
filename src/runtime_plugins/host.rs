@@ -463,9 +463,10 @@ fn handle_runtime_offset_request(
             .validate(&key, offset_type, offset_value)
             .map(RuntimeOffsetValue::Validate)
             .map_err(|err| err.to_string()),
-        RuntimeOffsetOperation::LoadCheckpointEnvelope { key } => Ok(
-            RuntimeOffsetValue::LoadCheckpointEnvelope(offsets.load_checkpoint_envelope(&key)),
-        ),
+        RuntimeOffsetOperation::LoadCheckpointEnvelope { key } => offsets
+            .load_checkpoint_envelope(&key)
+            .map(RuntimeOffsetValue::LoadCheckpointEnvelope)
+            .map_err(|err| err.to_string()),
     };
 
     RuntimeOffsetRpcResponse {
@@ -477,13 +478,18 @@ fn handle_runtime_offset_request(
 fn materialize_runtime_offset_hints(
     offsets: &Offsets,
     hints: Vec<RuntimeOffsetMaterializationHint>,
-) {
+) -> Result<(), String> {
     for hint in hints {
-        offsets.set(&hint.key, OffsetTypes::Position, hint.position);
+        offsets
+            .set(&hint.key, OffsetTypes::Position, hint.position)
+            .map_err(|err| err.to_string())?;
         if hint.closed {
-            offsets.set(&hint.key, OffsetTypes::Closed, 1);
+            offsets
+                .set(&hint.key, OffsetTypes::Closed, 1)
+                .map_err(|err| err.to_string())?;
         }
     }
+    Ok(())
 }
 
 struct BufferedRuntimeFrameReader {
@@ -1420,7 +1426,7 @@ pub async fn sync_runtime_input_plugin(
                             .map_err(|err| io::Error::other(err.to_string()))?;
                         saw_unflushed_batches = false;
                     }
-                    materialize_runtime_offset_hints(&offsets, hints);
+                    materialize_runtime_offset_hints(&offsets, hints).map_err(io::Error::other)?;
                 }
             }
             continue;
@@ -4399,7 +4405,7 @@ mod tests {
             RuntimeOffsetValue::Validate(None)
         );
 
-        offsets.set(&key, OffsetTypes::Closed, 1);
+        offsets.set(&key, OffsetTypes::Closed, 1).unwrap();
         offsets
             .store_checkpoint_payload(
                 "runtime-host-checkpoint",

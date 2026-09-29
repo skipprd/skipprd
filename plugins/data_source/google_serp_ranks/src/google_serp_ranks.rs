@@ -262,7 +262,7 @@ impl DataSourceGoogleSerpRanksPlugin {
                     &self.config.country,
                     &self.config.language,
                     self.config.device.as_str(),
-                )
+                )?
             };
             if !discover
                 && should_skip_query_today(
@@ -783,7 +783,8 @@ mod tests {
             &cfg.language,
             cfg.device.as_str(),
         )
-        .expect("checkpoint");
+        .expect("checkpoint")
+        .expect("checkpoint stored");
         assert_eq!(cp.status, QueryTerminalStatus::Blocked);
 
         clear_fixture_dir();
@@ -832,7 +833,8 @@ mod tests {
             &cfg.language,
             cfg.device.as_str(),
         )
-        .expect("checkpoint");
+        .expect("checkpoint")
+        .expect("checkpoint stored");
         assert_eq!(cp.status, QueryTerminalStatus::Error);
 
         clear_fixture_dir();

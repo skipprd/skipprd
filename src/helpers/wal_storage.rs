@@ -120,6 +120,21 @@ impl OffsetStoreKind {
     pub fn is_clustered_control_plane(self) -> bool {
         matches!(self, Self::DynamoDb | Self::CloudTables)
     }
+
+    /// Disk/S3 default to sled. Clustered defaults to DynamoDB when that
+    /// feature is on, otherwise Cloud Tables.
+    pub fn default_for_wal(storage: WalStorage) -> Self {
+        match storage {
+            WalStorage::Clustered => {
+                if cfg!(feature = "offset-store-dynamodb") {
+                    Self::DynamoDb
+                } else {
+                    Self::CloudTables
+                }
+            }
+            WalStorage::Disk | WalStorage::S3 => Self::Sled,
+        }
+    }
 }
 
 impl FromStr for OffsetStoreKind {
@@ -248,6 +263,31 @@ mod tests {
         assert!(
             offenders.is_empty(),
             "WAL_STORAGE must be matched as WalStorage, found: {offenders:?}"
+        );
+    }
+
+    #[test]
+    fn default_for_wal_is_the_offset_kind_resolver() {
+        assert_eq!(
+            OffsetStoreKind::default_for_wal(WalStorage::Disk),
+            OffsetStoreKind::Sled
+        );
+        assert_eq!(
+            OffsetStoreKind::default_for_wal(WalStorage::S3),
+            OffsetStoreKind::Sled
+        );
+        #[cfg(feature = "offset-store-dynamodb")]
+        assert_eq!(
+            OffsetStoreKind::default_for_wal(WalStorage::Clustered),
+            OffsetStoreKind::DynamoDb
+        );
+        #[cfg(all(
+            feature = "offset-store-cloud-tables",
+            not(feature = "offset-store-dynamodb")
+        ))]
+        assert_eq!(
+            OffsetStoreKind::default_for_wal(WalStorage::Clustered),
+            OffsetStoreKind::CloudTables
         );
     }
 

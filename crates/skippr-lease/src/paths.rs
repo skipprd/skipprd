@@ -13,7 +13,7 @@ pub fn validate_path_component(value: &str) -> Result<(), PathError> {
             "path component '{value}' is not allowed"
         )));
     }
-    if value.contains('/') || value.contains('\\') || value.contains('\0') {
+    if value.contains('/') || value.contains('\\') || value.contains('\0') || value.contains('#') {
         return Err(PathError::InvalidComponent(format!(
             "path component '{value}' contains a reserved character"
         )));
@@ -138,6 +138,8 @@ mod tests {
     fn rejects_path_separators() {
         assert!(PipelineKey::new("acme", "prod", "a/b").is_err());
         assert!(validate_path_component("..").is_err());
+        assert!(validate_path_component("a#b").is_err());
+        assert!(PipelineKey::new("acme", "prod", "a#b").is_err());
     }
 
     #[test]

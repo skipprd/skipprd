@@ -204,7 +204,7 @@ impl DataSourceDynamodbPlugin {
                     }
                 };
 
-                let skip_ingest = partition_already_closed(ctx.as_ref(), &offset_key);
+                let skip_ingest = partition_already_closed(ctx.as_ref(), &offset_key)?;
 
                 if !skip_ingest {
                     let items = out.items();
@@ -317,7 +317,7 @@ impl DataSourceDynamodbPlugin {
         let snapshot_done = load_checkpoint_payload::<DynamodbSnapshotCheckpoint>(
             ctx.as_ref(),
             &snapshot_checkpoint_key,
-        )
+        )?
         .is_some();
         let should_run_snapshot = mode.includes_initial_snapshot() && !snapshot_done;
 
@@ -451,7 +451,7 @@ impl DataSourceDynamodbPlugin {
 
         let shard_ckpt_key = format!("dynamodb-stream:{}:{}:seq", table_name, shard_id);
         let stored_seq =
-            load_checkpoint_payload::<DynamodbCheckpoint>(ctx.as_ref(), &shard_ckpt_key)
+            load_checkpoint_payload::<DynamodbCheckpoint>(ctx.as_ref(), &shard_ckpt_key)?
                 .map(|checkpoint| checkpoint.sequence_number);
 
         let mut iter_builder = self

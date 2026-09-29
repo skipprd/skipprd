@@ -350,7 +350,7 @@ impl DataSource for DataSourceSiteQualityPlugin {
                 let prior = if discover {
                     None
                 } else {
-                    load_page_checkpoint(ctx.as_ref(), url, &device.profile)
+                    load_page_checkpoint(ctx.as_ref(), url, &device.profile)?
                 };
                 let job = build_job_request(&self.config, url, device, false, prior.clone());
                 let started = Instant::now();
@@ -626,8 +626,11 @@ mod tests {
             Ok(())
         }
 
-        fn load_checkpoint_envelope(&self, key: &str) -> Option<CheckpointEnvelope> {
-            self.checkpoints.lock().unwrap().get(key).cloned()
+        fn load_checkpoint_envelope(
+            &self,
+            key: &str,
+        ) -> Result<Option<CheckpointEnvelope>, String> {
+            Ok(self.checkpoints.lock().unwrap().get(key).cloned())
         }
     }
 }

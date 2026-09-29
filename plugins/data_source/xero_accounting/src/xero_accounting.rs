@@ -200,8 +200,11 @@ impl DataSourceXeroAccountingPlugin {
         format!("xero:{}:{}", self.tenant_id, stream)
     }
 
-    fn load_last_modified(ctx: &dyn SourceSyncContext, key: &str) -> Option<String> {
-        load_checkpoint_payload::<XeroStreamCheckpoint>(ctx, key).map(|cp| cp.last_modified)
+    fn load_last_modified(
+        ctx: &dyn SourceSyncContext,
+        key: &str,
+    ) -> Result<Option<String>, std::io::Error> {
+        Ok(load_checkpoint_payload::<XeroStreamCheckpoint>(ctx, key)?.map(|cp| cp.last_modified))
     }
 
     fn store_last_modified(
@@ -445,7 +448,7 @@ impl DataSourceXeroAccountingPlugin {
         let if_modified = if discover {
             None
         } else {
-            Self::load_last_modified(ctx, &ckpt_key)
+            Self::load_last_modified(ctx, &ckpt_key)?
         };
         let rows = client.list_accounts(if_modified.as_deref()).await?;
         let curated: Vec<Value> = rows
@@ -472,7 +475,7 @@ impl DataSourceXeroAccountingPlugin {
         let if_modified = if discover {
             None
         } else {
-            Self::load_last_modified(ctx, &ckpt_key)
+            Self::load_last_modified(ctx, &ckpt_key)?
         };
         let rows = client.list_contacts(if_modified.as_deref()).await?;
         let curated: Vec<Value> = rows
@@ -499,7 +502,7 @@ impl DataSourceXeroAccountingPlugin {
         let if_modified = if discover {
             None
         } else {
-            Self::load_last_modified(ctx, &ckpt_key)
+            Self::load_last_modified(ctx, &ckpt_key)?
         };
         let where_clause = if discover {
             None
@@ -558,7 +561,7 @@ impl DataSourceXeroAccountingPlugin {
         let if_modified = if discover {
             None
         } else {
-            Self::load_last_modified(ctx, &ckpt_key)
+            Self::load_last_modified(ctx, &ckpt_key)?
         };
         let where_clause = if discover {
             None
@@ -592,7 +595,7 @@ impl DataSourceXeroAccountingPlugin {
         let if_modified = if discover {
             None
         } else {
-            Self::load_last_modified(ctx, &ckpt_key)
+            Self::load_last_modified(ctx, &ckpt_key)?
         };
         let where_clause = if discover {
             None

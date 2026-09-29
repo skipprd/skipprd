@@ -28,7 +28,7 @@ pub fn load_query_checkpoint(
     keyword: &str,
     storefront: &str,
     entity: &str,
-) -> Option<QueryCheckpoint> {
+) -> Result<Option<QueryCheckpoint>, std::io::Error> {
     let key = query_checkpoint_key(keyword, storefront, entity);
     load_checkpoint_payload::<QueryCheckpoint>(ctx, &key)
 }

@@ -277,15 +277,18 @@ impl DataSourceAppleSearchAdsPlugin {
         format!("asa:{}:{}", self.config.org_id.trim(), namespace)
     }
 
-    fn load_last_completed(ctx: &dyn SourceSyncContext, key: &str) -> Option<NaiveDate> {
-        let Some(cp) = load_checkpoint_payload::<AsaNamespaceCheckpoint>(ctx, key) else {
-            return None;
+    fn load_last_completed(
+        ctx: &dyn SourceSyncContext,
+        key: &str,
+    ) -> Result<Option<NaiveDate>, std::io::Error> {
+        let Some(cp) = load_checkpoint_payload::<AsaNamespaceCheckpoint>(ctx, key)? else {
+            return Ok(None);
         };
         match Self::parse_date(&cp.last_completed_date) {
-            Ok(date) => Some(date),
+            Ok(date) => Ok(Some(date)),
             Err(err) => {
                 tracing::warn!("ASA ignoring corrupt checkpoint for {key}: {err}");
-                None
+                Ok(None)
             }
         }
     }
@@ -770,7 +773,7 @@ impl DataSource for DataSourceAppleSearchAdsPlugin {
             let last_completed = if discover {
                 None
             } else {
-                Self::load_last_completed(ctx.as_ref(), &checkpoint_key)
+                Self::load_last_completed(ctx.as_ref(), &checkpoint_key)?
             };
             let window = planner.plan(start_date, last_completed, end_date);
             let dates = DateWindowPlanner::dates_inclusive(&window);
@@ -1270,8 +1273,11 @@ mod tests {
             Ok(())
         }
 
-        fn load_checkpoint_envelope(&self, _key: &str) -> Option<CheckpointEnvelope> {
-            None
+        fn load_checkpoint_envelope(
+            &self,
+            _key: &str,
+        ) -> Result<Option<CheckpointEnvelope>, String> {
+            Ok(None)
         }
     }
 }

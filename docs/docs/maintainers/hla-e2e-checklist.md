@@ -79,8 +79,8 @@ Harness contract (not a cluster):
 - [x] `insert_position_preserves_closed`
   - **Result:** pass.
 
-- [x] `store_read_error_is_not_missing` / `store_error_does_not_process` / `closed_check_fails_closed`
-  - **Result:** `store_error_does_not_process` and `closed_check_fails_closed` pass (re-run this pass: runtime-sdk closed_check pass). `store_read_error_is_not_missing` was pass on the prior pass; not re-filtered this pass (same binary, offsets tests still compiled).
+- [x] `store_read_error_is_not_missing` / `validate_entries_surfaces_store_errors` / `closed_check_fails_closed`
+  - **Result:** `validate_entries_surfaces_store_errors` and `closed_check_fails_closed` pass (re-run this pass: runtime-sdk closed_check pass). `store_read_error_is_not_missing` was pass on the prior pass; not re-filtered this pass (same binary, offsets tests still compiled).
   - **Remark:** `commit_segment_publishes_closed_offsets` pass inside `buffer::durable::` (22 tests).
 
 - [x] `cargo test -p skippr-offset-store-dynamodb`
