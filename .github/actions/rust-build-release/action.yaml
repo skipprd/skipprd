@@ -70,9 +70,15 @@ runs:
       shell: bash
       if: startsWith(github.ref, 'refs/tags/')
       run: |
+        version="${{ github.ref_name }}"
+        if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "::error::engine tags must be unprefixed semver (x.y.z), got ${version}"
+          exit 1
+        fi
         python3 .github/scripts/set_root_package_version.py \
           --workspace "$GITHUB_WORKSPACE" \
-          --version "${{ github.ref_name }}"
+          --version "$version"
+        echo "SKIPPR_CLI_VERSION=$version" >> "$GITHUB_ENV"
     - name: Verify host dependency boundary
       shell: bash
       run: |
@@ -80,9 +86,6 @@ runs:
     - name: Build release
       shell: bash
       run: |
-        if [[ "${GITHUB_REF:-}" == refs/tags/* ]]; then
-          export SKIPPR_CLI_VERSION="${GITHUB_REF_NAME}"
-        fi
         export RUNTIME_PLUGIN_PACKAGES_JSON='${{ inputs.runtime_plugin_packages_json }}'
         plugin_packages_file="$(mktemp)"
         python3 - <<'PY' > "${plugin_packages_file}"

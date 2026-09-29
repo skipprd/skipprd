@@ -67,8 +67,6 @@ def latest_manifest_index_url(public_base_url: str, bucket: str, subdir: str) ->
 
 def release_bundle_version(raw: Optional[str] = None) -> Optional[str]:
     value = (raw if raw is not None else os.environ.get("SKIPPRD_RELEASE_VERSION") or os.environ.get("GITHUB_REF_NAME") or "").strip()
-    if value.startswith("v") and value[1:2].isdigit():
-        value = value[1:]
     if not value or value == "latest":
         return None
     parts = value.split(".")

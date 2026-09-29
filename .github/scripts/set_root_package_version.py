@@ -10,10 +10,9 @@ SEMVER_RE = re.compile(r"^\d+\.\d+\.\d+$")
 
 
 def normalize_semver(version: str) -> str:
-    stripped = version[1:] if version.startswith("v") else version
-    if not SEMVER_RE.fullmatch(stripped):
-        raise SystemExit(f"version must be plain semver (x.y.z), got: {version}")
-    return stripped
+    if not SEMVER_RE.fullmatch(version):
+        raise SystemExit(f"version must be unprefixed semver (x.y.z), got: {version}")
+    return version
 
 
 def replace_manifest_package_version(cargo_toml_path: Path, package_name: str, version: str) -> None:
@@ -43,7 +42,7 @@ def replace_lockfile_package_version(cargo_lock_path: Path, package_name: str, v
 def main() -> None:
     parser = argparse.ArgumentParser(description="Set release package versions in checked-in manifests.")
     parser.add_argument("--workspace", required=True, help="Workspace root containing Cargo.toml and Cargo.lock")
-    parser.add_argument("--version", required=True, help="Semver version to write (optional v prefix)")
+    parser.add_argument("--version", required=True, help="Unprefixed semver version to write (x.y.z)")
     args = parser.parse_args()
 
     version = normalize_semver(args.version)

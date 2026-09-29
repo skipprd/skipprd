@@ -127,6 +127,28 @@ skipprd = { path = "../.." }
             self.assertEqual(first, second)
             self.assertEqual(len(first), 64)
 
+    def test_runtime_sdk_fingerprint_skips_path_deps_outside_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            root = Path(tmp_dir)
+            workspace = root / "ws"
+            outside = root / "outside"
+            outside.mkdir()
+            (outside / "Cargo.toml").write_text(
+                '[package]\nname = "cloud-client"\nversion = "0.1.0"\nedition = "2021"\n',
+                encoding="utf-8",
+            )
+            self.write_runtime_sdk_workspace(workspace)
+            manifest = workspace / "crates" / "skippr-runtime-sdk" / "Cargo.toml"
+            manifest.write_text(
+                manifest.read_text(encoding="utf-8")
+                + f'\ncloud-client = {{ path = "{outside}" }}\n',
+                encoding="utf-8",
+            )
+            fingerprint = runtime_plugin_catalog.workspace_runtime_sdk_build_fingerprint(
+                workspace
+            )
+            self.assertEqual(len(fingerprint), 64)
+
     def test_runtime_sdk_build_fingerprint_changes_with_sdk_source(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:
             workspace = Path(tmp_dir)
