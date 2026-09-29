@@ -40,7 +40,6 @@ pub struct DataSourceMotherduckPlugin {
 const MOTHERDUCK_SQL_ENDPOINT: &str = "https://api.motherduck.com/v1/sql";
 
 impl DataSourceMotherduckPlugin {
-
     pub fn with_runtime_config(config: DataSourceMotherduckPluginConfig) -> Self {
         Self {
             config,

@@ -57,7 +57,6 @@ pub struct DataSourceHttpClientPlugin {
 }
 
 impl DataSourceHttpClientPlugin {
-
     pub fn with_runtime_config(config: DataSourceHttpClientPluginConfig) -> Self {
         Self {
             client: Client::new(),

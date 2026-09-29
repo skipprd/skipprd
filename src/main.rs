@@ -274,16 +274,15 @@ async fn async_main() {
                 error!("{err}");
                 process::exit(1);
             });
-            let collect_plain =
-                storage == WalStorage::Clustered || (options.plain && options.watch.is_none());
             if let Some(sql) = options.sql {
+                let collect_plain = skipprd::sqlrt::query::sql_uses_record_batch_collect(&sql)
+                    && (storage == WalStorage::Clustered
+                        || (options.plain && options.watch.is_none()));
                 let now = Instant::now();
                 if collect_plain {
                     match session.query(&sql).await {
                         Ok(batches) => {
-                            for batch in &batches {
-                                skipprd::sqlrt::query::print_batches_plain(batch);
-                            }
+                            skipprd::sqlrt::query::print_query_plain_json(&batches);
                         }
                         Err(err) => {
                             error!("query failed: {err}");
@@ -305,7 +304,7 @@ async fn async_main() {
                 }
                 let elapsed = now.elapsed();
                 if !options.plain && storage != WalStorage::Clustered {
-                    println!("Query time: {} seconds", elapsed.as_secs());
+                    eprintln!("Query time: {} seconds", elapsed.as_secs());
                 }
             } else if storage == WalStorage::Clustered {
                 error!("clustered query requires --sql");
@@ -340,7 +339,7 @@ async fn async_main() {
                         )
                         .await;
                     let elapsed = now.elapsed();
-                    println!("Query time: {} seconds", elapsed.as_secs());
+                    eprintln!("Query time: {} seconds", elapsed.as_secs());
                 }
             }
         }
@@ -377,9 +376,7 @@ async fn async_main() {
             });
             match session.df(options.namespace.as_deref()).await {
                 Ok(batches) => {
-                    for batch in &batches {
-                        skipprd::sqlrt::query::print_batches_plain(batch);
-                    }
+                    skipprd::sqlrt::query::print_query_plain_json(&batches);
                 }
                 Err(err) => {
                     error!("df failed: {err}");

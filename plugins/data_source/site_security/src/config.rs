@@ -1,9 +1,9 @@
-use skippr_runtime_sdk::SkipprConfig;
 use serde::Deserialize;
 use skippr_plugin_data_source_site_quality::config::{
     default_user_agent_for_profile, DeviceProfile, Viewport,
 };
 use skippr_plugin_data_source_site_quality::sampling::UrlMode;
+use skippr_runtime_sdk::SkipprConfig;
 
 #[derive(Debug, Clone, Deserialize, SkipprConfig)]
 pub struct DataSourceSiteSecurityPluginConfig {

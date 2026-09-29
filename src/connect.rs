@@ -4,6 +4,9 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
+
+use serde::Serialize;
 
 use crate::helpers::configuration::Config;
 use crate::helpers::wal_storage::{ElStorageMode, OffsetStoreKind};
@@ -169,7 +172,7 @@ pub fn persist_plugin(
     let role = plugin.role();
     let plugin_name = plugin.plugin_name();
     for key in plugin.secret_fields() {
-        if let Some(value) = fields.get(*key) {
+        if let Some(value) = yaml_get_path(&fields, key) {
             let raw = value.as_str().unwrap_or("");
             if !raw.is_empty() && !(raw.starts_with("${") && raw.ends_with('}')) {
                 return Err(format!(
@@ -287,6 +290,25 @@ fn insert_parts(
     insert_parts(child, rest, value)
 }
 
+fn durable_config_sync(file: &fs::File) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::io::AsRawFd;
+        // POSIX fsync. Do not use std File::sync_* on Apple: they request a
+        // device barrier Darwin CI VMs reject with EIO.
+        let rc = unsafe { libc::fsync(file.as_raw_fd()) };
+        if rc == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        file.sync_data()
+    }
+}
+
 pub fn write_document(path: &Path, doc: &serde_yaml::Value) -> Result<(), String> {
     if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -301,9 +323,15 @@ pub fn write_document(path: &Path, doc: &serde_yaml::Value) -> Result<(), String
         .map_err(|err| format!("failed to write {}: {err}", tmp.display()))?;
     file.write_all(rendered.as_bytes())
         .map_err(|err| format!("failed to write {}: {err}", tmp.display()))?;
-    file.sync_all()
-        .map_err(|err| format!("failed to sync {}: {err}", tmp.display()))?;
+    durable_config_sync(&file).map_err(|err| format!("failed to sync {}: {err}", tmp.display()))?;
+    drop(file);
     fs::rename(&tmp, path).map_err(|err| format!("failed to replace {}: {err}", path.display()))?;
+    let parent = match path.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    crate::helpers::fsync::fsync_dir(parent)
+        .map_err(|err| format!("failed to sync {}: {err}", parent.display()))?;
     Ok(())
 }
 
@@ -324,6 +352,71 @@ pub fn yaml_scalar_from_string(value: String) -> serde_yaml::Value {
             }
         }
     }
+}
+
+fn coerce_yaml_scalars(value: serde_yaml::Value) -> serde_yaml::Value {
+    match value {
+        serde_yaml::Value::String(s) => yaml_scalar_from_string(s),
+        serde_yaml::Value::Mapping(map) => serde_yaml::Value::Mapping(
+            map.into_iter()
+                .map(|(key, nested)| (key, coerce_yaml_scalars(nested)))
+                .collect(),
+        ),
+        serde_yaml::Value::Sequence(items) => {
+            serde_yaml::Value::Sequence(items.into_iter().map(coerce_yaml_scalars).collect())
+        }
+        other => other,
+    }
+}
+
+pub fn yaml_map_from_serialize<T: Serialize>(value: &T) -> BTreeMap<String, serde_yaml::Value> {
+    let serialized = serde_yaml::to_value(value).expect("plugin config must serialize to YAML");
+    let serde_yaml::Value::Mapping(map) = serialized else {
+        panic!("plugin config must serialize to a YAML mapping");
+    };
+    map.into_iter()
+        .filter_map(|(key, nested)| {
+            let ident = key.as_str()?.to_string();
+            Some((ident, coerce_yaml_scalars(nested)))
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct YamlArg(pub serde_yaml::Value);
+
+impl Serialize for YamlArg {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.0.serialize(serializer)
+    }
+}
+
+impl FromStr for YamlArg {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        serde_yaml::from_str(s)
+            .map(YamlArg)
+            .map_err(|err| err.to_string())
+    }
+}
+
+pub fn yaml_get_path<'a>(
+    fields: &'a BTreeMap<String, serde_yaml::Value>,
+    path: &str,
+) -> Option<&'a serde_yaml::Value> {
+    if let Some(value) = fields.get(path) {
+        return Some(value);
+    }
+    let mut parts = path.split('.');
+    let first = parts.next()?;
+    let mut current = fields.get(first)?;
+    for part in parts {
+        current = current
+            .as_mapping()?
+            .get(serde_yaml::Value::String(part.to_string()))?;
+    }
+    Some(current)
 }
 
 pub fn yaml_string_map(fields: BTreeMap<String, String>) -> BTreeMap<String, serde_yaml::Value> {
@@ -388,9 +481,9 @@ impl<'a> ConnectBuilder<'a> {
         self
     }
 
-    fn set_field(&mut self, ident: &str, value: String) {
-        self.fields
-            .insert(ident.to_string(), yaml_scalar_from_string(value));
+    pub fn yaml_fields(mut self, fields: BTreeMap<String, serde_yaml::Value>) -> Self {
+        self.fields.extend(fields);
+        self
     }
 
     pub fn save(self) -> Result<(), String> {
@@ -429,6 +522,33 @@ include!("connect_generated.rs");
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn write_document_roundtrips_and_drops_tmp() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("skippr.yml");
+        let doc = serde_yaml::from_str::<serde_yaml::Value>(SKELETON).unwrap();
+        write_document(&path, &doc).unwrap();
+        assert!(path.exists());
+        assert!(!path.with_extension("yml.tmp").exists());
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("skipprd_el_storage_mode"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn write_document_succeeds_without_opening_parent_as_file() {
+        write_document_roundtrips_and_drops_tmp();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn durable_config_sync_uses_posix_fsync() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("skippr.yml.tmp");
+        let file = fs::File::create(&path).unwrap();
+        durable_config_sync(&file).unwrap();
+    }
 
     #[test]
     fn persist_plugin_keeps_sibling_pipeline_and_extra_fields() {
@@ -695,6 +815,87 @@ data_sources:
     }
 
     #[test]
+    fn persist_iceberg_file_io_from_nested_yaml_and_cli_idents() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("skippr.yml");
+        let mut file_io = serde_yaml::Mapping::new();
+        file_io.insert(
+            serde_yaml::Value::String("type".into()),
+            serde_yaml::Value::String("r2".into()),
+        );
+        file_io.insert(
+            serde_yaml::Value::String("endpoint".into()),
+            serde_yaml::Value::String("${OBJECTS_S3_ENDPOINT}".into()),
+        );
+        file_io.insert(
+            serde_yaml::Value::String("secret_access_key".into()),
+            serde_yaml::Value::String("${OBJECTS_SECRET_ACCESS_KEY}".into()),
+        );
+        let mut catalog = serde_yaml::Mapping::new();
+        catalog.insert(
+            serde_yaml::Value::String("type".into()),
+            serde_yaml::Value::String("skippr".into()),
+        );
+        catalog.insert(
+            serde_yaml::Value::String("table".into()),
+            serde_yaml::Value::String("cat".into()),
+        );
+        catalog.insert(
+            serde_yaml::Value::String("warehouse".into()),
+            serde_yaml::Value::String("s3://wh/".into()),
+        );
+        catalog.insert(
+            serde_yaml::Value::String("file_io".into()),
+            serde_yaml::Value::Mapping(file_io),
+        );
+        persist_plugin(
+            &path,
+            "p",
+            ConnectPlugin::DataSinkIceberg,
+            "lake",
+            BTreeMap::from([("catalog".into(), serde_yaml::Value::Mapping(catalog))]),
+        )
+        .unwrap();
+        let doc: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(
+            doc["data_sinks"]["lake"]["Iceberg"]["catalog"]["file_io"]["type"]
+                .as_str()
+                .unwrap(),
+            "r2"
+        );
+        assert_eq!(
+            doc["data_sinks"]["lake"]["Iceberg"]["catalog"]["file_io"]["secret_access_key"]
+                .as_str()
+                .unwrap(),
+            "${OBJECTS_SECRET_ACCESS_KEY}"
+        );
+
+        let err = persist_plugin(
+            &path,
+            "p",
+            ConnectPlugin::DataSinkIceberg,
+            "lake",
+            yaml_path_fields(
+                ConnectPlugin::DataSinkIceberg,
+                &yaml_string_map(BTreeMap::from([
+                    ("catalog_type".into(), "skippr".into()),
+                    ("catalog_table".into(), "cat".into()),
+                    ("catalog_warehouse".into(), "s3://wh/".into()),
+                    ("catalog_file_io_type".into(), "r2".into()),
+                    (
+                        "catalog_file_io_secret_access_key".into(),
+                        "plaintext".into(),
+                    ),
+                ])),
+            )
+            .unwrap(),
+        )
+        .unwrap_err();
+        assert!(err.contains("${ENV}"), "{err}");
+    }
+
+    #[test]
     fn session_connect_save_writes_source() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("skippr.yml");
@@ -715,8 +916,14 @@ data_sources:
             .unwrap()
             .data_source(DataSource::S3)
             .name("sample")
-            .s3_bucket("b")
-            .s3_prefix("p")
+            .yaml_fields(yaml_string_map(
+                [
+                    ("s3_bucket".to_string(), "b".to_string()),
+                    ("s3_prefix".to_string(), "p".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            ))
             .save()
             .unwrap();
         let raw = fs::read_to_string(&path).unwrap();
@@ -754,7 +961,11 @@ data_sources:
             .unwrap()
             .data_source(DataSource::Otlp)
             .name("otel")
-            .auth_token("${OTLP_TOKEN}")
+            .yaml_fields(yaml_string_map(
+                [("auth_token".to_string(), "${OTLP_TOKEN}".to_string())]
+                    .into_iter()
+                    .collect(),
+            ))
             .save()
             .unwrap();
         let doc: serde_yaml::Value =
@@ -772,7 +983,11 @@ data_sources:
             .unwrap()
             .data_source(DataSource::Otlp)
             .name("otel")
-            .auth_token("hunter2")
+            .yaml_fields(yaml_string_map(
+                [("auth_token".to_string(), "hunter2".to_string())]
+                    .into_iter()
+                    .collect(),
+            ))
             .save()
             .unwrap_err();
         assert!(err.contains("${ENV}"));
@@ -782,8 +997,14 @@ data_sources:
             .unwrap()
             .data_source(DataSource::HttpClient)
             .name("http")
-            .url("https://ex")
-            .auth_token("${HTTP_TOKEN}")
+            .yaml_fields(yaml_string_map(
+                [
+                    ("url".to_string(), "https://ex".to_string()),
+                    ("auth_token".to_string(), "${HTTP_TOKEN}".to_string()),
+                ]
+                .into_iter()
+                .collect(),
+            ))
             .save()
             .unwrap();
         let doc: serde_yaml::Value =

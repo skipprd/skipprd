@@ -52,7 +52,6 @@ pub struct DataSourceMysqlPlugin {
 }
 
 impl DataSourceMysqlPlugin {
-
     pub fn with_runtime_config(config: DataSourceMysqlPluginConfig) -> Self {
         Self { config }
     }

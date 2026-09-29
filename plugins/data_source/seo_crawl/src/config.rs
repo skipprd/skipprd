@@ -1,6 +1,6 @@
-use skippr_runtime_sdk::SkipprConfig;
 use serde::Deserialize;
 use serde_derive::Serialize;
+use skippr_runtime_sdk::SkipprConfig;
 
 #[derive(Debug, Clone, Serialize, Deserialize, SkipprConfig, PartialEq)]
 pub struct DataSourceSeoCrawlPluginConfig {

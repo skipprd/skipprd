@@ -1,6 +1,6 @@
-use skippr_runtime_sdk::SkipprConfig;
 use serde::Deserialize;
 use serde_derive::Serialize;
+use skippr_runtime_sdk::SkipprConfig;
 
 use crate::domain::normalize_domain;
 

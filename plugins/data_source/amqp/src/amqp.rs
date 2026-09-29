@@ -44,7 +44,6 @@ pub struct DataSourceAmqpPlugin {
 }
 
 impl DataSourceAmqpPlugin {
-
     pub fn with_runtime_config(config: DataSourceAmqpPluginConfig) -> Self {
         Self { config }
     }

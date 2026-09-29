@@ -1,5 +1,5 @@
-use skippr_runtime_sdk::SkipprConfig;
 use serde_derive::{Deserialize, Serialize};
+use skippr_runtime_sdk::SkipprConfig;
 
 /// Runtime / pipeline config for the Postgres data sink.
 #[derive(Debug, Deserialize, SkipprConfig, Serialize, Clone)]

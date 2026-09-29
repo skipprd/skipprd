@@ -35,7 +35,6 @@ pub struct DataSourceStatsdPlugin {
 }
 
 impl DataSourceStatsdPlugin {
-
     pub fn with_runtime_config(config: DataSourceStatsdPluginConfig) -> Self {
         Self { config }
     }

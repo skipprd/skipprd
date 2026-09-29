@@ -55,7 +55,6 @@ impl DataSourceSnsPlugin {
         Self { config, sqs_client }
     }
 
-
     pub async fn with_runtime_config(config: DataSourceSnsPluginConfig) -> Self {
         Self::from_config(config).await
     }

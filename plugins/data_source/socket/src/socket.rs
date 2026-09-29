@@ -38,7 +38,6 @@ pub struct DataSourceSocketPlugin {
 }
 
 impl DataSourceSocketPlugin {
-
     pub fn with_runtime_config(config: DataSourceSocketPluginConfig) -> Self {
         Self { config }
     }

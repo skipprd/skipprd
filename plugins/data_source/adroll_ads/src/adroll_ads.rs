@@ -1,4 +1,3 @@
-use skippr_runtime_sdk::SkipprConfig;
 use crate::adroll_ads_api::{parse_rows, AdRollAdsApiClient};
 use crate::streams::{resolve_streams, AdRollStreamDef, AdRollStreamKind, StreamProfile};
 use async_trait::async_trait;
@@ -20,6 +19,7 @@ use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 use skippr_runtime_sdk::source_compat::{
     load_checkpoint_payload, submit_payload_batches, IngestBatch,
 };
+use skippr_runtime_sdk::SkipprConfig;
 use std::sync::Arc;
 const CHECKPOINT_PAYLOAD_VERSION: u32 = 1;
 const DISCOVER_SAMPLE_DAYS: u32 = 3;

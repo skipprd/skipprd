@@ -74,7 +74,6 @@ pub struct DataSourceHttpServerPlugin {
 }
 
 impl DataSourceHttpServerPlugin {
-
     pub fn with_runtime_config(config: DataSourceHttpServerPluginConfig) -> Self {
         Self { config }
     }

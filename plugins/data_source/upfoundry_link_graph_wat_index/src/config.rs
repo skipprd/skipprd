@@ -1,5 +1,5 @@
-use skippr_runtime_sdk::SkipprConfig;
 use serde::{Deserialize, Serialize};
+use skippr_runtime_sdk::SkipprConfig;
 
 fn default_bucket_count() -> u32 {
     32_768

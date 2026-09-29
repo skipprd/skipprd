@@ -38,7 +38,6 @@ pub struct DataSourceDeltaLakePlugin {
 }
 
 impl DataSourceDeltaLakePlugin {
-
     pub fn with_runtime_config(config: DataSourceDeltaLakePluginConfig) -> Self {
         Self { config }
     }

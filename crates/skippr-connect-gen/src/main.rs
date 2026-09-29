@@ -19,9 +19,11 @@ fn main() {
         process::exit(1);
     }
     if check {
-        let kinds = skippr_connect_gen::emit_kinds_rs(&plugins);
-        let cli = skippr_connect_gen::emit_cli_rs(&plugins);
-        let py = skippr_connect_gen::emit_python_rs(&plugins);
+        let (kinds, cli, py) =
+            skippr_connect_gen::generated_sources(&plugins).unwrap_or_else(|err| {
+                eprintln!("{err}");
+                process::exit(1);
+            });
         let ok_kinds =
             std::fs::read_to_string(root.join("src/connect_generated.rs")).unwrap_or_default();
         let ok_cli =

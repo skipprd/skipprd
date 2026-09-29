@@ -1,4 +1,3 @@
-use skippr_runtime_sdk::SkipprConfig;
 use crate::helpers::configuration::DataSinkPluginConfig;
 use async_trait::async_trait;
 use datafusion::arrow::record_batch::RecordBatch;
@@ -13,6 +12,7 @@ use skippr_runtime_sdk::plugins::{
     AtLeastOnceMessageDelivery, DataSink, GroupedBatchReader, GroupedSinkWriteContext,
     SinkWriteContext, SinkWriteOutcome,
 };
+use skippr_runtime_sdk::SkipprConfig;
 use std::{future::Future, io, pin::Pin, sync::Arc};
 use tokio::sync::Mutex;
 use tracing::info;

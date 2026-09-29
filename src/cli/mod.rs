@@ -92,7 +92,7 @@ pub struct QueryOptions {
     /// Watch interval in seconds for live SELECT (optional)
     #[arg(long)]
     pub watch: Option<u64>,
-    /// Print plain results to stdout instead of TUI (non-interactive)
+    /// Print one JSON document `{header, rows}` to stdout instead of the TUI
     #[arg(long, default_value_t = false)]
     pub plain: bool,
 }
@@ -157,7 +157,4 @@ pub struct DfOptions {
     /// Namespace, or pipeline.namespace
     #[arg(long)]
     pub namespace: Option<String>,
-    /// Print CSV-like rows instead of a table
-    #[arg(long, default_value_t = false)]
-    pub plain: bool,
 }
