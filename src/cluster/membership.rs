@@ -26,6 +26,7 @@ use tokio::sync::RwLock;
 use skippr_lease::{ClusterId, ClusterMembershipStore, NodeAd};
 
 use crate::cluster::identity::ClusterConfig;
+use crate::helpers::configuration::Config;
 
 #[derive(Clone, Copy, Debug)]
 pub struct MembershipEndpoints {
@@ -53,9 +54,11 @@ pub struct MembershipService {
 
 impl MembershipService {
     pub async fn start(
+        app_cfg: &Config,
         config: ClusterConfig,
         endpoints: MembershipEndpoints,
     ) -> Result<Self, String> {
+        let _ = app_cfg;
         #[cfg(any(
             feature = "offset-store-dynamodb",
             feature = "offset-store-cloud-tables"
@@ -63,7 +66,10 @@ impl MembershipService {
         let store = if config.table.is_empty() {
             None
         } else {
-            Some(crate::cluster::backend::open_membership_store(config.table.clone()).await?)
+            Some(
+                crate::cluster::backend::open_membership_store(app_cfg, config.table.clone())
+                    .await?,
+            )
         };
         Ok(Self {
             config,

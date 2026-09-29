@@ -159,6 +159,7 @@ fn clustered_rejects_at_least_once_sink() {
         sink_ref: None,
         iceberg: false,
         flatten_events: false,
+        wal_storage: WalStorage::Clustered,
     };
     assert!(view.validate_clustered_sink().is_err());
 }

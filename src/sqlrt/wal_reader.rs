@@ -43,6 +43,20 @@ impl WalReader for ClusteredWalReader {
     }
 }
 
+pub struct DiskWalReader {
+    segs: PathBuf,
+}
+
+impl WalReader for DiskWalReader {
+    fn load_committed_batches(
+        &self,
+        name: &str,
+        limit_files: usize,
+    ) -> io::Result<Vec<RecordBatch>> {
+        load_seg_dir_batches(self.segs.clone(), name, limit_files)
+    }
+}
+
 fn load_seg_dir_batches(
     seg_dir: PathBuf,
     namespace_or_pipeline: &str,
@@ -225,7 +239,18 @@ impl WalReaderFactory {
                 let prefix_url = format!("s3://{}/{}", bucket, base.trim_start_matches('/'));
                 Box::new(S3WalReader { prefix_url })
             }
-            WalStorage::Disk | WalStorage::Clustered => Box::new(ClusteredWalReader),
+            WalStorage::Disk => {
+                let bound = if _pipeline.is_empty() {
+                    config.clone()
+                } else {
+                    config.bind_pipeline(_pipeline)
+                };
+                let paths = skippr_lease::PipelinePaths::legacy_disk(std::path::Path::new(
+                    &bound.get_data_dir(),
+                ));
+                Box::new(DiskWalReader { segs: paths.segs })
+            }
+            WalStorage::Clustered => Box::new(ClusteredWalReader),
         }
     }
 
@@ -271,5 +296,43 @@ mod tests {
             .unwrap_err();
         remove_durable_store(&key);
         assert!(err.to_string().contains("missing"));
+    }
+
+    #[test]
+    fn disk_wal_reader_loads_committed_seg_without_durable_store() {
+        use crate::buffer::segment_file::{PartitionKey, SegmentFile};
+        use arrow::array::StringArray;
+        use arrow::datatypes::{DataType, Field, Schema};
+        use std::collections::HashMap;
+        use std::sync::Arc;
+
+        let dir = tempfile::tempdir().unwrap();
+        let segs = dir.path().join("segment_buffer/segs");
+        std::fs::create_dir_all(&segs).unwrap();
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
+        let seg = SegmentFile::new(&segs, "file-seg").unwrap();
+        let mut batches = HashMap::new();
+        batches.insert(
+            PartitionKey {
+                sink_ref: String::new(),
+                namespace: "orders_el".into(),
+                partition: "p0".into(),
+                time: None,
+                schema_fingerprint: "fp".into(),
+            },
+            vec![arrow::array::RecordBatch::try_new(
+                schema,
+                vec![Arc::new(StringArray::from(vec!["row-1"]))],
+            )
+            .unwrap()],
+        );
+        seg.write_snapshot(&HashMap::new(), &batches, &HashMap::new(), &HashMap::new())
+            .unwrap();
+        std::fs::write(segs.join("file-seg.seg.commit"), []).unwrap();
+        let reader = DiskWalReader { segs };
+        let loaded = reader
+            .load_committed_batches("orders_el", usize::MAX)
+            .unwrap();
+        assert_eq!(loaded.iter().map(|b| b.num_rows()).sum::<usize>(), 1);
     }
 }

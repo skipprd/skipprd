@@ -277,6 +277,8 @@ def skipprd_bin() -> Path:
 
 def write_skippr_yml(path: Path, events_dir: Path, warehouse: Path) -> None:
     warehouse_uri = f"file://{warehouse}"
+    # Local file:// warehouse omits catalog.file_io (S3 default / local FS).
+    # R2 FileIO is catalog.file_io type: r2 + ${OBJECTS_*}; not this HLA fixture.
     path.write_text(
         f"""skippr:
   workspace: {WORKSPACE}
@@ -1091,22 +1093,42 @@ def wait_same_elected_scheduler(nodes: list[Node], timeout: float) -> str:
     )
 
 
+def parse_plain_query(stdout: str) -> dict[str, Any]:
+    text = stdout.strip()
+    try:
+        doc = json.loads(text)
+    except json.JSONDecodeError as err:
+        raise HarnessError(f"could not parse plain query json from:\n{stdout}") from err
+    if not isinstance(doc, dict) or "header" not in doc or "rows" not in doc:
+        raise HarnessError(f"plain query json missing header/rows:\n{stdout}")
+    return doc
+
+
 def parse_ids(stdout: str) -> list[str]:
+    doc = parse_plain_query(stdout)
+    header = [str(h) for h in doc["header"]]
+    header_l = [h.lower() for h in header]
+    if "id" not in header_l:
+        raise HarnessError(f"plain query json has no id column:\n{stdout}")
+    idx = header_l.index("id")
     ids: list[str] = []
-    for line in stdout.splitlines():
-        line = line.strip()
-        if not line or line.lower() == "id" or line.lower().startswith("count"):
-            continue
-        ids.append(line.split(",")[0])
+    for row in doc["rows"]:
+        if len(row) != len(header):
+            raise HarnessError(
+                f"plain query json row width {len(row)} != header {len(header)}:\n{stdout}"
+            )
+        ids.append(str(row[idx]))
     return ids
 
 
 def parse_count(stdout: str) -> int:
-    for line in reversed(stdout.splitlines()):
-        line = line.strip()
-        if line.isdigit():
-            return int(line)
-    raise HarnessError(f"could not parse count from:\n{stdout}")
+    doc = parse_plain_query(stdout)
+    if not doc["rows"] or not doc["rows"][-1]:
+        raise HarnessError(f"could not parse count from:\n{stdout}")
+    try:
+        return int(str(doc["rows"][-1][0]))
+    except ValueError as err:
+        raise HarnessError(f"could not parse count from:\n{stdout}") from err
 
 
 def pipeline_root(node: Node, pipeline: str = PIPELINE) -> Path:

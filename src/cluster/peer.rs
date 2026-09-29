@@ -366,8 +366,7 @@ pub async fn stream_payload_to_path(
     file.sync_all().await?;
     tokio::fs::rename(&tmp, dest).await?;
     if let Some(parent) = dest.parent() {
-        let dir = tokio::fs::File::open(parent).await?;
-        dir.sync_all().await?;
+        crate::helpers::fsync::fsync_dir(parent)?;
     }
     Ok(hasher.finalize().into())
 }

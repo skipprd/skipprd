@@ -2,7 +2,7 @@ use std::path::PathBuf;
 
 use crate::buffer::compaction_transaction::SinkRetrySemantics;
 use crate::helpers::configuration::{Config, Pipeline};
-use crate::helpers::wal_storage::ConfigError;
+use crate::helpers::wal_storage::{ConfigError, WalStorage};
 use crate::plugins::cdc::SinkCapability;
 use skippr_lease::{PipelineKey, PipelinePaths};
 
@@ -18,6 +18,7 @@ pub struct PipelineConfigView {
     pub sink_ref: Option<String>,
     pub iceberg: bool,
     pub flatten_events: bool,
+    pub wal_storage: WalStorage,
 }
 
 impl PipelineConfigView {
@@ -49,6 +50,7 @@ impl PipelineConfigView {
             sink_ref,
             iceberg,
             flatten_events,
+            wal_storage: config.get_wal_storage(),
         })
     }
 
@@ -58,10 +60,10 @@ impl PipelineConfigView {
             view.key = key.clone();
             return Ok(view);
         }
-        Self::synthetic_iceberg(key)
+        Self::synthetic_iceberg(key, config.get_wal_storage())
     }
 
-    fn synthetic_iceberg(key: &PipelineKey) -> Result<Self, ConfigError> {
+    fn synthetic_iceberg(key: &PipelineKey, wal_storage: WalStorage) -> Result<Self, ConfigError> {
         Ok(Self {
             key: key.clone(),
             data_root: PathBuf::from(std::env::var("DATA_DIR").unwrap_or_else(|_| "./data".into())),
@@ -71,6 +73,7 @@ impl PipelineConfigView {
             sink_ref: None,
             iceberg: true,
             flatten_events: false,
+            wal_storage,
         })
     }
 
@@ -81,6 +84,20 @@ impl PipelineConfigView {
     pub fn paths(&self) -> Result<PipelinePaths, ConfigError> {
         PipelinePaths::new(&self.data_root, &self.key)
             .map_err(|err| ConfigError::InvalidIdentity(err.to_string()))
+    }
+
+    /// WAL segs for `skipprd query` when no durable store is installed.
+    /// Layout follows `WAL_STORAGE` (`WalStorage`), not directory existence.
+    pub fn query_wal_paths(&self) -> Result<Option<PipelinePaths>, ConfigError> {
+        match self.wal_storage {
+            WalStorage::Clustered => self.paths().map(Some),
+            WalStorage::Disk => {
+                Ok(Some(PipelinePaths::legacy_disk(&self.data_root.join(
+                    format!("{}_{}", self.key.workspace(), self.key.pipeline()),
+                ))))
+            }
+            WalStorage::S3 => Ok(None),
+        }
     }
 
     pub fn sink_capability(&self) -> Option<&'static SinkCapability> {
@@ -188,6 +205,7 @@ mod tests {
             sink_ref: None,
             iceberg: false,
             flatten_events: false,
+            wal_storage: WalStorage::Disk,
         };
         assert!(view.validate_clustered_sink().is_err());
         assert_eq!(
@@ -209,6 +227,7 @@ mod tests {
             sink_ref: None,
             iceberg: true,
             flatten_events: false,
+            wal_storage: WalStorage::Clustered,
         };
         assert!(view.validate_clustered_sink().is_ok());
     }
@@ -222,5 +241,41 @@ mod tests {
         assert!(view.iceberg);
         assert_eq!(view.sink_plugin, "Iceberg");
         assert!(view.validate_clustered_sink().is_ok());
+    }
+
+    #[test]
+    fn query_wal_paths_follow_wal_storage() {
+        let dir = tempfile::tempdir().unwrap();
+        let data_root = dir.path();
+        let key = PipelineKey::new("default", "de-query-r2", "orders_el").unwrap();
+        let disk = PipelineConfigView {
+            key: key.clone(),
+            data_root: data_root.to_path_buf(),
+            source_plugin: "File".into(),
+            sink_plugin: String::new(),
+            schema_plugin: None,
+            sink_ref: None,
+            iceberg: false,
+            flatten_events: false,
+            wal_storage: WalStorage::Disk,
+        };
+        let disk_root = data_root.join("de-query-r2_orders_el");
+        let paths = disk.query_wal_paths().unwrap().unwrap();
+        assert_eq!(paths.segs, disk_root.join("segment_buffer/segs"));
+
+        let clustered = PipelineConfigView {
+            wal_storage: WalStorage::Clustered,
+            ..disk.clone()
+        };
+        let clustered_paths = clustered.query_wal_paths().unwrap().unwrap();
+        assert!(clustered_paths
+            .root
+            .ends_with("clustered/default/de-query-r2/orders_el"));
+
+        let s3 = PipelineConfigView {
+            wal_storage: WalStorage::S3,
+            ..disk
+        };
+        assert!(s3.query_wal_paths().unwrap().is_none());
     }
 }

@@ -18,7 +18,7 @@ skipprd --config skippr.yml query --sql "<SQL>" [--watch <seconds>] [--plain] [-
 |---|---|---|
 | `--sql, -s` | No | The SQL statement to execute. If omitted, opens interactive mode. |
 | `--watch` | No | Re-run the query every N seconds (live refresh). |
-| `--plain` | No | Print plain-text results to stdout instead of the TUI. |
+| `--plain` | No | Print one JSON document `{ "header": [...], "rows": [[...]] }` to stdout instead of the TUI. |
 | `--log` | No | Enable logging. |
 
 ## Examples

@@ -68,6 +68,22 @@ pub struct QueryExecutionOptions {
     pub watch: Option<u64>,
 }
 
+pub fn sql_uses_record_batch_collect(sql: &str) -> bool {
+    let upper = sql.trim().to_uppercase();
+    !(upper.starts_with("SHOW ")
+        || upper.starts_with("STREAM ")
+        || upper.starts_with("ENABLE ")
+        || upper.starts_with("DISABLE ")
+        || upper.starts_with("SCHEMA ")
+        || upper.starts_with("PIPELINE ")
+        || upper.starts_with("DROP ")
+        || upper.starts_with("ALTER ")
+        || upper.starts_with("RESET ")
+        || upper.starts_with("DESCRIBE ")
+        || upper.starts_with("DESC ")
+        || upper.starts_with("LOAD "))
+}
+
 impl Default for QueryExecutionOptions {
     fn default() -> Self {
         Self {
@@ -268,18 +284,8 @@ pub async fn query_with_options(
     let sql_trim = sql_str.trim();
     // Enforce fully-qualified table names: require <pipeline>.<namespace>, forbid default.*
     {
-        let upper = sql_trim.to_uppercase();
-        let is_ddl = upper.starts_with("ENABLE ")
-            || upper.starts_with("DISABLE ")
-            || upper.starts_with("SCHEMA ")
-            || upper.starts_with("PIPELINE ")
-            || upper.starts_with("DROP ")
-            || upper.starts_with("ALTER ")
-            || upper.starts_with("RESET ");
-        let is_stream = upper.starts_with("STREAM ");
-        let is_show = upper.starts_with("SHOW ");
-        let is_describe = upper.starts_with("DESCRIBE ") || upper.starts_with("DESC ");
-        if !is_ddl && !is_stream && !is_show && !is_describe {
+        let is_extension = !sql_uses_record_batch_collect(sql_trim);
+        if !is_extension {
             let lower = sql_trim.to_lowercase();
             if lower.contains(" default.") {
                 println!("Error: default.* schema is not allowed. Use <pipeline>.<namespace> (e.g., picnic.screen).");
@@ -1175,15 +1181,17 @@ pub async fn query_with_options(
                     .then(a.namespace.cmp(&b.namespace))
             });
             table_refs.dedup_by(|a, b| a.pipeline == b.pipeline && a.namespace == b.namespace);
-            // Log resolved table refs
-            println!(
-                "Resolved table refs: [{}]",
-                table_refs
-                    .iter()
-                    .map(|t| format!("{}.{}", t.pipeline, t.namespace))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            );
+            let plain = query_options.plain;
+            if !plain {
+                println!(
+                    "Resolved table refs: [{}]",
+                    table_refs
+                        .iter()
+                        .map(|t| format!("{}.{}", t.pipeline, t.namespace))
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                );
+            }
 
             // Strict mode: no special-cases (e.g., deadletters). All tables must be fully-qualified and pre-registered.
             let mut first = true;
@@ -1195,7 +1203,9 @@ pub async fn query_with_options(
                 // Switch pipeline context for correct local WAL dir and config resolution
                 config = config.bind_pipeline(&pipeline);
                 config.init().await;
-                println!("Context: pipeline='{}' namespace='{}'", pipeline, namespace);
+                if !plain {
+                    println!("Context: pipeline='{}' namespace='{}'", pipeline, namespace);
+                }
                 if first {
                     register_catalog(&config, &ctx).await;
                     first = false;
@@ -1222,45 +1232,55 @@ pub async fn query_with_options(
                                         .map(|f| format!("{}:{:?}", f.name(), f.data_type()))
                                         .collect();
                                     // println!("Published ARROW_SCHEMA for '{}' (fields={}, {:?})", pipeline, schema.fields().len(), field_list);
-                                    println!(
-                                        "Arrow schema ready for namespace='{}' fields={}",
-                                        namespace,
-                                        schema.fields().len()
-                                    );
+                                    if !plain {
+                                        println!(
+                                            "Arrow schema ready for namespace='{}' fields={}",
+                                            namespace,
+                                            schema.fields().len()
+                                        );
+                                    }
                                 }
                                 Err(e) => {
-                                    println!(
-                                        "Failed to build Arrow schema for '{}': {}",
-                                        namespace, e
-                                    );
+                                    if !plain {
+                                        println!(
+                                            "Failed to build Arrow schema for '{}': {}",
+                                            namespace, e
+                                        );
+                                    }
                                 }
                             }
                         } else {
                             // missing namespace; proceed without schema
-                            println!(
-                                "Metadata missing for namespace='{}' (continuing)",
-                                namespace
-                            );
+                            if !plain {
+                                println!(
+                                    "Metadata missing for namespace='{}' (continuing)",
+                                    namespace
+                                );
+                            }
                         }
                     }
                     Err(_) => {
                         // no metadata; proceed
                         METADATA.store(Arc::new(PipelineMetadata::new(&config)));
-                        println!("No pipeline metadata found; proceeding without schema");
+                        if !plain {
+                            println!("No pipeline metadata found; proceeding without schema");
+                        }
                     }
                 }
 
-                let _ = crate::sqlrt::tables::register_namespace_view(
+                if let Err(e) = crate::sqlrt::tables::register_namespace_view(
                     &ctx, &config, &pipeline, &namespace,
                 )
                 .await
-                .map_err(|e| {
-                    println!(
-                        "Failed to register namespace view for {}.{}: {}",
-                        pipeline, namespace, e
-                    );
-                    e
-                });
+                {
+                    if !plain {
+                        println!(
+                            "Failed to register namespace view for {}.{}: {}",
+                            pipeline, namespace, e
+                        );
+                    }
+                    return;
+                }
             }
             // Restore original pipeline context
             config = config.bind_pipeline(&original_pipeline);
@@ -1403,32 +1423,10 @@ pub async fn query_with_options(
             let rewritten_sql = sql_str.to_string();
 
             // Short-circuit for non-TUI plain mode
-            let plain = query_options.plain;
             if plain {
                 match ctx.sql(&rewritten_sql).await {
                     Ok(df) => match collect_user_sql(df).await {
-                        Ok(res) => {
-                            for batch in &res {
-                                let schema = batch.schema();
-                                let headers: Vec<String> = schema
-                                    .fields()
-                                    .iter()
-                                    .map(|f| f.name().to_string())
-                                    .collect();
-                                println!("{}", headers.join(","));
-                                let cols = batch.columns().len();
-                                for row in 0..batch.num_rows() {
-                                    let mut parts: Vec<String> = Vec::with_capacity(cols);
-                                    for col in 0..cols {
-                                        parts.push(crate::sqlrt::tui::value_to_string(
-                                            batch.column(col).as_ref(),
-                                            row,
-                                        ));
-                                    }
-                                    println!("{}", parts.join(","));
-                                }
-                            }
-                        }
+                        Ok(res) => print_query_plain_json(&res),
                         Err(e) => {
                             print_sql_error_plain(&e);
                         }
@@ -1695,14 +1693,7 @@ async fn show_semantic(
     };
     let df = ctx.sql(&sql).await?;
     let batches = df.collect().await?;
-    if ns.is_empty() {
-        println!("Semantic data:");
-    } else {
-        println!("Semantic data for namespace '{}':", ns);
-    }
-    for b in &batches {
-        print_batches_plain(&b);
-    }
+    print_query_plain_json(&batches);
     Ok(())
 }
 
@@ -1722,7 +1713,7 @@ async fn show_catalog(
             {
                 if let Some(d) = val.get("description").and_then(|x| x.as_str()) {
                     if !d.trim().is_empty() {
-                        println!("Description: {}", d);
+                        eprintln!("Description: {}", d);
                     }
                 }
             }
@@ -1736,34 +1727,71 @@ async fn show_catalog(
     };
     let df = ctx.sql(&sql).await?;
     let batches = df.collect().await?;
-    if ns.is_empty() {
-        println!("Catalog data:");
-    } else {
-        println!("Catalog data for namespace '{}':", ns);
-    }
-    for b in &batches {
-        print_batches_plain(&b);
-    }
+    print_query_plain_json(&batches);
     Ok(())
 }
 
-pub fn print_batches_plain(batch: &RecordBatch) {
-    let schema = batch.schema();
-    let headers: Vec<String> = schema
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct PlainQueryDocument {
+    pub header: Vec<String>,
+    pub rows: Vec<Vec<String>>,
+}
+
+pub fn record_batches_to_plain_query(
+    batches: &[RecordBatch],
+) -> Result<PlainQueryDocument, String> {
+    let Some(first) = batches.first() else {
+        return Ok(PlainQueryDocument {
+            header: Vec::new(),
+            rows: Vec::new(),
+        });
+    };
+    let header: Vec<String> = first
+        .schema()
         .fields()
         .iter()
         .map(|f| f.name().to_string())
         .collect();
-    println!("{}", headers.join(","));
-    for row in 0..batch.num_rows() {
-        let mut parts: Vec<String> = Vec::with_capacity(headers.len());
-        for col in 0..headers.len() {
-            parts.push(crate::sqlrt::tui::value_to_string(
-                batch.column(col).as_ref(),
-                row,
+    let mut rows = Vec::new();
+    for batch in batches {
+        let names: Vec<String> = batch
+            .schema()
+            .fields()
+            .iter()
+            .map(|f| f.name().to_string())
+            .collect();
+        if names != header {
+            return Err(format!(
+                "plain query schema mismatch: expected {header:?}, got {names:?}"
             ));
         }
-        println!("{}", parts.join(","));
+        for row in 0..batch.num_rows() {
+            let mut parts: Vec<String> = Vec::with_capacity(header.len());
+            for col in 0..header.len() {
+                parts.push(crate::sqlrt::tui::value_to_string(
+                    batch.column(col).as_ref(),
+                    row,
+                ));
+            }
+            rows.push(parts);
+        }
+    }
+    Ok(PlainQueryDocument { header, rows })
+}
+
+pub fn print_query_plain_json(batches: &[RecordBatch]) {
+    match record_batches_to_plain_query(batches) {
+        Ok(doc) => match serde_json::to_string(&doc) {
+            Ok(json) => println!("{json}"),
+            Err(e) => {
+                eprintln!("failed to encode skipprd --plain query JSON: {e}");
+                process::exit(1);
+            }
+        },
+        Err(e) => {
+            eprintln!("{e}");
+            process::exit(1);
+        }
     }
 }
 
@@ -1880,4 +1908,72 @@ async fn show_pipeline(config: &Config, pipeline_name: &str) {
     });
 
     println!("{}", serde_json::to_string_pretty(&result).unwrap());
+}
+
+#[cfg(test)]
+mod plain_query_document_tests {
+    use super::{record_batches_to_plain_query, PlainQueryDocument};
+    use arrow::array::{ArrayRef, StringArray};
+    use arrow_schema::{DataType, Field, Schema};
+    use datafusion::arrow::array::RecordBatch;
+    use std::sync::Arc;
+
+    fn batch(names: &[&str], rows: &[&[&str]]) -> RecordBatch {
+        let fields: Vec<Field> = names
+            .iter()
+            .map(|n| Field::new(*n, DataType::Utf8, false))
+            .collect();
+        let columns: Vec<ArrayRef> = (0..names.len())
+            .map(|col| {
+                let values: Vec<&str> = rows.iter().map(|row| row[col]).collect();
+                Arc::new(StringArray::from(values)) as ArrayRef
+            })
+            .collect();
+        RecordBatch::try_new(Arc::new(Schema::new(fields)), columns).expect("batch")
+    }
+
+    #[test]
+    fn plain_query_document_keeps_commas_inside_cells() {
+        let batches = [batch(
+            &["id", "name"],
+            &[&["1", "alice,bob"], &["2", "carol"]],
+        )];
+        let doc = record_batches_to_plain_query(&batches).expect("doc");
+        assert_eq!(
+            doc,
+            PlainQueryDocument {
+                header: vec!["id".into(), "name".into()],
+                rows: vec![
+                    vec!["1".into(), "alice,bob".into()],
+                    vec!["2".into(), "carol".into()]
+                ],
+            }
+        );
+        let json = serde_json::to_string(&doc).expect("json");
+        assert!(json.contains("alice,bob"));
+        assert!(!json.contains("alice,bob\n"));
+        let round: PlainQueryDocument = serde_json::from_str(&json).expect("roundtrip");
+        assert_eq!(round, doc);
+    }
+
+    #[test]
+    fn plain_query_document_concatenates_batches_with_one_header() {
+        let batches = [batch(&["id"], &[&["1"]]), batch(&["id"], &[&["2"]])];
+        let doc = record_batches_to_plain_query(&batches).expect("doc");
+        assert_eq!(doc.header, vec!["id"]);
+        assert_eq!(doc.rows, vec![vec!["1".to_string()], vec!["2".to_string()]]);
+    }
+
+    #[test]
+    fn dialect_sql_does_not_use_record_batch_collect() {
+        assert!(!super::sql_uses_record_batch_collect(
+            "SHOW PIPELINE orders_el"
+        ));
+        assert!(!super::sql_uses_record_batch_collect(
+            "LOAD SCHEMA x INTO y"
+        ));
+        assert!(super::sql_uses_record_batch_collect(
+            "SELECT 1 FROM pipe.ns"
+        ));
+    }
 }

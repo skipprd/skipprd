@@ -435,6 +435,10 @@ mod tests {
             "CLI Query collect path must call Session.query"
         );
         assert!(
+            query_arm.contains("sql_uses_record_batch_collect"),
+            "CLI Query collect path must not swallow SHOW/DDL into RecordBatch JSON"
+        );
+        assert!(
             query_arm.contains(".query_with_options("),
             "CLI Query watch/TUI/REPL must call Session.query_with_options"
         );

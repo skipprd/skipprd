@@ -255,7 +255,7 @@ pub async fn register_namespace_view(
     config.init().await;
     match crate::cluster::PipelineConfigView::for_name(config, pipeline) {
         Ok(view) if view.iceberg => {
-            return register_iceberg_union_view(
+            match register_iceberg_union_view(
                 config,
                 ctx,
                 pipeline,
@@ -263,7 +263,15 @@ pub async fn register_namespace_view(
                 &view,
                 &namespace_union_opts(config),
             )
-            .await;
+            .await
+            {
+                Ok(()) => return Ok(()),
+                Err(err) => {
+                    return Err(DataFusionError::Plan(format!(
+                        "Iceberg catalog unavailable for '{pipeline}.{namespace}': {err}"
+                    )));
+                }
+            }
         }
         Ok(_) => {}
         Err(err)
@@ -338,14 +346,11 @@ pub async fn register_namespace_view(
         }
     }
     if s3_paths.is_empty() {
-        // First-sync fallback: derive standard datalake prefix and proceed
-        let bucket = config.get_skippr_s3_bucket();
-        let fallback = format!("s3://{}/datalake/{}/", bucket, namespace);
         info!(
-            "register_namespace_view: no manifest prefixes for '{}.{}'; falling back to {}",
-            pipeline, namespace, fallback
+            "register_namespace_view: no lake prefixes for '{}.{}'; registering WAL view",
+            pipeline, namespace
         );
-        s3_paths.push(fallback);
+        return register_wal_namespace_view(ctx, config, pipeline, namespace).await;
     }
     // S3 DF (single listing from common prefix) + timestamp projection
     info!(
@@ -363,17 +368,17 @@ pub async fn register_namespace_view(
         Ok(Ok(df)) => df,
         Ok(Err(e)) => {
             warn!(
-                "register_namespace_view: failed to build S3 DF for '{}.{}': {}",
+                "register_namespace_view: failed to build S3 DF for '{}.{}'; registering WAL view: {}",
                 pipeline, namespace, e
             );
-            return Ok(());
+            return register_wal_namespace_view(ctx, config, pipeline, namespace).await;
         }
         Err(_) => {
             warn!(
-                "register_namespace_view: timed out building S3 DF for '{}.{}'",
+                "register_namespace_view: timed out building S3 DF for '{}.{}'; registering WAL view",
                 pipeline, namespace
             );
-            return Ok(());
+            return register_wal_namespace_view(ctx, config, pipeline, namespace).await;
         }
     };
     let df_s3 = build_timestamp_projection(&df_s3, namespace);
@@ -423,43 +428,65 @@ pub async fn register_namespace_view(
         pipeline, namespace
     );
     let view = ViewTable::new(plan, Some(namespace.to_string()));
-    // Register strictly under schema = pipeline
-    {
-        use datafusion::catalog::memory::{MemoryCatalogProvider, MemorySchemaProvider};
-        use datafusion::catalog::{CatalogProvider, SchemaProvider};
-        // Access default catalog "datafusion"
-        let state = ctx.state();
-        let cat_list = state.catalog_list();
-        if let Some(catalog) = cat_list.catalog("datafusion") {
-            // Try to get or create schema for this pipeline
-            if let Some(schema) = catalog.schema(pipeline) {
-                schema
-                    .register_table(namespace.to_string(), Arc::new(view))
-                    .map_err(|e| DataFusionError::Execution(e.to_string()))?;
-            } else {
-                // Downcast to memory catalog and create schema
-                if let Some(memcat) = catalog.as_any().downcast_ref::<MemoryCatalogProvider>() {
-                    let new_schema = Arc::new(MemorySchemaProvider::new());
-                    let _ = memcat.register_schema(pipeline, new_schema.clone());
-                    new_schema
-                        .register_table(namespace.to_string(), Arc::new(view))
-                        .map_err(|e| DataFusionError::Execution(e.to_string()))?;
-                } else {
-                    return Err(DataFusionError::Plan(format!(
-                        "Cannot register schema for pipeline '{}' in default catalog",
-                        pipeline
-                    )));
-                }
-            }
-            info!("DF FQN: registered datafusion.{}.{}.", pipeline, namespace);
-        } else {
-            return Err(DataFusionError::Plan(
-                "Default catalog 'datafusion' not found".to_string(),
-            ));
-        }
-    }
+    register_table_under_pipeline_schema(ctx, pipeline, namespace, Arc::new(view))?;
     debug!("Registered FQN view for '{}.{}'", pipeline, namespace);
     Ok(())
+}
+
+fn register_table_under_pipeline_schema(
+    ctx: &SessionContext,
+    pipeline: &str,
+    namespace: &str,
+    table: Arc<dyn TableProvider>,
+) -> Result<(), DataFusionError> {
+    use datafusion::catalog::memory::{MemoryCatalogProvider, MemorySchemaProvider};
+    use datafusion::catalog::{CatalogProvider, SchemaProvider};
+    let state = ctx.state();
+    let cat_list = state.catalog_list();
+    let Some(catalog) = cat_list.catalog("datafusion") else {
+        return Err(DataFusionError::Plan(
+            "Default catalog 'datafusion' not found".to_string(),
+        ));
+    };
+    if let Some(schema) = catalog.schema(pipeline) {
+        let _ = schema.deregister_table(namespace);
+        schema
+            .register_table(namespace.to_string(), table)
+            .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+    } else if let Some(memcat) = catalog.as_any().downcast_ref::<MemoryCatalogProvider>() {
+        let new_schema = Arc::new(MemorySchemaProvider::new());
+        let _ = memcat.register_schema(pipeline, new_schema.clone());
+        let _ = new_schema.deregister_table(namespace);
+        new_schema
+            .register_table(namespace.to_string(), table)
+            .map_err(|e| DataFusionError::Execution(e.to_string()))?;
+    } else {
+        return Err(DataFusionError::Plan(format!(
+            "Cannot register schema for pipeline '{pipeline}' in default catalog"
+        )));
+    }
+    info!("DF FQN: registered datafusion.{pipeline}.{namespace}.");
+    Ok(())
+}
+
+async fn register_wal_namespace_view(
+    ctx: &SessionContext,
+    config: &Config,
+    pipeline: &str,
+    namespace: &str,
+) -> Result<(), DataFusionError> {
+    let bound = config.bind_pipeline(pipeline);
+    match build_wal_df(&bound, ctx, pipeline, namespace).await? {
+        Some(df) => {
+            let plan = df.into_optimized_plan()?;
+            let view = ViewTable::new(plan, Some(namespace.to_string()));
+            register_table_under_pipeline_schema(ctx, pipeline, namespace, Arc::new(view))
+        }
+        None => {
+            warn!("register_wal_namespace_view: no WAL batches for '{pipeline}.{namespace}'");
+            Ok(())
+        }
+    }
 }
 
 /// Register deadletters as a recursive Parquet listing with partition columns
@@ -898,9 +925,10 @@ async fn list_iceberg_source_namespaces(
     {
         match &sink.catalog_cfg {
             skippr_iceberg_catalog::IcebergCatalogConfig::Skippr { .. } => {
-                let catalog = crate::cluster::backend::open_skippr_catalog(&sink.catalog_cfg)
-                    .await
-                    .map_err(|err| DataFusionError::Plan(err))?;
+                let catalog =
+                    crate::cluster::backend::open_skippr_catalog(config, &sink.catalog_cfg)
+                        .await
+                        .map_err(|err| DataFusionError::Plan(err))?;
                 let ns = iceberg::NamespaceIdent::from_strs([&sink.catalog_ns])
                     .map_err(|err| DataFusionError::External(Box::new(err)))?;
                 let tables = iceberg::Catalog::list_tables(catalog.as_ref(), &ns)
@@ -940,7 +968,7 @@ struct LoadedIcebergScan {
 async fn register_iceberg_union_view(
     config: &Config,
     ctx: &SessionContext,
-    _pipeline: &str,
+    pipeline: &str,
     namespace: &str,
     view: &crate::cluster::PipelineConfigView,
     opts: &ClusteredSelectOpts,
@@ -974,9 +1002,7 @@ async fn register_iceberg_union_view(
         }),
         None => loaded.provider,
     };
-    let _ = ctx.deregister_table(namespace);
-    ctx.register_table(namespace, table)
-        .map_err(|err| DataFusionError::Execution(err.to_string()))?;
+    register_table_under_pipeline_schema(ctx, pipeline, namespace, table)?;
     Ok(())
 }
 
@@ -991,8 +1017,14 @@ async fn wal_child_provider(
         Some(gossip) => gossip.known_ads().await,
         None => Vec::new(),
     };
-    let paths =
-        crate::cluster::wal_head::local_wal_paths(&view.key, opts.registry.as_deref()).await;
+    let paths = match crate::cluster::wal_head::local_wal_paths(&view.key, opts.registry.as_deref())
+        .await
+    {
+        Some(paths) => Some(paths),
+        None => view
+            .query_wal_paths()
+            .map_err(|err| DataFusionError::Plan(err.to_string()))?,
+    };
     if crate::cluster::identity::process_query_bind().is_none() {
         let Some(paths) = paths else {
             return Ok(None);
@@ -1175,9 +1207,10 @@ async fn load_iceberg_scan_provider(
     {
         match &sink.catalog_cfg {
             skippr_iceberg_catalog::IcebergCatalogConfig::Skippr { .. } => {
-                let catalog = crate::cluster::backend::open_skippr_catalog(&sink.catalog_cfg)
-                    .await
-                    .map_err(|err| DataFusionError::Plan(err))?;
+                let catalog =
+                    crate::cluster::backend::open_skippr_catalog(config, &sink.catalog_cfg)
+                        .await
+                        .map_err(|err| DataFusionError::Plan(err))?;
                 let (table, snapshot_id) =
                     crate::sqlrt::iceberg_table::load_pinned_iceberg_table(catalog, &ident).await?;
                 let compacted_segment_ids =
@@ -1254,6 +1287,86 @@ mod tests {
             let schema = crate::sqlrt::wal_table::projected_schema(&self.schema, projection)?;
             Ok(Arc::new(EmptyExec::new(schema)))
         }
+    }
+
+    #[test]
+    fn file_wal_query_registers_without_invented_datalake_prefix() {
+        let src = include_str!("tables.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            prod.contains("register_wal_namespace_view"),
+            "WAL-only File pipelines must register a WAL TableProvider"
+        );
+        assert!(
+            prod.contains("query_wal_paths"),
+            "query() has no durable store; WAL paths come from PipelineConfigView"
+        );
+        assert!(
+            !prod.contains("falling back to {}"),
+            "must not invent s3://bucket/datalake/ns/ when the lake manifest is missing"
+        );
+    }
+
+    #[test]
+    fn iceberg_namespace_register_does_not_fall_back_to_wal_only() {
+        let src = include_str!("tables.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let start = prod
+            .find("Ok(view) if view.iceberg")
+            .expect("iceberg PipelineConfigView arm");
+        let rest = &prod[start..];
+        let arm_end = rest.find("Ok(_) =>").expect("end of iceberg arm");
+        let arm = &rest[..arm_end];
+        assert!(
+            arm.contains("register_iceberg_union_view"),
+            "Iceberg pipelines register Iceberg ∪ WAL picker, not listing"
+        );
+        assert!(
+            !arm.contains("register_wal_namespace_view"),
+            "Iceberg catalog/scan failure must not succeed as a WAL-only view"
+        );
+    }
+
+    #[test]
+    fn iceberg_union_registers_pipeline_namespace_fqn() {
+        let src = include_str!("tables.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let start = prod
+            .find("async fn register_iceberg_union_view")
+            .expect("register_iceberg_union_view");
+        let body = &prod[start..];
+        let body = body.split("async fn ").nth(1).unwrap_or(body);
+        assert!(
+            body.contains("register_table_under_pipeline_schema(ctx, pipeline, namespace, table)"),
+            "Iceberg ∪ WAL must register datafusion.{{pipeline}}.{{namespace}}, not a bare default-schema table"
+        );
+        assert!(
+            !body.contains("ctx.register_table(namespace, table)"),
+            "bare SessionContext::register_table(namespace) is illegal next to pipeline.namespace"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_table_under_pipeline_schema_is_two_part_fqn() {
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Utf8, true)]));
+        let ctx = SessionContext::new();
+        let mem = MemTable::try_new(schema, vec![vec![]]).unwrap();
+        register_table_under_pipeline_schema(&ctx, "orders_el", "orders_el", Arc::new(mem))
+            .unwrap();
+        let batches = ctx
+            .sql("SELECT count(*) FROM orders_el.orders_el")
+            .await
+            .unwrap()
+            .collect()
+            .await
+            .unwrap();
+        let count = batches[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<datafusion::arrow::array::Int64Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(count, 0);
     }
 
     #[test]

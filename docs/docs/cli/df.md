@@ -5,7 +5,7 @@
 ## Usage
 
 ```bash
-skipprd df --pipeline <name> [--namespace <ns>] [--plain]
+skipprd df --pipeline <name> [--namespace <ns>]
 skipprd --config skippr.yml df --pipeline bikehire
 skipprd df --pipeline bikehire --namespace orders
 skipprd df --namespace bikehire.orders
@@ -17,7 +17,6 @@ skipprd df --namespace bikehire.orders
 |---|---|---|
 | `--pipeline, -p` | No | Pipeline name. Falls back to `PIPELINE_NAME`. Required when `--namespace` is a bare namespace (not `pipeline.namespace`). |
 | `--namespace` | No | Namespace, or `pipeline.namespace` FQN (same two-part split as `skipprd query`). Omit to read every namespace for the session pipeline. |
-| `--plain` | No | Print rows without table formatting. |
 | `--log` | No | Enable logging. |
 
 ```bash
