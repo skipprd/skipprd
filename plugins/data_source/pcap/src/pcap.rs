@@ -24,7 +24,6 @@ pub struct DataSourcePcapPlugin {
 }
 
 impl DataSourcePcapPlugin {
-
     pub fn with_runtime_config(config: DataSourcePcapPluginConfig) -> Self {
         Self { _config: config }
     }

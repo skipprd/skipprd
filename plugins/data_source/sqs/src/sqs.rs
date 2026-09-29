@@ -64,7 +64,6 @@ impl DataSourceSqsPlugin {
         DataSourceSqsPlugin { config, client }
     }
 
-
     pub async fn with_runtime_config(config: DataSourceSqsPluginConfig) -> Self {
         Self::from_config(config).await
     }

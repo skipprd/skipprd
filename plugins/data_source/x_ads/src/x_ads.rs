@@ -1,4 +1,3 @@
-use skippr_runtime_sdk::SkipprConfig;
 use crate::streams::{resolve_streams, StreamProfile, XAdsStreamDef, XAdsStreamKind};
 use crate::x_ads_api::{normalize_account_id, parse_rows, XAdsApiClient, XOAuth1Credentials};
 use async_trait::async_trait;
@@ -18,6 +17,7 @@ use skippr_runtime_sdk::protocol::SKIPPR_RUNTIME_EXECUTION_MODE_ENV;
 use skippr_runtime_sdk::source_compat::{
     load_checkpoint_payload, submit_payload_batches, IngestBatch,
 };
+use skippr_runtime_sdk::SkipprConfig;
 use std::sync::Arc;
 const CHECKPOINT_PAYLOAD_VERSION: u32 = 1;
 const DISCOVER_SAMPLE_DAYS: u32 = 3;

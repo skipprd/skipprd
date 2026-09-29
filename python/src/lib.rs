@@ -466,15 +466,10 @@ struct PyConnect {
     pipeline: String,
     plugin: Option<ConnectPlugin>,
     name: Option<String>,
-    fields: BTreeMap<String, String>,
+    fields: BTreeMap<String, serde_yaml::Value>,
 }
 
 impl PyConnect {
-    fn set_field(&mut self, ident: &str, value: String) -> PyResult<()> {
-        self.fields.insert(ident.to_string(), value);
-        self.maybe_persist()
-    }
-
     fn maybe_persist(&mut self) -> PyResult<()> {
         let Some(plugin) = self.plugin else {
             return Ok(());
@@ -485,20 +480,25 @@ impl PyConnect {
         if name.trim().is_empty() {
             return Ok(());
         }
-        let yaml_fields =
-            connect::yaml_path_fields(plugin, &connect::yaml_string_map(self.fields.clone()))
-                .map_err(PyValueError::new_err)?;
         let required = plugin.required_fields();
         let secrets = plugin.secret_fields();
         let complete = required
             .iter()
-            .all(|field| yaml_fields.contains_key(*field));
-        let has_secret = secrets.iter().any(|field| yaml_fields.contains_key(*field));
+            .all(|field| connect::yaml_get_path(&self.fields, field).is_some());
+        let has_secret = secrets
+            .iter()
+            .any(|field| connect::yaml_get_path(&self.fields, field).is_some());
         if !complete && !has_secret {
             return Ok(());
         }
-        let doc = connect::persist_plugin(&self.path, &self.pipeline, plugin, name, yaml_fields)
-            .map_err(PyValueError::new_err)?;
+        let doc = connect::persist_plugin(
+            &self.path,
+            &self.pipeline,
+            plugin,
+            name,
+            self.fields.clone(),
+        )
+        .map_err(PyValueError::new_err)?;
         Python::attach(|py| {
             let mut session = self.session.borrow_mut(py);
             session
@@ -522,6 +522,7 @@ fn skippr(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyDataSource>()?;
     m.add_class::<PyDataSink>()?;
     m.add_class::<PySchemaSink>()?;
+    register_connect_plugin_classes(m)?;
     m.add_function(wrap_pyfunction!(workspace, m)?)?;
     m.add_function(wrap_pyfunction!(storage_mode, m)?)?;
     m.add_function(wrap_pyfunction!(offset_store, m)?)?;

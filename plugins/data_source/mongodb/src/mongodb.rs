@@ -51,7 +51,6 @@ pub struct DataSourceMongodbPlugin {
 }
 
 impl DataSourceMongodbPlugin {
-
     pub fn with_runtime_config(config: DataSourceMongodbPluginConfig) -> Self {
         Self { config }
     }

@@ -36,15 +36,15 @@ import skippr
 from skippr import DataSink
 
 s = skippr.Session(pipeline="bikehire")
-(
-    s.connect()
-    .data_sink(DataSink.Postgres)
-    .name("warehouse")
-    .host("localhost")
-    .user("skippr")
-    .password("${POSTGRES_PASSWORD}")
-    .database("analytics")
-)
+s.connect().data_sink(
+    DataSink.Postgres,
+    skippr.DataSinkPostgres(
+        host="localhost",
+        user="skippr",
+        password="${POSTGRES_PASSWORD}",
+        database="analytics",
+    ),
+).name("warehouse")
 ```
 
 ```bash
@@ -81,13 +81,25 @@ from skippr import DataSource, StorageMode
 )
 
 s = skippr.Session(pipeline="bikehire")
-(
-    s.connect()
-    .data_source(DataSource.S3)
-    .name("sample")
-    .s3_bucket("...")
-    .s3_prefix("...")
-)
+s.connect().data_source(
+    DataSource.S3,
+    skippr.DataSourceS3(s3_bucket="...", s3_prefix="..."),
+).name("sample")
 ```
 
 See [Python](/python).
+
+Iceberg R2 FileIO is nested `catalog.file_io`. CLI flatten uses `--catalog-file-io-type r2` plus endpoint and `${OBJECTS_*}` secrets:
+
+```bash
+skipprd connect data-sink iceberg \
+  --pipeline bikehire \
+  --name lake \
+  --catalog-type skippr \
+  --catalog-table my-iceberg-catalog \
+  --catalog-warehouse 's3://my-iceberg-warehouse/' \
+  --catalog-file-io-type r2 \
+  --catalog-file-io-endpoint '${OBJECTS_S3_ENDPOINT}' \
+  --catalog-file-io-access-key-id '${OBJECTS_ACCESS_KEY_ID}' \
+  --catalog-file-io-secret-access-key '${OBJECTS_SECRET_ACCESS_KEY}'
+```

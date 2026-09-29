@@ -52,7 +52,6 @@ impl DataSourceRedshiftPlugin {
         Self { config, client }
     }
 
-
     pub async fn with_runtime_config(config: DataSourceRedshiftPluginConfig) -> Self {
         Self::from_config(config).await
     }

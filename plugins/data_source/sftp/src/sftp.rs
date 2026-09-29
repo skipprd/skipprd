@@ -41,7 +41,6 @@ pub struct DataSourceSftpPlugin {
 }
 
 impl DataSourceSftpPlugin {
-
     pub fn with_runtime_config(config: DataSourceSftpPluginConfig) -> Self {
         Self { config }
     }

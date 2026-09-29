@@ -1,6 +1,6 @@
-use skippr_runtime_sdk::SkipprConfig;
 use serde::Deserialize;
 use serde_derive::Serialize;
+use skippr_runtime_sdk::SkipprConfig;
 
 pub const MAX_DEPTH_CAP: u32 = 200;
 pub const MAX_QUERIES_PER_RUN_CAP: u32 = 100;

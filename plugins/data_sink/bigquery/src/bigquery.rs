@@ -1,4 +1,3 @@
-use skippr_runtime_sdk::SkipprConfig;
 use async_trait::async_trait;
 use dashmap::DashSet;
 use datafusion::arrow::array::*;
@@ -7,6 +6,7 @@ use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
 use once_cell::sync::Lazy;
 use serde_derive::Deserialize;
+use skippr_runtime_sdk::SkipprConfig;
 use tracing::{error, info, warn};
 
 use skippr_runtime_sdk::plugins::{DataSink, SchemaSink};

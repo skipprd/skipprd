@@ -40,7 +40,6 @@ pub struct DataSourceClickhousePlugin {
 }
 
 impl DataSourceClickhousePlugin {
-
     pub fn with_runtime_config(config: DataSourceClickhousePluginConfig) -> Self {
         Self {
             config,

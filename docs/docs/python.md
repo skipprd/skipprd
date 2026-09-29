@@ -52,28 +52,25 @@ from skippr import DataSource, DataSink, StorageMode
 )
 
 s = skippr.Session(pipeline="bikehire")
-(
-    s.connect()
-    .data_source(DataSource.S3)
-    .name("sample")
-    .s3_bucket("bucket")
-    .s3_prefix("bike-hire")
-)
+s.connect().data_source(
+    DataSource.S3,
+    skippr.DataSourceS3(s3_bucket="bucket", s3_prefix="bike-hire"),
+).name("sample")
 s.discover()
 ```
 
 Python persists when required fields are set. Secret fields must be `${ENV}` references — a Python string, quoted in the shell so the shell does not expand it.
 
 ```python
-(
-    s.connect()
-    .data_sink(DataSink.Postgres)
-    .name("warehouse")
-    .host("localhost")
-    .user("skippr")
-    .password("${POSTGRES_PASSWORD}")
-    .database("analytics")
-)
+s.connect().data_sink(
+    DataSink.Postgres,
+    skippr.DataSinkPostgres(
+        host="localhost",
+        user="skippr",
+        password="${POSTGRES_PASSWORD}",
+        database="analytics",
+    ),
+).name("warehouse")
 ```
 
 ```bash
@@ -84,6 +81,39 @@ skipprd connect data-sink postgres \
   --user skippr \
   --password '${POSTGRES_PASSWORD}' \
   --database analytics
+```
+
+Nested plugin structs are generated pyclasses. HttpClient `auth` is `HttpClientDataSourceHttpAuthConfig`:
+
+```python
+s.connect().data_source(
+    DataSource.HttpClient,
+    skippr.HttpClient(
+        url="https://ex",
+        auth=skippr.HttpClientDataSourceHttpAuthConfig(token="${HTTP_TOKEN}"),
+    ),
+).name("http")
+```
+
+Iceberg `catalog.file_io` is nested. `type="r2"` takes `${OBJECTS_*}` secrets, never plaintext:
+
+```python
+s.connect().data_sink(
+    DataSink.Iceberg,
+    skippr.DataSinkIceberg(
+        catalog=skippr.DataSinkIcebergIcebergCatalogConfig(
+            type="skippr",
+            table="my-iceberg-catalog",
+            warehouse="s3://my-iceberg-warehouse/",
+            file_io=skippr.DataSinkIcebergIcebergFileIo(
+                type="r2",
+                endpoint="${OBJECTS_S3_ENDPOINT}",
+                access_key_id="${OBJECTS_ACCESS_KEY_ID}",
+                secret_access_key="${OBJECTS_SECRET_ACCESS_KEY}",
+            ),
+        ),
+    ),
+).name("lake")
 ```
 
 See [`skipprd connect`](/cli/connect).

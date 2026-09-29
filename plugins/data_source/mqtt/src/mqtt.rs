@@ -44,7 +44,6 @@ pub struct DataSourceMqttPlugin {
 }
 
 impl DataSourceMqttPlugin {
-
     pub fn with_runtime_config(config: DataSourceMqttPluginConfig) -> Self {
         Self { config }
     }

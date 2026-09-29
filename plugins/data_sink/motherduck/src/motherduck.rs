@@ -1,4 +1,3 @@
-use skippr_runtime_sdk::SkipprConfig;
 use async_trait::async_trait;
 use datafusion::arrow::array::*;
 use datafusion::arrow::datatypes::DataType as ArrowDataType;
@@ -6,6 +5,7 @@ use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
 use reqwest::Client;
 use serde_derive::Deserialize;
+use skippr_runtime_sdk::SkipprConfig;
 use tracing::{error, info, warn};
 
 use dashmap::DashSet;

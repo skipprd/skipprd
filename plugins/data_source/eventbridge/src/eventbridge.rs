@@ -56,7 +56,6 @@ impl DataSourceEventbridgePlugin {
         Self { config, sqs_client }
     }
 
-
     pub async fn with_runtime_config(config: DataSourceEventbridgePluginConfig) -> Self {
         Self::from_config(config).await
     }

@@ -261,12 +261,22 @@ impl ConnectPlugin {
     }
     pub fn secret_fields(self) -> &'static [&'static str] {
         match self {
-            Self::DataSourceAdRollAds => &["access_token", "personal_access_token", "oauth_client_secret", "oauth_refresh_token"],
+            Self::DataSourceAdRollAds => &[
+                "access_token",
+                "personal_access_token",
+                "oauth_client_secret",
+                "oauth_refresh_token",
+            ],
             Self::DataSourceAiCitations => &[],
             Self::DataSourceAmqp => &["connection_string"],
             Self::DataSourceAppleAppStoreSerp => &[],
             Self::DataSourceAppleSearchAds => &["private_key_pem", "access_token"],
-            Self::DataSourceBingWebmasterTools => &["api_key", "access_token", "oauth_client_secret", "oauth_refresh_token"],
+            Self::DataSourceBingWebmasterTools => &[
+                "api_key",
+                "access_token",
+                "oauth_client_secret",
+                "oauth_refresh_token",
+            ],
             Self::DataSourceClickhouse => &["password"],
             Self::DataSourceContentQuality => &[],
             Self::DataSourceDataForSeoBacklinks => &["password"],
@@ -275,19 +285,36 @@ impl ConnectPlugin {
             Self::DataSourceDynamodb => &[],
             Self::DataSourceEventbridge => &[],
             Self::DataSourceFile => &[],
-            Self::DataSourceGoogleAds => &["developer_token", "access_token", "oauth_client_secret", "oauth_refresh_token"],
-            Self::DataSourceGoogleAnalytics => &["access_token", "oauth_client_secret", "oauth_refresh_token"],
+            Self::DataSourceGoogleAds => &[
+                "developer_token",
+                "access_token",
+                "oauth_client_secret",
+                "oauth_refresh_token",
+            ],
+            Self::DataSourceGoogleAnalytics => {
+                &["access_token", "oauth_client_secret", "oauth_refresh_token"]
+            }
             Self::DataSourceGooglePageSpeed => &["api_key"],
-            Self::DataSourceGoogleSearchConsole => &["access_token", "oauth_client_secret", "oauth_refresh_token"],
+            Self::DataSourceGoogleSearchConsole => {
+                &["access_token", "oauth_client_secret", "oauth_refresh_token"]
+            }
             Self::DataSourceGoogleSerpRanks => &[],
             Self::DataSourceHttpClient => &["auth.password", "auth.token"],
             Self::DataSourceHttpServer => &["auth_token"],
-            Self::DataSourceHubspotCrm => &["access_token", "oauth_client_secret", "oauth_refresh_token"],
+            Self::DataSourceHubspotCrm => {
+                &["access_token", "oauth_client_secret", "oauth_refresh_token"]
+            }
             Self::DataSourceKafka => &["sasl_password"],
             Self::DataSourceKinesis => &[],
-            Self::DataSourceLinkedInAds => &["access_token", "oauth_client_secret", "oauth_refresh_token"],
-            Self::DataSourceMetaAds => &["access_token", "oauth_client_secret", "oauth_refresh_token"],
-            Self::DataSourceMetaInstagramAds => &["access_token", "oauth_client_secret", "oauth_refresh_token"],
+            Self::DataSourceLinkedInAds => {
+                &["access_token", "oauth_client_secret", "oauth_refresh_token"]
+            }
+            Self::DataSourceMetaAds => {
+                &["access_token", "oauth_client_secret", "oauth_refresh_token"]
+            }
+            Self::DataSourceMetaInstagramAds => {
+                &["access_token", "oauth_client_secret", "oauth_refresh_token"]
+            }
             Self::DataSourceMongodb => &["connection_string"],
             Self::DataSourceMotherduck => &["motherduck_token"],
             Self::DataSourceMqtt => &["password"],
@@ -297,7 +324,9 @@ impl ConnectPlugin {
             Self::DataSourcePcap => &[],
             Self::DataSourcePostgres => &["password", "connection_string"],
             Self::DataSourceRedshift => &[],
-            Self::DataSourceRevolutBusiness => &["private_key_pem", "refresh_token", "access_token"],
+            Self::DataSourceRevolutBusiness => {
+                &["private_key_pem", "refresh_token", "access_token"]
+            }
             Self::DataSourceS3 => &[],
             Self::DataSourceSeoCrawl => &[],
             Self::DataSourceSftp => &["password"],
@@ -309,15 +338,28 @@ impl ConnectPlugin {
             Self::DataSourceSqs => &[],
             Self::DataSourceStatsd => &[],
             Self::DataSourceStdin => &[],
-            Self::DataSourceStripe => &["access_token", "oauth_client_secret", "oauth_refresh_token"],
-            Self::DataSourceSumUp => &["oauth_client_secret", "oauth_refresh_token", "access_token"],
+            Self::DataSourceStripe => {
+                &["access_token", "oauth_client_secret", "oauth_refresh_token"]
+            }
+            Self::DataSourceSumUp => {
+                &["oauth_client_secret", "oauth_refresh_token", "access_token"]
+            }
             Self::DataSourceUpfoundryBacklinks => &[],
             Self::DataSourceUpfoundryLinkGraphCompact => &[],
             Self::DataSourceUpfoundryLinkGraphIngest => &[],
             Self::DataSourceUpfoundryLinkGraphWatIndex => &[],
             Self::DataSourceWebsocket => &[],
-            Self::DataSourceXAds => &["bearer_token", "access_token", "oauth_consumer_key", "oauth_consumer_secret", "oauth_token", "oauth_token_secret"],
-            Self::DataSourceXeroAccounting => &["oauth_client_secret", "oauth_refresh_token", "access_token"],
+            Self::DataSourceXAds => &[
+                "bearer_token",
+                "access_token",
+                "oauth_consumer_key",
+                "oauth_consumer_secret",
+                "oauth_token",
+                "oauth_token_secret",
+            ],
+            Self::DataSourceXeroAccounting => {
+                &["oauth_client_secret", "oauth_refresh_token", "access_token"]
+            }
             Self::DataSinkAmqp => &["connection_string"],
             Self::DataSinkAthena => &[],
             Self::DataSinkAzureBlob => &["account_key", "sas_token"],
@@ -326,32 +368,50 @@ impl ConnectPlugin {
             Self::DataSinkDatabricks => &["token"],
             Self::DataSinkFile => &[],
             Self::DataSinkGcs => &[],
-            Self::DataSinkIceberg => &["catalog.token", "catalog.client_secret"],
+            Self::DataSinkIceberg => &[
+                "catalog.file_io.secret_access_key",
+                "catalog.token",
+                "catalog.client_secret",
+            ],
             Self::DataSinkMotherduck => &["motherduck_token"],
             Self::DataSinkPostgres => &["password"],
             Self::DataSinkRedshift => &[],
             Self::DataSinkS3 => &[],
             Self::DataSinkSftp => &["password"],
-            Self::DataSinkSnowflake => &["password", "staging_azure_sas_token", "staging_azure_account_key"],
+            Self::DataSinkSnowflake => &[
+                "password",
+                "staging_azure_sas_token",
+                "staging_azure_account_key",
+            ],
             Self::DataSinkStdout => &[],
             Self::DataSinkSynapse => &["connection_string"],
             Self::SchemaSinkBigquery => &[],
             Self::SchemaSinkClickhouse => &["password"],
             Self::SchemaSinkGlue => &[],
-            Self::SchemaSinkIceberg => &["catalog.token", "catalog.client_secret"],
+            Self::SchemaSinkIceberg => &[
+                "catalog.file_io.secret_access_key",
+                "catalog.token",
+                "catalog.client_secret",
+            ],
             Self::SchemaSinkMotherduck => &["motherduck_token"],
             Self::SchemaSinkPostgres => &["password"],
             Self::SchemaSinkRedshift => &[],
-            Self::SchemaSinkSnowflake => &["password", "staging_azure_sas_token", "staging_azure_account_key"],
+            Self::SchemaSinkSnowflake => &[
+                "password",
+                "staging_azure_sas_token",
+                "staging_azure_account_key",
+            ],
         }
     }
     pub fn required_fields(self) -> &'static [&'static str] {
         match self {
             Self::DataSourceAdRollAds => &["advertiser_id", "start_date"],
-            Self::DataSourceAiCitations => &["site"],
+            Self::DataSourceAiCitations => &["site", "prompt_list", "models"],
             Self::DataSourceAmqp => &["connection_string", "queue"],
-            Self::DataSourceAppleAppStoreSerp => &[],
-            Self::DataSourceAppleSearchAds => &["org_id", "client_id", "team_id", "key_id", "start_date"],
+            Self::DataSourceAppleAppStoreSerp => &["targets", "keywords", "storefronts"],
+            Self::DataSourceAppleSearchAds => {
+                &["org_id", "client_id", "team_id", "key_id", "start_date"]
+            }
             Self::DataSourceBingWebmasterTools => &["site_url", "start_date"],
             Self::DataSourceClickhouse => &["url"],
             Self::DataSourceContentQuality => &["site"],
@@ -365,7 +425,7 @@ impl ConnectPlugin {
             Self::DataSourceGoogleAnalytics => &["property_id", "start_date"],
             Self::DataSourceGooglePageSpeed => &["site"],
             Self::DataSourceGoogleSearchConsole => &["site_url", "start_date"],
-            Self::DataSourceGoogleSerpRanks => &[],
+            Self::DataSourceGoogleSerpRanks => &["targets", "keywords"],
             Self::DataSourceHttpClient => &["url"],
             Self::DataSourceHttpServer => &[],
             Self::DataSourceHubspotCrm => &["hub_id", "start_date"],
@@ -405,7 +465,12 @@ impl ConnectPlugin {
             Self::DataSourceXAds => &["account_id", "start_date"],
             Self::DataSourceXeroAccounting => &["tenant_id", "start_date"],
             Self::DataSinkAmqp => &["connection_string", "exchange"],
-            Self::DataSinkAthena => &["s3_bucket", "s3_prefix", "athena_workgroup_name", "athena_results_s3_bucket"],
+            Self::DataSinkAthena => &[
+                "s3_bucket",
+                "s3_prefix",
+                "athena_workgroup_name",
+                "athena_results_s3_bucket",
+            ],
             Self::DataSinkAzureBlob => &["account_name", "container"],
             Self::DataSinkBigquery => &["project", "dataset"],
             Self::DataSinkClickhouse => &["url"],
@@ -423,7 +488,12 @@ impl ConnectPlugin {
             Self::DataSinkSynapse => &["connection_string"],
             Self::SchemaSinkBigquery => &["project", "dataset"],
             Self::SchemaSinkClickhouse => &["url"],
-            Self::SchemaSinkGlue => &["s3_bucket", "s3_prefix", "athena_workgroup_name", "athena_results_s3_bucket"],
+            Self::SchemaSinkGlue => &[
+                "s3_bucket",
+                "s3_prefix",
+                "athena_workgroup_name",
+                "athena_results_s3_bucket",
+            ],
             Self::SchemaSinkIceberg => &["catalog.type"],
             Self::SchemaSinkMotherduck => &["motherduck_token"],
             Self::SchemaSinkPostgres => &["user", "database"],
@@ -447,10 +517,16 @@ impl ConnectPlugin {
             (Self::DataSourceAdRollAds, "lookback_days") => Some("lookback_days"),
             (Self::DataSourceAdRollAds, "stream_profile") => Some("stream_profile"),
             (Self::DataSourceAdRollAds, "processing_lag_days") => Some("processing_lag_days"),
+            (Self::DataSourceAdRollAds, "streams") => Some("streams"),
             (Self::DataSourceAiCitations, "site") => Some("site"),
+            (Self::DataSourceAiCitations, "brand_names") => Some("brand_names"),
+            (Self::DataSourceAiCitations, "prompt_list") => Some("prompt_list"),
+            (Self::DataSourceAiCitations, "models") => Some("models"),
             (Self::DataSourceAiCitations, "requests_per_minute") => Some("requests_per_minute"),
             (Self::DataSourceAiCitations, "max_prompts_per_run") => Some("max_prompts_per_run"),
-            (Self::DataSourceAiCitations, "skip_unchanged_responses") => Some("skip_unchanged_responses"),
+            (Self::DataSourceAiCitations, "skip_unchanged_responses") => {
+                Some("skip_unchanged_responses")
+            }
             (Self::DataSourceAiCitations, "openai_base_url") => Some("openai_base_url"),
             (Self::DataSourceAmqp, "connection_string") => Some("connection_string"),
             (Self::DataSourceAmqp, "queue") => Some("queue"),
@@ -463,13 +539,24 @@ impl ConnectPlugin {
             (Self::DataSourceAmqp, "format") => Some("format"),
             (Self::DataSourceAmqp, "batch_size_bytes") => Some("batch_size_bytes"),
             (Self::DataSourceAmqp, "batch_size_seconds") => Some("batch_size_seconds"),
+            (Self::DataSourceAppleAppStoreSerp, "targets") => Some("targets"),
+            (Self::DataSourceAppleAppStoreSerp, "keywords") => Some("keywords"),
+            (Self::DataSourceAppleAppStoreSerp, "storefronts") => Some("storefronts"),
             (Self::DataSourceAppleAppStoreSerp, "entity") => Some("entity"),
             (Self::DataSourceAppleAppStoreSerp, "max_depth") => Some("max_depth"),
-            (Self::DataSourceAppleAppStoreSerp, "min_query_interval_ms") => Some("min_query_interval_ms"),
-            (Self::DataSourceAppleAppStoreSerp, "max_queries_per_run") => Some("max_queries_per_run"),
-            (Self::DataSourceAppleAppStoreSerp, "stop_after_first_target_match") => Some("stop_after_first_target_match"),
+            (Self::DataSourceAppleAppStoreSerp, "min_query_interval_ms") => {
+                Some("min_query_interval_ms")
+            }
+            (Self::DataSourceAppleAppStoreSerp, "max_queries_per_run") => {
+                Some("max_queries_per_run")
+            }
+            (Self::DataSourceAppleAppStoreSerp, "stop_after_first_target_match") => {
+                Some("stop_after_first_target_match")
+            }
             (Self::DataSourceAppleAppStoreSerp, "capture_results") => Some("capture_results"),
-            (Self::DataSourceAppleAppStoreSerp, "force_refresh_today") => Some("force_refresh_today"),
+            (Self::DataSourceAppleAppStoreSerp, "force_refresh_today") => {
+                Some("force_refresh_today")
+            }
             (Self::DataSourceAppleAppStoreSerp, "user_agent") => Some("user_agent"),
             (Self::DataSourceAppleSearchAds, "org_id") => Some("org_id"),
             (Self::DataSourceAppleSearchAds, "client_id") => Some("client_id"),
@@ -484,27 +571,42 @@ impl ConnectPlugin {
             (Self::DataSourceAppleSearchAds, "stream_profile") => Some("stream_profile"),
             (Self::DataSourceAppleSearchAds, "processing_lag_days") => Some("processing_lag_days"),
             (Self::DataSourceAppleSearchAds, "time_zone") => Some("time_zone"),
-            (Self::DataSourceAppleSearchAds, "return_records_with_no_metrics") => Some("return_records_with_no_metrics"),
-            (Self::DataSourceAppleSearchAds, "max_concurrent_requests") => Some("max_concurrent_requests"),
+            (Self::DataSourceAppleSearchAds, "return_records_with_no_metrics") => {
+                Some("return_records_with_no_metrics")
+            }
+            (Self::DataSourceAppleSearchAds, "max_concurrent_requests") => {
+                Some("max_concurrent_requests")
+            }
+            (Self::DataSourceAppleSearchAds, "streams") => Some("streams"),
             (Self::DataSourceBingWebmasterTools, "site_url") => Some("site_url"),
             (Self::DataSourceBingWebmasterTools, "api_key") => Some("api_key"),
             (Self::DataSourceBingWebmasterTools, "access_token") => Some("access_token"),
             (Self::DataSourceBingWebmasterTools, "oauth_token_url") => Some("oauth_token_url"),
             (Self::DataSourceBingWebmasterTools, "oauth_client_id") => Some("oauth_client_id"),
-            (Self::DataSourceBingWebmasterTools, "oauth_client_secret") => Some("oauth_client_secret"),
-            (Self::DataSourceBingWebmasterTools, "oauth_refresh_token") => Some("oauth_refresh_token"),
+            (Self::DataSourceBingWebmasterTools, "oauth_client_secret") => {
+                Some("oauth_client_secret")
+            }
+            (Self::DataSourceBingWebmasterTools, "oauth_refresh_token") => {
+                Some("oauth_refresh_token")
+            }
             (Self::DataSourceBingWebmasterTools, "start_date") => Some("start_date"),
             (Self::DataSourceBingWebmasterTools, "end_date") => Some("end_date"),
             (Self::DataSourceBingWebmasterTools, "lookback_days") => Some("lookback_days"),
             (Self::DataSourceBingWebmasterTools, "stream_profile") => Some("stream_profile"),
-            (Self::DataSourceBingWebmasterTools, "processing_lag_days") => Some("processing_lag_days"),
+            (Self::DataSourceBingWebmasterTools, "processing_lag_days") => {
+                Some("processing_lag_days")
+            }
             (Self::DataSourceBingWebmasterTools, "window_in_days") => Some("window_in_days"),
-            (Self::DataSourceBingWebmasterTools, "request_interval_ms") => Some("request_interval_ms"),
+            (Self::DataSourceBingWebmasterTools, "streams") => Some("streams"),
+            (Self::DataSourceBingWebmasterTools, "request_interval_ms") => {
+                Some("request_interval_ms")
+            }
             (Self::DataSourceBingWebmasterTools, "max_api_retries") => Some("max_api_retries"),
             (Self::DataSourceClickhouse, "url") => Some("url"),
             (Self::DataSourceClickhouse, "database") => Some("database"),
             (Self::DataSourceClickhouse, "user") => Some("user"),
             (Self::DataSourceClickhouse, "password") => Some("password"),
+            (Self::DataSourceClickhouse, "tables") => Some("tables"),
             (Self::DataSourceClickhouse, "query") => Some("query"),
             (Self::DataSourceClickhouse, "batch_size_rows") => Some("batch_size_rows"),
             (Self::DataSourceClickhouse, "format") => Some("format"),
@@ -514,26 +616,42 @@ impl ConnectPlugin {
             (Self::DataSourceContentQuality, "max_urls") => Some("max_urls"),
             (Self::DataSourceContentQuality, "max_depth") => Some("max_depth"),
             (Self::DataSourceContentQuality, "render_js") => Some("render_js"),
-            (Self::DataSourceContentQuality, "crawl_rate_per_second") => Some("crawl_rate_per_second"),
+            (Self::DataSourceContentQuality, "crawl_rate_per_second") => {
+                Some("crawl_rate_per_second")
+            }
             (Self::DataSourceContentQuality, "respect_robots") => Some("respect_robots"),
             (Self::DataSourceContentQuality, "openai_model") => Some("openai_model"),
             (Self::DataSourceContentQuality, "openai_enabled") => Some("openai_enabled"),
-            (Self::DataSourceContentQuality, "openai_max_blocks_per_page") => Some("openai_max_blocks_per_page"),
-            (Self::DataSourceContentQuality, "skip_unchanged_content") => Some("skip_unchanged_content"),
+            (Self::DataSourceContentQuality, "openai_max_blocks_per_page") => {
+                Some("openai_max_blocks_per_page")
+            }
+            (Self::DataSourceContentQuality, "skip_unchanged_content") => {
+                Some("skip_unchanged_content")
+            }
             (Self::DataSourceContentQuality, "user_agent") => Some("user_agent"),
             (Self::DataSourceContentQuality, "worker_node_path") => Some("worker_node_path"),
             (Self::DataSourceContentQuality, "render_wait_until") => Some("render_wait_until"),
             (Self::DataSourceContentQuality, "render_timeout_ms") => Some("render_timeout_ms"),
-            (Self::DataSourceContentQuality, "playwright_executable_path") => Some("playwright_executable_path"),
+            (Self::DataSourceContentQuality, "playwright_executable_path") => {
+                Some("playwright_executable_path")
+            }
+            (Self::DataSourceContentQuality, "seed_urls") => Some("seed_urls"),
+            (Self::DataSourceContentQuality, "url_list") => Some("url_list"),
             (Self::DataSourceContentQuality, "max_response_bytes") => Some("max_response_bytes"),
             (Self::DataSourceDataForSeoBacklinks, "login") => Some("login"),
             (Self::DataSourceDataForSeoBacklinks, "password") => Some("password"),
             (Self::DataSourceDataForSeoBacklinks, "site") => Some("site"),
             (Self::DataSourceDataForSeoBacklinks, "run_mode") => Some("run_mode"),
+            (Self::DataSourceDataForSeoBacklinks, "backlink_jobs") => Some("backlink_jobs"),
+            (Self::DataSourceDataForSeoBacklinks, "intersection_jobs") => Some("intersection_jobs"),
+            (Self::DataSourceDataForSeoBacklinks, "competitors") => Some("competitors"),
+            (Self::DataSourceDataForSeoBacklinks, "streams") => Some("streams"),
             (Self::DataSourceDataForSeoBacklinks, "history_date_from") => Some("history.date_from"),
             (Self::DataSourceDataForSeoBacklinks, "history_date_to") => Some("history.date_to"),
             (Self::DataSourceDataForSeoBacklinks, "rank_scale") => Some("rank_scale"),
-            (Self::DataSourceDataForSeoBacklinks, "request_interval_ms") => Some("request_interval_ms"),
+            (Self::DataSourceDataForSeoBacklinks, "request_interval_ms") => {
+                Some("request_interval_ms")
+            }
             (Self::DataSourceDataForSeoBacklinks, "max_api_retries") => Some("max_api_retries"),
             (Self::DataSourceDataForSeoSeoOpportunities, "login") => Some("login"),
             (Self::DataSourceDataForSeoSeoOpportunities, "password") => Some("password"),
@@ -543,25 +661,64 @@ impl ConnectPlugin {
             (Self::DataSourceDataForSeoSeoOpportunities, "device") => Some("device"),
             (Self::DataSourceDataForSeoSeoOpportunities, "search_engine") => Some("search_engine"),
             (Self::DataSourceDataForSeoSeoOpportunities, "run_mode") => Some("run_mode"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "seed_queries_from_gsc") => Some("seed_queries_from_gsc"),
+            (Self::DataSourceDataForSeoSeoOpportunities, "seed_keywords") => Some("seed_keywords"),
+            (Self::DataSourceDataForSeoSeoOpportunities, "seed_queries_from_gsc") => {
+                Some("seed_queries_from_gsc")
+            }
             (Self::DataSourceDataForSeoSeoOpportunities, "gsc_source") => Some("gsc_source"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "seed_urls_from_crawl") => Some("seed_urls_from_crawl"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "seo_crawl_source") => Some("seo_crawl_source"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "limits_max_seed_keywords") => Some("limits.max_seed_keywords"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "limits_max_generated_keywords") => Some("limits.max_generated_keywords"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "limits_serp_depth") => Some("limits.serp_depth"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "limits_rank_track_depth") => Some("limits.rank_track_depth"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "limits_max_competitors") => Some("limits.max_competitors"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "scoring_min_search_volume") => Some("scoring.min_search_volume"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "scoring_max_keyword_difficulty") => Some("scoring.max_keyword_difficulty"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "scoring_weak_domain_rank_threshold") => Some("scoring.weak_domain_rank_threshold"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "scoring_prefer_question_keywords") => Some("scoring.prefer_question_keywords"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "scoring_prefer_low_backlink_serps") => Some("scoring.prefer_low_backlink_serps"),
+            (Self::DataSourceDataForSeoSeoOpportunities, "seed_urls_from_crawl") => {
+                Some("seed_urls_from_crawl")
+            }
+            (Self::DataSourceDataForSeoSeoOpportunities, "seo_crawl_source") => {
+                Some("seo_crawl_source")
+            }
+            (Self::DataSourceDataForSeoSeoOpportunities, "competitors") => Some("competitors"),
+            (Self::DataSourceDataForSeoSeoOpportunities, "rank_track_keywords") => {
+                Some("rank_track_keywords")
+            }
+            (Self::DataSourceDataForSeoSeoOpportunities, "streams") => Some("streams"),
+            (Self::DataSourceDataForSeoSeoOpportunities, "limits_max_seed_keywords") => {
+                Some("limits.max_seed_keywords")
+            }
+            (Self::DataSourceDataForSeoSeoOpportunities, "limits_max_generated_keywords") => {
+                Some("limits.max_generated_keywords")
+            }
+            (Self::DataSourceDataForSeoSeoOpportunities, "limits_serp_depth") => {
+                Some("limits.serp_depth")
+            }
+            (Self::DataSourceDataForSeoSeoOpportunities, "limits_rank_track_depth") => {
+                Some("limits.rank_track_depth")
+            }
+            (Self::DataSourceDataForSeoSeoOpportunities, "limits_max_competitors") => {
+                Some("limits.max_competitors")
+            }
+            (Self::DataSourceDataForSeoSeoOpportunities, "scoring_min_search_volume") => {
+                Some("scoring.min_search_volume")
+            }
+            (Self::DataSourceDataForSeoSeoOpportunities, "scoring_max_keyword_difficulty") => {
+                Some("scoring.max_keyword_difficulty")
+            }
+            (Self::DataSourceDataForSeoSeoOpportunities, "scoring_weak_domain_rank_threshold") => {
+                Some("scoring.weak_domain_rank_threshold")
+            }
+            (Self::DataSourceDataForSeoSeoOpportunities, "scoring_prefer_question_keywords") => {
+                Some("scoring.prefer_question_keywords")
+            }
+            (Self::DataSourceDataForSeoSeoOpportunities, "scoring_prefer_low_backlink_serps") => {
+                Some("scoring.prefer_low_backlink_serps")
+            }
             (Self::DataSourceDataForSeoSeoOpportunities, "openai_model") => Some("openai_model"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "openai_enabled") => Some("openai_enabled"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "request_interval_ms") => Some("request_interval_ms"),
-            (Self::DataSourceDataForSeoSeoOpportunities, "max_api_retries") => Some("max_api_retries"),
+            (Self::DataSourceDataForSeoSeoOpportunities, "openai_enabled") => {
+                Some("openai_enabled")
+            }
+            (Self::DataSourceDataForSeoSeoOpportunities, "request_interval_ms") => {
+                Some("request_interval_ms")
+            }
+            (Self::DataSourceDataForSeoSeoOpportunities, "max_api_retries") => {
+                Some("max_api_retries")
+            }
             (Self::DataSourceDeltaLake, "table_uri") => Some("table_uri"),
+            (Self::DataSourceDeltaLake, "storage_options") => Some("storage_options"),
             (Self::DataSourceDeltaLake, "version") => Some("version"),
             (Self::DataSourceDeltaLake, "filter") => Some("filter"),
             (Self::DataSourceDeltaLake, "batch_size_rows") => Some("batch_size_rows"),
@@ -601,13 +758,16 @@ impl ConnectPlugin {
             (Self::DataSourceGoogleAds, "lookback_days") => Some("lookback_days"),
             (Self::DataSourceGoogleAds, "stream_profile") => Some("stream_profile"),
             (Self::DataSourceGoogleAds, "processing_lag_days") => Some("processing_lag_days"),
+            (Self::DataSourceGoogleAds, "streams") => Some("streams"),
             (Self::DataSourceGoogleAnalytics, "property_id") => Some("property_id"),
             (Self::DataSourceGoogleAnalytics, "access_token") => Some("access_token"),
             (Self::DataSourceGoogleAnalytics, "oauth_token_url") => Some("oauth_token_url"),
             (Self::DataSourceGoogleAnalytics, "oauth_client_id") => Some("oauth_client_id"),
             (Self::DataSourceGoogleAnalytics, "oauth_client_secret") => Some("oauth_client_secret"),
             (Self::DataSourceGoogleAnalytics, "oauth_refresh_token") => Some("oauth_refresh_token"),
-            (Self::DataSourceGoogleAnalytics, "service_account_json_path") => Some("service_account_json_path"),
+            (Self::DataSourceGoogleAnalytics, "service_account_json_path") => {
+                Some("service_account_json_path")
+            }
             (Self::DataSourceGoogleAnalytics, "start_date") => Some("start_date"),
             (Self::DataSourceGoogleAnalytics, "end_date") => Some("end_date"),
             (Self::DataSourceGoogleAnalytics, "lookback_days") => Some("lookback_days"),
@@ -615,64 +775,104 @@ impl ConnectPlugin {
             (Self::DataSourceGoogleAnalytics, "keep_empty_rows") => Some("keep_empty_rows"),
             (Self::DataSourceGoogleAnalytics, "processing_lag_days") => Some("processing_lag_days"),
             (Self::DataSourceGoogleAnalytics, "window_in_days") => Some("window_in_days"),
+            (Self::DataSourceGoogleAnalytics, "streams") => Some("streams"),
             (Self::DataSourceGoogleAnalytics, "request_interval_ms") => Some("request_interval_ms"),
             (Self::DataSourceGoogleAnalytics, "max_api_retries") => Some("max_api_retries"),
             (Self::DataSourceGooglePageSpeed, "site") => Some("site"),
             (Self::DataSourceGooglePageSpeed, "api_key") => Some("api_key"),
             (Self::DataSourceGooglePageSpeed, "url_mode") => Some("url_mode"),
+            (Self::DataSourceGooglePageSpeed, "url_list") => Some("url_list"),
             (Self::DataSourceGooglePageSpeed, "max_urls") => Some("max_urls"),
+            (Self::DataSourceGooglePageSpeed, "strategies") => Some("strategies"),
+            (Self::DataSourceGooglePageSpeed, "categories") => Some("categories"),
             (Self::DataSourceGooglePageSpeed, "locale") => Some("locale"),
-            (Self::DataSourceGooglePageSpeed, "max_requests_per_run") => Some("max_requests_per_run"),
+            (Self::DataSourceGooglePageSpeed, "max_requests_per_run") => {
+                Some("max_requests_per_run")
+            }
             (Self::DataSourceGooglePageSpeed, "requests_per_minute") => Some("requests_per_minute"),
             (Self::DataSourceGooglePageSpeed, "respect_robots") => Some("respect_robots"),
             (Self::DataSourceGooglePageSpeed, "top_audits_per_page") => Some("top_audits_per_page"),
-            (Self::DataSourceGooglePageSpeed, "max_concurrent_requests") => Some("max_concurrent_requests"),
+            (Self::DataSourceGooglePageSpeed, "max_concurrent_requests") => {
+                Some("max_concurrent_requests")
+            }
             (Self::DataSourceGoogleSearchConsole, "site_url") => Some("site_url"),
             (Self::DataSourceGoogleSearchConsole, "access_token") => Some("access_token"),
             (Self::DataSourceGoogleSearchConsole, "oauth_token_url") => Some("oauth_token_url"),
             (Self::DataSourceGoogleSearchConsole, "oauth_client_id") => Some("oauth_client_id"),
-            (Self::DataSourceGoogleSearchConsole, "oauth_client_secret") => Some("oauth_client_secret"),
-            (Self::DataSourceGoogleSearchConsole, "oauth_refresh_token") => Some("oauth_refresh_token"),
-            (Self::DataSourceGoogleSearchConsole, "service_account_json_path") => Some("service_account_json_path"),
+            (Self::DataSourceGoogleSearchConsole, "oauth_client_secret") => {
+                Some("oauth_client_secret")
+            }
+            (Self::DataSourceGoogleSearchConsole, "oauth_refresh_token") => {
+                Some("oauth_refresh_token")
+            }
+            (Self::DataSourceGoogleSearchConsole, "service_account_json_path") => {
+                Some("service_account_json_path")
+            }
             (Self::DataSourceGoogleSearchConsole, "start_date") => Some("start_date"),
             (Self::DataSourceGoogleSearchConsole, "end_date") => Some("end_date"),
             (Self::DataSourceGoogleSearchConsole, "lookback_days") => Some("lookback_days"),
             (Self::DataSourceGoogleSearchConsole, "stream_profile") => Some("stream_profile"),
-            (Self::DataSourceGoogleSearchConsole, "processing_lag_days") => Some("processing_lag_days"),
+            (Self::DataSourceGoogleSearchConsole, "processing_lag_days") => {
+                Some("processing_lag_days")
+            }
             (Self::DataSourceGoogleSearchConsole, "window_in_days") => Some("window_in_days"),
+            (Self::DataSourceGoogleSearchConsole, "streams") => Some("streams"),
             (Self::DataSourceGoogleSearchConsole, "search_type") => Some("search_type"),
             (Self::DataSourceGoogleSearchConsole, "data_state") => Some("data_state"),
             (Self::DataSourceGoogleSearchConsole, "row_limit") => Some("row_limit"),
-            (Self::DataSourceGoogleSearchConsole, "request_interval_ms") => Some("request_interval_ms"),
+            (Self::DataSourceGoogleSearchConsole, "request_interval_ms") => {
+                Some("request_interval_ms")
+            }
             (Self::DataSourceGoogleSearchConsole, "max_api_retries") => Some("max_api_retries"),
-            (Self::DataSourceGoogleSearchConsole, "url_inspection_enabled") => Some("url_inspection_enabled"),
+            (Self::DataSourceGoogleSearchConsole, "url_inspection_enabled") => {
+                Some("url_inspection_enabled")
+            }
+            (Self::DataSourceGoogleSearchConsole, "url_list") => Some("url_list"),
+            (Self::DataSourceGoogleSerpRanks, "targets") => Some("targets"),
+            (Self::DataSourceGoogleSerpRanks, "keywords") => Some("keywords"),
             (Self::DataSourceGoogleSerpRanks, "country") => Some("country"),
             (Self::DataSourceGoogleSerpRanks, "language") => Some("language"),
             (Self::DataSourceGoogleSerpRanks, "device") => Some("device"),
             (Self::DataSourceGoogleSerpRanks, "max_depth") => Some("max_depth"),
-            (Self::DataSourceGoogleSerpRanks, "min_query_interval_ms") => Some("min_query_interval_ms"),
+            (Self::DataSourceGoogleSerpRanks, "min_query_interval_ms") => {
+                Some("min_query_interval_ms")
+            }
             (Self::DataSourceGoogleSerpRanks, "max_queries_per_run") => Some("max_queries_per_run"),
-            (Self::DataSourceGoogleSerpRanks, "stop_after_first_target_match") => Some("stop_after_first_target_match"),
+            (Self::DataSourceGoogleSerpRanks, "stop_after_first_target_match") => {
+                Some("stop_after_first_target_match")
+            }
             (Self::DataSourceGoogleSerpRanks, "capture_results") => Some("capture_results"),
             (Self::DataSourceGoogleSerpRanks, "force_refresh_today") => Some("force_refresh_today"),
-            (Self::DataSourceGoogleSerpRanks, "navigation_timeout_ms") => Some("navigation_timeout_ms"),
+            (Self::DataSourceGoogleSerpRanks, "navigation_timeout_ms") => {
+                Some("navigation_timeout_ms")
+            }
             (Self::DataSourceGoogleSerpRanks, "worker_node_path") => Some("worker_node_path"),
-            (Self::DataSourceGoogleSerpRanks, "playwright_executable_path") => Some("playwright_executable_path"),
+            (Self::DataSourceGoogleSerpRanks, "playwright_executable_path") => {
+                Some("playwright_executable_path")
+            }
             (Self::DataSourceGoogleSerpRanks, "user_agent") => Some("user_agent"),
             (Self::DataSourceGoogleSerpRanks, "brightdata_zone") => Some("brightdata_zone"),
             (Self::DataSourceGoogleSerpRanks, "brightdata_api_base") => Some("brightdata_api_base"),
             (Self::DataSourceGoogleSerpRanks, "include_allintitle") => Some("include_allintitle"),
+            (Self::DataSourceGoogleSerpRanks, "allintitle_keywords") => Some("allintitle_keywords"),
             (Self::DataSourceGoogleSerpRanks, "allintitle_only") => Some("allintitle_only"),
-            (Self::DataSourceGoogleSerpRanks, "max_allintitle_queries_per_run") => Some("max_allintitle_queries_per_run"),
+            (Self::DataSourceGoogleSerpRanks, "max_allintitle_queries_per_run") => {
+                Some("max_allintitle_queries_per_run")
+            }
             (Self::DataSourceHttpClient, "url") => Some("url"),
             (Self::DataSourceHttpClient, "method") => Some("method"),
+            (Self::DataSourceHttpClient, "headers") => Some("headers"),
             (Self::DataSourceHttpClient, "body") => Some("body"),
             (Self::DataSourceHttpClient, "auth_strategy") => Some("auth.strategy"),
             (Self::DataSourceHttpClient, "auth_user") => Some("auth.user"),
             (Self::DataSourceHttpClient, "auth_password") => Some("auth.password"),
             (Self::DataSourceHttpClient, "auth_token") => Some("auth.token"),
-            (Self::DataSourceHttpClient, "scrape_interval_seconds") => Some("scrape_interval_seconds"),
-            (Self::DataSourceHttpClient, "scrape_timeout_seconds") => Some("scrape_timeout_seconds"),
+            (Self::DataSourceHttpClient, "scrape_interval_seconds") => {
+                Some("scrape_interval_seconds")
+            }
+            (Self::DataSourceHttpClient, "scrape_timeout_seconds") => {
+                Some("scrape_timeout_seconds")
+            }
             (Self::DataSourceHttpClient, "format") => Some("format"),
             (Self::DataSourceHttpClient, "batch_size_bytes") => Some("batch_size_bytes"),
             (Self::DataSourceHttpClient, "batch_size_seconds") => Some("batch_size_seconds"),
@@ -686,6 +886,7 @@ impl ConnectPlugin {
             (Self::DataSourceHubspotCrm, "start_date") => Some("start_date"),
             (Self::DataSourceHubspotCrm, "lookback_days") => Some("lookback_days"),
             (Self::DataSourceHubspotCrm, "stream_profile") => Some("stream_profile"),
+            (Self::DataSourceHubspotCrm, "streams") => Some("streams"),
             (Self::DataSourceHubspotCrm, "min_query_interval_ms") => Some("min_query_interval_ms"),
             (Self::DataSourceHubspotCrm, "access_token") => Some("access_token"),
             (Self::DataSourceHubspotCrm, "oauth_token_url") => Some("oauth_token_url"),
@@ -694,6 +895,16 @@ impl ConnectPlugin {
             (Self::DataSourceHubspotCrm, "oauth_refresh_token") => Some("oauth_refresh_token"),
             (Self::DataSourceHubspotCrm, "privacy_mode") => Some("privacy.mode"),
             (Self::DataSourceHubspotCrm, "privacy_profile") => Some("privacy.profile"),
+            (Self::DataSourceHubspotCrm, "privacy_drop_properties") => {
+                Some("privacy.drop_properties")
+            }
+            (Self::DataSourceHubspotCrm, "privacy_keep_properties") => {
+                Some("privacy.keep_properties")
+            }
+            (Self::DataSourceHubspotCrm, "privacy_drop_streams") => Some("privacy.drop_streams"),
+            (Self::DataSourceHubspotCrm, "privacy_hash_properties") => {
+                Some("privacy.hash_properties")
+            }
             (Self::DataSourceHubspotCrm, "privacy_on_violation") => Some("privacy.on_violation"),
             (Self::DataSourceKafka, "brokers") => Some("brokers"),
             (Self::DataSourceKafka, "topic") => Some("topic"),
@@ -730,6 +941,7 @@ impl ConnectPlugin {
             (Self::DataSourceLinkedInAds, "lookback_days") => Some("lookback_days"),
             (Self::DataSourceLinkedInAds, "stream_profile") => Some("stream_profile"),
             (Self::DataSourceLinkedInAds, "processing_lag_days") => Some("processing_lag_days"),
+            (Self::DataSourceLinkedInAds, "streams") => Some("streams"),
             (Self::DataSourceMetaAds, "ad_account_id") => Some("ad_account_id"),
             (Self::DataSourceMetaAds, "access_token") => Some("access_token"),
             (Self::DataSourceMetaAds, "oauth_token_url") => Some("oauth_token_url"),
@@ -743,19 +955,27 @@ impl ConnectPlugin {
             (Self::DataSourceMetaAds, "stream_profile") => Some("stream_profile"),
             (Self::DataSourceMetaAds, "processing_lag_days") => Some("processing_lag_days"),
             (Self::DataSourceMetaAds, "instagram_filter") => Some("instagram_filter"),
+            (Self::DataSourceMetaAds, "streams") => Some("streams"),
             (Self::DataSourceMetaInstagramAds, "ad_account_id") => Some("ad_account_id"),
             (Self::DataSourceMetaInstagramAds, "access_token") => Some("access_token"),
             (Self::DataSourceMetaInstagramAds, "oauth_token_url") => Some("oauth_token_url"),
             (Self::DataSourceMetaInstagramAds, "oauth_client_id") => Some("oauth_client_id"),
-            (Self::DataSourceMetaInstagramAds, "oauth_client_secret") => Some("oauth_client_secret"),
-            (Self::DataSourceMetaInstagramAds, "oauth_refresh_token") => Some("oauth_refresh_token"),
+            (Self::DataSourceMetaInstagramAds, "oauth_client_secret") => {
+                Some("oauth_client_secret")
+            }
+            (Self::DataSourceMetaInstagramAds, "oauth_refresh_token") => {
+                Some("oauth_refresh_token")
+            }
             (Self::DataSourceMetaInstagramAds, "api_version") => Some("api_version"),
             (Self::DataSourceMetaInstagramAds, "start_date") => Some("start_date"),
             (Self::DataSourceMetaInstagramAds, "end_date") => Some("end_date"),
             (Self::DataSourceMetaInstagramAds, "lookback_days") => Some("lookback_days"),
             (Self::DataSourceMetaInstagramAds, "stream_profile") => Some("stream_profile"),
-            (Self::DataSourceMetaInstagramAds, "processing_lag_days") => Some("processing_lag_days"),
+            (Self::DataSourceMetaInstagramAds, "processing_lag_days") => {
+                Some("processing_lag_days")
+            }
             (Self::DataSourceMetaInstagramAds, "instagram_filter") => Some("instagram_filter"),
+            (Self::DataSourceMetaInstagramAds, "streams") => Some("streams"),
             (Self::DataSourceMongodb, "connection_string") => Some("connection_string"),
             (Self::DataSourceMongodb, "database") => Some("database"),
             (Self::DataSourceMongodb, "collection") => Some("collection"),
@@ -767,6 +987,7 @@ impl ConnectPlugin {
             (Self::DataSourceMongodb, "cdc_mode") => Some("cdc_mode"),
             (Self::DataSourceMotherduck, "motherduck_token") => Some("motherduck_token"),
             (Self::DataSourceMotherduck, "database") => Some("database"),
+            (Self::DataSourceMotherduck, "tables") => Some("tables"),
             (Self::DataSourceMotherduck, "query") => Some("query"),
             (Self::DataSourceMotherduck, "batch_size_rows") => Some("batch_size_rows"),
             (Self::DataSourceMotherduck, "format") => Some("format"),
@@ -785,12 +1006,14 @@ impl ConnectPlugin {
             (Self::DataSourceMqtt, "batch_size_bytes") => Some("batch_size_bytes"),
             (Self::DataSourceMqtt, "batch_size_seconds") => Some("batch_size_seconds"),
             (Self::DataSourceMssql, "connection_string") => Some("connection_string"),
+            (Self::DataSourceMssql, "tables") => Some("tables"),
             (Self::DataSourceMssql, "batch_size_rows") => Some("batch_size_rows"),
             (Self::DataSourceMssql, "query_timeout_seconds") => Some("query_timeout_seconds"),
             (Self::DataSourceMssql, "format") => Some("format"),
             (Self::DataSourceMssql, "batch_size_bytes") => Some("batch_size_bytes"),
             (Self::DataSourceMssql, "batch_size_seconds") => Some("batch_size_seconds"),
             (Self::DataSourceMysql, "connection_string") => Some("connection_string"),
+            (Self::DataSourceMysql, "tables") => Some("tables"),
             (Self::DataSourceMysql, "format") => Some("format"),
             (Self::DataSourceMysql, "batch_size_bytes") => Some("batch_size_bytes"),
             (Self::DataSourceMysql, "batch_size_seconds") => Some("batch_size_seconds"),
@@ -799,13 +1022,16 @@ impl ConnectPlugin {
             (Self::DataSourceMysql, "cdc_idle_timeout_seconds") => Some("cdc_idle_timeout_seconds"),
             (Self::DataSourceOtlp, "listen_address_grpc") => Some("listen_address_grpc"),
             (Self::DataSourceOtlp, "listen_address_http") => Some("listen_address_http"),
+            (Self::DataSourceOtlp, "signals") => Some("signals"),
             (Self::DataSourceOtlp, "auth_token") => Some("auth_token"),
+            (Self::DataSourceOtlp, "attribute_allowlist") => Some("attribute_allowlist"),
             (Self::DataSourcePostgres, "host") => Some("host"),
             (Self::DataSourcePostgres, "port") => Some("port"),
             (Self::DataSourcePostgres, "user") => Some("user"),
             (Self::DataSourcePostgres, "password") => Some("password"),
             (Self::DataSourcePostgres, "database") => Some("database"),
             (Self::DataSourcePostgres, "connection_string") => Some("connection_string"),
+            (Self::DataSourcePostgres, "tables") => Some("tables"),
             (Self::DataSourcePostgres, "query") => Some("query"),
             (Self::DataSourcePostgres, "batch_size_rows") => Some("batch_size_rows"),
             (Self::DataSourcePostgres, "format") => Some("format"),
@@ -814,11 +1040,14 @@ impl ConnectPlugin {
             (Self::DataSourcePostgres, "cdc_mode") => Some("cdc_mode"),
             (Self::DataSourcePostgres, "replication_slot_name") => Some("replication_slot_name"),
             (Self::DataSourcePostgres, "publication_name") => Some("publication_name"),
-            (Self::DataSourcePostgres, "cdc_idle_timeout_seconds") => Some("cdc_idle_timeout_seconds"),
+            (Self::DataSourcePostgres, "cdc_idle_timeout_seconds") => {
+                Some("cdc_idle_timeout_seconds")
+            }
             (Self::DataSourceRedshift, "cluster_identifier") => Some("cluster_identifier"),
             (Self::DataSourceRedshift, "workgroup_name") => Some("workgroup_name"),
             (Self::DataSourceRedshift, "database") => Some("database"),
             (Self::DataSourceRedshift, "db_user") => Some("db_user"),
+            (Self::DataSourceRedshift, "tables") => Some("tables"),
             (Self::DataSourceRedshift, "query") => Some("query"),
             (Self::DataSourceRedshift, "region") => Some("region"),
             (Self::DataSourceRedshift, "format") => Some("format"),
@@ -828,7 +1057,10 @@ impl ConnectPlugin {
             (Self::DataSourceRevolutBusiness, "start_date") => Some("start_date"),
             (Self::DataSourceRevolutBusiness, "lookback_days") => Some("lookback_days"),
             (Self::DataSourceRevolutBusiness, "stream_profile") => Some("stream_profile"),
-            (Self::DataSourceRevolutBusiness, "min_query_interval_ms") => Some("min_query_interval_ms"),
+            (Self::DataSourceRevolutBusiness, "streams") => Some("streams"),
+            (Self::DataSourceRevolutBusiness, "min_query_interval_ms") => {
+                Some("min_query_interval_ms")
+            }
             (Self::DataSourceRevolutBusiness, "api_base") => Some("api_base"),
             (Self::DataSourceRevolutBusiness, "private_key_pem") => Some("private_key_pem"),
             (Self::DataSourceRevolutBusiness, "refresh_token") => Some("refresh_token"),
@@ -836,7 +1068,18 @@ impl ConnectPlugin {
             (Self::DataSourceRevolutBusiness, "issuer_domain") => Some("issuer_domain"),
             (Self::DataSourceRevolutBusiness, "privacy_mode") => Some("privacy.mode"),
             (Self::DataSourceRevolutBusiness, "privacy_profile") => Some("privacy.profile"),
-            (Self::DataSourceRevolutBusiness, "privacy_on_violation") => Some("privacy.on_violation"),
+            (Self::DataSourceRevolutBusiness, "privacy_drop_properties") => {
+                Some("privacy.drop_properties")
+            }
+            (Self::DataSourceRevolutBusiness, "privacy_keep_properties") => {
+                Some("privacy.keep_properties")
+            }
+            (Self::DataSourceRevolutBusiness, "privacy_hash_properties") => {
+                Some("privacy.hash_properties")
+            }
+            (Self::DataSourceRevolutBusiness, "privacy_on_violation") => {
+                Some("privacy.on_violation")
+            }
             (Self::DataSourceS3, "format") => Some("format"),
             (Self::DataSourceS3, "batch_size_seconds") => Some("batch_size_seconds"),
             (Self::DataSourceS3, "batch_size_bytes") => Some("batch_size_bytes"),
@@ -852,10 +1095,15 @@ impl ConnectPlugin {
             (Self::DataSourceSeoCrawl, "render_js") => Some("render_js"),
             (Self::DataSourceSeoCrawl, "crawl_rate_per_second") => Some("crawl_rate_per_second"),
             (Self::DataSourceSeoCrawl, "respect_robots") => Some("respect_robots"),
+            (Self::DataSourceSeoCrawl, "sitemap_probe_paths") => Some("sitemap_probe_paths"),
             (Self::DataSourceSeoCrawl, "openai_model") => Some("openai_model"),
-            (Self::DataSourceSeoCrawl, "openai_structure_enabled") => Some("openai_structure_enabled"),
+            (Self::DataSourceSeoCrawl, "openai_structure_enabled") => {
+                Some("openai_structure_enabled")
+            }
             (Self::DataSourceSeoCrawl, "skip_unchanged_content") => Some("skip_unchanged_content"),
             (Self::DataSourceSeoCrawl, "user_agent") => Some("user_agent"),
+            (Self::DataSourceSeoCrawl, "seed_urls") => Some("seed_urls"),
+            (Self::DataSourceSeoCrawl, "url_list") => Some("url_list"),
             (Self::DataSourceSeoCrawl, "max_response_bytes") => Some("max_response_bytes"),
             (Self::DataSourceSftp, "host") => Some("host"),
             (Self::DataSourceSftp, "port") => Some("port"),
@@ -871,7 +1119,10 @@ impl ConnectPlugin {
             (Self::DataSourceShopifyAdmin, "start_date") => Some("start_date"),
             (Self::DataSourceShopifyAdmin, "lookback_days") => Some("lookback_days"),
             (Self::DataSourceShopifyAdmin, "stream_profile") => Some("stream_profile"),
-            (Self::DataSourceShopifyAdmin, "min_query_interval_ms") => Some("min_query_interval_ms"),
+            (Self::DataSourceShopifyAdmin, "streams") => Some("streams"),
+            (Self::DataSourceShopifyAdmin, "min_query_interval_ms") => {
+                Some("min_query_interval_ms")
+            }
             (Self::DataSourceShopifyAdmin, "max_queries_per_run") => Some("max_queries_per_run"),
             (Self::DataSourceShopifyAdmin, "use_bulk_operations") => Some("use_bulk_operations"),
             (Self::DataSourceShopifyAdmin, "oauth_client_id") => Some("oauth_client_id"),
@@ -879,32 +1130,54 @@ impl ConnectPlugin {
             (Self::DataSourceShopifyAdmin, "oauth_access_token") => Some("oauth_access_token"),
             (Self::DataSourceSiteQuality, "site") => Some("site"),
             (Self::DataSourceSiteQuality, "url_mode") => Some("url_mode"),
+            (Self::DataSourceSiteQuality, "url_list") => Some("url_list"),
             (Self::DataSourceSiteQuality, "max_pages_per_run") => Some("max_pages_per_run"),
             (Self::DataSourceSiteQuality, "max_crawl_depth") => Some("max_crawl_depth"),
+            (Self::DataSourceSiteQuality, "crawl_seed_urls") => Some("crawl_seed_urls"),
+            (Self::DataSourceSiteQuality, "devices") => Some("devices"),
             (Self::DataSourceSiteQuality, "wait_until") => Some("wait_until"),
             (Self::DataSourceSiteQuality, "navigation_timeout_ms") => Some("navigation_timeout_ms"),
             (Self::DataSourceSiteQuality, "lighthouse_enabled") => Some("lighthouse_enabled"),
+            (Self::DataSourceSiteQuality, "lighthouse_categories") => Some("lighthouse_categories"),
             (Self::DataSourceSiteQuality, "axe_enabled") => Some("axe_enabled"),
+            (Self::DataSourceSiteQuality, "axe_tags") => Some("axe_tags"),
             (Self::DataSourceSiteQuality, "throttle_rtt_ms") => Some("throttle.rtt_ms"),
-            (Self::DataSourceSiteQuality, "throttle_throughput_kbps") => Some("throttle.throughput_kbps"),
+            (Self::DataSourceSiteQuality, "throttle_throughput_kbps") => {
+                Some("throttle.throughput_kbps")
+            }
             (Self::DataSourceSiteQuality, "throttle_cpu_slowdown") => Some("throttle.cpu_slowdown"),
             (Self::DataSourceSiteQuality, "pages_per_minute") => Some("pages_per_minute"),
             (Self::DataSourceSiteQuality, "worker_node_path") => Some("worker_node_path"),
-            (Self::DataSourceSiteQuality, "playwright_executable_path") => Some("playwright_executable_path"),
+            (Self::DataSourceSiteQuality, "playwright_executable_path") => {
+                Some("playwright_executable_path")
+            }
             (Self::DataSourceSiteQuality, "respect_robots") => Some("respect_robots"),
-            (Self::DataSourceSiteQuality, "skip_heavy_when_unchanged") => Some("skip_heavy_when_unchanged"),
+            (Self::DataSourceSiteQuality, "skip_heavy_when_unchanged") => {
+                Some("skip_heavy_when_unchanged")
+            }
             (Self::DataSourceSiteSecurity, "site") => Some("site"),
             (Self::DataSourceSiteSecurity, "url_mode") => Some("url_mode"),
+            (Self::DataSourceSiteSecurity, "url_list") => Some("url_list"),
             (Self::DataSourceSiteSecurity, "max_pages_per_run") => Some("max_pages_per_run"),
             (Self::DataSourceSiteSecurity, "max_crawl_depth") => Some("max_crawl_depth"),
+            (Self::DataSourceSiteSecurity, "crawl_seed_urls") => Some("crawl_seed_urls"),
+            (Self::DataSourceSiteSecurity, "devices") => Some("devices"),
             (Self::DataSourceSiteSecurity, "wait_until") => Some("wait_until"),
-            (Self::DataSourceSiteSecurity, "navigation_timeout_ms") => Some("navigation_timeout_ms"),
+            (Self::DataSourceSiteSecurity, "navigation_timeout_ms") => {
+                Some("navigation_timeout_ms")
+            }
             (Self::DataSourceSiteSecurity, "pages_per_minute") => Some("pages_per_minute"),
             (Self::DataSourceSiteSecurity, "worker_node_path") => Some("worker_node_path"),
-            (Self::DataSourceSiteSecurity, "playwright_executable_path") => Some("playwright_executable_path"),
+            (Self::DataSourceSiteSecurity, "playwright_executable_path") => {
+                Some("playwright_executable_path")
+            }
             (Self::DataSourceSiteSecurity, "respect_robots") => Some("respect_robots"),
-            (Self::DataSourceSiteSecurity, "max_third_party_scripts") => Some("max_third_party_scripts"),
-            (Self::DataSourceSiteSecurity, "import_lighthouse_from_site_quality") => Some("import_lighthouse_from_site_quality"),
+            (Self::DataSourceSiteSecurity, "max_third_party_scripts") => {
+                Some("max_third_party_scripts")
+            }
+            (Self::DataSourceSiteSecurity, "import_lighthouse_from_site_quality") => {
+                Some("import_lighthouse_from_site_quality")
+            }
             (Self::DataSourceSns, "topic_arn") => Some("topic_arn"),
             (Self::DataSourceSns, "sqs_queue_url") => Some("sqs_queue_url"),
             (Self::DataSourceSns, "region") => Some("region"),
@@ -937,6 +1210,7 @@ impl ConnectPlugin {
             (Self::DataSourceStripe, "start_date") => Some("start_date"),
             (Self::DataSourceStripe, "lookback_days") => Some("lookback_days"),
             (Self::DataSourceStripe, "stream_profile") => Some("stream_profile"),
+            (Self::DataSourceStripe, "streams") => Some("streams"),
             (Self::DataSourceStripe, "min_query_interval_ms") => Some("min_query_interval_ms"),
             (Self::DataSourceStripe, "write_policy") => Some("write_policy"),
             (Self::DataSourceStripe, "access_token") => Some("access_token"),
@@ -946,11 +1220,15 @@ impl ConnectPlugin {
             (Self::DataSourceStripe, "oauth_refresh_token") => Some("oauth_refresh_token"),
             (Self::DataSourceStripe, "privacy_mode") => Some("privacy.mode"),
             (Self::DataSourceStripe, "privacy_profile") => Some("privacy.profile"),
+            (Self::DataSourceStripe, "privacy_drop_properties") => Some("privacy.drop_properties"),
+            (Self::DataSourceStripe, "privacy_keep_properties") => Some("privacy.keep_properties"),
+            (Self::DataSourceStripe, "privacy_hash_properties") => Some("privacy.hash_properties"),
             (Self::DataSourceStripe, "privacy_on_violation") => Some("privacy.on_violation"),
             (Self::DataSourceSumUp, "merchant_code") => Some("merchant_code"),
             (Self::DataSourceSumUp, "start_date") => Some("start_date"),
             (Self::DataSourceSumUp, "lookback_days") => Some("lookback_days"),
             (Self::DataSourceSumUp, "stream_profile") => Some("stream_profile"),
+            (Self::DataSourceSumUp, "streams") => Some("streams"),
             (Self::DataSourceSumUp, "min_query_interval_ms") => Some("min_query_interval_ms"),
             (Self::DataSourceSumUp, "oauth_token_url") => Some("oauth_token_url"),
             (Self::DataSourceSumUp, "oauth_client_id") => Some("oauth_client_id"),
@@ -959,61 +1237,138 @@ impl ConnectPlugin {
             (Self::DataSourceSumUp, "access_token") => Some("access_token"),
             (Self::DataSourceSumUp, "privacy_mode") => Some("privacy.mode"),
             (Self::DataSourceSumUp, "privacy_profile") => Some("privacy.profile"),
+            (Self::DataSourceSumUp, "privacy_drop_properties") => Some("privacy.drop_properties"),
+            (Self::DataSourceSumUp, "privacy_keep_properties") => Some("privacy.keep_properties"),
+            (Self::DataSourceSumUp, "privacy_hash_properties") => Some("privacy.hash_properties"),
             (Self::DataSourceSumUp, "privacy_on_violation") => Some("privacy.on_violation"),
             (Self::DataSourceUpfoundryBacklinks, "site") => Some("site"),
             (Self::DataSourceUpfoundryBacklinks, "entity_kind") => Some("entity_kind"),
             (Self::DataSourceUpfoundryBacklinks, "entity_domain") => Some("entity_domain"),
+            (Self::DataSourceUpfoundryBacklinks, "domain_variants") => Some("domain_variants"),
             (Self::DataSourceUpfoundryBacklinks, "primary_domain") => Some("primary_domain"),
             (Self::DataSourceUpfoundryBacklinks, "competitor_name") => Some("competitor_name"),
             (Self::DataSourceUpfoundryBacklinks, "ops_bucket") => Some("ops_bucket"),
             (Self::DataSourceUpfoundryBacklinks, "ops_prefix") => Some("ops_prefix"),
-            (Self::DataSourceUpfoundryBacklinks, "selected_snapshot_id") => Some("selected_snapshot_id"),
-            (Self::DataSourceUpfoundryBacklinks, "include_subdomains") => Some("include_subdomains"),
+            (Self::DataSourceUpfoundryBacklinks, "selected_snapshot_id") => {
+                Some("selected_snapshot_id")
+            }
+            (Self::DataSourceUpfoundryBacklinks, "include_subdomains") => {
+                Some("include_subdomains")
+            }
             (Self::DataSourceUpfoundryBacklinks, "max_detail_rows") => Some("max_detail_rows"),
-            (Self::DataSourceUpfoundryBacklinks, "materialization_manifest_key") => Some("materialization_manifest_key"),
+            (Self::DataSourceUpfoundryBacklinks, "materialization_manifest_key") => {
+                Some("materialization_manifest_key")
+            }
             (Self::DataSourceUpfoundryBacklinks, "max_outbound_rows") => Some("max_outbound_rows"),
             (Self::DataSourceUpfoundryLinkGraphCompact, "ops_bucket") => Some("ops_bucket"),
             (Self::DataSourceUpfoundryLinkGraphCompact, "ops_prefix") => Some("ops_prefix"),
-            (Self::DataSourceUpfoundryLinkGraphCompact, "max_staging_partitions") => Some("max_staging_partitions"),
-            (Self::DataSourceUpfoundryLinkGraphCompact, "pagerank_damping") => Some("pagerank_damping"),
-            (Self::DataSourceUpfoundryLinkGraphCompact, "pagerank_max_iterations") => Some("pagerank_max_iterations"),
-            (Self::DataSourceUpfoundryLinkGraphCompact, "keep_complete_snapshots") => Some("keep_complete_snapshots"),
-            (Self::DataSourceUpfoundryLinkGraphCompact, "keep_failed_manifest_days") => Some("keep_failed_manifest_days"),
-            (Self::DataSourceUpfoundryLinkGraphCompact, "keep_staging_days") => Some("keep_staging_days"),
-            (Self::DataSourceUpfoundryLinkGraphCompact, "spam_model_version") => Some("spam_model_version"),
+            (Self::DataSourceUpfoundryLinkGraphCompact, "max_staging_partitions") => {
+                Some("max_staging_partitions")
+            }
+            (Self::DataSourceUpfoundryLinkGraphCompact, "pagerank_damping") => {
+                Some("pagerank_damping")
+            }
+            (Self::DataSourceUpfoundryLinkGraphCompact, "pagerank_max_iterations") => {
+                Some("pagerank_max_iterations")
+            }
+            (Self::DataSourceUpfoundryLinkGraphCompact, "keep_complete_snapshots") => {
+                Some("keep_complete_snapshots")
+            }
+            (Self::DataSourceUpfoundryLinkGraphCompact, "keep_failed_manifest_days") => {
+                Some("keep_failed_manifest_days")
+            }
+            (Self::DataSourceUpfoundryLinkGraphCompact, "keep_staging_days") => {
+                Some("keep_staging_days")
+            }
+            (Self::DataSourceUpfoundryLinkGraphCompact, "spam_model_version") => {
+                Some("spam_model_version")
+            }
             (Self::DataSourceUpfoundryLinkGraphIngest, "ops_bucket") => Some("ops_bucket"),
             (Self::DataSourceUpfoundryLinkGraphIngest, "ops_prefix") => Some("ops_prefix"),
+            (Self::DataSourceUpfoundryLinkGraphIngest, "frontier_domains") => {
+                Some("frontier_domains")
+            }
             (Self::DataSourceUpfoundryLinkGraphIngest, "cc_crawl_id") => Some("cc_crawl_id"),
-            (Self::DataSourceUpfoundryLinkGraphIngest, "cc_index_base_uri") => Some("cc_index_base_uri"),
-            (Self::DataSourceUpfoundryLinkGraphIngest, "cc_urls_index_prefix") => Some("cc_urls_index_prefix"),
-            (Self::DataSourceUpfoundryLinkGraphIngest, "cc_index_source") => Some("cc_index_source"),
-            (Self::DataSourceUpfoundryLinkGraphIngest, "cc_direct_index_enabled") => Some("cc_direct_index_enabled"),
-            (Self::DataSourceUpfoundryLinkGraphIngest, "max_urls_per_run") => Some("max_urls_per_run"),
-            (Self::DataSourceUpfoundryLinkGraphIngest, "max_links_per_page") => Some("max_links_per_page"),
+            (Self::DataSourceUpfoundryLinkGraphIngest, "cc_crawl_ids") => Some("cc_crawl_ids"),
+            (Self::DataSourceUpfoundryLinkGraphIngest, "cc_index_base_uri") => {
+                Some("cc_index_base_uri")
+            }
+            (Self::DataSourceUpfoundryLinkGraphIngest, "cc_urls_index_prefix") => {
+                Some("cc_urls_index_prefix")
+            }
+            (Self::DataSourceUpfoundryLinkGraphIngest, "cc_index_source") => {
+                Some("cc_index_source")
+            }
+            (Self::DataSourceUpfoundryLinkGraphIngest, "cc_direct_index_enabled") => {
+                Some("cc_direct_index_enabled")
+            }
+            (Self::DataSourceUpfoundryLinkGraphIngest, "max_urls_per_run") => {
+                Some("max_urls_per_run")
+            }
+            (Self::DataSourceUpfoundryLinkGraphIngest, "max_links_per_page") => {
+                Some("max_links_per_page")
+            }
             (Self::DataSourceUpfoundryLinkGraphIngest, "monthly_window") => Some("monthly_window"),
-            (Self::DataSourceUpfoundryLinkGraphIngest, "cc_web_graph_uri") => Some("cc_web_graph_uri"),
-            (Self::DataSourceUpfoundryLinkGraphIngest, "cc_web_graph_max_rows") => Some("cc_web_graph_max_rows"),
-            (Self::DataSourceUpfoundryLinkGraphIngest, "live_crawl_enabled") => Some("live_crawl_enabled"),
-            (Self::DataSourceUpfoundryLinkGraphIngest, "brightdata_proxy_escalation_enabled") => Some("brightdata_proxy_escalation_enabled"),
-            (Self::DataSourceUpfoundryLinkGraphIngest, "include_subdomains") => Some("include_subdomains"),
-            (Self::DataSourceUpfoundryLinkGraphIngest, "selected_referrer_page_refs_uri") => Some("selected_referrer_page_refs_uri"),
+            (Self::DataSourceUpfoundryLinkGraphIngest, "cc_web_graph_uri") => {
+                Some("cc_web_graph_uri")
+            }
+            (Self::DataSourceUpfoundryLinkGraphIngest, "cc_web_graph_max_rows") => {
+                Some("cc_web_graph_max_rows")
+            }
+            (Self::DataSourceUpfoundryLinkGraphIngest, "live_crawl_enabled") => {
+                Some("live_crawl_enabled")
+            }
+            (Self::DataSourceUpfoundryLinkGraphIngest, "brightdata_proxy_escalation_enabled") => {
+                Some("brightdata_proxy_escalation_enabled")
+            }
+            (Self::DataSourceUpfoundryLinkGraphIngest, "include_subdomains") => {
+                Some("include_subdomains")
+            }
+            (Self::DataSourceUpfoundryLinkGraphIngest, "selected_referrer_page_refs_uri") => {
+                Some("selected_referrer_page_refs_uri")
+            }
             (Self::DataSourceUpfoundryLinkGraphIngest, "corpus_run_id") => Some("corpus_run_id"),
-            (Self::DataSourceUpfoundryLinkGraphIngest, "max_referrer_pages_per_run") => Some("max_referrer_pages_per_run"),
+            (Self::DataSourceUpfoundryLinkGraphIngest, "max_referrer_pages_per_run") => {
+                Some("max_referrer_pages_per_run")
+            }
             (Self::DataSourceUpfoundryLinkGraphWatIndex, "crawl_id") => Some("crawl_id"),
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "wat_paths_manifest_uri") => Some("wat_paths_manifest_uri"),
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "wat_path_start") => Some("wat_path_start"),
+            (Self::DataSourceUpfoundryLinkGraphWatIndex, "wat_paths_manifest_uri") => {
+                Some("wat_paths_manifest_uri")
+            }
+            (Self::DataSourceUpfoundryLinkGraphWatIndex, "wat_path_start") => {
+                Some("wat_path_start")
+            }
             (Self::DataSourceUpfoundryLinkGraphWatIndex, "wat_path_end") => Some("wat_path_end"),
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "target_domain_bucket_count") => Some("target_domain_bucket_count"),
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "batch_size_bytes") => Some("batch_size_bytes"),
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "max_records_per_batch") => Some("max_records_per_batch"),
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "max_links_per_page") => Some("max_links_per_page"),
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "max_wat_objects_per_sync") => Some("max_wat_objects_per_sync"),
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "max_wat_object_bytes") => Some("max_wat_object_bytes"),
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "max_wat_records_per_object") => Some("max_wat_records_per_object"),
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "include_subdomains") => Some("include_subdomains"),
+            (Self::DataSourceUpfoundryLinkGraphWatIndex, "target_domain_bucket_count") => {
+                Some("target_domain_bucket_count")
+            }
+            (Self::DataSourceUpfoundryLinkGraphWatIndex, "batch_size_bytes") => {
+                Some("batch_size_bytes")
+            }
+            (Self::DataSourceUpfoundryLinkGraphWatIndex, "max_records_per_batch") => {
+                Some("max_records_per_batch")
+            }
+            (Self::DataSourceUpfoundryLinkGraphWatIndex, "max_links_per_page") => {
+                Some("max_links_per_page")
+            }
+            (Self::DataSourceUpfoundryLinkGraphWatIndex, "max_wat_objects_per_sync") => {
+                Some("max_wat_objects_per_sync")
+            }
+            (Self::DataSourceUpfoundryLinkGraphWatIndex, "max_wat_object_bytes") => {
+                Some("max_wat_object_bytes")
+            }
+            (Self::DataSourceUpfoundryLinkGraphWatIndex, "max_wat_records_per_object") => {
+                Some("max_wat_records_per_object")
+            }
+            (Self::DataSourceUpfoundryLinkGraphWatIndex, "include_subdomains") => {
+                Some("include_subdomains")
+            }
             (Self::DataSourceUpfoundryLinkGraphWatIndex, "sqs_queue_url") => Some("sqs_queue_url"),
-            (Self::DataSourceUpfoundryLinkGraphWatIndex, "sqs_visibility_timeout_seconds") => Some("sqs_visibility_timeout_seconds"),
+            (Self::DataSourceUpfoundryLinkGraphWatIndex, "sqs_visibility_timeout_seconds") => {
+                Some("sqs_visibility_timeout_seconds")
+            }
             (Self::DataSourceWebsocket, "url") => Some("url"),
+            (Self::DataSourceWebsocket, "headers") => Some("headers"),
             (Self::DataSourceWebsocket, "ping_interval_seconds") => Some("ping_interval_seconds"),
             (Self::DataSourceWebsocket, "mode") => Some("mode"),
             (Self::DataSourceWebsocket, "idle_timeout_seconds") => Some("idle_timeout_seconds"),
@@ -1033,12 +1388,16 @@ impl ConnectPlugin {
             (Self::DataSourceXAds, "lookback_days") => Some("lookback_days"),
             (Self::DataSourceXAds, "stream_profile") => Some("stream_profile"),
             (Self::DataSourceXAds, "processing_lag_days") => Some("processing_lag_days"),
+            (Self::DataSourceXAds, "streams") => Some("streams"),
             (Self::DataSourceXeroAccounting, "tenant_id") => Some("tenant_id"),
             (Self::DataSourceXeroAccounting, "start_date") => Some("start_date"),
             (Self::DataSourceXeroAccounting, "lookback_days") => Some("lookback_days"),
             (Self::DataSourceXeroAccounting, "page_size") => Some("page_size"),
             (Self::DataSourceXeroAccounting, "stream_profile") => Some("stream_profile"),
-            (Self::DataSourceXeroAccounting, "min_query_interval_ms") => Some("min_query_interval_ms"),
+            (Self::DataSourceXeroAccounting, "streams") => Some("streams"),
+            (Self::DataSourceXeroAccounting, "min_query_interval_ms") => {
+                Some("min_query_interval_ms")
+            }
             (Self::DataSourceXeroAccounting, "oauth_token_url") => Some("oauth_token_url"),
             (Self::DataSourceXeroAccounting, "oauth_client_id") => Some("oauth_client_id"),
             (Self::DataSourceXeroAccounting, "oauth_client_secret") => Some("oauth_client_secret"),
@@ -1046,7 +1405,18 @@ impl ConnectPlugin {
             (Self::DataSourceXeroAccounting, "access_token") => Some("access_token"),
             (Self::DataSourceXeroAccounting, "privacy_mode") => Some("privacy.mode"),
             (Self::DataSourceXeroAccounting, "privacy_profile") => Some("privacy.profile"),
-            (Self::DataSourceXeroAccounting, "privacy_on_violation") => Some("privacy.on_violation"),
+            (Self::DataSourceXeroAccounting, "privacy_drop_properties") => {
+                Some("privacy.drop_properties")
+            }
+            (Self::DataSourceXeroAccounting, "privacy_keep_properties") => {
+                Some("privacy.keep_properties")
+            }
+            (Self::DataSourceXeroAccounting, "privacy_hash_properties") => {
+                Some("privacy.hash_properties")
+            }
+            (Self::DataSourceXeroAccounting, "privacy_on_violation") => {
+                Some("privacy.on_violation")
+            }
             (Self::DataSinkAmqp, "connection_string") => Some("connection_string"),
             (Self::DataSinkAmqp, "exchange") => Some("exchange"),
             (Self::DataSinkAmqp, "routing_key") => Some("routing_key"),
@@ -1076,7 +1446,9 @@ impl ConnectPlugin {
             (Self::DataSinkBigquery, "credentials_path") => Some("credentials_path"),
             (Self::DataSinkBigquery, "format") => Some("format"),
             (Self::DataSinkBigquery, "max_concurrency") => Some("max_concurrency"),
-            (Self::DataSinkBigquery, "discovery_cache_ttl_secs") => Some("discovery_cache_ttl_secs"),
+            (Self::DataSinkBigquery, "discovery_cache_ttl_secs") => {
+                Some("discovery_cache_ttl_secs")
+            }
             (Self::DataSinkClickhouse, "url") => Some("url"),
             (Self::DataSinkClickhouse, "database") => Some("database"),
             (Self::DataSinkClickhouse, "user") => Some("user"),
@@ -1091,6 +1463,7 @@ impl ConnectPlugin {
             (Self::DataSinkDatabricks, "table") => Some("table"),
             (Self::DataSinkDatabricks, "format") => Some("format"),
             (Self::DataSinkDatabricks, "delta_table_uri") => Some("delta_table_uri"),
+            (Self::DataSinkDatabricks, "storage_options") => Some("storage_options"),
             (Self::DataSinkFile, "format") => Some("format"),
             (Self::DataSinkFile, "output_dir") => Some("output_dir"),
             (Self::DataSinkGcs, "bucket") => Some("bucket"),
@@ -1102,6 +1475,18 @@ impl ConnectPlugin {
             (Self::DataSinkIceberg, "catalog_database") => Some("catalog.database"),
             (Self::DataSinkIceberg, "catalog_catalog_id") => Some("catalog.catalog_id"),
             (Self::DataSinkIceberg, "catalog_region") => Some("catalog.region"),
+            (Self::DataSinkIceberg, "catalog_file_io_type") => Some("catalog.file_io.type"),
+            (Self::DataSinkIceberg, "catalog_file_io_endpoint") => Some("catalog.file_io.endpoint"),
+            (Self::DataSinkIceberg, "catalog_file_io_region") => Some("catalog.file_io.region"),
+            (Self::DataSinkIceberg, "catalog_file_io_access_key_id") => {
+                Some("catalog.file_io.access_key_id")
+            }
+            (Self::DataSinkIceberg, "catalog_file_io_secret_access_key") => {
+                Some("catalog.file_io.secret_access_key")
+            }
+            (Self::DataSinkIceberg, "catalog_file_io_path_style") => {
+                Some("catalog.file_io.path_style")
+            }
             (Self::DataSinkIceberg, "catalog_table") => Some("catalog.table"),
             (Self::DataSinkIceberg, "catalog_uri") => Some("catalog.uri"),
             (Self::DataSinkIceberg, "catalog_token") => Some("catalog.token"),
@@ -1110,6 +1495,7 @@ impl ConnectPlugin {
             (Self::DataSinkIceberg, "table_namespace") => Some("table_namespace"),
             (Self::DataSinkIceberg, "table_prefix") => Some("table_prefix"),
             (Self::DataSinkIceberg, "table_location_prefix") => Some("table_location_prefix"),
+            (Self::DataSinkIceberg, "properties") => Some("properties"),
             (Self::DataSinkIceberg, "query_engine_type") => Some("query_engine.type"),
             (Self::DataSinkIceberg, "query_engine_workgroup") => Some("query_engine.workgroup"),
             (Self::DataSinkIceberg, "format") => Some("format"),
@@ -1159,12 +1545,20 @@ impl ConnectPlugin {
             (Self::DataSinkSnowflake, "format") => Some("format"),
             (Self::DataSinkSnowflake, "private_key_path") => Some("private_key_path"),
             (Self::DataSinkSnowflake, "staging_uri") => Some("staging_uri"),
-            (Self::DataSinkSnowflake, "staging_storage_integration") => Some("staging_storage_integration"),
+            (Self::DataSinkSnowflake, "staging_storage_integration") => {
+                Some("staging_storage_integration")
+            }
             (Self::DataSinkSnowflake, "staging_azure_sas_token") => Some("staging_azure_sas_token"),
-            (Self::DataSinkSnowflake, "staging_azure_account_key") => Some("staging_azure_account_key"),
-            (Self::DataSinkSnowflake, "staging_gcs_service_account_key_path") => Some("staging_gcs_service_account_key_path"),
+            (Self::DataSinkSnowflake, "staging_azure_account_key") => {
+                Some("staging_azure_account_key")
+            }
+            (Self::DataSinkSnowflake, "staging_gcs_service_account_key_path") => {
+                Some("staging_gcs_service_account_key_path")
+            }
             (Self::DataSinkSnowflake, "max_concurrency") => Some("max_concurrency"),
-            (Self::DataSinkSnowflake, "discovery_cache_ttl_secs") => Some("discovery_cache_ttl_secs"),
+            (Self::DataSinkSnowflake, "discovery_cache_ttl_secs") => {
+                Some("discovery_cache_ttl_secs")
+            }
             (Self::DataSinkSynapse, "connection_string") => Some("connection_string"),
             (Self::DataSinkSynapse, "schema") => Some("schema"),
             (Self::DataSinkSynapse, "table") => Some("table"),
@@ -1175,7 +1569,9 @@ impl ConnectPlugin {
             (Self::SchemaSinkBigquery, "credentials_path") => Some("credentials_path"),
             (Self::SchemaSinkBigquery, "format") => Some("format"),
             (Self::SchemaSinkBigquery, "max_concurrency") => Some("max_concurrency"),
-            (Self::SchemaSinkBigquery, "discovery_cache_ttl_secs") => Some("discovery_cache_ttl_secs"),
+            (Self::SchemaSinkBigquery, "discovery_cache_ttl_secs") => {
+                Some("discovery_cache_ttl_secs")
+            }
             (Self::SchemaSinkClickhouse, "url") => Some("url"),
             (Self::SchemaSinkClickhouse, "database") => Some("database"),
             (Self::SchemaSinkClickhouse, "user") => Some("user"),
@@ -1197,6 +1593,20 @@ impl ConnectPlugin {
             (Self::SchemaSinkIceberg, "catalog_database") => Some("catalog.database"),
             (Self::SchemaSinkIceberg, "catalog_catalog_id") => Some("catalog.catalog_id"),
             (Self::SchemaSinkIceberg, "catalog_region") => Some("catalog.region"),
+            (Self::SchemaSinkIceberg, "catalog_file_io_type") => Some("catalog.file_io.type"),
+            (Self::SchemaSinkIceberg, "catalog_file_io_endpoint") => {
+                Some("catalog.file_io.endpoint")
+            }
+            (Self::SchemaSinkIceberg, "catalog_file_io_region") => Some("catalog.file_io.region"),
+            (Self::SchemaSinkIceberg, "catalog_file_io_access_key_id") => {
+                Some("catalog.file_io.access_key_id")
+            }
+            (Self::SchemaSinkIceberg, "catalog_file_io_secret_access_key") => {
+                Some("catalog.file_io.secret_access_key")
+            }
+            (Self::SchemaSinkIceberg, "catalog_file_io_path_style") => {
+                Some("catalog.file_io.path_style")
+            }
             (Self::SchemaSinkIceberg, "catalog_table") => Some("catalog.table"),
             (Self::SchemaSinkIceberg, "catalog_uri") => Some("catalog.uri"),
             (Self::SchemaSinkIceberg, "catalog_token") => Some("catalog.token"),
@@ -1205,6 +1615,7 @@ impl ConnectPlugin {
             (Self::SchemaSinkIceberg, "table_namespace") => Some("table_namespace"),
             (Self::SchemaSinkIceberg, "table_prefix") => Some("table_prefix"),
             (Self::SchemaSinkIceberg, "table_location_prefix") => Some("table_location_prefix"),
+            (Self::SchemaSinkIceberg, "properties") => Some("properties"),
             (Self::SchemaSinkIceberg, "query_engine_type") => Some("query_engine.type"),
             (Self::SchemaSinkIceberg, "query_engine_workgroup") => Some("query_engine.workgroup"),
             (Self::SchemaSinkIceberg, "format") => Some("format"),
@@ -1243,12 +1654,22 @@ impl ConnectPlugin {
             (Self::SchemaSinkSnowflake, "format") => Some("format"),
             (Self::SchemaSinkSnowflake, "private_key_path") => Some("private_key_path"),
             (Self::SchemaSinkSnowflake, "staging_uri") => Some("staging_uri"),
-            (Self::SchemaSinkSnowflake, "staging_storage_integration") => Some("staging_storage_integration"),
-            (Self::SchemaSinkSnowflake, "staging_azure_sas_token") => Some("staging_azure_sas_token"),
-            (Self::SchemaSinkSnowflake, "staging_azure_account_key") => Some("staging_azure_account_key"),
-            (Self::SchemaSinkSnowflake, "staging_gcs_service_account_key_path") => Some("staging_gcs_service_account_key_path"),
+            (Self::SchemaSinkSnowflake, "staging_storage_integration") => {
+                Some("staging_storage_integration")
+            }
+            (Self::SchemaSinkSnowflake, "staging_azure_sas_token") => {
+                Some("staging_azure_sas_token")
+            }
+            (Self::SchemaSinkSnowflake, "staging_azure_account_key") => {
+                Some("staging_azure_account_key")
+            }
+            (Self::SchemaSinkSnowflake, "staging_gcs_service_account_key_path") => {
+                Some("staging_gcs_service_account_key_path")
+            }
             (Self::SchemaSinkSnowflake, "max_concurrency") => Some("max_concurrency"),
-            (Self::SchemaSinkSnowflake, "discovery_cache_ttl_secs") => Some("discovery_cache_ttl_secs"),
+            (Self::SchemaSinkSnowflake, "discovery_cache_ttl_secs") => {
+                Some("discovery_cache_ttl_secs")
+            }
             _ => None,
         }
     }
@@ -1448,1244 +1869,5 @@ impl SchemaSink {
             Self::Redshift => ConnectPlugin::SchemaSinkRedshift,
             Self::Snowflake => ConnectPlugin::SchemaSinkSnowflake,
         }
-    }
-}
-
-impl ConnectBuilder<'_> {
-    pub fn advertiser_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("advertiser_id", value.into());
-        self
-    }
-    pub fn access_token(mut self, value: impl Into<String>) -> Self {
-        self.set_field("access_token", value.into());
-        self
-    }
-    pub fn personal_access_token(mut self, value: impl Into<String>) -> Self {
-        self.set_field("personal_access_token", value.into());
-        self
-    }
-    pub fn oauth_token_url(mut self, value: impl Into<String>) -> Self {
-        self.set_field("oauth_token_url", value.into());
-        self
-    }
-    pub fn oauth_client_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("oauth_client_id", value.into());
-        self
-    }
-    pub fn oauth_client_secret(mut self, value: impl Into<String>) -> Self {
-        self.set_field("oauth_client_secret", value.into());
-        self
-    }
-    pub fn oauth_refresh_token(mut self, value: impl Into<String>) -> Self {
-        self.set_field("oauth_refresh_token", value.into());
-        self
-    }
-    pub fn api_base_url(mut self, value: impl Into<String>) -> Self {
-        self.set_field("api_base_url", value.into());
-        self
-    }
-    pub fn reporting_base_url(mut self, value: impl Into<String>) -> Self {
-        self.set_field("reporting_base_url", value.into());
-        self
-    }
-    pub fn start_date(mut self, value: impl Into<String>) -> Self {
-        self.set_field("start_date", value.into());
-        self
-    }
-    pub fn end_date(mut self, value: impl Into<String>) -> Self {
-        self.set_field("end_date", value.into());
-        self
-    }
-    pub fn lookback_days(mut self, value: impl Into<String>) -> Self {
-        self.set_field("lookback_days", value.into());
-        self
-    }
-    pub fn stream_profile(mut self, value: impl Into<String>) -> Self {
-        self.set_field("stream_profile", value.into());
-        self
-    }
-    pub fn processing_lag_days(mut self, value: impl Into<String>) -> Self {
-        self.set_field("processing_lag_days", value.into());
-        self
-    }
-    pub fn site(mut self, value: impl Into<String>) -> Self {
-        self.set_field("site", value.into());
-        self
-    }
-    pub fn requests_per_minute(mut self, value: impl Into<String>) -> Self {
-        self.set_field("requests_per_minute", value.into());
-        self
-    }
-    pub fn max_prompts_per_run(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_prompts_per_run", value.into());
-        self
-    }
-    pub fn skip_unchanged_responses(mut self, value: impl Into<String>) -> Self {
-        self.set_field("skip_unchanged_responses", value.into());
-        self
-    }
-    pub fn openai_base_url(mut self, value: impl Into<String>) -> Self {
-        self.set_field("openai_base_url", value.into());
-        self
-    }
-    pub fn connection_string(mut self, value: impl Into<String>) -> Self {
-        self.set_field("connection_string", value.into());
-        self
-    }
-    pub fn queue(mut self, value: impl Into<String>) -> Self {
-        self.set_field("queue", value.into());
-        self
-    }
-    pub fn exchange(mut self, value: impl Into<String>) -> Self {
-        self.set_field("exchange", value.into());
-        self
-    }
-    pub fn routing_key(mut self, value: impl Into<String>) -> Self {
-        self.set_field("routing_key", value.into());
-        self
-    }
-    pub fn consumer_tag(mut self, value: impl Into<String>) -> Self {
-        self.set_field("consumer_tag", value.into());
-        self
-    }
-    pub fn prefetch_count(mut self, value: impl Into<String>) -> Self {
-        self.set_field("prefetch_count", value.into());
-        self
-    }
-    pub fn mode(mut self, value: impl Into<String>) -> Self {
-        self.set_field("mode", value.into());
-        self
-    }
-    pub fn idle_timeout_seconds(mut self, value: impl Into<String>) -> Self {
-        self.set_field("idle_timeout_seconds", value.into());
-        self
-    }
-    pub fn format(mut self, value: impl Into<String>) -> Self {
-        self.set_field("format", value.into());
-        self
-    }
-    pub fn batch_size_bytes(mut self, value: impl Into<String>) -> Self {
-        self.set_field("batch_size_bytes", value.into());
-        self
-    }
-    pub fn batch_size_seconds(mut self, value: impl Into<String>) -> Self {
-        self.set_field("batch_size_seconds", value.into());
-        self
-    }
-    pub fn entity(mut self, value: impl Into<String>) -> Self {
-        self.set_field("entity", value.into());
-        self
-    }
-    pub fn max_depth(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_depth", value.into());
-        self
-    }
-    pub fn min_query_interval_ms(mut self, value: impl Into<String>) -> Self {
-        self.set_field("min_query_interval_ms", value.into());
-        self
-    }
-    pub fn max_queries_per_run(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_queries_per_run", value.into());
-        self
-    }
-    pub fn stop_after_first_target_match(mut self, value: impl Into<String>) -> Self {
-        self.set_field("stop_after_first_target_match", value.into());
-        self
-    }
-    pub fn capture_results(mut self, value: impl Into<String>) -> Self {
-        self.set_field("capture_results", value.into());
-        self
-    }
-    pub fn force_refresh_today(mut self, value: impl Into<String>) -> Self {
-        self.set_field("force_refresh_today", value.into());
-        self
-    }
-    pub fn user_agent(mut self, value: impl Into<String>) -> Self {
-        self.set_field("user_agent", value.into());
-        self
-    }
-    pub fn org_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("org_id", value.into());
-        self
-    }
-    pub fn client_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("client_id", value.into());
-        self
-    }
-    pub fn team_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("team_id", value.into());
-        self
-    }
-    pub fn key_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("key_id", value.into());
-        self
-    }
-    pub fn private_key_path(mut self, value: impl Into<String>) -> Self {
-        self.set_field("private_key_path", value.into());
-        self
-    }
-    pub fn private_key_pem(mut self, value: impl Into<String>) -> Self {
-        self.set_field("private_key_pem", value.into());
-        self
-    }
-    pub fn time_zone(mut self, value: impl Into<String>) -> Self {
-        self.set_field("time_zone", value.into());
-        self
-    }
-    pub fn return_records_with_no_metrics(mut self, value: impl Into<String>) -> Self {
-        self.set_field("return_records_with_no_metrics", value.into());
-        self
-    }
-    pub fn max_concurrent_requests(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_concurrent_requests", value.into());
-        self
-    }
-    pub fn site_url(mut self, value: impl Into<String>) -> Self {
-        self.set_field("site_url", value.into());
-        self
-    }
-    pub fn api_key(mut self, value: impl Into<String>) -> Self {
-        self.set_field("api_key", value.into());
-        self
-    }
-    pub fn window_in_days(mut self, value: impl Into<String>) -> Self {
-        self.set_field("window_in_days", value.into());
-        self
-    }
-    pub fn request_interval_ms(mut self, value: impl Into<String>) -> Self {
-        self.set_field("request_interval_ms", value.into());
-        self
-    }
-    pub fn max_api_retries(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_api_retries", value.into());
-        self
-    }
-    pub fn url(mut self, value: impl Into<String>) -> Self {
-        self.set_field("url", value.into());
-        self
-    }
-    pub fn database(mut self, value: impl Into<String>) -> Self {
-        self.set_field("database", value.into());
-        self
-    }
-    pub fn user(mut self, value: impl Into<String>) -> Self {
-        self.set_field("user", value.into());
-        self
-    }
-    pub fn password(mut self, value: impl Into<String>) -> Self {
-        self.set_field("password", value.into());
-        self
-    }
-    pub fn query(mut self, value: impl Into<String>) -> Self {
-        self.set_field("query", value.into());
-        self
-    }
-    pub fn batch_size_rows(mut self, value: impl Into<String>) -> Self {
-        self.set_field("batch_size_rows", value.into());
-        self
-    }
-    pub fn max_urls(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_urls", value.into());
-        self
-    }
-    pub fn render_js(mut self, value: impl Into<String>) -> Self {
-        self.set_field("render_js", value.into());
-        self
-    }
-    pub fn crawl_rate_per_second(mut self, value: impl Into<String>) -> Self {
-        self.set_field("crawl_rate_per_second", value.into());
-        self
-    }
-    pub fn respect_robots(mut self, value: impl Into<String>) -> Self {
-        self.set_field("respect_robots", value.into());
-        self
-    }
-    pub fn openai_model(mut self, value: impl Into<String>) -> Self {
-        self.set_field("openai_model", value.into());
-        self
-    }
-    pub fn openai_enabled(mut self, value: impl Into<String>) -> Self {
-        self.set_field("openai_enabled", value.into());
-        self
-    }
-    pub fn openai_max_blocks_per_page(mut self, value: impl Into<String>) -> Self {
-        self.set_field("openai_max_blocks_per_page", value.into());
-        self
-    }
-    pub fn skip_unchanged_content(mut self, value: impl Into<String>) -> Self {
-        self.set_field("skip_unchanged_content", value.into());
-        self
-    }
-    pub fn worker_node_path(mut self, value: impl Into<String>) -> Self {
-        self.set_field("worker_node_path", value.into());
-        self
-    }
-    pub fn render_wait_until(mut self, value: impl Into<String>) -> Self {
-        self.set_field("render_wait_until", value.into());
-        self
-    }
-    pub fn render_timeout_ms(mut self, value: impl Into<String>) -> Self {
-        self.set_field("render_timeout_ms", value.into());
-        self
-    }
-    pub fn playwright_executable_path(mut self, value: impl Into<String>) -> Self {
-        self.set_field("playwright_executable_path", value.into());
-        self
-    }
-    pub fn max_response_bytes(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_response_bytes", value.into());
-        self
-    }
-    pub fn login(mut self, value: impl Into<String>) -> Self {
-        self.set_field("login", value.into());
-        self
-    }
-    pub fn run_mode(mut self, value: impl Into<String>) -> Self {
-        self.set_field("run_mode", value.into());
-        self
-    }
-    pub fn history_date_from(mut self, value: impl Into<String>) -> Self {
-        self.set_field("history_date_from", value.into());
-        self
-    }
-    pub fn history_date_to(mut self, value: impl Into<String>) -> Self {
-        self.set_field("history_date_to", value.into());
-        self
-    }
-    pub fn rank_scale(mut self, value: impl Into<String>) -> Self {
-        self.set_field("rank_scale", value.into());
-        self
-    }
-    pub fn location_code(mut self, value: impl Into<String>) -> Self {
-        self.set_field("location_code", value.into());
-        self
-    }
-    pub fn language_code(mut self, value: impl Into<String>) -> Self {
-        self.set_field("language_code", value.into());
-        self
-    }
-    pub fn device(mut self, value: impl Into<String>) -> Self {
-        self.set_field("device", value.into());
-        self
-    }
-    pub fn search_engine(mut self, value: impl Into<String>) -> Self {
-        self.set_field("search_engine", value.into());
-        self
-    }
-    pub fn seed_queries_from_gsc(mut self, value: impl Into<String>) -> Self {
-        self.set_field("seed_queries_from_gsc", value.into());
-        self
-    }
-    pub fn gsc_source(mut self, value: impl Into<String>) -> Self {
-        self.set_field("gsc_source", value.into());
-        self
-    }
-    pub fn seed_urls_from_crawl(mut self, value: impl Into<String>) -> Self {
-        self.set_field("seed_urls_from_crawl", value.into());
-        self
-    }
-    pub fn seo_crawl_source(mut self, value: impl Into<String>) -> Self {
-        self.set_field("seo_crawl_source", value.into());
-        self
-    }
-    pub fn limits_max_seed_keywords(mut self, value: impl Into<String>) -> Self {
-        self.set_field("limits_max_seed_keywords", value.into());
-        self
-    }
-    pub fn limits_max_generated_keywords(mut self, value: impl Into<String>) -> Self {
-        self.set_field("limits_max_generated_keywords", value.into());
-        self
-    }
-    pub fn limits_serp_depth(mut self, value: impl Into<String>) -> Self {
-        self.set_field("limits_serp_depth", value.into());
-        self
-    }
-    pub fn limits_rank_track_depth(mut self, value: impl Into<String>) -> Self {
-        self.set_field("limits_rank_track_depth", value.into());
-        self
-    }
-    pub fn limits_max_competitors(mut self, value: impl Into<String>) -> Self {
-        self.set_field("limits_max_competitors", value.into());
-        self
-    }
-    pub fn scoring_min_search_volume(mut self, value: impl Into<String>) -> Self {
-        self.set_field("scoring_min_search_volume", value.into());
-        self
-    }
-    pub fn scoring_max_keyword_difficulty(mut self, value: impl Into<String>) -> Self {
-        self.set_field("scoring_max_keyword_difficulty", value.into());
-        self
-    }
-    pub fn scoring_weak_domain_rank_threshold(mut self, value: impl Into<String>) -> Self {
-        self.set_field("scoring_weak_domain_rank_threshold", value.into());
-        self
-    }
-    pub fn scoring_prefer_question_keywords(mut self, value: impl Into<String>) -> Self {
-        self.set_field("scoring_prefer_question_keywords", value.into());
-        self
-    }
-    pub fn scoring_prefer_low_backlink_serps(mut self, value: impl Into<String>) -> Self {
-        self.set_field("scoring_prefer_low_backlink_serps", value.into());
-        self
-    }
-    pub fn table_uri(mut self, value: impl Into<String>) -> Self {
-        self.set_field("table_uri", value.into());
-        self
-    }
-    pub fn version(mut self, value: impl Into<String>) -> Self {
-        self.set_field("version", value.into());
-        self
-    }
-    pub fn filter(mut self, value: impl Into<String>) -> Self {
-        self.set_field("filter", value.into());
-        self
-    }
-    pub fn table_name(mut self, value: impl Into<String>) -> Self {
-        self.set_field("table_name", value.into());
-        self
-    }
-    pub fn region(mut self, value: impl Into<String>) -> Self {
-        self.set_field("region", value.into());
-        self
-    }
-    pub fn endpoint_url(mut self, value: impl Into<String>) -> Self {
-        self.set_field("endpoint_url", value.into());
-        self
-    }
-    pub fn cdc_mode(mut self, value: impl Into<String>) -> Self {
-        self.set_field("cdc_mode", value.into());
-        self
-    }
-    pub fn event_bus_name(mut self, value: impl Into<String>) -> Self {
-        self.set_field("event_bus_name", value.into());
-        self
-    }
-    pub fn rule_name(mut self, value: impl Into<String>) -> Self {
-        self.set_field("rule_name", value.into());
-        self
-    }
-    pub fn sqs_queue_url(mut self, value: impl Into<String>) -> Self {
-        self.set_field("sqs_queue_url", value.into());
-        self
-    }
-    pub fn path(mut self, value: impl Into<String>) -> Self {
-        self.set_field("path", value.into());
-        self
-    }
-    pub fn customer_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("customer_id", value.into());
-        self
-    }
-    pub fn developer_token(mut self, value: impl Into<String>) -> Self {
-        self.set_field("developer_token", value.into());
-        self
-    }
-    pub fn login_customer_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("login_customer_id", value.into());
-        self
-    }
-    pub fn api_version(mut self, value: impl Into<String>) -> Self {
-        self.set_field("api_version", value.into());
-        self
-    }
-    pub fn property_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("property_id", value.into());
-        self
-    }
-    pub fn service_account_json_path(mut self, value: impl Into<String>) -> Self {
-        self.set_field("service_account_json_path", value.into());
-        self
-    }
-    pub fn keep_empty_rows(mut self, value: impl Into<String>) -> Self {
-        self.set_field("keep_empty_rows", value.into());
-        self
-    }
-    pub fn url_mode(mut self, value: impl Into<String>) -> Self {
-        self.set_field("url_mode", value.into());
-        self
-    }
-    pub fn locale(mut self, value: impl Into<String>) -> Self {
-        self.set_field("locale", value.into());
-        self
-    }
-    pub fn max_requests_per_run(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_requests_per_run", value.into());
-        self
-    }
-    pub fn top_audits_per_page(mut self, value: impl Into<String>) -> Self {
-        self.set_field("top_audits_per_page", value.into());
-        self
-    }
-    pub fn search_type(mut self, value: impl Into<String>) -> Self {
-        self.set_field("search_type", value.into());
-        self
-    }
-    pub fn data_state(mut self, value: impl Into<String>) -> Self {
-        self.set_field("data_state", value.into());
-        self
-    }
-    pub fn row_limit(mut self, value: impl Into<String>) -> Self {
-        self.set_field("row_limit", value.into());
-        self
-    }
-    pub fn url_inspection_enabled(mut self, value: impl Into<String>) -> Self {
-        self.set_field("url_inspection_enabled", value.into());
-        self
-    }
-    pub fn country(mut self, value: impl Into<String>) -> Self {
-        self.set_field("country", value.into());
-        self
-    }
-    pub fn language(mut self, value: impl Into<String>) -> Self {
-        self.set_field("language", value.into());
-        self
-    }
-    pub fn navigation_timeout_ms(mut self, value: impl Into<String>) -> Self {
-        self.set_field("navigation_timeout_ms", value.into());
-        self
-    }
-    pub fn brightdata_zone(mut self, value: impl Into<String>) -> Self {
-        self.set_field("brightdata_zone", value.into());
-        self
-    }
-    pub fn brightdata_api_base(mut self, value: impl Into<String>) -> Self {
-        self.set_field("brightdata_api_base", value.into());
-        self
-    }
-    pub fn include_allintitle(mut self, value: impl Into<String>) -> Self {
-        self.set_field("include_allintitle", value.into());
-        self
-    }
-    pub fn allintitle_only(mut self, value: impl Into<String>) -> Self {
-        self.set_field("allintitle_only", value.into());
-        self
-    }
-    pub fn max_allintitle_queries_per_run(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_allintitle_queries_per_run", value.into());
-        self
-    }
-    pub fn method(mut self, value: impl Into<String>) -> Self {
-        self.set_field("method", value.into());
-        self
-    }
-    pub fn body(mut self, value: impl Into<String>) -> Self {
-        self.set_field("body", value.into());
-        self
-    }
-    pub fn auth_strategy(mut self, value: impl Into<String>) -> Self {
-        self.set_field("auth_strategy", value.into());
-        self
-    }
-    pub fn auth_user(mut self, value: impl Into<String>) -> Self {
-        self.set_field("auth_user", value.into());
-        self
-    }
-    pub fn auth_password(mut self, value: impl Into<String>) -> Self {
-        self.set_field("auth_password", value.into());
-        self
-    }
-    pub fn auth_token(mut self, value: impl Into<String>) -> Self {
-        self.set_field("auth_token", value.into());
-        self
-    }
-    pub fn scrape_interval_seconds(mut self, value: impl Into<String>) -> Self {
-        self.set_field("scrape_interval_seconds", value.into());
-        self
-    }
-    pub fn scrape_timeout_seconds(mut self, value: impl Into<String>) -> Self {
-        self.set_field("scrape_timeout_seconds", value.into());
-        self
-    }
-    pub fn listen_address(mut self, value: impl Into<String>) -> Self {
-        self.set_field("listen_address", value.into());
-        self
-    }
-    pub fn hub_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("hub_id", value.into());
-        self
-    }
-    pub fn privacy_mode(mut self, value: impl Into<String>) -> Self {
-        self.set_field("privacy_mode", value.into());
-        self
-    }
-    pub fn privacy_profile(mut self, value: impl Into<String>) -> Self {
-        self.set_field("privacy_profile", value.into());
-        self
-    }
-    pub fn privacy_on_violation(mut self, value: impl Into<String>) -> Self {
-        self.set_field("privacy_on_violation", value.into());
-        self
-    }
-    pub fn brokers(mut self, value: impl Into<String>) -> Self {
-        self.set_field("brokers", value.into());
-        self
-    }
-    pub fn topic(mut self, value: impl Into<String>) -> Self {
-        self.set_field("topic", value.into());
-        self
-    }
-    pub fn group_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("group_id", value.into());
-        self
-    }
-    pub fn auto_offset_reset(mut self, value: impl Into<String>) -> Self {
-        self.set_field("auto_offset_reset", value.into());
-        self
-    }
-    pub fn security_protocol(mut self, value: impl Into<String>) -> Self {
-        self.set_field("security_protocol", value.into());
-        self
-    }
-    pub fn sasl_mechanism(mut self, value: impl Into<String>) -> Self {
-        self.set_field("sasl_mechanism", value.into());
-        self
-    }
-    pub fn sasl_username(mut self, value: impl Into<String>) -> Self {
-        self.set_field("sasl_username", value.into());
-        self
-    }
-    pub fn sasl_password(mut self, value: impl Into<String>) -> Self {
-        self.set_field("sasl_password", value.into());
-        self
-    }
-    pub fn debezium_format(mut self, value: impl Into<String>) -> Self {
-        self.set_field("debezium_format", value.into());
-        self
-    }
-    pub fn stream_name(mut self, value: impl Into<String>) -> Self {
-        self.set_field("stream_name", value.into());
-        self
-    }
-    pub fn ad_account_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("ad_account_id", value.into());
-        self
-    }
-    pub fn rest_version(mut self, value: impl Into<String>) -> Self {
-        self.set_field("rest_version", value.into());
-        self
-    }
-    pub fn instagram_filter(mut self, value: impl Into<String>) -> Self {
-        self.set_field("instagram_filter", value.into());
-        self
-    }
-    pub fn collection(mut self, value: impl Into<String>) -> Self {
-        self.set_field("collection", value.into());
-        self
-    }
-    pub fn motherduck_token(mut self, value: impl Into<String>) -> Self {
-        self.set_field("motherduck_token", value.into());
-        self
-    }
-    pub fn broker_url(mut self, value: impl Into<String>) -> Self {
-        self.set_field("broker_url", value.into());
-        self
-    }
-    pub fn port(mut self, value: impl Into<String>) -> Self {
-        self.set_field("port", value.into());
-        self
-    }
-    pub fn qos(mut self, value: impl Into<String>) -> Self {
-        self.set_field("qos", value.into());
-        self
-    }
-    pub fn username(mut self, value: impl Into<String>) -> Self {
-        self.set_field("username", value.into());
-        self
-    }
-    pub fn query_timeout_seconds(mut self, value: impl Into<String>) -> Self {
-        self.set_field("query_timeout_seconds", value.into());
-        self
-    }
-    pub fn server_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("server_id", value.into());
-        self
-    }
-    pub fn cdc_idle_timeout_seconds(mut self, value: impl Into<String>) -> Self {
-        self.set_field("cdc_idle_timeout_seconds", value.into());
-        self
-    }
-    pub fn listen_address_grpc(mut self, value: impl Into<String>) -> Self {
-        self.set_field("listen_address_grpc", value.into());
-        self
-    }
-    pub fn listen_address_http(mut self, value: impl Into<String>) -> Self {
-        self.set_field("listen_address_http", value.into());
-        self
-    }
-    pub fn host(mut self, value: impl Into<String>) -> Self {
-        self.set_field("host", value.into());
-        self
-    }
-    pub fn replication_slot_name(mut self, value: impl Into<String>) -> Self {
-        self.set_field("replication_slot_name", value.into());
-        self
-    }
-    pub fn publication_name(mut self, value: impl Into<String>) -> Self {
-        self.set_field("publication_name", value.into());
-        self
-    }
-    pub fn cluster_identifier(mut self, value: impl Into<String>) -> Self {
-        self.set_field("cluster_identifier", value.into());
-        self
-    }
-    pub fn workgroup_name(mut self, value: impl Into<String>) -> Self {
-        self.set_field("workgroup_name", value.into());
-        self
-    }
-    pub fn db_user(mut self, value: impl Into<String>) -> Self {
-        self.set_field("db_user", value.into());
-        self
-    }
-    pub fn api_base(mut self, value: impl Into<String>) -> Self {
-        self.set_field("api_base", value.into());
-        self
-    }
-    pub fn refresh_token(mut self, value: impl Into<String>) -> Self {
-        self.set_field("refresh_token", value.into());
-        self
-    }
-    pub fn issuer_domain(mut self, value: impl Into<String>) -> Self {
-        self.set_field("issuer_domain", value.into());
-        self
-    }
-    pub fn s3_bucket(mut self, value: impl Into<String>) -> Self {
-        self.set_field("s3_bucket", value.into());
-        self
-    }
-    pub fn s3_prefix(mut self, value: impl Into<String>) -> Self {
-        self.set_field("s3_prefix", value.into());
-        self
-    }
-    pub fn s3_prefix_ordered_depth(mut self, value: impl Into<String>) -> Self {
-        self.set_field("s3_prefix_ordered_depth", value.into());
-        self
-    }
-    pub fn s3_delimiter(mut self, value: impl Into<String>) -> Self {
-        self.set_field("s3_delimiter", value.into());
-        self
-    }
-    pub fn openai_structure_enabled(mut self, value: impl Into<String>) -> Self {
-        self.set_field("openai_structure_enabled", value.into());
-        self
-    }
-    pub fn remote_path(mut self, value: impl Into<String>) -> Self {
-        self.set_field("remote_path", value.into());
-        self
-    }
-    pub fn shop_domain(mut self, value: impl Into<String>) -> Self {
-        self.set_field("shop_domain", value.into());
-        self
-    }
-    pub fn use_bulk_operations(mut self, value: impl Into<String>) -> Self {
-        self.set_field("use_bulk_operations", value.into());
-        self
-    }
-    pub fn oauth_access_token(mut self, value: impl Into<String>) -> Self {
-        self.set_field("oauth_access_token", value.into());
-        self
-    }
-    pub fn max_pages_per_run(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_pages_per_run", value.into());
-        self
-    }
-    pub fn max_crawl_depth(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_crawl_depth", value.into());
-        self
-    }
-    pub fn wait_until(mut self, value: impl Into<String>) -> Self {
-        self.set_field("wait_until", value.into());
-        self
-    }
-    pub fn lighthouse_enabled(mut self, value: impl Into<String>) -> Self {
-        self.set_field("lighthouse_enabled", value.into());
-        self
-    }
-    pub fn axe_enabled(mut self, value: impl Into<String>) -> Self {
-        self.set_field("axe_enabled", value.into());
-        self
-    }
-    pub fn throttle_rtt_ms(mut self, value: impl Into<String>) -> Self {
-        self.set_field("throttle_rtt_ms", value.into());
-        self
-    }
-    pub fn throttle_throughput_kbps(mut self, value: impl Into<String>) -> Self {
-        self.set_field("throttle_throughput_kbps", value.into());
-        self
-    }
-    pub fn throttle_cpu_slowdown(mut self, value: impl Into<String>) -> Self {
-        self.set_field("throttle_cpu_slowdown", value.into());
-        self
-    }
-    pub fn pages_per_minute(mut self, value: impl Into<String>) -> Self {
-        self.set_field("pages_per_minute", value.into());
-        self
-    }
-    pub fn skip_heavy_when_unchanged(mut self, value: impl Into<String>) -> Self {
-        self.set_field("skip_heavy_when_unchanged", value.into());
-        self
-    }
-    pub fn max_third_party_scripts(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_third_party_scripts", value.into());
-        self
-    }
-    pub fn import_lighthouse_from_site_quality(mut self, value: impl Into<String>) -> Self {
-        self.set_field("import_lighthouse_from_site_quality", value.into());
-        self
-    }
-    pub fn topic_arn(mut self, value: impl Into<String>) -> Self {
-        self.set_field("topic_arn", value.into());
-        self
-    }
-    pub fn address(mut self, value: impl Into<String>) -> Self {
-        self.set_field("address", value.into());
-        self
-    }
-    pub fn framing(mut self, value: impl Into<String>) -> Self {
-        self.set_field("framing", value.into());
-        self
-    }
-    pub fn queue_url(mut self, value: impl Into<String>) -> Self {
-        self.set_field("queue_url", value.into());
-        self
-    }
-    pub fn stripe_account_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("stripe_account_id", value.into());
-        self
-    }
-    pub fn write_policy(mut self, value: impl Into<String>) -> Self {
-        self.set_field("write_policy", value.into());
-        self
-    }
-    pub fn merchant_code(mut self, value: impl Into<String>) -> Self {
-        self.set_field("merchant_code", value.into());
-        self
-    }
-    pub fn entity_kind(mut self, value: impl Into<String>) -> Self {
-        self.set_field("entity_kind", value.into());
-        self
-    }
-    pub fn entity_domain(mut self, value: impl Into<String>) -> Self {
-        self.set_field("entity_domain", value.into());
-        self
-    }
-    pub fn primary_domain(mut self, value: impl Into<String>) -> Self {
-        self.set_field("primary_domain", value.into());
-        self
-    }
-    pub fn competitor_name(mut self, value: impl Into<String>) -> Self {
-        self.set_field("competitor_name", value.into());
-        self
-    }
-    pub fn ops_bucket(mut self, value: impl Into<String>) -> Self {
-        self.set_field("ops_bucket", value.into());
-        self
-    }
-    pub fn ops_prefix(mut self, value: impl Into<String>) -> Self {
-        self.set_field("ops_prefix", value.into());
-        self
-    }
-    pub fn selected_snapshot_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("selected_snapshot_id", value.into());
-        self
-    }
-    pub fn include_subdomains(mut self, value: impl Into<String>) -> Self {
-        self.set_field("include_subdomains", value.into());
-        self
-    }
-    pub fn max_detail_rows(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_detail_rows", value.into());
-        self
-    }
-    pub fn materialization_manifest_key(mut self, value: impl Into<String>) -> Self {
-        self.set_field("materialization_manifest_key", value.into());
-        self
-    }
-    pub fn max_outbound_rows(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_outbound_rows", value.into());
-        self
-    }
-    pub fn max_staging_partitions(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_staging_partitions", value.into());
-        self
-    }
-    pub fn pagerank_damping(mut self, value: impl Into<String>) -> Self {
-        self.set_field("pagerank_damping", value.into());
-        self
-    }
-    pub fn pagerank_max_iterations(mut self, value: impl Into<String>) -> Self {
-        self.set_field("pagerank_max_iterations", value.into());
-        self
-    }
-    pub fn keep_complete_snapshots(mut self, value: impl Into<String>) -> Self {
-        self.set_field("keep_complete_snapshots", value.into());
-        self
-    }
-    pub fn keep_failed_manifest_days(mut self, value: impl Into<String>) -> Self {
-        self.set_field("keep_failed_manifest_days", value.into());
-        self
-    }
-    pub fn keep_staging_days(mut self, value: impl Into<String>) -> Self {
-        self.set_field("keep_staging_days", value.into());
-        self
-    }
-    pub fn spam_model_version(mut self, value: impl Into<String>) -> Self {
-        self.set_field("spam_model_version", value.into());
-        self
-    }
-    pub fn cc_crawl_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("cc_crawl_id", value.into());
-        self
-    }
-    pub fn cc_index_base_uri(mut self, value: impl Into<String>) -> Self {
-        self.set_field("cc_index_base_uri", value.into());
-        self
-    }
-    pub fn cc_urls_index_prefix(mut self, value: impl Into<String>) -> Self {
-        self.set_field("cc_urls_index_prefix", value.into());
-        self
-    }
-    pub fn cc_index_source(mut self, value: impl Into<String>) -> Self {
-        self.set_field("cc_index_source", value.into());
-        self
-    }
-    pub fn cc_direct_index_enabled(mut self, value: impl Into<String>) -> Self {
-        self.set_field("cc_direct_index_enabled", value.into());
-        self
-    }
-    pub fn max_urls_per_run(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_urls_per_run", value.into());
-        self
-    }
-    pub fn max_links_per_page(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_links_per_page", value.into());
-        self
-    }
-    pub fn monthly_window(mut self, value: impl Into<String>) -> Self {
-        self.set_field("monthly_window", value.into());
-        self
-    }
-    pub fn cc_web_graph_uri(mut self, value: impl Into<String>) -> Self {
-        self.set_field("cc_web_graph_uri", value.into());
-        self
-    }
-    pub fn cc_web_graph_max_rows(mut self, value: impl Into<String>) -> Self {
-        self.set_field("cc_web_graph_max_rows", value.into());
-        self
-    }
-    pub fn live_crawl_enabled(mut self, value: impl Into<String>) -> Self {
-        self.set_field("live_crawl_enabled", value.into());
-        self
-    }
-    pub fn brightdata_proxy_escalation_enabled(mut self, value: impl Into<String>) -> Self {
-        self.set_field("brightdata_proxy_escalation_enabled", value.into());
-        self
-    }
-    pub fn selected_referrer_page_refs_uri(mut self, value: impl Into<String>) -> Self {
-        self.set_field("selected_referrer_page_refs_uri", value.into());
-        self
-    }
-    pub fn corpus_run_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("corpus_run_id", value.into());
-        self
-    }
-    pub fn max_referrer_pages_per_run(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_referrer_pages_per_run", value.into());
-        self
-    }
-    pub fn crawl_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("crawl_id", value.into());
-        self
-    }
-    pub fn wat_paths_manifest_uri(mut self, value: impl Into<String>) -> Self {
-        self.set_field("wat_paths_manifest_uri", value.into());
-        self
-    }
-    pub fn wat_path_start(mut self, value: impl Into<String>) -> Self {
-        self.set_field("wat_path_start", value.into());
-        self
-    }
-    pub fn wat_path_end(mut self, value: impl Into<String>) -> Self {
-        self.set_field("wat_path_end", value.into());
-        self
-    }
-    pub fn target_domain_bucket_count(mut self, value: impl Into<String>) -> Self {
-        self.set_field("target_domain_bucket_count", value.into());
-        self
-    }
-    pub fn max_records_per_batch(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_records_per_batch", value.into());
-        self
-    }
-    pub fn max_wat_objects_per_sync(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_wat_objects_per_sync", value.into());
-        self
-    }
-    pub fn max_wat_object_bytes(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_wat_object_bytes", value.into());
-        self
-    }
-    pub fn max_wat_records_per_object(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_wat_records_per_object", value.into());
-        self
-    }
-    pub fn sqs_visibility_timeout_seconds(mut self, value: impl Into<String>) -> Self {
-        self.set_field("sqs_visibility_timeout_seconds", value.into());
-        self
-    }
-    pub fn ping_interval_seconds(mut self, value: impl Into<String>) -> Self {
-        self.set_field("ping_interval_seconds", value.into());
-        self
-    }
-    pub fn account_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("account_id", value.into());
-        self
-    }
-    pub fn bearer_token(mut self, value: impl Into<String>) -> Self {
-        self.set_field("bearer_token", value.into());
-        self
-    }
-    pub fn oauth_consumer_key(mut self, value: impl Into<String>) -> Self {
-        self.set_field("oauth_consumer_key", value.into());
-        self
-    }
-    pub fn oauth_consumer_secret(mut self, value: impl Into<String>) -> Self {
-        self.set_field("oauth_consumer_secret", value.into());
-        self
-    }
-    pub fn oauth_token(mut self, value: impl Into<String>) -> Self {
-        self.set_field("oauth_token", value.into());
-        self
-    }
-    pub fn oauth_token_secret(mut self, value: impl Into<String>) -> Self {
-        self.set_field("oauth_token_secret", value.into());
-        self
-    }
-    pub fn tenant_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("tenant_id", value.into());
-        self
-    }
-    pub fn page_size(mut self, value: impl Into<String>) -> Self {
-        self.set_field("page_size", value.into());
-        self
-    }
-    pub fn exchange_type(mut self, value: impl Into<String>) -> Self {
-        self.set_field("exchange_type", value.into());
-        self
-    }
-    pub fn max_in_flight(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_in_flight", value.into());
-        self
-    }
-    pub fn max_in_flight_bytes(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_in_flight_bytes", value.into());
-        self
-    }
-    pub fn athena_workgroup_name(mut self, value: impl Into<String>) -> Self {
-        self.set_field("athena_workgroup_name", value.into());
-        self
-    }
-    pub fn glue_database_name(mut self, value: impl Into<String>) -> Self {
-        self.set_field("glue_database_name", value.into());
-        self
-    }
-    pub fn athena_results_s3_bucket(mut self, value: impl Into<String>) -> Self {
-        self.set_field("athena_results_s3_bucket", value.into());
-        self
-    }
-    pub fn catalog(mut self, value: impl Into<String>) -> Self {
-        self.set_field("catalog", value.into());
-        self
-    }
-    pub fn max_concurrency(mut self, value: impl Into<String>) -> Self {
-        self.set_field("max_concurrency", value.into());
-        self
-    }
-    pub fn discovery_cache_ttl_secs(mut self, value: impl Into<String>) -> Self {
-        self.set_field("discovery_cache_ttl_secs", value.into());
-        self
-    }
-    pub fn account_name(mut self, value: impl Into<String>) -> Self {
-        self.set_field("account_name", value.into());
-        self
-    }
-    pub fn account_key(mut self, value: impl Into<String>) -> Self {
-        self.set_field("account_key", value.into());
-        self
-    }
-    pub fn sas_token(mut self, value: impl Into<String>) -> Self {
-        self.set_field("sas_token", value.into());
-        self
-    }
-    pub fn container(mut self, value: impl Into<String>) -> Self {
-        self.set_field("container", value.into());
-        self
-    }
-    pub fn prefix(mut self, value: impl Into<String>) -> Self {
-        self.set_field("prefix", value.into());
-        self
-    }
-    pub fn project(mut self, value: impl Into<String>) -> Self {
-        self.set_field("project", value.into());
-        self
-    }
-    pub fn dataset(mut self, value: impl Into<String>) -> Self {
-        self.set_field("dataset", value.into());
-        self
-    }
-    pub fn location(mut self, value: impl Into<String>) -> Self {
-        self.set_field("location", value.into());
-        self
-    }
-    pub fn credentials_path(mut self, value: impl Into<String>) -> Self {
-        self.set_field("credentials_path", value.into());
-        self
-    }
-    pub fn table(mut self, value: impl Into<String>) -> Self {
-        self.set_field("table", value.into());
-        self
-    }
-    pub fn workspace_url(mut self, value: impl Into<String>) -> Self {
-        self.set_field("workspace_url", value.into());
-        self
-    }
-    pub fn token(mut self, value: impl Into<String>) -> Self {
-        self.set_field("token", value.into());
-        self
-    }
-    pub fn warehouse_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("warehouse_id", value.into());
-        self
-    }
-    pub fn schema(mut self, value: impl Into<String>) -> Self {
-        self.set_field("schema", value.into());
-        self
-    }
-    pub fn delta_table_uri(mut self, value: impl Into<String>) -> Self {
-        self.set_field("delta_table_uri", value.into());
-        self
-    }
-    pub fn output_dir(mut self, value: impl Into<String>) -> Self {
-        self.set_field("output_dir", value.into());
-        self
-    }
-    pub fn bucket(mut self, value: impl Into<String>) -> Self {
-        self.set_field("bucket", value.into());
-        self
-    }
-    pub fn service_account_key_path(mut self, value: impl Into<String>) -> Self {
-        self.set_field("service_account_key_path", value.into());
-        self
-    }
-    pub fn catalog_type(mut self, value: impl Into<String>) -> Self {
-        self.set_field("catalog_type", value.into());
-        self
-    }
-    pub fn catalog_warehouse(mut self, value: impl Into<String>) -> Self {
-        self.set_field("catalog_warehouse", value.into());
-        self
-    }
-    pub fn catalog_database(mut self, value: impl Into<String>) -> Self {
-        self.set_field("catalog_database", value.into());
-        self
-    }
-    pub fn catalog_catalog_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("catalog_catalog_id", value.into());
-        self
-    }
-    pub fn catalog_region(mut self, value: impl Into<String>) -> Self {
-        self.set_field("catalog_region", value.into());
-        self
-    }
-    pub fn catalog_table(mut self, value: impl Into<String>) -> Self {
-        self.set_field("catalog_table", value.into());
-        self
-    }
-    pub fn catalog_uri(mut self, value: impl Into<String>) -> Self {
-        self.set_field("catalog_uri", value.into());
-        self
-    }
-    pub fn catalog_token(mut self, value: impl Into<String>) -> Self {
-        self.set_field("catalog_token", value.into());
-        self
-    }
-    pub fn catalog_client_id(mut self, value: impl Into<String>) -> Self {
-        self.set_field("catalog_client_id", value.into());
-        self
-    }
-    pub fn catalog_client_secret(mut self, value: impl Into<String>) -> Self {
-        self.set_field("catalog_client_secret", value.into());
-        self
-    }
-    pub fn table_namespace(mut self, value: impl Into<String>) -> Self {
-        self.set_field("table_namespace", value.into());
-        self
-    }
-    pub fn table_prefix(mut self, value: impl Into<String>) -> Self {
-        self.set_field("table_prefix", value.into());
-        self
-    }
-    pub fn table_location_prefix(mut self, value: impl Into<String>) -> Self {
-        self.set_field("table_location_prefix", value.into());
-        self
-    }
-    pub fn query_engine_type(mut self, value: impl Into<String>) -> Self {
-        self.set_field("query_engine_type", value.into());
-        self
-    }
-    pub fn query_engine_workgroup(mut self, value: impl Into<String>) -> Self {
-        self.set_field("query_engine_workgroup", value.into());
-        self
-    }
-    pub fn sslmode(mut self, value: impl Into<String>) -> Self {
-        self.set_field("sslmode", value.into());
-        self
-    }
-    pub fn staging_s3_bucket(mut self, value: impl Into<String>) -> Self {
-        self.set_field("staging_s3_bucket", value.into());
-        self
-    }
-    pub fn staging_s3_prefix(mut self, value: impl Into<String>) -> Self {
-        self.set_field("staging_s3_prefix", value.into());
-        self
-    }
-    pub fn iam_role_arn(mut self, value: impl Into<String>) -> Self {
-        self.set_field("iam_role_arn", value.into());
-        self
-    }
-    pub fn account(mut self, value: impl Into<String>) -> Self {
-        self.set_field("account", value.into());
-        self
-    }
-    pub fn warehouse(mut self, value: impl Into<String>) -> Self {
-        self.set_field("warehouse", value.into());
-        self
-    }
-    pub fn role(mut self, value: impl Into<String>) -> Self {
-        self.set_field("role", value.into());
-        self
-    }
-    pub fn stage(mut self, value: impl Into<String>) -> Self {
-        self.set_field("stage", value.into());
-        self
-    }
-    pub fn staging_uri(mut self, value: impl Into<String>) -> Self {
-        self.set_field("staging_uri", value.into());
-        self
-    }
-    pub fn staging_storage_integration(mut self, value: impl Into<String>) -> Self {
-        self.set_field("staging_storage_integration", value.into());
-        self
-    }
-    pub fn staging_azure_sas_token(mut self, value: impl Into<String>) -> Self {
-        self.set_field("staging_azure_sas_token", value.into());
-        self
-    }
-    pub fn staging_azure_account_key(mut self, value: impl Into<String>) -> Self {
-        self.set_field("staging_azure_account_key", value.into());
-        self
-    }
-    pub fn staging_gcs_service_account_key_path(mut self, value: impl Into<String>) -> Self {
-        self.set_field("staging_gcs_service_account_key_path", value.into());
-        self
     }
 }

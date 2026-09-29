@@ -91,7 +91,6 @@ impl DataSourceDynamodbPlugin {
         }
     }
 
-
     pub async fn with_runtime_config(config: DataSourceDynamodbPluginConfig) -> Self {
         Self::from_config(config).await
     }
