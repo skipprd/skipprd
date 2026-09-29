@@ -546,12 +546,10 @@ impl InstalledAthenaSchemaState {
     }
 }
 
-fn is_deadletter_athena_target(binding: RuntimeBinding, namespace: &str) -> bool {
+fn is_deadletter_athena_target(binding: RuntimeBinding, namespace: &str, pipeline: &str) -> bool {
     binding == RuntimeBinding::Deadletter
         && namespace
-            == skippr_runtime_sdk::sink_compat::deadletter::table_name(
-                &skippr_runtime_sdk::helpers::configuration::Config::new(),
-            )
+            == skippr_runtime_sdk::sink_compat::deadletter::table_name_for_pipeline(pipeline)
 }
 
 fn deadletter_output_metadata() -> OutputMetadata {
@@ -1426,7 +1424,8 @@ impl DataSinkAthenaPlugin {
         let key = &self.config.s3_prefix;
 
         let namespace = BufferChunker::decode_file_namespace(&filename);
-        let is_deadletter_target = is_deadletter_athena_target(self.binding, &namespace);
+        let is_deadletter_target =
+            is_deadletter_athena_target(self.binding, &namespace, &self.context.pipeline_name);
 
         if is_deadletter_target && !self.deadletter_schema_ready.load(Ordering::Acquire) {
             AwsAthena::create_or_update_schema_with_config(
@@ -2003,7 +2002,7 @@ impl AwsAthena {
         match AwsAthena::glue_get_table(&config, namespace).await {
             Ok(table) => {
                 let deadletter_table_needs_rebuild =
-                    is_deadletter_athena_target(binding, namespace)
+                    is_deadletter_athena_target(binding, namespace, &context.pipeline_name)
                         && table
                             .table()
                             .and_then(|t| t.partition_keys.as_ref())
@@ -3069,11 +3068,7 @@ fn build_glue_partition_keys(
     metadata: &OutputMetadata,
     partition_columns_override: Option<&[Column]>,
 ) -> Vec<Column> {
-    let is_deadletter = binding == RuntimeBinding::Deadletter
-        && namespace
-            == skippr_runtime_sdk::sink_compat::deadletter::table_name(
-                &skippr_runtime_sdk::helpers::configuration::Config::new(),
-            );
+    let is_deadletter = is_deadletter_athena_target(binding, namespace, &context.pipeline_name);
     if is_deadletter {
         return Vec::new();
     }
@@ -3138,7 +3133,7 @@ async fn try_heal_glue_partition_layout(
     existing_partition_keys: &[Column],
     partition_columns_override: Option<&[Column]>,
 ) -> Result<bool, String> {
-    if is_deadletter_athena_target(binding, namespace) {
+    if is_deadletter_athena_target(binding, namespace, &context.pipeline_name) {
         return Ok(false);
     }
 

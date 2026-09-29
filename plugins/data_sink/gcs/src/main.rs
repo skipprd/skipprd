@@ -23,6 +23,7 @@ skippr_runtime_sdk::runtime_main!(async {
             DataSinkGcsPlugin::new_with_config(
                 buffer_name_for_runtime_binding(install.binding),
                 config,
+                install.context.output_layout,
             )
             .await
         },

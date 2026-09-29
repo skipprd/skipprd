@@ -42,7 +42,7 @@ struct DataSinkFilePluginConfig {
 struct FileSinkRuntimePlugin {
     config: DataSinkFilePluginConfig,
     data_dir: String,
-    order_fields: Vec<String>,
+    output_layout: skippr_runtime_sdk::protocol::RuntimeOutputLayout,
     object_backend: Arc<AtomicFileBackend>,
 }
 
@@ -68,7 +68,12 @@ impl DataSink for FileSinkRuntimePlugin {
             &ctx.idempotency_key,
             "",
         )?;
-        let output_file = output_file_path(&self.data_dir, &ctx.filename, &object_stem)?;
+        let output_file = output_file_path(
+            &self.data_dir,
+            &ctx.filename,
+            &object_stem,
+            &self.output_layout,
+        )?;
         let manifest_file = output_file.with_file_name(manifest_object_name(
             output_file
                 .file_name()
@@ -138,7 +143,8 @@ impl DataSink for FileSinkRuntimePlugin {
         sync_file_sink(
             &self.config,
             &self.data_dir,
-            &self.order_fields,
+            &self.output_layout.order_fields,
+            &self.output_layout,
             self.object_backend.clone(),
             stream,
             ctx.filename,
@@ -163,7 +169,12 @@ impl DataSink for FileSinkRuntimePlugin {
             &ctx.idempotency_key,
             "",
         )?;
-        let output_file = output_file_path(&self.data_dir, &ctx.filename, &object_stem)?;
+        let output_file = output_file_path(
+            &self.data_dir,
+            &ctx.filename,
+            &object_stem,
+            &self.output_layout,
+        )?;
         let manifest_file = output_file.with_file_name(manifest_object_name(
             output_file
                 .file_name()
@@ -189,7 +200,8 @@ impl DataSink for FileSinkRuntimePlugin {
         let receipt = sync_file_sink(
             &self.config,
             &self.data_dir,
-            &self.order_fields,
+            &self.output_layout.order_fields,
+            &self.output_layout,
             self.object_backend.clone(),
             stream,
             ctx.filename.clone(),
@@ -209,7 +221,12 @@ impl DataSink for FileSinkRuntimePlugin {
             &ctx.idempotency_key,
             "",
         )?;
-        let output_file = output_file_path(&self.data_dir, &ctx.filename, &object_stem)?;
+        let output_file = output_file_path(
+            &self.data_dir,
+            &ctx.filename,
+            &object_stem,
+            &self.output_layout,
+        )?;
         let manifest_file = output_file.with_file_name(manifest_object_name(
             output_file
                 .file_name()
@@ -229,14 +246,15 @@ impl DataSink for FileSinkRuntimePlugin {
             }
         }
         let (legacy_output_file, legacy_manifest_file, legacy_manifest) =
-            legacy_file_chunk_manifest(&self.data_dir, &ctx, 0)?;
+            legacy_file_chunk_manifest(&self.data_dir, &ctx, 0, &self.output_layout)?;
         if local_manifest_matches(&legacy_manifest_file, &legacy_manifest)?
             || legacy_output_file.exists()
         {
             let receipt = sync_file_legacy_chunks(
                 &self.config,
                 &self.data_dir,
-                &self.order_fields,
+                &self.output_layout.order_fields,
+                &self.output_layout,
                 self.object_backend.clone(),
                 &mut reader,
                 &ctx,
@@ -253,7 +271,8 @@ impl DataSink for FileSinkRuntimePlugin {
         let receipt = sync_file_sink(
             &self.config,
             &self.data_dir,
-            &self.order_fields,
+            &self.output_layout.order_fields,
+            &self.output_layout,
             self.object_backend.clone(),
             stream,
             ctx.filename,
@@ -294,7 +313,7 @@ skippr_runtime_sdk::runtime_main!(async {
             Ok(FileSinkRuntimePlugin {
                 config,
                 data_dir: install.context.data_dir,
-                order_fields: install.context.output_layout.order_fields,
+                output_layout: install.context.output_layout,
                 object_backend: Arc::new(AtomicFileBackend::new()),
             })
         },
@@ -310,6 +329,7 @@ async fn sync_file_sink(
     config: &DataSinkFilePluginConfig,
     data_dir: &str,
     order_fields: &[String],
+    output_layout: &skippr_runtime_sdk::protocol::RuntimeOutputLayout,
     object_backend: Arc<AtomicFileBackend>,
     stream: SendableRecordBatchStream,
     filename: String,
@@ -329,7 +349,7 @@ async fn sync_file_sink(
     let object_stem = object_stem
         .map(str::to_string)
         .unwrap_or_else(|| hex::encode(md5::compute(&filename).0));
-    let output_file = output_file_path(data_dir, &filename, &object_stem)?;
+    let output_file = output_file_path(data_dir, &filename, &object_stem, output_layout)?;
     let schema = stream.schema();
     let effective_order =
         skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order_from_fields(
@@ -370,10 +390,11 @@ fn legacy_file_chunk_manifest(
     data_dir: &str,
     ctx: &skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
     chunk_index: u64,
+    output_layout: &skippr_runtime_sdk::protocol::RuntimeOutputLayout,
 ) -> io::Result<(PathBuf, PathBuf, ObjectWriteManifest)> {
     let object_stem = legacy_chunk_idempotency_key(&ctx.idempotency_key, chunk_index);
     let chunk_filename = ctx.chunk_filename(chunk_index, false);
-    let output_file = output_file_path(data_dir, &chunk_filename, &object_stem)?;
+    let output_file = output_file_path(data_dir, &chunk_filename, &object_stem, output_layout)?;
     let manifest_file = output_file.with_file_name(manifest_object_name(
         output_file
             .file_name()
@@ -402,6 +423,7 @@ async fn sync_file_legacy_chunks(
     config: &DataSinkFilePluginConfig,
     data_dir: &str,
     order_fields: &[String],
+    output_layout: &skippr_runtime_sdk::protocol::RuntimeOutputLayout,
     object_backend: Arc<AtomicFileBackend>,
     reader: &mut skippr_runtime_sdk::plugins::GroupedBatchReader,
     ctx: &skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
@@ -419,7 +441,7 @@ async fn sync_file_legacy_chunks(
         let object_stem = legacy_chunk_idempotency_key(&ctx.idempotency_key, chunk_index);
         let chunk_filename = ctx.chunk_filename(chunk_index, false);
         let (output_file, manifest_file, expected) =
-            legacy_file_chunk_manifest(data_dir, ctx, chunk_index)?;
+            legacy_file_chunk_manifest(data_dir, ctx, chunk_index, output_layout)?;
         let (chunk_bytes, chunk_transport_count, chunk_etag) =
             if local_manifest_matches(&manifest_file, &expected)? {
                 let metadata = fs::metadata(&output_file)?;
@@ -437,6 +459,7 @@ async fn sync_file_legacy_chunks(
                     config,
                     data_dir,
                     order_fields,
+                    output_layout,
                     object_backend.clone(),
                     stream,
                     chunk_filename,
@@ -500,6 +523,7 @@ fn output_file_path(
     data_dir: &str,
     filename: &str,
     object_stem: &str,
+    output_layout: &skippr_runtime_sdk::protocol::RuntimeOutputLayout,
 ) -> io::Result<std::path::PathBuf> {
     let namespace = BufferChunker::decode_file_namespace(filename);
     let mut full_key = if namespace.is_empty() {
@@ -514,9 +538,10 @@ fn output_file_path(
     }
 
     let filename_owned = filename.to_string();
-    if let Ok(time_key) = TimePartitioner::new(&filename_owned)
-        .process(&skippr_runtime_sdk::helpers::configuration::Config::new())
-    {
+    if let Ok(time_key) = TimePartitioner::new(&filename_owned).process_from_layout(
+        output_layout.time_partition_granularity.as_deref(),
+        output_layout.time_partition_prefix.as_deref(),
+    ) {
         full_key = format!("{}/{}", full_key, time_key);
     }
 
@@ -531,7 +556,13 @@ mod tests {
     #[test]
     fn deterministic_output_path_is_unchanged() {
         assert_eq!(
-            output_file_path("/data", "namespace=events", "apply-0001").unwrap(),
+            output_file_path(
+                "/data",
+                "namespace=events",
+                "apply-0001",
+                &skippr_runtime_sdk::protocol::RuntimeOutputLayout::default(),
+            )
+            .unwrap(),
             PathBuf::from("/data/output/events/apply-0001.parquet")
         );
     }

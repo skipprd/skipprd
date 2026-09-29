@@ -58,6 +58,7 @@ pub fn coerce_timestamp_dates_to_date32(
 async fn serialize_to_parquet_inner(
     mut batches: SendableRecordBatchStream,
     date_field_names: Option<&HashSet<String>>,
+    configured_order_fields: &[String],
 ) -> Result<ParquetBytes, io::Error> {
     let first_batch = match batches.next().await {
         Some(batch) => batch.map_err(|err| io::Error::other(err.to_string()))?,
@@ -68,10 +69,11 @@ async fn serialize_to_parquet_inner(
         None => first_batch,
     };
     let schema = first_batch.schema();
-    let order_fields = skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order(
-        &skippr_runtime_sdk::helpers::configuration::Config::new(),
-        &schema,
-    );
+    let order_fields =
+        skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order_from_fields(
+            &schema,
+            configured_order_fields,
+        );
     let props = skippr_runtime_sdk::converters::parquet_ordering::build_writer_properties(
         &schema,
         &order_fields,
@@ -110,15 +112,17 @@ async fn serialize_to_parquet_inner(
 
 pub async fn serialize_to_parquet(
     batches: SendableRecordBatchStream,
+    configured_order_fields: &[String],
 ) -> Result<ParquetBytes, io::Error> {
-    serialize_to_parquet_inner(batches, None).await
+    serialize_to_parquet_inner(batches, None, configured_order_fields).await
 }
 
 pub async fn serialize_to_parquet_for_iceberg(
     batches: SendableRecordBatchStream,
     date_field_names: &HashSet<String>,
+    configured_order_fields: &[String],
 ) -> Result<ParquetBytes, io::Error> {
-    serialize_to_parquet_inner(batches, Some(date_field_names)).await
+    serialize_to_parquet_inner(batches, Some(date_field_names), configured_order_fields).await
 }
 
 #[cfg(test)]

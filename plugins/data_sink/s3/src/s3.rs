@@ -46,6 +46,7 @@ pub struct DataSinkS3Plugin {
     s3_client: S3Client,
     object_backend: Arc<S3ObjectBackend>,
     config: DataSinkS3PluginConfig,
+    output_layout: skippr_runtime_sdk::protocol::RuntimeOutputLayout,
 }
 
 struct S3ObjectBackend {
@@ -348,6 +349,7 @@ impl DataSinkS3Plugin {
     pub async fn new_with_config(
         _buffer_name: String,
         config: DataSinkS3PluginConfig,
+        output_layout: skippr_runtime_sdk::protocol::RuntimeOutputLayout,
     ) -> io::Result<DataSinkS3Plugin> {
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
@@ -367,6 +369,7 @@ impl DataSinkS3Plugin {
             s3_client,
             object_backend,
             config,
+            output_layout,
         })
     }
 
@@ -427,9 +430,10 @@ impl DataSinkS3Plugin {
         }
 
         let filename_owned = filename.to_string();
-        if let Ok(k) = TimePartitioner::new(&filename_owned)
-            .process(&skippr_runtime_sdk::helpers::configuration::Config::new())
-        {
+        if let Ok(k) = TimePartitioner::new(&filename_owned).process_from_layout(
+            self.output_layout.time_partition_granularity.as_deref(),
+            self.output_layout.time_partition_prefix.as_deref(),
+        ) {
             full_key = format!("{}/{}", full_key, k);
         }
 
@@ -575,9 +579,9 @@ impl DataSinkS3Plugin {
 
         let schema = stream.schema();
         let order_fields =
-            skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order(
-                &skippr_runtime_sdk::helpers::configuration::Config::new(),
+            skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order_from_fields(
                 &schema,
+                &self.output_layout.order_fields,
             );
         let writer_properties =
             skippr_runtime_sdk::converters::parquet_ordering::build_writer_properties(
