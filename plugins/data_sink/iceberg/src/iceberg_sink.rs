@@ -2474,9 +2474,10 @@ impl DataSinkIcebergPlugin {
                 if let Some(region) = region {
                     props.insert(AWS_REGION_NAME.to_string(), region.clone());
                 }
-                for (key, value) in
-                    skippr_iceberg_catalog::s3_file_io_props(self.config.catalog.file_io())
-                        .map_err(io::Error::other)?
+                for (key, value) in skippr_iceberg_catalog::s3_object_store_props(
+                    self.config.catalog.object_store(),
+                )
+                .map_err(io::Error::other)?
                 {
                     props.insert(key, value);
                 }

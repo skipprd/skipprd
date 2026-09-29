@@ -177,7 +177,7 @@ def test_google_serp_targets_persist_as_yaml_list(tmp_path):
     assert "ex" in raw
 
 
-def test_iceberg_file_io_nested_persist_and_secret(tmp_path):
+def test_iceberg_object_store_nested_persist_and_secret(tmp_path):
     path = tmp_path / "skippr.yml"
     skippr.workspace("demo", config=str(path))
     s = skippr.Session(pipeline="p", config_file=str(path))
@@ -188,7 +188,7 @@ def test_iceberg_file_io_nested_persist_and_secret(tmp_path):
                 type="skippr",
                 table="cat",
                 warehouse="s3://wh/",
-                file_io=skippr.DataSinkIcebergIcebergFileIo(
+                object_store=skippr.DataSinkIcebergWarehouseObjectStore(
                     type="r2",
                     endpoint="${OBJECTS_S3_ENDPOINT}",
                     access_key_id="${OBJECTS_ACCESS_KEY_ID}",
@@ -208,7 +208,7 @@ def test_iceberg_file_io_nested_persist_and_secret(tmp_path):
                     type="skippr",
                     table="cat",
                     warehouse="s3://wh/",
-                    file_io=skippr.DataSinkIcebergIcebergFileIo(
+                    object_store=skippr.DataSinkIcebergWarehouseObjectStore(
                         type="r2",
                         endpoint="https://x",
                         access_key_id="k",

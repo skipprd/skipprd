@@ -815,19 +815,19 @@ data_sources:
     }
 
     #[test]
-    fn persist_iceberg_file_io_from_nested_yaml_and_cli_idents() {
+    fn persist_iceberg_object_store_from_nested_yaml_and_cli_idents() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("skippr.yml");
-        let mut file_io = serde_yaml::Mapping::new();
-        file_io.insert(
+        let mut object_store = serde_yaml::Mapping::new();
+        object_store.insert(
             serde_yaml::Value::String("type".into()),
             serde_yaml::Value::String("r2".into()),
         );
-        file_io.insert(
+        object_store.insert(
             serde_yaml::Value::String("endpoint".into()),
             serde_yaml::Value::String("${OBJECTS_S3_ENDPOINT}".into()),
         );
-        file_io.insert(
+        object_store.insert(
             serde_yaml::Value::String("secret_access_key".into()),
             serde_yaml::Value::String("${OBJECTS_SECRET_ACCESS_KEY}".into()),
         );
@@ -845,8 +845,8 @@ data_sources:
             serde_yaml::Value::String("s3://wh/".into()),
         );
         catalog.insert(
-            serde_yaml::Value::String("file_io".into()),
-            serde_yaml::Value::Mapping(file_io),
+            serde_yaml::Value::String("object_store".into()),
+            serde_yaml::Value::Mapping(object_store),
         );
         persist_plugin(
             &path,
@@ -859,13 +859,13 @@ data_sources:
         let doc: serde_yaml::Value =
             serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
-            doc["data_sinks"]["lake"]["Iceberg"]["catalog"]["file_io"]["type"]
+            doc["data_sinks"]["lake"]["Iceberg"]["catalog"]["object_store"]["type"]
                 .as_str()
                 .unwrap(),
             "r2"
         );
         assert_eq!(
-            doc["data_sinks"]["lake"]["Iceberg"]["catalog"]["file_io"]["secret_access_key"]
+            doc["data_sinks"]["lake"]["Iceberg"]["catalog"]["object_store"]["secret_access_key"]
                 .as_str()
                 .unwrap(),
             "${OBJECTS_SECRET_ACCESS_KEY}"
@@ -882,9 +882,9 @@ data_sources:
                     ("catalog_type".into(), "skippr".into()),
                     ("catalog_table".into(), "cat".into()),
                     ("catalog_warehouse".into(), "s3://wh/".into()),
-                    ("catalog_file_io_type".into(), "r2".into()),
+                    ("catalog_object_store_type".into(), "r2".into()),
                     (
-                        "catalog_file_io_secret_access_key".into(),
+                        "catalog_object_store_secret_access_key".into(),
                         "plaintext".into(),
                     ),
                 ])),

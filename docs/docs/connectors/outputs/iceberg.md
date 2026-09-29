@@ -31,10 +31,10 @@ catalog:
   region: us-east-1
 ```
 
-Parquet FileIO is `catalog.file_io`. Omit it or set `type: s3` for the AWS default credential chain. Use `type: r2` for Cloudflare R2 (or other path-style S3-compatible stores). Catalog pointer credentials (DynamoDB / Cloud Tables) stay on the catalog backend, not FileIO.
+Object storage credentials are `catalog.object_store`. Omit it or set `type: s3` for the AWS default credential chain. Use `type: r2` for Cloudflare R2 (or other path-style S3-compatible stores). Catalog pointer credentials (DynamoDB / Cloud Tables) stay on the catalog backend, not `object_store`.
 
 ```yaml
-file_io:
+object_store:
   type: r2
   endpoint: ${OBJECTS_S3_ENDPOINT}
   region: auto
