@@ -4,7 +4,7 @@ use crate::metrics::counters as metrics_counters;
 use dashmap::DashMap;
 use once_cell::sync::Lazy;
 use sha2::{Digest, Sha256};
-use std::fs::{self, File};
+use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -225,7 +225,7 @@ impl SegmentCompletionLedger {
         }
 
         if changed {
-            if let Err(error) = fsync_dir(&self.done_dir) {
+            if let Err(error) = crate::helpers::fsync::fsync_dir(&self.done_dir) {
                 if first_error.is_none() {
                     first_error = Some(error);
                 }
@@ -285,7 +285,7 @@ impl SegmentCompletionLedger {
         }
 
         if !completed_ordinals.is_empty() {
-            if let Err(error) = fsync_dir(&self.done_dir) {
+            if let Err(error) = crate::helpers::fsync::fsync_dir(&self.done_dir) {
                 SEGMENT_CACHE.remove(&bitmap_path);
                 return Err(error);
             }
@@ -515,7 +515,7 @@ fn persist_bitmap(path: &Path, bitmap: &CompletionBitmap) -> io::Result<()> {
                     file.sync_data()?;
                     drop(file);
                     fs::rename(&candidate, path)?;
-                    fsync_dir(parent)
+                    crate::helpers::fsync::fsync_dir(parent)
                 })();
                 if result.is_err() {
                     let _ = fs::remove_file(&candidate);
@@ -530,16 +530,6 @@ fn persist_bitmap(path: &Path, bitmap: &CompletionBitmap) -> io::Result<()> {
         io::ErrorKind::AlreadyExists,
         "could not allocate a completion bitmap temp file",
     ))
-}
-
-#[cfg(not(windows))]
-fn fsync_dir(dir: &Path) -> io::Result<()> {
-    File::open(dir)?.sync_all()
-}
-
-#[cfg(windows)]
-fn fsync_dir(_dir: &Path) -> io::Result<()> {
-    Ok(())
 }
 
 #[cfg(test)]

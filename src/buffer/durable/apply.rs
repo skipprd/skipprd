@@ -127,10 +127,7 @@ fn persist_portable_manifest(dir: &Path, txn: &CompactionTransaction) -> Result<
     let file = std::fs::File::open(&tmp)?;
     file.sync_all()?;
     fs::rename(&tmp, &path)?;
-    #[cfg(not(windows))]
-    {
-        std::fs::File::open(dir)?.sync_all()?;
-    }
+    crate::helpers::fsync::fsync_dir(dir)?;
     Ok(())
 }
 
