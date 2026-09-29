@@ -112,6 +112,7 @@ pub enum IcebergQueryEngineConfig {
         #[serde(default)]
         workgroup: Option<String>,
     },
+    Skippr,
 }
 
 #[derive(Default)]
@@ -1262,7 +1263,10 @@ impl DataSinkIcebergPlugin {
         let partition =
             stored_partition_from_schema_and_batches(iceberg_schema.as_ref(), &prepared);
         let order_fields =
-            skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order(&schema);
+            skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order_from_fields(
+                &schema,
+                &self.context.output_layout.order_fields,
+            );
         let writer_properties =
             skippr_runtime_sdk::converters::parquet_ordering::build_writer_properties(
                 &schema,
@@ -1605,6 +1609,7 @@ impl DataSinkIcebergPlugin {
             let parquet_bytes = crate::parquet_util::serialize_to_parquet_for_iceberg(
                 batch_stream(data_batches),
                 &date_fields,
+                &self.context.output_layout.order_fields,
             )
             .await?;
             row_count = parquet_bytes.num_rows as u64;
@@ -1661,6 +1666,7 @@ impl DataSinkIcebergPlugin {
             let delete_bytes = crate::parquet_util::serialize_to_parquet_for_iceberg(
                 batch_stream(projected_delete_batches),
                 &date_fields,
+                &self.context.output_layout.order_fields,
             )
             .await?;
             let delete_row_count = delete_bytes.num_rows as u64;
@@ -1795,9 +1801,12 @@ impl DataSinkIcebergPlugin {
             let delete_batch =
                 apply_iceberg_field_ids(delete_batch, table.metadata().current_schema())?;
             let delete_stream = batch_stream(vec![delete_batch]);
-            let delete_bytes =
-                crate::parquet_util::serialize_to_parquet_for_iceberg(delete_stream, &date_fields)
-                    .await?;
+            let delete_bytes = crate::parquet_util::serialize_to_parquet_for_iceberg(
+                delete_stream,
+                &date_fields,
+                &self.context.output_layout.order_fields,
+            )
+            .await?;
             let delete_row_count = delete_bytes.num_rows as u64;
             if delete_row_count > 0 {
                 let delete_file_uri = self
@@ -1826,9 +1835,12 @@ impl DataSinkIcebergPlugin {
                 apply_iceberg_field_ids(data_batch, table.metadata().current_schema())?;
             let partition = partition_struct_from_table_and_batches(&table, &[data_batch.clone()])?;
             let data_stream = batch_stream(vec![data_batch]);
-            let parquet_bytes =
-                crate::parquet_util::serialize_to_parquet_for_iceberg(data_stream, &date_fields)
-                    .await?;
+            let parquet_bytes = crate::parquet_util::serialize_to_parquet_for_iceberg(
+                data_stream,
+                &date_fields,
+                &self.context.output_layout.order_fields,
+            )
+            .await?;
             row_count = parquet_bytes.num_rows as u64;
             if row_count > 0 {
                 let data_file_uri = self
@@ -2462,6 +2474,12 @@ impl DataSinkIcebergPlugin {
                 if let Some(region) = region {
                     props.insert(AWS_REGION_NAME.to_string(), region.clone());
                 }
+                for (key, value) in
+                    skippr_iceberg_catalog::s3_file_io_props(self.config.catalog.file_io())
+                        .map_err(io::Error::other)?
+                {
+                    props.insert(key, value);
+                }
                 Arc::new(
                     GlueCatalogBuilder::default()
                         .load("glue", props)
@@ -2469,7 +2487,7 @@ impl DataSinkIcebergPlugin {
                         .map_err(|err| io::Error::other(err.to_string()))?,
                 )
             }
-            IcebergCatalogConfig::Skippr { warehouse, .. } => {
+            IcebergCatalogConfig::Skippr { .. } => {
                 let catalog: Arc<dyn Catalog> = if offset_store_is_cloud_tables(
                     &std::env::var("SKIPPR_OFFSET_STORE").unwrap_or_default(),
                 ) {
@@ -2477,18 +2495,12 @@ impl DataSinkIcebergPlugin {
                         &self.config.catalog,
                     )
                     .await
-                    .map_err(|err| io::Error::other(err.to_string()))?
-                    .with_file_io(
-                        skippr_iceberg_catalog_cloud_tables::file_io_for_warehouse(warehouse),
-                    );
+                    .map_err(|err| io::Error::other(err.to_string()))?;
                     Arc::new(catalog)
                 } else {
                     let catalog = DynamoDbCatalog::new(&self.config.catalog)
                         .await
-                        .map_err(|err| io::Error::other(err.to_string()))?
-                        .with_file_io(skippr_iceberg_catalog_dynamodb::file_io_for_warehouse(
-                            warehouse,
-                        ));
+                        .map_err(|err| io::Error::other(err.to_string()))?;
                     Arc::new(catalog)
                 };
                 catalog
@@ -4726,6 +4738,24 @@ mod tests {
         let stored = stored_partition_from_schema_and_batches(&schema, &[batch]);
         assert!(stored.is_empty());
         assert_eq!(stored_partition_to_struct(&stored), Struct::empty());
+    }
+
+    #[test]
+    fn iceberg_query_engine_accepts_skippr() {
+        let cfg: DataSinkIcebergPluginConfig = serde_json::from_value(serde_json::json!({
+            "catalog": {
+                "type": "skippr",
+                "table": "skippr-iceberg-catalog",
+                "warehouse": "s3://cloud-logs/skippr-de-query-r2/",
+                "region": "auto"
+            },
+            "query_engine": { "type": "skippr" }
+        }))
+        .expect("skippr query engine");
+        assert!(matches!(
+            cfg.query_engine,
+            Some(IcebergQueryEngineConfig::Skippr)
+        ));
     }
 }
 

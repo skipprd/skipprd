@@ -1,4 +1,3 @@
-use skippr_runtime_sdk::SkipprConfig;
 use async_trait::async_trait;
 use aws_config::BehaviorVersion;
 use aws_sdk_redshiftdata::Client as RedshiftClient;
@@ -9,6 +8,7 @@ use datafusion::arrow::datatypes::DataType as ArrowDataType;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
 use serde_derive::Deserialize;
+use skippr_runtime_sdk::SkipprConfig;
 use tokio::time::{sleep, Duration};
 use tracing::{error, info, warn};
 
@@ -66,6 +66,7 @@ pub struct DataSinkRedshiftPlugin {
     buffer_name: String,
     redshift_client: RedshiftClient,
     s3_client: Option<S3Client>,
+    order_fields: Vec<String>,
 }
 
 skippr_runtime_sdk::declare_sink_spec!(
@@ -85,6 +86,7 @@ impl DataSinkRedshiftPlugin {
     pub async fn new_with_config(
         buffer_name: String,
         config: DataSinkRedshiftPluginConfig,
+        order_fields: Vec<String>,
     ) -> Self {
         let mut aws_builder = aws_config::defaults(BehaviorVersion::latest());
         if let Some(ref region) = config.region {
@@ -102,6 +104,7 @@ impl DataSinkRedshiftPlugin {
             buffer_name,
             redshift_client,
             s3_client,
+            order_fields,
         }
     }
 
@@ -330,7 +333,7 @@ impl DataSinkRedshiftPlugin {
             .as_deref()
             .unwrap_or("skippr-staging");
 
-        let parquet_bytes = serialize_to_parquet(stream).await?;
+        let parquet_bytes = serialize_to_parquet(stream, &self.order_fields).await?;
         let row_count = parquet_bytes.num_rows as u64;
 
         let md5_digest = md5::compute(filename.as_bytes());

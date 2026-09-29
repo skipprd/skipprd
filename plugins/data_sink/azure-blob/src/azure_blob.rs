@@ -1,4 +1,3 @@
-use skippr_runtime_sdk::SkipprConfig;
 use crate::helpers::configuration::DataSinkPluginConfig;
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
@@ -21,6 +20,7 @@ use skippr_runtime_sdk::sink_idempotency::{
     legacy_chunk_idempotency_key, manifest_object_name, persisted_object_write_matches,
     GroupedWriteReceipt, ObjectWriteManifest,
 };
+use skippr_runtime_sdk::SkipprConfig;
 use std::collections::BTreeMap;
 use std::io;
 use std::sync::Arc;
@@ -50,6 +50,7 @@ pub struct DataSinkAzureBlobPlugin {
     store: Arc<dyn ObjectStore>,
     object_backend: Arc<ObjectStoreBackend>,
     config: DataSinkAzureBlobPluginConfig,
+    output_layout: skippr_runtime_sdk::protocol::RuntimeOutputLayout,
 }
 
 skippr_runtime_sdk::declare_sink_spec!(
@@ -228,6 +229,7 @@ impl DataSinkAzureBlobPlugin {
     pub async fn new_with_config(
         _buffer_name: String,
         config: DataSinkAzureBlobPluginConfig,
+        output_layout: skippr_runtime_sdk::protocol::RuntimeOutputLayout,
     ) -> io::Result<Self> {
         let mut builder = MicrosoftAzureBuilder::new()
             .with_account(&config.account_name)
@@ -261,6 +263,7 @@ impl DataSinkAzureBlobPlugin {
             store,
             object_backend,
             config,
+            output_layout,
         })
     }
 
@@ -287,7 +290,10 @@ impl DataSinkAzureBlobPlugin {
         }
 
         let filename_owned = filename.to_string();
-        if let Ok(k) = TimePartitioner::new(&filename_owned).process() {
+        if let Ok(k) = TimePartitioner::new(&filename_owned).process_from_layout(
+            self.output_layout.time_partition_granularity.as_deref(),
+            self.output_layout.time_partition_prefix.as_deref(),
+        ) {
             full_key = format!("{}/{}", full_key, k);
         }
 
@@ -406,7 +412,10 @@ impl DataSinkAzureBlobPlugin {
 
         let schema = stream.schema();
         let order_fields =
-            skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order(&schema);
+            skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order_from_fields(
+                &schema,
+                &self.output_layout.order_fields,
+            );
         let writer_properties =
             skippr_runtime_sdk::converters::parquet_ordering::build_writer_properties(
                 &schema,

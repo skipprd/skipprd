@@ -1,4 +1,3 @@
-use skippr_runtime_sdk::SkipprConfig;
 use async_trait::async_trait;
 use datafusion::execution::SendableRecordBatchStream;
 use futures::StreamExt;
@@ -14,6 +13,7 @@ use skippr_runtime_sdk::sink_idempotency::{
     legacy_chunk_idempotency_key, manifest_object_name, persisted_object_write_matches,
     GroupedWriteReceipt, ObjectWriteManifest,
 };
+use skippr_runtime_sdk::SkipprConfig;
 use ssh2::Session;
 use std::collections::{BTreeMap, HashMap};
 use std::io::{Read, Write};
@@ -50,6 +50,7 @@ impl TryFrom<DataSinkPluginConfig> for DataSinkSftpPluginConfig {
 pub struct DataSinkSftpPlugin {
     config: DataSinkSftpPluginConfig,
     object_backend: Arc<SftpObjectBackend>,
+    order_fields: Vec<String>,
 }
 
 #[derive(Clone)]
@@ -427,7 +428,11 @@ impl DataSink for DataSinkSftpPlugin {
 }
 
 impl DataSinkSftpPlugin {
-    pub async fn new_with_config(_buffer_name: String, config: DataSinkSftpPluginConfig) -> Self {
+    pub async fn new_with_config(
+        _buffer_name: String,
+        config: DataSinkSftpPluginConfig,
+        order_fields: Vec<String>,
+    ) -> Self {
         let object_backend = Arc::new(SftpObjectBackend {
             config: config.clone(),
             spool_backend: Arc::new(AtomicFileBackend::new()),
@@ -438,6 +443,7 @@ impl DataSinkSftpPlugin {
         Self {
             config,
             object_backend,
+            order_fields,
         }
     }
 
@@ -577,7 +583,10 @@ impl DataSinkSftpPlugin {
 
         let schema = stream.schema();
         let order_fields =
-            skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order(&schema);
+            skippr_runtime_sdk::converters::parquet_ordering::resolve_effective_order_from_fields(
+                &schema,
+                &self.order_fields,
+            );
         let writer_properties =
             skippr_runtime_sdk::converters::parquet_ordering::build_writer_properties(
                 &schema,

@@ -302,13 +302,15 @@ mod tests {
             "missing_col".to_string(),
             "name".to_string(),
         ];
-        let schema_fields: HashSet<&str> =
-            schema.fields().iter().map(|f| f.name().as_str()).collect();
-        let effective: Vec<String> = order
-            .into_iter()
-            .filter(|n| schema_fields.contains(n.as_str()))
-            .collect();
+        let effective = resolve_effective_order_from_fields(&schema, &order);
         assert_eq!(effective, vec!["id", "name"]);
+    }
+
+    #[test]
+    fn empty_configured_order_fields_means_unsorted() {
+        let schema = sample_schema();
+        let effective = resolve_effective_order_from_fields(&schema, &[]);
+        assert!(effective.is_empty());
     }
 
     #[test]

@@ -12,10 +12,14 @@ pub struct ParquetBytes {
 
 pub async fn serialize_to_parquet(
     mut batches: SendableRecordBatchStream,
+    configured_order_fields: &[String],
 ) -> Result<ParquetBytes, io::Error> {
     let schema = batches.schema();
 
-    let order_fields = crate::converters::parquet_ordering::resolve_effective_order(&schema);
+    let order_fields = crate::converters::parquet_ordering::resolve_effective_order_from_fields(
+        &schema,
+        configured_order_fields,
+    );
     let props = crate::converters::parquet_ordering::build_writer_properties(
         &schema,
         &order_fields,

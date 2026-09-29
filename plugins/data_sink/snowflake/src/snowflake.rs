@@ -1,4 +1,3 @@
-use skippr_runtime_sdk::SkipprConfig;
 use async_trait::async_trait;
 use aws_credential_types::provider::ProvideCredentials;
 use aws_sdk_s3::primitives::ByteStream;
@@ -17,6 +16,7 @@ use object_store::{
 };
 use once_cell::sync::Lazy;
 use serde_derive::Deserialize;
+use skippr_runtime_sdk::SkipprConfig;
 use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap};
 use std::future::Future;
@@ -138,6 +138,7 @@ struct EncryptionMaterial {
 pub struct DataSinkSnowflakePlugin {
     pub(crate) config: DataSinkSnowflakePluginConfig,
     pub(crate) buffer_name: String,
+    order_fields: Vec<String>,
     client: reqwest::Client,
     /// Cached v2 API token (JWT for key-pair, session token for password)
     token: tokio::sync::RwLock<Option<(String, std::time::Instant)>>,
@@ -268,10 +269,12 @@ impl DataSinkSnowflakePlugin {
     pub async fn new_with_config(
         buffer_name: String,
         config: DataSinkSnowflakePluginConfig,
+        order_fields: Vec<String>,
     ) -> Self {
         Self {
             config,
             buffer_name,
+            order_fields,
             client: reqwest::Client::new(),
             token: Default::default(),
             session_token: Default::default(),
@@ -2008,7 +2011,7 @@ impl DataSinkSnowflakePlugin {
             e
         })?;
 
-        let parquet = match serialize_to_parquet(stream).await {
+        let parquet = match serialize_to_parquet(stream, &self.order_fields).await {
             Ok(p) => p,
             Err(e) => {
                 counters::dec_uploads_in_flight();
@@ -2113,7 +2116,7 @@ impl DataSinkSnowflakePlugin {
             e
         })?;
 
-        let parquet = match serialize_to_parquet(stream).await {
+        let parquet = match serialize_to_parquet(stream, &self.order_fields).await {
             Ok(p) => p,
             Err(e) => {
                 counters::dec_uploads_in_flight();
@@ -3080,9 +3083,12 @@ mod tests {
 
     #[tokio::test]
     async fn gcs_external_staging_requires_storage_integration() {
-        let plugin =
-            DataSinkSnowflakePlugin::new_with_config("buffer".to_string(), sample_plugin_config())
-                .await;
+        let plugin = DataSinkSnowflakePlugin::new_with_config(
+            "buffer".to_string(),
+            sample_plugin_config(),
+            vec![],
+        )
+        .await;
         let location =
             DataSinkSnowflakePlugin::parse_external_stage_uri("gcs://stage-bucket/prefix").unwrap();
 
@@ -3098,7 +3104,8 @@ mod tests {
     async fn storage_integration_clause_overrides_provider_specific_copy_creds() {
         let mut config = sample_plugin_config();
         config.staging_storage_integration = Some("my_int".to_string());
-        let plugin = DataSinkSnowflakePlugin::new_with_config("buffer".to_string(), config).await;
+        let plugin =
+            DataSinkSnowflakePlugin::new_with_config("buffer".to_string(), config, vec![]).await;
         let location =
             DataSinkSnowflakePlugin::parse_external_stage_uri("azure://acct/container/prefix")
                 .unwrap();

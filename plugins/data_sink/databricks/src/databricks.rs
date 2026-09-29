@@ -59,6 +59,7 @@ impl TryFrom<DataSinkPluginConfig> for DataSinkDatabricksPluginConfig {
 pub struct DataSinkDatabricksPlugin {
     client: Client,
     config: DataSinkDatabricksPluginConfig,
+    order_fields: Vec<String>,
 }
 
 skippr_runtime_sdk::declare_sink_spec!(
@@ -118,10 +119,12 @@ impl DataSinkDatabricksPlugin {
     pub async fn new_with_config(
         _buffer_name: String,
         config: DataSinkDatabricksPluginConfig,
+        order_fields: Vec<String>,
     ) -> Self {
         Self {
             client: Client::new(),
             config,
+            order_fields,
         }
     }
 
@@ -133,7 +136,7 @@ impl DataSinkDatabricksPlugin {
         use skippr_runtime_sdk::metrics::counters;
         counters::inc_uploads_in_flight();
 
-        let parquet_bytes = serialize_to_parquet(stream).await?;
+        let parquet_bytes = serialize_to_parquet(stream, &self.order_fields).await?;
 
         let upload_path = format!(
             "/Volumes/{}/{}/staging/{}",
@@ -207,10 +210,12 @@ impl DataSinkDatabricksPlugin {
         let table_url = deltalake::ensure_table_uri(delta_uri)
             .map_err(|e| std::io::Error::other(format!("Delta URI: {}", e)))?;
 
-        let parquet_bytes = serialize_to_parquet(stream).await.map_err(|e| {
-            counters::dec_uploads_in_flight();
-            e
-        })?;
+        let parquet_bytes = serialize_to_parquet(stream, &self.order_fields)
+            .await
+            .map_err(|e| {
+                counters::dec_uploads_in_flight();
+                e
+            })?;
         let total_rows = parquet_bytes.num_rows as u64;
 
         if total_rows == 0 {

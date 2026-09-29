@@ -31,7 +31,7 @@ impl TimePartitioner {
 
         let mut full_key = String::new();
         for granularity in GRANULARITIES.iter() {
-            let foo = TimePartitioner::get_date_component(date, &granularity)?;
+            let foo = TimePartitioner::get_date_component(date, granularity)?;
             let granularity_name = TimePartitioner::get_granularity_name(config, granularity);
             full_key = format!("{}/{}={}", full_key, granularity_name, foo);
 
@@ -41,6 +41,49 @@ impl TimePartitioner {
         }
 
         Ok(full_key)
+    }
+
+    pub fn process_from_layout(
+        &self,
+        granularity_target: Option<&str>,
+        prefix: Option<&str>,
+    ) -> Result<String, io::Error> {
+        let Some(granularity_target) = granularity_target.map(str::trim).filter(|s| !s.is_empty())
+        else {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Time partition granularity is empty",
+            ));
+        };
+        let time_partition_str = BufferChunker::decode_file_time_to_datetime_string(&self.filename);
+
+        if time_partition_str.is_empty() {
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "Time partition string is empty",
+            ));
+        }
+
+        let date = self.parse_datetime(&time_partition_str)?;
+
+        let mut full_key = String::new();
+        for granularity in GRANULARITIES.iter() {
+            let foo = TimePartitioner::get_date_component(date, granularity)?;
+            let granularity_name = match prefix {
+                Some(p) if !p.is_empty() => format!("{p}{granularity}"),
+                _ => granularity.to_string(),
+            };
+            full_key = format!("{}/{}={}", full_key, granularity_name, foo);
+
+            if granularity.eq_ignore_ascii_case(granularity_target) {
+                return Ok(full_key);
+            }
+        }
+
+        Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Unsupported time partition granularity '{granularity_target}'"),
+        ))
     }
 
     pub fn parse_datetime(&self, time_str: &str) -> Result<DateTime<FixedOffset>, io::Error> {
@@ -130,5 +173,28 @@ impl TimePartitioner {
         } else {
             granularity.to_string()
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn process_from_layout_uses_runtime_granularity() {
+        let filename = "buffer=test&namespace=&partition=&time=1645296045".to_string();
+        let key = TimePartitioner::new(&filename)
+            .process_from_layout(Some("day"), None)
+            .unwrap();
+        assert_eq!(key, "/year=2022/month=2/day=19");
+    }
+
+    #[test]
+    fn process_from_layout_empty_granularity_skips_time_key() {
+        let filename = "buffer=test&namespace=&partition=&time=1645296045".to_string();
+        let err = TimePartitioner::new(&filename)
+            .process_from_layout(None, None)
+            .unwrap_err();
+        assert!(err.to_string().contains("granularity is empty"));
     }
 }

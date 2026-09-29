@@ -23,6 +23,7 @@ skippr_runtime_sdk::runtime_main!("snowflake-data-sink-main", async {
             Ok(DataSinkSnowflakePlugin::new_with_config(
                 buffer_name_for_runtime_binding(install.binding),
                 cfg,
+                install.context.output_layout.order_fields,
             )
             .await)
         },
