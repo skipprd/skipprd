@@ -3503,22 +3503,22 @@ pub struct DataSinkIcebergArgs {
     pub catalog_region: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_file_io_type: Option<String>,
+    pub catalog_object_store_type: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_file_io_endpoint: Option<String>,
+    pub catalog_object_store_endpoint: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_file_io_region: Option<String>,
+    pub catalog_object_store_region: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_file_io_access_key_id: Option<String>,
+    pub catalog_object_store_access_key_id: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_file_io_secret_access_key: Option<String>,
+    pub catalog_object_store_secret_access_key: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_file_io_path_style: Option<String>,
+    pub catalog_object_store_path_style: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_table: Option<String>,
@@ -4001,22 +4001,22 @@ pub struct SchemaSinkIcebergArgs {
     pub catalog_region: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_file_io_type: Option<String>,
+    pub catalog_object_store_type: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_file_io_endpoint: Option<String>,
+    pub catalog_object_store_endpoint: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_file_io_region: Option<String>,
+    pub catalog_object_store_region: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_file_io_access_key_id: Option<String>,
+    pub catalog_object_store_access_key_id: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_file_io_secret_access_key: Option<String>,
+    pub catalog_object_store_secret_access_key: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_file_io_path_style: Option<String>,
+    pub catalog_object_store_path_style: Option<String>,
     #[arg(long)]
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_table: Option<String>,

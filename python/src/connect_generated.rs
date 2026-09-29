@@ -5121,11 +5121,11 @@ impl PyDataSinkGcs {
 
 #[pyclass(
     from_py_object,
-    name = "DataSinkIcebergIcebergFileIo",
+    name = "DataSinkIcebergWarehouseObjectStore",
     module = "skippr"
 )]
 #[derive(Clone, Default, Serialize)]
-pub struct PyDataSinkIcebergIcebergFileIo {
+pub struct PyDataSinkIcebergWarehouseObjectStore {
     #[serde(skip_serializing_if = "Option::is_none")]
     r#type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5141,7 +5141,7 @@ pub struct PyDataSinkIcebergIcebergFileIo {
 }
 
 #[pymethods]
-impl PyDataSinkIcebergIcebergFileIo {
+impl PyDataSinkIcebergWarehouseObjectStore {
     #[new]
     #[pyo3(signature = (*, r#type=None, endpoint=None, region=None, access_key_id=None, secret_access_key=None, path_style=None))]
     fn new(
@@ -5181,7 +5181,7 @@ pub struct PyDataSinkIcebergIcebergCatalogConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     region: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    file_io: Option<PyDataSinkIcebergIcebergFileIo>,
+    object_store: Option<PyDataSinkIcebergWarehouseObjectStore>,
     #[serde(skip_serializing_if = "Option::is_none")]
     table: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5197,14 +5197,14 @@ pub struct PyDataSinkIcebergIcebergCatalogConfig {
 #[pymethods]
 impl PyDataSinkIcebergIcebergCatalogConfig {
     #[new]
-    #[pyo3(signature = (*, r#type=None, warehouse=None, database=None, catalog_id=None, region=None, file_io=None, table=None, uri=None, token=None, client_id=None, client_secret=None))]
+    #[pyo3(signature = (*, r#type=None, warehouse=None, database=None, catalog_id=None, region=None, object_store=None, table=None, uri=None, token=None, client_id=None, client_secret=None))]
     fn new(
         r#type: Option<String>,
         warehouse: Option<String>,
         database: Option<String>,
         catalog_id: Option<String>,
         region: Option<String>,
-        file_io: Option<PyDataSinkIcebergIcebergFileIo>,
+        object_store: Option<PyDataSinkIcebergWarehouseObjectStore>,
         table: Option<String>,
         uri: Option<String>,
         token: Option<String>,
@@ -5217,7 +5217,7 @@ impl PyDataSinkIcebergIcebergCatalogConfig {
             database,
             catalog_id,
             region,
-            file_io,
+            object_store,
             table,
             uri,
             token,
@@ -5783,11 +5783,11 @@ impl PySchemaSinkGlue {
 
 #[pyclass(
     from_py_object,
-    name = "SchemaSinkIcebergIcebergFileIo",
+    name = "SchemaSinkIcebergWarehouseObjectStore",
     module = "skippr"
 )]
 #[derive(Clone, Default, Serialize)]
-pub struct PySchemaSinkIcebergIcebergFileIo {
+pub struct PySchemaSinkIcebergWarehouseObjectStore {
     #[serde(skip_serializing_if = "Option::is_none")]
     r#type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5803,7 +5803,7 @@ pub struct PySchemaSinkIcebergIcebergFileIo {
 }
 
 #[pymethods]
-impl PySchemaSinkIcebergIcebergFileIo {
+impl PySchemaSinkIcebergWarehouseObjectStore {
     #[new]
     #[pyo3(signature = (*, r#type=None, endpoint=None, region=None, access_key_id=None, secret_access_key=None, path_style=None))]
     fn new(
@@ -5843,7 +5843,7 @@ pub struct PySchemaSinkIcebergIcebergCatalogConfig {
     #[serde(skip_serializing_if = "Option::is_none")]
     region: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    file_io: Option<PySchemaSinkIcebergIcebergFileIo>,
+    object_store: Option<PySchemaSinkIcebergWarehouseObjectStore>,
     #[serde(skip_serializing_if = "Option::is_none")]
     table: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5859,14 +5859,14 @@ pub struct PySchemaSinkIcebergIcebergCatalogConfig {
 #[pymethods]
 impl PySchemaSinkIcebergIcebergCatalogConfig {
     #[new]
-    #[pyo3(signature = (*, r#type=None, warehouse=None, database=None, catalog_id=None, region=None, file_io=None, table=None, uri=None, token=None, client_id=None, client_secret=None))]
+    #[pyo3(signature = (*, r#type=None, warehouse=None, database=None, catalog_id=None, region=None, object_store=None, table=None, uri=None, token=None, client_id=None, client_secret=None))]
     fn new(
         r#type: Option<String>,
         warehouse: Option<String>,
         database: Option<String>,
         catalog_id: Option<String>,
         region: Option<String>,
-        file_io: Option<PySchemaSinkIcebergIcebergFileIo>,
+        object_store: Option<PySchemaSinkIcebergWarehouseObjectStore>,
         table: Option<String>,
         uri: Option<String>,
         token: Option<String>,
@@ -5879,7 +5879,7 @@ impl PySchemaSinkIcebergIcebergCatalogConfig {
             database,
             catalog_id,
             region,
-            file_io,
+            object_store,
             table,
             uri,
             token,
@@ -6831,7 +6831,7 @@ pub fn register_connect_plugin_classes(m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_class::<PyDataSinkDatabricks>()?;
     m.add_class::<PyDataSinkFile>()?;
     m.add_class::<PyDataSinkGcs>()?;
-    m.add_class::<PyDataSinkIcebergIcebergFileIo>()?;
+    m.add_class::<PyDataSinkIcebergWarehouseObjectStore>()?;
     m.add_class::<PyDataSinkIcebergIcebergCatalogConfig>()?;
     m.add_class::<PyDataSinkIcebergIcebergQueryEngineConfig>()?;
     m.add_class::<PyDataSinkIceberg>()?;
@@ -6846,7 +6846,7 @@ pub fn register_connect_plugin_classes(m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_class::<PySchemaSinkBigquery>()?;
     m.add_class::<PySchemaSinkClickhouse>()?;
     m.add_class::<PySchemaSinkGlue>()?;
-    m.add_class::<PySchemaSinkIcebergIcebergFileIo>()?;
+    m.add_class::<PySchemaSinkIcebergWarehouseObjectStore>()?;
     m.add_class::<PySchemaSinkIcebergIcebergCatalogConfig>()?;
     m.add_class::<PySchemaSinkIcebergIcebergQueryEngineConfig>()?;
     m.add_class::<PySchemaSinkIceberg>()?;

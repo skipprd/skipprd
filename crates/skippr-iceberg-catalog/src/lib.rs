@@ -15,11 +15,12 @@ pub fn take_cas_conflicts() -> u64 {
     ICEBERG_CAS_CONFLICTS.swap(0, Ordering::Relaxed)
 }
 
-/// Object-store FileIO for Iceberg parquet. `s3` is the AWS default chain.
-/// `r2` is explicit S3-compatible credentials (Cloudflare R2 / path-style).
+/// How to reach S3-compatible object storage for Iceberg parquet.
+/// `s3` is the AWS default chain. `r2` is explicit path-style credentials.
+/// YAML key is `object_store` (not `file_io`, not Apache Iceberg `FileIO`).
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, SkipprConfig, Default)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum IcebergFileIo {
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum WarehouseObjectStore {
     #[default]
     S3,
     R2 {
@@ -39,7 +40,7 @@ fn default_r2_path_style() -> bool {
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, SkipprConfig)]
-#[serde(tag = "type", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum IcebergCatalogConfig {
     Glue {
         warehouse: String,
@@ -50,7 +51,7 @@ pub enum IcebergCatalogConfig {
         #[serde(default)]
         region: Option<String>,
         #[serde(default)]
-        file_io: IcebergFileIo,
+        object_store: WarehouseObjectStore,
     },
     Skippr {
         table: String,
@@ -58,13 +59,13 @@ pub enum IcebergCatalogConfig {
         #[serde(default)]
         region: Option<String>,
         #[serde(default)]
-        file_io: IcebergFileIo,
+        object_store: WarehouseObjectStore,
     },
     Rest {
         uri: String,
         warehouse: String,
         #[serde(default)]
-        file_io: IcebergFileIo,
+        object_store: WarehouseObjectStore,
     },
     Unity {
         uri: String,
@@ -73,7 +74,7 @@ pub enum IcebergCatalogConfig {
         #[skippr(secret)]
         token: Option<String>,
         #[serde(default)]
-        file_io: IcebergFileIo,
+        object_store: WarehouseObjectStore,
     },
     Polaris {
         uri: String,
@@ -84,7 +85,7 @@ pub enum IcebergCatalogConfig {
         #[skippr(secret)]
         client_secret: Option<String>,
         #[serde(default)]
-        file_io: IcebergFileIo,
+        object_store: WarehouseObjectStore,
     },
 }
 
@@ -118,13 +119,13 @@ impl IcebergCatalogConfig {
         }
     }
 
-    pub fn file_io(&self) -> &IcebergFileIo {
+    pub fn object_store(&self) -> &WarehouseObjectStore {
         match self {
-            Self::Glue { file_io, .. }
-            | Self::Skippr { file_io, .. }
-            | Self::Rest { file_io, .. }
-            | Self::Unity { file_io, .. }
-            | Self::Polaris { file_io, .. } => file_io,
+            Self::Glue { object_store, .. }
+            | Self::Skippr { object_store, .. }
+            | Self::Rest { object_store, .. }
+            | Self::Unity { object_store, .. }
+            | Self::Polaris { object_store, .. } => object_store,
         }
     }
 }
@@ -151,12 +152,14 @@ pub fn warehouse_hash(warehouse: &str) -> String {
     hex_encode(hasher.finalize().as_slice())
 }
 
-/// Iceberg FileIO S3 properties from typed `catalog.file_io`.
+/// OpenDal/Iceberg S3 properties from typed `catalog.object_store`.
 /// `S3` uses the AWS default chain (empty props). `R2` requires endpoint and keys.
-pub fn s3_file_io_props(file_io: &IcebergFileIo) -> Result<HashMap<String, String>, String> {
-    match file_io {
-        IcebergFileIo::S3 => Ok(HashMap::new()),
-        IcebergFileIo::R2 {
+pub fn s3_object_store_props(
+    object_store: &WarehouseObjectStore,
+) -> Result<HashMap<String, String>, String> {
+    match object_store {
+        WarehouseObjectStore::S3 => Ok(HashMap::new()),
+        WarehouseObjectStore::R2 {
             endpoint,
             region,
             access_key_id,
@@ -168,7 +171,7 @@ pub fn s3_file_io_props(file_io: &IcebergFileIo) -> Result<HashMap<String, Strin
             let secret_access_key = secret_access_key.trim();
             if endpoint.is_empty() || access_key_id.is_empty() || secret_access_key.is_empty() {
                 return Err(
-                    "catalog.file_io type r2 requires endpoint, access_key_id, and secret_access_key"
+                    "catalog.object_store type r2 requires endpoint, access_key_id, and secret_access_key"
                         .into(),
                 );
             }
@@ -190,6 +193,61 @@ pub fn s3_file_io_props(file_io: &IcebergFileIo) -> Result<HashMap<String, Strin
                 props.insert("s3.region".into(), region.to_string());
             }
             Ok(props)
+        }
+    }
+}
+
+fn sql_string_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+fn duckdb_s3_endpoint(endpoint: &str) -> String {
+    endpoint
+        .trim()
+        .trim_start_matches("https://")
+        .trim_start_matches("http://")
+        .trim_end_matches('/')
+        .to_string()
+}
+
+impl WarehouseObjectStore {
+    /// DuckDB `httpfs`/`iceberg` CREATE SECRET. R2 uses path-style S3.
+    pub fn duckdb_create_secret_sql(&self) -> Result<String, String> {
+        match self {
+            Self::S3 => {
+                Ok("CREATE OR REPLACE SECRET (TYPE S3, PROVIDER CREDENTIAL_CHAIN);".to_string())
+            }
+            Self::R2 {
+                endpoint,
+                region,
+                access_key_id,
+                secret_access_key,
+                path_style,
+            } => {
+                let endpoint = duckdb_s3_endpoint(endpoint);
+                let access_key_id = access_key_id.trim();
+                let secret_access_key = secret_access_key.trim();
+                if endpoint.is_empty() || access_key_id.is_empty() || secret_access_key.is_empty() {
+                    return Err(
+                        "object_store type r2 requires endpoint, access_key_id, and secret_access_key"
+                            .into(),
+                    );
+                }
+                let region = region
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or("auto");
+                let url_style = if *path_style { "path" } else { "vhost" };
+                Ok(format!(
+                    "CREATE OR REPLACE SECRET (TYPE S3, KEY_ID {}, SECRET {}, REGION {}, ENDPOINT {}, URL_STYLE '{}');",
+                    sql_string_literal(access_key_id),
+                    sql_string_literal(secret_access_key),
+                    sql_string_literal(region),
+                    sql_string_literal(&endpoint),
+                    url_style,
+                ))
+            }
         }
     }
 }
@@ -274,8 +332,8 @@ mod tests {
     }
 
     #[test]
-    fn s3_file_io_default_is_empty_aws_chain() {
-        let props = super::s3_file_io_props(&IcebergFileIo::S3).unwrap();
+    fn s3_object_store_default_is_empty_aws_chain() {
+        let props = super::s3_object_store_props(&WarehouseObjectStore::S3).unwrap();
         assert!(props.is_empty());
         let cfg: IcebergCatalogConfig = serde_json::from_value(serde_json::json!({
             "type": "skippr",
@@ -283,20 +341,61 @@ mod tests {
             "warehouse": "s3://bucket/wh"
         }))
         .unwrap();
-        assert_eq!(cfg.file_io(), &IcebergFileIo::S3);
-        assert!(super::s3_file_io_props(cfg.file_io()).unwrap().is_empty());
+        assert_eq!(cfg.object_store(), &WarehouseObjectStore::S3);
+        assert!(super::s3_object_store_props(cfg.object_store())
+            .unwrap()
+            .is_empty());
     }
 
     #[test]
-    fn r2_file_io_props_come_from_catalog_not_env() {
-        let file_io = IcebergFileIo::R2 {
+    fn r2_object_store_maps_to_duckdb_path_style_secret() {
+        let sql = WarehouseObjectStore::R2 {
+            endpoint: "https://account.r2.cloudflarestorage.com/".into(),
+            region: Some("auto".into()),
+            access_key_id: "ak".into(),
+            secret_access_key: "sk'quote".into(),
+            path_style: true,
+        }
+        .duckdb_create_secret_sql()
+        .unwrap();
+        assert!(sql.contains("ENDPOINT 'account.r2.cloudflarestorage.com'"));
+        assert!(sql.contains("URL_STYLE 'path'"));
+        assert!(sql.contains("SECRET 'sk''quote'"));
+        assert!(sql.contains("REGION 'auto'"));
+    }
+
+    #[test]
+    fn s3_object_store_uses_credential_chain_secret() {
+        let sql = WarehouseObjectStore::S3.duckdb_create_secret_sql().unwrap();
+        assert!(sql.contains("PROVIDER CREDENTIAL_CHAIN"));
+    }
+
+    #[test]
+    fn catalog_file_io_key_fails_closed() {
+        let err = serde_json::from_value::<IcebergCatalogConfig>(serde_json::json!({
+            "type": "skippr",
+            "table": "skippr-hla",
+            "warehouse": "s3://bucket/wh",
+            "file_io": { "type": "s3" }
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("file_io") || err.contains("unknown field"),
+            "leftover catalog.file_io must not default to s3: {err}"
+        );
+    }
+
+    #[test]
+    fn r2_object_store_props_come_from_catalog_not_env() {
+        let object_store = WarehouseObjectStore::R2 {
             endpoint: "https://r2.example".into(),
             region: Some("auto".into()),
             access_key_id: "objects-key".into(),
             secret_access_key: "objects-secret".into(),
             path_style: true,
         };
-        let props = super::s3_file_io_props(&file_io).unwrap();
+        let props = super::s3_object_store_props(&object_store).unwrap();
         assert_eq!(
             props.get("s3.endpoint").map(String::as_str),
             Some("https://r2.example")
@@ -322,7 +421,7 @@ mod tests {
             "type": "skippr",
             "table": "skippr-hla",
             "warehouse": "s3://bucket/wh",
-            "file_io": {
+            "object_store": {
                 "type": "r2",
                 "endpoint": "${OBJECTS_S3_ENDPOINT}",
                 "region": "auto",
@@ -332,8 +431,8 @@ mod tests {
             }
         }))
         .unwrap();
-        match cfg.file_io() {
-            IcebergFileIo::R2 {
+        match cfg.object_store() {
+            WarehouseObjectStore::R2 {
                 endpoint,
                 access_key_id,
                 secret_access_key,
@@ -343,13 +442,13 @@ mod tests {
                 assert_eq!(access_key_id, "${OBJECTS_ACCESS_KEY_ID}");
                 assert_eq!(secret_access_key, "${OBJECTS_SECRET_ACCESS_KEY}");
             }
-            IcebergFileIo::S3 => panic!("r2 fixture must not default to s3"),
+            WarehouseObjectStore::S3 => panic!("r2 fixture must not default to s3"),
         }
     }
 
     #[test]
-    fn r2_file_io_fails_closed_without_keys() {
-        let err = super::s3_file_io_props(&IcebergFileIo::R2 {
+    fn r2_object_store_fails_closed_without_keys() {
+        let err = super::s3_object_store_props(&WarehouseObjectStore::R2 {
             endpoint: "".into(),
             region: None,
             access_key_id: "k".into(),

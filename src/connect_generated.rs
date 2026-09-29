@@ -369,7 +369,7 @@ impl ConnectPlugin {
             Self::DataSinkFile => &[],
             Self::DataSinkGcs => &[],
             Self::DataSinkIceberg => &[
-                "catalog.file_io.secret_access_key",
+                "catalog.object_store.secret_access_key",
                 "catalog.token",
                 "catalog.client_secret",
             ],
@@ -389,7 +389,7 @@ impl ConnectPlugin {
             Self::SchemaSinkClickhouse => &["password"],
             Self::SchemaSinkGlue => &[],
             Self::SchemaSinkIceberg => &[
-                "catalog.file_io.secret_access_key",
+                "catalog.object_store.secret_access_key",
                 "catalog.token",
                 "catalog.client_secret",
             ],
@@ -1475,17 +1475,23 @@ impl ConnectPlugin {
             (Self::DataSinkIceberg, "catalog_database") => Some("catalog.database"),
             (Self::DataSinkIceberg, "catalog_catalog_id") => Some("catalog.catalog_id"),
             (Self::DataSinkIceberg, "catalog_region") => Some("catalog.region"),
-            (Self::DataSinkIceberg, "catalog_file_io_type") => Some("catalog.file_io.type"),
-            (Self::DataSinkIceberg, "catalog_file_io_endpoint") => Some("catalog.file_io.endpoint"),
-            (Self::DataSinkIceberg, "catalog_file_io_region") => Some("catalog.file_io.region"),
-            (Self::DataSinkIceberg, "catalog_file_io_access_key_id") => {
-                Some("catalog.file_io.access_key_id")
+            (Self::DataSinkIceberg, "catalog_object_store_type") => {
+                Some("catalog.object_store.type")
             }
-            (Self::DataSinkIceberg, "catalog_file_io_secret_access_key") => {
-                Some("catalog.file_io.secret_access_key")
+            (Self::DataSinkIceberg, "catalog_object_store_endpoint") => {
+                Some("catalog.object_store.endpoint")
             }
-            (Self::DataSinkIceberg, "catalog_file_io_path_style") => {
-                Some("catalog.file_io.path_style")
+            (Self::DataSinkIceberg, "catalog_object_store_region") => {
+                Some("catalog.object_store.region")
+            }
+            (Self::DataSinkIceberg, "catalog_object_store_access_key_id") => {
+                Some("catalog.object_store.access_key_id")
+            }
+            (Self::DataSinkIceberg, "catalog_object_store_secret_access_key") => {
+                Some("catalog.object_store.secret_access_key")
+            }
+            (Self::DataSinkIceberg, "catalog_object_store_path_style") => {
+                Some("catalog.object_store.path_style")
             }
             (Self::DataSinkIceberg, "catalog_table") => Some("catalog.table"),
             (Self::DataSinkIceberg, "catalog_uri") => Some("catalog.uri"),
@@ -1593,19 +1599,23 @@ impl ConnectPlugin {
             (Self::SchemaSinkIceberg, "catalog_database") => Some("catalog.database"),
             (Self::SchemaSinkIceberg, "catalog_catalog_id") => Some("catalog.catalog_id"),
             (Self::SchemaSinkIceberg, "catalog_region") => Some("catalog.region"),
-            (Self::SchemaSinkIceberg, "catalog_file_io_type") => Some("catalog.file_io.type"),
-            (Self::SchemaSinkIceberg, "catalog_file_io_endpoint") => {
-                Some("catalog.file_io.endpoint")
+            (Self::SchemaSinkIceberg, "catalog_object_store_type") => {
+                Some("catalog.object_store.type")
             }
-            (Self::SchemaSinkIceberg, "catalog_file_io_region") => Some("catalog.file_io.region"),
-            (Self::SchemaSinkIceberg, "catalog_file_io_access_key_id") => {
-                Some("catalog.file_io.access_key_id")
+            (Self::SchemaSinkIceberg, "catalog_object_store_endpoint") => {
+                Some("catalog.object_store.endpoint")
             }
-            (Self::SchemaSinkIceberg, "catalog_file_io_secret_access_key") => {
-                Some("catalog.file_io.secret_access_key")
+            (Self::SchemaSinkIceberg, "catalog_object_store_region") => {
+                Some("catalog.object_store.region")
             }
-            (Self::SchemaSinkIceberg, "catalog_file_io_path_style") => {
-                Some("catalog.file_io.path_style")
+            (Self::SchemaSinkIceberg, "catalog_object_store_access_key_id") => {
+                Some("catalog.object_store.access_key_id")
+            }
+            (Self::SchemaSinkIceberg, "catalog_object_store_secret_access_key") => {
+                Some("catalog.object_store.secret_access_key")
+            }
+            (Self::SchemaSinkIceberg, "catalog_object_store_path_style") => {
+                Some("catalog.object_store.path_style")
             }
             (Self::SchemaSinkIceberg, "catalog_table") => Some("catalog.table"),
             (Self::SchemaSinkIceberg, "catalog_uri") => Some("catalog.uri"),

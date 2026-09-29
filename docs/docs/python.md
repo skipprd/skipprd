@@ -95,7 +95,7 @@ s.connect().data_source(
 ).name("http")
 ```
 
-Iceberg `catalog.file_io` is nested. `type="r2"` takes `${OBJECTS_*}` secrets, never plaintext:
+Iceberg `catalog.object_store` is nested. `type="r2"` takes `${OBJECTS_*}` secrets, never plaintext:
 
 ```python
 s.connect().data_sink(
@@ -105,7 +105,7 @@ s.connect().data_sink(
             type="skippr",
             table="my-iceberg-catalog",
             warehouse="s3://my-iceberg-warehouse/",
-            file_io=skippr.DataSinkIcebergIcebergFileIo(
+            object_store=skippr.DataSinkIcebergWarehouseObjectStore(
                 type="r2",
                 endpoint="${OBJECTS_S3_ENDPOINT}",
                 access_key_id="${OBJECTS_ACCESS_KEY_ID}",

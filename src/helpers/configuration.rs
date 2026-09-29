@@ -617,6 +617,25 @@ impl Config {
                     pipeline_name,
                     "data_sink.schema_sink",
                 )?;
+                let entry = config
+                    .data_sinks
+                    .as_ref()
+                    .and_then(|sinks| sinks.get(&data_sink_name))
+                    .expect("data sink ref already validated");
+                let schema_name = Self::parse_registry_ref(schema_ref, "schema_sinks")
+                    .expect("schema sink ref already validated");
+                let schema_cfg = config
+                    .schema_sinks
+                    .as_ref()
+                    .and_then(|sinks| sinks.get(&schema_name))
+                    .cloned()
+                    .expect("schema sink ref already validated");
+                Self::inherit_schema_install_config(&entry.config, schema_cfg).map_err(|err| {
+                    format!(
+                        "Invalid configuration for pipeline '{}': {}",
+                        pipeline_name, err
+                    )
+                })?;
             }
         }
 
@@ -686,6 +705,20 @@ impl Config {
             }
         }
         plugin_config
+    }
+
+    /// Schema-sink install config. Iceberg data_sink must pair with Iceberg schema_sink.
+    pub(crate) fn inherit_schema_install_config(
+        data_sink: &PluginConfigEntry,
+        schema: SchemaSinkConfig,
+    ) -> Result<SchemaSinkConfig, String> {
+        match (data_sink.plugin_name.as_str(), schema.plugin_name.as_str()) {
+            ("Iceberg", "Iceberg") => Ok(schema),
+            ("Iceberg", other) => Err(format!(
+                "Iceberg data sink must pair with schema_sinks.*.Iceberg, not {other}"
+            )),
+            _ => Ok(schema),
+        }
     }
 
     pub fn get_pipeline_input_plugin_name(&self) -> String {
@@ -1571,7 +1604,7 @@ impl Config {
             )
         })?;
 
-        config
+        let schema = config
             .schema_sinks
             .as_ref()
             .and_then(|registry| registry.get(&schema_name))
@@ -1581,7 +1614,8 @@ impl Config {
                     "Invalid configuration for pipeline '{}': schema_sink references '{}', but '{}' is not defined in schema_sinks.",
                     pipeline_name, schema_ref, schema_name
                 )
-            })
+            })?;
+        Self::inherit_schema_install_config(&entry.config, schema)
     }
 
     pub fn get_pipeline_deadletter_schema_config(&self) -> Result<SchemaSinkConfig, String> {
@@ -1629,7 +1663,7 @@ impl Config {
             )
         })?;
 
-        config
+        let schema = config
             .schema_sinks
             .as_ref()
             .and_then(|registry| registry.get(&schema_name))
@@ -1639,7 +1673,8 @@ impl Config {
                     "Invalid configuration for pipeline '{}': schema_sink references '{}', but '{}' is not defined in schema_sinks.",
                     pipeline_name, schema_ref, schema_name
                 )
-            })
+            })?;
+        Self::inherit_schema_install_config(&entry.config, schema)
     }
 
     pub fn deserialize_pipeline_input_plugin_config<T: DeserializeOwned>(

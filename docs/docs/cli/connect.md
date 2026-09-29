@@ -89,7 +89,7 @@ s.connect().data_source(
 
 See [Python](/python).
 
-Iceberg R2 FileIO is nested `catalog.file_io`. CLI flatten uses `--catalog-file-io-type r2` plus endpoint and `${OBJECTS_*}` secrets:
+Iceberg R2 credentials are nested `catalog.object_store`. CLI flatten uses `--catalog-object-store-type r2` plus endpoint and `${OBJECTS_*}` secrets:
 
 ```bash
 skipprd connect data-sink iceberg \
@@ -98,8 +98,8 @@ skipprd connect data-sink iceberg \
   --catalog-type skippr \
   --catalog-table my-iceberg-catalog \
   --catalog-warehouse 's3://my-iceberg-warehouse/' \
-  --catalog-file-io-type r2 \
-  --catalog-file-io-endpoint '${OBJECTS_S3_ENDPOINT}' \
-  --catalog-file-io-access-key-id '${OBJECTS_ACCESS_KEY_ID}' \
-  --catalog-file-io-secret-access-key '${OBJECTS_SECRET_ACCESS_KEY}'
+  --catalog-object-store-type r2 \
+  --catalog-object-store-endpoint '${OBJECTS_S3_ENDPOINT}' \
+  --catalog-object-store-access-key-id '${OBJECTS_ACCESS_KEY_ID}' \
+  --catalog-object-store-secret-access-key '${OBJECTS_SECRET_ACCESS_KEY}'
 ```

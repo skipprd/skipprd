@@ -1579,13 +1579,14 @@ mod tests {
             "required tagged enum keeps the tag field required"
         );
         assert!(
-            iceberg.fields.iter().any(|f| f.ident == "catalog_file_io_type"
-                && f.yaml_path == "catalog.file_io.type"),
-            "IcebergFileIo must expand under catalog.file_io, not a scalar catalog_file_io"
+            iceberg.fields.iter().any(|f| f.ident == "catalog_object_store_type"
+                && f.yaml_path == "catalog.object_store.type"),
+            "WarehouseObjectStore must expand under catalog.object_store, not a scalar catalog_object_store"
         );
         assert!(
             iceberg.fields.iter().any(|f| {
-                f.yaml_path == "catalog.file_io.secret_access_key" && f.secret == SecretKind::Secret
+                f.yaml_path == "catalog.object_store.secret_access_key"
+                    && f.secret == SecretKind::Secret
             }),
             "R2 secret_access_key must be a connect secret path"
         );
@@ -1593,8 +1594,9 @@ mod tests {
             !iceberg
                 .fields
                 .iter()
-                .any(|f| f.ident == "catalog_file_io" && f.rust_ty.contains("IcebergFileIo")),
-            "catalog.file_io must not remain an unexpanded IcebergFileIo leaf"
+                .any(|f| f.ident == "catalog_object_store"
+                    && f.rust_ty.contains("WarehouseObjectStore")),
+            "catalog.object_store must not remain an unexpanded WarehouseObjectStore leaf"
         );
     }
 
@@ -1704,12 +1706,12 @@ mod tests {
             "CLI must accept repeated --tables, not skip Vec"
         );
         assert!(
-            cli.contains("pub catalog_file_io_type: Option<String>"),
-            "CLI must flatten catalog.file_io.type, not Option<String> catalog_file_io"
+            cli.contains("pub catalog_object_store_type: Option<String>"),
+            "CLI must flatten catalog.object_store.type, not Option<String> catalog_object_store"
         );
         assert!(
-            !cli.contains("pub catalog_file_io: Option<String>"),
-            "unexpanded IcebergFileIo leaf is illegal"
+            !cli.contains("pub catalog_object_store: Option<String>"),
+            "unexpanded WarehouseObjectStore leaf is illegal"
         );
     }
 
@@ -1747,9 +1749,9 @@ mod tests {
             "unique plugins keep short nested python names"
         );
         assert!(
-            python.contains("name = \"DataSinkIcebergIcebergFileIo\"")
-                && python.contains("name = \"SchemaSinkIcebergIcebergFileIo\""),
-            "Iceberg FileIO nested types must be unique per plugin kind"
+            python.contains("name = \"DataSinkIcebergWarehouseObjectStore\"")
+                && python.contains("name = \"SchemaSinkIcebergWarehouseObjectStore\""),
+            "Iceberg object_store nested types must be unique per plugin kind"
         );
     }
 

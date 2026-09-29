@@ -277,8 +277,8 @@ def skipprd_bin() -> Path:
 
 def write_skippr_yml(path: Path, events_dir: Path, warehouse: Path) -> None:
     warehouse_uri = f"file://{warehouse}"
-    # Local file:// warehouse omits catalog.file_io (S3 default / local FS).
-    # R2 FileIO is catalog.file_io type: r2 + ${OBJECTS_*}; not this HLA fixture.
+    # Local file:// warehouse omits catalog.object_store (S3 default / local FS).
+    # R2 is catalog.object_store type: r2 + ${OBJECTS_*}; not this HLA fixture.
     path.write_text(
         f"""skippr:
   workspace: {WORKSPACE}

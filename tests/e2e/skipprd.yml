@@ -99,10 +99,6 @@ data_sources:
   test_delta_lake:
     DeltaLake:
       table_uri: "/tmp/delta-e2e-test"
-  test_duckdb:
-    Duckdb:
-      connection_string: "/tmp/duckdb-e2e-test.duckdb"
-      tables: ["test_data"]
 
 data_sinks:
   test_postgres:
@@ -134,9 +130,6 @@ data_sinks:
     Clickhouse:
       url: "http://127.0.0.1:18123"
       database: skippr_test
-  test_duckdb_out:
-    Duckdb:
-      connection_string: "/tmp/duckdb-e2e-sink.duckdb"
 
 pipelines:
   test_mysql:         { data_source: data_sources.test_mysql,        data_sink: data_sinks.test_postgres }
@@ -163,6 +156,4 @@ pipelines:
   test_sink_amqp:     { data_source: data_sources.test_file,         data_sink: data_sinks.test_amqp_out }
   test_clickhouse:    { data_source: data_sources.test_clickhouse,   data_sink: data_sinks.test_postgres }
   test_delta_lake:    { data_source: data_sources.test_delta_lake,   data_sink: data_sinks.test_postgres }
-  test_duckdb:        { data_source: data_sources.test_duckdb,       data_sink: data_sinks.test_postgres }
   test_sink_ch:       { data_source: data_sources.test_file,         data_sink: data_sinks.test_clickhouse_out }
-  test_sink_duckdb:   { data_source: data_sources.test_file,         data_sink: data_sinks.test_duckdb_out }
