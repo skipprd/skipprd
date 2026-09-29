@@ -146,7 +146,7 @@ impl CatalogOutbox {
             .join(format!("v{CATALOG_OUTBOX_FORMAT_VERSION}"))
             .join("pending");
         fs::create_dir_all(&pending_dir)?;
-        sync_directory(
+        crate::helpers::fsync::fsync_dir(
             pending_dir
                 .parent()
                 .expect("catalog outbox pending directory has a parent"),
@@ -366,7 +366,7 @@ impl CatalogOutbox {
     }
 
     fn sync_pending_directory(&self) -> io::Result<()> {
-        sync_directory(&self.pending_dir)?;
+        crate::helpers::fsync::fsync_dir(&self.pending_dir)?;
         #[cfg(test)]
         self.directory_syncs
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -513,10 +513,6 @@ fn write_entry_atomic_rename(path: &Path, entry: &PendingCatalogIntent) -> io::R
         return Err(err);
     }
     Ok(())
-}
-
-fn sync_directory(path: &Path) -> io::Result<()> {
-    File::open(path)?.sync_all()
 }
 
 #[cfg(test)]

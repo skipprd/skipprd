@@ -1,5 +1,5 @@
 use std::collections::{BTreeMap, HashSet};
-use std::fs::{self, File};
+use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -259,10 +259,7 @@ pub fn write_live_snapshot_pack(
     }
     let dest = paths.snapshot_current();
     fs::rename(&staging, &dest)?;
-    #[cfg(not(windows))]
-    {
-        File::open(&paths.snapshots)?.sync_all()?;
-    }
+    crate::helpers::fsync::fsync_dir(&paths.snapshots)?;
     Ok(dest)
 }
 
@@ -421,10 +418,7 @@ fn write_installed_state(root: &Path, snapshot: &StateSnapshot) -> Result<(), Du
     DirectIoFile::write_path_sync(&tmp, &bytes)?;
     fs::rename(&tmp, &state_path)?;
     DirectIoFile::write_path_sync(&durable.join("mutation.log"), &[])?;
-    #[cfg(not(windows))]
-    {
-        File::open(&durable)?.sync_all()?;
-    }
+    crate::helpers::fsync::fsync_dir(&durable)?;
     let marker = durable.join("CLUSTER_FORMAT_V1");
     if !marker.exists() {
         fs::write(&marker, super::mutation::CLUSTER_FORMAT_V1.as_bytes())?;

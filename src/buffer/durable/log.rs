@@ -1,6 +1,6 @@
 use crate::buffer::direct_io::DirectIoFile;
-use std::fs::{self, File};
-use std::io::{self, Write};
+use std::fs;
+use std::io::Write;
 use std::path::Path;
 
 use sha2::{Digest, Sha256};
@@ -329,7 +329,7 @@ fn rewrite_committed_log(path: &Path, envelopes: &[MutationEnvelope]) -> Result<
         DirectIoFile::write_path_sync(path, &[])?;
     }
     if let Some(parent) = path.parent() {
-        fsync_dir(parent)?;
+        crate::helpers::fsync::fsync_dir(parent)?;
     }
     Ok(())
 }
@@ -364,7 +364,7 @@ fn write_framed(path: &Path, payload: &[u8]) -> Result<(), DurableError> {
     file.write_all(&checksum)?;
     file.sync_data()?;
     if let Some(parent) = path.parent() {
-        fsync_dir(parent)?;
+        crate::helpers::fsync::fsync_dir(parent)?;
     }
     Ok(())
 }
@@ -403,20 +403,8 @@ fn atomic_write(dir: &Path, path: &Path, bytes: &[u8]) -> Result<(), DurableErro
     let tmp = path.with_extension("tmp");
     DirectIoFile::write_path_sync(&tmp, bytes)?;
     fs::rename(&tmp, path)?;
-    fsync_dir(dir)?;
+    crate::helpers::fsync::fsync_dir(dir)?;
     Ok(())
-}
-
-fn fsync_dir(dir: &Path) -> io::Result<()> {
-    #[cfg(not(windows))]
-    {
-        File::open(dir)?.sync_all()
-    }
-    #[cfg(windows)]
-    {
-        let _ = dir;
-        Ok(())
-    }
 }
 
 #[cfg(test)]

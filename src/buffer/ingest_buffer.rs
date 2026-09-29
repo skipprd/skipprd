@@ -48,7 +48,7 @@ use rayon::prelude::*;
 use serde_derive::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap, HashSet};
-use std::fs::{File, OpenOptions};
+use std::fs::OpenOptions;
 use std::future::Future;
 use std::io::{Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -2512,19 +2512,6 @@ impl Buffers {
         Ok(cleanup)
     }
 
-    #[cfg(not(windows))]
-    fn fsync_dir(dir: &PathBuf) -> io::Result<()> {
-        let df = File::open(dir)?;
-        df.sync_all()
-    }
-
-    #[cfg(windows)]
-    fn fsync_dir(_dir: &PathBuf) -> io::Result<()> {
-        // Windows can return ERROR_ACCESS_DENIED when flushing directory
-        // handles. The commit marker file itself is fsynced before this call.
-        Ok(())
-    }
-
     pub fn write_seg_commit(
         seg_path: &PathBuf,
         sha256: &[u8; 32],
@@ -2540,7 +2527,7 @@ impl Buffers {
         );
         DirectIoFile::write_path_sync(&commit_path, &buf)?;
         if let Some(parent) = commit_path.parent() {
-            Self::fsync_dir(&parent.to_path_buf())?;
+            crate::helpers::fsync::fsync_dir(parent)?;
         }
         Ok(())
     }
