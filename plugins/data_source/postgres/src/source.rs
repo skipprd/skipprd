@@ -10,6 +10,7 @@ use tokio_postgres::{NoTls, Row};
 use tracing::{info, warn};
 
 use crate::pgoutput::{self, PgColumn, PgOutputMessage};
+use skippr_runtime_sdk::helpers::configuration::Config;
 use skippr_runtime_sdk::plugins::cdc::{
     source_capabilities, MutationKind, PostgresCheckpoint, WalRowMeta,
 };
@@ -133,9 +134,15 @@ impl DataSourcePostgresPlugin {
         format!("postgres:{slot_name}:lsn")
     }
 
-    fn stored_resume_lsn(&self, ctx: &dyn SourceSyncContext, slot_name: &str) -> Option<u64> {
-        load_checkpoint_payload::<PostgresCheckpoint>(ctx, &Self::checkpoint_key(slot_name))
-            .map(|checkpoint| checkpoint.lsn)
+    fn stored_resume_lsn(
+        &self,
+        ctx: &dyn SourceSyncContext,
+        slot_name: &str,
+    ) -> Result<Option<u64>, io::Error> {
+        Ok(
+            load_checkpoint_payload::<PostgresCheckpoint>(ctx, &Self::checkpoint_key(slot_name))?
+                .map(|checkpoint| checkpoint.lsn),
+        )
     }
 
     fn store_resume_checkpoint(
@@ -167,6 +174,7 @@ impl DataSourcePostgresPlugin {
 
     fn cdc_batch(
         &self,
+        ingest_config: &Config,
         table: &str,
         columns: &[PgColumn],
         tuple: &[Option<String>],
@@ -179,6 +187,7 @@ impl DataSourcePostgresPlugin {
         let bytes = json_str.len();
         let lsn_id = lsn.to_be_bytes().to_vec();
         IngestBatch::new_with_offset_pos(
+            ingest_config,
             offset_key,
             json_str,
             bytes,
@@ -194,6 +203,7 @@ impl DataSourcePostgresPlugin {
     }
 
     async fn sync_snapshot(&mut self, ctx: Arc<dyn SourceSyncContext>) -> io::Result<()> {
+        let ingest_config = Config::new();
         let conn_str = self.connection_string();
         let (client, conn) = tokio_postgres::connect(&conn_str, NoTls)
             .await
@@ -235,6 +245,7 @@ impl DataSourcePostgresPlugin {
                 let json_str = Self::row_to_json(row);
                 let bytes = json_str.len();
                 current_batch.push(IngestBatch::new(
+                    &ingest_config,
                     offset_key.clone(),
                     json_str,
                     bytes,
@@ -294,7 +305,8 @@ impl DataSourcePostgresPlugin {
             info!("Created publication {}", pub_name);
         }
 
-        let stored_lsn = self.stored_resume_lsn(ctx.as_ref(), &slot_name);
+        let ingest_config = Config::new();
+        let stored_lsn = self.stored_resume_lsn(ctx.as_ref(), &slot_name)?;
         let resume_mode = stored_lsn.is_some();
 
         let snapshot_lsn: u64 = if let Some(lsn_val) = stored_lsn {
@@ -393,6 +405,7 @@ impl DataSourcePostgresPlugin {
                 let json_str = Self::row_to_json(row);
                 let bytes = json_str.len();
                 current_batch.push(IngestBatch::new_with_offset_pos(
+                    &ingest_config,
                     offset_key.clone(),
                     json_str,
                     bytes,
@@ -509,6 +522,7 @@ impl DataSourcePostgresPlugin {
                         PgOutputMessage::Insert { oid, new_row } => {
                             if let Some((table, cols)) = relation_map.get(&oid) {
                                 pending_batches.push(self.cdc_batch(
+                                    &ingest_config,
                                     table,
                                     cols,
                                     &new_row,
@@ -520,6 +534,7 @@ impl DataSourcePostgresPlugin {
                         PgOutputMessage::Update { oid, new_row, .. } => {
                             if let Some((table, cols)) = relation_map.get(&oid) {
                                 pending_batches.push(self.cdc_batch(
+                                    &ingest_config,
                                     table,
                                     cols,
                                     &new_row,
@@ -531,6 +546,7 @@ impl DataSourcePostgresPlugin {
                         PgOutputMessage::Delete { oid, old_row } => {
                             if let Some((table, cols)) = relation_map.get(&oid) {
                                 pending_batches.push(self.cdc_batch(
+                                    &ingest_config,
                                     table,
                                     cols,
                                     &old_row,

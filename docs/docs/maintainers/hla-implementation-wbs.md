@@ -706,7 +706,7 @@ Distributed Flight/Ballista UNION remains WU-7.3 / WU-7.5 ([`hla-flight-sql-ball
 - File sources keep mtime wait and retain the lease.
 - Other finite sources: `begin_drain`, `release_after_drain`, return `ReleasedAfterFinite` so the loop can try the next pipeline.
 - Indefinite source retains lease.
-- Ingest store is the ActivePrimary `PipelineDurableStore`, not scheduler-written `PIPELINE_NAME`.
+- Ingest store is this process's writer `PipelineDurableStore` (ActivePrimary, OwnerElect, or Idle after fence; not Replica), not scheduler-written `PIPELINE_NAME`.
 - Renew is `renew_until_lost`.
 
 **Tests:** two pipelines, lease held elsewhere, finite switch, no concurrent primary.

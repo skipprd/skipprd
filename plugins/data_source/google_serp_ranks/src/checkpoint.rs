@@ -34,7 +34,7 @@ pub fn load_query_checkpoint(
     country: &str,
     language: &str,
     device: &str,
-) -> Option<QueryCheckpoint> {
+) -> Result<Option<QueryCheckpoint>, std::io::Error> {
     let key = query_checkpoint_key(keyword, country, language, device);
     load_checkpoint_payload::<QueryCheckpoint>(ctx, &key)
 }

@@ -28,10 +28,13 @@ pub struct PartitionKey {
 const MAGIC: &[u8; 4] = b"SEGF";
 const PART: &[u8; 4] = b"PART";
 const FOOT: &[u8; 4] = b"FOOT";
+const COMMIT_MAGIC: &[u8; 4] = b"SEGC";
 /// Segment format version. Includes an optional `part_meta_blob` per PART
 /// for CDC row-aligned metadata (mutation kind, event_id, order_token).
 const VERSION: u32 = 3;
 const COMMIT_HEADER_VERSION: u32 = 1;
+const FOOTER_LEN: usize = 4 + 4 + 32;
+const COMMIT_HEADER_LEN: usize = 60;
 
 /// Compact, in-memory-only summary of a WAL PART metadata sidecar.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -85,6 +88,33 @@ pub struct SegmentFileMetadata {
     pub num_partitions: u32,
     pub offsets: std::collections::HashMap<OffsetKey, u64>,
     pub index: Vec<SegmentPartitionIndexEntry>,
+    /// SHA-256 of the body prefix (bytes before FOOT). Same digest SEGC carries.
+    pub body_sha256: [u8; 32],
+}
+
+/// 60-byte `SEGC` commit marker. Presence owns the pair; the digest binds the body.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SegCommitHeader {
+    pub version: u32,
+    pub created_at_secs: u64,
+    pub total_bytes: u64,
+    pub parts_count: u32,
+    pub sha256: [u8; 32],
+}
+
+/// Result of un-owning then dropping a local `.seg` / `.seg.commit` pair.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WalPairReclaim {
+    Removed,
+    AlreadyUnowned,
+}
+
+/// Encoded SEGF body plus FOOT. Offsets live in the body; SEGC is a sibling object.
+pub struct EncodedSnapshot {
+    pub bytes: Vec<u8>,
+    pub meta: SegmentFileMetadata,
+    pub total_rows: u64,
+    pub sha256: [u8; 32],
 }
 
 pub struct SegmentFile {
@@ -156,6 +186,105 @@ impl SegmentFile {
         buf[28..60].copy_from_slice(sha256);
         buf
     }
+
+    pub fn commit_path_for_seg(seg_path: &Path) -> PathBuf {
+        seg_path.with_extension("seg.commit")
+    }
+
+    pub fn parse_commit_header(bytes: &[u8]) -> io::Result<SegCommitHeader> {
+        if bytes.len() < COMMIT_HEADER_LEN {
+            return Err(invalid_data("commit header truncated"));
+        }
+        if &bytes[0..4] != COMMIT_MAGIC {
+            return Err(invalid_data("bad commit magic"));
+        }
+        let version = u32::from_le_bytes(bytes[4..8].try_into().unwrap());
+        if version != COMMIT_HEADER_VERSION {
+            return Err(invalid_data(format!("commit refused version={version}")));
+        }
+        let mut sha256 = [0u8; 32];
+        sha256.copy_from_slice(&bytes[28..60]);
+        Ok(SegCommitHeader {
+            version,
+            created_at_secs: u64::from_le_bytes(bytes[8..16].try_into().unwrap()),
+            total_bytes: u64::from_le_bytes(bytes[16..24].try_into().unwrap()),
+            parts_count: u32::from_le_bytes(bytes[24..28].try_into().unwrap()),
+            sha256,
+        })
+    }
+
+    pub fn bind_commit(commit: &SegCommitHeader, meta: &SegmentFileMetadata) -> io::Result<()> {
+        if commit.sha256 != meta.body_sha256 {
+            return Err(invalid_data(
+                "SEGC sha256 does not match FOOT; commit does not name this body",
+            ));
+        }
+        if commit.parts_count != meta.num_partitions {
+            return Err(invalid_data("SEGC parts_count does not match FOOT"));
+        }
+        if commit.total_bytes != meta.total_bytes {
+            return Err(invalid_data("SEGC size does not match segment total_bytes"));
+        }
+        Ok(())
+    }
+
+    pub fn verify_body_checksum(bytes: &[u8]) -> io::Result<[u8; 32]> {
+        if bytes.len() < FOOTER_LEN {
+            return Err(invalid_data("segment too short for FOOT"));
+        }
+        let prefix_len = bytes.len() - FOOTER_LEN;
+        let footer = &bytes[prefix_len..];
+        if &footer[0..4] != FOOT {
+            return Err(invalid_data("missing FOOT"));
+        }
+        let mut claimed = [0u8; 32];
+        claimed.copy_from_slice(&footer[8..40]);
+        let digest = Sha256::digest(&bytes[..prefix_len]);
+        if digest.as_slice() != claimed {
+            return Err(invalid_data("FOOT sha256 does not match body"));
+        }
+        Ok(claimed)
+    }
+
+    pub fn admit_owned_pair_bytes(
+        body: &[u8],
+        commit_bytes: &[u8],
+    ) -> io::Result<SegmentFileMetadata> {
+        let claimed = Self::verify_body_checksum(body)?;
+        let commit = Self::parse_commit_header(commit_bytes)?;
+        let meta = Self::read_metadata_from_bytes(body)?;
+        if claimed != meta.body_sha256 {
+            return Err(invalid_data("FOOT digest disagrees with metadata scan"));
+        }
+        Self::bind_commit(&commit, &meta)?;
+        Ok(meta)
+    }
+
+    pub fn admit_owned_pair_path(seg_path: &Path) -> io::Result<SegmentFileMetadata> {
+        let commit_path = Self::commit_path_for_seg(seg_path);
+        let mut buf = [0u8; COMMIT_HEADER_LEN];
+        let mut commit_file = DirectIoFile::open(&commit_path)?;
+        commit_file.read_exact(&mut buf)?;
+        let mut body_file = DirectIoFile::open(seg_path)?;
+        let mut body = Vec::new();
+        body_file.read_to_end(&mut body)?;
+        Self::admit_owned_pair_bytes(&body, &buf)
+    }
+
+    pub fn reclaim_local_pair(seg_path: &Path) -> io::Result<WalPairReclaim> {
+        let commit_path = Self::commit_path_for_seg(seg_path);
+        match fs::remove_file(&commit_path) {
+            Ok(()) => {}
+            Err(err) if err.kind() == io::ErrorKind::NotFound => {}
+            Err(err) => return Err(err),
+        }
+        match fs::remove_file(seg_path) {
+            Ok(()) => Ok(WalPairReclaim::Removed),
+            Err(err) if err.kind() == io::ErrorKind::NotFound => Ok(WalPairReclaim::AlreadyUnowned),
+            Err(err) => Err(err),
+        }
+    }
+
     /// Read segment metadata from an in-memory buffer.
     /// This mirrors `read_metadata`, but operates on bytes, allowing S3-backed reads.
     pub fn read_metadata_from_bytes(bytes: &[u8]) -> io::Result<SegmentFileMetadata> {
@@ -203,16 +332,16 @@ impl SegmentFile {
             let mut tag = [0u8; 4];
             match reader.read_exact(&mut tag) {
                 Ok(()) => {}
-                Err(e) => {
-                    if e.kind() == io::ErrorKind::UnexpectedEof {
-                        break;
-                    } else {
-                        return Err(e);
-                    }
+                Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => {
+                    return Err(invalid_data("WAL segment missing FOOT"));
                 }
+                Err(e) => return Err(e),
+            }
+            if &tag == FOOT {
+                break;
             }
             if &tag != PART {
-                break;
+                return Err(invalid_data("WAL segment expected PART or FOOT"));
             }
             let mut key_len_buf = [0u8; 8];
             reader.read_exact(&mut key_len_buf)?;
@@ -282,12 +411,30 @@ impl SegmentFile {
             metrics_counters::record_cdc_metadata_segment_scan(file_len);
         }
 
+        let mut parts_buf = [0u8; 4];
+        reader.read_exact(&mut parts_buf)?;
+        let footer_parts = u32::from_le_bytes(parts_buf);
+        let mut body_sha256 = [0u8; 32];
+        reader.read_exact(&mut body_sha256)?;
+        let pos = reader.stream_position()?;
+        if pos != file_len {
+            return Err(invalid_data("WAL segment has trailing bytes after FOOT"));
+        }
+        let num_partitions = u32::try_from(index.len())
+            .map_err(|_| invalid_data("WAL segment contains too many partitions"))?;
+        if footer_parts != num_partitions {
+            return Err(invalid_data(format!(
+                "FOOT parts_count {footer_parts} does not match index {num_partitions}"
+            )));
+        }
+
         Ok(SegmentFileMetadata {
             created_at_secs,
             total_bytes,
-            num_partitions: index.len() as u32,
+            num_partitions,
             offsets,
             index,
+            body_sha256,
         })
     }
 
@@ -319,124 +466,154 @@ impl SegmentFile {
         u64,      /*rows*/
         [u8; 32], /*sha256*/
     )> {
-        let mut file = Cursor::new(Vec::new());
+        let encoded = encode_snapshot(offsets, batches, partitions_meta, part_meta_blobs)?;
+        let mut durable = DirectIoFile::create(&self.path)?;
+        durable.write_all(&encoded.bytes)?;
+        durable.sync_data()?;
+        Ok((encoded.meta, encoded.total_rows, encoded.sha256))
+    }
+}
 
-        file.write_all(MAGIC)?;
-        file.write_all(&VERSION.to_le_bytes())?;
-        let created_at_secs = SystemTime::now()
+/// Encode a SEGF body + FOOT once. Disk and S3 persist the same bytes.
+pub fn encode_snapshot(
+    offsets: &std::collections::HashMap<OffsetKey, u64>,
+    batches: &std::collections::HashMap<PartitionKey, Vec<RecordBatch>>,
+    partitions_meta: &std::collections::HashMap<
+        PartitionKey,
+        (u64 /*bytes*/, SystemTime /*updated*/),
+    >,
+    part_meta_blobs: &std::collections::HashMap<PartitionKey, Vec<u8>>,
+) -> io::Result<EncodedSnapshot> {
+    let mut file = Cursor::new(Vec::new());
+
+    file.write_all(MAGIC)?;
+    file.write_all(&VERSION.to_le_bytes())?;
+    let created_at_secs = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs();
+    file.write_all(&created_at_secs.to_le_bytes())?;
+
+    let offsets_blob = bincode::serialize(offsets)
+        .map_err(|err| invalid_data(format!("encode WAL offsets: {err}")))?;
+    let offsets_len = offsets_blob.len() as u64;
+    file.write_all(&offsets_len.to_le_bytes())?;
+    file.write_all(&offsets_blob)?;
+
+    let mut total_rows: u64 = 0;
+    let mut total_bytes: u64 = 0;
+    let mut parts_count: u32 = 0;
+    let mut index: Vec<SegmentPartitionIndexEntry> = Vec::with_capacity(batches.len());
+
+    for (key, rbatches) in batches.iter() {
+        if rbatches.is_empty() {
+            continue;
+        }
+        parts_count = parts_count.saturating_add(1);
+        file.write_all(PART)?;
+        let key_blob = bincode::serialize(key)
+            .map_err(|err| invalid_data(format!("encode WAL key: {err}")))?;
+        let key_len = key_blob.len() as u64;
+        file.write_all(&key_len.to_le_bytes())?;
+        file.write_all(&key_blob)?;
+        let (p_bytes, p_updated) = partitions_meta
+            .get(key)
+            .cloned()
+            .unwrap_or((0, SystemTime::now()));
+        let updated_secs = p_updated
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
-        file.write_all(&created_at_secs.to_le_bytes())?;
+        file.write_all(&p_bytes.to_le_bytes())?;
+        file.write_all(&updated_secs.to_le_bytes())?;
 
-        let offsets_blob = bincode::serialize(offsets).unwrap();
-        let offsets_len = offsets_blob.len() as u64;
-        file.write_all(&offsets_len.to_le_bytes())?;
-        file.write_all(&offsets_blob)?;
-
-        let mut total_rows: u64 = 0;
-        let mut total_bytes: u64 = 0;
-        let mut parts_count: u32 = 0;
-        let mut index: Vec<SegmentPartitionIndexEntry> = Vec::with_capacity(batches.len());
-
-        for (key, rbatches) in batches.iter() {
-            if rbatches.is_empty() {
-                continue;
-            }
-            parts_count = parts_count.saturating_add(1);
-            file.write_all(PART)?;
-            let key_blob = bincode::serialize(key).unwrap();
-            let key_len = key_blob.len() as u64;
-            file.write_all(&key_len.to_le_bytes())?;
-            file.write_all(&key_blob)?;
-            let (p_bytes, p_updated) = partitions_meta
-                .get(key)
-                .cloned()
-                .unwrap_or((0, SystemTime::now()));
-            let updated_secs = p_updated
-                .duration_since(SystemTime::UNIX_EPOCH)
-                .unwrap_or_default()
-                .as_secs();
-            file.write_all(&p_bytes.to_le_bytes())?;
-            file.write_all(&updated_secs.to_le_bytes())?;
-
-            // Write and index the metadata sidecar without retaining row metadata
-            // in the scheduling index.
-            let meta_blob = part_meta_blobs
-                .get(key)
-                .map(Vec::as_slice)
-                .unwrap_or_default();
-            let part_meta_summary = summarize_part_meta_blob(meta_blob)?;
-            let meta_len = meta_blob.len() as u64;
-            file.write_all(&meta_len.to_le_bytes())?;
-            let part_meta_start = file.stream_position()?;
-            if meta_len > 0 {
-                file.write_all(meta_blob)?;
-            }
-
-            let data_len_pos = file.stream_position()?;
-            file.write_all(&0u64.to_le_bytes())?;
-
-            let start = file.stream_position()?;
-            {
-                let options = IpcWriteOptions::default();
-                let mut writer = StreamWriter::try_new_with_options(
-                    &mut file,
-                    &rbatches[0].schema(),
-                    options,
-                )
-                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
-                for b in rbatches.iter() {
-                    total_rows += b.num_rows() as u64;
-                    writer.write(b).map_err(|e| {
-                        io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e))
-                    })?;
-                }
-                writer
-                    .finish()
-                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
-            }
-            let end = file.stream_position()?;
-            let len = end - start;
-            total_bytes = total_bytes.saturating_add(len);
-
-            file.seek(io::SeekFrom::Start(data_len_pos))?;
-            file.write_all(&len.to_le_bytes())?;
-            file.seek(io::SeekFrom::Start(end))?;
-
-            index.push(SegmentPartitionIndexEntry {
-                key: key.clone(),
-                bytes: p_bytes,
-                updated_at_secs: updated_secs,
-                slice_ordinal: parts_count - 1,
-                part_meta_start,
-                part_meta_len: meta_len,
-                part_meta_summary,
-                start,
-                len,
-            });
+        // Write and index the metadata sidecar without retaining row metadata
+        // in the scheduling index.
+        let meta_blob = part_meta_blobs
+            .get(key)
+            .map(Vec::as_slice)
+            .unwrap_or_default();
+        let part_meta_summary = summarize_part_meta_blob(meta_blob)?;
+        let meta_len = meta_blob.len() as u64;
+        file.write_all(&meta_len.to_le_bytes())?;
+        let part_meta_start = file.stream_position()?;
+        if meta_len > 0 {
+            file.write_all(meta_blob)?;
         }
 
-        let end_before_footer = file.stream_position()?;
-        let digest = Sha256::digest(&file.get_ref()[..end_before_footer as usize]);
-        let mut sha_bytes: [u8; 32] = [0u8; 32];
-        sha_bytes.copy_from_slice(&digest);
+        let data_len_pos = file.stream_position()?;
+        file.write_all(&0u64.to_le_bytes())?;
 
-        file.write_all(FOOT)?;
-        file.write_all(&parts_count.to_le_bytes())?;
-        file.write_all(&sha_bytes)?;
-        let mut durable = DirectIoFile::create(&self.path)?;
-        durable.write_all(file.get_ref())?;
-        durable.sync_data()?;
+        let start = file.stream_position()?;
+        {
+            let options = IpcWriteOptions::default();
+            let mut writer =
+                StreamWriter::try_new_with_options(&mut file, &rbatches[0].schema(), options)
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
+            for b in rbatches.iter() {
+                total_rows += b.num_rows() as u64;
+                writer
+                    .write(b)
+                    .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
+            }
+            writer
+                .finish()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, format!("arrow: {}", e)))?;
+        }
+        let end = file.stream_position()?;
+        let len = end - start;
+        total_bytes = total_bytes.saturating_add(len);
 
-        let meta = SegmentFileMetadata {
-            created_at_secs,
-            total_bytes,
-            num_partitions: parts_count,
-            offsets: offsets.clone(),
-            index,
-        };
-        Ok((meta, total_rows, sha_bytes))
+        file.seek(io::SeekFrom::Start(data_len_pos))?;
+        file.write_all(&len.to_le_bytes())?;
+        file.seek(io::SeekFrom::Start(end))?;
+
+        index.push(SegmentPartitionIndexEntry {
+            key: key.clone(),
+            bytes: p_bytes,
+            updated_at_secs: updated_secs,
+            slice_ordinal: parts_count - 1,
+            part_meta_start,
+            part_meta_len: meta_len,
+            part_meta_summary,
+            start,
+            len,
+        });
+    }
+
+    let end_before_footer = file.stream_position()?;
+    let digest = Sha256::digest(&file.get_ref()[..end_before_footer as usize]);
+    let mut sha_bytes: [u8; 32] = [0u8; 32];
+    sha_bytes.copy_from_slice(&digest);
+
+    file.write_all(FOOT)?;
+    file.write_all(&parts_count.to_le_bytes())?;
+    file.write_all(&sha_bytes)?;
+
+    let meta = SegmentFileMetadata {
+        created_at_secs,
+        total_bytes,
+        num_partitions: parts_count,
+        offsets: offsets.clone(),
+        index,
+        body_sha256: sha_bytes,
+    };
+    Ok(EncodedSnapshot {
+        bytes: file.into_inner(),
+        meta,
+        total_rows,
+        sha256: sha_bytes,
+    })
+}
+
+impl SegmentFile {
+    pub fn write_commit_marker(&self, meta: &SegmentFileMetadata) -> io::Result<()> {
+        let buf = Self::build_commit_header_bytes(
+            meta.num_partitions,
+            meta.total_bytes,
+            &meta.body_sha256,
+        );
+        fs::write(Self::commit_path_for_seg(&self.path), buf)
     }
 
     /// Read one selected PART metadata sidecar directly from its indexed range.
@@ -537,7 +714,11 @@ impl SegmentFile {
             let key_len = u64::from_le_bytes(key_len_buf);
             let mut key_blob = vec![0u8; key_len as usize];
             reader.read_exact(&mut key_blob)?;
-            let key: PartitionKey = bincode::deserialize(&key_blob).unwrap();
+            let key: PartitionKey = bincode::deserialize(&key_blob).map_err(|err| {
+                invalid_data(format!(
+                    "invalid WAL partition key in part-meta scan: {err}"
+                ))
+            })?;
 
             // Skip part_bytes + updated_secs
             reader.seek(io::SeekFrom::Current(16))?;
@@ -572,6 +753,7 @@ impl SegmentFile {
         FULL_PART_META_SCANS.load(Ordering::Relaxed)
     }
 
+    #[cfg(test)]
     pub fn read_metadata_durable(&self) -> io::Result<SegmentFileMetadata> {
         let mut file = DirectIoFile::open(&self.path)?;
         Self::read_metadata_from_reader(&mut file)
@@ -811,5 +993,124 @@ mod tests_wal_writer {
         let meta = SegmentFile::read_metadata_from_bytes(&bytes).unwrap();
         assert_eq!(meta.num_partitions, 1);
         assert_eq!(meta.index[0].key, key);
+    }
+
+    fn snapshot_one_part(name: &str) -> (PathBuf, SegmentFile, [u8; 32], SegmentFileMetadata) {
+        let dir = temp_dir();
+        let seg = SegmentFile::new(&dir, name).unwrap();
+        let mut batches: HashMap<PartitionKey, Vec<RecordBatch>> = HashMap::new();
+        let key = PartitionKey {
+            sink_ref: "out".into(),
+            namespace: "ns".into(),
+            partition: String::new(),
+            time: Some(0),
+            schema_fingerprint: "schema".into(),
+        };
+        batches.insert(key.clone(), vec![make_batch()]);
+        let mut parts_meta = HashMap::new();
+        parts_meta.insert(key, (0, SystemTime::now()));
+        let offsets = HashMap::new();
+        let empty = HashMap::new();
+        let (meta, _rows, sha) = seg
+            .write_snapshot(&offsets, &batches, &parts_meta, &empty)
+            .unwrap();
+        (dir, seg, sha, meta)
+    }
+
+    #[test]
+    fn metadata_read_without_foot_is_refused() {
+        let (_dir, seg, _sha, _meta) = snapshot_one_part("no_foot");
+        let mut bytes = fs::read(&seg.path).unwrap();
+        bytes.truncate(bytes.len() - FOOTER_LEN);
+        let err = SegmentFile::read_metadata_from_bytes(&bytes).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("FOOT"));
+    }
+
+    #[test]
+    fn admit_owned_pair_binds_segc_to_foot() {
+        let (_dir, seg, sha, meta) = snapshot_one_part("bind");
+        let commit =
+            SegmentFile::build_commit_header_bytes(meta.num_partitions, meta.total_bytes, &sha);
+        fs::write(SegmentFile::commit_path_for_seg(&seg.path), commit).unwrap();
+        let admitted = SegmentFile::admit_owned_pair_path(&seg.path).unwrap();
+        assert_eq!(admitted.body_sha256, sha);
+        let body = fs::read(&seg.path).unwrap();
+        let from_bytes = SegmentFile::admit_owned_pair_bytes(&body, &commit).unwrap();
+        assert_eq!(from_bytes.body_sha256, sha);
+    }
+
+    #[test]
+    fn admit_owned_pair_refuses_mismatched_segc_digest() {
+        let (_dir, seg, _sha, meta) = snapshot_one_part("mismatch");
+        let wrong = [0u8; 32];
+        let commit =
+            SegmentFile::build_commit_header_bytes(meta.num_partitions, meta.total_bytes, &wrong);
+        let body = fs::read(&seg.path).unwrap();
+        let err = SegmentFile::admit_owned_pair_bytes(&body, &commit).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("SEGC"));
+    }
+
+    #[test]
+    fn verify_body_checksum_refuses_flipped_payload() {
+        let (_dir, seg, _sha, _meta) = snapshot_one_part("flip");
+        let mut body = fs::read(&seg.path).unwrap();
+        let flip_at = body.len() - FOOTER_LEN - 1;
+        body[flip_at] ^= 0xff;
+        let err = SegmentFile::verify_body_checksum(&body).unwrap_err();
+        assert!(err.to_string().contains("FOOT sha256"));
+    }
+
+    #[test]
+    fn admit_owned_pair_path_refuses_flipped_payload() {
+        let (_dir, seg, sha, meta) = snapshot_one_part("flip-path");
+        let commit =
+            SegmentFile::build_commit_header_bytes(meta.num_partitions, meta.total_bytes, &sha);
+        fs::write(SegmentFile::commit_path_for_seg(&seg.path), commit).unwrap();
+        let mut body = fs::read(&seg.path).unwrap();
+        let flip_at = body.len() - FOOTER_LEN - 1;
+        body[flip_at] ^= 0xff;
+        fs::write(&seg.path, &body).unwrap();
+        let err = SegmentFile::admit_owned_pair_path(&seg.path).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("FOOT sha256"));
+    }
+
+    #[test]
+    fn reclaim_local_pair_unowns_before_dropping_body() {
+        let dir = temp_dir();
+        let seg_path = dir.join("gate.seg");
+        let commit_path = SegmentFile::commit_path_for_seg(&seg_path);
+        fs::create_dir(&seg_path).unwrap();
+        fs::write(&commit_path, b"SEGC").unwrap();
+        let err = SegmentFile::reclaim_local_pair(&seg_path).unwrap_err();
+        assert_ne!(err.kind(), io::ErrorKind::NotFound);
+        assert!(!commit_path.exists(), "commit must be un-owned first");
+        assert!(seg_path.exists(), "body must not be deleted if drop fails");
+    }
+
+    #[test]
+    fn reclaim_local_pair_retries_body_after_commit_already_gone() {
+        let dir = temp_dir();
+        let seg_path = dir.join("orphan-body.seg");
+        fs::write(&seg_path, b"body").unwrap();
+        let result = SegmentFile::reclaim_local_pair(&seg_path).unwrap();
+        assert_eq!(result, WalPairReclaim::Removed);
+        assert!(!seg_path.exists());
+        assert!(!SegmentFile::commit_path_for_seg(&seg_path).exists());
+    }
+
+    #[test]
+    fn reclaim_local_pair_deletes_commit_then_body() {
+        let dir = temp_dir();
+        let seg_path = dir.join("ok.seg");
+        let commit_path = SegmentFile::commit_path_for_seg(&seg_path);
+        fs::write(&seg_path, b"body").unwrap();
+        fs::write(&commit_path, b"commit").unwrap();
+        let result = SegmentFile::reclaim_local_pair(&seg_path).unwrap();
+        assert_eq!(result, WalPairReclaim::Removed);
+        assert!(!seg_path.exists());
+        assert!(!commit_path.exists());
     }
 }

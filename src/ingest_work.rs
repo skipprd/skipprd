@@ -3424,8 +3424,26 @@ impl Ingest {
                         namespace: ok.namespace.clone(),
                         partition: ok.partition.clone(),
                     };
-                    offset_db_clone.set(&offset_key, OffsetTypes::Closed, 1);
-                    offset_db_clone.set(&offset_key, OffsetTypes::Position, pos);
+                    if let Err(err) = offset_db_clone.set(&offset_key, OffsetTypes::Closed, 1) {
+                        warn!("deadletter offset closed publish failed: {err}");
+                        if submit_id != 0 {
+                            crate::buffer::wal_writer::fail_request(
+                                submit_id,
+                                format!("deadletter offset closed publish failed: {err}"),
+                            );
+                        }
+                        return;
+                    }
+                    if let Err(err) = offset_db_clone.set(&offset_key, OffsetTypes::Position, pos) {
+                        warn!("deadletter offset position publish failed: {err}");
+                        if submit_id != 0 {
+                            crate::buffer::wal_writer::fail_request(
+                                submit_id,
+                                format!("deadletter offset position publish failed: {err}"),
+                            );
+                        }
+                        return;
+                    }
                 }
             }
         }

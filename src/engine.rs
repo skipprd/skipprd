@@ -934,18 +934,38 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
 
     let offsets_db = Arc::new(offsets_db);
 
+    let pipeline_lease = match config.get_wal_storage() {
+        crate::helpers::wal_storage::WalStorage::Clustered => None,
+        crate::helpers::wal_storage::WalStorage::Disk
+        | crate::helpers::wal_storage::WalStorage::S3 => Some(
+            crate::pipeline_backend::acquire_ingest_lease(config, offsets_db.as_ref())
+                .await
+                .map_err(io::Error::other)?,
+        ),
+    };
+
     if matches!(
         config.get_wal_storage(),
-        crate::helpers::wal_storage::WalStorage::Disk
+        crate::helpers::wal_storage::WalStorage::Disk | crate::helpers::wal_storage::WalStorage::S3
     ) {
-        crate::buffer::wal_store::ensure_disk_durable_store(config, offsets_db.clone())?;
+        let guard = pipeline_lease
+            .as_ref()
+            .map(|lease| lease.guard.clone())
+            .ok_or_else(|| io::Error::other("pipeline writer lease is not installed"))?;
+        crate::buffer::wal_store::ensure_disk_durable_store(config, offsets_db.clone(), guard)?;
     }
 
     let _offsets_clone = offsets_db.clone();
 
     wal_recover(config, offsets_db.clone())
         .await
-        .expect("Failed to recover WAL index");
+        .map_err(|err| io::Error::other(format!("Failed to recover WAL index: {err}")))?;
+
+    if let Some(lease) = &pipeline_lease {
+        lease.activate().map_err(|err| {
+            io::Error::other(format!("pipeline writer lease activate failed: {err}"))
+        })?;
+    }
 
     {
         METRICS.write().status = MetricsStatus::Running;
@@ -1383,12 +1403,18 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
         if reporter.enabled() {
             reporter.finish();
         }
+        if let Some(lease) = pipeline_lease {
+            lease.release_after_quiesce(false).await;
+        }
         return Err(err);
     }
 
     if let Some(err) = finalization_error {
         if reporter.enabled() {
             reporter.finish();
+        }
+        if let Some(lease) = pipeline_lease {
+            lease.release_after_quiesce(false).await;
         }
         return Err(std::io::Error::other(err));
     }
@@ -1424,6 +1450,10 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
 
     if reporter.enabled() {
         reporter.finish();
+    }
+
+    if let Some(lease) = pipeline_lease {
+        lease.release_after_quiesce(true).await;
     }
 
     Ok(())

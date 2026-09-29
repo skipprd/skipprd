@@ -264,7 +264,7 @@ impl DataSource for DataSourceAiCitationsPlugin {
                 let prior = if discover {
                     None
                 } else {
-                    load_prompt_checkpoint(ctx.as_ref(), &prompt.id, model)
+                    load_prompt_checkpoint(ctx.as_ref(), &prompt.id, model)?
                 };
 
                 let skip_api = !discover && self.config.skip_unchanged_responses && prior.is_some();

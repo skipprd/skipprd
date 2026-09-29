@@ -222,7 +222,7 @@ impl DataSourceMysqlPlugin {
         // Check for stored checkpoint to enable resume
         let checkpoint_key = format!("mysql:{}:binlog", db_name);
         let stored_checkpoint =
-            load_checkpoint_payload::<MysqlCheckpoint>(ctx.as_ref(), &checkpoint_key);
+            load_checkpoint_payload::<MysqlCheckpoint>(ctx.as_ref(), &checkpoint_key)?;
         let resume_mode = stored_checkpoint.is_some();
 
         let (binlog_file, binlog_pos) = if let Some(ref ckpt) = stored_checkpoint {
@@ -282,7 +282,7 @@ impl DataSourceMysqlPlugin {
                 partition: table_fq.clone(),
             };
 
-            if partition_already_closed(ctx.as_ref(), &offset_key) {
+            if partition_already_closed(ctx.as_ref(), &offset_key)? {
                 info!("CDC snapshot: skipping already-ingested {}", table_fq);
                 continue;
             }
@@ -575,7 +575,7 @@ impl DataSourceMysqlPlugin {
                 partition: table_fq.clone(),
             };
 
-            if partition_already_closed(ctx.as_ref(), &offset_key) {
+            if partition_already_closed(ctx.as_ref(), &offset_key)? {
                 info!("Skipping already-ingested table: {}", table_fq);
                 continue;
             }

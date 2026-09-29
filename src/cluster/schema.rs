@@ -58,13 +58,14 @@ pub fn live_wal_namespaces(
         let id = skippr_lease::SegmentId::new(&descriptor.segment_id)
             .map_err(|err| PromoteError::Other(err.to_string()))?;
         let path = paths.segment(&id);
-        let seg = crate::buffer::segment_file::SegmentFile { path };
-        let meta = seg.read_metadata_durable().map_err(|err| {
-            PromoteError::Other(format!(
-                "live WAL decode failed for {}: {err}",
-                descriptor.segment_id
-            ))
-        })?;
+        let meta = crate::buffer::segment_file::SegmentFile::admit_owned_pair_path(&path).map_err(
+            |err| {
+                PromoteError::Other(format!(
+                    "live WAL decode failed for {}: {err}",
+                    descriptor.segment_id
+                ))
+            },
+        )?;
         for idx in meta.index {
             if !idx.key.namespace.is_empty() {
                 out.push(idx.key.namespace);

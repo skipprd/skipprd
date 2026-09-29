@@ -32,7 +32,11 @@ impl RecordingSyncContext {
     }
 
     #[allow(dead_code)]
-    pub fn checkpoint_payload(&self, prompt_id: &str, model: &str) -> Option<PromptCheckpoint> {
+    pub fn checkpoint_payload(
+        &self,
+        prompt_id: &str,
+        model: &str,
+    ) -> Result<Option<PromptCheckpoint>, std::io::Error> {
         let key = crate::checkpoint::checkpoint_key(prompt_id, model);
         let ctx = self as &dyn SourceSyncContext;
         load_checkpoint_payload::<PromptCheckpoint>(ctx, &key)
@@ -93,8 +97,8 @@ impl SourceSyncContext for RecordingSyncContext {
         Ok(())
     }
 
-    fn load_checkpoint_envelope(&self, key: &str) -> Option<CheckpointEnvelope> {
-        self.checkpoints.lock().unwrap().get(key).cloned()
+    fn load_checkpoint_envelope(&self, key: &str) -> Result<Option<CheckpointEnvelope>, String> {
+        Ok(self.checkpoints.lock().unwrap().get(key).cloned())
     }
 }
 

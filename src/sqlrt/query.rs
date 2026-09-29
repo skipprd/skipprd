@@ -1,5 +1,5 @@
 use std::fs::OpenOptions;
-use std::io::{BufReader, Read, Seek};
+use std::io::BufReader;
 use std::{fs, process};
 // removed unused Write import
 use crate::discover::{Metadata, PipelineMetadata, SkipprDataType};
@@ -32,12 +32,10 @@ use datafusion::prelude::SessionConfig;
 use datafusion::arrow::array::RecordBatch;
 use datafusion::datasource::MemTable;
 // removed unused ViewTable
-use crate::buffer::segment_file::SegmentFile;
 use crate::ingest_work::Ingest;
 use crate::sqlrt::tui::{QueryEditorConfig, QueryEditorView};
 use crate::ARROW_SCHEMA;
 use arc_swap::ArcSwap;
-use arrow::ipc::reader::StreamReader;
 use datafusion::sql::sqlparser::ast::{
     Expr as StdExpr, Function, FunctionArg, FunctionArgExpr, FunctionArgumentList,
     FunctionArguments, GroupByExpr, Ident, ObjectName as SqlObjectName, OrderByKind,
@@ -1501,56 +1499,15 @@ pub async fn query_with_options(
                             register_catalog(&config, &ctx).await;
                             config = config.bind_pipeline(&pipeline_name);
                             config.init().await;
-                            let seg_dir = format!("{}/segment_buffer/segs", config.get_data_dir());
-                            let mut wal_batches: Vec<RecordBatch> = Vec::new();
-                            if std::path::Path::new(&seg_dir).exists() {
-                                let dir_iter = match std::fs::read_dir(&seg_dir) {
-                                    Ok(r) => r,
-                                    Err(_) => continue,
-                                };
-                                for entry in dir_iter {
-                                    if let Ok(ent) = entry {
-                                        let path = ent.path();
-                                        if path.extension().and_then(|s| s.to_str()) != Some("seg")
-                                        {
-                                            continue;
-                                        }
-                                        if let Ok(mut meta_file) = std::fs::File::open(&path) {
-                                            if let Ok(meta) = SegmentFile::read_metadata_from_reader(
-                                                &mut meta_file,
-                                            ) {
-                                                for idx in meta.index.iter() {
-                                                    if idx.key.namespace != pipeline_name {
-                                                        continue;
-                                                    }
-                                                    if let Ok(mut file) = std::fs::File::open(&path)
-                                                    {
-                                                        if file
-                                                            .seek(std::io::SeekFrom::Start(
-                                                                idx.start,
-                                                            ))
-                                                            .is_ok()
-                                                        {
-                                                            let reader =
-                                                                std::io::BufReader::new(file);
-                                                            let mut take = reader.take(idx.len);
-                                                            if let Ok(sr) = StreamReader::try_new(
-                                                                &mut take, None,
-                                                            ) {
-                                                                for it in sr {
-                                                                    if let Ok(b) = it {
-                                                                        wal_batches.push(b);
-                                                                    }
-                                                                }
-                                                            }
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            let reader =
+                                crate::sqlrt::wal_reader::WalReaderFactory::for_pipeline_async(
+                                    &config,
+                                    &pipeline_name,
+                                )
+                                .await;
+                            let wal_batches: Vec<RecordBatch> = reader
+                                .load_committed_batches(&pipeline_name, usize::MAX)
+                                .unwrap_or_default();
                             if !wal_batches.is_empty() {
                                 let schema = wal_batches[0].schema();
                                 let filtered: Vec<RecordBatch> = wal_batches

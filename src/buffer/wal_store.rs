@@ -1,12 +1,15 @@
 use crate::buffer::segment_file::{PartitionKey, SegmentFileMetadata};
-use crate::buffer::segment_object::SegmentObject;
+use crate::buffer::wal_object_store::{parse_s3_prefix, S3WalObjectStore};
+use crate::buffer::wal_persist::{persist_error_from_io, persist_snapshot_pair};
 use crate::helpers::configuration::Config;
 use crate::helpers::wal_storage::WalStorage;
 use arrow::array::RecordBatch;
 use async_trait::async_trait;
+use skippr_lease::LeaseGuard;
 use std::collections::HashMap;
 use std::io;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::SystemTime;
 use tokio::runtime::Handle;
 
@@ -46,6 +49,13 @@ where
     }
 }
 
+fn ingest_writer_store(store: &crate::buffer::durable::PipelineDurableStore) -> bool {
+    !matches!(
+        store.guard().role(),
+        skippr_lease::PipelineRole::Replica { .. }
+    )
+}
+
 fn ingest_primary_store(
     config: &Config,
 ) -> Option<std::sync::Arc<crate::buffer::durable::PipelineDurableStore>> {
@@ -56,27 +66,18 @@ fn ingest_primary_store(
     let key =
         skippr_lease::PipelineKey::new(config.get_tenant(), config.get_workspace_name(), pipeline)
             .ok()?;
-    crate::buffer::durable::durable_store_for(&key).filter(|store| {
-        matches!(
-            store.guard().role(),
-            skippr_lease::PipelineRole::ActivePrimary(_)
-        )
-    })
+    crate::buffer::durable::durable_store_for(&key).filter(|store| ingest_writer_store(store))
 }
 
-/// Ingest-path lookup: the ActivePrimary store for this process.
+/// Ingest-path lookup: this process's writer store for the pipeline (ActivePrimary,
+/// OwnerElect, or Idle after fence). Replica stores are not ingest writers.
 /// Replica/query code must use [`crate::buffer::durable::durable_store_for`].
 pub fn ingest_durable_store() -> Option<std::sync::Arc<crate::buffer::durable::PipelineDurableStore>>
 {
     ingest_primary_store(&Config::new()).or_else(|| {
         crate::buffer::durable::all_durable_stores()
             .into_iter()
-            .find(|store| {
-                matches!(
-                    store.guard().role(),
-                    skippr_lease::PipelineRole::ActivePrimary(_)
-                )
-            })
+            .find(|store| ingest_writer_store(store))
     })
 }
 
@@ -96,8 +97,8 @@ fn ingest_store_for_paths(
     })
 }
 
-/// Segment directory for the ingest pipeline: clustered `PipelinePaths` when an
-/// ActivePrimary store is installed for this config's pipeline, otherwise the
+/// Segment directory for the ingest pipeline: clustered `PipelinePaths` when a
+/// writer store is installed for this config's pipeline, otherwise the
 /// legacy `{DATA_DIR}/segment_buffer/...` layout used by S3 WAL.
 pub fn ingest_segment_dir(config: &Config) -> PathBuf {
     ingest_store_for_paths(config)
@@ -148,8 +149,6 @@ impl S3WalStore {
             prefix_url: prefix_url.to_string(),
         }
     }
-
-    // no extra helpers; streaming lives in SegmentObject
 }
 
 #[async_trait]
@@ -163,34 +162,39 @@ impl WalStore for S3WalStore {
         part_meta_blobs: &HashMap<PartitionKey, Vec<u8>>,
         _checkpoint_updates: &HashMap<String, crate::plugins::cdc::CheckpointEnvelope>,
     ) -> io::Result<SegmentWriteResult> {
+        let lease = ingest_writer_lease()?;
         let client = crate::helpers::s3::get_s3_client().await;
-        let (meta, total_rows, sha256, bucket, key) = SegmentObject::stream_snapshot_to_s3(
-            &client,
+        let (bucket, _) = parse_s3_prefix(&self.prefix_url)?;
+        let store = S3WalObjectStore::new(client, bucket);
+        persist_snapshot_pair(
+            &store,
             &self.prefix_url,
             snapshot_id,
             offsets,
             batches,
             partitions_meta,
             part_meta_blobs,
+            lease.as_ref(),
         )
-        .await?;
-        Ok(SegmentWriteResult {
-            meta,
-            total_rows,
-            sha256,
-            location: SegmentWriteLocation::S3 { key, bucket },
-            offsets_published: false,
-        })
+        .await
+        .map_err(|err| persist_error_from_io(err, snapshot_id))
     }
 }
 
 /// Disk-backed WAL uses [`PipelineDurableStore`] via [`ensure_disk_durable_store`].
 
-/// Install a local-only [`PipelineDurableStore`] on the legacy disk layout.
-/// Clustered mode must not call this; it uses tenant-scoped [`skippr_lease::PipelinePaths::new`].
+pub fn ingest_writer_lease() -> io::Result<Arc<LeaseGuard>> {
+    ingest_durable_store()
+        .map(|store| Arc::clone(store.guard()))
+        .ok_or_else(|| io::Error::other("pipeline writer lease is not installed"))
+}
+
+/// Install a [`PipelineDurableStore`] on the legacy disk layout using the
+/// acquired ingest writer lease. Clustered mode must not call this.
 pub fn ensure_disk_durable_store(
     config: &Config,
     offsets: std::sync::Arc<crate::helpers::offsets::Offsets>,
+    guard: Arc<LeaseGuard>,
 ) -> io::Result<()> {
     if ingest_primary_store(config).is_some() {
         return Ok(());
@@ -204,10 +208,13 @@ pub fn ensure_disk_durable_store(
     let key =
         skippr_lease::PipelineKey::new(config.get_tenant(), config.get_workspace_name(), pipeline)
             .map_err(|err| io::Error::other(err.to_string()))?;
+    if guard.key() != &key {
+        return Err(io::Error::other(
+            "installed writer lease does not match this pipeline",
+        ));
+    }
     let paths =
         skippr_lease::PipelinePaths::legacy_disk(std::path::Path::new(&config.get_data_dir()));
-    let clock = std::sync::Arc::new(skippr_lease::SystemClock::new());
-    let guard = skippr_lease::LeaseGuard::single_node(key.clone(), clock);
     let log = crate::buffer::durable::log::MutationLog::open(paths.clone())
         .map_err(|err| io::Error::other(err.to_string()))?;
     let store = crate::buffer::durable::store::PipelineDurableStore::new(
@@ -310,7 +317,7 @@ mod tests {
 
     #[test]
     #[serial_test::serial]
-    fn ingest_durable_store_requires_active_primary() {
+    fn ingest_durable_store_hides_replica() {
         clear_active_durable_store();
         let dir = tempfile::tempdir().unwrap();
         let key = PipelineKey::new("t", "w", "idle-only").unwrap();
@@ -331,6 +338,31 @@ mod tests {
         );
         install_durable_store(store);
         assert!(ingest_durable_store().is_none());
+        remove_durable_store(&key);
+    }
+
+    #[test]
+    #[serial_test::serial]
+    fn ingest_durable_store_keeps_fenced_writer() {
+        clear_active_durable_store();
+        let dir = tempfile::tempdir().unwrap();
+        let key = PipelineKey::new("t", "w", "fenced-writer").unwrap();
+        let paths = PipelinePaths::new(dir.path(), &key).unwrap();
+        let guard = LeaseGuard::single_node(key.clone(), Arc::new(SystemClock::new()));
+        let log = MutationLog::open(paths.clone()).unwrap();
+        let store = PipelineDurableStore::new(
+            key.clone(),
+            paths,
+            guard,
+            log,
+            ReplicationMode::LocalOnly,
+            OffsetMode::Dynamo(MemoryOffsetPublisher::new()),
+        );
+        install_durable_store(store);
+        let found = ingest_durable_store().expect("writer store is installed");
+        found.guard().fence();
+        let fenced = ingest_durable_store().expect("fenced writer store must stay visible");
+        assert!(fenced.guard().require_active_epoch().is_err());
         remove_durable_store(&key);
     }
 }

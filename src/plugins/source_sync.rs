@@ -124,5 +124,5 @@ pub trait SourceSyncContext: Send + Sync {
     fn store_checkpoint(&self, key: &str, envelope: &CheckpointEnvelope) -> Result<(), String>;
 
     /// Load a durable checkpoint envelope from the host offset store.
-    fn load_checkpoint_envelope(&self, key: &str) -> Option<CheckpointEnvelope>;
+    fn load_checkpoint_envelope(&self, key: &str) -> Result<Option<CheckpointEnvelope>, String>;
 }

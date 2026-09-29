@@ -160,7 +160,7 @@ impl DataSource for DataSourceContentQualityPlugin {
 
         for page in pages {
             let url = page.parsed.canonical_url.clone();
-            let checkpoint = load_page_checkpoint(ctx.as_ref(), &url);
+            let checkpoint = load_page_checkpoint(ctx.as_ref(), &url)?;
             let unchanged = content_unchanged(
                 self.config.skip_unchanged_content,
                 checkpoint.as_ref(),

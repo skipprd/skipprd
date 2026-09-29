@@ -1,7 +1,5 @@
-use std::collections::HashSet;
-use std::fs::File;
-
 use skippr_lease::{PipelineKey, SegmentId};
+use std::collections::HashSet;
 
 use crate::buffer::durable::log::MutationLog;
 use crate::buffer::durable::mutation::DurableMutation;
@@ -54,11 +52,7 @@ pub fn select_live_ordinals(
             continue;
         };
         let path = log.paths().segment(&seg_id);
-        let mut file = match File::open(&path) {
-            Ok(file) => file,
-            Err(_) => continue,
-        };
-        let Ok(meta) = SegmentFile::read_metadata_from_reader(&mut file) else {
+        let Ok(meta) = SegmentFile::admit_owned_pair_path(&path) else {
             continue;
         };
         for ordinal in 0..meta.index.len() as u32 {
@@ -127,8 +121,10 @@ mod tests {
                     .unwrap();
             batches.insert(part, vec![batch]);
         }
-        seg.write_snapshot(&HashMap::new(), &batches, &HashMap::new(), &HashMap::new())
+        let (meta, _rows, _sha) = seg
+            .write_snapshot(&HashMap::new(), &batches, &HashMap::new(), &HashMap::new())
             .unwrap();
+        seg.write_commit_marker(&meta).unwrap();
     }
 
     fn commit(

@@ -190,7 +190,7 @@ impl DataSourceMongodbPlugin {
             self.config.database, self.config.collection
         );
         let stored_token =
-            load_checkpoint_payload::<MongodbCheckpoint>(ctx.as_ref(), &checkpoint_key)
+            load_checkpoint_payload::<MongodbCheckpoint>(ctx.as_ref(), &checkpoint_key)?
                 .map(|checkpoint| checkpoint.resume_token);
         let resume_mode = stored_token.is_some();
 

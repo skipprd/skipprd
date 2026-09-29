@@ -28,7 +28,7 @@ pub fn load_page_checkpoint(
     ctx: &dyn SourceSyncContext,
     canonical_url: &str,
     device_profile: &str,
-) -> Option<PageCheckpoint> {
+) -> Result<Option<PageCheckpoint>, std::io::Error> {
     let key = checkpoint_key(canonical_url, device_profile);
     load_checkpoint_payload::<PageCheckpoint>(ctx, &key)
 }

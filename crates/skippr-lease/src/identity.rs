@@ -177,6 +177,26 @@ impl PipelineKey {
         format!("{}#{}#{}", self.tenant, self.workspace, self.pipeline)
     }
 
+    pub fn pipe_pk(&self) -> String {
+        format!("PIPE#{}#{}#{}", self.tenant, self.workspace, self.pipeline)
+    }
+
+    pub fn parse_pipe_pk(pk: &str) -> Result<Self, PathError> {
+        let rest = pk.strip_prefix("PIPE#").ok_or_else(|| {
+            PathError::InvalidComponent(format!("pipeline META PK must start with PIPE#: {pk}"))
+        })?;
+        let mut parts = rest.split('#');
+        let tenant = parts.next().unwrap_or("");
+        let workspace = parts.next().unwrap_or("");
+        let pipeline = parts.next().unwrap_or("");
+        if parts.next().is_some() {
+            return Err(PathError::InvalidComponent(format!(
+                "pipeline META PK must be PIPE#tenant#workspace#name: {pk}"
+            )));
+        }
+        Self::new(tenant, workspace, pipeline)
+    }
+
     pub fn canonical_bytes(&self) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(self.tenant.as_bytes());
@@ -253,5 +273,16 @@ mod tests {
             ClusterId::new("acme").unwrap().membership_pk()
         );
         assert!(!key.dynamo_pk().ends_with("#cluster"));
+    }
+
+    #[test]
+    fn pipeline_key_pipe_pk_roundtrips_and_rejects_hash() {
+        let key = PipelineKey::new("acme", "default", "orders").unwrap();
+        assert_eq!(key.pipe_pk(), "PIPE#acme#default#orders");
+        assert_eq!(PipelineKey::parse_pipe_pk(&key.pipe_pk()).unwrap(), key);
+        assert!(PipelineKey::new("acme#x", "default", "orders").is_err());
+        assert!(PipelineKey::parse_pipe_pk("acme#default#orders").is_err());
+        assert!(PipelineKey::parse_pipe_pk("PIPE#acme#default#orders#extra").is_err());
+        assert!(PipelineKey::parse_pipe_pk("RUN#t#r").is_err());
     }
 }

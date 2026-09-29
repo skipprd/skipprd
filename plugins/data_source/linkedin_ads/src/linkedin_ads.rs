@@ -173,9 +173,14 @@ impl DataSourceLinkedInAdsPlugin {
     fn checkpoint_key(&self, namespace: &str) -> String {
         format!("linkedin_ads:{}:{}", self.account_id, namespace)
     }
-    fn load_last_completed(ctx: &dyn SourceSyncContext, key: &str) -> Option<NaiveDate> {
-        load_checkpoint_payload::<LinkedInNamespaceCheckpoint>(ctx, key)
-            .and_then(|cp| Self::parse_date(&cp.last_completed_date).ok())
+    fn load_last_completed(
+        ctx: &dyn SourceSyncContext,
+        key: &str,
+    ) -> Result<Option<NaiveDate>, std::io::Error> {
+        Ok(
+            load_checkpoint_payload::<LinkedInNamespaceCheckpoint>(ctx, key)?
+                .and_then(|cp| Self::parse_date(&cp.last_completed_date).ok()),
+        )
     }
     fn store_last_completed(
         ctx: &dyn SourceSyncContext,
@@ -371,7 +376,7 @@ impl DataSource for DataSourceLinkedInAdsPlugin {
                     let last = if discover {
                         None
                     } else {
-                        Self::load_last_completed(ctx.as_ref(), &key)
+                        Self::load_last_completed(ctx.as_ref(), &key)?
                     };
                     let end = if discover {
                         discover_sample_date_window(end_date).1

@@ -187,7 +187,7 @@ impl DataSourceLocalFilePlugin {
             ctx.clone(),
             self.config.path.clone(),
             self.config.batch_size_bytes.unwrap_or(1_000_000),
-        ));
+        )?);
 
         while let Some(batch_groups) = data_batches_stream.next().await {
             submit_payload_batch_groups(ctx.as_ref(), batch_groups)?;
@@ -200,7 +200,7 @@ impl DataSourceLocalFilePlugin {
         ctx: Arc<dyn SourceSyncContext>,
         source_dir: String,
         chunk_size: i64,
-    ) -> impl futures::Stream<Item = Vec<Vec<IngestBatch>>> {
+    ) -> Result<impl futures::Stream<Item = Vec<Vec<IngestBatch>>>, std::io::Error> {
         let (tx, rx) = futures::channel::mpsc::unbounded();
         let input_format = InputFormat::from_option(self.config.format.as_deref());
         let ingest_config = Config::new();
@@ -217,7 +217,7 @@ impl DataSourceLocalFilePlugin {
                 offset_key.partition.clone(),
             );
 
-            if partition_already_closed(ctx.as_ref(), &closed_key) {
+            if partition_already_closed(ctx.as_ref(), &closed_key)? {
                 continue;
             }
 
@@ -308,7 +308,7 @@ impl DataSourceLocalFilePlugin {
             }
         }
 
-        rx
+        Ok(rx)
     }
 }
 

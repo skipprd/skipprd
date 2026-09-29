@@ -25,7 +25,7 @@ pub fn load_prompt_checkpoint(
     ctx: &dyn SourceSyncContext,
     prompt_id: &str,
     model: &str,
-) -> Option<PromptCheckpoint> {
+) -> Result<Option<PromptCheckpoint>, std::io::Error> {
     let key = checkpoint_key(prompt_id, model);
     load_checkpoint_payload::<PromptCheckpoint>(ctx, &key)
 }
@@ -94,7 +94,9 @@ mod tests {
             link_count: 3,
         };
         store_prompt_checkpoint(ctx.as_ref(), "p1", "gpt-4.1-mini", &payload).unwrap();
-        let loaded = load_prompt_checkpoint(ctx.as_ref(), "p1", "gpt-4.1-mini").unwrap();
+        let loaded = load_prompt_checkpoint(ctx.as_ref(), "p1", "gpt-4.1-mini")
+            .unwrap()
+            .expect("checkpoint stored");
         assert_eq!(loaded, payload);
     }
 

@@ -104,12 +104,11 @@ pub fn validate_wal_storage_for_mode(
 
 pub fn validate_clustered_backend(
     storage: WalStorage,
-    configured_offset_store: Option<OffsetStoreKind>,
+    kind: OffsetStoreKind,
     table: &str,
 ) -> Result<OffsetStoreKind, ConfigError> {
     match storage {
         WalStorage::Disk | WalStorage::S3 => {
-            let kind = configured_offset_store.unwrap_or(OffsetStoreKind::Sled);
             if kind == OffsetStoreKind::CloudTables {
                 if !cloud_tables_feature_enabled() {
                     return Err(ConfigError::ClusteredFeatureMissing);
@@ -130,15 +129,9 @@ pub fn validate_clustered_backend(
             if table.trim().is_empty() {
                 return Err(ConfigError::ClusteredTableMissing);
             }
-            let kind = match configured_offset_store {
-                Some(OffsetStoreKind::Sled) => {
-                    return Err(ConfigError::ClusteredOffsetStoreConflict("sled".into()));
-                }
-                Some(OffsetStoreKind::CloudTables) => OffsetStoreKind::CloudTables,
-                Some(OffsetStoreKind::DynamoDb) => OffsetStoreKind::DynamoDb,
-                None if dynamodb_feature_enabled() => OffsetStoreKind::DynamoDb,
-                None => OffsetStoreKind::CloudTables,
-            };
+            if kind == OffsetStoreKind::Sled {
+                return Err(ConfigError::ClusteredOffsetStoreConflict("sled".into()));
+            }
             match kind {
                 OffsetStoreKind::DynamoDb if !dynamodb_feature_enabled() => {
                     Err(ConfigError::ClusteredFeatureMissing)
@@ -209,8 +202,9 @@ fn validate_configured_offset_store(
     storage: WalStorage,
 ) -> Result<OffsetStoreKind, ConfigError> {
     let table = config.get_offset_dynamodb_table();
-    let configured = config.configured_offset_store()?;
-    validate_clustered_backend(storage, configured, &table)
+    let kind = crate::pipeline_backend::configured_kind(config)
+        .map_err(ConfigError::InvalidOffsetStore)?;
+    validate_clustered_backend(storage, kind, &table)
 }
 
 pub fn validate_clustered_cli(
@@ -352,7 +346,7 @@ mod tests {
 
     #[test]
     fn clustered_without_table_fails() {
-        let err = validate_clustered_backend(WalStorage::Clustered, None, "").unwrap_err();
+        let err = validate_clustered_backend(WalStorage::Clustered, OffsetStoreKind::default_for_wal(WalStorage::Clustered), "").unwrap_err();
         #[cfg(any(
             feature = "offset-store-dynamodb",
             feature = "offset-store-cloud-tables"
@@ -369,7 +363,7 @@ mod tests {
     fn clustered_rejects_explicit_sled() {
         let err = validate_clustered_backend(
             WalStorage::Clustered,
-            Some(OffsetStoreKind::Sled),
+            OffsetStoreKind::Sled,
             "offsets",
         )
         .unwrap_err();
@@ -397,7 +391,7 @@ mod tests {
         #[cfg(feature = "offset-store-dynamodb")]
         {
             assert_eq!(
-                validate_clustered_backend(WalStorage::Clustered, None, "offsets").unwrap(),
+                validate_clustered_backend(WalStorage::Clustered, OffsetStoreKind::default_for_wal(WalStorage::Clustered), "offsets").unwrap(),
                 OffsetStoreKind::DynamoDb
             );
         }
@@ -407,7 +401,7 @@ mod tests {
         ))]
         {
             assert_eq!(
-                validate_clustered_backend(WalStorage::Clustered, None, "offsets").unwrap_err(),
+                validate_clustered_backend(WalStorage::Clustered, OffsetStoreKind::default_for_wal(WalStorage::Clustered), "offsets").unwrap_err(),
                 ConfigError::CloudTablesEndpointMissing
             );
         }
@@ -417,7 +411,7 @@ mod tests {
         )))]
         {
             assert_eq!(
-                validate_clustered_backend(WalStorage::Clustered, None, "offsets").unwrap_err(),
+                validate_clustered_backend(WalStorage::Clustered, OffsetStoreKind::default_for_wal(WalStorage::Clustered), "offsets").unwrap_err(),
                 ConfigError::ClusteredFeatureMissing
             );
         }
@@ -426,11 +420,11 @@ mod tests {
     #[test]
     fn disk_and_s3_do_not_require_dynamodb() {
         assert_eq!(
-            validate_clustered_backend(WalStorage::Disk, None, "").unwrap(),
+            validate_clustered_backend(WalStorage::Disk, OffsetStoreKind::default_for_wal(WalStorage::Disk), "").unwrap(),
             OffsetStoreKind::Sled
         );
         assert_eq!(
-            validate_clustered_backend(WalStorage::S3, Some(OffsetStoreKind::DynamoDb), "t")
+            validate_clustered_backend(WalStorage::S3, OffsetStoreKind::DynamoDb, "t")
                 .unwrap(),
             OffsetStoreKind::DynamoDb
         );
@@ -447,7 +441,7 @@ mod tests {
         std::env::set_var("CLOUD_BEARER_TOKEN", "guest-held-jwt");
         let err = validate_clustered_backend(
             WalStorage::Disk,
-            Some(OffsetStoreKind::CloudTables),
+            OffsetStoreKind::CloudTables,
             "offsets",
         )
         .unwrap_err();
@@ -522,7 +516,7 @@ mod tests {
         std::env::set_var("CLOUD_ACCESS_TOKEN", "guest-held-jwt");
         let err = validate_clustered_backend(
             WalStorage::Clustered,
-            Some(OffsetStoreKind::CloudTables),
+            OffsetStoreKind::CloudTables,
             "offsets",
         )
         .unwrap_err();
@@ -558,7 +552,7 @@ mod tests {
         std::env::remove_var("CLOUD_SYSTEM_BROKER_CONFIG");
         let err = validate_clustered_backend(
             WalStorage::Clustered,
-            Some(OffsetStoreKind::CloudTables),
+            OffsetStoreKind::CloudTables,
             "offsets",
         )
         .unwrap_err();
@@ -594,7 +588,7 @@ mod tests {
         std::env::remove_var("CLOUD_OPERATOR_ACCESS_KEY_ID");
         let kind = validate_clustered_backend(
             WalStorage::Clustered,
-            Some(OffsetStoreKind::CloudTables),
+            OffsetStoreKind::CloudTables,
             "offsets",
         );
         std::env::remove_var("CLOUD_TABLES_ENDPOINT");

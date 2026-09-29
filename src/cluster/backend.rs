@@ -12,34 +12,14 @@ pub async fn open_lease_store(
     config: &Config,
     table: String,
 ) -> Result<Arc<dyn PipelineLeaseStore>, String> {
-    match configured_kind(config)? {
-        OffsetStoreKind::CloudTables => {
-            #[cfg(feature = "offset-store-cloud-tables")]
-            {
-                let store = skippr_lease_store_cloud_tables::CloudTablesLeaseStore::connect(table)
-                    .await
-                    .map_err(|err| err.to_string())?;
-                return Ok(Arc::new(store));
-            }
-            #[cfg(not(feature = "offset-store-cloud-tables"))]
-            {
-                let _ = table;
-                Err("SKIPPR_OFFSET_STORE=cloud-tables requires --features offset-store-cloud-tables".into())
-            }
-        }
-        OffsetStoreKind::DynamoDb | OffsetStoreKind::Sled => {
-            #[cfg(feature = "offset-store-dynamodb")]
-            {
-                let store = skippr_lease_store_dynamodb::DynamoDbLeaseStore::connect(table)
-                    .await
-                    .map_err(|err| err.to_string())?;
-                Ok(Arc::new(store))
-            }
-            #[cfg(not(feature = "offset-store-dynamodb"))]
-            {
-                let _ = table;
-                Err("clustered sync requires --features offset-store-dynamodb".into())
-            }
+    let kind = crate::pipeline_backend::configured_kind(config)?;
+    match kind {
+        OffsetStoreKind::Sled => Err(
+            "clustered pipeline leases require dynamodb or cloud-tables; sled is the Disk/S3 lease backend"
+                .into(),
+        ),
+        OffsetStoreKind::CloudTables | OffsetStoreKind::DynamoDb => {
+            crate::pipeline_backend::open_pipeline_lease_store(kind, None, table).await
         }
     }
 }
@@ -48,7 +28,7 @@ pub async fn open_membership_store(
     config: &Config,
     table: String,
 ) -> Result<Arc<dyn ClusterMembershipStore>, String> {
-    match configured_kind(config)? {
+    match crate::pipeline_backend::configured_kind(config)? {
         OffsetStoreKind::CloudTables => {
             #[cfg(feature = "offset-store-cloud-tables")]
             {
@@ -64,7 +44,7 @@ pub async fn open_membership_store(
                 Err("SKIPPR_OFFSET_STORE=cloud-tables requires --features offset-store-cloud-tables".into())
             }
         }
-        OffsetStoreKind::DynamoDb | OffsetStoreKind::Sled => {
+        OffsetStoreKind::DynamoDb => {
             #[cfg(feature = "offset-store-dynamodb")]
             {
                 let store = skippr_lease_store_dynamodb::DynamoDbMembershipStore::connect(table)
@@ -78,25 +58,18 @@ pub async fn open_membership_store(
                 Err("clustered membership requires --features offset-store-dynamodb".into())
             }
         }
-    }
-}
-
-pub fn configured_kind(config: &Config) -> Result<OffsetStoreKind, String> {
-    match config.configured_offset_store() {
-        Ok(Some(kind)) => Ok(kind),
-        Ok(None) => {
-            if cfg!(feature = "offset-store-dynamodb") {
-                Ok(OffsetStoreKind::DynamoDb)
-            } else {
-                Ok(OffsetStoreKind::CloudTables)
-            }
-        }
-        Err(err) => Err(err.to_string()),
+        OffsetStoreKind::Sled => Err(
+            "clustered membership requires dynamodb or cloud-tables; sled is the Disk/S3 lease backend"
+                .into(),
+        ),
     }
 }
 
 pub fn uses_cloud_tables(config: &Config) -> bool {
-    matches!(configured_kind(config), Ok(OffsetStoreKind::CloudTables))
+    matches!(
+        crate::pipeline_backend::configured_kind(config),
+        Ok(OffsetStoreKind::CloudTables)
+    )
 }
 
 pub async fn open_skippr_catalog(
@@ -181,8 +154,60 @@ pub fn offset_publisher_for(
     #[cfg(not(feature = "offset-store-dynamodb"))]
     {
         let _ = (config, key);
-        Ok(OffsetMode::Dynamo(
-            crate::buffer::durable::store::MemoryOffsetPublisher::new(),
+        Err(DurableError::ProtocolMismatch(
+            "clustered offset publish requires --features offset-store-dynamodb or offset-store-cloud-tables"
+                .into(),
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use serial_test::serial;
+
+    fn disk_config() -> Config {
+        serde_json::from_value(json!({
+            "skippr": { "workspace": "ws-a", "tenant": "ten-a" },
+            "pipelines": {
+                "orders": { "data_source": "data_sources.sample" }
+            },
+            "data_sources": {
+                "sample": { "S3": { "s3_bucket": "b", "s3_prefix": "p" } }
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    #[serial]
+    fn disk_without_offset_store_is_sled_not_cloud_tables() {
+        let old_store = std::env::var("SKIPPR_OFFSET_STORE").ok();
+        let old_wal = std::env::var("WAL_STORAGE").ok();
+        std::env::remove_var("SKIPPR_OFFSET_STORE");
+        Config::set_evncache("SKIPPR_OFFSET_STORE", "");
+        Config::set_wal_storage("disk");
+        let config = disk_config();
+        assert_eq!(
+            crate::pipeline_backend::configured_kind(&config).unwrap(),
+            OffsetStoreKind::Sled
+        );
+        assert!(
+            !uses_cloud_tables(&config),
+            "Disk YAML pipelines must not switch the registry to Cloud Tables"
+        );
+        if let Some(value) = old_store {
+            Config::set_offset_store(&value);
+        } else {
+            std::env::remove_var("SKIPPR_OFFSET_STORE");
+            Config::set_evncache("SKIPPR_OFFSET_STORE", "");
+        }
+        if let Some(value) = old_wal {
+            Config::set_wal_storage(&value);
+        } else {
+            std::env::remove_var("WAL_STORAGE");
+            Config::set_evncache("WAL_STORAGE", "");
+        }
     }
 }

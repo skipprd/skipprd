@@ -298,15 +298,18 @@ impl DataSourceGoogleSearchConsolePlugin {
         format!("gsc:{}:{}", self.config.normalized_site_url(), namespace)
     }
 
-    fn load_last_completed(ctx: &dyn SourceSyncContext, key: &str) -> Option<NaiveDate> {
-        let Some(cp) = load_checkpoint_payload::<GscNamespaceCheckpoint>(ctx, key) else {
-            return None;
+    fn load_last_completed(
+        ctx: &dyn SourceSyncContext,
+        key: &str,
+    ) -> Result<Option<NaiveDate>, std::io::Error> {
+        let Some(cp) = load_checkpoint_payload::<GscNamespaceCheckpoint>(ctx, key)? else {
+            return Ok(None);
         };
         match Self::parse_date(&cp.last_completed_date) {
-            Ok(date) => Some(date),
+            Ok(date) => Ok(Some(date)),
             Err(err) => {
                 tracing::warn!("GSC ignoring corrupt checkpoint for {key}: {err}");
-                None
+                Ok(None)
             }
         }
     }
@@ -395,7 +398,7 @@ impl DataSourceGoogleSearchConsolePlugin {
         let last_completed = if discover {
             None
         } else {
-            Self::load_last_completed(ctx.as_ref(), &checkpoint_key)
+            Self::load_last_completed(ctx.as_ref(), &checkpoint_key)?
         };
         let planner = DateWindowPlanner {
             lookback_days: if discover {
@@ -934,8 +937,11 @@ mod tests {
             Ok(())
         }
 
-        fn load_checkpoint_envelope(&self, _key: &str) -> Option<CheckpointEnvelope> {
-            None
+        fn load_checkpoint_envelope(
+            &self,
+            _key: &str,
+        ) -> Result<Option<CheckpointEnvelope>, String> {
+            Ok(None)
         }
     }
 }

@@ -307,7 +307,7 @@ impl DataSource for UpfoundryLinkGraphWatIndexPlugin {
 
         let ckpt_key = checkpoint_key(&crawl_id);
         let checkpoint = effective_checkpoint(
-            load_checkpoint_payload::<WatManifestCheckpoint>(ctx.as_ref(), &ckpt_key),
+            load_checkpoint_payload::<WatManifestCheckpoint>(ctx.as_ref(), &ckpt_key)?,
             reset_checkpoint,
         );
         let manifest_uri =

@@ -7,7 +7,7 @@ use crate::helpers::configuration::Config;
 pub async fn scheduled_pipeline_keys(cfg: &Config) -> Result<Vec<PipelineKey>, DurableError> {
     #[cfg(feature = "offset-store-cloud-tables")]
     {
-        if crate::cluster::backend::uses_cloud_tables() {
+        if crate::cluster::backend::uses_cloud_tables(cfg) {
             return cloud_tables_keys().await;
         }
     }
@@ -31,10 +31,6 @@ fn yaml_pipeline_keys(cfg: &Config) -> Result<Vec<PipelineKey>, DurableError> {
 async fn cloud_tables_keys() -> Result<Vec<PipelineKey>, DurableError> {
     use skippr_lease_store_cloud_tables::PipelineRegistry;
     let registry = skippr_lease_store_cloud_tables::CloudTablesPipelineRegistry::connect()
-        .await
-        .map_err(|err| DurableError::Io(err.to_string()))?;
-    registry
-        .ensure_platform_otel()
         .await
         .map_err(|err| DurableError::Io(err.to_string()))?;
     let records = registry
@@ -96,14 +92,16 @@ mod tests {
             kind: PipelineKind::Tenant,
             enabled: true,
             generation: 1,
-            config: None,
+            source: Some("postgres://orders".into()),
+            sink: Some("iceberg://lake".into()),
         });
         registry.upsert(PipelineRecord {
             key: PipelineKey::new("globex", "default", "orders").unwrap(),
             kind: PipelineKind::Tenant,
             enabled: true,
             generation: 1,
-            config: None,
+            source: Some("postgres://orders".into()),
+            sink: Some("iceberg://lake".into()),
         });
         registry.upsert(PipelineRecord::platform_otel(OTEL_LOGS).unwrap());
         let listed = registry.list().await.unwrap();

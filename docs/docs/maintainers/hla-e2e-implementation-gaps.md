@@ -31,9 +31,9 @@ Named point `FailpointName::AfterPrepared`. The e2e binary arms it by writing th
 
 ## 2. Dynamo offset read errors are not “never ingested” — closed
 
-`Offsets::try_get` / `get` / `snapshot_value` / `validate` return `Result<_, OffsetsError>`. Store I/O is `OffsetsError::Store`, not `None`. Ingest `process_batch` fails the request on snapshot error. Offset-service `should_process` is false on `Err`. Source `partition_already_closed` fails closed when the offset service does not answer.
+`Offsets::try_get` / `get` / `snapshot_value` / `validate` return `Result<_, OffsetsError>`. Store I/O is `OffsetsError::Store`, not `None`. Ingest `process_batch` fails the request on snapshot error. Offset-service `validate_entries` returns `Err` on store I/O (the RPC fails; it does not map store errors to `should_process: false`). Source `partition_already_closed` fails closed when the offset service does not answer.
 
-**Tests:** `store_read_error_is_not_missing`, `store_error_does_not_process`, `closed_check_fails_closed_on_offset_service_error`.
+**Tests:** `store_read_error_is_not_missing`, `validate_entries_surfaces_store_errors`, `closed_check_fails_closed_on_offset_service_error`.
 
 ## 3. One Dynamo offset write protocol — closed
 
