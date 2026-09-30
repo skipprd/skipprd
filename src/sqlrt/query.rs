@@ -93,7 +93,9 @@ impl Default for QueryExecutionOptions {
 }
 
 // Build a SessionContext and pre-register all pipelines/namespaces so two-part names resolve
-pub async fn new_context_all_namespaces(config: &Config) -> SessionContext {
+pub async fn new_context_all_namespaces(
+    config: &Config,
+) -> Result<SessionContext, DataFusionError> {
     let ctx = crate::sqlrt::session::build_query_context(SessionConfig::new());
     let pipelines = crate::sqlrt::registry::list_pipelines(&config).await;
     for pipeline in pipelines {
@@ -101,12 +103,11 @@ pub async fn new_context_all_namespaces(config: &Config) -> SessionContext {
         namespaces.sort();
         for ns in namespaces {
             // Keep sqlrt self-contained: register DataFusion views directly via sqlrt tables.
-            let _ =
-                crate::sqlrt::tables::register_namespace_view(&ctx, config, &pipeline, &ns).await;
+            crate::sqlrt::tables::register_namespace_view(&ctx, config, &pipeline, &ns).await?;
         }
         let _ = crate::sqlrt::tables::register_deadletters(&ctx, config, &pipeline).await;
     }
-    ctx
+    Ok(ctx)
 }
 
 pub async fn register_catalog(config: &Config, ctx: &SessionContext) {
@@ -263,7 +264,9 @@ pub async fn query_collect(
     sql_str: &str,
 ) -> std::io::Result<Vec<arrow::array::RecordBatch>> {
     config.init().await;
-    let ctx = new_context_all_namespaces(&config).await;
+    let ctx = new_context_all_namespaces(&config)
+        .await
+        .map_err(|e| std::io::Error::other(e.to_string()))?;
     let df = ctx
         .sql(sql_str)
         .await
@@ -1932,5 +1935,27 @@ mod plain_query_document_tests {
         assert!(super::sql_uses_record_batch_collect(
             "SELECT 1 FROM pipe.ns"
         ));
+    }
+
+    #[test]
+    fn namespace_register_errors_are_not_swallowed() {
+        let src = include_str!("query.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let start = prod
+            .find("pub async fn new_context_all_namespaces")
+            .expect("new_context_all_namespaces");
+        let body = prod[start..]
+            .split("pub async fn ")
+            .nth(1)
+            .expect("function body after signature");
+        assert!(
+            !body
+                .contains("let _ =\n                crate::sqlrt::tables::register_namespace_view"),
+            "Iceberg catalog/scan failure must fail the query, not leave tables unregistered"
+        );
+        assert!(
+            body.contains("register_namespace_view(&ctx, config, &pipeline, &ns).await?"),
+            "query context must propagate Iceberg catalog register errors"
+        );
     }
 }
