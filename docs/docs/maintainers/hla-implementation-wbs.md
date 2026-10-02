@@ -29,7 +29,7 @@ pub enum WalStorage {
 
 - Existing `WAL_STORAGE` / `--wal-storage` only.
 - `clustered` reuses existing `SKIPPR_OFFSET_DYNAMODB_TABLE` for offsets, leases, and membership.
-- Iceberg `catalog.type: skippr` uses a separate customer-created `catalog.table`. It MUST NOT be the offset table.
+- SkipprLake `catalog_table` is a separate customer-created catalog table. It MUST NOT be the offset table.
 - No lease/quorum/TTL/node/bind/peer-list knobs.
 - Quorum and replication factor are both two total copies.
 - `clustered` forces DynamoDB offsets/checkpoints.
@@ -569,8 +569,8 @@ No implicit majority on hash disagreement. Initialized head loss is fatal.
 
 **Create:** `crates/skippr-iceberg-catalog`.
 
-- Move `IcebergCatalogConfig` out of plugin.
-- Add Skippr `table`/`warehouse`/`region` variant (`catalog.type: skippr`). `table` is a customer-created catalog table, distinct from `SKIPPR_OFFSET_DYNAMODB_TABLE`.
+- Shared `SkipprLakeConfig { warehouse, catalog_table, region, object_store, table_namespace }` (IcebergCatalogConfig is deleted). `catalog_table` is a customer-created catalog table, distinct from `SKIPPR_OFFSET_DYNAMODB_TABLE`.
+- `SkipprLakeConfig { warehouse, catalog_table, region, object_store, table_namespace }`. `catalog_table` is a customer-created catalog table, distinct from `SKIPPR_OFFSET_DYNAMODB_TABLE`.
 - Plugin and host share one serde contract.
 - `glue_catalog` becomes `Arc<dyn Catalog>` factory/cache.
 - Refactor Glue-concrete commit helpers.
@@ -603,7 +603,7 @@ uuid, metadata_location, previous_location, generation
 
 **Tests:** MemoryCatalog parity, all methods, races, rename, non-empty namespace, stale requirements, orphan metadata.
 
-## WU-6.3 Iceberg sink wiring and query identity
+## WU-6.3 SkipprLake sink wiring and query identity
 
 - Build DynamoDB catalog in plugin.
 - Preserve Glue.
@@ -665,9 +665,9 @@ live_wal_scan(tenant, workspace, pipeline, namespace, exclude_segment_ids)
 - Foreign tenant/workspace and unknown pipeline fail closed. DDL/update rejected.
 - Membership `flight_addr` becomes the gRPC bind. Same ephemeral wildcard, no new knobs.
 - `IcebergWalUnionProvider` WAL child is `FlightSqlExec`, not eager `StreamingBatchesExec`. Until WU-7.5, `execute` MAY DoGet in-process on the query client.
-- Catalog listing stays prefix-filtered (`catalog_table_to_namespace`).
+- Catalog listing is the Iceberg table name (`catalog_table_to_namespace` is identity). Isolation is `table_namespace`.
 
-**Tests:** metadata prefix filter, SELECT unique ids, unknown pipeline, read-only rejection, reclaim between GetFlightInfo and DoGet skips the file, oversized SQL, Iceberg-only with no ready member, harness `query_each_replica_socket` over Flight SQL. `cargo test -p skipprd --lib query_flight::` replaces `query_socket::`.
+**Tests:** metadata lists tables in `table_namespace`, SELECT unique ids, unknown pipeline, read-only rejection, reclaim between GetFlightInfo and DoGet skips the file, oversized SQL, Iceberg-only with no ready member, harness `query_each_replica_socket` over Flight SQL. `cargo test -p skipprd --lib query_flight::` replaces `query_socket::`.
 
 ## WU-7.4 Unpinned UNION
 

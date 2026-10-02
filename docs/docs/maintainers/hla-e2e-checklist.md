@@ -153,7 +153,7 @@ Each item: ran the closest existing test if any. `[ ]` means the **process** sce
   - **Harness:** `corrupt_replica_purge` (2026-08-17 `run.py`).
   - **Result:** pass (harness advanced).
 
-### Compaction / Iceberg sink (WU-2.6 / WU-6.3)
+### Compaction / SkipprLake sink (WU-2.6 / WU-6.3)
 
 - [ ] Compaction crash after sink success, before `PutCompaction(Acked)`; restart is `AlreadyApplied`, no duplicate parquet
   - **Ran:** `after_compaction_sink` failpoint + `batch8.jsonl`; parquet count after recovery is not a duplicate-file blow-up; unique ids through `evt-20`.
