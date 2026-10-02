@@ -758,12 +758,12 @@ pub async fn clustered_query_collect(
     }
     tracing::info!(
         error = last_err.as_deref().unwrap_or("no ready Flight SQL node"),
-        "clustered query Flight SQL unreachable; Iceberg-only"
+        "clustered query Flight SQL unreachable; SkipprLake-only"
     );
-    run_iceberg_only_query(app_cfg, sql, &config).await
+    run_lake_only_query(app_cfg, sql, &config).await
 }
 
-async fn run_iceberg_only_query(
+async fn run_lake_only_query(
     app_cfg: &Config,
     sql: &str,
     config: &ClusterConfig,
@@ -775,18 +775,25 @@ async fn run_iceberg_only_query(
         scope,
         local_flight: "127.0.0.1:0".parse().unwrap(),
         registry: None,
-        iceberg_only: true,
+        lake_only: true,
     };
-    let df = crate::sqlrt::tables::plan_clustered_select(app_cfg, sql, &opts)
+    let plan = crate::sqlrt::tables::plan_clustered_select(app_cfg, sql, &opts)
         .await
         .map_err(|err| DurableError::Io(err.to_string()))?;
-    let batches = df
+    if !plan.wal_only.is_empty() {
+        tracing::info!(
+            wal_only = ?plan.wal_only,
+            "clustered query does not register WAL-only pipelines"
+        );
+    }
+    let batches = plan
+        .df
         .collect()
         .await
         .map_err(|err| DurableError::Io(err.to_string()))?;
     tracing::info!(
         rows = batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
-        "clustered query Iceberg-only"
+        "clustered query SkipprLake-only"
     );
     Ok(batches)
 }
@@ -854,7 +861,7 @@ mod tests {
     }
 
     #[test]
-    fn clustered_query_is_one_flight_or_iceberg_only() {
+    fn clustered_query_is_one_flight_or_lake_only() {
         let src = include_str!("scheduler.rs");
         let query = src
             .split("pub async fn clustered_query_collect")
@@ -864,8 +871,8 @@ mod tests {
             .next()
             .unwrap();
         assert!(query.contains("fetch_flight_sql"));
-        assert!(query.contains("Iceberg-only"));
-        assert!(query.contains("run_iceberg_only_query"));
+        assert!(query.contains("SkipprLake-only"));
+        assert!(query.contains("run_lake_only_query"));
         assert!(!query.contains("query_status"));
         assert!(!query.contains("query_schedulers"));
         assert!(!query.contains("select_highest_hash_consistent"));

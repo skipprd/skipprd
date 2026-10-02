@@ -1,0 +1,37 @@
+[package]
+name = "skippr-plugin-data-sink-skipprlake"
+version = "0.2.0"
+edition = "2021"
+
+[[bin]]
+name = "skippr-plugin-data-sink-skipprlake"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+tokio.workspace = true
+skippr-runtime-sdk.workspace = true
+skippr-iceberg-writer = { path = "../../../crates/skippr-iceberg-writer" }
+skippr-iceberg-catalog = { path = "../../../crates/skippr-iceberg-catalog" }
+skippr-iceberg-catalog-dynamodb = { path = "../../../crates/skippr-iceberg-catalog-dynamodb" }
+skippr-iceberg-catalog-cloud-tables = { path = "../../../crates/skippr-iceberg-catalog-cloud-tables" }
+iceberg = "0.9.1"
+
+[package.metadata.skippr-plugin]
+kind = "DataSink"
+plugin_name = "SkipprLake"
+
+[package.metadata.skippr-plugin.sink_capability]
+name = "SkipprLake"
+max_sessions_per_child = 1
+guarantee_tier = "ExactOnceCdcEligible"
+can_manage_skippr_columns = true
+can_maintain_tombstone_tables = true
+can_compare_order_tokens = true
+supports_transactions = true
+retry_semantics = "TransactionalIdempotent"
+grouping_support = "FinalStateBatches"
+supports_merge_by_key = true
+supports_replace_partition = true
+supports_replace_table = true
+supports_primary_key_metadata = false

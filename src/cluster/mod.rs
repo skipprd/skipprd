@@ -28,7 +28,7 @@ pub use identity::{
     derive_advertised_ip, derive_host_id, ClusterConfig, ClusterIdentity, ProcessQueryBind,
     TenantScope,
 };
-pub use pipeline_view::PipelineConfigView;
+pub use pipeline_view::{PipelineConfigView, QueryBackend};
 pub use validation::{validate_clustered_mode, CliModeKind};
 
 #[cfg(test)]

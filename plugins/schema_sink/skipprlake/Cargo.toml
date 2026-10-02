@@ -1,0 +1,19 @@
+[package]
+name = "skippr-plugin-schema-sink-skipprlake"
+version = "0.2.0"
+edition = "2021"
+
+[[bin]]
+name = "skippr-plugin-schema-sink-skipprlake"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+skippr-runtime-sdk.workspace = true
+tokio.workspace = true
+skippr-plugin-data-sink-skipprlake = { path = "../../data_sink/skipprlake" }
+
+[package.metadata.skippr-plugin]
+kind = "SchemaSink"
+plugin_name = "SkipprLake"
+supports_schema = true

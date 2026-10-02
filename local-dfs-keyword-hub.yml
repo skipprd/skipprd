@@ -45,16 +45,12 @@ data_sources:
 
 data_sinks:
   tenant_athena:
-    Iceberg:
-      table_location_prefix: s3://upfoundry-prod-datalake/datalake/local-dfs-hub-debug/iceberg
-      catalog:
-        type: glue
-        warehouse: s3://upfoundry-prod-datalake/datalake/local-dfs-hub-debug/iceberg
-        database: upfoundry_local_dfs_hub_debug
-        region: eu-west-1
-      query_engine:
-        type: athena
-        workgroup: primary
+    AthenaIceberg:
+      warehouse: s3://upfoundry-prod-datalake/datalake/local-dfs-hub-debug/iceberg
+      glue_database_name: upfoundry_local_dfs_hub_debug
+      athena_workgroup_name: primary
+      athena_results_s3_bucket: upfoundry-prod-datalake
+      region: eu-west-1
     schema_sink: schema_sinks.glue_tenant
 
 deadletter_sinks:
@@ -68,13 +64,12 @@ deadletter_sinks:
 
 schema_sinks:
   glue_tenant:
-    Iceberg:
-      table_location_prefix: s3://upfoundry-prod-datalake/datalake/local-dfs-hub-debug/iceberg
-      catalog:
-        type: glue
-        warehouse: s3://upfoundry-prod-datalake/datalake/local-dfs-hub-debug/iceberg
-        database: upfoundry_local_dfs_hub_debug
-        region: eu-west-1
+    AthenaIceberg:
+      warehouse: s3://upfoundry-prod-datalake/datalake/local-dfs-hub-debug/iceberg
+      glue_database_name: upfoundry_local_dfs_hub_debug
+      athena_workgroup_name: primary
+      athena_results_s3_bucket: upfoundry-prod-datalake
+      region: eu-west-1
   glue_deadletters:
     Glue:
       glue_database_name: upfoundry_local_dfs_hub_debug_deadletters

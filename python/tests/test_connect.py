@@ -177,23 +177,20 @@ def test_google_serp_targets_persist_as_yaml_list(tmp_path):
     assert "ex" in raw
 
 
-def test_iceberg_object_store_nested_persist_and_secret(tmp_path):
+def test_skipprlake_object_store_nested_persist_and_secret(tmp_path):
     path = tmp_path / "skippr.yml"
     skippr.workspace("demo", config=str(path))
     s = skippr.Session(pipeline="p", config_file=str(path))
     s.connect().data_sink(
-        skippr.DataSink.Iceberg,
-        skippr.DataSinkIceberg(
-            catalog=skippr.DataSinkIcebergIcebergCatalogConfig(
-                type="skippr",
-                table="cat",
-                warehouse="s3://wh/",
-                object_store=skippr.DataSinkIcebergWarehouseObjectStore(
-                    type="r2",
-                    endpoint="${OBJECTS_S3_ENDPOINT}",
-                    access_key_id="${OBJECTS_ACCESS_KEY_ID}",
-                    secret_access_key="${OBJECTS_SECRET_ACCESS_KEY}",
-                ),
+        skippr.DataSink.SkipprLake,
+        skippr.DataSinkSkipprLake(
+            warehouse="s3://wh/",
+            catalog_table="cat",
+            object_store=skippr.DataSinkSkipprLakeWarehouseObjectStore(
+                type="r2",
+                endpoint="${OBJECTS_S3_ENDPOINT}",
+                access_key_id="${OBJECTS_ACCESS_KEY_ID}",
+                secret_access_key="${OBJECTS_SECRET_ACCESS_KEY}",
             ),
         ),
     ).name("lake")
@@ -202,21 +199,97 @@ def test_iceberg_object_store_nested_persist_and_secret(tmp_path):
     assert "${OBJECTS_SECRET_ACCESS_KEY}" in raw
     with pytest.raises(ValueError, match=r"\$\{ENV\}"):
         s.connect().data_sink(
-            skippr.DataSink.Iceberg,
-            skippr.DataSinkIceberg(
-                catalog=skippr.DataSinkIcebergIcebergCatalogConfig(
-                    type="skippr",
-                    table="cat",
-                    warehouse="s3://wh/",
-                    object_store=skippr.DataSinkIcebergWarehouseObjectStore(
-                        type="r2",
-                        endpoint="https://x",
-                        access_key_id="k",
-                        secret_access_key="plaintext",
-                    ),
+            skippr.DataSink.SkipprLake,
+            skippr.DataSinkSkipprLake(
+                warehouse="s3://wh/",
+                catalog_table="cat",
+                object_store=skippr.DataSinkSkipprLakeWarehouseObjectStore(
+                    type="r2",
+                    endpoint="https://x",
+                    access_key_id="k",
+                    secret_access_key="plaintext",
                 ),
             ),
         ).name("lake")
+
+
+def test_athena_iceberg_persist_required_fields(tmp_path):
+    path = tmp_path / "skippr.yml"
+    skippr.workspace("demo", config=str(path))
+    s = skippr.Session(pipeline="p", config_file=str(path))
+    s.connect().data_sink(
+        skippr.DataSink.AthenaIceberg,
+        skippr.DataSinkAthenaIceberg(
+            warehouse="s3://wh/",
+            glue_database_name="analytics",
+            athena_workgroup_name="primary",
+            athena_results_s3_bucket="results",
+        ),
+    ).name("warehouse")
+    raw = path.read_text()
+    assert "AthenaIceberg:" in raw
+    assert "glue_database_name: analytics" in raw
+    assert "athena_workgroup_name: primary" in raw
+    assert "athena_results_s3_bucket: results" in raw
+    assert "catalog:" not in raw
+    assert "query_engine:" not in raw
+    assert "table_prefix:" not in raw
+
+
+def test_athena_iceberg_schema_sink_persist(tmp_path):
+    path = tmp_path / "skippr.yml"
+    skippr.workspace("demo", config=str(path))
+    s = skippr.Session(pipeline="p", config_file=str(path))
+    s.connect().schema_sink(
+        skippr.SchemaSink.AthenaIceberg,
+        skippr.SchemaSinkAthenaIceberg(
+            warehouse="s3://wh/",
+            glue_database_name="analytics",
+            athena_workgroup_name="primary",
+            athena_results_s3_bucket="results",
+        ),
+    ).name("warehouse_schema")
+    raw = path.read_text()
+    assert "AthenaIceberg:" in raw
+    assert "glue_database_name: analytics" in raw
+    assert "schema_sinks:" in raw
+
+
+def test_duckdb_persist_required_fields(tmp_path):
+    path = tmp_path / "skippr.yml"
+    skippr.workspace("demo", config=str(path))
+    s = skippr.Session(pipeline="p", config_file=str(path))
+    s.connect().data_sink(
+        skippr.DataSink.Duckdb,
+        skippr.DataSinkDuckdb(
+            warehouse="file:///tmp/lake",
+            table_namespace="bronze",
+        ),
+    ).name("lake")
+    raw = path.read_text()
+    assert "Duckdb:" in raw
+    assert "warehouse: file:///tmp/lake" in raw
+    assert "table_namespace: bronze" in raw
+    assert "catalog:" not in raw
+    assert "query_engine:" not in raw
+    assert "object_store:" not in raw
+
+
+def test_duckdb_schema_sink_persist(tmp_path):
+    path = tmp_path / "skippr.yml"
+    skippr.workspace("demo", config=str(path))
+    s = skippr.Session(pipeline="p", config_file=str(path))
+    s.connect().schema_sink(
+        skippr.SchemaSink.Duckdb,
+        skippr.SchemaSinkDuckdb(
+            warehouse="file:///tmp/lake",
+            table_namespace="bronze",
+        ),
+    ).name("lake_schema")
+    raw = path.read_text()
+    assert "Duckdb:" in raw
+    assert "table_namespace: bronze" in raw
+    assert "schema_sinks:" in raw
 
 
 def test_schema_sink_attaches_to_data_sink(tmp_path):

@@ -24,7 +24,9 @@ use skipprd::METRICS;
 use serde_json;
 use skipprd::benchmark::PerformanceBenchmark;
 use skipprd::sqlrt::doc_parser::SqlDocParser;
-use skipprd::sqlrt::docs::{get_docs_in_format, DocFormat};
+use skipprd::sqlrt::docs::{
+    get_docs_in_format, print_categorized_sql_docs, DocFormat, SqlDocListingKind,
+};
 use skipprd::sqlrt::query::{QueryExecutionMode, QueryExecutionOptions};
 
 // pub static DISPLAY_METRICS: Lazy<TimedRwLock<AtomicBool>> =
@@ -137,11 +139,25 @@ async fn async_main() {
     if let Some(bucket) = &cli.wal_s3_bucket {
         Config::set_wal_s3_bucket(bucket);
     }
-    if let Some(store) = &cli.offset_store {
-        Config::set_offset_store(store.as_str());
+    if let Some(store) = cli.store_type.as_ref().or(cli.offset_store.as_ref()) {
+        if cli.offset_store.is_some() && cli.store_type.is_none() {
+            tracing::warn!(
+                "--offset-store is deprecated; use --store-type (skippr.store.type / SKIPPR_STORE_TYPE)"
+            );
+        }
+        Config::set_skippr_store_type(store.as_str());
     }
-    if let Some(table) = &cli.offset_dynamodb_table {
-        Config::set_offset_dynamodb_table(table);
+    if let Some(table) = cli
+        .store_name
+        .as_deref()
+        .or(cli.offset_dynamodb_table.as_deref())
+    {
+        if cli.offset_dynamodb_table.is_some() && cli.store_name.is_none() {
+            tracing::warn!(
+                "--offset-dynamodb-table is deprecated; use --store-name (skippr.store.name / SKIPPR_STORE_NAME)"
+            );
+        }
+        Config::set_skippr_store_name(table);
     }
 
     // Initialize logging if --log is provided; default level is 'info', '--log debug' enables debug
@@ -439,64 +455,9 @@ async fn async_main() {
                     }
                 }
             } else {
-                // Show all SQL commands
                 println!("Supported SQL Commands:");
                 println!();
-
-                // Group by category for better readability
-                let mut schema_cmds = Vec::new();
-                let mut pipeline_cmds = Vec::new();
-                let mut data_cmds = Vec::new();
-                let mut query_cmds = Vec::new();
-
-                for doc in SqlDocParser::list_all_statements() {
-                    if doc.name.contains("SCHEMA") {
-                        schema_cmds.push(doc);
-                    } else if doc.name.contains("PIPELINE") {
-                        pipeline_cmds.push(doc);
-                    } else if doc.name.contains("TABLE") || doc.name.contains("DATABASE") {
-                        data_cmds.push(doc);
-                    } else {
-                        query_cmds.push(doc);
-                    }
-                }
-
-                if !schema_cmds.is_empty() {
-                    println!("Schema Operations:");
-                    println!("-----------------");
-                    for doc in schema_cmds {
-                        println!("  {} - {}", doc.name, doc.description);
-                    }
-                    println!();
-                }
-
-                if !pipeline_cmds.is_empty() {
-                    println!("Pipeline Operations:");
-                    println!("-------------------");
-                    for doc in pipeline_cmds {
-                        println!("  {} - {}", doc.name, doc.description);
-                    }
-                    println!();
-                }
-
-                if !data_cmds.is_empty() {
-                    println!("Data Operations:");
-                    println!("---------------");
-                    for doc in data_cmds {
-                        println!("  {} - {}", doc.name, doc.description);
-                    }
-                    println!();
-                }
-
-                if !query_cmds.is_empty() {
-                    println!("Query Operations:");
-                    println!("----------------");
-                    for doc in query_cmds {
-                        println!("  {} - {}", doc.name, doc.description);
-                    }
-                    println!();
-                }
-
+                print_categorized_sql_docs(SqlDocListingKind::Brief);
                 println!("For more details on a specific command, use:");
                 println!("  skipprd sql-help --command \"<SQL COMMAND>\"");
                 println!();
@@ -562,6 +523,8 @@ async fn async_main() {
             if cli.workspace.is_some()
                 || cli.storage_mode.is_some()
                 || cli.wal_s3_bucket.is_some()
+                || cli.store_type.is_some()
+                || cli.store_name.is_some()
                 || cli.offset_store.is_some()
                 || cli.offset_dynamodb_table.is_some()
                 || cli.skippr_s3_bucket.is_some()
@@ -572,8 +535,10 @@ async fn async_main() {
                     cli.workspace.as_deref(),
                     cli.storage_mode,
                     cli.wal_s3_bucket.as_deref(),
-                    cli.offset_store,
-                    cli.offset_dynamodb_table.as_deref(),
+                    cli.store_type.or(cli.offset_store),
+                    cli.store_name
+                        .as_deref()
+                        .or(cli.offset_dynamodb_table.as_deref()),
                     cli.skippr_s3_bucket.as_deref(),
                     cli.tenant.as_deref(),
                 ) {

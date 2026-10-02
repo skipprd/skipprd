@@ -1,79 +1,88 @@
-use crate::converters::skippr_hive::SkipprHive;
-use crate::discover::{Metadata, OutputMetadata};
 use crate::sqlrt::parser::SchemaDumpStatement;
-use datafusion::sql::sqlparser::ast::ObjectName;
+use datafusion::arrow::datatypes::SchemaRef;
+use datafusion::prelude::SessionContext;
 use std::fs::OpenOptions;
 use std::io::{BufWriter, Write};
 
-pub fn dump_schema(
-    schema_name: ObjectName,
-    metadata: &Metadata,
+pub async fn dump_schema(
+    ctx: &SessionContext,
+    pipeline: &str,
+    namespace: &str,
     stmt: &SchemaDumpStatement,
 ) -> Result<(), String> {
     let metadata_file = format!("{}", stmt.target);
+    let table = match ctx.table(&format!("{pipeline}.{namespace}")).await {
+        Ok(table) => table,
+        Err(_) => ctx.table(namespace).await.map_err(|err| {
+            format!("SCHEMA DUMP: table '{pipeline}.{namespace}' is not registered: {err}")
+        })?,
+    };
+    let schema: SchemaRef = table.schema().inner().clone();
+    write_arrow_create_table(&metadata_file, namespace, &schema)
+}
 
+fn write_arrow_create_table(
+    path: &str,
+    table_name: &str,
+    schema: &SchemaRef,
+) -> Result<(), String> {
     let file = OpenOptions::new()
         .create(true)
         .write(true)
         .truncate(true)
-        .open(&metadata_file)
-        .expect(&format!(
-            "Failed to open target schema file {}",
-            &metadata_file
-        ));
-
+        .open(path)
+        .map_err(|err| format!("Failed to open target schema file {path}: {err}"))?;
     let mut writer = BufWriter::new(file);
-    let output_metadata = OutputMetadata::from_metadata(metadata);
-
-    let hive_schema = SkipprHive::convert_skippr_to_hive(&output_metadata).unwrap();
-    let mut schema_str = format!("CREATE TABLE `{}` (\n", schema_name);
-
-    for (i, col) in hive_schema.iter().enumerate() {
-        if let Some(col_type) = col.r#type() {
-            schema_str.push_str(&format_column(col.name(), col_type, 1));
-            if i < hive_schema.len() - 1 {
-                schema_str.push_str(",");
-            }
-            schema_str.push_str("\n");
+    let mut schema_str = format!("CREATE TABLE `{table_name}` (\n");
+    for (i, field) in schema.fields().iter().enumerate() {
+        schema_str.push_str(&format!(
+            "  `{}` {}{}",
+            field.name(),
+            field.data_type(),
+            if field.is_nullable() { "" } else { " NOT NULL" }
+        ));
+        if i + 1 < schema.fields().len() {
+            schema_str.push(',');
         }
+        schema_str.push('\n');
     }
-
     schema_str.push_str(");\n");
-
     writer
         .write_all(schema_str.as_bytes())
-        .expect("Failed to write schema to file");
-
+        .map_err(|err| format!("Failed to write schema to file: {err}"))?;
     Ok(())
 }
 
-fn format_column(name: &str, col_type: &str, indent: usize) -> String {
-    let indentation = "  ".repeat(indent);
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use datafusion::arrow::datatypes::{DataType, Field, Schema};
+    use datafusion::datasource::MemTable;
+    use datafusion::sql::sqlparser::ast::{Ident, ObjectName};
+    use std::sync::Arc;
 
-    if col_type.starts_with("struct<") {
-        let inner = col_type;
-        // .trim_start_matches("struct<")
-        // .trim_end_matches('>');
-
-        let fields: Vec<String> = inner
-            .split(',')
-            .filter_map(|field| field.split_once(':'))
-            .map(|(field_name, field_type)| {
-                format_column(field_name.trim(), field_type.trim(), indent + 1)
-            })
-            .collect();
-
-        format!(
-            "{} `{}` struct<\n{}\n{}>",
-            indentation,
-            name,
-            fields.join(",\n"),
-            indentation
-        )
-    // } else if col_type.starts_with("array<") {
-    //     let inner_type = &col_type[6..col_type.len() - 1]; // Extract inside of array<>
-    //     format!("{} `{}` array<{}>", indentation, name, format_column("", inner_type, indent + 1).trim_start())
-    } else {
-        format!("{} `{}` {}", indentation, name, col_type)
+    #[tokio::test]
+    async fn dump_schema_writes_arrow_field_types() {
+        let schema = Arc::new(Schema::new(vec![
+            Field::new("id", DataType::Utf8, true),
+            Field::new("n", DataType::Int64, false),
+        ]));
+        let ctx = SessionContext::new();
+        let mem = MemTable::try_new(schema, vec![vec![]]).unwrap();
+        ctx.register_table("rides", Arc::new(mem)).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("schema.sql");
+        let stmt = SchemaDumpStatement {
+            pipeline: ObjectName::from(vec![Ident::new("p")]),
+            schema: Some(ObjectName::from(vec![Ident::new("rides")])),
+            target: target.to_string_lossy().into_owned(),
+        };
+        dump_schema(&ctx, "p", "rides", &stmt).await.unwrap();
+        let text = std::fs::read_to_string(&target).unwrap();
+        assert!(text.contains("CREATE TABLE `rides`"));
+        assert!(text.contains("`id` Utf8"));
+        assert!(text.contains("`n` Int64 NOT NULL"));
+        assert!(!text.contains("record<"));
+        assert!(!text.contains("struct<"));
     }
 }

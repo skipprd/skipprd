@@ -1,20 +1,19 @@
 [package]
-name = "skippr-plugin-schema-sink-iceberg"
-version = "0.1.4"
+name = "skippr-plugin-schema-sink-duckdb"
+version = "0.2.0"
 edition = "2021"
 
 [[bin]]
-name = "skippr-plugin-schema-sink-iceberg"
+name = "skippr-plugin-schema-sink-duckdb"
 path = "src/main.rs"
 
 [dependencies]
-async-trait.workspace = true
 clap.workspace = true
 skippr-runtime-sdk.workspace = true
 tokio.workspace = true
-skippr-plugin-data-sink-iceberg = { path = "../../data_sink/iceberg" }
+skippr-plugin-data-sink-duckdb = { path = "../../data_sink/duckdb" }
 
 [package.metadata.skippr-plugin]
 kind = "SchemaSink"
-plugin_name = "Iceberg"
+plugin_name = "Duckdb"
 supports_schema = true

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use iceberg::io::{FileIO, FileIOBuilder};
+use iceberg::io::FileIO;
 use iceberg::spec::{TableMetadata, TableMetadataBuilder};
 use iceberg::table::Table;
 use iceberg::{
@@ -14,8 +14,7 @@ use iceberg::{
 use serde_json::json;
 use skippr_cloud::{attr_n, attr_s, n, s, Client};
 use skippr_iceberg_catalog::{
-    decode_name, encode_name, skippr_catalog_reuses_offset_table, warehouse_hash,
-    IcebergCatalogConfig,
+    decode_name, encode_name, iceberg_file_io_for_warehouse, warehouse_hash, SkipprLakeConfig,
 };
 use uuid::Uuid;
 
@@ -40,25 +39,12 @@ impl std::fmt::Debug for CloudTablesCatalog {
 }
 
 impl CloudTablesCatalog {
-    pub async fn new(config: &IcebergCatalogConfig) -> Result<Self> {
-        let IcebergCatalogConfig::Skippr {
-            table, warehouse, ..
-        } = config
-        else {
-            return Err(Error::new(
-                ErrorKind::DataInvalid,
-                "CloudTablesCatalog requires catalog type skippr",
-            ));
-        };
-        let offset_table = std::env::var("SKIPPR_OFFSET_DYNAMODB_TABLE").unwrap_or_default();
-        if skippr_catalog_reuses_offset_table(table, &offset_table) {
-            return Err(Error::new(
-                ErrorKind::DataInvalid,
-                format!(
-                    "Iceberg catalog.table '{table}' must not be SKIPPR_OFFSET_DYNAMODB_TABLE; create a separate catalog table"
-                ),
-            ));
-        }
+    pub async fn new(config: &SkipprLakeConfig) -> Result<Self> {
+        let SkipprLakeConfig {
+            catalog_table: table,
+            warehouse,
+            ..
+        } = config;
         let client =
             Client::from_env().map_err(|err| Error::new(ErrorKind::Unexpected, err.to_string()))?;
         Ok(Self {
@@ -151,26 +137,6 @@ impl CloudTablesCatalog {
             .await
             .map_err(|err| Error::new(ErrorKind::Unexpected, err.to_string()))?;
         Ok(())
-    }
-}
-
-pub fn iceberg_file_io_for_warehouse(config: &IcebergCatalogConfig) -> Result<FileIO> {
-    let warehouse = config.warehouse();
-    if warehouse.starts_with("memory:") || warehouse.starts_with("memory://") {
-        Ok(FileIO::new_with_memory())
-    } else if warehouse.starts_with("s3://") || warehouse.starts_with("s3a://") {
-        let props = skippr_iceberg_catalog::s3_object_store_props(config.object_store())
-            .map_err(|err| Error::new(ErrorKind::DataInvalid, err))?;
-        Ok(FileIOBuilder::new(Arc::new(
-            iceberg_storage_opendal::OpenDalStorageFactory::S3 {
-                configured_scheme: "s3".to_string(),
-                customized_credential_load: None,
-            },
-        ))
-        .with_props(props)
-        .build())
-    } else {
-        Ok(FileIO::new_with_fs())
     }
 }
 

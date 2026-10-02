@@ -4893,6 +4893,94 @@ impl PyDataSinkAthena {
     }
 }
 
+#[pyclass(
+    from_py_object,
+    name = "DataSinkAthenaIcebergWarehouseObjectStore",
+    module = "skippr"
+)]
+#[derive(Clone, Default, Serialize)]
+pub struct PyDataSinkAthenaIcebergWarehouseObjectStore {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    r#type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    access_key_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secret_access_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_style: Option<bool>,
+}
+
+#[pymethods]
+impl PyDataSinkAthenaIcebergWarehouseObjectStore {
+    #[new]
+    #[pyo3(signature = (*, r#type=None, endpoint=None, region=None, access_key_id=None, secret_access_key=None, path_style=None))]
+    fn new(
+        r#type: Option<String>,
+        endpoint: Option<String>,
+        region: Option<String>,
+        access_key_id: Option<String>,
+        secret_access_key: Option<String>,
+        path_style: Option<bool>,
+    ) -> Self {
+        Self {
+            r#type,
+            endpoint,
+            region,
+            access_key_id,
+            secret_access_key,
+            path_style,
+        }
+    }
+}
+
+#[pyclass(from_py_object, name = "DataSinkAthenaIceberg", module = "skippr")]
+#[derive(Clone, Default, Serialize)]
+pub struct PyDataSinkAthenaIceberg {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warehouse: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    glue_database_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    athena_workgroup_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    athena_results_s3_bucket: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    catalog_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    object_store: Option<PyDataSinkAthenaIcebergWarehouseObjectStore>,
+}
+
+#[pymethods]
+impl PyDataSinkAthenaIceberg {
+    #[new]
+    #[pyo3(signature = (*, warehouse=None, glue_database_name=None, athena_workgroup_name=None, athena_results_s3_bucket=None, region=None, catalog_id=None, object_store=None))]
+    fn new(
+        warehouse: Option<String>,
+        glue_database_name: Option<String>,
+        athena_workgroup_name: Option<String>,
+        athena_results_s3_bucket: Option<String>,
+        region: Option<String>,
+        catalog_id: Option<String>,
+        object_store: Option<PyDataSinkAthenaIcebergWarehouseObjectStore>,
+    ) -> Self {
+        Self {
+            warehouse,
+            glue_database_name,
+            athena_workgroup_name,
+            athena_results_s3_bucket,
+            region,
+            catalog_id,
+            object_store,
+        }
+    }
+}
+
 #[pyclass(from_py_object, name = "AzureBlob", module = "skippr")]
 #[derive(Clone, Default, Serialize)]
 pub struct PyDataSinkAzureBlob {
@@ -5069,6 +5157,27 @@ impl PyDataSinkDatabricks {
     }
 }
 
+#[pyclass(from_py_object, name = "DataSinkDuckdb", module = "skippr")]
+#[derive(Clone, Default, Serialize)]
+pub struct PyDataSinkDuckdb {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warehouse: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    table_namespace: Option<String>,
+}
+
+#[pymethods]
+impl PyDataSinkDuckdb {
+    #[new]
+    #[pyo3(signature = (*, warehouse=None, table_namespace=None))]
+    fn new(warehouse: Option<String>, table_namespace: Option<String>) -> Self {
+        Self {
+            warehouse,
+            table_namespace,
+        }
+    }
+}
+
 #[pyclass(from_py_object, name = "DataSinkFile", module = "skippr")]
 #[derive(Clone, Default, Serialize)]
 pub struct PyDataSinkFile {
@@ -5114,180 +5223,6 @@ impl PyDataSinkGcs {
             bucket,
             prefix,
             service_account_key_path,
-            format,
-        }
-    }
-}
-
-#[pyclass(
-    from_py_object,
-    name = "DataSinkIcebergWarehouseObjectStore",
-    module = "skippr"
-)]
-#[derive(Clone, Default, Serialize)]
-pub struct PyDataSinkIcebergWarehouseObjectStore {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    r#type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    endpoint: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    region: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    access_key_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    secret_access_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    path_style: Option<bool>,
-}
-
-#[pymethods]
-impl PyDataSinkIcebergWarehouseObjectStore {
-    #[new]
-    #[pyo3(signature = (*, r#type=None, endpoint=None, region=None, access_key_id=None, secret_access_key=None, path_style=None))]
-    fn new(
-        r#type: Option<String>,
-        endpoint: Option<String>,
-        region: Option<String>,
-        access_key_id: Option<String>,
-        secret_access_key: Option<String>,
-        path_style: Option<bool>,
-    ) -> Self {
-        Self {
-            r#type,
-            endpoint,
-            region,
-            access_key_id,
-            secret_access_key,
-            path_style,
-        }
-    }
-}
-
-#[pyclass(
-    from_py_object,
-    name = "DataSinkIcebergIcebergCatalogConfig",
-    module = "skippr"
-)]
-#[derive(Clone, Default, Serialize)]
-pub struct PyDataSinkIcebergIcebergCatalogConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    r#type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    warehouse: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    database: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    catalog_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    region: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    object_store: Option<PyDataSinkIcebergWarehouseObjectStore>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    table: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    uri: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    token: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    client_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    client_secret: Option<String>,
-}
-
-#[pymethods]
-impl PyDataSinkIcebergIcebergCatalogConfig {
-    #[new]
-    #[pyo3(signature = (*, r#type=None, warehouse=None, database=None, catalog_id=None, region=None, object_store=None, table=None, uri=None, token=None, client_id=None, client_secret=None))]
-    fn new(
-        r#type: Option<String>,
-        warehouse: Option<String>,
-        database: Option<String>,
-        catalog_id: Option<String>,
-        region: Option<String>,
-        object_store: Option<PyDataSinkIcebergWarehouseObjectStore>,
-        table: Option<String>,
-        uri: Option<String>,
-        token: Option<String>,
-        client_id: Option<String>,
-        client_secret: Option<String>,
-    ) -> Self {
-        Self {
-            r#type,
-            warehouse,
-            database,
-            catalog_id,
-            region,
-            object_store,
-            table,
-            uri,
-            token,
-            client_id,
-            client_secret,
-        }
-    }
-}
-
-#[pyclass(
-    from_py_object,
-    name = "DataSinkIcebergIcebergQueryEngineConfig",
-    module = "skippr"
-)]
-#[derive(Clone, Default, Serialize)]
-pub struct PyDataSinkIcebergIcebergQueryEngineConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    r#type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    workgroup: Option<String>,
-}
-
-#[pymethods]
-impl PyDataSinkIcebergIcebergQueryEngineConfig {
-    #[new]
-    #[pyo3(signature = (*, r#type=None, workgroup=None))]
-    fn new(r#type: Option<String>, workgroup: Option<String>) -> Self {
-        Self { r#type, workgroup }
-    }
-}
-
-#[pyclass(from_py_object, name = "DataSinkIceberg", module = "skippr")]
-#[derive(Clone, Default, Serialize)]
-pub struct PyDataSinkIceberg {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    catalog: Option<PyDataSinkIcebergIcebergCatalogConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    table_namespace: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    table_prefix: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    table_location_prefix: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    properties: Option<BTreeMap<String, String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    query_engine: Option<PyDataSinkIcebergIcebergQueryEngineConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<String>,
-}
-
-#[pymethods]
-impl PyDataSinkIceberg {
-    #[new]
-    #[pyo3(signature = (*, catalog=None, table_namespace=None, table_prefix=None, table_location_prefix=None, properties=None, query_engine=None, format=None))]
-    fn new(
-        catalog: Option<PyDataSinkIcebergIcebergCatalogConfig>,
-        table_namespace: Option<String>,
-        table_prefix: Option<String>,
-        table_location_prefix: Option<String>,
-        properties: Option<BTreeMap<String, String>>,
-        query_engine: Option<PyDataSinkIcebergIcebergQueryEngineConfig>,
-        format: Option<String>,
-    ) -> Self {
-        Self {
-            catalog,
-            table_namespace,
-            table_prefix,
-            table_location_prefix,
-            properties,
-            query_engine,
             format,
         }
     }
@@ -5513,6 +5448,86 @@ impl PyDataSinkSftp {
     }
 }
 
+#[pyclass(
+    from_py_object,
+    name = "DataSinkSkipprLakeWarehouseObjectStore",
+    module = "skippr"
+)]
+#[derive(Clone, Default, Serialize)]
+pub struct PyDataSinkSkipprLakeWarehouseObjectStore {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    r#type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    access_key_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secret_access_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_style: Option<bool>,
+}
+
+#[pymethods]
+impl PyDataSinkSkipprLakeWarehouseObjectStore {
+    #[new]
+    #[pyo3(signature = (*, r#type=None, endpoint=None, region=None, access_key_id=None, secret_access_key=None, path_style=None))]
+    fn new(
+        r#type: Option<String>,
+        endpoint: Option<String>,
+        region: Option<String>,
+        access_key_id: Option<String>,
+        secret_access_key: Option<String>,
+        path_style: Option<bool>,
+    ) -> Self {
+        Self {
+            r#type,
+            endpoint,
+            region,
+            access_key_id,
+            secret_access_key,
+            path_style,
+        }
+    }
+}
+
+#[pyclass(from_py_object, name = "DataSinkSkipprLake", module = "skippr")]
+#[derive(Clone, Default, Serialize)]
+pub struct PyDataSinkSkipprLake {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warehouse: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    catalog_table: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    object_store: Option<PyDataSinkSkipprLakeWarehouseObjectStore>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    table_namespace: Option<String>,
+}
+
+#[pymethods]
+impl PyDataSinkSkipprLake {
+    #[new]
+    #[pyo3(signature = (*, warehouse=None, catalog_table=None, region=None, object_store=None, table_namespace=None))]
+    fn new(
+        warehouse: Option<String>,
+        catalog_table: Option<String>,
+        region: Option<String>,
+        object_store: Option<PyDataSinkSkipprLakeWarehouseObjectStore>,
+        table_namespace: Option<String>,
+    ) -> Self {
+        Self {
+            warehouse,
+            catalog_table,
+            region,
+            object_store,
+            table_namespace,
+        }
+    }
+}
+
 #[pyclass(from_py_object, name = "DataSinkSnowflake", module = "skippr")]
 #[derive(Clone, Default, Serialize)]
 pub struct PyDataSinkSnowflake {
@@ -5641,6 +5656,94 @@ impl PyDataSinkSynapse {
     }
 }
 
+#[pyclass(
+    from_py_object,
+    name = "SchemaSinkAthenaIcebergWarehouseObjectStore",
+    module = "skippr"
+)]
+#[derive(Clone, Default, Serialize)]
+pub struct PySchemaSinkAthenaIcebergWarehouseObjectStore {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    r#type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    access_key_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secret_access_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_style: Option<bool>,
+}
+
+#[pymethods]
+impl PySchemaSinkAthenaIcebergWarehouseObjectStore {
+    #[new]
+    #[pyo3(signature = (*, r#type=None, endpoint=None, region=None, access_key_id=None, secret_access_key=None, path_style=None))]
+    fn new(
+        r#type: Option<String>,
+        endpoint: Option<String>,
+        region: Option<String>,
+        access_key_id: Option<String>,
+        secret_access_key: Option<String>,
+        path_style: Option<bool>,
+    ) -> Self {
+        Self {
+            r#type,
+            endpoint,
+            region,
+            access_key_id,
+            secret_access_key,
+            path_style,
+        }
+    }
+}
+
+#[pyclass(from_py_object, name = "SchemaSinkAthenaIceberg", module = "skippr")]
+#[derive(Clone, Default, Serialize)]
+pub struct PySchemaSinkAthenaIceberg {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warehouse: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    glue_database_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    athena_workgroup_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    athena_results_s3_bucket: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    catalog_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    object_store: Option<PySchemaSinkAthenaIcebergWarehouseObjectStore>,
+}
+
+#[pymethods]
+impl PySchemaSinkAthenaIceberg {
+    #[new]
+    #[pyo3(signature = (*, warehouse=None, glue_database_name=None, athena_workgroup_name=None, athena_results_s3_bucket=None, region=None, catalog_id=None, object_store=None))]
+    fn new(
+        warehouse: Option<String>,
+        glue_database_name: Option<String>,
+        athena_workgroup_name: Option<String>,
+        athena_results_s3_bucket: Option<String>,
+        region: Option<String>,
+        catalog_id: Option<String>,
+        object_store: Option<PySchemaSinkAthenaIcebergWarehouseObjectStore>,
+    ) -> Self {
+        Self {
+            warehouse,
+            glue_database_name,
+            athena_workgroup_name,
+            athena_results_s3_bucket,
+            region,
+            catalog_id,
+            object_store,
+        }
+    }
+}
+
 #[pyclass(from_py_object, name = "SchemaSinkBigquery", module = "skippr")]
 #[derive(Clone, Default, Serialize)]
 pub struct PySchemaSinkBigquery {
@@ -5725,6 +5828,27 @@ impl PySchemaSinkClickhouse {
     }
 }
 
+#[pyclass(from_py_object, name = "SchemaSinkDuckdb", module = "skippr")]
+#[derive(Clone, Default, Serialize)]
+pub struct PySchemaSinkDuckdb {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warehouse: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    table_namespace: Option<String>,
+}
+
+#[pymethods]
+impl PySchemaSinkDuckdb {
+    #[new]
+    #[pyo3(signature = (*, warehouse=None, table_namespace=None))]
+    fn new(warehouse: Option<String>, table_namespace: Option<String>) -> Self {
+        Self {
+            warehouse,
+            table_namespace,
+        }
+    }
+}
+
 #[pyclass(from_py_object, name = "Glue", module = "skippr")]
 #[derive(Clone, Default, Serialize)]
 pub struct PySchemaSinkGlue {
@@ -5777,180 +5901,6 @@ impl PySchemaSinkGlue {
             catalog,
             max_concurrency,
             discovery_cache_ttl_secs,
-        }
-    }
-}
-
-#[pyclass(
-    from_py_object,
-    name = "SchemaSinkIcebergWarehouseObjectStore",
-    module = "skippr"
-)]
-#[derive(Clone, Default, Serialize)]
-pub struct PySchemaSinkIcebergWarehouseObjectStore {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    r#type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    endpoint: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    region: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    access_key_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    secret_access_key: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    path_style: Option<bool>,
-}
-
-#[pymethods]
-impl PySchemaSinkIcebergWarehouseObjectStore {
-    #[new]
-    #[pyo3(signature = (*, r#type=None, endpoint=None, region=None, access_key_id=None, secret_access_key=None, path_style=None))]
-    fn new(
-        r#type: Option<String>,
-        endpoint: Option<String>,
-        region: Option<String>,
-        access_key_id: Option<String>,
-        secret_access_key: Option<String>,
-        path_style: Option<bool>,
-    ) -> Self {
-        Self {
-            r#type,
-            endpoint,
-            region,
-            access_key_id,
-            secret_access_key,
-            path_style,
-        }
-    }
-}
-
-#[pyclass(
-    from_py_object,
-    name = "SchemaSinkIcebergIcebergCatalogConfig",
-    module = "skippr"
-)]
-#[derive(Clone, Default, Serialize)]
-pub struct PySchemaSinkIcebergIcebergCatalogConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    r#type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    warehouse: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    database: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    catalog_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    region: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    object_store: Option<PySchemaSinkIcebergWarehouseObjectStore>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    table: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    uri: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    token: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    client_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    client_secret: Option<String>,
-}
-
-#[pymethods]
-impl PySchemaSinkIcebergIcebergCatalogConfig {
-    #[new]
-    #[pyo3(signature = (*, r#type=None, warehouse=None, database=None, catalog_id=None, region=None, object_store=None, table=None, uri=None, token=None, client_id=None, client_secret=None))]
-    fn new(
-        r#type: Option<String>,
-        warehouse: Option<String>,
-        database: Option<String>,
-        catalog_id: Option<String>,
-        region: Option<String>,
-        object_store: Option<PySchemaSinkIcebergWarehouseObjectStore>,
-        table: Option<String>,
-        uri: Option<String>,
-        token: Option<String>,
-        client_id: Option<String>,
-        client_secret: Option<String>,
-    ) -> Self {
-        Self {
-            r#type,
-            warehouse,
-            database,
-            catalog_id,
-            region,
-            object_store,
-            table,
-            uri,
-            token,
-            client_id,
-            client_secret,
-        }
-    }
-}
-
-#[pyclass(
-    from_py_object,
-    name = "SchemaSinkIcebergIcebergQueryEngineConfig",
-    module = "skippr"
-)]
-#[derive(Clone, Default, Serialize)]
-pub struct PySchemaSinkIcebergIcebergQueryEngineConfig {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    r#type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    workgroup: Option<String>,
-}
-
-#[pymethods]
-impl PySchemaSinkIcebergIcebergQueryEngineConfig {
-    #[new]
-    #[pyo3(signature = (*, r#type=None, workgroup=None))]
-    fn new(r#type: Option<String>, workgroup: Option<String>) -> Self {
-        Self { r#type, workgroup }
-    }
-}
-
-#[pyclass(from_py_object, name = "SchemaSinkIceberg", module = "skippr")]
-#[derive(Clone, Default, Serialize)]
-pub struct PySchemaSinkIceberg {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    catalog: Option<PySchemaSinkIcebergIcebergCatalogConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    table_namespace: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    table_prefix: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    table_location_prefix: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    properties: Option<BTreeMap<String, String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    query_engine: Option<PySchemaSinkIcebergIcebergQueryEngineConfig>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    format: Option<String>,
-}
-
-#[pymethods]
-impl PySchemaSinkIceberg {
-    #[new]
-    #[pyo3(signature = (*, catalog=None, table_namespace=None, table_prefix=None, table_location_prefix=None, properties=None, query_engine=None, format=None))]
-    fn new(
-        catalog: Option<PySchemaSinkIcebergIcebergCatalogConfig>,
-        table_namespace: Option<String>,
-        table_prefix: Option<String>,
-        table_location_prefix: Option<String>,
-        properties: Option<BTreeMap<String, String>>,
-        query_engine: Option<PySchemaSinkIcebergIcebergQueryEngineConfig>,
-        format: Option<String>,
-    ) -> Self {
-        Self {
-            catalog,
-            table_namespace,
-            table_prefix,
-            table_location_prefix,
-            properties,
-            query_engine,
-            format,
         }
     }
 }
@@ -6095,6 +6045,86 @@ impl PySchemaSinkRedshift {
             iam_role_arn,
             format,
             schema,
+        }
+    }
+}
+
+#[pyclass(
+    from_py_object,
+    name = "SchemaSinkSkipprLakeWarehouseObjectStore",
+    module = "skippr"
+)]
+#[derive(Clone, Default, Serialize)]
+pub struct PySchemaSinkSkipprLakeWarehouseObjectStore {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    r#type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    access_key_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    secret_access_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path_style: Option<bool>,
+}
+
+#[pymethods]
+impl PySchemaSinkSkipprLakeWarehouseObjectStore {
+    #[new]
+    #[pyo3(signature = (*, r#type=None, endpoint=None, region=None, access_key_id=None, secret_access_key=None, path_style=None))]
+    fn new(
+        r#type: Option<String>,
+        endpoint: Option<String>,
+        region: Option<String>,
+        access_key_id: Option<String>,
+        secret_access_key: Option<String>,
+        path_style: Option<bool>,
+    ) -> Self {
+        Self {
+            r#type,
+            endpoint,
+            region,
+            access_key_id,
+            secret_access_key,
+            path_style,
+        }
+    }
+}
+
+#[pyclass(from_py_object, name = "SchemaSinkSkipprLake", module = "skippr")]
+#[derive(Clone, Default, Serialize)]
+pub struct PySchemaSinkSkipprLake {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warehouse: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    catalog_table: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    region: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    object_store: Option<PySchemaSinkSkipprLakeWarehouseObjectStore>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    table_namespace: Option<String>,
+}
+
+#[pymethods]
+impl PySchemaSinkSkipprLake {
+    #[new]
+    #[pyo3(signature = (*, warehouse=None, catalog_table=None, region=None, object_store=None, table_namespace=None))]
+    fn new(
+        warehouse: Option<String>,
+        catalog_table: Option<String>,
+        region: Option<String>,
+        object_store: Option<PySchemaSinkSkipprLakeWarehouseObjectStore>,
+        table_namespace: Option<String>,
+    ) -> Self {
+        Self {
+            warehouse,
+            catalog_table,
+            region,
+            object_store,
+            table_namespace,
         }
     }
 }
@@ -6250,18 +6280,20 @@ pub enum PyDataSource {
 pub enum PyDataSink {
     Amqp,
     Athena,
+    AthenaIceberg,
     AzureBlob,
     Bigquery,
     Clickhouse,
     Databricks,
+    Duckdb,
     File,
     Gcs,
-    Iceberg,
     Motherduck,
     Postgres,
     Redshift,
     S3,
     Sftp,
+    SkipprLake,
     Snowflake,
     Stdout,
     Synapse,
@@ -6270,13 +6302,15 @@ pub enum PyDataSink {
 #[pyclass(eq, eq_int, from_py_object, name = "SchemaSink", module = "skippr")]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PySchemaSink {
+    AthenaIceberg,
     Bigquery,
     Clickhouse,
+    Duckdb,
     Glue,
-    Iceberg,
     Motherduck,
     Postgres,
     Redshift,
+    SkipprLake,
     Snowflake,
 }
 
@@ -6351,18 +6385,20 @@ pub fn connect_plugin_data_sink(kind: PyDataSink) -> ConnectPlugin {
     match kind {
         PyDataSink::Amqp => ConnectPlugin::DataSinkAmqp,
         PyDataSink::Athena => ConnectPlugin::DataSinkAthena,
+        PyDataSink::AthenaIceberg => ConnectPlugin::DataSinkAthenaIceberg,
         PyDataSink::AzureBlob => ConnectPlugin::DataSinkAzureBlob,
         PyDataSink::Bigquery => ConnectPlugin::DataSinkBigquery,
         PyDataSink::Clickhouse => ConnectPlugin::DataSinkClickhouse,
         PyDataSink::Databricks => ConnectPlugin::DataSinkDatabricks,
+        PyDataSink::Duckdb => ConnectPlugin::DataSinkDuckdb,
         PyDataSink::File => ConnectPlugin::DataSinkFile,
         PyDataSink::Gcs => ConnectPlugin::DataSinkGcs,
-        PyDataSink::Iceberg => ConnectPlugin::DataSinkIceberg,
         PyDataSink::Motherduck => ConnectPlugin::DataSinkMotherduck,
         PyDataSink::Postgres => ConnectPlugin::DataSinkPostgres,
         PyDataSink::Redshift => ConnectPlugin::DataSinkRedshift,
         PyDataSink::S3 => ConnectPlugin::DataSinkS3,
         PyDataSink::Sftp => ConnectPlugin::DataSinkSftp,
+        PyDataSink::SkipprLake => ConnectPlugin::DataSinkSkipprLake,
         PyDataSink::Snowflake => ConnectPlugin::DataSinkSnowflake,
         PyDataSink::Stdout => ConnectPlugin::DataSinkStdout,
         PyDataSink::Synapse => ConnectPlugin::DataSinkSynapse,
@@ -6370,13 +6406,15 @@ pub fn connect_plugin_data_sink(kind: PyDataSink) -> ConnectPlugin {
 }
 pub fn connect_plugin_schema_sink(kind: PySchemaSink) -> ConnectPlugin {
     match kind {
+        PySchemaSink::AthenaIceberg => ConnectPlugin::SchemaSinkAthenaIceberg,
         PySchemaSink::Bigquery => ConnectPlugin::SchemaSinkBigquery,
         PySchemaSink::Clickhouse => ConnectPlugin::SchemaSinkClickhouse,
+        PySchemaSink::Duckdb => ConnectPlugin::SchemaSinkDuckdb,
         PySchemaSink::Glue => ConnectPlugin::SchemaSinkGlue,
-        PySchemaSink::Iceberg => ConnectPlugin::SchemaSinkIceberg,
         PySchemaSink::Motherduck => ConnectPlugin::SchemaSinkMotherduck,
         PySchemaSink::Postgres => ConnectPlugin::SchemaSinkPostgres,
         PySchemaSink::Redshift => ConnectPlugin::SchemaSinkRedshift,
+        PySchemaSink::SkipprLake => ConnectPlugin::SchemaSinkSkipprLake,
         PySchemaSink::Snowflake => ConnectPlugin::SchemaSinkSnowflake,
     }
 }
@@ -6569,6 +6607,9 @@ pub fn data_sink_config_yaml(
         PyDataSink::Athena => Ok(connect::yaml_map_from_serialize(
             &config.extract::<PyDataSinkAthena>()?,
         )),
+        PyDataSink::AthenaIceberg => Ok(connect::yaml_map_from_serialize(
+            &config.extract::<PyDataSinkAthenaIceberg>()?,
+        )),
         PyDataSink::AzureBlob => Ok(connect::yaml_map_from_serialize(
             &config.extract::<PyDataSinkAzureBlob>()?,
         )),
@@ -6581,14 +6622,14 @@ pub fn data_sink_config_yaml(
         PyDataSink::Databricks => Ok(connect::yaml_map_from_serialize(
             &config.extract::<PyDataSinkDatabricks>()?,
         )),
+        PyDataSink::Duckdb => Ok(connect::yaml_map_from_serialize(
+            &config.extract::<PyDataSinkDuckdb>()?,
+        )),
         PyDataSink::File => Ok(connect::yaml_map_from_serialize(
             &config.extract::<PyDataSinkFile>()?,
         )),
         PyDataSink::Gcs => Ok(connect::yaml_map_from_serialize(
             &config.extract::<PyDataSinkGcs>()?,
-        )),
-        PyDataSink::Iceberg => Ok(connect::yaml_map_from_serialize(
-            &config.extract::<PyDataSinkIceberg>()?,
         )),
         PyDataSink::Motherduck => Ok(connect::yaml_map_from_serialize(
             &config.extract::<PyDataSinkMotherduck>()?,
@@ -6604,6 +6645,9 @@ pub fn data_sink_config_yaml(
         )),
         PyDataSink::Sftp => Ok(connect::yaml_map_from_serialize(
             &config.extract::<PyDataSinkSftp>()?,
+        )),
+        PyDataSink::SkipprLake => Ok(connect::yaml_map_from_serialize(
+            &config.extract::<PyDataSinkSkipprLake>()?,
         )),
         PyDataSink::Snowflake => Ok(connect::yaml_map_from_serialize(
             &config.extract::<PyDataSinkSnowflake>()?,
@@ -6621,17 +6665,20 @@ pub fn schema_sink_config_yaml(
     config: Bound<'_, PyAny>,
 ) -> PyResult<BTreeMap<String, Value>> {
     match kind {
+        PySchemaSink::AthenaIceberg => Ok(connect::yaml_map_from_serialize(
+            &config.extract::<PySchemaSinkAthenaIceberg>()?,
+        )),
         PySchemaSink::Bigquery => Ok(connect::yaml_map_from_serialize(
             &config.extract::<PySchemaSinkBigquery>()?,
         )),
         PySchemaSink::Clickhouse => Ok(connect::yaml_map_from_serialize(
             &config.extract::<PySchemaSinkClickhouse>()?,
         )),
+        PySchemaSink::Duckdb => Ok(connect::yaml_map_from_serialize(
+            &config.extract::<PySchemaSinkDuckdb>()?,
+        )),
         PySchemaSink::Glue => Ok(connect::yaml_map_from_serialize(
             &config.extract::<PySchemaSinkGlue>()?,
-        )),
-        PySchemaSink::Iceberg => Ok(connect::yaml_map_from_serialize(
-            &config.extract::<PySchemaSinkIceberg>()?,
         )),
         PySchemaSink::Motherduck => Ok(connect::yaml_map_from_serialize(
             &config.extract::<PySchemaSinkMotherduck>()?,
@@ -6641,6 +6688,9 @@ pub fn schema_sink_config_yaml(
         )),
         PySchemaSink::Redshift => Ok(connect::yaml_map_from_serialize(
             &config.extract::<PySchemaSinkRedshift>()?,
+        )),
+        PySchemaSink::SkipprLake => Ok(connect::yaml_map_from_serialize(
+            &config.extract::<PySchemaSinkSkipprLake>()?,
         )),
         PySchemaSink::Snowflake => Ok(connect::yaml_map_from_serialize(
             &config.extract::<PySchemaSinkSnowflake>()?,
@@ -6825,34 +6875,36 @@ pub fn register_connect_plugin_classes(m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_class::<PyDataSourceXeroAccounting>()?;
     m.add_class::<PyDataSinkAmqp>()?;
     m.add_class::<PyDataSinkAthena>()?;
+    m.add_class::<PyDataSinkAthenaIcebergWarehouseObjectStore>()?;
+    m.add_class::<PyDataSinkAthenaIceberg>()?;
     m.add_class::<PyDataSinkAzureBlob>()?;
     m.add_class::<PyDataSinkBigquery>()?;
     m.add_class::<PyDataSinkClickhouse>()?;
     m.add_class::<PyDataSinkDatabricks>()?;
+    m.add_class::<PyDataSinkDuckdb>()?;
     m.add_class::<PyDataSinkFile>()?;
     m.add_class::<PyDataSinkGcs>()?;
-    m.add_class::<PyDataSinkIcebergWarehouseObjectStore>()?;
-    m.add_class::<PyDataSinkIcebergIcebergCatalogConfig>()?;
-    m.add_class::<PyDataSinkIcebergIcebergQueryEngineConfig>()?;
-    m.add_class::<PyDataSinkIceberg>()?;
     m.add_class::<PyDataSinkMotherduck>()?;
     m.add_class::<PyDataSinkPostgres>()?;
     m.add_class::<PyDataSinkRedshift>()?;
     m.add_class::<PyDataSinkS3>()?;
     m.add_class::<PyDataSinkSftp>()?;
+    m.add_class::<PyDataSinkSkipprLakeWarehouseObjectStore>()?;
+    m.add_class::<PyDataSinkSkipprLake>()?;
     m.add_class::<PyDataSinkSnowflake>()?;
     m.add_class::<PyDataSinkStdout>()?;
     m.add_class::<PyDataSinkSynapse>()?;
+    m.add_class::<PySchemaSinkAthenaIcebergWarehouseObjectStore>()?;
+    m.add_class::<PySchemaSinkAthenaIceberg>()?;
     m.add_class::<PySchemaSinkBigquery>()?;
     m.add_class::<PySchemaSinkClickhouse>()?;
+    m.add_class::<PySchemaSinkDuckdb>()?;
     m.add_class::<PySchemaSinkGlue>()?;
-    m.add_class::<PySchemaSinkIcebergWarehouseObjectStore>()?;
-    m.add_class::<PySchemaSinkIcebergIcebergCatalogConfig>()?;
-    m.add_class::<PySchemaSinkIcebergIcebergQueryEngineConfig>()?;
-    m.add_class::<PySchemaSinkIceberg>()?;
     m.add_class::<PySchemaSinkMotherduck>()?;
     m.add_class::<PySchemaSinkPostgres>()?;
     m.add_class::<PySchemaSinkRedshift>()?;
+    m.add_class::<PySchemaSinkSkipprLakeWarehouseObjectStore>()?;
+    m.add_class::<PySchemaSinkSkipprLake>()?;
     m.add_class::<PySchemaSinkSnowflake>()?;
     Ok(())
 }

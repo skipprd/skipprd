@@ -915,35 +915,69 @@ pub mod source_capabilities {
 
     /// Look up a source capability by plugin name.
     pub fn by_name(name: &str) -> Option<&'static SourceCapability> {
-        match name {
-            "Postgres" => Some(&POSTGRES),
-            "Mysql" => Some(&MYSQL),
-            "Mssql" => Some(&MSSQL),
-            "Mongodb" => Some(&MONGODB),
-            "Dynamodb" => Some(&DYNAMODB),
-            "DeltaLake" => Some(&DELTA_LAKE),
-            "Kafka" => Some(&KAFKA),
-            "Kinesis" => Some(&KINESIS),
-            "Sqs" => Some(&SQS),
-            "Sns" => Some(&SNS),
-            "Eventbridge" => Some(&EVENTBRIDGE),
-            "File" => Some(&FILE),
-            "S3" => Some(&S3),
-            "Sftp" => Some(&SFTP),
-            "HttpClient" => Some(&HTTP_CLIENT),
-            "Clickhouse" => Some(&CLICKHOUSE),
-            "Redshift" => Some(&REDSHIFT),
-            "Motherduck" => Some(&MOTHERDUCK),
-            "Amqp" => Some(&AMQP),
-            "Mqtt" => Some(&MQTT),
-            "HttpServer" => Some(&HTTP_SERVER),
-            "Otlp" => Some(&OTLP),
-            "Websocket" => Some(&WEBSOCKET),
-            "Socket" => Some(&SOCKET),
-            "Stdin" => Some(&STDIN),
-            "Statsd" => Some(&STATSD),
-            "Pcap" => Some(&PCAP),
-            _ => None,
+        crate::connect::DataSource::parse(name).and_then(by_kind)
+    }
+
+    pub fn by_kind(kind: crate::connect::DataSource) -> Option<&'static SourceCapability> {
+        use crate::connect::DataSource as Src;
+        match kind {
+            Src::Postgres => Some(&POSTGRES),
+            Src::Mysql => Some(&MYSQL),
+            Src::Mssql => Some(&MSSQL),
+            Src::Mongodb => Some(&MONGODB),
+            Src::Dynamodb => Some(&DYNAMODB),
+            Src::DeltaLake => Some(&DELTA_LAKE),
+            Src::Kafka => Some(&KAFKA),
+            Src::Kinesis => Some(&KINESIS),
+            Src::Sqs => Some(&SQS),
+            Src::Sns => Some(&SNS),
+            Src::Eventbridge => Some(&EVENTBRIDGE),
+            Src::File => Some(&FILE),
+            Src::S3 => Some(&S3),
+            Src::Sftp => Some(&SFTP),
+            Src::HttpClient => Some(&HTTP_CLIENT),
+            Src::Clickhouse => Some(&CLICKHOUSE),
+            Src::Redshift => Some(&REDSHIFT),
+            Src::Motherduck => Some(&MOTHERDUCK),
+            Src::Amqp => Some(&AMQP),
+            Src::Mqtt => Some(&MQTT),
+            Src::HttpServer => Some(&HTTP_SERVER),
+            Src::Otlp => Some(&OTLP),
+            Src::Websocket => Some(&WEBSOCKET),
+            Src::Socket => Some(&SOCKET),
+            Src::Stdin => Some(&STDIN),
+            Src::Statsd => Some(&STATSD),
+            Src::Pcap => Some(&PCAP),
+            Src::AdRollAds
+            | Src::AiCitations
+            | Src::AppleAppStoreSerp
+            | Src::AppleSearchAds
+            | Src::BingWebmasterTools
+            | Src::ContentQuality
+            | Src::DataForSeoBacklinks
+            | Src::DataForSeoSeoOpportunities
+            | Src::GoogleAds
+            | Src::GoogleAnalytics
+            | Src::GooglePageSpeed
+            | Src::GoogleSearchConsole
+            | Src::GoogleSerpRanks
+            | Src::HubspotCrm
+            | Src::LinkedInAds
+            | Src::MetaAds
+            | Src::MetaInstagramAds
+            | Src::RevolutBusiness
+            | Src::SeoCrawl
+            | Src::ShopifyAdmin
+            | Src::SiteQuality
+            | Src::SiteSecurity
+            | Src::Stripe
+            | Src::SumUp
+            | Src::UpfoundryBacklinks
+            | Src::UpfoundryLinkGraphCompact
+            | Src::UpfoundryLinkGraphIngest
+            | Src::UpfoundryLinkGraphWatIndex
+            | Src::XAds
+            | Src::XeroAccounting => None,
         }
     }
 }
@@ -1062,13 +1096,37 @@ pub mod sink_capabilities {
         grouping_support: Grouping::CdcEncodedBatches,
     };
 
-    pub const ICEBERG: SinkCapability = SinkCapability {
-        name: "Iceberg",
+    pub const SKIPPRLAKE: SinkCapability = SinkCapability {
+        name: skippr_iceberg_catalog::SkipprLakeConfig::PLUGIN_NAME,
         max_sessions_per_child: 1,
         guarantee_tier: SinkGuaranteeTier::ExactOnceCdcEligible,
         can_manage_skippr_columns: true,
         can_maintain_tombstone_tables: true,
         can_compare_order_tokens: true,
+        supports_transactions: true,
+        retry_semantics: Retry::TransactionalIdempotent,
+        grouping_support: Grouping::FinalStateBatches,
+    };
+
+    pub const ATHENA_ICEBERG: SinkCapability = SinkCapability {
+        name: "AthenaIceberg",
+        max_sessions_per_child: 1,
+        guarantee_tier: SinkGuaranteeTier::ExactOnceCdcEligible,
+        can_manage_skippr_columns: true,
+        can_maintain_tombstone_tables: true,
+        can_compare_order_tokens: true,
+        supports_transactions: true,
+        retry_semantics: Retry::TransactionalIdempotent,
+        grouping_support: Grouping::FinalStateBatches,
+    };
+
+    pub const DUCKDB: SinkCapability = SinkCapability {
+        name: "Duckdb",
+        max_sessions_per_child: 1,
+        guarantee_tier: SinkGuaranteeTier::CdcEncodedOnly,
+        can_manage_skippr_columns: false,
+        can_maintain_tombstone_tables: false,
+        can_compare_order_tokens: false,
         supports_transactions: true,
         retry_semantics: Retry::TransactionalIdempotent,
         grouping_support: Grouping::FinalStateBatches,
@@ -1160,26 +1218,32 @@ pub mod sink_capabilities {
 
     /// Look up a sink capability by plugin name.
     pub fn by_name(name: &str) -> Option<&'static SinkCapability> {
-        match name {
-            "Postgres" => Some(&POSTGRES),
-            "Snowflake" => Some(&SNOWFLAKE),
-            "Bigquery" => Some(&BIGQUERY),
-            "Redshift" => Some(&REDSHIFT),
-            "Databricks" => Some(&DATABRICKS),
-            "Motherduck" => Some(&MOTHERDUCK),
-            "Clickhouse" => Some(&CLICKHOUSE),
-            "Synapse" => Some(&SYNAPSE),
-            "Athena" => Some(&ATHENA),
-            "Iceberg" => Some(&ICEBERG),
-            "S3" => Some(&S3),
-            "Gcs" => Some(&GCS),
-            "AzureBlob" => Some(&AZURE_BLOB),
-            "File" => Some(&FILE),
-            "Sftp" => Some(&SFTP),
-            "Amqp" => Some(&AMQP),
-            "Stdout" => Some(&STDOUT),
-            _ => None,
-        }
+        crate::connect::DataSink::parse(name).and_then(by_kind)
+    }
+
+    pub fn by_kind(kind: crate::connect::DataSink) -> Option<&'static SinkCapability> {
+        use crate::connect::DataSink as Snk;
+        Some(match kind {
+            Snk::Postgres => &POSTGRES,
+            Snk::Snowflake => &SNOWFLAKE,
+            Snk::Bigquery => &BIGQUERY,
+            Snk::Redshift => &REDSHIFT,
+            Snk::Databricks => &DATABRICKS,
+            Snk::Motherduck => &MOTHERDUCK,
+            Snk::Clickhouse => &CLICKHOUSE,
+            Snk::Synapse => &SYNAPSE,
+            Snk::Athena => &ATHENA,
+            Snk::SkipprLake => &SKIPPRLAKE,
+            Snk::AthenaIceberg => &ATHENA_ICEBERG,
+            Snk::Duckdb => &DUCKDB,
+            Snk::S3 => &S3,
+            Snk::Gcs => &GCS,
+            Snk::AzureBlob => &AZURE_BLOB,
+            Snk::File => &FILE,
+            Snk::Sftp => &SFTP,
+            Snk::Amqp => &AMQP,
+            Snk::Stdout => &STDOUT,
+        })
     }
 }
 
@@ -1299,7 +1363,9 @@ mod tests {
             "Clickhouse",
             "Synapse",
             "Athena",
-            "Iceberg",
+            skippr_iceberg_catalog::SkipprLakeConfig::PLUGIN_NAME,
+            "AthenaIceberg",
+            "Duckdb",
             "S3",
             "Gcs",
             "AzureBlob",
@@ -1342,6 +1408,123 @@ mod tests {
     }
 
     #[test]
+    fn iceberg_plugin_name_is_unknown() {
+        assert!(sink_capabilities::by_name("Iceberg").is_none());
+        assert_eq!(
+            sink_capabilities::SKIPPRLAKE.name,
+            skippr_iceberg_catalog::SkipprLakeConfig::PLUGIN_NAME
+        );
+        assert_eq!(
+            sink_capabilities::by_name(skippr_iceberg_catalog::SkipprLakeConfig::PLUGIN_NAME)
+                .map(|c| c.name),
+            Some(skippr_iceberg_catalog::SkipprLakeConfig::PLUGIN_NAME)
+        );
+        assert_eq!(
+            sink_capabilities::by_name(sink_capabilities::ATHENA_ICEBERG.name).map(|c| c.name),
+            Some(sink_capabilities::ATHENA_ICEBERG.name)
+        );
+        assert_eq!(
+            sink_capabilities::by_name("athenaiceberg").map(|c| c.name),
+            Some(sink_capabilities::ATHENA_ICEBERG.name)
+        );
+        assert_eq!(
+            sink_capabilities::by_kind(crate::connect::DataSink::Athena).map(|c| c.name),
+            Some(sink_capabilities::ATHENA.name)
+        );
+        assert!(sink_capabilities::by_name("Azure").is_none());
+        assert_eq!(
+            sink_capabilities::by_name("azureblob").map(|c| c.name),
+            Some(sink_capabilities::AZURE_BLOB.name)
+        );
+        assert_eq!(
+            sink_capabilities::by_name(sink_capabilities::DUCKDB.name).map(|c| c.name),
+            Some(sink_capabilities::DUCKDB.name)
+        );
+        assert_eq!(
+            sink_capabilities::by_name("duckdb").map(|c| c.name),
+            Some(sink_capabilities::DUCKDB.name)
+        );
+        assert_ne!(
+            sink_capabilities::by_name("Motherduck").map(|c| c.name),
+            Some(sink_capabilities::DUCKDB.name)
+        );
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        assert!(
+            !root.join("plugins/data_sink/iceberg").exists(),
+            "data_sink/iceberg must be deleted"
+        );
+        assert!(
+            !root.join("plugins/schema_sink/iceberg").exists(),
+            "schema_sink/iceberg must be deleted"
+        );
+        assert!(
+            root.join("plugins/data_sink/athena_iceberg").exists(),
+            "data_sink/athena_iceberg must exist"
+        );
+        assert!(
+            root.join("plugins/schema_sink/athena_iceberg").exists(),
+            "schema_sink/athena_iceberg must exist"
+        );
+    }
+
+    #[test]
+    fn skipprlake_capability_matches_cargo_metadata() {
+        let toml = include_str!("../../plugins/data_sink/skipprlake/Cargo.toml");
+        assert!(
+            toml.contains("plugin_name = \"SkipprLake\""),
+            "data-sink crate metadata must use SkipprLake"
+        );
+        assert!(
+            toml.contains("name = \"SkipprLake\""),
+            "sink_capability.name must be SkipprLake"
+        );
+        assert!(
+            !toml.contains("plugin_name = \"Iceberg\""),
+            "Iceberg plugin key is deleted"
+        );
+    }
+
+    #[test]
+    fn athena_iceberg_capability_matches_cargo_metadata() {
+        let toml = include_str!("../../plugins/data_sink/athena_iceberg/Cargo.toml");
+        assert!(
+            toml.contains("plugin_name = \"AthenaIceberg\""),
+            "data-sink crate metadata must use AthenaIceberg"
+        );
+        assert!(
+            toml.contains("name = \"AthenaIceberg\""),
+            "sink_capability.name must be AthenaIceberg"
+        );
+        assert_eq!(sink_capabilities::ATHENA_ICEBERG.name, "AthenaIceberg");
+        assert!(
+            !toml.contains("plugin_name = \"Iceberg\""),
+            "Iceberg plugin key is deleted"
+        );
+        assert!(
+            toml.contains("guarantee_tier = \"ExactOnceCdcEligible\""),
+            "AthenaIceberg ships ExactOnce until e2e Athena reads prove otherwise"
+        );
+    }
+
+    #[test]
+    fn duckdb_capability_matches_cargo_metadata() {
+        let toml = include_str!("../../plugins/data_sink/duckdb/Cargo.toml");
+        assert!(
+            toml.contains("plugin_name = \"Duckdb\""),
+            "data-sink crate metadata must use Duckdb"
+        );
+        assert!(toml.contains("name = \"Duckdb\""));
+        assert_eq!(sink_capabilities::DUCKDB.name, "Duckdb");
+        assert!(toml.contains("guarantee_tier = \"CdcEncodedOnly\""));
+        assert!(toml.contains("supports_merge_by_key = false"));
+        assert!(toml.contains("supports_replace_partition = false"));
+        assert!(toml.contains("supports_replace_table = true"));
+        assert!(toml.contains("grouping_support = \"FinalStateBatches\""));
+        let schema = include_str!("../../plugins/schema_sink/duckdb/Cargo.toml");
+        assert!(schema.contains("plugin_name = \"Duckdb\""));
+    }
+
+    #[test]
     fn test_postgres_to_postgres_derives_exact_once() {
         let source = source_capabilities::POSTGRES;
         let sink = sink_capabilities::POSTGRES;
@@ -1374,7 +1557,7 @@ mod tests {
     #[test]
     fn test_mssql_to_iceberg_rejects_exact_once_cdc_until_cdc_exists() {
         let source = source_capabilities::MSSQL;
-        let sink = sink_capabilities::ICEBERG;
+        let sink = sink_capabilities::SKIPPRLAKE;
         let keys = vec!["id".to_string()];
         match derive_and_validate(&source, &sink, "dbo.orders", &keys) {
             CompatibilityResult::Compatible(_) => {
@@ -1406,7 +1589,7 @@ mod tests {
     #[test]
     fn test_postgres_to_iceberg_derives_exact_once() {
         let source = source_capabilities::POSTGRES;
-        let sink = sink_capabilities::ICEBERG;
+        let sink = sink_capabilities::SKIPPRLAKE;
         let keys = vec!["id".to_string()];
         match derive_and_validate(&source, &sink, "users", &keys) {
             CompatibilityResult::Compatible(g) => {
@@ -1424,7 +1607,7 @@ mod tests {
     #[test]
     fn test_dynamodb_to_iceberg_derives_exact_once() {
         let source = source_capabilities::DYNAMODB;
-        let sink = sink_capabilities::ICEBERG;
+        let sink = sink_capabilities::SKIPPRLAKE;
         let keys = vec!["pk".to_string()];
         match derive_and_validate(&source, &sink, "events", &keys) {
             CompatibilityResult::Compatible(g) => {

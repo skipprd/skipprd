@@ -39,40 +39,22 @@ impl SqlDocParser {
             Statement::PipelineDrop(_) => docs.get("DROP PIPELINE").unwrap().clone(),
             Statement::PipelineReset(_) => docs.get("RESET PIPELINE").unwrap().clone(),
             Statement::SchemaLoad(_) => docs.get("SCHEMA LOAD").unwrap().clone(),
-            Statement::PipelineToggle(stmt) => {
-                match stmt.toggle {
-                    PipelineToggle::Enable => docs.get("ENABLE PIPELINE").unwrap().clone(),
-                    PipelineToggle::Disable => docs.get("DISABLE PIPELINE").unwrap().clone(),
-                }
+            Statement::PipelineToggle(stmt) => match stmt.toggle {
+                PipelineToggle::Enable => docs.get("ENABLE PIPELINE").unwrap().clone(),
+                PipelineToggle::Disable => docs.get("DISABLE PIPELINE").unwrap().clone(),
             },
-            Statement::AlterSchemaDropColumn(_) => docs.get("ALTER SCHEMA DROP COLUMN").unwrap().clone(),
-            Statement::AlterSchemaAlterColumnType(_) => docs.get("ALTER SCHEMA ALTER COLUMN").unwrap().clone(),
+            Statement::AlterSchemaDropColumn(_) => {
+                docs.get("ALTER SCHEMA DROP COLUMN").unwrap().clone()
+            }
+            Statement::AlterSchemaAlterColumnType(_) => {
+                docs.get("ALTER SCHEMA ALTER COLUMN").unwrap().clone()
+            }
             Statement::TableDrop(_) => docs.get("DROP TABLE").unwrap().clone(),
             Statement::ShowDocs => docs.get("SHOW DOCS").unwrap().clone(),
-            Statement::ShowStats { .. } => SqlStatementDoc {
-                name: "SHOW STATS".to_string(),
-                description: "Show per-field statistics JSON for a pipeline (optionally filtered by namespace).".to_string(),
-                syntax: "SHOW STATS FOR <pipeline>[.<namespace>]".to_string(),
-                example: "SHOW STATS FOR bike_hire.ride_start".to_string(),
-            },
-            Statement::ShowSemantic { .. } => SqlStatementDoc {
-                name: "SHOW SEMANTIC".to_string(),
-                description: "Show semantic roles for <pipeline>[.<namespace>]. Falls back to S3 if local cache missing.".to_string(),
-                syntax: "SHOW SEMANTIC FOR <pipeline>[.<namespace>]".to_string(),
-                example: "SHOW SEMANTIC FOR bike_hire.ride_start".to_string(),
-            },
-            Statement::ShowCatalog { .. } => SqlStatementDoc {
-                name: "SHOW CATALOG".to_string(),
-                description: "Show catalog fields for <pipeline>[.<namespace>]. Falls back to S3 if local cache missing.".to_string(),
-                syntax: "SHOW CATALOG FOR <pipeline>[.<namespace>]".to_string(),
-                example: "SHOW CATALOG FOR bike_hire.ride_start".to_string(),
-            },
-            Statement::ShowPipeline { .. } => SqlStatementDoc {
-                name: "SHOW PIPELINE".to_string(),
-                description: "Show pipeline status including namespaces, field counts, and offsets.".to_string(),
-                syntax: "SHOW PIPELINE <pipeline_name>".to_string(),
-                example: "SHOW PIPELINE el_mssql".to_string(),
-            },
+            Statement::ShowStats { .. } => docs.get("SHOW STATS").unwrap().clone(),
+            Statement::ShowSemantic { .. } => docs.get("SHOW SEMANTIC").unwrap().clone(),
+            Statement::ShowCatalog { .. } => docs.get("SHOW CATALOG").unwrap().clone(),
+            Statement::ShowPipeline { .. } => docs.get("SHOW PIPELINE").unwrap().clone(),
         }
     }
 
@@ -90,38 +72,5 @@ impl SqlDocParser {
         }
 
         None
-    }
-
-    /// Returns a list of all supported SQL statements
-    pub fn list_all_statements() -> Vec<SqlStatementDoc> {
-        get_sql_docs().into_values().collect()
-    }
-
-    /// Validates if a SQL statement is supported
-    #[allow(dead_code)]
-    pub fn is_supported(sql: &str) -> bool {
-        match SqlDocParser::parse_and_document(sql) {
-            Ok(Some(_)) => true,
-            _ => false,
-        }
-    }
-
-    /// Returns documentation in Markdown format for all supported SQL statements
-    #[allow(dead_code)]
-    pub fn generate_markdown_docs() -> String {
-        crate::sqlrt::docs::get_sql_docs_formatted()
-    }
-
-    /// Exports the documentation to a file
-    #[allow(dead_code)]
-    pub fn export_docs_to_file(file_path: &str) -> Result<(), std::io::Error> {
-        use std::fs::File;
-        use std::io::Write;
-
-        let docs = SqlDocParser::generate_markdown_docs();
-        let mut file = File::create(file_path)?;
-        file.write_all(docs.as_bytes())?;
-
-        Ok(())
     }
 }

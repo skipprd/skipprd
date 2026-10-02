@@ -334,6 +334,11 @@ impl RuntimeChildConnection {
             .env("PIPELINE_NAME", &pipeline_name)
             .env("WORKSPACE_NAME", config.get_workspace_name())
             .env("DATA_DIR", config.get_pipeline_data_dir())
+            .env(
+                "SKIPPR_STORE_TYPE",
+                crate::pipeline_backend::skippr_store_type_value(config),
+            )
+            .env("SKIPPR_STORE_NAME", config.get_skippr_store_name())
             .env(SKIPPR_RUNTIME_CONTROL_ADDR_ENV, control_addr.to_string())
             .env(SKIPPR_RUNTIME_DATA_ADDR_ENV, data_addr.to_string())
             .env(SKIPPR_RUNTIME_SESSION_TOKEN_ENV, &session_token);

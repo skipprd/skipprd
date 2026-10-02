@@ -9,7 +9,7 @@ use std::str::FromStr;
 use serde::Serialize;
 
 use crate::helpers::configuration::Config;
-use crate::helpers::wal_storage::{ElStorageMode, OffsetStoreKind};
+use crate::helpers::wal_storage::{ElStorageMode, SkipprStoreKind};
 
 const SKELETON: &str = r#"skippr:
   workspace: ""
@@ -102,8 +102,8 @@ pub fn persist_skippr_keys(
     workspace: Option<&str>,
     storage_mode: Option<ElStorageMode>,
     wal_s3_bucket: Option<&str>,
-    offset_store: Option<OffsetStoreKind>,
-    offset_dynamodb_table: Option<&str>,
+    store: Option<SkipprStoreKind>,
+    store_name: Option<&str>,
     skippr_s3_bucket: Option<&str>,
     tenant: Option<&str>,
 ) -> Result<serde_yaml::Value, String> {
@@ -128,17 +128,20 @@ pub fn persist_skippr_keys(
             serde_yaml::Value::String(bucket.to_string()),
         );
     }
-    if let Some(store) = offset_store {
-        skippr.insert(
-            serde_yaml::Value::String("offset_store".into()),
-            serde_yaml::Value::String(store.as_str().to_string()),
-        );
-    }
-    if let Some(table) = offset_dynamodb_table {
-        skippr.insert(
-            serde_yaml::Value::String("offset_dynamodb_table".into()),
-            serde_yaml::Value::String(table.to_string()),
-        );
+    if store.is_some() || store_name.is_some() {
+        let store_map = child_mapping(skippr, "store")?;
+        if let Some(kind) = store {
+            store_map.insert(
+                serde_yaml::Value::String("type".into()),
+                serde_yaml::Value::String(kind.as_str().to_string()),
+            );
+        }
+        if let Some(name) = store_name {
+            store_map.insert(
+                serde_yaml::Value::String("name".into()),
+                serde_yaml::Value::String(name.to_string()),
+            );
+        }
     }
     if let Some(bucket) = skippr_s3_bucket {
         skippr.insert(
@@ -781,6 +784,28 @@ data_sources:
     }
 
     #[test]
+    fn persist_skippr_store_type_and_name() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("skippr.yml");
+        persist_skippr_keys(
+            &path,
+            None,
+            None,
+            None,
+            Some(SkipprStoreKind::DynamoDb),
+            Some("console-skipprd-offsets-prod"),
+            None,
+            None,
+        )
+        .unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(raw.contains("type: dynamodb"));
+        assert!(raw.contains("name: console-skipprd-offsets-prod"));
+        assert!(!raw.contains("offset_store:"));
+        assert!(!raw.contains("offset_dynamodb_table:"));
+    }
+
+    #[test]
     fn persist_nested_secret_path_under_auth() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("skippr.yml");
@@ -815,7 +840,7 @@ data_sources:
     }
 
     #[test]
-    fn persist_iceberg_object_store_from_nested_yaml_and_cli_idents() {
+    fn persist_skipprlake_object_store_from_nested_yaml_and_cli_idents() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("skippr.yml");
         let mut object_store = serde_yaml::Mapping::new();
@@ -831,41 +856,37 @@ data_sources:
             serde_yaml::Value::String("secret_access_key".into()),
             serde_yaml::Value::String("${OBJECTS_SECRET_ACCESS_KEY}".into()),
         );
-        let mut catalog = serde_yaml::Mapping::new();
-        catalog.insert(
-            serde_yaml::Value::String("type".into()),
-            serde_yaml::Value::String("skippr".into()),
-        );
-        catalog.insert(
-            serde_yaml::Value::String("table".into()),
-            serde_yaml::Value::String("cat".into()),
-        );
-        catalog.insert(
-            serde_yaml::Value::String("warehouse".into()),
-            serde_yaml::Value::String("s3://wh/".into()),
-        );
-        catalog.insert(
-            serde_yaml::Value::String("object_store".into()),
-            serde_yaml::Value::Mapping(object_store),
-        );
         persist_plugin(
             &path,
             "p",
-            ConnectPlugin::DataSinkIceberg,
+            ConnectPlugin::DataSinkSkipprLake,
             "lake",
-            BTreeMap::from([("catalog".into(), serde_yaml::Value::Mapping(catalog))]),
+            BTreeMap::from([
+                (
+                    "warehouse".into(),
+                    serde_yaml::Value::String("s3://wh/".into()),
+                ),
+                (
+                    "catalog_table".into(),
+                    serde_yaml::Value::String("cat".into()),
+                ),
+                (
+                    "object_store".into(),
+                    serde_yaml::Value::Mapping(object_store),
+                ),
+            ]),
         )
         .unwrap();
         let doc: serde_yaml::Value =
             serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(
-            doc["data_sinks"]["lake"]["Iceberg"]["catalog"]["object_store"]["type"]
+            doc["data_sinks"]["lake"]["SkipprLake"]["object_store"]["type"]
                 .as_str()
                 .unwrap(),
             "r2"
         );
         assert_eq!(
-            doc["data_sinks"]["lake"]["Iceberg"]["catalog"]["object_store"]["secret_access_key"]
+            doc["data_sinks"]["lake"]["SkipprLake"]["object_store"]["secret_access_key"]
                 .as_str()
                 .unwrap(),
             "${OBJECTS_SECRET_ACCESS_KEY}"
@@ -874,25 +895,98 @@ data_sources:
         let err = persist_plugin(
             &path,
             "p",
-            ConnectPlugin::DataSinkIceberg,
+            ConnectPlugin::DataSinkSkipprLake,
             "lake",
             yaml_path_fields(
-                ConnectPlugin::DataSinkIceberg,
+                ConnectPlugin::DataSinkSkipprLake,
                 &yaml_string_map(BTreeMap::from([
-                    ("catalog_type".into(), "skippr".into()),
+                    ("warehouse".into(), "s3://wh/".into()),
                     ("catalog_table".into(), "cat".into()),
-                    ("catalog_warehouse".into(), "s3://wh/".into()),
-                    ("catalog_object_store_type".into(), "r2".into()),
-                    (
-                        "catalog_object_store_secret_access_key".into(),
-                        "plaintext".into(),
-                    ),
+                    ("object_store_type".into(), "r2".into()),
+                    ("object_store_secret_access_key".into(), "plaintext".into()),
                 ])),
             )
             .unwrap(),
         )
         .unwrap_err();
         assert!(err.contains("${ENV}"), "{err}");
+    }
+
+    #[test]
+    fn persist_athena_iceberg_required_fields() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("skippr.yml");
+        persist_plugin(
+            &path,
+            "p",
+            ConnectPlugin::DataSinkAthenaIceberg,
+            "warehouse",
+            BTreeMap::from([
+                (
+                    "warehouse".into(),
+                    serde_yaml::Value::String("s3://wh/".into()),
+                ),
+                (
+                    "glue_database_name".into(),
+                    serde_yaml::Value::String("analytics".into()),
+                ),
+                (
+                    "athena_workgroup_name".into(),
+                    serde_yaml::Value::String("primary".into()),
+                ),
+                (
+                    "athena_results_s3_bucket".into(),
+                    serde_yaml::Value::String("results".into()),
+                ),
+            ]),
+        )
+        .unwrap();
+        let doc: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let body = &doc["data_sinks"]["warehouse"]["AthenaIceberg"];
+        assert_eq!(body["warehouse"].as_str().unwrap(), "s3://wh/");
+        assert_eq!(body["glue_database_name"].as_str().unwrap(), "analytics");
+        assert_eq!(body["athena_workgroup_name"].as_str().unwrap(), "primary");
+        assert_eq!(
+            body["athena_results_s3_bucket"].as_str().unwrap(),
+            "results"
+        );
+        assert!(body.get("catalog").is_none());
+        assert!(body.get("query_engine").is_none());
+        assert!(body.get("table_prefix").is_none());
+    }
+
+    #[test]
+    fn persist_duckdb_required_fields() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("skippr.yml");
+        persist_plugin(
+            &path,
+            "p",
+            ConnectPlugin::DataSinkDuckdb,
+            "lake",
+            BTreeMap::from([
+                (
+                    "warehouse".into(),
+                    serde_yaml::Value::String("file:///tmp/lake".into()),
+                ),
+                (
+                    "table_namespace".into(),
+                    serde_yaml::Value::String("bronze".into()),
+                ),
+            ]),
+        )
+        .unwrap();
+        let doc: serde_yaml::Value =
+            serde_yaml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        let body = &doc["data_sinks"]["lake"]["Duckdb"];
+        assert_eq!(body["warehouse"].as_str().unwrap(), "file:///tmp/lake");
+        assert_eq!(body["table_namespace"].as_str().unwrap(), "bronze");
+        assert!(body.get("catalog").is_none());
+        assert!(body.get("query_engine").is_none());
+        assert!(body.get("path").is_none());
+        assert!(body.get("schema").is_none());
+        assert!(body.get("object_store").is_none());
     }
 
     #[test]

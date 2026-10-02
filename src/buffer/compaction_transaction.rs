@@ -61,6 +61,14 @@ impl SinkRetrySemantics {
             Self::AtLeastOnce | Self::NonRetryable => false,
         }
     }
+
+    /// Host grouped compaction maps these retries to `SinkWriteSemantics::ExactOnce`.
+    pub const fn grouped_writes_are_exact_once(self) -> bool {
+        match self {
+            Self::TransactionalIdempotent | Self::FinalStateIdempotent => true,
+            Self::DeterministicOverwrite | Self::AtLeastOnce | Self::NonRetryable => false,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]

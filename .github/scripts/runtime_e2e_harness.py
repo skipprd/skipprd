@@ -52,9 +52,12 @@ EXPECTED_RUNTIME_PLUGIN_PATTERNS = (
     "skippr-plugin-data-source-mysql*",
     "skippr-plugin-data-source-dynamodb*",
     "skippr-plugin-data-sink-athena*",
-    "skippr-plugin-data-sink-iceberg*",
+    "skippr-plugin-data-sink-skipprlake*",
     "skippr-plugin-schema-sink-glue*",
-    "skippr-plugin-schema-sink-iceberg*",
+    "skippr-plugin-schema-sink-skipprlake*",
+    "skippr-plugin-schema-sink-athena-iceberg*",
+    "skippr-plugin-data-sink-duckdb*",
+    "skippr-plugin-schema-sink-duckdb*",
 )
 LOCAL_SCENARIO_RUNTIME_MANIFESTS = (
     ("runtime_s3_source", "s3-source.json"),
@@ -64,8 +67,10 @@ LOCAL_SCENARIO_RUNTIME_MANIFESTS = (
     ("runtime_mssql_source", "mssql-source.json"),
     ("runtime_mysql_source", "mysql-source.json"),
     ("runtime_dynamodb_source", "dynamodb-source.json"),
-    ("runtime_iceberg_sink", "iceberg-sink.json"),
-    ("runtime_iceberg_schema", "iceberg-schema.json"),
+    ("runtime_skipprlake_sink", "skipprlake-sink.json"),
+    ("runtime_skipprlake_schema", "skipprlake-schema.json"),
+    ("runtime_athena_iceberg_sink", "athena-iceberg-sink.json"),
+    ("runtime_athena_iceberg_schema", "athena-iceberg-schema.json"),
     ("runtime_snowflake_sink", "snowflake-sink.json"),
     ("runtime_snowflake_schema", "snowflake-schema.json"),
 )
@@ -77,43 +82,43 @@ DEFAULT_LOCAL_SCENARIO_RUNTIME_MANIFESTS = (
 LOCAL_SCENARIO_RUNTIME_MANIFESTS_BY_SCENARIO = {
     "postgres_iceberg_types_cdc": (
         ("runtime_postgres_source", "postgres-source.json"),
-        ("runtime_iceberg_sink", "iceberg-sink.json"),
-        ("runtime_iceberg_schema", "iceberg-schema.json"),
+        ("runtime_athena_iceberg_sink", "athena-iceberg-sink.json"),
+        ("runtime_athena_iceberg_schema", "athena-iceberg-schema.json"),
     ),
     "mysql_iceberg_types_cdc": (
         ("runtime_mysql_source", "mysql-source.json"),
-        ("runtime_iceberg_sink", "iceberg-sink.json"),
-        ("runtime_iceberg_schema", "iceberg-schema.json"),
+        ("runtime_athena_iceberg_sink", "athena-iceberg-sink.json"),
+        ("runtime_athena_iceberg_schema", "athena-iceberg-schema.json"),
     ),
     "dynamodb_iceberg_types_cdc": (
         ("runtime_dynamodb_source", "dynamodb-source.json"),
-        ("runtime_iceberg_sink", "iceberg-sink.json"),
-        ("runtime_iceberg_schema", "iceberg-schema.json"),
+        ("runtime_athena_iceberg_sink", "athena-iceberg-sink.json"),
+        ("runtime_athena_iceberg_schema", "athena-iceberg-schema.json"),
     ),
     "postgres_iceberg_cdc_late_delete": (
         ("runtime_postgres_source", "postgres-source.json"),
-        ("runtime_iceberg_sink", "iceberg-sink.json"),
-        ("runtime_iceberg_schema", "iceberg-schema.json"),
+        ("runtime_athena_iceberg_sink", "athena-iceberg-sink.json"),
+        ("runtime_athena_iceberg_schema", "athena-iceberg-schema.json"),
     ),
     "stripe_iceberg_replace_partition": (
         ("runtime_stripe_source", "stripe-source.json"),
-        ("runtime_iceberg_sink", "iceberg-sink.json"),
-        ("runtime_iceberg_schema", "iceberg-schema.json"),
+        ("runtime_athena_iceberg_sink", "athena-iceberg-sink.json"),
+        ("runtime_athena_iceberg_schema", "athena-iceberg-schema.json"),
     ),
     "stripe_iceberg_merge_by_key": (
         ("runtime_stripe_source", "stripe-source.json"),
-        ("runtime_iceberg_sink", "iceberg-sink.json"),
-        ("runtime_iceberg_schema", "iceberg-schema.json"),
+        ("runtime_athena_iceberg_sink", "athena-iceberg-sink.json"),
+        ("runtime_athena_iceberg_schema", "athena-iceberg-schema.json"),
     ),
     "mssql_iceberg_debug_linux": (
         ("runtime_mssql_source", "mssql-source.json"),
-        ("runtime_iceberg_sink", "iceberg-sink.json"),
-        ("runtime_iceberg_schema", "iceberg-schema.json"),
+        ("runtime_athena_iceberg_sink", "athena-iceberg-sink.json"),
+        ("runtime_athena_iceberg_schema", "athena-iceberg-schema.json"),
     ),
     "mssql_iceberg_debug_windows": (
         ("runtime_mssql_source", "mssql-source.json"),
-        ("runtime_iceberg_sink", "iceberg-sink.json"),
-        ("runtime_iceberg_schema", "iceberg-schema.json"),
+        ("runtime_athena_iceberg_sink", "athena-iceberg-sink.json"),
+        ("runtime_athena_iceberg_schema", "athena-iceberg-schema.json"),
     ),
     "mssql_snowflake": (
         ("runtime_mssql_source", "mssql-source.json"),
@@ -154,43 +159,43 @@ SCENARIO_RUNTIME_VERSION_ANCHORS = {
     "deadletters_test": DEADLETTERS_RUNTIME_VERSION_ANCHORS,
     "postgres_iceberg_types_cdc": (
         ("  postgres_types_cdc:\n    Postgres:\n", "Postgres"),
-        ("  iceberg_types_cdc:\n    Iceberg:\n", "Iceberg"),
-        ("  iceberg_glue:\n    Iceberg:\n", "Iceberg"),
+        ("  iceberg_types_cdc:\n    AthenaIceberg:\n", "AthenaIceberg"),
+        ("  iceberg_glue:\n    AthenaIceberg:\n", "AthenaIceberg"),
     ),
     "mysql_iceberg_types_cdc": (
         ("  mysql_types_cdc:\n    Mysql:\n", "Mysql"),
-        ("  iceberg_types_cdc:\n    Iceberg:\n", "Iceberg"),
-        ("  iceberg_glue:\n    Iceberg:\n", "Iceberg"),
+        ("  iceberg_types_cdc:\n    AthenaIceberg:\n", "AthenaIceberg"),
+        ("  iceberg_glue:\n    AthenaIceberg:\n", "AthenaIceberg"),
     ),
     "dynamodb_iceberg_types_cdc": (
         ("  dynamodb_types_cdc:\n    Dynamodb:\n", "Dynamodb"),
-        ("  iceberg_types_cdc:\n    Iceberg:\n", "Iceberg"),
-        ("  iceberg_glue:\n    Iceberg:\n", "Iceberg"),
+        ("  iceberg_types_cdc:\n    AthenaIceberg:\n", "AthenaIceberg"),
+        ("  iceberg_glue:\n    AthenaIceberg:\n", "AthenaIceberg"),
     ),
     "postgres_iceberg_cdc_late_delete": (
         ("  postgres_types_cdc:\n    Postgres:\n", "Postgres"),
-        ("  iceberg_types_cdc:\n    Iceberg:\n", "Iceberg"),
-        ("  iceberg_glue:\n    Iceberg:\n", "Iceberg"),
+        ("  iceberg_types_cdc:\n    AthenaIceberg:\n", "AthenaIceberg"),
+        ("  iceberg_glue:\n    AthenaIceberg:\n", "AthenaIceberg"),
     ),
     "stripe_iceberg_replace_partition": (
         ("  stripe_fixture:\n    Stripe:\n", "Stripe"),
-        ("  iceberg_stripe:\n    Iceberg:\n", "Iceberg"),
-        ("  iceberg_glue:\n    Iceberg:\n", "Iceberg"),
+        ("  iceberg_stripe:\n    AthenaIceberg:\n", "AthenaIceberg"),
+        ("  iceberg_glue:\n    AthenaIceberg:\n", "AthenaIceberg"),
     ),
     "stripe_iceberg_merge_by_key": (
         ("  stripe_fixture:\n    Stripe:\n", "Stripe"),
-        ("  iceberg_stripe:\n    Iceberg:\n", "Iceberg"),
-        ("  iceberg_glue:\n    Iceberg:\n", "Iceberg"),
+        ("  iceberg_stripe:\n    AthenaIceberg:\n", "AthenaIceberg"),
+        ("  iceberg_glue:\n    AthenaIceberg:\n", "AthenaIceberg"),
     ),
     "mssql_iceberg_debug_linux": (
         ("  mssql_debug:\n    Mssql:\n", "Mssql"),
-        ("  iceberg_debug:\n    Iceberg:\n", "Iceberg"),
-        ("  iceberg_glue:\n    Iceberg:\n", "Iceberg"),
+        ("  iceberg_debug:\n    AthenaIceberg:\n", "AthenaIceberg"),
+        ("  iceberg_glue:\n    AthenaIceberg:\n", "AthenaIceberg"),
     ),
     "mssql_iceberg_debug_windows": (
         ("  mssql_debug:\n    Mssql:\n", "Mssql"),
-        ("  iceberg_debug:\n    Iceberg:\n", "Iceberg"),
-        ("  iceberg_glue:\n    Iceberg:\n", "Iceberg"),
+        ("  iceberg_debug:\n    AthenaIceberg:\n", "AthenaIceberg"),
+        ("  iceberg_glue:\n    AthenaIceberg:\n", "AthenaIceberg"),
     ),
 }
 RUNTIME_PLUGIN_SMOKE_SUPPORT_MANIFESTS = (
@@ -249,7 +254,7 @@ def storage_namespace_key(namespace: str) -> str:
 
 
 def iceberg_table_suffix(namespace: str) -> str:
-    """Mirror `iceberg_table_suffix` in the Iceberg data sink plugin."""
+    """Mirror `iceberg_table_suffix` in skippr-iceberg-writer."""
     raw = namespace.rsplit(".", 1)[-1]
     out: list[str] = []
     for ch in raw:
@@ -261,13 +266,10 @@ def iceberg_table_suffix(namespace: str) -> str:
     return trimmed or "table"
 
 
-def iceberg_glue_table_name(source_namespace: str, *, table_prefix: str = "skippr") -> str:
-    """Glue/Athena table name after ingest namespace sanitization and Iceberg naming."""
+def iceberg_glue_table_name(source_namespace: str) -> str:
+    """Glue/Athena table name after ingest namespace sanitization. Unprefixed."""
     storage_ns = storage_namespace_key(source_namespace)
-    suffix = iceberg_table_suffix(storage_ns)
-    if table_prefix:
-        return f"{table_prefix}_{suffix}"
-    return suffix
+    return iceberg_table_suffix(storage_ns)
 
 
 ICEBERG_CDC_SCENARIO_AWS_STATE = {

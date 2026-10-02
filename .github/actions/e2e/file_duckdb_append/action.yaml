@@ -1,0 +1,75 @@
+name: File Duckdb append e2e
+description: File source to Duckdb Iceberg on file://, then DuckDB iceberg_scan without version guessing.
+runs:
+  using: composite
+  steps:
+    - name: Install DuckDB CLI
+      shell: bash
+      run: |
+        set -euo pipefail
+        if command -v duckdb >/dev/null 2>&1; then
+          duckdb --version
+          exit 0
+        fi
+        if command -v brew >/dev/null 2>&1; then
+          brew install duckdb
+          duckdb --version
+          exit 0
+        fi
+        curl -fsSL https://install.duckdb.org | sh
+        export PATH="${HOME}/.duckdb/cli/latest:${PATH}"
+        duckdb --version
+
+    - name: Build skipprd and Duckdb runtime plugins
+      shell: bash
+      env:
+        CARGO_BUILD_JOBS: "2"
+        CARGO_INCREMENTAL: "0"
+        RUSTFLAGS: "-C debuginfo=0"
+      run: |
+        cargo build \
+          -p skipprd \
+          -p skippr-plugin-data-source-file \
+          -p skippr-plugin-data-sink-duckdb \
+          -p skippr-plugin-schema-sink-duckdb
+
+    - name: Stage local runtime manifests
+      id: local_runtime
+      shell: bash
+      env:
+        CARGO_TARGET_DIR: target
+      run: |
+        set -euo pipefail
+        work="${RUNNER_TEMP:-/tmp}/skippr-file-duckdb-append"
+        mkdir -p "${work}/source" "${work}/warehouse" "${work}/data" "${work}/manifests"
+        cp tests/fixtures/formats/people.csv "${work}/source/people.csv"
+        warehouse_uri="file://${work}/warehouse"
+        sed \
+          -e "s|SOURCE_DIR|${work}/source|" \
+          -e "s|WAREHOUSE_URI|${warehouse_uri}|" \
+          .github/actions/e2e/file_duckdb_append/skippr.yml \
+          > "${work}/skippr.yml"
+        python3 .github/scripts/local_runtime_plugins.py \
+          --config "${work}/skippr.yml" \
+          --pipeline file_duckdb_append \
+          --output-dir "${work}/manifests" \
+          --skip-cargo-build
+        echo "work=${work}" >> "$GITHUB_OUTPUT"
+        echo "warehouse=${work}/warehouse" >> "$GITHUB_OUTPUT"
+
+    - name: Sync File into Duckdb Iceberg and scan
+      shell: bash
+      env:
+        USE_LOCAL_PLUGIN_CODE: "1"
+        SKIPPR_LOCAL_RUNTIME_PLUGIN_MANIFEST_DIR: ${{ steps.local_runtime.outputs.work }}/manifests
+      run: |
+        set -euo pipefail
+        work="${{ steps.local_runtime.outputs.work }}"
+        warehouse="${{ steps.local_runtime.outputs.warehouse }}"
+        export PATH="${HOME}/.duckdb/cli/latest:${PATH}"
+        DATA_DIR="${work}/data" DATA_DIR_MIN_FREE_BYTES=0 \
+          target/debug/skipprd sync --log --pipeline file_duckdb_append --once \
+          --config "${work}/skippr.yml"
+        count="$(duckdb -c "INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('${warehouse}/bronze/file_duckdb_append');")"
+        echo "${count}"
+        echo "${count}" | grep -q '2'

@@ -37,7 +37,7 @@ Public engineer docs: [elt.skippr.io](https://elt.skippr.io). Markdown is `docs/
 
 Release CI on `skipprd-private` is a **full integration test** of user-facing behaviour, not a slim compile check.
 
-- E2E jobs exercise the same paths customers use: `skipprd discover`, `skipprd sync`, runtime plugins, and downstream sinks (Iceberg/Glue/Athena, Snowflake, etc.).
+- E2E jobs exercise the same paths customers use: `skipprd discover`, `skipprd sync`, runtime plugins, and downstream sinks (SkipprLake, Athena, Snowflake, etc.).
 - CI authenticates with `SKIPPR_API_KEY` (API key exchange → JWT) the same way automation customers use; do **not** add CI-only shortcuts that skip auth, run locks, ingest, or other platform steps.
 - If an E2E job fails, fix the product or the test scenario—do not bypass the failing step for GitHub Actions only.
 - Auth API routes (including `/auth/workspaces/.../runs/lock/*`) must be deployed to production before release tags that depend on them; the CLI assumes those endpoints exist when run locks are enabled.

@@ -93,9 +93,9 @@ impl FromStr for ElStorageMode {
     }
 }
 
-/// Offset/checkpoint backend selected by `SKIPPR_OFFSET_STORE`.
+/// SkipprStore backend selected by `skippr.store.type` / `SKIPPR_STORE_TYPE`.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum, Deserialize, Serialize)]
-pub enum OffsetStoreKind {
+pub enum SkipprStoreKind {
     #[default]
     #[serde(rename = "sled")]
     #[value(name = "sled")]
@@ -108,7 +108,18 @@ pub enum OffsetStoreKind {
     CloudTables,
 }
 
-impl OffsetStoreKind {
+/// Durable Skippr KV store: offsets, checkpoints, leases, membership, and
+/// SkipprLake catalog pointers share one table via non-colliding PK/SK prefixes.
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize, Serialize)]
+pub struct SkipprStore {
+    #[serde(rename = "type")]
+    pub kind: SkipprStoreKind,
+    /// Table name for DynamoDB / Cloud Tables. Unused for sled.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+impl SkipprStoreKind {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Sled => "sled",
@@ -137,21 +148,24 @@ impl OffsetStoreKind {
     }
 }
 
-impl FromStr for OffsetStoreKind {
+impl FromStr for SkipprStoreKind {
     type Err = ConfigError;
 
     fn from_str(raw: &str) -> Result<Self, Self::Err> {
         let raw = raw.trim().to_ascii_lowercase();
-        if skippr_iceberg_catalog::offset_store_is_cloud_tables(&raw) {
+        if skippr_iceberg_catalog::store_is_cloud_tables(&raw) {
             return Ok(Self::CloudTables);
         }
         match raw.as_str() {
             "" | "sled" => Ok(Self::Sled),
             "dynamodb" => Ok(Self::DynamoDb),
-            other => Err(ConfigError::InvalidOffsetStore(other.to_owned())),
+            other => Err(ConfigError::InvalidSkipprStore(other.to_owned())),
         }
     }
 }
+
+/// Deprecated: `SKIPPR_OFFSET_STORE` / `skippr.offset_store`. Use `SkipprStoreKind`.
+pub type OffsetStoreKind = SkipprStoreKind;
 
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ConfigError {
@@ -159,15 +173,15 @@ pub enum ConfigError {
     InvalidWalStorage(String),
     #[error("invalid skipprd_el_storage_mode value '{0}'; expected local or s3")]
     InvalidElStorageMode(String),
-    #[error("invalid SKIPPR_OFFSET_STORE value '{0}'; expected sled, dynamodb, or cloud-tables")]
-    InvalidOffsetStore(String),
+    #[error("invalid skippr.store.type value '{0}'; expected sled, dynamodb, or cloud-tables")]
+    InvalidSkipprStore(String),
     #[error("WAL_STORAGE=clustered requires skipprd built with --features offset-store-dynamodb or offset-store-cloud-tables")]
     ClusteredFeatureMissing,
-    #[error("WAL_STORAGE=clustered requires SKIPPR_OFFSET_DYNAMODB_TABLE")]
+    #[error("WAL_STORAGE=clustered requires skippr.store.name (or SKIPPR_STORE_NAME)")]
     ClusteredTableMissing,
-    #[error("SKIPPR_OFFSET_STORE=cloud-tables requires CLOUD_TABLES_ENDPOINT (mesh/loopback, not *.cloud.skippr.io)")]
+    #[error("skippr.store.type=cloud-tables requires CLOUD_TABLES_ENDPOINT (mesh/loopback, not *.cloud.skippr.io)")]
     CloudTablesEndpointMissing,
-    #[error("Cloud Tables offset store requires SDK default credentials")]
+    #[error("Cloud Tables SkipprStore requires SDK default credentials")]
     CloudTablesAuthMissing,
     #[error("WAL_STORAGE=clustered requires SKIPPR_CLUSTER_ID")]
     ClusterIdMissing,
@@ -175,15 +189,10 @@ pub enum ConfigError {
     GossipKeyMissing,
     #[error("WAL_STORAGE=clustered requires SKIPPR_CLUSTER_TLS_CERT, SKIPPR_CLUSTER_TLS_KEY, and SKIPPR_CLUSTER_TLS_CA")]
     ClusterTlsMissing,
+    #[error("SkipprLake config is invalid: {0}")]
+    SkipprLakeConfigInvalid(String),
     #[error(
-        "Iceberg catalog.table '{catalog_table}' must not be SKIPPR_OFFSET_DYNAMODB_TABLE '{offset_table}'; create a separate catalog table"
-    )]
-    SkipprCatalogReusesOffsetTable {
-        catalog_table: String,
-        offset_table: String,
-    },
-    #[error(
-        "WAL_STORAGE=clustered cannot be used with SKIPPR_OFFSET_STORE={0}; clustered mode uses DynamoDB or Cloud tables offsets"
+        "WAL_STORAGE=clustered cannot be used with skippr.store.type={0}; clustered mode uses DynamoDB or Cloud tables"
     )]
     ClusteredOffsetStoreConflict(String),
     #[error(
@@ -267,47 +276,54 @@ mod tests {
     }
 
     #[test]
-    fn default_for_wal_is_the_offset_kind_resolver() {
+    fn default_for_wal_is_the_store_kind_resolver() {
         assert_eq!(
-            OffsetStoreKind::default_for_wal(WalStorage::Disk),
-            OffsetStoreKind::Sled
+            SkipprStoreKind::default_for_wal(WalStorage::Disk),
+            SkipprStoreKind::Sled
         );
         assert_eq!(
-            OffsetStoreKind::default_for_wal(WalStorage::S3),
-            OffsetStoreKind::Sled
+            SkipprStoreKind::default_for_wal(WalStorage::S3),
+            SkipprStoreKind::Sled
         );
         #[cfg(feature = "offset-store-dynamodb")]
         assert_eq!(
-            OffsetStoreKind::default_for_wal(WalStorage::Clustered),
-            OffsetStoreKind::DynamoDb
+            SkipprStoreKind::default_for_wal(WalStorage::Clustered),
+            SkipprStoreKind::DynamoDb
         );
         #[cfg(all(
             feature = "offset-store-cloud-tables",
             not(feature = "offset-store-dynamodb")
         ))]
         assert_eq!(
-            OffsetStoreKind::default_for_wal(WalStorage::Clustered),
-            OffsetStoreKind::CloudTables
+            SkipprStoreKind::default_for_wal(WalStorage::Clustered),
+            SkipprStoreKind::CloudTables
         );
     }
 
     #[test]
-    fn cloud_tables_offset_store_aliases_parse() {
+    fn cloud_tables_store_aliases_parse() {
         assert_eq!(
-            "cloud-tables".parse::<OffsetStoreKind>().unwrap(),
-            OffsetStoreKind::CloudTables
+            "cloud-tables".parse::<SkipprStoreKind>().unwrap(),
+            SkipprStoreKind::CloudTables
         );
         assert_eq!(
-            "tables".parse::<OffsetStoreKind>().unwrap(),
-            OffsetStoreKind::CloudTables
+            "tables".parse::<SkipprStoreKind>().unwrap(),
+            SkipprStoreKind::CloudTables
         );
         assert_eq!(
-            "CLOUD_TABLES".parse::<OffsetStoreKind>().unwrap(),
-            OffsetStoreKind::CloudTables
+            "CLOUD_TABLES".parse::<SkipprStoreKind>().unwrap(),
+            SkipprStoreKind::CloudTables
         );
         assert_eq!(
-            "dynamodb".parse::<OffsetStoreKind>().unwrap(),
-            OffsetStoreKind::DynamoDb
+            "dynamodb".parse::<SkipprStoreKind>().unwrap(),
+            SkipprStoreKind::DynamoDb
         );
+    }
+
+    #[test]
+    fn skippr_store_yaml_is_type_and_name() {
+        let store: SkipprStore = serde_yaml::from_str("type: dynamodb\nname: offsets\n").unwrap();
+        assert_eq!(store.kind, SkipprStoreKind::DynamoDb);
+        assert_eq!(store.name.as_deref(), Some("offsets"));
     }
 }

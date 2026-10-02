@@ -6,7 +6,7 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use aws_sdk_dynamodb::types::{AttributeValue, Put, TransactWriteItem, Update};
 use aws_sdk_dynamodb::Client;
-use iceberg::io::{FileIO, FileIOBuilder};
+use iceberg::io::FileIO;
 use iceberg::spec::{TableMetadata, TableMetadataBuilder};
 use iceberg::table::Table;
 use iceberg::{
@@ -14,8 +14,7 @@ use iceberg::{
     TableIdent,
 };
 use skippr_iceberg_catalog::{
-    decode_name, encode_name, skippr_catalog_reuses_offset_table, warehouse_hash,
-    IcebergCatalogConfig,
+    decode_name, encode_name, iceberg_file_io_for_warehouse, warehouse_hash, SkipprLakeConfig,
 };
 use uuid::Uuid;
 
@@ -35,28 +34,13 @@ pub struct DynamoDbCatalog {
 }
 
 impl DynamoDbCatalog {
-    pub async fn new(config: &IcebergCatalogConfig) -> Result<Self> {
-        let IcebergCatalogConfig::Skippr {
-            table,
+    pub async fn new(config: &SkipprLakeConfig) -> Result<Self> {
+        let SkipprLakeConfig {
+            catalog_table: table,
             warehouse,
             region,
             ..
-        } = config
-        else {
-            return Err(Error::new(
-                ErrorKind::DataInvalid,
-                "DynamoDbCatalog requires catalog type skippr",
-            ));
-        };
-        let offset_table = std::env::var("SKIPPR_OFFSET_DYNAMODB_TABLE").unwrap_or_default();
-        if skippr_catalog_reuses_offset_table(table, &offset_table) {
-            return Err(Error::new(
-                ErrorKind::DataInvalid,
-                format!(
-                    "Iceberg catalog.table '{table}' must not be SKIPPR_OFFSET_DYNAMODB_TABLE; create a separate catalog table"
-                ),
-            ));
-        };
+        } = config;
         let mut loader = aws_config::defaults(aws_config::BehaviorVersion::latest());
         if let Some(region) = region {
             loader = loader.region(aws_config::Region::new(region.clone()));
@@ -136,26 +120,6 @@ impl DynamoDbCatalog {
             .and_then(|n| n.parse().ok())
             .ok_or_else(|| Error::new(ErrorKind::DataInvalid, "missing generation"))?;
         Ok((location, generation))
-    }
-}
-
-pub fn iceberg_file_io_for_warehouse(config: &IcebergCatalogConfig) -> Result<FileIO> {
-    let warehouse = config.warehouse();
-    if warehouse.starts_with("memory:") || warehouse.starts_with("memory://") {
-        Ok(FileIO::new_with_memory())
-    } else if warehouse.starts_with("s3://") || warehouse.starts_with("s3a://") {
-        let props = skippr_iceberg_catalog::s3_object_store_props(config.object_store())
-            .map_err(|err| Error::new(ErrorKind::DataInvalid, err))?;
-        Ok(FileIOBuilder::new(Arc::new(
-            iceberg_storage_opendal::OpenDalStorageFactory::S3 {
-                configured_scheme: "s3".to_string(),
-                customized_credential_load: None,
-            },
-        ))
-        .with_props(props)
-        .build())
-    } else {
-        Ok(FileIO::new_with_fs())
     }
 }
 
@@ -564,7 +528,19 @@ impl Catalog for DynamoDbCatalog {
 
 #[cfg(test)]
 mod tests {
-    use skippr_iceberg_catalog::{decode_name, encode_name, IcebergCatalogConfig};
+    use skippr_iceberg_catalog::{
+        decode_name, encode_name, SkipprLakeConfig, WarehouseObjectStore,
+    };
+
+    fn lake(warehouse: &str) -> SkipprLakeConfig {
+        SkipprLakeConfig {
+            warehouse: warehouse.into(),
+            catalog_table: "t".into(),
+            region: None,
+            object_store: WarehouseObjectStore::S3,
+            table_namespace: "default".into(),
+        }
+    }
 
     #[test]
     fn table_sk_uses_length_prefixed_encoding() {
@@ -574,19 +550,9 @@ mod tests {
 
     #[test]
     fn memory_warehouse_builds_file_io() {
-        let cfg = IcebergCatalogConfig::Skippr {
-            table: "t".into(),
-            warehouse: "memory://warehouse".into(),
-            region: None,
-            file_io: Default::default(),
-        };
-        let _ = super::iceberg_file_io_for_warehouse(&cfg).unwrap();
-        let cfg = IcebergCatalogConfig::Skippr {
-            table: "t".into(),
-            warehouse: "/tmp/warehouse".into(),
-            region: None,
-            file_io: Default::default(),
-        };
-        let _ = super::iceberg_file_io_for_warehouse(&cfg).unwrap();
+        let _ = skippr_iceberg_catalog::iceberg_file_io_for_warehouse(&lake("memory://warehouse"))
+            .unwrap();
+        let _ =
+            skippr_iceberg_catalog::iceberg_file_io_for_warehouse(&lake("/tmp/warehouse")).unwrap();
     }
 }

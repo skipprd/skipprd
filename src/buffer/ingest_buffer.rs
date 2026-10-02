@@ -4693,7 +4693,7 @@ mod tests_wal_commit {
         }
 
         fn capability(&self) -> &'static crate::plugins::cdc::SinkCapability {
-            &crate::plugins::cdc::sink_capabilities::ICEBERG
+            &crate::plugins::cdc::sink_capabilities::SKIPPRLAKE
         }
     }
 
@@ -5459,11 +5459,11 @@ mod compaction_semantics_tests {
 
     fn mock_router_sink() -> MockMultiSink {
         MockMultiSink {
-            primary: &sink_capabilities::ICEBERG,
+            primary: &sink_capabilities::SKIPPRLAKE,
             by_ref: HashMap::from([
                 (
                     "data_sinks.ds_datalake".to_string(),
-                    &sink_capabilities::ICEBERG,
+                    &sink_capabilities::SKIPPRLAKE,
                 ),
                 (
                     "deadletter_sinks.ds_deadletters".to_string(),
@@ -5482,7 +5482,7 @@ mod compaction_semantics_tests {
             SinkWriteSemantics::IdempotentAtLeastOnce
         );
         assert_eq!(
-            Buffers::grouped_write_semantics(&sink_capabilities::ICEBERG),
+            Buffers::grouped_write_semantics(&sink_capabilities::SKIPPRLAKE),
             SinkWriteSemantics::ExactOnce
         );
     }
