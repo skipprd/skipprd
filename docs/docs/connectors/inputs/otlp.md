@@ -1,6 +1,6 @@
 # OTLP Input
 
-Receives OpenTelemetry Protocol (OTLP) traces, logs, and metrics over gRPC (`:4317`) and HTTP (`:4318`). Pair with the Iceberg sink. The OpenTelemetry Collector is the customer-run agent.
+Receives OpenTelemetry Protocol (OTLP) traces, logs, and metrics over gRPC (`:4317`) and HTTP (`:4318`). Pair with the [SkipprLake](../outputs/skipprlake.md) sink. The OpenTelemetry Collector is the customer-run agent.
 
 ## How it works
 
@@ -63,5 +63,5 @@ SQL catalog schema is the pipeline name (quote hyphens): `"otel-traces".spans`.
 
 ## Related
 
-- [Iceberg output](../outputs/iceberg.md)
+- [SkipprLake output](../outputs/skipprlake.md)
 - [HTTP Server](http_server.md)

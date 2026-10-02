@@ -17,7 +17,7 @@ skipprd --workspace bikehire --storage-mode local connect data-source s3 \
   --s3-prefix bike-hire
 ```
 
-`--storage-mode` is `local` or `s3`. `--offset-store` is `sled`, `dynamodb`, or `cloud-tables`. WAL backend stays `--wal-storage` / `WAL_STORAGE` (not a YAML key).
+`--storage-mode` is `local` or `s3`. `--store-type` is `sled`, `dynamodb`, or `cloud-tables`. `--store-name` is the SkipprStore table. WAL backend stays `--wal-storage` / `WAL_STORAGE` (not a YAML key).
 
 ## Roles
 
@@ -89,17 +89,16 @@ s.connect().data_source(
 
 See [Python](/python).
 
-Iceberg R2 credentials are nested `catalog.object_store`. CLI flatten uses `--catalog-object-store-type r2` plus endpoint and `${OBJECTS_*}` secrets:
+SkipprLake R2 credentials are nested `object_store`. CLI flatten uses `--object-store-type r2` plus endpoint and `${OBJECTS_*}` secrets:
 
 ```bash
-skipprd connect data-sink iceberg \
+skipprd connect data-sink skippr-lake \
   --pipeline bikehire \
   --name lake \
-  --catalog-type skippr \
   --catalog-table my-iceberg-catalog \
-  --catalog-warehouse 's3://my-iceberg-warehouse/' \
-  --catalog-object-store-type r2 \
-  --catalog-object-store-endpoint '${OBJECTS_S3_ENDPOINT}' \
-  --catalog-object-store-access-key-id '${OBJECTS_ACCESS_KEY_ID}' \
-  --catalog-object-store-secret-access-key '${OBJECTS_SECRET_ACCESS_KEY}'
+  --warehouse 's3://my-iceberg-warehouse/' \
+  --object-store-type r2 \
+  --object-store-endpoint '${OBJECTS_S3_ENDPOINT}' \
+  --object-store-access-key-id '${OBJECTS_ACCESS_KEY_ID}' \
+  --object-store-secret-access-key '${OBJECTS_SECRET_ACCESS_KEY}'
 ```

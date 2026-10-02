@@ -87,15 +87,17 @@ Optional `version:` on a source, sink, or schema connector pins that connector t
 | Plugin | Doc |
 | --- | --- |
 | `Athena` | [Athena (S3 + Glue)](outputs/athena.md) |
+| `AthenaIceberg` | [AthenaIceberg](outputs/athenaiceberg.md) |
 | `Bigquery` | [BigQuery](outputs/bigquery.md) |
 | `Clickhouse` | [ClickHouse](outputs/clickhouse.md) |
 | `Databricks` | [Databricks](outputs/databricks.md) |
+| `Duckdb` | [Duckdb](outputs/duckdb.md) |
 | `Motherduck` | [MotherDuck](outputs/motherduck.md) |
 | `Postgres` | [Postgres](outputs/postgres.md) |
 | `Redshift` | [Redshift](outputs/redshift.md) |
 | `Snowflake` | [Snowflake](outputs/snowflake.md) |
 | `Synapse` | [Synapse](outputs/synapse.md) |
-| `Iceberg` | [Iceberg](outputs/iceberg.md) |
+| `SkipprLake` | [SkipprLake](outputs/skipprlake.md) |
 | `S3` | [S3](outputs/s3.md) |
 | `Gcs` | [GCS](outputs/gcs.md) |
 | `AzureBlob` | [Azure Blob](outputs/azure_blob.md) |
@@ -109,7 +111,9 @@ Optional `version:` on a source, sink, or schema connector pins that connector t
 | Plugin | Doc | Typical data sink |
 | --- | --- | --- |
 | `Glue` | [Glue](schema_sinks/glue.md) | `Athena` |
-| `Iceberg` | [Iceberg](schema_sinks/iceberg.md) | `Iceberg` |
+| `AthenaIceberg` | [AthenaIceberg](schema_sinks/athenaiceberg.md) | `AthenaIceberg` |
+| `Duckdb` | [Duckdb](schema_sinks/duckdb.md) | `Duckdb` |
+| `SkipprLake` | [SkipprLake](schema_sinks/skipprlake.md) | `SkipprLake` |
 | `Bigquery` | — | `Bigquery` |
 | `Snowflake` | — | `Snowflake` |
 | `Postgres` | — | `Postgres` |

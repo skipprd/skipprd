@@ -34,7 +34,8 @@ The host validates contracts when a source starts and checks that your pipelineâ
 | Data sink | `replace_partition` |
 |---|---|
 | Athena (S3 + Glue) | Yes |
-| Iceberg | Yes |
+| AthenaIceberg | Yes |
+| SkipprLake | Yes |
 | Append-only sinks | No â€” pipeline validation fails |
 
 ## Discover vs contracts

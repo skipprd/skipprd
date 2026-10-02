@@ -1,10 +1,11 @@
 # query
 
-Run engine SQL against configured data, manage pipelines and schemas, and
-stream from the WAL.
+Run engine SQL against SkipprLake Iceberg tables and the live WAL, manage
+pipelines and schemas, and stream from the WAL.
 
-Use `skipprd query` for the local runtime. `sde query` is a different
-command: warehouse SQL through the modeling stack, not engine pipeline SQL.
+Athena, AthenaIceberg, and Duckdb sinks are not queried by this command;
+those warehouses use their own SQL. Use `sde query` for warehouse SQL through
+the modeling stack.
 
 ## Usage
 
@@ -59,7 +60,9 @@ Stream from the WAL:
 skipprd --config skippr.yml query --sql "STREAM * FROM bikehire LIMIT 100"
 ```
 
-See the [SQL Reference](../sql/reference.md) for all supported statements.
+See [`skipprd sql-help`](sql-help.md) or `SHOW DOCS` for every supported
+statement. `skipprd sql-help --output sql-docs.md` regenerates the checked-in
+reference at the repository root.
 
 ## Exit codes
 
