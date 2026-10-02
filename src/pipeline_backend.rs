@@ -10,22 +10,22 @@ use skippr_lease::{
 
 use crate::helpers::configuration::Config;
 use crate::helpers::offsets::Offsets;
-use crate::helpers::wal_storage::OffsetStoreKind;
+use crate::helpers::wal_storage::SkipprStoreKind;
 
 pub async fn open_pipeline_lease_store(
-    kind: OffsetStoreKind,
+    kind: SkipprStoreKind,
     offsets: Option<&Offsets>,
     table: String,
 ) -> Result<Arc<dyn PipelineLeaseStore>, String> {
     match kind {
-        OffsetStoreKind::Sled => {
+        SkipprStoreKind::Sled => {
             let offsets = offsets.ok_or_else(|| {
                 "sled pipeline lease requires an open local offset database".to_string()
             })?;
             let store = offsets.open_sled_lease_store()?;
             Ok(Arc::new(store))
         }
-        OffsetStoreKind::CloudTables => {
+        SkipprStoreKind::CloudTables => {
             #[cfg(feature = "offset-store-cloud-tables")]
             {
                 let store = skippr_lease_store_cloud_tables::CloudTablesLeaseStore::connect(table)
@@ -37,12 +37,12 @@ pub async fn open_pipeline_lease_store(
             {
                 let _ = table;
                 Err(
-                    "SKIPPR_OFFSET_STORE=cloud-tables requires --features offset-store-cloud-tables"
+                    "skippr.store.type=cloud-tables requires --features offset-store-cloud-tables"
                         .into(),
                 )
             }
         }
-        OffsetStoreKind::DynamoDb => {
+        SkipprStoreKind::DynamoDb => {
             #[cfg(feature = "offset-store-dynamodb")]
             {
                 let store = skippr_lease_store_dynamodb::DynamoDbLeaseStore::connect(table)
@@ -53,18 +53,32 @@ pub async fn open_pipeline_lease_store(
             #[cfg(not(feature = "offset-store-dynamodb"))]
             {
                 let _ = table;
-                Err("SKIPPR_OFFSET_STORE=dynamodb requires --features offset-store-dynamodb".into())
+                Err("skippr.store.type=dynamodb requires --features offset-store-dynamodb".into())
             }
         }
     }
 }
 
-pub fn configured_kind(config: &Config) -> Result<OffsetStoreKind, String> {
-    match config.configured_offset_store() {
+pub fn configured_kind(config: &Config) -> Result<SkipprStoreKind, String> {
+    match config.configured_skippr_store() {
         Ok(Some(kind)) => Ok(kind),
-        Ok(None) => Ok(OffsetStoreKind::default_for_wal(config.get_wal_storage())),
+        Ok(None) => Ok(SkipprStoreKind::default_for_wal(config.get_wal_storage())),
         Err(err) => Err(err.to_string()),
     }
+}
+
+/// Canonical SkipprStore type string. Host query and spawned plugins
+/// both feed this to `SkipprCatalogBackend::from_store_type`.
+pub fn skippr_store_type_value(config: &Config) -> String {
+    match configured_kind(config) {
+        Ok(kind) => kind.as_str().to_string(),
+        Err(_) => String::new(),
+    }
+}
+
+/// Deprecated name for [`skippr_store_type_value`].
+pub fn offset_store_env_value(config: &Config) -> String {
+    skippr_store_type_value(config)
 }
 
 pub fn pipeline_key(config: &Config) -> Result<PipelineKey, String> {
@@ -88,7 +102,7 @@ pub async fn acquire_ingest_lease(
     offsets: &Offsets,
 ) -> Result<AcquiredPipelineLease, String> {
     let kind = configured_kind(config)?;
-    let table = config.get_offset_dynamodb_table();
+    let table = config.get_skippr_store_name();
     let store = open_pipeline_lease_store(kind, Some(offsets), table).await?;
     let key = pipeline_key(config)?;
     let clock = Arc::new(SystemClock::new());
@@ -144,7 +158,7 @@ impl AcquiredPipelineLease {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::helpers::wal_storage::OffsetStoreKind;
+    use crate::helpers::wal_storage::SkipprStoreKind;
     use serde_json::json;
     use serial_test::serial;
 
@@ -166,7 +180,7 @@ mod tests {
             }
         }))
         .unwrap();
-        assert_eq!(configured_kind(&config).unwrap(), OffsetStoreKind::Sled);
+        assert_eq!(configured_kind(&config).unwrap(), SkipprStoreKind::Sled);
         if let Some(value) = old_store {
             Config::set_offset_store(&value);
         } else {

@@ -23,27 +23,21 @@ data_sources:
 
 data_sinks:
   iceberg_types_cdc:
-    Iceberg:
-      table_namespace: iceberg_e2e_dynamodb
-      table_prefix: skippr
-      table_location_prefix: s3://skippr-e2e-sample-data-output/iceberg-e2e-dynamodb
-      catalog:
-        type: glue
-        warehouse: s3://skippr-e2e-sample-data-output/iceberg-e2e-dynamodb
-        database: iceberg_e2e_dynamodb
-        catalog_id: "353855562591"
-        region: us-east-1
+    AthenaIceberg:
+      warehouse: s3://skippr-e2e-sample-data-output/iceberg-e2e-dynamodb
+      glue_database_name: iceberg_e2e_dynamodb
+      athena_workgroup_name: bikehire
+      athena_results_s3_bucket: skippr-e2e-sample-data-output
+      catalog_id: "353855562591"
+      region: us-east-1
     schema_sink: schema_sinks.iceberg_glue
 
 schema_sinks:
   iceberg_glue:
-    Iceberg:
-      table_namespace: iceberg_e2e_dynamodb
-      table_prefix: skippr
-      table_location_prefix: s3://skippr-e2e-sample-data-output/iceberg-e2e-dynamodb
-      catalog:
-        type: glue
-        warehouse: s3://skippr-e2e-sample-data-output/iceberg-e2e-dynamodb
-        database: iceberg_e2e_dynamodb
-        catalog_id: "353855562591"
-        region: us-east-1
+    AthenaIceberg:
+      warehouse: s3://skippr-e2e-sample-data-output/iceberg-e2e-dynamodb
+      glue_database_name: iceberg_e2e_dynamodb
+      athena_workgroup_name: bikehire
+      athena_results_s3_bucket: skippr-e2e-sample-data-output
+      catalog_id: "353855562591"
+      region: us-east-1

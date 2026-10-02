@@ -92,12 +92,12 @@ impl DynamoDbOffsetStore {
     ) -> Result<Self, String> {
         if table.is_empty() {
             return Err(
-                "SKIPPR_OFFSET_DYNAMODB_TABLE is required when SKIPPR_OFFSET_STORE=dynamodb".into(),
+                "skippr.store.name (SKIPPR_STORE_NAME) is required when skippr.store.type is dynamodb".into(),
             );
         }
         if warn_without_s3_wal {
             warn!(
-                "SKIPPR_OFFSET_STORE=dynamodb without WAL_STORAGE=s3; resume may be incomplete on cold start"
+                "skippr.store.type=dynamodb without WAL_STORAGE=s3; resume may be incomplete on cold start"
             );
         }
         info!(

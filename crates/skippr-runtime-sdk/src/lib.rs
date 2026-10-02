@@ -23,6 +23,14 @@ pub use skippr_plugin_macros::SkipprConfig;
 #[macro_export]
 macro_rules! declare_sink_spec {
     ($spec:ident, $plugin:ty, $capability:path, $support:ty) => {
+        $crate::declare_sink_spec!($spec, $capability, $support);
+
+        impl $crate::plugins::HasSinkSpec for $plugin {
+            type Spec = $spec;
+        }
+    };
+    // Spec only: for plugins whose writer type already implements `HasSinkSpec<Spec = S>`.
+    ($spec:ident, $capability:path, $support:ty) => {
         const _: () = {
             assert!(!$capability.grouping_support.is_none());
             assert!($capability
@@ -40,6 +48,10 @@ macro_rules! declare_sink_spec {
                 $capability.grouping_support.is_none()
                     || <$support as $crate::plugins::SinkWriteSupport>::BOUNDED_GROUPED_STREAM
             );
+            assert!(
+                !$capability.retry_semantics.grouped_writes_are_exact_once()
+                    || <$support as $crate::plugins::SinkWriteSupport>::EXACT_ONCE_ALLOWED
+            );
         };
 
         pub struct $spec;
@@ -48,10 +60,6 @@ macro_rules! declare_sink_spec {
             const NAME: &'static str = $capability.name;
             const CAPABILITY: $crate::plugins::cdc::SinkCapability = $capability;
             type WriteSupport = $support;
-        }
-
-        impl $crate::plugins::HasSinkSpec for $plugin {
-            type Spec = $spec;
         }
     };
 }

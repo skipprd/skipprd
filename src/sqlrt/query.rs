@@ -3,10 +3,8 @@ use std::io::BufReader;
 use std::{fs, process};
 // removed unused Write import
 use crate::discover::{Metadata, PipelineMetadata, SkipprDataType};
-use crate::helpers::athena_admin::{
-    delete_glue_database, glue_delete_table, output_athena_admin_config,
-};
 use crate::helpers::configuration::Config;
+use crate::sqlrt::docs::{print_categorized_sql_docs, SqlDocListingKind};
 use crate::sqlrt::operators::alter_column::alter_column_type;
 use crate::sqlrt::operators::drop_column::alter_column_drop;
 use crate::sqlrt::operators::drop_table::drop_table;
@@ -581,73 +579,17 @@ pub async fn query_with_options(
             // Print SQL documentation
             println!("SQL Documentation:");
             println!("=================\n");
-
-            // Group by category for better readability
-            let mut schema_cmds = Vec::new();
-            let mut pipeline_cmds = Vec::new();
-            let mut data_cmds = Vec::new();
-            let mut query_cmds = Vec::new();
-
-            for doc in SqlDocParser::list_all_statements() {
-                if doc.name.contains("SCHEMA") {
-                    schema_cmds.push(doc);
-                } else if doc.name.contains("PIPELINE") {
-                    pipeline_cmds.push(doc);
-                } else if doc.name.contains("TABLE") || doc.name.contains("DATABASE") {
-                    data_cmds.push(doc);
-                } else {
-                    query_cmds.push(doc);
-                }
-            }
-
-            if !schema_cmds.is_empty() {
-                println!("Schema Operations:");
-                println!("-----------------");
-                for doc in schema_cmds {
-                    println!("  {} - {}", doc.name, doc.description);
-                    println!("  Syntax: {}", doc.syntax);
-                    println!("  Example: {}\n", doc.example);
-                }
-            }
-
-            if !pipeline_cmds.is_empty() {
-                println!("Pipeline Operations:");
-                println!("-------------------");
-                for doc in pipeline_cmds {
-                    println!("  {} - {}", doc.name, doc.description);
-                    println!("  Syntax: {}", doc.syntax);
-                    println!("  Example: {}\n", doc.example);
-                }
-            }
-
-            if !data_cmds.is_empty() {
-                println!("Data Operations:");
-                println!("---------------");
-                for doc in data_cmds {
-                    println!("  {} - {}", doc.name, doc.description);
-                    println!("  Syntax: {}", doc.syntax);
-                    println!("  Example: {}\n", doc.example);
-                }
-            }
-
-            if !query_cmds.is_empty() {
-                println!("Query Operations:");
-                println!("----------------");
-                for doc in query_cmds {
-                    println!("  {} - {}", doc.name, doc.description);
-                    println!("  Syntax: {}", doc.syntax);
-                    println!("  Example: {}\n", doc.example);
-                }
-            }
-
+            print_categorized_sql_docs(SqlDocListingKind::Full);
             println!("For more detailed documentation, run:");
             println!("  skipprd sql-help");
         }
         Ok(Statement::DatabaseDrop(stmt)) => {
             let db_name = stmt.database.clone();
-
-            match delete_glue_database(&db_name.to_string()).await {
-                Ok(_) => {
+            config.init().await;
+            match crate::sqlrt::operators::drop_table::drop_database(&config, &db_name.to_string())
+                .await
+            {
+                Ok(()) => {
                     println!("Dropped Database: {}", db_name);
                 }
                 Err(e) => {
@@ -897,21 +839,32 @@ pub async fn query_with_options(
             };
 
             let schema_name = stmt.schema.clone().unwrap_or(stmt.pipeline.clone());
+            if skippr_metadata
+                .metadata
+                .get(&format!("{}", schema_name))
+                .is_none()
+            {
+                println!(
+                    "Schema '{}' not found for pipeline: '{}'",
+                    schema_name, &stmt.pipeline
+                );
+                return;
+            }
 
-            let metadata = match skippr_metadata.metadata.get(&format!("{}", schema_name)) {
-                Some(metadata) => metadata,
-                None => {
-                    println!(
-                        "Schema '{}' not found for pipeline: '{}'",
-                        schema_name, &stmt.pipeline
-                    );
-                    return;
-                }
-            };
-
-            dump_schema(schema_name, &metadata, &stmt).expect("Failed to drop column");
-
-            println!("Schema dumped to '{}'", stmt.target);
+            let pipeline = format!("{}", stmt.pipeline);
+            let namespace = format!("{}", schema_name);
+            let ctx = SessionContext::new();
+            if let Err(err) =
+                crate::sqlrt::tables::register_namespace_view(&ctx, &config, &pipeline, &namespace)
+                    .await
+            {
+                println!("SCHEMA DUMP failed: {err}");
+                return;
+            }
+            match dump_schema(&ctx, &pipeline, &namespace, &stmt).await {
+                Ok(()) => println!("Schema dumped to '{}'", stmt.target),
+                Err(err) => println!("SCHEMA DUMP failed: {err}"),
+            }
         }
         Ok(Statement::AlterSchemaDropColumn(stmt)) => {
             // println!("Alter table drop column: {}", stmt.column_name);
@@ -1030,23 +983,8 @@ pub async fn query_with_options(
                         METADATA.store(Arc::new(skippr_metadata.clone()));
                     }
 
-                    // Save the updated metadata
-                    config.set_metadata(&skippr_metadata, false).await; // we don't need to sync the schemas as we are dropping the table below
-
-                    // Delete Glue table
-                    match output_athena_admin_config(&config) {
-                        Ok(admin_cfg) => match glue_delete_table(&admin_cfg, &table_str).await {
-                            Ok(_) => {
-                                println!("Dropped table: {}", table_str);
-                            }
-                            Err(e) => {
-                                println!("{}", e);
-                            }
-                        },
-                        Err(e) => {
-                            println!("{}", e);
-                        }
-                    }
+                    config.set_metadata(&skippr_metadata, false).await;
+                    println!("Dropped table: {}", table_str);
                 }
                 Err(e) => {
                     println!("{}", e);

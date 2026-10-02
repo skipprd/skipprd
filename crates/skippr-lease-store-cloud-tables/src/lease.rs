@@ -22,7 +22,7 @@ impl CloudTablesLeaseStore {
     pub async fn connect(table: String) -> Result<Self, LeaseError> {
         if table.is_empty() {
             return Err(LeaseError::StoreUnavailable(
-                "SKIPPR_OFFSET_DYNAMODB_TABLE is required for clustered leases".into(),
+                "skippr.store.name (SKIPPR_STORE_NAME) is required for clustered leases".into(),
             ));
         }
         let client =

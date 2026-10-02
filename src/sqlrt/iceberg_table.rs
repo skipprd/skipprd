@@ -474,9 +474,8 @@ async fn reload_iceberg_table(
             "IcebergScanExec is missing catalog reload state".into(),
         ));
     }
-    let catalog_cfg: skippr_iceberg_catalog::IcebergCatalogConfig =
-        serde_json::from_str(catalog_json)
-            .map_err(|err| DataFusionError::Execution(err.to_string()))?;
+    let catalog_cfg: skippr_iceberg_catalog::SkipprLakeConfig = serde_json::from_str(catalog_json)
+        .map_err(|err| DataFusionError::Execution(err.to_string()))?;
     let ident = iceberg::TableIdent::from_strs([catalog_ns, table_name])
         .map_err(|err| DataFusionError::External(Box::new(err)))?;
     #[cfg(any(
@@ -484,20 +483,11 @@ async fn reload_iceberg_table(
         feature = "offset-store-cloud-tables"
     ))]
     {
-        match &catalog_cfg {
-            skippr_iceberg_catalog::IcebergCatalogConfig::Skippr { .. } => {
-                let catalog =
-                    crate::cluster::backend::open_skippr_catalog(&Config::new(), &catalog_cfg)
-                        .await
-                        .map_err(DataFusionError::Plan)?;
-                let (table, _) = load_pinned_iceberg_table(catalog, &ident).await?;
-                Ok(table)
-            }
-            other => Err(DataFusionError::Plan(format!(
-                "IcebergScanExec cannot reload catalog adapter '{}'",
-                other.adapter_name()
-            ))),
-        }
+        let catalog = crate::cluster::backend::open_skippr_catalog(&Config::new(), &catalog_cfg)
+            .await
+            .map_err(DataFusionError::Plan)?;
+        let (table, _) = load_pinned_iceberg_table(catalog, &ident).await?;
+        Ok(table)
     }
     #[cfg(not(any(
         feature = "offset-store-dynamodb",

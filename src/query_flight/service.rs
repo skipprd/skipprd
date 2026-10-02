@@ -305,7 +305,7 @@ impl SkipprFlightSql {
         crate::query_flight::ballista::ensure_elected_live()
             .await
             .map_err(|err| Status::internal(err.to_string()))?;
-        let df = crate::sqlrt::tables::plan_clustered_select(
+        let plan = crate::sqlrt::tables::plan_clustered_select(
             &self.app_config,
             sql,
             &crate::sqlrt::tables::process_clustered_select_opts(scope.clone())
@@ -313,6 +313,13 @@ impl SkipprFlightSql {
         )
         .await
         .map_err(|err| Status::internal(err.to_string()))?;
+        if !plan.wal_only.is_empty() {
+            tracing::info!(
+                wal_only = ?plan.wal_only,
+                "clustered query does not register WAL-only pipelines"
+            );
+        }
+        let df = plan.df;
         let schema = df.schema().inner().clone();
         let stream = df
             .execute_stream()
@@ -566,8 +573,9 @@ impl FlightSqlService for SkipprFlightSql {
         request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
         let scope = Self::session_scope(&request)?;
-        let tables =
-            crate::sqlrt::tables::list_configured_iceberg_tables(&self.app_config, &scope).await;
+        let tables = crate::sqlrt::tables::list_configured_iceberg_tables(&self.app_config, &scope)
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?;
         let pattern = query.table_name_filter_pattern.clone();
         let mut builder = query.into_builder();
         for (name, schema) in tables {

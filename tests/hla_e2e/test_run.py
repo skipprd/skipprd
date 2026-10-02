@@ -64,8 +64,9 @@ class HlaE2eHarnessTests(unittest.TestCase):
             warehouse = Path(tmp) / "warehouse"
             hla_e2e.write_skippr_yml(config, events, warehouse)
             text = config.read_text(encoding="utf-8")
-            self.assertIn("type: skippr", text)
-            self.assertIn(f"table: {hla_e2e.CATALOG_TABLE}", text)
+            self.assertIn("SkipprLake:", text)
+            self.assertIn(f"catalog_table: {hla_e2e.CATALOG_TABLE}", text)
+            self.assertNotIn("type: skippr", text)
             self.assertNotIn(f"table: {hla_e2e.OFFSET_TABLE}", text)
             self.assertNotEqual(hla_e2e.OFFSET_TABLE, hla_e2e.CATALOG_TABLE)
             self.assertIn(f"file://{warehouse}", text)
@@ -76,7 +77,7 @@ class HlaE2eHarnessTests(unittest.TestCase):
                 two, events, Path(tmp) / "events-b", warehouse
             )
             two_text = two.read_text(encoding="utf-8")
-            self.assertIn(f"table: {hla_e2e.CATALOG_TABLE}", two_text)
+            self.assertIn(f"catalog_table: {hla_e2e.CATALOG_TABLE}", two_text)
             self.assertNotIn(f"table: {hla_e2e.OFFSET_TABLE}", two_text)
 
     def test_union_sql_uses_pipeline_namespace(self) -> None:

@@ -151,6 +151,8 @@ pub enum DataSinkKindCmd {
     Amqp(DataSinkAmqpArgs),
     #[command(name = "athena")]
     Athena(DataSinkAthenaArgs),
+    #[command(name = "athena-iceberg")]
+    AthenaIceberg(DataSinkAthenaIcebergArgs),
     #[command(name = "azure-blob")]
     AzureBlob(DataSinkAzureBlobArgs),
     #[command(name = "bigquery")]
@@ -159,12 +161,12 @@ pub enum DataSinkKindCmd {
     Clickhouse(DataSinkClickhouseArgs),
     #[command(name = "databricks")]
     Databricks(DataSinkDatabricksArgs),
+    #[command(name = "duckdb")]
+    Duckdb(DataSinkDuckdbArgs),
     #[command(name = "file")]
     File(DataSinkFileArgs),
     #[command(name = "gcs")]
     Gcs(DataSinkGcsArgs),
-    #[command(name = "iceberg")]
-    Iceberg(DataSinkIcebergArgs),
     #[command(name = "motherduck")]
     Motherduck(DataSinkMotherduckArgs),
     #[command(name = "postgres")]
@@ -175,6 +177,8 @@ pub enum DataSinkKindCmd {
     S3(DataSinkS3Args),
     #[command(name = "sftp")]
     Sftp(DataSinkSftpArgs),
+    #[command(name = "skippr-lake")]
+    SkipprLake(DataSinkSkipprLakeArgs),
     #[command(name = "snowflake")]
     Snowflake(DataSinkSnowflakeArgs),
     #[command(name = "stdout")]
@@ -185,20 +189,24 @@ pub enum DataSinkKindCmd {
 
 #[derive(Parser, Clone, PartialEq)]
 pub enum SchemaSinkKindCmd {
+    #[command(name = "athena-iceberg")]
+    AthenaIceberg(SchemaSinkAthenaIcebergArgs),
     #[command(name = "bigquery")]
     Bigquery(SchemaSinkBigqueryArgs),
     #[command(name = "clickhouse")]
     Clickhouse(SchemaSinkClickhouseArgs),
+    #[command(name = "duckdb")]
+    Duckdb(SchemaSinkDuckdbArgs),
     #[command(name = "glue")]
     Glue(SchemaSinkGlueArgs),
-    #[command(name = "iceberg")]
-    Iceberg(SchemaSinkIcebergArgs),
     #[command(name = "motherduck")]
     Motherduck(SchemaSinkMotherduckArgs),
     #[command(name = "postgres")]
     Postgres(SchemaSinkPostgresArgs),
     #[command(name = "redshift")]
     Redshift(SchemaSinkRedshiftArgs),
+    #[command(name = "skippr-lake")]
+    SkipprLake(SchemaSinkSkipprLakeArgs),
     #[command(name = "snowflake")]
     Snowflake(SchemaSinkSnowflakeArgs),
 }
@@ -3281,6 +3289,58 @@ impl DataSinkAthenaArgs {
 }
 
 #[derive(Parser, Clone, PartialEq, Default, Serialize)]
+pub struct DataSinkAthenaIcebergArgs {
+    #[arg(long)]
+    #[serde(skip)]
+    pub pipeline: Option<String>,
+    #[arg(long)]
+    #[serde(skip)]
+    pub name: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warehouse: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub glue_database_name: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub athena_workgroup_name: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub athena_results_s3_bucket: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_id: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_type: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_endpoint: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_region: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_access_key_id: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_secret_access_key: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_path_style: Option<String>,
+}
+
+impl DataSinkAthenaIcebergArgs {
+    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
+        crate::connect::yaml_map_from_serialize(self)
+    }
+}
+
+#[derive(Parser, Clone, PartialEq, Default, Serialize)]
 pub struct DataSinkAzureBlobArgs {
     #[arg(long)]
     #[serde(skip)]
@@ -3429,6 +3489,28 @@ impl DataSinkDatabricksArgs {
 }
 
 #[derive(Parser, Clone, PartialEq, Default, Serialize)]
+pub struct DataSinkDuckdbArgs {
+    #[arg(long)]
+    #[serde(skip)]
+    pub pipeline: Option<String>,
+    #[arg(long)]
+    #[serde(skip)]
+    pub name: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warehouse: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_namespace: Option<String>,
+}
+
+impl DataSinkDuckdbArgs {
+    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
+        crate::connect::yaml_map_from_serialize(self)
+    }
+}
+
+#[derive(Parser, Clone, PartialEq, Default, Serialize)]
 pub struct DataSinkFileArgs {
     #[arg(long)]
     #[serde(skip)]
@@ -3473,91 +3555,6 @@ pub struct DataSinkGcsArgs {
 }
 
 impl DataSinkGcsArgs {
-    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
-        crate::connect::yaml_map_from_serialize(self)
-    }
-}
-
-#[derive(Parser, Clone, PartialEq, Default, Serialize)]
-pub struct DataSinkIcebergArgs {
-    #[arg(long)]
-    #[serde(skip)]
-    pub pipeline: Option<String>,
-    #[arg(long)]
-    #[serde(skip)]
-    pub name: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_type: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_warehouse: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_database: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_catalog_id: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_region: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_object_store_type: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_object_store_endpoint: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_object_store_region: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_object_store_access_key_id: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_object_store_secret_access_key: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_object_store_path_style: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_table: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_uri: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_token: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_client_id: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_client_secret: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub table_namespace: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub table_prefix: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub table_location_prefix: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub properties: Option<YamlArg>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub query_engine_type: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub query_engine_workgroup: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
-}
-
-impl DataSinkIcebergArgs {
     pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
         crate::connect::yaml_map_from_serialize(self)
     }
@@ -3749,6 +3746,52 @@ impl DataSinkSftpArgs {
 }
 
 #[derive(Parser, Clone, PartialEq, Default, Serialize)]
+pub struct DataSinkSkipprLakeArgs {
+    #[arg(long)]
+    #[serde(skip)]
+    pub pipeline: Option<String>,
+    #[arg(long)]
+    #[serde(skip)]
+    pub name: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warehouse: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_table: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_type: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_endpoint: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_region: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_access_key_id: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_secret_access_key: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_path_style: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_namespace: Option<String>,
+}
+
+impl DataSinkSkipprLakeArgs {
+    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
+        crate::connect::yaml_map_from_serialize(self)
+    }
+}
+
+#[derive(Parser, Clone, PartialEq, Default, Serialize)]
 pub struct DataSinkSnowflakeArgs {
     #[arg(long)]
     #[serde(skip)]
@@ -3860,6 +3903,58 @@ impl DataSinkSynapseArgs {
 }
 
 #[derive(Parser, Clone, PartialEq, Default, Serialize)]
+pub struct SchemaSinkAthenaIcebergArgs {
+    #[arg(long)]
+    #[serde(skip)]
+    pub pipeline: Option<String>,
+    #[arg(long)]
+    #[serde(skip)]
+    pub name: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warehouse: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub glue_database_name: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub athena_workgroup_name: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub athena_results_s3_bucket: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_id: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_type: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_endpoint: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_region: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_access_key_id: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_secret_access_key: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_path_style: Option<String>,
+}
+
+impl SchemaSinkAthenaIcebergArgs {
+    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
+        crate::connect::yaml_map_from_serialize(self)
+    }
+}
+
+#[derive(Parser, Clone, PartialEq, Default, Serialize)]
 pub struct SchemaSinkBigqueryArgs {
     #[arg(long)]
     #[serde(skip)]
@@ -3931,6 +4026,28 @@ impl SchemaSinkClickhouseArgs {
 }
 
 #[derive(Parser, Clone, PartialEq, Default, Serialize)]
+pub struct SchemaSinkDuckdbArgs {
+    #[arg(long)]
+    #[serde(skip)]
+    pub pipeline: Option<String>,
+    #[arg(long)]
+    #[serde(skip)]
+    pub name: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warehouse: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_namespace: Option<String>,
+}
+
+impl SchemaSinkDuckdbArgs {
+    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
+        crate::connect::yaml_map_from_serialize(self)
+    }
+}
+
+#[derive(Parser, Clone, PartialEq, Default, Serialize)]
 pub struct SchemaSinkGlueArgs {
     #[arg(long)]
     #[serde(skip)]
@@ -3971,91 +4088,6 @@ pub struct SchemaSinkGlueArgs {
 }
 
 impl SchemaSinkGlueArgs {
-    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
-        crate::connect::yaml_map_from_serialize(self)
-    }
-}
-
-#[derive(Parser, Clone, PartialEq, Default, Serialize)]
-pub struct SchemaSinkIcebergArgs {
-    #[arg(long)]
-    #[serde(skip)]
-    pub pipeline: Option<String>,
-    #[arg(long)]
-    #[serde(skip)]
-    pub name: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_type: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_warehouse: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_database: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_catalog_id: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_region: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_object_store_type: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_object_store_endpoint: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_object_store_region: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_object_store_access_key_id: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_object_store_secret_access_key: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_object_store_path_style: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_table: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_uri: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_token: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_client_id: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub catalog_client_secret: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub table_namespace: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub table_prefix: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub table_location_prefix: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub properties: Option<YamlArg>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub query_engine_type: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub query_engine_workgroup: Option<String>,
-    #[arg(long)]
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub format: Option<String>,
-}
-
-impl SchemaSinkIcebergArgs {
     pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
         crate::connect::yaml_map_from_serialize(self)
     }
@@ -4176,6 +4208,52 @@ pub struct SchemaSinkRedshiftArgs {
 }
 
 impl SchemaSinkRedshiftArgs {
+    pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
+        crate::connect::yaml_map_from_serialize(self)
+    }
+}
+
+#[derive(Parser, Clone, PartialEq, Default, Serialize)]
+pub struct SchemaSinkSkipprLakeArgs {
+    #[arg(long)]
+    #[serde(skip)]
+    pub pipeline: Option<String>,
+    #[arg(long)]
+    #[serde(skip)]
+    pub name: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warehouse: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catalog_table: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_type: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_endpoint: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_region: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_access_key_id: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_secret_access_key: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub object_store_path_style: Option<String>,
+    #[arg(long)]
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub table_namespace: Option<String>,
+}
+
+impl SchemaSinkSkipprLakeArgs {
     pub fn to_yaml_map(&self) -> BTreeMap<String, serde_yaml::Value> {
         crate::connect::yaml_map_from_serialize(self)
     }
@@ -4436,6 +4514,9 @@ impl ConnectRoleCmd {
                 kind: DataSinkKindCmd::Athena(_),
             } => ConnectPlugin::DataSinkAthena,
             Self::DataSink {
+                kind: DataSinkKindCmd::AthenaIceberg(_),
+            } => ConnectPlugin::DataSinkAthenaIceberg,
+            Self::DataSink {
                 kind: DataSinkKindCmd::AzureBlob(_),
             } => ConnectPlugin::DataSinkAzureBlob,
             Self::DataSink {
@@ -4448,14 +4529,14 @@ impl ConnectRoleCmd {
                 kind: DataSinkKindCmd::Databricks(_),
             } => ConnectPlugin::DataSinkDatabricks,
             Self::DataSink {
+                kind: DataSinkKindCmd::Duckdb(_),
+            } => ConnectPlugin::DataSinkDuckdb,
+            Self::DataSink {
                 kind: DataSinkKindCmd::File(_),
             } => ConnectPlugin::DataSinkFile,
             Self::DataSink {
                 kind: DataSinkKindCmd::Gcs(_),
             } => ConnectPlugin::DataSinkGcs,
-            Self::DataSink {
-                kind: DataSinkKindCmd::Iceberg(_),
-            } => ConnectPlugin::DataSinkIceberg,
             Self::DataSink {
                 kind: DataSinkKindCmd::Motherduck(_),
             } => ConnectPlugin::DataSinkMotherduck,
@@ -4472,6 +4553,9 @@ impl ConnectRoleCmd {
                 kind: DataSinkKindCmd::Sftp(_),
             } => ConnectPlugin::DataSinkSftp,
             Self::DataSink {
+                kind: DataSinkKindCmd::SkipprLake(_),
+            } => ConnectPlugin::DataSinkSkipprLake,
+            Self::DataSink {
                 kind: DataSinkKindCmd::Snowflake(_),
             } => ConnectPlugin::DataSinkSnowflake,
             Self::DataSink {
@@ -4481,17 +4565,20 @@ impl ConnectRoleCmd {
                 kind: DataSinkKindCmd::Synapse(_),
             } => ConnectPlugin::DataSinkSynapse,
             Self::SchemaSink {
+                kind: SchemaSinkKindCmd::AthenaIceberg(_),
+            } => ConnectPlugin::SchemaSinkAthenaIceberg,
+            Self::SchemaSink {
                 kind: SchemaSinkKindCmd::Bigquery(_),
             } => ConnectPlugin::SchemaSinkBigquery,
             Self::SchemaSink {
                 kind: SchemaSinkKindCmd::Clickhouse(_),
             } => ConnectPlugin::SchemaSinkClickhouse,
             Self::SchemaSink {
+                kind: SchemaSinkKindCmd::Duckdb(_),
+            } => ConnectPlugin::SchemaSinkDuckdb,
+            Self::SchemaSink {
                 kind: SchemaSinkKindCmd::Glue(_),
             } => ConnectPlugin::SchemaSinkGlue,
-            Self::SchemaSink {
-                kind: SchemaSinkKindCmd::Iceberg(_),
-            } => ConnectPlugin::SchemaSinkIceberg,
             Self::SchemaSink {
                 kind: SchemaSinkKindCmd::Motherduck(_),
             } => ConnectPlugin::SchemaSinkMotherduck,
@@ -4501,6 +4588,9 @@ impl ConnectRoleCmd {
             Self::SchemaSink {
                 kind: SchemaSinkKindCmd::Redshift(_),
             } => ConnectPlugin::SchemaSinkRedshift,
+            Self::SchemaSink {
+                kind: SchemaSinkKindCmd::SkipprLake(_),
+            } => ConnectPlugin::SchemaSinkSkipprLake,
             Self::SchemaSink {
                 kind: SchemaSinkKindCmd::Snowflake(_),
             } => ConnectPlugin::SchemaSinkSnowflake,
@@ -4686,6 +4776,9 @@ impl ConnectRoleCmd {
                 kind: DataSinkKindCmd::Athena(args),
             } => args.pipeline.as_deref(),
             Self::DataSink {
+                kind: DataSinkKindCmd::AthenaIceberg(args),
+            } => args.pipeline.as_deref(),
+            Self::DataSink {
                 kind: DataSinkKindCmd::AzureBlob(args),
             } => args.pipeline.as_deref(),
             Self::DataSink {
@@ -4698,13 +4791,13 @@ impl ConnectRoleCmd {
                 kind: DataSinkKindCmd::Databricks(args),
             } => args.pipeline.as_deref(),
             Self::DataSink {
+                kind: DataSinkKindCmd::Duckdb(args),
+            } => args.pipeline.as_deref(),
+            Self::DataSink {
                 kind: DataSinkKindCmd::File(args),
             } => args.pipeline.as_deref(),
             Self::DataSink {
                 kind: DataSinkKindCmd::Gcs(args),
-            } => args.pipeline.as_deref(),
-            Self::DataSink {
-                kind: DataSinkKindCmd::Iceberg(args),
             } => args.pipeline.as_deref(),
             Self::DataSink {
                 kind: DataSinkKindCmd::Motherduck(args),
@@ -4722,6 +4815,9 @@ impl ConnectRoleCmd {
                 kind: DataSinkKindCmd::Sftp(args),
             } => args.pipeline.as_deref(),
             Self::DataSink {
+                kind: DataSinkKindCmd::SkipprLake(args),
+            } => args.pipeline.as_deref(),
+            Self::DataSink {
                 kind: DataSinkKindCmd::Snowflake(args),
             } => args.pipeline.as_deref(),
             Self::DataSink {
@@ -4731,16 +4827,19 @@ impl ConnectRoleCmd {
                 kind: DataSinkKindCmd::Synapse(args),
             } => args.pipeline.as_deref(),
             Self::SchemaSink {
+                kind: SchemaSinkKindCmd::AthenaIceberg(args),
+            } => args.pipeline.as_deref(),
+            Self::SchemaSink {
                 kind: SchemaSinkKindCmd::Bigquery(args),
             } => args.pipeline.as_deref(),
             Self::SchemaSink {
                 kind: SchemaSinkKindCmd::Clickhouse(args),
             } => args.pipeline.as_deref(),
             Self::SchemaSink {
-                kind: SchemaSinkKindCmd::Glue(args),
+                kind: SchemaSinkKindCmd::Duckdb(args),
             } => args.pipeline.as_deref(),
             Self::SchemaSink {
-                kind: SchemaSinkKindCmd::Iceberg(args),
+                kind: SchemaSinkKindCmd::Glue(args),
             } => args.pipeline.as_deref(),
             Self::SchemaSink {
                 kind: SchemaSinkKindCmd::Motherduck(args),
@@ -4750,6 +4849,9 @@ impl ConnectRoleCmd {
             } => args.pipeline.as_deref(),
             Self::SchemaSink {
                 kind: SchemaSinkKindCmd::Redshift(args),
+            } => args.pipeline.as_deref(),
+            Self::SchemaSink {
+                kind: SchemaSinkKindCmd::SkipprLake(args),
             } => args.pipeline.as_deref(),
             Self::SchemaSink {
                 kind: SchemaSinkKindCmd::Snowflake(args),
@@ -4936,6 +5038,9 @@ impl ConnectRoleCmd {
                 kind: DataSinkKindCmd::Athena(args),
             } => args.name.as_deref(),
             Self::DataSink {
+                kind: DataSinkKindCmd::AthenaIceberg(args),
+            } => args.name.as_deref(),
+            Self::DataSink {
                 kind: DataSinkKindCmd::AzureBlob(args),
             } => args.name.as_deref(),
             Self::DataSink {
@@ -4948,13 +5053,13 @@ impl ConnectRoleCmd {
                 kind: DataSinkKindCmd::Databricks(args),
             } => args.name.as_deref(),
             Self::DataSink {
+                kind: DataSinkKindCmd::Duckdb(args),
+            } => args.name.as_deref(),
+            Self::DataSink {
                 kind: DataSinkKindCmd::File(args),
             } => args.name.as_deref(),
             Self::DataSink {
                 kind: DataSinkKindCmd::Gcs(args),
-            } => args.name.as_deref(),
-            Self::DataSink {
-                kind: DataSinkKindCmd::Iceberg(args),
             } => args.name.as_deref(),
             Self::DataSink {
                 kind: DataSinkKindCmd::Motherduck(args),
@@ -4972,6 +5077,9 @@ impl ConnectRoleCmd {
                 kind: DataSinkKindCmd::Sftp(args),
             } => args.name.as_deref(),
             Self::DataSink {
+                kind: DataSinkKindCmd::SkipprLake(args),
+            } => args.name.as_deref(),
+            Self::DataSink {
                 kind: DataSinkKindCmd::Snowflake(args),
             } => args.name.as_deref(),
             Self::DataSink {
@@ -4981,16 +5089,19 @@ impl ConnectRoleCmd {
                 kind: DataSinkKindCmd::Synapse(args),
             } => args.name.as_deref(),
             Self::SchemaSink {
+                kind: SchemaSinkKindCmd::AthenaIceberg(args),
+            } => args.name.as_deref(),
+            Self::SchemaSink {
                 kind: SchemaSinkKindCmd::Bigquery(args),
             } => args.name.as_deref(),
             Self::SchemaSink {
                 kind: SchemaSinkKindCmd::Clickhouse(args),
             } => args.name.as_deref(),
             Self::SchemaSink {
-                kind: SchemaSinkKindCmd::Glue(args),
+                kind: SchemaSinkKindCmd::Duckdb(args),
             } => args.name.as_deref(),
             Self::SchemaSink {
-                kind: SchemaSinkKindCmd::Iceberg(args),
+                kind: SchemaSinkKindCmd::Glue(args),
             } => args.name.as_deref(),
             Self::SchemaSink {
                 kind: SchemaSinkKindCmd::Motherduck(args),
@@ -5000,6 +5111,9 @@ impl ConnectRoleCmd {
             } => args.name.as_deref(),
             Self::SchemaSink {
                 kind: SchemaSinkKindCmd::Redshift(args),
+            } => args.name.as_deref(),
+            Self::SchemaSink {
+                kind: SchemaSinkKindCmd::SkipprLake(args),
             } => args.name.as_deref(),
             Self::SchemaSink {
                 kind: SchemaSinkKindCmd::Snowflake(args),
@@ -5186,6 +5300,9 @@ impl ConnectRoleCmd {
                 kind: DataSinkKindCmd::Athena(args),
             } => args.to_yaml_map(),
             Self::DataSink {
+                kind: DataSinkKindCmd::AthenaIceberg(args),
+            } => args.to_yaml_map(),
+            Self::DataSink {
                 kind: DataSinkKindCmd::AzureBlob(args),
             } => args.to_yaml_map(),
             Self::DataSink {
@@ -5198,13 +5315,13 @@ impl ConnectRoleCmd {
                 kind: DataSinkKindCmd::Databricks(args),
             } => args.to_yaml_map(),
             Self::DataSink {
+                kind: DataSinkKindCmd::Duckdb(args),
+            } => args.to_yaml_map(),
+            Self::DataSink {
                 kind: DataSinkKindCmd::File(args),
             } => args.to_yaml_map(),
             Self::DataSink {
                 kind: DataSinkKindCmd::Gcs(args),
-            } => args.to_yaml_map(),
-            Self::DataSink {
-                kind: DataSinkKindCmd::Iceberg(args),
             } => args.to_yaml_map(),
             Self::DataSink {
                 kind: DataSinkKindCmd::Motherduck(args),
@@ -5222,6 +5339,9 @@ impl ConnectRoleCmd {
                 kind: DataSinkKindCmd::Sftp(args),
             } => args.to_yaml_map(),
             Self::DataSink {
+                kind: DataSinkKindCmd::SkipprLake(args),
+            } => args.to_yaml_map(),
+            Self::DataSink {
                 kind: DataSinkKindCmd::Snowflake(args),
             } => args.to_yaml_map(),
             Self::DataSink {
@@ -5231,16 +5351,19 @@ impl ConnectRoleCmd {
                 kind: DataSinkKindCmd::Synapse(args),
             } => args.to_yaml_map(),
             Self::SchemaSink {
+                kind: SchemaSinkKindCmd::AthenaIceberg(args),
+            } => args.to_yaml_map(),
+            Self::SchemaSink {
                 kind: SchemaSinkKindCmd::Bigquery(args),
             } => args.to_yaml_map(),
             Self::SchemaSink {
                 kind: SchemaSinkKindCmd::Clickhouse(args),
             } => args.to_yaml_map(),
             Self::SchemaSink {
-                kind: SchemaSinkKindCmd::Glue(args),
+                kind: SchemaSinkKindCmd::Duckdb(args),
             } => args.to_yaml_map(),
             Self::SchemaSink {
-                kind: SchemaSinkKindCmd::Iceberg(args),
+                kind: SchemaSinkKindCmd::Glue(args),
             } => args.to_yaml_map(),
             Self::SchemaSink {
                 kind: SchemaSinkKindCmd::Motherduck(args),
@@ -5250,6 +5373,9 @@ impl ConnectRoleCmd {
             } => args.to_yaml_map(),
             Self::SchemaSink {
                 kind: SchemaSinkKindCmd::Redshift(args),
+            } => args.to_yaml_map(),
+            Self::SchemaSink {
+                kind: SchemaSinkKindCmd::SkipprLake(args),
             } => args.to_yaml_map(),
             Self::SchemaSink {
                 kind: SchemaSinkKindCmd::Snowflake(args),

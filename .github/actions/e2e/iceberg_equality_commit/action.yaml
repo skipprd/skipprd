@@ -1,5 +1,5 @@
-name: Iceberg equality-commit e2e
-description: Build skipprd and Iceberg runtime plugins once, then run equality-delete commit scenarios.
+name: AthenaIceberg equality-commit e2e
+description: Build skipprd and AthenaIceberg runtime plugins once, then run equality-delete commit scenarios.
 inputs:
   scenarios:
     description: Space-separated runtime e2e harness scenario names
@@ -23,8 +23,8 @@ runs:
           -p skipprd \
           -p skippr-plugin-data-source-postgres \
           -p skippr-plugin-data-source-stripe \
-          -p skippr-plugin-data-sink-iceberg \
-          -p skippr-plugin-schema-sink-iceberg
+          -p skippr-plugin-data-sink-athena-iceberg \
+          -p skippr-plugin-schema-sink-athena-iceberg
 
     - name: Stage local runtime manifests
       id: local_runtime

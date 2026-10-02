@@ -142,19 +142,27 @@ impl From<&SinkCapability> for RuntimeSinkCapabilityDescriptor {
 
 impl RuntimeSinkCapabilityDescriptor {
     fn supports_primary_key_metadata_for_sink(name: &str) -> bool {
-        matches!(name, "Athena")
+        matches!(
+            crate::connect::DataSink::parse(name),
+            Some(crate::connect::DataSink::Athena)
+        )
     }
 
     fn default_write_policy_flags_for_sink(name: &str) -> SinkWritePolicySupport {
         let mut support = SinkWritePolicySupport::default();
-        match name {
-            "Athena" => {
+        match crate::connect::DataSink::parse(name) {
+            Some(crate::connect::DataSink::Athena) => {
                 support.supports_replace_partition = true;
                 support.supports_replace_table = true;
             }
-            "Iceberg" => {
+            Some(
+                crate::connect::DataSink::SkipprLake | crate::connect::DataSink::AthenaIceberg,
+            ) => {
                 support.supports_merge_by_key = true;
                 support.supports_replace_partition = true;
+                support.supports_replace_table = true;
+            }
+            Some(crate::connect::DataSink::Duckdb) => {
                 support.supports_replace_table = true;
             }
             _ => {}
@@ -1193,5 +1201,55 @@ mod tests {
                 .max_sessions_per_child,
             1
         );
+    }
+
+    #[test]
+    fn athena_iceberg_sink_capability_handshake_matches_plugin_manifest_metadata() {
+        use crate::buffer::compaction_transaction::{SinkGroupingSupport, SinkRetrySemantics};
+        use crate::plugins::cdc::{sink_capabilities, SinkGuaranteeTier};
+
+        let handshake = RuntimeSinkCapabilityDescriptor::from(&sink_capabilities::ATHENA_ICEBERG);
+        let manifest = RuntimeSinkCapabilityDescriptor {
+            name: "AthenaIceberg".into(),
+            max_sessions_per_child: 1,
+            guarantee_tier: SinkGuaranteeTier::ExactOnceCdcEligible,
+            can_manage_skippr_columns: true,
+            can_maintain_tombstone_tables: true,
+            can_compare_order_tokens: true,
+            supports_transactions: true,
+            supports_merge_by_key: true,
+            supports_replace_table: true,
+            supports_replace_partition: true,
+            supports_primary_key_metadata: false,
+            supports_bounded_grouped_stream: true,
+            retry_semantics: SinkRetrySemantics::TransactionalIdempotent,
+            grouping_support: SinkGroupingSupport::FinalStateBatches,
+        };
+        assert_eq!(handshake, manifest);
+    }
+
+    #[test]
+    fn duckdb_sink_capability_handshake_matches_plugin_manifest_metadata() {
+        use crate::buffer::compaction_transaction::{SinkGroupingSupport, SinkRetrySemantics};
+        use crate::plugins::cdc::{sink_capabilities, SinkGuaranteeTier};
+
+        let handshake = RuntimeSinkCapabilityDescriptor::from(&sink_capabilities::DUCKDB);
+        let manifest = RuntimeSinkCapabilityDescriptor {
+            name: "Duckdb".into(),
+            max_sessions_per_child: 1,
+            guarantee_tier: SinkGuaranteeTier::CdcEncodedOnly,
+            can_manage_skippr_columns: false,
+            can_maintain_tombstone_tables: false,
+            can_compare_order_tokens: false,
+            supports_transactions: true,
+            supports_merge_by_key: false,
+            supports_replace_table: true,
+            supports_replace_partition: false,
+            supports_primary_key_metadata: false,
+            supports_bounded_grouped_stream: true,
+            retry_semantics: SinkRetrySemantics::TransactionalIdempotent,
+            grouping_support: SinkGroupingSupport::FinalStateBatches,
+        };
+        assert_eq!(handshake, manifest);
     }
 }

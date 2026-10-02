@@ -16,6 +16,8 @@ members = [
     "crates/skippr-lease-store-cloud-tables",
     "crates/skippr-iceberg-catalog-cloud-tables",
     "crates/skippr-iceberg-catalog",
+    "crates/skippr-iceberg-writer",
+    "crates/skippr-iceberg-catalog-fs",
     "crates/skippr-iceberg-catalog-dynamodb",
     "crates/skippr-query-ballista",
     "crates/skippr-runtime-sdk",

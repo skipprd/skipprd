@@ -22,6 +22,14 @@ impl PluginConfigEntry {
     }
 
     pub fn format(&self) -> String {
+        match crate::connect::DataSink::parse(&self.plugin_name) {
+            Some(
+                crate::connect::DataSink::SkipprLake
+                | crate::connect::DataSink::AthenaIceberg
+                | crate::connect::DataSink::Duckdb,
+            ) => return String::new(),
+            _ => {}
+        }
         self.string_field("format")
             .unwrap_or_else(|| default_format_for_plugin(&self.plugin_name).to_string())
     }
@@ -151,10 +159,19 @@ fn plugin_entry_from_map(
 }
 
 fn default_format_for_plugin(plugin_name: &str) -> &'static str {
-    match plugin_name {
-        "Mssql" => "row",
-        "Snowflake" | "AzureBlob" | "Gcs" | "GCS" | "Sftp" | "Databricks" | "Redshift"
-        | "Iceberg" => "parquet",
+    if let Some(crate::connect::DataSource::Mssql) = crate::connect::DataSource::parse(plugin_name)
+    {
+        return "row";
+    }
+    match crate::connect::DataSink::parse(plugin_name) {
+        Some(
+            crate::connect::DataSink::Snowflake
+            | crate::connect::DataSink::AzureBlob
+            | crate::connect::DataSink::Gcs
+            | crate::connect::DataSink::Sftp
+            | crate::connect::DataSink::Databricks
+            | crate::connect::DataSink::Redshift,
+        ) => "parquet",
         _ => "json",
     }
 }
@@ -188,5 +205,53 @@ mod tests {
         };
 
         assert_eq!(entry.version(), None);
+    }
+
+    #[test]
+    fn skipprlake_does_not_invent_a_format() {
+        let src = include_str!("plugin_config.rs");
+        assert!(
+            !src.contains("is_plugin_name(name) => \"parquet\""),
+            "SkipprLake must not default format to parquet"
+        );
+        let entry = PluginConfigEntry {
+            plugin_name: skippr_iceberg_catalog::SkipprLakeConfig::PLUGIN_NAME.to_string(),
+            config: serde_json::json!({
+                "warehouse": "file:///tmp/warehouse",
+                "catalog_table": "cat",
+                "table_namespace": "bronze"
+            }),
+        };
+        assert_eq!(entry.format(), "");
+    }
+
+    #[test]
+    fn athena_iceberg_does_not_invent_a_format() {
+        let entry = PluginConfigEntry {
+            plugin_name: crate::plugins::cdc::sink_capabilities::ATHENA_ICEBERG
+                .name
+                .to_string(),
+            config: serde_json::json!({
+                "warehouse": "s3://lake/",
+                "glue_database_name": "analytics",
+                "athena_workgroup_name": "primary",
+                "athena_results_s3_bucket": "results"
+            }),
+        };
+        assert_eq!(entry.format(), "");
+    }
+
+    #[test]
+    fn duckdb_does_not_invent_a_format() {
+        let entry = PluginConfigEntry {
+            plugin_name: crate::plugins::cdc::sink_capabilities::DUCKDB
+                .name
+                .to_string(),
+            config: serde_json::json!({
+                "warehouse": "file:///tmp/lake",
+                "table_namespace": "bronze"
+            }),
+        };
+        assert_eq!(entry.format(), "");
     }
 }

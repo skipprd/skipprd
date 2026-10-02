@@ -11639,6 +11639,8 @@ dependencies = [
 name = "skippr-iceberg-catalog"
 version = "0.1.0"
 dependencies = [
+ "iceberg",
+ "iceberg-storage-opendal",
  "serde",
  "serde_derive",
  "serde_json",
@@ -11677,6 +11679,44 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid 1.23.2",
+]
+
+[[package]]
+name = "skippr-iceberg-catalog-fs"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "iceberg",
+ "object_store",
+ "skippr-iceberg-catalog",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-iceberg-writer"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "aws-config",
+ "aws-sdk-s3",
+ "bytes",
+ "datafusion",
+ "futures",
+ "hex",
+ "iceberg",
+ "md5",
+ "parquet",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "skippr-iceberg-catalog",
+ "skippr-object-writer",
+ "skippr-runtime-sdk",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -11816,6 +11856,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippr-plugin-data-sink-athena-iceberg"
+version = "0.2.0"
+dependencies = [
+ "clap",
+ "iceberg",
+ "iceberg-catalog-glue",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "skippr-iceberg-catalog",
+ "skippr-iceberg-writer",
+ "skippr-runtime-sdk",
+ "tokio",
+]
+
+[[package]]
 name = "skippr-plugin-data-sink-azure-blob"
 version = "0.1.3"
 dependencies = [
@@ -11912,6 +11968,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippr-plugin-data-sink-duckdb"
+version = "0.2.0"
+dependencies = [
+ "clap",
+ "iceberg",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "skippr-iceberg-catalog",
+ "skippr-iceberg-catalog-fs",
+ "skippr-iceberg-writer",
+ "skippr-runtime-sdk",
+ "tokio",
+]
+
+[[package]]
 name = "skippr-plugin-data-sink-file"
 version = "0.1.3"
 dependencies = [
@@ -11948,35 +12020,6 @@ dependencies = [
  "parquet",
  "serde",
  "serde_derive",
- "skippr-object-writer",
- "skippr-runtime-sdk",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "skippr-plugin-data-sink-iceberg"
-version = "0.1.8"
-dependencies = [
- "arrow",
- "async-trait",
- "aws-config",
- "aws-sdk-s3",
- "bytes",
- "clap",
- "datafusion",
- "futures",
- "hex",
- "iceberg",
- "iceberg-catalog-glue",
- "md5",
- "parquet",
- "serde",
- "serde_derive",
- "serde_json",
- "skippr-iceberg-catalog",
- "skippr-iceberg-catalog-cloud-tables",
- "skippr-iceberg-catalog-dynamodb",
  "skippr-object-writer",
  "skippr-runtime-sdk",
  "tokio",
@@ -12098,6 +12141,20 @@ dependencies = [
  "ssh2",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "skippr-plugin-data-sink-skipprlake"
+version = "0.2.0"
+dependencies = [
+ "clap",
+ "iceberg",
+ "skippr-iceberg-catalog",
+ "skippr-iceberg-catalog-cloud-tables",
+ "skippr-iceberg-catalog-dynamodb",
+ "skippr-iceberg-writer",
+ "skippr-runtime-sdk",
+ "tokio",
 ]
 
 [[package]]
@@ -13208,6 +13265,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippr-plugin-schema-sink-athena-iceberg"
+version = "0.2.0"
+dependencies = [
+ "clap",
+ "skippr-plugin-data-sink-athena-iceberg",
+ "skippr-runtime-sdk",
+ "tokio",
+]
+
+[[package]]
 name = "skippr-plugin-schema-sink-bigquery"
 version = "0.1.3"
 dependencies = [
@@ -13228,23 +13295,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippr-plugin-schema-sink-duckdb"
+version = "0.2.0"
+dependencies = [
+ "clap",
+ "skippr-plugin-data-sink-duckdb",
+ "skippr-runtime-sdk",
+ "tokio",
+]
+
+[[package]]
 name = "skippr-plugin-schema-sink-glue"
 version = "0.1.3"
 dependencies = [
  "async-trait",
  "clap",
  "skippr-plugin-data-sink-athena",
- "skippr-runtime-sdk",
- "tokio",
-]
-
-[[package]]
-name = "skippr-plugin-schema-sink-iceberg"
-version = "0.1.4"
-dependencies = [
- "async-trait",
- "clap",
- "skippr-plugin-data-sink-iceberg",
  "skippr-runtime-sdk",
  "tokio",
 ]
@@ -13276,6 +13342,16 @@ version = "0.1.3"
 dependencies = [
  "clap",
  "skippr-plugin-data-sink-redshift",
+ "skippr-runtime-sdk",
+ "tokio",
+]
+
+[[package]]
+name = "skippr-plugin-schema-sink-skipprlake"
+version = "0.2.0"
+dependencies = [
+ "clap",
+ "skippr-plugin-data-sink-skipprlake",
  "skippr-runtime-sdk",
  "tokio",
 ]
@@ -13504,7 +13580,7 @@ dependencies = [
 
 [[package]]
 name = "skipprd-python"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "arrow",
  "pyo3",

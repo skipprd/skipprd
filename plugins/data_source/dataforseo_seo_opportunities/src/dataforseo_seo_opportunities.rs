@@ -1155,7 +1155,10 @@ mod tests {
             Ok(())
         }
 
-        fn load_checkpoint_envelope(&self, key: &str) -> Result<Option<CheckpointEnvelope>, String> {
+        fn load_checkpoint_envelope(
+            &self,
+            key: &str,
+        ) -> Result<Option<CheckpointEnvelope>, String> {
             Ok(self.checkpoints.lock().unwrap().get(key).cloned())
         }
     }

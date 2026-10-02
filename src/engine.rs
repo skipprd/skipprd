@@ -1024,10 +1024,14 @@ pub async fn run_sync(config: &Config, output_mode: &str, source_once: bool) -> 
             )
             .await
             .unwrap_or_else(|err| panic!("Runtime output manifest resolution failed: {}", err));
-            let src_cap = runtime_source_capability_for_manifest(&runtime_input_manifest)
-                .or_else(|| source_capability_for_plugin(&input_name).cloned());
-            let sink_cap = runtime_sink_capability_for_manifest(&runtime_output_manifest)
-                .or_else(|| sink_capability_for_plugin(&output_plugin_name).cloned());
+            let src_cap =
+                runtime_source_capability_for_manifest(&runtime_input_manifest).or_else(|| {
+                    crate::plugins::cdc::source_capabilities::by_name(&input_name).cloned()
+                });
+            let sink_cap =
+                runtime_sink_capability_for_manifest(&runtime_output_manifest).or_else(|| {
+                    crate::plugins::cdc::sink_capabilities::by_name(&output_plugin_name).cloned()
+                });
             if let (Some(src), Some(snk)) = (src_cap.as_ref(), sink_cap.as_ref()) {
                 let mut contracts = BTreeMap::new();
                 let default_contract = cdc_cfg.default_contract();
@@ -1635,64 +1639,6 @@ fn resolve_runtime_sink_config(
     RuntimeSinkConfig::try_from(config).map_err(io::Error::other)
 }
 
-fn source_capability_for_plugin(
-    name: &str,
-) -> Option<&'static crate::plugins::cdc::SourceCapability> {
-    use crate::plugins::cdc::source_capabilities;
-    match name {
-        "Postgres" => Some(&source_capabilities::POSTGRES),
-        "Mysql" => Some(&source_capabilities::MYSQL),
-        "Mongodb" => Some(&source_capabilities::MONGODB),
-        "Dynamodb" => Some(&source_capabilities::DYNAMODB),
-        "Kafka" => Some(&source_capabilities::KAFKA),
-        "S3" => Some(&source_capabilities::S3),
-        "Kinesis" => Some(&source_capabilities::KINESIS),
-        "Sqs" => Some(&source_capabilities::SQS),
-        "File" => Some(&source_capabilities::FILE),
-        "Mssql" => Some(&source_capabilities::MSSQL),
-        "HttpClient" => Some(&source_capabilities::HTTP_CLIENT),
-        "HttpServer" => Some(&source_capabilities::HTTP_SERVER),
-        "Stdin" => Some(&source_capabilities::STDIN),
-        "Eventbridge" => Some(&source_capabilities::EVENTBRIDGE),
-        "Sns" => Some(&source_capabilities::SNS),
-        "Mqtt" => Some(&source_capabilities::MQTT),
-        "Sftp" => Some(&source_capabilities::SFTP),
-        "Redshift" => Some(&source_capabilities::REDSHIFT),
-        "Amqp" => Some(&source_capabilities::AMQP),
-        "Websocket" => Some(&source_capabilities::WEBSOCKET),
-        "Statsd" => Some(&source_capabilities::STATSD),
-        "Socket" => Some(&source_capabilities::SOCKET),
-        "Clickhouse" => Some(&source_capabilities::CLICKHOUSE),
-        "DeltaLake" => Some(&source_capabilities::DELTA_LAKE),
-        "Motherduck" => Some(&source_capabilities::MOTHERDUCK),
-        _ => None,
-    }
-}
-
-fn sink_capability_for_plugin(name: &str) -> Option<&'static crate::plugins::cdc::SinkCapability> {
-    use crate::plugins::cdc::sink_capabilities;
-    match name {
-        "Postgres" => Some(&sink_capabilities::POSTGRES),
-        "Snowflake" => Some(&sink_capabilities::SNOWFLAKE),
-        "Bigquery" | "BigQuery" => Some(&sink_capabilities::BIGQUERY),
-        "Redshift" => Some(&sink_capabilities::REDSHIFT),
-        "Clickhouse" | "ClickHouse" => Some(&sink_capabilities::CLICKHOUSE),
-        "Motherduck" | "MotherDuck" => Some(&sink_capabilities::MOTHERDUCK),
-        "Synapse" => Some(&sink_capabilities::SYNAPSE),
-        "Databricks" => Some(&sink_capabilities::DATABRICKS),
-        "S3" => Some(&sink_capabilities::S3),
-        "Gcs" | "GCS" => Some(&sink_capabilities::GCS),
-        "AzureBlob" | "Azure" => Some(&sink_capabilities::AZURE_BLOB),
-        "File" => Some(&sink_capabilities::FILE),
-        "Sftp" | "SFTP" => Some(&sink_capabilities::SFTP),
-        "Athena" => Some(&sink_capabilities::ATHENA),
-        "Iceberg" => Some(&sink_capabilities::ICEBERG),
-        "Stdout" => Some(&sink_capabilities::STDOUT),
-        "Amqp" | "AMQP" => Some(&sink_capabilities::AMQP),
-        _ => None,
-    }
-}
-
 pub async fn sync_input_plugin(
     config: &Config,
     offsets_clone: Arc<Offsets>,
@@ -1867,7 +1813,7 @@ mod output_router_capability_tests {
     fn capability_for_sink_ref_is_strict_per_registered_sink() {
         let primary = "data_sinks.ds_datalake".to_string();
         let mut sinks = HashMap::new();
-        sinks.insert(primary.clone(), boxed_sink(&sink_capabilities::ICEBERG));
+        sinks.insert(primary.clone(), boxed_sink(&sink_capabilities::SKIPPRLAKE));
         sinks.insert(
             "deadletter_sinks.ds_deadletters".to_string(),
             boxed_sink(&sink_capabilities::ATHENA),
@@ -1881,7 +1827,7 @@ mod output_router_capability_tests {
             router
                 .capability_for_sink_ref("data_sinks.ds_datalake")
                 .map(|cap| cap.name),
-            Some("Iceberg")
+            Some("SkipprLake")
         );
         assert_eq!(
             router

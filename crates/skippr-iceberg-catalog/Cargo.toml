@@ -10,6 +10,8 @@ sha2.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_derive.workspace = true
 skippr-plugin-macros = { path = "../skippr-plugin-macros" }
+iceberg = "0.9.1"
+iceberg-storage-opendal = "0.9.1"
 
 [dev-dependencies]
 serde_json.workspace = true

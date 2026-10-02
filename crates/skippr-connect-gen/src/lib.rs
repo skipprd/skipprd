@@ -184,11 +184,12 @@ struct ReflectedConfig {
 }
 
 fn reflect_crate(crate_dir: &Path) -> Result<Option<ReflectedConfig>, String> {
-    let mut files = Vec::new();
-    collect_mod_graph(crate_dir, &crate_dir.join("src/lib.rs"), &mut files)?;
+    let mut plugin_files = Vec::new();
+    collect_mod_graph(crate_dir, &crate_dir.join("src/lib.rs"), &mut plugin_files)?;
     if crate_dir.join("src/main.rs").exists() {
-        collect_mod_graph(crate_dir, &crate_dir.join("src/main.rs"), &mut files)?;
+        collect_mod_graph(crate_dir, &crate_dir.join("src/main.rs"), &mut plugin_files)?;
     }
+    let mut files = plugin_files.clone();
     if let Ok(cargo_text) = fs::read_to_string(crate_dir.join("Cargo.toml")) {
         if let Ok(cargo) = toml::from_str::<toml::Value>(&cargo_text) {
             if let Some(deps) = cargo.get("dependencies").and_then(|v| v.as_table()) {
@@ -204,8 +205,10 @@ fn reflect_crate(crate_dir: &Path) -> Result<Option<ReflectedConfig>, String> {
     let mut structs: BTreeMap<String, (bool, Vec<FieldSpec>)> = BTreeMap::new();
     let mut enums: BTreeMap<String, (Option<String>, Vec<FieldSpec>)> = BTreeMap::new();
     let mut try_from_targets = BTreeSet::new();
-    for file in files {
-        let text = match fs::read_to_string(&file) {
+    let mut plugin_struct_names = BTreeSet::new();
+    for file in &files {
+        let plugin_local = plugin_files.iter().any(|p| p == file);
+        let text = match fs::read_to_string(file) {
             Ok(text) => text,
             Err(_) => continue,
         };
@@ -218,6 +221,9 @@ fn reflect_crate(crate_dir: &Path) -> Result<Option<ReflectedConfig>, String> {
                 Item::Struct(item) => {
                     if !has_deserialize(&item.attrs) && item.ident != "OtlpConfigRaw" {
                         continue;
+                    }
+                    if plugin_local {
+                        plugin_struct_names.insert(item.ident.to_string());
                     }
                     let fields = struct_fields(&item.fields)?;
                     structs.insert(item.ident.to_string(), (true, fields));
@@ -253,7 +259,7 @@ fn reflect_crate(crate_dir: &Path) -> Result<Option<ReflectedConfig>, String> {
             }
         }
     }
-    if let Some(name) = pick_config_name(&structs, &try_from_targets) {
+    if let Some(name) = pick_config_name(&structs, &try_from_targets, &plugin_struct_names) {
         let fields = structs
             .get(&name)
             .map(|(_, fields)| fields.clone())
@@ -348,7 +354,19 @@ fn expand_nested(
 fn pick_config_name(
     structs: &BTreeMap<String, (bool, Vec<FieldSpec>)>,
     try_from_targets: &BTreeSet<String>,
+    plugin_struct_names: &BTreeSet<String>,
 ) -> Option<String> {
+    let plugin_configs: Vec<String> = plugin_struct_names
+        .iter()
+        .filter(|name| name.ends_with("PluginConfig") || name.ends_with("Config"))
+        .filter(|name| {
+            !name.ends_with("Checkpoint") && !name.contains("Privacy") && *name != "RetryConfig"
+        })
+        .cloned()
+        .collect();
+    if plugin_configs.len() == 1 {
+        return Some(plugin_configs[0].clone());
+    }
     let plugin_configs: Vec<String> = structs
         .keys()
         .filter(|name| name.ends_with("PluginConfig"))
@@ -763,7 +781,21 @@ pub fn emit_kinds_rs(plugins: &[PluginSpec]) -> String {
                 plugin.plugin_name
             ));
         }
-        out.push_str("        }\n    }\n}\n\n");
+        out.push_str("        }\n    }\n");
+        out.push_str(
+            "    pub fn parse(raw: &str) -> Option<Self> {\n        match raw.trim().to_ascii_lowercase().as_str() {\n",
+        );
+        for plugin in plugins {
+            out.push_str(&format!(
+                "            {:?} => Some(Self::{}),\n",
+                plugin.plugin_name.to_ascii_lowercase(),
+                ident_ok(&plugin.plugin_name)
+            ));
+        }
+        out.push_str("            _ => None,\n        }\n    }\n");
+        out.push_str(
+            "    pub fn plugin_name(self) -> &'static str {\n        self.plugin().plugin_name()\n    }\n}\n\n",
+        );
     }
     let sources: Vec<_> = plugins
         .iter()
@@ -1493,14 +1525,13 @@ mod tests {
             .find(|f| f.yaml_path == "auth.password")
             .expect("auth.password");
         assert_eq!(password.secret, SecretKind::Secret);
-        let iceberg = plugins
+        let lake = plugins
             .iter()
-            .find(|p| p.kind == PluginKind::DataSink && p.plugin_name == "Iceberg")
-            .expect("Iceberg");
-        assert!(iceberg
-            .fields
-            .iter()
-            .any(|f| f.yaml_path == "catalog.token" && f.secret == SecretKind::Secret));
+            .find(|p| p.kind == PluginKind::DataSink && p.plugin_name == "SkipprLake")
+            .expect("SkipprLake");
+        assert!(lake.fields.iter().any(|f| {
+            f.yaml_path == "object_store.secret_access_key" && f.secret == SecretKind::Secret
+        }));
     }
 
     #[test]
@@ -1527,6 +1558,22 @@ mod tests {
         assert!(
             kinds.contains("(Self::DataSourceHttpClient, \"auth_token\") => Some(\"auth.token\")"),
             "HttpClient auth_token must keep the nested yaml path"
+        );
+        assert!(
+            kinds.contains("pub fn parse(raw: &str) -> Option<Self>"),
+            "DataSource/DataSink/SchemaSink must parse plugin names"
+        );
+        assert!(
+            kinds.contains("\"skipprlake\" => Some(Self::SkipprLake)"),
+            "SkipprLake must parse case-insensitively"
+        );
+        assert!(
+            kinds.contains("\"athenaiceberg\" => Some(Self::AthenaIceberg)"),
+            "AthenaIceberg must parse case-insensitively"
+        );
+        assert!(
+            !kinds.contains("\"azure\" => Some(Self::AzureBlob)"),
+            "Azure is not an alias of AzureBlob"
         );
     }
 
@@ -1560,43 +1607,99 @@ mod tests {
             .iter()
             .any(|f| f.ident == "entity" && f.yaml_path == "entity"));
         assert!(!apple.fields.iter().any(|f| f.ident == "entity_type"));
-        let iceberg = plugins
+        let lake = plugins
             .iter()
-            .find(|p| p.kind == PluginKind::DataSink && p.plugin_name == "Iceberg")
-            .expect("Iceberg");
+            .find(|p| p.kind == PluginKind::DataSink && p.plugin_name == "SkipprLake")
+            .expect("SkipprLake");
         assert!(
-            iceberg
-                .fields
+            lake.fields
                 .iter()
-                .any(|f| f.ident == "catalog_type" && f.yaml_path == "catalog.type"),
-            "IcebergCatalogConfig is internally tagged"
+                .any(|f| f.ident == "warehouse" && f.yaml_path == "warehouse" && !f.optional),
+            "SkipprLake warehouse is required and flat"
         );
         assert!(
-            iceberg
-                .fields
+            lake.fields.iter().any(|f| f.ident == "catalog_table"
+                && f.yaml_path == "catalog_table"
+                && !f.optional),
+            "SkipprLake catalog_table is required and flat"
+        );
+        assert!(
+            lake.fields
                 .iter()
-                .any(|f| f.ident == "catalog_type" && !f.optional),
-            "required tagged enum keeps the tag field required"
+                .any(|f| f.ident == "object_store_type" && f.yaml_path == "object_store.type"),
+            "WarehouseObjectStore must expand under object_store, not a scalar object_store"
         );
         assert!(
-            iceberg.fields.iter().any(|f| f.ident == "catalog_object_store_type"
-                && f.yaml_path == "catalog.object_store.type"),
-            "WarehouseObjectStore must expand under catalog.object_store, not a scalar catalog_object_store"
-        );
-        assert!(
-            iceberg.fields.iter().any(|f| {
-                f.yaml_path == "catalog.object_store.secret_access_key"
-                    && f.secret == SecretKind::Secret
+            lake.fields.iter().any(|f| {
+                f.yaml_path == "object_store.secret_access_key" && f.secret == SecretKind::Secret
             }),
             "R2 secret_access_key must be a connect secret path"
         );
         assert!(
-            !iceberg
+            !lake
                 .fields
                 .iter()
-                .any(|f| f.ident == "catalog_object_store"
-                    && f.rust_ty.contains("WarehouseObjectStore")),
-            "catalog.object_store must not remain an unexpanded WarehouseObjectStore leaf"
+                .any(|f| f.ident == "object_store" && f.rust_ty.contains("WarehouseObjectStore")),
+            "object_store must not remain an unexpanded WarehouseObjectStore leaf"
+        );
+        assert!(
+            !lake
+                .fields
+                .iter()
+                .any(|f| f.yaml_path.starts_with("catalog.")
+                    || f.yaml_path == "table_prefix"
+                    || f.yaml_path == "query_engine.type"),
+            "removed Iceberg keys must not appear on SkipprLake"
+        );
+        let athena_iceberg = plugins
+            .iter()
+            .find(|p| p.kind == PluginKind::DataSink && p.plugin_name == "AthenaIceberg")
+            .expect("AthenaIceberg");
+        for required in [
+            "warehouse",
+            "glue_database_name",
+            "athena_workgroup_name",
+            "athena_results_s3_bucket",
+        ] {
+            assert!(
+                athena_iceberg
+                    .fields
+                    .iter()
+                    .any(|f| f.ident == required && f.yaml_path == required && !f.optional),
+                "AthenaIceberg {required} is required and flat"
+            );
+        }
+        assert!(
+            !athena_iceberg.fields.iter().any(|f| {
+                f.yaml_path.starts_with("catalog.")
+                    || f.yaml_path == "table_prefix"
+                    || f.yaml_path == "query_engine.type"
+                    || f.yaml_path == "table_location_prefix"
+            }),
+            "removed Iceberg keys must not appear on AthenaIceberg"
+        );
+        let duckdb = plugins
+            .iter()
+            .find(|p| p.kind == PluginKind::DataSink && p.plugin_name == "Duckdb")
+            .expect("Duckdb");
+        for required in ["warehouse", "table_namespace"] {
+            assert!(
+                duckdb
+                    .fields
+                    .iter()
+                    .any(|f| f.ident == required && f.yaml_path == required && !f.optional),
+                "Duckdb {required} is required and flat"
+            );
+        }
+        assert!(
+            !duckdb.fields.iter().any(|f| {
+                f.yaml_path.starts_with("catalog.")
+                    || f.yaml_path == "query_engine.type"
+                    || f.yaml_path == "path"
+                    || f.yaml_path == "schema"
+                    || f.yaml_path.starts_with("object_store")
+            }),
+            "Duckdb must not grow catalog, query_engine, path, schema, or object_store"
         );
     }
 
@@ -1612,6 +1715,8 @@ mod tests {
             "log",
             "wal_storage",
             "wal_s3_bucket",
+            "store_type",
+            "store_name",
             "offset_store",
             "offset_dynamodb_table",
             "skippr_s3_bucket",
@@ -1706,11 +1811,11 @@ mod tests {
             "CLI must accept repeated --tables, not skip Vec"
         );
         assert!(
-            cli.contains("pub catalog_object_store_type: Option<String>"),
-            "CLI must flatten catalog.object_store.type, not Option<String> catalog_object_store"
+            cli.contains("pub object_store_type: Option<String>"),
+            "CLI must flatten object_store.type, not Option<String> object_store"
         );
         assert!(
-            !cli.contains("pub catalog_object_store: Option<String>"),
+            !cli.contains("pub object_store: Option<String>"),
             "unexpanded WarehouseObjectStore leaf is illegal"
         );
     }
@@ -1741,17 +1846,25 @@ mod tests {
             "nested row types must be generated pyclasses"
         );
         assert!(
-            python.contains("DataSinkIceberg") && python.contains("SchemaSinkIceberg"),
-            "Iceberg data/schema sinks must not share one generated pyclass"
+            python.contains("DataSinkSkipprLake") && python.contains("SchemaSinkSkipprLake"),
+            "SkipprLake data/schema sinks must not share one generated pyclass"
+        );
+        assert!(
+            python.contains("DataSinkAthenaIceberg") && python.contains("SchemaSinkAthenaIceberg"),
+            "AthenaIceberg data/schema sinks must not share one generated pyclass"
+        );
+        assert!(
+            python.contains("DataSinkDuckdb") && python.contains("SchemaSinkDuckdb"),
+            "Duckdb data/schema sinks must not share one generated pyclass"
         );
         assert!(
             python.contains("name = \"HttpClientDataSourceHttpAuthConfig\""),
             "unique plugins keep short nested python names"
         );
         assert!(
-            python.contains("name = \"DataSinkIcebergWarehouseObjectStore\"")
-                && python.contains("name = \"SchemaSinkIcebergWarehouseObjectStore\""),
-            "Iceberg object_store nested types must be unique per plugin kind"
+            python.contains("name = \"DataSinkSkipprLakeWarehouseObjectStore\"")
+                && python.contains("name = \"SchemaSinkSkipprLakeWarehouseObjectStore\""),
+            "SkipprLake object_store nested types must be unique per plugin kind"
         );
     }
 

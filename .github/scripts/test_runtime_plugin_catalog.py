@@ -433,15 +433,15 @@ skipprd = { path = "../.." }
             )
 
     def test_validate_plugin_metadata_normalizes_bounded_grouped_sink_capability(self) -> None:
-        package = {"name": "skippr-plugin-data-sink-iceberg"}
+        package = {"name": "skippr-plugin-data-sink-skipprlake"}
 
         metadata = runtime_plugin_catalog.validate_plugin_metadata(
             package,
             {
                 "kind": "DataSink",
-                "plugin_name": "Iceberg",
+                "plugin_name": "SkipprLake",
                 "sink_capability": {
-                    "name": "Iceberg",
+                    "name": "SkipprLake",
                     "max_sessions_per_child": 1,
                     "retry_semantics": "TransactionalIdempotent",
                     "grouping_support": "FinalStateBatches",
@@ -557,6 +557,85 @@ skipprd = { path = "../.." }
                 runtime_plugin_catalog.workspace_runtime_protocol_version(workspace),
                 6,
             )
+
+    def test_warehouse_docs_and_crates_name_skipprlake_not_iceberg_plugin(self) -> None:
+        repo = Path(__file__).resolve().parents[2]
+        connectors = repo / "docs" / "docs" / "connectors"
+        for gone in (
+            connectors / "outputs" / "iceberg.md",
+            connectors / "schema_sinks" / "iceberg.md",
+            connectors / "outputs" / "athena_iceberg.md",
+            connectors / "schema_sinks" / "athena_iceberg.md",
+        ):
+            self.assertFalse(gone.exists(), f"{gone} must be deleted")
+        for present in (
+            connectors / "outputs" / "skipprlake.md",
+            connectors / "schema_sinks" / "skipprlake.md",
+            connectors / "outputs" / "athenaiceberg.md",
+            connectors / "schema_sinks" / "athenaiceberg.md",
+            connectors / "outputs" / "duckdb.md",
+            connectors / "schema_sinks" / "duckdb.md",
+        ):
+            self.assertTrue(present.is_file(), f"{present} must exist")
+        index = (connectors / "index.md").read_text(encoding="utf-8")
+        self.assertIn("`SkipprLake`", index)
+        self.assertIn("`AthenaIceberg`", index)
+        self.assertIn("`Duckdb`", index)
+        self.assertNotIn("outputs/iceberg.md", index)
+        changelog = (repo / "CHANGELOG.md").read_text(encoding="utf-8")
+        self.assertIn("**`SkipprLake`**", changelog)
+        self.assertIn("**`AthenaIceberg`**", changelog)
+        self.assertIn("**`Duckdb`**", changelog)
+        vitepress = (repo / "docs" / ".vitepress" / "config.mjs").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("/connectors/outputs/skipprlake", vitepress)
+        self.assertIn("/connectors/outputs/athenaiceberg", vitepress)
+        self.assertIn("/connectors/outputs/duckdb", vitepress)
+        self.assertNotIn("/connectors/outputs/iceberg", vitepress)
+        self.assertNotIn("athena_iceberg", vitepress)
+        skipprlake = (connectors / "outputs" / "skipprlake.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("`AthenaIceberg`", skipprlake)
+        self.assertIn("`Duckdb`", skipprlake)
+        self.assertNotIn("Athena Iceberg", skipprlake)
+        self.assertNotIn("DuckDB Iceberg", skipprlake)
+        self.assertNotIn("Skippr catalog", skipprlake)
+        datalake = (repo / "docs" / "docs" / "concepts" / "datalake.md").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("**SkipprLake**", datalake)
+        self.assertNotIn("Skipprd catalog", datalake)
+        python_md = (repo / "docs" / "docs" / "python.md").read_text(encoding="utf-8")
+        self.assertIn("DataSink.AthenaIceberg", python_md)
+        self.assertIn("DataSink.Duckdb", python_md)
+        self.assertNotIn("Athena Iceberg", python_md)
+        self.assertNotIn("DuckDB Iceberg", python_md)
+        otel_wbs = (
+            repo / "docs" / "docs" / "maintainers" / "hla-observability-implementation-wbs.md"
+        ).read_text(encoding="utf-8")
+        self.assertIn("SkipprLake is the dest", otel_wbs)
+        self.assertNotIn("Iceberg is the dest", otel_wbs)
+        plugins = repo / "plugins"
+        self.assertFalse((plugins / "data_sink" / "iceberg").exists())
+        self.assertFalse((plugins / "schema_sink" / "iceberg").exists())
+        iceberg_plugin_tomls = [
+            str(cargo.relative_to(repo))
+            for cargo in plugins.rglob("Cargo.toml")
+            if 'plugin_name = "Iceberg"' in cargo.read_text(encoding="utf-8")
+        ]
+        self.assertEqual(iceberg_plugin_tomls, [])
+        named = {
+            line.split("=", 1)[1].strip().strip('"')
+            for cargo in plugins.rglob("Cargo.toml")
+            for line in cargo.read_text(encoding="utf-8").splitlines()
+            if line.strip().startswith("plugin_name =")
+        }
+        self.assertIn("SkipprLake", named)
+        self.assertIn("AthenaIceberg", named)
+        self.assertIn("Duckdb", named)
+        self.assertNotIn("Iceberg", named)
 
     def test_workspace_runtime_protocol_version_supports_legacy_sdk_location(self) -> None:
         with tempfile.TemporaryDirectory() as tmp_dir:

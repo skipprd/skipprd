@@ -61,28 +61,32 @@ pub enum ConnectPlugin {
     DataSourceXeroAccounting,
     DataSinkAmqp,
     DataSinkAthena,
+    DataSinkAthenaIceberg,
     DataSinkAzureBlob,
     DataSinkBigquery,
     DataSinkClickhouse,
     DataSinkDatabricks,
+    DataSinkDuckdb,
     DataSinkFile,
     DataSinkGcs,
-    DataSinkIceberg,
     DataSinkMotherduck,
     DataSinkPostgres,
     DataSinkRedshift,
     DataSinkS3,
     DataSinkSftp,
+    DataSinkSkipprLake,
     DataSinkSnowflake,
     DataSinkStdout,
     DataSinkSynapse,
+    SchemaSinkAthenaIceberg,
     SchemaSinkBigquery,
     SchemaSinkClickhouse,
+    SchemaSinkDuckdb,
     SchemaSinkGlue,
-    SchemaSinkIceberg,
     SchemaSinkMotherduck,
     SchemaSinkPostgres,
     SchemaSinkRedshift,
+    SchemaSinkSkipprLake,
     SchemaSinkSnowflake,
 }
 
@@ -148,28 +152,32 @@ impl ConnectPlugin {
             Self::DataSourceXeroAccounting => ConnectRole::DataSource,
             Self::DataSinkAmqp => ConnectRole::DataSink,
             Self::DataSinkAthena => ConnectRole::DataSink,
+            Self::DataSinkAthenaIceberg => ConnectRole::DataSink,
             Self::DataSinkAzureBlob => ConnectRole::DataSink,
             Self::DataSinkBigquery => ConnectRole::DataSink,
             Self::DataSinkClickhouse => ConnectRole::DataSink,
             Self::DataSinkDatabricks => ConnectRole::DataSink,
+            Self::DataSinkDuckdb => ConnectRole::DataSink,
             Self::DataSinkFile => ConnectRole::DataSink,
             Self::DataSinkGcs => ConnectRole::DataSink,
-            Self::DataSinkIceberg => ConnectRole::DataSink,
             Self::DataSinkMotherduck => ConnectRole::DataSink,
             Self::DataSinkPostgres => ConnectRole::DataSink,
             Self::DataSinkRedshift => ConnectRole::DataSink,
             Self::DataSinkS3 => ConnectRole::DataSink,
             Self::DataSinkSftp => ConnectRole::DataSink,
+            Self::DataSinkSkipprLake => ConnectRole::DataSink,
             Self::DataSinkSnowflake => ConnectRole::DataSink,
             Self::DataSinkStdout => ConnectRole::DataSink,
             Self::DataSinkSynapse => ConnectRole::DataSink,
+            Self::SchemaSinkAthenaIceberg => ConnectRole::SchemaSink,
             Self::SchemaSinkBigquery => ConnectRole::SchemaSink,
             Self::SchemaSinkClickhouse => ConnectRole::SchemaSink,
+            Self::SchemaSinkDuckdb => ConnectRole::SchemaSink,
             Self::SchemaSinkGlue => ConnectRole::SchemaSink,
-            Self::SchemaSinkIceberg => ConnectRole::SchemaSink,
             Self::SchemaSinkMotherduck => ConnectRole::SchemaSink,
             Self::SchemaSinkPostgres => ConnectRole::SchemaSink,
             Self::SchemaSinkRedshift => ConnectRole::SchemaSink,
+            Self::SchemaSinkSkipprLake => ConnectRole::SchemaSink,
             Self::SchemaSinkSnowflake => ConnectRole::SchemaSink,
         }
     }
@@ -234,28 +242,32 @@ impl ConnectPlugin {
             Self::DataSourceXeroAccounting => "XeroAccounting",
             Self::DataSinkAmqp => "Amqp",
             Self::DataSinkAthena => "Athena",
+            Self::DataSinkAthenaIceberg => "AthenaIceberg",
             Self::DataSinkAzureBlob => "AzureBlob",
             Self::DataSinkBigquery => "Bigquery",
             Self::DataSinkClickhouse => "Clickhouse",
             Self::DataSinkDatabricks => "Databricks",
+            Self::DataSinkDuckdb => "Duckdb",
             Self::DataSinkFile => "File",
             Self::DataSinkGcs => "Gcs",
-            Self::DataSinkIceberg => "Iceberg",
             Self::DataSinkMotherduck => "Motherduck",
             Self::DataSinkPostgres => "Postgres",
             Self::DataSinkRedshift => "Redshift",
             Self::DataSinkS3 => "S3",
             Self::DataSinkSftp => "Sftp",
+            Self::DataSinkSkipprLake => "SkipprLake",
             Self::DataSinkSnowflake => "Snowflake",
             Self::DataSinkStdout => "Stdout",
             Self::DataSinkSynapse => "Synapse",
+            Self::SchemaSinkAthenaIceberg => "AthenaIceberg",
             Self::SchemaSinkBigquery => "Bigquery",
             Self::SchemaSinkClickhouse => "Clickhouse",
+            Self::SchemaSinkDuckdb => "Duckdb",
             Self::SchemaSinkGlue => "Glue",
-            Self::SchemaSinkIceberg => "Iceberg",
             Self::SchemaSinkMotherduck => "Motherduck",
             Self::SchemaSinkPostgres => "Postgres",
             Self::SchemaSinkRedshift => "Redshift",
+            Self::SchemaSinkSkipprLake => "SkipprLake",
             Self::SchemaSinkSnowflake => "Snowflake",
         }
     }
@@ -362,22 +374,20 @@ impl ConnectPlugin {
             }
             Self::DataSinkAmqp => &["connection_string"],
             Self::DataSinkAthena => &[],
+            Self::DataSinkAthenaIceberg => &["object_store.secret_access_key"],
             Self::DataSinkAzureBlob => &["account_key", "sas_token"],
             Self::DataSinkBigquery => &[],
             Self::DataSinkClickhouse => &["password"],
             Self::DataSinkDatabricks => &["token"],
+            Self::DataSinkDuckdb => &[],
             Self::DataSinkFile => &[],
             Self::DataSinkGcs => &[],
-            Self::DataSinkIceberg => &[
-                "catalog.object_store.secret_access_key",
-                "catalog.token",
-                "catalog.client_secret",
-            ],
             Self::DataSinkMotherduck => &["motherduck_token"],
             Self::DataSinkPostgres => &["password"],
             Self::DataSinkRedshift => &[],
             Self::DataSinkS3 => &[],
             Self::DataSinkSftp => &["password"],
+            Self::DataSinkSkipprLake => &["object_store.secret_access_key"],
             Self::DataSinkSnowflake => &[
                 "password",
                 "staging_azure_sas_token",
@@ -385,17 +395,15 @@ impl ConnectPlugin {
             ],
             Self::DataSinkStdout => &[],
             Self::DataSinkSynapse => &["connection_string"],
+            Self::SchemaSinkAthenaIceberg => &["object_store.secret_access_key"],
             Self::SchemaSinkBigquery => &[],
             Self::SchemaSinkClickhouse => &["password"],
+            Self::SchemaSinkDuckdb => &[],
             Self::SchemaSinkGlue => &[],
-            Self::SchemaSinkIceberg => &[
-                "catalog.object_store.secret_access_key",
-                "catalog.token",
-                "catalog.client_secret",
-            ],
             Self::SchemaSinkMotherduck => &["motherduck_token"],
             Self::SchemaSinkPostgres => &["password"],
             Self::SchemaSinkRedshift => &[],
+            Self::SchemaSinkSkipprLake => &["object_store.secret_access_key"],
             Self::SchemaSinkSnowflake => &[
                 "password",
                 "staging_azure_sas_token",
@@ -471,33 +479,47 @@ impl ConnectPlugin {
                 "athena_workgroup_name",
                 "athena_results_s3_bucket",
             ],
+            Self::DataSinkAthenaIceberg => &[
+                "warehouse",
+                "glue_database_name",
+                "athena_workgroup_name",
+                "athena_results_s3_bucket",
+            ],
             Self::DataSinkAzureBlob => &["account_name", "container"],
             Self::DataSinkBigquery => &["project", "dataset"],
             Self::DataSinkClickhouse => &["url"],
             Self::DataSinkDatabricks => &[],
+            Self::DataSinkDuckdb => &["warehouse", "table_namespace"],
             Self::DataSinkFile => &[],
             Self::DataSinkGcs => &["bucket"],
-            Self::DataSinkIceberg => &["catalog.type"],
             Self::DataSinkMotherduck => &["motherduck_token"],
             Self::DataSinkPostgres => &["user", "database"],
             Self::DataSinkRedshift => &["database"],
             Self::DataSinkS3 => &["s3_bucket", "s3_prefix"],
             Self::DataSinkSftp => &["host", "username", "remote_path"],
+            Self::DataSinkSkipprLake => &["warehouse", "catalog_table"],
             Self::DataSinkSnowflake => &["account", "user", "warehouse", "database", "schema"],
             Self::DataSinkStdout => &[],
             Self::DataSinkSynapse => &["connection_string"],
+            Self::SchemaSinkAthenaIceberg => &[
+                "warehouse",
+                "glue_database_name",
+                "athena_workgroup_name",
+                "athena_results_s3_bucket",
+            ],
             Self::SchemaSinkBigquery => &["project", "dataset"],
             Self::SchemaSinkClickhouse => &["url"],
+            Self::SchemaSinkDuckdb => &["warehouse", "table_namespace"],
             Self::SchemaSinkGlue => &[
                 "s3_bucket",
                 "s3_prefix",
                 "athena_workgroup_name",
                 "athena_results_s3_bucket",
             ],
-            Self::SchemaSinkIceberg => &["catalog.type"],
             Self::SchemaSinkMotherduck => &["motherduck_token"],
             Self::SchemaSinkPostgres => &["user", "database"],
             Self::SchemaSinkRedshift => &["database"],
+            Self::SchemaSinkSkipprLake => &["warehouse", "catalog_table"],
             Self::SchemaSinkSnowflake => &["account", "user", "warehouse", "database", "schema"],
         }
     }
@@ -1434,6 +1456,26 @@ impl ConnectPlugin {
             (Self::DataSinkAthena, "catalog") => Some("catalog"),
             (Self::DataSinkAthena, "max_concurrency") => Some("max_concurrency"),
             (Self::DataSinkAthena, "discovery_cache_ttl_secs") => Some("discovery_cache_ttl_secs"),
+            (Self::DataSinkAthenaIceberg, "warehouse") => Some("warehouse"),
+            (Self::DataSinkAthenaIceberg, "glue_database_name") => Some("glue_database_name"),
+            (Self::DataSinkAthenaIceberg, "athena_workgroup_name") => Some("athena_workgroup_name"),
+            (Self::DataSinkAthenaIceberg, "athena_results_s3_bucket") => {
+                Some("athena_results_s3_bucket")
+            }
+            (Self::DataSinkAthenaIceberg, "region") => Some("region"),
+            (Self::DataSinkAthenaIceberg, "catalog_id") => Some("catalog_id"),
+            (Self::DataSinkAthenaIceberg, "object_store_type") => Some("object_store.type"),
+            (Self::DataSinkAthenaIceberg, "object_store_endpoint") => Some("object_store.endpoint"),
+            (Self::DataSinkAthenaIceberg, "object_store_region") => Some("object_store.region"),
+            (Self::DataSinkAthenaIceberg, "object_store_access_key_id") => {
+                Some("object_store.access_key_id")
+            }
+            (Self::DataSinkAthenaIceberg, "object_store_secret_access_key") => {
+                Some("object_store.secret_access_key")
+            }
+            (Self::DataSinkAthenaIceberg, "object_store_path_style") => {
+                Some("object_store.path_style")
+            }
             (Self::DataSinkAzureBlob, "account_name") => Some("account_name"),
             (Self::DataSinkAzureBlob, "account_key") => Some("account_key"),
             (Self::DataSinkAzureBlob, "sas_token") => Some("sas_token"),
@@ -1464,47 +1506,14 @@ impl ConnectPlugin {
             (Self::DataSinkDatabricks, "format") => Some("format"),
             (Self::DataSinkDatabricks, "delta_table_uri") => Some("delta_table_uri"),
             (Self::DataSinkDatabricks, "storage_options") => Some("storage_options"),
+            (Self::DataSinkDuckdb, "warehouse") => Some("warehouse"),
+            (Self::DataSinkDuckdb, "table_namespace") => Some("table_namespace"),
             (Self::DataSinkFile, "format") => Some("format"),
             (Self::DataSinkFile, "output_dir") => Some("output_dir"),
             (Self::DataSinkGcs, "bucket") => Some("bucket"),
             (Self::DataSinkGcs, "prefix") => Some("prefix"),
             (Self::DataSinkGcs, "service_account_key_path") => Some("service_account_key_path"),
             (Self::DataSinkGcs, "format") => Some("format"),
-            (Self::DataSinkIceberg, "catalog_type") => Some("catalog.type"),
-            (Self::DataSinkIceberg, "catalog_warehouse") => Some("catalog.warehouse"),
-            (Self::DataSinkIceberg, "catalog_database") => Some("catalog.database"),
-            (Self::DataSinkIceberg, "catalog_catalog_id") => Some("catalog.catalog_id"),
-            (Self::DataSinkIceberg, "catalog_region") => Some("catalog.region"),
-            (Self::DataSinkIceberg, "catalog_object_store_type") => {
-                Some("catalog.object_store.type")
-            }
-            (Self::DataSinkIceberg, "catalog_object_store_endpoint") => {
-                Some("catalog.object_store.endpoint")
-            }
-            (Self::DataSinkIceberg, "catalog_object_store_region") => {
-                Some("catalog.object_store.region")
-            }
-            (Self::DataSinkIceberg, "catalog_object_store_access_key_id") => {
-                Some("catalog.object_store.access_key_id")
-            }
-            (Self::DataSinkIceberg, "catalog_object_store_secret_access_key") => {
-                Some("catalog.object_store.secret_access_key")
-            }
-            (Self::DataSinkIceberg, "catalog_object_store_path_style") => {
-                Some("catalog.object_store.path_style")
-            }
-            (Self::DataSinkIceberg, "catalog_table") => Some("catalog.table"),
-            (Self::DataSinkIceberg, "catalog_uri") => Some("catalog.uri"),
-            (Self::DataSinkIceberg, "catalog_token") => Some("catalog.token"),
-            (Self::DataSinkIceberg, "catalog_client_id") => Some("catalog.client_id"),
-            (Self::DataSinkIceberg, "catalog_client_secret") => Some("catalog.client_secret"),
-            (Self::DataSinkIceberg, "table_namespace") => Some("table_namespace"),
-            (Self::DataSinkIceberg, "table_prefix") => Some("table_prefix"),
-            (Self::DataSinkIceberg, "table_location_prefix") => Some("table_location_prefix"),
-            (Self::DataSinkIceberg, "properties") => Some("properties"),
-            (Self::DataSinkIceberg, "query_engine_type") => Some("query_engine.type"),
-            (Self::DataSinkIceberg, "query_engine_workgroup") => Some("query_engine.workgroup"),
-            (Self::DataSinkIceberg, "format") => Some("format"),
             (Self::DataSinkMotherduck, "motherduck_token") => Some("motherduck_token"),
             (Self::DataSinkMotherduck, "database") => Some("database"),
             (Self::DataSinkMotherduck, "table") => Some("table"),
@@ -1540,6 +1549,22 @@ impl ConnectPlugin {
             (Self::DataSinkSftp, "private_key_path") => Some("private_key_path"),
             (Self::DataSinkSftp, "remote_path") => Some("remote_path"),
             (Self::DataSinkSftp, "format") => Some("format"),
+            (Self::DataSinkSkipprLake, "warehouse") => Some("warehouse"),
+            (Self::DataSinkSkipprLake, "catalog_table") => Some("catalog_table"),
+            (Self::DataSinkSkipprLake, "region") => Some("region"),
+            (Self::DataSinkSkipprLake, "object_store_type") => Some("object_store.type"),
+            (Self::DataSinkSkipprLake, "object_store_endpoint") => Some("object_store.endpoint"),
+            (Self::DataSinkSkipprLake, "object_store_region") => Some("object_store.region"),
+            (Self::DataSinkSkipprLake, "object_store_access_key_id") => {
+                Some("object_store.access_key_id")
+            }
+            (Self::DataSinkSkipprLake, "object_store_secret_access_key") => {
+                Some("object_store.secret_access_key")
+            }
+            (Self::DataSinkSkipprLake, "object_store_path_style") => {
+                Some("object_store.path_style")
+            }
+            (Self::DataSinkSkipprLake, "table_namespace") => Some("table_namespace"),
             (Self::DataSinkSnowflake, "account") => Some("account"),
             (Self::DataSinkSnowflake, "user") => Some("user"),
             (Self::DataSinkSnowflake, "password") => Some("password"),
@@ -1569,6 +1594,30 @@ impl ConnectPlugin {
             (Self::DataSinkSynapse, "schema") => Some("schema"),
             (Self::DataSinkSynapse, "table") => Some("table"),
             (Self::DataSinkSynapse, "format") => Some("format"),
+            (Self::SchemaSinkAthenaIceberg, "warehouse") => Some("warehouse"),
+            (Self::SchemaSinkAthenaIceberg, "glue_database_name") => Some("glue_database_name"),
+            (Self::SchemaSinkAthenaIceberg, "athena_workgroup_name") => {
+                Some("athena_workgroup_name")
+            }
+            (Self::SchemaSinkAthenaIceberg, "athena_results_s3_bucket") => {
+                Some("athena_results_s3_bucket")
+            }
+            (Self::SchemaSinkAthenaIceberg, "region") => Some("region"),
+            (Self::SchemaSinkAthenaIceberg, "catalog_id") => Some("catalog_id"),
+            (Self::SchemaSinkAthenaIceberg, "object_store_type") => Some("object_store.type"),
+            (Self::SchemaSinkAthenaIceberg, "object_store_endpoint") => {
+                Some("object_store.endpoint")
+            }
+            (Self::SchemaSinkAthenaIceberg, "object_store_region") => Some("object_store.region"),
+            (Self::SchemaSinkAthenaIceberg, "object_store_access_key_id") => {
+                Some("object_store.access_key_id")
+            }
+            (Self::SchemaSinkAthenaIceberg, "object_store_secret_access_key") => {
+                Some("object_store.secret_access_key")
+            }
+            (Self::SchemaSinkAthenaIceberg, "object_store_path_style") => {
+                Some("object_store.path_style")
+            }
             (Self::SchemaSinkBigquery, "project") => Some("project"),
             (Self::SchemaSinkBigquery, "dataset") => Some("dataset"),
             (Self::SchemaSinkBigquery, "location") => Some("location"),
@@ -1584,6 +1633,8 @@ impl ConnectPlugin {
             (Self::SchemaSinkClickhouse, "password") => Some("password"),
             (Self::SchemaSinkClickhouse, "table") => Some("table"),
             (Self::SchemaSinkClickhouse, "format") => Some("format"),
+            (Self::SchemaSinkDuckdb, "warehouse") => Some("warehouse"),
+            (Self::SchemaSinkDuckdb, "table_namespace") => Some("table_namespace"),
             (Self::SchemaSinkGlue, "format") => Some("format"),
             (Self::SchemaSinkGlue, "s3_bucket") => Some("s3_bucket"),
             (Self::SchemaSinkGlue, "s3_prefix") => Some("s3_prefix"),
@@ -1594,41 +1645,6 @@ impl ConnectPlugin {
             (Self::SchemaSinkGlue, "catalog") => Some("catalog"),
             (Self::SchemaSinkGlue, "max_concurrency") => Some("max_concurrency"),
             (Self::SchemaSinkGlue, "discovery_cache_ttl_secs") => Some("discovery_cache_ttl_secs"),
-            (Self::SchemaSinkIceberg, "catalog_type") => Some("catalog.type"),
-            (Self::SchemaSinkIceberg, "catalog_warehouse") => Some("catalog.warehouse"),
-            (Self::SchemaSinkIceberg, "catalog_database") => Some("catalog.database"),
-            (Self::SchemaSinkIceberg, "catalog_catalog_id") => Some("catalog.catalog_id"),
-            (Self::SchemaSinkIceberg, "catalog_region") => Some("catalog.region"),
-            (Self::SchemaSinkIceberg, "catalog_object_store_type") => {
-                Some("catalog.object_store.type")
-            }
-            (Self::SchemaSinkIceberg, "catalog_object_store_endpoint") => {
-                Some("catalog.object_store.endpoint")
-            }
-            (Self::SchemaSinkIceberg, "catalog_object_store_region") => {
-                Some("catalog.object_store.region")
-            }
-            (Self::SchemaSinkIceberg, "catalog_object_store_access_key_id") => {
-                Some("catalog.object_store.access_key_id")
-            }
-            (Self::SchemaSinkIceberg, "catalog_object_store_secret_access_key") => {
-                Some("catalog.object_store.secret_access_key")
-            }
-            (Self::SchemaSinkIceberg, "catalog_object_store_path_style") => {
-                Some("catalog.object_store.path_style")
-            }
-            (Self::SchemaSinkIceberg, "catalog_table") => Some("catalog.table"),
-            (Self::SchemaSinkIceberg, "catalog_uri") => Some("catalog.uri"),
-            (Self::SchemaSinkIceberg, "catalog_token") => Some("catalog.token"),
-            (Self::SchemaSinkIceberg, "catalog_client_id") => Some("catalog.client_id"),
-            (Self::SchemaSinkIceberg, "catalog_client_secret") => Some("catalog.client_secret"),
-            (Self::SchemaSinkIceberg, "table_namespace") => Some("table_namespace"),
-            (Self::SchemaSinkIceberg, "table_prefix") => Some("table_prefix"),
-            (Self::SchemaSinkIceberg, "table_location_prefix") => Some("table_location_prefix"),
-            (Self::SchemaSinkIceberg, "properties") => Some("properties"),
-            (Self::SchemaSinkIceberg, "query_engine_type") => Some("query_engine.type"),
-            (Self::SchemaSinkIceberg, "query_engine_workgroup") => Some("query_engine.workgroup"),
-            (Self::SchemaSinkIceberg, "format") => Some("format"),
             (Self::SchemaSinkMotherduck, "motherduck_token") => Some("motherduck_token"),
             (Self::SchemaSinkMotherduck, "database") => Some("database"),
             (Self::SchemaSinkMotherduck, "table") => Some("table"),
@@ -1653,6 +1669,22 @@ impl ConnectPlugin {
             (Self::SchemaSinkRedshift, "iam_role_arn") => Some("iam_role_arn"),
             (Self::SchemaSinkRedshift, "format") => Some("format"),
             (Self::SchemaSinkRedshift, "schema") => Some("schema"),
+            (Self::SchemaSinkSkipprLake, "warehouse") => Some("warehouse"),
+            (Self::SchemaSinkSkipprLake, "catalog_table") => Some("catalog_table"),
+            (Self::SchemaSinkSkipprLake, "region") => Some("region"),
+            (Self::SchemaSinkSkipprLake, "object_store_type") => Some("object_store.type"),
+            (Self::SchemaSinkSkipprLake, "object_store_endpoint") => Some("object_store.endpoint"),
+            (Self::SchemaSinkSkipprLake, "object_store_region") => Some("object_store.region"),
+            (Self::SchemaSinkSkipprLake, "object_store_access_key_id") => {
+                Some("object_store.access_key_id")
+            }
+            (Self::SchemaSinkSkipprLake, "object_store_secret_access_key") => {
+                Some("object_store.secret_access_key")
+            }
+            (Self::SchemaSinkSkipprLake, "object_store_path_style") => {
+                Some("object_store.path_style")
+            }
+            (Self::SchemaSinkSkipprLake, "table_namespace") => Some("table_namespace"),
             (Self::SchemaSinkSnowflake, "account") => Some("account"),
             (Self::SchemaSinkSnowflake, "user") => Some("user"),
             (Self::SchemaSinkSnowflake, "password") => Some("password"),
@@ -1808,24 +1840,91 @@ impl DataSource {
             Self::XeroAccounting => ConnectPlugin::DataSourceXeroAccounting,
         }
     }
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "adrollads" => Some(Self::AdRollAds),
+            "aicitations" => Some(Self::AiCitations),
+            "amqp" => Some(Self::Amqp),
+            "appleappstoreserp" => Some(Self::AppleAppStoreSerp),
+            "applesearchads" => Some(Self::AppleSearchAds),
+            "bingwebmastertools" => Some(Self::BingWebmasterTools),
+            "clickhouse" => Some(Self::Clickhouse),
+            "contentquality" => Some(Self::ContentQuality),
+            "dataforseobacklinks" => Some(Self::DataForSeoBacklinks),
+            "dataforseoseoopportunities" => Some(Self::DataForSeoSeoOpportunities),
+            "deltalake" => Some(Self::DeltaLake),
+            "dynamodb" => Some(Self::Dynamodb),
+            "eventbridge" => Some(Self::Eventbridge),
+            "file" => Some(Self::File),
+            "googleads" => Some(Self::GoogleAds),
+            "googleanalytics" => Some(Self::GoogleAnalytics),
+            "googlepagespeed" => Some(Self::GooglePageSpeed),
+            "googlesearchconsole" => Some(Self::GoogleSearchConsole),
+            "googleserpranks" => Some(Self::GoogleSerpRanks),
+            "httpclient" => Some(Self::HttpClient),
+            "httpserver" => Some(Self::HttpServer),
+            "hubspotcrm" => Some(Self::HubspotCrm),
+            "kafka" => Some(Self::Kafka),
+            "kinesis" => Some(Self::Kinesis),
+            "linkedinads" => Some(Self::LinkedInAds),
+            "metaads" => Some(Self::MetaAds),
+            "metainstagramads" => Some(Self::MetaInstagramAds),
+            "mongodb" => Some(Self::Mongodb),
+            "motherduck" => Some(Self::Motherduck),
+            "mqtt" => Some(Self::Mqtt),
+            "mssql" => Some(Self::Mssql),
+            "mysql" => Some(Self::Mysql),
+            "otlp" => Some(Self::Otlp),
+            "pcap" => Some(Self::Pcap),
+            "postgres" => Some(Self::Postgres),
+            "redshift" => Some(Self::Redshift),
+            "revolutbusiness" => Some(Self::RevolutBusiness),
+            "s3" => Some(Self::S3),
+            "seocrawl" => Some(Self::SeoCrawl),
+            "sftp" => Some(Self::Sftp),
+            "shopifyadmin" => Some(Self::ShopifyAdmin),
+            "sitequality" => Some(Self::SiteQuality),
+            "sitesecurity" => Some(Self::SiteSecurity),
+            "sns" => Some(Self::Sns),
+            "socket" => Some(Self::Socket),
+            "sqs" => Some(Self::Sqs),
+            "statsd" => Some(Self::Statsd),
+            "stdin" => Some(Self::Stdin),
+            "stripe" => Some(Self::Stripe),
+            "sumup" => Some(Self::SumUp),
+            "upfoundrybacklinks" => Some(Self::UpfoundryBacklinks),
+            "upfoundrylinkgraphcompact" => Some(Self::UpfoundryLinkGraphCompact),
+            "upfoundrylinkgraphingest" => Some(Self::UpfoundryLinkGraphIngest),
+            "upfoundrylinkgraphwatindex" => Some(Self::UpfoundryLinkGraphWatIndex),
+            "websocket" => Some(Self::Websocket),
+            "xads" => Some(Self::XAds),
+            "xeroaccounting" => Some(Self::XeroAccounting),
+            _ => None,
+        }
+    }
+    pub fn plugin_name(self) -> &'static str {
+        self.plugin().plugin_name()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DataSink {
     Amqp,
     Athena,
+    AthenaIceberg,
     AzureBlob,
     Bigquery,
     Clickhouse,
     Databricks,
+    Duckdb,
     File,
     Gcs,
-    Iceberg,
     Motherduck,
     Postgres,
     Redshift,
     S3,
     Sftp,
+    SkipprLake,
     Snowflake,
     Stdout,
     Synapse,
@@ -1836,48 +1935,99 @@ impl DataSink {
         match self {
             Self::Amqp => ConnectPlugin::DataSinkAmqp,
             Self::Athena => ConnectPlugin::DataSinkAthena,
+            Self::AthenaIceberg => ConnectPlugin::DataSinkAthenaIceberg,
             Self::AzureBlob => ConnectPlugin::DataSinkAzureBlob,
             Self::Bigquery => ConnectPlugin::DataSinkBigquery,
             Self::Clickhouse => ConnectPlugin::DataSinkClickhouse,
             Self::Databricks => ConnectPlugin::DataSinkDatabricks,
+            Self::Duckdb => ConnectPlugin::DataSinkDuckdb,
             Self::File => ConnectPlugin::DataSinkFile,
             Self::Gcs => ConnectPlugin::DataSinkGcs,
-            Self::Iceberg => ConnectPlugin::DataSinkIceberg,
             Self::Motherduck => ConnectPlugin::DataSinkMotherduck,
             Self::Postgres => ConnectPlugin::DataSinkPostgres,
             Self::Redshift => ConnectPlugin::DataSinkRedshift,
             Self::S3 => ConnectPlugin::DataSinkS3,
             Self::Sftp => ConnectPlugin::DataSinkSftp,
+            Self::SkipprLake => ConnectPlugin::DataSinkSkipprLake,
             Self::Snowflake => ConnectPlugin::DataSinkSnowflake,
             Self::Stdout => ConnectPlugin::DataSinkStdout,
             Self::Synapse => ConnectPlugin::DataSinkSynapse,
         }
     }
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "amqp" => Some(Self::Amqp),
+            "athena" => Some(Self::Athena),
+            "athenaiceberg" => Some(Self::AthenaIceberg),
+            "azureblob" => Some(Self::AzureBlob),
+            "bigquery" => Some(Self::Bigquery),
+            "clickhouse" => Some(Self::Clickhouse),
+            "databricks" => Some(Self::Databricks),
+            "duckdb" => Some(Self::Duckdb),
+            "file" => Some(Self::File),
+            "gcs" => Some(Self::Gcs),
+            "motherduck" => Some(Self::Motherduck),
+            "postgres" => Some(Self::Postgres),
+            "redshift" => Some(Self::Redshift),
+            "s3" => Some(Self::S3),
+            "sftp" => Some(Self::Sftp),
+            "skipprlake" => Some(Self::SkipprLake),
+            "snowflake" => Some(Self::Snowflake),
+            "stdout" => Some(Self::Stdout),
+            "synapse" => Some(Self::Synapse),
+            _ => None,
+        }
+    }
+    pub fn plugin_name(self) -> &'static str {
+        self.plugin().plugin_name()
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum SchemaSink {
+    AthenaIceberg,
     Bigquery,
     Clickhouse,
+    Duckdb,
     Glue,
-    Iceberg,
     Motherduck,
     Postgres,
     Redshift,
+    SkipprLake,
     Snowflake,
 }
 
 impl SchemaSink {
     pub fn plugin(self) -> ConnectPlugin {
         match self {
+            Self::AthenaIceberg => ConnectPlugin::SchemaSinkAthenaIceberg,
             Self::Bigquery => ConnectPlugin::SchemaSinkBigquery,
             Self::Clickhouse => ConnectPlugin::SchemaSinkClickhouse,
+            Self::Duckdb => ConnectPlugin::SchemaSinkDuckdb,
             Self::Glue => ConnectPlugin::SchemaSinkGlue,
-            Self::Iceberg => ConnectPlugin::SchemaSinkIceberg,
             Self::Motherduck => ConnectPlugin::SchemaSinkMotherduck,
             Self::Postgres => ConnectPlugin::SchemaSinkPostgres,
             Self::Redshift => ConnectPlugin::SchemaSinkRedshift,
+            Self::SkipprLake => ConnectPlugin::SchemaSinkSkipprLake,
             Self::Snowflake => ConnectPlugin::SchemaSinkSnowflake,
         }
+    }
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "athenaiceberg" => Some(Self::AthenaIceberg),
+            "bigquery" => Some(Self::Bigquery),
+            "clickhouse" => Some(Self::Clickhouse),
+            "duckdb" => Some(Self::Duckdb),
+            "glue" => Some(Self::Glue),
+            "motherduck" => Some(Self::Motherduck),
+            "postgres" => Some(Self::Postgres),
+            "redshift" => Some(Self::Redshift),
+            "skipprlake" => Some(Self::SkipprLake),
+            "snowflake" => Some(Self::Snowflake),
+            _ => None,
+        }
+    }
+    pub fn plugin_name(self) -> &'static str {
+        self.plugin().plugin_name()
     }
 }

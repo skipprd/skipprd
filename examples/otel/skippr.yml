@@ -72,21 +72,17 @@ data_sources:
 
 data_sinks:
   lake:
-    Iceberg:
+    SkipprLake:
       table_namespace: otel
-      catalog:
-        type: skippr
-        table: otel-iceberg-catalog
-        warehouse: s3://example-otel-warehouse/
-        region: us-east-1
-    schema_sink: schema_sinks.iceberg_catalog
+      catalog_table: otel-iceberg-catalog
+      warehouse: s3://example-otel-warehouse/
+      region: us-east-1
+    schema_sink: schema_sinks.lake_schema
 
 schema_sinks:
-  iceberg_catalog:
-    Iceberg:
+  lake_schema:
+    SkipprLake:
       table_namespace: otel
-      catalog:
-        type: skippr
-        table: otel-iceberg-catalog
-        warehouse: s3://example-otel-warehouse/
-        region: us-east-1
+      catalog_table: otel-iceberg-catalog
+      warehouse: s3://example-otel-warehouse/
+      region: us-east-1

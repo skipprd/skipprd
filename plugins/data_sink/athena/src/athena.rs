@@ -1790,35 +1790,6 @@ impl DataSinkAthenaPlugin {
             uploaded_bytes,
             upload_start.elapsed().as_millis()
         );
-        // Update manifest with the canonical namespace root prefix (absolute s3:// URL)
-        // Canonical: s3://{bucket}/{s3_prefix}/{namespace}/
-        let trimmed_key_root = key.trim_matches('/').to_string();
-        let ns_root = if !namespace.is_empty() {
-            if trimmed_key_root.is_empty() {
-                namespace.clone()
-            } else {
-                format!("{}/{}", trimmed_key_root, namespace)
-            }
-        } else {
-            trimmed_key_root.clone()
-        };
-        let mut abs_prefix = format!("s3://{}/{}", bucket, ns_root.trim_start_matches('/'));
-        if !abs_prefix.ends_with('/') {
-            abs_prefix.push('/');
-        }
-        {
-            let ns = namespace.to_string();
-            let prefix_for_manifest = abs_prefix.clone();
-            tokio::spawn(async move {
-                crate::helpers::manifest::Manifest::ensure_prefix_and_db(
-                    &crate::helpers::configuration::Config::new(),
-                    &ns,
-                    &prefix_for_manifest,
-                    "",
-                )
-                .await;
-            });
-        }
 
         if let Some(manifest) = idempotency_manifest {
             self.write_manifest(&idempotency_manifest_key, manifest)

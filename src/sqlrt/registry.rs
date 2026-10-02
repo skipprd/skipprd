@@ -160,8 +160,3 @@ pub async fn set_embeddings_uri(config: &Config, pipeline: &str, uri: &str) -> R
         .insert(pipeline.to_string(), uri.to_string());
     write_registry(config, reg).await
 }
-
-/// Build the S3 key for a namespace manifest for a given pipeline, independent of any global pipeline state.
-pub fn manifest_key_for(config: &Config, pipeline: &str, namespace: &str) -> String {
-    crate::helpers::manifest::Manifest::s3_key_for(config, pipeline, namespace)
-}

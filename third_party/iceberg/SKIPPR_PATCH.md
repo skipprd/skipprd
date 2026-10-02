@@ -9,5 +9,5 @@ This vendored copy adds:
 - `SnapshotProducer::new_with_deletes()` and delete-manifest writing
 - `Transaction::equality_delta_append()` (`EqualityDeltaAppendAction`)
 
-Wired from `skippr-plugin-data-sink-iceberg` via `[patch.crates-io]` in the workspace root
+Wired from `skippr-plugin-data-sink-skipprlake` via `[patch.crates-io]` in the workspace root
 `Cargo.toml`.

@@ -1,43 +1,32 @@
 [package]
-name = "skippr-plugin-data-sink-iceberg"
-version = "0.1.8"
+name = "skippr-plugin-data-sink-athena-iceberg"
+version = "0.2.0"
 edition = "2021"
 
 [[bin]]
-name = "skippr-plugin-data-sink-iceberg"
+name = "skippr-plugin-data-sink-athena-iceberg"
 path = "src/main.rs"
 
 [dependencies]
-async-trait.workspace = true
 clap.workspace = true
 tokio.workspace = true
-skippr-runtime-sdk.workspace = true
-skippr-object-writer = { path = "../../../crates/skippr-object-writer" }
-arrow.workspace = true
-bytes.workspace = true
-datafusion.workspace = true
-futures.workspace = true
-hex.workspace = true
-md5.workspace = true
-parquet.workspace = true
 serde.workspace = true
 serde_derive.workspace = true
-serde_json.workspace = true
-tracing.workspace = true
-aws-config = "1.5.1"
-aws-sdk-s3 = "1.32.0"
+skippr-runtime-sdk.workspace = true
+skippr-iceberg-writer = { path = "../../../crates/skippr-iceberg-writer" }
 skippr-iceberg-catalog = { path = "../../../crates/skippr-iceberg-catalog" }
-skippr-iceberg-catalog-dynamodb = { path = "../../../crates/skippr-iceberg-catalog-dynamodb" }
-skippr-iceberg-catalog-cloud-tables = { path = "../../../crates/skippr-iceberg-catalog-cloud-tables" }
 iceberg = "0.9.1"
 iceberg-catalog-glue = "0.9.1"
 
+[dev-dependencies]
+serde_json.workspace = true
+
 [package.metadata.skippr-plugin]
 kind = "DataSink"
-plugin_name = "Iceberg"
+plugin_name = "AthenaIceberg"
 
 [package.metadata.skippr-plugin.sink_capability]
-name = "Iceberg"
+name = "AthenaIceberg"
 max_sessions_per_child = 1
 guarantee_tier = "ExactOnceCdcEligible"
 can_manage_skippr_columns = true

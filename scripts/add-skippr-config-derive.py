@@ -3,11 +3,11 @@ import re
 
 ROOT = pathlib.Path("/Users/huders2000/Documents/sites/skippr/skipprd")
 STRUCT = re.compile(
-    r"^pub struct (OtlpConfigRaw|\w+(?:PluginConfig|HttpAuthConfig)|IcebergCatalogConfig)\b"
+    r"^pub struct (OtlpConfigRaw|\w+(?:PluginConfig|HttpAuthConfig)|SkipprLakeConfig)\b"
 )
 # Also pub(crate) OtlpConfigRaw and Upfoundry*Config
 STRUCT2 = re.compile(
-    r"^(?:pub(?:\([^)]+\))? )?struct (OtlpConfigRaw|IcebergCatalogConfig|\w+PluginConfig|Upfoundry\w+Config|DataSourceHttpAuthConfig)\b"
+    r"^(?:pub(?:\([^)]+\))? )?struct (OtlpConfigRaw|SkipprLakeConfig|\w+PluginConfig|Upfoundry\w+Config|DataSourceHttpAuthConfig)\b"
 )
 
 changed = 0

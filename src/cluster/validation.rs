@@ -157,41 +157,38 @@ pub fn validate_clustered_backend(
     }
 }
 
-fn skippr_catalog_table(entry: &PluginConfigEntry) -> Option<String> {
-    if !entry.plugin_name.eq_ignore_ascii_case("Iceberg") {
-        return None;
+fn skippr_catalog_table(entry: &PluginConfigEntry) -> Result<Option<String>, ConfigError> {
+    if crate::connect::DataSink::parse(&entry.plugin_name)
+        != Some(crate::connect::DataSink::SkipprLake)
+        && crate::connect::SchemaSink::parse(&entry.plugin_name)
+            != Some(crate::connect::SchemaSink::SkipprLake)
+    {
+        return Ok(None);
     }
-    let catalog = entry.config.get("catalog")?;
-    let cfg: skippr_iceberg_catalog::IcebergCatalogConfig =
-        serde_json::from_value(catalog.clone()).ok()?;
-    cfg.skippr_table().map(str::to_string)
+    let cfg: skippr_iceberg_catalog::SkipprLakeConfig =
+        serde_json::from_value(entry.config.clone())
+            .map_err(|err| ConfigError::SkipprLakeConfigInvalid(err.to_string()))?;
+    Ok(Some(cfg.catalog_table))
 }
 
-fn sink_skippr_catalog_table(entry: &DataSinkEntry) -> Option<String> {
+fn sink_skippr_catalog_table(entry: &DataSinkEntry) -> Result<Option<String>, ConfigError> {
     skippr_catalog_table(&entry.config)
 }
 
-pub fn validate_skippr_catalog_tables(
-    config: &Config,
-    offset_table: &str,
-) -> Result<(), ConfigError> {
-    let mut catalog_tables = Vec::new();
+pub fn validate_skippr_catalog_tables(config: &Config) -> Result<(), ConfigError> {
     if let Some(sinks) = &config.data_sinks {
-        catalog_tables.extend(sinks.values().filter_map(sink_skippr_catalog_table));
+        for entry in sinks.values() {
+            let _ = sink_skippr_catalog_table(entry)?;
+        }
     }
     if let Some(sinks) = &config.deadletter_sinks {
-        catalog_tables.extend(sinks.values().filter_map(sink_skippr_catalog_table));
+        for entry in sinks.values() {
+            let _ = sink_skippr_catalog_table(entry)?;
+        }
     }
     if let Some(sinks) = &config.schema_sinks {
-        catalog_tables.extend(sinks.values().filter_map(skippr_catalog_table));
-    }
-    for catalog_table in catalog_tables {
-        if skippr_iceberg_catalog::skippr_catalog_reuses_offset_table(&catalog_table, offset_table)
-        {
-            return Err(ConfigError::SkipprCatalogReusesOffsetTable {
-                catalog_table,
-                offset_table: offset_table.to_string(),
-            });
+        for entry in sinks.values() {
+            let _ = skippr_catalog_table(entry)?;
         }
     }
     Ok(())
@@ -201,9 +198,9 @@ fn validate_configured_offset_store(
     config: &Config,
     storage: WalStorage,
 ) -> Result<OffsetStoreKind, ConfigError> {
-    let table = config.get_offset_dynamodb_table();
+    let table = config.get_skippr_store_name();
     let kind = crate::pipeline_backend::configured_kind(config)
-        .map_err(ConfigError::InvalidOffsetStore)?;
+        .map_err(ConfigError::InvalidSkipprStore)?;
     validate_clustered_backend(storage, kind, &table)
 }
 
@@ -219,9 +216,8 @@ pub fn validate_clustered_cli(
             Ok(())
         }
         WalStorage::Clustered => {
-            let table = config.get_offset_dynamodb_table();
             validate_configured_offset_store(config, storage)?;
-            validate_skippr_catalog_tables(config, &table)?;
+            validate_skippr_catalog_tables(config)?;
             if matches!(mode, CliModeKind::Sync { once: false }) {
                 for name in config.pipelines.keys() {
                     PipelineConfigView::for_name(config, name)?.validate_clustered_sink()?;
@@ -244,9 +240,9 @@ pub fn validate_clustered_mode(
             Ok(None)
         }
         WalStorage::Clustered => {
-            let table = config.get_offset_dynamodb_table();
+            let table = config.get_skippr_store_name();
             validate_configured_offset_store(config, storage)?;
-            validate_skippr_catalog_tables(config, &table)?;
+            validate_skippr_catalog_tables(config)?;
             let lock_data_dir = !matches!(
                 mode,
                 CliModeKind::Query | CliModeKind::SqlHelp | CliModeKind::Connect
@@ -346,7 +342,12 @@ mod tests {
 
     #[test]
     fn clustered_without_table_fails() {
-        let err = validate_clustered_backend(WalStorage::Clustered, OffsetStoreKind::default_for_wal(WalStorage::Clustered), "").unwrap_err();
+        let err = validate_clustered_backend(
+            WalStorage::Clustered,
+            OffsetStoreKind::default_for_wal(WalStorage::Clustered),
+            "",
+        )
+        .unwrap_err();
         #[cfg(any(
             feature = "offset-store-dynamodb",
             feature = "offset-store-cloud-tables"
@@ -361,12 +362,9 @@ mod tests {
 
     #[test]
     fn clustered_rejects_explicit_sled() {
-        let err = validate_clustered_backend(
-            WalStorage::Clustered,
-            OffsetStoreKind::Sled,
-            "offsets",
-        )
-        .unwrap_err();
+        let err =
+            validate_clustered_backend(WalStorage::Clustered, OffsetStoreKind::Sled, "offsets")
+                .unwrap_err();
         #[cfg(any(
             feature = "offset-store-dynamodb",
             feature = "offset-store-cloud-tables"
@@ -391,7 +389,12 @@ mod tests {
         #[cfg(feature = "offset-store-dynamodb")]
         {
             assert_eq!(
-                validate_clustered_backend(WalStorage::Clustered, OffsetStoreKind::default_for_wal(WalStorage::Clustered), "offsets").unwrap(),
+                validate_clustered_backend(
+                    WalStorage::Clustered,
+                    OffsetStoreKind::default_for_wal(WalStorage::Clustered),
+                    "offsets"
+                )
+                .unwrap(),
                 OffsetStoreKind::DynamoDb
             );
         }
@@ -401,7 +404,12 @@ mod tests {
         ))]
         {
             assert_eq!(
-                validate_clustered_backend(WalStorage::Clustered, OffsetStoreKind::default_for_wal(WalStorage::Clustered), "offsets").unwrap_err(),
+                validate_clustered_backend(
+                    WalStorage::Clustered,
+                    OffsetStoreKind::default_for_wal(WalStorage::Clustered),
+                    "offsets"
+                )
+                .unwrap_err(),
                 ConfigError::CloudTablesEndpointMissing
             );
         }
@@ -411,7 +419,12 @@ mod tests {
         )))]
         {
             assert_eq!(
-                validate_clustered_backend(WalStorage::Clustered, OffsetStoreKind::default_for_wal(WalStorage::Clustered), "offsets").unwrap_err(),
+                validate_clustered_backend(
+                    WalStorage::Clustered,
+                    OffsetStoreKind::default_for_wal(WalStorage::Clustered),
+                    "offsets"
+                )
+                .unwrap_err(),
                 ConfigError::ClusteredFeatureMissing
             );
         }
@@ -420,12 +433,16 @@ mod tests {
     #[test]
     fn disk_and_s3_do_not_require_dynamodb() {
         assert_eq!(
-            validate_clustered_backend(WalStorage::Disk, OffsetStoreKind::default_for_wal(WalStorage::Disk), "").unwrap(),
+            validate_clustered_backend(
+                WalStorage::Disk,
+                OffsetStoreKind::default_for_wal(WalStorage::Disk),
+                ""
+            )
+            .unwrap(),
             OffsetStoreKind::Sled
         );
         assert_eq!(
-            validate_clustered_backend(WalStorage::S3, OffsetStoreKind::DynamoDb, "t")
-                .unwrap(),
+            validate_clustered_backend(WalStorage::S3, OffsetStoreKind::DynamoDb, "t").unwrap(),
             OffsetStoreKind::DynamoDb
         );
     }
@@ -439,12 +456,9 @@ mod tests {
         std::env::remove_var("CLOUD_ACCESS_KEY_ID");
         std::env::set_var("CLOUD_TABLES_ENDPOINT", "http://127.0.0.1:8003");
         std::env::set_var("CLOUD_BEARER_TOKEN", "guest-held-jwt");
-        let err = validate_clustered_backend(
-            WalStorage::Disk,
-            OffsetStoreKind::CloudTables,
-            "offsets",
-        )
-        .unwrap_err();
+        let err =
+            validate_clustered_backend(WalStorage::Disk, OffsetStoreKind::CloudTables, "offsets")
+                .unwrap_err();
         std::env::remove_var("CLOUD_TABLES_ENDPOINT");
         std::env::remove_var("CLOUD_BEARER_TOKEN");
         assert_eq!(err, ConfigError::CloudTablesAuthMissing);
@@ -471,13 +485,11 @@ mod tests {
     fn iceberg_skippr_sink(table: &str) -> crate::helpers::plugin_config::DataSinkEntry {
         crate::helpers::plugin_config::DataSinkEntry {
             config: crate::helpers::plugin_config::PluginConfigEntry {
-                plugin_name: "Iceberg".into(),
+                plugin_name: skippr_iceberg_catalog::SkipprLakeConfig::PLUGIN_NAME.into(),
                 config: serde_json::json!({
-                    "catalog": {
-                        "type": "skippr",
-                        "table": table,
-                        "warehouse": "file:///tmp/warehouse"
-                    }
+                    "catalog_table": table,
+                    "warehouse": "file:///tmp/warehouse",
+                    "table_namespace": "default"
                 }),
             },
             schema_sink: None,
@@ -485,20 +497,37 @@ mod tests {
     }
 
     #[test]
-    fn skippr_catalog_table_must_not_reuse_offset_table() {
+    fn skippr_catalog_table_may_reuse_store_table() {
         let mut config = Config::new();
         config.data_sinks = Some(
             [("lake".into(), iceberg_skippr_sink("skippr-offsets"))]
                 .into_iter()
                 .collect(),
         );
-        let err = validate_skippr_catalog_tables(&config, "skippr-offsets").unwrap_err();
-        assert_eq!(
-            err,
-            ConfigError::SkipprCatalogReusesOffsetTable {
-                catalog_table: "skippr-offsets".into(),
-                offset_table: "skippr-offsets".into(),
-            }
+        assert!(validate_skippr_catalog_tables(&config).is_ok());
+    }
+
+    #[test]
+    fn skippr_catalog_table_undecodable_config_fails_closed() {
+        let mut config = Config::new();
+        config.data_sinks = Some(
+            [(
+                "lake".into(),
+                crate::helpers::plugin_config::DataSinkEntry {
+                    config: crate::helpers::plugin_config::PluginConfigEntry {
+                        plugin_name: skippr_iceberg_catalog::SkipprLakeConfig::PLUGIN_NAME.into(),
+                        config: serde_json::json!({ "catalog_table": "cat" }),
+                    },
+                    schema_sink: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let err = validate_skippr_catalog_tables(&config).unwrap_err();
+        assert!(
+            matches!(err, ConfigError::SkipprLakeConfigInvalid(_)),
+            "{err:?}"
         );
     }
 
@@ -605,6 +634,6 @@ mod tests {
                 .into_iter()
                 .collect(),
         );
-        assert!(validate_skippr_catalog_tables(&config, "skippr-offsets").is_ok());
+        assert!(validate_skippr_catalog_tables(&config).is_ok());
     }
 }

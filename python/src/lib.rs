@@ -7,7 +7,7 @@ use std::sync::OnceLock;
 use ::skipprd::api::Session as EngineSession;
 use ::skipprd::connect::{self, ConnectPlugin};
 use ::skipprd::helpers::configuration::Config;
-use ::skipprd::helpers::wal_storage::{ElStorageMode, OffsetStoreKind};
+use ::skipprd::helpers::wal_storage::{ElStorageMode, SkipprStoreKind};
 use arrow::array::RecordBatch;
 use arrow::compute::concat_batches;
 use arrow::pyarrow::ToPyArrow;
@@ -80,9 +80,9 @@ impl From<PyStorageMode> for ElStorageMode {
     }
 }
 
-#[pyclass(eq, eq_int, from_py_object, name = "OffsetStore", module = "skippr")]
+#[pyclass(eq, eq_int, from_py_object, name = "SkipprStore", module = "skippr")]
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
-enum PyOffsetStore {
+enum PySkipprStore {
     #[pyo3(name = "SLED")]
     Sled,
     #[pyo3(name = "DYNAMODB")]
@@ -91,12 +91,12 @@ enum PyOffsetStore {
     CloudTables,
 }
 
-impl From<PyOffsetStore> for OffsetStoreKind {
-    fn from(value: PyOffsetStore) -> Self {
+impl From<PySkipprStore> for SkipprStoreKind {
+    fn from(value: PySkipprStore) -> Self {
         match value {
-            PyOffsetStore::Sled => Self::Sled,
-            PyOffsetStore::DynamoDb => Self::DynamoDb,
-            PyOffsetStore::CloudTables => Self::CloudTables,
+            PySkipprStore::Sled => Self::Sled,
+            PySkipprStore::DynamoDb => Self::DynamoDb,
+            PySkipprStore::CloudTables => Self::CloudTables,
         }
     }
 }
@@ -112,8 +112,8 @@ impl PySkipprRoot {
         workspace: Option<&str>,
         storage_mode: Option<ElStorageMode>,
         wal_s3_bucket: Option<&str>,
-        offset_store: Option<OffsetStoreKind>,
-        offset_dynamodb_table: Option<&str>,
+        store: Option<SkipprStoreKind>,
+        store_name: Option<&str>,
         skippr_s3_bucket: Option<&str>,
         tenant: Option<&str>,
     ) -> PyResult<()> {
@@ -122,8 +122,8 @@ impl PySkipprRoot {
             workspace,
             storage_mode,
             wal_s3_bucket,
-            offset_store,
-            offset_dynamodb_table,
+            store,
+            store_name,
             skippr_s3_bucket,
             tenant,
         )
@@ -146,7 +146,26 @@ impl PySkipprRoot {
         Ok(slf.unbind())
     }
 
-    fn offset_store(slf: Bound<'_, Self>, value: PyOffsetStore) -> PyResult<Py<Self>> {
+    #[pyo3(signature = (kind, name = None))]
+    fn store(
+        slf: Bound<'_, Self>,
+        kind: PySkipprStore,
+        name: Option<String>,
+    ) -> PyResult<Py<Self>> {
+        slf.borrow().persist(
+            None,
+            None,
+            None,
+            Some(kind.into()),
+            name.as_deref(),
+            None,
+            None,
+        )?;
+        Ok(slf.unbind())
+    }
+
+    /// Deprecated: use `store`. Still writes `skippr.store.type`.
+    fn offset_store(slf: Bound<'_, Self>, value: PySkipprStore) -> PyResult<Py<Self>> {
         slf.borrow()
             .persist(None, None, None, Some(value.into()), None, None, None)?;
         Ok(slf.unbind())
@@ -158,6 +177,7 @@ impl PySkipprRoot {
         Ok(slf.unbind())
     }
 
+    /// Deprecated: use `store`. Still writes `skippr.store.name`.
     fn offset_dynamodb_table(slf: Bound<'_, Self>, value: String) -> PyResult<Py<Self>> {
         slf.borrow()
             .persist(None, None, None, None, Some(&value), None, None)?;
@@ -204,10 +224,31 @@ fn storage_mode(
 }
 
 #[pyfunction]
+#[pyo3(signature = (kind, name = None, config = None))]
+fn store(
+    py: Python<'_>,
+    kind: PySkipprStore,
+    name: Option<String>,
+    config: Option<String>,
+) -> PyResult<Py<PySkipprRoot>> {
+    let root = skippr_root(config);
+    root.persist(
+        None,
+        None,
+        None,
+        Some(kind.into()),
+        name.as_deref(),
+        None,
+        None,
+    )?;
+    Bound::new(py, root).map(|b| b.unbind())
+}
+
+#[pyfunction]
 #[pyo3(signature = (value, config = None))]
 fn offset_store(
     py: Python<'_>,
-    value: PyOffsetStore,
+    value: PySkipprStore,
     config: Option<String>,
 ) -> PyResult<Py<PySkipprRoot>> {
     let root = skippr_root(config);
@@ -275,6 +316,7 @@ impl PyConfig {
                 skippr_s3_bucket: None,
                 skipprd_el_storage_mode: None,
                 wal_s3_bucket: None,
+                store: None,
                 offset_store: None,
                 offset_dynamodb_table: None,
             })
@@ -518,13 +560,15 @@ fn skippr(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<PyConnect>()?;
     m.add_class::<PySkipprRoot>()?;
     m.add_class::<PyStorageMode>()?;
-    m.add_class::<PyOffsetStore>()?;
+    m.add_class::<PySkipprStore>()?;
+    m.add("OffsetStore", m.py().get_type::<PySkipprStore>())?;
     m.add_class::<PyDataSource>()?;
     m.add_class::<PyDataSink>()?;
     m.add_class::<PySchemaSink>()?;
     register_connect_plugin_classes(m)?;
     m.add_function(wrap_pyfunction!(workspace, m)?)?;
     m.add_function(wrap_pyfunction!(storage_mode, m)?)?;
+    m.add_function(wrap_pyfunction!(store, m)?)?;
     m.add_function(wrap_pyfunction!(offset_store, m)?)?;
     m.add_function(wrap_pyfunction!(wal_s3_bucket, m)?)?;
     m.add_function(wrap_pyfunction!(offset_dynamodb_table, m)?)?;

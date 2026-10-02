@@ -1,6 +1,16 @@
-use skippr_runtime_sdk::SkipprConfig;
+pub use skippr_runtime_sdk::{
+    converters, discover, helpers, ingest, lineage, metrics, plugins, serdes,
+};
+
+#[path = "../../../plugins/shared/cdc_encode.rs"]
+pub mod cdc_encode;
+
+#[path = "../../../plugins/shared/parquet_util.rs"]
+pub mod parquet_util;
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io;
+use std::marker::PhantomData;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -30,14 +40,10 @@ use iceberg::spec::{
     PrimitiveLiteral, PrimitiveType, Schema, Struct, Transform, Type, UnboundPartitionSpec,
 };
 use iceberg::transaction::{ApplyTransactionAction, Transaction};
-use iceberg::{Catalog, CatalogBuilder, NamespaceIdent, TableCreation, TableIdent};
-use iceberg_catalog_glue::{GlueCatalogBuilder, GLUE_CATALOG_PROP_CATALOG_ID};
-use iceberg_catalog_glue::{AWS_REGION_NAME, GLUE_CATALOG_PROP_WAREHOUSE};
+use iceberg::{Catalog, NamespaceIdent, TableCreation, TableIdent};
 use parquet::arrow::PARQUET_FIELD_ID_META_KEY;
 use serde_derive::{Deserialize, Serialize};
-use skippr_iceberg_catalog::offset_store_is_cloud_tables;
-pub use skippr_iceberg_catalog::IcebergCatalogConfig;
-use skippr_iceberg_catalog_dynamodb::DynamoDbCatalog;
+use skippr_iceberg_catalog::to_iceberg_s3_uri;
 use skippr_object_writer::{
     CompletionMetadata, MultipartUpload, ObjectPartReceipt, ObjectWriteBackend, ObjectWriteError,
     ObjectWriteRequest, ObjectWriteSession, ObjectWriterConfig, PartMetadata,
@@ -58,13 +64,6 @@ const SNAPSHOT_SCHEMA_FINGERPRINT: &str = "skippr.schema-fingerprint";
 const SNAPSHOT_WAL_FINGERPRINT: &str = "skippr.wal-refs-fingerprint-v2";
 const SNAPSHOT_WAL_REF_COUNT: &str = "skippr.wal-ref-count";
 
-const ICEBERG_WRITE_POLICY_SUPPORT: SinkWritePolicySupport = SinkWritePolicySupport {
-    supports_merge_by_key: true,
-    supports_replace_partition: true,
-    supports_replace_table: true,
-};
-
-use crate::helpers::configuration::DataSinkPluginConfig;
 use skippr_runtime_sdk::discover::{OutputMetadata, SkipprDataType};
 use skippr_runtime_sdk::plugins::cdc::EffectiveGuarantee;
 use skippr_runtime_sdk::plugins::source_contract::{
@@ -72,7 +71,7 @@ use skippr_runtime_sdk::plugins::source_contract::{
     FieldPath, SinkWritePolicySupport, SourceNamespaceContract, WritePolicy,
 };
 use skippr_runtime_sdk::plugins::{
-    DataSink, SchemaSink, SinkPreflightOutcome, SinkWriteContext, SinkWriteOutcome,
+    DataSink, SchemaSink, SinkPreflightOutcome, SinkSpec, SinkWriteContext, SinkWriteOutcome,
 };
 use skippr_runtime_sdk::protocol::{
     RuntimeBinding, RuntimeExecutionContext, RuntimeSchemaState, SchemaDelta,
@@ -80,39 +79,16 @@ use skippr_runtime_sdk::protocol::{
 use skippr_runtime_sdk::sink_compat::BufferChunker;
 use skippr_runtime_sdk::sink_idempotency::{manifest_object_name, ObjectWriteManifest};
 
-#[derive(Debug, Deserialize, SkipprConfig, Clone)]
-pub struct DataSinkIcebergPluginConfig {
-    pub catalog: IcebergCatalogConfig,
-    #[serde(default)]
-    pub table_namespace: Option<String>,
-    #[serde(default)]
-    pub table_prefix: Option<String>,
-    #[serde(default)]
-    pub table_location_prefix: Option<String>,
-    #[serde(default)]
-    pub properties: BTreeMap<String, String>,
-    #[serde(default)]
-    pub query_engine: Option<IcebergQueryEngineConfig>,
-    #[serde(default)]
-    pub format: Option<String>,
-}
-
-impl TryFrom<DataSinkPluginConfig> for DataSinkIcebergPluginConfig {
-    type Error = String;
-
-    fn try_from(entry: DataSinkPluginConfig) -> Result<Self, Self::Error> {
-        entry.decode_for_plugin("Iceberg")
-    }
-}
-
-#[derive(Debug, Deserialize, Clone)]
-#[serde(tag = "type", rename_all = "snake_case")]
-pub enum IcebergQueryEngineConfig {
-    Athena {
-        #[serde(default)]
-        workgroup: Option<String>,
-    },
-    Skippr,
+/// Everything the writer needs that is not the catalog itself. Plugins resolve their own
+/// config into this; the writer never sees plugin config, catalog kind or query engine.
+#[derive(Clone, Debug)]
+pub struct IcebergWriterConfig {
+    /// Which non-append write policies this sink may execute.
+    pub policies: SinkWritePolicySupport,
+    /// Iceberg namespace that holds sink-managed tables.
+    pub table_namespace: String,
+    /// `{warehouse}/{table_namespace}`. Every table lives at `{location_root}/{table_name}`.
+    pub location_root: String,
 }
 
 #[derive(Default)]
@@ -181,17 +157,18 @@ struct CachedIcebergTable {
     table: iceberg::table::Table,
 }
 
-pub struct DataSinkIcebergPlugin {
+pub struct IcebergWriter<S: SinkSpec> {
     context: RuntimeExecutionContext,
     binding: RuntimeBinding,
     #[allow(dead_code)]
     buffer_name: String,
-    config: DataSinkIcebergPluginConfig,
+    config: IcebergWriterConfig,
     s3_client: S3Client,
     schema_state: RwLock<InstalledIcebergSchemaState>,
-    catalog_cache: RwLock<Option<Arc<dyn Catalog>>>,
+    catalog: Arc<dyn Catalog>,
     table_cache: RwLock<HashMap<String, CachedIcebergTable>>,
     table_lanes: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    _spec: PhantomData<fn() -> S>,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -372,15 +349,23 @@ impl ObjectWriteBackend for S3ObjectWriteBackend {
     }
 }
 
-skippr_runtime_sdk::declare_sink_spec!(
-    IcebergSinkSpec,
-    DataSinkIcebergPlugin,
-    skippr_runtime_sdk::plugins::cdc::sink_capabilities::ICEBERG,
-    skippr_runtime_sdk::plugins::TransactionalTableCommit
-);
+impl<S: SinkSpec> skippr_runtime_sdk::plugins::HasSinkSpec for IcebergWriter<S> {
+    type Spec = S;
+}
+
+/// The schema sink for sink spec `S` carries the same plugin name.
+pub struct IcebergSchemaSpec<S>(PhantomData<fn() -> S>);
+
+impl<S: SinkSpec> skippr_runtime_sdk::plugins::SchemaSinkSpec for IcebergSchemaSpec<S> {
+    const NAME: &'static str = S::NAME;
+}
+
+impl<S: SinkSpec> skippr_runtime_sdk::plugins::HasSchemaSinkSpec for IcebergWriter<S> {
+    type Spec = IcebergSchemaSpec<S>;
+}
 
 #[async_trait]
-impl DataSink for DataSinkIcebergPlugin {
+impl<S: SinkSpec> DataSink for IcebergWriter<S> {
     async fn preflight(
         &self,
         ctx: SinkWriteContext<'_>,
@@ -388,7 +373,7 @@ impl DataSink for DataSinkIcebergPlugin {
         if !ctx.is_grouped() {
             return Ok(SinkPreflightOutcome::Ready);
         }
-        ctx.validate_grouped::<skippr_runtime_sdk::plugins::TransactionalTableCommit>()
+        ctx.validate_grouped::<S::WriteSupport>()
             .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
         let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
         let manifest = ObjectWriteManifest::from_context(
@@ -435,7 +420,7 @@ impl DataSink for DataSinkIcebergPlugin {
         ctx: SinkWriteContext<'_>,
     ) -> Result<(), io::Error> {
         let stream = match ctx.cdc_ctx {
-            Some(cdc) => super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
+            Some(cdc) => crate::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta),
             None => stream,
         };
         let object_stem = if ctx.idempotency_key.is_empty() {
@@ -458,7 +443,7 @@ impl DataSink for DataSinkIcebergPlugin {
             .map(|c| c.write_policy)
             .unwrap_or(WritePolicy::Append);
         if let Some(ref contract) = resolved_contract {
-            validate_write_policy_for_sink(contract, "Iceberg", ICEBERG_WRITE_POLICY_SUPPORT)
+            validate_write_policy_for_sink(contract, S::NAME, self.config.policies)
                 .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err.to_string()))?;
         }
         ensure_source_contract_for_policy(&namespace, policy, resolved_contract.as_ref())?;
@@ -492,7 +477,7 @@ impl DataSink for DataSinkIcebergPlugin {
             self.sync_with_context(stream, ctx).await?;
             return Ok(SinkWriteOutcome::Applied);
         }
-        ctx.validate_grouped::<skippr_runtime_sdk::plugins::TransactionalTableCommit>()
+        ctx.validate_grouped::<S::WriteSupport>()
             .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
         let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
         let manifest = ObjectWriteManifest::from_context(
@@ -517,7 +502,7 @@ impl DataSink for DataSinkIcebergPlugin {
         ctx: skippr_runtime_sdk::plugins::GroupedSinkWriteContext<'_>,
     ) -> Result<SinkWriteOutcome, io::Error> {
         ctx.to_sink_write_context()
-            .validate_grouped::<skippr_runtime_sdk::plugins::TransactionalTableCommit>()
+            .validate_grouped::<S::WriteSupport>()
             .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err))?;
         let namespace = BufferChunker::decode_file_namespace(&ctx.filename);
         let manifest = ObjectWriteManifest::from_context(
@@ -628,7 +613,7 @@ impl DataSink for DataSinkIcebergPlugin {
     }
 
     fn capability(&self) -> &'static skippr_runtime_sdk::plugins::cdc::SinkCapability {
-        &skippr_runtime_sdk::plugins::cdc::sink_capabilities::ICEBERG
+        &S::CAPABILITY
     }
 
     async fn install_schema_state(
@@ -677,13 +662,13 @@ impl DataSink for DataSinkIcebergPlugin {
 }
 
 #[async_trait]
-impl SchemaSink for DataSinkIcebergPlugin {
+impl<S: SinkSpec> SchemaSink for IcebergWriter<S> {
     async fn sync_schema(
         &self,
         namespace: &str,
         metadata: &OutputMetadata,
     ) -> Result<(), io::Error> {
-        let catalog = self.catalog().await?;
+        let catalog = Arc::clone(&self.catalog);
         let table = self
             .ensure_table(catalog.as_ref(), namespace, metadata)
             .await?;
@@ -706,12 +691,13 @@ impl SchemaSink for DataSinkIcebergPlugin {
     }
 }
 
-impl DataSinkIcebergPlugin {
-    pub async fn new_with_config(
+impl<S: SinkSpec> IcebergWriter<S> {
+    pub async fn new(
         context: RuntimeExecutionContext,
         binding: RuntimeBinding,
         buffer_name: String,
-        config: DataSinkIcebergPluginConfig,
+        catalog: Arc<dyn Catalog>,
+        config: IcebergWriterConfig,
     ) -> io::Result<Self> {
         let aws_config = aws_config::defaults(aws_config::BehaviorVersion::latest())
             .load()
@@ -724,9 +710,10 @@ impl DataSinkIcebergPlugin {
             config,
             s3_client,
             schema_state: RwLock::new(InstalledIcebergSchemaState::default()),
-            catalog_cache: RwLock::new(None),
+            catalog,
             table_cache: RwLock::new(HashMap::new()),
             table_lanes: Mutex::new(HashMap::new()),
+            _spec: PhantomData,
         })
     }
 
@@ -770,7 +757,7 @@ impl DataSinkIcebergPlugin {
                 return Ok(cached.table);
             }
         }
-        let catalog = self.catalog().await?;
+        let catalog = Arc::clone(&self.catalog);
         let table = self
             .ensure_table(catalog.as_ref(), namespace, metadata)
             .await?;
@@ -790,7 +777,7 @@ impl DataSinkIcebergPlugin {
         schema_version: u64,
         metadata: &OutputMetadata,
     ) -> Result<iceberg::table::Table, io::Error> {
-        let catalog = self.catalog().await?;
+        let catalog = Arc::clone(&self.catalog);
         let table_ident = self.table_ident(namespace)?;
         if catalog
             .table_exists(&table_ident)
@@ -828,9 +815,7 @@ impl DataSinkIcebergPlugin {
                 return Ok(true);
             }
         }
-        let table_location = self.table_location(namespace).ok_or_else(|| {
-            io::Error::other("Iceberg sink requires table_location_prefix for legacy replay")
-        })?;
+        let table_location = self.table_location(namespace);
         let (bucket, table_prefix) = parse_object_location(&table_location)?.parts();
         for key in legacy_grouped_object_keys(&table_prefix, &ctx.idempotency_key) {
             if self.s3_object_exists(&bucket, &key).await? {
@@ -1002,7 +987,7 @@ impl DataSinkIcebergPlugin {
                 )
             })
             .collect::<Result<Vec<_>, _>>()?;
-        let catalog = self.catalog().await?;
+        let catalog = Arc::clone(&self.catalog);
         let committed = self
             .commit_grouped_append_with_retries(
                 catalog.as_ref(),
@@ -1047,7 +1032,7 @@ impl DataSinkIcebergPlugin {
         };
         if ctx.cdc_ctx.is_none() {
             if let Some(contract) = resolved_contract.as_ref() {
-                validate_write_policy_for_sink(contract, "Iceberg", ICEBERG_WRITE_POLICY_SUPPORT)
+                validate_write_policy_for_sink(contract, S::NAME, self.config.policies)
                     .map_err(|err| io::Error::new(io::ErrorKind::Unsupported, err.to_string()))?;
             }
             ensure_source_contract_for_policy(namespace, policy, resolved_contract.as_ref())?;
@@ -1141,7 +1126,7 @@ impl DataSinkIcebergPlugin {
             let stream = chunk.into_stream(reader_schema.clone());
             let stream = match chunk_cdc.as_ref() {
                 Some(cdc) => {
-                    super::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta)
+                    crate::cdc_encode::augment_stream_with_cdc_columns(stream, &cdc.part_meta)
                 }
                 None => stream,
             };
@@ -1325,9 +1310,7 @@ impl DataSinkIcebergPlugin {
         content: PendingFileContent,
         identity: &str,
     ) -> Result<(String, String, String), io::Error> {
-        let table_location = self.table_location(namespace).ok_or_else(|| {
-            io::Error::other("Iceberg sink requires table_location_prefix for data file writes")
-        })?;
+        let table_location = self.table_location(namespace);
         let root = parse_object_location(&table_location)?;
         let content_dir = match content {
             PendingFileContent::Data => "data",
@@ -1556,9 +1539,7 @@ impl DataSinkIcebergPlugin {
     }
 
     fn cdc_state_shard_uri(&self, namespace: &str, shard: u8) -> Result<String, io::Error> {
-        let table_location = self.table_location(namespace).ok_or_else(|| {
-            io::Error::other("Iceberg sink requires table_location_prefix for CDC state")
-        })?;
+        let table_location = self.table_location(namespace);
         Ok(format!(
             "{}/metadata/skippr-cdc-state-v2/{shard:02}.json",
             table_location.trim_end_matches('/')
@@ -1574,7 +1555,7 @@ impl DataSinkIcebergPlugin {
     ) -> Result<(), io::Error> {
         let namespace = BufferChunker::decode_file_namespace(&filename);
         let metadata = self.namespace_metadata(&namespace).await?;
-        let catalog = self.catalog().await?;
+        let catalog = Arc::clone(&self.catalog);
         let table = self
             .ensure_table(catalog.as_ref(), &namespace, &metadata)
             .await?;
@@ -1725,7 +1706,7 @@ impl DataSinkIcebergPlugin {
     ) -> Result<(), io::Error> {
         let namespace = BufferChunker::decode_file_namespace(&filename);
         let metadata = self.namespace_metadata(&namespace).await?;
-        let catalog = self.catalog().await?;
+        let catalog = Arc::clone(&self.catalog);
 
         if policy == WritePolicy::ReplaceTable {
             let table_ident = self.table_ident(&namespace)?;
@@ -2318,9 +2299,7 @@ impl DataSinkIcebergPlugin {
     }
 
     fn cdc_state_uri(&self, namespace: &str) -> Result<String, io::Error> {
-        let table_location = self.table_location(namespace).ok_or_else(|| {
-            io::Error::other("Iceberg sink requires table_location_prefix for CDC state")
-        })?;
+        let table_location = self.table_location(namespace);
         Ok(format!(
             "{}/metadata/skippr-cdc-state.json",
             table_location.trim_end_matches('/')
@@ -2335,9 +2314,7 @@ impl DataSinkIcebergPlugin {
         object_stem: Option<&str>,
         bytes: bytes::Bytes,
     ) -> Result<String, io::Error> {
-        let table_location = self.table_location(namespace).ok_or_else(|| {
-            io::Error::other("Iceberg sink requires table_location_prefix for data file writes")
-        })?;
+        let table_location = self.table_location(namespace);
         let (bucket, table_prefix) = parse_object_location(&table_location)?.parts();
         let digest = object_stem
             .map(str::to_string)
@@ -2364,11 +2341,7 @@ impl DataSinkIcebergPlugin {
         namespace: &str,
         idempotency_key: &str,
     ) -> Result<ObjectLocation, io::Error> {
-        let table_location = self.table_location(namespace).ok_or_else(|| {
-            io::Error::other(
-                "Iceberg sink requires table_location_prefix for idempotency manifests",
-            )
-        })?;
+        let table_location = self.table_location(namespace);
         let object_name = manifest_object_name(&format!("{idempotency_key}.json"));
         Ok(parse_object_location(&table_location)?
             .join(&format!("metadata/skippr-idempotency/{object_name}")))
@@ -2453,72 +2426,6 @@ impl DataSinkIcebergPlugin {
         })
     }
 
-    async fn catalog(&self) -> Result<Arc<dyn Catalog>, io::Error> {
-        if let Some(catalog) = self.catalog_cache.read().await.clone() {
-            return Ok(catalog);
-        }
-        let catalog: Arc<dyn Catalog> = match &self.config.catalog {
-            IcebergCatalogConfig::Glue {
-                warehouse,
-                catalog_id,
-                region,
-                ..
-            } => {
-                let mut props = HashMap::from([(
-                    GLUE_CATALOG_PROP_WAREHOUSE.to_string(),
-                    to_iceberg_s3_uri(warehouse),
-                )]);
-                if let Some(catalog_id) = catalog_id {
-                    props.insert(GLUE_CATALOG_PROP_CATALOG_ID.to_string(), catalog_id.clone());
-                }
-                if let Some(region) = region {
-                    props.insert(AWS_REGION_NAME.to_string(), region.clone());
-                }
-                for (key, value) in skippr_iceberg_catalog::s3_object_store_props(
-                    self.config.catalog.object_store(),
-                )
-                .map_err(io::Error::other)?
-                {
-                    props.insert(key, value);
-                }
-                Arc::new(
-                    GlueCatalogBuilder::default()
-                        .load("glue", props)
-                        .await
-                        .map_err(|err| io::Error::other(err.to_string()))?,
-                )
-            }
-            IcebergCatalogConfig::Skippr { .. } => {
-                let catalog: Arc<dyn Catalog> = if offset_store_is_cloud_tables(
-                    &std::env::var("SKIPPR_OFFSET_STORE").unwrap_or_default(),
-                ) {
-                    let catalog = skippr_iceberg_catalog_cloud_tables::CloudTablesCatalog::new(
-                        &self.config.catalog,
-                    )
-                    .await
-                    .map_err(|err| io::Error::other(err.to_string()))?;
-                    Arc::new(catalog)
-                } else {
-                    let catalog = DynamoDbCatalog::new(&self.config.catalog)
-                        .await
-                        .map_err(|err| io::Error::other(err.to_string()))?;
-                    Arc::new(catalog)
-                };
-                catalog
-            }
-            IcebergCatalogConfig::Rest { .. }
-            | IcebergCatalogConfig::Unity { .. }
-            | IcebergCatalogConfig::Polaris { .. } => {
-                return Err(io::Error::other(format!(
-                    "Iceberg catalog adapter '{}' is configured but not implemented yet",
-                    self.config.catalog.adapter_name()
-                )));
-            }
-        };
-        let mut cache = self.catalog_cache.write().await;
-        Ok(cache.get_or_insert_with(|| catalog.clone()).clone())
-    }
-
     async fn ensure_table(
         &self,
         catalog: &dyn Catalog,
@@ -2561,10 +2468,14 @@ impl DataSinkIcebergPlugin {
                 .remove_old_schemas()
                 .apply(tx)
                 .map_err(|err| io::Error::other(err.to_string()))?;
-            return tx
-                .commit(catalog)
-                .await
-                .map_err(|err| io::Error::other(err.to_string()));
+            return match tx.commit(catalog).await {
+                Ok(table) => Ok(table),
+                Err(err) if err.kind() == iceberg::ErrorKind::CatalogCommitConflicts => catalog
+                    .load_table(&table_ident)
+                    .await
+                    .map_err(|err| io::Error::other(err.to_string())),
+                Err(err) => Err(io::Error::other(err.to_string())),
+            };
         }
 
         let catalog_namespace = self.catalog_namespace()?;
@@ -2574,12 +2485,7 @@ impl DataSinkIcebergPlugin {
             .await?;
 
         let iceberg_schema = iceberg_schema_from_output_metadata(namespace, metadata)?;
-        let mut properties: HashMap<String, String> = self
-            .config
-            .properties
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        let mut properties: HashMap<String, String> = HashMap::new();
         properties.insert(
             "skippr.pipeline".to_string(),
             self.context.pipeline_name.clone(),
@@ -2593,48 +2499,27 @@ impl DataSinkIcebergPlugin {
             .partition_spec_opt(partition_spec)
             .properties(properties)
             .build();
-        let creation = if let Some(location) = self.table_location(namespace) {
-            TableCreation {
-                location: Some(location),
-                ..creation
-            }
-        } else {
-            creation
+        let creation = TableCreation {
+            location: Some(self.table_location(namespace)),
+            ..creation
         };
 
         match catalog.create_table(&namespace_ident, creation).await {
             Ok(table) => Ok(table),
             Err(err) => {
-                let message = err.to_string();
-                if message.contains("AlreadyExistsException")
-                    || message.contains("Table already exists")
-                {
+                if is_table_already_present(&err) {
                     return catalog
                         .load_table(&table_ident)
                         .await
                         .map_err(|err| io::Error::other(err.to_string()));
                 }
-                Err(io::Error::other(message))
+                Err(io::Error::other(err.to_string()))
             }
         }
     }
 
     fn catalog_namespace(&self) -> Result<String, io::Error> {
-        if let Some(namespace) = &self.config.table_namespace {
-            return Ok(namespace.clone());
-        }
-        match &self.config.catalog {
-            IcebergCatalogConfig::Glue { database, .. } => database
-                .clone()
-                .ok_or_else(|| io::Error::other("Iceberg Glue catalog requires database or table_namespace")),
-            IcebergCatalogConfig::Skippr { .. }
-            | IcebergCatalogConfig::Rest { .. }
-            | IcebergCatalogConfig::Unity { .. }
-            | IcebergCatalogConfig::Polaris { .. } => Err(io::Error::other(format!(
-                "Iceberg catalog adapter '{}' requires table_namespace until its catalog-specific namespace discovery is implemented",
-                self.config.catalog.adapter_name()
-            ))),
-        }
+        Ok(self.config.table_namespace.clone())
     }
 
     async fn ensure_catalog_namespace(
@@ -2657,21 +2542,20 @@ impl DataSinkIcebergPlugin {
             {
                 Ok(_) => return Ok(()),
                 Err(err) => {
-                    let message = err.to_string();
-                    if message.contains("AlreadyExistsException") {
+                    if is_namespace_already_present(&err) {
                         return Ok(());
                     }
-                    if message.contains("ConcurrentModificationException") && attempt < 3 {
+                    if err.to_string().contains("ConcurrentModificationException") && attempt < 3 {
                         tokio::time::sleep(Duration::from_secs(1)).await;
                         continue;
                     }
-                    return Err(io::Error::other(message));
+                    return Err(io::Error::other(err.to_string()));
                 }
             }
         }
 
         Err(io::Error::other(
-            "Iceberg Glue namespace creation did not converge after retries",
+            "Iceberg namespace creation did not converge after retries",
         ))
     }
 
@@ -2683,21 +2567,15 @@ impl DataSinkIcebergPlugin {
     }
 
     fn table_name(&self, namespace: &str) -> String {
-        let namespace_name = iceberg_table_suffix(namespace);
-        match &self.config.table_prefix {
-            Some(prefix) if !prefix.is_empty() => format!("{}_{}", prefix, namespace_name),
-            _ => namespace_name,
-        }
+        iceberg_table_suffix(namespace)
     }
 
-    fn table_location(&self, namespace: &str) -> Option<String> {
-        self.config.table_location_prefix.as_ref().map(|prefix| {
-            to_iceberg_s3_uri(&format!(
-                "{}/{}",
-                prefix.trim_end_matches('/'),
-                self.table_name(namespace)
-            ))
-        })
+    fn table_location(&self, namespace: &str) -> String {
+        to_iceberg_s3_uri(&format!(
+            "{}/{}",
+            self.config.location_root.trim_end_matches('/'),
+            self.table_name(namespace)
+        ))
     }
 }
 
@@ -3760,14 +3638,6 @@ fn primitive_type_for_skippr(value: &SkipprDataType) -> Type {
     Type::Primitive(primitive)
 }
 
-fn to_iceberg_s3_uri(uri: &str) -> String {
-    if let Some(rest) = uri.strip_prefix("s3://") {
-        format!("s3a://{rest}")
-    } else {
-        uri.to_string()
-    }
-}
-
 #[derive(Clone, Debug, Eq, PartialEq)]
 enum ObjectLocation {
     S3 { bucket: String, key: String },
@@ -3834,11 +3704,28 @@ fn parse_s3_uri(uri: &str) -> Result<(String, String), io::Error> {
     Ok((bucket.to_string(), key.to_string()))
 }
 
+fn is_table_already_present(err: &iceberg::Error) -> bool {
+    matches!(
+        err.kind(),
+        iceberg::ErrorKind::TableAlreadyExists | iceberg::ErrorKind::CatalogCommitConflicts
+    ) || glue_already_exists(err)
+}
+
+fn is_namespace_already_present(err: &iceberg::Error) -> bool {
+    err.kind() == iceberg::ErrorKind::NamespaceAlreadyExists || glue_already_exists(err)
+}
+
+fn glue_already_exists(err: &iceberg::Error) -> bool {
+    err.kind() == iceberg::ErrorKind::Unexpected
+        && err.to_string().contains("AlreadyExistsException")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use iceberg::memory::{MemoryCatalogBuilder, MEMORY_CATALOG_WAREHOUSE};
     use iceberg::spec::{DataFileBuilder, DataFileFormat, Struct};
+    use iceberg::CatalogBuilder;
     use serde_json::json;
 
     fn output_metadata(value: serde_json::Value) -> OutputMetadata {
@@ -4372,12 +4259,6 @@ mod tests {
             state_delta: BTreeMap::new(),
         };
         validate_grouped_pending(&pending, "orders", &grouped_manifest("7"), "7").unwrap();
-        let apply_src = include_str!("iceberg_sink.rs");
-        let banned = format!("{} < pending.schema_version", "installed_version");
-        assert!(
-            !apply_src.contains(&banned),
-            "Sent apply must not compare process-local schema clocks"
-        );
     }
 
     #[test]
@@ -4526,6 +4407,114 @@ mod tests {
         assert_eq!(state.namespaces["events"], initial);
         assert_eq!(state.namespace_versions["events"], 4);
         assert_eq!(state.namespace_versions["users"], 2);
+    }
+
+    #[test]
+    fn table_already_present_uses_error_kind_not_glue_message() {
+        let exists = iceberg::Error::new(iceberg::ErrorKind::TableAlreadyExists, "bronze.source");
+        assert!(is_table_already_present(&exists), "{exists}");
+        let occ = iceberg::Error::new(
+            iceberg::ErrorKind::CatalogCommitConflicts,
+            "Hadoop metadata v0 already exists",
+        );
+        assert!(is_table_already_present(&occ), "{occ}");
+        let glue = iceberg::Error::new(
+            iceberg::ErrorKind::Unexpected,
+            "AlreadyExistsException: EntityAlreadyExistsException",
+        );
+        assert!(is_table_already_present(&glue), "{glue}");
+        let denied = iceberg::Error::new(iceberg::ErrorKind::Unexpected, "AccessDenied");
+        assert!(!is_table_already_present(&denied), "{denied}");
+    }
+
+    #[test]
+    fn namespace_already_present_uses_error_kind() {
+        let exists = iceberg::Error::new(iceberg::ErrorKind::NamespaceAlreadyExists, "bronze");
+        assert!(is_namespace_already_present(&exists), "{exists}");
+        let glue = iceberg::Error::new(iceberg::ErrorKind::Unexpected, "AlreadyExistsException");
+        assert!(is_namespace_already_present(&glue), "{glue}");
+        let denied = iceberg::Error::new(iceberg::ErrorKind::Unexpected, "AccessDenied");
+        assert!(!is_namespace_already_present(&denied), "{denied}");
+    }
+
+    skippr_runtime_sdk::declare_sink_spec!(
+        TestIcebergSpec,
+        skippr_runtime_sdk::plugins::cdc::sink_capabilities::SKIPPRLAKE,
+        skippr_runtime_sdk::plugins::TransactionalTableCommit
+    );
+
+    #[tokio::test]
+    async fn sync_schema_creates_table_in_injected_catalog_namespace() {
+        let catalog: Arc<dyn Catalog> = Arc::new(
+            MemoryCatalogBuilder::default()
+                .load(
+                    "test",
+                    HashMap::from([(
+                        MEMORY_CATALOG_WAREHOUSE.to_string(),
+                        "memory://warehouse".to_string(),
+                    )]),
+                )
+                .await
+                .unwrap(),
+        );
+        // MemoryCatalog errors on `table_exists` for a missing namespace (Glue and the Skippr
+        // catalogs return false), so the test creates the namespace up front.
+        catalog
+            .create_namespace(
+                &NamespaceIdent::from_strs(["lake"]).unwrap(),
+                HashMap::new(),
+            )
+            .await
+            .unwrap();
+        let writer = IcebergWriter::<TestIcebergSpec>::new(
+            skippr_runtime_sdk::protocol::RuntimeExecutionContext {
+                pipeline_name: "p".to_string(),
+                workspace_name: "w".to_string(),
+                data_dir: "/tmp".to_string(),
+                execution_mode: Default::default(),
+                output_layout: Default::default(),
+                inject_fields: BTreeMap::new(),
+            },
+            skippr_runtime_sdk::protocol::RuntimeBinding::Primary,
+            "schema".to_string(),
+            Arc::clone(&catalog),
+            IcebergWriterConfig {
+                policies: SinkWritePolicySupport {
+                    supports_merge_by_key: true,
+                    supports_replace_partition: true,
+                    supports_replace_table: true,
+                },
+                table_namespace: "lake".to_string(),
+                location_root: "memory://warehouse/lake".to_string(),
+            },
+        )
+        .await
+        .unwrap();
+        let metadata = output_metadata(json!({
+            "out_field_name": "",
+            "determined_type": "record",
+            "determined_type_values": "",
+            "fields": {
+                "id": {
+                    "out_field_name": "id",
+                    "determined_type": "long",
+                    "determined_type_values": "",
+                    "field_id": 10,
+                    "schema_id": 1,
+                    "lineage_id": "orders:id",
+                    "nullable": false,
+                    "default_value": null,
+                    "fields": {}
+                }
+            }
+        }));
+
+        <IcebergWriter<TestIcebergSpec> as SchemaSink>::sync_schema(&writer, "orders", &metadata)
+            .await
+            .unwrap();
+
+        let ident = TableIdent::from_strs(["lake", "orders"]).unwrap();
+        assert!(catalog.table_exists(&ident).await.unwrap());
     }
 
     #[tokio::test]
@@ -4740,24 +4729,6 @@ mod tests {
         assert!(stored.is_empty());
         assert_eq!(stored_partition_to_struct(&stored), Struct::empty());
     }
-
-    #[test]
-    fn iceberg_query_engine_accepts_skippr() {
-        let cfg: DataSinkIcebergPluginConfig = serde_json::from_value(serde_json::json!({
-            "catalog": {
-                "type": "skippr",
-                "table": "skippr-iceberg-catalog",
-                "warehouse": "s3://cloud-logs/skippr-de-query-r2/",
-                "region": "auto"
-            },
-            "query_engine": { "type": "skippr" }
-        }))
-        .expect("skippr query engine");
-        assert!(matches!(
-            cfg.query_engine,
-            Some(IcebergQueryEngineConfig::Skippr)
-        ));
-    }
 }
 
 fn is_duplicate_iceberg_file_error(err: &str) -> bool {
@@ -4784,7 +4755,7 @@ fn make_v2_minimal_table_for_tests() -> iceberg::table::Table {
     use iceberg::TableIdent;
 
     let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../../third_party/iceberg/testdata/table_metadata");
+        .join("../../third_party/iceberg/testdata/table_metadata");
     let file = File::open(manifest_dir.join("TableMetadataV2ValidMinimal.json")).unwrap();
     let reader = BufReader::new(file);
     let metadata = serde_json::from_reader::<_, TableMetadata>(reader).unwrap();

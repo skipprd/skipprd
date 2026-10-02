@@ -78,6 +78,30 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
         self.assertNotIn('"    dbt:', mssql_snowflake_action)
         self.assertIn("model --pipeline $projectName --no-resume", mssql_snowflake_action)
 
+    def test_glue_e2e_configs_use_athena_iceberg(self) -> None:
+        github_dir = runtime_e2e_harness.REPO_ROOT / ".github" / "actions" / "e2e"
+        names = [
+            "postgres_iceberg_types_cdc",
+            "postgres_iceberg_cdc_late_delete",
+            "mysql_iceberg_types_cdc",
+            "dynamodb_iceberg_types_cdc",
+            "mssql_iceberg_debug_linux",
+            "mssql_iceberg_debug_windows",
+            "stripe_iceberg_merge_by_key",
+            "stripe_iceberg_replace_partition",
+        ]
+        for name in names:
+            config_path = github_dir / name / "skippr.yml"
+            text = config_path.read_text(encoding="utf-8")
+            with self.subTest(config=name):
+                self.assertIn("\n    AthenaIceberg:\n", text)
+                self.assertNotIn("\n    Iceberg:\n", text)
+                self.assertNotIn("table_prefix:", text)
+                self.assertNotIn("query_engine:", text)
+                self.assertIn("athena_workgroup_name:", text)
+                self.assertIn("athena_results_s3_bucket:", text)
+                self.assertIn("glue_database_name:", text)
+
     def test_resolve_skipprd_accepts_binary_path(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             binary = Path(temp_dir) / "skipprd"
@@ -210,25 +234,25 @@ class RuntimeE2eHarnessTests(unittest.TestCase):
             runtime_e2e_harness.iceberg_glue_table_name(
                 runtime_e2e_harness.POSTGRES_TYPE_MATRIX_NAMESPACE
             ),
-            "skippr_postgres_type_matrix_orders",
+            "postgres_type_matrix_orders",
         )
         self.assertEqual(
             runtime_e2e_harness.iceberg_glue_table_name(
                 runtime_e2e_harness.MYSQL_TYPE_MATRIX_NAMESPACE
             ),
-            "skippr_type_matrix_orders",
+            "type_matrix_orders",
         )
         self.assertEqual(
             runtime_e2e_harness.iceberg_glue_table_name(
                 runtime_e2e_harness.DYNAMODB_TYPE_MATRIX_NAMESPACE
             ),
-            "skippr_dynamodb_iceberg_types_cdc",
+            "dynamodb_iceberg_types_cdc",
         )
         self.assertEqual(
             runtime_e2e_harness.iceberg_glue_table_name(
                 runtime_e2e_harness.MSSQL_DEBUG_TABLE_NAMESPACES[0]
             ),
-            "skippr_customers",
+            "customers",
         )
 
     def test_mssql_debug_expected_counts_match_seed_fixture(self) -> None:
@@ -590,13 +614,23 @@ schema_sinks:
                         "package_version": "0.7.0",
                     },
                     {
-                        "manifest_filename": "iceberg-sink.json",
-                        "manifest_stem": "iceberg-sink",
+                        "manifest_filename": "skipprlake-sink.json",
+                        "manifest_stem": "skipprlake-sink",
+                        "package_version": "0.7.1",
+                    },
+                    {
+                        "manifest_filename": "skipprlake-schema.json",
+                        "manifest_stem": "skipprlake-schema",
+                        "package_version": "0.7.2",
+                    },
+                    {
+                        "manifest_filename": "athena-iceberg-sink.json",
+                        "manifest_stem": "athena-iceberg-sink",
                         "package_version": "0.8.0",
                     },
                     {
-                        "manifest_filename": "iceberg-schema.json",
-                        "manifest_stem": "iceberg-schema",
+                        "manifest_filename": "athena-iceberg-schema.json",
+                        "manifest_stem": "athena-iceberg-schema",
                         "package_version": "0.9.0",
                     },
                     {

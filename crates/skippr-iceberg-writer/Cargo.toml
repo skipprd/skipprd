@@ -1,0 +1,27 @@
+[package]
+name = "skippr-iceberg-writer"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Shared Iceberg data and schema sink writer. The catalog is injected; plugins own config and catalog construction."
+
+[dependencies]
+async-trait.workspace = true
+tokio.workspace = true
+skippr-runtime-sdk.workspace = true
+skippr-object-writer = { path = "../skippr-object-writer" }
+skippr-iceberg-catalog = { path = "../skippr-iceberg-catalog" }
+arrow.workspace = true
+bytes.workspace = true
+datafusion.workspace = true
+futures.workspace = true
+hex.workspace = true
+md5.workspace = true
+parquet.workspace = true
+serde.workspace = true
+serde_derive.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+aws-config = "1.5.1"
+aws-sdk-s3 = "1.32.0"
+iceberg = "0.9.1"

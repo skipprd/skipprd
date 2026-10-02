@@ -6,7 +6,7 @@ use skippr_lease::{ClusterMembershipStore, PipelineLeaseStore};
 
 use crate::cluster::identity::ClusterConfig;
 use crate::helpers::configuration::Config;
-use crate::helpers::wal_storage::OffsetStoreKind;
+use crate::helpers::wal_storage::SkipprStoreKind;
 
 pub async fn open_lease_store(
     config: &Config,
@@ -14,11 +14,11 @@ pub async fn open_lease_store(
 ) -> Result<Arc<dyn PipelineLeaseStore>, String> {
     let kind = crate::pipeline_backend::configured_kind(config)?;
     match kind {
-        OffsetStoreKind::Sled => Err(
+        SkipprStoreKind::Sled => Err(
             "clustered pipeline leases require dynamodb or cloud-tables; sled is the Disk/S3 lease backend"
                 .into(),
         ),
-        OffsetStoreKind::CloudTables | OffsetStoreKind::DynamoDb => {
+        SkipprStoreKind::CloudTables | SkipprStoreKind::DynamoDb => {
             crate::pipeline_backend::open_pipeline_lease_store(kind, None, table).await
         }
     }
@@ -29,7 +29,7 @@ pub async fn open_membership_store(
     table: String,
 ) -> Result<Arc<dyn ClusterMembershipStore>, String> {
     match crate::pipeline_backend::configured_kind(config)? {
-        OffsetStoreKind::CloudTables => {
+        SkipprStoreKind::CloudTables => {
             #[cfg(feature = "offset-store-cloud-tables")]
             {
                 let store =
@@ -41,10 +41,10 @@ pub async fn open_membership_store(
             #[cfg(not(feature = "offset-store-cloud-tables"))]
             {
                 let _ = table;
-                Err("SKIPPR_OFFSET_STORE=cloud-tables requires --features offset-store-cloud-tables".into())
+                Err("skippr.store.type=cloud-tables requires --features offset-store-cloud-tables".into())
             }
         }
-        OffsetStoreKind::DynamoDb => {
+        SkipprStoreKind::DynamoDb => {
             #[cfg(feature = "offset-store-dynamodb")]
             {
                 let store = skippr_lease_store_dynamodb::DynamoDbMembershipStore::connect(table)
@@ -58,7 +58,7 @@ pub async fn open_membership_store(
                 Err("clustered membership requires --features offset-store-dynamodb".into())
             }
         }
-        OffsetStoreKind::Sled => Err(
+        SkipprStoreKind::Sled => Err(
             "clustered membership requires dynamodb or cloud-tables; sled is the Disk/S3 lease backend"
                 .into(),
         ),
@@ -66,47 +66,54 @@ pub async fn open_membership_store(
 }
 
 pub fn uses_cloud_tables(config: &Config) -> bool {
-    matches!(
-        crate::pipeline_backend::configured_kind(config),
-        Ok(OffsetStoreKind::CloudTables)
+    catalog_backend(config) == skippr_iceberg_catalog::SkipprCatalogBackend::CloudTables
+}
+
+fn catalog_backend(config: &Config) -> skippr_iceberg_catalog::SkipprCatalogBackend {
+    skippr_iceberg_catalog::SkipprCatalogBackend::from_store_type(
+        &crate::pipeline_backend::skippr_store_type_value(config),
     )
 }
 
 pub async fn open_skippr_catalog(
     config: &Config,
-    cfg: &skippr_iceberg_catalog::IcebergCatalogConfig,
+    cfg: &skippr_iceberg_catalog::SkipprLakeConfig,
 ) -> Result<Arc<dyn iceberg::Catalog>, String> {
-    if uses_cloud_tables(config) {
-        #[cfg(feature = "offset-store-cloud-tables")]
-        {
-            let catalog = skippr_iceberg_catalog_cloud_tables::CloudTablesCatalog::new(cfg)
-                .await
-                .map_err(|err| err.to_string())?;
-            return Ok(Arc::new(catalog));
+    match catalog_backend(config) {
+        skippr_iceberg_catalog::SkipprCatalogBackend::CloudTables => {
+            #[cfg(feature = "offset-store-cloud-tables")]
+            {
+                let catalog = skippr_iceberg_catalog_cloud_tables::CloudTablesCatalog::new(cfg)
+                    .await
+                    .map_err(|err| err.to_string())?;
+                Ok(Arc::new(catalog))
+            }
+            #[cfg(not(feature = "offset-store-cloud-tables"))]
+            {
+                let _ = cfg;
+                Err(
+                    "skippr.store.type=cloud-tables requires --features offset-store-cloud-tables"
+                        .into(),
+                )
+            }
         }
-        #[cfg(not(feature = "offset-store-cloud-tables"))]
-        {
-            let _ = cfg;
-            return Err(
-                "SKIPPR_OFFSET_STORE=cloud-tables requires --features offset-store-cloud-tables"
-                    .into(),
-            );
+        skippr_iceberg_catalog::SkipprCatalogBackend::DynamoDb => {
+            #[cfg(feature = "offset-store-dynamodb")]
+            {
+                let catalog = skippr_iceberg_catalog_dynamodb::DynamoDbCatalog::new(cfg)
+                    .await
+                    .map_err(|err| err.to_string())?;
+                Ok(Arc::new(catalog))
+            }
+            #[cfg(not(feature = "offset-store-dynamodb"))]
+            {
+                let _ = cfg;
+                Err(
+                    "SkipprLake catalog requires offset-store-dynamodb or offset-store-cloud-tables"
+                        .into(),
+                )
+            }
         }
-    }
-    #[cfg(feature = "offset-store-dynamodb")]
-    {
-        let catalog = skippr_iceberg_catalog_dynamodb::DynamoDbCatalog::new(cfg)
-            .await
-            .map_err(|err| err.to_string())?;
-        Ok(Arc::new(catalog))
-    }
-    #[cfg(not(feature = "offset-store-dynamodb"))]
-    {
-        let _ = cfg;
-        Err(
-            "Skippr Iceberg catalog requires offset-store-dynamodb or offset-store-cloud-tables"
-                .into(),
-        )
     }
 }
 
@@ -134,7 +141,7 @@ pub fn offset_publisher_for(
         {
             let _ = (config, key);
             return Err(DurableError::ProtocolMismatch(
-                "SKIPPR_OFFSET_STORE=cloud-tables requires --features offset-store-cloud-tables"
+                "skippr.store.type=cloud-tables requires --features offset-store-cloud-tables"
                     .into(),
             ));
         }
@@ -180,6 +187,77 @@ mod tests {
         .unwrap()
     }
 
+    fn yaml_offset_store(store: &str) -> Config {
+        serde_json::from_value(json!({
+            "skippr": { "workspace": "ws-a", "tenant": "ten-a", "offset_store": store },
+            "pipelines": {
+                "orders": { "data_source": "data_sources.sample" }
+            },
+            "data_sources": {
+                "sample": { "S3": { "s3_bucket": "b", "s3_prefix": "p" } }
+            }
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn catalog_backend_and_plugin_share_store_type() {
+        let backend = include_str!("backend.rs");
+        assert!(
+            backend.contains("SkipprCatalogBackend::from_store_type"),
+            "host catalog must use the shared selector"
+        );
+        assert!(
+            backend.contains("skippr_store_type_value"),
+            "host catalog must use the same resolved SkipprStore type as plugins"
+        );
+        let host = include_str!("../runtime_plugins/host.rs");
+        assert!(
+            host.contains("SKIPPR_STORE_TYPE"),
+            "runtime plugin spawn must inject SKIPPR_STORE_TYPE"
+        );
+        assert!(
+            host.contains("skippr_store_type_value"),
+            "runtime plugin spawn must inject the host-resolved SkipprStore type"
+        );
+        let plugin = include_str!("../../plugins/data_sink/skipprlake/src/lib.rs");
+        assert!(
+            plugin.contains("SkipprCatalogBackend::from_store_type"),
+            "plugin catalog must use the shared selector"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn yaml_cloud_tables_is_the_catalog_backend_and_plugin_env() {
+        let old_store = std::env::var("SKIPPR_OFFSET_STORE").ok();
+        let old_wal = std::env::var("WAL_STORAGE").ok();
+        std::env::remove_var("SKIPPR_OFFSET_STORE");
+        Config::set_evncache("SKIPPR_OFFSET_STORE", "");
+        Config::set_wal_storage("disk");
+        let config = yaml_offset_store("cloud-tables");
+        assert_eq!(
+            crate::pipeline_backend::offset_store_env_value(&config),
+            "cloud-tables"
+        );
+        assert_eq!(
+            catalog_backend(&config),
+            skippr_iceberg_catalog::SkipprCatalogBackend::CloudTables
+        );
+        if let Some(value) = old_store {
+            Config::set_offset_store(&value);
+        } else {
+            std::env::remove_var("SKIPPR_OFFSET_STORE");
+            Config::set_evncache("SKIPPR_OFFSET_STORE", "");
+        }
+        if let Some(value) = old_wal {
+            Config::set_wal_storage(&value);
+        } else {
+            std::env::remove_var("WAL_STORAGE");
+            Config::set_evncache("WAL_STORAGE", "");
+        }
+    }
+
     #[test]
     #[serial]
     fn disk_without_offset_store_is_sled_not_cloud_tables() {
@@ -191,7 +269,7 @@ mod tests {
         let config = disk_config();
         assert_eq!(
             crate::pipeline_backend::configured_kind(&config).unwrap(),
-            OffsetStoreKind::Sled
+            SkipprStoreKind::Sled
         );
         assert!(
             !uses_cloud_tables(&config),

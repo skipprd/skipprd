@@ -253,7 +253,7 @@ impl Offsets {
                         #[cfg(not(feature = "offset-store-cloud-tables"))]
                         {
                             return Err(OffsetsError::AlreadyOpenError(
-                                "SKIPPR_OFFSET_STORE=cloud-tables requires skipprd built with --features offset-store-cloud-tables".into(),
+                                "skippr.store.type=cloud-tables requires skipprd built with --features offset-store-cloud-tables".into(),
                             ));
                         }
                     }
@@ -272,7 +272,7 @@ impl Offsets {
                         #[cfg(not(feature = "offset-store-dynamodb"))]
                         {
                             return Err(OffsetsError::AlreadyOpenError(
-                                "SKIPPR_OFFSET_STORE=dynamodb requires skipprd built with --features offset-store-dynamodb".into(),
+                                "skippr.store.type=dynamodb requires skipprd built with --features offset-store-dynamodb".into(),
                             ));
                         }
                     }

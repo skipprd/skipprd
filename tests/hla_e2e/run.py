@@ -304,28 +304,20 @@ data_sources:
 
 data_sinks:
   iceberg_local:
-    Iceberg:
+    SkipprLake:
       table_namespace: hla
-      table_prefix: hla
-      table_location_prefix: {warehouse_uri}
-      catalog:
-        type: skippr
-        table: {CATALOG_TABLE}
-        warehouse: {warehouse_uri}
-        region: us-east-1
+      warehouse: {warehouse_uri}
+      catalog_table: {CATALOG_TABLE}
+      region: us-east-1
     schema_sink: schema_sinks.iceberg_local
 
 schema_sinks:
   iceberg_local:
-    Iceberg:
+    SkipprLake:
       table_namespace: hla
-      table_prefix: hla
-      table_location_prefix: {warehouse_uri}
-      catalog:
-        type: skippr
-        table: {CATALOG_TABLE}
-        warehouse: {warehouse_uri}
-        region: us-east-1
+      warehouse: {warehouse_uri}
+      catalog_table: {CATALOG_TABLE}
+      region: us-east-1
 """,
         encoding="utf-8",
     )
@@ -2358,49 +2350,33 @@ data_sources:
 
 data_sinks:
   iceberg_local:
-    Iceberg:
+    SkipprLake:
       table_namespace: hla
-      table_prefix: hla
-      table_location_prefix: {warehouse_uri}
-      catalog:
-        type: skippr
-        table: {CATALOG_TABLE}
-        warehouse: {warehouse_uri}
-        region: us-east-1
+      warehouse: {warehouse_uri}
+      catalog_table: {CATALOG_TABLE}
+      region: us-east-1
     schema_sink: schema_sinks.iceberg_local
   iceberg_b:
-    Iceberg:
-      table_namespace: hla
-      table_prefix: hla-b
-      table_location_prefix: {warehouse_uri}
-      catalog:
-        type: skippr
-        table: {CATALOG_TABLE}
-        warehouse: {warehouse_uri}
-        region: us-east-1
+    SkipprLake:
+      table_namespace: hla_b
+      warehouse: {warehouse_uri}
+      catalog_table: {CATALOG_TABLE}
+      region: us-east-1
     schema_sink: schema_sinks.iceberg_b
 
 schema_sinks:
   iceberg_local:
-    Iceberg:
+    SkipprLake:
       table_namespace: hla
-      table_prefix: hla
-      table_location_prefix: {warehouse_uri}
-      catalog:
-        type: skippr
-        table: {CATALOG_TABLE}
-        warehouse: {warehouse_uri}
-        region: us-east-1
+      warehouse: {warehouse_uri}
+      catalog_table: {CATALOG_TABLE}
+      region: us-east-1
   iceberg_b:
-    Iceberg:
-      table_namespace: hla
-      table_prefix: hla-b
-      table_location_prefix: {warehouse_uri}
-      catalog:
-        type: skippr
-        table: {CATALOG_TABLE}
-        warehouse: {warehouse_uri}
-        region: us-east-1
+    SkipprLake:
+      table_namespace: hla_b
+      warehouse: {warehouse_uri}
+      catalog_table: {CATALOG_TABLE}
+      region: us-east-1
 """,
         encoding="utf-8",
     )

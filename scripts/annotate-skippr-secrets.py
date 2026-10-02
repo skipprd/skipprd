@@ -39,7 +39,7 @@ SECRET_PATH = {
 }
 
 STRUCT_START = re.compile(
-    r"^(pub(?:\([^)]+\))? )?struct (OtlpConfigRaw|\w+(?:PluginConfig|Config|HttpAuthConfig)|IcebergCatalogConfig)\b"
+    r"^(pub(?:\([^)]+\))? )?struct (OtlpConfigRaw|\w+(?:PluginConfig|Config|HttpAuthConfig)|SkipprLakeConfig)\b"
 )
 FIELD = re.compile(r"^(\s+)pub(?:\([^)]+\))? ([a-zA-Z0-9_]+):")
 

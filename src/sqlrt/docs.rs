@@ -1,5 +1,5 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 
 /// Documentation for a SQL statement, including its syntax and description
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,9 +14,10 @@ pub struct SqlStatementDoc {
     pub example: String,
 }
 
-/// Returns documentation for all SQL statements supported by the application
-pub fn get_sql_docs() -> HashMap<String, SqlStatementDoc> {
-    let mut docs = HashMap::new();
+/// Returns documentation for all SQL statements supported by the application.
+/// BTreeMap keeps SHOW DOCS / sql-help / sql-docs.md order stable.
+pub fn get_sql_docs() -> BTreeMap<String, SqlStatementDoc> {
+    let mut docs = BTreeMap::new();
 
     // Schema Dump
     docs.insert(
@@ -35,7 +36,7 @@ pub fn get_sql_docs() -> HashMap<String, SqlStatementDoc> {
         SqlStatementDoc {
             name: "DROP DATABASE".to_string(),
             syntax: "DROP DATABASE <database_name>".to_string(),
-            description: "Drops a database from the AWS Glue Catalog.".to_string(),
+            description: "Drops a SkipprLake Iceberg namespace from the catalog.".to_string(),
             example: "DROP DATABASE data_warehouse".to_string(),
         },
     );
@@ -79,7 +80,7 @@ pub fn get_sql_docs() -> HashMap<String, SqlStatementDoc> {
         SqlStatementDoc {
             name: "SCHEMA LOAD".to_string(),
             syntax: "LOAD SCHEMA '<source_path>' INTO <pipeline_name>".to_string(),
-            description: "Loads a schema definition from a file into a pipeline.".to_string(),
+            description: "Loads a schema definition from a JSON file into a pipeline. Column `type` maps VARCHAR/STRING/TEXT→String, NUMBER/INT/INTEGER/BIGINT→Long, DOUBLE/FLOAT/REAL/NUMERIC/DECIMAL→Double, BOOLEAN/BOOL→Boolean, DATE→Date, TIMESTAMP/DATETIME/TIMESTAMP_NTZ→Timestamp, VARIANT/OBJECT/ARRAY→String.".to_string(),
             example: "LOAD SCHEMA 'bike_hire_schema.json' INTO bike_hire".to_string(),
         },
     );
@@ -136,7 +137,8 @@ pub fn get_sql_docs() -> HashMap<String, SqlStatementDoc> {
         SqlStatementDoc {
             name: "DROP TABLE".to_string(),
             syntax: "DROP TABLE [<schema_name>.]<table_name>".to_string(),
-            description: "Drops a table from the metadata and from AWS Glue catalog.".to_string(),
+            description: "Drops a SkipprLake Iceberg table from the catalog and local metadata."
+                .to_string(),
             example: "DROP TABLE analytics.user_events".to_string(),
         },
     );
@@ -147,7 +149,7 @@ pub fn get_sql_docs() -> HashMap<String, SqlStatementDoc> {
         SqlStatementDoc {
             name: "DEADLETTERS TABLE".to_string(),
             syntax: "SELECT <columns> FROM _dl_<pipeline_name> [WHERE namespace = '<ns>'] [ORDER BY processed_time DESC]".to_string(),
-            description: "Query deadletters from the configured deadletter destination. When Athena is used as the deadletter sink, the table name is `_dl_<pipeline_name>` in the deadletter database.".to_string(),
+            description: "Query deadletters from the configured deadletter destination. The table name is `_dl_<pipeline_name>`.".to_string(),
             example: "SELECT id, namespace, error FROM _dl_bike_hire WHERE namespace = 'rides' ORDER BY processed_time DESC LIMIT 50".to_string(),
         },
     );
@@ -158,7 +160,7 @@ pub fn get_sql_docs() -> HashMap<String, SqlStatementDoc> {
         SqlStatementDoc {
             name: "SELECT".to_string(),
             syntax: "SELECT <columns> FROM <table_name> [WHERE <condition>] [GROUP BY <expressions>] [HAVING <condition>] [ORDER BY <expressions>] [LIMIT <count>]".to_string(),
-            description: "Executes a standard SQL query against the data. Supports querying from AWS Athena/Glue tables.".to_string(),
+            description: "Executes a standard SQL query against SkipprLake Iceberg tables and the live WAL.".to_string(),
             example: "SELECT user_id, COUNT(*) FROM bike_hire WHERE date > '2023-01-01' GROUP BY user_id LIMIT 10".to_string(),
         },
     );
@@ -185,7 +187,6 @@ pub fn get_sql_docs() -> HashMap<String, SqlStatementDoc> {
         },
     );
 
-    // Show Docs command
     docs.insert(
         "SHOW DOCS".to_string(),
         SqlStatementDoc {
@@ -196,59 +197,138 @@ pub fn get_sql_docs() -> HashMap<String, SqlStatementDoc> {
         },
     );
 
+    docs.insert(
+        "SHOW STATS".to_string(),
+        SqlStatementDoc {
+            name: "SHOW STATS".to_string(),
+            syntax: "SHOW STATS FOR <pipeline>[.<namespace>]".to_string(),
+            description:
+                "Show per-field statistics JSON for a pipeline (optionally filtered by namespace)."
+                    .to_string(),
+            example: "SHOW STATS FOR bike_hire.ride_start".to_string(),
+        },
+    );
+
+    docs.insert(
+        "SHOW SEMANTIC".to_string(),
+        SqlStatementDoc {
+            name: "SHOW SEMANTIC".to_string(),
+            syntax: "SHOW SEMANTIC FOR <pipeline>[.<namespace>]".to_string(),
+            description: "Show semantic roles for <pipeline>[.<namespace>]. Falls back to object storage if local cache is missing.".to_string(),
+            example: "SHOW SEMANTIC FOR bike_hire.ride_start".to_string(),
+        },
+    );
+
+    docs.insert(
+        "SHOW CATALOG".to_string(),
+        SqlStatementDoc {
+            name: "SHOW CATALOG".to_string(),
+            syntax: "SHOW CATALOG FOR <pipeline>[.<namespace>]".to_string(),
+            description: "Show catalog fields for <pipeline>[.<namespace>]. Falls back to object storage if local cache is missing.".to_string(),
+            example: "SHOW CATALOG FOR bike_hire.ride_start".to_string(),
+        },
+    );
+
+    docs.insert(
+        "SHOW PIPELINE".to_string(),
+        SqlStatementDoc {
+            name: "SHOW PIPELINE".to_string(),
+            syntax: "SHOW PIPELINE <pipeline_name>".to_string(),
+            description: "Show pipeline status as JSON: namespaces (name, enabled, fields), offsets, and metadata_location (S3 URI, or a local path when SKIPPRD_EL_STORAGE_MODE=local).".to_string(),
+            example: "SHOW PIPELINE el_mssql".to_string(),
+        },
+    );
+
     docs
+}
+
+/// One category in SHOW DOCS / sql-help / generated markdown/html/json.
+pub struct SqlDocCategory {
+    pub title: &'static str,
+    pub rule: &'static str,
+    pub statements: Vec<SqlStatementDoc>,
+}
+
+/// One grouping for every SQL-doc surface. Iteration order is the BTreeMap key order.
+pub fn categorized_sql_docs() -> Vec<SqlDocCategory> {
+    let mut schema = Vec::new();
+    let mut pipeline = Vec::new();
+    let mut data = Vec::new();
+    let mut query = Vec::new();
+    for doc in get_sql_docs().into_values() {
+        if doc.name.contains("SCHEMA") {
+            schema.push(doc);
+        } else if doc.name.contains("PIPELINE") {
+            pipeline.push(doc);
+        } else if doc.name.contains("TABLE") || doc.name.contains("DATABASE") {
+            data.push(doc);
+        } else {
+            query.push(doc);
+        }
+    }
+    vec![
+        SqlDocCategory {
+            title: "Schema Operations",
+            rule: "-----------------",
+            statements: schema,
+        },
+        SqlDocCategory {
+            title: "Pipeline Operations",
+            rule: "-------------------",
+            statements: pipeline,
+        },
+        SqlDocCategory {
+            title: "Data Operations",
+            rule: "---------------",
+            statements: data,
+        },
+        SqlDocCategory {
+            title: "Query Operations",
+            rule: "----------------",
+            statements: query,
+        },
+    ]
+}
+
+/// How `print_categorized_sql_docs` presents each statement.
+#[derive(Clone, Copy)]
+pub enum SqlDocListingKind {
+    /// sql-help list: name and description.
+    Brief,
+    /// SHOW DOCS: name, description, syntax, example.
+    Full,
+}
+
+/// One printer for sql-help list and SHOW DOCS.
+pub fn print_categorized_sql_docs(kind: SqlDocListingKind) {
+    for category in categorized_sql_docs() {
+        if category.statements.is_empty() {
+            continue;
+        }
+        println!("{}:", category.title);
+        println!("{}", category.rule);
+        for doc in &category.statements {
+            println!("  {} - {}", doc.name, doc.description);
+            if matches!(kind, SqlDocListingKind::Full) {
+                println!("  Syntax: {}", doc.syntax);
+                println!("  Example: {}\n", doc.example);
+            }
+        }
+        println!();
+    }
 }
 
 /// Returns a formatted string with documentation for all SQL statements
 pub fn get_sql_docs_formatted() -> String {
-    let docs = get_sql_docs();
     let mut result = String::new();
-
     result.push_str("# Skippr SQL Documentation\n\n");
     result.push_str("This document describes all SQL statements supported by Skippr.\n\n");
-
-    // Group docs by category
-    let mut schema_operations: Vec<&SqlStatementDoc> = Vec::new();
-    let mut pipeline_operations: Vec<&SqlStatementDoc> = Vec::new();
-    let mut data_operations: Vec<&SqlStatementDoc> = Vec::new();
-    let mut query_operations: Vec<&SqlStatementDoc> = Vec::new();
-
-    for (_, doc) in &docs {
-        if doc.name.contains("SCHEMA") {
-            schema_operations.push(doc);
-        } else if doc.name.contains("PIPELINE") {
-            pipeline_operations.push(doc);
-        } else if doc.name.contains("TABLE") || doc.name.contains("DATABASE") {
-            data_operations.push(doc);
-        } else {
-            query_operations.push(doc);
+    for category in categorized_sql_docs() {
+        result.push_str(&format!("## {}\n\n", category.title));
+        for doc in &category.statements {
+            add_doc_to_result(&mut result, doc);
         }
     }
-
-    // Add schema operations
-    result.push_str("## Schema Operations\n\n");
-    for doc in schema_operations {
-        add_doc_to_result(&mut result, doc);
-    }
-
-    // Add pipeline operations
-    result.push_str("## Pipeline Operations\n\n");
-    for doc in pipeline_operations {
-        add_doc_to_result(&mut result, doc);
-    }
-
-    // Add data operations
-    result.push_str("## Data Operations\n\n");
-    for doc in data_operations {
-        add_doc_to_result(&mut result, doc);
-    }
-
-    // Add query operations
-    result.push_str("## Query Operations\n\n");
-    for doc in query_operations {
-        add_doc_to_result(&mut result, doc);
-    }
-
     result
 }
 
@@ -257,15 +337,6 @@ fn add_doc_to_result(result: &mut String, doc: &SqlStatementDoc) {
     result.push_str(&format!("**Syntax:**\n```sql\n{}\n```\n\n", doc.syntax));
     result.push_str(&format!("**Description:**\n{}\n\n", doc.description));
     result.push_str(&format!("**Example:**\n```sql\n{}\n```\n\n", doc.example));
-}
-
-/// Returns a list of supported SQL statements with their syntax
-#[allow(dead_code)]
-pub fn list_supported_sql_statements() -> Vec<String> {
-    get_sql_docs()
-        .into_iter()
-        .map(|(_, doc)| format!("{}: {}", doc.name, doc.syntax))
-        .collect()
 }
 
 /// Format for documentation output
@@ -286,7 +357,6 @@ pub fn get_docs_in_format(format: DocFormat) -> String {
 
 /// Returns documentation in HTML format
 pub fn get_sql_docs_html() -> String {
-    let docs = get_sql_docs();
     let mut result = String::new();
 
     result.push_str("<!DOCTYPE html>\n<html>\n<head>\n");
@@ -304,46 +374,11 @@ pub fn get_sql_docs_html() -> String {
     result.push_str("<h1>Skippr SQL Documentation</h1>\n");
     result.push_str("<p>This document describes all SQL statements supported by Skippr.</p>\n");
 
-    // Group docs by category
-    let mut schema_operations: Vec<&SqlStatementDoc> = Vec::new();
-    let mut pipeline_operations: Vec<&SqlStatementDoc> = Vec::new();
-    let mut data_operations: Vec<&SqlStatementDoc> = Vec::new();
-    let mut query_operations: Vec<&SqlStatementDoc> = Vec::new();
-
-    for (_, doc) in &docs {
-        if doc.name.contains("SCHEMA") {
-            schema_operations.push(doc);
-        } else if doc.name.contains("PIPELINE") {
-            pipeline_operations.push(doc);
-        } else if doc.name.contains("TABLE") || doc.name.contains("DATABASE") {
-            data_operations.push(doc);
-        } else {
-            query_operations.push(doc);
+    for category in categorized_sql_docs() {
+        result.push_str(&format!("<h2>{}</h2>\n", category.title));
+        for doc in &category.statements {
+            add_doc_to_html(&mut result, doc);
         }
-    }
-
-    // Add schema operations
-    result.push_str("<h2>Schema Operations</h2>\n");
-    for doc in schema_operations {
-        add_doc_to_html(&mut result, doc);
-    }
-
-    // Add pipeline operations
-    result.push_str("<h2>Pipeline Operations</h2>\n");
-    for doc in pipeline_operations {
-        add_doc_to_html(&mut result, doc);
-    }
-
-    // Add data operations
-    result.push_str("<h2>Data Operations</h2>\n");
-    for doc in data_operations {
-        add_doc_to_html(&mut result, doc);
-    }
-
-    // Add query operations
-    result.push_str("<h2>Query Operations</h2>\n");
-    for doc in query_operations {
-        add_doc_to_html(&mut result, doc);
     }
 
     result.push_str("</body>\n</html>");
@@ -362,44 +397,13 @@ pub fn get_sql_docs_json() -> String {
         statements: Vec<SqlStatementDoc>,
     }
 
-    let docs = get_sql_docs();
-
-    // Group docs by category
-    let mut schema_operations: Vec<SqlStatementDoc> = Vec::new();
-    let mut pipeline_operations: Vec<SqlStatementDoc> = Vec::new();
-    let mut data_operations: Vec<SqlStatementDoc> = Vec::new();
-    let mut query_operations: Vec<SqlStatementDoc> = Vec::new();
-
-    for (_, doc) in docs {
-        if doc.name.contains("SCHEMA") {
-            schema_operations.push(doc);
-        } else if doc.name.contains("PIPELINE") {
-            pipeline_operations.push(doc);
-        } else if doc.name.contains("TABLE") || doc.name.contains("DATABASE") {
-            data_operations.push(doc);
-        } else {
-            query_operations.push(doc);
-        }
-    }
-
-    let categories = vec![
-        DocCategory {
-            name: "Schema Operations".to_string(),
-            statements: schema_operations,
-        },
-        DocCategory {
-            name: "Pipeline Operations".to_string(),
-            statements: pipeline_operations,
-        },
-        DocCategory {
-            name: "Data Operations".to_string(),
-            statements: data_operations,
-        },
-        DocCategory {
-            name: "Query Operations".to_string(),
-            statements: query_operations,
-        },
-    ];
+    let categories: Vec<DocCategory> = categorized_sql_docs()
+        .into_iter()
+        .map(|category| DocCategory {
+            name: category.title.to_string(),
+            statements: category.statements,
+        })
+        .collect();
 
     let json_value = json!({
         "title": "Skippr SQL Documentation",
@@ -418,4 +422,125 @@ fn add_doc_to_html(result: &mut String, doc: &SqlStatementDoc) {
     result.push_str(&format!("<p>{}</p>\n", doc.description));
     result.push_str("<h4>Example:</h4>\n");
     result.push_str(&format!("<div class=\"example\">{}</div>\n", doc.example));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+    use std::path::PathBuf;
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+    }
+
+    #[test]
+    fn get_sql_docs_covers_show_statements() {
+        let docs = get_sql_docs();
+        for name in [
+            "SHOW STATS",
+            "SHOW SEMANTIC",
+            "SHOW CATALOG",
+            "SHOW PIPELINE",
+        ] {
+            assert!(
+                docs.contains_key(name),
+                "get_sql_docs() is the SQL-doc SoT and must include {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn select_and_drop_docs_name_skipprlake_only() {
+        let docs = get_sql_docs();
+        let banned_a = concat!("ath", "ena");
+        let banned_g = concat!("gl", "ue");
+        for name in ["SELECT", "DROP DATABASE", "DROP TABLE"] {
+            let description = &docs[name].description;
+            assert!(
+                description.contains("SkipprLake"),
+                "{name} must name SkipprLake: {description}"
+            );
+            let lower = description.to_ascii_lowercase();
+            assert!(
+                !lower.contains(banned_g) && !lower.contains(banned_a),
+                "{name} must not teach other warehouse sinks as the engine catalog: {description}"
+            );
+        }
+    }
+
+    #[test]
+    fn checked_in_sql_docs_md_matches_formatted() {
+        let path = repo_root().join("sql-docs.md");
+        let on_disk = fs::read_to_string(&path).unwrap_or_default();
+        assert_eq!(
+            on_disk,
+            get_sql_docs_formatted(),
+            "{} must be generated from get_sql_docs_formatted()",
+            path.display()
+        );
+    }
+
+    #[test]
+    fn engine_sql_markdown_is_not_a_second_handwritten_sot() {
+        let gone = repo_root().join("docs/docs/sql/reference.md");
+        assert!(
+            !gone.exists(),
+            "{} is a second SQL SoT; delete it and point CLI docs at sql-help / sql-docs.md",
+            gone.display()
+        );
+        let query_md = fs::read_to_string(repo_root().join("docs/docs/cli/query.md")).unwrap();
+        assert!(
+            !query_md.contains("sql/reference"),
+            "cli/query.md must not link a handwritten SQL reference"
+        );
+        assert!(
+            query_md.contains("sql-help") || query_md.contains("SHOW DOCS"),
+            "cli/query.md must send readers to sql-help or SHOW DOCS"
+        );
+        assert!(
+            !repo_root().join("src/commands/sql_help.rs").exists(),
+            "src/commands/sql_help.rs is a dead second sql-help path"
+        );
+    }
+
+    #[test]
+    fn warehouse_cutover_section_three_is_historical() {
+        let text = fs::read_to_string(
+            repo_root().join("docs/docs/maintainers/warehouse-sinks-cutover.md"),
+        )
+        .unwrap();
+        assert!(
+            !text.contains("## 3. Current state (audit)"),
+            "cutover §3 must not read as present-tense current state"
+        );
+        assert!(
+            !text.contains(&format!(
+                "src/sqlrt/docs.rs: remove {}/{} text",
+                concat!("Ath", "ena"),
+                concat!("Gl", "ue")
+            )),
+            "W2.7 must not still treat warehouse-sink query docs as open work"
+        );
+    }
+
+    #[test]
+    fn doc_parser_looks_up_show_docs_from_get_sql_docs() {
+        let src = include_str!("doc_parser.rs");
+        for name in [
+            "SHOW STATS",
+            "SHOW SEMANTIC",
+            "SHOW CATALOG",
+            "SHOW PIPELINE",
+        ] {
+            assert!(
+                src.contains(&format!("docs.get(\"{name}\")")),
+                "doc_parser must look up {name} from get_sql_docs()"
+            );
+            assert!(
+                !src.contains(&format!("name: \"{name}\"")),
+                "doc_parser must not inline {name} SqlStatementDoc fields"
+            );
+        }
+    }
 }

@@ -1,0 +1,29 @@
+skippr:
+  workspace: test
+  skipprd_el_storage_mode: local
+
+pipelines:
+  file_duckdb_append:
+    auto_approve: yes
+    env: test
+    data_source: data_sources.orders
+    data_sink: data_sinks.local
+
+data_sources:
+  orders:
+    File:
+      path: SOURCE_DIR
+      format: csv
+
+data_sinks:
+  local:
+    Duckdb:
+      warehouse: WAREHOUSE_URI
+      table_namespace: bronze
+    schema_sink: schema_sinks.local
+
+schema_sinks:
+  local:
+    Duckdb:
+      warehouse: WAREHOUSE_URI
+      table_namespace: bronze

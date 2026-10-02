@@ -1,0 +1,17 @@
+[package]
+name = "skippr-iceberg-catalog-fs"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Hadoop-style filesystem Iceberg catalog for the Duckdb sink"
+
+[dependencies]
+async-trait.workspace = true
+bytes.workspace = true
+iceberg = "0.9.1"
+object_store.workspace = true
+skippr-iceberg-catalog = { path = "../skippr-iceberg-catalog" }
+tokio = { workspace = true, features = ["fs", "macros", "rt"] }
+
+[dev-dependencies]
+tempfile = "3"

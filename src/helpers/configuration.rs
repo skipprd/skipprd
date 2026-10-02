@@ -17,13 +17,13 @@ use once_cell::sync::OnceCell;
 
 // use aws_config::profile::profile_file::ProfileFileKind::Config;
 use serde::de::DeserializeOwned;
-use serde_derive::{Deserialize, Serialize};
+use serde_derive::Deserialize;
 
 use serde_json::Value;
 
 use crate::discover::{Metadata, OutputMetadata, PipelineMetadata};
 use crate::helpers::plugin_config::{DataSinkEntry, PluginConfigEntry};
-use crate::helpers::wal_storage::{ElStorageMode, OffsetStoreKind};
+use crate::helpers::wal_storage::{ElStorageMode, SkipprStore, SkipprStoreKind};
 use crate::METADATA;
 
 use crate::helpers::timed_rwlock::TimedRwLock;
@@ -35,6 +35,12 @@ use tracing::{debug, error, info, warn};
 lazy_static! {
     static ref ENV_CACHE: TimedRwLock<DashMap<String, String>> =
         TimedRwLock::new("env_cache".to_string(), DashMap::new());
+}
+
+fn warn_deprecated_skippr_store(key: &str) {
+    warn!(
+        "{key} is deprecated; use skippr.store.type and skippr.store.name (SKIPPR_STORE_TYPE / SKIPPR_STORE_NAME)"
+    );
 }
 
 const DEFAULT_CONFIG: &'static str = "NULL_VALUE";
@@ -53,6 +59,51 @@ impl SchemaPublicationRequest {
         self.config.schema_publication_identity(&self.namespace)
     }
 }
+
+/// Host pairing projection of plugin `AthenaIcebergConfig`. Same serde shape;
+/// skipprd cannot depend on the plugin crate.
+#[derive(Debug, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+struct AthenaIcebergPairing {
+    warehouse: String,
+    glue_database_name: String,
+    athena_workgroup_name: String,
+    athena_results_s3_bucket: String,
+    #[serde(default)]
+    region: Option<String>,
+    #[serde(default)]
+    catalog_id: Option<String>,
+    #[serde(default)]
+    object_store: skippr_iceberg_catalog::WarehouseObjectStore,
+}
+
+/// Host pairing projection of plugin `DuckdbConfig`. Same serde shape;
+/// skipprd cannot depend on the plugin crate.
+#[derive(Debug, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+struct DuckdbPairing {
+    warehouse: String,
+    table_namespace: String,
+}
+
+impl DuckdbPairing {
+    fn warehouse_key(&self) -> String {
+        skippr_iceberg_catalog::warehouse_key(&self.warehouse)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        skippr_iceberg_catalog::validate_file_warehouse(&self.warehouse, &self.table_namespace)
+    }
+}
+
+impl PartialEq for DuckdbPairing {
+    fn eq(&self, other: &Self) -> bool {
+        self.warehouse_key() == other.warehouse_key()
+            && self.table_namespace == other.table_namespace
+    }
+}
+
+impl Eq for DuckdbPairing {}
 
 type SchemaSyncWorkerState = (
     UnboundedSender<SchemaPublicationRequest>,
@@ -77,9 +128,11 @@ pub struct Skippr {
     pub skipprd_el_storage_mode: Option<ElStorageMode>,
     /// Dedicated S3 bucket for WAL segments (falls back to skippr_s3_bucket).
     pub wal_s3_bucket: Option<String>,
-    /// Offset store backend: `sled` (default) or `dynamodb`.
-    pub offset_store: Option<OffsetStoreKind>,
-    /// DynamoDB table for offset/checkpoint rows when offset_store=dynamodb.
+    /// SkipprStore: KV backend for offsets, checkpoints, leases, membership, catalog pointers.
+    pub store: Option<SkipprStore>,
+    /// Deprecated: use `store.type`. Still parsed for old skippr.yml.
+    pub offset_store: Option<SkipprStoreKind>,
+    /// Deprecated: use `store.name`. Still parsed for old skippr.yml.
     pub offset_dynamodb_table: Option<String>,
 }
 
@@ -338,6 +391,7 @@ impl Config {
                 skippr_s3_bucket: None,
                 skipprd_el_storage_mode: None,
                 wal_s3_bucket: None,
+                store: None,
                 offset_store: None,
                 offset_dynamodb_table: None,
             }),
@@ -603,39 +657,17 @@ impl Config {
                 pipeline_name,
                 "data_sink",
             )?;
-
-            if let Some(schema_ref) = config
+            if let Some(entry) = config
                 .data_sinks
                 .as_ref()
                 .and_then(|sinks| sinks.get(&data_sink_name))
-                .and_then(|entry| entry.schema_sink.as_ref())
             {
-                Self::validate_registry_ref_exists(
-                    config.schema_sinks.as_ref(),
-                    schema_ref,
-                    "schema_sinks",
+                Self::validate_paired_schema_sink(
+                    config,
                     pipeline_name,
                     "data_sink.schema_sink",
+                    entry,
                 )?;
-                let entry = config
-                    .data_sinks
-                    .as_ref()
-                    .and_then(|sinks| sinks.get(&data_sink_name))
-                    .expect("data sink ref already validated");
-                let schema_name = Self::parse_registry_ref(schema_ref, "schema_sinks")
-                    .expect("schema sink ref already validated");
-                let schema_cfg = config
-                    .schema_sinks
-                    .as_ref()
-                    .and_then(|sinks| sinks.get(&schema_name))
-                    .cloned()
-                    .expect("schema sink ref already validated");
-                Self::inherit_schema_install_config(&entry.config, schema_cfg).map_err(|err| {
-                    format!(
-                        "Invalid configuration for pipeline '{}': {}",
-                        pipeline_name, err
-                    )
-                })?;
             }
         }
 
@@ -647,23 +679,53 @@ impl Config {
                 pipeline_name,
                 "deadletter_sink",
             )?;
-            if let Some(schema_ref) = config
+            if let Some(entry) = config
                 .deadletter_sinks
                 .as_ref()
                 .and_then(|sinks| sinks.get(&deadletter_name))
-                .and_then(|entry| entry.schema_sink.as_ref())
             {
-                Self::validate_registry_ref_exists(
-                    config.schema_sinks.as_ref(),
-                    schema_ref,
-                    "schema_sinks",
+                Self::validate_paired_schema_sink(
+                    config,
                     pipeline_name,
                     "deadletter_sink.schema_sink",
+                    entry,
                 )?;
             }
         }
 
         Ok(())
+    }
+
+    fn validate_paired_schema_sink(
+        config: &Config,
+        pipeline_name: &str,
+        field_name: &str,
+        sink_entry: &crate::helpers::plugin_config::DataSinkEntry,
+    ) -> Result<(), String> {
+        let Some(schema_ref) = sink_entry.schema_sink.as_ref() else {
+            return Ok(());
+        };
+        Self::validate_registry_ref_exists(
+            config.schema_sinks.as_ref(),
+            schema_ref,
+            "schema_sinks",
+            pipeline_name,
+            field_name,
+        )?;
+        let schema_name = Self::parse_registry_ref(schema_ref, "schema_sinks")?;
+        let schema_cfg = config
+            .schema_sinks
+            .as_ref()
+            .and_then(|sinks| sinks.get(&schema_name))
+            .cloned()
+            .ok_or_else(|| {
+                format!(
+                    "Invalid configuration for pipeline '{pipeline_name}': {field_name} references '{schema_ref}', but '{schema_name}' is not defined in schema_sinks."
+                )
+            })?;
+        Self::inherit_schema_install_config(&sink_entry.config, schema_cfg)
+            .map_err(|err| format!("Invalid configuration for pipeline '{pipeline_name}': {err}"))
+            .map(|_| ())
     }
 
     pub fn validate_current_pipeline_registry_refs(&self) -> Result<(), String> {
@@ -707,15 +769,66 @@ impl Config {
         plugin_config
     }
 
-    /// Schema-sink install config. Iceberg data_sink must pair with Iceberg schema_sink.
+    /// Schema-sink install config. SkipprLake and AthenaIceberg data_sinks must
+    /// pair with the same plugin and equal config.
     pub(crate) fn inherit_schema_install_config(
         data_sink: &PluginConfigEntry,
         schema: SchemaSinkConfig,
     ) -> Result<SchemaSinkConfig, String> {
-        match (data_sink.plugin_name.as_str(), schema.plugin_name.as_str()) {
-            ("Iceberg", "Iceberg") => Ok(schema),
-            ("Iceberg", other) => Err(format!(
-                "Iceberg data sink must pair with schema_sinks.*.Iceberg, not {other}"
+        use crate::connect::{DataSink, SchemaSink};
+        let schema_label = |parsed: Option<SchemaSink>| {
+            parsed
+                .map(|kind| kind.plugin_name().to_string())
+                .unwrap_or_else(|| schema.plugin_name.clone())
+        };
+        match (
+            DataSink::parse(&data_sink.plugin_name),
+            SchemaSink::parse(&schema.plugin_name),
+        ) {
+            (Some(DataSink::SkipprLake), Some(SchemaSink::SkipprLake)) => {
+                let data_cfg: skippr_iceberg_catalog::SkipprLakeConfig = data_sink.deserialize()?;
+                let schema_cfg: skippr_iceberg_catalog::SkipprLakeConfig = schema.deserialize()?;
+                if data_cfg != schema_cfg {
+                    return Err(
+                        "paired SkipprLake data_sink and schema_sink configs must be equal".into(),
+                    );
+                }
+                Ok(schema)
+            }
+            (Some(DataSink::SkipprLake), other) => Err(format!(
+                "SkipprLake data sink must pair with schema_sinks.*.SkipprLake, not {}",
+                schema_label(other)
+            )),
+            (Some(DataSink::AthenaIceberg), Some(SchemaSink::AthenaIceberg)) => {
+                let data_cfg: AthenaIcebergPairing = data_sink.deserialize()?;
+                let schema_cfg: AthenaIcebergPairing = schema.deserialize()?;
+                if data_cfg != schema_cfg {
+                    return Err(
+                        "paired AthenaIceberg data_sink and schema_sink configs must be equal"
+                            .into(),
+                    );
+                }
+                Ok(schema)
+            }
+            (Some(DataSink::AthenaIceberg), other) => Err(format!(
+                "AthenaIceberg data sink must pair with schema_sinks.*.AthenaIceberg, not {}",
+                schema_label(other)
+            )),
+            (Some(DataSink::Duckdb), Some(SchemaSink::Duckdb)) => {
+                let data_cfg: DuckdbPairing = data_sink.deserialize()?;
+                let schema_cfg: DuckdbPairing = schema.deserialize()?;
+                data_cfg.validate()?;
+                schema_cfg.validate()?;
+                if data_cfg != schema_cfg {
+                    return Err(
+                        "paired Duckdb data_sink and schema_sink configs must be equal".into(),
+                    );
+                }
+                Ok(schema)
+            }
+            (Some(DataSink::Duckdb), other) => Err(format!(
+                "Duckdb data sink must pair with schema_sinks.*.Duckdb, not {}",
+                schema_label(other)
             )),
             _ => Ok(schema),
         }
@@ -937,21 +1050,42 @@ impl Config {
         Config::set_evncache("WAL_STORAGE", value);
     }
 
-    /// `Some` when `SKIPPR_OFFSET_STORE` or `skippr.offset_store` is explicitly set.
-    pub fn configured_offset_store(
+    /// `Some` when `skippr.store.type`, deprecated `skippr.offset_store`,
+    /// `SKIPPR_STORE_TYPE`, or deprecated `SKIPPR_OFFSET_STORE` is set.
+    pub fn configured_skippr_store(
         &self,
-    ) -> Result<
-        Option<crate::helpers::wal_storage::OffsetStoreKind>,
-        crate::helpers::wal_storage::ConfigError,
-    > {
-        if let Some(store) = self.skippr.as_ref().and_then(|skippr| skippr.offset_store) {
-            return Ok(Some(store));
+    ) -> Result<Option<SkipprStoreKind>, crate::helpers::wal_storage::ConfigError> {
+        if let Some(root) = self.skippr.as_ref() {
+            if let Some(store) = root.store.as_ref() {
+                if root.offset_store.is_some() || root.offset_dynamodb_table.is_some() {
+                    warn_deprecated_skippr_store(
+                        "skippr.offset_store / skippr.offset_dynamodb_table",
+                    );
+                }
+                return Ok(Some(store.kind));
+            }
         }
-        let from_env = std::env::var("SKIPPR_OFFSET_STORE").unwrap_or_default();
+        if let Some(kind) = self.skippr.as_ref().and_then(|skippr| skippr.offset_store) {
+            warn_deprecated_skippr_store("skippr.offset_store");
+            return Ok(Some(kind));
+        }
+        let from_env = std::env::var("SKIPPR_STORE_TYPE").unwrap_or_default();
         if !from_env.is_empty() {
             return from_env.parse().map(Some);
         }
+        let deprecated = std::env::var("SKIPPR_OFFSET_STORE").unwrap_or_default();
+        if !deprecated.is_empty() {
+            warn_deprecated_skippr_store("SKIPPR_OFFSET_STORE");
+            return deprecated.parse().map(Some);
+        }
         Ok(None)
+    }
+
+    /// Deprecated name for [`Self::configured_skippr_store`].
+    pub fn configured_offset_store(
+        &self,
+    ) -> Result<Option<SkipprStoreKind>, crate::helpers::wal_storage::ConfigError> {
+        self.configured_skippr_store()
     }
 
     /// S3 bucket for WAL segments. Prefer skippr.wal_s3_bucket, then env, then datalake bucket.
@@ -976,23 +1110,58 @@ impl Config {
         Config::set_evncache("SKIPPR_WAL_S3_BUCKET", value);
     }
 
+    pub fn set_skippr_store_type(value: &str) {
+        Config::setenv("SKIPPR_STORE_TYPE", value);
+        Config::set_evncache("SKIPPR_STORE_TYPE", value);
+    }
+
+    /// Deprecated: sets `SKIPPR_OFFSET_STORE`. Use [`Self::set_skippr_store_type`].
     pub fn set_offset_store(value: &str) {
         Config::setenv("SKIPPR_OFFSET_STORE", value);
         Config::set_evncache("SKIPPR_OFFSET_STORE", value);
     }
 
-    pub fn get_offset_dynamodb_table(&self) -> String {
+    pub fn get_skippr_store_name(&self) -> String {
+        if let Some(name) = self
+            .skippr
+            .as_ref()
+            .and_then(|skippr| skippr.store.as_ref())
+            .and_then(|store| store.name.as_ref())
+            .filter(|name| !name.is_empty())
+        {
+            return name.clone();
+        }
         if let Some(table) = self
             .skippr
             .as_ref()
             .and_then(|skippr| skippr.offset_dynamodb_table.as_ref())
             .filter(|table| !table.is_empty())
         {
+            warn_deprecated_skippr_store("skippr.offset_dynamodb_table");
             return table.clone();
         }
-        Config::getenv("SKIPPR_OFFSET_DYNAMODB_TABLE", "")
+        let from_env = Config::getenv("SKIPPR_STORE_NAME", "");
+        if !from_env.is_empty() {
+            return from_env;
+        }
+        let deprecated = Config::getenv("SKIPPR_OFFSET_DYNAMODB_TABLE", "");
+        if !deprecated.is_empty() {
+            warn_deprecated_skippr_store("SKIPPR_OFFSET_DYNAMODB_TABLE");
+        }
+        deprecated
     }
 
+    /// Deprecated name for [`Self::get_skippr_store_name`].
+    pub fn get_offset_dynamodb_table(&self) -> String {
+        self.get_skippr_store_name()
+    }
+
+    pub fn set_skippr_store_name(value: &str) {
+        Config::setenv("SKIPPR_STORE_NAME", value);
+        Config::set_evncache("SKIPPR_STORE_NAME", value);
+    }
+
+    /// Deprecated: sets `SKIPPR_OFFSET_DYNAMODB_TABLE`. Use [`Self::set_skippr_store_name`].
     pub fn set_offset_dynamodb_table(value: &str) {
         Config::setenv("SKIPPR_OFFSET_DYNAMODB_TABLE", value);
         Config::set_evncache("SKIPPR_OFFSET_DYNAMODB_TABLE", value);
@@ -1285,6 +1454,100 @@ impl Config {
         })
     }
 
+    fn skippr_lake_from_entry(
+        entry: &crate::helpers::plugin_config::PluginConfigEntry,
+    ) -> Result<Option<skippr_iceberg_catalog::SkipprLakeConfig>, String> {
+        if crate::connect::DataSink::parse(&entry.plugin_name)
+            != Some(crate::connect::DataSink::SkipprLake)
+        {
+            return Ok(None);
+        }
+        entry.deserialize().map(Some)
+    }
+
+    fn skippr_lake_namespace_violations(&self) -> Vec<String> {
+        use std::collections::HashMap;
+        let mut seen: HashMap<(String, String), String> = HashMap::new();
+        let mut out = Vec::new();
+        let mut consider =
+            |kind: &str, name: &str, entry: &crate::helpers::plugin_config::PluginConfigEntry| {
+                match Self::skippr_lake_from_entry(entry) {
+                    Ok(Some(cfg)) => {
+                        let key = (cfg.catalog_table.clone(), cfg.table_namespace.clone());
+                        if let Some(first) = seen.get(&key) {
+                            out.push(format!(
+                        "SkipprLake {kind} '{name}' reuses catalog_table '{}' table_namespace '{}' already used by {first}",
+                        cfg.catalog_table, cfg.table_namespace
+                    ));
+                        } else {
+                            seen.insert(key, format!("{kind} '{name}'"));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => out.push(format!("SkipprLake {kind} '{name}': {err}")),
+                }
+            };
+        if let Some(sinks) = &self.data_sinks {
+            for (name, entry) in sinks {
+                consider("data_sink", name, &entry.config);
+            }
+        }
+        if let Some(sinks) = &self.deadletter_sinks {
+            for (name, entry) in sinks {
+                consider("deadletter_sink", name, &entry.config);
+            }
+        }
+        out
+    }
+
+    fn duckdb_from_entry(
+        entry: &crate::helpers::plugin_config::PluginConfigEntry,
+    ) -> Result<Option<DuckdbPairing>, String> {
+        if crate::connect::DataSink::parse(&entry.plugin_name)
+            != Some(crate::connect::DataSink::Duckdb)
+        {
+            return Ok(None);
+        }
+        let cfg: DuckdbPairing = entry.deserialize()?;
+        cfg.validate()?;
+        Ok(Some(cfg))
+    }
+
+    fn duckdb_namespace_violations(&self) -> Vec<String> {
+        use std::collections::HashMap;
+        let mut seen: HashMap<(String, String), String> = HashMap::new();
+        let mut out = Vec::new();
+        let mut consider =
+            |kind: &str, name: &str, entry: &crate::helpers::plugin_config::PluginConfigEntry| {
+                match Self::duckdb_from_entry(entry) {
+                    Ok(Some(cfg)) => {
+                        let key = (cfg.warehouse_key(), cfg.table_namespace.clone());
+                        if let Some(first) = seen.get(&key) {
+                            out.push(format!(
+                        "Duckdb {kind} '{name}' reuses warehouse '{}' table_namespace '{}' already used by {first}",
+                        cfg.warehouse_key(), cfg.table_namespace
+                    ));
+                        } else {
+                            seen.insert(key, format!("{kind} '{name}'"));
+                        }
+                    }
+                    Ok(None) => {}
+                    Err(err) => out.push(format!("Duckdb {kind} '{name}': {err}")),
+                }
+            };
+        if let Some(sinks) = &self.data_sinks {
+            for (name, entry) in sinks {
+                consider("data_sink", name, &entry.config);
+            }
+        }
+        if let Some(sinks) = &self.deadletter_sinks {
+            for (name, entry) in sinks {
+                consider("deadletter_sink", name, &entry.config);
+            }
+        }
+        out
+    }
+
     pub fn get_config_dependency_violations(&self) -> Vec<String> {
         let mut violations: Vec<String> = Vec::new();
 
@@ -1332,6 +1595,9 @@ impl Config {
                 violations.push(err);
             }
         }
+
+        violations.extend(self.skippr_lake_namespace_violations());
+        violations.extend(self.duckdb_namespace_violations());
 
         Self::validate_env_u64(self, "SYNC_FREQUENCY", &mut violations);
         Self::validate_env_u64(self, "BUFFER_THRESHOLD_BYTES", &mut violations);
@@ -1831,35 +2097,6 @@ impl Config {
             .filter(|name| !name.is_empty())
             .cloned()
             .unwrap_or_else(|| Config::getenv("TENANT", "default"))
-    }
-
-    // Delegates to helpers::manifest::Manifest — kept for backward compat
-    pub fn get_manifest_s3_key(&self, namespace: &str) -> Option<(String, String)> {
-        Some(crate::helpers::manifest::Manifest::s3_key(self, namespace))
-    }
-
-    pub async fn read_manifest(&self, namespace: &str) -> Option<serde_json::Value> {
-        crate::helpers::manifest::Manifest::read(self, namespace).await
-    }
-
-    pub async fn get_manifest_epoch(&self, namespace: &str) -> Option<u64> {
-        crate::helpers::manifest::Manifest::epoch(self, namespace).await
-    }
-
-    pub async fn update_manifest_with_prefix(&self, namespace: &str, dir_prefix: &str) {
-        crate::helpers::manifest::Manifest::ensure_prefix(self, namespace, dir_prefix).await;
-    }
-
-    pub async fn update_manifest_with_prefix_and_db(
-        &self,
-        namespace: &str,
-        dir_prefix: &str,
-        database: &str,
-    ) {
-        crate::helpers::manifest::Manifest::ensure_prefix_and_db(
-            self, namespace, dir_prefix, database,
-        )
-        .await;
     }
 
     pub fn get_full_namespace_name(&self) -> String {
@@ -2862,6 +3099,431 @@ mod tests {
         Config::reset_envcache();
     }
 
+    fn skippr_lake_sink(
+        table: &str,
+        namespace: &str,
+    ) -> crate::helpers::plugin_config::DataSinkEntry {
+        crate::helpers::plugin_config::DataSinkEntry {
+            config: crate::helpers::plugin_config::PluginConfigEntry {
+                plugin_name: skippr_iceberg_catalog::SkipprLakeConfig::PLUGIN_NAME.into(),
+                config: serde_json::json!({
+                    "catalog_table": table,
+                    "warehouse": "file:///tmp/warehouse",
+                    "table_namespace": namespace
+                }),
+            },
+            schema_sink: None,
+        }
+    }
+
+    #[test]
+    fn skipprlake_duplicate_namespace_is_a_config_violation() {
+        let mut config = Config::new();
+        config.data_sinks = Some(
+            [
+                ("a".into(), skippr_lake_sink("cat", "bronze")),
+                ("b".into(), skippr_lake_sink("cat", "bronze")),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let violations = config.get_config_dependency_violations();
+        assert!(
+            violations.iter().any(|v| v.contains("reuses catalog_table")
+                && v.contains("bronze")
+                && v.contains("cat")),
+            "{violations:?}"
+        );
+    }
+
+    #[test]
+    fn skipprlake_undecodable_config_is_a_violation() {
+        let mut config = Config::new();
+        config.data_sinks = Some(
+            [(
+                "a".into(),
+                crate::helpers::plugin_config::DataSinkEntry {
+                    config: crate::helpers::plugin_config::PluginConfigEntry {
+                        plugin_name: skippr_iceberg_catalog::SkipprLakeConfig::PLUGIN_NAME.into(),
+                        config: serde_json::json!({ "catalog_table": "cat" }),
+                    },
+                    schema_sink: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        );
+        let violations = config.get_config_dependency_violations();
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("SkipprLake") && v.contains("Failed to decode")),
+            "{violations:?}"
+        );
+    }
+
+    #[test]
+    fn skipprlake_distinct_namespaces_are_allowed() {
+        let mut config = Config::new();
+        config.data_sinks = Some(
+            [
+                ("a".into(), skippr_lake_sink("cat", "bronze")),
+                ("b".into(), skippr_lake_sink("cat", "silver")),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let violations = config.get_config_dependency_violations();
+        assert!(
+            !violations
+                .iter()
+                .any(|v| v.contains("reuses catalog_table")),
+            "{violations:?}"
+        );
+    }
+
+    fn lake_entry(warehouse: &str, namespace: &str) -> PluginConfigEntry {
+        PluginConfigEntry {
+            plugin_name: skippr_iceberg_catalog::SkipprLakeConfig::PLUGIN_NAME.into(),
+            config: serde_json::json!({
+                "catalog_table": "cat",
+                "warehouse": warehouse,
+                "table_namespace": namespace
+            }),
+        }
+    }
+
+    #[test]
+    fn skipprlake_schema_sink_must_match_data_sink_config() {
+        let data = lake_entry("file:///tmp/a", "bronze");
+        let schema = lake_entry("file:///tmp/b", "bronze");
+        let err = Config::inherit_schema_install_config(&data, schema).unwrap_err();
+        assert!(err.contains("must be equal"), "{err}");
+    }
+
+    #[test]
+    fn skipprlake_schema_sink_equal_config_is_ok() {
+        let data = lake_entry("file:///tmp/a", "bronze");
+        let schema = lake_entry("file:///tmp/a", "bronze");
+        assert!(Config::inherit_schema_install_config(&data, schema).is_ok());
+    }
+
+    #[test]
+    fn skipprlake_schema_sink_other_plugin_is_rejected() {
+        let data = lake_entry("file:///tmp/a", "bronze");
+        let schema = PluginConfigEntry {
+            plugin_name: "Athena".into(),
+            config: serde_json::json!({}),
+        };
+        let err = Config::inherit_schema_install_config(&data, schema).unwrap_err();
+        assert!(err.contains("must pair"), "{err}");
+    }
+
+    fn athena_iceberg_entry(warehouse: &str, database: &str) -> PluginConfigEntry {
+        PluginConfigEntry {
+            plugin_name: crate::plugins::cdc::sink_capabilities::ATHENA_ICEBERG
+                .name
+                .into(),
+            config: serde_json::json!({
+                "warehouse": warehouse,
+                "glue_database_name": database,
+                "athena_workgroup_name": "primary",
+                "athena_results_s3_bucket": "results"
+            }),
+        }
+    }
+
+    #[test]
+    fn athena_iceberg_schema_sink_must_match_data_sink_config() {
+        let data = athena_iceberg_entry("s3://a/", "analytics");
+        let schema = athena_iceberg_entry("s3://b/", "analytics");
+        let err = Config::inherit_schema_install_config(&data, schema).unwrap_err();
+        assert!(err.contains("must be equal"), "{err}");
+    }
+
+    #[test]
+    fn athena_iceberg_schema_sink_equal_config_is_ok() {
+        let data = athena_iceberg_entry("s3://a/", "analytics");
+        let schema = athena_iceberg_entry("s3://a/", "analytics");
+        assert!(Config::inherit_schema_install_config(&data, schema).is_ok());
+    }
+
+    #[test]
+    fn athena_iceberg_schema_sink_glue_hive_is_rejected() {
+        let data = athena_iceberg_entry("s3://a/", "analytics");
+        let schema = PluginConfigEntry {
+            plugin_name: "Glue".into(),
+            config: serde_json::json!({}),
+        };
+        let err = Config::inherit_schema_install_config(&data, schema).unwrap_err();
+        assert!(err.contains("AthenaIceberg"), "{err}");
+        assert!(err.contains("Glue"), "{err}");
+    }
+
+    #[test]
+    fn athena_iceberg_pairing_treats_omitted_optional_as_equal() {
+        let data = PluginConfigEntry {
+            plugin_name: crate::plugins::cdc::sink_capabilities::ATHENA_ICEBERG
+                .name
+                .into(),
+            config: serde_json::json!({
+                "warehouse": "s3://a/",
+                "glue_database_name": "analytics",
+                "athena_workgroup_name": "primary",
+                "athena_results_s3_bucket": "results"
+            }),
+        };
+        let schema = PluginConfigEntry {
+            plugin_name: crate::plugins::cdc::sink_capabilities::ATHENA_ICEBERG
+                .name
+                .into(),
+            config: serde_json::json!({
+                "warehouse": "s3://a/",
+                "glue_database_name": "analytics",
+                "athena_workgroup_name": "primary",
+                "athena_results_s3_bucket": "results",
+                "region": null,
+                "catalog_id": null
+            }),
+        };
+        assert!(Config::inherit_schema_install_config(&data, schema).is_ok());
+    }
+
+    #[test]
+    fn skipprlake_deadletter_schema_sink_must_match_at_load() {
+        let config = serde_json::from_value::<Config>(json!({
+            "skippr": { "workspace": "ws" },
+            "pipelines": {
+                "orders": {
+                    "data_source": "data_sources.sample",
+                    "deadletter_sink": "deadletter_sinks.dl"
+                }
+            },
+            "data_sources": {
+                "sample": { "S3": { "s3_bucket": "b", "s3_prefix": "p" } }
+            },
+            "deadletter_sinks": {
+                "dl": {
+                    "SkipprLake": {
+                        "catalog_table": "cat",
+                        "warehouse": "file:///tmp/a",
+                        "table_namespace": "bronze"
+                    },
+                    "schema_sink": "schema_sinks.dl_schema"
+                }
+            },
+            "schema_sinks": {
+                "dl_schema": {
+                    "SkipprLake": {
+                        "catalog_table": "cat",
+                        "warehouse": "file:///tmp/b",
+                        "table_namespace": "bronze"
+                    }
+                }
+            }
+        }))
+        .unwrap()
+        .bind_pipeline("orders");
+        let violations = config.get_config_dependency_violations();
+        assert!(
+            violations.iter().any(|v| v.contains("must be equal")),
+            "{violations:?}"
+        );
+    }
+
+    #[test]
+    fn athena_iceberg_schema_sink_must_match_at_load() {
+        let config = serde_json::from_value::<Config>(json!({
+            "skippr": { "workspace": "ws" },
+            "pipelines": {
+                "orders": {
+                    "data_source": "data_sources.sample",
+                    "data_sink": "data_sinks.warehouse"
+                }
+            },
+            "data_sources": {
+                "sample": { "S3": { "s3_bucket": "b", "s3_prefix": "p" } }
+            },
+            "data_sinks": {
+                "warehouse": {
+                    "AthenaIceberg": {
+                        "warehouse": "s3://a/",
+                        "glue_database_name": "analytics",
+                        "athena_workgroup_name": "primary",
+                        "athena_results_s3_bucket": "results"
+                    },
+                    "schema_sink": "schema_sinks.catalog"
+                }
+            },
+            "schema_sinks": {
+                "catalog": {
+                    "Glue": {
+                        "glue_database_name": "analytics"
+                    }
+                }
+            }
+        }))
+        .unwrap()
+        .bind_pipeline("orders");
+        let violations = config.get_config_dependency_violations();
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("AthenaIceberg") && v.contains("Glue")),
+            "{violations:?}"
+        );
+    }
+
+    fn duckdb_entry(warehouse: &str, namespace: &str) -> PluginConfigEntry {
+        PluginConfigEntry {
+            plugin_name: crate::plugins::cdc::sink_capabilities::DUCKDB.name.into(),
+            config: serde_json::json!({
+                "warehouse": warehouse,
+                "table_namespace": namespace
+            }),
+        }
+    }
+
+    #[test]
+    fn duckdb_schema_sink_must_match_data_sink_config() {
+        let data = duckdb_entry("file:///tmp/a", "bronze");
+        let schema = duckdb_entry("file:///tmp/b", "bronze");
+        let err = Config::inherit_schema_install_config(&data, schema).unwrap_err();
+        assert!(err.contains("must be equal"), "{err}");
+    }
+
+    #[test]
+    fn duckdb_schema_sink_equal_config_is_ok() {
+        let data = duckdb_entry("file:///tmp/a", "bronze");
+        let schema = duckdb_entry("file:///tmp/a", "bronze");
+        assert!(Config::inherit_schema_install_config(&data, schema).is_ok());
+    }
+
+    #[test]
+    fn duckdb_schema_sink_equal_after_warehouse_trim() {
+        let data = duckdb_entry("file:///tmp/a", "bronze");
+        let schema = duckdb_entry("file:///tmp/a/", "bronze");
+        assert!(Config::inherit_schema_install_config(&data, schema).is_ok());
+        let padded = duckdb_entry("  file:///tmp/a  ", "bronze");
+        assert!(Config::inherit_schema_install_config(&data, padded).is_ok());
+    }
+
+    #[test]
+    fn duckdb_schema_sink_other_plugin_is_rejected() {
+        let data = duckdb_entry("file:///tmp/a", "bronze");
+        let schema = PluginConfigEntry {
+            plugin_name: "Athena".into(),
+            config: serde_json::json!({}),
+        };
+        let err = Config::inherit_schema_install_config(&data, schema).unwrap_err();
+        assert!(err.contains("Duckdb"), "{err}");
+        assert!(err.contains("Athena"), "{err}");
+    }
+
+    fn duckdb_sink(
+        warehouse: &str,
+        namespace: &str,
+    ) -> crate::helpers::plugin_config::DataSinkEntry {
+        crate::helpers::plugin_config::DataSinkEntry {
+            config: duckdb_entry(warehouse, namespace),
+            schema_sink: None,
+        }
+    }
+
+    #[test]
+    fn duckdb_duplicate_namespace_is_a_config_violation() {
+        let mut config = Config::new();
+        config.data_sinks = Some(
+            [
+                ("a".into(), duckdb_sink("file:///tmp/lake", "bronze")),
+                ("b".into(), duckdb_sink("file:///tmp/lake", "bronze")),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let violations = config.get_config_dependency_violations();
+        assert!(
+            violations.iter().any(|v| v.contains("reuses warehouse")
+                && v.contains("bronze")
+                && v.contains("file:///tmp/lake")),
+            "{violations:?}"
+        );
+    }
+
+    #[test]
+    fn duckdb_trailing_slash_warehouse_is_the_same_namespace() {
+        let mut config = Config::new();
+        config.data_sinks = Some(
+            [
+                ("a".into(), duckdb_sink("file:///tmp/lake", "bronze")),
+                ("b".into(), duckdb_sink("file:///tmp/lake/", "bronze")),
+            ]
+            .into_iter()
+            .collect(),
+        );
+        let violations = config.get_config_dependency_violations();
+        assert!(
+            violations.iter().any(|v| v.contains("reuses warehouse")),
+            "{violations:?}"
+        );
+    }
+
+    #[test]
+    fn duckdb_s3_warehouse_is_a_config_violation() {
+        let mut config = Config::new();
+        config.data_sinks = Some(
+            [("a".into(), duckdb_sink("s3://bucket/wh", "bronze"))]
+                .into_iter()
+                .collect(),
+        );
+        let violations = config.get_config_dependency_violations();
+        assert!(
+            violations.iter().any(|v| v.contains("file://")),
+            "{violations:?}"
+        );
+    }
+
+    #[test]
+    fn duckdb_schema_sink_must_match_at_load() {
+        let config = serde_json::from_value::<Config>(json!({
+            "skippr": { "workspace": "ws" },
+            "pipelines": {
+                "orders": {
+                    "data_source": "data_sources.sample",
+                    "data_sink": "data_sinks.warehouse"
+                }
+            },
+            "data_sources": {
+                "sample": { "S3": { "s3_bucket": "b", "s3_prefix": "p" } }
+            },
+            "data_sinks": {
+                "warehouse": {
+                    "Duckdb": {
+                        "warehouse": "file:///tmp/a",
+                        "table_namespace": "bronze"
+                    },
+                    "schema_sink": "schema_sinks.catalog"
+                }
+            },
+            "schema_sinks": {
+                "catalog": {
+                    "Glue": {
+                        "glue_database_name": "analytics"
+                    }
+                }
+            }
+        }))
+        .unwrap()
+        .bind_pipeline("orders");
+        let violations = config.get_config_dependency_violations();
+        assert!(
+            violations
+                .iter()
+                .any(|v| v.contains("Duckdb") && v.contains("Glue")),
+            "{violations:?}"
+        );
+    }
+
     #[test]
     fn schema_sync_worker_does_not_freeze_first_caller_config() {
         let src = include_str!("configuration.rs");
@@ -3238,6 +3900,76 @@ data_sinks:
     }
 
     #[test]
+    fn skippr_store_yaml_type_and_name() {
+        let config: Config = serde_yaml::from_str(
+            r#"
+skippr:
+  workspace: ws
+  store:
+    type: dynamodb
+    name: console-skipprd-offsets-prod
+pipelines: {}
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.configured_skippr_store().unwrap(),
+            Some(SkipprStoreKind::DynamoDb)
+        );
+        assert_eq!(
+            config.get_skippr_store_name(),
+            "console-skipprd-offsets-prod"
+        );
+    }
+
+    #[test]
+    #[serial]
+    fn skippr_store_reads_deprecated_offset_store_yaml() {
+        ENV_CACHE.write().clear();
+        std::env::remove_var("SKIPPR_STORE_TYPE");
+        std::env::remove_var("SKIPPR_OFFSET_STORE");
+        Config::set_evncache("SKIPPR_STORE_TYPE", "");
+        Config::set_evncache("SKIPPR_OFFSET_STORE", "");
+        let config: Config = serde_yaml::from_str(
+            r#"
+skippr:
+  workspace: ws
+  offset_store: cloud-tables
+  offset_dynamodb_table: old-table
+pipelines: {}
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.configured_skippr_store().unwrap(),
+            Some(SkipprStoreKind::CloudTables)
+        );
+        assert_eq!(config.get_skippr_store_name(), "old-table");
+    }
+
+    #[test]
+    fn skippr_store_yaml_wins_over_deprecated_offset_keys() {
+        let config: Config = serde_yaml::from_str(
+            r#"
+skippr:
+  workspace: ws
+  store:
+    type: dynamodb
+    name: new-table
+  offset_store: sled
+  offset_dynamodb_table: old-table
+pipelines: {}
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.configured_skippr_store().unwrap(),
+            Some(SkipprStoreKind::DynamoDb)
+        );
+        assert_eq!(config.get_skippr_store_name(), "new-table");
+    }
+
+    #[test]
     fn skipprd_el_storage_mode_uses_explicit_name() {
         let original_env = std::env::var("SKIPPRD_EL_STORAGE_MODE").ok();
         ENV_CACHE.write().clear();
@@ -3250,6 +3982,7 @@ data_sinks:
             skippr_s3_bucket: None,
             skipprd_el_storage_mode: Some(ElStorageMode::Local),
             wal_s3_bucket: None,
+            store: None,
             offset_store: None,
             offset_dynamodb_table: None,
         });
@@ -3292,6 +4025,7 @@ data_sinks:
                 skippr_s3_bucket: None,
                 skipprd_el_storage_mode: None,
                 wal_s3_bucket: None,
+                store: None,
                 offset_store: None,
                 offset_dynamodb_table: None,
             }),
@@ -3341,6 +4075,7 @@ data_sinks:
                 skippr_s3_bucket: None,
                 skipprd_el_storage_mode: None,
                 wal_s3_bucket: None,
+                store: None,
                 offset_store: None,
                 offset_dynamodb_table: None,
             }),
@@ -3723,7 +4458,7 @@ schema_sinks:
             .expect("data_sinks.lake");
         assert_eq!(
             lake.schema_sink.as_deref(),
-            Some("schema_sinks.iceberg_catalog")
+            Some("schema_sinks.lake_schema")
         );
     }
 

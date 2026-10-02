@@ -1,0 +1,19 @@
+[package]
+name = "skippr-plugin-schema-sink-athena-iceberg"
+version = "0.2.0"
+edition = "2021"
+
+[[bin]]
+name = "skippr-plugin-schema-sink-athena-iceberg"
+path = "src/main.rs"
+
+[dependencies]
+clap.workspace = true
+skippr-runtime-sdk.workspace = true
+tokio.workspace = true
+skippr-plugin-data-sink-athena-iceberg = { path = "../../data_sink/athena_iceberg" }
+
+[package.metadata.skippr-plugin]
+kind = "SchemaSink"
+plugin_name = "AthenaIceberg"
+supports_schema = true
