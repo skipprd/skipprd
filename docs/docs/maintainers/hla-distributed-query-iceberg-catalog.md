@@ -34,7 +34,7 @@ clustered  local WAL via the same PipelineDurableStore + ClusteredWalStore, sync
 
 `DiskWalStore` does not exist. Disk and clustered share one local-disk writer. Disk still starts no replica, gossip, or cluster membership services.
 
-`WAL_STORAGE=clustered` is the only cluster-mode switch. It reuses the existing `SKIPPR_OFFSET_DYNAMODB_TABLE` for offsets, leases, and membership. Product env (not impl knobs): `SKIPPR_CLUSTER_ID`, `SKIPPR_CLUSTER_GOSSIP_KEY`, cluster TLS PEM contents, and Flight session tenant/workspace. No lease, quorum, TTL, bind-address, or peer-list knobs. Iceberg `catalog.type: skippr` requires a separate customer-created `catalog.table`.
+`WAL_STORAGE=clustered` is the only cluster-mode switch. It reuses SkipprStore (`skippr.store.name` / `SKIPPR_STORE_NAME`) for offsets, leases, membership, and (optionally) SkipprLake catalog pointers. Product env (not impl knobs): `SKIPPR_CLUSTER_ID`, `SKIPPR_CLUSTER_GOSSIP_KEY`, cluster TLS PEM contents, and Flight session tenant/workspace. No lease, quorum, TTL, bind-address, or peer-list knobs. `SkipprLake.catalog_table` MAY be the SkipprStore table.
 
 Cluster constants:
 
@@ -51,8 +51,8 @@ Unknown `WAL_STORAGE` values fail startup. `clustered` requires `SKIPPR_OFFSET_S
 
 | Concern | OSS / HLA harness | Skippr Cloud |
 |---------|-------------------|--------------|
-| Offsets, leases, membership | DynamoDB table `SKIPPR_OFFSET_DYNAMODB_TABLE` (DynamoDB Local in HLA) | Cloud Tables (`SKIPPR_OFFSET_STORE=cloud-tables`, same table name) |
-| Iceberg catalog pointers | Separate DynamoDB `catalog.table` | Separate Cloud Tables table (MUST NOT equal the offset table) |
+| Offsets, leases, membership | DynamoDB table `SKIPPR_STORE_NAME` (DynamoDB Local in HLA) | Cloud Tables (`SKIPPR_STORE_TYPE=cloud-tables`, same table name) |
+| Iceberg catalog pointers | `SkipprLake.catalog_table` (MAY be SkipprStore) | Same table is allowed (PK/SK prefixes do not collide) |
 | Iceberg warehouse / parquet | `file://` or S3 | **objects** / R2 |
 | Replica RPC, Flight SQL, Ballista gRPC | **Always mTLS** (HLA mints a throwaway CA; SAN `skippr-cluster`) | Same PEMs; mesh only |
 | Gossip | Authenticated Chitchat (WU-5.1); `SKIPPR_CLUSTER_GOSSIP_KEY` required | Same; no tenant-string fallback |
@@ -408,7 +408,7 @@ In-flight Iceberg `Sent` apply uses that installed document. A process-local `sc
 
 ## Iceberg DynamoDB catalog
 
-YAML `catalog.type` is `skippr` (Skippr-managed Iceberg catalog). DynamoDB is the storage implementation, not the product name. Customers create and name two tables: `SKIPPR_OFFSET_DYNAMODB_TABLE` (offsets, leases, membership) and Iceberg `catalog.table` (catalog pointers). Those are distinct product tables. HLA e2e creates two DynamoDB Local tables (`skippr-hla-e2e-offsets` and `skippr-hla-e2e-catalog`). Catalog pointer keys remain `catalog#{warehouse_hash}` on the catalog table.
+SkipprLake is the Skippr-managed Iceberg catalog. DynamoDB is the storage implementation, not the product name. Customers name SkipprStore (`skippr.store.name`) for offsets, leases, and membership. SkipprLake `catalog_table` MAY be that same table: catalog pointer keys are `catalog#{warehouse_hash}` and do not collide with offset/lease SK prefixes. HLA e2e may still create two DynamoDB Local tables (`skippr-hla-e2e-offsets` and `skippr-hla-e2e-catalog`). Isolation between SkipprLake sinks sharing a warehouse is `table_namespace`, not a table name prefix.
 
 Writer path uses an in-process implementation of the complete `iceberg::Catalog` trait. A REST facade is not part of v1.
 
@@ -478,7 +478,7 @@ Locked here so other HLA docs do not drift:
 
 ### UNION
 
-**Shipped:** `IcebergWalUnionProvider::scan` builds a DataFusion `UnionExec` of the Iceberg plan and the live WAL plan, with `GlobalLimitExec` on the union (not eager collect with Iceberg-only limit). UNION is a dumb concat: it MUST NOT DISTINCT, wait, or pin. Catalog listing keeps only prefix-matching tables (`catalog_table_to_namespace`); an empty second pipeline MUST NOT fail the first.
+**Shipped:** `IcebergWalUnionProvider::scan` builds a DataFusion `UnionExec` of the Iceberg plan and the live WAL plan, with `GlobalLimitExec` on the union (not eager collect with Iceberg-only limit). UNION is a dumb concat: it MUST NOT DISTINCT, wait, or pin. Catalog listing returns tables in that pipeline's Iceberg namespace (`catalog_table_to_namespace` is the table name); an empty second pipeline MUST NOT fail the first.
 
 For each table:
 

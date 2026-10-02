@@ -13,7 +13,7 @@ skipprd stays JWT-ignorant. Fully functional on `skipprd sync` + `sde query` (an
 
 - Compile-time invariants first: newtypes, enums, exhaustive matches, typed errors.
 - Host MUST NOT depend on `plugins/data_source/otlp`.
-- Do not add `plugins/data_sink/otel`. Iceberg is the dest.
+- Do not add `plugins/data_sink/otel`. SkipprLake is the dest.
 - OTLP plugin MUST NOT call Iceberg `Catalog` / `DataSink` APIs. Lake writes are host WAL via existing Arrow IPC (`ingest_runtime_batches_into_core`).
 - UDF code is keyed by `PipelineConfigView` / `register_namespace_view` — never `Config::get_pipeline_name()` or `PIPELINE_NAME`.
 - No env/config knobs for payload ceilings, series caps, lookback, or timeouts (code constants).
@@ -24,7 +24,7 @@ skipprd stays JWT-ignorant. Fully functional on `skipprd sync` + `sde query` (an
 
 ## Locked decisions
 
-1. Native OTLP **DataSource** plugin (`plugin_name = "Otlp"`), HTTP `:4318` and gRPC `:4317`. Collector is the agent. Dest is existing Iceberg DataSink.
+1. Native OTLP **DataSource** plugin (`plugin_name = "Otlp"`), HTTP `:4318` and gRPC `:4317`. Collector is the agent. Dest is existing SkipprLake DataSink.
 2. Three signal pipelines: `otel-traces`, `otel-logs`, `otel-metrics`. SQL catalog schema = pipeline name (quote hyphens).
 3. **SQL + UDFs only.** No PromQL. No skipprd o11y HTTP.
 4. Iceberg partition = **identity** on bronze `hour` + `service_name` + `tenant_id`. No Iceberg `hour()` transform.
@@ -54,7 +54,7 @@ plugins/data_source/otlp/          # DataSource only
   src/{lib,main,config,bronze,decode,arrow,http,grpc,sync}.rs
   proto/                           # OTLP protos for tonic-build
   tests/fixtures/
-plugins/data_sink/iceberg/         # A.19/A.20 partition spec + write values
+plugins/data_sink/skipprlake/      # A.19/A.20 partition spec + write values
 src/sqlrt/session.rs
 src/sqlrt/schema_seed.rs
 src/sqlrt/udfs/

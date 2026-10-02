@@ -26,7 +26,7 @@ Shipped: every clustered `skipprd` process serves Arrow Flight SQL 58.3 on membe
    There is no public custom Flight ticket type, no `wal_scan` RPC, and no client-supplied head cut. `exclude_segment_ids` is the Iceberg snapshot property `skippr.wal-segment-ids` (semicolon- or comma-joined). The replica ignores unknown ids.
 4. Flight SQL is read-only. INSERT, UPDATE, DELETE, CREATE, DROP, ALTER, MERGE, and CommandStatementUpdate MUST fail closed.
 5. `live_wal_scan` tenant/workspace MUST equal the Flight session `TenantScope` (`Authorization: Basic {tenant}/{workspace}` on **every** RPC). Foreign identity is a typed rejection, not an empty scan. Unknown pipeline is a typed rejection. Cluster membership is **not** a tenant.
-6. Iceberg catalog listing for UNION registration MUST keep only tables whose names match that pipeline sink's `table_prefix` (see `catalog_table_to_namespace`). A pipeline with no catalog tables yet MUST NOT fail registration of another pipeline in the same session.
+6. SkipprLake catalog listing for UNION registration lists tables in that pipeline's `table_namespace` (see `catalog_table_to_namespace`). Isolation is the Iceberg namespace, not a table name prefix. A pipeline with no catalog tables yet MUST NOT fail registration of another pipeline in the same session.
 7. UNION is a dumb concat of Iceberg snapshot + live WAL. It MUST NOT DISTINCT, wait, or pin. Missing WAL files skip that ordinal. Unreachable WAL is Iceberg-only (complete Iceberg result, not a partial UNION).
 8. Ballista 53 MUST execute that UNION **before** aggregate, join, sort, or limit that is not pushed into a scan. Iceberg parquet MAY run on any executor in the elected cluster (shared warehouse; `IcebergScanExec` reloads from `catalog_json`). Live WAL is always a one-partition `FlightSqlExec` DoGet to the advertised `flight_addr` of the picker winner (best-effort max `committed_index`, including when the winner is this process). `WalTableProvider` / `WalScanExec` MUST NOT enter a Ballista plan (`paths_root` is owner-local). `WalScanExec` runs only inside the owner's `live_wal_scan` DoGet.
 9. Every clustered `skipprd` node is a query node: in-process Ballista scheduler+executor bind first, then Flight SQL on `flight_addr`, then gossip. Executors and `query_context()` connect to the gossip-elected scheduler (minimum `NodeId` among ads that published `scheduler`, including self; replica `ready` is not a gate). Clustered SELECT fails closed if Ballista is not connected. `clustered query` opens Flight SQL on any ready `flight_addr`. The serving node plans UNION. `SK=query-scheduler#{generation}` is **not** used.
@@ -62,7 +62,7 @@ Shipped: every clustered `skipprd` process serves Arrow Flight SQL 58.3 on membe
 | Live ordinals | `src/query_flight/live_wal.rs` `select_live_ordinals` | Snapshot segments ∪ suffix `CommitSegment`, minus reclaim, minus Iceberg named ids; skip unreadable ordinals. Ledger-complete ordinals stay visible until Iceberg lists the segment. |
 | In-process UNION | `IcebergWalUnionProvider` | `UnionExec` + `GlobalLimitExec` on the union; WAL is always `FlightSqlExec` to the picker winner's advertised `flight_addr` |
 | Client | `Session.query` → `clustered_query_collect` | Flight SQL to ready `flight_addr`s in `node_id` contact order; Iceberg-only is inside the serving node; never takes an ingest lease |
-| Catalog prefix | `catalog_table_to_namespace` | Shared Dynamo namespace, per-sink prefix |
+| Catalog listing | `catalog_table_to_namespace` | Iceberg table name is identity; isolation is `table_namespace` |
 
 Move `select_live_ordinals` with the Flight SQL module. Do not fork a second selector.
 
@@ -102,7 +102,7 @@ Implement Arrow Flight SQL 58.3 read-only commands:
 | Command | Behavior |
 |---|---|
 | Handshake / GetFlightInfo / DoGet / metadata | **Require** `Authorization: Basic {tenant}/{workspace}`. Missing header is `Unauthenticated`. Scope is the session `TenantScope`, not `ClusterId`. |
-| GetSqlInfo / GetCatalogs / GetSchemas / GetTables / GetTableTypes | Catalogs/schemas/tables for Iceberg pipelines **in the session tenant/workspace only**, prefix-filtered. |
+| GetSqlInfo / GetCatalogs / GetSchemas / GetTables / GetTableTypes | Catalogs/schemas/tables for Iceberg pipelines **in the session tenant/workspace only**, listed in that pipeline's `table_namespace`. |
 | CommandStatementQuery | SELECT (and `live_wal_scan` TVF) under that scope. |
 | CommandStatementUpdate | Reject. |
 | CreatePreparedStatement / ClosePreparedStatement | Opaque handle is the statement SQL. It does **not** encode a live ordinal snapshot. Tenant is re-checked at execute from request metadata. |
@@ -141,7 +141,7 @@ The UNION WAL child is always that `FlightSqlExec`, including when the picker wi
 
 ### Tests (WU-7.3)
 
-- Flight SQL metadata lists prefix-matching Iceberg tables only.
+- Flight SQL metadata lists Iceberg tables in that pipeline's `table_namespace` only.
 - SELECT against Iceberg∪WAL unique ids (existing e2e assertion, new transport).
 - `live_wal_scan` foreign tenant rejected; unknown pipeline rejected; DDL/update rejected.
 - Prepared handle DoGet re-selects ordinals (a reclaim between GetFlightInfo and DoGet skips the file, does not fail closed unless every path fails).
@@ -252,7 +252,7 @@ message FlightSqlExecNode {
 Product SQL stays `sde query` / `skipprd query --sql`. Clustered mode:
 
 - User writes `SELECT ... FROM <iceberg namespace>`.
-- The session registers UNION views per pipeline namespace (prefix-stripped catalog names).
+- The session registers UNION views per pipeline namespace (Iceberg table names; isolation is `table_namespace`).
 - `live_wal_scan` is internal to the WAL leaf (sole-FROM statement). It is not a documented customer table.
 
 `STREAM ... FROM ...` (single-process WAL tail) is unchanged and is not Ballista.

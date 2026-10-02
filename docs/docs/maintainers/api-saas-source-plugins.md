@@ -395,7 +395,7 @@ so the compactor and object layout align with contract partition keys. Missing `
 
 Ad platforms and analytics APIs **revise** past days (conversions, spend, etc.). Use `write_policy: replace_partition`, `partition_key` on the report date, and `refresh_window` / `lookback_days` on the source. Checkpoints record **extraction progress**, not “downstream is correct forever.”
 
-Pair with Athena or Iceberg sinks that declare `supports_replace_partition` in the manifest; append-only sinks should fail validation at startup.
+Pair with Athena, AthenaIceberg, or SkipprLake sinks that declare `supports_replace_partition` in the manifest; append-only sinks should fail validation at startup.
 
 ### Ship CLI, lineage, and plugin name mapping together
 
@@ -436,7 +436,7 @@ Use these for end-to-end examples only; new connectors should follow the generic
 | Source | `plugins/data_source/bing_webmaster_tools/` | Bing Webmaster read APIs (`GetQueryStats`, `GetRankAndTrafficStats`, `GetPageStats`, `GetCrawlStats`); client-side date filtering; `replace_partition` on `date`; fixtures via `SKIPPR_BING_WEBMASTER_TOOLS_FIXTURE_DIR`. See [Bing Webmaster Tools plugin](./bing-webmaster-tools-plugin.md). |
 | Source | `plugins/data_source/google_search_console/` | GSC Search Analytics daily grains; same mutable-report pattern as Bing. See [Google Search Console plugin](./google-search-console-plugin.md). |
 | Data sink | `plugins/data_sink/athena/` | S3 + Glue; contract-driven partition delete; rejects `merge_by_key` |
-| Data sink | `plugins/data_sink/iceberg/` | Native merge / replace partition / replace table |
+| Data sink | `plugins/data_sink/skipprlake/` | Native merge / replace partition / replace table |
 | Schema sink | `plugins/schema_sink/glue/` | Glue DDL; merges `partition_key` into table on create (shared Athena helpers) |
 
 ---
