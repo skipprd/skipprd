@@ -9,7 +9,7 @@ Skipprd is not a warehouse product. Warehouses you already use (Athena, Snowflak
 ## How Skipprd uses it
 
 1. **ELT** ingest writes a durable WAL, then compact to Iceberg Parquet in object storage.
-2. **Skipprd catalog** (`catalog.type: skippr`) holds Iceberg table pointers. Self-hosted clustered runs use a DynamoDB catalog table.
+2. **SkipprLake** (`catalog_table`) holds Iceberg table pointers. Self-hosted clustered runs use a DynamoDB catalog table.
 3. Clustered query unions the Iceberg snapshot with live WAL over Flight SQL. That path is documented in [maintainer architecture](../maintainers/hla-distributed-query-iceberg-catalog.md).
 
-See also [How Skipprd Works](how-it-works.md) and the [Iceberg output](../connectors/outputs/iceberg.md).
+See also [How Skipprd Works](how-it-works.md) and the [SkipprLake output](../connectors/outputs/skipprlake.md).

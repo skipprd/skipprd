@@ -29,8 +29,8 @@ Optional `version:` on a sink or schema block pins that connector to a specific 
 
 Connector reference:
 
-- [Data sinks](../connectors/index.md#data-sinks) — Athena, Snowflake, Iceberg, S3, and others
-- [Schema sinks](../connectors/schema_sinks/glue.md) — Glue, Iceberg catalog DDL
+- [Data sinks](../connectors/index.md#data-sinks) — Athena, AthenaIceberg, Duckdb, SkipprLake, Snowflake, S3, and others
+- [Schema sinks](../connectors/index.md#schema-sinks) — Glue, AthenaIceberg, Duckdb, SkipprLake
 - [Connector index](../connectors/index.md) — full list
 
 ## Athena output configuration

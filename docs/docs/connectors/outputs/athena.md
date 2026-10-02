@@ -27,6 +27,8 @@ data_sinks:
 
 `s3_bucket`, `s3_prefix`, `glue_database_name`, `athena_workgroup_name`, and `athena_results_s3_bucket` are ingest fields. `region`, `catalog`, `max_concurrency`, and `discovery_cache_ttl_secs` are optional query/model keys; ingest ignores them.
 
+`skipprd query` on an Athena pipeline serves live WAL only. Query warehouse Parquet through Athena (or SDE `AthenaProvider` / dbt-athena).
+
 `athena_results_s3_bucket` is a **bucket name**, not an `s3://` URI.
 
 Environment equivalents:

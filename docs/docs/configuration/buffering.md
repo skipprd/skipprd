@@ -35,8 +35,8 @@ The Write-Ahead Log provides durability and crash recovery. Every record passes 
 | **Values** | `disk`, `s3`, `clustered` |
 
 - `disk` — WAL segments are stored in `DATA_DIR`. Fast, but requires the same disk on restart. Single-node ingest acquires a pipeline writer lease; there is no peer quorum.
-- `s3` — WAL segments are stored in `SKIPPR_WAL_S3_BUCKET` when set, otherwise `SKIPPR_S3_BUCKET`. No local disk dependency. Enables fully stateless compute. Ingest acquires a pipeline writer lease; there is no peer quorum. See [DynamoDB offset store](offset-store-dynamodb.md) for Lambda resume with `SKIPPR_OFFSET_STORE=dynamodb`.
-- `clustered` — local disk WAL plus synchronous peer replication (two durable copies), a clock-free lease, and offsets/checkpoints in DynamoDB (`SKIPPR_OFFSET_STORE=dynamodb`, the clustered default) or Skippr Cloud Tables (`SKIPPR_OFFSET_STORE=cloud-tables`). Both use `SKIPPR_OFFSET_DYNAMODB_TABLE` as the table name. `sync --once` and `discover` are rejected; `sync` runs the long-lived scheduler; `query` is query-only and never takes an ingest lease. Automatic failover with continued writes needs three live processes.
+- `s3` — WAL segments are stored in `SKIPPR_WAL_S3_BUCKET` when set, otherwise `SKIPPR_S3_BUCKET`. No local disk dependency. Enables fully stateless compute. Ingest acquires a pipeline writer lease; there is no peer quorum. See [SkipprStore](skippr-store.md) for Lambda resume with `SKIPPR_STORE_TYPE=dynamodb`.
+- `clustered` — local disk WAL plus synchronous peer replication (two durable copies), a clock-free lease, and offsets/checkpoints in DynamoDB (`SKIPPR_STORE_TYPE=dynamodb`, the clustered default) or Skippr Cloud Tables (`SKIPPR_STORE_TYPE=cloud-tables`). Both use `SKIPPR_STORE_NAME` as the table name. `sync --once` and `discover` are rejected; `sync` runs the long-lived scheduler; `query` is query-only and never takes an ingest lease. Automatic failover with continued writes needs three live processes.
 
 Unknown `WAL_STORAGE` values fail startup. There is no YAML `skippr.wal_storage` field.
 

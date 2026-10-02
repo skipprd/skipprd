@@ -95,26 +95,25 @@ s.connect().data_source(
 ).name("http")
 ```
 
-Iceberg `catalog.object_store` is nested. `type="r2"` takes `${OBJECTS_*}` secrets, never plaintext:
+SkipprLake `object_store` is nested. `type="r2"` takes `${OBJECTS_*}` secrets, never plaintext:
 
 ```python
 s.connect().data_sink(
-    DataSink.Iceberg,
-    skippr.DataSinkIceberg(
-        catalog=skippr.DataSinkIcebergIcebergCatalogConfig(
-            type="skippr",
-            table="my-iceberg-catalog",
-            warehouse="s3://my-iceberg-warehouse/",
-            object_store=skippr.DataSinkIcebergWarehouseObjectStore(
-                type="r2",
-                endpoint="${OBJECTS_S3_ENDPOINT}",
-                access_key_id="${OBJECTS_ACCESS_KEY_ID}",
-                secret_access_key="${OBJECTS_SECRET_ACCESS_KEY}",
-            ),
+    DataSink.SkipprLake,
+    skippr.DataSinkSkipprLake(
+        warehouse="s3://my-iceberg-warehouse/",
+        catalog_table="my-iceberg-catalog",
+        object_store=skippr.DataSinkSkipprLakeWarehouseObjectStore(
+            type="r2",
+            endpoint="${OBJECTS_S3_ENDPOINT}",
+            access_key_id="${OBJECTS_ACCESS_KEY_ID}",
+            secret_access_key="${OBJECTS_SECRET_ACCESS_KEY}",
         ),
     ),
 ).name("lake")
 ```
+
+`DataSink.AthenaIceberg` writes Iceberg to Glue. `DataSink.Duckdb` writes Iceberg on `file://` (skipprd output only; SDE does not model it).
 
 See [`skipprd connect`](/cli/connect).
 
