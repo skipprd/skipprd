@@ -1,11 +1,13 @@
 # query
 
-Run engine SQL against SkipprLake Iceberg tables and the live WAL, manage
-pipelines and schemas, and stream from the WAL.
+Run engine SQL against Iceberg tables skipprd wrote (SkipprLake, AthenaIceberg,
+Duckdb). The **lake contract** is Iceberg `namespace.table` (`bronze.shop`).
+`pipeline.namespace` (`shop.shop`) is the local Iceberg ∪ WAL view of ingest
+on the sync host. Manage pipelines and schemas, and stream from the WAL.
 
-Athena, AthenaIceberg, and Duckdb sinks are not queried by this command;
-those warehouses use their own SQL. Use `sde query` for warehouse SQL through
-the modeling stack.
+Hive Athena, Snowflake, and other non-Iceberg sinks are live WAL only. Athena
+SQL and DuckDB `iceberg_scan` remain available for those warehouses' own
+clients. Use `sde query` for modeled warehouse SQL.
 
 ## Usage
 

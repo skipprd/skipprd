@@ -53,7 +53,7 @@ use crate::{Error, ErrorKind, Result};
 pub trait Catalog: Debug + Sync + Send {
     /// List namespaces inside the catalog.
     async fn list_namespaces(&self, parent: Option<&NamespaceIdent>)
-    -> Result<Vec<NamespaceIdent>>;
+        -> Result<Vec<NamespaceIdent>>;
 
     /// Create a new namespace inside the catalog.
     async fn create_namespace(
@@ -344,6 +344,19 @@ pub struct TableCommit {
 }
 
 impl TableCommit {
+    /// Build a commit from a REST `CommitTableRequest`.
+    pub fn from_rest(
+        ident: TableIdent,
+        requirements: Vec<TableRequirement>,
+        updates: Vec<TableUpdate>,
+    ) -> Self {
+        Self {
+            ident,
+            requirements,
+            updates,
+        }
+    }
+
     /// Return the table identifier.
     pub fn identifier(&self) -> &TableIdent {
         &self.ident
@@ -803,7 +816,9 @@ pub(super) mod _serde {
     pub(super) fn deserialize_snapshot<'de, D>(
         deserializer: D,
     ) -> std::result::Result<Snapshot, D::Error>
-    where D: Deserializer<'de> {
+    where
+        D: Deserializer<'de>,
+    {
         let buf = CatalogSnapshot::deserialize(deserializer)?;
         Ok(buf.into())
     }
@@ -1024,7 +1039,9 @@ mod _serde_set_statistics {
     }
 
     pub fn deserialize<'de, D>(deserializer: D) -> std::result::Result<StatisticsFile, D::Error>
-    where D: Deserializer<'de> {
+    where
+        D: Deserializer<'de>,
+    {
         let SetStatistics {
             snapshot_id,
             statistics,
@@ -1050,19 +1067,19 @@ mod tests {
     use std::io::BufReader;
 
     use base64::Engine as _;
-    use serde::Serialize;
     use serde::de::DeserializeOwned;
+    use serde::Serialize;
     use uuid::uuid;
 
     use super::ViewUpdate;
     use crate::io::FileIO;
     use crate::spec::{
-        BlobMetadata, EncryptedKey, FormatVersion, MAIN_BRANCH, NestedField, NullOrder, Operation,
+        BlobMetadata, EncryptedKey, FormatVersion, NestedField, NullOrder, Operation,
         PartitionStatisticsFile, PrimitiveType, Schema, Snapshot, SnapshotReference,
         SnapshotRetention, SortDirection, SortField, SortOrder, SqlViewRepresentation,
         StatisticsFile, Summary, TableMetadata, TableMetadataBuilder, Transform, Type,
         UnboundPartitionSpec, ViewFormatVersion, ViewRepresentation, ViewRepresentations,
-        ViewVersion,
+        ViewVersion, MAIN_BRANCH,
     };
     use crate::table::Table;
     use crate::{
@@ -2422,12 +2439,10 @@ mod tests {
         );
 
         // metadata version should be bumped
-        assert!(
-            updated_table
-                .metadata_location()
-                .unwrap()
-                .starts_with("s3://bucket/test/location/metadata/00001-")
-        );
+        assert!(updated_table
+            .metadata_location()
+            .unwrap()
+            .starts_with("s3://bucket/test/location/metadata/00001-"));
 
         assert_eq!(
             updated_table.metadata().location,

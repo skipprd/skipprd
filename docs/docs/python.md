@@ -145,7 +145,7 @@ s.discover()
 
 ## df and query
 
-Same views as `skipprd query`. Live WAL, unioned with the Skippr datalake when that pipeline has one. No sink and no lake → WAL only.
+Same views as `skipprd query`. Live WAL, unioned with Iceberg when the pipeline sink is SkipprLake, AthenaIceberg, or Duckdb. No Iceberg sink → WAL only.
 
 ```python
 s.df()                          # every namespace for this pipeline

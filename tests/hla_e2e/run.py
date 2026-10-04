@@ -78,6 +78,9 @@ from botocore.exceptions import ClientError
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HARNESS_DIR = Path(__file__).resolve().parent
+sys.path.insert(0, str(HARNESS_DIR.parent))
+from e2e_support import dynamodb_local as ddb_local
+from e2e_support import flight_sql
 TESTDATA = HARNESS_DIR / "testdata" / "events"
 PIPELINE = "hla_events"
 OFFSET_TABLE = "skippr-hla-e2e-offsets"
@@ -92,10 +95,9 @@ CURRENT_PROTOCOL = 2
 DDB_PORT = 8000
 DDB_ENDPOINT = f"http://127.0.0.1:{DDB_PORT}"
 CONTAINER = "skippr-hla-e2e-ddb"
-DDB_LOCAL_URL = "https://d1ni2b6xgvw0s0.cloudfront.net/v2.x/dynamodb_local_latest.tar.gz"
-DDB_LOCAL_DIR = REPO_ROOT / ".skippr" / "dynamodb-local"
-HLA_VENV = REPO_ROOT / ".skippr" / "hla-venv"
-DDB_JAVA: subprocess.Popen[str] | None = None
+DDB_LOCAL_URL = ddb_local.DDB_LOCAL_URL
+DDB_LOCAL_DIR = ddb_local.DDB_LOCAL_DIR
+HLA_VENV = flight_sql.HLA_VENV
 LEASE_STEAL_SECONDS = 35
 PROMOTE_WAIT_SECONDS = LEASE_STEAL_SECONDS + 180
 # WAL/Iceberg namespace is the pipeline name (`hla_events`), not the File path leaf.
@@ -277,8 +279,6 @@ def skipprd_bin() -> Path:
 
 def write_skippr_yml(path: Path, events_dir: Path, warehouse: Path) -> None:
     warehouse_uri = f"file://{warehouse}"
-    # Local file:// warehouse omits catalog.object_store (S3 default / local FS).
-    # R2 is catalog.object_store type: r2 + ${OBJECTS_*}; not this HLA fixture.
     path.write_text(
         f"""skippr:
   workspace: {WORKSPACE}
@@ -309,6 +309,8 @@ data_sinks:
       warehouse: {warehouse_uri}
       catalog_table: {CATALOG_TABLE}
       region: us-east-1
+      object_store:
+        type: file
     schema_sink: schema_sinks.iceberg_local
 
 schema_sinks:
@@ -318,6 +320,8 @@ schema_sinks:
       warehouse: {warehouse_uri}
       catalog_table: {CATALOG_TABLE}
       region: us-east-1
+      object_store:
+        type: file
 """,
         encoding="utf-8",
     )
@@ -401,156 +405,28 @@ def stage_plugins(config_path: Path) -> str:
 
 
 def java_bin() -> str:
-    candidates = [
-        Path("/opt/homebrew/opt/openjdk@21/bin/java"),
-        Path("/opt/homebrew/opt/openjdk@17/bin/java"),
-        Path("/usr/local/opt/openjdk@21/bin/java"),
-        Path("/usr/local/opt/openjdk@17/bin/java"),
-    ]
-    if os.environ.get("JAVA_HOME"):
-        candidates.append(Path(os.environ["JAVA_HOME"]) / "bin" / "java")
-    which = shutil.which("java")
-    if which:
-        candidates.append(Path(which))
-    for candidate in candidates:
-        if not candidate.is_file():
-            continue
-        version = subprocess.run(
-            [str(candidate), "-version"],
-            capture_output=True,
-            text=True,
-        )
-        text = version.stderr + version.stdout
-        if any(
-            token in text
-            for token in (
-                'version "17',
-                'version "18',
-                'version "19',
-                'version "20',
-                'version "21',
-                'version "22',
-                'version "23',
-                'version "24',
-                'version "25',
-            )
-        ):
-            return str(candidate)
-    raise HarnessError("DynamoDB Local requires Java 17+")
+    return ddb_local.java_bin()
 
 
 def ensure_dynamodb_local_jar() -> Path:
-    jar = DDB_LOCAL_DIR / "DynamoDBLocal.jar"
-    if jar.is_file():
-        return jar
-    DDB_LOCAL_DIR.mkdir(parents=True, exist_ok=True)
-    archive = DDB_LOCAL_DIR / "dynamodb_local_latest.tar.gz"
-    log(f"downloading DynamoDB Local to {archive}")
-    urllib.request.urlretrieve(DDB_LOCAL_URL, archive)
-    with tarfile.open(archive, "r:gz") as tar:
-        tar.extractall(DDB_LOCAL_DIR)
-    if not jar.is_file():
-        raise HarnessError(f"DynamoDB Local jar missing after extract: {jar}")
-    return jar
+    return ddb_local.ensure_jar()
 
 
 def wait_dynamodb_client() -> Any:
-    client = boto3.client(
-        "dynamodb",
-        endpoint_url=DDB_ENDPOINT,
-        region_name="us-east-1",
-        aws_access_key_id="local",
-        aws_secret_access_key="local",
-        config=BotoConfig(retries={"max_attempts": 8}),
-    )
-    deadline = time.time() + 30
-    while time.time() < deadline:
-        try:
-            client.list_tables()
-            return client
-        except Exception:
-            time.sleep(0.5)
-    raise HarnessError("DynamoDB Local did not become ready")
+    return ddb_local.wait_client(DDB_ENDPOINT)
 
 
 def start_dynamodb() -> Any:
-    global DDB_JAVA
     log("starting DynamoDB Local")
-    stop_dynamodb()
-    time.sleep(0.5)
-    docker = shutil.which("docker")
-    if docker is not None:
-        probe = subprocess.run(
-            [docker, "info"],
-            capture_output=True,
-            text=True,
-        )
-        if probe.returncode == 0:
-            subprocess.run([docker, "rm", "-f", CONTAINER], check=False, capture_output=True)
-            subprocess.run(
-                [
-                    docker,
-                    "run",
-                    "-d",
-                    "--name",
-                    CONTAINER,
-                    "-p",
-                    f"{DDB_PORT}:8000",
-                    "amazon/dynamodb-local",
-                    "-jar",
-                    "DynamoDBLocal.jar",
-                    "-sharedDb",
-                    "-inMemory",
-                ],
-                check=True,
-            )
-            client = wait_dynamodb_client()
-            ensure_tables(client)
-            return client
-        log("Docker daemon unavailable; using Java DynamoDB Local")
-    jar = ensure_dynamodb_local_jar()
-    log_path = DDB_LOCAL_DIR / "local.log"
-    log_file = log_path.open("w", encoding="utf-8")
-    DDB_JAVA = subprocess.Popen(
-        [
-            java_bin(),
-            f"-Djava.library.path={jar.parent / 'DynamoDBLocal_lib'}",
-            "-jar",
-            str(jar),
-            "-sharedDb",
-            "-inMemory",
-            "-port",
-            str(DDB_PORT),
-        ],
-        cwd=jar.parent,
-        stdout=log_file,
-        stderr=subprocess.STDOUT,
-        text=True,
+    return ddb_local.start(
+        port=DDB_PORT,
+        tables=[OFFSET_TABLE, CATALOG_TABLE],
+        container=CONTAINER,
     )
-    client = wait_dynamodb_client()
-    ensure_tables(client)
-    return client
 
 
 def ensure_pk_sk_table(client: Any, name: str) -> None:
-    try:
-        client.delete_table(TableName=name)
-        client.get_waiter("table_not_exists").wait(TableName=name)
-    except ClientError:
-        pass
-    client.create_table(
-        TableName=name,
-        AttributeDefinitions=[
-            {"AttributeName": "PK", "AttributeType": "S"},
-            {"AttributeName": "SK", "AttributeType": "S"},
-        ],
-        KeySchema=[
-            {"AttributeName": "PK", "KeyType": "HASH"},
-            {"AttributeName": "SK", "KeyType": "RANGE"},
-        ],
-        BillingMode="PAY_PER_REQUEST",
-    )
-    client.get_waiter("table_exists").wait(TableName=name)
+    ddb_local.ensure_pk_sk_table(client, name)
 
 
 def ensure_tables(client: Any) -> None:
@@ -559,17 +435,7 @@ def ensure_tables(client: Any) -> None:
 
 
 def stop_dynamodb() -> None:
-    global DDB_JAVA
-    if DDB_JAVA is not None and DDB_JAVA.poll() is None:
-        DDB_JAVA.send_signal(signal.SIGTERM)
-        try:
-            DDB_JAVA.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            DDB_JAVA.send_signal(signal.SIGKILL)
-            DDB_JAVA.wait(timeout=5)
-        DDB_JAVA = None
-    if shutil.which("docker"):
-        subprocess.run(["docker", "rm", "-f", CONTAINER], check=False, capture_output=True)
+    ddb_local.stop(port=DDB_PORT, container=CONTAINER)
     lsof = shutil.which("lsof")
     if lsof:
         probe = subprocess.run(
@@ -713,8 +579,9 @@ def membership_rows(harness: Harness) -> list[dict[str, Any]]:
         if log_path.is_file():
             ddb_log = log_path.read_text(encoding="utf-8", errors="replace")[-2000:]
         java_state = "unset"
-        if DDB_JAVA is not None:
-            java_state = f"poll={DDB_JAVA.poll()} pid={DDB_JAVA.pid}"
+        java = ddb_local._JAVA.get(DDB_PORT)
+        if java is not None:
+            java_state = f"poll={java.poll()} pid={java.pid}"
         raise HarnessError(
             f"DynamoDB query failed ({java_state}): {err}\n--- ddb log ---\n{ddb_log}"
         ) from err
@@ -961,66 +828,8 @@ def run_query_with_stderr(
     return result.stdout, result.stderr
 
 
-def _varint(n: int) -> bytes:
-    out = bytearray()
-    while True:
-        bits = n & 0x7F
-        n >>= 7
-        if n:
-            out.append(bits | 0x80)
-        else:
-            out.append(bits)
-            return bytes(out)
-
-
-def _proto_len_delim(tag: int, value: bytes) -> bytes:
-    return bytes([(tag << 3) | 2]) + _varint(len(value)) + value
-
-
-def _flight_sql_command_statement_query(sql: str) -> bytes:
-    inner = _proto_len_delim(1, sql.encode())
-    type_url = b"type.googleapis.com/arrow.flight.protocol.sql.CommandStatementQuery"
-    return _proto_len_delim(1, type_url) + _proto_len_delim(2, inner)
-
-
-def _flight():
-    try:
-        import pyarrow.flight as flight
-        return flight
-    except ImportError:
-        pass
-    python = HLA_VENV / "bin" / "python"
-    if not python.exists():
-        log("installing pyarrow into .skippr/hla-venv from PyPI")
-        HLA_VENV.parent.mkdir(parents=True, exist_ok=True)
-        subprocess.check_call([sys.executable, "-m", "venv", str(HLA_VENV)])
-        pip_env = os.environ.copy()
-        pip_env["PIP_CONFIG_FILE"] = os.devnull
-        pip_env["PIP_INDEX_URL"] = "https://pypi.org/simple"
-        subprocess.check_call(
-            [str(HLA_VENV / "bin" / "pip"), "install", "-q", "pyarrow"],
-            env=pip_env,
-        )
-    for site in (HLA_VENV / "lib").glob("python*/site-packages"):
-        path = str(site)
-        if path not in sys.path:
-            sys.path.insert(0, path)
-    try:
-        import pyarrow.flight as flight
-        return flight
-    except ImportError as err:
-        raise HarnessError("pyarrow is required for Flight SQL") from err
-
-
 def query_flight_table(addr: str, sql: str, timeout: float = 10.0):
-    flight = _flight()
-    del timeout
-    client = flight.FlightClient(f"grpc://{addr}")
-    descriptor = flight.FlightDescriptor.for_command(_flight_sql_command_statement_query(sql))
-    info = client.get_flight_info(descriptor)
-    if not info.endpoints:
-        raise HarnessError(f"no Flight SQL endpoint from {addr}")
-    return client.do_get(info.endpoints[0].ticket).read_all()
+    return flight_sql.query_flight_table(addr, sql, timeout)
 
 
 def query_flight_ids(addr: str, sql: str, timeout: float = 10.0) -> list[str]:
@@ -1044,13 +853,7 @@ def query_flight_ids(addr: str, sql: str, timeout: float = 10.0) -> list[str]:
 
 
 def query_flight_count(addr: str, sql: str, timeout: float = 10.0) -> int:
-    table = query_flight_table(addr, sql, timeout)
-    if table.num_columns < 1 or table.num_rows < 1:
-        raise HarnessError(f"count query on {addr} returned empty: {table.to_pydict()}")
-    value = table.column(0)[0].as_py()
-    if value is None:
-        raise HarnessError(f"count query on {addr} was null")
-    return int(value)
+    return flight_sql.query_flight_count(addr, sql, timeout)
 
 
 ELECTED_SCHEDULER_RE = re.compile(r"elected_scheduler=([0-9.:]+)")
@@ -2355,6 +2158,8 @@ data_sinks:
       warehouse: {warehouse_uri}
       catalog_table: {CATALOG_TABLE}
       region: us-east-1
+      object_store:
+        type: file
     schema_sink: schema_sinks.iceberg_local
   iceberg_b:
     SkipprLake:
@@ -2362,6 +2167,8 @@ data_sinks:
       warehouse: {warehouse_uri}
       catalog_table: {CATALOG_TABLE}
       region: us-east-1
+      object_store:
+        type: file
     schema_sink: schema_sinks.iceberg_b
 
 schema_sinks:
@@ -2371,12 +2178,16 @@ schema_sinks:
       warehouse: {warehouse_uri}
       catalog_table: {CATALOG_TABLE}
       region: us-east-1
+      object_store:
+        type: file
   iceberg_b:
     SkipprLake:
       table_namespace: hla_b
       warehouse: {warehouse_uri}
       catalog_table: {CATALOG_TABLE}
       region: us-east-1
+      object_store:
+        type: file
 """,
         encoding="utf-8",
     )

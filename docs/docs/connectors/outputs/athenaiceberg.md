@@ -1,8 +1,8 @@
 # AthenaIceberg Output
 
-Writes compacted batches to Apache Iceberg tables in the AWS Glue catalog, on S3. Query those tables with Amazon Athena.
+Writes compacted batches to Apache Iceberg tables in the AWS Glue catalog, on S3. Query those tables with `skipprd query` (Iceberg ∪ WAL) or Amazon Athena.
 
-`skipprd query` does not read AthenaIceberg tables; that path is live WAL only. Pair with the [AthenaIceberg schema sink](../schema_sinks/athenaiceberg.md). Do not pair this sink with the Hive [Glue](../schema_sinks/glue.md) schema sink.
+Pair with the [AthenaIceberg schema sink](../schema_sinks/athenaiceberg.md). Do not pair this sink with the Hive [Glue](../schema_sinks/glue.md) schema sink.
 
 ## Configuration
 

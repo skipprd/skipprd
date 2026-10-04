@@ -25,13 +25,27 @@ use skippr_lease::{DurableError, CONTROL_FRAME_MAX_BYTES};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio_stream::wrappers::TcpListenerStream;
-use tonic::transport::Server;
+use tonic::transport::{Server, ServerTlsConfig};
 use tonic::{Request, Response, Status, Streaming};
 
 use crate::cluster::identity::{ClusterIdentity, TenantScope};
 use crate::cluster::peer::ReplicaRegistry;
 use crate::helpers::configuration::Config;
 use crate::query_flight::sql::{classify_sql, matches_sql_like, reject_ddl, ClassifiedSql};
+
+#[derive(Clone)]
+pub enum FlightAuth {
+    ClusterBasic,
+    Bearer { token: Arc<str>, scope: TenantScope },
+}
+
+#[derive(Clone)]
+pub enum FlightEngine {
+    Clustered {
+        registry: Option<Arc<ReplicaRegistry>>,
+    },
+    Local,
+}
 
 pub struct QueryFlightServer {
     bind: SocketAddr,
@@ -58,8 +72,26 @@ impl QueryFlightServer {
         registry: Option<Arc<ReplicaRegistry>>,
         app_config: Config,
     ) -> Result<Self, DurableError> {
-        let _ = crate::cluster::tls::tonic_server_tls()
+        let _ = identity;
+        let tls = crate::cluster::tls::tonic_server_tls()
             .map_err(|err| DurableError::Io(err.to_string()))?;
+        Self::start_with(
+            bind,
+            FlightAuth::ClusterBasic,
+            FlightEngine::Clustered { registry },
+            app_config,
+            Some(tls),
+        )
+        .await
+    }
+
+    pub async fn start_with(
+        bind: SocketAddr,
+        auth: FlightAuth,
+        engine: FlightEngine,
+        app_config: Config,
+        tls: Option<ServerTlsConfig>,
+    ) -> Result<Self, DurableError> {
         let listener = TcpListener::bind(bind)
             .await
             .map_err(|err| DurableError::Io(err.to_string()))?;
@@ -69,8 +101,8 @@ impl QueryFlightServer {
         let (stop, mut rx) = watch::channel(false);
         let in_flight = Arc::new(AtomicUsize::new(0));
         let svc = SkipprFlightSql {
-            _identity: identity,
-            registry,
+            auth,
+            engine,
             in_flight: in_flight.clone(),
             app_config,
         };
@@ -91,17 +123,13 @@ impl QueryFlightServer {
                 }
             };
             let mut builder = Server::builder();
-            match crate::cluster::tls::tonic_server_tls() {
-                Ok(tls) => match builder.tls_config(tls) {
+            if let Some(tls) = tls {
+                match builder.tls_config(tls) {
                     Ok(configured) => builder = configured,
                     Err(err) => {
                         tracing::error!(error = %err, "Flight SQL TLS config failed");
                         return;
                     }
-                },
-                Err(err) => {
-                    tracing::error!(error = %err, "Flight SQL TLS material missing");
-                    return;
                 }
             }
             if let Err(err) = builder
@@ -137,8 +165,8 @@ impl QueryFlightServer {
 
 #[derive(Clone)]
 struct SkipprFlightSql {
-    _identity: ClusterIdentity,
-    registry: Option<Arc<ReplicaRegistry>>,
+    auth: FlightAuth,
+    engine: FlightEngine,
     in_flight: Arc<AtomicUsize>,
     app_config: Config,
 }
@@ -180,14 +208,26 @@ impl SkipprFlightSql {
         })
     }
 
-    fn session_scope<T>(request: &Request<T>) -> Result<TenantScope, Status> {
+    fn session_scope<T>(&self, request: &Request<T>) -> Result<TenantScope, Status> {
         let auth = request.metadata().get("authorization").ok_or_else(|| {
-            Status::unauthenticated("Flight SQL requires Basic tenant/workspace identity")
+            Status::unauthenticated("Flight SQL requires an Authorization header")
         })?;
         let value = auth
             .to_str()
             .map_err(|_| Status::unauthenticated("Flight SQL authorization is not valid UTF-8"))?;
-        Self::parse_handshake_authorization(value)
+        match &self.auth {
+            FlightAuth::ClusterBasic => Self::parse_handshake_authorization(value),
+            FlightAuth::Bearer { token, scope } => {
+                let expected = format!("Bearer {}", token.as_ref());
+                if value == expected {
+                    Ok(scope.clone())
+                } else {
+                    Err(Status::unauthenticated(
+                        "Flight SQL requires a valid bearer token",
+                    ))
+                }
+            }
+        }
     }
 
     fn ticket_for_sql(sql: &str) -> Ticket {
@@ -228,6 +268,16 @@ impl SkipprFlightSql {
         scope: &TenantScope,
     ) -> Result<SchemaRef, Status> {
         Self::check_sql(sql)?;
+        if matches!(self.engine, FlightEngine::Local) {
+            let ctx = crate::sqlrt::query::new_context_iceberg_namespaces(config)
+                .await
+                .map_err(|err| Status::internal(err.to_string()))?;
+            let df = ctx
+                .sql(sql)
+                .await
+                .map_err(|err| Status::internal(err.to_string()))?;
+            return Ok(df.schema().inner().clone());
+        }
         match classify_sql(sql, scope).map_err(|err| Status::invalid_argument(err.to_string()))? {
             ClassifiedSql::LiveWal(request) => {
                 Ok(iceberg_schema_for_namespace(config, &request.namespace)
@@ -281,10 +331,30 @@ impl SkipprFlightSql {
         Status,
     > {
         Self::check_sql(sql)?;
+        if matches!(self.engine, FlightEngine::Local) {
+            let ctx = crate::sqlrt::query::new_context_iceberg_namespaces(&self.app_config)
+                .await
+                .map_err(|err| Status::internal(err.to_string()))?;
+            let df = ctx
+                .sql(sql)
+                .await
+                .map_err(|err| Status::internal(err.to_string()))?;
+            let schema = df.schema().inner().clone();
+            let stream = df
+                .execute_stream()
+                .await
+                .map_err(|err| Status::internal(err.to_string()))?
+                .map_err(|err| Status::internal(err.to_string()));
+            return Ok((schema, Box::pin(stream)));
+        }
+        let registry = match &self.engine {
+            FlightEngine::Clustered { registry } => registry,
+            FlightEngine::Local => unreachable!("local engine returned above"),
+        };
         match classify_sql(sql, scope).map_err(|err| Status::invalid_argument(err.to_string()))? {
             ClassifiedSql::LiveWal(request) => {
                 let (schema, stream) =
-                    execute_live_wal(&self.app_config, &request, self.registry.as_ref()).await?;
+                    execute_live_wal(&self.app_config, &request, registry.as_ref()).await?;
                 return Ok((schema, stream));
             }
             ClassifiedSql::Iceberg(namespace) => {
@@ -343,7 +413,7 @@ impl FlightSqlService for SkipprFlightSql {
         Response<Pin<Box<dyn Stream<Item = Result<HandshakeResponse, Status>> + Send>>>,
         Status,
     > {
-        let _scope = Self::session_scope(&request)?;
+        let _scope = self.session_scope(&request)?;
         let output = futures::stream::iter(vec![Ok(HandshakeResponse {
             protocol_version: 0,
             payload: Bytes::new(),
@@ -356,7 +426,7 @@ impl FlightSqlService for SkipprFlightSql {
         query: CommandStatementQuery,
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        let scope = Self::session_scope(&request)?;
+        let scope = self.session_scope(&request)?;
         Self::check_sql(&query.query)?;
         Self::flight_info_for_sql(
             &query.query,
@@ -371,7 +441,7 @@ impl FlightSqlService for SkipprFlightSql {
         ticket: TicketStatementQuery,
         request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
-        let scope = Self::session_scope(&request)?;
+        let scope = self.session_scope(&request)?;
         let sql = std::str::from_utf8(&ticket.statement_handle)
             .map_err(|err| Status::invalid_argument(err.to_string()))?;
         if sql.len() > CONTROL_FRAME_MAX_BYTES
@@ -393,7 +463,7 @@ impl FlightSqlService for SkipprFlightSql {
         query: CommandPreparedStatementQuery,
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        let scope = Self::session_scope(&request)?;
+        let scope = self.session_scope(&request)?;
         let sql = std::str::from_utf8(&query.prepared_statement_handle)
             .map_err(|err| Status::invalid_argument(err.to_string()))?;
         Self::check_sql(sql)?;
@@ -410,7 +480,7 @@ impl FlightSqlService for SkipprFlightSql {
         query: CommandPreparedStatementQuery,
         request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
-        let scope = Self::session_scope(&request)?;
+        let scope = self.session_scope(&request)?;
         let sql = std::str::from_utf8(&query.prepared_statement_handle)
             .map_err(|err| Status::invalid_argument(err.to_string()))?;
         if sql.len() > CONTROL_FRAME_MAX_BYTES
@@ -432,7 +502,7 @@ impl FlightSqlService for SkipprFlightSql {
         query: ActionCreatePreparedStatementRequest,
         request: Request<arrow_flight::Action>,
     ) -> Result<ActionCreatePreparedStatementResult, Status> {
-        let _scope = Self::session_scope(&request)?;
+        let _scope = self.session_scope(&request)?;
         Self::check_sql(&query.query)?;
         Ok(ActionCreatePreparedStatementResult {
             prepared_statement_handle: Bytes::from(query.query.into_bytes()),
@@ -446,7 +516,7 @@ impl FlightSqlService for SkipprFlightSql {
         _query: ActionClosePreparedStatementRequest,
         request: Request<arrow_flight::Action>,
     ) -> Result<(), Status> {
-        let _scope = Self::session_scope(&request)?;
+        let _scope = self.session_scope(&request)?;
         Ok(())
     }
 
@@ -455,7 +525,7 @@ impl FlightSqlService for SkipprFlightSql {
         _query: CommandStatementUpdate,
         request: Request<arrow_flight::sql::server::PeekableFlightDataStream>,
     ) -> Result<i64, Status> {
-        let _scope = Self::session_scope(&request)?;
+        let _scope = self.session_scope(&request)?;
         Err(Status::invalid_argument("Flight SQL is read-only"))
     }
 
@@ -464,7 +534,7 @@ impl FlightSqlService for SkipprFlightSql {
         query: CommandGetSqlInfo,
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        let _scope = Self::session_scope(&request)?;
+        let _scope = self.session_scope(&request)?;
         let mut builder = SqlInfoDataBuilder::new();
         builder.append(SqlInfo::FlightSqlServerName, "skipprd");
         builder.append(SqlInfo::FlightSqlServerReadOnly, true);
@@ -487,7 +557,7 @@ impl FlightSqlService for SkipprFlightSql {
         query: CommandGetCatalogs,
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        let _scope = Self::session_scope(&request)?;
+        let _scope = self.session_scope(&request)?;
         let ticket = Ticket::new(skippr_query_ballista::encode_flight_sql_command(&query));
         let schema = query.into_builder().schema();
         let endpoint = FlightEndpoint::new().with_ticket(ticket);
@@ -504,7 +574,7 @@ impl FlightSqlService for SkipprFlightSql {
         query: CommandGetCatalogs,
         request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
-        let _scope = Self::session_scope(&request)?;
+        let _scope = self.session_scope(&request)?;
         let mut builder = query.into_builder();
         builder.append("skippr");
         let schema = builder.schema();
@@ -521,7 +591,7 @@ impl FlightSqlService for SkipprFlightSql {
         query: CommandGetDbSchemas,
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        let _scope = Self::session_scope(&request)?;
+        let _scope = self.session_scope(&request)?;
         let ticket = Ticket::new(skippr_query_ballista::encode_flight_sql_command(&query));
         let schema = query.into_builder().schema();
         let endpoint = FlightEndpoint::new().with_ticket(ticket);
@@ -538,9 +608,17 @@ impl FlightSqlService for SkipprFlightSql {
         query: CommandGetDbSchemas,
         request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
-        let scope = Self::session_scope(&request)?;
+        let scope = self.session_scope(&request)?;
+        let tables = crate::sqlrt::tables::list_configured_iceberg_tables(&self.app_config, &scope)
+            .await
+            .map_err(|err| Status::internal(err.to_string()))?;
         let mut builder = query.into_builder();
-        builder.append("skippr", scope.workspace.clone());
+        let mut seen = std::collections::BTreeSet::new();
+        for table in tables {
+            if seen.insert(table.namespace.clone()) {
+                builder.append("datafusion", table.namespace);
+            }
+        }
         let schema = builder.schema();
         let batch = builder.build();
         let stream = FlightDataEncoderBuilder::new()
@@ -555,7 +633,7 @@ impl FlightSqlService for SkipprFlightSql {
         query: CommandGetTables,
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        let _scope = Self::session_scope(&request)?;
+        let _scope = self.session_scope(&request)?;
         let ticket = Ticket::new(skippr_query_ballista::encode_flight_sql_command(&query));
         let schema = query.into_builder().schema();
         let endpoint = FlightEndpoint::new().with_ticket(ticket);
@@ -572,23 +650,23 @@ impl FlightSqlService for SkipprFlightSql {
         query: CommandGetTables,
         request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
-        let scope = Self::session_scope(&request)?;
+        let scope = self.session_scope(&request)?;
         let tables = crate::sqlrt::tables::list_configured_iceberg_tables(&self.app_config, &scope)
             .await
             .map_err(|err| Status::internal(err.to_string()))?;
         let pattern = query.table_name_filter_pattern.clone();
         let mut builder = query.into_builder();
-        for (name, schema) in tables {
-            if !matches_sql_like(&name, pattern.as_deref()) {
+        for table in tables {
+            if !matches_sql_like(&table.name, pattern.as_deref()) {
                 continue;
             }
             builder
                 .append(
-                    "skippr",
-                    scope.workspace.clone(),
-                    name,
+                    "datafusion",
+                    table.namespace,
+                    table.name,
                     "TABLE",
-                    schema.as_ref(),
+                    table.schema.as_ref(),
                 )
                 .map_err(Status::from)?;
         }
@@ -606,7 +684,7 @@ impl FlightSqlService for SkipprFlightSql {
         query: CommandGetTableTypes,
         request: Request<FlightDescriptor>,
     ) -> Result<Response<FlightInfo>, Status> {
-        let _scope = Self::session_scope(&request)?;
+        let _scope = self.session_scope(&request)?;
         let ticket = Ticket::new(skippr_query_ballista::encode_flight_sql_command(&query));
         let schema = query.into_builder().schema();
         let endpoint = FlightEndpoint::new().with_ticket(ticket);
@@ -623,7 +701,7 @@ impl FlightSqlService for SkipprFlightSql {
         query: CommandGetTableTypes,
         request: Request<Ticket>,
     ) -> Result<Response<<Self as FlightService>::DoGetStream>, Status> {
-        let _scope = Self::session_scope(&request)?;
+        let _scope = self.session_scope(&request)?;
         let mut builder = query.into_builder();
         builder.append("TABLE");
         builder.append("VIEW");
@@ -941,5 +1019,169 @@ mod tests {
         let src = include_str!("service.rs");
         assert!(src.contains("list_configured_iceberg_tables"));
         assert!(!src.contains("\"tables\", \"TABLE\""));
+        let get_tables = src
+            .split("async fn do_get_tables")
+            .nth(1)
+            .expect("do_get_tables")
+            .split("async fn get_flight_info_table_types")
+            .next()
+            .unwrap();
+        assert!(
+            get_tables.contains("table.namespace"),
+            "GetTables schema_name is Iceberg namespace, not workspace"
+        );
+        assert!(
+            !get_tables.contains("scope.workspace"),
+            "GetTables must not stuff workspace as db_schema"
+        );
+    }
+
+    #[test]
+    fn get_schemas_lists_iceberg_namespaces() {
+        let src = include_str!("service.rs");
+        let get_schemas = src
+            .split("async fn do_get_schemas")
+            .nth(1)
+            .expect("do_get_schemas")
+            .split("async fn get_flight_info_tables")
+            .next()
+            .unwrap();
+        assert!(get_schemas.contains("list_configured_iceberg_tables"));
+        assert!(get_schemas.contains("table.namespace"));
+        assert!(
+            !get_schemas.contains("scope.workspace"),
+            "GetDbSchemas must list Iceberg namespaces, not workspace"
+        );
+    }
+
+    #[test]
+    fn local_flight_sql_uses_iceberg_namespace_context() {
+        let src = include_str!("service.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            prod.contains("new_context_iceberg_namespaces"),
+            "skipprd serve Flight must execute Iceberg namespace.table"
+        );
+        assert!(
+            !prod.contains("new_context_all_namespaces"),
+            "skipprd serve Flight must not share skipprd query Iceberg ∪ WAL registration"
+        );
+    }
+
+    async fn start_local(auth: FlightAuth) -> QueryFlightServer {
+        start_local_with(auth, Config::new()).await
+    }
+
+    async fn start_local_with(auth: FlightAuth, config: Config) -> QueryFlightServer {
+        QueryFlightServer::start_with(
+            "127.0.0.1:0".parse().unwrap(),
+            auth,
+            FlightEngine::Local,
+            config,
+            None,
+        )
+        .await
+        .unwrap()
+    }
+
+    fn wal_only_config() -> Config {
+        serde_json::from_value(serde_json::json!({
+            "skippr": {
+                "workspace": "w",
+                "tenant": "t",
+                "skipprd_el_storage_mode": "local"
+            },
+            "pipelines": {
+                "p": { "data_source": "data_sources.sample" }
+            },
+            "data_sources": {
+                "sample": { "File": { "path": "/tmp/skipprd-flight-local.json" } }
+            }
+        }))
+        .unwrap()
+    }
+
+    fn bearer() -> FlightAuth {
+        FlightAuth::Bearer {
+            token: Arc::from("secret"),
+            scope: TenantScope::new("t", "w").unwrap(),
+        }
+    }
+
+    #[tokio::test]
+    async fn flight_bearer_rejects_missing_and_wrong_token() {
+        let server = start_local(bearer()).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let addr = server.bind_addr().to_string();
+        let missing =
+            skippr_query_ballista::fetch_statement_batches_plain_unauthenticated(&addr, "SELECT 1")
+                .await
+                .unwrap_err();
+        assert!(
+            missing.to_string().to_ascii_lowercase().contains("unauth")
+                || missing.to_string().to_ascii_lowercase().contains("bearer")
+                || missing
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains("authorization")
+                || missing
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains("credentials"),
+            "{missing}"
+        );
+        let wrong =
+            skippr_query_ballista::fetch_statement_batches_plain(&addr, "SELECT 1", "Bearer wrong")
+                .await
+                .unwrap_err();
+        assert!(
+            wrong.to_string().to_ascii_lowercase().contains("unauth")
+                || wrong.to_string().to_ascii_lowercase().contains("bearer")
+                || wrong
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains("authorization")
+                || wrong
+                    .to_string()
+                    .to_ascii_lowercase()
+                    .contains("credentials"),
+            "{wrong}"
+        );
+        server.drain().await;
+    }
+
+    #[tokio::test]
+    async fn flight_local_serves_select_1() {
+        let server = start_local_with(bearer(), wal_only_config()).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let batches = skippr_query_ballista::fetch_statement_batches_plain(
+            &server.bind_addr().to_string(),
+            "SELECT 1",
+            "Bearer secret",
+        )
+        .await
+        .unwrap();
+        let rows: usize = batches.iter().map(|batch| batch.num_rows()).sum();
+        assert_eq!(rows, 1);
+        server.drain().await;
+    }
+
+    #[tokio::test]
+    async fn flight_local_rejects_ddl() {
+        let server = start_local_with(bearer(), wal_only_config()).await;
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        let err = skippr_query_ballista::fetch_statement_batches_plain(
+            &server.bind_addr().to_string(),
+            "INSERT INTO t VALUES (1)",
+            "Bearer secret",
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            err.to_string().to_ascii_lowercase().contains("read-only")
+                || err.to_string().contains("invalid"),
+            "{err}"
+        );
+        server.drain().await;
     }
 }

@@ -1,0 +1,11 @@
+[package]
+name = "skippr-iceberg-catalog-glue"
+version = "0.1.0"
+edition = "2021"
+publish = false
+description = "Glue Iceberg catalog opener for AthenaIceberg write and skipprd query"
+
+[dependencies]
+iceberg = "0.9.1"
+iceberg-catalog-glue = "0.9.1"
+skippr-iceberg-catalog = { path = "../skippr-iceberg-catalog" }

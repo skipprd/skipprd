@@ -1,10 +1,10 @@
 # Duckdb Output
 
-Writes compacted batches to Apache Iceberg tables on the local filesystem (`file://`). Query those tables with DuckDB `iceberg_scan`. DuckDB sees persisted Iceberg only — not the skipprd WAL.
+Writes compacted batches to Apache Iceberg tables on the local filesystem (`file://`). Query those tables with `skipprd query` (Iceberg ∪ WAL) or DuckDB `iceberg_scan`. DuckDB sees persisted Iceberg only — not the skipprd WAL.
 
-`skipprd query` does not read Duckdb tables; that path is live WAL only. Pair with the [Duckdb schema sink](../schema_sinks/duckdb.md).
+Pair with the [Duckdb schema sink](../schema_sinks/duckdb.md).
 
-This sink is skipprd output only. Skippr Data Engineer does not write Duckdb.
+Skippr Data Engineer does not model DuckDB as a warehouse.
 
 ## Configuration
 

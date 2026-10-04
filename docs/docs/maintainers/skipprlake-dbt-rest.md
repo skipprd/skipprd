@@ -12,7 +12,7 @@ Repos touched: `skipprd` (server side), **`dbt-skipprlake` (new repo, fully stan
    - Iceberg REST Catalog API (tables and views).
    - Arrow Flight SQL (reads).
    - Iceberg view spec (view metadata).
-3. skipprd serves those protocols for a SkipprLake, so any Iceberg client can use the same endpoint later: Spark, Trino, Snowflake, PyIceberg, DuckDB (read).
+3. skipprd serves those protocols for any Iceberg lake skipprd wrote (SkipprLake first; AthenaIceberg Glue and Duckdb filesystem use the same server), so any Iceberg client can use the same endpoint later: Spark, Trino, Snowflake, PyIceberg, DuckDB (read).
 4. No translation layer between the adapter and skipprd (no "lake commit" CLI, no custom RPC). Writes and metadata go through the REST catalog.
 5. SDE runs dbt against SkipprLake like any other warehouse. The "Skippr is not a dbt adapter" special cases are deleted.
 
@@ -31,29 +31,31 @@ Confirmed 2026-09-30: **S4** (ingest namespace is read-only over REST; dbt write
 | # | Decision | Why |
 |---|---|---|
 | S1 | `dbt-skipprlake` is a separate Apache-2.0 Python package in its own repo. It depends on `dbt-core`, `dbt-adapters`, `pyiceberg`, `adbc-driver-flightsql`, `pyarrow`. It has no dependency on, or reference to, skipprd. | Encapsulation requirement. |
-| S2 | skipprd gains `skipprd serve`, which exposes an Iceberg REST catalog and a read-only Flight SQL endpoint for the pipelines that use a `SkipprLake` sink. | The only way to speak the open protocols without a shim. |
-| S3 | **Reads** (dbt tests, previews, table materialization source SQL) go through Flight SQL and see `Iceberg ∪ WAL`. **Metadata and writes** go through REST. | REST/Iceberg clients cannot see WAL. dbt models must, to match `skipprd query`. |
-| S4 | Sink-managed tables (every `table_namespace` of a `SkipprLake` sink served by this lake; a `serve` lake shares one `(warehouse, catalog_table, region)` but may hold several namespaces, so the ingest namespaces are a **set**) are **read-only over REST**. Create, commit, drop and rename against that namespace return **403 `ForbiddenException`**. Load and list stay allowed. dbt writes only to other namespaces. | The ingest writer owns idempotency manifests and CDC state in those tables. External commits would corrupt them. |
-| S5 | Views use the Iceberg view spec v1 (SQL representation, dialect `skipprlake`). View metadata JSON lives in object storage next to tables. The pointer lives in the Skippr catalog store. `skipprd query` registers them as DataFusion views. | Makes `materialized='view'` work and stays standard for future engines. |
-| S6 | Flight SQL stays read-only (`reject_ddl` remains). All DDL and DML from clients go through REST. | One authority for writes. |
+| S2 | skipprd gains `skipprd serve`, which exposes Iceberg REST and read-only Flight SQL for the **one physical Iceberg catalog** in the config (`IcebergCatalogSpec` equality). Iceberg sinks are SkipprLake, AthenaIceberg, and Duckdb. | Kernel service (with query and Ballista), not a SkipprLake plugin. |
+| S3 | **Reads** (dbt tests, previews, table materialization source SQL) go through Flight SQL as Iceberg `namespace.table` (committed snapshot). **Metadata and writes** from Iceberg clients go through REST. `pipeline.namespace` is the local Iceberg ∪ WAL ingest view only. `skipprd query` SQL DDL mutates the same `iceberg::Catalog`. | Lake contract is Iceberg identity. WAL freshness is the local ingest alias, not Flight/dbt. |
+| S4 | Sink-managed ingest namespaces (SkipprLake `table_namespace`, AthenaIceberg Glue database, Duckdb namespace) are **read-only over REST**. Create, commit, drop and rename against those namespaces return **403 `ForbiddenException`**. Load and list stay allowed. | The ingest writer owns idempotency manifests and CDC state in those tables. |
+| S5 | Views use the Iceberg view spec v1 (SQL representation, dialect **`skipprd`**). View metadata JSON lives in object storage next to tables. The pointer lives in the catalog store. `skipprd query` registers them as DataFusion views. | Makes `materialized='view'` work and stays standard for future engines. |
+| S6 | Flight SQL stays read-only (`reject_ddl` remains). Iceberg clients mutate via REST. `skipprd query` SQL DDL (`DROP TABLE` / `DROP DATABASE`) uses `Catalog::drop_*` on the same catalog. | Flight is not a second write protocol. REST and skipprd SQL DDL share `iceberg::Catalog`. |
 | S7 | Table materialization data path in v1 is client-side: Flight SQL → Arrow stream → PyIceberg → object store → REST commit. | Standard Iceberg client behaviour; no server-side write path to invent. |
 | S8 | Auth in v1 is a static bearer token plus optional TLS. Skippr Cloud fronts the endpoints with its gateway (JWT, D31). | Simple, explicit product config. |
 | S9 | Namespace rule: an Iceberg namespace other than the sink's ingest namespace becomes a DataFusion schema of the same name. It must not equal any pipeline name. | Pipelines already own `datafusion.<pipeline>` (Iceberg ∪ WAL). |
 
 ## 3. Naming and WAL visibility
 
-One physical lake, two views of it:
+The **lake contract** is the Iceberg `namespace.table` (`bronze.shop`, `shop_gold.fct_shop`). SDE, dbt-skipprlake, Flight SQL `GetTables`, and REST clients use that name. `pipeline.table` (`shop.shop`) is a **local** Iceberg ∪ WAL view on the sync host. It is not the lake identity and SDE never quotes it.
 
-| Client | Table name for the ingest table `orders` from pipeline `shop` | Sees live WAL |
+| Client | Table name for ingest table `shop` from pipeline `shop`, `table_namespace: bronze` | Sees live WAL |
 |---|---|---|
-| `skipprd query`, Flight SQL, dbt-skipprlake sources | `shop.orders` | Yes (Iceberg ∪ WAL) |
-| Spark, Trino, PyIceberg, DuckDB via REST | `<table_namespace>.orders` (for example `bronze.orders`) | No |
-| dbt-skipprlake model output `analytics.fct_orders` | `analytics.fct_orders` in both | n/a (pure Iceberg) |
+| `skipprd query` ingest alias | `shop.shop` (`datafusion.<pipeline>.<namespace>`) | Yes (Iceberg ∪ WAL) |
+| Flight SQL / `skipprd query` lake ident | Iceberg ident `bronze.shop` | No (committed Iceberg) |
+| Spark, Trino, PyIceberg, DuckDB via REST | `bronze.shop` | No |
+| dbt-skipprlake source | `source('bronze','shop')` — SchemaOnly: dbt schema = Iceberg namespace | No (committed Iceberg) |
+| dbt-skipprlake silver / gold | `shop_silver.stg_bronze_shop`, `shop_gold.fct_shop` | n/a (pure Iceberg) |
 
 Rules:
 
-- dbt sources use the pipeline-schema form (`shop.orders`) so models read WAL-fresh data.
-- dbt models write to their own namespaces (dbt `schema:`), for example `analytics`. Those tables are visible to every Iceberg client and to `skipprd query` as `datafusion.analytics.*`.
+- dbt sources use the Iceberg ingest namespace (`table_namespace`) as the dbt source schema and the Iceberg table as the identifier. After a one-shot `skipprd sync`, that snapshot is the lake.
+- Silver and gold dbt `schema:` values are Iceberg namespaces `{pipeline}_silver` / `{pipeline}_gold`. Flight SQL `GetTables` lists every Iceberg `namespace.table`.
 - Creating a namespace whose name equals a configured pipeline name is rejected (REST `createNamespace` → 409, query registration → error).
 
 ## 4. Architecture
@@ -64,7 +66,7 @@ flowchart LR
   dbt -->|Iceberg REST tables and views| rest[Iceberg REST server]
   dbt -->|Parquet via PyIceberg| store[(object storage)]
   spark[Spark Trino PyIceberg] -->|Iceberg REST| rest
-  flight --> engine[skipprd query engine Iceberg plus WAL plus views]
+  flight --> engine[skipprd serve Flight Iceberg namespace.table]
   rest --> cat[Skippr catalog DynamoDB or Cloud Tables]
   engine --> cat
   engine --> store
@@ -72,13 +74,13 @@ flowchart LR
   sink --> store
 ```
 
-The REST server and Flight server live in one process (`skipprd serve`) and share the `SkipprLakeConfig` and the catalog handle.
+The REST server and Flight server live in one process (`skipprd serve`) and share the `IcebergCatalogSpec` and the catalog handle.
 
 ## 5. Protocol surface
 
 ### 5.1 Iceberg REST subset (server)
 
-`{prefix}` is the configured `--rest-prefix` (default empty; when empty the path is `/v1/namespaces`). Multi-level namespaces use the unit separator `0x1F` percent-encoded as `%1F`.
+`{prefix}` is empty in `skipprd serve` (`RestState.prefix` is `""`; there is no `--rest-prefix` CLI flag). When empty the path is `/v1/namespaces`. Tests may nest under a non-empty prefix. Multi-level namespaces use the unit separator `0x1F` percent-encoded as `%1F`.
 
 | Method and path | Purpose | Notes |
 |---|---|---|
@@ -93,7 +95,7 @@ The REST server and Flight server live in one process (`skipprd serve`) and shar
 | `POST /v1/{prefix}/namespaces/{ns}/tables/{t}` | Commit | 403 in the ingest namespace; 409 on requirement failure |
 | `DELETE /v1/{prefix}/namespaces/{ns}/tables/{t}` | Drop | 403 in the ingest namespace |
 | `POST /v1/{prefix}/tables/rename` | Rename | 403 if source or destination is in the ingest namespace |
-| `GET /v1/{prefix}/namespaces/{ns}/views` | List views | |
+| `GET /v1/{prefix}/namespaces/{ns}/views` | List views | Ships with dbt-skipprlake (P7) |
 | `POST /v1/{prefix}/namespaces/{ns}/views` | Create view | |
 | `GET/HEAD /v1/{prefix}/namespaces/{ns}/views/{v}` | Load, exists | |
 | `POST /v1/{prefix}/namespaces/{ns}/views/{v}` | Commit view | Requirement `assert-view-uuid` |
@@ -142,7 +144,7 @@ Path: `<warehouse>/<namespace>/<view>/metadata/<version>-<uuid>.metadata.json`.
       "summary": {"engine-name": "dbt-skipprlake", "engine-version": "0.1.0"},
       "default-namespace": ["analytics"],
       "representations": [
-        {"type": "sql", "sql": "select id, total from shop.orders", "dialect": "skipprlake"}
+        {"type": "sql", "sql": "select id, total from bronze.shop", "dialect": "skipprd"}
       ]
     }
   ],
@@ -157,7 +159,7 @@ Path: `<warehouse>/<namespace>/<view>/metadata/<version>-<uuid>.metadata.json`.
 }
 ```
 
-Dialect string `skipprlake` means "DataFusion SQL as executed by the skipprd query engine". Engines that find no representation for their dialect must not guess. skipprd does the same: a view without a `skipprlake` representation is skipped with a warning and does not appear in queries.
+Dialect string `skipprd` means "DataFusion SQL as executed by the skipprd query engine". Engines that find no representation for their dialect must not guess. skipprd does the same: a view without a `skipprd` representation is skipped with a warning and does not appear in queries.
 
 ## 6. Server implementation (skipprd)
 
@@ -186,14 +188,14 @@ impl TableCommit {
 crates/skippr-iceberg-rest/
   Cargo.toml
   src/lib.rs         router(state) -> axum::Router
-  src/state.rs       RestState
   src/tables.rs      table and namespace handlers
-  src/views.rs       view handlers
   src/error.rs       RestError -> Response
   src/auth.rs        bearer middleware
 ```
 
-`Cargo.toml` dependencies: `axum`, `tower`, `tower-http` (trace), `serde`, `serde_json`, `iceberg = "0.9.1"`, `skippr-iceberg-catalog`, `tracing`, `uuid`. Dev: `iceberg-catalog-memory` (or the DynamoDB catalog against DynamoDB-local) and `reqwest`.
+View handlers (`src/views.rs`) ship with dbt-skipprlake (P7). Table and namespace REST plus `skipprd serve` ship in this crate now.
+
+`Cargo.toml` dependencies: `axum`, `serde`, `serde_json`, `iceberg = "0.9.1"`. Dev: MemoryCatalog.
 
 State:
 
@@ -201,16 +203,15 @@ State:
 #[derive(Clone)]
 pub struct RestState {
     pub catalog: Arc<dyn iceberg::Catalog>,
-    pub views: Arc<dyn ViewCatalog>,
-    pub lake: Arc<SkipprLakeConfig>,
-    /// Pipeline names, to reject namespaces that would shadow `datafusion.<pipeline>`.
-    pub pipeline_names: Arc<BTreeSet<String>>,
+    pub ingest_namespaces: BTreeSet<String>,
+    pub pipeline_names: BTreeSet<String>,
     pub token: Arc<str>,
+    pub prefix: String,
 }
 
 impl RestState {
     fn is_ingest_namespace(&self, ns: &NamespaceIdent) -> bool {
-        ns.as_ref() == [self.lake.table_namespace.clone()]
+        self.ingest_namespaces.contains(&ns.to_string())
     }
 }
 ```
@@ -228,16 +229,12 @@ pub fn router(state: RestState) -> Router {
         .route("/v1/namespaces/:ns/tables/:t",
                get(load_table).head(table_exists).post(commit_table).delete(drop_table))
         .route("/v1/tables/rename", post(rename_table))
-        .route("/v1/namespaces/:ns/views", get(list_views).post(create_view))
-        .route("/v1/namespaces/:ns/views/:v",
-               get(load_view).head(view_exists).post(commit_view).delete(drop_view))
-        .route("/v1/views/rename", post(rename_view))
         .layer(middleware::from_fn_with_state(state.clone(), auth::require_bearer))
         .with_state(state)
 }
 ```
 
-If `--rest-prefix` is set, nest the router under `/v1/{prefix}` (axum `nest`) and have `config` return `overrides: {"prefix": "<prefix>"}`.
+`RestState.prefix` is empty in `skipprd serve`. Tests may nest the catalog routes under `/v1/{prefix}` and have `config` return `overrides: {"prefix": "<prefix>"}`. There is no `--rest-prefix` CLI flag.
 
 ### 6.3 Error mapping
 
@@ -408,11 +405,11 @@ Startup validation (fail closed, in this order):
 
 1. Token env var set and non-empty.
 2. Non-loopback bind requires TLS.
-3. Config contains at least one pipeline with a `SkipprLake` sink.
-4. All `SkipprLake` sinks describe the same lake: identical `(warehouse, catalog_table, region)`. Otherwise error `"serve exposes one SkipprLake; found N"`.
+3. Config contains at least one pipeline with an Iceberg sink (`QueryBackend::Iceberg`).
+4. All Iceberg sinks describe the same physical catalog (`IcebergCatalogSpec::physical_key`). Otherwise error `"serve exposes one Iceberg catalog; found SkipprLake and AthenaIceberg"`.
 5. No ingest namespace equals a pipeline name.
 
-Then: open the catalog once (`skippr_iceberg_catalog_dynamodb` or `cloud_tables` through the existing `open_skippr_catalog`), build `RestState`, start both servers with `tokio::try_join!`, write the ready file.
+Then: open the catalog once (`open_iceberg_catalog` on `plan.spec`), build `RestState`, start both servers, write the ready file.
 
 Port `0` is valid and the actual bound addresses are written to the ready file. SDE relies on this.
 
@@ -446,54 +443,39 @@ impl QueryFlightServer {
 match &self.engine {
     FlightEngine::Clustered { .. } => { /* existing: ensure_elected_live + plan_clustered_select */ }
     FlightEngine::Local => {
-        let ctx = crate::sqlrt::session::build_query_context(SessionConfig::new());
-        crate::sqlrt::tables::register_all(&ctx, &self.app_config).await?; // pipelines + user namespaces + views
+        let ctx = crate::sqlrt::query::new_context_iceberg_namespaces(&self.app_config).await?;
         let df = ctx.sql(sql).await?;
         (df.schema().inner().clone(), Box::pin(df.execute_stream().await?...))
     }
 }
 ```
 
-`register_all` is the shared function behind `new_context_all_namespaces` (section 6.8). The `LiveWal` and `Iceberg` classified branches keep working in cluster mode only; in local mode `classify_sql` returns `User` for everything.
+Local serve Flight registers Iceberg `namespace.table` only (`register_user_namespaces`). It does not call `new_context_all_namespaces` (that is `skipprd query` Iceberg ∪ WAL). Clustered HLA Flight still classifies `LiveWal` / `Iceberg`.
 
 Tests first:
 
 - `flight_bearer_rejects_missing_and_wrong_token`.
-- `flight_local_serves_select_over_wal_only_pipeline`.
+- `flight_local_serves_select_1`.
 - `flight_local_rejects_ddl` (`reject_ddl`).
 - Cluster path unchanged: existing tests stay green.
 
 ### 6.8 Query side: user namespaces and views
 
-In `src/sqlrt/tables.rs` (still SkipprLake-only knowledge; the isolation test from Spec 1 must stay green):
+In `src/sqlrt/tables.rs` (sqlrt still must not name Athena/Glue/Duckdb; the isolation test from Spec 1 must stay green):
 
 ```rust
-/// Register every catalog namespace except the ingest namespace as a DataFusion schema.
+/// Register every Iceberg catalog namespace as a DataFusion schema (`namespace.table`).
+/// skipprd query still aliases ingest as `pipeline.table` via register_namespace_view.
 async fn register_user_namespaces(
     ctx: &SessionContext,
     config: &Config,
-    lake: &SkipprLakeConfig,
-    pipeline_names: &BTreeSet<String>,
 ) -> Result<(), DataFusionError> {
-    let catalog = open_skippr_catalog(config, lake).await.map_err(DataFusionError::Plan)?;
-    for ns in catalog.list_namespaces(None).await.map_err(ext)? {
-        let name = ns.to_url_string();
-        if name == lake.table_namespace { continue; }               // ingest tables appear as `<pipeline>.<table>`
-        if pipeline_names.contains(&name) {
-            return Err(DataFusionError::Plan(format!(
-                "Iceberg namespace '{name}' collides with pipeline '{name}'"
-            )));
-        }
-        for ident in catalog.list_tables(&ns).await.map_err(ext)? {
-            let (table, snapshot_id) = load_pinned_iceberg_table(catalog.clone(), &ident).await?;
-            let provider = IcebergScanTableProvider::new_with_catalog(
-                table, snapshot_id, serde_json::to_string(lake)?, name.clone(), ident.name().to_string(),
-            )?;
-            register_table_under_pipeline_schema(ctx, &name, ident.name(), Arc::new(provider))?;
-        }
-    }
-    Ok(())
+    // Open each distinct IcebergCatalogSpec via open_iceberg_catalog.
+    // extra_namespace_names includes ingest Iceberg idents (bronze.shop for dbt)
+    // and rejects pipeline-name collisions. skipprd query still aliases ingest as pipeline.table.
+    // IcebergScanTableProvider::new_with_catalog serializes IcebergCatalogSpec JSON.
 }
+```
 ```
 
 Views (after all tables are registered, so views may reference tables and other views):
@@ -523,17 +505,19 @@ async fn register_views(ctx: &SessionContext, views: &dyn ViewCatalog, namespace
 
 `collect_skipprlake_view_sql` picks the representation with `type == "sql"` and `dialect == "skipprlake"` from `current-version-id`. Views with no such representation are skipped with a `tracing::warn!`.
 
-`new_context_all_namespaces` (used by `skipprd query`) and the Flight local engine both call one `register_all(ctx, config)` so the CLI and Flight behave identically:
+`skipprd query` uses `new_context_all_namespaces` (`register_namespace_view` Iceberg ∪ WAL ingest alias plus `register_user_namespaces`). `skipprd serve` Flight uses `new_context_iceberg_namespaces` (`register_user_namespaces` only) so lake clients see Iceberg `namespace.table`, not `pipeline.namespace`.
 
 ```text
-register_all:
-  for each pipeline: register_namespace_view (SkipprLake ∪ WAL, or WAL only)      # Spec 1
-  if any pipeline is SkipprLake: register_user_namespaces, then register_views      # this spec
+skipprd query:
+  for each pipeline: register_namespace_view (Iceberg ∪ WAL, or WAL only)
+  if any pipeline is Iceberg: register_user_namespaces
+skipprd serve Flight:
+  register_user_namespaces only  # Iceberg namespace.table
 ```
 
-Clustered Ballista (`plan_clustered_select`) gets the same two calls. `IcebergScanTableProvider` already serializes the catalog JSON for executors; it now serializes `SkipprLakeConfig`.
+Clustered Ballista (`plan_clustered_select`) gets the same two calls. `IcebergScanTableProvider` already serializes the catalog JSON for executors; it now serializes `IcebergCatalogSpec` (`SkipprLakeOpen` includes backend and object store).
 
-Tests first: user namespace tables queryable as `analytics.fct_x`; ingest namespace not exposed twice; collision errors; view over table; view over view; cycle detected; non-`skipprlake` dialect view skipped.
+Tests first: user namespace tables queryable as `shop_gold.fct_x`; ingest namespace not exposed twice; collision errors; view over table; view over view; cycle detected; non-`skipprlake` dialect view skipped.
 
 ### 6.9 Docs and CLI help
 
@@ -626,7 +610,7 @@ my_lake:
       catalog_uri: http://127.0.0.1:8181         # Iceberg REST
       query_uri: grpc://127.0.0.1:8815           # Arrow Flight SQL (grpc+tls:// for TLS)
       token: "{{ env_var('SKIPPRLAKE_TOKEN') }}"
-      schema: analytics                          # default Iceberg namespace for models
+      schema: shop_gold                          # Iceberg namespace (SchemaOnly; no database)
       threads: 4
       storage:                                   # optional; PyIceberg FileIO properties
         s3.endpoint: https://<account>.r2.cloudflarestorage.com
@@ -822,7 +806,7 @@ class SkipprLakeRelation(BaseRelation):
     include_policy: Policy = field(default_factory=lambda: SkipprLakePolicy(database=False, schema=True, identifier=True))
 ```
 
-Two-part names (`"schema"."identifier"`) match how `skipprd query` resolves `datafusion.<schema>.<table>` and pipeline tables.
+Two-part names (`"schema"."identifier"`) match Iceberg `namespace.table` on `skipprd serve` Flight and REST. They are not `pipeline.namespace` ingest aliases.
 
 ### 7.6 Data path: table, append, merge
 
@@ -932,7 +916,7 @@ Rules:
 {% macro skipprlake__type_float() %}double{% endmacro %}
 {% macro skipprlake__type_numeric() %}decimal(38, 9){% endmacro %}
 {% macro skipprlake__type_bigint() %}bigint{% endmacro %}
-{% macro skipprlake__type_int() %}int{% endmacro %}
+{% macro skipprlake__type_int() %}bigint{% endmacro %}
 {% macro skipprlake__type_boolean() %}boolean{% endmacro %}
 ```
 
@@ -947,7 +931,7 @@ Cross-database `dbt-utils`/`dbt.*` macros dispatch to `default__` unless overrid
 Unit (no server):
 
 - `SkipprLakeCredentials` validation for each missing key.
-- Relation rendering: `"analytics"."fct_orders"`.
+- Relation rendering: `shop_gold.fct_shop` (SchemaOnly: identifier is `schema.table`, no database).
 - `_iceberg_schema_json(arrow_schema)` field ids and types.
 - View commit request bodies (assert exact JSON).
 - Retry loop: 409 twice then success; 409 four times then fail.
@@ -1031,10 +1015,10 @@ New workflow `.github/workflows/dbt-skipprlake.yml`:
 3. Start `skipprd serve --rest-bind 127.0.0.1:0 --flight-bind 127.0.0.1:0 --ready-file ready.json` with a File-source pipeline that lands rows in a `SkipprLake` sink.
 4. `pip install dbt-skipprlake[test]` (from the sibling repo at a pinned ref).
 5. Export `SKIPPRLAKE_TEST_*` from `ready.json` and run the functional suite.
-6. Run a real project: source `shop.orders` (with a WAL-only tail row), model `analytics.fct_orders` as table, `analytics.v_orders` as view, an incremental merge model. Assert:
-   - `fct_orders` includes the WAL-only tail row (Flight read).
-   - PyIceberg reads `analytics.fct_orders`.
-   - `v_orders` resolves in `skipprd query` and Flight.
+6. Run a real project: source `bronze.shop`, model `shop_gold.fct_shop` as table, an incremental merge model. Assert:
+   - `fct_shop` matches the committed Iceberg bronze row count (Flight `namespace.table`).
+   - PyIceberg reads `shop_gold.fct_shop`.
+   - `materialized='view'` is rejected until REST views exist.
 
 ### 8.4 Observability of the server
 
@@ -1135,15 +1119,15 @@ The sidecar is created by the dbt provider (`provider-dbt`) before the first dbt
 
 `skipprd` path uses the single resolver from Spec 1 (`SKIPPRD_BIN`).
 
-### 9.4 Delete the "no adapter" special cases
+### 9.4 Deleted "no adapter" special cases
 
-Search and remove (names as they exist after the local-Iceberg smoke fixes; grep to confirm):
+Hard-cutover complete. These names MUST NOT return in `sde`:
 
-- `SKIPPR_NOT_DBT_ADAPTER` constant and all references (`profile.rs`, `de_config.rs`, tests).
-- `WarehouseKind::dbt_models_are_warehouse_relations`: `Skippr` returns `true`. If every kind now returns `true`, delete the method and its callers (`phase_plan.rs` 256/309, `project_fs/yaml.rs` 271, `gold_model.rs` 42, `runtime_prereqs.rs` 133, `main.rs` 7095).
-- `skippr_dbt_adapter_observation` and `skippr_publish_observation` (validate and publish treat Skippr as N/A today).
-- `skip_gold_warehouse_validation` for Skippr in `gold_model.rs`.
-- `has_any_gold_model_sql` workaround that lists local `models/marts` for Skippr only, if the generic listing now works.
+- `SKIPPR_NOT_DBT_ADAPTER`
+- `skippr_dbt_adapter_observation`
+- `skippr_publish_observation`
+
+SkipprLake dbt uses `dbt-skipprlake` (`type: skipprlake`) and the local sidecar. Gold warehouse validation uses SkipprLake relation FQNs (`schema.identifier`).
 
 ### 9.5 Profile and routing
 
@@ -1173,14 +1157,14 @@ r#"{profile}:
 
 `tier_routing` for Skippr: `DbtNamespaceShape::SchemaOnly` (dbt `schema:` = Iceberg namespace; no database).
 
-Sources for authored staging models use the pipeline-schema form:
+Sources for authored staging models use the Iceberg ingest namespace (`DbtNamespaceShape::SchemaOnly`):
 
 ```yaml
 sources:
-  - name: shop
-    schema: shop          # the pipeline
+  - name: bronze
+    schema: bronze        # Iceberg ingest namespace (table_namespace)
     tables:
-      - name: orders
+      - name: shop
 ```
 
 ### 9.6 Runtime prerequisites
@@ -1189,7 +1173,7 @@ sources:
 
 ### 9.7 Query provider
 
-No change in this spec: `SkipprCliProvider` keeps `skipprd query --plain`. Optional follow-up: when a sidecar or remote endpoint exists, query through Flight SQL to skip process spawn per query.
+SDE warehouse I/O is `SkipprLakeFlightProvider` against one `skipprd serve` (Flight SQL, Iceberg `namespace.table`). `SkipprCliProvider` is EL-only (`discover` / `sync` / `SHOW PIPELINE` / `LOAD SCHEMA`).
 
 ### 9.8 SDE verification
 
@@ -1200,8 +1184,8 @@ cargo test -p react-suite-data-engineer -p sde
 Smoke (progressive, local `file://` lake, DynamoDB-local):
 
 1. `skipprd sync` File source → SkipprLake (12 rows).
-2. `sde model`: staging (view or table) → gold (`analytics.fct_*`) → tests → publish, all through `dbt-skipprlake` via the local sidecar.
-3. `skipprd query 'select count(*) from analytics.fct_events'` returns the modelled rows.
+2. `sde model`: staging (view or table) → gold (`shop_gold.fct_*`) → tests → publish, all through `dbt-skipprlake` via the local sidecar.
+3. Flight SQL `select count(*) from shop_gold.fct_shop` returns the modelled rows.
 4. Same project with `Remote` endpoint pointing at a manually started `skipprd serve`.
 5. Regression: Athena and Snowflake projects unchanged.
 
@@ -1213,7 +1197,7 @@ Smoke (progressive, local `file://` lake, DynamoDB-local):
 P0 spec lock, PyIceberg and DuckDB read checks
   → P1 catalog: ViewCatalog + view metadata + TableCommit::from_rest
     → P2 skippr-iceberg-rest (tables, namespaces, views) + contract tests
-      → P3 query: user namespaces + views + register_all
+      → P3 query: user namespaces on serve Flight; ∪WAL stays on skipprd query
         → P4 Flight: bearer auth + local engine
           → P5 skipprd serve + ready file + e2e with PyIceberg
             → P6 dbt-skipprlake repo (M1..M5 below)

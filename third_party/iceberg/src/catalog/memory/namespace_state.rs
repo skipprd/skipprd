@@ -15,7 +15,7 @@
 // specific language governing permissions and limitations
 // under the License.
 
-use std::collections::{HashMap, hash_map};
+use std::collections::{hash_map, HashMap};
 
 use itertools::Itertools;
 

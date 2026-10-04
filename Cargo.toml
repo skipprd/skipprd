@@ -18,6 +18,8 @@ members = [
     "crates/skippr-iceberg-catalog",
     "crates/skippr-iceberg-writer",
     "crates/skippr-iceberg-catalog-fs",
+    "crates/skippr-iceberg-catalog-glue",
+    "crates/skippr-iceberg-rest",
     "crates/skippr-iceberg-catalog-dynamodb",
     "crates/skippr-query-ballista",
     "crates/skippr-runtime-sdk",
@@ -102,6 +104,9 @@ skippr-offset-store-dynamodb = { path = "crates/skippr-offset-store-dynamodb", o
 skippr-lease = { path = "crates/skippr-lease" }
 skippr-lease-store-dynamodb = { path = "crates/skippr-lease-store-dynamodb", optional = true }
 skippr-iceberg-catalog = { path = "crates/skippr-iceberg-catalog" }
+skippr-iceberg-catalog-fs = { path = "crates/skippr-iceberg-catalog-fs" }
+skippr-iceberg-catalog-glue = { path = "crates/skippr-iceberg-catalog-glue" }
+skippr-iceberg-rest = { path = "crates/skippr-iceberg-rest" }
 skippr-iceberg-catalog-dynamodb = { path = "crates/skippr-iceberg-catalog-dynamodb", optional = true }
 skippr-offset-store-cloud-tables = { path = "crates/skippr-offset-store-cloud-tables", optional = true }
 skippr-lease-store-cloud-tables = { path = "crates/skippr-lease-store-cloud-tables", optional = true }

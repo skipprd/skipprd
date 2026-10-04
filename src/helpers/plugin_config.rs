@@ -219,6 +219,7 @@ mod tests {
             config: serde_json::json!({
                 "warehouse": "file:///tmp/warehouse",
                 "catalog_table": "cat",
+                "object_store": { "type": "file" },
                 "table_namespace": "bronze"
             }),
         };

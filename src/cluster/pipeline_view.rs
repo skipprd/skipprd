@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
 use crate::buffer::compaction_transaction::SinkRetrySemantics;
+use crate::cluster::iceberg_lake::{FsCatalogConfig, GlueCatalogConfig, IcebergLake};
+use crate::connect::DataSink;
 use crate::helpers::configuration::{Config, Pipeline};
 use crate::helpers::wal_storage::{ConfigError, WalStorage};
 use crate::plugins::cdc::SinkCapability;
@@ -10,9 +12,9 @@ use skippr_lease::{PipelineKey, PipelinePaths};
 /// How `skipprd query` reads one pipeline. Resolved once at `PipelineConfigView::for_name`.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum QueryBackend {
-    /// Data sink is `SkipprLake`: Iceberg (Skippr catalog) ∪ live WAL.
-    SkipprLake(SkipprLakeConfig),
-    /// Any other sink, or no sink: live WAL only (local query). Clustered: typed notice, not registered.
+    /// Iceberg data sink: Iceberg catalog ∪ live WAL.
+    Iceberg(IcebergLake),
+    /// Non-Iceberg sink, or no sink: live WAL only (local query). Clustered: typed notice, not registered.
     WalOnly,
 }
 
@@ -25,26 +27,56 @@ impl QueryBackend {
         let Some(data_sink_ref) = pipeline_cfg.data_sink.as_ref() else {
             return Ok(Self::WalOnly);
         };
-        let Ok(name) = Config::parse_registry_ref(data_sink_ref, "data_sinks") else {
-            return Ok(Self::WalOnly);
-        };
+        let name = Config::parse_registry_ref(data_sink_ref, "data_sinks")
+            .map_err(ConfigError::InvalidIdentity)?;
         let Some(entry) = config
             .data_sinks
             .as_ref()
             .and_then(|sinks| sinks.get(&name))
         else {
-            return Ok(Self::WalOnly);
+            return Err(ConfigError::InvalidIdentity(format!(
+                "data_sink '{name}' is not defined"
+            )));
         };
-        if crate::connect::DataSink::parse(&entry.config.plugin_name)
-            == Some(crate::connect::DataSink::SkipprLake)
-        {
-            let cfg = entry
-                .config
-                .deserialize()
-                .map_err(ConfigError::SkipprLakeConfigInvalid)?;
-            Ok(Self::SkipprLake(cfg))
-        } else {
-            Ok(Self::WalOnly)
+        match DataSink::parse(&entry.config.plugin_name) {
+            Some(DataSink::SkipprLake) => {
+                let cfg: SkipprLakeConfig = entry
+                    .config
+                    .deserialize()
+                    .map_err(|err| ConfigError::IcebergConfigInvalid(err))?;
+                cfg.validate().map_err(ConfigError::IcebergConfigInvalid)?;
+                let backend = skippr_iceberg_catalog::SkipprCatalogBackend::from_store_type(
+                    &crate::pipeline_backend::skippr_store_type_value(config),
+                );
+                Ok(Self::Iceberg(IcebergLake::skippr(cfg, backend)))
+            }
+            Some(DataSink::AthenaIceberg) => {
+                let cfg: GlueCatalogConfig = entry
+                    .config
+                    .deserialize()
+                    .map_err(|err| ConfigError::IcebergConfigInvalid(err))?;
+                if cfg.warehouse.trim().is_empty() || cfg.glue_database_name.trim().is_empty() {
+                    return Err(ConfigError::IcebergConfigInvalid(
+                        "AthenaIceberg warehouse and glue_database_name are required".into(),
+                    ));
+                }
+                skippr_iceberg_catalog::require_s3_warehouse(&cfg.warehouse)
+                    .map_err(ConfigError::IcebergConfigInvalid)?;
+                Ok(Self::Iceberg(IcebergLake::glue(cfg)))
+            }
+            Some(DataSink::Duckdb) => {
+                let cfg: FsCatalogConfig = entry
+                    .config
+                    .deserialize()
+                    .map_err(|err| ConfigError::IcebergConfigInvalid(err))?;
+                skippr_iceberg_catalog::validate_file_warehouse(
+                    &cfg.warehouse,
+                    &cfg.table_namespace,
+                )
+                .map_err(ConfigError::IcebergConfigInvalid)?;
+                Ok(Self::Iceberg(IcebergLake::filesystem(cfg)))
+            }
+            _ => Ok(Self::WalOnly),
         }
     }
 }
@@ -254,13 +286,16 @@ mod tests {
             sink_plugin: skippr_iceberg_catalog::SkipprLakeConfig::PLUGIN_NAME.into(),
             schema_plugin: None,
             sink_ref: None,
-            backend: QueryBackend::SkipprLake(SkipprLakeConfig {
-                warehouse: "file:///tmp/warehouse".into(),
-                catalog_table: "cat".into(),
-                region: None,
-                object_store: skippr_iceberg_catalog::WarehouseObjectStore::S3,
-                table_namespace: "default".into(),
-            }),
+            backend: QueryBackend::Iceberg(IcebergLake::skippr(
+                SkipprLakeConfig {
+                    warehouse: "file:///tmp/warehouse".into(),
+                    catalog_table: "cat".into(),
+                    region: None,
+                    object_store: skippr_iceberg_catalog::WarehouseObjectStore::File,
+                    table_namespace: "default".into(),
+                },
+                skippr_iceberg_catalog::SkipprCatalogBackend::DynamoDb,
+            )),
             flatten_events: false,
             wal_storage: WalStorage::Clustered,
         };
@@ -278,12 +313,18 @@ mod tests {
                 .into(),
             schema_plugin: None,
             sink_ref: None,
-            backend: QueryBackend::WalOnly,
+            backend: QueryBackend::Iceberg(IcebergLake::glue(GlueCatalogConfig {
+                warehouse: "s3://wh/".into(),
+                glue_database_name: "db".into(),
+                region: None,
+                catalog_id: None,
+                object_store: skippr_iceberg_catalog::S3CompatibleObjectStore::S3,
+            })),
             flatten_events: false,
             wal_storage: WalStorage::Clustered,
         };
         assert!(view.validate_clustered_sink().is_ok());
-        assert_eq!(view.backend, QueryBackend::WalOnly);
+        assert!(matches!(view.backend, QueryBackend::Iceberg(_)));
     }
 
     #[test]
@@ -295,12 +336,15 @@ mod tests {
             sink_plugin: crate::plugins::cdc::sink_capabilities::DUCKDB.name.into(),
             schema_plugin: None,
             sink_ref: None,
-            backend: QueryBackend::WalOnly,
+            backend: QueryBackend::Iceberg(IcebergLake::filesystem(FsCatalogConfig {
+                warehouse: "file:///tmp/lake".into(),
+                table_namespace: "bronze".into(),
+            })),
             flatten_events: false,
             wal_storage: WalStorage::Clustered,
         };
         assert!(view.validate_clustered_sink().is_ok());
-        assert_eq!(view.backend, QueryBackend::WalOnly);
+        assert!(matches!(view.backend, QueryBackend::Iceberg(_)));
     }
 
     #[test]
@@ -398,8 +442,20 @@ mod tests {
         );
         assert!(matches!(
             QueryBackend::for_pipeline(&cfg, "p").unwrap(),
-            QueryBackend::SkipprLake(_)
+            QueryBackend::Iceberg(_)
         ));
+        match QueryBackend::for_pipeline(&cfg, "p").unwrap() {
+            QueryBackend::Iceberg(lake) => match lake.catalog {
+                crate::cluster::IcebergCatalogSpec::Skippr(open) => {
+                    assert_eq!(
+                        open.backend,
+                        skippr_iceberg_catalog::SkipprCatalogBackend::DynamoDb
+                    );
+                }
+                other => panic!("expected Skippr catalog, got {other:?}"),
+            },
+            other => panic!("expected Iceberg, got {other:?}"),
+        }
     }
 
     #[test]
@@ -412,7 +468,66 @@ mod tests {
     }
 
     #[test]
-    fn athena_iceberg_sink_resolves_wal_only() {
+    fn skipprlake_file_warehouse_requires_file_object_store() {
+        let missing = config_with_sink(
+            "SkipprLake",
+            serde_json::json!({
+                "warehouse": "file:///tmp/warehouse",
+                "catalog_table": "cat",
+                "table_namespace": "bronze"
+            }),
+        );
+        let err = QueryBackend::for_pipeline(&missing, "p").unwrap_err();
+        assert!(err.to_string().contains("s3://"), "{err}");
+        let cfg = config_with_sink(
+            "SkipprLake",
+            serde_json::json!({
+                "warehouse": "file:///tmp/warehouse",
+                "catalog_table": "cat",
+                "object_store": { "type": "file" },
+                "table_namespace": "bronze"
+            }),
+        );
+        match QueryBackend::for_pipeline(&cfg, "p").unwrap() {
+            QueryBackend::Iceberg(lake) => {
+                assert_eq!(lake.ingest_namespace, "bronze");
+            }
+            other => panic!("expected Iceberg, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn athena_iceberg_rejects_file_warehouse() {
+        let cfg = config_with_sink(
+            "AthenaIceberg",
+            serde_json::json!({
+                "warehouse": "file:///tmp/lake",
+                "glue_database_name": "db",
+                "athena_workgroup_name": "wg",
+                "athena_results_s3_bucket": "r"
+            }),
+        );
+        let err = QueryBackend::for_pipeline(&cfg, "p").unwrap_err();
+        assert!(err.to_string().contains("s3://"), "{err}");
+    }
+
+    #[test]
+    fn athena_iceberg_cannot_name_file_object_store() {
+        let cfg = config_with_sink(
+            "AthenaIceberg",
+            serde_json::json!({
+                "warehouse": "s3://wh/",
+                "glue_database_name": "db",
+                "athena_workgroup_name": "wg",
+                "athena_results_s3_bucket": "r",
+                "object_store": { "type": "file" }
+            }),
+        );
+        assert!(QueryBackend::for_pipeline(&cfg, "p").is_err());
+    }
+
+    #[test]
+    fn athena_iceberg_sink_resolves_iceberg() {
         let cfg = config_with_sink(
             "AthenaIceberg",
             serde_json::json!({
@@ -422,14 +537,17 @@ mod tests {
                 "athena_results_s3_bucket": "r"
             }),
         );
-        assert_eq!(
-            QueryBackend::for_pipeline(&cfg, "p").unwrap(),
-            QueryBackend::WalOnly
-        );
+        match QueryBackend::for_pipeline(&cfg, "p").unwrap() {
+            QueryBackend::Iceberg(lake) => {
+                assert_eq!(lake.ingest_namespace, "db");
+                assert_eq!(lake.catalog.kind_name(), "AthenaIceberg");
+            }
+            other => panic!("expected Iceberg, got {other:?}"),
+        }
     }
 
     #[test]
-    fn duckdb_sink_resolves_wal_only() {
+    fn duckdb_sink_resolves_iceberg() {
         let cfg = config_with_sink(
             "Duckdb",
             serde_json::json!({
@@ -437,9 +555,69 @@ mod tests {
                 "table_namespace": "bronze"
             }),
         );
-        assert_eq!(
-            QueryBackend::for_pipeline(&cfg, "p").unwrap(),
-            QueryBackend::WalOnly
+        match QueryBackend::for_pipeline(&cfg, "p").unwrap() {
+            QueryBackend::Iceberg(lake) => {
+                assert_eq!(lake.ingest_namespace, "bronze");
+                assert_eq!(lake.catalog.kind_name(), "Duckdb");
+            }
+            other => panic!("expected Iceberg, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn malformed_athena_iceberg_config_fails_closed_not_wal_only() {
+        let cfg = config_with_sink(
+            "AthenaIceberg",
+            serde_json::json!({"warehouse": "s3://wh/"}),
         );
+        assert!(QueryBackend::for_pipeline(&cfg, "p").is_err());
+    }
+
+    #[test]
+    fn malformed_duckdb_config_fails_closed_not_wal_only() {
+        let cfg = config_with_sink(
+            "Duckdb",
+            serde_json::json!({"warehouse": "s3://not-file", "table_namespace": "bronze"}),
+        );
+        assert!(QueryBackend::for_pipeline(&cfg, "p").is_err());
+    }
+
+    #[test]
+    fn missing_data_sink_entry_fails_closed_not_wal_only() {
+        let cfg = serde_json::from_value(serde_json::json!({
+            "skippr": { "workspace": "ws", "tenant": "t" },
+            "pipelines": {
+                "p": {
+                    "data_source": "data_sources.sample",
+                    "data_sink": "data_sinks.missing"
+                }
+            },
+            "data_sources": {
+                "sample": { "S3": { "s3_bucket": "b", "s3_prefix": "p" } }
+            },
+            "data_sinks": {}
+        }))
+        .unwrap();
+        let err = QueryBackend::for_pipeline(&cfg, "p").unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidIdentity(_)), "{err:?}");
+    }
+
+    #[test]
+    fn malformed_data_sink_ref_fails_closed_not_wal_only() {
+        let cfg = serde_json::from_value(serde_json::json!({
+            "skippr": { "workspace": "ws", "tenant": "t" },
+            "pipelines": {
+                "p": {
+                    "data_source": "data_sources.sample",
+                    "data_sink": "not-a-registry-ref"
+                }
+            },
+            "data_sources": {
+                "sample": { "S3": { "s3_bucket": "b", "s3_prefix": "p" } }
+            }
+        }))
+        .unwrap();
+        let err = QueryBackend::for_pipeline(&cfg, "p").unwrap_err();
+        assert!(matches!(err, ConfigError::InvalidIdentity(_)), "{err:?}");
     }
 }

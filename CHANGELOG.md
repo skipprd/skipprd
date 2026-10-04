@@ -7,7 +7,8 @@ All notable changes to this project will be documented in this file.
 ### Breaking
 
 - The `Iceberg` data-sink and schema-sink plugin is **`SkipprLake`**. Nested `catalog.type` / `query_engine` / `table_prefix` / `table_location_prefix` are removed. Flat keys: `warehouse`, `catalog_table`, `table_namespace`, `region`.
-- Athena on Iceberg is a separate plugin **`AthenaIceberg`**. `Athena` stays Hive Parquet + Glue. `skipprd query` serves WAL only for non-SkipprLake sinks.
+- Athena on Iceberg is a separate plugin **`AthenaIceberg`**. `Athena` stays Hive Parquet + Glue. `skipprd query` serves Iceberg ∪ WAL for SkipprLake, AthenaIceberg, and Duckdb; Hive Athena and other non-Iceberg sinks stay WAL-only.
+- **`skipprd serve`** exposes Iceberg REST (`crates/skippr-iceberg-rest`) and local Flight SQL for one physical Iceberg catalog.
 - **`Duckdb`** is a skipprd output plugin (filesystem Iceberg catalog). SDE does not treat DuckDB as a warehouse.
 - SDE skipprd-binary env is **`SKIPPRD_BIN`** only.
 - Plugin identity in `by_name` is generated `DataSource`/`DataSink`/`SchemaSink::parse` (case-insensitive). `Azure` is not `AzureBlob`.

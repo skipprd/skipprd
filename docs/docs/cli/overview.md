@@ -1,6 +1,6 @@
 # CLI
 
-Skipprd is the engine binary. The public commands are `connect`, `discover`, `schema`, `sync`, `query`, `doctor`, and `df`. Python `Session` calls the same engine.
+Skipprd is the engine binary. The public commands are `connect`, `discover`, `schema`, `sync`, `query`, `serve`, `doctor`, and `df`. Python `Session` calls the same engine.
 
 ## Commands
 
@@ -10,7 +10,8 @@ Skipprd is the engine binary. The public commands are `connect`, `discover`, `sc
 | [`discover`](discover.md) | Infer source schema. Does not write to the destination. |
 | [`schema`](schema.md) | Print the discovered schema. |
 | [`sync`](sync.md) | Ingest through the WAL, then into the sink if one is configured. Without a sink the WAL is the dataset. |
-| [`query`](query.md) | SQL against engine views (live WAL, unioned with the datalake when present). |
+| [`query`](query.md) | SQL against engine views (live WAL, unioned with Iceberg when the sink is SkipprLake, AthenaIceberg, or Duckdb). |
+| [`serve`](serve.md) | Iceberg REST and read-only Flight SQL for one physical Iceberg catalog. |
 | [`doctor`](doctor.md) | Preflight: config, source, optional sink, WAL. |
 | [`df`](df.md) | `SELECT *` on those query views. Same as `Session.df()`. |
 

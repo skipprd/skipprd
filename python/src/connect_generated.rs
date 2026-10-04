@@ -4895,11 +4895,11 @@ impl PyDataSinkAthena {
 
 #[pyclass(
     from_py_object,
-    name = "DataSinkAthenaIcebergWarehouseObjectStore",
+    name = "DataSinkAthenaIcebergS3CompatibleObjectStore",
     module = "skippr"
 )]
 #[derive(Clone, Default, Serialize)]
-pub struct PyDataSinkAthenaIcebergWarehouseObjectStore {
+pub struct PyDataSinkAthenaIcebergS3CompatibleObjectStore {
     #[serde(skip_serializing_if = "Option::is_none")]
     r#type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -4915,7 +4915,7 @@ pub struct PyDataSinkAthenaIcebergWarehouseObjectStore {
 }
 
 #[pymethods]
-impl PyDataSinkAthenaIcebergWarehouseObjectStore {
+impl PyDataSinkAthenaIcebergS3CompatibleObjectStore {
     #[new]
     #[pyo3(signature = (*, r#type=None, endpoint=None, region=None, access_key_id=None, secret_access_key=None, path_style=None))]
     fn new(
@@ -4953,7 +4953,7 @@ pub struct PyDataSinkAthenaIceberg {
     #[serde(skip_serializing_if = "Option::is_none")]
     catalog_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    object_store: Option<PyDataSinkAthenaIcebergWarehouseObjectStore>,
+    object_store: Option<PyDataSinkAthenaIcebergS3CompatibleObjectStore>,
 }
 
 #[pymethods]
@@ -4967,7 +4967,7 @@ impl PyDataSinkAthenaIceberg {
         athena_results_s3_bucket: Option<String>,
         region: Option<String>,
         catalog_id: Option<String>,
-        object_store: Option<PyDataSinkAthenaIcebergWarehouseObjectStore>,
+        object_store: Option<PyDataSinkAthenaIcebergS3CompatibleObjectStore>,
     ) -> Self {
         Self {
             warehouse,
@@ -5658,11 +5658,11 @@ impl PyDataSinkSynapse {
 
 #[pyclass(
     from_py_object,
-    name = "SchemaSinkAthenaIcebergWarehouseObjectStore",
+    name = "SchemaSinkAthenaIcebergS3CompatibleObjectStore",
     module = "skippr"
 )]
 #[derive(Clone, Default, Serialize)]
-pub struct PySchemaSinkAthenaIcebergWarehouseObjectStore {
+pub struct PySchemaSinkAthenaIcebergS3CompatibleObjectStore {
     #[serde(skip_serializing_if = "Option::is_none")]
     r#type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -5678,7 +5678,7 @@ pub struct PySchemaSinkAthenaIcebergWarehouseObjectStore {
 }
 
 #[pymethods]
-impl PySchemaSinkAthenaIcebergWarehouseObjectStore {
+impl PySchemaSinkAthenaIcebergS3CompatibleObjectStore {
     #[new]
     #[pyo3(signature = (*, r#type=None, endpoint=None, region=None, access_key_id=None, secret_access_key=None, path_style=None))]
     fn new(
@@ -5716,7 +5716,7 @@ pub struct PySchemaSinkAthenaIceberg {
     #[serde(skip_serializing_if = "Option::is_none")]
     catalog_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    object_store: Option<PySchemaSinkAthenaIcebergWarehouseObjectStore>,
+    object_store: Option<PySchemaSinkAthenaIcebergS3CompatibleObjectStore>,
 }
 
 #[pymethods]
@@ -5730,7 +5730,7 @@ impl PySchemaSinkAthenaIceberg {
         athena_results_s3_bucket: Option<String>,
         region: Option<String>,
         catalog_id: Option<String>,
-        object_store: Option<PySchemaSinkAthenaIcebergWarehouseObjectStore>,
+        object_store: Option<PySchemaSinkAthenaIcebergS3CompatibleObjectStore>,
     ) -> Self {
         Self {
             warehouse,
@@ -6875,7 +6875,7 @@ pub fn register_connect_plugin_classes(m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_class::<PyDataSourceXeroAccounting>()?;
     m.add_class::<PyDataSinkAmqp>()?;
     m.add_class::<PyDataSinkAthena>()?;
-    m.add_class::<PyDataSinkAthenaIcebergWarehouseObjectStore>()?;
+    m.add_class::<PyDataSinkAthenaIcebergS3CompatibleObjectStore>()?;
     m.add_class::<PyDataSinkAthenaIceberg>()?;
     m.add_class::<PyDataSinkAzureBlob>()?;
     m.add_class::<PyDataSinkBigquery>()?;
@@ -6894,7 +6894,7 @@ pub fn register_connect_plugin_classes(m: &Bound<'_, PyModule>) -> PyResult<()> 
     m.add_class::<PyDataSinkSnowflake>()?;
     m.add_class::<PyDataSinkStdout>()?;
     m.add_class::<PyDataSinkSynapse>()?;
-    m.add_class::<PySchemaSinkAthenaIcebergWarehouseObjectStore>()?;
+    m.add_class::<PySchemaSinkAthenaIcebergS3CompatibleObjectStore>()?;
     m.add_class::<PySchemaSinkAthenaIceberg>()?;
     m.add_class::<PySchemaSinkBigquery>()?;
     m.add_class::<PySchemaSinkClickhouse>()?;

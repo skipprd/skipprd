@@ -189,8 +189,8 @@ pub enum ConfigError {
     GossipKeyMissing,
     #[error("WAL_STORAGE=clustered requires SKIPPR_CLUSTER_TLS_CERT, SKIPPR_CLUSTER_TLS_KEY, and SKIPPR_CLUSTER_TLS_CA")]
     ClusterTlsMissing,
-    #[error("SkipprLake config is invalid: {0}")]
-    SkipprLakeConfigInvalid(String),
+    #[error("Iceberg sink config is invalid: {0}")]
+    IcebergConfigInvalid(String),
     #[error(
         "WAL_STORAGE=clustered cannot be used with skippr.store.type={0}; clustered mode uses DynamoDB or Cloud tables"
     )]

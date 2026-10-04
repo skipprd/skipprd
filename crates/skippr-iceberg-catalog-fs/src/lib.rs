@@ -462,7 +462,6 @@ mod tests {
     use super::*;
     use iceberg::spec::{NestedField, PrimitiveType, Schema, Type};
     use iceberg::transaction::{ApplyTransactionAction, Transaction};
-    use skippr_iceberg_catalog::{iceberg_file_io_for, WarehouseObjectStore};
     use std::str::FromStr;
 
     fn schema() -> Schema {
@@ -480,7 +479,7 @@ mod tests {
     async fn catalog() -> (FsCatalog, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
         let warehouse = format!("file://{}", dir.path().display());
-        let file_io = iceberg_file_io_for(&warehouse, &WarehouseObjectStore::S3).unwrap();
+        let file_io = FileIO::new_with_fs();
         (FsCatalog::new(&warehouse, file_io).unwrap(), dir)
     }
 

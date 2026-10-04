@@ -19,6 +19,7 @@ pub enum CliModeKind {
     SqlHelp,
     Benchmark,
     Connect,
+    Serve,
 }
 
 impl CliModeKind {
@@ -34,6 +35,7 @@ impl CliModeKind {
             Mode::Doctor(_) => Self::SqlHelp,
             Mode::Df(_) => Self::Query,
             Mode::Connect(_) => Self::Connect,
+            Mode::Serve(_) => Self::Serve,
         }
     }
 
@@ -48,6 +50,7 @@ impl CliModeKind {
             Self::SqlHelp => "sql-help",
             Self::Benchmark => "benchmark",
             Self::Connect => "connect",
+            Self::Serve => "serve",
         }
     }
 }
@@ -94,6 +97,7 @@ pub fn validate_wal_storage_for_mode(
             CliModeKind::Metadata => Err(ConfigError::ClusteredModeRejected("metadata".into())),
             CliModeKind::Benchmark => Err(ConfigError::ClusteredModeRejected("benchmark".into())),
             CliModeKind::Schema => Err(ConfigError::ClusteredModeRejected("schema".into())),
+            CliModeKind::Serve => Err(ConfigError::ClusteredModeRejected("serve".into())),
             CliModeKind::Sync { once: false }
             | CliModeKind::Query
             | CliModeKind::SqlHelp
@@ -167,7 +171,7 @@ fn skippr_catalog_table(entry: &PluginConfigEntry) -> Result<Option<String>, Con
     }
     let cfg: skippr_iceberg_catalog::SkipprLakeConfig =
         serde_json::from_value(entry.config.clone())
-            .map_err(|err| ConfigError::SkipprLakeConfigInvalid(err.to_string()))?;
+            .map_err(|err| ConfigError::IcebergConfigInvalid(err.to_string()))?;
     Ok(Some(cfg.catalog_table))
 }
 
@@ -489,6 +493,7 @@ mod tests {
                 config: serde_json::json!({
                     "catalog_table": table,
                     "warehouse": "file:///tmp/warehouse",
+                    "object_store": { "type": "file" },
                     "table_namespace": "default"
                 }),
             },
@@ -526,7 +531,7 @@ mod tests {
         );
         let err = validate_skippr_catalog_tables(&config).unwrap_err();
         assert!(
-            matches!(err, ConfigError::SkipprLakeConfigInvalid(_)),
+            matches!(err, ConfigError::IcebergConfigInvalid(_)),
             "{err:?}"
         );
     }

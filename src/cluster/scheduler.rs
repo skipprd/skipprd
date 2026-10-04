@@ -758,7 +758,7 @@ pub async fn clustered_query_collect(
     }
     tracing::info!(
         error = last_err.as_deref().unwrap_or("no ready Flight SQL node"),
-        "clustered query Flight SQL unreachable; SkipprLake-only"
+        "clustered query Flight SQL unreachable; Iceberg-only"
     );
     run_lake_only_query(app_cfg, sql, &config).await
 }
@@ -793,7 +793,7 @@ async fn run_lake_only_query(
         .map_err(|err| DurableError::Io(err.to_string()))?;
     tracing::info!(
         rows = batches.iter().map(|batch| batch.num_rows()).sum::<usize>(),
-        "clustered query SkipprLake-only"
+        "clustered query Iceberg-only"
     );
     Ok(batches)
 }
@@ -871,7 +871,7 @@ mod tests {
             .next()
             .unwrap();
         assert!(query.contains("fetch_flight_sql"));
-        assert!(query.contains("SkipprLake-only"));
+        assert!(query.contains("Iceberg-only"));
         assert!(query.contains("run_lake_only_query"));
         assert!(!query.contains("query_status"));
         assert!(!query.contains("query_schedulers"));

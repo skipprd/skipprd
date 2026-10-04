@@ -345,7 +345,7 @@ fn rel_path(root: &Path, path: &Path) -> Result<String, DurableError> {
         .strip_prefix(root)
         .map_err(|err| DurableError::Io(err.to_string()))?;
     let text = rel.to_string_lossy().replace('\\', "/");
-    if text.is_empty() || text.starts_with('/') || text.contains("..") {
+    if text.is_empty() || text.starts_with('/') || text.split('/').any(|part| part == "..") {
         return Err(DurableError::Io(format!("unsafe snapshot path {text}")));
     }
     Ok(text)
@@ -503,6 +503,18 @@ mod tests {
         let live = Path::new("/data/clustered/t/w/p");
         let staging = snapshot_staging_dir(live, "abc");
         assert_eq!(staging, Path::new("/data/clustered/t/w/p.bootstrap-abc"));
+    }
+
+    #[test]
+    fn rel_path_allows_empty_partition_dotdot_in_filename() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let name = "seg.data_sinks.lake.shop..0.fp.tombstone";
+        let path = root.join(name);
+        std::fs::write(&path, b"x").unwrap();
+        assert_eq!(rel_path(root, &path).unwrap(), name);
+        let traversal = root.join("..").join("outside");
+        assert!(rel_path(root, &traversal).is_err());
     }
 
     #[test]

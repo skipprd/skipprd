@@ -74,7 +74,7 @@ struct AthenaIcebergPairing {
     #[serde(default)]
     catalog_id: Option<String>,
     #[serde(default)]
-    object_store: skippr_iceberg_catalog::WarehouseObjectStore,
+    object_store: skippr_iceberg_catalog::S3CompatibleObjectStore,
 }
 
 /// Host pairing projection of plugin `DuckdbConfig`. Same serde shape;
@@ -3109,6 +3109,7 @@ mod tests {
                 config: serde_json::json!({
                     "catalog_table": table,
                     "warehouse": "file:///tmp/warehouse",
+                    "object_store": { "type": "file" },
                     "table_namespace": namespace
                 }),
             },
@@ -3307,6 +3308,7 @@ mod tests {
                     "SkipprLake": {
                         "catalog_table": "cat",
                         "warehouse": "file:///tmp/a",
+                        "object_store": { "type": "file" },
                         "table_namespace": "bronze"
                     },
                     "schema_sink": "schema_sinks.dl_schema"
@@ -3317,6 +3319,7 @@ mod tests {
                     "SkipprLake": {
                         "catalog_table": "cat",
                         "warehouse": "file:///tmp/b",
+                        "object_store": { "type": "file" },
                         "table_namespace": "bronze"
                     }
                 }
@@ -3371,6 +3374,23 @@ mod tests {
                 .iter()
                 .any(|v| v.contains("AthenaIceberg") && v.contains("Glue")),
             "{violations:?}"
+        );
+    }
+
+    #[test]
+    fn athena_iceberg_pairing_cannot_name_file_object_store() {
+        let err = serde_json::from_value::<AthenaIcebergPairing>(json!({
+            "warehouse": "s3://a/",
+            "glue_database_name": "analytics",
+            "athena_workgroup_name": "primary",
+            "athena_results_s3_bucket": "results",
+            "object_store": { "type": "file" }
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("unknown variant") || err.contains("file"),
+            "{err}"
         );
     }
 
