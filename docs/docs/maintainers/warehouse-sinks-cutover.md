@@ -3,7 +3,7 @@
 Status: draft for implementation. Companion: [Spec 2: SkipprLake dbt + REST](./skipprlake-dbt-rest.md).
 Repos touched: `skipprd` (primary), `sde`, `cloud` (docs and decisions only), `skippr-web` (docs only).
 
-This spec fixes the existing DuckDB, Athena, Iceberg and `skipprd query` wiring. It ships no new user-facing warehouse capability. Spec 2 adds the SkipprLake dbt adapter and REST catalog on top of the shape this spec leaves behind.
+This spec fixes the existing DuckDB, Athena, Iceberg and `skipprd query` wiring. Spec 2 (`dbt-skipprlake`, REST, Flight, LocalSidecar) has landed on this shape.
 
 ## 1. Goals and non-goals
 
@@ -13,21 +13,22 @@ This spec fixes the existing DuckDB, Athena, Iceberg and `skipprd query` wiring.
 
    | Plugin key | Writes | Read by |
    |---|---|---|
-   | `SkipprLake` | Iceberg on object storage, Skippr catalog (DynamoDB or Cloud Tables) | `skipprd query` (Ballista over persisted data, DataFusion over WAL) |
-   | `Athena` | Hive Parquet plus Glue (unchanged) | Athena only (SDE `AthenaProvider`, dbt-athena) |
-   | `AthenaIceberg` | Iceberg on S3, Glue catalog | Athena only |
-   | `Duckdb` | Iceberg on `file://`, metadata colocated with data | DuckDB clients only. skipprd output only. |
+   | `SkipprLake` | Iceberg on object storage, Skippr catalog (DynamoDB or Cloud Tables) | `skipprd query` (Iceberg ∪ WAL ingest alias); `skipprd serve` Flight/REST (Iceberg `namespace.table`); Spark/Trino via REST |
+   | `Athena` | Hive Parquet plus Glue (unchanged) | Athena only (SDE `AthenaProvider`, dbt-athena). `skipprd query` is WAL-only. |
+   | `AthenaIceberg` | Iceberg on S3, Glue catalog | `skipprd query` (Iceberg ∪ WAL ingest alias); `skipprd serve` Flight (Iceberg `namespace.table`); Athena SQL |
+   | `Duckdb` | Iceberg on `file://`, metadata colocated with data | `skipprd query` (Iceberg ∪ WAL ingest alias); `skipprd serve` Flight (Iceberg `namespace.table`); DuckDB `iceberg_scan`. SDE does not model DuckDB. |
 
-2. `skipprd query` has **zero knowledge** of any sink except `SkipprLake`. For every other sink (or none) it serves the live WAL only.
+2. `skipprd query` resolves `QueryBackend { Iceberg(IcebergLake), WalOnly }` once at the edge. Iceberg sinks are SkipprLake, AthenaIceberg, and Duckdb. Hive Athena, Snowflake, and other non-Iceberg sinks serve live WAL only. sqlrt never names those sinks.
 3. Delete `query_engine`, the Glue/REST/Unity/Polaris catalog variants, and every "Iceberg" plugin-name string.
 4. One Iceberg writer implementation shared by three thin plugins.
 5. SDE drops `Duckdb` as a warehouse entirely. SDE maps `SkipprLake` and `AthenaIceberg` correctly and never sees `query_engine`.
 
-### Non-goals (deferred to Spec 2)
+### Non-goals (Spec 2)
 
-- dbt adapter for SkipprLake, REST catalog, views, public Flight SQL endpoint.
-- Any DuckDB write path from SDE. Any REST catalog for DuckDB.
-- Changing how `sde query` reaches SkipprLake (it keeps shelling `skipprd query --plain`).
+- Iceberg views and public credential vending. SkipprLake dbt is `dbt-skipprlake` (`type: skipprlake`).
+- Any DuckDB write path from SDE.
+- `sde query` / `sde model` warehouse I/O is Flight against one `skipprd serve` (Iceberg `namespace.table`). `SkipprCliProvider` stays EL-only. The `pipeline.namespace` ∪WAL alias remains `skipprd query` only.
+- `skipprd serve` is a kernel service (Iceberg REST + Flight SQL), not a SkipprLake plugin.
 
 ## 2. Locked decisions
 
@@ -38,20 +39,20 @@ Confirmed 2026-09-30: **D3** (`AthenaIceberg` is a separate plugin key; `Athena`
 | D1 | Plugin key selects warehouse family. No `query_engine` anywhere. | One authority per job. |
 | D2 | `Iceberg` becomes **`SkipprLake`**, for both the data sink and the schema sink. Flat config, Skippr catalog only. | The plugin is only ever used for the Skippr warehouse. The nested `catalog: {type: ...}` block runs against the flat encapsulated shape used by `Athena`. |
 | D3 | Athena on Iceberg is a **separate plugin key `AthenaIceberg`**. `Athena` stays Hive only. No `table_format` switch on `Athena`. | Sink capability is static per plugin name (`[package.metadata.skippr-plugin.sink_capability]` in the plugin `Cargo.toml` plus `sink_capabilities::by_name` in `src/plugins/cdc.rs`). Hive is `CdcEncodedOnly / DeterministicOverwrite`; Iceberg is `ExactOnceCdcEligible / TransactionalIdempotent`. A `table_format` switch on one key would force config-aware capabilities and lose the compile-time guarantee. |
-| D4 | `skipprd query` resolves a typed `QueryBackend { SkipprLake(cfg), WalOnly }` once, at the edge. | Compile-time exhaustiveness. No string compares in sqlrt. |
+| D4 | `skipprd query` resolves a typed `QueryBackend { Iceberg(IcebergLake), WalOnly }` once, at the edge. `IcebergLake` holds serializable `IcebergCatalogSpec` (Skippr / Glue / filesystem) plus ingest namespace. | Compile-time exhaustiveness. No string compares in sqlrt. Catalogs open asynchronously. |
+| D6 | `Duckdb` writes Hadoop-style filesystem Iceberg. `skipprd query` serves Iceberg ∪ WAL; `skipprd serve` Flight serves Iceberg `namespace.table`. SDE does not model DuckDB. | Same Iceberg catalog opener as SkipprLake and AthenaIceberg. |
+| D7 | The filesystem catalog crate is the Duckdb catalog backend. Host query opens it through `IcebergCatalogSpec::Filesystem`. | One opener. Not a second Skippr catalog. |
+| D12 | Clustered query serves **Iceberg** pipelines. A `WalOnly` pipeline is **not registered** and yields an explicit typed notice (`ClusteredSelectPlan.wal_only`), never a silent skip. Local `skipprd query` serves WAL for WalOnly and Iceberg ∪ WAL for Iceberg. | Ballista scans persisted Iceberg; Hive/Snowflake have none that skipprd may know about. |
 | D5 | Manifest-prefix S3 Parquet listing in `skipprd query` is deleted. | It encodes the Athena Hive lake layout inside the query engine. |
-| D6 | `Duckdb` is skipprd output only. It uses a filesystem ("Hadoop-style") Iceberg catalog in a new crate, restricted to write policies DuckDB can read. | DuckDB writes Iceberg only via REST; the goal here is only "land Iceberg DuckDB can read". |
-| D7 | The filesystem catalog is used by `Duckdb` only. | It must not become a second SkipprLake catalog. |
 | D8 | One shared writer crate `skippr-iceberg-writer`. Plugins are config plus catalog constructor plus `main`. | DRY. `iceberg_sink.rs` is 4.8k LOC with 36 tests. Three copies would diverge. |
-| D9 | SDE keeps Skippr as "not a dbt adapter" in this spec. Only the error copy changes. | The adapter is Spec 2. |
+| D9 | SDE models SkipprLake through `dbt-skipprlake` (`type: skipprlake`). Local `file://` uses LocalSidecar `skipprd serve`. | Spec 2 landed; `SKIPPR_NOT_DBT_ADAPTER` is deleted. |
 | D11 | `table_prefix` is removed. Each `SkipprLake` sink owns a unique `(catalog_table, table_namespace)`, validated at config load (`Config::get_config_dependency_violations`). The Iceberg namespace is the isolation unit. | With no prefix, two sinks sharing a namespace would share table names. A load-time check makes that unrepresentable at run time. |
-| D12 | Clustered query (`plan_clustered_select`, `run_lake_only_query`) serves `SkipprLake` pipelines only. A `WalOnly` pipeline is **not registered** and yields an explicit typed notice (`ClusteredSelectPlan.wal_only`), never a silent skip. Local `skipprd query` serves WAL only. | Ballista scans persisted lake data; a non-Skippr sink has none that `skipprd` may know about. |
 | D13 | Table location is derived: `{warehouse}/{table_namespace}/{table_name}`. `table_location_prefix`, `properties`, `format`, `query_engine` and `catalog` are removed from the `SkipprLake` config. | Removes six "requires table_location_prefix" runtime error sites and a config input that could disagree with the catalog. |
 | D10 | No compatibility shims. Configs using `Iceberg:` fail with the normal unknown-plugin error. Rename is documented in the changelog. | Hard cutover. |
 
 ## 3. Pre-cutover audit (historical)
 
-W1–W8 replaced this world. Do not treat this section as current code. `skipprd query` is `QueryBackend::{SkipprLake, WalOnly}`. Statement copy is `sqlrt::docs::get_sql_docs()`; checked-in `sql-docs.md` is generated from it (W9). Glue remains the Athena Hive schema sink, not the engine query catalog.
+W1–W8 replaced this world. Do not treat this section as current code. `skipprd query` is `QueryBackend::{Iceberg, WalOnly}`. Statement copy is `sqlrt::docs::get_sql_docs()`; checked-in `sql-docs.md` is generated from it (W9). Hive Glue remains the Athena Hive schema sink, not the engine query catalog.
 
 ### 3.1 skipprd query knew other sinks
 
@@ -89,8 +90,10 @@ flowchart LR
   wal --> ath[Athena sink Hive]
   wal --> athI[AthenaIceberg sink]
   wal --> duck[Duckdb sink]
-  lake --> ballista[skipprd query Ballista plus WAL]
-  wal --> ballista
+  lake --> query[skipprd query and serve]
+  athI --> query
+  duck --> query
+  wal --> query
   ath --> athena[Athena SQL]
   athI --> athena
   duck --> duckdbClients[DuckDB iceberg_scan]
@@ -98,18 +101,21 @@ flowchart LR
 
 Notes:
 
-- `skipprd query` sees SkipprLake tables (Iceberg ∪ WAL) and, for every other pipeline, the WAL only.
-- Athena and DuckDB never touch skipprd query.
+- `skipprd query` sees Iceberg ∪ WAL for SkipprLake, AthenaIceberg, and Duckdb. `skipprd serve` Flight sees Iceberg `namespace.table` only. Hive Athena, Snowflake, and other non-Iceberg pipelines are WAL-only on `skipprd query`.
+- Host query opens catalogs through `IcebergCatalogSpec` (Skippr / Glue / filesystem). Plugin YAML may carry extra Athena SQL keys; `GlueCatalogConfig` / `FsCatalogConfig` are the query/serve subset and do not link sink binaries.
+- Athena SQL and DuckDB `iceberg_scan` remain available for those warehouses' own clients.
 
 ### 4.1 Crate layout after the cutover
 
 ```text
 crates/
-  skippr-iceberg-writer/          NEW  shared writer (extracted from iceberg_sink.rs)
-  skippr-iceberg-catalog/         SHRINK  WarehouseObjectStore + SkipprLakeConfig only
+  skippr-iceberg-writer/          shared writer (extracted from iceberg_sink.rs)
+  skippr-iceberg-catalog/         WarehouseObjectStore + SkipprLakeConfig + SkipprCatalogBackend
   skippr-iceberg-catalog-dynamodb/        KEEP (typed config in)
   skippr-iceberg-catalog-cloud-tables/    KEEP (typed config in)
-  skippr-iceberg-catalog-fs/      NEW  filesystem catalog (Duckdb sink only)
+  skippr-iceberg-catalog-glue/    Glue opener for host query/serve (no Athena SQL keys)
+  skippr-iceberg-catalog-fs/      filesystem catalog (Duckdb sink and host query)
+  skippr-iceberg-rest/            Iceberg REST for skipprd serve
 plugins/
   data_sink/skipprlake/           RENAMED from data_sink/iceberg
   schema_sink/skipprlake/         RENAMED from schema_sink/iceberg
@@ -129,7 +135,7 @@ Each unit is a hard cutover: code, tests, docs and callers move together. Order 
 W0 spikes and spec lock
   → W1 writer extraction (pure refactor, green before anything else)
     → W3 SkipprLake config + plugin rename (D11, D13; defines SkipprLakeConfig)
-      → W2 query isolation (QueryBackend carries SkipprLakeConfig, so it needs W3)
+      → W2 query isolation (`QueryBackend::{Iceberg(IcebergLake), WalOnly}`; `IcebergCatalogSpec::Skippr` wraps `SkipprLakeOpen` from W3 YAML)
         → W4 AthenaIceberg (same merge chain: Glue Iceberg moves off the lake plugin)
           → W5 Duckdb sink
           → W6 SDE cutover
@@ -288,7 +294,8 @@ Add `tests/query_isolation.rs`. It fails until W2 lands and stays as a permanent
 use std::fs;
 use std::path::Path;
 
-/// `skipprd query` must not know any warehouse sink except SkipprLake.
+/// `skipprd query` must not know Hive Athena, Snowflake, or Athena SQL.
+/// Iceberg catalog backends are opened at the cluster edge, not in sqlrt.
 /// Banned identifiers are assembled with concat! so this file does not trip itself.
 #[test]
 fn sqlrt_and_query_flight_know_no_other_sinks() {
@@ -311,7 +318,7 @@ fn sqlrt_and_query_flight_know_no_other_sinks() {
             for word in banned {
                 assert!(
                     !text.contains(word),
-                    "{} mentions banned identifier `{word}`; skipprd query is SkipprLake-only",
+                    "{} mentions banned identifier `{word}`; skipprd query is Iceberg ∪ WAL, not Hive/Snowflake SQL",
                     entry.display()
                 );
             }
@@ -322,7 +329,7 @@ fn sqlrt_and_query_flight_know_no_other_sinks() {
 
 `walk` is a small recursive `read_dir` helper in the test file. Tests inside `sqlrt` that legitimately need a phrase use `concat!` too.
 
-Behavioural tests, in `src/sqlrt/backend.rs` and `src/sqlrt/tables.rs` test modules:
+Behavioural tests, in `src/cluster/pipeline_view.rs` (historical W2 named `sqlrt/backend.rs`; query backend lives at the cluster edge):
 
 ```rust
 #[test]
@@ -338,7 +345,7 @@ fn skipprlake_sink_resolves_typed_backend() {
         "warehouse": "s3://wh/", "catalog_table": "cat", "region": "us-east-1",
         "table_namespace": "bronze"
     }));
-    assert!(matches!(QueryBackend::for_pipeline(&cfg, "p").unwrap(), QueryBackend::SkipprLake(_)));
+    assert!(matches!(QueryBackend::for_pipeline(&cfg, "p").unwrap(), QueryBackend::Iceberg(_)));
 }
 
 #[test]
@@ -367,14 +374,14 @@ Lives on `PipelineConfigView` (cluster is the edge that already owns sink identi
 /// How `skipprd query` reads one pipeline. Resolved once; never re-derived from strings.
 #[derive(Clone, Debug)]
 pub enum QueryBackend {
-    /// Data sink is `SkipprLake`: Iceberg (Skippr catalog) ∪ live WAL.
-    SkipprLake(SkipprLakeConfig),
+    /// Iceberg data sink: Iceberg catalog ∪ live WAL.
+    Iceberg(IcebergLake),
     /// Any other sink, or no sink: live WAL only (local query). Clustered: typed notice, not registered.
     WalOnly,
 }
 ```
 
-`SkipprLakeConfig::is_plugin_name` is the only sink-name check. Malformed SkipprLake config is `ConfigError::SkipprLakeConfigInvalid`, not `WalOnly`.
+Plugin name is matched **once** at `QueryBackend::for_pipeline`. Malformed Iceberg sink config is `ConfigError::IcebergConfigInvalid`, not `WalOnly`.
 
 ### W2.3 `PipelineConfigView`
 
@@ -401,10 +408,10 @@ pub async fn register_namespace_view(
     let view = PipelineConfigView::for_name(config, pipeline)
         .map_err(|e| DataFusionError::Plan(e.to_string()))?;
     match &view.backend {
-        QueryBackend::SkipprLake(_) => register_iceberg_union_view(
+        QueryBackend::Iceberg(_) => register_iceberg_union_view(
             config, ctx, pipeline, namespace, &view, &namespace_union_opts(config),
         ).await.map_err(|err| DataFusionError::Plan(format!(
-            "SkipprLake catalog unavailable for '{pipeline}.{namespace}': {err}"
+            "Iceberg catalog unavailable for '{pipeline}.{namespace}': {err}"
         ))),
         QueryBackend::WalOnly => register_wal_namespace_view(ctx, config, pipeline, namespace).await,
     }
@@ -418,33 +425,33 @@ Delete: `build_s3_df`, `build_timestamp_projection` (if only used here), the man
 `iceberg_sink_catalog` / `IcebergSinkCatalog` become:
 
 ```rust
-fn skipprlake_catalog(view: &PipelineConfigView) -> Result<&SkipprLakeConfig, DataFusionError> {
+fn iceberg_lake(view: &PipelineConfigView) -> Result<&IcebergLake, DataFusionError> {
     match &view.backend {
-        QueryBackend::SkipprLake(cfg) => Ok(cfg),
+        QueryBackend::Iceberg(lake) => Ok(lake),
         QueryBackend::WalOnly => Err(DataFusionError::Plan(
-            "pipeline is not a SkipprLake pipeline".into(),
+            "pipeline is not an Iceberg pipeline".into(),
         )),
     }
 }
 ```
 
-`load_iceberg_scan_provider` and `list_iceberg_source_namespaces` drop the `match &sink.catalog_cfg { Skippr => ..., other => Err(adapter_name) }` arms. `open_skippr_catalog` (in `src/cluster/backend.rs`) takes `&SkipprLakeConfig`.
+`load_iceberg_scan_provider` and `list_iceberg_source_namespaces` drop the `match &sink.catalog_cfg { Skippr => ..., other => Err(adapter_name) }` arms. `open_iceberg_catalog` (in `src/cluster/backend.rs`) takes `&IcebergCatalogSpec`. Skippr identity includes `SkipprCatalogBackend` and `object_store` (`SkipprLakeOpen`); Ballista reload must not guess DynamoDB via `Config::new()`.
 
 Delete `#[allow(dead_code)] struct IcebergSinkCatalog`.
 
 ### W2.6 Clustered path (D12)
 
-Clustered query serves `SkipprLake` pipelines only. `plan_clustered_select` currently skips non-Iceberg pipelines silently (`if !view.iceberg { continue; }`). Replace the skip with `QueryBackend` (do **not** add a second `ClusteredPipelineScope` enum):
+Clustered query serves **Iceberg** pipelines. `plan_clustered_select` currently skips non-Iceberg pipelines silently (`if !view.iceberg { continue; }`). Replace the skip with `QueryBackend` (do **not** add a second `ClusteredPipelineScope` enum):
 
 ```rust
 pub struct ClusteredSelectPlan {
     pub df: datafusion::dataframe::DataFrame,
-    /// Pipelines whose sink is not SkipprLake. Not registered. Never silently omitted.
+    /// Pipelines whose sink is not Iceberg. Not registered. Never silently omitted.
     pub wal_only: Vec<String>,
 }
 ```
 
-`plan_clustered_select` returns `ClusteredSelectPlan`. SkipprLake pipelines register Iceberg ∪ WAL. WalOnly names go on `wal_only` and are not registered. Catalog-list **errors** fail the plan (not warn+continue). An empty namespace list is success (no tables yet). Rename `iceberg_only` / `run_iceberg_only_query` to `lake_only` / `run_lake_only_query`. Local `skipprd query` serves WAL-only pipelines via `register_wal_namespace_view`.
+`plan_clustered_select` returns `ClusteredSelectPlan`. Iceberg pipelines register Iceberg ∪ WAL. WalOnly names go on `wal_only` and are not registered. Catalog-list **errors** fail the plan (not warn+continue). An empty namespace list is success (no tables yet). Rename `iceberg_only` / `run_iceberg_only_query` to `lake_only` / `run_lake_only_query`. Local `skipprd query` serves WAL-only pipelines via `register_wal_namespace_view`.
 
 ### W2.7 Remove Glue/Athena/Hive from the query REPL
 
@@ -452,7 +459,7 @@ pub struct ClusteredSelectPlan {
 
 - Delete the `use crate::helpers::athena_admin::{...}` import and the `Statement::DatabaseDrop` arm that calls `delete_glue_database`.
 - Delete the `glue_delete_table` branch (~1036–1048) in table drop.
-- `DROP DATABASE` and `DROP TABLE` in the REPL become: SkipprLake drops the Iceberg table via the catalog (see W2.8); any other backend returns `"DROP is only supported for SkipprLake pipelines"`.
+- `DROP DATABASE` and `DROP TABLE` in the REPL become: Iceberg pipelines drop via the catalog (see W2.8); any other backend returns `"DROP TABLE is only supported for Iceberg pipelines"`.
 - Delete `src/helpers/athena_admin.rs` and its `pub mod` if no other caller remains (grep shows only `sqlrt/query.rs`).
 
 `src/sqlrt/operators/dump_schema.rs`: replace Hive with the Arrow schema:
@@ -468,7 +475,7 @@ let rows: Vec<(String, String, bool)> = schema
     .collect();
 ```
 
-`src/sqlrt/docs.rs`: statement copy names SkipprLake Iceberg ∪ WAL. Glue/Athena are not the engine query catalog. Markdown is generated (`sql-docs.md` from `get_sql_docs_formatted()`); handwritten `docs/docs/sql/reference.md` is deleted (W9).
+`src/sqlrt/docs.rs`: statement copy names Iceberg ∪ WAL. Glue/Athena are not the engine query catalog. Markdown is generated (`sql-docs.md` from `get_sql_docs_formatted()`); handwritten `docs/docs/sql/reference.md` is deleted (W9).
 
 ### W2.8 `drop_table`
 
@@ -476,13 +483,13 @@ let rows: Vec<(String, String, bool)> = schema
 
 ```rust
 match &view.backend {
-    QueryBackend::SkipprLake(cfg) => {
-        let catalog = open_skippr_catalog(config, cfg).await?;
+    QueryBackend::Iceberg(lake) => {
+        let catalog = open_iceberg_catalog(&lake.catalog).await?;
         catalog.drop_table(&ident).await?;   // pointer delete; data purge stays a sink concern
         delete_wal_partition(...).await?;
     }
     QueryBackend::WalOnly => return Err(DataFusionError::Plan(
-        "DROP TABLE is only supported for SkipprLake pipelines".into(),
+        "DROP TABLE is only supported for Iceberg pipelines".into(),
     )),
 }
 ```
@@ -504,7 +511,7 @@ match &view.backend {
 
 ### W3.1 Config
 
-Flat, encapsulated, `deny_unknown_fields`. Lives in `crates/skippr-iceberg-catalog/src/lib.rs` beside `WarehouseObjectStore` (the query side needs it, so it cannot live only in the plugin).
+Flat, encapsulated, `deny_unknown_fields`. Lives in `crates/skippr-iceberg-catalog/src/lib.rs` beside `WarehouseObjectStore` so the host can deserialize sink YAML without linking the plugin binary. Query identity is `SkipprLakeOpen { lake, backend }` inside `IcebergCatalogSpec`, not `SkipprLakeConfig` alone.
 
 ```rust
 /// Data sink and schema sink config for `SkipprLake:`.
@@ -714,11 +721,11 @@ pub struct AthenaIcebergConfig {
     #[serde(default)]
     pub catalog_id: Option<String>,
     #[serde(default)]
-    pub object_store: WarehouseObjectStore,
+    pub object_store: S3CompatibleObjectStore,
 }
 ```
 
-Missing `glue_database_name`, workgroup or results bucket is a config error (no silent defaults). This also fixes the bug where the old Iceberg→Athena projection dropped `result_s3`.
+`object_store` is `S3CompatibleObjectStore` (`S3` | `R2`). `File` cannot be named. Missing `glue_database_name`, workgroup or results bucket is a config error (no silent defaults). This also fixes the bug where the old Iceberg→Athena projection dropped `result_s3`.
 
 YAML:
 
@@ -759,7 +766,7 @@ pub async fn open_glue_catalog(cfg: &AthenaIcebergConfig) -> Result<Arc<dyn Cata
 
 Writer config: `table_namespace = cfg.glue_database_name`, `location_root` from warehouse + namespace (D13). There is no `table_prefix` on `IcebergWriterConfig`. Table names are unprefixed (`type_matrix_orders`, not `skippr_type_matrix_orders`).
 
-**W4 SoT (locked after red-team):** `AthenaIcebergConfig` lives in the plugin crate, not in `skippr-iceberg-catalog`. `open_glue_catalog` lives in the plugin, not `src/cluster/backend.rs`. `QueryBackend` stays `{ SkipprLake, WalOnly }` — AthenaIceberg is WalOnly for `skipprd query`. Pairing: AthenaIceberg data_sink MUST use AthenaIceberg schema_sink (same config equality as SkipprLake). Delete `plugins/*/iceberg` in the same change. Workgroup/results keys are Athena SQL / SDE, not skipprd query.
+**W4 SoT (superseded by D4 Iceberg):** AthenaIceberg is an Iceberg query lake. `open_glue_catalog` is `skippr-iceberg-catalog-glue` used by the plugin and host `IcebergCatalogSpec::Glue`. Pairing: AthenaIceberg data_sink MUST use AthenaIceberg schema_sink. Workgroup/results keys are Athena SQL / SDE.
 
 ### W4.4 Capability
 
@@ -851,7 +858,7 @@ Also update:
 
 `crates/skippr-iceberg-catalog-fs/src/lib.rs`, implementing `iceberg::Catalog`.
 
-**W5 SoT (locked after red-team + S1):** `DuckdbConfig` lives in `plugins/data_sink/duckdb`, not `skippr-iceberg-catalog`. `FsCatalog` lives only in this crate. `open_fs_catalog` lives in the plugin. `QueryBackend` stays `{ SkipprLake, WalOnly }` — Duckdb is WalOnly. Pairing: Duckdb data_sink MUST equal Duckdb schema_sink (host `DuckdbPairing` if skipprd cannot depend on the plugin crate). Skippr catalog crates and `skipprd` query MUST NOT depend on catalog-fs (D7). No REST (D6). No Glue. No `path`/`schema` keys. No `QueryBackend::Duckdb`. W5 warehouse is `file://` only.
+**W5 SoT (superseded by D4/D6/D7):** `DuckdbConfig` stays on the plugin. `FsCatalog` is `skippr-iceberg-catalog-fs`. Host query opens it through `IcebergCatalogSpec::Filesystem`. Pairing: Duckdb data_sink MUST equal Duckdb schema_sink. No REST for DuckDB as a product warehouse. Warehouse is `file://` only.
 
 **Metadata layout (S1):** iceberg-rust writes `{table}/metadata/{version:05}-{uuid}.metadata.json`. DuckDB 1.5.5 `iceberg_scan` reads that with `unsafe_enable_version_guessing`. Without guessing it looks up `version-hint.text` as Hadoop `v{N}.metadata.json` (or `{N}.metadata.json`) — a numeric hint does **not** open UUID filenames. FsCatalog therefore writes both:
 
@@ -964,7 +971,7 @@ pub async fn open_fs_catalog(cfg: &DuckdbConfig) -> Result<Arc<dyn Catalog>, io:
 duckdb -c "INSTALL iceberg; LOAD iceberg; SELECT count(*) FROM iceberg_scan('$WAREHOUSE/bronze/source');"
 ```
 
-- Docs land in W5 (not W7): `outputs/duckdb.md`, `schema_sinks/duckdb.md`, VitePress, `connectors/index.md`. DuckDB `iceberg_scan` sees persisted Iceberg (**no WAL**). `skipprd query` on Duckdb is **WAL only**. No merge/CDC. No S3/R2 warehouse.
+- Docs land in W5 (not W7): `outputs/duckdb.md`, `schema_sinks/duckdb.md`, VitePress, `connectors/index.md`. DuckDB `iceberg_scan` sees persisted Iceberg (**no WAL**). `skipprd query` on Duckdb is Iceberg ∪ WAL. No merge/CDC. No S3/R2 warehouse.
 
 ---
 
@@ -1044,7 +1051,7 @@ Those production greps are clean.
 1. SkipprLake local `file://` plus DynamoDB-local — **not run** (needs DynamoDB Local).
 2. Duckdb sink `file://` → `duckdb` `iceberg_scan` — **not run** (needs DuckDB CLI).
 3. AthenaIceberg live CI — **not run** (needs Athena credentials).
-4. `skipprd query` on Athena is WAL-only — covered by `query_isolation` + host `QueryBackend::WalOnly`.
+4. `skipprd query` on Hive Athena is WAL-only — covered by `query_isolation` + host `QueryBackend::WalOnly`. AthenaIceberg is Iceberg ∪ WAL.
 
 ## 9. Risks
 
@@ -1068,10 +1075,10 @@ Those production greps are clean.
 
 After this spec, Spec 2 relies on:
 
-- `SkipprLakeConfig` as the single typed description of a SkipprLake (used by the REST server and the query side).
-- The Skippr catalog crates exposing `Arc<dyn iceberg::Catalog>` (REST wraps that trait).
-- `QueryBackend::SkipprLake` as the only place query builds Iceberg ∪ WAL providers (views register there).
-- SDE `WarehouseKind::Skippr` staying "not a dbt adapter" until the adapter exists.
+- `IcebergCatalogSpec` (`SkipprLakeOpen` includes backend and object store) as the typed lake identity for REST, Flight, Ballista reload, and query.
+- The catalog crates exposing `Arc<dyn iceberg::Catalog>` (REST wraps that trait).
+- `QueryBackend::Iceberg` as the only place query builds Iceberg ∪ WAL providers (views register there).
+- SDE `WarehouseKind::Skippr` using `dbt-skipprlake` (`DbtNamespaceShape::SchemaOnly`) plus LocalSidecar for `file://`.
 
 ## 12. Spike results (fill in during W0)
 

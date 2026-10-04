@@ -105,6 +105,17 @@ pub async fn new_context_all_namespaces(
         }
         let _ = crate::sqlrt::tables::register_deadletters(&ctx, config, &pipeline).await;
     }
+    crate::sqlrt::tables::register_user_namespaces(&ctx, config).await?;
+    Ok(ctx)
+}
+
+/// Iceberg `namespace.table` only — the lake contract for `skipprd serve` Flight.
+/// Does not register `pipeline.namespace` Iceberg ∪ WAL ingest aliases.
+pub async fn new_context_iceberg_namespaces(
+    config: &Config,
+) -> Result<SessionContext, DataFusionError> {
+    let ctx = crate::sqlrt::session::build_query_context(SessionConfig::new());
+    crate::sqlrt::tables::register_user_namespaces(&ctx, config).await?;
     Ok(ctx)
 }
 
@@ -1894,6 +1905,35 @@ mod plain_query_document_tests {
         assert!(
             body.contains("register_namespace_view(&ctx, config, &pipeline, &ns).await?"),
             "query context must propagate Iceberg catalog register errors"
+        );
+        assert!(
+            body.contains("register_user_namespaces(&ctx, config).await?"),
+            "user Iceberg namespaces must register as DataFusion schemas"
+        );
+    }
+
+    #[test]
+    fn iceberg_namespace_context_skips_wal_ingest_alias() {
+        let src = include_str!("query.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        let start = prod
+            .find("pub async fn new_context_iceberg_namespaces")
+            .expect("new_context_iceberg_namespaces");
+        let body = prod[start..]
+            .split("pub async fn ")
+            .nth(1)
+            .expect("function body after signature");
+        assert!(
+            body.contains("register_user_namespaces(&ctx, config).await?"),
+            "serve Flight must register Iceberg namespace.table"
+        );
+        assert!(
+            !body.contains("register_namespace_view"),
+            "serve Flight must not register pipeline.namespace Iceberg ∪ WAL"
+        );
+        assert!(
+            !body.contains("register_deadletters"),
+            "serve Flight must not register WAL deadletters"
         );
     }
 }

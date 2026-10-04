@@ -365,6 +365,70 @@ fn cluster_client_tls() -> Result<tonic::transport::ClientTlsConfig, DataFusionE
         .domain_name("skippr-cluster"))
 }
 
+fn flight_channel_plain(endpoint: &str) -> Result<tonic::transport::Endpoint, DataFusionError> {
+    validate_flight_endpoint(endpoint)?;
+    let url = format!("http://{endpoint}");
+    tonic::transport::Endpoint::from_shared(url)
+        .map_err(|err| DataFusionError::Execution(err.to_string()))
+}
+
+pub async fn fetch_statement_batches_plain(
+    endpoint: &str,
+    sql: &str,
+    authorization: &str,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let channel = flight_channel_plain(endpoint)?
+        .connect()
+        .await
+        .map_err(|err| DataFusionError::Execution(err.to_string()))?;
+    let mut client = arrow_flight::sql::client::FlightSqlServiceClient::new(channel);
+    attach_session(&mut client, &resolve_authorization(authorization)?)?;
+    let info = client
+        .execute(sql.to_string(), None)
+        .await
+        .map_err(|err| DataFusionError::Execution(err.to_string()))?;
+    let ticket = info
+        .endpoint
+        .first()
+        .and_then(|ep| ep.ticket.clone())
+        .ok_or_else(|| DataFusionError::Execution("Flight SQL response missing ticket".into()))?;
+    let stream = client
+        .do_get(ticket)
+        .await
+        .map_err(|err| DataFusionError::Execution(err.to_string()))?;
+    stream
+        .map_err(|err| DataFusionError::Execution(err.to_string()))
+        .try_collect()
+        .await
+}
+
+pub async fn fetch_statement_batches_plain_unauthenticated(
+    endpoint: &str,
+    sql: &str,
+) -> Result<Vec<RecordBatch>, DataFusionError> {
+    let channel = flight_channel_plain(endpoint)?
+        .connect()
+        .await
+        .map_err(|err| DataFusionError::Execution(err.to_string()))?;
+    let mut client = arrow_flight::sql::client::FlightSqlServiceClient::new(channel);
+    let info = client
+        .execute(sql.to_string(), None)
+        .await
+        .map_err(|err| DataFusionError::Execution(err.to_string()))?;
+    let ticket = info
+        .endpoint
+        .first()
+        .and_then(|ep| ep.ticket.clone())
+        .ok_or_else(|| DataFusionError::Execution("Flight SQL response missing ticket".into()))?;
+    client
+        .do_get(ticket)
+        .await
+        .map_err(|err| DataFusionError::Execution(err.to_string()))?
+        .map_err(|err| DataFusionError::Execution(err.to_string()))
+        .try_collect()
+        .await
+}
+
 fn flight_channel(endpoint: &str) -> Result<tonic::transport::Endpoint, DataFusionError> {
     validate_flight_endpoint(endpoint)?;
     let url = format!("https://{endpoint}");

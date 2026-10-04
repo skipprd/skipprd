@@ -515,6 +515,16 @@ async fn async_main() {
                 }
             }
         }
+        Mode::Serve(options) => {
+            let loaded = Config::build_config();
+            let storage = reject_invalid_wal_storage();
+            reject_invalid_clustered_mode(&loaded, storage, CliModeKind::Serve);
+            if let Err(err) = skipprd::serve::run(loaded, options).await {
+                error!("{err}");
+                eprintln!("{err}");
+                process::exit(1);
+            }
+        }
         Mode::Connect(args) => {
             let path = cli
                 .config

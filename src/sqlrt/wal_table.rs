@@ -94,8 +94,12 @@ pub(crate) fn project_batch(batch: RecordBatch, schema: &SchemaRef) -> Result<Re
             ));
         }
     }
-    RecordBatch::try_new(schema.clone(), columns)
-        .map_err(|err| DataFusionError::ArrowError(Box::new(err), None))
+    RecordBatch::try_new_with_options(
+        schema.clone(),
+        columns,
+        &arrow::array::RecordBatchOptions::new().with_row_count(Some(batch.num_rows())),
+    )
+    .map_err(|err| DataFusionError::ArrowError(Box::new(err), None))
 }
 
 pub(crate) fn projected_schema(
@@ -387,6 +391,20 @@ mod tests {
     use crate::sqlrt::stream_plan::StreamingBatchesExec;
     use datafusion::arrow::datatypes::{DataType, Field, Schema};
     use skippr_lease::PipelineKey;
+
+    #[test]
+    fn project_batch_empty_schema_keeps_row_count() {
+        use datafusion::arrow::array::Int64Array;
+        use datafusion::arrow::datatypes::{DataType, Field, Schema};
+
+        let schema = Arc::new(Schema::new(vec![Field::new("id", DataType::Int64, true)]));
+        let batch =
+            RecordBatch::try_new(schema, vec![Arc::new(Int64Array::from(vec![1, 2, 3]))]).unwrap();
+        let empty = Arc::new(Schema::empty());
+        let projected = project_batch(batch, &empty).unwrap();
+        assert_eq!(projected.num_rows(), 3);
+        assert_eq!(projected.num_columns(), 0);
+    }
 
     #[test]
     fn provider_scans_selected_ordinals_only() {

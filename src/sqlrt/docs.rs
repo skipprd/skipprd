@@ -36,7 +36,7 @@ pub fn get_sql_docs() -> BTreeMap<String, SqlStatementDoc> {
         SqlStatementDoc {
             name: "DROP DATABASE".to_string(),
             syntax: "DROP DATABASE <database_name>".to_string(),
-            description: "Drops a SkipprLake Iceberg namespace from the catalog.".to_string(),
+            description: "Drops an Iceberg namespace from the catalog.".to_string(),
             example: "DROP DATABASE data_warehouse".to_string(),
         },
     );
@@ -137,8 +137,7 @@ pub fn get_sql_docs() -> BTreeMap<String, SqlStatementDoc> {
         SqlStatementDoc {
             name: "DROP TABLE".to_string(),
             syntax: "DROP TABLE [<schema_name>.]<table_name>".to_string(),
-            description: "Drops a SkipprLake Iceberg table from the catalog and local metadata."
-                .to_string(),
+            description: "Drops an Iceberg table from the catalog and local metadata.".to_string(),
             example: "DROP TABLE analytics.user_events".to_string(),
         },
     );
@@ -160,7 +159,7 @@ pub fn get_sql_docs() -> BTreeMap<String, SqlStatementDoc> {
         SqlStatementDoc {
             name: "SELECT".to_string(),
             syntax: "SELECT <columns> FROM <table_name> [WHERE <condition>] [GROUP BY <expressions>] [HAVING <condition>] [ORDER BY <expressions>] [LIMIT <count>]".to_string(),
-            description: "Executes a standard SQL query against SkipprLake Iceberg tables and the live WAL.".to_string(),
+            description: "Executes a standard SQL query against Iceberg tables and the live WAL.".to_string(),
             example: "SELECT user_id, COUNT(*) FROM bike_hire WHERE date > '2023-01-01' GROUP BY user_id LIMIT 10".to_string(),
         },
     );
@@ -451,15 +450,15 @@ mod tests {
     }
 
     #[test]
-    fn select_and_drop_docs_name_skipprlake_only() {
+    fn select_and_drop_docs_name_iceberg() {
         let docs = get_sql_docs();
         let banned_a = concat!("ath", "ena");
         let banned_g = concat!("gl", "ue");
         for name in ["SELECT", "DROP DATABASE", "DROP TABLE"] {
             let description = &docs[name].description;
             assert!(
-                description.contains("SkipprLake"),
-                "{name} must name SkipprLake: {description}"
+                description.contains("Iceberg"),
+                "{name} must name Iceberg: {description}"
             );
             let lower = description.to_ascii_lowercase();
             assert!(

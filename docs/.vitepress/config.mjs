@@ -35,6 +35,7 @@ const sidebar = [
       { text: 'Skipprd schema', link: '/cli/schema' },
       { text: 'Skipprd sync', link: '/cli/sync' },
       { text: 'Skipprd query', link: '/cli/query' },
+      { text: 'Skipprd serve', link: '/cli/serve' },
       { text: 'Skipprd doctor', link: '/cli/doctor' },
       { text: 'Skipprd df', link: '/cli/df' },
     ],
@@ -207,7 +208,6 @@ export default defineSkipprDocs({
   outDir: '.vitepress/dist',
   srcExclude: [
     'maintainers/**',
-    'cli/query.md',
     'cli/sql-help.md',
     'query/**',
     'connectors/inputs/google_search_console.md',

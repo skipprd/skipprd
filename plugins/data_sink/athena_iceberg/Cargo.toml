@@ -15,8 +15,8 @@ serde_derive.workspace = true
 skippr-runtime-sdk.workspace = true
 skippr-iceberg-writer = { path = "../../../crates/skippr-iceberg-writer" }
 skippr-iceberg-catalog = { path = "../../../crates/skippr-iceberg-catalog" }
+skippr-iceberg-catalog-glue = { path = "../../../crates/skippr-iceberg-catalog-glue" }
 iceberg = "0.9.1"
-iceberg-catalog-glue = "0.9.1"
 
 [dev-dependencies]
 serde_json.workspace = true

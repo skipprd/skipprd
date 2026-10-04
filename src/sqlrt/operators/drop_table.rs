@@ -1,10 +1,9 @@
-use crate::cluster::{PipelineConfigView, QueryBackend};
+use crate::cluster::{IcebergLake, PipelineConfigView, QueryBackend};
 use crate::discover::PipelineMetadata;
 use crate::helpers::configuration::Config;
 use crate::sqlrt::parser::TableDropStatement;
-use skippr_iceberg_catalog::SkipprLakeConfig;
 
-/// Removes a table from the metadata and drops the SkipprLake Iceberg table.
+/// Removes a table from the metadata and drops the Iceberg table for Iceberg pipelines.
 pub async fn drop_table(
     config: &Config,
     pipeline_metadata: &mut PipelineMetadata,
@@ -21,11 +20,11 @@ pub async fn drop_table(
     let ns = &table_str;
     let view = PipelineConfigView::for_name(config, &pipeline).map_err(|err| err.to_string())?;
     match &view.backend {
-        QueryBackend::SkipprLake(cfg) => {
-            drop_skipprlake_table(config, cfg, ns).await?;
+        QueryBackend::Iceberg(lake) => {
+            drop_iceberg_table(lake, ns).await?;
         }
         QueryBackend::WalOnly => {
-            return Err("DROP TABLE is only supported for SkipprLake pipelines".into());
+            return Err("DROP TABLE is only supported for Iceberg pipelines".into());
         }
     }
 
@@ -96,7 +95,7 @@ mod tests {
         };
         let err = drop_table(&config, &mut metadata, &stmt).await.unwrap_err();
         assert!(
-            err.contains("DROP TABLE is only supported for SkipprLake pipelines"),
+            err.contains("DROP TABLE is only supported for Iceberg pipelines"),
             "{err}"
         );
     }
@@ -109,86 +108,48 @@ mod tests {
             !prod.contains("/parquet/"),
             "query must not purge warehouse data; data purge stays a sink concern"
         );
-        assert!(prod.contains("drop_skipprlake_table"));
+        assert!(prod.contains("drop_iceberg_table"));
         assert!(prod.contains("/wal/"));
     }
 }
 
-/// Drops a SkipprLake Iceberg namespace. Other backends are rejected.
+/// Drops an Iceberg namespace owned by exactly one Iceberg pipeline.
 pub async fn drop_database(config: &Config, database: &str) -> Result<(), String> {
-    let mut matched: Option<SkipprLakeConfig> = None;
+    let mut matched: Option<IcebergLake> = None;
     for name in config.pipelines.keys() {
         let view = PipelineConfigView::for_name(config, name).map_err(|err| err.to_string())?;
         match &view.backend {
-            QueryBackend::SkipprLake(cfg) if cfg.table_namespace == database => {
+            QueryBackend::Iceberg(lake) if lake.ingest_namespace == database => {
                 if matched.is_some() {
                     return Err(format!(
-                        "DROP DATABASE '{database}' matches multiple SkipprLake pipelines"
+                        "DROP DATABASE '{database}' matches multiple Iceberg pipelines"
                     ));
                 }
-                matched = Some(cfg.clone());
+                matched = Some(lake.clone());
             }
-            QueryBackend::SkipprLake(_) | QueryBackend::WalOnly => {}
+            QueryBackend::Iceberg(_) | QueryBackend::WalOnly => {}
         }
     }
-    let Some(cfg) = matched else {
-        return Err("DROP DATABASE is only supported for SkipprLake pipelines".into());
+    let Some(lake) = matched else {
+        return Err("DROP DATABASE is only supported for Iceberg pipelines".into());
     };
-    drop_skipprlake_namespace(config, &cfg).await
+    drop_iceberg_namespace(&lake).await
 }
 
-async fn drop_skipprlake_table(
-    config: &Config,
-    cfg: &SkipprLakeConfig,
-    table: &str,
-) -> Result<(), String> {
-    #[cfg(any(
-        feature = "offset-store-dynamodb",
-        feature = "offset-store-cloud-tables"
-    ))]
-    {
-        let catalog = crate::cluster::backend::open_skippr_catalog(config, cfg).await?;
-        let ident = iceberg::TableIdent::from_strs([cfg.table_namespace.as_str(), table])
-            .map_err(|err| err.to_string())?;
-        iceberg::Catalog::drop_table(catalog.as_ref(), &ident)
-            .await
-            .map_err(|err| err.to_string())
-    }
-    #[cfg(not(any(
-        feature = "offset-store-dynamodb",
-        feature = "offset-store-cloud-tables"
-    )))]
-    {
-        let _ = (config, cfg, table);
-        Err(
-            "SkipprLake DROP TABLE requires offset-store-dynamodb or offset-store-cloud-tables"
-                .into(),
-        )
-    }
+async fn drop_iceberg_table(lake: &IcebergLake, table: &str) -> Result<(), String> {
+    let catalog = crate::cluster::backend::open_iceberg_catalog(&lake.catalog).await?;
+    let ident = iceberg::TableIdent::from_strs([lake.ingest_namespace.as_str(), table])
+        .map_err(|err| err.to_string())?;
+    iceberg::Catalog::drop_table(catalog.as_ref(), &ident)
+        .await
+        .map_err(|err| err.to_string())
 }
 
-async fn drop_skipprlake_namespace(config: &Config, cfg: &SkipprLakeConfig) -> Result<(), String> {
-    #[cfg(any(
-        feature = "offset-store-dynamodb",
-        feature = "offset-store-cloud-tables"
-    ))]
-    {
-        let catalog = crate::cluster::backend::open_skippr_catalog(config, cfg).await?;
-        let ns = iceberg::NamespaceIdent::from_strs([&cfg.table_namespace])
-            .map_err(|err| err.to_string())?;
-        iceberg::Catalog::drop_namespace(catalog.as_ref(), &ns)
-            .await
-            .map_err(|err| err.to_string())
-    }
-    #[cfg(not(any(
-        feature = "offset-store-dynamodb",
-        feature = "offset-store-cloud-tables"
-    )))]
-    {
-        let _ = (config, cfg);
-        Err(
-            "SkipprLake DROP DATABASE requires offset-store-dynamodb or offset-store-cloud-tables"
-                .into(),
-        )
-    }
+async fn drop_iceberg_namespace(lake: &IcebergLake) -> Result<(), String> {
+    let catalog = crate::cluster::backend::open_iceberg_catalog(&lake.catalog).await?;
+    let ns = iceberg::NamespaceIdent::from_strs([&lake.ingest_namespace])
+        .map_err(|err| err.to_string())?;
+    iceberg::Catalog::drop_namespace(catalog.as_ref(), &ns)
+        .await
+        .map_err(|err| err.to_string())
 }

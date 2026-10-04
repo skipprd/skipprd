@@ -1,7 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-/// `skipprd query` must not know any warehouse sink except SkipprLake.
+/// `skipprd query` must not know Hive Athena, Snowflake, or Athena SQL.
+/// Iceberg catalog backends are opened at the cluster edge, not in sqlrt.
 /// Banned identifiers are assembled with concat! so this file does not trip itself.
 #[test]
 fn sqlrt_and_query_flight_know_no_other_sinks() {
@@ -30,10 +31,30 @@ fn sqlrt_and_query_flight_know_no_other_sinks() {
             for word in banned {
                 assert!(
                     !lower.contains(&word.to_ascii_lowercase()),
-                    "{} mentions banned identifier `{word}`; skipprd query is SkipprLake-only",
+                    "{} mentions banned identifier `{word}`; skipprd query is Iceberg ∪ WAL, not Hive/Snowflake SQL",
                     entry.display()
                 );
             }
+        }
+    }
+}
+
+#[test]
+fn sqlrt_does_not_speak_iceberg_rest() {
+    let banned: &[&str] = &[
+        concat!("skippr", "_iceberg_rest"),
+        concat!("/v1/", "namespaces"),
+        "axum::",
+    ];
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/sqlrt");
+    for entry in walk(&root) {
+        let text = fs::read_to_string(&entry).unwrap();
+        for word in banned {
+            assert!(
+                !text.contains(word),
+                "{} mentions REST identifier `{word}`; Iceberg REST lives in skippr-iceberg-rest + serve",
+                entry.display()
+            );
         }
     }
 }

@@ -53,7 +53,7 @@ Every ingested record is first written to the WAL before downstream compaction a
 
 - **Local disk WAL** (`WAL_STORAGE=disk`) — segments written under `DATA_DIR`
 - **S3 WAL** (`WAL_STORAGE=s3`) — segments written to `SKIPPR_S3_BUCKET`
-- **Clustered disk WAL** (`WAL_STORAGE=clustered`) — local segments plus one synchronous replica. SkipprLake is the cold query path for SkipprLake sinks; live WAL is unioned in-process with that Iceberg snapshot ([Datalake](datalake.md)). AthenaIceberg and Duckdb are WAL-only for `skipprd query`.
+- **Clustered disk WAL** (`WAL_STORAGE=clustered`) — local segments plus one synchronous replica. Iceberg sinks (SkipprLake, AthenaIceberg, Duckdb) are the cold query path; live WAL is unioned in-process with that Iceberg snapshot ([Datalake](datalake.md)). Hive Athena and other non-Iceberg sinks are WAL-only for `skipprd query`.
 
 ### Compactor
 

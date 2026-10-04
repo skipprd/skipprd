@@ -43,12 +43,33 @@ pub fn validate_file_warehouse(warehouse: &str, table_namespace: &str) -> Result
     Ok(())
 }
 
-/// How to reach S3-compatible object storage for Iceberg parquet.
-/// `s3` is the AWS default chain. `r2` is explicit path-style credentials.
+/// AthenaIceberg / Glue parquet location. Local FS is not a nameable state.
+/// YAML key is `object_store`. `s3` is the AWS default chain. `r2` is explicit
+/// path-style credentials.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, SkipprConfig, Default)]
+#[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
+pub enum S3CompatibleObjectStore {
+    #[default]
+    S3,
+    R2 {
+        endpoint: String,
+        #[serde(default)]
+        region: Option<String>,
+        access_key_id: String,
+        #[skippr(secret)]
+        secret_access_key: String,
+        #[serde(default = "default_r2_path_style")]
+        path_style: bool,
+    },
+}
+
+/// SkipprLake parquet location: local FS, AWS S3, or R2.
 /// YAML key is `object_store` (not `file_io`, not Apache Iceberg `FileIO`).
+/// AthenaIceberg MUST use [`S3CompatibleObjectStore`] so `File` cannot be named.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, SkipprConfig, Default)]
 #[serde(tag = "type", rename_all = "snake_case", deny_unknown_fields)]
 pub enum WarehouseObjectStore {
+    File,
     #[default]
     S3,
     R2 {
@@ -71,7 +92,9 @@ fn default_lake_namespace() -> String {
     "default".to_string()
 }
 
-/// Config for the `SkipprLake` data sink and schema sink, and the shape `skipprd query` reads.
+/// Config for the `SkipprLake` data sink and schema sink.
+/// Query and serve wrap this in `SkipprLakeOpen` (plus `SkipprCatalogBackend`)
+/// inside `IcebergCatalogSpec`, not as a standalone query backend.
 /// The Skippr catalog is the only catalog: pointers live in `catalog_table`
 /// (DynamoDB, or Cloud Tables when SkipprStore selects it). Catalog rows MAY
 /// share the SkipprStore table; PK/SK prefixes do not collide with offsets.
@@ -106,11 +129,34 @@ impl SkipprLakeConfig {
     pub fn is_plugin_name(name: &str) -> bool {
         name.eq_ignore_ascii_case(Self::PLUGIN_NAME)
     }
+
+    /// Warehouse URI must match `object_store`. Default store is S3; `file://`
+    /// lakes MUST set `object_store: { type: file }`.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.warehouse.trim().is_empty() {
+            return Err("warehouse is required".into());
+        }
+        if self.catalog_table.trim().is_empty() {
+            return Err("catalog_table is required".into());
+        }
+        if self.table_namespace.trim().is_empty() {
+            return Err("table_namespace is required".into());
+        }
+        self.object_store.validate_warehouse(&self.warehouse)?;
+        match &self.object_store {
+            WarehouseObjectStore::R2 { .. } => {
+                s3_object_store_props(&self.object_store.s3_compatible()?)?;
+            }
+            WarehouseObjectStore::File | WarehouseObjectStore::S3 => {}
+        }
+        Ok(())
+    }
 }
 
 /// Which Skippr catalog pointer backend the lake uses. Derived from SkipprStore
 /// type — one function for the plugin process and the query host.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SkipprCatalogBackend {
     DynamoDb,
     CloudTables,
@@ -170,74 +216,172 @@ pub fn warehouse_hash(warehouse: &str) -> String {
     hex_encode(hasher.finalize().as_slice())
 }
 
-/// OpenDal/Iceberg S3 properties from typed `object_store`.
+pub fn require_s3_warehouse(warehouse: &str) -> Result<String, String> {
+    if warehouse.trim().is_empty() {
+        return Err("warehouse is required".into());
+    }
+    let key = warehouse_key(warehouse);
+    if !(key.starts_with("s3://") || key.starts_with("s3a://")) {
+        return Err("warehouse must be s3://".into());
+    }
+    Ok(key)
+}
+
+/// `{warehouse}/{namespace}/{table}` — writer and REST/catalog create share this.
+pub fn iceberg_table_location(warehouse: &str, namespace: &str, table: &str) -> String {
+    format!(
+        "{}/{}/{}",
+        warehouse.trim().trim_end_matches('/'),
+        namespace.trim().trim_matches('/'),
+        table.trim().trim_matches('/')
+    )
+}
+
+impl S3CompatibleObjectStore {
+    pub fn physical_key(&self) -> String {
+        match self {
+            Self::S3 => "s3".into(),
+            Self::R2 { endpoint, .. } => format!("r2:{endpoint}"),
+        }
+    }
+
+    pub fn validate_warehouse(&self, warehouse: &str) -> Result<(), String> {
+        require_s3_warehouse(warehouse).map(|_| ())
+    }
+}
+
+impl WarehouseObjectStore {
+    pub fn physical_key(&self) -> String {
+        match self {
+            Self::File => "file".into(),
+            Self::S3 => "s3".into(),
+            Self::R2 { endpoint, .. } => format!("r2:{endpoint}"),
+        }
+    }
+
+    pub fn validate_warehouse(&self, warehouse: &str) -> Result<(), String> {
+        match self {
+            Self::File => require_file_warehouse(warehouse).map(|_| ()),
+            Self::S3 | Self::R2 { .. } => require_s3_warehouse(warehouse).map(|_| ()),
+        }
+    }
+
+    pub fn s3_compatible(&self) -> Result<S3CompatibleObjectStore, String> {
+        match self {
+            Self::File => Err("object_store type file is not S3-compatible".into()),
+            Self::S3 => Ok(S3CompatibleObjectStore::S3),
+            Self::R2 {
+                endpoint,
+                region,
+                access_key_id,
+                secret_access_key,
+                path_style,
+            } => Ok(S3CompatibleObjectStore::R2 {
+                endpoint: endpoint.clone(),
+                region: region.clone(),
+                access_key_id: access_key_id.clone(),
+                secret_access_key: secret_access_key.clone(),
+                path_style: *path_style,
+            }),
+        }
+    }
+}
+
+/// OpenDal/Iceberg S3 properties from typed S3-compatible `object_store`.
 /// `S3` uses the AWS default chain (empty props). `R2` requires endpoint and keys.
 pub fn s3_object_store_props(
-    object_store: &WarehouseObjectStore,
+    object_store: &S3CompatibleObjectStore,
 ) -> Result<HashMap<String, String>, String> {
     match object_store {
-        WarehouseObjectStore::S3 => Ok(HashMap::new()),
-        WarehouseObjectStore::R2 {
+        S3CompatibleObjectStore::S3 => Ok(HashMap::new()),
+        S3CompatibleObjectStore::R2 {
             endpoint,
             region,
             access_key_id,
             secret_access_key,
             path_style,
-        } => {
-            let endpoint = endpoint.trim();
-            let access_key_id = access_key_id.trim();
-            let secret_access_key = secret_access_key.trim();
-            if endpoint.is_empty() || access_key_id.is_empty() || secret_access_key.is_empty() {
-                return Err(
-                    "object_store type r2 requires endpoint, access_key_id, and secret_access_key"
-                        .into(),
-                );
-            }
-            let mut props = HashMap::new();
-            props.insert("s3.endpoint".into(), endpoint.to_string());
-            props.insert(
-                "s3.path-style-access".into(),
-                if *path_style { "true" } else { "false" }.into(),
-            );
-            props.insert("s3.access-key-id".into(), access_key_id.to_string());
-            props.insert("s3.secret-access-key".into(), secret_access_key.to_string());
-            props.insert("s3.disable-config-load".into(), "true".into());
-            props.insert("s3.disable-ec2-metadata".into(), "true".into());
-            if let Some(region) = region
-                .as_deref()
-                .map(str::trim)
-                .filter(|value| !value.is_empty())
-            {
-                props.insert("s3.region".into(), region.to_string());
-            }
-            Ok(props)
-        }
+        } => r2_object_store_props(
+            endpoint,
+            region.as_deref(),
+            access_key_id,
+            secret_access_key,
+            *path_style,
+        ),
     }
+}
+
+fn r2_object_store_props(
+    endpoint: &str,
+    region: Option<&str>,
+    access_key_id: &str,
+    secret_access_key: &str,
+    path_style: bool,
+) -> Result<HashMap<String, String>, String> {
+    let endpoint = endpoint.trim();
+    let access_key_id = access_key_id.trim();
+    let secret_access_key = secret_access_key.trim();
+    if endpoint.is_empty() || access_key_id.is_empty() || secret_access_key.is_empty() {
+        return Err(
+            "object_store type r2 requires endpoint, access_key_id, and secret_access_key".into(),
+        );
+    }
+    let mut props = HashMap::new();
+    props.insert("s3.endpoint".into(), endpoint.to_string());
+    props.insert(
+        "s3.path-style-access".into(),
+        if path_style { "true" } else { "false" }.into(),
+    );
+    props.insert("s3.access-key-id".into(), access_key_id.to_string());
+    props.insert("s3.secret-access-key".into(), secret_access_key.to_string());
+    props.insert("s3.disable-config-load".into(), "true".into());
+    props.insert("s3.disable-ec2-metadata".into(), "true".into());
+    if let Some(region) = region.map(str::trim).filter(|value| !value.is_empty()) {
+        props.insert("s3.region".into(), region.to_string());
+    }
+    Ok(props)
 }
 
 pub fn iceberg_file_io_for(
     warehouse: &str,
     object_store: &WarehouseObjectStore,
 ) -> IcebergResult<FileIO> {
-    if warehouse.starts_with("memory:") || warehouse.starts_with("memory://") {
-        Ok(FileIO::new_with_memory())
-    } else if warehouse.starts_with("s3://") || warehouse.starts_with("s3a://") {
-        let props = s3_object_store_props(object_store)
-            .map_err(|err| Error::new(ErrorKind::DataInvalid, err))?;
-        Ok(FileIOBuilder::new(Arc::new(
-            iceberg_storage_opendal::OpenDalStorageFactory::S3 {
-                configured_scheme: "s3".to_string(),
-                customized_credential_load: None,
-            },
-        ))
-        .with_props(props)
-        .build())
-    } else {
-        Ok(FileIO::new_with_fs())
+    object_store
+        .validate_warehouse(warehouse)
+        .map_err(|err| Error::new(ErrorKind::DataInvalid, err))?;
+    match object_store {
+        WarehouseObjectStore::File => Ok(FileIO::new_with_fs()),
+        WarehouseObjectStore::S3 | WarehouseObjectStore::R2 { .. } => {
+            let compatible = object_store
+                .s3_compatible()
+                .map_err(|err| Error::new(ErrorKind::DataInvalid, err))?;
+            iceberg_file_io_s3(warehouse, &compatible)
+        }
     }
 }
 
+pub fn iceberg_file_io_s3(
+    warehouse: &str,
+    object_store: &S3CompatibleObjectStore,
+) -> IcebergResult<FileIO> {
+    object_store
+        .validate_warehouse(warehouse)
+        .map_err(|err| Error::new(ErrorKind::DataInvalid, err))?;
+    let props = s3_object_store_props(object_store)
+        .map_err(|err| Error::new(ErrorKind::DataInvalid, err))?;
+    Ok(FileIOBuilder::new(Arc::new(
+        iceberg_storage_opendal::OpenDalStorageFactory::S3 {
+            configured_scheme: "s3".to_string(),
+            customized_credential_load: None,
+        },
+    ))
+    .with_props(props)
+    .build())
+}
+
 pub fn iceberg_file_io_for_warehouse(config: &SkipprLakeConfig) -> IcebergResult<FileIO> {
+    config
+        .validate()
+        .map_err(|err| Error::new(ErrorKind::DataInvalid, err))?;
     iceberg_file_io_for(&config.warehouse, &config.object_store)
 }
 
@@ -258,6 +402,7 @@ impl WarehouseObjectStore {
     /// DuckDB `httpfs`/`iceberg` CREATE SECRET. R2 uses path-style S3.
     pub fn duckdb_create_secret_sql(&self) -> Result<String, String> {
         match self {
+            Self::File => Err("object_store type file has no duckdb secret".into()),
             Self::S3 => {
                 Ok("CREATE OR REPLACE SECRET (TYPE S3, PROVIDER CREDENTIAL_CHAIN);".to_string())
             }
@@ -357,12 +502,13 @@ mod tests {
     fn skipprlake_config_is_flat_with_default_namespace() {
         let cfg = lake(serde_json::json!({
             "catalog_table": "skippr-hla",
-            "warehouse": "file:///tmp/warehouse/"
+            "warehouse": "s3://bucket/warehouse/"
         }))
         .unwrap();
         assert_eq!(cfg.catalog_table, "skippr-hla");
         assert_eq!(cfg.table_namespace, "default");
-        assert_eq!(cfg.location_root(), "file:///tmp/warehouse/default");
+        assert_eq!(cfg.location_root(), "s3://bucket/warehouse/default");
+        cfg.validate().unwrap();
     }
 
     #[test]
@@ -395,8 +541,61 @@ mod tests {
     }
 
     #[test]
-    fn iceberg_file_io_for_file_does_not_require_skipprlake_config() {
-        super::iceberg_file_io_for("file:///tmp/lake", &WarehouseObjectStore::S3).unwrap();
+    fn iceberg_file_io_for_file_store_requires_file_uri() {
+        super::iceberg_file_io_for("file:///tmp/lake", &WarehouseObjectStore::File).unwrap();
+        let err = super::iceberg_file_io_for("s3://bucket/wh", &WarehouseObjectStore::File)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("file://"), "{err}");
+        let err = super::iceberg_file_io_for("file:///tmp/lake", &WarehouseObjectStore::S3)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("s3://"), "{err}");
+    }
+
+    #[test]
+    fn skipprlake_file_warehouse_requires_file_object_store() {
+        let omitted = lake(serde_json::json!({
+            "catalog_table": "skippr-hla",
+            "warehouse": "file:///tmp/warehouse/"
+        }))
+        .unwrap();
+        assert_eq!(omitted.object_store, WarehouseObjectStore::S3);
+        let err = omitted.validate().unwrap_err();
+        assert!(err.contains("s3://"), "{err}");
+        let cfg = lake(serde_json::json!({
+            "catalog_table": "skippr-hla",
+            "warehouse": "file:///tmp/warehouse/",
+            "object_store": { "type": "file" }
+        }))
+        .unwrap();
+        cfg.validate().unwrap();
+        super::iceberg_file_io_for_warehouse(&cfg).unwrap();
+    }
+
+    #[test]
+    fn iceberg_table_location_includes_namespace() {
+        assert_eq!(
+            super::iceberg_table_location("file:///lake/", "analytics", "fct_orders"),
+            "file:///lake/analytics/fct_orders"
+        );
+        assert_eq!(
+            super::iceberg_table_location("s3://bucket/wh", "bronze", "orders"),
+            "s3://bucket/wh/bronze/orders"
+        );
+    }
+
+    #[test]
+    fn s3_compatible_store_cannot_name_file() {
+        let err = serde_json::from_value::<S3CompatibleObjectStore>(serde_json::json!({
+            "type": "file"
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("unknown variant") || err.contains("file"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -427,7 +626,7 @@ mod tests {
 
     #[test]
     fn s3_object_store_default_is_empty_aws_chain() {
-        let props = super::s3_object_store_props(&WarehouseObjectStore::S3).unwrap();
+        let props = super::s3_object_store_props(&S3CompatibleObjectStore::S3).unwrap();
         assert!(props.is_empty());
         let cfg = lake(serde_json::json!({
             "catalog_table": "skippr-hla",
@@ -435,9 +634,11 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(cfg.object_store, WarehouseObjectStore::S3);
-        assert!(super::s3_object_store_props(&cfg.object_store)
-            .unwrap()
-            .is_empty());
+        assert!(
+            super::s3_object_store_props(&cfg.object_store.s3_compatible().unwrap())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -496,7 +697,7 @@ mod tests {
             secret_access_key: "objects-secret".into(),
             path_style: true,
         };
-        let props = super::s3_object_store_props(&object_store).unwrap();
+        let props = super::s3_object_store_props(&object_store.s3_compatible().unwrap()).unwrap();
         assert_eq!(
             props.get("s3.endpoint").map(String::as_str),
             Some("https://r2.example")
@@ -542,13 +743,15 @@ mod tests {
                 assert_eq!(access_key_id, "${OBJECTS_ACCESS_KEY_ID}");
                 assert_eq!(secret_access_key, "${OBJECTS_SECRET_ACCESS_KEY}");
             }
-            WarehouseObjectStore::S3 => panic!("r2 fixture must not default to s3"),
+            WarehouseObjectStore::S3 | WarehouseObjectStore::File => {
+                panic!("r2 fixture must not default to s3")
+            }
         }
     }
 
     #[test]
     fn r2_object_store_fails_closed_without_keys() {
-        let err = super::s3_object_store_props(&WarehouseObjectStore::R2 {
+        let err = super::s3_object_store_props(&S3CompatibleObjectStore::R2 {
             endpoint: "".into(),
             region: None,
             access_key_id: "k".into(),

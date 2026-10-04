@@ -21,7 +21,12 @@ data_sinks:
 
 Each SkipprLake data sink must own a unique `(catalog_table, table_namespace)`. Table location is `{warehouse}/{table_namespace}/{table_name}`.
 
-Object storage credentials are `object_store`. Omit it or set `type: s3` for the AWS default credential chain. Use `type: r2` for Cloudflare R2 (or other path-style S3-compatible stores). Catalog pointer credentials stay on the catalog backend, not `object_store`.
+Object storage credentials are `object_store`. `type: s3` (or omit it) is the AWS default credential chain and requires a `s3://` warehouse. `type: r2` is Cloudflare R2 (or other path-style S3-compatible stores). `type: file` is local parquet and requires a `file:///` warehouse. Catalog pointer credentials stay on the catalog backend, not `object_store`.
+
+```yaml
+object_store:
+  type: file
+```
 
 ```yaml
 object_store:
@@ -38,7 +43,7 @@ object_store:
 | `warehouse` | *(required)* | Iceberg warehouse root (`s3://…` or `file:///…`) |
 | `catalog_table` | *(required)* | Catalog pointer table. MAY share SkipprStore. |
 | `region` | | AWS region for the catalog backend |
-| `object_store` | `s3` | Object-store credentials for Parquet |
+| `object_store` | `s3` | Parquet store: `file` (`file://` warehouse), `s3` (`s3://`), or `r2` (`s3://` + endpoint) |
 | `table_namespace` | `default` | Iceberg namespace for sink-managed tables |
 
 ## Supported write policies

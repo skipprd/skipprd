@@ -1,6 +1,6 @@
 # Skipprd df
 
-`SELECT *` on engine query views. Same as Python `Session.df()`. Live WAL, unioned with the Skippr datalake when that pipeline has one. No sink and no lake → WAL only.
+`SELECT *` on engine query views. Same as Python `Session.df()`. Live WAL, unioned with Iceberg when the pipeline sink is SkipprLake, AthenaIceberg, or Duckdb. No Iceberg sink → WAL only.
 
 ## Usage
 

@@ -289,7 +289,11 @@ impl Catalog for CloudTablesCatalog {
     ) -> Result<Table> {
         let ident = TableIdent::new(namespace.clone(), creation.name.clone());
         let location = creation.location.clone().unwrap_or_else(|| {
-            format!("{}/{}", self.warehouse.trim_end_matches('/'), ident.name())
+            skippr_iceberg_catalog::iceberg_table_location(
+                &self.warehouse,
+                &namespace.as_ref().join("/"),
+                ident.name(),
+            )
         });
         let metadata = TableMetadataBuilder::from_table_creation(TableCreation {
             location: Some(location.clone()),

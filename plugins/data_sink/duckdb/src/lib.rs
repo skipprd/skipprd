@@ -1,9 +1,9 @@
 use std::io;
 use std::sync::Arc;
 
+use iceberg::io::FileIO;
 use iceberg::Catalog;
 use serde_derive::{Deserialize, Serialize};
-use skippr_iceberg_catalog::WarehouseObjectStore;
 use skippr_iceberg_catalog_fs::FsCatalog;
 pub use skippr_iceberg_writer::{IcebergWriter, IcebergWriterConfig};
 use skippr_runtime_sdk::plugins::cdc::sink_capabilities;
@@ -26,7 +26,7 @@ const DUCKDB_WRITE_POLICIES: SinkWritePolicySupport = SinkWritePolicySupport {
 };
 
 /// Config for the `Duckdb` data sink and schema sink.
-/// `skipprd query` does not read this sink; that path is WalOnly.
+/// `skipprd query` reads filesystem Iceberg ∪ WAL. DuckDB `iceberg_scan` still reads compacted Iceberg only.
 #[derive(Debug, Deserialize, Serialize, Clone, SkipprConfig)]
 #[serde(deny_unknown_fields)]
 pub struct DuckdbConfig {
@@ -77,9 +77,7 @@ pub fn writer_config(cfg: &DuckdbConfig) -> IcebergWriterConfig {
 
 pub async fn open_fs_catalog(cfg: &DuckdbConfig) -> io::Result<Arc<dyn Catalog>> {
     cfg.validate().map_err(io::Error::other)?;
-    let file_io =
-        skippr_iceberg_catalog::iceberg_file_io_for(&cfg.warehouse, &WarehouseObjectStore::S3)
-            .map_err(|err| io::Error::other(err.to_string()))?;
+    let file_io = FileIO::new_with_fs();
     let catalog = FsCatalog::new(cfg.warehouse.clone(), file_io)
         .map_err(|err| io::Error::other(err.to_string()))?;
     Ok(Arc::new(catalog))

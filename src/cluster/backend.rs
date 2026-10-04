@@ -75,11 +75,11 @@ fn catalog_backend(config: &Config) -> skippr_iceberg_catalog::SkipprCatalogBack
     )
 }
 
-pub async fn open_skippr_catalog(
-    config: &Config,
+async fn open_skippr_catalog_backend(
+    backend: skippr_iceberg_catalog::SkipprCatalogBackend,
     cfg: &skippr_iceberg_catalog::SkipprLakeConfig,
 ) -> Result<Arc<dyn iceberg::Catalog>, String> {
-    match catalog_backend(config) {
+    match backend {
         skippr_iceberg_catalog::SkipprCatalogBackend::CloudTables => {
             #[cfg(feature = "offset-store-cloud-tables")]
             {
@@ -115,6 +115,46 @@ pub async fn open_skippr_catalog(
             }
         }
     }
+}
+
+pub async fn open_iceberg_catalog(
+    spec: &crate::cluster::IcebergCatalogSpec,
+) -> Result<Arc<dyn iceberg::Catalog>, String> {
+    open_iceberg_catalog_spec(spec).await
+}
+
+async fn open_iceberg_catalog_spec(
+    spec: &crate::cluster::IcebergCatalogSpec,
+) -> Result<Arc<dyn iceberg::Catalog>, String> {
+    match spec {
+        crate::cluster::IcebergCatalogSpec::Skippr(open) => {
+            open_skippr_catalog_backend(open.backend, &open.lake).await
+        }
+        crate::cluster::IcebergCatalogSpec::Glue(cfg) => {
+            skippr_iceberg_catalog_glue::open(&skippr_iceberg_catalog_glue::GlueOpen {
+                warehouse: cfg.warehouse.clone(),
+                region: cfg.region.clone(),
+                catalog_id: cfg.catalog_id.clone(),
+                object_store: cfg.object_store.clone(),
+            })
+            .await
+        }
+        crate::cluster::IcebergCatalogSpec::Filesystem(cfg) => {
+            skippr_iceberg_catalog::validate_file_warehouse(&cfg.warehouse, &cfg.table_namespace)?;
+            let file_io = iceberg::io::FileIO::new_with_fs();
+            let catalog = skippr_iceberg_catalog_fs::FsCatalog::new(cfg.warehouse.clone(), file_io)
+                .map_err(|err| err.to_string())?;
+            Ok(Arc::new(catalog))
+        }
+    }
+}
+
+pub async fn reopen_iceberg_catalog(
+    catalog_json: &str,
+) -> Result<Arc<dyn iceberg::Catalog>, String> {
+    let spec: crate::cluster::IcebergCatalogSpec =
+        serde_json::from_str(catalog_json).map_err(|err| err.to_string())?;
+    open_iceberg_catalog_spec(&spec).await
 }
 
 pub fn offset_publisher_for(
@@ -208,8 +248,16 @@ mod tests {
             "host catalog must use the shared selector"
         );
         assert!(
-            backend.contains("skippr_store_type_value"),
-            "host catalog must use the same resolved SkipprStore type as plugins"
+            !backend.contains(concat!("pub async fn ", "open_skippr_catalog")),
+            "Skippr catalog identity is SkipprLakeOpen.backend; Config must not select the backend at query/serve open"
+        );
+        assert!(
+            backend.contains("open_iceberg_catalog_spec"),
+            "query/serve catalog open must not depend on process Config for Iceberg identity"
+        );
+        assert!(
+            !backend.contains(concat!("open_iceberg_catalog(&", "Config::new()")),
+            "Ballista reload must reopen from IcebergCatalogSpec, not Config::new()"
         );
         let host = include_str!("../runtime_plugins/host.rs");
         assert!(

@@ -1,14 +1,9 @@
-use std::collections::HashMap;
 use std::io;
 use std::sync::Arc;
 
 use iceberg::Catalog;
-use iceberg::CatalogBuilder;
-use iceberg_catalog_glue::{
-    GlueCatalogBuilder, AWS_REGION_NAME, GLUE_CATALOG_PROP_CATALOG_ID, GLUE_CATALOG_PROP_WAREHOUSE,
-};
 use serde_derive::{Deserialize, Serialize};
-use skippr_iceberg_catalog::WarehouseObjectStore;
+use skippr_iceberg_catalog::S3CompatibleObjectStore;
 pub use skippr_iceberg_writer::{IcebergWriter, IcebergWriterConfig};
 use skippr_runtime_sdk::plugins::cdc::sink_capabilities;
 use skippr_runtime_sdk::plugins::source_contract::SinkWritePolicySupport;
@@ -30,7 +25,7 @@ const ATHENA_ICEBERG_WRITE_POLICIES: SinkWritePolicySupport = SinkWritePolicySup
 };
 
 /// Config for the `AthenaIceberg` data sink and schema sink.
-/// `skipprd query` does not read this sink; that path is WalOnly.
+/// `skipprd query` reads Glue Iceberg ∪ WAL. Athena SQL still queries the same tables.
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Eq, SkipprConfig)]
 #[serde(deny_unknown_fields)]
 pub struct AthenaIcebergConfig {
@@ -46,7 +41,7 @@ pub struct AthenaIcebergConfig {
     #[serde(default)]
     pub catalog_id: Option<String>,
     #[serde(default)]
-    pub object_store: WarehouseObjectStore,
+    pub object_store: S3CompatibleObjectStore,
 }
 
 impl AthenaIcebergConfig {
@@ -79,6 +74,7 @@ impl AthenaIcebergConfig {
                 return Err(format!("{name} is required"));
             }
         }
+        skippr_iceberg_catalog::require_s3_warehouse(&self.warehouse)?;
         Ok(())
     }
 }
@@ -93,31 +89,14 @@ pub fn writer_config(cfg: &AthenaIcebergConfig) -> IcebergWriterConfig {
 
 pub async fn open_glue_catalog(cfg: &AthenaIcebergConfig) -> io::Result<Arc<dyn Catalog>> {
     cfg.validate().map_err(io::Error::other)?;
-    let mut props = HashMap::new();
-    props.insert(
-        GLUE_CATALOG_PROP_WAREHOUSE.to_string(),
-        cfg.warehouse.clone(),
-    );
-    if let Some(id) = &cfg.catalog_id {
-        if !id.trim().is_empty() {
-            props.insert(GLUE_CATALOG_PROP_CATALOG_ID.to_string(), id.clone());
-        }
-    }
-    if let Some(region) = &cfg.region {
-        if !region.trim().is_empty() {
-            props.insert(AWS_REGION_NAME.to_string(), region.clone());
-        }
-    }
-    for (k, v) in skippr_iceberg_catalog::s3_object_store_props(&cfg.object_store)
-        .map_err(io::Error::other)?
-    {
-        props.insert(k, v);
-    }
-    let catalog = GlueCatalogBuilder::default()
-        .load("glue", props)
-        .await
-        .map_err(|err| io::Error::other(err.to_string()))?;
-    Ok(Arc::new(catalog))
+    skippr_iceberg_catalog_glue::open(&skippr_iceberg_catalog_glue::GlueOpen {
+        warehouse: cfg.warehouse.clone(),
+        region: cfg.region.clone(),
+        catalog_id: cfg.catalog_id.clone(),
+        object_store: cfg.object_store.clone(),
+    })
+    .await
+    .map_err(io::Error::other)
 }
 
 pub async fn open_writer(
@@ -168,6 +147,28 @@ mod tests {
         let cfg = decode(empty).unwrap();
         let err = cfg.validate().unwrap_err();
         assert!(err.contains("glue_database_name"), "{err}");
+    }
+
+    #[test]
+    fn athena_iceberg_rejects_file_warehouse() {
+        let mut body = valid_body();
+        body["warehouse"] = serde_json::json!("file:///tmp/lake");
+        let cfg = decode(body).unwrap();
+        let err = cfg.validate().unwrap_err();
+        assert!(err.contains("s3://"), "{err}");
+        let err = decode(serde_json::json!({
+            "warehouse": "s3://lake/warehouse/",
+            "glue_database_name": "analytics",
+            "athena_workgroup_name": "primary",
+            "athena_results_s3_bucket": "athena-results",
+            "object_store": { "type": "file" }
+        }))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("unknown variant") || err.contains("file"),
+            "{err}"
+        );
     }
 
     #[test]

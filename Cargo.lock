@@ -1573,6 +1573,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "axum-server"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b1df331683d982a0b9492b38127151e6453639cd34926eb9c07d4cd8c6d22bfc"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "either",
+ "fs-err",
+ "http 1.4.1",
+ "http-body 1.0.1",
+ "hyper 1.10.1",
+ "hyper-util",
+ "pin-project-lite",
+ "rustls 0.23.40",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls 0.26.4",
+ "tower-service",
+]
+
+[[package]]
 name = "backon"
 version = "1.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4620,6 +4642,16 @@ dependencies = [
  "frunk_proc_macro_helpers",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "fs-err"
+version = "3.3.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b91aa448ca50d7e79433bdf3ee8d99215430d2ec02ade5aefab2a073a1822e8a"
+dependencies = [
+ "autocfg",
+ "tokio",
 ]
 
 [[package]]
@@ -11695,6 +11727,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "skippr-iceberg-catalog-glue"
+version = "0.1.0"
+dependencies = [
+ "iceberg",
+ "iceberg-catalog-glue",
+ "skippr-iceberg-catalog",
+]
+
+[[package]]
+name = "skippr-iceberg-rest"
+version = "0.1.0"
+dependencies = [
+ "axum 0.8.9",
+ "axum-server",
+ "http-body-util",
+ "iceberg",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "skippr-iceberg-catalog",
+ "tokio",
+ "tower",
+]
+
+[[package]]
 name = "skippr-iceberg-writer"
 version = "0.1.0"
 dependencies = [
@@ -11861,11 +11918,11 @@ version = "0.2.0"
 dependencies = [
  "clap",
  "iceberg",
- "iceberg-catalog-glue",
  "serde",
  "serde_derive",
  "serde_json",
  "skippr-iceberg-catalog",
+ "skippr-iceberg-catalog-glue",
  "skippr-iceberg-writer",
  "skippr-runtime-sdk",
  "tokio",
@@ -13548,6 +13605,9 @@ dependencies = [
  "skippr-iceberg-catalog",
  "skippr-iceberg-catalog-cloud-tables",
  "skippr-iceberg-catalog-dynamodb",
+ "skippr-iceberg-catalog-fs",
+ "skippr-iceberg-catalog-glue",
+ "skippr-iceberg-rest",
  "skippr-lease",
  "skippr-lease-store-cloud-tables",
  "skippr-lease-store-dynamodb",

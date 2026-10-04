@@ -156,8 +156,14 @@ class HlaE2eHarnessTests(unittest.TestCase):
         self.assertIn("last_flight_addr", src)
         self.assertIn("reap_stale_hla_processes", src)
         self.assertIn("harness.nodes[:2]", src)
-        self.assertIn("hla-venv", src)
-        self.assertIn("pypi.org/simple", src)
+        self.assertIn("HLA_VENV = flight_sql.HLA_VENV", src)
+        flight = (
+            Path(hla_e2e.__file__).resolve().parents[1]
+            / "e2e_support"
+            / "flight_sql.py"
+        ).read_text(encoding="utf-8")
+        self.assertIn("pypi.org/simple", flight)
+        self.assertIn("hla-venv", flight)
         self.assertIn("PROTOCOL_DUMMY_ADDR", src)
         self.assertIn("Iceberg-only", src)
         self.assertNotIn("skipped unreachable replica", src)

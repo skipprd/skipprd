@@ -10,6 +10,7 @@ pub mod catchup;
 pub mod disk;
 pub mod failpoint;
 pub mod gossip;
+pub mod iceberg_lake;
 pub mod identity;
 pub mod lifecycle;
 pub mod membership;
@@ -24,6 +25,10 @@ pub mod tls;
 pub mod validation;
 pub mod wal_head;
 
+pub use iceberg_lake::{
+    extra_namespace_names, require_one_physical_catalog, FsCatalogConfig, GlueCatalogConfig,
+    IcebergCatalogSpec, IcebergLake, SkipprLakeOpen,
+};
 pub use identity::{
     derive_advertised_ip, derive_host_id, ClusterConfig, ClusterIdentity, ProcessQueryBind,
     TenantScope,

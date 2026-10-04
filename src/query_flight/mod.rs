@@ -5,4 +5,4 @@ pub mod live_wal;
 pub mod service;
 pub mod sql;
 
-pub use service::QueryFlightServer;
+pub use service::{FlightAuth, FlightEngine, QueryFlightServer};

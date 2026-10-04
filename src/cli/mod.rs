@@ -65,6 +65,29 @@ pub enum Mode {
     Doctor(DoctorOptions),
     Df(DfOptions),
     Connect(connect_generated::ConnectArgs),
+    Serve(ServeArgs),
+}
+
+#[derive(Parser, Clone, PartialEq)]
+pub struct ServeArgs {
+    /// Iceberg REST bind address.
+    #[arg(long, default_value = "127.0.0.1:8181")]
+    pub rest_bind: std::net::SocketAddr,
+    /// Flight SQL bind address.
+    #[arg(long, default_value = "127.0.0.1:8815")]
+    pub flight_bind: std::net::SocketAddr,
+    /// Name of the env var that holds the bearer token.
+    #[arg(long, default_value = "SKIPPRLAKE_TOKEN")]
+    pub token_env: String,
+    /// TLS cert PEM path. Required with --tls-key for non-loopback binds.
+    #[arg(long, requires = "tls_key")]
+    pub tls_cert: Option<PathBuf>,
+    /// TLS key PEM path.
+    #[arg(long, requires = "tls_cert")]
+    pub tls_key: Option<PathBuf>,
+    /// Write `{"rest":"http(s)://host:port","flight":"grpc://host:port"}` once both listeners are up.
+    #[arg(long)]
+    pub ready_file: Option<PathBuf>,
 }
 
 #[derive(Parser, Clone, PartialEq)]

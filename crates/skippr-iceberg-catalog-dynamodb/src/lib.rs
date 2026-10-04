@@ -171,7 +171,16 @@ impl Catalog for DynamoDbCatalog {
             .condition_expression("attribute_not_exists(PK)")
             .send()
             .await
-            .map_err(|err| Error::new(ErrorKind::Unexpected, err.to_string()))?;
+            .map_err(|err| {
+                if is_conditional_check_failed(&err) {
+                    Error::new(
+                        ErrorKind::NamespaceAlreadyExists,
+                        format!("namespace {namespace:?}"),
+                    )
+                } else {
+                    Error::new(ErrorKind::Unexpected, err.to_string())
+                }
+            })?;
         Ok(Namespace::with_properties(namespace.clone(), properties))
     }
 
@@ -270,7 +279,11 @@ impl Catalog for DynamoDbCatalog {
     ) -> Result<Table> {
         let ident = TableIdent::new(namespace.clone(), creation.name.clone());
         let location = creation.location.clone().unwrap_or_else(|| {
-            format!("{}/{}", self.warehouse.trim_end_matches('/'), ident.name())
+            skippr_iceberg_catalog::iceberg_table_location(
+                &self.warehouse,
+                &namespace.as_ref().join("/"),
+                ident.name(),
+            )
         });
         let metadata = TableMetadataBuilder::from_table_creation(TableCreation {
             location: Some(location.clone()),
@@ -537,7 +550,11 @@ mod tests {
             warehouse: warehouse.into(),
             catalog_table: "t".into(),
             region: None,
-            object_store: WarehouseObjectStore::S3,
+            object_store: if warehouse.starts_with("file://") {
+                WarehouseObjectStore::File
+            } else {
+                WarehouseObjectStore::S3
+            },
             table_namespace: "default".into(),
         }
     }
@@ -549,10 +566,19 @@ mod tests {
     }
 
     #[test]
-    fn memory_warehouse_builds_file_io() {
-        let _ = skippr_iceberg_catalog::iceberg_file_io_for_warehouse(&lake("memory://warehouse"))
-            .unwrap();
+    fn file_warehouse_builds_file_io() {
         let _ =
-            skippr_iceberg_catalog::iceberg_file_io_for_warehouse(&lake("/tmp/warehouse")).unwrap();
+            skippr_iceberg_catalog::iceberg_file_io_for_warehouse(&lake("file:///tmp/warehouse"))
+                .unwrap();
+        let err = skippr_iceberg_catalog::iceberg_file_io_for_warehouse(&SkipprLakeConfig {
+            warehouse: "file:///tmp/warehouse".into(),
+            catalog_table: "t".into(),
+            region: None,
+            object_store: WarehouseObjectStore::S3,
+            table_namespace: "default".into(),
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("s3://"), "{err}");
     }
 }

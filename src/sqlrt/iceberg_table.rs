@@ -16,12 +16,6 @@ use iceberg::Catalog;
 
 use skippr_query_ballista::{schema_from_ipc, schema_to_ipc, IcebergScanNode};
 
-#[cfg(any(
-    feature = "offset-store-dynamodb",
-    feature = "offset-store-cloud-tables"
-))]
-use crate::helpers::configuration::Config;
-
 /// Read-only Iceberg scan over a pinned snapshot. Iceberg pipelines never fall
 /// back to Parquet listing.
 pub struct IcebergScanTableProvider {
@@ -331,10 +325,10 @@ impl ExecutionPlan for IcebergScanExec {
             DataFusionError::Execution(format!("IcebergScanExec requires a Tokio runtime: {err}"))
         })?;
         let snapshot_id = self.snapshot_id;
-        let select_names: Option<Vec<String>> = if self.schema.fields().is_empty() {
-            None
+        let select = if self.schema.fields().is_empty() {
+            IcebergColumnSelect::Empty
         } else {
-            Some(
+            IcebergColumnSelect::Named(
                 self.schema
                     .fields()
                     .iter()
@@ -353,7 +347,7 @@ impl ExecutionPlan for IcebergScanExec {
             stream_iceberg_into(
                 table,
                 snapshot_id,
-                select_names,
+                select,
                 limit,
                 catalog_json,
                 catalog_ns,
@@ -370,10 +364,16 @@ impl ExecutionPlan for IcebergScanExec {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum IcebergColumnSelect {
+    Named(Vec<String>),
+    Empty,
+}
+
 async fn stream_iceberg_into(
     table: Option<Table>,
     snapshot_id: i64,
-    schema_names: Option<Vec<String>>,
+    select: IcebergColumnSelect,
     limit: Option<usize>,
     catalog_json: String,
     catalog_ns: String,
@@ -385,7 +385,7 @@ async fn stream_iceberg_into(
     match iceberg_arrow_stream(
         table,
         snapshot_id,
-        schema_names,
+        select,
         catalog_json,
         catalog_ns,
         table_name,
@@ -438,7 +438,7 @@ async fn stream_iceberg_into(
 async fn iceberg_arrow_stream(
     table: Option<Table>,
     snapshot_id: i64,
-    schema_names: Option<Vec<String>>,
+    select: IcebergColumnSelect,
     catalog_json: String,
     catalog_ns: String,
     table_name: String,
@@ -448,11 +448,10 @@ async fn iceberg_arrow_stream(
         None => reload_iceberg_table(&catalog_json, &catalog_ns, &table_name).await?,
     };
     let mut builder = table.scan().snapshot_id(snapshot_id);
-    if let Some(names) = schema_names {
-        if !names.is_empty() {
-            builder = builder.select(names);
-        }
-    }
+    builder = match select {
+        IcebergColumnSelect::Named(names) => builder.select(names),
+        IcebergColumnSelect::Empty => builder.select_empty(),
+    };
     let stream = builder
         .build()
         .map_err(|err| DataFusionError::External(Box::new(err)))?
@@ -474,31 +473,13 @@ async fn reload_iceberg_table(
             "IcebergScanExec is missing catalog reload state".into(),
         ));
     }
-    let catalog_cfg: skippr_iceberg_catalog::SkipprLakeConfig = serde_json::from_str(catalog_json)
-        .map_err(|err| DataFusionError::Execution(err.to_string()))?;
+    let catalog = crate::cluster::backend::reopen_iceberg_catalog(catalog_json)
+        .await
+        .map_err(DataFusionError::Plan)?;
     let ident = iceberg::TableIdent::from_strs([catalog_ns, table_name])
         .map_err(|err| DataFusionError::External(Box::new(err)))?;
-    #[cfg(any(
-        feature = "offset-store-dynamodb",
-        feature = "offset-store-cloud-tables"
-    ))]
-    {
-        let catalog = crate::cluster::backend::open_skippr_catalog(&Config::new(), &catalog_cfg)
-            .await
-            .map_err(DataFusionError::Plan)?;
-        let (table, _) = load_pinned_iceberg_table(catalog, &ident).await?;
-        Ok(table)
-    }
-    #[cfg(not(any(
-        feature = "offset-store-dynamodb",
-        feature = "offset-store-cloud-tables"
-    )))]
-    {
-        let _ = (catalog_cfg, ident);
-        Err(DataFusionError::Plan(
-            "IcebergScanExec catalog reload requires offset-store-dynamodb or offset-store-cloud-tables".into(),
-        ))
-    }
+    let (table, _) = load_pinned_iceberg_table(catalog, &ident).await?;
+    Ok(table)
 }
 
 pub async fn load_pinned_iceberg_table(
@@ -552,6 +533,31 @@ pub fn segment_ids_from_snapshot_properties(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn empty_projection_selects_no_iceberg_columns() {
+        let src = include_str!("iceberg_table.rs");
+        let prod = src.split("#[cfg(test)]").next().unwrap();
+        assert!(prod.contains("IcebergColumnSelect::Empty"));
+        assert!(prod.contains("builder.select_empty()"));
+        assert!(!prod.contains("select_names: Option<Vec<String>>"));
+        let execute = prod
+            .split("fn execute(")
+            .nth(1)
+            .expect("IcebergScanExec::execute");
+        let execute = execute
+            .split("async fn stream_iceberg_into")
+            .next()
+            .unwrap();
+        assert!(
+            execute.contains("IcebergColumnSelect::Empty"),
+            "COUNT(*) empty projection must not fall through to select_all"
+        );
+        assert!(
+            !execute.contains("select_names"),
+            "empty projection must not use Option<Vec> select_names"
+        );
+    }
+
     #[test]
     fn iceberg_provider_never_constructs_listing_table() {
         let src = include_str!("iceberg_table.rs");

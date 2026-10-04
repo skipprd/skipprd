@@ -181,7 +181,7 @@ DROP DATABASE <database_name>
 ```
 
 **Description:**
-Drops a SkipprLake Iceberg namespace from the catalog.
+Drops an Iceberg namespace from the catalog.
 
 **Example:**
 ```sql
@@ -196,7 +196,7 @@ DROP TABLE [<schema_name>.]<table_name>
 ```
 
 **Description:**
-Drops a SkipprLake Iceberg table from the catalog and local metadata.
+Drops an Iceberg table from the catalog and local metadata.
 
 **Example:**
 ```sql
@@ -228,7 +228,7 @@ SELECT <columns> FROM <table_name> [WHERE <condition>] [GROUP BY <expressions>] 
 ```
 
 **Description:**
-Executes a standard SQL query against SkipprLake Iceberg tables and the live WAL.
+Executes a standard SQL query against Iceberg tables and the live WAL.
 
 **Example:**
 ```sql
